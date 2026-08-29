@@ -275,6 +275,12 @@ pub async fn set_ignore(State(state): State<AppState>, Json(req): Json<IgnoreReq
         .collect();
     servers.sort();
     servers.dedup();
+    // Если в игнор-лист попало mojibake-имя — добавляем починенный вариант,
+    // чтобы подстрока совпала с реальным именем сервера у провайдера.
+    let repaired: Vec<String> = servers.iter().filter_map(|s| mihomo::fix_mojibake(s)).collect();
+    servers.extend(repaired);
+    servers.sort();
+    servers.dedup();
     cfg.ignore_servers = servers.clone();
 
     let yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
@@ -298,11 +304,47 @@ pub async fn set_ignore(State(state): State<AppState>, Json(req): Json<IgnoreReq
     if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
         return api_err(format!("exclude-filter записан, но reload Mihomo не удался: {e}"));
     }
+    // exclude-filter провайдера применяется только при его загрузке — принудительно
+    // перечитываем провайдеры, иначе игнор не подействует до планового обновления.
+    let updated = mihomo::force_update_all_providers(&state.http, &cfg).await;
     if let Err(e) = config::save(&state.config_path, &cfg).await {
         return api_err(format!("Ошибка сохранения конфига: {e}"));
     }
     *state.config.write().await = cfg;
-    api_ok(json!({ "applied": servers.len() }))
+    api_ok(json!({ "applied": servers.len(), "providers_updated": updated }))
+}
+
+/// POST /api/servers/fix-names — ремонт mojibake-имён статических прокси в config.yaml
+/// (глобальная замена битого имени на починенное затрагивает и группы, и правила), reload.
+pub async fn fix_names(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let _guard = state.routing_lock.lock().await;
+    let yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+        Ok(y) => y,
+        Err(e) => return api_err(format!("Не удалось прочитать {}: {e}", cfg.mihomo.config_path)),
+    };
+    let mut new_yaml = yaml.clone();
+    let mut fixed: Vec<String> = Vec::new();
+    for name in routing::parse_static_proxy_names(&yaml) {
+        if let Some(repaired) = mihomo::fix_mojibake(&name) {
+            new_yaml = new_yaml.replace(&name, &repaired);
+            fixed.push(format!("{name} → {repaired}"));
+        }
+    }
+    if fixed.is_empty() {
+        return api_ok(json!({ "fixed": 0, "names": fixed }));
+    }
+    let tmp = format!("{}.tmp", cfg.mihomo.config_path);
+    if let Err(e) = tokio::fs::write(&tmp, &new_yaml).await {
+        return api_err(format!("Ошибка записи: {e}"));
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, &cfg.mihomo.config_path).await {
+        return api_err(format!("Ошибка переименования: {e}"));
+    }
+    if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
+        return api_err(format!("Имена исправлены, но reload Mihomo не удался: {e}"));
+    }
+    api_ok(json!({ "fixed": fixed.len(), "names": fixed }))
 }
 
 /// GET /api/routing — текущие AUTO-DEVICE назначения + live-серверы.

@@ -67,6 +67,76 @@ pub async fn get_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Result<BTre
     }
     Ok(out)
 }
+/// Mihomo отвечает на /providers/proxies объектом {"providers": {...}} — разворачиваем в карту
+/// «имя прокси → данные». Провайдеры с vehicleType "Compatible" (служебные DIRECT/REJECT) пропускаем.
+pub async fn get_provider_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Result<BTreeMap<String, Value>, String> {
+    let v = m_get(http, cfg, "/providers/proxies").await?;
+    let mut out = BTreeMap::new();
+    if let Some(map) = v.get("providers").and_then(|p| p.as_object()) {
+        for (_pname, prov) in map {
+            if prov.get("vehicleType").and_then(|t| t.as_str()) == Some("Compatible") {
+                continue;
+            }
+            if let Some(list) = prov.get("proxies").and_then(|p| p.as_array()) {
+                for p in list {
+                    if let Some(name) = p.get("name").and_then(|n| n.as_str()) {
+                        out.insert(name.to_string(), p.clone());
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Имена провайдеров, которых нужно принудительно обновлять (vehicleType HTTP/File).
+pub async fn updatable_provider_names(http: &reqwest::Client, cfg: &AppConfig) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(v) = m_get(http, cfg, "/providers/proxies").await {
+        if let Some(map) = v.get("providers").and_then(|p| p.as_object()) {
+            for (pname, prov) in map {
+                if let Some(t) = prov.get("vehicleType").and_then(|t| t.as_str()) {
+                    if t == "HTTP" || t == "File" {
+                        out.push(pname.clone());
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Принудительное обновление провайдера: exclude-filter применяется при загрузке,
+/// поэтому после правки config.yaml провайдера нужно перечитать (PUT, пустой ответ = ок).
+pub async fn force_update_provider(http: &reqwest::Client, cfg: &AppConfig, name: &str) -> Result<(), String> {
+    let enc = urlencoding_lite(name);
+    let url = format!("{}{}", cfg.mihomo_url(), format_args!("/providers/proxies/{enc}"));
+    let mut req = http
+        .put(&url)
+        .timeout(std::time::Duration::from_secs(60))
+        .header("Content-Length", "0");
+    if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
+        req = req.header(k, v);
+    }
+    let resp = req.send().await.map_err(|e| format!("Mihomo update {name}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Mihomo update {name}: статус {}", resp.status()));
+    }
+    Ok(())
+}
+
+/// Принудительное обновление всех провайдеров (после правки exclude-filter).
+pub async fn force_update_all_providers(http: &reqwest::Client, cfg: &AppConfig) -> usize {
+    let mut ok = 0usize;
+    for name in updatable_provider_names(http, cfg).await {
+        if force_update_provider(http, cfg, &name).await.is_ok() {
+            ok += 1;
+        }
+    }
+    ok
+}
+
+/// Рекурсивное разрешение активного «листа» из цепочек selector/fallback/urltest.
 
 /// Рекурсивное разрешение активного «листа» из цепочек selector/fallback/urltest.
 pub fn resolve_active_leaf(proxies: &BTreeMap<String, Value>) -> String {
@@ -97,6 +167,112 @@ pub fn resolve_active_leaf(proxies: &BTreeMap<String, Value>) -> String {
         }
     }
     cur
+}
+
+// --- Отображение имён: mojibake-ремонт и чистка эмодзи ---
+
+/// Попытка обратной перекодировки: строка была UTF-8, но байты были прочитаны как
+/// cp1251/cp1252/cp866 и сохранены как есть. Возвращаем байты исходного UTF-8.
+fn decode_as(source: &str, table: fn(char) -> Option<u8>) -> Option<String> {
+    let mut bytes = Vec::with_capacity(source.len());
+    for c in source.chars() {
+        if c.is_ascii() {
+            bytes.push(c as u8);
+        } else {
+            bytes.push(table(c)?);
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn cp1251_byte(c: char) -> Option<u8> {
+    let u = c as u32;
+    match u {
+        0x0410..=0x044F => Some((u - 0x0410 + 0xC0) as u8),
+        0x0401 => Some(0xA8),
+        0x0451 => Some(0xB8),
+        _ => None,
+    }
+}
+
+fn cp1252_byte(c: char) -> Option<u8> {
+    let u = c as u32;
+    match u {
+        0x20AC => Some(0x80), 0x201A => Some(0x82), 0x0192 => Some(0x83),
+        0x201E => Some(0x84), 0x2026 => Some(0x85), 0x2020 => Some(0x86),
+        0x2021 => Some(0x87), 0x02C6 => Some(0x88), 0x2030 => Some(0x89),
+        0x0160 => Some(0x8A), 0x2039 => Some(0x8B), 0x0152 => Some(0x8C),
+        0x017D => Some(0x8E), 0x2018 => Some(0x91), 0x2019 => Some(0x92),
+        0x201C => Some(0x93), 0x201D => Some(0x94), 0x2022 => Some(0x95),
+        0x2013 => Some(0x96), 0x2014 => Some(0x97), 0x02DC => Some(0x98),
+        0x2122 => Some(0x99), 0x0161 => Some(0x9A), 0x203A => Some(0x9B),
+        0x0153 => Some(0x9C), 0x017E => Some(0x9E), 0x0178 => Some(0x9F),
+        // C1-управляющие (байты 0x80-0x9F, не имеющие представления в cp1252) — passthrough
+        0x0080..=0x009F => Some(u as u8),
+        0x00A0..=0x00FF => Some(u as u8),
+        _ => None,
+    }
+}
+
+fn cp866_byte(c: char) -> Option<u8> {
+    let u = c as u32;
+    match u {
+        0x0410..=0x043F => Some((u - 0x0410 + 0x80) as u8),
+        0x0440..=0x044F => Some((u - 0x0440 + 0xE0) as u8),
+        0x0401 => Some(0xF0),
+        0x0451 => Some(0xF1),
+        _ => None,
+    }
+}
+
+fn has_cyrillic(s: &str) -> bool {
+    s.chars().any(|c| matches!(c as u32, 0x0400..=0x04FF))
+}
+
+/// Ремонт mojibake: если строка — результат чтения UTF-8 как cp1251/cp1252/cp866
+/// (однократно или дважды), возвращаем исходный читаемый текст.
+/// Реальный mojibake смешивает символы из разных таблиц (байты ≥0xC0 читаются как
+/// кириллица, остальные — как Latin-1/спецсимволы), поэтому пробуем все по очереди.
+pub fn fix_mojibake(s: &str) -> Option<String> {
+    let fixed = decode_as(s, |c| cp1251_byte(c).or_else(|| cp1252_byte(c)).or_else(|| cp866_byte(c)))?;
+    if has_cyrillic(&fixed) && fixed != s {
+        // Рекурсия на случай двойного перекодирования.
+        if let Some(double) = fix_mojibake(&fixed) {
+            return Some(double);
+        }
+        return Some(fixed);
+    }
+    None
+}
+
+/// Чистое имя для отображения: без ведущих эмодзи/флагов/fe0f, обрезка пробелов.
+/// id/переключение всегда по оригинальному имени (mihomo требует точное имя).
+pub fn clean_display_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .skip_while(|c| {
+            let u = *c as u32;
+            c.is_whitespace()
+                || u == 0xFE0F
+                || u == 0x200D
+                || u == 0x20E3
+                || (0x1F000..=0x1FAFF).contains(&u)
+                || (0x2600..=0x27BF).contains(&u)
+                || (0x2B00..=0x2BFF).contains(&u)
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        name.trim().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Имя для показа в панели: сначала ремонт mojibake, затем чистка эмодзи.
+pub fn display_name(name: &str) -> String {
+    let repaired = fix_mojibake(name).unwrap_or_else(|| name.to_string());
+    clean_display_name(&repaired)
 }
 
 fn last_delay(p: &Value) -> i64 {
@@ -152,7 +328,7 @@ pub async fn get_servers(
         seen_names.insert(name.clone());
         servers.push(Server {
             id: name.clone(),
-            name: name.clone(),
+            name: display_name(name),
             protocol: typ.to_uppercase(),
             host: p.get("server").and_then(|s| s.as_str()).unwrap_or(name).to_string(),
             port: p.get("port").and_then(|s| s.as_u64()).unwrap_or(0) as u16,
@@ -160,6 +336,30 @@ pub async fn get_servers(
             is_priority: *name == priority_server,
             ping_ms: last_delay(p),
         });
+    }
+
+    // Провайдерные серверы: GET /proxies их НЕ содержит — мержим /providers/proxies.
+    if let Ok(providers) = get_provider_proxies(http, cfg).await {
+        for (name, p) in &providers {
+            let typ = p.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
+            if matches!(typ.as_str(), "direct" | "reject" | "reject-drop" | "rejectdrop" | "pass" | "passrule" | "compatible" | "selector" | "urltest" | "fallback" | "relay" | "load") {
+                continue;
+            }
+            if seen_names.contains(name) {
+                continue;
+            }
+            seen_names.insert(name.clone());
+            servers.push(Server {
+                id: name.clone(),
+                name: display_name(name),
+                protocol: typ.to_uppercase(),
+                host: p.get("server").and_then(|s| s.as_str()).unwrap_or(name).to_string(),
+                port: p.get("port").and_then(|s| s.as_u64()).unwrap_or(0) as u16,
+                is_active: *name == active,
+                is_priority: *name == priority_server,
+                ping_ms: last_delay(p),
+            });
+        }
     }
 
     servers.sort_by(|a, b| b.is_active.cmp(&a.is_active).then(b.ping_ms.cmp(&a.ping_ms)));
@@ -364,6 +564,50 @@ mod tests {
     #[test]
     fn urlencoding_encodes_non_unreserved() {
         assert_eq!(urlencoding_lite("a b/c.d-e~f_g"), "a%20b%2Fc.d-e~f_g");
+    }
+
+    #[test]
+    fn mojibake_cp1251_repaired() {
+        // "Финляндия" в UTF-8, прочитанном как cp1251
+        let src = "Финляндия";
+        let bytes = src.as_bytes().to_vec();
+        // кодируем байты как cp1251-символы (имитация чтения UTF-8 как cp1251)
+        let mojibake: String = bytes
+            .into_iter()
+            .map(|b| match b {
+                0xC0..=0xFF => char::from_u32(0x0410 + (b as u32 - 0xC0)).unwrap(),
+                b => b as char,
+            })
+            .collect();
+        let fixed = fix_mojibake(&mojibake).expect("должен починиться");
+        assert_eq!(fixed, src);
+    }
+
+    #[test]
+    fn mojibake_normal_cyrillic_untouched() {
+        assert_eq!(fix_mojibake("Финляндия"), None);
+        assert_eq!(fix_mojibake("DE Germany"), None);
+    }
+
+    #[test]
+    fn clean_name_strips_flags_and_emoji() {
+        assert_eq!(clean_display_name("🇫🇮 Финляндия [⚡ Стабильный ]").starts_with("Финляндия"), true);
+        assert_eq!(clean_display_name("⚡ Fastest"), "Fastest");
+        assert_eq!(clean_display_name("plain"), "plain");
+    }
+
+    #[test]
+    fn display_name_repairs_and_cleans() {
+        // mojibake + флаг: чистим и чиним
+        let bytes = "Финляндия".as_bytes().to_vec();
+        let mojibake: String = bytes
+            .into_iter()
+            .map(|b| match b {
+                0xC0..=0xFF => char::from_u32(0x0410 + (b as u32 - 0xC0)).unwrap(),
+                b => b as char,
+            })
+            .collect();
+        assert_eq!(display_name(&mojibake), "Финляндия");
     }
 }
 

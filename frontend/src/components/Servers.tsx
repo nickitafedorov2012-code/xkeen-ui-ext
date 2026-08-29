@@ -107,6 +107,24 @@ export default function Servers({ notify }: Props) {
   // для игнор-листа годятся только реальные серверы (не синтетические Fastest/Fallback)
   const ignoreCandidates = servers.filter((s) => s.protocol !== 'URL-TEST' && s.protocol !== 'FALLBACK')
 
+  const [fixing, setFixing] = useState(false)
+  const fixNames = async () => {
+    setFixing(true)
+    try {
+      const data = await apiPost<{ fixed: number; names: string[] }>('servers/fix-names', {})
+      notify(
+        data.fixed > 0
+          ? `Исправлено имён: ${data.fixed} — ${data.names.join('; ')}`
+          : 'Битых (mojibake) имён не найдено',
+      )
+      load()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка исправления имён', true)
+    } finally {
+      setFixing(false)
+    }
+  }
+
   return (
     <section className="card">
       <div className="toolbar">
@@ -124,6 +142,9 @@ export default function Servers({ notify }: Props) {
         </button>
         <button className="btn" onClick={openIgnore}>
           🚫 Игнор-лист{ignored.size > 0 ? ` (${ignored.size})` : ''}
+        </button>
+        <button className="btn" onClick={fixNames} disabled={fixing} title="Починить битые (mojibake) имена серверов в config.yaml">
+          {fixing ? 'Исправление…' : '🩹 Исправить имена'}
         </button>
         <button className="btn" onClick={load}>🔄 Обновить</button>
         <span className="muted">{filtered.length} шт.</span>

@@ -156,6 +156,7 @@ async fn main() {
         .route("/api/servers", get(api::get_servers))
         .route("/api/servers/switch", post(api::switch_server))
         .route("/api/servers/ping", post(api::ping_servers))
+        .route("/api/servers/fix-names", post(api::fix_names))
         .route("/api/devices", get(api::get_devices))
         .route("/api/devices/policy", post(api::set_device_policy))
         .route("/api/devices/speed", post(api::set_device_speed))
