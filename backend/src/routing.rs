@@ -275,7 +275,7 @@ pub fn apply_ignore_to_groups(yaml: &str, ignore: &[String]) -> Result<String, S
                 if !filter_done && !filter.is_empty() {
                     out.push(rendered("    "));
                 }
-                if use_explicit && !proxies_done {
+                if use_explicit && !proxies_done && !kept.is_empty() {
                     push_proxies_block(&mut out, &kept);
                 }
                 if !use_explicit && !include_seen {
@@ -298,7 +298,7 @@ pub fn apply_ignore_to_groups(yaml: &str, ignore: &[String]) -> Result<String, S
                 if !filter_done && !filter.is_empty() {
                     out.push(rendered("    "));
                 }
-                if use_explicit && !proxies_done {
+                if use_explicit && !proxies_done && !kept.is_empty() {
                     push_proxies_block(&mut out, &kept);
                 }
                 if !use_explicit && !include_seen {
@@ -326,7 +326,7 @@ pub fn apply_ignore_to_groups(yaml: &str, ignore: &[String]) -> Result<String, S
             }
 
             if trimmed == "proxies:" && line.starts_with("    ") {
-                if use_explicit && !proxies_done {
+                if use_explicit && !proxies_done && !kept.is_empty() {
                     push_proxies_block(&mut out, &kept);
                     proxies_done = true;
                 }
@@ -337,7 +337,7 @@ pub fn apply_ignore_to_groups(yaml: &str, ignore: &[String]) -> Result<String, S
             if trimmed == "include-all: true" {
                 include_seen = true;
                 if use_explicit {
-                    if !proxies_done {
+                    if !proxies_done && !kept.is_empty() {
                         push_proxies_block(&mut out, &kept);
                         proxies_done = true;
                     }
@@ -360,7 +360,7 @@ pub fn apply_ignore_to_groups(yaml: &str, ignore: &[String]) -> Result<String, S
         if !filter_done && !filter.is_empty() {
             out.push(rendered("    "));
         }
-        if use_explicit && !proxies_done {
+        if use_explicit && !proxies_done && !kept.is_empty() {
             push_proxies_block(&mut out, &kept);
         }
         if !use_explicit && !include_seen {
@@ -483,6 +483,15 @@ mod tests {
         assert!(!out.contains("exclude-filter"), "OUT={out}");
         let g = &out[out.find("proxy-groups:").unwrap()..];
         assert!(!g.contains("    proxies:"), "OUT={out}");
+    }
+
+    #[test]
+    fn ignore_all_static_drops_proxies_list()
+    {
+        let out = apply_ignore_to_groups(GROUPS_YAML, &["Финляндия".to_string(), "Германия".to_string()]).unwrap();
+        assert!(!out.contains("    proxies:"), "OUT={out}");
+        assert!(!out.contains("include-all"));
+        assert_eq!(out.matches("exclude-filter").count(), 2);
     }
 
     #[test]
