@@ -363,10 +363,10 @@ export default function Settings({ notify }: Props) {
         </button>
       </section>
 
-      <section className="card">
+      <section className="card" style={{ gridColumn: '1 / -1' }}>
         <h2>📄 Журнал (логи)</h2>
         <p className="muted small">Файл: {logPath || '…'} · ротация при 2 МБ (старая копия — .log.old)</p>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
           <button className="btn" onClick={loadLogs} disabled={logsBusy}>🔄 Обновить</button>
           <a className="btn" href="/api/logs/download" download>⬇ Скачать</a>
           <button
@@ -375,18 +375,18 @@ export default function Settings({ notify }: Props) {
             onClick={() => { if (confirm('Очистить журнал?')) clearLogs() }}
             disabled={logsBusy}
           >🗑 Очистить</button>
-          <label className="row" style={{ marginLeft: 'auto' }}>
+          <label className="check" style={{ marginLeft: 'auto' }}>
             <input type="checkbox" checked={logsAuto} onChange={(e) => setLogsAuto(e.target.checked)} />
             автообновление 5 сек
           </label>
         </div>
         <textarea
           className="input"
-          rows={14}
+          rows={16}
           readOnly
           value={logText}
           placeholder="Журнал пуст"
-          style={{ fontFamily: 'Consolas, monospace', fontSize: 12, whiteSpace: 'pre', overflow: 'auto' }}
+          style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'Consolas, monospace', fontSize: 12, whiteSpace: 'pre', overflow: 'auto' }}
         />
       </section>
     </div>

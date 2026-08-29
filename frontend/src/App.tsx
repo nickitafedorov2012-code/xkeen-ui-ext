@@ -4,16 +4,18 @@ import Dashboard from './components/Dashboard'
 import Devices from './components/Devices'
 import Servers from './components/Servers'
 import Settings from './components/Settings'
+import Help from './components/Help'
 import { apiGet } from './api'
 import type { StatusInfo } from './types'
 
-type TabId = 'dashboard' | 'servers' | 'devices' | 'settings'
+type TabId = 'dashboard' | 'servers' | 'devices' | 'settings' | 'help'
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'dashboard', label: '📊 Дашборд' },
   { id: 'servers', label: '🛰 Серверы' },
   { id: 'devices', label: '📱 Устройства' },
   { id: 'settings', label: '⚙️ Настройки' },
+  { id: 'help', label: '📖 Справка' },
 ]
 
 interface Toast {
@@ -117,6 +119,7 @@ export default function App() {
           {tab === 'servers' && <Servers notify={notify} />}
           {tab === 'devices' && <Devices notify={notify} />}
           {tab === 'settings' && <Settings notify={notify} />}
+          {tab === 'help' && <Help status={status} />}
         </ErrorBoundary>
       </main>
 
