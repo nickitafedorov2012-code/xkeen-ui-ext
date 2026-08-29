@@ -128,12 +128,27 @@ body {
 }
 
 /* таблица устройств */
-table.devices { width: 100%; border-collapse: collapse; }
+.card { overflow-x: auto; }
+table.devices {
+  width: 100%; border-collapse: collapse;
+  table-layout: fixed; min-width: 900px;
+}
 table.devices th {
   text-align: left; color: var(--muted); font-size: 12px; font-weight: 600;
   padding: 6px 8px; border-bottom: 1px solid var(--border);
 }
-table.devices td { padding: 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+table.devices th:nth-child(1) { width: 34px; }          /* чекбокс */
+table.devices th:nth-child(2) { width: 21%; }           /* устройство */
+table.devices th:nth-child(3) { width: 11%; }           /* IP */
+table.devices th:nth-child(4) { width: 14%; }           /* политика */
+table.devices th:nth-child(5) { width: 12%; }           /* скорость */
+/* сервер (раздельная) — остальное */
+table.devices td {
+  padding: 8px; border-bottom: 1px solid var(--border);
+  vertical-align: middle; overflow: hidden;
+}
+table.devices td .select { width: 100%; min-width: 0; }
+table.devices td .btn.sm { flex-shrink: 0; }
 table.devices tr.me { background: rgba(79, 140, 255, 0.05); }
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; }
 .dot.on { background: var(--green); }
