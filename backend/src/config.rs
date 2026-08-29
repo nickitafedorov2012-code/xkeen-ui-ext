@@ -84,6 +84,8 @@ pub struct AppConfig {
     pub refresh_interval_sec: u32,
     /// Игнор-лист: серверы, исключаемые из групп Fastest/Fallback (exclude-filter).
     pub ignore_servers: Vec<String>,
+    /// Original provider exclude-filters (restored when ignore list is cleared).
+    pub provider_filters: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for AppConfig {
@@ -94,6 +96,7 @@ impl Default for AppConfig {
             failover: FailoverConfig::default(),
             refresh_interval_sec: 10,
             ignore_servers: Vec::new(),
+            provider_filters: std::collections::BTreeMap::new(),
         }
     }
 }

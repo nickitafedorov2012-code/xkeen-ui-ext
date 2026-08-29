@@ -369,6 +369,73 @@ pub fn apply_ignore_to_groups(yaml: &str, ignore: &[String]) -> Result<String, S
     }
     Ok(out.join("\n"))
 }
+/// Обновление exclude-filter провайдеров (proxy-providers): добавление игнор-подстрок.
+/// saved хранит оригинальные фильтры для восстановления при очистке игнор-листа.
+pub fn apply_ignore_to_providers(yaml: &str, ignore: &[String], saved: &mut std::collections::BTreeMap<String, String>) -> String {
+    let ig: Vec<String> = ignore.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+    let mut out: Vec<String> = Vec::with_capacity(yaml.lines().count() + 4);
+    let mut in_providers = false;
+    let mut cur_provider: Option<String> = None;
+
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+
+        if line.trim_end() == "proxy-providers:" {
+            in_providers = true;
+            cur_provider = None;
+            out.push(line.to_string());
+            continue;
+        }
+        if in_providers && is_top {
+            in_providers = false;
+            cur_provider = None;
+            out.push(line.to_string());
+            continue;
+        }
+        if in_providers {
+            // имя провайдера: строка "  name:" (ровно 2 пробела, ключ мапы)
+            if line.starts_with("  ") && !line.starts_with("   ") && trimmed.ends_with(':') && !trimmed.starts_with('-') {
+                cur_provider = Some(trimmed.trim_end_matches(':').to_string());
+                out.push(line.to_string());
+                continue;
+            }
+            if trimmed.starts_with("exclude-filter:") {
+                if let Some(p) = &cur_provider {
+                    if ig.is_empty() {
+                        if let Some(orig) = saved.get(p) {
+                            out.push(format!("    exclude-filter: \"{}\"", orig));
+                        } else {
+                            out.push(line.to_string());
+                        }
+                        continue;
+                    }
+                    let orig = saved.entry(p.clone()).or_insert_with(|| extract_filter_value(trimmed));
+                    let mut parts: Vec<String> = orig.split('|').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    for i in &ig {
+                        if !parts.iter().any(|p2| p2.eq_ignore_ascii_case(i)) {
+                            parts.push(i.clone());
+                        }
+                    }
+                    out.push(format!("    exclude-filter: \"{}\"", parts.join("|")));
+                    continue;
+                }
+            }
+            out.push(line.to_string());
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    out.join("\n")
+}
+
+fn extract_filter_value(trimmed: &str) -> String {
+    let v = trimmed.strip_prefix("exclude-filter:").unwrap_or("").trim();
+    let v = v.strip_prefix('"').unwrap_or(v);
+    let v = v.strip_suffix('"').unwrap_or(v);
+    let v = v.strip_prefix('\'').unwrap_or(v);
+    v.strip_suffix('\'').unwrap_or(v).to_string()
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,6 +559,28 @@ mod tests {
         assert!(!out.contains("    proxies:"), "OUT={out}");
         assert!(!out.contains("include-all"));
         assert_eq!(out.matches("exclude-filter").count(), 2);
+    }
+
+    #[test]
+    fn provider_filter_append_and_restore()
+    {
+        let pyaml = "proxy-providers:
+  geodema:
+    type: http
+    exclude-filter: \"(?i)DIRECT|Russia|RU\"
+    interval: 43200
+  geodema2:
+    type: http
+proxy-groups:
+  - name: PROXY
+    type: select
+";
+        let mut saved = std::collections::BTreeMap::new();
+        let out = apply_ignore_to_providers(pyaml, &["Германия".to_string()], &mut saved);
+        assert!(out.contains("exclude-filter: \"(?i)DIRECT|Russia|RU|Германия\""), "OUT={out}");
+        assert_eq!(saved.len(), 1);
+        let restored = apply_ignore_to_providers(&out, &[], &mut saved);
+        assert!(restored.contains("exclude-filter: \"(?i)DIRECT|Russia|RU\""), "OUT={restored}");
     }
 
     #[test]

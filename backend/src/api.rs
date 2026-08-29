@@ -285,6 +285,9 @@ pub async fn set_ignore(State(state): State<AppState>, Json(req): Json<IgnoreReq
         Ok(y) => y,
         Err(e) => return api_err(e),
     };
+    let mut saved = cfg.provider_filters.clone();
+    let new_yaml = routing::apply_ignore_to_providers(&new_yaml, &servers, &mut saved);
+    cfg.provider_filters = saved;
     let tmp = format!("{}.tmp", cfg.mihomo.config_path);
     if let Err(e) = tokio::fs::write(&tmp, &new_yaml).await {
         return api_err(format!("Ошибка записи: {e}"));
