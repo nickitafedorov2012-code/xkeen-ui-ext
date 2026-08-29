@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { apiGet, apiPost } from '../api'
-import { fmtBytes, fmtSpeed, type DeviceInfo, type PolicyInfo, type RoutingAssignmentInfo, type ServerInfo } from '../types'
+import { apiGet, apiPost, apiPut } from '../api'
+import {
+  fmtBytes,
+  fmtSpeed,
+  pingClass,
+  type DeviceInfo,
+  type DeviceRoutingEntry,
+  type PolicyInfo,
+  type RoutingAssignmentInfo,
+  type ServerInfo,
+} from '../types'
 
 interface Props {
   notify: (msg: string, isError?: boolean) => void
@@ -18,6 +27,8 @@ export default function Devices({ notify }: Props) {
   const [policies, setPolicies] = useState<PolicyInfo[]>([])
   const [servers, setServers] = useState<ServerInfo[]>([])
   const [routing, setRouting] = useState<RoutingAssignmentInfo[]>([])
+  const [drMap, setDrMap] = useState<Record<string, DeviceRoutingEntry>>({})
+  const [devFailover, setDevFailover] = useState(false)
   const [filter, setFilter] = useState('')
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [limit, setLimit] = useState(25)
@@ -26,19 +37,32 @@ export default function Devices({ notify }: Props) {
   const [batchPolicy, setBatchPolicy] = useState('')
   const [batchSpeed, setBatchSpeed] = useState(0)
   const [showOffline, setShowOffline] = useState(true)
+  const [drModal, setDrModal] = useState<{
+    ip: string
+    name: string
+    servers: string[]
+    threshold: number
+    autoRestore: boolean
+  } | null>(null)
 
   const load = useCallback(async () => {
     try {
-      const [d, p, s, r] = await Promise.all([
+      const [d, p, s, r, dr] = await Promise.all([
         apiGet<{ devices: DeviceInfo[] }>('devices'),
         apiGet<{ policies: PolicyInfo[] }>('policies'),
         apiGet<{ servers: ServerInfo[] }>('servers'),
         apiGet<{ assignments: RoutingAssignmentInfo[] }>('routing'),
+        apiGet<{ routing: Record<string, DeviceRoutingEntry>; device_failover_enabled: boolean }>('device-routing').catch(() => ({
+          routing: {} as Record<string, DeviceRoutingEntry>,
+          device_failover_enabled: false,
+        })),
       ])
       setDevices(d.devices)
       setPolicies(p.policies)
       setServers(s.servers)
       setRouting(r.assignments)
+      setDrMap(dr.routing)
+      setDevFailover(dr.device_failover_enabled)
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка загрузки устройств', true)
     } finally {
@@ -117,6 +141,65 @@ export default function Devices({ notify }: Props) {
     }
   }
 
+  // Подпись сервера с пингом для дропдаунов.
+  const serverLabel = (id: string) => {
+    const s = servers.find((x) => x.id === id)
+    if (!s) return id
+    return s.ping_ms > 0 ? `${s.name} · ${s.ping_ms} мс` : `${s.name} · —`
+  }
+
+  const openDrModal = (d: DeviceInfo, assigned?: string) => {
+    const entry = drMap[d.ip]
+    setDrModal({
+      ip: d.ip,
+      name: d.name,
+      servers: entry?.servers?.length ? [...entry.servers] : assigned ? [assigned] : [],
+      threshold: entry?.ping_threshold_ms || 300,
+      autoRestore: entry?.auto_restore ?? true,
+    })
+  }
+
+  const saveDr = async () => {
+    if (!drModal) return
+    setBusy(true)
+    try {
+      await apiPost('device-routing', {
+        ip: drModal.ip,
+        name: drModal.name,
+        servers: drModal.servers,
+        ping_threshold_ms: drModal.threshold,
+        auto_restore: drModal.autoRestore,
+      })
+      notify(drModal.servers.length ? `Цепочка сохранена: ${drModal.servers.length} сервер(ов)` : 'Маршрутизация снята')
+      setDrModal(null)
+      load()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка сохранения', true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const toggleDevFailover = async (on: boolean) => {
+    setDevFailover(on)
+    try {
+      await apiPut('settings', { failover: { device_failover_enabled: on } })
+      notify(on ? 'Per-device failover включён' : 'Per-device failover выключен')
+    } catch (e) {
+      setDevFailover(!on)
+      notify(e instanceof Error ? e.message : 'Ошибка', true)
+    }
+  }
+
+  const drMove = (idx: number, dir: -1 | 1) => {
+    if (!drModal) return
+    const next = [...drModal.servers]
+    const j = idx + dir
+    if (j < 0 || j >= next.length) return
+    ;[next[idx], next[j]] = [next[j], next[idx]]
+    setDrModal({ ...drModal, servers: next })
+  }
+
   const selectedMacs = [...selected]
 
   return (
@@ -134,6 +217,10 @@ export default function Devices({ notify }: Props) {
         <label className="check">
           <input type="checkbox" checked={showOffline} onChange={(e) => setShowOffline(e.target.checked)} />
           показывать офлайн
+        </label>
+        <label className="check" title="Мониторинг цепочек сервер+резерв: смена сервера при отвале или пинге выше порога">
+          <input type="checkbox" checked={devFailover} onChange={(e) => toggleDevFailover(e.target.checked)} />
+          ⚡ failover устройств
         </label>
         <button className="btn" onClick={load} disabled={busy}>🔄 Обновить</button>
         <span className="muted">{filtered.length} шт.</span>
@@ -218,22 +305,39 @@ export default function Devices({ notify }: Props) {
                       </select>
                     </td>
                     <td>
-                      <select
-                        className="select"
-                        value={assigned ? '__keep__' : 'default'}
-                        disabled={busy}
-                        onChange={(e) =>
-                          applyServer(d.ip, d.name, e.target.value === '__keep__' ? assigned || '' : e.target.value)
-                        }
-                      >
-                        <option value="default">По умолчанию (PROXY)</option>
-                        {assigned && <option value="__keep__">{assigned}</option>}
-                        {servers
-                          .filter((s) => s.id !== assigned)
-                          .map((s) => (
-                            <option key={s.id} value={s.id}>{s.name}</option>
-                          ))}
-                      </select>
+                      <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                        <select
+                          className="select"
+                          style={{ flex: 1 }}
+                          value={assigned ? '__keep__' : 'default'}
+                          disabled={busy}
+                          onChange={(e) =>
+                            applyServer(d.ip, d.name, e.target.value === '__keep__' ? assigned || '' : e.target.value)
+                          }
+                        >
+                          <option value="default">По умолчанию (PROXY)</option>
+                          {assigned && <option value="__keep__">{serverLabel(assigned)}</option>}
+                          {servers
+                            .filter((s) => s.id !== assigned)
+                            .map((s) => (
+                              <option key={s.id} value={s.id}>{serverLabel(s.id)}</option>
+                            ))}
+                        </select>
+                        <button
+                          className="btn sm ghost"
+                          title="Резервные серверы и порог пинга"
+                          disabled={busy}
+                          onClick={() => openDrModal(d, assigned)}
+                        >
+                          ⚙
+                        </button>
+                      </div>
+                      {drMap[d.ip]?.servers?.length > 1 && (
+                        <div className="muted small">
+                          резерв: {drMap[d.ip].servers.slice(1).map(serverLabel).join(', ')}
+                          {devFailover ? ` · порог ${drMap[d.ip].ping_threshold_ms || 300} мс` : ' · failover выкл'}
+                        </div>
+                      )}
                     </td>
                   </tr>
                 )
@@ -246,6 +350,93 @@ export default function Devices({ notify }: Props) {
             </button>
           )}
         </>
+      )}
+
+      {drModal && (
+        <div className="modal-overlay" onClick={() => setDrModal(null)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>🛡️ Сервер и резервы — {drModal.name}</h2>
+            <p className="muted small">
+              Цепочка: первый — основной, остальные — резервы. Если основной отвалился или пинг выше порога,
+              устройство переключается на следующий живой. При восстановлении основного — автовозврат.
+            </p>
+            <div className="modal-list">
+              {drModal.servers.length === 0 && <p className="muted">Цепочка пуста — устройство использует PROXY по умолчанию.</p>}
+              {drModal.servers.map((id, i) => {
+                const s = servers.find((x) => x.id === id)
+                return (
+                  <div key={id} className="check-row" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    <span className="badge">{i === 0 ? 'ОСН' : `РЕЗ${i}`}</span>
+                    <span className="server-name" style={{ flex: 1 }} title={id}>{serverLabel(id)}</span>
+                    {s && <span className={'ping ' + pingClass(s.ping_ms)}>{s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}</span>}
+                    <button className="btn sm ghost" disabled={i === 0} onClick={() => drMove(i, -1)}>↑</button>
+                    <button className="btn sm ghost" disabled={i === drModal.servers.length - 1} onClick={() => drMove(i, 1)}>↓</button>
+                    <button
+                      className="btn sm ghost"
+                      onClick={() => setDrModal({ ...drModal, servers: drModal.servers.filter((x) => x !== id) })}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )
+              })}
+              <select
+                className="select"
+                value=""
+                onChange={(e) => {
+                  if (!e.target.value) return
+                  if (!drModal.servers.includes(e.target.value)) {
+                    setDrModal({ ...drModal, servers: [...drModal.servers, e.target.value] })
+                  }
+                }}
+              >
+                <option value="">+ добавить сервер в цепочку…</option>
+                {servers
+                  .filter((s) => !drModal.servers.includes(s.id))
+                  .map((s) => (
+                    <option key={s.id} value={s.id}>{serverLabel(s.id)}</option>
+                  ))}
+              </select>
+            </div>
+            <div className="modal-actions" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
+              <label className="check" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                Порог пинга, мс:
+                <input
+                  className="input"
+                  type="number"
+                  min={50}
+                  max={5000}
+                  step={50}
+                  value={drModal.threshold}
+                  onChange={(e) => setDrModal({ ...drModal, threshold: Number(e.target.value) || 0 })}
+                />
+              </label>
+              <label className="check" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <input
+                  type="checkbox"
+                  checked={drModal.autoRestore}
+                  onChange={(e) => setDrModal({ ...drModal, autoRestore: e.target.checked })}
+                />
+                автовозврат на основной, когда восстановится
+              </label>
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <button className="btn ghost" onClick={() => setDrModal(null)}>Отмена</button>
+                {drMap[drModal.ip] && (
+                  <button
+                    className="btn ghost"
+                    disabled={busy}
+                    onClick={() => { setDrModal({ ...drModal, servers: [] }); }}
+                  >
+                    Снять маршрутизацию
+                  </button>
+                )}
+                <button className="btn primary" disabled={busy} onClick={saveDr}>
+                  {busy ? 'Применение…' : 'Сохранить'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </section>
   )

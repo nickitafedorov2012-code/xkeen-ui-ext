@@ -162,6 +162,7 @@ async fn main() {
         .route("/api/devices/speed", post(api::set_device_speed))
         .route("/api/policies", get(api::get_policies))
         .route("/api/routing", get(api::get_routing).post(api::apply_routing))
+        .route("/api/device-routing", get(api::get_device_routing).post(api::set_device_routing))
         .route("/api/ignore", get(api::get_ignore).post(api::set_ignore))
         .route("/api/failover/check", post(api::failover_check))
         .route("/api/failover/events", get(api::failover_events))

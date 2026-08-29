@@ -7,6 +7,7 @@
 use crate::{mihomo, AppState};
 use chrono::Local;
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::VecDeque;
 use tokio::sync::Mutex;
 
@@ -145,6 +146,94 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
     }
 }
 
+/// Per-device проверка: для каждого устройства с цепочкой серверов —
+/// пинг текущего; отвалился или пинг > порога → переключение на следующий
+/// живой из цепочки; автовозврат на основной, когда восстановился.
+pub async fn run_device_check(state: &AppState) -> Result<String, String> {
+    let cfg = state.config.read().await.clone();
+    if cfg.device_routing.is_empty() {
+        return Ok("Нет устройств с резервными цепочками".to_string());
+    }
+    let proxies = mihomo::get_proxies(&state.http, &cfg).await?;
+    let rules = mihomo::m_get(&state.http, &cfg, "/rules").await.unwrap_or(Value::Null);
+    let groups_by_ip = mihomo::ip_groups_from_rules(&rules);
+
+    let mut actions: Vec<String> = Vec::new();
+    for (ip, dr) in &cfg.device_routing {
+        if dr.servers.is_empty() {
+            continue;
+        }
+        // Группа устройства: из SRC-IP правил (AUTO-DEVICE).
+        let Some(group) = groups_by_ip.get(ip) else {
+            continue;
+        };
+        let Some(cur) = proxies.get(group).and_then(|g| g.get("now")).and_then(|n| n.as_str()) else {
+            continue;
+        };
+        // Ручное переключение на сервер вне цепочки не трогаем.
+        if !dr.servers.iter().any(|s| s == cur) {
+            continue;
+        }
+        let threshold = if dr.ping_threshold_ms > 0 {
+            dr.ping_threshold_ms as i64
+        } else {
+            cfg.failover.ping_threshold_ms as i64
+        };
+        let cur_ping = mihomo::ping_server(&state.http, &cfg, cur, 1500).await;
+        if cur_ping > 0 && cur_ping <= threshold {
+            // В норме: автовозврат на основной, если сейчас на резерве и основной ожил.
+            if dr.auto_restore && cur != dr.servers[0] {
+                let p = mihomo::ping_server(&state.http, &cfg, &dr.servers[0], 1500).await;
+                if p > 0 && p <= threshold {
+                    match mihomo::switch_group(&state.http, &cfg, group, &dr.servers[0]).await {
+                        Ok(_) => actions.push(format!(
+                            "[{ip}] основной '{}' восстановился ({p} мс) — возврат с резерва '{cur}'",
+                            dr.servers[0]
+                        )),
+                        Err(e) => actions.push(format!("[{ip}] возврат на основной не удался: {e}")),
+                    }
+                }
+            }
+            continue;
+        }
+        let reason = if cur_ping > 0 {
+            format!("пинг {cur_ping} мс > порога {threshold}")
+        } else {
+            "не отвечает".to_string()
+        };
+        let cands: Vec<String> = dr.servers.iter().filter(|s| *s != cur).cloned().collect();
+        if cands.is_empty() {
+            continue;
+        }
+        let pings = mihomo::ping_all(&state.http, &cfg, &cands, 1500).await;
+        let mut valid: Vec<(String, i64)> = pings
+            .iter()
+            .filter(|(_, ms)| **ms > 0 && **ms <= threshold)
+            .map(|(id, ms)| (id.clone(), *ms))
+            .collect();
+        if valid.is_empty() {
+            valid = pings.iter().filter(|(_, ms)| **ms > 0).map(|(id, ms)| (id.clone(), *ms)).collect();
+        }
+        valid.sort_by_key(|(_, ms)| *ms);
+        if let Some((best, ms)) = valid.first() {
+            match mihomo::switch_group(&state.http, &cfg, group, best).await {
+                Ok(_) => actions.push(format!("[{ip}] '{cur}' ({reason}) → резерв '{best}' ({ms} мс)")),
+                Err(e) => actions.push(format!("[{ip}] переключение на '{best}' не удалось: {e}")),
+            }
+        } else {
+            actions.push(format!("[{ip}] '{cur}' ({reason}), все резервы недоступны"));
+        }
+    }
+
+    if actions.is_empty() {
+        return Ok("Устройства: всё в норме".to_string());
+    }
+    for a in &actions {
+        state.failover_log.push(a, true).await;
+    }
+    Ok(actions.join("; "))
+}
+
 /// Фоновый цикл: каждые interval_secs (если enabled).
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
@@ -155,11 +244,16 @@ pub fn spawn(state: AppState) {
             };
             tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
 
-            let enabled = state.config.read().await.failover.enabled;
-            if !enabled {
-                continue;
+            let (enabled, dev_enabled) = {
+                let cfg = state.config.read().await;
+                (cfg.failover.enabled, cfg.failover.device_failover_enabled)
+            };
+            if enabled {
+                let _ = run_check(&state).await;
             }
-            let _ = run_check(&state).await;
+            if dev_enabled {
+                let _ = run_device_check(&state).await;
+            }
         }
     });
 }

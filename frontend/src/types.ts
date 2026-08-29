@@ -53,6 +53,12 @@ export interface RoutingAssignmentInfo {
   current_server: string
 }
 
+export interface DeviceRoutingEntry {
+  servers: string[]
+  ping_threshold_ms: number
+  auto_restore: boolean
+}
+
 export interface FailoverEventInfo {
   time: string
   message: string

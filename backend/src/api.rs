@@ -348,6 +348,126 @@ pub async fn fix_names(State(state): State<AppState>) -> Response {
     api_ok(json!({ "fixed": fixed.len(), "names": fixed }))
 }
 
+/// GET /api/device-routing — per-device цепочки серверов (основной + резервы).
+pub async fn get_device_routing(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let map: serde_json::Map<String, serde_json::Value> = cfg
+        .device_routing
+        .iter()
+        .map(|(ip, dr)| {
+            (
+                ip.clone(),
+                json!({
+                    "servers": dr.servers,
+                    "ping_threshold_ms": dr.ping_threshold_ms,
+                    "auto_restore": dr.auto_restore,
+                }),
+            )
+        })
+        .collect();
+    api_ok(json!({
+        "routing": map,
+        "device_failover_enabled": cfg.failover.device_failover_enabled,
+        "global_threshold_ms": cfg.failover.ping_threshold_ms,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct DeviceRoutingReq {
+    pub ip: String,
+    #[serde(default)]
+    pub name: String,
+    /// Пусто = снять маршрутизацию устройства.
+    #[serde(default)]
+    pub servers: Vec<String>,
+    #[serde(default)]
+    pub ping_threshold_ms: u32,
+    #[serde(default = "default_true")]
+    pub auto_restore: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// POST /api/device-routing — сохранить цепочку устройства, применить AUTO-DEVICE
+/// назначение (основной сервер), reload Mihomo. Пустой servers = снять.
+pub async fn set_device_routing(State(state): State<AppState>, Json(req): Json<DeviceRoutingReq>) -> Response {
+    let mut cfg = state.config.read().await.clone();
+    let _guard = state.routing_lock.lock().await;
+
+    let ip = req.ip.trim().to_string();
+    if ip.is_empty() {
+        return api_err("Пустой IP устройства");
+    }
+    let mut servers: Vec<String> = req
+        .servers
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    servers.dedup();
+
+    // 1. Сохранить/удалить настройки в конфиге
+    if servers.is_empty() {
+        cfg.device_routing.remove(&ip);
+    } else {
+        cfg.device_routing.insert(
+            ip.clone(),
+            config::DeviceRouting {
+                servers: servers.clone(),
+                ping_threshold_ms: req.ping_threshold_ms,
+                auto_restore: req.auto_restore,
+            },
+        );
+    }
+
+    // 2. Применить AUTO-DEVICE назначение (primary или снятие)
+    let yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+        Ok(y) => y,
+        Err(e) => return api_err(format!("Не удалось прочитать config.yaml: {e}")),
+    };
+    let assignment = routing::Assignment {
+        ip: ip.clone(),
+        name: req.name.clone(),
+        server: servers.first().cloned(),
+    };
+    let new_yaml = match routing::apply_assignments(&yaml, &[assignment]) {
+        Ok(y) => y,
+        Err(e) => return api_err(e),
+    };
+    let tmp = format!("{}.tmp", cfg.mihomo.config_path);
+    if let Err(e) = tokio::fs::write(&tmp, &new_yaml).await {
+        return api_err(format!("Ошибка записи: {e}"));
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, &cfg.mihomo.config_path).await {
+        return api_err(format!("Ошибка переименования: {e}"));
+    }
+    if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
+        return api_err(format!("Конфиг записан, но reload Mihomo не удался: {e}"));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+
+    // 3. Перевыбор основного сервера в новой группе
+    let mut reselected = false;
+    if let Some(primary) = servers.first() {
+        let gname = routing::group_name_for(&ip, &req.name);
+        if mihomo::switch_group(&state.http, &cfg, &gname, primary).await.is_ok() {
+            reselected = true;
+        }
+    }
+
+    if let Err(e) = config::save(&state.config_path, &cfg).await {
+        return api_err(format!("Ошибка сохранения конфига: {e}"));
+    }
+    *state.config.write().await = cfg;
+    api_ok(json!({
+        "applied": !servers.is_empty(),
+        "servers": servers,
+        "reselected": reselected,
+    }))
+}
+
 /// GET /api/routing — текущие AUTO-DEVICE назначения + live-серверы.
 pub async fn get_routing(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();

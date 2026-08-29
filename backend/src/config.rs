@@ -61,6 +61,8 @@ pub struct FailoverConfig {
     pub priority_server: String,
     pub auto_restore_priority: bool,
     pub interval_secs: u32,
+    /// Per-device failover: мониторинг цепочек server+резервы (device_routing).
+    pub device_failover_enabled: bool,
 }
 
 impl Default for FailoverConfig {
@@ -71,6 +73,27 @@ impl Default for FailoverConfig {
             priority_server: String::new(),
             auto_restore_priority: true,
             interval_secs: 60,
+            device_failover_enabled: false,
+        }
+    }
+}
+
+/// Цепочка серверов для устройства: [основной, резерв1, резерв2, ...].
+/// Ключ — IP устройства. Порог 0 = наследовать глобальный failover.ping_threshold_ms.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct DeviceRouting {
+    pub servers: Vec<String>,
+    pub ping_threshold_ms: u32,
+    pub auto_restore: bool,
+}
+
+impl Default for DeviceRouting {
+    fn default() -> Self {
+        Self {
+            servers: Vec::new(),
+            ping_threshold_ms: 300,
+            auto_restore: true,
         }
     }
 }
@@ -86,6 +109,8 @@ pub struct AppConfig {
     pub ignore_servers: Vec<String>,
     /// Original provider exclude-filters (restored when ignore list is cleared).
     pub provider_filters: std::collections::BTreeMap<String, String>,
+    /// Per-device цепочки серверов (основной + резервы). Ключ — IP устройства.
+    pub device_routing: std::collections::BTreeMap<String, DeviceRouting>,
 }
 
 impl Default for AppConfig {
@@ -97,6 +122,7 @@ impl Default for AppConfig {
             refresh_interval_sec: 10,
             ignore_servers: Vec::new(),
             provider_filters: std::collections::BTreeMap::new(),
+            device_routing: std::collections::BTreeMap::new(),
         }
     }
 }
