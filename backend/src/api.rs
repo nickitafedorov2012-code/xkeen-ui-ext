@@ -277,7 +277,7 @@ pub async fn set_ignore(State(state): State<AppState>, Json(req): Json<IgnoreReq
     servers.dedup();
     // Если в игнор-лист попало mojibake-имя — добавляем починенный вариант,
     // чтобы подстрока совпала с реальным именем сервера у провайдера.
-    let repaired: Vec<String> = servers.iter().filter_map(|s| mihomo::fix_mojibake(s)).collect();
+    let repaired: Vec<String> = servers.iter().map(|s| mihomo::fix_mojibake_smart(s)).collect();
     servers.extend(repaired);
     servers.sort();
     servers.dedup();
@@ -326,7 +326,8 @@ pub async fn fix_names(State(state): State<AppState>) -> Response {
     let mut new_yaml = yaml.clone();
     let mut fixed: Vec<String> = Vec::new();
     for name in routing::parse_static_proxy_names(&yaml) {
-        if let Some(repaired) = mihomo::fix_mojibake(&name) {
+        let repaired = mihomo::fix_mojibake_smart(&name);
+        if repaired != name {
             new_yaml = new_yaml.replace(&name, &repaired);
             fixed.push(format!("{name} → {repaired}"));
         }

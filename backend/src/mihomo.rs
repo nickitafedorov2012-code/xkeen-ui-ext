@@ -270,9 +270,27 @@ pub fn clean_display_name(name: &str) -> String {
 }
 
 /// Имя для показа в панели: сначала ремонт mojibake, затем чистка эмодзи.
+/// Если строка целиком не декодируется (эмодзи-флаги ломают таблицы) — ремонт по словам.
 pub fn display_name(name: &str) -> String {
-    let repaired = fix_mojibake(name).unwrap_or_else(|| name.to_string());
+    let repaired = fix_mojibake_smart(name);
     clean_display_name(&repaired)
+}
+
+/// Умный ремонт: сначала вся строка, затем по словам (эмодзи в строке мешают декоду).
+pub fn fix_mojibake_smart(s: &str) -> String {
+    if let Some(fixed) = fix_mojibake(s) {
+        return fixed;
+    }
+    let words: Vec<String> = s
+        .split_whitespace()
+        .map(|w| fix_mojibake(w).unwrap_or_else(|| w.to_string()))
+        .collect();
+    let joined = words.join(" ");
+    if joined == s {
+        s.to_string()
+    } else {
+        joined
+    }
 }
 
 fn last_delay(p: &Value) -> i64 {
@@ -608,6 +626,11 @@ mod tests {
             })
             .collect();
         assert_eq!(display_name(&mojibake), "Финляндия");
+        // флаг-эмодзи перед mojibake: вся строка не декодируется — чиним по словам
+        let with_flag = format!("\u{1F1EB}\u{1F1EE} {mojibake}");
+        assert_eq!(display_name(&with_flag), "Финляндия");
+        // нормальное имя с флагом не ломается
+        assert_eq!(display_name("🇩🇪 Германия"), "Германия");
     }
 }
 
