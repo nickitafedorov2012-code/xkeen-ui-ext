@@ -14,11 +14,19 @@ export default function Servers({ notify }: Props) {
   const [limit, setLimit] = useState(PAGE)
   const [loading, setLoading] = useState(true)
   const [pinging, setPinging] = useState(false)
+  const [ignored, setIgnored] = useState<Set<string>>(new Set())
+  const [ignoreOpen, setIgnoreOpen] = useState(false)
+  const [ignoreDraft, setIgnoreDraft] = useState<Set<string>>(new Set())
+  const [ignoreSaving, setIgnoreSaving] = useState(false)
 
   const load = useCallback(async () => {
     try {
-      const data = await apiGet<{ servers: ServerInfo[] }>('servers')
+      const [data, ig] = await Promise.all([
+        apiGet<{ servers: ServerInfo[] }>('servers'),
+        apiGet<{ servers: string[] }>('ignore').catch(() => ({ servers: [] as string[] })),
+      ])
       setServers(data.servers)
+      setIgnored(new Set(ig.servers))
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка загрузки серверов', true)
     } finally {
@@ -68,6 +76,37 @@ export default function Servers({ notify }: Props) {
     }
   }
 
+  const openIgnore = () => {
+    setIgnoreDraft(new Set(ignored))
+    setIgnoreOpen(true)
+  }
+
+  const toggleIgnoreDraft = (id: string, on: boolean) => {
+    setIgnoreDraft((prev) => {
+      const next = new Set(prev)
+      if (on) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+
+  const saveIgnore = async () => {
+    setIgnoreSaving(true)
+    try {
+      await apiPost<{ applied: number }>('ignore', { servers: [...ignoreDraft] })
+      notify(`Игнор-лист применён: исключено из Fastest/Fallback — ${ignoreDraft.size}`)
+      setIgnoreOpen(false)
+      load()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка применения игнор-листа', true)
+    } finally {
+      setIgnoreSaving(false)
+    }
+  }
+
+  // для игнор-листа годятся только реальные серверы (не синтетические Fastest/Fallback)
+  const ignoreCandidates = servers.filter((s) => s.protocol !== 'URL-TEST' && s.protocol !== 'FALLBACK')
+
   return (
     <section className="card">
       <div className="toolbar">
@@ -83,6 +122,9 @@ export default function Servers({ notify }: Props) {
         <button className="btn" onClick={pingAll} disabled={pinging}>
           {pinging ? 'Пинг…' : '📡 Пинг всех'}
         </button>
+        <button className="btn" onClick={openIgnore}>
+          🚫 Игнор-лист{ignored.size > 0 ? ` (${ignored.size})` : ''}
+        </button>
         <button className="btn" onClick={load}>🔄 Обновить</button>
         <span className="muted">{filtered.length} шт.</span>
       </div>
@@ -96,6 +138,7 @@ export default function Servers({ notify }: Props) {
               <div className="server-head">
                 <span className="badge">{s.protocol}</span>
                 <span className="server-name" title={s.name}>{s.name}</span>
+                {ignored.has(s.id) && <span className="tag ignored">ИГНОР</span>}
                 <span className={'ping ' + pingClass(s.ping_ms)}>
                   {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
                 </span>
@@ -119,6 +162,43 @@ export default function Servers({ notify }: Props) {
               Показать ещё ({filtered.length - limit})
             </button>
           )}
+        </div>
+      )}
+
+      {ignoreOpen && (
+        <div className="modal-overlay" onClick={() => setIgnoreOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>🚫 Игнор-лист серверов</h2>
+            <p className="muted small">
+              Отмеченные серверы будут исключены из авто-групп <b>Fastest</b> (url-test) и <b>Fallback</b> —
+              они не будут выбираться автоматически. Ручное подключение к ним остаётся доступным.
+            </p>
+            <div className="modal-list">
+              {ignoreCandidates.length === 0 && <p className="muted">Нет реальных серверов.</p>}
+              {ignoreCandidates.map((s) => (
+                <label key={s.id} className="check-row">
+                  <input
+                    type="checkbox"
+                    checked={ignoreDraft.has(s.id)}
+                    onChange={(e) => toggleIgnoreDraft(s.id, e.target.checked)}
+                  />
+                  <span className="badge">{s.protocol}</span>
+                  <span className="server-name" title={s.name}>{s.name}</span>
+                  {s.ping_ms > 0 && <span className={'ping ' + pingClass(s.ping_ms)}>{s.ping_ms} мс</span>}
+                </label>
+              ))}
+            </div>
+            <div className="modal-actions">
+              <button className="btn" onClick={() => setIgnoreOpen(false)}>Отмена</button>
+              <button className="btn ghost" disabled={ignoreSaving || ignoreDraft.size === 0}
+                onClick={() => { setIgnoreDraft(new Set()); }}>
+                Снять все
+              </button>
+              <button className="btn primary" onClick={saveIgnore} disabled={ignoreSaving}>
+                {ignoreSaving ? 'Применение…' : `Применить (${ignoreDraft.size})`}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </section>

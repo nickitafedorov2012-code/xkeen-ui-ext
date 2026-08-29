@@ -1,6 +1,6 @@
-//! Раздельная маршрутизация per-device: AUTO-DEVICE-GROUPS / AUTO-DEVICE-RULES блоки
-//! в /opt/etc/mihomo/config.yaml. Формат блоков 1:1 с десктопным KeeneticPolicyManager
-//! (общее хранилище правил ПК/Android/веб-версий).
+//! Р Р°Р·РґРµР»СЊРЅР°СЏ РјР°СЂС€СЂСѓС‚РёР·Р°С†РёСЏ per-device: AUTO-DEVICE-GROUPS / AUTO-DEVICE-RULES Р±Р»РѕРєРё
+//! РІ /opt/etc/mihomo/config.yaml. Р¤РѕСЂРјР°С‚ Р±Р»РѕРєРѕРІ 1:1 СЃ РґРµСЃРєС‚РѕРїРЅС‹Рј KeeneticPolicyManager
+//! (РѕР±С‰РµРµ С…СЂР°РЅРёР»РёС‰Рµ РїСЂР°РІРёР» РџРљ/Android/РІРµР±-РІРµСЂСЃРёР№).
 
 use regex_lite::Regex;
 use std::collections::BTreeMap;
@@ -14,11 +14,11 @@ pub const RULES_END: &str = "# --- AUTO-DEVICE-RULES-END ---";
 pub struct Assignment {
     pub ip: String,
     pub name: String,
-    /// None или "default" — снять назначение устройства.
+    /// None РёР»Рё "default" вЂ” СЃРЅСЏС‚СЊ РЅР°Р·РЅР°С‡РµРЅРёРµ СѓСЃС‚СЂРѕР№СЃС‚РІР°.
     pub server: Option<String>,
 }
 
-/// 'Big PC 192_168_2_118' → '192.168.2.118'; 'DEV_aa_bb_cc_dd_ee_ff' → MAC-вид.
+/// 'Big PC 192_168_2_118' в†’ '192.168.2.118'; 'DEV_aa_bb_cc_dd_ee_ff' в†’ MAC-РІРёРґ.
 pub fn ip_key_from_group(gname: &str) -> String {
     let mut token = gname.trim().split(' ').next_back().unwrap_or("");
     if let Some(stripped) = token.strip_prefix("DEV_") {
@@ -36,7 +36,7 @@ pub fn ip_key_from_group(gname: &str) -> String {
     }
 }
 
-/// Имя группы устройства: '{чистое имя} {ip_с_подчёркиваниями}' или 'DEV_{ip}'.
+/// РРјСЏ РіСЂСѓРїРїС‹ СѓСЃС‚СЂРѕР№СЃС‚РІР°: '{С‡РёСЃС‚РѕРµ РёРјСЏ} {ip_СЃ_РїРѕРґС‡С‘СЂРєРёРІР°РЅРёСЏРјРё}' РёР»Рё 'DEV_{ip}'.
 pub fn group_name_for(ip: &str, name: &str) -> String {
     let safe_ip = ip.replace('.', "_").replace(':', "_");
     let clean: String = name
@@ -51,14 +51,14 @@ pub fn group_name_for(ip: &str, name: &str) -> String {
     }
 }
 
-/// YAML-текст select-группы устройства (формат десктопа).
+/// YAML-С‚РµРєСЃС‚ select-РіСЂСѓРїРїС‹ СѓСЃС‚СЂРѕР№СЃС‚РІР° (С„РѕСЂРјР°С‚ РґРµСЃРєС‚РѕРїР°).
 pub fn group_yaml(group_name: &str) -> String {
     format!(
         "  - name: '{group_name}'\n    type: select\n    proxies:\n      - Fastest\n      - Fallback\n    use:\n      - geodema\n      - geodema2"
     )
 }
 
-/// Строка правила для устройства.
+/// РЎС‚СЂРѕРєР° РїСЂР°РІРёР»Р° РґР»СЏ СѓСЃС‚СЂРѕР№СЃС‚РІР°.
 pub fn rule_line(ip: &str, group_name: &str) -> String {
     format!("  - SRC-IP-CIDR,{ip}/32,{group_name}")
 }
@@ -69,7 +69,7 @@ fn extract_block<'a>(yaml: &'a str, begin: &str, end: &str) -> Option<&'a str> {
     Some(&yaml[p1..p2])
 }
 
-/// Парсинг существующих групп: ip → исходный YAML-текст группы.
+/// РџР°СЂСЃРёРЅРі СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёС… РіСЂСѓРїРї: ip в†’ РёСЃС…РѕРґРЅС‹Р№ YAML-С‚РµРєСЃС‚ РіСЂСѓРїРїС‹.
 pub fn parse_groups(yaml: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let Some(block) = extract_block(yaml, GROUPS_BEGIN, GROUPS_END) else {
@@ -100,7 +100,7 @@ pub fn parse_groups(yaml: &str) -> BTreeMap<String, String> {
     out
 }
 
-/// Парсинг существующих правил: ip → исходная строка правила.
+/// РџР°СЂСЃРёРЅРі СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёС… РїСЂР°РІРёР»: ip в†’ РёСЃС…РѕРґРЅР°СЏ СЃС‚СЂРѕРєР° РїСЂР°РІРёР»Р°.
 pub fn parse_rules(yaml: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let Some(block) = extract_block(yaml, RULES_BEGIN, RULES_END) else {
@@ -118,7 +118,7 @@ pub fn parse_rules(yaml: &str) -> BTreeMap<String, String> {
     out
 }
 
-/// Удаление AUTO-блоков из YAML (для последующей вставки объединённых).
+/// РЈРґР°Р»РµРЅРёРµ AUTO-Р±Р»РѕРєРѕРІ РёР· YAML (РґР»СЏ РїРѕСЃР»РµРґСѓСЋС‰РµР№ РІСЃС‚Р°РІРєРё РѕР±СЉРµРґРёРЅС‘РЅРЅС‹С…).
 pub fn remove_blocks(yaml: &str) -> String {
     let mut out = yaml.to_string();
     for (begin, end) in [(RULES_BEGIN, RULES_END), (GROUPS_BEGIN, GROUPS_END)] {
@@ -132,8 +132,8 @@ pub fn remove_blocks(yaml: &str) -> String {
     out
 }
 
-/// Merge-семантика десктопа: существующие правила сохраняются, применяются только
-/// переданные назначения (server=None/"default" — снять). Возвращает новый YAML.
+/// Merge-СЃРµРјР°РЅС‚РёРєР° РґРµСЃРєС‚РѕРїР°: СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёРµ РїСЂР°РІРёР»Р° СЃРѕС…СЂР°РЅСЏСЋС‚СЃСЏ, РїСЂРёРјРµРЅСЏСЋС‚СЃСЏ С‚РѕР»СЊРєРѕ
+/// РїРµСЂРµРґР°РЅРЅС‹Рµ РЅР°Р·РЅР°С‡РµРЅРёСЏ (server=None/"default" вЂ” СЃРЅСЏС‚СЊ). Р’РѕР·РІСЂР°С‰Р°РµС‚ РЅРѕРІС‹Р№ YAML.
 pub fn apply_assignments(yaml: &str, assignments: &[Assignment]) -> Result<String, String> {
     let mut groups_by_ip = parse_groups(yaml);
     let mut rules_by_ip = parse_rules(yaml);
@@ -166,7 +166,7 @@ pub fn apply_assignments(yaml: &str, assignments: &[Assignment]) -> Result<Strin
         let block = format!("{GROUPS_BEGIN}\n{}\n{GROUPS_END}\n", groups_sorted.join("\n"));
         let pos = content
             .find("proxy-groups:")
-            .ok_or("В config.yaml нет секции proxy-groups:")?
+            .ok_or("Р’ config.yaml РЅРµС‚ СЃРµРєС†РёРё proxy-groups:")?
             + "proxy-groups:".len();
         content = format!("{}{}\n{}", &content[..pos], block, &content[pos..]);
     }
@@ -178,11 +178,90 @@ pub fn apply_assignments(yaml: &str, assignments: &[Assignment]) -> Result<Strin
         .collect();
     if !rules_sorted.is_empty() {
         let block = format!("{RULES_BEGIN}\n{}\n{RULES_END}\n", rules_sorted.join("\n"));
-        let pos = content.find("rules:").ok_or("В config.yaml нет секции rules:")? + "rules:".len();
+        let pos = content.find("rules:").ok_or("Р’ config.yaml РЅРµС‚ СЃРµРєС†РёРё rules:")? + "rules:".len();
         content = format!("{}{}\n{}", &content[..pos], block, &content[pos..]);
     }
 
     Ok(content)
+}
+
+/// Р­РєСЂР°РЅРёСЂРѕРІР°РЅРёРµ РёРјРµРЅРё СЃРµСЂРІРµСЂР° РґР»СЏ regex (exclude-filter РёСЃРїРѕР»СЊР·СѓРµС‚ Go regexp).
+pub fn regex_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        if matches!(c, '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn filter_line(ignore: &[String]) -> String {
+    let escaped: Vec<String> = ignore.iter().map(|s| regex_escape(s.trim())).collect();
+    format!("^({})$", escaped.join("|"))
+}
+
+/// Р’СЃС‚Р°РІРєР°/Р·Р°РјРµРЅР°/СѓРґР°Р»РµРЅРёРµ `exclude-filter` РІ РіСЂСѓРїРїР°С… Fastest Рё Fallback.
+/// РџСѓСЃС‚РѕР№ ignore в†’ СЃС‚СЂРѕРєРё exclude-filter СѓРґР°Р»СЏСЋС‚СЃСЏ (РїРѕР»РЅС‹Р№ СЃР±СЂРѕСЃ).
+pub fn apply_exclude_filter(yaml: &str, ignore: &[String]) -> Result<String, String> {
+    let filter = if ignore.is_empty() {
+        String::new()
+    } else {
+        filter_line(ignore)
+    };
+    let rendered = |indent: &str| {
+        format!("{indent}exclude-filter: '{}'", filter.replace('\'', "''"))
+    };
+
+    let mut out: Vec<String> = Vec::with_capacity(yaml.lines().count() + 4);
+    let mut in_target = false;
+    let mut filter_done = false;
+
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        let is_target_start = matches!(trimmed, "- name: Fastest" | "- name: Fallback" | "- name: 'Fastest'" | "- name: 'Fallback'")
+            && !line.starts_with("    ");
+
+        if is_target_start {
+            in_target = true;
+            filter_done = false;
+            out.push(line.to_string());
+            continue;
+        }
+
+        if in_target {
+            let is_new_group = trimmed.starts_with("- name:") && !line.starts_with("    ");
+            let is_new_section = !line.starts_with(' ') && !trimmed.is_empty();
+            if is_new_group || is_new_section {
+                if !filter_done && !filter.is_empty() {
+                    out.push(rendered("    "));
+                }
+                in_target = false;
+                out.push(line.to_string());
+                continue;
+            }
+            if trimmed.starts_with("exclude-filter:") {
+                if !filter.is_empty() && !filter_done {
+                    out.push(rendered("    "));
+                    filter_done = true;
+                }
+                // РїСѓСЃС‚РѕР№ filter в†’ СЃС‚СЂРѕРєР° СѓРґР°Р»СЏРµС‚СЃСЏ
+                continue;
+            }
+            out.push(line.to_string());
+            if trimmed == "include-all: true" && !filter.is_empty() && !filter_done {
+                out.push(rendered("    "));
+                filter_done = true;
+            }
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    if in_target && !filter_done && !filter.is_empty() {
+        out.push(rendered("    "));
+    }
+    Ok(out.join("\n"))
 }
 
 #[cfg(test)]
@@ -195,20 +274,20 @@ mod tests {
     fn add_assignment_creates_blocks() {
         let out = apply_assignments(
             BASE_YAML,
-            &[Assignment { ip: "192.168.2.118".into(), name: "Big PC".into(), server: Some("🇩🇪 DE".into()) }],
+            &[Assignment { ip: "192.168.2.118".into(), name: "Big PC".into(), server: Some("рџ‡©рџ‡Є DE".into()) }],
         )
         .unwrap();
         assert!(out.contains(GROUPS_BEGIN));
         assert!(out.contains("- name: 'Big PC 192_168_2_118'"));
         assert!(out.contains("SRC-IP-CIDR,192.168.2.118/32,Big PC 192_168_2_118"));
-        // блоки вставлены сразу после секций
+        // Р±Р»РѕРєРё РІСЃС‚Р°РІР»РµРЅС‹ СЃСЂР°Р·Сѓ РїРѕСЃР»Рµ СЃРµРєС†РёР№
         let gpos = out.find("proxy-groups:").unwrap();
         let bpos = out.find(GROUPS_BEGIN).unwrap();
         assert!(bpos > gpos && bpos - gpos < 20);
         let rpos = out.find("rules:").unwrap();
         let rbpos = out.find(RULES_BEGIN).unwrap();
         assert!(rbpos > rpos && rbpos - rpos < 20);
-        // исходные правила не тронуты
+        // РёСЃС…РѕРґРЅС‹Рµ РїСЂР°РІРёР»Р° РЅРµ С‚СЂРѕРЅСѓС‚С‹
         assert!(out.contains("GEOIP,RU,DIRECT"));
     }
 
@@ -219,7 +298,7 @@ mod tests {
             &[Assignment { ip: "10.0.0.5".into(), name: "Phone".into(), server: Some("X".into()) }],
         )
         .unwrap();
-        // добавляем второе устройство — первое должно сохраниться
+        // РґРѕР±Р°РІР»СЏРµРј РІС‚РѕСЂРѕРµ СѓСЃС‚СЂРѕР№СЃС‚РІРѕ вЂ” РїРµСЂРІРѕРµ РґРѕР»Р¶РЅРѕ СЃРѕС…СЂР°РЅРёС‚СЊСЃСЏ
         let with_two = apply_assignments(
             &with_one,
             &[Assignment { ip: "10.0.0.6".into(), name: "TV".into(), server: Some("Y".into()) }],
@@ -266,6 +345,45 @@ mod tests {
     fn sanitize_name_in_group() {
         assert_eq!(group_name_for("1.2.3.4", "Po'ket,#PC\n"), "PoketPC 1_2_3_4");
         assert_eq!(group_name_for("1.2.3.4", ""), "DEV_1_2_3_4");
+    }
+
+    const GROUPS_YAML: &str = "proxy-groups:\n  - name: Fallback\n    type: fallback\n    include-all: true\n    use:\n      - geodema\n\n  - name: Fastest\n    type: url-test\n    include-all: true\n    use:\n      - geodema\n\n  - name: PROXY\n    type: select\n";
+
+    #[test]
+    fn exclude_filter_inserts_into_both_groups() {
+        let out = apply_exclude_filter(GROUPS_YAML, &["DE Germany".to_string(), "рџ‡«рџ‡® FI [fast]".to_string()]).unwrap();
+        let expected = "exclude-filter: '^(DE Germany|рџ‡«рџ‡® FI \\[fast\\])$'";
+        assert_eq!(out.matches(expected).count(), 2, "filter РІ РѕР±РµРёС… РіСЂСѓРїРїР°С…: {out}");
+        // РґСЂСѓРіРёРµ РіСЂСѓРїРїС‹ РЅРµ С‚СЂРѕРЅСѓС‚С‹
+        let proxy_pos = out.find("- name: PROXY").unwrap();
+        assert!(!out[proxy_pos..].contains("exclude-filter"));
+        // РІСЃС‚Р°РІР»РµРЅ РїРѕСЃР»Рµ include-all
+        let fpos = out.find("exclude-filter").unwrap();
+        let ipos = out.find("include-all: true").unwrap();
+        assert!(fpos > ipos && fpos - ipos < 40);
+    }
+
+    #[test]
+    fn exclude_filter_replaces_existing() {
+        let with_old = apply_exclude_filter(GROUPS_YAML, &["Old".to_string()]).unwrap();
+        let out = apply_exclude_filter(&with_old, &["New".to_string()]).unwrap();
+        assert!(!out.contains("Old"));
+        assert_eq!(out.matches("exclude-filter: '^(New)$'").count(), 2);
+    }
+
+    #[test]
+    fn exclude_filter_empty_removes_lines() {
+        let with_old = apply_exclude_filter(GROUPS_YAML, &["Old".to_string()]).unwrap();
+        let out = apply_exclude_filter(&with_old, &[]).unwrap();
+        assert!(!out.contains("exclude-filter"));
+        // СЃС‚СЂСѓРєС‚СѓСЂР° СЃРѕС…СЂР°РЅРµРЅР°
+        assert!(out.contains("- name: Fastest") && out.contains("- name: Fallback"));
+    }
+
+    #[test]
+    fn regex_escape_specials() {
+        assert_eq!(regex_escape("a.b[c](d)"), "a\\.b\\[c\\]\\(d\\)");
+        assert_eq!(regex_escape("plain name"), "plain name");
     }
 }
 

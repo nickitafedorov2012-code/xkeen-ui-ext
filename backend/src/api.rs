@@ -253,6 +253,55 @@ pub async fn set_device_speed(State(state): State<AppState>, Json(req): Json<Spe
     }
 }
 
+/// GET /api/ignore — текущий игнор-лист (exclude-filter для Fastest/Fallback).
+pub async fn get_ignore(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    api_ok(json!({ "servers": cfg.ignore_servers }))
+}
+
+#[derive(Deserialize)]
+pub struct IgnoreReq {
+    pub servers: Vec<String>,
+}
+
+/// POST /api/ignore — сохранить игнор-лист, применить exclude-filter к config.yaml, reload Mihomo.
+pub async fn set_ignore(State(state): State<AppState>, Json(req): Json<IgnoreReq>) -> Response {
+    let mut cfg = state.config.read().await.clone();
+    let mut servers: Vec<String> = req
+        .servers
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    servers.sort();
+    servers.dedup();
+    cfg.ignore_servers = servers.clone();
+
+    let yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+        Ok(y) => y,
+        Err(e) => return api_err(format!("Не удалось прочитать {}: {e}", cfg.mihomo.config_path)),
+    };
+    let new_yaml = match routing::apply_exclude_filter(&yaml, &servers) {
+        Ok(y) => y,
+        Err(e) => return api_err(e),
+    };
+    let tmp = format!("{}.tmp", cfg.mihomo.config_path);
+    if let Err(e) = tokio::fs::write(&tmp, &new_yaml).await {
+        return api_err(format!("Ошибка записи: {e}"));
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, &cfg.mihomo.config_path).await {
+        return api_err(format!("Ошибка переименования: {e}"));
+    }
+    if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
+        return api_err(format!("exclude-filter записан, но reload Mihomo не удался: {e}"));
+    }
+    if let Err(e) = config::save(&state.config_path, &cfg).await {
+        return api_err(format!("Ошибка сохранения конфига: {e}"));
+    }
+    *state.config.write().await = cfg;
+    api_ok(json!({ "applied": servers.len() }))
+}
+
 /// GET /api/routing — текущие AUTO-DEVICE назначения + live-серверы.
 pub async fn get_routing(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();

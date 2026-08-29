@@ -82,6 +82,8 @@ pub struct AppConfig {
     pub mihomo: MihomoConfig,
     pub failover: FailoverConfig,
     pub refresh_interval_sec: u32,
+    /// Игнор-лист: серверы, исключаемые из групп Fastest/Fallback (exclude-filter).
+    pub ignore_servers: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -91,6 +93,7 @@ impl Default for AppConfig {
             mihomo: MihomoConfig::default(),
             failover: FailoverConfig::default(),
             refresh_interval_sec: 10,
+            ignore_servers: Vec::new(),
         }
     }
 }
