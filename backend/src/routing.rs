@@ -51,11 +51,131 @@ pub fn group_name_for(ip: &str, name: &str) -> String {
     }
 }
 
-/// YAML-С‚РµРєСЃС‚ select-РіСЂСѓРїРїС‹ СѓСЃС‚СЂРѕР№СЃС‚РІР° (С„РѕСЂРјР°С‚ РґРµСЃРєС‚РѕРїР°).
-pub fn group_yaml(group_name: &str) -> String {
-    format!(
-        "  - name: '{group_name}'\n    type: select\n    proxies:\n      - Fastest\n      - Fallback\n    use:\n      - geodema\n      - geodema2"
-    )
+/// YAML-текст select-группы устройства. Провайдеры (use:) передаются снаружи —
+/// на чужом железе имена провайдеров свои (или их нет вовсе).
+pub fn group_yaml(group_name: &str, providers: &[String]) -> String {
+    let base = format!(
+        "  - name: '{group_name}'\n    type: select\n    proxies:\n      - Fastest\n      - Fallback"
+    );
+    let mut use_block = String::new();
+    for p in providers {
+        let p = p.trim();
+        if p.is_empty() {
+            continue;
+        }
+        if use_block.is_empty() {
+            use_block.push_str("\n    use:");
+        }
+        use_block.push_str(&format!("\n      - {p}"));
+    }
+    format!("{base}{use_block}")
+}
+
+/// Имена proxy-providers верхнего уровня из config.yaml (для универсальности:
+/// на другом железе имена провайдеров свои).
+pub fn parse_provider_names(yaml: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_providers = false;
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        if line.trim_end() == "proxy-providers:" {
+            in_providers = true;
+            continue;
+        }
+        if in_providers {
+            let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+            if is_top {
+                break;
+            }
+            // имя провайдера: строка "  name:" (ровно 2 пробела, ключ мапы)
+            if line.starts_with("  ") && !line.starts_with("   ") && trimmed.ends_with(':') && !trimmed.starts_with('-') {
+                out.push(trimmed.trim_end_matches(':').to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Домены: очистка и нормализация (нижний регистр, без пробелов/протоколов/путей).
+pub fn sanitize_domains(list: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = list
+        .iter()
+        .map(|d| {
+            d.trim()
+                .to_lowercase()
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .trim_start_matches("www.")
+                .to_string()
+        })
+        .map(|d| d.split('/').next().unwrap_or("").trim().to_string())
+        .filter(|d| !d.is_empty() && d.contains('.'))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+// --- Доменные списки: AUTO-DIRECT / AUTO-FORCE блоки в rules ---
+
+pub const DIRECT_BEGIN: &str = "# --- AUTO-DIRECT-BEGIN ---";
+pub const DIRECT_END: &str = "# --- AUTO-DIRECT-END ---";
+pub const FORCE_BEGIN: &str = "# --- AUTO-FORCE-BEGIN ---";
+pub const FORCE_END: &str = "# --- AUTO-FORCE-END ---";
+
+/// Удаление доменных блоков (DIRECT/FORCE) из YAML.
+pub fn remove_domain_blocks(yaml: &str) -> String {
+    let mut out = yaml.to_string();
+    for (begin, end) in [(DIRECT_BEGIN, DIRECT_END), (FORCE_BEGIN, FORCE_END)] {
+        if let (Some(p1), Some(p2rel)) = (out.find(begin), out.find(end)) {
+            let p2 = p2rel + end.len();
+            if p1 < p2 {
+                out = format!("{}{}", &out[..p1], &out[p2..]);
+            }
+        }
+    }
+    out
+}
+
+fn domain_block(begin: &str, end: &str, domains: &[String], target: &str) -> String {
+    if domains.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("{begin}\n");
+    for d in domains {
+        out.push_str(&format!("  - DOMAIN-SUFFIX,{d},{target}\n"));
+    }
+    out.push_str(end);
+    out.push('\n');
+    out
+}
+
+/// Вставка доменных правил в rules: (сразу после строки rules:, чтобы они имели
+/// приоритет над остальными правилами). Пустые списки = блоки удаляются.
+pub fn apply_domain_rules(yaml: &str, direct: &[String], force: &[String]) -> Result<String, String> {
+    let content = remove_domain_blocks(yaml);
+    let direct = sanitize_domains(direct);
+    let force = sanitize_domains(force);
+    if direct.is_empty() && force.is_empty() {
+        return Ok(content);
+    }
+    // Ищем строку "rules:" верхнего уровня.
+    let mut insert_pos: Option<usize> = None;
+    let mut offset = 0usize;
+    for line in content.lines() {
+        if line.trim_end() == "rules:" {
+            insert_pos = Some(offset + line.len());
+            break;
+        }
+        offset += line.len() + 1; // +1 за \n
+    }
+    let pos = insert_pos.ok_or("В config.yaml нет секции rules:")?;
+    let block = format!(
+        "\n{}{}",
+        domain_block(DIRECT_BEGIN, DIRECT_END, &direct, "DIRECT"),
+        domain_block(FORCE_BEGIN, FORCE_END, &force, "PROXY")
+    );
+    Ok(format!("{}{}{}", &content[..pos], block, &content[pos..]))
 }
 
 /// РЎС‚СЂРѕРєР° РїСЂР°РІРёР»Р° РґР»СЏ СѓСЃС‚СЂРѕР№СЃС‚РІР°.
@@ -134,7 +254,7 @@ pub fn remove_blocks(yaml: &str) -> String {
 
 /// Merge-СЃРµРјР°РЅС‚РёРєР° РґРµСЃРєС‚РѕРїР°: СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёРµ РїСЂР°РІРёР»Р° СЃРѕС…СЂР°РЅСЏСЋС‚СЃСЏ, РїСЂРёРјРµРЅСЏСЋС‚СЃСЏ С‚РѕР»СЊРєРѕ
 /// РїРµСЂРµРґР°РЅРЅС‹Рµ РЅР°Р·РЅР°С‡РµРЅРёСЏ (server=None/"default" вЂ” СЃРЅСЏС‚СЊ). Р’РѕР·РІСЂР°С‰Р°РµС‚ РЅРѕРІС‹Р№ YAML.
-pub fn apply_assignments(yaml: &str, assignments: &[Assignment]) -> Result<String, String> {
+pub fn apply_assignments(yaml: &str, assignments: &[Assignment], providers: &[String]) -> Result<String, String> {
     let mut groups_by_ip = parse_groups(yaml);
     let mut rules_by_ip = parse_rules(yaml);
 
@@ -154,7 +274,7 @@ pub fn apply_assignments(yaml: &str, assignments: &[Assignment]) -> Result<Strin
         }
         let server = a.server.clone().unwrap_or_default();
         let gname = group_name_for(ip, &a.name);
-        groups_by_ip.insert(ip.to_string(), group_yaml(&gname));
+        groups_by_ip.insert(ip.to_string(), group_yaml(&gname, providers));
         rules_by_ip.insert(ip.to_string(), rule_line(ip, &gname));
         let _ = server;
     }
@@ -447,19 +567,21 @@ mod tests {
         let out = apply_assignments(
             BASE_YAML,
             &[Assignment { ip: "192.168.2.118".into(), name: "Big PC".into(), server: Some("рџ‡©рџ‡Є DE".into()) }],
+            &["geodema".to_string(), "geodema2".to_string()],
         )
         .unwrap();
         assert!(out.contains(GROUPS_BEGIN));
         assert!(out.contains("- name: 'Big PC 192_168_2_118'"));
         assert!(out.contains("SRC-IP-CIDR,192.168.2.118/32,Big PC 192_168_2_118"));
-        // Р±Р»РѕРєРё РІСЃС‚Р°РІР»РµРЅС‹ СЃСЂР°Р·Сѓ РїРѕСЃР»Рµ СЃРµРєС†РёР№
+        assert!(out.contains("- geodema2"), "use: провайдеры из параметра");
+        // блоки вставлены сразу после секций
         let gpos = out.find("proxy-groups:").unwrap();
         let bpos = out.find(GROUPS_BEGIN).unwrap();
         assert!(bpos > gpos && bpos - gpos < 20);
         let rpos = out.find("rules:").unwrap();
         let rbpos = out.find(RULES_BEGIN).unwrap();
         assert!(rbpos > rpos && rbpos - rpos < 20);
-        // РёСЃС…РѕРґРЅС‹Рµ РїСЂР°РІРёР»Р° РЅРµ С‚СЂРѕРЅСѓС‚С‹
+        // исходные правила не тронуты
         assert!(out.contains("GEOIP,RU,DIRECT"));
     }
 
@@ -468,12 +590,14 @@ mod tests {
         let with_one = apply_assignments(
             BASE_YAML,
             &[Assignment { ip: "10.0.0.5".into(), name: "Phone".into(), server: Some("X".into()) }],
+            &[],
         )
         .unwrap();
-        // РґРѕР±Р°РІР»СЏРµРј РІС‚РѕСЂРѕРµ СѓСЃС‚СЂРѕР№СЃС‚РІРѕ вЂ” РїРµСЂРІРѕРµ РґРѕР»Р¶РЅРѕ СЃРѕС…СЂР°РЅРёС‚СЊСЃСЏ
+        // добавляем второе устройство — первое должно сохраниться
         let with_two = apply_assignments(
             &with_one,
             &[Assignment { ip: "10.0.0.6".into(), name: "TV".into(), server: Some("Y".into()) }],
+            &[],
         )
         .unwrap();
         assert!(with_two.contains("Phone 10_0_0_5"));
@@ -486,11 +610,13 @@ mod tests {
         let with_one = apply_assignments(
             BASE_YAML,
             &[Assignment { ip: "10.0.0.5".into(), name: "Phone".into(), server: Some("X".into()) }],
+            &[],
         )
         .unwrap();
         let removed = apply_assignments(
             &with_one,
             &[Assignment { ip: "10.0.0.5".into(), name: "Phone".into(), server: None }],
+            &[],
         )
         .unwrap();
         assert!(parse_groups(&removed).is_empty());
@@ -503,14 +629,57 @@ mod tests {
         let with_one = apply_assignments(
             BASE_YAML,
             &[Assignment { ip: "10.0.0.5".into(), name: "Phone".into(), server: Some("X".into()) }],
+            &[],
         )
         .unwrap();
         let removed = apply_assignments(
             &with_one,
             &[Assignment { ip: "10.0.0.5".into(), name: "Phone".into(), server: Some("default".into()) }],
+            &[],
         )
         .unwrap();
         assert!(parse_groups(&removed).is_empty());
+    }
+
+    #[test]
+    fn group_yaml_without_providers_has_no_use() {
+        let out = group_yaml("DEV_1_2_3_4", &[]);
+        assert!(!out.contains("use:"));
+        assert!(out.contains("- Fastest"));
+        let out2 = group_yaml("X 1_2_3_4", &["prov1".to_string(), "prov2".to_string()]);
+        assert!(out2.contains("use:"));
+        assert!(out2.contains("- prov1") && out2.contains("- prov2"));
+    }
+
+    #[test]
+    fn parse_provider_names_finds_top_level() {
+        let yaml = "port: 7890\nproxy-providers:\n  alpha:\n    type: http\n    url: x\n  beta:\n    type: file\nrules:\n  - MATCH,PROXY\n";
+        assert_eq!(parse_provider_names(yaml), vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn sanitize_domains_normalizes() {
+        let out = sanitize_domains(&[" https://WWW.Example.com/path ".to_string(), "example.com".to_string(), "notadomain".to_string()]);
+        assert_eq!(out, vec!["example.com".to_string()]);
+    }
+
+    #[test]
+    fn domain_rules_inserted_and_removed() {
+        let out = apply_domain_rules(BASE_YAML, &["example.com".to_string()], &["forced.org".to_string()]).unwrap();
+        assert!(out.contains(DIRECT_BEGIN));
+        assert!(out.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
+        assert!(out.contains("DOMAIN-SUFFIX,forced.org,PROXY"));
+        // доменные правила — сразу после rules: (приоритет над остальными)
+        let rpos = out.find("rules:").unwrap();
+        let dpos = out.find("DOMAIN-SUFFIX,example.com").unwrap();
+        assert!(dpos > rpos && dpos - rpos < 60);
+        // повторное применение — без дублей
+        let out2 = apply_domain_rules(&out, &["example.com".to_string()], &["forced.org".to_string()]).unwrap();
+        assert_eq!(out2.matches("DOMAIN-SUFFIX,example.com").count(), 1);
+        // очистка — блоки удалены
+        let cleared = apply_domain_rules(&out2, &[], &[]).unwrap();
+        assert!(!cleared.contains("DOMAIN-SUFFIX,example.com"));
+        assert!(cleared.contains("GEOIP,RU,DIRECT"));
     }
 
     #[test]

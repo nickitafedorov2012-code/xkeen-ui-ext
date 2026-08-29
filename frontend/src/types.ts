@@ -67,8 +67,8 @@ export interface FailoverEventInfo {
 
 export interface AppSettings {
   rci: { host: string; port: number; login: string; password: string; use_https: boolean; token: string }
-  mihomo: { host: string; port: number; secret: string; config_path: string }
-  failover: { enabled: boolean; ping_threshold_ms: number; priority_server: string; auto_restore_priority: boolean; interval_secs: number }
+  mihomo: { host: string; port: number; secret: string; config_path: string; device_providers: string[] }
+  failover: { enabled: boolean; ping_threshold_ms: number; priority_server: string; auto_restore_priority: boolean; interval_secs: number; device_failover_enabled: boolean }
   refresh_interval_sec: number
 }
 

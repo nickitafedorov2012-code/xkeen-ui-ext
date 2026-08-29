@@ -10,11 +10,20 @@ export default function Settings({ notify }: Props) {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [servers, setServers] = useState<ServerInfo[]>([])
   const [saving, setSaving] = useState(false)
+  const [directDomains, setDirectDomains] = useState('')
+  const [forceDomains, setForceDomains] = useState('')
+  const [savingDomains, setSavingDomains] = useState(false)
 
   useEffect(() => {
     apiGet<AppSettings>('settings').then(setSettings).catch((e) => notify(e instanceof Error ? e.message : 'Ошибка', true))
     apiGet<{ servers: ServerInfo[] }>('servers')
       .then((d) => setServers(d.servers))
+      .catch(() => {})
+    apiGet<{ direct: string[]; force: string[] }>('domains')
+      .then((d) => {
+        setDirectDomains(d.direct.join('\n'))
+        setForceDomains(d.force.join('\n'))
+      })
       .catch(() => {})
   }, [notify])
 
@@ -44,6 +53,21 @@ export default function Settings({ notify }: Props) {
       notify(data.message)
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка проверки', true)
+    }
+  }
+
+  const saveDomains = async () => {
+    setSavingDomains(true)
+    try {
+      const data = await apiPost<{ direct: number; force: number }>('domains', {
+        direct: directDomains.split('\n'),
+        force: forceDomains.split('\n'),
+      })
+      notify(`Домены сохранены: напрямую ${data.direct}, через прокси ${data.force}`)
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка сохранения доменов', true)
+    } finally {
+      setSavingDomains(false)
     }
   }
 
@@ -117,6 +141,15 @@ export default function Settings({ notify }: Props) {
         <label className="row"><span>Путь к config.yaml</span>
           <input className="input" value={settings.mihomo.config_path} onChange={(e) => patch((s) => (s.mihomo.config_path = e.target.value))} />
         </label>
+        <label className="row"><span>Провайдеры групп устройств</span>
+          <input
+            className="input"
+            placeholder="пусто = авто из config.yaml"
+            value={(settings.mihomo.device_providers ?? []).join(', ')}
+            onChange={(e) => patch((s) => (s.mihomo.device_providers = e.target.value.split(',').map((x) => x.trim()).filter(Boolean)))}
+          />
+        </label>
+        <p className="muted small">Имена proxy-providers, подключаемые к per-device группам (use:). Пусто — берутся все из config.yaml автоматически.</p>
       </section>
 
       <section className="card">
@@ -129,6 +162,36 @@ export default function Settings({ notify }: Props) {
           {saving ? 'Сохранение…' : '💾 Сохранить настройки'}
         </button>
         <p className="muted small">Конфиг хранится в /opt/etc/xkeen-route/config.json (путь — на дашборде).</p>
+      </section>
+
+      <section className="card">
+        <h2>🌐 Домены</h2>
+        <p className="muted small">По одному домену в строке. Правила вставляются в начало rules: (DOMAIN-SUFFIX) и имеют приоритет. Применяется сразу при сохранении.</p>
+        <label className="row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+          <span>⏭ Напрямую (мимо прокси → DIRECT)</span>
+          <textarea
+            className="input"
+            rows={7}
+            placeholder={'example.com\nlocal-service.net\nw3.org'}
+            value={directDomains}
+            onChange={(e) => setDirectDomains(e.target.value)}
+            style={{ fontFamily: 'Consolas, monospace', fontSize: 12.5, resize: 'vertical' }}
+          />
+        </label>
+        <label className="row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+          <span>🔒 Принудительно через прокси (→ PROXY)</span>
+          <textarea
+            className="input"
+            rows={7}
+            placeholder={'openai.com\nyoutube.com\ngithub.com'}
+            value={forceDomains}
+            onChange={(e) => setForceDomains(e.target.value)}
+            style={{ fontFamily: 'Consolas, monospace', fontSize: 12.5, resize: 'vertical' }}
+          />
+        </label>
+        <button className="btn primary" onClick={saveDomains} disabled={savingDomains}>
+          {savingDomains ? 'Применение…' : '🌐 Применить домены'}
+        </button>
       </section>
     </div>
   )

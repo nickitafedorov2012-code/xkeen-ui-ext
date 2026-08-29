@@ -432,7 +432,8 @@ pub async fn set_device_routing(State(state): State<AppState>, Json(req): Json<D
         name: req.name.clone(),
         server: servers.first().cloned(),
     };
-    let new_yaml = match routing::apply_assignments(&yaml, &[assignment]) {
+    let providers = device_providers_for(&cfg, &yaml);
+    let new_yaml = match routing::apply_assignments(&yaml, &[assignment], &providers) {
         Ok(y) => y,
         Err(e) => return api_err(e),
     };
@@ -466,6 +467,67 @@ pub async fn set_device_routing(State(state): State<AppState>, Json(req): Json<D
         "servers": servers,
         "reselected": reselected,
     }))
+}
+
+/// Провайдеры для use: групп устройств: из настроек, иначе все proxy-providers
+/// из config.yaml (универсальность — на другом железе имена свои).
+fn device_providers_for(cfg: &config::AppConfig, yaml: &str) -> Vec<String> {
+    if cfg.mihomo.device_providers.is_empty() {
+        routing::parse_provider_names(yaml)
+    } else {
+        cfg.mihomo.device_providers.clone()
+    }
+}
+
+/// GET /api/domains — списки доменов (напрямую / принудительно через прокси).
+pub async fn get_domains(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    api_ok(json!({
+        "direct": cfg.direct_domains,
+        "force": cfg.force_domains,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct DomainsReq {
+    #[serde(default)]
+    pub direct: Vec<String>,
+    #[serde(default)]
+    pub force: Vec<String>,
+}
+
+/// POST /api/domains — сохранить списки, вставить DOMAIN-SUFFIX правила в rules:, reload.
+pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsReq>) -> Response {
+    let mut cfg = state.config.read().await.clone();
+    let _guard = state.routing_lock.lock().await;
+
+    cfg.direct_domains = routing::sanitize_domains(&req.direct);
+    cfg.force_domains = routing::sanitize_domains(&req.force);
+
+    let yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+        Ok(y) => y,
+        Err(e) => return api_err(format!("Не удалось прочитать config.yaml: {e}")),
+    };
+    let new_yaml = match routing::apply_domain_rules(&yaml, &cfg.direct_domains, &cfg.force_domains) {
+        Ok(y) => y,
+        Err(e) => return api_err(e),
+    };
+    let tmp = format!("{}.tmp", cfg.mihomo.config_path);
+    if let Err(e) = tokio::fs::write(&tmp, &new_yaml).await {
+        return api_err(format!("Ошибка записи: {e}"));
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, &cfg.mihomo.config_path).await {
+        return api_err(format!("Ошибка переименования: {e}"));
+    }
+    if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
+        return api_err(format!("Правила записаны, но reload Mihomo не удался: {e}"));
+    }
+    if let Err(e) = config::save(&state.config_path, &cfg).await {
+        return api_err(format!("Ошибка сохранения конфига: {e}"));
+    }
+    let (n_direct, n_force) = (cfg.direct_domains.len(), cfg.force_domains.len());
+    *state.config.write().await = cfg;
+    api_ok(json!({ "direct": n_direct, "force": n_force }))
 }
 
 /// GET /api/routing — текущие AUTO-DEVICE назначения + live-серверы.
@@ -518,7 +580,7 @@ pub async fn apply_routing(State(state): State<AppState>, Json(req): Json<Routin
         .into_iter()
         .map(|a| routing::Assignment { ip: a.ip, name: a.name, server: a.server })
         .collect();
-    let new_yaml = match routing::apply_assignments(&yaml, &assignments) {
+    let new_yaml = match routing::apply_assignments(&yaml, &assignments, &device_providers_for(&cfg, &yaml)) {
         Ok(y) => y,
         Err(e) => return api_err(e),
     };

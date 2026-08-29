@@ -39,6 +39,9 @@ pub struct MihomoConfig {
     pub secret: String,
     /// Путь к конфигу Mihomo на роутере (для AUTO-DEVICE маршрутизации).
     pub config_path: String,
+    /// Провайдеры, подключаемые к группам устройств (use:). Пусто = взять все
+    /// proxy-providers из config.yaml автоматически.
+    pub device_providers: Vec<String>,
 }
 
 impl Default for MihomoConfig {
@@ -48,6 +51,7 @@ impl Default for MihomoConfig {
             port: 9090,
             secret: String::new(),
             config_path: "/opt/etc/mihomo/config.yaml".into(),
+            device_providers: Vec::new(),
         }
     }
 }
@@ -111,6 +115,10 @@ pub struct AppConfig {
     pub provider_filters: std::collections::BTreeMap<String, String>,
     /// Per-device цепочки серверов (основной + резервы). Ключ — IP устройства.
     pub device_routing: std::collections::BTreeMap<String, DeviceRouting>,
+    /// Домены, которые всегда идут напрямую (мимо прокси).
+    pub direct_domains: Vec<String>,
+    /// Домены, которые всегда принудительно через прокси.
+    pub force_domains: Vec<String>,
 }
 
 impl Default for AppConfig {
@@ -123,6 +131,8 @@ impl Default for AppConfig {
             ignore_servers: Vec::new(),
             provider_filters: std::collections::BTreeMap::new(),
             device_routing: std::collections::BTreeMap::new(),
+            direct_domains: Vec::new(),
+            force_domains: Vec::new(),
         }
     }
 }

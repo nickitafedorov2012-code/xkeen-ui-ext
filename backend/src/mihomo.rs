@@ -140,12 +140,26 @@ pub async fn force_update_all_providers(http: &reqwest::Client, cfg: &AppConfig)
 
 /// Рекурсивное разрешение активного «листа» из цепочек selector/fallback/urltest.
 pub fn resolve_active_leaf(proxies: &BTreeMap<String, Value>) -> String {
-    let initial = ["PROXY", "GLOBAL", "Proxy", "auto", "Fallback"]
+    let mut initial = ["PROXY", "GLOBAL", "Proxy", "auto", "Fallback"]
         .iter()
         .find_map(|g| {
             proxies.get(*g).and_then(|p| p.get("now")).and_then(|n| n.as_str()).map(|s| s.to_string()).filter(|s| !s.is_empty())
         })
         .unwrap_or_default();
+    // Универсальный fallback: нет привычных имён — берём первый selector.
+    if initial.is_empty() {
+        for (_, p) in proxies.iter() {
+            let typ = p.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
+            if typ == "selector" {
+                if let Some(now) = p.get("now").and_then(|n| n.as_str()) {
+                    if !now.is_empty() {
+                        initial = now.to_string();
+                        break;
+                    }
+                }
+            }
+        }
+    }
     if initial.is_empty() {
         return String::new();
     }
@@ -317,8 +331,20 @@ pub async fn get_servers(
 ) -> Result<Vec<Server>, String> {
     let proxies = get_proxies(http, cfg).await?;
     let active = resolve_active_leaf(&proxies);
-    let proxy_now = proxies
-        .get("PROXY")
+    // Активная группа: привычные имена, иначе первый selector (универсальность).
+    let proxy_group: Option<String> = ["PROXY", "GLOBAL", "Proxy"]
+        .iter()
+        .find(|g| proxies.contains_key(**g))
+        .map(|g| g.to_string())
+        .or_else(|| {
+            proxies
+                .iter()
+                .find(|(_, p)| p.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase() == "selector")
+                .map(|(name, _)| name.clone())
+        });
+    let proxy_now = proxy_group
+        .as_deref()
+        .and_then(|g| proxies.get(g))
         .and_then(|p| p.get("now"))
         .and_then(|n| n.as_str())
         .unwrap_or("")
@@ -453,24 +479,50 @@ pub async fn live_device_servers(http: &reqwest::Client, cfg: &AppConfig) -> BTr
     out
 }
 
-/// Переключение активного сервера во всех группах маршрутизации.
+/// Переключение активного сервера во всех основных select-группах.
+/// Универсально: группы обнаруживаются динамически (selector без IP в имени,
+/// кроме Fastest/Fallback и AUTO-DEVICE групп устройств).
 pub async fn switch_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &str) -> Result<String, String> {
     let target = match server_id.to_lowercase().as_str() {
         "fastest" => "Fastest".to_string(),
         "fallback" => "Fallback".to_string(),
         _ => server_id.trim().to_string(),
     };
-    let groups = ["PROXY", "GLOBAL", "Proxy", "YouTube", "Discord", "Telegram", "Steam", "Twitch", "User List"];
-    let mut switched = false;
-    for g in groups {
-        if m_put(http, cfg, &format!("/proxies/{g}"), json!({ "name": target }), 3).await.is_ok() {
-            switched = true;
+    let proxies = get_proxies(http, cfg).await?;
+    let mut groups: Vec<String> = Vec::new();
+    for (name, p) in &proxies {
+        let typ = p.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
+        if typ != "selector" {
+            continue;
+        }
+        // исключаем авто-группы и группы устройств (в имени есть IP/MAC)
+        if name == "Fastest" || name == "Fallback" || ip_from_group_name(name).is_some() {
+            continue;
+        }
+        groups.push(name.clone());
+    }
+    // Известные общие имена — в начало (если существуют).
+    for pref in ["PROXY", "GLOBAL", "Proxy"] {
+        if let Some(pos) = groups.iter().position(|g| g == pref) {
+            let g = groups.remove(pos);
+            groups.insert(0, g);
         }
     }
-    if switched {
-        Ok(format!("Активный сервер переключен на '{target}'"))
+    if groups.is_empty() {
+        return Err("Не найдено ни одной select-группы для переключения".into());
+    }
+    let mut switched = 0usize;
+    let mut last_err = String::new();
+    for g in &groups {
+        match m_put(http, cfg, &format!("/proxies/{}", urlencoding_lite(g)), json!({ "name": target }), 3).await {
+            Ok(_) => switched += 1,
+            Err(e) => last_err = e,
+        }
+    }
+    if switched > 0 {
+        Ok(format!("Активный сервер переключен на '{target}' (групп: {switched})"))
     } else {
-        Err("Не удалось изменить активный сервер в Mihomo".into())
+        Err(format!("Не удалось изменить активный сервер в Mihomo: {last_err}"))
     }
 }
 
@@ -519,9 +571,9 @@ pub async fn ping_all(http: &reqwest::Client, cfg: &AppConfig, ids: &[String], t
     out
 }
 
-/// Reload конфига Mihomo (после правки config.yaml).
+/// Reload конфига Mihomo (после правки config.yaml). Путь — из настроек.
 pub async fn reload_config(http: &reqwest::Client, cfg: &AppConfig) -> Result<(), String> {
-    m_put(http, cfg, "/configs?force=true", json!({ "path": "/opt/etc/mihomo/config.yaml" }), 15).await
+    m_put(http, cfg, "/configs?force=true", json!({ "path": cfg.mihomo.config_path }), 15).await
 }
 
 /// Выбор сервера в конкретной группе (для AUTO-DEVICE групп после reload).
