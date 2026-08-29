@@ -40,12 +40,10 @@ get_arch() {
 }
 
 download_url() {
-  if [ "$BETA" = true ]; then
-    curl -s https://api.github.com/repos/$REPO/releases | \
-      grep -m1 '"browser_download_url".*xkeen-route-'"$ARCH" | cut -d '"' -f4
-  else
-    echo "https://github.com/$REPO/releases/latest/download/xkeen-route-$ARCH"
-  fi
+  # Через API: первый browser_download_url в списке релизов = самый свежий.
+  # (прямой /releases/latest/download ненадёжен: «latest» может не иметь ассета)
+  curl -s https://api.github.com/repos/$REPO/releases | \
+    grep -m1 '"browser_download_url".*xkeen-route-'"$ARCH" | cut -d '"' -f4
 }
 
 do_install() {

@@ -46,6 +46,12 @@ curl -Ls https://raw.githubusercontent.com/nickitafedorov2012-code/xkeen-ui-ext/
 
 При запуске с терминала (SSH) скрипт показывает меню: установить/обновить, удалить или удалить полностью.
 
+> **Если raw.githubusercontent.com недоступен** (блокировки на некоторых сетях) — используйте зеркало:
+>
+> ```sh
+> curl -Ls https://ghproxy.net/https://raw.githubusercontent.com/nickitafedorov2012-code/xkeen-ui-ext/main/setup.sh | sh
+> ```
+
 Порт по умолчанию: **1001**. Управление сервисом:
 
 ```sh
