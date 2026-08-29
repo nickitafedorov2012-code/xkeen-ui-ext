@@ -42,8 +42,9 @@ get_arch() {
 download_url() {
   # Через API: первый browser_download_url в списке релизов = самый свежий.
   # (прямой /releases/latest/download ненадёжен: «latest» может не иметь ассета)
+  # busybox grep не умеет -m1 — берём head -1.
   curl -s https://api.github.com/repos/$REPO/releases | \
-    grep -m1 '"browser_download_url".*xkeen-route-'"$ARCH" | cut -d '"' -f4
+    grep '"browser_download_url".*xkeen-route-'"$ARCH" | head -1 | cut -d '"' -f4
 }
 
 do_install() {
