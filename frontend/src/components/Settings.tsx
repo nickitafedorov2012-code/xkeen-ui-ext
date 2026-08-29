@@ -38,6 +38,40 @@ export default function Settings({ notify }: Props) {
       .catch(() => {})
   }, [notify])
 
+  const loadBackups = useCallback(async () => {
+    try {
+      const d = await apiGet<{ backups: { name: string }[]; dir: string }>('backups')
+      setBackups(d.backups.map((b) => b.name))
+      setBackupDir(d.dir)
+    } catch {
+      /* бэкапы не критичны для загрузки страницы */
+    }
+  }, [])
+
+  useEffect(() => {
+    loadBackups()
+  }, [loadBackups])
+
+  const loadLogs = useCallback(async () => {
+    try {
+      const d = await apiGet<{ text: string; path: string }>('logs?lines=800')
+      setLogText(d.text)
+      setLogPath(d.path)
+    } catch {
+      /* журнал не критичен */
+    }
+  }, [])
+
+  useEffect(() => {
+    loadLogs()
+  }, [loadLogs])
+
+  useEffect(() => {
+    if (!logsAuto) return
+    const t = setInterval(loadLogs, 5000)
+    return () => clearInterval(t)
+  }, [logsAuto, loadLogs])
+
   if (!settings) return <section className="card"><p className="muted">Загрузка…</p></section>
 
   const patch = (fn: (s: AppSettings) => void) => {
@@ -95,40 +129,6 @@ export default function Settings({ notify }: Props) {
       setSvcBusy('')
     }
   }
-
-  const loadBackups = useCallback(async () => {
-    try {
-      const d = await apiGet<{ backups: { name: string }[]; dir: string }>('backups')
-      setBackups(d.backups.map((b) => b.name))
-      setBackupDir(d.dir)
-    } catch {
-      /* бэкапы не критичны для загрузки страницы */
-    }
-  }, [])
-
-  useEffect(() => {
-    loadBackups()
-  }, [loadBackups])
-
-  const loadLogs = useCallback(async () => {
-    try {
-      const d = await apiGet<{ text: string; path: string }>('logs?lines=800')
-      setLogText(d.text)
-      setLogPath(d.path)
-    } catch {
-      /* журнал не критичен */
-    }
-  }, [])
-
-  useEffect(() => {
-    loadLogs()
-  }, [loadLogs])
-
-  useEffect(() => {
-    if (!logsAuto) return
-    const t = setInterval(loadLogs, 5000)
-    return () => clearInterval(t)
-  }, [logsAuto, loadLogs])
 
   const clearLogs = async () => {
     setLogsBusy(true)
