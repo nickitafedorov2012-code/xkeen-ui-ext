@@ -13,6 +13,12 @@ export default function Settings({ notify }: Props) {
   const [directDomains, setDirectDomains] = useState('')
   const [forceDomains, setForceDomains] = useState('')
   const [savingDomains, setSavingDomains] = useState(false)
+  // --- Сервис XKeen ---
+  const [svcBusy, setSvcBusy] = useState('')
+  // --- Бэкапы ---
+  const [backups, setBackups] = useState<string[]>([])
+  const [backupDir, setBackupDir] = useState('')
+  const [backupBusy, setBackupBusy] = useState(false)
 
   useEffect(() => {
     apiGet<AppSettings>('settings').then(setSettings).catch((e) => notify(e instanceof Error ? e.message : 'Ошибка', true))
@@ -72,7 +78,6 @@ export default function Settings({ notify }: Props) {
   }
 
   // --- Сервис XKeen ---
-  const [svcBusy, setSvcBusy] = useState('')
   const svc = async (action: string) => {
     setSvcBusy(action)
     try {
@@ -85,11 +90,6 @@ export default function Settings({ notify }: Props) {
       setSvcBusy('')
     }
   }
-
-  // --- Бэкапы ---
-  const [backups, setBackups] = useState<string[]>([])
-  const [backupDir, setBackupDir] = useState('')
-  const [backupBusy, setBackupBusy] = useState(false)
 
   const loadBackups = useCallback(async () => {
     try {

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import React from 'react'
 import Dashboard from './components/Dashboard'
 import Devices from './components/Devices'
 import Servers from './components/Servers'
@@ -22,6 +23,28 @@ interface Toast {
 }
 
 let toastSeq = 1
+
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null }
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <section className="card">
+          <h2>⚠️ Ошибка интерфейса</h2>
+          <p className="muted">{this.state.error.message}</p>
+          <button className="btn" onClick={() => this.setState({ error: null })}>Перезагрузить</button>
+        </section>
+      )
+    }
+    return this.props.children
+  }
+}
 
 export default function App() {
   const initial = (() => {
@@ -89,10 +112,12 @@ export default function App() {
       </nav>
 
       <main className="content">
-        {tab === 'dashboard' && <Dashboard status={status} notify={notify} />}
-        {tab === 'servers' && <Servers notify={notify} />}
-        {tab === 'devices' && <Devices notify={notify} />}
-        {tab === 'settings' && <Settings notify={notify} />}
+        <ErrorBoundary>
+          {tab === 'dashboard' && <Dashboard status={status} notify={notify} />}
+          {tab === 'servers' && <Servers notify={notify} />}
+          {tab === 'devices' && <Devices notify={notify} />}
+          {tab === 'settings' && <Settings notify={notify} />}
+        </ErrorBoundary>
       </main>
 
       <div className="toasts">
