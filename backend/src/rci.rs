@@ -238,6 +238,14 @@ pub async fn get_version(http: &reqwest::Client, cfg: &AppConfig) -> Result<BTre
                 out.insert(key.to_string(), s.to_string());
             }
         }
+        // Keenetic не отдаёт поле "version" — берём человекочитаемый title или release
+        if !out.contains_key("version") {
+            if let Some(s) = o.get("title").and_then(|x| x.as_str()) {
+                out.insert("version".into(), format!("KeeneticOS {s}"));
+            } else if let Some(s) = o.get("release").and_then(|x| x.as_str()) {
+                out.insert("version".into(), format!("KeeneticOS {s}"));
+            }
+        }
         if let Some(u) = o.get("uptime").and_then(|x| x.as_u64()) {
             out.insert("uptime".into(), u.to_string());
         }

@@ -6,6 +6,9 @@ mod mihomo;
 mod rci;
 mod routing;
 
+use axum::extract::Request;
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::{get, post};
 use axum::Router;
 use clap::{Parser, Subcommand};
@@ -14,7 +17,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 
-pub const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+pub const VERSION: &str = match option_env!("XKEEN_ROUTE_VERSION") {
+    Some(v) => v,
+    None => concat!("v", env!("CARGO_PKG_VERSION")),
+};
 pub const APP_NAME: &str = "XKeen Route";
 
 #[cfg(target_os = "linux")]
@@ -96,6 +102,15 @@ fn create_init() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Запрет кэширования ответов панели (иначе браузер показывает устаревшие данные).
+async fn no_cache(req: Request, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    if let Ok(v) = axum::http::HeaderValue::from_str("no-store") {
+        res.headers_mut().insert("Cache-Control", v);
+    }
+    res
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -151,6 +166,7 @@ async fn main() {
         .route("/api/settings", get(api::get_settings).put(api::put_settings))
         .route("/api/settings/priority", post(api::set_priority))
         .fallback(frontend::serve)
+        .layer(middleware::from_fn(no_cache))
         .with_state(state);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));

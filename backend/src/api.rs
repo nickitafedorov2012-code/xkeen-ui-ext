@@ -16,8 +16,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
         .and_then(|servers| servers.into_iter().find(|s| s.is_active))
         .map(|s| json!({ "id": s.id, "name": s.name, "ping_ms": s.ping_ms }));
 
-    Json(json!({
-        "success": true,
+    api_ok(json!({
         "version": VERSION,
         "config_path": state.config_path.display().to_string(),
         "router": router,

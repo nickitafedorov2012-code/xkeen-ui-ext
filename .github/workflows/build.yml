@@ -52,11 +52,6 @@ jobs:
           name: frontend-dist
           path: frontend/dist
 
-      - name: Set version
-        run: |
-          sed -i "s/^version = .*/version = \"${{ inputs.version || github.ref_name }}\"/" backend/Cargo.toml
-          cat backend/Cargo.toml
-
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: backend
@@ -101,6 +96,7 @@ jobs:
         working-directory: backend
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
+          XKEEN_ROUTE_VERSION: ${{ inputs.version || github.ref_name }}
         run: |
           set -o pipefail
           if ! cross build --release --target ${{ matrix.target }} 2>&1 | tee build.log; then

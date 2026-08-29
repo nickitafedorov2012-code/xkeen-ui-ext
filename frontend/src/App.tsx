@@ -24,9 +24,18 @@ interface Toast {
 let toastSeq = 1
 
 export default function App() {
-  const [tab, setTab] = useState<TabId>('dashboard')
+  const initial = (() => {
+    const h = window.location.hash.replace('#', '')
+    return (TABS.some((t) => t.id === h) ? h : 'dashboard') as TabId
+  })()
+  const [tab, setTab] = useState<TabId>(initial)
   const [status, setStatus] = useState<StatusInfo | null>(null)
   const [toasts, setToasts] = useState<Toast[]>([])
+
+  const switchTab = (t: TabId) => {
+    setTab(t)
+    history.replaceState(null, '', '#' + t)
+  }
 
   const notify = useCallback((msg: string, error = false) => {
     const id = toastSeq++
@@ -73,7 +82,7 @@ export default function App() {
 
       <nav className="tabs">
         {TABS.map((t) => (
-          <button key={t.id} className={'tab' + (tab === t.id ? ' active' : '')} onClick={() => setTab(t.id)}>
+          <button key={t.id} className={'tab' + (tab === t.id ? ' active' : '')} onClick={() => switchTab(t.id)}>
             {t.label}
           </button>
         ))}

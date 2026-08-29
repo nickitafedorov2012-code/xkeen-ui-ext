@@ -143,7 +143,7 @@ pub async fn get_servers(
 
     for (name, p) in &proxies {
         let typ = p.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
-        if matches!(typ.as_str(), "direct" | "reject" | "reject-drop" | "pass" | "compatible" | "selector" | "urltest" | "fallback" | "relay" | "load") {
+        if matches!(typ.as_str(), "direct" | "reject" | "reject-drop" | "rejectdrop" | "pass" | "passrule" | "compatible" | "selector" | "urltest" | "fallback" | "relay" | "load") {
             continue;
         }
         if seen_names.contains(name) {
