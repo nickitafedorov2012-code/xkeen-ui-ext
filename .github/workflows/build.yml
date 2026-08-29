@@ -65,6 +65,9 @@ jobs:
       - name: Install cross
         run: type cross || cargo install cross --git https://github.com/cross-rs/cross
 
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
       - name: Inject frontend dist for cross
         working-directory: backend
         run: |
