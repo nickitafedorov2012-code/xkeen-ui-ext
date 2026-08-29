@@ -59,12 +59,19 @@ do_install() {
   # -k: на Entware часто нет CA-бандла (иначе curl отвечает rc=60).
   OK=0
   for P in "" "https://ghproxy.net/" "https://ghfast.top/" "http://ghproxy.net/"; do
-    curl -Lsk --max-time 90 "${P}${DOWNLOAD_URL}" -o "$BIN.tmp"
+    if [ -z "$P" ]; then
+      msg "${NC}   пробую github.com (до 20 сек)...${NC}"
+      T=20
+    else
+      msg "${NC}   пробую зеркало ${P} (до 60 сек)...${NC}"
+      T=60
+    fi
+    curl -Lsk --max-time "$T" --connect-timeout 10 "${P}${DOWNLOAD_URL}" -o "$BIN.tmp" </dev/null
     if [ -f "$BIN.tmp" ] && [ "$(wc -c < "$BIN.tmp")" -gt 1000000 ]; then
       OK=1
       break
     fi
-    msg "${RED}   не удалось, пробую зеркало...${NC}"
+    msg "${RED}   не удалось, пробую следующий источник...${NC}"
   done
   [ "$OK" = 1 ] && chmod +x "$BIN.tmp" && mv "$BIN.tmp" "$BIN" || {
     msg "${RED} ❌ Не удалось загрузить бинарник${NC}"; return 1
