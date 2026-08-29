@@ -55,7 +55,17 @@ do_install() {
   [ -z "$DOWNLOAD_URL" ] && { msg "${RED} ❌ Не удалось определить ссылку загрузки${NC}"; return 1; }
 
   msg "${GREEN}⬇️ Загрузка бинарника...${NC}"
-  curl -Lso "$BIN.tmp" "$DOWNLOAD_URL" && chmod +x "$BIN.tmp" && mv "$BIN.tmp" "$BIN" || {
+  # Прямая ссылка + зеркала (github может быть недоступен с некоторых сетей).
+  OK=0
+  for P in "" "https://ghproxy.net/" "https://ghfast.top/"; do
+    curl -Ls --max-time 180 "${P}${DOWNLOAD_URL}" -o "$BIN.tmp"
+    if [ -f "$BIN.tmp" ] && [ "$(wc -c < "$BIN.tmp")" -gt 1000000 ]; then
+      OK=1
+      break
+    fi
+    msg "${RED}   не удалось, пробую зеркало...${NC}"
+  done
+  [ "$OK" = 1 ] && chmod +x "$BIN.tmp" && mv "$BIN.tmp" "$BIN" || {
     msg "${RED} ❌ Не удалось загрузить бинарник${NC}"; return 1
   }
 
