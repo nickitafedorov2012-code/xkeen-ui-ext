@@ -30,6 +30,8 @@ jobs:
   build:
     needs: frontend
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     strategy:
       matrix:
         include:
@@ -83,6 +85,17 @@ jobs:
             exit 1
           fi
           cp target/${{ matrix.target }}/release/xkeen-route ../xkeen-route-${{ matrix.name }}
+
+      - name: Dump build log to ci-log branch (on failure)
+        if: failure()
+        working-directory: backend
+        run: |
+          git config user.name "ci-log-bot"
+          git config user.email "noreply@github.com"
+          git checkout -f -B ci-log
+          git add -f build.log || true
+          git commit -m "ci: build log for debugging" || true
+          git push -f origin ci-log || true
 
       - uses: actions/upload-artifact@v4
         with:
