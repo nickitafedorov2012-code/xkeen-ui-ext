@@ -35,6 +35,7 @@ jobs:
         include:
           - target: aarch64-unknown-linux-musl
             name: arm64-v8a
+            rustflags: "-C target-feature=+crt-static"
           # TODO: mips/mipsel требуют nightly + muslsf (soft-float) — добавить позже:
           # - target: mipsel-unknown-linux-musl
           #   name: mips32le
@@ -71,9 +72,16 @@ jobs:
       - name: Build binary
         working-directory: backend
         env:
-          RUSTFLAGS: "-C target-feature=+crt-static"
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: |
-          cross build --release --target ${{ matrix.target }}
+          set -o pipefail
+          if ! cross build --release --target ${{ matrix.target }} 2>&1 | tee build.log; then
+            echo "### ❌ Build failed (last 120 lines)" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            tail -n 120 build.log >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
           cp target/${{ matrix.target }}/release/xkeen-route ../xkeen-route-${{ matrix.name }}
 
       - uses: actions/upload-artifact@v4
