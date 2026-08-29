@@ -56,6 +56,29 @@ impl Default for MihomoConfig {
     }
 }
 
+/// Сервис и бэкапы (универсальные пути; на Entware — стандартные).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct SystemConfig {
+    /// Init-скрипт сервиса XKeen (start/stop/restart возвращают исходный конфиг).
+    pub xkeen_init: String,
+    /// Каталог бэкапов (как в XKeen-UI: /opt/backups).
+    pub backup_dir: String,
+}
+
+impl Default for SystemConfig {
+    fn default() -> Self {
+        Self {
+            xkeen_init: "/opt/etc/init.d/S05xkeen".into(),
+            backup_dir: if cfg!(target_os = "linux") {
+                "/opt/backups".into()
+            } else {
+                "backups".into()
+            },
+        }
+    }
+}
+
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
@@ -119,6 +142,8 @@ pub struct AppConfig {
     pub direct_domains: Vec<String>,
     /// Домены, которые всегда принудительно через прокси.
     pub force_domains: Vec<String>,
+    /// Сервис XKeen и бэкапы.
+    pub system: SystemConfig,
 }
 
 impl Default for AppConfig {
@@ -133,6 +158,7 @@ impl Default for AppConfig {
             device_routing: std::collections::BTreeMap::new(),
             direct_domains: Vec::new(),
             force_domains: Vec::new(),
+            system: SystemConfig::default(),
         }
     }
 }

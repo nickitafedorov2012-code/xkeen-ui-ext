@@ -71,6 +71,81 @@ export default function Settings({ notify }: Props) {
     }
   }
 
+  // --- Сервис XKeen ---
+  const [svcBusy, setSvcBusy] = useState('')
+  const svc = async (action: string) => {
+    setSvcBusy(action)
+    try {
+      const data = await apiPost<{ stdout: string; stderr: string }>('xkeen/service', { action })
+      const out = (data.stdout || data.stderr || '').trim()
+      notify(`XKeen ${action}: ${out || 'готово'}`)
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка', true)
+    } finally {
+      setSvcBusy('')
+    }
+  }
+
+  // --- Бэкапы ---
+  const [backups, setBackups] = useState<string[]>([])
+  const [backupDir, setBackupDir] = useState('')
+  const [backupBusy, setBackupBusy] = useState(false)
+
+  const loadBackups = useCallback(async () => {
+    try {
+      const d = await apiGet<{ backups: { name: string }[]; dir: string }>('backups')
+      setBackups(d.backups.map((b) => b.name))
+      setBackupDir(d.dir)
+    } catch {
+      /* бэкапы не критичны для загрузки страницы */
+    }
+  }, [])
+
+  useEffect(() => {
+    loadBackups()
+  }, [loadBackups])
+
+  const createBackup = async () => {
+    setBackupBusy(true)
+    try {
+      const d = await apiPost<{ name: string }>('backups', {})
+      notify(`Бэкап создан: ${d.name}`)
+      loadBackups()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка', true)
+    } finally {
+      setBackupBusy(false)
+    }
+  }
+
+  const restoreBackup = async (name: string) => {
+    if (!confirm(`Восстановить конфиги из ${name}? Текущие config.yaml и config.json будут перезаписаны.`)) return
+    setBackupBusy(true)
+    try {
+      await apiPost('backups/restore', { name })
+      notify(`Восстановлено из ${name}`)
+      loadBackups()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка', true)
+    } finally {
+      setBackupBusy(false)
+    }
+  }
+
+  const deleteBackup = async (name: string) => {
+    if (!confirm(`Удалить бэкап ${name}?`)) return
+    setBackupBusy(true)
+    try {
+      await apiPost('backups/delete', { name })
+      notify(`Бэкап ${name} удалён`)
+      loadBackups()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка', true)
+    } finally {
+      setBackupBusy(false)
+    }
+  }
+
   return (
     <div className="grid2">
       <section className="card">
@@ -162,6 +237,43 @@ export default function Settings({ notify }: Props) {
           {saving ? 'Сохранение…' : '💾 Сохранить настройки'}
         </button>
         <p className="muted small">Конфиг хранится в /opt/etc/xkeen-route/config.json (путь — на дашборде).</p>
+      </section>
+
+      <section className="card">
+        <h2>🖥 Сервис XKeen</h2>
+        <p className="muted small">Restart перегенерирует config.yaml — настройки маршрутизации возвращаются к исходным (до любых изменений из панели).</p>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button className="btn" disabled={svcBusy !== ''} onClick={() => svc('status')}>📊 Статус</button>
+          <button className="btn" disabled={svcBusy !== ''} onClick={() => svc('start')}>▶ Старт</button>
+          <button className="btn" disabled={svcBusy !== ''} onClick={() => svc('restart')}>🔄 Рестарт</button>
+          <button className="btn" style={{ borderColor: 'var(--red)', color: 'var(--red)' }} disabled={svcBusy !== ''} onClick={() => { if (confirm('Остановить сервис XKeen? Интернет через прокси пропадёт.')) svc('stop') }}>⏹ Стоп</button>
+        </div>
+        <label className="row" style={{ marginTop: 10 }}><span>Init-скрипт XKeen</span>
+          <input className="input" value={settings.system?.xkeen_init ?? '/opt/etc/init.d/S05xkeen'}
+            onChange={(e) => patch((s) => (s.system.xkeen_init = e.target.value))} />
+        </label>
+      </section>
+
+      <section className="card">
+        <h2>💾 Бэкапы</h2>
+        <p className="muted small">Снимок config.yaml (Mihomo) + config.json (панель). Каталог: {backupDir || '…'}</p>
+        <button className="btn primary" onClick={createBackup} disabled={backupBusy}>
+          {backupBusy ? 'Работаю…' : '＋ Создать бэкап'}
+        </button>
+        <div className="modal-list" style={{ marginTop: 10 }}>
+          {backups.length === 0 && <p className="muted small">Бэкапов пока нет.</p>}
+          {backups.map((b) => (
+            <div key={b} className="check-row" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <span className="server-name" style={{ flex: 1 }}>{b}</span>
+              <button className="btn sm" disabled={backupBusy} onClick={() => restoreBackup(b)}>Восстановить</button>
+              <button className="btn sm ghost" disabled={backupBusy} onClick={() => deleteBackup(b)}>✕</button>
+            </div>
+          ))}
+        </div>
+        <label className="row" style={{ marginTop: 10 }}><span>Каталог бэкапов</span>
+          <input className="input" value={settings.system?.backup_dir ?? ''}
+            onChange={(e) => patch((s) => (s.system.backup_dir = e.target.value))} />
+        </label>
       </section>
 
       <section className="card">

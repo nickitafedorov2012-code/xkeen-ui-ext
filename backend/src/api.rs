@@ -530,6 +530,136 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
     api_ok(json!({ "direct": n_direct, "force": n_force }))
 }
 
+// --- Сервис XKeen и бэкапы ---
+
+#[derive(Deserialize)]
+pub struct ServiceReq {
+    pub action: String,
+}
+
+/// POST /api/xkeen/service — start/stop/restart/status сервиса XKeen.
+/// Restart перегенерирует config.yaml — настройки возвращаются к исходным.
+pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<ServiceReq>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let action = req.action.trim().to_string();
+    if !matches!(action.as_str(), "start" | "stop" | "restart" | "status") {
+        return api_err("Недопустимое действие (start/stop/restart/status)");
+    }
+    let out = tokio::process::Command::new("sh")
+        .arg(&cfg.system.xkeen_init)
+        .arg(&action)
+        .output()
+        .await;
+    match out {
+        Ok(o) => api_ok(json!({
+            "code": o.status.code(),
+            "stdout": String::from_utf8_lossy(&o.stdout),
+            "stderr": String::from_utf8_lossy(&o.stderr),
+        })),
+        Err(e) => api_err(format!(
+            "Не удалось выполнить {} {}: {e} (путь настраивается в system.xkeen_init)",
+            cfg.system.xkeen_init, action
+        )),
+    }
+}
+
+/// Каталог бэкапов панели: {backup_dir}/xkeen-route.
+fn backup_root(cfg: &config::AppConfig) -> std::path::PathBuf {
+    std::path::Path::new(&cfg.system.backup_dir).join("xkeen-route")
+}
+
+/// Валидация имени бэкапа (защита от path traversal).
+fn valid_backup_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.starts_with("xr-")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// GET /api/backups — список бэкапов.
+pub async fn list_backups(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let root = backup_root(&cfg);
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    if let Ok(mut rd) = tokio::fs::read_dir(&root).await {
+        let mut names: Vec<String> = Vec::new();
+        while let Ok(Some(e)) = rd.next_entry().await {
+            if e.path().is_dir() {
+                names.push(e.file_name().to_string_lossy().to_string());
+            }
+        }
+        names.sort();
+        names.reverse();
+        for n in names {
+            items.push(json!({ "name": n }));
+        }
+    }
+    api_ok(json!({ "backups": items, "dir": root.display().to_string() }))
+}
+
+/// POST /api/backups — создать бэкап (config.yaml Mihomo + config.json панели).
+pub async fn create_backup(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let name = format!("xr-{ts}");
+    let dir = backup_root(&cfg).join(&name);
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        return api_err(format!("Не удалось создать {}: {e}", dir.display()));
+    }
+    // 1. config.yaml Mihomo
+    if let Err(e) = tokio::fs::copy(&cfg.mihomo.config_path, dir.join("config.yaml")).await {
+        return api_err(format!("Не удалось скопировать {}: {e}", cfg.mihomo.config_path));
+    }
+    // 2. config.json панели
+    if let Err(e) = tokio::fs::copy(state.config_path.as_path(), dir.join("config.json")).await {
+        return api_err(format!("Не удалось скопировать {}: {e}", state.config_path.display()));
+    }
+    api_ok(json!({ "name": name, "dir": dir.display().to_string() }))
+}
+
+#[derive(Deserialize)]
+pub struct BackupReq {
+    pub name: String,
+}
+
+/// POST /api/backups/restore — восстановить конфиги из бэкапа, reload Mihomo.
+pub async fn restore_backup(State(state): State<AppState>, Json(req): Json<BackupReq>) -> Response {
+    if !valid_backup_name(&req.name) {
+        return api_err("Некорректное имя бэкапа");
+    }
+    let cfg = state.config.read().await.clone();
+    let dir = backup_root(&cfg).join(&req.name);
+    if !dir.is_dir() {
+        return api_err(format!("Бэкап {} не найден", req.name));
+    }
+    if let Err(e) = tokio::fs::copy(dir.join("config.yaml"), &cfg.mihomo.config_path).await {
+        return api_err(format!("Не удалось восстановить config.yaml: {e}"));
+    }
+    if let Err(e) = tokio::fs::copy(dir.join("config.json"), state.config_path.as_path()).await {
+        return api_err(format!("Не удалось восстановить config.json: {e}"));
+    }
+    if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
+        return api_err(format!("Конфиги восстановлены, но reload Mihomo не удался: {e}"));
+    }
+    // Перечитать конфиг панели в состояние.
+    *state.config.write().await = config::load(&state.config_path);
+    api_ok(json!({ "restored": req.name }))
+}
+
+/// POST /api/backups/delete — удалить бэкап.
+pub async fn delete_backup(State(state): State<AppState>, Json(req): Json<BackupReq>) -> Response {
+    if !valid_backup_name(&req.name) {
+        return api_err("Некорректное имя бэкапа");
+    }
+    let cfg = state.config.read().await.clone();
+    let dir = backup_root(&cfg).join(&req.name);
+    match tokio::fs::remove_dir_all(&dir).await {
+        Ok(_) => api_ok(json!({ "deleted": req.name })),
+        Err(e) => api_err(format!("Не удалось удалить {}: {e}", req.name)),
+    }
+}
+
 /// GET /api/routing — текущие AUTO-DEVICE назначения + live-серверы.
 pub async fn get_routing(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();

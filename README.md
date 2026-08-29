@@ -20,9 +20,25 @@
 
 ## ⚡ Установка (Entware)
 
+Стабильная/Latest версия:
+
 ```sh
-curl -Lsfo /tmp/xr-setup.sh <URL>/setup.sh && sh /tmp/xr-setup.sh
+curl -Ls https://raw.githubusercontent.com/nickitafedorov2012-code/xkeen-ui-ext/main/setup.sh | sh
 ```
+
+Бета:
+
+```sh
+curl -Ls https://raw.githubusercontent.com/nickitafedorov2012-code/xkeen-ui-ext/main/setup.sh | sh -s -- beta
+```
+
+Удаление:
+
+```sh
+curl -Ls https://raw.githubusercontent.com/nickitafedorov2012-code/xkeen-ui-ext/main/setup.sh | sh -s -- uninstall
+```
+
+При запуске с терминала (SSH) скрипт показывает меню: установить/обновить или удалить.
 
 Порт по умолчанию: **1001**. Управление сервисом:
 
@@ -198,6 +214,21 @@ RCI-доступ: приоритет у `token` (`X-Ndma-Tkn`; панель по
 - Watchdog-восстановление правок после перегенерации конфига XKeen'ом.
 
 ## 📋 Ченжлог
+
+### v0.3.0 — сервис XKeen (старт/стоп), бэкапы, установка одной командой
+
+- **feat**: управление сервисом XKeen (Настройки → 🖥 Сервис XKeen): Старт / Стоп /
+  Рестарт / Статус. Рестарт перегенерирует config.yaml — настройки возвращаются
+  к исходным (до любых изменений из панели). Путь init-скрипта настраивается
+  (`system.xkeen_init`, по умолчанию `/opt/etc/init.d/S05xkeen`). API: `POST /api/xkeen/service`.
+- **feat**: бэкапы как в XKeen-UI (Настройки → 💾 Бэкапы): создание снимка
+  (config.yaml Mihomo + config.json панели), список, восстановление (с reload
+  Mihomo и перечитыванием конфига панели), удаление. Каталог `{backup_dir}/xkeen-route`
+  (по умолчанию `/opt/backups`). API: `GET/POST /api/backups`, `POST /api/backups/restore|delete`.
+- **feat**: установка одной командой через SSH:
+  `curl -Ls https://raw.githubusercontent.com/.../setup.sh | sh` (+ `beta`, `uninstall`,
+  интерактивное меню при запуске с терминала).
+- **fix**: tokio-фича `process`, мелкие исправления компиляции.
 
 ### v0.2.9 — универсальность + доменные списки (DIRECT / PROXY)
 
