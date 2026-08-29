@@ -2,6 +2,7 @@ mod api;
 mod config;
 mod failover;
 mod frontend;
+mod logger;
 mod mihomo;
 mod rci;
 mod routing;
@@ -111,6 +112,27 @@ async fn no_cache(req: Request, next: Next) -> Response {
     res
 }
 
+/// Логирование HTTP-запросов: метод, путь, статус, длительность.
+async fn log_requests(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let query = req.uri().query().unwrap_or("").to_string();
+    let start = std::time::Instant::now();
+    let res = next.run(req).await;
+    // Не логируем частые опросы статуса — шум.
+    if path != "/api/status" {
+        log_i!(
+            "{} {}{} -> {} ({} мс)",
+            method,
+            path,
+            if query.is_empty() { String::new() } else { format!("?{}", query) },
+            res.status().as_u16(),
+            start.elapsed().as_millis()
+        );
+    }
+    res
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -132,7 +154,12 @@ async fn main() {
 
     let config_path = PathBuf::from(cli.config.clone().unwrap_or_else(|| CONFIG_PATH.to_string()));
     let cfg = config::load(&config_path);
-    println!("{} [INFO] {} запущен, конфиг: {}", chrono_ts(), APP_NAME, config_path.display());
+    logger::init(&config_path, &cfg.logs.remote_syslog);
+    logger::set_level(&cfg.logs.level);
+    log_i!("{} {} запущен, конфиг: {}", APP_NAME, VERSION, config_path.display());
+    if !cfg.logs.remote_syslog.is_empty() {
+        log_i!("Логи дублируются на syslog {}", cfg.logs.remote_syslog);
+    }
 
     let port = cli.port;
     let state = AppState {
@@ -173,15 +200,19 @@ async fn main() {
         .route("/api/failover/events", get(api::failover_events))
         .route("/api/settings", get(api::get_settings).put(api::put_settings))
         .route("/api/settings/priority", post(api::set_priority))
+        .route("/api/logs", get(api::logs_tail))
+        .route("/api/logs/download", get(api::logs_download))
+        .route("/api/logs/clear", post(api::logs_clear))
         .fallback(frontend::serve)
         .layer(middleware::from_fn(no_cache))
+        .layer(middleware::from_fn(log_requests))
         .with_state(state);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .unwrap_or_else(|e| panic!("Не удалось занять порт {}: {}", port, e));
-    println!("{} [INFO] Панель доступна на http://0.0.0.0:{}", chrono_ts(), port);
+    log_i!("Панель доступна на http://0.0.0.0:{}", port);
     axum::serve(listener, app).await.unwrap();
 }
 

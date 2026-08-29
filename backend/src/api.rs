@@ -1,4 +1,4 @@
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
 use serde_json::json;
@@ -65,6 +65,8 @@ pub async fn put_settings(
         return api_err(format!("Ошибка сохранения конфига: {}", e));
     }
     *state.config.write().await = new_cfg;
+    crate::logger::set_level(&state.config.read().await.logs.level);
+    log_i!("Настройки сохранены");
     api_ok(json!({ "saved": true }))
 }
 
@@ -99,8 +101,14 @@ pub struct SwitchReq {
 pub async fn switch_server(State(state): State<AppState>, Json(req): Json<SwitchReq>) -> Response {
     let cfg = state.config.read().await.clone();
     match mihomo::switch_server(&state.http, &cfg, &req.server_id).await {
-        Ok(msg) => api_ok(json!({ "message": msg })),
-        Err(e) => api_err(e),
+        Ok(msg) => {
+            log_i!("Смена сервера: {} — {}", req.server_id, msg);
+            api_ok(json!({ "message": msg }))
+        }
+        Err(e) => {
+            log_e!("Ошибка смены сервера на {}: {}", req.server_id, e);
+            api_err(e)
+        }
     }
 }
 
@@ -551,12 +559,21 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
         .output()
         .await;
     match out {
-        Ok(o) => api_ok(json!({
-            "code": o.status.code(),
-            "stdout": String::from_utf8_lossy(&o.stdout),
-            "stderr": String::from_utf8_lossy(&o.stderr),
-        })),
-        Err(e) => api_err(format!(
+        Ok(o) => {
+            log_i!(
+                "Сервис XKeen: {} (код {})",
+                action,
+                o.status.code().unwrap_or(-1)
+            );
+            api_ok(json!({
+                "code": o.status.code(),
+                "stdout": String::from_utf8_lossy(&o.stdout),
+                "stderr": String::from_utf8_lossy(&o.stderr),
+            }))
+        }
+        Err(e) => {
+            log_e!("Сервис XKeen: {} не удался: {e}", action);
+            api_err(format!(
             "Не удалось выполнить {} {}: {e} (путь настраивается в system.xkeen_init)",
             cfg.system.xkeen_init, action
         )),
@@ -615,6 +632,7 @@ pub async fn create_backup(State(state): State<AppState>) -> Response {
     if let Err(e) = tokio::fs::copy(state.config_path.as_path(), dir.join("config.json")).await {
         return api_err(format!("Не удалось скопировать {}: {e}", state.config_path.display()));
     }
+    log_i!("Бэкап создан: {} ({})", name, dir.display());
     api_ok(json!({ "name": name, "dir": dir.display().to_string() }))
 }
 
@@ -644,6 +662,7 @@ pub async fn restore_backup(State(state): State<AppState>, Json(req): Json<Backu
     }
     // Перечитать конфиг панели в состояние.
     *state.config.write().await = config::load(&state.config_path);
+    log_i!("Конфиги восстановлены из бэкапа {}", req.name);
     api_ok(json!({ "restored": req.name }))
 }
 
@@ -655,8 +674,58 @@ pub async fn delete_backup(State(state): State<AppState>, Json(req): Json<Backup
     let cfg = state.config.read().await.clone();
     let dir = backup_root(&cfg).join(&req.name);
     match tokio::fs::remove_dir_all(&dir).await {
-        Ok(_) => api_ok(json!({ "deleted": req.name })),
+        Ok(_) => {
+            log_i!("Бэкап {} удалён", req.name);
+            api_ok(json!({ "deleted": req.name }))
+        }
         Err(e) => api_err(format!("Не удалось удалить {}: {e}", req.name)),
+    }
+}
+
+// ---------- Логи ----------
+
+#[derive(Deserialize)]
+pub struct LogsQuery {
+    pub lines: Option<usize>,
+}
+
+/// GET /api/logs?lines=500 — хвост журнала.
+pub async fn logs_tail(Query(q): Query<LogsQuery>) -> Response {
+    match crate::logger::tail(q.lines.unwrap_or(500)) {
+        Ok(text) => api_ok(json!({
+            "text": text,
+            "path": crate::logger::path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+        })),
+        Err(e) => api_err(e),
+    }
+}
+
+/// GET /api/logs/download — скачать весь журнал (text/plain).
+pub async fn logs_download() -> impl IntoResponse {
+    let text = crate::logger::read_all().unwrap_or_default();
+    (
+        [
+            ("Content-Type", "text/plain; charset=utf-8"),
+            (
+                "Content-Disposition",
+                "attachment; filename=\"xkeen-route.log\"",
+            ),
+        ],
+        text,
+    )
+        .into_response()
+}
+
+/// POST /api/logs/clear — очистить журнал.
+pub async fn logs_clear() -> Response {
+    match crate::logger::clear() {
+        Ok(_) => {
+            log_i!("Журнал очищен");
+            api_ok(json!({ "cleared": true }))
+        }
+        Err(e) => api_err(e),
     }
 }
 

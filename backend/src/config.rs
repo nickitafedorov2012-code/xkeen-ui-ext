@@ -125,6 +125,28 @@ impl Default for DeviceRouting {
     }
 }
 
+/// Настройки логирования.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct LogsConfig {
+    /// Минимальный уровень: "info" | "warn" | "error".
+    pub level: String,
+    /// Удалённый syslog "host:port" (UDP, RFC 3164). Пусто = не отправлять.
+    pub remote_syslog: String,
+    /// Логировать HTTP-запросы к панели.
+    pub log_requests: bool,
+}
+
+impl Default for LogsConfig {
+    fn default() -> Self {
+        Self {
+            level: "info".into(),
+            remote_syslog: String::new(),
+            log_requests: true,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct AppConfig {
@@ -144,6 +166,8 @@ pub struct AppConfig {
     pub force_domains: Vec<String>,
     /// Сервис XKeen и бэкапы.
     pub system: SystemConfig,
+    /// Логирование.
+    pub logs: LogsConfig,
 }
 
 impl Default for AppConfig {
@@ -159,6 +183,7 @@ impl Default for AppConfig {
             direct_domains: Vec::new(),
             force_domains: Vec::new(),
             system: SystemConfig::default(),
+            logs: LogsConfig::default(),
         }
     }
 }

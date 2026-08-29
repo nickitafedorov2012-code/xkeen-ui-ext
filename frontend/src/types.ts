@@ -71,6 +71,7 @@ export interface AppSettings {
   failover: { enabled: boolean; ping_threshold_ms: number; priority_server: string; auto_restore_priority: boolean; interval_secs: number; device_failover_enabled: boolean }
   refresh_interval_sec: number
   system: { xkeen_init: string; backup_dir: string }
+  logs: { level: string; remote_syslog: string; log_requests: boolean }
 }
 
 export function pingClass(ms: number): string {

@@ -19,6 +19,11 @@ export default function Settings({ notify }: Props) {
   const [backups, setBackups] = useState<string[]>([])
   const [backupDir, setBackupDir] = useState('')
   const [backupBusy, setBackupBusy] = useState(false)
+  // --- Журнал ---
+  const [logText, setLogText] = useState('')
+  const [logPath, setLogPath] = useState('')
+  const [logsBusy, setLogsBusy] = useState(false)
+  const [logsAuto, setLogsAuto] = useState(false)
 
   useEffect(() => {
     apiGet<AppSettings>('settings').then(setSettings).catch((e) => notify(e instanceof Error ? e.message : 'Ошибка', true))
@@ -104,6 +109,39 @@ export default function Settings({ notify }: Props) {
   useEffect(() => {
     loadBackups()
   }, [loadBackups])
+
+  const loadLogs = useCallback(async () => {
+    try {
+      const d = await apiGet<{ text: string; path: string }>('logs?lines=800')
+      setLogText(d.text)
+      setLogPath(d.path)
+    } catch {
+      /* журнал не критичен */
+    }
+  }, [])
+
+  useEffect(() => {
+    loadLogs()
+  }, [loadLogs])
+
+  useEffect(() => {
+    if (!logsAuto) return
+    const t = setInterval(loadLogs, 5000)
+    return () => clearInterval(t)
+  }, [logsAuto, loadLogs])
+
+  const clearLogs = async () => {
+    setLogsBusy(true)
+    try {
+      await apiPost('logs/clear')
+      setLogText('')
+      notify('Журнал очищен')
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка', true)
+    } finally {
+      setLogsBusy(false)
+    }
+  }
 
   const createBackup = async () => {
     setBackupBusy(true)
@@ -233,6 +271,25 @@ export default function Settings({ notify }: Props) {
           <input className="input" type="number" min={3} max={300} value={settings.refresh_interval_sec}
             onChange={(e) => patch((s) => (s.refresh_interval_sec = Number(e.target.value) || 10))} />
         </label>
+        <label className="row"><span>Уровень логов</span>
+          <select className="select" value={settings.logs?.level ?? 'info'}
+            onChange={(e) => patch((s) => { s.logs.level = e.target.value })}>
+            <option value="info">info (подробно)</option>
+            <option value="warn">warn (предупреждения и ошибки)</option>
+            <option value="error">error (только ошибки)</option>
+          </select>
+        </label>
+        <label className="row">
+          <input type="checkbox" checked={settings.logs?.log_requests ?? true}
+            onChange={(e) => patch((s) => (s.logs.log_requests = e.target.checked))} />
+          Логировать HTTP-запросы к панели
+        </label>
+        <label className="row"><span>Удалённый syslog (host:port, UDP)</span>
+          <input className="input" placeholder="пусто = не отправлять, напр. 192.168.2.10:514"
+            value={settings.logs?.remote_syslog ?? ''}
+            onChange={(e) => patch((s) => (s.logs.remote_syslog = e.target.value))} />
+        </label>
+        <p className="muted small">Syslog начнёт работать после перезапуска панели (restart в разделе «Сервис XKeen» не нужен — перезапуск S99xkeen-route).</p>
         <button className="btn primary" onClick={save} disabled={saving}>
           {saving ? 'Сохранение…' : '💾 Сохранить настройки'}
         </button>
@@ -304,6 +361,33 @@ export default function Settings({ notify }: Props) {
         <button className="btn primary" onClick={saveDomains} disabled={savingDomains}>
           {savingDomains ? 'Применение…' : '🌐 Применить домены'}
         </button>
+      </section>
+
+      <section className="card">
+        <h2>📄 Журнал (логи)</h2>
+        <p className="muted small">Файл: {logPath || '…'} · ротация при 2 МБ (старая копия — .log.old)</p>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
+          <button className="btn" onClick={loadLogs} disabled={logsBusy}>🔄 Обновить</button>
+          <a className="btn" href="/api/logs/download" download>⬇ Скачать</a>
+          <button
+            className="btn ghost"
+            style={{ borderColor: 'var(--red)', color: 'var(--red)' }}
+            onClick={() => { if (confirm('Очистить журнал?')) clearLogs() }}
+            disabled={logsBusy}
+          >🗑 Очистить</button>
+          <label className="row" style={{ marginLeft: 'auto' }}>
+            <input type="checkbox" checked={logsAuto} onChange={(e) => setLogsAuto(e.target.checked)} />
+            автообновление 5 сек
+          </label>
+        </div>
+        <textarea
+          className="input"
+          rows={14}
+          readOnly
+          value={logText}
+          placeholder="Журнал пуст"
+          style={{ fontFamily: 'Consolas, monospace', fontSize: 12, whiteSpace: 'pre', overflow: 'auto' }}
+        />
       </section>
     </div>
   )

@@ -27,10 +27,16 @@ pub struct FailoverLog {
 
 impl FailoverLog {
     pub async fn push(&self, message: impl Into<String>, switched: bool) {
+        let message = message.into();
+        if switched {
+            crate::log_w!("Failover: {}", message);
+        } else {
+            crate::log_i!("Failover: {}", message);
+        }
         let mut q = self.events.lock().await;
         q.push_back(FailoverEvent {
             time: Local::now().format("%H:%M:%S").to_string(),
-            message: message.into(),
+            message,
             switched,
         });
         while q.len() > MAX_EVENTS {
