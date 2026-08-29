@@ -68,6 +68,29 @@ jobs:
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
 
+      - name: Debug cargo metadata
+        working-directory: backend
+        run: |
+          cargo metadata --filter-platform ${{ matrix.target }} --format-version 1 > /dev/null 2> meta.err || true
+          {
+            echo "=== cargo version ==="; cargo --version; rustc --version
+            echo "=== installed targets ==="; rustup target list --installed
+            echo "=== cargo metadata stderr ==="; cat meta.err
+          } > debug.log 2>&1 || true
+
+      - name: Upload debug info
+        if: always()
+        working-directory: backend
+        run: |
+          git config user.name "ci-log-bot"
+          git config user.email "noreply@github.com"
+          git checkout -f -B ci-log
+          git add -f debug.log meta.err build.log 2>/dev/null || true
+          git commit -m "ci: debug info" || true
+          git push -f origin ci-log || true
+          git checkout -f ${{ github.ref_name }}
+
+
       - name: Inject frontend dist for cross
         working-directory: backend
         run: |
