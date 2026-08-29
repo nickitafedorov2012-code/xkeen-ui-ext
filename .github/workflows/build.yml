@@ -83,12 +83,19 @@ jobs:
         if: always()
         working-directory: backend
         run: |
+          mkdir -p /tmp/dbg
+          cp -f debug.log meta.err build.log /tmp/dbg/ 2>/dev/null || true
+          git checkout -f -B ci-log
+          cp -f /tmp/dbg/* . 2>/dev/null || true
           git config user.name "ci-log-bot"
           git config user.email "noreply@github.com"
-          git checkout -f -B ci-log
           git add -f debug.log meta.err build.log 2>/dev/null || true
           git commit -m "ci: debug info" || true
           git push -f origin ci-log || true
+          # восстановить версию пакета (checkout -f откатил sed-правку Cargo.toml)
+          VER="${{ inputs.version || github.ref_name }}"
+          sed -i "s/^version = .*/version = \"${VER#v}\"/" Cargo.toml
+          grep '^version' Cargo.toml
 
 
       - name: Inject frontend dist for cross
