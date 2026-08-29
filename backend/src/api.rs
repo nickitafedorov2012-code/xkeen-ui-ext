@@ -3,7 +3,7 @@ use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{config, failover, mihomo, rci, routing, AppState, VERSION};
+use crate::{config, failover, log_e, log_i, mihomo, rci, routing, AppState, VERSION};
 
 /// GET /api/status — сводка: панель + роутер + активный сервер Mihomo.
 pub async fn status(State(state): State<AppState>) -> Response {
