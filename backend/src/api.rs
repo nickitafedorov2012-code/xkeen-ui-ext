@@ -574,9 +574,10 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
         Err(e) => {
             log_e!("Сервис XKeen: {} не удался: {e}", action);
             api_err(format!(
-            "Не удалось выполнить {} {}: {e} (путь настраивается в system.xkeen_init)",
-            cfg.system.xkeen_init, action
-        )),
+                "Не удалось выполнить {} {}: {e} (путь настраивается в system.xkeen_init)",
+                cfg.system.xkeen_init, action
+            ))
+        }
     }
 }
 
