@@ -281,7 +281,7 @@ pub async fn set_ignore(State(state): State<AppState>, Json(req): Json<IgnoreReq
         Ok(y) => y,
         Err(e) => return api_err(format!("Не удалось прочитать {}: {e}", cfg.mihomo.config_path)),
     };
-    let new_yaml = match routing::apply_exclude_filter(&yaml, &servers) {
+    let new_yaml = match routing::apply_ignore_to_groups(&yaml, &servers) {
         Ok(y) => y,
         Err(e) => return api_err(e),
     };

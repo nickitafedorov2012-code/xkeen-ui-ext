@@ -186,6 +186,7 @@ pub fn apply_assignments(yaml: &str, assignments: &[Assignment]) -> Result<Strin
 }
 
 /// Р­РєСЂР°РЅРёСЂРѕРІР°РЅРёРµ РёРјРµРЅРё СЃРµСЂРІРµСЂР° РґР»СЏ regex (exclude-filter РёСЃРїРѕР»СЊР·СѓРµС‚ Go regexp).
+/// Экранирование имени сервера для regex (exclude-filter провайдеров).
 pub fn regex_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
@@ -197,35 +198,95 @@ pub fn regex_escape(s: &str) -> String {
     out
 }
 
+/// Подстрочный OR-regex для exclude-filter провайдеров (надёжнее к эмодзи/вариант-селекторам).
 fn filter_line(ignore: &[String]) -> String {
-    let escaped: Vec<String> = ignore.iter().map(|s| regex_escape(s.trim())).collect();
-    format!("^({})$", escaped.join("|"))
+    ignore.iter().map(|s| regex_escape(s.trim())).collect::<Vec<_>>().join("|")
 }
 
-/// Р’СЃС‚Р°РІРєР°/Р·Р°РјРµРЅР°/СѓРґР°Р»РµРЅРёРµ `exclude-filter` РІ РіСЂСѓРїРїР°С… Fastest Рё Fallback.
-/// РџСѓСЃС‚РѕР№ ignore в†’ СЃС‚СЂРѕРєРё exclude-filter СѓРґР°Р»СЏСЋС‚СЃСЏ (РїРѕР»РЅС‹Р№ СЃР±СЂРѕСЃ).
-pub fn apply_exclude_filter(yaml: &str, ignore: &[String]) -> Result<String, String> {
-    let filter = if ignore.is_empty() {
-        String::new()
-    } else {
-        filter_line(ignore)
-    };
-    let rendered = |indent: &str| {
-        format!("{indent}exclude-filter: '{}'", filter.replace('\'', "''"))
-    };
+/// Имена статических прокси из секции proxies верхнего уровня.
+pub fn parse_static_proxy_names(yaml: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_section = false;
+    for line in yaml.lines() {
+        if line.trim_end() == "proxies:" && !line.starts_with(' ') {
+            in_section = true;
+            continue;
+        }
+        if in_section {
+            if !line.starts_with(' ') && !line.trim().is_empty() {
+                break;
+            }
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("- name:") {
+                let name = rest.trim().trim_matches('\'').trim_matches('"').to_string();
+                if !name.is_empty() {
+                    out.push(name);
+                }
+            }
+        }
+    }
+    out
+}
 
-    let mut out: Vec<String> = Vec::with_capacity(yaml.lines().count() + 4);
+fn push_proxies_block(out: &mut Vec<String>, names: &[String]) {
+    out.push("    proxies:".to_string());
+    for n in names {
+        out.push(format!("      - '{}'", n.replace('\'', "''")));
+    }
+}
+
+/// Применение игнор-листа к группам Fastest/Fallback:
+/// - статические прокси (секция proxies), чьё имя содержит любой из ignore (подстрочно,
+///   без учёта регистра), исключаются: include-all заменяется на явный proxies-список;
+/// - для провайдеров (use) ставится подстрочный exclude-filter;
+/// - пустой ignore → полное восстановление include-all и удаление наших вставок.
+pub fn apply_ignore_to_groups(yaml: &str, ignore: &[String]) -> Result<String, String> {
+    let static_names = parse_static_proxy_names(yaml);
+    let ig_lower: Vec<String> = ignore.iter().map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
+    let use_explicit = !ig_lower.is_empty();
+    let kept: Vec<String> = static_names
+        .iter()
+        .filter(|n| {
+            let nl = n.to_lowercase();
+            !ig_lower.iter().any(|ig| nl.contains(ig.as_str()))
+        })
+        .cloned()
+        .collect();
+
+    let filter = if ig_lower.is_empty() { String::new() } else { filter_line(ignore) };
+    let rendered = |indent: &str| format!("{indent}exclude-filter: '{}'", filter.replace('\'', "''"));
+
+    let mut out: Vec<String> = Vec::with_capacity(yaml.lines().count() + 16);
     let mut in_target = false;
     let mut filter_done = false;
+    let mut proxies_done = false;
+    let mut include_seen = false;
+    let mut in_old_proxies_list = false;
 
     for line in yaml.lines() {
         let trimmed = line.trim();
-        let is_target_start = matches!(trimmed, "- name: Fastest" | "- name: Fallback" | "- name: 'Fastest'" | "- name: 'Fallback'")
-            && !line.starts_with("    ");
+        let is_target_start = matches!(
+            trimmed,
+            "- name: Fastest" | "- name: Fallback" | "- name: 'Fastest'" | "- name: 'Fallback'"
+        ) && !line.starts_with("    ");
 
         if is_target_start {
+            if in_target {
+                if !filter_done && !filter.is_empty() {
+                    out.push(rendered("    "));
+                }
+                if use_explicit && !proxies_done {
+                    push_proxies_block(&mut out, &kept);
+                }
+                if !use_explicit && !include_seen {
+                    out.push("    include-all: true".to_string());
+                }
+            }
             in_target = true;
             filter_done = false;
+            proxies_done = false;
+            include_seen = false;
+            in_old_proxies_list = false;
             out.push(line.to_string());
             continue;
         }
@@ -237,33 +298,77 @@ pub fn apply_exclude_filter(yaml: &str, ignore: &[String]) -> Result<String, Str
                 if !filter_done && !filter.is_empty() {
                     out.push(rendered("    "));
                 }
+                if use_explicit && !proxies_done {
+                    push_proxies_block(&mut out, &kept);
+                }
+                if !use_explicit && !include_seen {
+                    out.push("    include-all: true".to_string());
+                }
                 in_target = false;
+                in_old_proxies_list = false;
                 out.push(line.to_string());
                 continue;
             }
+
+            if in_old_proxies_list {
+                if line.starts_with("      - ") {
+                    continue;
+                }
+                in_old_proxies_list = false;
+            }
+
             if trimmed.starts_with("exclude-filter:") {
                 if !filter.is_empty() && !filter_done {
                     out.push(rendered("    "));
                     filter_done = true;
                 }
-                // РїСѓСЃС‚РѕР№ filter в†’ СЃС‚СЂРѕРєР° СѓРґР°Р»СЏРµС‚СЃСЏ
                 continue;
             }
-            out.push(line.to_string());
-            if trimmed == "include-all: true" && !filter.is_empty() && !filter_done {
-                out.push(rendered("    "));
-                filter_done = true;
+
+            if trimmed == "proxies:" && line.starts_with("    ") {
+                if use_explicit && !proxies_done {
+                    push_proxies_block(&mut out, &kept);
+                    proxies_done = true;
+                }
+                in_old_proxies_list = true;
+                continue;
             }
+
+            if trimmed == "include-all: true" {
+                include_seen = true;
+                if use_explicit {
+                    if !proxies_done {
+                        push_proxies_block(&mut out, &kept);
+                        proxies_done = true;
+                    }
+                    continue;
+                }
+                out.push(line.to_string());
+                if !filter.is_empty() && !filter_done {
+                    out.push(rendered("    "));
+                    filter_done = true;
+                }
+                continue;
+            }
+
+            out.push(line.to_string());
         } else {
             out.push(line.to_string());
         }
     }
-    if in_target && !filter_done && !filter.is_empty() {
-        out.push(rendered("    "));
+    if in_target {
+        if !filter_done && !filter.is_empty() {
+            out.push(rendered("    "));
+        }
+        if use_explicit && !proxies_done {
+            push_proxies_block(&mut out, &kept);
+        }
+        if !use_explicit && !include_seen {
+            out.push("    include-all: true".to_string());
+        }
     }
     Ok(out.join("\n"))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,37 +452,37 @@ mod tests {
         assert_eq!(group_name_for("1.2.3.4", ""), "DEV_1_2_3_4");
     }
 
-    const GROUPS_YAML: &str = "proxy-groups:\n  - name: Fallback\n    type: fallback\n    include-all: true\n    use:\n      - geodema\n\n  - name: Fastest\n    type: url-test\n    include-all: true\n    use:\n      - geodema\n\n  - name: PROXY\n    type: select\n";
+    
+    const GROUPS_YAML: &str = "proxies:\n  - name: '🇫🇮 Финляндия [⚡ Стабильный ]'\n    type: vless\n  - name: '🇩🇪 Германия'\n    type: vless\nproxy-groups:\n  - name: Fallback\n    type: fallback\n    include-all: true\n    use:\n      - geodema\n\n  - name: Fastest\n    type: url-test\n    include-all: true\n    use:\n      - geodema\n\n  - name: PROXY\n    type: select\n";
 
     #[test]
-    fn exclude_filter_inserts_into_both_groups() {
-        let out = apply_exclude_filter(GROUPS_YAML, &["DE Germany".to_string(), "рџ‡«рџ‡® FI [fast]".to_string()]).unwrap();
-        let expected = "exclude-filter: '^(DE Germany|рџ‡«рџ‡® FI \\[fast\\])$'";
-        assert_eq!(out.matches(expected).count(), 2, "filter РІ РѕР±РµРёС… РіСЂСѓРїРїР°С…: {out}");
-        // РґСЂСѓРіРёРµ РіСЂСѓРїРїС‹ РЅРµ С‚СЂРѕРЅСѓС‚С‹
-        let proxy_pos = out.find("- name: PROXY").unwrap();
-        assert!(!out[proxy_pos..].contains("exclude-filter"));
-        // РІСЃС‚Р°РІР»РµРЅ РїРѕСЃР»Рµ include-all
-        let fpos = out.find("exclude-filter").unwrap();
-        let ipos = out.find("include-all: true").unwrap();
-        assert!(fpos > ipos && fpos - ipos < 40);
+    fn ignore_replaces_include_all_with_explicit_list() {
+        let out = apply_ignore_to_groups(GROUPS_YAML, &["Финляндия".to_string()]).unwrap();
+        assert_eq!(out.matches("    proxies:").count(), 2, "OUT={out}");
+        assert!(!out.contains("include-all"));
+        assert!(out.contains("- '🇩🇪 Германия'"));
+        assert!(!out.contains("- '🇫🇮 Финляндия"));
+        assert_eq!(out.matches("exclude-filter: 'Финляндия'").count(), 2);
+        let p = out.find("- name: PROXY").unwrap();
+        assert!(!out[p..].contains("proxies:"));
     }
 
     #[test]
-    fn exclude_filter_replaces_existing() {
-        let with_old = apply_exclude_filter(GROUPS_YAML, &["Old".to_string()]).unwrap();
-        let out = apply_exclude_filter(&with_old, &["New".to_string()]).unwrap();
-        assert!(!out.contains("Old"));
-        assert_eq!(out.matches("exclude-filter: '^(New)$'").count(), 2);
+    fn ignore_replaces_previous_explicit_list() {
+        let with_old = apply_ignore_to_groups(GROUPS_YAML, &["Германия".to_string()]).unwrap();
+        let out = apply_ignore_to_groups(&with_old, &["Финляндия".to_string()]).unwrap();
+        assert!(out.contains("- '🇩🇪 Германия'"), "OUT={out}");
+        assert!(!out.contains("- '🇫🇮 Финляндия"));
     }
 
     #[test]
-    fn exclude_filter_empty_removes_lines() {
-        let with_old = apply_exclude_filter(GROUPS_YAML, &["Old".to_string()]).unwrap();
-        let out = apply_exclude_filter(&with_old, &[]).unwrap();
-        assert!(!out.contains("exclude-filter"));
-        // СЃС‚СЂСѓРєС‚СѓСЂР° СЃРѕС…СЂР°РЅРµРЅР°
-        assert!(out.contains("- name: Fastest") && out.contains("- name: Fallback"));
+    fn ignore_empty_restores_include_all() {
+        let with_old = apply_ignore_to_groups(GROUPS_YAML, &["Финляндия".to_string()]).unwrap();
+        let out = apply_ignore_to_groups(&with_old, &[]).unwrap();
+        assert_eq!(out.matches("include-all: true").count(), 2, "OUT={out}");
+        assert!(!out.contains("exclude-filter"), "OUT={out}");
+        let g = &out[out.find("proxy-groups:").unwrap()..];
+        assert!(!g.contains("    proxies:"), "OUT={out}");
     }
 
     #[test]
@@ -385,5 +490,11 @@ mod tests {
         assert_eq!(regex_escape("a.b[c](d)"), "a\\.b\\[c\\]\\(d\\)");
         assert_eq!(regex_escape("plain name"), "plain name");
     }
-}
 
+    #[test]
+    fn parse_static_names_skips_groups() {
+        let names = parse_static_proxy_names(GROUPS_YAML);
+        assert_eq!(names.len(), 2);
+        assert!(names[0].starts_with("🇫🇮"));
+    }
+}
