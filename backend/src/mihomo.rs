@@ -270,19 +270,26 @@ pub fn clean_display_name(name: &str) -> String {
 }
 
 /// Имя для показа в панели: сначала ремонт mojibake, затем чистка эмодзи.
-/// Если строка целиком не декодируется (эмодзи-флаги ломают таблицы) — ремонт по словам.
 pub fn display_name(name: &str) -> String {
     let repaired = fix_mojibake_smart(name);
     clean_display_name(&repaired)
 }
 
-/// Умный ремонт: сначала вся строка, затем по словам (эмодзи в строке мешают декоду).
+/// Умный ремонт mojibake. Порядок важен:
+/// 1) вся строка целиком (байт 0xA0 в mojibake — это NBSP, поэтому split_whitespace
+///    рвёт слова — делить нельзя, пока строка не декодируется целиком);
+/// 2) срезаем ведущие эмодзи-флаги (они ломают декодирование) и пробуем снова;
+/// 3) запасной вариант — по словам (только по обычному пробелу).
 pub fn fix_mojibake_smart(s: &str) -> String {
     if let Some(fixed) = fix_mojibake(s) {
         return fixed;
     }
-    let words: Vec<String> = s
-        .split_whitespace()
+    let stripped = clean_display_name(s);
+    if let Some(fixed) = fix_mojibake(&stripped) {
+        return fixed;
+    }
+    let words: Vec<String> = stripped
+        .split(' ')
         .map(|w| fix_mojibake(w).unwrap_or_else(|| w.to_string()))
         .collect();
     let joined = words.join(" ");
@@ -626,9 +633,20 @@ mod tests {
             })
             .collect();
         assert_eq!(display_name(&mojibake), "Финляндия");
-        // флаг-эмодзи перед mojibake: вся строка не декодируется — чиним по словам
+        // флаг-эмодзи перед mojibake: вся строка не декодируется — срезаем флаг, чиним остаток
         let with_flag = format!("\u{1F1EB}\u{1F1EE} {mojibake}");
         assert_eq!(display_name(&with_flag), "Финляндия");
+        // NBSP (байт 0xA0 в mojibake) не должен рвать слова: "🇷🇺 Россия" с 0xA0 внутри
+        let mut ru_bytes = "Россия".as_bytes().to_vec();
+        let ru_mojibake: String = ru_bytes
+            .drain(..)
+            .map(|b| match b {
+                0xC0..=0xFF => char::from_u32(0x0410 + (b as u32 - 0xC0)).unwrap(),
+                b => char::from_u32(b as u32).unwrap(),
+            })
+            .collect();
+        let ru_with_flag = format!("\u{1F1F7}\u{1F1FA} {ru_mojibake}");
+        assert_eq!(display_name(&ru_with_flag), "Россия");
         // нормальное имя с флагом не ломается
         assert_eq!(display_name("🇩🇪 Германия"), "Германия");
     }
