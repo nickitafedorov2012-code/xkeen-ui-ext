@@ -89,7 +89,6 @@ jobs:
           git add -f debug.log meta.err build.log 2>/dev/null || true
           git commit -m "ci: debug info" || true
           git push -f origin ci-log || true
-          git checkout -f ${{ github.ref_name }}
 
 
       - name: Inject frontend dist for cross
