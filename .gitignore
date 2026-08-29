@@ -1,0 +1,12 @@
+# Rust
+backend/target/
+**/*.rs.bk
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Локальные конфиги и логи
+*.log
+xkeen-route.config.json
+config.json

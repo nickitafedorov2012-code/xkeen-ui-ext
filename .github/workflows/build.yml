@@ -1,0 +1,97 @@
+name: Build XKeen Route
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. v0.1.0)"
+        required: false
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build frontend
+        working-directory: frontend
+        run: npm install && npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+  build:
+    needs: frontend
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-unknown-linux-musl
+            name: arm64-v8a
+          - target: mipsel-unknown-linux-musl
+            name: mips32le
+          - target: mips-unknown-linux-musl
+            name: mips32
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Set version
+        run: |
+          sed -i "s/^version = .*/version = \"${{ inputs.version || github.ref_name }}\"/" backend/Cargo.toml
+          cat backend/Cargo.toml
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+          key: ${{ matrix.target }}
+
+      - name: Install cross
+        run: type cross || cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Inject frontend dist for cross
+        working-directory: backend
+        run: |
+          cp -r ../frontend/dist ./dist
+          sed -i 's|\.\./frontend/dist|./dist|' src/frontend.rs
+
+      - name: Build binary
+        working-directory: backend
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: |
+          cross build --release --target ${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/xkeen-route ../xkeen-route-${{ matrix.name }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xkeen-route-${{ matrix.name }}
+          path: xkeen-route-${{ matrix.name }}
+
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version || github.ref_name }}
+          prerelease: true
+          files: artifacts/xkeen-route-*/*
