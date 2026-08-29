@@ -35,10 +35,11 @@ jobs:
         include:
           - target: aarch64-unknown-linux-musl
             name: arm64-v8a
-          - target: mipsel-unknown-linux-musl
-            name: mips32le
-          - target: mips-unknown-linux-musl
-            name: mips32
+          # TODO: mips/mipsel требуют nightly + muslsf (soft-float) — добавить позже:
+          # - target: mipsel-unknown-linux-musl
+          #   name: mips32le
+          # - target: mips-unknown-linux-musl
+          #   name: mips32
     steps:
       - uses: actions/checkout@v4
 

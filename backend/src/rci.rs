@@ -136,7 +136,8 @@ async fn challenge_auth(
     ))
 }
 
-/// Гарантирует авторизацию: токен из файлов, иначе challenge-auth. Возвращает токен (может быть пустым).
+/// Гарантирует авторизацию: токен из файлов → challenge-auth → попытка без авторизации
+/// (на многих прошивках RCI с localhost отвечает без auth). Возвращает токен (может быть пустым).
 pub async fn ensure_auth(http: &reqwest::Client, cfg: &AppConfig) -> Result<String, String> {
     let token = token_from_files(cfg);
     if !token.is_empty() {
@@ -155,11 +156,26 @@ pub async fn ensure_auth(http: &reqwest::Client, cfg: &AppConfig) -> Result<Stri
         }
         AUTHED.store(false, Ordering::Relaxed);
     }
-    if cfg.rci.password.is_empty() {
-        return Err("Нет rci.token и пустой rci.password — заполните конфиг".into());
+    if !cfg.rci.password.is_empty() {
+        if challenge_auth(http, &cfg.base_url(), &cfg.rci.login, &cfg.rci.password)
+            .await
+            .is_ok()
+        {
+            return Ok(String::new());
+        }
     }
-    challenge_auth(http, &cfg.base_url(), &cfg.rci.login, &cfg.rci.password).await?;
-    Ok(String::new())
+    // Последняя попытка: RCI без авторизации (типично для localhost на KeeneticOS 4/5)
+    let probe = http
+        .get(format!("{}/rci/show/version", cfg.base_url()))
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+        .map_err(|e| format!("RCI недоступен: {e}"))?;
+    if probe.status().is_success() {
+        AUTHED.store(true, Ordering::Relaxed);
+        return Ok(String::new());
+    }
+    Err("RCI требует авторизацию: задайте rci.token или rci.password в конфиге".into())
 }
 
 async fn rci_get(http: &reqwest::Client, cfg: &AppConfig, token: &str, path: &str) -> Result<Value, String> {
