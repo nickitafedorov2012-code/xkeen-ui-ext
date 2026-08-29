@@ -32,13 +32,19 @@ curl -Ls https://raw.githubusercontent.com/nickitafedorov2012-code/xkeen-ui-ext/
 curl -Ls https://raw.githubusercontent.com/nickitafedorov2012-code/xkeen-ui-ext/main/setup.sh | sh -s -- beta
 ```
 
-Удаление:
+Удаление (конфиги сохраняются):
 
 ```sh
 curl -Ls https://raw.githubusercontent.com/nickitafedorov2012-code/xkeen-ui-ext/main/setup.sh | sh -s -- uninstall
 ```
 
-При запуске с терминала (SSH) скрипт показывает меню: установить/обновить или удалить.
+Удаление полностью (вместе с конфигами):
+
+```sh
+curl -Ls https://raw.githubusercontent.com/nickitafedorov2012-code/xkeen-ui-ext/main/setup.sh | sh -s -- uninstall purge
+```
+
+При запуске с терминала (SSH) скрипт показывает меню: установить/обновить, удалить или удалить полностью.
 
 Порт по умолчанию: **1001**. Управление сервисом:
 

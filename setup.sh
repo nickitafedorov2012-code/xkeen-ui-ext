@@ -3,7 +3,9 @@
 # Установка одной командой:
 #   curl -Ls https://raw.githubusercontent.com/nickitafedorov2012-code/xkeen-ui-ext/main/setup.sh | sh
 # Бета:      ... | sh -s -- beta
-# Удаление:  ... | sh -s -- uninstall
+# Удаление:  ... | sh -s -- uninstall            (конфиги сохраняются)
+# Удаление полностью (с конфигами):
+#            ... | sh -s -- uninstall purge
 
 GREEN=$'\033[32m'
 RED=$'\033[31m'
@@ -17,9 +19,13 @@ REPO="nickitafedorov2012-code/xkeen-ui-ext"
 
 BETA=false
 ACTION="install"
+UNINSTALL_MODE=""
 case "$1" in
   beta) BETA=true ;;
-  uninstall) ACTION="uninstall" ;;
+  uninstall)
+    ACTION="uninstall"
+    [ "$2" = "purge" ] && UNINSTALL_MODE="purge"
+    ;;
 esac
 
 msg() { printf "%b\n" "$1"; }
@@ -73,23 +79,33 @@ do_install() {
 }
 
 do_uninstall() {
+  PURGE="$1"
   msg "${GREEN}🛑 Остановка сервиса...${NC}"
   [ -f "$INIT" ] && sh "$INIT" stop 2>/dev/null
   rm -f "$INIT" "$BIN"
-  msg "${GREEN}✅ XKeen Route удалён (бинарь и init-скрипт).${NC}"
-  msg "   Конфиг сохранён: $CONF_DIR (удалить вручную при необходимости)."
+  if [ "$PURGE" = "purge" ]; then
+    rm -rf "$CONF_DIR"
+    msg "${GREEN}✅ XKeen Route полностью удалён (бинарь, init-скрипт, конфиги).${NC}"
+  else
+    msg "${GREEN}✅ XKeen Route удалён (бинарь и init-скрипт).${NC}"
+    msg "   Конфиг сохранён: $CONF_DIR (удалить вручную или переустановить с purge)."
+  fi
 }
 
 # Интерактивное меню — только если запущено с терминала (не через curl | sh).
 if [ -t 0 ] && [ "$ACTION" = "install" ] && [ "$BETA" = false ]; then
   echo "1) Установить / обновить"
-  echo "2) Удалить"
+  echo "2) Удалить (конфиги сохраняются)"
+  echo "3) Удалить полностью (с конфигами)"
   printf "Выбор [1]: "
   read -r choice
-  [ "$choice" = "2" ] && ACTION="uninstall"
+  case "$choice" in
+    2) ACTION="uninstall" ;;
+    3) ACTION="uninstall"; UNINSTALL_MODE="purge" ;;
+  esac
 fi
 
 case "$ACTION" in
-  uninstall) do_uninstall ;;
+  uninstall) do_uninstall "$UNINSTALL_MODE" ;;
   *) do_install ;;
 esac
