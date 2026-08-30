@@ -386,6 +386,12 @@ RCI-доступ: приоритет у `token` (`X-Ndma-Tkn`; панель по
 - Идеи бэклога: mips/mipsel CI-сборки, пароль-авторизация (Argon2 как в XKeen-UI), webhook/Telegram-уведомления об ERROR.
 
 ## Дополнения после v1.0.0
+
+### v1.0.1 — качество кода и устойчивость (по итогам код-ревью)
+- **Backend**: файловый I/O логов (`/api/logs`, `/api/logs/download`) вынесен в `spawn_blocking` — не блокирует tokio-воркеры; `logger::tail()` читает с конца файла только нужные байты (было: весь файл в память — важно для роутеров с 64 МБ RAM); Regex парсинга YAML вынесен в `LazyLock` (компиляция один раз); RCI: токен из файла ревалидируется (кэш `TOKEN_OK`), при HTTP 401/403 — автоматический reauth (challenge-auth при заданном пароле) и повтор запроса; per-device failover: добавлен гистерезис −50 мс при автовозврате на основной (защита от флаппинга на границе порога).
+- **Frontend**: плашка «⚠ Нет связи с роутером» при недоступности бэкенда (раньше UI «тихо» показывал устаревшие данные); `Devices.tsx` разбит на `DeviceRow` + `DeviceRoutingModal`.
+
+## Дополнения после v1.0.0 (dev notes)
 - **WebSocket live-логи**: `GET /api/logs/ws?lines=N` — сначала хвост истории, затем broadcast-поток (`logger::subscribe()`). В axum 0.8 `WebSocket::send` — это `futures_util::SinkExt::send` (нужен dep `futures-util` c feature `sink`); «no method named send found for Message» = забыли `use futures_util::SinkExt;`.
 - **Graceful shutdown**: `axum::serve(...).with_graceful_shutdown(shutdown_signal())` + `failover::shutdown()` (AtomicBool; фоновый цикл спит по 1 сек и проверяет флаг — не обрывает текущую проверку). Entware init шлёт SIGTERM.
 - **is_current_device («ВЫ»)**: нужен `into_make_service_with_connect_info::<SocketAddr>()` в `axum::serve` + экстракт `ConnectInfo<SocketAddr>` в хендлере; иначе клиентский IP пуст и фича мертва.

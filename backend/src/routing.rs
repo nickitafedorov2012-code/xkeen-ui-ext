@@ -4,6 +4,19 @@
 
 use regex_lite::Regex;
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
+
+/// Regex'ы парсинга компилируются один раз (LazyLock), а не на каждый вызов
+/// parse_groups/parse_rules — экономия на горячем пути /api/routing.
+fn groups_name_re() -> &'static Regex {
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s{2}- name: '(.+?)'\s*$").unwrap());
+    &RE
+}
+
+fn rules_cidr_re() -> &'static Regex {
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*- SRC-IP-CIDR,(.+?)/32,").unwrap());
+    &RE
+}
 
 pub const GROUPS_BEGIN: &str = "# --- AUTO-DEVICE-GROUPS-BEGIN ---";
 pub const GROUPS_END: &str = "# --- AUTO-DEVICE-GROUPS-END ---";
@@ -196,7 +209,7 @@ pub fn parse_groups(yaml: &str) -> BTreeMap<String, String> {
     let Some(block) = extract_block(yaml, GROUPS_BEGIN, GROUPS_END) else {
         return out;
     };
-    let re = Regex::new(r"\s{2}- name: '(.+?)'\s*$").unwrap();
+    let re = groups_name_re();
     let mut cur_name: Option<String> = None;
     let mut cur_lines: Vec<&str> = Vec::new();
     for line in block.split('\n') {
@@ -231,7 +244,7 @@ pub fn parse_rules(yaml: &str) -> BTreeMap<String, String> {
     let Some(block) = extract_block(yaml, RULES_BEGIN, RULES_END) else {
         return out;
     };
-    let re = Regex::new(r"\s*- SRC-IP-CIDR,(.+?)/32,").unwrap();
+    let re = rules_cidr_re();
     for line in block.split('\n') {
         if let Some(c) = re.captures(line) {
             let ip = c.get(1).map(|m| m.as_str().trim().to_string()).unwrap_or_default();

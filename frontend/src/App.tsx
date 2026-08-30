@@ -55,6 +55,7 @@ export default function App() {
   })()
   const [tab, setTab] = useState<TabId>(initial)
   const [status, setStatus] = useState<StatusInfo | null>(null)
+  const [connected, setConnected] = useState(true)
   const [toasts, setToasts] = useState<Toast[]>([])
 
   const switchTab = (t: TabId) => {
@@ -72,8 +73,10 @@ export default function App() {
     try {
       const data = await apiGet<StatusInfo>('status')
       setStatus(data)
+      setConnected(true)
     } catch {
-      /* роутер недоступен — оставляем прошлые данные */
+      /* роутер недоступен — оставляем прошлые данные, но показываем плашку */
+      setConnected(false)
     }
   }, [])
 
@@ -112,6 +115,20 @@ export default function App() {
           </button>
         ))}
       </nav>
+
+      {!connected && (
+        <div
+          style={{
+            background: 'var(--warn-bg, #4a3b12)',
+            color: 'var(--warn-fg, #ffd54f)',
+            padding: '8px 16px',
+            textAlign: 'center',
+            fontWeight: 600,
+          }}
+        >
+          ⚠ Нет связи с роутером — переподключение…
+        </div>
+      )}
 
       <main className="content">
         <ErrorBoundary>

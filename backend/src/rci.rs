@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::config::AppConfig;
 
 static AUTHED: AtomicBool = AtomicBool::new(false);
+/// Файловый RCI-токен проверен и валиден (кэш, чтобы не дёргать /rci/show/version на каждый вызов).
+static TOKEN_OK: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Debug)]
 pub struct Policy {
@@ -144,7 +146,25 @@ async fn challenge_auth(
 pub async fn ensure_auth(http: &reqwest::Client, cfg: &AppConfig) -> Result<String, String> {
     let token = token_from_files(cfg);
     if !token.is_empty() {
-        return Ok(token);
+        if TOKEN_OK.load(Ordering::Relaxed) {
+            return Ok(token);
+        }
+        // Токен из файла может устареть (RCI-сессии истекают по времени) —
+        // проверяем один за процесс, результат кэшируется в TOKEN_OK.
+        let ok = http
+            .get(format!("{}/rci/show/version", cfg.base_url()))
+            .timeout(std::time::Duration::from_secs(3))
+            .header("X-Ndma-Tkn", &token)
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false);
+        if ok {
+            TOKEN_OK.store(true, Ordering::Relaxed);
+            return Ok(token);
+        }
+        TOKEN_OK.store(false, Ordering::Relaxed);
+        // Токен невалиден — пробуем challenge-auth ниже.
     }
     if AUTHED.load(Ordering::Relaxed) {
         let check = http
@@ -181,7 +201,39 @@ pub async fn ensure_auth(http: &reqwest::Client, cfg: &AppConfig) -> Result<Stri
     Err("RCI требует авторизацию: задайте rci.token или rci.password в конфиге".into())
 }
 
+/// Повторная авторизация после 401/403: сброс кэша токена, challenge-auth
+/// (если задан пароль) или повторный ensure_auth. Возвращает новый токен.
+async fn reauth(http: &reqwest::Client, cfg: &AppConfig, had_token: bool) -> Result<String, String> {
+    TOKEN_OK.store(false, Ordering::Relaxed);
+    if !cfg.rci.password.is_empty()
+        && challenge_auth(http, &cfg.base_url(), &cfg.rci.login, &cfg.rci.password)
+            .await
+            .is_ok()
+    {
+        return Ok(String::new());
+    }
+    if had_token {
+        // Токен мог «ожить» после перезагрузки роутера — пробуем ревалидацию.
+    }
+    ensure_auth(http, cfg).await
+}
+
 async fn rci_get(http: &reqwest::Client, cfg: &AppConfig, token: &str, path: &str) -> Result<Value, String> {
+    match rci_get_once(http, cfg, token, path).await {
+        Err(e) if e.starts_with("RCI-AUTH:") => {
+            let t2 = reauth(http, cfg, !token.is_empty()).await?;
+            rci_get_once(http, cfg, &t2, path).await
+        }
+        r => r,
+    }
+}
+
+async fn rci_get_once(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    token: &str,
+    path: &str,
+) -> Result<Value, String> {
     let mut req = http
         .get(format!("{}{}", cfg.base_url(), path))
         .timeout(std::time::Duration::from_secs(4));
@@ -190,6 +242,9 @@ async fn rci_get(http: &reqwest::Client, cfg: &AppConfig, token: &str, path: &st
     }
     let resp = req.send().await.map_err(|e| e.to_string())?;
     let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(format!("RCI-AUTH: {path}: статус {status}"));
+    }
     let body: Value = resp.json().await.map_err(|e| format!("RCI {path}: {e}"))?;
     if !status.is_success() {
         return Err(format!("RCI {path}: статус {status}"));
@@ -198,6 +253,22 @@ async fn rci_get(http: &reqwest::Client, cfg: &AppConfig, token: &str, path: &st
 }
 
 async fn rci_post(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    token: &str,
+    path: &str,
+    body: Value,
+) -> Result<Value, String> {
+    match rci_post_once(http, cfg, token, path, body.clone()).await {
+        Err(e) if e.starts_with("RCI-AUTH:") => {
+            let t2 = reauth(http, cfg, !token.is_empty()).await?;
+            rci_post_once(http, cfg, &t2, path, body).await
+        }
+        r => r,
+    }
+}
+
+async fn rci_post_once(
     http: &reqwest::Client,
     cfg: &AppConfig,
     token: &str,
@@ -213,6 +284,9 @@ async fn rci_post(
     }
     let resp = req.send().await.map_err(|e| e.to_string())?;
     let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(format!("RCI-AUTH: {path}: статус {status}"));
+    }
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
         let head: String = text.chars().take(200).collect();

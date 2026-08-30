@@ -190,7 +190,10 @@ pub async fn run_device_check(state: &AppState) -> Result<String, String> {
             // В норме: автовозврат на основной, если сейчас на резерве и основной ожил.
             if dr.auto_restore && cur != dr.servers[0] {
                 let p = mihomo::ping_server(&state.http, &cfg, &dr.servers[0], 1500).await;
-                if p > 0 && p <= threshold {
+                // Гистерезис как в run_check: возвращаемся только при уверенном
+                // восстановлении (порог - 50 мс), иначе флаппинг на границе порога.
+                let hyst = (threshold - 50).max(1);
+                if p > 0 && p <= hyst {
                     match mihomo::switch_group(&state.http, &cfg, group, &dr.servers[0]).await {
                         Ok(_) => actions.push((
                             format!(

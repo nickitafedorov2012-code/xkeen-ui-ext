@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
+import DeviceRow from './DeviceRow'
+import DeviceRoutingModal from './DeviceRoutingModal'
 import {
-  fmtBytes,
-  fmtSpeed,
-  pingClass,
   type DeviceInfo,
   type DeviceRoutingEntry,
   type PolicyInfo,
@@ -191,15 +190,6 @@ export default function Devices({ notify }: Props) {
     }
   }
 
-  const drMove = (idx: number, dir: -1 | 1) => {
-    if (!drModal) return
-    const next = [...drModal.servers]
-    const j = idx + dir
-    if (j < 0 || j >= next.length) return
-    ;[next[idx], next[j]] = [next[j], next[idx]]
-    setDrModal({ ...drModal, servers: next })
-  }
-
   const selectedMacs = [...selected]
 
   return (
@@ -269,77 +259,23 @@ export default function Devices({ notify }: Props) {
               {filtered.slice(0, limit).map((d) => {
                 const assigned = serverByIp.get(d.ip)
                 return (
-                  <tr key={d.mac} className={d.is_current_device ? 'me' : ''}>
-                    <td>
-                      <input
-                        type="checkbox"
-                        checked={selected.has(d.mac)}
-                        onChange={(e) => toggleSelect(d.mac, e.target.checked)}
-                      />
-                    </td>
-                    <td>
-                      <span className={'dot ' + (d.online ? 'on' : 'off')} />
-                      <b>{d.name}</b>
-                      {d.is_current_device && <span className="tag current">ВЫ</span>}
-                      <div className="muted small">
-                        {d.mac}{d.interface ? ` · ${d.interface}` : ''} · ↓{fmtBytes(d.rxbytes)} ↑{fmtBytes(d.txbytes)}
-                      </div>
-                    </td>
-                    <td className="mono">{d.ip}</td>
-                    <td>
-                      <select className="select" value={d.policy} disabled={busy} onChange={(e) => applyPolicy([d.mac], e.target.value)}>
-                        <option value={d.policy}>{d.policy_name}</option>
-                        {policies
-                          .filter((p) => p.id !== d.policy)
-                          .map((p) => (
-                            <option key={p.id} value={p.id}>{p.name}</option>
-                          ))}
-                      </select>
-                    </td>
-                    <td>
-                      <select className="select" value="" disabled={busy} onChange={(e) => applySpeed([d.mac], Number(e.target.value))}>
-                        <option value="">{fmtSpeed(d.speed_limit_kbps)}</option>
-                        {SPEED_PRESETS.map((s) => (
-                          <option key={s.value} value={s.value}>{s.label}</option>
-                        ))}
-                      </select>
-                    </td>
-                    <td>
-                      <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
-                        <select
-                          className="select"
-                          style={{ flex: 1 }}
-                          value={assigned ? '__keep__' : 'default'}
-                          disabled={busy}
-                          onChange={(e) =>
-                            applyServer(d.ip, d.name, e.target.value === '__keep__' ? assigned || '' : e.target.value)
-                          }
-                        >
-                          <option value="default">По умолчанию (PROXY)</option>
-                          {assigned && <option value="__keep__">{serverLabel(assigned)}</option>}
-                          {servers
-                            .filter((s) => s.id !== assigned)
-                            .map((s) => (
-                              <option key={s.id} value={s.id}>{serverLabel(s.id)}</option>
-                            ))}
-                        </select>
-                        <button
-                          className="btn sm ghost"
-                          title="Резервные серверы и порог пинга"
-                          disabled={busy}
-                          onClick={() => openDrModal(d, assigned)}
-                        >
-                          ⚙
-                        </button>
-                      </div>
-                      {drMap[d.ip]?.servers?.length > 1 && (
-                        <div className="muted small">
-                          резерв: {drMap[d.ip].servers.slice(1).map(serverLabel).join(', ')}
-                          {devFailover ? ` · порог ${drMap[d.ip].ping_threshold_ms || 300} мс` : ' · failover выкл'}
-                        </div>
-                      )}
-                    </td>
-                  </tr>
+                  <DeviceRow
+                    key={d.mac}
+                    d={d}
+                    policies={policies}
+                    servers={servers}
+                    assigned={assigned}
+                    drEntry={drMap[d.ip]}
+                    devFailover={devFailover}
+                    busy={busy}
+                    selected={selected.has(d.mac)}
+                    onToggleSelect={toggleSelect}
+                    applyPolicy={applyPolicy}
+                    applySpeed={applySpeed}
+                    applyServer={applyServer}
+                    serverLabel={serverLabel}
+                    openDrModal={openDrModal}
+                  />
                 )
               })}
             </tbody>
@@ -353,90 +289,16 @@ export default function Devices({ notify }: Props) {
       )}
 
       {drModal && (
-        <div className="modal-overlay" onClick={() => setDrModal(null)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h2>🛡️ Сервер и резервы — {drModal.name}</h2>
-            <p className="muted small">
-              Цепочка: первый — основной, остальные — резервы. Если основной отвалился или пинг выше порога,
-              устройство переключается на следующий живой. При восстановлении основного — автовозврат.
-            </p>
-            <div className="modal-list">
-              {drModal.servers.length === 0 && <p className="muted">Цепочка пуста — устройство использует PROXY по умолчанию.</p>}
-              {drModal.servers.map((id, i) => {
-                const s = servers.find((x) => x.id === id)
-                return (
-                  <div key={id} className="check-row" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                    <span className="badge">{i === 0 ? 'ОСН' : `РЕЗ${i}`}</span>
-                    <span className="server-name" style={{ flex: 1 }} title={id}>{serverLabel(id)}</span>
-                    {s && <span className={'ping ' + pingClass(s.ping_ms)}>{s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}</span>}
-                    <button className="btn sm ghost" disabled={i === 0} onClick={() => drMove(i, -1)}>↑</button>
-                    <button className="btn sm ghost" disabled={i === drModal.servers.length - 1} onClick={() => drMove(i, 1)}>↓</button>
-                    <button
-                      className="btn sm ghost"
-                      onClick={() => setDrModal({ ...drModal, servers: drModal.servers.filter((x) => x !== id) })}
-                    >
-                      ✕
-                    </button>
-                  </div>
-                )
-              })}
-              <select
-                className="select"
-                value=""
-                onChange={(e) => {
-                  if (!e.target.value) return
-                  if (!drModal.servers.includes(e.target.value)) {
-                    setDrModal({ ...drModal, servers: [...drModal.servers, e.target.value] })
-                  }
-                }}
-              >
-                <option value="">+ добавить сервер в цепочку…</option>
-                {servers
-                  .filter((s) => !drModal.servers.includes(s.id))
-                  .map((s) => (
-                    <option key={s.id} value={s.id}>{serverLabel(s.id)}</option>
-                  ))}
-              </select>
-            </div>
-            <div className="modal-actions" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
-              <label className="check" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                Порог пинга, мс:
-                <input
-                  className="input"
-                  type="number"
-                  min={50}
-                  max={5000}
-                  step={50}
-                  value={drModal.threshold}
-                  onChange={(e) => setDrModal({ ...drModal, threshold: Number(e.target.value) || 0 })}
-                />
-              </label>
-              <label className="check" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                <input
-                  type="checkbox"
-                  checked={drModal.autoRestore}
-                  onChange={(e) => setDrModal({ ...drModal, autoRestore: e.target.checked })}
-                />
-                автовозврат на основной, когда восстановится
-              </label>
-              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                <button className="btn ghost" onClick={() => setDrModal(null)}>Отмена</button>
-                {drMap[drModal.ip] && (
-                  <button
-                    className="btn ghost"
-                    disabled={busy}
-                    onClick={() => { setDrModal({ ...drModal, servers: [] }); }}
-                  >
-                    Снять маршрутизацию
-                  </button>
-                )}
-                <button className="btn primary" disabled={busy} onClick={saveDr}>
-                  {busy ? 'Применение…' : 'Сохранить'}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+        <DeviceRoutingModal
+          modal={drModal}
+          servers={servers}
+          busy={busy}
+          hasExisting={!!drMap[drModal.ip]}
+          onChange={setDrModal}
+          onClose={() => setDrModal(null)}
+          onSave={saveDr}
+          serverLabel={serverLabel}
+        />
       )}
     </section>
   )

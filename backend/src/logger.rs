@@ -122,19 +122,36 @@ fn rotate_if_needed(path: &Path) {
 }
 
 /// Хвост лога: последние `lines` строк (по умолчанию 500, максимум 5000).
+/// Читает с конца файла только нужный объём байт (lines * 200), не загружая
+/// весь файл в память — важно для роутеров с 64 МБ RAM.
 pub fn tail(lines: usize) -> Result<String, String> {
+    use std::io::{Read, Seek, SeekFrom};
     let path = LOG_PATH
         .get()
         .ok_or_else(|| "лог не инициализирован".to_string())?;
-    let content = std::fs::read_to_string(path).unwrap_or_default();
     let take = lines.clamp(1, 5000);
-    let mut start = content.len().saturating_sub(take * 200);
-    // Сдвигаемся вперёд до границы UTF-8 (кириллица — 2 байта, иначе slice паникует).
-    while start < content.len() && !content.is_char_boundary(start) {
-        start += 1;
+    let want = (take * 200) as u64; // ~200 байт на строку с запасом
+    let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(want);
+
+    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    f.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+    let mut bytes = Vec::with_capacity(want as usize);
+    f.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+
+    // Читаем с середины файла — отбрасываем первую (возможно обрезанную) строку.
+    if start > 0 {
+        if let Some(pos) = bytes.iter().position(|&b| b == b'\n') {
+            bytes.drain(..=pos);
+        }
     }
-    let slice = &content[start..];
-    let mut iter: Vec<&str> = slice.lines().collect();
+    // Страховка границы UTF-8 (кириллица — 2 байта/символ).
+    let mut s = 0;
+    while s < bytes.len() && (bytes[s] & 0xC0) == 0x80 {
+        s += 1;
+    }
+    let content = String::from_utf8_lossy(&bytes[s..]);
+    let mut iter: Vec<&str> = content.lines().collect();
     if iter.len() > take {
         iter = iter.split_off(iter.len() - take);
     }

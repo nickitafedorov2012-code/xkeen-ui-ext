@@ -702,21 +702,27 @@ pub struct LogsQuery {
 }
 
 /// GET /api/logs?lines=500 — хвост журнала.
+/// Файловый I/O — в spawn_blocking, чтобы не блокировать tokio-воркеры.
 pub async fn logs_tail(Query(q): Query<LogsQuery>) -> Response {
-    match crate::logger::tail(q.lines.unwrap_or(500)) {
-        Ok(text) => api_ok(json!({
+    let lines = q.lines.unwrap_or(500);
+    match tokio::task::spawn_blocking(move || crate::logger::tail(lines)).await {
+        Ok(Ok(text)) => api_ok(json!({
             "text": text,
             "path": crate::logger::path()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
         })),
-        Err(e) => api_err(e),
+        Ok(Err(e)) => api_err(e),
+        Err(e) => api_err(format!("internal: {e}")),
     }
 }
 
 /// GET /api/logs/download — скачать весь журнал (text/plain).
 pub async fn logs_download() -> impl IntoResponse {
-    let text = crate::logger::read_all().unwrap_or_default();
+    let text = tokio::task::spawn_blocking(crate::logger::read_all)
+        .await
+        .unwrap_or_else(|e| Err(format!("internal: {e}")))
+        .unwrap_or_default();
     (
         [
             ("Content-Type", "text/plain; charset=utf-8"),
