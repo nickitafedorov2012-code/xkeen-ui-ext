@@ -385,4 +385,15 @@ RCI-доступ: приоритет у `token` (`X-Ndma-Tkn`; панель по
 - Рестарт XKeen (`S05xkeen restart`) перегенерирует config.yaml и сбрасывает правки панели (домены, per-device, игнор) — это известное ограничение; кандидат в будущие фиксы: watchdog, восстанавливающий AUTO-блоки.
 - Идеи бэклога: mips/mipsel CI-сборки, пароль-авторизация (Argon2 как в XKeen-UI), webhook/Telegram-уведомления об ERROR.
 
+## Дополнения после v1.0.0
+- **WebSocket live-логи**: `GET /api/logs/ws?lines=N` — сначала хвост истории, затем broadcast-поток (`logger::subscribe()`). В axum 0.8 `WebSocket::send` — это `futures_util::SinkExt::send` (нужен dep `futures-util` c feature `sink`); «no method named send found for Message» = забыли `use futures_util::SinkExt;`.
+- **Graceful shutdown**: `axum::serve(...).with_graceful_shutdown(shutdown_signal())` + `failover::shutdown()` (AtomicBool; фоновый цикл спит по 1 сек и проверяет флаг — не обрывает текущую проверку). Entware init шлёт SIGTERM.
+- **is_current_device («ВЫ»)**: нужен `into_make_service_with_connect_info::<SocketAddr>()` в `axum::serve` + экстракт `ConnectInfo<SocketAddr>` в хендлере; иначе клиентский IP пуст и фича мертва.
+- **Проверка WS из консоли**: обычный `curl` на WS-эндпоинт **висит вечно** (соединение остаётся открытым — это норма). Обязательно `--max-time 5`; успех = HTTP 101.
+- **Локальные тесты на Windows**: после обновления Cargo.lock `getrandom` 0.3/0.4 не собирается (`dlltool.exe: program not found` — специфика windows-gnu тулчейна). Это окружение, не код: `cargo check` проходит, тесты гонять в CI (musl через cross собирается нормально). Не тратить время на лечение локально.
+- **Зомби-процессы от `cmd /c start /min`**: несколько параллельных xr-chk.bat пишут в один xr-out.txt — старые (с прежним xr-cmd.txt) затирают вывод новых. Если вывод «устарел» — перезаписать xr-cmd.txt отдельной командой, убедиться, что она применилась ('ok' в выводе), и только потом запускать bat.
+- **setup.sh**: интерактивное меню (баннер + 1/2/3/0) читает выбор с `/dev/tty` при `curl | sh`; без tty — молча ставит. Аргументы `-s -- uninstall [purge]` сохранены. Статус в меню: `$BIN version` + `S99xkeen-route status | grep alive`.
+- **Sparkline пинга**: чисто фронтенд — история последних ~40 значений `active_server.ping_ms` из опросов `/api/status`, SVG-polyline (провалы — красные точки). Бэкап истории не хранится, после F5 пустой.
+- **Версия в бинаре**: CI делает `sed` версии из тега в Cargo.toml + `XKEEN_ROUTE_VERSION` env; локальная версия в Cargo.toml поддерживается вручную для консистентности.
+
 
