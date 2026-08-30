@@ -59,6 +59,9 @@ pub fn init(config_path: &Path, remote_syslog: &str) {
 }
 
 pub fn log(level: &str, msg: &str) {
+    // NOTE (known limitation): блокирующий std::fs I/O в контексте tokio worker.
+    // Строки короткие, запись редкая, ротация раз в 2 МБ — для роутера приемлемо.
+    // При необходимости можно перевести на mpsc + фоновую задачу записи.
     if level_num(level) < MIN_LEVEL.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
@@ -111,8 +114,12 @@ pub fn tail(lines: usize) -> Result<String, String> {
         .ok_or_else(|| "лог не инициализирован".to_string())?;
     let content = std::fs::read_to_string(path).unwrap_or_default();
     let take = lines.clamp(1, 5000);
-    let start = content.len().saturating_sub(take * 160); // грубая оценка для поиска среза
-    let slice = &content[start.min(content.len())..];
+    let mut start = content.len().saturating_sub(take * 200);
+    // Сдвигаемся вперёд до границы UTF-8 (кириллица — 2 байта, иначе slice паникует).
+    while start < content.len() && !content.is_char_boundary(start) {
+        start += 1;
+    }
+    let slice = &content[start..];
     let mut iter: Vec<&str> = slice.lines().collect();
     if iter.len() > take {
         iter = iter.split_off(iter.len() - take);
@@ -150,4 +157,24 @@ macro_rules! log_w {
 #[macro_export]
 macro_rules! log_e {
     ($($arg:tt)*) => { $crate::logger::log("ERROR", &format!($($arg)*)) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tail_handles_multibyte_boundary() {
+        let dir = std::env::temp_dir().join("xr-log-test");
+        let cfg = dir.join("config.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        init(&cfg, "");
+        // Кириллица (2 байта/символ) — старый код срезал середину символа и паниковал.
+        for i in 0..300 {
+            log("INFO", &format!("Проверка кириллицы {i} — тестовая строка журнала"));
+        }
+        let out = tail(1).expect("tail");
+        assert!(out.contains("Проверка кириллицы"), "OUT={out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -34,7 +34,10 @@ pub struct Device {
 }
 
 fn md5_hex(s: &str) -> String {
-    format!("{:x}", md5::compute(s.as_bytes()))
+    use md5::{Digest, Md5};
+    let mut h = Md5::new();
+    h.update(s.as_bytes());
+    format!("{:x}", h.finalize())
 }
 
 fn sha256_hex(s: &str) -> String {

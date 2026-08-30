@@ -1,6 +1,6 @@
-//! Р Р°Р·РґРµР»СЊРЅР°СЏ РјР°СЂС€СЂСѓС‚РёР·Р°С†РёСЏ per-device: AUTO-DEVICE-GROUPS / AUTO-DEVICE-RULES Р±Р»РѕРєРё
-//! РІ /opt/etc/mihomo/config.yaml. Р¤РѕСЂРјР°С‚ Р±Р»РѕРєРѕРІ 1:1 СЃ РґРµСЃРєС‚РѕРїРЅС‹Рј KeeneticPolicyManager
-//! (РѕР±С‰РµРµ С…СЂР°РЅРёР»РёС‰Рµ РїСЂР°РІРёР» РџРљ/Android/РІРµР±-РІРµСЂСЃРёР№).
+//! Раздельная маршрутизация per-device: AUTO-DEVICE-GROUPS / AUTO-DEVICE-RULES блоки
+//! в /opt/etc/mihomo/config.yaml. Формат блоков 1:1 с десктопным KeeneticPolicyManager
+//! (общее хранилище правил ПК/Android/веб-версий).
 
 use regex_lite::Regex;
 use std::collections::BTreeMap;
@@ -14,12 +14,13 @@ pub const RULES_END: &str = "# --- AUTO-DEVICE-RULES-END ---";
 pub struct Assignment {
     pub ip: String,
     pub name: String,
-    /// None РёР»Рё "default" вЂ” СЃРЅСЏС‚СЊ РЅР°Р·РЅР°С‡РµРЅРёРµ СѓСЃС‚СЂРѕР№СЃС‚РІР°.
+    /// None или "default" — снять назначение устройства.
     pub server: Option<String>,
 }
 
-/// 'Big PC 192_168_2_118' в†’ '192.168.2.118'; 'DEV_aa_bb_cc_dd_ee_ff' в†’ MAC-РІРёРґ.
-pub fn ip_key_from_group(gname: &str) -> String {
+/// 'Big PC 192_168_2_118' → '192.168.2.118'; 'DEV_aa_bb_cc_dd_ee_ff' → MAC-вид.
+/// None — имя группы не кодирует устройство.
+pub fn ip_key_from_group(gname: &str) -> Option<String> {
     let mut token = gname.trim().split(' ').next_back().unwrap_or("");
     if let Some(stripped) = token.strip_prefix("DEV_") {
         token = stripped;
@@ -27,16 +28,16 @@ pub fn ip_key_from_group(gname: &str) -> String {
     let cand = token.replace('_', ".");
     let parts: Vec<&str> = cand.split('.').collect();
     if parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok()) {
-        return cand;
+        return Some(cand);
     }
     if token.contains('_') {
-        token.replace('_', ":")
+        Some(token.replace('_', ":"))
     } else {
-        token.to_string()
+        None
     }
 }
 
-/// РРјСЏ РіСЂСѓРїРїС‹ СѓСЃС‚СЂРѕР№СЃС‚РІР°: '{С‡РёСЃС‚РѕРµ РёРјСЏ} {ip_СЃ_РїРѕРґС‡С‘СЂРєРёРІР°РЅРёСЏРјРё}' РёР»Рё 'DEV_{ip}'.
+/// Имя группы устройства: '{чистое имя} {ip_с_подчёркиваниями}' или 'DEV_{ip}'.
 pub fn group_name_for(ip: &str, name: &str) -> String {
     let safe_ip = ip.replace('.', "_").replace(':', "_");
     let clean: String = name
@@ -178,7 +179,7 @@ pub fn apply_domain_rules(yaml: &str, direct: &[String], force: &[String]) -> Re
     Ok(format!("{}{}{}", &content[..pos], block, &content[pos..]))
 }
 
-/// РЎС‚СЂРѕРєР° РїСЂР°РІРёР»Р° РґР»СЏ СѓСЃС‚СЂРѕР№СЃС‚РІР°.
+/// Строка правила для устройства.
 pub fn rule_line(ip: &str, group_name: &str) -> String {
     format!("  - SRC-IP-CIDR,{ip}/32,{group_name}")
 }
@@ -189,7 +190,7 @@ fn extract_block<'a>(yaml: &'a str, begin: &str, end: &str) -> Option<&'a str> {
     Some(&yaml[p1..p2])
 }
 
-/// РџР°СЂСЃРёРЅРі СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёС… РіСЂСѓРїРї: ip в†’ РёСЃС…РѕРґРЅС‹Р№ YAML-С‚РµРєСЃС‚ РіСЂСѓРїРїС‹.
+/// Парсинг существующих групп: ip → исходный YAML-текст группы.
 pub fn parse_groups(yaml: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let Some(block) = extract_block(yaml, GROUPS_BEGIN, GROUPS_END) else {
@@ -202,7 +203,9 @@ pub fn parse_groups(yaml: &str) -> BTreeMap<String, String> {
         match re.captures(line) {
             Some(c) => {
                 if let Some(n) = cur_name.take() {
-                    out.insert(ip_key_from_group(&n), cur_lines.join("\n"));
+                    if let Some(ip) = ip_key_from_group(&n) {
+                        out.insert(ip, cur_lines.join("\n"));
+                    }
                 }
                 cur_name = Some(c.get(1).map(|m| m.as_str().to_string()).unwrap_or_default());
                 cur_lines = vec![line];
@@ -215,12 +218,14 @@ pub fn parse_groups(yaml: &str) -> BTreeMap<String, String> {
         }
     }
     if let Some(n) = cur_name {
-        out.insert(ip_key_from_group(&n), cur_lines.join("\n"));
+        if let Some(ip) = ip_key_from_group(&n) {
+            out.insert(ip, cur_lines.join("\n"));
+        }
     }
     out
 }
 
-/// РџР°СЂСЃРёРЅРі СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёС… РїСЂР°РІРёР»: ip в†’ РёСЃС…РѕРґРЅР°СЏ СЃС‚СЂРѕРєР° РїСЂР°РІРёР»Р°.
+/// Парсинг существующих правил: ip → исходная строка правила.
 pub fn parse_rules(yaml: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let Some(block) = extract_block(yaml, RULES_BEGIN, RULES_END) else {
@@ -238,7 +243,7 @@ pub fn parse_rules(yaml: &str) -> BTreeMap<String, String> {
     out
 }
 
-/// РЈРґР°Р»РµРЅРёРµ AUTO-Р±Р»РѕРєРѕРІ РёР· YAML (РґР»СЏ РїРѕСЃР»РµРґСѓСЋС‰РµР№ РІСЃС‚Р°РІРєРё РѕР±СЉРµРґРёРЅС‘РЅРЅС‹С…).
+/// Удаление AUTO-блоков из YAML (для последующей вставки объединённых).
 pub fn remove_blocks(yaml: &str) -> String {
     let mut out = yaml.to_string();
     for (begin, end) in [(RULES_BEGIN, RULES_END), (GROUPS_BEGIN, GROUPS_END)] {
@@ -252,8 +257,8 @@ pub fn remove_blocks(yaml: &str) -> String {
     out
 }
 
-/// Merge-СЃРµРјР°РЅС‚РёРєР° РґРµСЃРєС‚РѕРїР°: СЃСѓС‰РµСЃС‚РІСѓСЋС‰РёРµ РїСЂР°РІРёР»Р° СЃРѕС…СЂР°РЅСЏСЋС‚СЃСЏ, РїСЂРёРјРµРЅСЏСЋС‚СЃСЏ С‚РѕР»СЊРєРѕ
-/// РїРµСЂРµРґР°РЅРЅС‹Рµ РЅР°Р·РЅР°С‡РµРЅРёСЏ (server=None/"default" вЂ” СЃРЅСЏС‚СЊ). Р’РѕР·РІСЂР°С‰Р°РµС‚ РЅРѕРІС‹Р№ YAML.
+/// Merge-семантика десктопа: существующие правила сохраняются, применяются только
+/// переданные назначения (server=None/"default" — снять). Возвращает новый YAML.
 pub fn apply_assignments(yaml: &str, assignments: &[Assignment], providers: &[String]) -> Result<String, String> {
     let mut groups_by_ip = parse_groups(yaml);
     let mut rules_by_ip = parse_rules(yaml);
@@ -288,7 +293,8 @@ pub fn apply_assignments(yaml: &str, assignments: &[Assignment], providers: &[St
             .find("proxy-groups:")
             .ok_or("Р’ config.yaml РЅРµС‚ СЃРµРєС†РёРё proxy-groups:")?
             + "proxy-groups:".len();
-        content = format!("{}{}\n{}", &content[..pos], block, &content[pos..]);
+        let prefix = if content[..pos].ends_with('\n') { "" } else { "\n" };
+        content = format!("{}{prefix}{}\n{}", &content[..pos], block, &content[pos..]);
     }
 
     let rules_sorted: Vec<String> = rules_by_ip
@@ -299,14 +305,14 @@ pub fn apply_assignments(yaml: &str, assignments: &[Assignment], providers: &[St
     if !rules_sorted.is_empty() {
         let block = format!("{RULES_BEGIN}\n{}\n{RULES_END}\n", rules_sorted.join("\n"));
         let pos = content.find("rules:").ok_or("Р’ config.yaml РЅРµС‚ СЃРµРєС†РёРё rules:")? + "rules:".len();
-        content = format!("{}{}\n{}", &content[..pos], block, &content[pos..]);
+        let prefix = if content[..pos].ends_with('\n') { "" } else { "\n" };
+        content = format!("{}{prefix}{}\n{}", &content[..pos], block, &content[pos..]);
     }
 
     Ok(content)
 }
 
-/// Р­РєСЂР°РЅРёСЂРѕРІР°РЅРёРµ РёРјРµРЅРё СЃРµСЂРІРµСЂР° РґР»СЏ regex (exclude-filter РёСЃРїРѕР»СЊР·СѓРµС‚ Go regexp).
-/// Экранирование имени сервера для regex (exclude-filter провайдеров).
+/// Экранирование имени сервера для regex (exclude-filter использует Go regexp).
 pub fn regex_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
@@ -763,5 +769,33 @@ proxy-groups:
         let names = parse_static_proxy_names(GROUPS_YAML);
         assert_eq!(names.len(), 2);
         assert!(names[0].starts_with("🇫🇮"));
+    }
+
+    #[test]
+    fn ip_key_from_group_rejects_non_device_names() {
+        assert_eq!(ip_key_from_group("Big PC 192_168_2_118").as_deref(), Some("192.168.2.118"));
+        assert_eq!(ip_key_from_group("DEV_aa_bb_cc_dd_ee_ff").as_deref(), Some("aa:bb:cc:dd:ee:ff"));
+        assert_eq!(ip_key_from_group("Fallback"), None);
+        assert_eq!(ip_key_from_group("NoIpHere"), None);
+    }
+
+    #[test]
+    fn auto_blocks_inserted_with_newline_when_missing() {
+        // YAML без перевода строки после "proxy-groups:" и "rules:" —
+        // вставка не должна склеивать маркер с ключом секции.
+        let yaml = "proxies:\n  - name: 'srv'\n    type: vless\nproxy-groups:\n  - name: PROXY\n    type: select\nrules:\n  - MATCH,PROXY";
+        let a = Assignment {
+            ip: "192.168.2.50".into(),
+            name: "Тест".into(),
+            server: Some("srv".into()),
+        };
+        let out = apply_assignments(yaml, &[a], &[]).unwrap();
+        assert!(out.contains("\nproxy-groups:# --- AUTO-DEVICE-GROUPS-BEGIN ---") == false);
+        assert!(out.contains("proxy-groups:\n# --- AUTO-DEVICE-GROUPS-BEGIN ---"));
+        assert!(out.contains("rules:\n# --- AUTO-DEVICE-RULES-BEGIN ---"));
+        // YAML остаётся валидным по структуре: маркеры на отдельных строках
+        for line in out.lines() {
+            assert!(!line.starts_with("proxy-groups:#") && !line.starts_with("rules:#"));
+        }
     }
 }

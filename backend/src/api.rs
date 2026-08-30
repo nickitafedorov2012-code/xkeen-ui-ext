@@ -274,6 +274,7 @@ pub struct IgnoreReq {
 
 /// POST /api/ignore — сохранить игнор-лист, применить exclude-filter к config.yaml, reload Mihomo.
 pub async fn set_ignore(State(state): State<AppState>, Json(req): Json<IgnoreReq>) -> Response {
+    let _guard = state.routing_lock.lock().await; // как в остальных правках config.yaml
     let mut cfg = state.config.read().await.clone();
     let mut servers: Vec<String> = req
         .servers

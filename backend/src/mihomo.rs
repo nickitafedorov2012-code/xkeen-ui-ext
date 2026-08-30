@@ -4,6 +4,13 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 use crate::config::AppConfig;
+use crate::routing::ip_key_from_group;
+
+/// 'Big PC 192_168_2_118' → '192.168.2.118' (формат AUTO-DEVICE групп).
+/// Единая реализация с routing::ip_key_from_group.
+pub fn ip_from_group_name(gname: &str) -> Option<String> {
+    ip_key_from_group(gname)
+}
 
 #[derive(Clone, Debug)]
 pub struct Server {
@@ -370,7 +377,7 @@ pub async fn get_servers(
 
     for (name, p) in &proxies {
         let typ = p.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
-        if matches!(typ.as_str(), "direct" | "reject" | "reject-drop" | "rejectdrop" | "pass" | "passrule" | "compatible" | "selector" | "urltest" | "fallback" | "relay" | "load") {
+        if SKIP_TYPES.contains(&typ.as_str()) {
             continue;
         }
         if seen_names.contains(name) {
@@ -393,7 +400,7 @@ pub async fn get_servers(
     if let Ok(providers) = get_provider_proxies(http, cfg).await {
         for (name, p) in &providers {
             let typ = p.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
-            if matches!(typ.as_str(), "direct" | "reject" | "reject-drop" | "rejectdrop" | "pass" | "passrule" | "compatible" | "selector" | "urltest" | "fallback" | "relay" | "load") {
+            if SKIP_TYPES.contains(&typ.as_str()) {
                 continue;
             }
             if seen_names.contains(name) {
@@ -413,7 +420,16 @@ pub async fn get_servers(
         }
     }
 
-    servers.sort_by(|a, b| b.is_active.cmp(&a.is_active).then(b.ping_ms.cmp(&a.ping_ms)));
+    servers.sort_by(|a, b| {
+        b.is_active.cmp(&a.is_active).then_with(|| {
+            // -1/0 = пинг не измерен/недоступен → в конец списка
+            match (a.ping_ms > 0, b.ping_ms > 0) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.ping_ms.cmp(&b.ping_ms),
+            }
+        })
+    });
     Ok(servers)
 }
 
@@ -436,22 +452,11 @@ pub fn ip_groups_from_rules(rules: &Value) -> BTreeMap<String, String> {
     out
 }
 
-/// 'Big PC 192_168_2_118' → '192.168.2.118' (формат AUTO-DEVICE групп).
-pub fn ip_from_group_name(gname: &str) -> Option<String> {
-    let mut token = gname.trim().split(' ').next_back()?;
-    if let Some(stripped) = token.strip_prefix("DEV_") {
-        token = stripped;
-    }
-    let cand = token.replace('_', ".");
-    let parts: Vec<&str> = cand.split('.').collect();
-    if parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok()) {
-        return Some(cand);
-    }
-    if token.contains('_') {
-        return Some(token.replace('_', ":"));
-    }
-    None
-}
+/// Типы прокси, не являющиеся реальными серверами (служебные/групповые).
+const SKIP_TYPES: &[&str] = &[
+    "direct", "reject", "reject-drop", "rejectdrop", "pass", "passrule",
+    "compatible", "selector", "urltest", "fallback", "relay", "load",
+];
 
 /// Live-состояние: какой сервер реально используется каждым устройством.
 pub async fn live_device_servers(http: &reqwest::Client, cfg: &AppConfig) -> BTreeMap<String, String> {
