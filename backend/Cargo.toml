@@ -2,7 +2,8 @@
 name = "xkeen-route"
 version = "1.0.1"
 edition = "2021"
-description = "XKeen Route вЂ” РІРµР±-РїР°РЅРµР»СЊ СѓРїСЂР°РІР»РµРЅРёСЏ РјР°СЂС€СЂСѓС‚РёР·Р°С†РёРµР№ Keenetic/Mihomo РґР»СЏ Entware"
+description = "XKeen Route — веб-панель управления маршрутизацией Keenetic/Mihomo для Entware"
+license = "AGPL-3.0"
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
