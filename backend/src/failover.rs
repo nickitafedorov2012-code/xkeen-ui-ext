@@ -243,15 +243,34 @@ pub async fn run_device_check(state: &AppState) -> Result<String, String> {
     Ok(actions.iter().map(|(a, _)| a.as_str()).collect::<Vec<_>>().join("; "))
 }
 
+/// Флаг graceful shutdown: фоновый цикл завершается, не обрывая текущую проверку.
+static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Попросить фоновый цикл остановиться (graceful shutdown).
+pub fn shutdown() {
+    SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Фоновый цикл: каждые interval_secs (если enabled).
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         loop {
+            if SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                crate::log_i!("Failover: фоновый цикл остановлен");
+                return;
+            }
             let interval = {
                 let cfg = state.config.read().await;
                 cfg.failover.interval_secs.clamp(15, 3600) as u64
             };
-            tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+            // Спим короткими отрезками, чтобы быстро реагировать на shutdown.
+            for _ in 0..interval {
+                if SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
+                    crate::log_i!("Failover: фоновый цикл остановлен");
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
 
             let (enabled, dev_enabled) = {
                 let cfg = state.config.read().await;

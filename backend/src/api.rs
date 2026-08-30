@@ -730,6 +730,48 @@ pub async fn logs_download() -> impl IntoResponse {
         .into_response()
 }
 
+/// GET /api/logs/ws — живой поток журнала (WebSocket).
+pub async fn logs_ws(
+    ws: axum::extract::ws::WebSocketUpgrade,
+    Query(q): Query<LogsQuery>,
+) -> Response {
+    ws.on_upgrade(move |socket| async move {
+        ws_logs_stream(socket, q.lines.unwrap_or(200)).await
+    })
+}
+
+async fn ws_logs_stream(mut socket: axum::extract::ws::WebSocket, history_lines: usize) {
+    use futures_util::SinkExt;
+    // 1. Сначала — хвост истории.
+    if let Ok(text) = crate::logger::tail(history_lines) {
+        for line in text.lines() {
+            if socket.send(axum::extract::ws::Message::text(line)).await.is_err() {
+                return;
+            }
+        }
+    }
+    // 2. Затем — живой поток новых строк.
+    let Some(mut rx) = crate::logger::subscribe() else {
+        let _ = socket.send(axum::extract::ws::Message::text("(лог не инициализирован)")).await;
+        return;
+    };
+    loop {
+        match rx.recv().await {
+            Ok(line) => {
+                if socket.send(axum::extract::ws::Message::text(line)).await.is_err() {
+                    break;
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                let _ = socket
+                    .send(axum::extract::ws::Message::text(format!("…пропущено {n} строк…")))
+                    .await;
+            }
+            Err(_) => break,
+        }
+    }
+}
+
 /// POST /api/logs/clear — очистить журнал.
 pub async fn logs_clear() -> Response {
     match crate::logger::clear() {

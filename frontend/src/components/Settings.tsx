@@ -24,6 +24,7 @@ export default function Settings({ notify }: Props) {
   const [logPath, setLogPath] = useState('')
   const [logsBusy, setLogsBusy] = useState(false)
   const [logsAuto, setLogsAuto] = useState(false)
+  const [logsLive, setLogsLive] = useState(false)
 
   useEffect(() => {
     apiGet<AppSettings>('settings').then(setSettings).catch((e) => notify(e instanceof Error ? e.message : 'Ошибка', true))
@@ -71,6 +72,34 @@ export default function Settings({ notify }: Props) {
     const t = setInterval(loadLogs, 5000)
     return () => clearInterval(t)
   }, [logsAuto, loadLogs])
+
+  // Живой режим: WebSocket-поток новых строк журнала.
+  useEffect(() => {
+    if (!logsLive) return
+    let ws: WebSocket | null = null
+    let closed = false
+    let retry: ReturnType<typeof setTimeout>
+    const connect = () => {
+      if (closed) return
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+      ws = new WebSocket(`${proto}://${location.host}/api/logs/ws?lines=300`)
+      ws.onmessage = (ev) => {
+        setLogText((prev) => {
+          const lines = (prev ? prev.split('\n') : []).concat(ev.data as string)
+          return lines.slice(-500).join('\n')
+        })
+      }
+      ws.onclose = () => {
+        if (!closed) retry = setTimeout(connect, 3000)
+      }
+    }
+    connect()
+    return () => {
+      closed = true
+      clearTimeout(retry)
+      ws?.close()
+    }
+  }, [logsLive])
 
   if (!settings) return <section className="card"><p className="muted">Загрузка…</p></section>
 
@@ -376,7 +405,11 @@ export default function Settings({ notify }: Props) {
             disabled={logsBusy}
           >🗑 Очистить</button>
           <label className="check" style={{ marginLeft: 'auto' }}>
-            <input type="checkbox" checked={logsAuto} onChange={(e) => setLogsAuto(e.target.checked)} />
+            <input type="checkbox" checked={logsLive} onChange={(e) => { setLogsLive(e.target.checked); if (e.target.checked) setLogsAuto(false) }} />
+            🔴 live (WebSocket)
+          </label>
+          <label className="check">
+            <input type="checkbox" checked={logsAuto} onChange={(e) => { setLogsAuto(e.target.checked); if (e.target.checked) setLogsLive(false) }} />
             автообновление 5 сек
           </label>
         </div>

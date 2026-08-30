@@ -109,20 +109,64 @@ do_uninstall() {
   fi
 }
 
-# Интерактивное меню — только если запущено с терминала (не через curl | sh).
-if [ -t 0 ] && [ "$ACTION" = "install" ] && [ "$BETA" = false ]; then
-  echo "1) Установить / обновить"
-  echo "2) Удалить (конфиги сохраняются)"
-  echo "3) Удалить полностью (с конфигами)"
-  printf "Выбор [1]: "
-  read -r choice
-  case "$choice" in
-    2) ACTION="uninstall" ;;
-    3) ACTION="uninstall"; UNINSTALL_MODE="purge" ;;
+# Меню (как в XKeen-UI): баннер + выбор действия.
+# Через curl|sh читаем выбор с /dev/tty; если tty нет — ставим без вопросов.
+
+get_status() {
+  if [ -x "$BIN" ] && [ -f "$INIT" ]; then
+    VER=$("$BIN" version 2>/dev/null | grep -o 'v[0-9.]*' | head -1)
+    if sh "$INIT" status 2>/dev/null | grep -q alive; then
+      echo "статус: запущена ${VER:-}"
+    else
+      echo "статус: установлена ${VER:-}, но не запущена"
+    fi
+  else
+    echo "статус: не установлена"
+  fi
+}
+
+show_menu() {
+  CLEAR=$'\033[2J'
+  HOME_C=$'\033[H'
+  printf "${CLEAR}${HOME_C}"
+  cat <<'EOF'
+  __  __ __                       __  __ ____
+ | |/ / / //_/___   ___   ____      / / / //  _/
+ |   / / ,<  / _ \ / _ \ / __ \    / / / / / /
+ /   | / /| |/  __//  __// / / /   / /_/ /_/ /
+/_/|_|/_/ |_|\___/ \___//_/ /_/    \____//___/
+EOF
+  printf "\n$(get_status)\n"
+  printf "Архитектура: %s\n" "$(get_arch)"
+  printf "\nДобро пожаловать! Выберите действие:\n"
+  printf "  1. Установить/переустановить\n"
+  printf "  2. Обновить\n"
+  printf "  3. Удалить\n"
+  printf "\n  0. Выйти\n\n"
+}
+
+if [ "$ACTION" = "install" ] && [ "$BETA" = false ]; then
+  if [ -t 0 ] || [ -e /dev/tty ]; then
+    show_menu
+    printf ">: "
+    if [ -t 0 ]; then
+      read -r response
+    else
+      read -r response < /dev/tty
+    fi
+    case "$response" in
+      1|"") do_install ;;
+      2) do_install ;;
+      3) do_uninstall "" ;;
+      0) exit 0 ;;
+      *) msg "${RED} ❌ Неверный выбор.${NC}"; exit 1 ;;
+    esac
+  else
+    do_install
+  fi
+else
+  case "$ACTION" in
+    uninstall) do_uninstall "$UNINSTALL_MODE" ;;
+    *) do_install ;;
   esac
 fi
-
-case "$ACTION" in
-  uninstall) do_uninstall "$UNINSTALL_MODE" ;;
-  *) do_install ;;
-esac

@@ -206,6 +206,7 @@ async fn main() {
         .route("/api/logs", get(api::logs_tail))
         .route("/api/logs/download", get(api::logs_download))
         .route("/api/logs/clear", post(api::logs_clear))
+        .route("/api/logs/ws", get(api::logs_ws))
         .fallback(frontend::serve)
         .layer(middleware::from_fn(no_cache))
         .layer(middleware::from_fn(log_requests))
@@ -216,9 +217,35 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("Не удалось занять порт {}: {}", port, e));
     log_i!("Панель доступна на http://0.0.0.0:{}", port);
-    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-        .await
-        .unwrap();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .unwrap();
+    log_i!("Остановка: новые соединения закрыты, завершаю фоновые задачи…");
+    failover::shutdown();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    log_i!("XKeen Route остановлен");
+}
+
+/// Ожидание SIGINT/SIGTERM (init-скрипт Entware шлёт SIGTERM).
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut term = signal(SignalKind::terminate()).expect("SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = term.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+    log_i!("Получен сигнал остановки (graceful shutdown)");
 }
 
 pub fn chrono_ts() -> String {

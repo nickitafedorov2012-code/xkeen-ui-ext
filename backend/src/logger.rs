@@ -12,7 +12,15 @@ const MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 static SYSLOG: OnceLock<Option<SyslogTarget>> = OnceLock::new();
+static LOG_TX: OnceLock<tokio::sync::broadcast::Sender<String>> = OnceLock::new();
 static MIN_LEVEL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0); // 0=info 1=warn 2=error
+
+/// Подписка на живой поток строк журнала (для WebSocket).
+pub fn subscribe() -> Option<tokio::sync::broadcast::Receiver<String>> {
+    LOG_PATH.get()?; // лог должен быть инициализирован
+    let tx = LOG_TX.get_or_init(|| tokio::sync::broadcast::channel(512).0);
+    Some(tx.subscribe())
+}
 
 fn level_num(level: &str) -> u8 {
     match level {
@@ -67,6 +75,11 @@ pub fn log(level: &str, msg: &str) {
     }
     let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
     let line = format!("{ts} [{level:<5}] {msg}");
+
+    // Живой поток для WebSocket-подписчиков (медленных — откидываем, не блокируем).
+    if let Some(tx) = LOG_TX.get() {
+        let _ = tx.send(line.clone());
+    }
 
     if level == "ERROR" || level == "WARN" {
         eprintln!("{line}");

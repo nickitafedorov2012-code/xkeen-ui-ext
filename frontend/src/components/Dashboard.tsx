@@ -10,6 +10,17 @@ interface Props {
 export default function Dashboard({ status, notify }: Props) {
   const [events, setEvents] = useState<FailoverEventInfo[]>([])
   const [checking, setChecking] = useState(false)
+  // История пинга активного сервера (для sparkline): {значение, было ли измерение}
+  const [pingHistory, setPingHistory] = useState<{ ms: number; ok: boolean }[]>([])
+
+  useEffect(() => {
+    const ping = status?.active_server?.ping_ms
+    if (ping === undefined) return
+    setPingHistory((prev) => {
+      const next = [...prev, { ms: ping, ok: ping > 0 }].slice(-40)
+      return next
+    })
+  }, [status?.active_server?.ping_ms, status?.active_server?.name])
 
   const loadEvents = useCallback(async () => {
     try {
@@ -73,6 +84,10 @@ export default function Dashboard({ status, notify }: Props) {
             )}
           </li>
         </ul>
+        {pingHistory.length >= 2 && <PingSparkline data={pingHistory} />}
+        {pingHistory.length >= 2 && (
+          <p className="muted small">Стабильность за последние {pingHistory.length} опросов (выше = хуже пинг)</p>
+        )}
       </section>
 
       <section className="card">
@@ -103,5 +118,29 @@ export default function Dashboard({ status, notify }: Props) {
         )}
       </section>
     </div>
+  )
+}
+
+/// Мини-график пинга (SVG sparkline): последняя точка справа, провалы — красные.
+function PingSparkline({ data }: { data: { ms: number; ok: boolean }[] }) {
+  const W = 280
+  const H = 46
+  const okVals = data.filter((d) => d.ok).map((d) => d.ms)
+  const max = Math.max(100, ...okVals) * 1.15
+  const step = data.length > 1 ? W / (data.length - 1) : W
+  const y = (d: { ms: number; ok: boolean }) =>
+    d.ok ? H - 4 - (d.ms / max) * (H - 10) : H - 2
+  const pts = data.map((d, i) => `${(i * step).toFixed(1)},${y(d).toFixed(1)}`).join(' ')
+  const last = data[data.length - 1]
+  return (
+    <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: 'block', marginTop: 8 }}>
+      <polyline points={pts} fill="none" stroke="var(--accent)" strokeWidth="1.6" />
+      {data.map((d, i) =>
+        d.ok ? null : (
+          <circle key={i} cx={i * step} cy={y(d)} r="2.6" fill="var(--red, #e5484d)" />
+        ),
+      )}
+      <circle cx={(data.length - 1) * step} cy={y(last)} r="2.6" fill="var(--accent)" />
+    </svg>
   )
 }

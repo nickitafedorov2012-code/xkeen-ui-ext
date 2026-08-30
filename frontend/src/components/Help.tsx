@@ -91,8 +91,10 @@ function Part3() {
       <H>📄 Журнал (логи)</H>
       <P>Файл /opt/etc/xkeen-route/xkeen-route.log: все действия (смена сервера, бэкапы, домены, failover, HTTP-запросы, ошибки). Ротация при 2 МБ (старая копия — .log.old). <b>Обновить</b> — перечитать хвост, <b>Скачать</b> — весь файл, <b>Очистить</b> — стереть, <b>автообновление</b> — перечитывать каждые 5 сек.</P>
       <H>🧰 Установка и обновление</H>
-      <P>Одной командой (Entware): curl -Ls https://cdn.jsdelivr.net/gh/nickitafedorov2012-code/xkeen-ui-ext@v0.3.8/setup.sh | sh</P>
-      <P>Обновление — та же команда (конфиг сохраняется). Удаление: остановить сервис и удалить /opt/sbin/xkeen-route и /opt/etc/init.d/S99xkeen-route (конфиг и бэкапы можно сохранить).</P>
+      <P>Одной командой (Entware): curl -Ls https://cdn.jsdelivr.net/gh/nickitafedorov2012-code/xkeen-ui-ext@v1.0.0/setup.sh | sh — откроется меню (установить / обновить / удалить / выйти).</P>
+      <P>Обновление — та же команда (конфиг сохраняется). Удаление: пункт 3 меню, либо sh … setup.sh -s -- uninstall (конфиг сохраняется) / uninstall purge (полностью).</P>
+      <H>🔴 Живые логи и 📈 Sparkline</H>
+      <P>В «Журнале» есть режим 🔴 live — WebSocket-поток новых строк в реальном времени (без опроса). На дашборде под активным сервером — sparkline стабильности пинга за последние ~40 опросов (провалы отмечены красным).</P>
       <H>🔌 API (для скриптов)</H>
       <P>GET /api/status — сводка; GET /api/servers — список серверов; POST /api/servers/switch (server_id) — смена; GET /api/logs?lines=N — журнал; GET /api/logs/download — файл лога. Формат ответа: {'{ success, data | error }'}.</P>
     </>
