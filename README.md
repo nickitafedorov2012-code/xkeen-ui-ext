@@ -341,3 +341,48 @@ RCI-доступ: приоритет у `token` (`X-Ndma-Tkn`; панель по
   статических серверов, см. v0.2.1).
 - 17 тестов.
 
+---
+
+# Заметки для разработки (context dump)
+
+Практические знания об окружении, деплое и граблях. Если правите — правьте здесь же.
+
+## Доступ к роутеру (с ПК разработчика)
+- plink/pscp лежат в `%TEMP%` (putty-утилиты).
+- Подключение: `plink -batch -P 222 -hostkey 'SHA256:JYD/KYLTxqXSwi7OBY8wkXTO9Cm/8Afrhg88MqfWPIk' -l root -pw keenetic 192.168.2.1`
+- Копирование: `pscp -scp -P 222 -hostkey '...' файл root@192.168.2.1:/путь` (**только `-scp`** — SFTP на Entware нет).
+- **POST-тела через plink не слать** — plink ломает кавычки/кавычки в JSON. Только через файлы (`pscp` + `curl -d @file`) или base64.
+- Сложные команды с кавычками/regex: писать в `%TEMP%\xr-cmd.txt` и запускать `plink ... -m %TEMP%\xr-cmd.txt`.
+- Вывод plink в PowerShell часто теряется/ломается (cp866). Надёжный паттерн: скрытый bat → `plink ... > %TEMP%\xr-out.txt 2>&1`, затем `Get-Content`. Запуск: `cmd /c start /min "" "%TEMP%\xr-chk.bat"`, потом чтение файла.
+- PowerShell показывает UTF-8 JSON как mojibake — это артефакт консоли, данные корректны (проверять hex/curl).
+
+## Сеть роутера: что доступно, что нет
+- `raw.githubusercontent.com` — **заблокирован** с роутера.
+- Работающие источники: `cdn.jsdelivr.net` и `fastly.jsdelivr.net` (могут кэшировать `@main` с задержкой — см. ниже), `api.github.com`, `github.com` (release-ассеты — напрямую падают по таймауту, нужны зеркала).
+- Зеркала для скачивания бинарников: `https://ghproxy.net/URL`, `https://ghfast.top/URL`, фолбэк `http://ghproxy.net/` (у https-зеркал бывают проблемы с сертификатами для curl без CA-бандла; на Entware CA часто нет вообще → в setup.sh везде `curl -k`).
+- **jsDelivr кэширует `@main` агрессивно**: purge (`https://purge.jsdelivr.net/gh/...`) не гарантирует обновление на edge, куда попадает роутер. Надёжный путь — релизить тег и ссылаться на `@vX.Y.Z` (теговые URL отдаются свежими). Установщик резолвит ассет через API `releases` (не `latest` — тег latest может быть не проставлен).
+
+## Деплой (пайплайн)
+1. Коммит в `main` → тег `vX.Y.Z` → `git push origin vX.Y.Z`.
+2. CI (`.github/workflows/build.yml`): собирает фронтенд, кросс-компилирует `aarch64-unknown-linux-musl` через `cross`, публикует prerelease с ассетом `xkeen-route-arm64-v8a`. Сборка занимает 15–40 мин (раннеры бывают медленные/очередь).
+3. Обновление роутера: `curl -Ls https://cdn.jsdelivr.net/gh/nickitafedorov2012-code/xkeen-ui-ext@vX.Y.Z/setup.sh | sh` — установщик сам резолвит последний релиз через API, качает бинарник (github → ghproxy → ghfast → http-фолбэк), создаёт init, рестартует. Конфиг сохраняется.
+4. Проверка: `sh /opt/etc/init.d/S99xkeen-route status`, `curl -s http://127.0.0.1:1001/api/status`, хэш ассета в `/` должен смениться.
+
+## Локальная сборка/тесты (Windows ПК)
+- cargo есть в `%USERPROFILE%\.cargo\bin` (в PATH PowerShell его НЕТ — звать полным путём или через bat).
+- `cargo check` / `cargo test` запускать через скрытый bat с перенаправлением в файл (форграунд-процессы терминал убивает): см. паттерн plink выше.
+- npm/node в PATH нет — фронтенд собирает только CI.
+- **Перед тегом обязательно `cargo check` локально** — две сборки подряд падали в CI из-за тривиальных ошибок (незакрытая скобка, импорт макросов), а лог CI недоступен без авторизации (ветка `ci-log` с build.log иногда не создаётся).
+
+## Грабли в коде
+- **React: все хуки — строго до любого условного return.** Уже дважды ловили React #310 («Rendered more hooks») в Settings.tsx из-за хуков после `if (!settings) return`. ErrorBoundary в App.tsx теперь показывает текст ошибки вместо белого экрана — если пользователь присылает скрин «Ошибка интерфейса», читать сообщение там.
+- Макросы `log_i!/log_w!/log_e!` (`#[macro_export]`) в субмодулях требуют `use crate::{log_i, log_e};` (в main.rs — видны без импорта).
+- Логи: файл `/opt/etc/xkeen-route/xkeen-route.log`, ротация 2 МБ → `.log.old`, опциональный UDP syslog (`logs.remote_syslog` в конфиге, применяется после рестарта панели). API: `GET /api/logs?lines=N`, `GET /api/logs/download`, `POST /api/logs/clear`.
+- Кэш браузера: index.html отдаётся с `Cache-Control: no-store` (middleware `no_cache`), но после обновления пользователю иногда нужен Ctrl+F5.
+
+## Состояние/прочее
+- Порт панели: 1001 (`-p`), конфиг: `/opt/etc/xkeen-route/config.json`, бэкапы: `/opt/backups/xkeen-route/`.
+- Рестарт XKeen (`S05xkeen restart`) перегенерирует config.yaml и сбрасывает правки панели (домены, per-device, игнор) — это известное ограничение; кандидат в будущие фиксы: watchdog, восстанавливающий AUTO-блоки.
+- Идеи бэклога: mips/mipsel CI-сборки, пароль-авторизация (Argon2 как в XKeen-UI), webhook/Telegram-уведомления об ERROR.
+
+
