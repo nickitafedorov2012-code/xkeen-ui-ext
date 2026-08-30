@@ -85,6 +85,8 @@ pub struct AppState {
     pub failover_log: Arc<failover::FailoverLog>,
     /// Сериализация правок config.yaml (гонки failover/ручных правок).
     pub routing_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Сериализация read-modify-write конфига панели (config.json) — против TOCTOU.
+    pub config_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 
@@ -173,6 +175,7 @@ async fn main() {
         rci_token: Arc::new(RwLock::new(String::new())),
         failover_log: Arc::new(failover::FailoverLog::default()),
         routing_lock: Arc::new(tokio::sync::Mutex::new(())),
+        config_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     failover::spawn(state.clone());
@@ -213,7 +216,9 @@ async fn main() {
         .await
         .unwrap_or_else(|e| panic!("Не удалось занять порт {}: {}", port, e));
     log_i!("Панель доступна на http://0.0.0.0:{}", port);
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+        .await
+        .unwrap();
 }
 
 pub fn chrono_ts() -> String {

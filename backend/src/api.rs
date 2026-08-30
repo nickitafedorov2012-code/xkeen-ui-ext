@@ -1,4 +1,4 @@
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
 use serde_json::json;
@@ -55,6 +55,7 @@ pub async fn put_settings(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
+    let _cfg_guard = state.config_lock.lock().await;
     let mut merged = serde_json::to_value(state.config.read().await.clone()).unwrap_or_default();
     crate::config::merge_value(&mut merged, &body);
     let new_cfg: config::AppConfig = match serde_json::from_value(merged) {
@@ -167,6 +168,7 @@ pub struct PriorityReq {
 
 /// POST /api/settings/priority — назначить/снять приоритетный сервер.
 pub async fn set_priority(State(state): State<AppState>, Json(req): Json<PriorityReq>) -> Response {
+    let _cfg_guard = state.config_lock.lock().await;
     let mut cfg = state.config.read().await.clone();
     cfg.failover.priority_server = req.server_id.trim().to_string();
     if let Err(e) = config::save(&state.config_path, &cfg).await {
@@ -178,13 +180,17 @@ pub async fn set_priority(State(state): State<AppState>, Json(req): Json<Priorit
 
 
 /// GET /api/devices — устройства с политиками.
-pub async fn get_devices(State(state): State<AppState>) -> Response {
+pub async fn get_devices(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+) -> Response {
     let cfg = state.config.read().await.clone();
     let policies = match rci::get_policies(&state.http, &cfg).await {
         Ok(p) => p,
         Err(e) => return api_err(e),
     };
-    match rci::get_devices(&state.http, &cfg, &policies, "").await {
+    let client_ip = peer.ip().to_string();
+    match rci::get_devices(&state.http, &cfg, &policies, &client_ip).await {
         Ok(devices) => {
             let live = mihomo::live_device_servers(&state.http, &cfg).await;
             let arr: Vec<serde_json::Value> = devices
@@ -274,6 +280,7 @@ pub struct IgnoreReq {
 
 /// POST /api/ignore — сохранить игнор-лист, применить exclude-filter к config.yaml, reload Mihomo.
 pub async fn set_ignore(State(state): State<AppState>, Json(req): Json<IgnoreReq>) -> Response {
+    let _cfg_guard = state.config_lock.lock().await;
     let _guard = state.routing_lock.lock().await; // как в остальных правках config.yaml
     let mut cfg = state.config.read().await.clone();
     let mut servers: Vec<String> = req
@@ -402,6 +409,7 @@ fn default_true() -> bool {
 /// POST /api/device-routing — сохранить цепочку устройства, применить AUTO-DEVICE
 /// назначение (основной сервер), reload Mihomo. Пустой servers = снять.
 pub async fn set_device_routing(State(state): State<AppState>, Json(req): Json<DeviceRoutingReq>) -> Response {
+    let _cfg_guard = state.config_lock.lock().await;
     let mut cfg = state.config.read().await.clone();
     let _guard = state.routing_lock.lock().await;
 
@@ -507,6 +515,7 @@ pub struct DomainsReq {
 
 /// POST /api/domains — сохранить списки, вставить DOMAIN-SUFFIX правила в rules:, reload.
 pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsReq>) -> Response {
+    let _cfg_guard = state.config_lock.lock().await;
     let mut cfg = state.config.read().await.clone();
     let _guard = state.routing_lock.lock().await;
 
@@ -645,6 +654,7 @@ pub struct BackupReq {
 
 /// POST /api/backups/restore — восстановить конфиги из бэкапа, reload Mihomo.
 pub async fn restore_backup(State(state): State<AppState>, Json(req): Json<BackupReq>) -> Response {
+    let _cfg_guard = state.config_lock.lock().await;
     if !valid_backup_name(&req.name) {
         return api_err("Некорректное имя бэкапа");
     }

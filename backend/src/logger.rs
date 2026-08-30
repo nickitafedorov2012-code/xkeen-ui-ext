@@ -83,10 +83,11 @@ pub fn log(level: &str, msg: &str) {
 
     if let Some(Some(t)) = SYSLOG.get() {
         // RFC 3164: <priority>timestamp hostname tag: msg
+        // facility local0 (16): priority = 16*8 + severity
         let pr = match level {
-            "ERROR" => 11, // local0.err
-            "WARN" => 12,  // local0.warning
-            _ => 14,       // local0.info
+            "ERROR" => 131, // local0.err
+            "WARN" => 132,  // local0.warning
+            _ => 134,       // local0.info
         };
         let packet = format!(
             "<{pr}>{} {host} xkeen-route: {msg}",

@@ -291,7 +291,7 @@ pub fn apply_assignments(yaml: &str, assignments: &[Assignment], providers: &[St
         let block = format!("{GROUPS_BEGIN}\n{}\n{GROUPS_END}\n", groups_sorted.join("\n"));
         let pos = content
             .find("proxy-groups:")
-            .ok_or("Р’ config.yaml РЅРµС‚ СЃРµРєС†РёРё proxy-groups:")?
+            .ok_or("В config.yaml нет секции proxy-groups:")?
             + "proxy-groups:".len();
         let prefix = if content[..pos].ends_with('\n') { "" } else { "\n" };
         content = format!("{}{prefix}{}\n{}", &content[..pos], block, &content[pos..]);
@@ -304,7 +304,7 @@ pub fn apply_assignments(yaml: &str, assignments: &[Assignment], providers: &[St
         .collect();
     if !rules_sorted.is_empty() {
         let block = format!("{RULES_BEGIN}\n{}\n{RULES_END}\n", rules_sorted.join("\n"));
-        let pos = content.find("rules:").ok_or("Р’ config.yaml РЅРµС‚ СЃРµРєС†РёРё rules:")? + "rules:".len();
+        let pos = content.find("rules:").ok_or("В config.yaml нет секции rules:")? + "rules:".len();
         let prefix = if content[..pos].ends_with('\n') { "" } else { "\n" };
         content = format!("{}{prefix}{}\n{}", &content[..pos], block, &content[pos..]);
     }

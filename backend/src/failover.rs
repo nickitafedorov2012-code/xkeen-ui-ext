@@ -164,7 +164,7 @@ pub async fn run_device_check(state: &AppState) -> Result<String, String> {
     let rules = mihomo::m_get(&state.http, &cfg, "/rules").await.unwrap_or(Value::Null);
     let groups_by_ip = mihomo::ip_groups_from_rules(&rules);
 
-    let mut actions: Vec<String> = Vec::new();
+    let mut actions: Vec<(String, bool)> = Vec::new(); // (текст, было ли реальное переключение)
     for (ip, dr) in &cfg.device_routing {
         if dr.servers.is_empty() {
             continue;
@@ -192,11 +192,14 @@ pub async fn run_device_check(state: &AppState) -> Result<String, String> {
                 let p = mihomo::ping_server(&state.http, &cfg, &dr.servers[0], 1500).await;
                 if p > 0 && p <= threshold {
                     match mihomo::switch_group(&state.http, &cfg, group, &dr.servers[0]).await {
-                        Ok(_) => actions.push(format!(
-                            "[{ip}] основной '{}' восстановился ({p} мс) — возврат с резерва '{cur}'",
-                            dr.servers[0]
+                        Ok(_) => actions.push((
+                            format!(
+                                "[{ip}] основной '{}' восстановился ({p} мс) — возврат с резерва '{cur}'",
+                                dr.servers[0]
+                            ),
+                            true,
                         )),
-                        Err(e) => actions.push(format!("[{ip}] возврат на основной не удался: {e}")),
+                        Err(e) => actions.push((format!("[{ip}] возврат на основной не удался: {e}"), false)),
                     }
                 }
             }
@@ -223,21 +226,21 @@ pub async fn run_device_check(state: &AppState) -> Result<String, String> {
         valid.sort_by_key(|(_, ms)| *ms);
         if let Some((best, ms)) = valid.first() {
             match mihomo::switch_group(&state.http, &cfg, group, best).await {
-                Ok(_) => actions.push(format!("[{ip}] '{cur}' ({reason}) → резерв '{best}' ({ms} мс)")),
-                Err(e) => actions.push(format!("[{ip}] переключение на '{best}' не удалось: {e}")),
+                Ok(_) => actions.push((format!("[{ip}] '{cur}' ({reason}) → резерв '{best}' ({ms} мс)"), true)),
+                Err(e) => actions.push((format!("[{ip}] переключение на '{best}' не удалось: {e}"), false)),
             }
         } else {
-            actions.push(format!("[{ip}] '{cur}' ({reason}), все резервы недоступны"));
+            actions.push((format!("[{ip}] '{cur}' ({reason}), все резервы недоступны"), false));
         }
     }
 
     if actions.is_empty() {
         return Ok("Устройства: всё в норме".to_string());
     }
-    for a in &actions {
-        state.failover_log.push(a, true).await;
+    for (a, switched) in &actions {
+        state.failover_log.push(a, *switched).await;
     }
-    Ok(actions.join("; "))
+    Ok(actions.iter().map(|(a, _)| a.as_str()).collect::<Vec<_>>().join("; "))
 }
 
 /// Фоновый цикл: каждые interval_secs (если enabled).
