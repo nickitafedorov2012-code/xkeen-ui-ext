@@ -6,6 +6,7 @@ mod logger;
 mod mihomo;
 mod rci;
 mod routing;
+mod updater;
 
 use axum::extract::Request;
 use axum::middleware::{self, Next};
@@ -207,6 +208,8 @@ async fn main() {
         .route("/api/logs/download", get(api::logs_download))
         .route("/api/logs/clear", post(api::logs_clear))
         .route("/api/logs/ws", get(api::logs_ws))
+        .route("/api/update/check", get(crate::updater::check))
+        .route("/api/update/install", post(crate::updater::install))
         .fallback(frontend::serve)
         .layer(middleware::from_fn(no_cache))
         .layer(middleware::from_fn(log_requests))

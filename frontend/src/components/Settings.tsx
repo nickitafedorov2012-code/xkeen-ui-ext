@@ -25,6 +25,11 @@ export default function Settings({ notify }: Props) {
   const [logsBusy, setLogsBusy] = useState(false)
   const [logsAuto, setLogsAuto] = useState(false)
   const [logsLive, setLogsLive] = useState(false)
+  // --- Обновление панели ---
+  interface UpdateInfo { current: string; latest: string; update_available: boolean; notes: string[] }
+  const [upd, setUpd] = useState<UpdateInfo | null>(null)
+  const [updBusy, setUpdBusy] = useState(false)
+  const [updStage, setUpdStage] = useState('')
 
   useEffect(() => {
     apiGet<AppSettings>('settings').then(setSettings).catch((e) => notify(e instanceof Error ? e.message : 'Ошибка', true))
@@ -66,6 +71,26 @@ export default function Settings({ notify }: Props) {
   useEffect(() => {
     loadLogs()
   }, [loadLogs])
+
+  // Проверка новой версии панели.
+  useEffect(() => {
+    apiGet<UpdateInfo>('update/check').then(setUpd).catch(() => {})
+  }, [])
+
+  const doUpdate = async () => {
+    if (!confirm(`Установить обновление ${upd?.latest}? Панель перезапустится автоматически.`)) return
+    setUpdBusy(true)
+    setUpdStage('Загрузка и установка…')
+    try {
+      await apiPost<{ installed: string; restarting: boolean }>('update/install')
+      setUpdStage(`Установлена ${upd?.latest}. Перезапуск панели…`)
+      setTimeout(() => location.reload(), 8000)
+    } catch (e) {
+      setUpdBusy(false)
+      setUpdStage('')
+      notify(e instanceof Error ? e.message : 'Ошибка обновления', true)
+    }
+  }
 
   useEffect(() => {
     if (!logsAuto) return
@@ -323,6 +348,38 @@ export default function Settings({ notify }: Props) {
           {saving ? 'Сохранение…' : '💾 Сохранить настройки'}
         </button>
         <p className="muted small">Конфиг хранится в /opt/etc/xkeen-route/config.json (путь — на дашборде).</p>
+
+        {upd && (
+          <div style={{ marginTop: 14, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span className="muted small">Версия панели: <b>{upd.current}</b></span>
+              {upd.update_available && (
+                <>
+                  <span className="upd-dot" title="Доступна новая версия" />
+                  <button className="btn upd-glow" disabled={updBusy} onClick={() => {
+                    const el = document.getElementById('upd-notes')
+                    if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none'
+                  }}>
+                    ⬆ Доступна {upd.latest} — что нового
+                  </button>
+                </>
+              )}
+              {!upd.update_available && <span className="muted small">✓ актуальная</span>}
+            </div>
+            {upd.update_available && upd.notes.length > 0 && (
+              <div id="upd-notes" style={{ display: 'none', margin: '10px 0 0', padding: '10px 12px', background: 'var(--bg-elem, rgba(255,255,255,.04))', borderRadius: 8 }}>
+                <p className="small" style={{ margin: '0 0 6px' }}><b>Что нового в {upd.latest}:</b></p>
+                <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>
+                  {upd.notes.map((n, i) => <li key={i} style={{ marginBottom: 4 }}>{n}</li>)}
+                </ul>
+                <button className="btn primary upd-glow" style={{ marginTop: 10 }} disabled={updBusy} onClick={doUpdate}>
+                  ⬆ Обновить до {upd.latest}
+                </button>
+              </div>
+            )}
+            {updStage && <p className="small" style={{ margin: '8px 0 0' }}>⏳ {updStage}</p>}
+          </div>
+        )}
       </section>
 
       <section className="card">
