@@ -96,6 +96,9 @@ export default function Dashboard({ status, notify }: Props) {
           <li><span>Состояние</span><b>{f?.enabled ? '🟢 включён' : '⚪ выключен'}</b></li>
           <li><span>Порог пинга</span><b>{f ? `${f.ping_threshold_ms} мс` : '—'}</b></li>
           <li><span>Приоритетный</span><b>{f?.priority_server || 'не задан'}</b></li>
+          {(f?.priority_chain?.length ?? 0) > 1 && (
+            <li><span>Резервы</span><b>{f!.priority_chain!.slice(1).length} сервер(ов)</b></li>
+          )}
           <li><span>Интервал</span><b>{f ? `${f.interval_secs} с` : '—'}</b></li>
         </ul>
         <button className="btn primary" onClick={runCheck} disabled={checking}>

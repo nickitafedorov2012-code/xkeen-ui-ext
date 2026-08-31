@@ -25,6 +25,8 @@ export default function Settings({ notify }: Props) {
   const [logsBusy, setLogsBusy] = useState(false)
   const [logsAuto, setLogsAuto] = useState(false)
   const [logsLive, setLogsLive] = useState(false)
+  // --- Глобальная цепочка приоритетов ---
+  const [chainBusy, setChainBusy] = useState(false)
   // --- Обновление панели ---
   interface UpdateInfo { current: string; latest: string; update_available: boolean; notes: string[] }
   const [upd, setUpd] = useState<UpdateInfo | null>(null)
@@ -155,6 +157,29 @@ export default function Settings({ notify }: Props) {
     }
   }
 
+  // --- Глобальная цепочка приоритетов ---
+  const chain = settings?.failover.priority_chain ?? (settings?.failover.priority_server ? [settings.failover.priority_server] : [])
+
+  const chainMove = (idx: number, dir: -1 | 1) => {
+    const next = [...chain]
+    const j = idx + dir
+    if (j < 0 || j >= next.length) return
+    ;[next[idx], next[j]] = [next[j], next[idx]]
+    patch((s) => (s.failover.priority_chain = next))
+  }
+
+  const saveChain = async () => {
+    setChainBusy(true)
+    try {
+      const data = await apiPost<{ message?: string }>('settings/priority', { server_ids: chain })
+      if (data.message) notify(data.message)
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка сохранения цепочки', true)
+    } finally {
+      setChainBusy(false)
+    }
+  }
+
   const saveDomains = async () => {
     setSavingDomains(true)
     try {
@@ -254,13 +279,56 @@ export default function Settings({ notify }: Props) {
           <input className="input" type="number" min={50} max={5000} value={settings.failover.ping_threshold_ms}
             onChange={(e) => patch((s) => (s.failover.ping_threshold_ms = Number(e.target.value) || 300))} />
         </label>
-        <label className="row"><span>Приоритетный сервер</span>
-          <select className="select" value={settings.failover.priority_server}
-            onChange={(e) => patch((s) => (s.failover.priority_server = e.target.value))}>
-            <option value="">— не задан —</option>
-            {servers.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-        </label>
+        <div className="row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
+          <span>Цепочка приоритетов (первый — основной)</span>
+          <div className="modal-list" style={{ maxHeight: 260 }}>
+            {chain.length === 0 && <p className="muted small" style={{ margin: 0 }}>Цепочка не задана — failover выбирает лучший доступный сервер.</p>}
+            {chain.map((id, i) => {
+              const sv = servers.find((x) => x.id === id)
+              return (
+                <div key={id} className="check-row" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  <span className="badge">{i === 0 ? 'ОСН' : `РЕЗ${i}`}</span>
+                  <span className="server-name" style={{ flex: 1 }} title={id}>{sv ? sv.name : `${id} (сейчас недоступен)`}</span>
+                  <button className="btn sm ghost" disabled={i === 0} onClick={() => chainMove(i, -1)}>↑</button>
+                  <button className="btn sm ghost" disabled={i === chain.length - 1} onClick={() => chainMove(i, 1)}>↓</button>
+                  <button
+                    className="btn sm ghost"
+                    onClick={() => patch((s) => (s.failover.priority_chain = chain.filter((x) => x !== id)))}
+                  >
+                    ✕
+                  </button>
+                </div>
+              )
+            })}
+            <select
+              className="select"
+              value=""
+              onChange={(e) => {
+                if (!e.target.value) return
+                if (!chain.includes(e.target.value)) {
+                  patch((s) => (s.failover.priority_chain = [...chain, e.target.value]))
+                }
+              }}
+            >
+              <option value="">+ добавить сервер в цепочку…</option>
+              {servers
+                .filter((s) => !chain.includes(s.id))
+                .map((s) => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+            </select>
+          </div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            {chain.length > 0 && (
+              <button className="btn ghost" onClick={() => patch((s) => (s.failover.priority_chain = []))}>
+                Очистить
+              </button>
+            )}
+            <button className="btn primary" disabled={chainBusy} onClick={saveChain}>
+              {chainBusy ? 'Сохранение…' : 'Сохранить цепочку'}
+            </button>
+          </div>
+        </div>
         <label className="row">
           <input type="checkbox" checked={settings.failover.auto_restore_priority}
             onChange={(e) => patch((s) => (s.failover.auto_restore_priority = e.target.checked))} />

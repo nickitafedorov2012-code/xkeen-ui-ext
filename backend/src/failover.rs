@@ -4,7 +4,8 @@
 //! 2) Пинг активного: в норме (<= порога) — ничего.
 //! 3) Иначе: параллельный пинг кандидатов → переключение на лучший.
 
-use crate::{mihomo, AppState};
+use crate::mihomo::{self, Server};
+use crate::AppState;
 use chrono::Local;
 use serde::Serialize;
 use serde_json::Value;
@@ -53,17 +54,17 @@ impl FailoverLog {
 pub async fn run_check(state: &AppState) -> Result<String, String> {
     let cfg = state.config.read().await.clone();
     let threshold = cfg.failover.ping_threshold_ms as i64;
-    let servers = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_server).await?;
+    let servers = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await?;
 
     let active = servers.iter().find(|s| s.is_active).cloned();
-    let priority = if cfg.failover.priority_server.is_empty() {
-        None
-    } else {
-        servers
-            .iter()
-            .find(|s| s.id == cfg.failover.priority_server)
-            .cloned()
-    };
+    // Цепочка приоритетов: только существующие сейчас серверы, по порядку.
+    let chain: Vec<Server> = cfg
+        .failover
+        .priority_chain
+        .iter()
+        .filter_map(|id| servers.iter().find(|s| &s.id == id).cloned())
+        .collect();
+    let priority = chain.first().cloned();
 
     // 1. Возврат на приоритетный, если восстановился
     if let (Some(pri), Some(act)) = (&priority, &active) {
@@ -106,7 +107,38 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         "сервер не отвечает".to_string()
     };
 
-    // 3. Поиск лучшего кандидата
+    // 3. Кандидат: сначала цепочка приоритетов по порядку, затем best-of-rest.
+    let chain_candidates: Vec<String> = chain
+        .iter()
+        .filter(|s| s.id != active.id)
+        .map(|s| s.id.clone())
+        .collect();
+    if !chain_candidates.is_empty() {
+        let pings = mihomo::ping_all(&state.http, &cfg, &chain_candidates, 1500).await;
+        // Первый живой в порядке цепочки (пинг в пределах порога).
+        if let Some(id) = chain_candidates
+            .iter()
+            .find(|id| pings.get(*id).is_some_and(|ms| *ms > 0 && *ms < threshold))
+        {
+            let ms = pings[id];
+            let name = servers.iter().find(|s| &s.id == id).map(|s| s.name.clone()).unwrap_or_else(|| id.clone());
+            let msg = format!(
+                "Активный '{}' ({reason}) → переключение на '{name}' из цепочки приоритетов (пинг {ms} мс)",
+                active.name
+            );
+            return match mihomo::switch_server(&state.http, &cfg, id).await {
+                Ok(_) => {
+                    state.failover_log.push(&msg, true).await;
+                    Ok(msg)
+                }
+                Err(e) => {
+                    state.failover_log.push(format!("{msg} — ошибка: {e}"), false).await;
+                    Err(e)
+                }
+            };
+        }
+    }
+
     let candidate_ids: Vec<String> = servers
         .iter()
         .filter(|s| s.id != active.id)

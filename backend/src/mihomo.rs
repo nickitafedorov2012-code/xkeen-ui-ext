@@ -395,7 +395,7 @@ fn last_delay(p: &Value) -> i64 {
 pub async fn get_servers(
     http: &reqwest::Client,
     cfg: &AppConfig,
-    priority_server: &str,
+    priority_chain: &[String],
 ) -> Result<Vec<Server>, String> {
     let proxies = get_proxies(http, cfg).await?;
     let active = resolve_active_leaf(&proxies);
@@ -430,7 +430,7 @@ pub async fn get_servers(
                 host: format!("Авто: {}", p.get("now").and_then(|n| n.as_str()).unwrap_or("—")),
                 port: 0,
                 is_active: proxy_now == id,
-                is_priority: priority_server == id,
+                is_priority: priority_chain.iter().any(|p| p == id),
                 ping_ms: last_delay(p),
             });
         }
@@ -452,7 +452,7 @@ pub async fn get_servers(
             host: p.get("server").and_then(|s| s.as_str()).unwrap_or(name).to_string(),
             port: p.get("port").and_then(|s| s.as_u64()).unwrap_or(0) as u16,
             is_active: *name == active,
-            is_priority: *name == priority_server,
+            is_priority: priority_chain.iter().any(|p| p == name),
             ping_ms: last_delay(p),
         });
     }
@@ -475,7 +475,7 @@ pub async fn get_servers(
                 host: p.get("server").and_then(|s| s.as_str()).unwrap_or(name).to_string(),
                 port: p.get("port").and_then(|s| s.as_u64()).unwrap_or(0) as u16,
                 is_active: *name == active,
-                is_priority: *name == priority_server,
+                is_priority: priority_chain.iter().any(|p| p == name),
                 ping_ms: last_delay(p),
             });
         }
@@ -578,15 +578,30 @@ pub async fn switch_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &
         return Err("Не найдено ни одной select-группы для переключения".into());
     }
     let mut switched = 0usize;
+    let mut skipped = 0usize;
     let mut last_err = String::new();
     for g in &groups {
+        // Специализированные группы (YouTube и т.п.) могут не содержать целевой
+        // сервер — Mihomo ответит 400. Пропускаем такие группы без ошибки.
+        let member = proxies
+            .get(g)
+            .and_then(|p| p.get("all"))
+            .and_then(|a| a.as_array())
+            .map(|members| members.iter().any(|m| m.as_str() == Some(target.as_str())));
+        if member == Some(false) {
+            skipped += 1;
+            continue;
+        }
         match m_put(http, cfg, &format!("/proxies/{}", urlencoding_lite(g)), json!({ "name": target }), 3).await {
             Ok(_) => switched += 1,
             Err(e) => last_err = e,
         }
     }
     if switched > 0 {
-        Ok(format!("Активный сервер переключен на '{target}' (групп: {switched})"))
+        let skip_note = if skipped > 0 { format!(", пропущено: {skipped}") } else { String::new() };
+        Ok(format!("Активный сервер переключен на '{target}' (групп: {switched}{skip_note})"))
+    } else if skipped > 0 && last_err.is_empty() {
+        Err(format!("Сервер '{target}' не входит ни в одну переключаемую группу"))
     } else {
         Err(format!("Не удалось изменить активный сервер в Mihomo: {last_err}"))
     }

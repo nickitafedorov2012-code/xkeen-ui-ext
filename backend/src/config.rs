@@ -86,6 +86,9 @@ pub struct FailoverConfig {
     pub enabled: bool,
     pub ping_threshold_ms: u32,
     pub priority_server: String,
+    /// Глобальная цепочка приоритетов: [основной, резерв1, ...].
+    /// Миграция: если пуста, но задан priority_server — инициализируется из него.
+    pub priority_chain: Vec<String>,
     pub auto_restore_priority: bool,
     pub interval_secs: u32,
     /// Per-device failover: мониторинг цепочек server+резервы (device_routing).
@@ -98,9 +101,25 @@ impl Default for FailoverConfig {
             enabled: false,
             ping_threshold_ms: 300,
             priority_server: String::new(),
+            priority_chain: Vec::new(),
             auto_restore_priority: true,
             interval_secs: 60,
             device_failover_enabled: false,
+        }
+    }
+}
+
+impl FailoverConfig {
+    /// Обратная совместимость: пустая цепочка + заданный одиночный приоритет → цепочка из него.
+    /// Также синхронизирует priority_server = первый элемент цепочки.
+    pub fn migrate_priority(&mut self) {
+        if self.priority_chain.is_empty() && !self.priority_server.is_empty() {
+            self.priority_chain = vec![self.priority_server.clone()];
+        }
+        if !self.priority_chain.is_empty() {
+            self.priority_server = self.priority_chain[0].clone();
+        } else {
+            self.priority_server.clear();
         }
     }
 }
@@ -226,10 +245,15 @@ pub fn load(path: &Path) -> AppConfig {
         },
         Err(_) => {}
     }
-    serde_json::from_value(base).unwrap_or_else(|e| {
-        eprintln!("[WARN] Ошибка конфига {}: {} — использую дефолты", path.display(), e);
-        AppConfig::default()
-    })
+    serde_json::from_value::<AppConfig>(base)
+        .map(|mut c| {
+            c.failover.migrate_priority();
+            c
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("[WARN] Ошибка конфига {}: {} — использую дефолты", path.display(), e);
+            AppConfig::default()
+        })
 }
 
 /// Сохранение конфига атомарно (tmp + rename).

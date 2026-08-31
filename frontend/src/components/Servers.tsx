@@ -68,8 +68,8 @@ export default function Servers({ notify }: Props) {
 
   const setPriority = async (s: ServerInfo) => {
     try {
-      const data = await apiPost<{ message: string }>('settings/priority', { server_id: s.is_priority ? '' : s.id })
-      notify(data.message)
+      const data = await apiPost<{ message?: string }>('settings/priority', { server_id: s.is_priority ? '' : s.id })
+      if (data.message) notify(data.message)
       load()
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка', true)

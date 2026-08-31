@@ -10,7 +10,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
 
     let router = rci::get_version(&state.http, &cfg).await.ok();
-    let active = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_server)
+    let active = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain)
         .await
         .ok()
         .and_then(|servers| servers.into_iter().find(|s| s.is_active))
@@ -27,6 +27,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
             "enabled": cfg.failover.enabled,
             "ping_threshold_ms": cfg.failover.ping_threshold_ms,
             "priority_server": cfg.failover.priority_server,
+            "priority_chain": cfg.failover.priority_chain,
             "auto_restore_priority": cfg.failover.auto_restore_priority,
             "interval_secs": cfg.failover.interval_secs,
         },
@@ -74,7 +75,7 @@ pub async fn put_settings(
 /// GET /api/servers — карточки серверов.
 pub async fn get_servers(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
-    match mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_server).await {
+    match mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
         Ok(servers) => {
             let list: Vec<serde_json::Value> = servers
                 .iter()
@@ -123,7 +124,7 @@ pub async fn ping_servers(State(state): State<AppState>, Json(req): Json<PingReq
     let cfg = state.config.read().await.clone();
     let ids: Vec<String> = match req.server_id {
         Some(id) => vec![id],
-        None => match mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_server).await {
+        None => match mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
             Ok(servers) => servers.into_iter().map(|s| s.id).collect(),
             Err(e) => return api_err(e),
         },
@@ -163,19 +164,52 @@ pub async fn failover_events(State(state): State<AppState>) -> Response {
 
 #[derive(Deserialize)]
 pub struct PriorityReq {
-    pub server_id: String,
+    /// Одиночный приоритет (обратная совместимость).
+    pub server_id: Option<String>,
+    /// Цепочка приоритетов: [основной, резерв1, ...]. Пустой массив = снять.
+    #[serde(default)]
+    pub server_ids: Vec<String>,
 }
 
-/// POST /api/settings/priority — назначить/снять приоритетный сервер.
+/// POST /api/settings/priority — задать/снять глобальную цепочку приоритетов.
 pub async fn set_priority(State(state): State<AppState>, Json(req): Json<PriorityReq>) -> Response {
     let _cfg_guard = state.config_lock.lock().await;
     let mut cfg = state.config.read().await.clone();
-    cfg.failover.priority_server = req.server_id.trim().to_string();
+    // Совместимость: если пришёл только server_id — цепочка из одного элемента.
+    let chain: Vec<String> = if !req.server_ids.is_empty() {
+        req.server_ids
+    } else {
+        match req.server_id {
+            Some(id) => vec![id],
+            None => Vec::new(),
+        }
+    };
+    // id сохраняем ровно как прислал фронт (s.id из GET /api/servers) —
+    // trim() ломал совпадение с id серверов (эмодзи/пробелы в именах).
+    cfg.failover.priority_chain = chain;
+    cfg.failover.migrate_priority();
+    let message = if cfg.failover.priority_chain.is_empty() {
+        "Приоритет снят".to_string()
+    } else {
+        let names: Vec<String> = cfg
+            .failover
+            .priority_chain
+            .iter()
+            .map(|id| {
+                if id == "Fastest" || id == "Fallback" {
+                    id.clone()
+                } else {
+                    mihomo::display_name(id)
+                }
+            })
+            .collect();
+        format!("Цепочка приоритета: {}", names.join(" → "))
+    };
     if let Err(e) = config::save(&state.config_path, &cfg).await {
         return api_err(format!("Ошибка сохранения: {e}"));
     }
     *state.config.write().await = cfg;
-    api_ok(json!({ "saved": true }))
+    api_ok(json!({ "saved": true, "message": message }))
 }
 
 
