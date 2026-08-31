@@ -212,6 +212,22 @@ fn cp1251_byte(c: char) -> Option<u8> {
         0x0410..=0x044F => Some((u - 0x0410 + 0xC0) as u8),
         0x0401 => Some(0xA8),
         0x0451 => Some(0xB8),
+        // Символы cp1251 0x80-0xBF (в mojibake встречаются байты из этого диапазона)
+        0x0402 => Some(0x80), 0x0403 => Some(0x81), 0x0404 => Some(0xAA), 0x0405 => Some(0xBD),
+        0x0407 => Some(0xAF), 0x0408 => Some(0xA3), 0x0409 => Some(0x8A), 0x040A => Some(0x8C),
+        0x040B => Some(0x8E), 0x040C => Some(0x8D), 0x040E => Some(0xA1), 0x040F => Some(0x8F),
+        0x0452 => Some(0x90), 0x0453 => Some(0x83), 0x0454 => Some(0xBA), 0x0455 => Some(0xBE),
+        0x0456 => Some(0xB3), 0x0457 => Some(0xBF), 0x0458 => Some(0xBC), 0x0459 => Some(0x9A),
+        0x045A => Some(0x9C), 0x045B => Some(0x9E), 0x045C => Some(0x9D), 0x045E => Some(0xA2),
+        0x045F => Some(0x9F),
+        0x00A0 => Some(0xA0), 0x00A4 => Some(0xA4), 0x0490 => Some(0xA5), 0x0491 => Some(0xB4), 0x00A6 => Some(0xA6), 0x00A7 => Some(0xA7),
+        0x00A9 => Some(0xA9), 0x00AA => Some(0xAA), 0x00AB => Some(0xAB), 0x00AC => Some(0xAC),
+        0x00AD => Some(0xAD), 0x00AE => Some(0xAE), 0x00AF => Some(0xAF),
+        0x00B0..=0x00BE => Some(u as u8),
+        0x2116 => Some(0xB9),
+        // C1-управляющие и латин-1 (mojibake-рендеринг байтов 0x80-0x9F/0xC0-0xFF как latin1)
+        0x0080..=0x009F => Some(u as u8),
+        0x00A8 | 0x00C0..=0x00FF => Some(u as u8),
         _ => None,
     }
 }
@@ -242,6 +258,21 @@ fn cp866_byte(c: char) -> Option<u8> {
         0x0440..=0x044F => Some((u - 0x0440 + 0xE0) as u8),
         0x0401 => Some(0xF0),
         0x0451 => Some(0xF1),
+        // Псевдографика/символы (mojibake от байтов 0xB0-0xDF): «╨д╨╕╨╜…» — это
+        // UTF-8 «Фин…», прочитанный как cp866. Без этих веток ремонт не срабатывает.
+        0x2591 => Some(0xB0), 0x2592 => Some(0xB1), 0x2593 => Some(0xB2), 0x2502 => Some(0xB3),
+        0x2524 => Some(0xB4), 0x2561 => Some(0xB5), 0x2562 => Some(0xB6), 0x2556 => Some(0xB7),
+        0x2555 => Some(0xB8), 0x2563 => Some(0xB9), 0x2551 => Some(0xBA), 0x2557 => Some(0xBB),
+        0x255D => Some(0xBC), 0x255C => Some(0xBD), 0x255B => Some(0xBE), 0x2510 => Some(0xBF),
+        0x2514 => Some(0xC0), 0x2534 => Some(0xC1), 0x252C => Some(0xC2), 0x251C => Some(0xC3),
+        0x2500 => Some(0xC4), 0x253C => Some(0xC5), 0x255E => Some(0xC6), 0x255F => Some(0xC7),
+        0x255A => Some(0xC8), 0x2554 => Some(0xC9), 0x2569 => Some(0xCA), 0x2566 => Some(0xCB),
+        0x2560 => Some(0xCC), 0x2550 => Some(0xCD), 0x256C => Some(0xCE), 0x2567 => Some(0xCF),
+        0x2568 => Some(0xD0), 0x2564 => Some(0xD1), 0x2565 => Some(0xD2), 0x2559 => Some(0xD3),
+        0x2558 => Some(0xD4), 0x2552 => Some(0xD5), 0x2553 => Some(0xD6), 0x256B => Some(0xD7),
+        0x256A => Some(0xD8), 0x2518 => Some(0xD9), 0x250C => Some(0xDA), 0x2588 => Some(0xDB),
+        0x2584 => Some(0xDC), 0x258C => Some(0xDD), 0x2590 => Some(0xDE), 0x2580 => Some(0xDF),
+        0x240A => Some(0x0A), 0x240D => Some(0x0D), 0x2409 => Some(0x09), 0x2400 => Some(0x00),
         _ => None,
     }
 }
@@ -250,20 +281,50 @@ fn has_cyrillic(s: &str) -> bool {
     s.chars().any(|c| matches!(c as u32, 0x0400..=0x04FF))
 }
 
-/// Ремонт mojibake: если строка — результат чтения UTF-8 как cp1251/cp1252/cp866
-/// (однократно или дважды), возвращаем исходный читаемый текст.
-/// Реальный mojibake смешивает символы из разных таблиц (байты ≥0xC0 читаются как
-/// кириллица, остальные — как Latin-1/спецсимволы), поэтому пробуем все по очереди.
-pub fn fix_mojibake(s: &str) -> Option<String> {
-    let fixed = decode_as(s, |c| cp1251_byte(c).or_else(|| cp1252_byte(c)).or_else(|| cp866_byte(c)))?;
-    if has_cyrillic(&fixed) && fixed != s {
-        // Рекурсия на случай двойного перекодирования.
-        if let Some(double) = fix_mojibake(&fixed) {
-            return Some(double);
+/// Качество кандидата ремонта: доля «хороших» символов (буквы/цифры/пробел/
+/// пунктуация). Псевдографика (╨╤┌) и прочий мусор снижают оценку.
+fn repair_score(s: &str) -> f32 {
+    let mut good = 0usize;
+    let mut total = 0usize;
+    for c in s.chars() {
+        total += 1;
+        let u = c as u32;
+        if c.is_alphanumeric()
+            || c.is_whitespace()
+            || matches!(u, 0x20..=0x2F | 0x3A..=0x40 | 0x5B..=0x60 | 0x7B..=0x7E | 0x00AB | 0x00BB | 0x2013 | 0x2014)
+        {
+            good += 1;
         }
-        return Some(fixed);
     }
-    None
+    if total == 0 {
+        return 0.0;
+    }
+    good as f32 / total as f32
+}
+
+/// Ремонт mojibake: строка — результат чтения UTF-8 как cp1251/cp1252/cp866
+/// (однократно или дважды). Каждая таблица применяется СТРОГО: все не-ASCII
+/// символы должны маппиться в одну кодовую страницу. Раньше таблицы смешивались
+/// посимвольно (cp1251 → cp1252 → cp866), из-за чего ремонт порождал мусор
+/// вроде «тЯЗл ЬЯыЗо ⚡⚡⚡» вместо «🇫🇮 Финляндия [⚡ Стабильный]».
+pub fn fix_mojibake(s: &str) -> Option<String> {
+    let tables: [fn(char) -> Option<u8>; 3] = [cp1251_byte, cp866_byte, cp1252_byte];
+    let mut best: Option<(f32, String)> = None;
+    for table in tables {
+        let Some(fixed) = decode_as(s, table) else {
+            continue;
+        };
+        if !has_cyrillic(&fixed) || fixed == s {
+            continue;
+        }
+        // Рекурсия на случай двойного перекодирования.
+        let candidate = fix_mojibake(&fixed).unwrap_or(fixed);
+        let score = repair_score(&candidate);
+        if best.as_ref().map_or(true, |(bs, _)| score > *bs) {
+            best = Some((score, candidate));
+        }
+    }
+    best.map(|(_, s)| s)
 }
 
 /// Чистое имя для отображения: без ведущих эмодзи/флагов/fe0f, обрезка пробелов.
@@ -663,6 +724,18 @@ mod tests {
             .collect();
         let fixed = fix_mojibake(&mojibake).expect("должен починиться");
         assert_eq!(fixed, src);
+    }
+
+    #[test]
+    fn mojibake_cp866_pseudographics_repaired() {
+        // Реальный случай с роутера: «🇫🇮 Финляндия [⚡ Стабильный ]», прочитанный
+        // как cp866 (байты ≥0xB0 стали псевдографикой: «╨д╨╕╨╜…», «тЪб» = ⚡).
+        let mojibake = "\u{0401}\u{042F}\u{0417}\u{043B}\u{0401}\u{042F}\u{0417}\u{043E} \
+\u{2568}\u{0434}\u{2568}\u{2555}\u{2568}\u{255C}\u{2568}\u{2557}\u{2564}\u{041F}\u{2568}\u{255C}\u{2568}\u{2524}\u{2568}\u{2555}\u{2564}\u{041F} \
+[\u{0442}\u{042A}\u{0431} \u{2568}\u{0431}\u{2564}\u{0412}\u{2568}\u{2591}\u{2568}\u{2592}\u{2568}\u{2555}\u{2568}\u{2557}\u{2564}\u{041C}\u{2568}\u{255C}\u{2564}\u{041B}\u{2568}\u{2563} ]";
+        let dn = display_name(mojibake);
+        assert!(dn.starts_with("Финляндия"), "DN={dn}");
+        assert!(dn.contains("Стабильный"), "DN={dn}");
     }
 
     #[test]
