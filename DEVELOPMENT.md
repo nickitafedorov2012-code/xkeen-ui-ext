@@ -281,7 +281,7 @@
 
 ### v1.0.3 — скриншоты в README, обновление панели из UI
 - **README**: секция «📸 Скриншоты» — 4 скриншота (Устройства, Настройки, Сервис/Домены/Бэкапы/Журнал, Серверы) с пояснениями.
-- **Самообновление** (новый `backend/src/updater.rs`): `GET /api/update/check` — последняя версия с GitHub Releases + список изменений (body релиза); `POST /api/update/install` — скачивание ассета `xkeen-route-arm64-v8a` в /opt/tmp, проверка (размер ≥1МБ + ELF-магия), замена `/opt/sbin/xkeen-route`, chmod 755, spawn `S99xkeen-route restart`.
+- **Самообновление** (новый `backend/src/updater.rs`): `GET /api/update/check` — последняя версия + список изменений; `POST /api/update/install` — скачивание ассета `xkeen-route-arm64-v8a` в /opt/tmp, проверка (размер ≥1МБ + ELF-магия), замена `/opt/sbin/xkeen-route`, chmod 755, spawn `S99xkeen-route restart`. Источник версии — **jsDelivr API** (`data.jsdelivr.com/.../resolved`), т.к. GitHub API с роутера отдаёт 403 rate-limit; список изменений — секция `### vX.Y.Z` из DEVELOPMENT.md через cdn.jsdelivr; GitHub API — запасной путь.
 - **Frontend** (Settings → «Панель»): строка версии; при наличии обновления — пульсирующая зелёная точка и кнопка со свечением (CSS `upd-glow`/`upd-dot`); клик раскрывает «Что нового» (пункты из релиза) с кнопкой установки; после установки — статус и автоперезагрузка страницы через 8 сек.
 - **.clinerules**: правило — вести ченжлог в DEVELOPMENT.md при каждом релизе.
 

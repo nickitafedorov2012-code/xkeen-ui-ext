@@ -11,6 +11,9 @@ use std::time::Duration;
 use crate::api::{api_err, api_ok};
 use crate::AppState;
 
+const JSDELIVR_RESOLVED: &str =
+    "https://data.jsdelivr.com/v1/packages/gh/nickitafedorov2012-code/xkeen-ui-ext/resolved";
+const JSDELIVR_CDN: &str = "https://cdn.jsdelivr.net/gh/nickitafedorov2012-code/xkeen-ui-ext";
 const GITHUB_API: &str = "https://api.github.com/repos/nickitafedorov2012-code/xkeen-ui-ext/releases/latest";
 const GITHUB_RELEASE: &str = "https://github.com/nickitafedorov2012-code/xkeen-ui-ext/releases/download";
 const BIN_PATH: &str = "/opt/sbin/xkeen-route";
@@ -21,6 +24,11 @@ struct GhRelease {
     tag_name: String,
     #[serde(default)]
     body: String,
+}
+
+#[derive(Deserialize)]
+struct JsDelivrResolved {
+    version: String,
 }
 
 fn version_tuple(v: &str) -> Vec<u64> {
@@ -47,17 +55,60 @@ fn notes_lines(body: &str, max: usize) -> Vec<String> {
 }
 
 async fn fetch_latest(http: &reqwest::Client) -> Result<GhRelease, String> {
+    // Основной источник — jsDelivr (доступен с роутера, GitHub API часто 403 rate-limit).
+    if let Ok(res) = http
+        .get(JSDELIVR_RESOLVED)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+    {
+        if res.status().is_success() {
+            if let Ok(r) = res.json::<JsDelivrResolved>().await {
+                let tag = format!("v{}", r.version.trim_start_matches('v'));
+                let notes = fetch_notes(http, &tag).await;
+                return Ok(GhRelease { tag_name: tag, body: notes });
+            }
+        }
+    }
+    // Запасной путь — GitHub API.
     let res = http
         .get(GITHUB_API)
         .header("Accept", "application/vnd.github+json")
         .timeout(Duration::from_secs(15))
         .send()
         .await
-        .map_err(|e| format!("GitHub недоступен: {e}"))?;
+        .map_err(|e| format!("GitHub и jsDelivr недоступны: {e}"))?;
     if !res.status().is_success() {
         return Err(format!("GitHub API: HTTP {}", res.status()));
     }
     res.json::<GhRelease>().await.map_err(|e| format!("Ответ GitHub не разобран: {e}"))
+}
+
+/// Список изменений: секция `### {tag}` из DEVELOPMENT.md через jsDelivr CDN.
+async fn fetch_notes(http: &reqwest::Client, tag: &str) -> String {
+    let url = format!("{JSDELIVR_CDN}@{tag}/DEVELOPMENT.md");
+    let Ok(res) = http.get(&url).timeout(Duration::from_secs(15)).send().await else {
+        return String::new();
+    };
+    let Ok(text) = res.text().await else {
+        return String::new();
+    };
+    let mut lines = Vec::new();
+    let mut in_section = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with("### ") {
+            if in_section {
+                break;
+            }
+            in_section = t.contains(tag);
+            continue;
+        }
+        if in_section && (t.starts_with("- ") || t.starts_with("* ")) {
+            lines.push(t[2..].trim().to_string());
+        }
+    }
+    lines.join("\n")
 }
 
 /// GET /api/update/check — текущая/последняя версия + список изменений.
