@@ -48,7 +48,14 @@ fn notes_lines(body: &str, max: usize) -> Vec<String> {
     body.lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty() && !l.starts_with("<!--"))
-        .map(|l| l.trim_start_matches(['-', '*', ' ']).trim().to_string())
+        // Срезаем только маркер списка; markdown-выделение (**жирный**) не трогаем.
+        .map(|l| {
+            l.strip_prefix("- ")
+                .or_else(|| l.strip_prefix("* "))
+                .unwrap_or(l)
+                .trim()
+                .to_string()
+        })
         .filter(|l| !l.is_empty())
         .take(max)
         .collect()
