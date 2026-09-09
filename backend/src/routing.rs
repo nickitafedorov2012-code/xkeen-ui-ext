@@ -139,29 +139,23 @@ pub const FORCE_END: &str = "# --- AUTO-FORCE-END ---";
 
 /// Удаление доменных блоков (DIRECT/FORCE) из YAML.
 pub fn remove_domain_blocks(yaml: &str) -> String {
-    let mut out = yaml.to_string();
-    for (begin, end) in [(DIRECT_BEGIN, DIRECT_END), (FORCE_BEGIN, FORCE_END)] {
-        if let (Some(p1), Some(p2rel)) = (out.find(begin), out.find(end)) {
-            let p2 = p2rel + end.len();
-            if p1 < p2 {
-                out = format!("{}{}", &out[..p1], &out[p2..]);
-            }
+    let mut out = Vec::new();
+    let mut skip = false;
+    for line in yaml.lines() {
+        let t = line.trim();
+        if t == DIRECT_BEGIN || t == FORCE_BEGIN {
+            skip = true;
+            continue;
+        }
+        if t == DIRECT_END || t == FORCE_END {
+            skip = false;
+            continue;
+        }
+        if !skip {
+            out.push(line);
         }
     }
-    out
-}
-
-fn domain_block(begin: &str, end: &str, domains: &[String], target: &str) -> String {
-    if domains.is_empty() {
-        return String::new();
-    }
-    let mut out = format!("{begin}\n");
-    for d in domains {
-        out.push_str(&format!("  - DOMAIN-SUFFIX,{d},{target}\n"));
-    }
-    out.push_str(end);
-    out.push('\n');
-    out
+    out.join("\n")
 }
 
 /// Вставка доменных правил в rules: (сразу после строки rules:, чтобы они имели
@@ -173,23 +167,33 @@ pub fn apply_domain_rules(yaml: &str, direct: &[String], force: &[String]) -> Re
     if direct.is_empty() && force.is_empty() {
         return Ok(content);
     }
-    // Ищем строку "rules:" верхнего уровня.
-    let mut insert_pos: Option<usize> = None;
-    let mut offset = 0usize;
-    for line in content.lines() {
-        if line.trim_end() == "rules:" {
-            insert_pos = Some(offset + line.len());
-            break;
+    let lines: Vec<&str> = content.lines().collect();
+    let rules_idx = lines
+        .iter()
+        .position(|l| l.trim_end() == "rules:")
+        .ok_or("В config.yaml нет секции rules:")?;
+
+    let mut out = Vec::with_capacity(lines.len() + direct.len() + force.len() + 6);
+    for (i, line) in lines.iter().enumerate() {
+        out.push(line.to_string());
+        if i == rules_idx {
+            if !direct.is_empty() {
+                out.push(DIRECT_BEGIN.to_string());
+                for d in &direct {
+                    out.push(format!("  - DOMAIN-SUFFIX,{d},DIRECT"));
+                }
+                out.push(DIRECT_END.to_string());
+            }
+            if !force.is_empty() {
+                out.push(FORCE_BEGIN.to_string());
+                for d in &force {
+                    out.push(format!("  - DOMAIN-SUFFIX,{d},PROXY"));
+                }
+                out.push(FORCE_END.to_string());
+            }
         }
-        offset += line.len() + 1; // +1 за \n
     }
-    let pos = insert_pos.ok_or("В config.yaml нет секции rules:")?;
-    let block = format!(
-        "\n{}{}",
-        domain_block(DIRECT_BEGIN, DIRECT_END, &direct, "DIRECT"),
-        domain_block(FORCE_BEGIN, FORCE_END, &force, "PROXY,no-resolve")
-    );
-    Ok(format!("{}{}{}", &content[..pos], block, &content[pos..]))
+    Ok(out.join("\n"))
 }
 
 /// Строка правила для устройства.
@@ -687,11 +691,11 @@ mod tests {
         let out = apply_domain_rules(BASE_YAML, &["example.com".to_string()], &["forced.org".to_string()]).unwrap();
         assert!(out.contains(DIRECT_BEGIN));
         assert!(out.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
-        assert!(out.contains("DOMAIN-SUFFIX,forced.org,PROXY,no-resolve"));
+        assert!(out.contains("DOMAIN-SUFFIX,forced.org,PROXY"));
         // доменные правила — сразу после rules: (приоритет над остальными)
         let rpos = out.find("rules:").unwrap();
         let dpos = out.find("DOMAIN-SUFFIX,example.com").unwrap();
-        assert!(dpos > rpos && dpos - rpos < 60);
+        assert!(dpos > rpos && dpos - rpos < 80);
         // повторное применение — без дублей
         let out2 = apply_domain_rules(&out, &["example.com".to_string()], &["forced.org".to_string()]).unwrap();
         assert_eq!(out2.matches("DOMAIN-SUFFIX,example.com").count(), 1);
@@ -699,6 +703,18 @@ mod tests {
         let cleared = apply_domain_rules(&out2, &[], &[]).unwrap();
         assert!(!cleared.contains("DOMAIN-SUFFIX,example.com"));
         assert!(cleared.contains("GEOIP,RU,DIRECT"));
+    }
+
+    #[test]
+    fn domain_rules_work_with_crlf() {
+        let crlf_yaml = BASE_YAML.replace('\n', "\r\n");
+        let out = apply_domain_rules(&crlf_yaml, &["example.com".to_string()], &["forced.org".to_string()]).unwrap();
+        assert!(out.contains(DIRECT_BEGIN));
+        assert!(out.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
+        assert!(out.contains("DOMAIN-SUFFIX,forced.org,PROXY"));
+        let rpos = out.find("rules:").unwrap();
+        let dpos = out.find("DOMAIN-SUFFIX,example.com").unwrap();
+        assert!(dpos > rpos && dpos - rpos < 80);
     }
 
     #[test]

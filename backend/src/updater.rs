@@ -11,10 +11,12 @@ use std::time::Duration;
 use crate::api::{api_err, api_ok};
 use crate::AppState;
 
+const PROXY_ADDR: &str = "http://127.0.0.1:7890";
 const JSDELIVR_RESOLVED: &str =
     "https://data.jsdelivr.com/v1/packages/gh/nickitafedorov2012-code/xkeen-ui-ext/resolved";
 const JSDELIVR_CDN: &str = "https://cdn.jsdelivr.net/gh/nickitafedorov2012-code/xkeen-ui-ext";
-const GITHUB_API: &str = "https://api.github.com/repos/nickitafedorov2012-code/xkeen-ui-ext/releases/latest";
+const GITHUB_RELEASES: &str =
+    "https://api.github.com/repos/nickitafedorov2012-code/xkeen-ui-ext/releases?per_page=1";
 const GITHUB_RELEASE: &str = "https://github.com/nickitafedorov2012-code/xkeen-ui-ext/releases/download";
 const BIN_PATH: &str = "/opt/sbin/xkeen-route";
 const INIT_SCRIPT: &str = "/opt/etc/init.d/S99xkeen-route";
@@ -29,6 +31,16 @@ struct GhRelease {
 #[derive(Deserialize)]
 struct JsDelivrResolved {
     version: String,
+}
+
+/// Клиент с проксированием через Mihomo mixed-port (обход блокировок ТСПУ для локальных процессов).
+fn proxied_client() -> Option<reqwest::Client> {
+    let proxy = reqwest::Proxy::all(PROXY_ADDR).ok()?;
+    reqwest::Client::builder()
+        .proxy(proxy)
+        .danger_accept_invalid_certs(true)
+        .build()
+        .ok()
 }
 
 fn version_tuple(v: &str) -> Vec<u64> {
@@ -61,34 +73,49 @@ fn notes_lines(body: &str, max: usize) -> Vec<String> {
         .collect()
 }
 
-async fn fetch_latest(http: &reqwest::Client) -> Result<GhRelease, String> {
-    // Основной источник — jsDelivr (доступен с роутера, GitHub API часто 403 rate-limit).
-    if let Ok(res) = http
-        .get(JSDELIVR_RESOLVED)
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-    {
-        if res.status().is_success() {
-            if let Ok(r) = res.json::<JsDelivrResolved>().await {
-                let tag = format!("v{}", r.version.trim_start_matches('v'));
-                let notes = fetch_notes(http, &tag).await;
-                return Ok(GhRelease { tag_name: tag, body: notes });
+async fn fetch_latest(direct: &reqwest::Client) -> Result<GhRelease, String> {
+    let proxied = proxied_client();
+    let mut clients = Vec::new();
+    if let Some(ref p) = proxied {
+        clients.push(p);
+    }
+    clients.push(direct);
+
+    for http in clients {
+        // 1. jsDelivr
+        if let Ok(res) = http
+            .get(JSDELIVR_RESOLVED)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            if res.status().is_success() {
+                if let Ok(r) = res.json::<JsDelivrResolved>().await {
+                    let tag = format!("v{}", r.version.trim_start_matches('v'));
+                    let notes = fetch_notes(http, &tag).await;
+                    return Ok(GhRelease { tag_name: tag, body: notes });
+                }
+            }
+        }
+        // 2. GitHub API (список релизов поддерживает как стабильные, так и prerelease)
+        if let Ok(res) = http
+            .get(GITHUB_RELEASES)
+            .header("Accept", "application/vnd.github+json")
+            .header("User-Agent", "xkeen-route")
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            if res.status().is_success() {
+                if let Ok(mut list) = res.json::<Vec<GhRelease>>().await {
+                    if let Some(rel) = list.into_iter().next() {
+                        return Ok(rel);
+                    }
+                }
             }
         }
     }
-    // Запасной путь — GitHub API.
-    let res = http
-        .get(GITHUB_API)
-        .header("Accept", "application/vnd.github+json")
-        .timeout(Duration::from_secs(15))
-        .send()
-        .await
-        .map_err(|e| format!("GitHub и jsDelivr недоступны: {e}"))?;
-    if !res.status().is_success() {
-        return Err(format!("GitHub API: HTTP {}", res.status()));
-    }
-    res.json::<GhRelease>().await.map_err(|e| format!("Ответ GitHub не разобран: {e}"))
+    Err("GitHub и jsDelivr недоступны (напрямую и через прокси)".into())
 }
 
 /// Список изменений: секция `### {tag}` из DEVELOPMENT.md через jsDelivr CDN.
@@ -158,9 +185,11 @@ pub async fn install(State(state): State<AppState>) -> Response {
     let tmp = tmp_dir.join("xkeen-route.update");
     let tmp_for_check = tmp.clone();
 
-    let res = match state
-        .http
+    let proxied = proxied_client();
+    let http = proxied.as_ref().unwrap_or(&state.http);
+    let res = match http
         .get(&url)
+        .header("User-Agent", "xkeen-route")
         .timeout(Duration::from_secs(300))
         .send()
         .await

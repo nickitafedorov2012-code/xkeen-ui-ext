@@ -135,7 +135,7 @@ export default function App() {
           {tab === 'dashboard' && <Dashboard status={status} notify={notify} />}
           {tab === 'servers' && <Servers notify={notify} />}
           {tab === 'devices' && <Devices notify={notify} />}
-          {tab === 'settings' && <Settings notify={notify} />}
+          {tab === 'settings' && <Settings notify={notify} status={status} />}
           {tab === 'help' && <Help status={status} />}
         </ErrorBoundary>
       </main>
