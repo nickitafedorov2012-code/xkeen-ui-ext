@@ -530,12 +530,15 @@ fn device_providers_for(cfg: &config::AppConfig, yaml: &str) -> Vec<String> {
     }
 }
 
-/// GET /api/domains — списки доменов (напрямую / принудительно через прокси).
+/// GET /api/domains — списки доменов (напрямую / принудительно через прокси) + найденные CDN.
 pub async fn get_domains(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
+    let auto_cdns = crate::cdn_discovery::expand_bundles(&cfg.force_domains);
+    let auto_cdns_list: Vec<String> = auto_cdns.into_iter().collect();
     api_ok(json!({
         "direct": cfg.direct_domains,
         "force": cfg.force_domains,
+        "auto_cdns": auto_cdns_list,
     }))
 }
 
@@ -547,7 +550,7 @@ pub struct DomainsReq {
     pub force: Vec<String>,
 }
 
-/// POST /api/domains — сохранить списки, вставить DOMAIN-SUFFIX правила в rules:, reload.
+/// POST /api/domains — сохранить списки, авто-обнаружить CDN, вставить DOMAIN-SUFFIX правила в rules:, reload.
 pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsReq>) -> Response {
     let _cfg_guard = state.config_lock.lock().await;
     let mut cfg = state.config.read().await.clone();
@@ -556,11 +559,20 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
     cfg.direct_domains = routing::sanitize_domains(&req.direct);
     cfg.force_domains = routing::sanitize_domains(&req.force);
 
+    // Автоматическое обнаружение сопутствующих CDN (бандлы + поддомены + HTML-сканер)
+    let auto_cdns = crate::cdn_discovery::discover_all_cdns(&cfg.force_domains).await;
+    let mut all_force = cfg.force_domains.clone();
+    for cdn in &auto_cdns {
+        if !all_force.contains(cdn) {
+            all_force.push(cdn.clone());
+        }
+    }
+
     let yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
         Ok(y) => y,
         Err(e) => return api_err(format!("Не удалось прочитать config.yaml: {e}")),
     };
-    let new_yaml = match routing::apply_domain_rules(&yaml, &cfg.direct_domains, &cfg.force_domains) {
+    let new_yaml = match routing::apply_domain_rules(&yaml, &cfg.direct_domains, &all_force) {
         Ok(y) => y,
         Err(e) => return api_err(e),
     };
@@ -578,8 +590,8 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
         return api_err(format!("Ошибка сохранения конфига: {e}"));
     }
 
-    // Автоматическая синхронизация IP-адресов принудительно проксируемых доменов с geo_override
-    let overridden = match crate::override_sync::sync_geo_override(&cfg.force_domains).await {
+    // Автоматическая синхронизация IP-адресов принудительно проксируемых доменов и их CDN с geo_override
+    let overridden = match crate::override_sync::sync_geo_override(&all_force).await {
         Ok(count) => count,
         Err(e) => {
             crate::log_w!("[OVERRIDE] Ошибка синхронизации geo_override: {e}");
@@ -589,7 +601,13 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
 
     let (n_direct, n_force) = (cfg.direct_domains.len(), cfg.force_domains.len());
     *state.config.write().await = cfg;
-    api_ok(json!({ "direct": n_direct, "force": n_force, "overridden_ips": overridden }))
+    let auto_cdns_list: Vec<String> = auto_cdns.into_iter().collect();
+    api_ok(json!({
+        "direct": n_direct,
+        "force": n_force,
+        "auto_cdns": auto_cdns_list,
+        "overridden_ips": overridden
+    }))
 }
 
 // --- Сервис XKeen и бэкапы ---

@@ -8,6 +8,7 @@ mod rci;
 mod routing;
 mod updater;
 mod override_sync;
+mod cdn_discovery;
 
 use axum::extract::Request;
 use axum::middleware::{self, Next};
@@ -182,13 +183,16 @@ async fn main() {
 
     failover::spawn(state.clone());
 
-    // Начальная и периодическая синхронизация IP принудительно проксируемых доменов с geo_override
+    // Начальная и периодическая синхронизация IP принудительно проксируемых доменов и их CDN с geo_override
     let sync_state = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         let cfg = sync_state.config.read().await;
         if !cfg.force_domains.is_empty() {
-            let _ = override_sync::sync_geo_override(&cfg.force_domains).await;
+            let auto_cdns = cdn_discovery::discover_all_cdns(&cfg.force_domains).await;
+            let mut all_domains = cfg.force_domains.clone();
+            all_domains.extend(auto_cdns);
+            let _ = override_sync::sync_geo_override(&all_domains).await;
         }
     });
 
@@ -199,7 +203,10 @@ async fn main() {
             interval.tick().await;
             let cfg = periodic_state.config.read().await;
             if !cfg.force_domains.is_empty() {
-                let _ = override_sync::sync_geo_override(&cfg.force_domains).await;
+                let auto_cdns = cdn_discovery::discover_all_cdns(&cfg.force_domains).await;
+                let mut all_domains = cfg.force_domains.clone();
+                all_domains.extend(auto_cdns);
+                let _ = override_sync::sync_geo_override(&all_domains).await;
             }
         }
     });

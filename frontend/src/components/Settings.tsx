@@ -13,6 +13,7 @@ export default function Settings({ notify, status }: Props) {
   const [saving, setSaving] = useState(false)
   const [directDomains, setDirectDomains] = useState('')
   const [forceDomains, setForceDomains] = useState('')
+  const [autoCdns, setAutoCdns] = useState<string[]>([])
   const [savingDomains, setSavingDomains] = useState(false)
   // --- Сервис XKeen ---
   const [svcBusy, setSvcBusy] = useState('')
@@ -41,10 +42,11 @@ export default function Settings({ notify, status }: Props) {
     apiGet<{ servers: ServerInfo[] }>('servers')
       .then((d) => setServers(d.servers))
       .catch(() => {})
-    apiGet<{ direct: string[]; force: string[] }>('domains')
+    apiGet<{ direct: string[]; force: string[]; auto_cdns?: string[] }>('domains')
       .then((d) => {
         setDirectDomains(d.direct.join('\n'))
         setForceDomains(d.force.join('\n'))
+        if (d.auto_cdns) setAutoCdns(d.auto_cdns)
       })
       .catch(() => {})
   }, [notify])
@@ -196,14 +198,31 @@ export default function Settings({ notify, status }: Props) {
     }
   }
 
+  const addPreset = (domain: string) => {
+    const list = forceDomains.split('\n').map((s) => s.trim()).filter(Boolean)
+    if (!list.includes(domain)) {
+      list.push(domain)
+      setForceDomains(list.join('\n'))
+      notify(`Добавлен пресет: ${domain}`)
+    }
+  }
+
   const saveDomains = async () => {
     setSavingDomains(true)
     try {
-      const data = await apiPost<{ direct: number; force: number }>('domains', {
+      const data = await apiPost<{
+        direct: number
+        force: number
+        auto_cdns?: string[]
+        overridden_ips?: number
+      }>('domains', {
         direct: directDomains.split('\n'),
         force: forceDomains.split('\n'),
       })
-      notify(`Домены сохранены: напрямую ${data.direct}, через прокси ${data.force}`)
+      if (data.auto_cdns) setAutoCdns(data.auto_cdns)
+      const cdnMsg = data.auto_cdns && data.auto_cdns.length > 0 ? `, CDN: +${data.auto_cdns.length}` : ''
+      const ipMsg = data.overridden_ips ? `, IP: ${data.overridden_ips}` : ''
+      notify(`Домены сохранены: напрямую ${data.direct}, через прокси ${data.force}${cdnMsg}${ipMsg}`)
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка сохранения доменов', true)
     } finally {
@@ -551,31 +570,55 @@ export default function Settings({ notify, status }: Props) {
 
       <section className="card">
         <h2>🌐 Домены</h2>
-        <p className="muted small">По одному домену в строке. Правила вставляются в начало rules: (DOMAIN-SUFFIX) и имеют приоритет. Применяется сразу при сохранении.</p>
+        <p className="muted small">По одному домену в строке. Правила вставляются в начало rules: (DOMAIN-SUFFIX) и имеют приоритет. Сопутствующие CDN и медиа-сервера подтягиваются автоматически.</p>
         <label className="row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
           <span>⏭ Напрямую (мимо прокси → DIRECT)</span>
           <textarea
             className="input"
-            rows={7}
+            rows={6}
             placeholder={'example.com\nlocal-service.net\nw3.org'}
             value={directDomains}
             onChange={(e) => setDirectDomains(e.target.value)}
             style={{ fontFamily: 'Consolas, monospace', fontSize: 12.5, resize: 'vertical' }}
           />
         </label>
-        <label className="row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
-          <span>🔒 Принудительно через прокси (→ PROXY)</span>
+        <div style={{ marginTop: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4, flexWrap: 'wrap', gap: 4 }}>
+            <span style={{ fontWeight: 500 }}>🔒 Принудительно через прокси (→ PROXY)</span>
+            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+              <span className="muted small" style={{ alignSelf: 'center', marginRight: 2 }}>Пресеты:</span>
+              <button type="button" className="btn small ghost" onClick={() => addPreset('mysku.club')}>+ Муська</button>
+              <button type="button" className="btn small ghost" onClick={() => addPreset('habr.com')}>+ Хабр</button>
+              <button type="button" className="btn small ghost" onClick={() => addPreset('rutracker.org')}>+ Rutracker</button>
+              <button type="button" className="btn small ghost" onClick={() => addPreset('x.com')}>+ X/Twitter</button>
+              <button type="button" className="btn small ghost" onClick={() => addPreset('instagram.com')}>+ Instagram</button>
+            </div>
+          </div>
           <textarea
             className="input"
-            rows={7}
+            rows={6}
             placeholder={'openai.com\nyoutube.com\ngithub.com'}
             value={forceDomains}
             onChange={(e) => setForceDomains(e.target.value)}
-            style={{ fontFamily: 'Consolas, monospace', fontSize: 12.5, resize: 'vertical' }}
+            style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'Consolas, monospace', fontSize: 12.5, resize: 'vertical' }}
           />
-        </label>
-        <button className="btn primary" onClick={saveDomains} disabled={savingDomains}>
-          {savingDomains ? 'Применение…' : '🌐 Применить домены'}
+          {autoCdns.length > 0 && (
+            <div style={{ marginTop: 8, padding: '8px 10px', background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.2)', borderRadius: 6, fontSize: 12 }}>
+              <div style={{ color: '#38bdf8', fontWeight: 600, marginBottom: 4 }}>
+                ⚡ Автоматически подключенные CDN и медиа-сервера ({autoCdns.length}):
+              </div>
+              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                {autoCdns.map((cdn) => (
+                  <span key={cdn} style={{ fontSize: 11, background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace' }}>
+                    {cdn}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        <button className="btn primary" style={{ marginTop: 12 }} onClick={saveDomains} disabled={savingDomains}>
+          {savingDomains ? 'Применение и поиск CDN…' : '🌐 Применить домены'}
         </button>
       </section>
 
