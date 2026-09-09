@@ -26,7 +26,7 @@ pub const KNOWN_BUNDLES: &[(&str, &[&str])] = &[
             "ext.mysku-st.net",
         ],
     ),
-    ("habr.com", &["habrastorage.org", "hsto.org"]),
+    ("habr.com", &["habrastorage.org", "web.habrastorage.org", "hsto.org", "assets.habr.com"]),
     (
         "rutracker.org",
         &["rutracker.cc", "rutracker.net", "static.rutracker.cc"],
@@ -48,6 +48,7 @@ pub const KNOWN_BUNDLES: &[(&str, &[&str])] = &[
 /// Типовые префиксы CDN-поддоменов.
 const COMMON_CDN_PREFIXES: &[&str] = &[
     "img", "art", "ext", "cdn", "static", "assets", "media", "images", "pic", "files",
+    "web", "s", "i", "st", "cache", "thumb",
 ];
 
 /// Раскрывает список доменов по известным бандлам.
@@ -69,18 +70,31 @@ pub fn expand_bundles(domains: &[String]) -> BTreeSet<String> {
     extra
 }
 
-/// Асинхронно проверяет типичные CDN-поддомены (img., cdn., static. и т.д.)
+/// Асинхронно проверяет типичные CDN-поддомены (img., cdn., static. и т.д.) параллельно
 pub async fn probe_subdomains(domain: &str) -> Vec<String> {
-    let mut found = Vec::new();
     let clean = domain.trim().trim_start_matches("www.").to_lowercase();
     if clean.is_empty() || clean.contains('/') {
-        return found;
+        return Vec::new();
     }
 
+    let mut set = tokio::task::JoinSet::new();
     for &prefix in COMMON_CDN_PREFIXES {
         let sub = format!("{prefix}.{clean}");
-        let addr = format!("{sub}:443");
-        if tokio::net::lookup_host(addr).await.is_ok() {
+        set.spawn(async move {
+            let addr = format!("{sub}:443");
+            let res = tokio::time::timeout(Duration::from_millis(1200), tokio::net::lookup_host(addr)).await;
+            if let Ok(Ok(mut iter)) = res {
+                if iter.next().is_some() {
+                    return Some(sub);
+                }
+            }
+            None
+        });
+    }
+
+    let mut found = Vec::new();
+    while let Some(res) = set.join_next().await {
+        if let Ok(Some(sub)) = res {
             found.push(sub);
         }
     }

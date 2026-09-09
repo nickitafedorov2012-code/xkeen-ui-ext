@@ -4,42 +4,59 @@
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
+use std::time::Duration;
 
 const OVERRIDE_FILE: &str = "/opt/etc/xkeen/ipset/ru_exclude_override.lst";
 const OVERRIDE_DIR: &str = "/opt/etc/xkeen/ipset";
 pub const MARKER_BEGIN: &str = "# --- XKEEN-ROUTE-OVERRIDE-BEGIN ---";
 pub const MARKER_END: &str = "# --- XKEEN-ROUTE-OVERRIDE-END ---";
 
-/// Асинхронно резолвит список доменов во все уникальные IPv4 и IPv6 адреса.
+/// Асинхронно резолвит список доменов во все уникальные IPv4 и IPv6 адреса параллельно.
 pub async fn resolve_domains(domains: &[String]) -> (BTreeSet<Ipv4Addr>, BTreeSet<Ipv6Addr>) {
-    let mut v4 = BTreeSet::new();
-    let mut v6 = BTreeSet::new();
+    let mut set = tokio::task::JoinSet::new();
 
     for d in domains {
-        let clean = d.trim().trim_start_matches("www.");
+        let clean = d.trim().trim_start_matches("www.").to_string();
         if clean.is_empty() {
             continue;
         }
-        for host in [clean.to_string(), format!("www.{clean}")] {
-            let addr = format!("{host}:443");
-            if let Ok(iter) = tokio::net::lookup_host(addr).await {
-                for sa in iter {
-                    match sa.ip() {
-                        IpAddr::V4(ip) => {
-                            if !ip.is_loopback() && !ip.is_unspecified() {
-                                v4.insert(ip);
+        for host in [clean.clone(), format!("www.{clean}")] {
+            set.spawn(async move {
+                let mut v4_res = Vec::new();
+                let mut v6_res = Vec::new();
+                let addr = format!("{host}:443");
+                let res = tokio::time::timeout(Duration::from_millis(1500), tokio::net::lookup_host(addr)).await;
+                if let Ok(Ok(iter)) = res {
+                    for sa in iter {
+                        match sa.ip() {
+                            IpAddr::V4(ip) => {
+                                if !ip.is_loopback() && !ip.is_unspecified() {
+                                    v4_res.push(ip);
+                                }
                             }
-                        }
-                        IpAddr::V6(ip) => {
-                            if !ip.is_loopback() && !ip.is_unspecified() {
-                                v6.insert(ip);
+                            IpAddr::V6(ip) => {
+                                if !ip.is_loopback() && !ip.is_unspecified() {
+                                    v6_res.push(ip);
+                                }
                             }
                         }
                     }
                 }
-            }
+                (v4_res, v6_res)
+            });
         }
     }
+
+    let mut v4 = BTreeSet::new();
+    let mut v6 = BTreeSet::new();
+
+    while let Some(res) = set.join_next().await {
+        if let Ok((v4_list, v6_list)) = res {
+            v4.extend(v4_list);
+            v6.extend(v6_list);
+        }
+    }
+
     (v4, v6)
 }
 
