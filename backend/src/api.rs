@@ -577,9 +577,19 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
     if let Err(e) = config::save(&state.config_path, &cfg).await {
         return api_err(format!("Ошибка сохранения конфига: {e}"));
     }
+
+    // Автоматическая синхронизация IP-адресов принудительно проксируемых доменов с geo_override
+    let overridden = match crate::override_sync::sync_geo_override(&cfg.force_domains).await {
+        Ok(count) => count,
+        Err(e) => {
+            crate::log_w!("[OVERRIDE] Ошибка синхронизации geo_override: {e}");
+            0
+        }
+    };
+
     let (n_direct, n_force) = (cfg.direct_domains.len(), cfg.force_domains.len());
     *state.config.write().await = cfg;
-    api_ok(json!({ "direct": n_direct, "force": n_force }))
+    api_ok(json!({ "direct": n_direct, "force": n_force, "overridden_ips": overridden }))
 }
 
 // --- Сервис XKeen и бэкапы ---
@@ -781,7 +791,6 @@ pub async fn logs_ws(
 }
 
 async fn ws_logs_stream(mut socket: axum::extract::ws::WebSocket, history_lines: usize) {
-    use futures_util::SinkExt;
     // 1. Сначала — хвост истории.
     if let Ok(text) = crate::logger::tail(history_lines) {
         for line in text.lines() {

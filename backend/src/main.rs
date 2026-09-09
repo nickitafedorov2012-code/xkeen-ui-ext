@@ -7,6 +7,7 @@ mod mihomo;
 mod rci;
 mod routing;
 mod updater;
+mod override_sync;
 
 use axum::extract::Request;
 use axum::middleware::{self, Next};
@@ -180,6 +181,28 @@ async fn main() {
     };
 
     failover::spawn(state.clone());
+
+    // Начальная и периодическая синхронизация IP принудительно проксируемых доменов с geo_override
+    let sync_state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let cfg = sync_state.config.read().await;
+        if !cfg.force_domains.is_empty() {
+            let _ = override_sync::sync_geo_override(&cfg.force_domains).await;
+        }
+    });
+
+    let periodic_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1800));
+        loop {
+            interval.tick().await;
+            let cfg = periodic_state.config.read().await;
+            if !cfg.force_domains.is_empty() {
+                let _ = override_sync::sync_geo_override(&cfg.force_domains).await;
+            }
+        }
+    });
 
 
     let app = Router::new()

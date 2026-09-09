@@ -107,7 +107,7 @@ async fn fetch_latest(direct: &reqwest::Client) -> Result<GhRelease, String> {
             .await
         {
             if res.status().is_success() {
-                if let Ok(mut list) = res.json::<Vec<GhRelease>>().await {
+                if let Ok(list) = res.json::<Vec<GhRelease>>().await {
                     if let Some(rel) = list.into_iter().next() {
                         return Ok(rel);
                     }
