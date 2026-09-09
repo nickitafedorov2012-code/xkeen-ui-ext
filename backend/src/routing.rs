@@ -187,7 +187,7 @@ pub fn apply_domain_rules(yaml: &str, direct: &[String], force: &[String]) -> Re
     let block = format!(
         "\n{}{}",
         domain_block(DIRECT_BEGIN, DIRECT_END, &direct, "DIRECT"),
-        domain_block(FORCE_BEGIN, FORCE_END, &force, "PROXY")
+        domain_block(FORCE_BEGIN, FORCE_END, &force, "PROXY,no-resolve")
     );
     Ok(format!("{}{}{}", &content[..pos], block, &content[pos..]))
 }
@@ -687,7 +687,7 @@ mod tests {
         let out = apply_domain_rules(BASE_YAML, &["example.com".to_string()], &["forced.org".to_string()]).unwrap();
         assert!(out.contains(DIRECT_BEGIN));
         assert!(out.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
-        assert!(out.contains("DOMAIN-SUFFIX,forced.org,PROXY"));
+        assert!(out.contains("DOMAIN-SUFFIX,forced.org,PROXY,no-resolve"));
         // доменные правила — сразу после rules: (приоритет над остальными)
         let rpos = out.find("rules:").unwrap();
         let dpos = out.find("DOMAIN-SUFFIX,example.com").unwrap();
