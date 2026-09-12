@@ -49,7 +49,7 @@ pub fn api_err(error: impl Into<String>) -> axum::response::Response {
 /// Заготовка настроек: GET/PUT будут добавлены в следующих фазах.
 pub async fn get_settings(State(state): State<AppState>) -> impl IntoResponse {
     let cfg = state.config.read().await.clone();
-    api_ok(serde_json::to_value(cfg).unwrap_or_default())
+    api_ok(serde_json::to_value(&*cfg).unwrap_or_default())
 }
 
 pub async fn put_settings(
