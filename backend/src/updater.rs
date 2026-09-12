@@ -175,6 +175,9 @@ pub async fn install(State(state): State<AppState>) -> Response {
     let arch = std::env::consts::ARCH;
     let asset = match arch {
         "aarch64" => "xkeen-route-arm64-v8a",
+        "mipsel" => "xkeen-route-mipsel",
+        "mips" => "xkeen-route-mips",
+        "arm" => "xkeen-route-armv7",
         _ => return api_err(format!("Архитектура {arch} не поддерживается автообновлением")),
     };
     let url = format!("{GITHUB_RELEASE}/{ver}/{asset}");

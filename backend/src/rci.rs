@@ -12,6 +12,8 @@ use crate::config::AppConfig;
 static AUTHED: AtomicBool = AtomicBool::new(false);
 /// Файловый RCI-токен проверен и валиден (кэш, чтобы не дёргать /rci/show/version на каждый вызов).
 static TOKEN_OK: AtomicBool = AtomicBool::new(false);
+/// Мьютекс для синхронизации одновременных попыток авторизации к RCI
+static AUTH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Clone, Debug)]
 pub struct Policy {
@@ -145,12 +147,24 @@ async fn challenge_auth(
 /// (на многих прошивках RCI с localhost отвечает без auth). Возвращает токен (может быть пустым).
 pub async fn ensure_auth(http: &reqwest::Client, cfg: &AppConfig) -> Result<String, String> {
     let token = token_from_files(cfg);
+    // Быстрый путь без блокировки
+    if !token.is_empty() && TOKEN_OK.load(Ordering::Relaxed) {
+        return Ok(token);
+    }
+    if token.is_empty() && AUTHED.load(Ordering::Relaxed) {
+        return Ok(String::new());
+    }
+
+    // Синхронизация параллельных запросов
+    let _guard = AUTH_LOCK.lock().await;
+
+    // Повторная проверка под блокировкой (double-check)
     if !token.is_empty() {
         if TOKEN_OK.load(Ordering::Relaxed) {
             return Ok(token);
         }
         // Токен из файла может устареть (RCI-сессии истекают по времени) —
-        // проверяем один за процесс, результат кэшируется в TOKEN_OK.
+        // проверяем один раз, результат кэшируется в TOKEN_OK.
         let ok = http
             .get(format!("{}/rci/show/version", cfg.base_url()))
             .timeout(std::time::Duration::from_secs(3))
@@ -203,17 +217,16 @@ pub async fn ensure_auth(http: &reqwest::Client, cfg: &AppConfig) -> Result<Stri
 
 /// Повторная авторизация после 401/403: сброс кэша токена, challenge-auth
 /// (если задан пароль) или повторный ensure_auth. Возвращает новый токен.
-async fn reauth(http: &reqwest::Client, cfg: &AppConfig, had_token: bool) -> Result<String, String> {
+async fn reauth(http: &reqwest::Client, cfg: &AppConfig, _had_token: bool) -> Result<String, String> {
+    let _guard = AUTH_LOCK.lock().await;
     TOKEN_OK.store(false, Ordering::Relaxed);
+    AUTHED.store(false, Ordering::Relaxed);
     if !cfg.rci.password.is_empty()
         && challenge_auth(http, &cfg.base_url(), &cfg.rci.login, &cfg.rci.password)
             .await
             .is_ok()
     {
         return Ok(String::new());
-    }
-    if had_token {
-        // Токен мог «ожить» после перезагрузки роутера — пробуем ревалидацию.
     }
     ensure_auth(http, cfg).await
 }
@@ -556,26 +569,18 @@ pub async fn set_device_policy(
         }
     };
 
-    let ok_final: bool;
     if policy_id.is_empty() || policy_id == "default" {
         post("/rci/ip/hotspot/host/policy".into(), json!({ "mac": mac, "no": true })).await?;
-        let (_, text) = post("/rci/ip/hotspot/host".into(), json!({ "mac": mac, "access": "permit" })).await?;
-        ok_final = true;
-        let _ = text;
+        let _ = post("/rci/ip/hotspot/host".into(), json!({ "mac": mac, "access": "permit" })).await?;
     } else if policy_id == "block" {
-        let (_, text) = post("/rci/ip/hotspot/host".into(), json!({ "mac": mac, "access": "deny" })).await?;
-        let _ = text;
-        ok_final = true;
+        let _ = post("/rci/ip/hotspot/host".into(), json!({ "mac": mac, "access": "deny" })).await?;
     } else {
-        let (_, text) = post(
+        let _ = post(
             "/rci/ip/hotspot/host".into(),
             json!({ "mac": mac, "policy": policy_id, "access": "permit" }),
         )
         .await?;
-        let _ = text;
-        ok_final = true;
     }
-    let _ = ok_final;
 
     if save {
         save_config(http, cfg).await?;

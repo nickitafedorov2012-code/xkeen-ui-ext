@@ -1,6 +1,8 @@
+import { memo } from 'react'
 import {
   fmtBytes,
   fmtSpeed,
+  SPEED_PRESETS,
   type DeviceInfo,
   type DeviceRoutingEntry,
   type PolicyInfo,
@@ -24,9 +26,9 @@ interface Props {
   openDrModal: (d: DeviceInfo, assigned?: string) => void
 }
 
-/// Строка таблицы устройств (вынесено из Devices.tsx для читаемости
-/// и ускорения React Reconciliation).
-export default function DeviceRow({
+/// Строка таблицы устройств (обёрнуто в memo для предотвращения лишних ре-рендеров
+/// при тиках пинга и автообновления дашборда).
+const DeviceRow = memo(function DeviceRow({
   d,
   policies,
   servers,
@@ -115,11 +117,6 @@ export default function DeviceRow({
       </td>
     </tr>
   )
-}
+})
 
-const SPEED_PRESETS: { label: string; value: number }[] = [
-  { label: 'Без лимита', value: 0 },
-  { label: '10 Мбит/с', value: 10240 },
-  { label: '30 Мбит/с', value: 30720 },
-  { label: '100 Мбит/с', value: 102400 },
-]
+export default DeviceRow

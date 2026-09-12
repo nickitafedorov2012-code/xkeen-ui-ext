@@ -94,3 +94,10 @@ export function fmtSpeed(kbps: number): string {
   if (kbps >= 1024) return `${Math.round(kbps / 1024)} Мбит/с`
   return `${kbps} Кбит/с`
 }
+
+export const SPEED_PRESETS: { label: string; value: number }[] = [
+  { label: 'Без лимита', value: 0 },
+  { label: '10 Мбит/с', value: 10240 },
+  { label: '30 Мбит/с', value: 30720 },
+  { label: '100 Мбит/с', value: 102400 },
+]

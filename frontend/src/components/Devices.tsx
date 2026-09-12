@@ -3,6 +3,7 @@ import { apiGet, apiPost, apiPut } from '../api'
 import DeviceRow from './DeviceRow'
 import DeviceRoutingModal from './DeviceRoutingModal'
 import {
+  SPEED_PRESETS,
   type DeviceInfo,
   type DeviceRoutingEntry,
   type PolicyInfo,
@@ -13,13 +14,6 @@ import {
 interface Props {
   notify: (msg: string, isError?: boolean) => void
 }
-
-const SPEED_PRESETS: { label: string; value: number }[] = [
-  { label: 'Без лимита', value: 0 },
-  { label: '10 Мбит/с', value: 10240 },
-  { label: '30 Мбит/с', value: 30720 },
-  { label: '100 Мбит/с', value: 102400 },
-]
 
 export default function Devices({ notify }: Props) {
   const [devices, setDevices] = useState<DeviceInfo[]>([])

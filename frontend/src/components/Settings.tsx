@@ -36,6 +36,7 @@ export default function Settings({ notify, status }: Props) {
   const [updStage, setUpdStage] = useState('')
   const [updError, setUpdError] = useState('')
   const [updChecking, setUpdChecking] = useState(false)
+  const [showUpdNotes, setShowUpdNotes] = useState(false)
 
   useEffect(() => {
     apiGet<AppSettings>('settings').then(setSettings).catch((e) => notify(e instanceof Error ? e.message : 'Ошибка', true))
@@ -470,12 +471,9 @@ export default function Settings({ notify, status }: Props) {
                 <button
                   className="btn upd-glow"
                   disabled={updBusy}
-                  onClick={() => {
-                    const el = document.getElementById('upd-notes')
-                    if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none'
-                  }}
+                  onClick={() => setShowUpdNotes((prev) => !prev)}
                 >
-                  ⬆ Доступна {upd.latest} — что нового
+                  ⬆ Доступна {upd.latest} — {showUpdNotes ? 'скрыть' : 'что нового'}
                 </button>
               </>
             )}
@@ -496,11 +494,9 @@ export default function Settings({ notify, status }: Props) {
             </button>
           </div>
 
-          {upd?.update_available && upd.notes.length > 0 && (
+          {upd?.update_available && upd.notes.length > 0 && showUpdNotes && (
             <div
-              id="upd-notes"
               style={{
-                display: 'none',
                 margin: '10px 0 0',
                 padding: '10px 12px',
                 background: 'var(--bg-elem, rgba(255,255,255,.04))',

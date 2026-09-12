@@ -79,11 +79,9 @@ enum Command {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub config: Arc<RwLock<config::AppConfig>>,
+    pub config: Arc<RwLock<Arc<config::AppConfig>>>,
     pub config_path: Arc<PathBuf>,
     pub http: reqwest::Client,
-    /// Разрешённый RCI-токен (из конфига или /opt/etc/xkeen/xkeen.json). Пустая строка = cookie-сессия.
-    pub rci_token: Arc<RwLock<String>>,
     /// Лента событий failover.
     pub failover_log: Arc<failover::FailoverLog>,
     /// Сериализация правок config.yaml (гонки failover/ручных правок).
@@ -138,6 +136,27 @@ async fn log_requests(req: Request, next: Next) -> Response {
     res
 }
 
+/// Ожидание готовности RCI роутера при старте (после перезагрузки роутера).
+async fn wait_for_router_ready(state: &AppState) {
+    let max_attempts = 30; // 30 * 2 сек = 60 сек максимум
+    for attempt in 1..=max_attempts {
+        let cfg = state.config.read().await.clone();
+        match rci::get_version(&state.http, &cfg).await {
+            Ok(_) => {
+                log_i!("RCI роутера доступен (попытка {})", attempt);
+                return;
+            }
+            Err(_) => {
+                if attempt == 1 {
+                    log_i!("Ожидание готовности RCI роутера после старта...");
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    }
+    log_w!("RCI роутера не ответил за 60 сек, продолжаем в автономном режиме");
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -168,14 +187,13 @@ async fn main() {
 
     let port = cli.port;
     let state = AppState {
-        config: Arc::new(RwLock::new(cfg)),
+        config: Arc::new(RwLock::new(Arc::new(cfg))),
         config_path: Arc::new(config_path),
         http: reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
             .cookie_store(true)
             .build()
             .expect("http client"),
-        rci_token: Arc::new(RwLock::new(String::new())),
         failover_log: Arc::new(failover::FailoverLog::default()),
         routing_lock: Arc::new(tokio::sync::Mutex::new(())),
         config_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -186,19 +204,26 @@ async fn main() {
     // Начальная и периодическая синхронизация IP принудительно проксируемых доменов и их CDN с geo_override
     let sync_state = state.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // Задержка и ожидание готовности роутера/DNS после перезагрузки
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        wait_for_router_ready(&sync_state).await;
+
         let cfg = sync_state.config.read().await;
         if !cfg.force_domains.is_empty() {
+            log_i!("[STARTUP] Начало обнаружения CDN и синхронизации geo_override...");
             let auto_cdns = cdn_discovery::discover_all_cdns(&cfg.force_domains).await;
             let mut all_domains = cfg.force_domains.clone();
             all_domains.extend(auto_cdns);
-            let _ = override_sync::sync_geo_override(&all_domains).await;
+            if let Err(e) = override_sync::sync_geo_override(&all_domains).await {
+                log_w!("[STARTUP] Ошибка синхронизации geo_override: {}", e);
+            }
         }
     });
 
     let periodic_state = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1800));
+        interval.tick().await; // пропускаем немедленный первый тик, т.к. начальная синхронизация уже запущена
         loop {
             interval.tick().await;
             let cfg = periodic_state.config.read().await;
@@ -206,7 +231,9 @@ async fn main() {
                 let auto_cdns = cdn_discovery::discover_all_cdns(&cfg.force_domains).await;
                 let mut all_domains = cfg.force_domains.clone();
                 all_domains.extend(auto_cdns);
-                let _ = override_sync::sync_geo_override(&all_domains).await;
+                if let Err(e) = override_sync::sync_geo_override(&all_domains).await {
+                    log_w!("[PERIODIC] Ошибка периодической синхронизации geo_override: {}", e);
+                }
             }
         }
     });
@@ -246,17 +273,38 @@ async fn main() {
         .with_state(state);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .unwrap_or_else(|e| panic!("Не удалось занять порт {}: {}", port, e));
+    let listener = {
+        let mut attempts = 0;
+        loop {
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(l) => break l,
+                Err(e) if attempts < 10 => {
+                    log_w!(
+                        "Порт {} временно недоступен ({}/10): {}. Повтор через 2 сек...",
+                        port,
+                        attempts + 1,
+                        e
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    attempts += 1;
+                }
+                Err(e) => {
+                    log_e!("Критическая ошибка: не удалось занять порт {} после 10 попыток: {}", port, e);
+                    panic!("Не удалось занять порт {}: {}", port, e);
+                }
+            }
+        }
+    };
     log_i!("Панель доступна на http://0.0.0.0:{}", port);
-    axum::serve(
+    if let Err(e) = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await
-    .unwrap();
+    {
+        log_e!("Ошибка работы HTTP сервера: {}", e);
+    }
     log_i!("Остановка: новые соединения закрыты, завершаю фоновые задачи…");
     failover::shutdown();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;

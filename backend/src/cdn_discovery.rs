@@ -101,6 +101,19 @@ pub async fn probe_subdomains(domain: &str) -> Vec<String> {
     found
 }
 
+static PROXIED_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+
+fn proxied_client() -> &'static reqwest::Client {
+    PROXIED_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:7890").unwrap_or_else(|_| reqwest::Proxy::custom(|_| None::<reqwest::Url>)))
+            .timeout(Duration::from_millis(2500))
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap_or_default()
+    })
+}
+
 /// Быстрый парсер HTML через локальный прокси роутера для выявления доменов статики.
 pub async fn scan_html_cdns(domain: &str) -> Vec<String> {
     let mut found = BTreeSet::new();
@@ -109,15 +122,7 @@ pub async fn scan_html_cdns(domain: &str) -> Vec<String> {
         return Vec::new();
     }
 
-    // Создаем клиент с локальным прокси роутера (порт 7890)
-    let client = match reqwest::Client::builder()
-        .proxy(reqwest::Proxy::all("http://127.0.0.1:7890").unwrap_or_else(|_| reqwest::Proxy::custom(|_| None::<reqwest::Url>)))
-        .timeout(Duration::from_millis(2500))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
+    let client = proxied_client();
 
     let url = format!("https://{clean}/");
     let resp = match client.get(&url).send().await {

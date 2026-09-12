@@ -294,11 +294,9 @@ pub fn apply_assignments(yaml: &str, assignments: &[Assignment], providers: &[St
             rules_by_ip.remove(ip);
             continue;
         }
-        let server = a.server.clone().unwrap_or_default();
         let gname = group_name_for(ip, &a.name);
         groups_by_ip.insert(ip.to_string(), group_yaml(&gname, providers));
         rules_by_ip.insert(ip.to_string(), rule_line(ip, &gname));
-        let _ = server;
     }
 
     let mut content = remove_blocks(yaml);

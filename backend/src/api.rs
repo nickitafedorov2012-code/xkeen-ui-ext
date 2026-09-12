@@ -57,7 +57,7 @@ pub async fn put_settings(
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
     let _cfg_guard = state.config_lock.lock().await;
-    let mut merged = serde_json::to_value(state.config.read().await.clone()).unwrap_or_default();
+    let mut merged = serde_json::to_value(&**state.config.read().await).unwrap_or_default();
     crate::config::merge_value(&mut merged, &body);
     let new_cfg: config::AppConfig = match serde_json::from_value(merged) {
         Ok(c) => c,
@@ -66,7 +66,7 @@ pub async fn put_settings(
     if let Err(e) = config::save(&state.config_path, &new_cfg).await {
         return api_err(format!("Ошибка сохранения конфига: {}", e));
     }
-    *state.config.write().await = new_cfg;
+    *state.config.write().await = std::sync::Arc::new(new_cfg);
     crate::logger::set_level(&state.config.read().await.logs.level);
     log_i!("Настройки сохранены");
     api_ok(json!({ "saved": true }))
@@ -174,7 +174,7 @@ pub struct PriorityReq {
 /// POST /api/settings/priority — задать/снять глобальную цепочку приоритетов.
 pub async fn set_priority(State(state): State<AppState>, Json(req): Json<PriorityReq>) -> Response {
     let _cfg_guard = state.config_lock.lock().await;
-    let mut cfg = state.config.read().await.clone();
+    let mut cfg = (**state.config.read().await).clone();
     // Совместимость: если пришёл только server_id — цепочка из одного элемента.
     let chain: Vec<String> = if !req.server_ids.is_empty() {
         req.server_ids
@@ -208,7 +208,7 @@ pub async fn set_priority(State(state): State<AppState>, Json(req): Json<Priorit
     if let Err(e) = config::save(&state.config_path, &cfg).await {
         return api_err(format!("Ошибка сохранения: {e}"));
     }
-    *state.config.write().await = cfg;
+    *state.config.write().await = std::sync::Arc::new(cfg);
     api_ok(json!({ "saved": true, "message": message }))
 }
 
@@ -316,7 +316,7 @@ pub struct IgnoreReq {
 pub async fn set_ignore(State(state): State<AppState>, Json(req): Json<IgnoreReq>) -> Response {
     let _cfg_guard = state.config_lock.lock().await;
     let _guard = state.routing_lock.lock().await; // как в остальных правках config.yaml
-    let mut cfg = state.config.read().await.clone();
+    let mut cfg = (**state.config.read().await).clone();
     let mut servers: Vec<String> = req
         .servers
         .into_iter()
@@ -360,15 +360,16 @@ pub async fn set_ignore(State(state): State<AppState>, Json(req): Json<IgnoreReq
     if let Err(e) = config::save(&state.config_path, &cfg).await {
         return api_err(format!("Ошибка сохранения конфига: {e}"));
     }
-    *state.config.write().await = cfg;
+    *state.config.write().await = std::sync::Arc::new(cfg);
     api_ok(json!({ "applied": servers.len(), "providers_updated": updated }))
 }
 
 /// POST /api/servers/fix-names — ремонт mojibake-имён статических прокси в config.yaml
 /// (глобальная замена битого имени на починенное затрагивает и группы, и правила), reload.
 pub async fn fix_names(State(state): State<AppState>) -> Response {
-    let cfg = state.config.read().await.clone();
+    let _cfg_guard = state.config_lock.lock().await;
     let _guard = state.routing_lock.lock().await;
+    let cfg = state.config.read().await.clone();
     let yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
         Ok(y) => y,
         Err(e) => return api_err(format!("Не удалось прочитать {}: {e}", cfg.mihomo.config_path)),
@@ -444,8 +445,8 @@ fn default_true() -> bool {
 /// назначение (основной сервер), reload Mihomo. Пустой servers = снять.
 pub async fn set_device_routing(State(state): State<AppState>, Json(req): Json<DeviceRoutingReq>) -> Response {
     let _cfg_guard = state.config_lock.lock().await;
-    let mut cfg = state.config.read().await.clone();
     let _guard = state.routing_lock.lock().await;
+    let mut cfg = (**state.config.read().await).clone();
 
     let ip = req.ip.trim().to_string();
     if ip.is_empty() {
@@ -512,7 +513,7 @@ pub async fn set_device_routing(State(state): State<AppState>, Json(req): Json<D
     if let Err(e) = config::save(&state.config_path, &cfg).await {
         return api_err(format!("Ошибка сохранения конфига: {e}"));
     }
-    *state.config.write().await = cfg;
+    *state.config.write().await = std::sync::Arc::new(cfg);
     api_ok(json!({
         "applied": !servers.is_empty(),
         "servers": servers,
@@ -553,8 +554,8 @@ pub struct DomainsReq {
 /// POST /api/domains — сохранить списки, авто-обнаружить CDN, вставить DOMAIN-SUFFIX правила в rules:, reload.
 pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsReq>) -> Response {
     let _cfg_guard = state.config_lock.lock().await;
-    let mut cfg = state.config.read().await.clone();
     let _guard = state.routing_lock.lock().await;
+    let mut cfg = (**state.config.read().await).clone();
 
     cfg.direct_domains = routing::sanitize_domains(&req.direct);
     cfg.force_domains = routing::sanitize_domains(&req.force);
@@ -600,7 +601,7 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
     };
 
     let (n_direct, n_force) = (cfg.direct_domains.len(), cfg.force_domains.len());
-    *state.config.write().await = cfg;
+    *state.config.write().await = std::sync::Arc::new(cfg);
     let auto_cdns_list: Vec<String> = auto_cdns.into_iter().collect();
     api_ok(json!({
         "direct": n_direct,
@@ -735,7 +736,7 @@ pub async fn restore_backup(State(state): State<AppState>, Json(req): Json<Backu
         return api_err(format!("Конфиги восстановлены, но reload Mihomo не удался: {e}"));
     }
     // Перечитать конфиг панели в состояние.
-    *state.config.write().await = config::load(&state.config_path);
+    *state.config.write().await = std::sync::Arc::new(config::load(&state.config_path));
     log_i!("Конфиги восстановлены из бэкапа {}", req.name);
     api_ok(json!({ "restored": req.name }))
 }
@@ -888,8 +889,9 @@ pub struct RoutingReq {
 
 /// POST /api/routing — применить назначения (merge), reload Mihomo, перевыбор серверов.
 pub async fn apply_routing(State(state): State<AppState>, Json(req): Json<RoutingReq>) -> Response {
-    let cfg = state.config.read().await.clone();
+    let _cfg_guard = state.config_lock.lock().await;
     let _guard = state.routing_lock.lock().await;
+    let cfg = state.config.read().await.clone();
 
     let yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
         Ok(y) => y,

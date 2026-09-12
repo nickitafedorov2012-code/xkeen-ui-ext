@@ -13,6 +13,7 @@ const MAX_BYTES: u64 = 2 * 1024 * 1024;
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 static SYSLOG: OnceLock<Option<SyslogTarget>> = OnceLock::new();
 static LOG_TX: OnceLock<tokio::sync::broadcast::Sender<String>> = OnceLock::new();
+static FILE_TX: OnceLock<std::sync::mpsc::SyncSender<String>> = OnceLock::new();
 static MIN_LEVEL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0); // 0=info 1=warn 2=error
 
 /// Подписка на живой поток строк журнала (для WebSocket).
@@ -52,7 +53,28 @@ pub fn init(config_path: &Path, remote_syslog: &str) {
     if let Some(d) = path.parent() {
         let _ = std::fs::create_dir_all(d);
     }
-    let _ = LOG_PATH.set(path);
+    let _ = LOG_PATH.set(path.clone());
+
+    // Неблокирующая очередь для записи логов в отдельном потоке
+    let (tx, rx) = std::sync::mpsc::sync_channel::<String>(1024);
+    let _ = FILE_TX.set(tx);
+    let log_path_clone = path;
+    let _ = std::thread::Builder::new()
+        .name("xr-logger".into())
+        .spawn(move || {
+            use std::io::Write;
+            let mut count = 0u32;
+            while let Ok(line) = rx.recv() {
+                count = count.saturating_add(1);
+                if count % 16 == 1 {
+                    rotate_if_needed(&log_path_clone);
+                }
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path_clone) {
+                    let _ = f.write_all(line.as_bytes());
+                    let _ = f.write_all(b"\n");
+                }
+            }
+        });
 
     let target = remote_syslog.trim().split_once(':').and_then(|(host, port)| {
         let port: u16 = port.parse().ok()?;
@@ -67,9 +89,6 @@ pub fn init(config_path: &Path, remote_syslog: &str) {
 }
 
 pub fn log(level: &str, msg: &str) {
-    // NOTE (known limitation): блокирующий std::fs I/O в контексте tokio worker.
-    // Строки короткие, запись редкая, ротация раз в 2 МБ — для роутера приемлемо.
-    // При необходимости можно перевести на mpsc + фоновую задачу записи.
     if level_num(level) < MIN_LEVEL.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
@@ -85,13 +104,9 @@ pub fn log(level: &str, msg: &str) {
         eprintln!("{line}");
     }
 
-    if let Some(path) = LOG_PATH.get() {
-        rotate_if_needed(path);
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = f.write_all(line.as_bytes());
-            let _ = f.write_all(b"\n");
-        }
+    // Асинхронная запись в файл без блокировки Tokio рантайма
+    if let Some(tx) = FILE_TX.get() {
+        let _ = tx.try_send(line);
     }
 
     if let Some(Some(t)) = SYSLOG.get() {
