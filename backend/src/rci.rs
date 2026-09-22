@@ -352,6 +352,54 @@ pub struct SystemStats {
     pub app_memory_mb: f64,
     #[serde(default)]
     pub app_cpu_percent: f64,
+    #[serde(default)]
+    pub core_memory_mb: f64,
+    #[serde(default)]
+    pub total_xkeen_memory_mb: f64,
+}
+
+/// Получение показателей потребления физической памяти (RSS в МБ) процесса по его имени.
+pub fn get_process_rss(proc_name: &str) -> f64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.chars().all(|c| c.is_ascii_digit()) {
+                        let comm_path = path.join("comm");
+                        if let Ok(comm) = std::fs::read_to_string(&comm_path) {
+                            if comm.trim() == proc_name {
+                                let status_path = path.join("status");
+                                if let Ok(s) = std::fs::read_to_string(&status_path) {
+                                    for line in s.lines() {
+                                        if line.starts_with("VmRSS:") {
+                                            let parts: Vec<&str> = line.split_whitespace().collect();
+                                            if parts.len() >= 2 {
+                                                if let Ok(kb) = parts[1].parse::<f64>() {
+                                                    return (kb / 1024.0 * 10.0).round() / 10.0;
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        0.0
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = proc_name;
+        0.0
+    }
 }
 
 /// Получение показателей потребления собственного процесса (память RSS в МБ и CPU%).
@@ -406,7 +454,7 @@ pub fn get_proc_stats() -> (f64, f64) {
     }
 }
 
-/// Статистика нагрузки CPU и RAM из /rci/show/system + процесс xkeen-route.
+/// Статистика нагрузки CPU и RAM из /rci/show/system + процесс xkeen-route + ядро mihomo.
 pub async fn get_system(http: &reqwest::Client, cfg: &AppConfig) -> Result<SystemStats, String> {
     let token = ensure_auth(http, cfg).await?;
     let v = as_object(rci_get(http, cfg, &token, "/rci/show/system").await?);
@@ -429,12 +477,16 @@ pub async fn get_system(http: &reqwest::Client, cfg: &AppConfig) -> Result<Syste
             }
         }
         let (app_memory_mb, app_cpu_percent) = get_proc_stats();
+        let core_memory_mb = get_process_rss("mihomo");
+        let total_xkeen_memory_mb = ((app_memory_mb + core_memory_mb) * 10.0).round() / 10.0;
         return Ok(SystemStats {
             cpu_percent,
             memory_used_mb,
             memory_total_mb,
             app_memory_mb,
             app_cpu_percent,
+            core_memory_mb,
+            total_xkeen_memory_mb,
         });
     }
     Err("Invalid system response".into())

@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { apiGet, apiPost, apiPut } from '../api'
+import { apiGet, apiPost } from '../api'
 import DeviceRow from './DeviceRow'
 import DeviceRoutingModal from './DeviceRoutingModal'
 import {
-  SPEED_PRESETS,
   type DeviceInfo,
   type DeviceRoutingEntry,
   type PolicyInfo,
@@ -15,6 +14,8 @@ interface Props {
   notify: (msg: string, isError?: boolean) => void
 }
 
+type SortColumn = 'device' | 'ip' | 'policy' | 'speed' | 'server'
+
 export default function Devices({ notify }: Props) {
   const [devices, setDevices] = useState<DeviceInfo[]>([])
   const [policies, setPolicies] = useState<PolicyInfo[]>([])
@@ -23,13 +24,21 @@ export default function Devices({ notify }: Props) {
   const [drMap, setDrMap] = useState<Record<string, DeviceRoutingEntry>>({})
   const [devFailover, setDevFailover] = useState(false)
   const [filter, setFilter] = useState('')
+  const [statusFilter, setStatusFilter] = useState<'all' | 'online' | 'offline'>('all')
+  const [offlineExpanded, setOfflineExpanded] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [limit, setLimit] = useState(25)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
-  const [batchPolicy, setBatchPolicy] = useState('')
-  const [batchSpeed, setBatchSpeed] = useState(0)
-  const [showOffline, setShowOffline] = useState(true)
+
+  // Сортировка колонок
+  const [sortCol, setSortCol] = useState<SortColumn | null>(null)
+  const [sortAsc, setSortAsc] = useState(true)
+
+  // Модальные окна массовых действий
+  const [batchPolicyOpen, setBatchPolicyOpen] = useState(false)
+  const [batchServerOpen, setBatchServerOpen] = useState(false)
+
+  // Модальное окно резервирования (⚙ Edit)
   const [drModal, setDrModal] = useState<{
     ip: string
     name: string
@@ -73,14 +82,99 @@ export default function Devices({ notify }: Props) {
     return m
   }, [routing])
 
-  const filtered = useMemo(() => {
-    const q = filter.trim().toLowerCase()
-    return devices.filter(
-      (d) =>
-        (showOffline || d.online || d.is_current_device) &&
-        (!q || d.name.toLowerCase().includes(q) || d.ip.includes(q) || d.mac.includes(q)),
-    )
-  }, [devices, filter, showOffline])
+  // Поиск по имени, IP, MAC
+  const q = filter.trim().toLowerCase()
+  const matchesSearch = useCallback(
+    (d: DeviceInfo) =>
+      !q ||
+      d.name.toLowerCase().includes(q) ||
+      d.ip.includes(q) ||
+      d.mac.toLowerCase().includes(q),
+    [q],
+  )
+
+  const onlineTotal = useMemo(() => devices.filter((d) => d.online || d.is_current_device).length, [devices])
+  const offlineTotal = useMemo(() => devices.filter((d) => !d.online && !d.is_current_device).length, [devices])
+
+  const onlineDevices = useMemo(
+    () => devices.filter((d) => (d.online || d.is_current_device) && matchesSearch(d)),
+    [devices, matchesSearch],
+  )
+  const offlineDevices = useMemo(
+    () => devices.filter((d) => !d.online && !d.is_current_device && matchesSearch(d)),
+    [devices, matchesSearch],
+  )
+
+  // Функция сортировки
+  const sortDevices = useCallback(
+    (list: DeviceInfo[]) => {
+      if (!sortCol) return list
+      return [...list].sort((a, b) => {
+        if (sortCol === 'device') {
+          return sortAsc ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name)
+        }
+        if (sortCol === 'ip') {
+          const pa = a.ip.split('.').map(Number)
+          const pb = b.ip.split('.').map(Number)
+          for (let i = 0; i < 4; i++) {
+            if ((pa[i] || 0) !== (pb[i] || 0)) {
+              return sortAsc ? (pa[i] || 0) - (pb[i] || 0) : (pb[i] || 0) - (pa[i] || 0)
+            }
+          }
+          return 0
+        }
+        if (sortCol === 'policy') {
+          const pa = (a.policy_name || a.policy).toLowerCase()
+          const pb = (b.policy_name || b.policy).toLowerCase()
+          return sortAsc ? pa.localeCompare(pb) : pb.localeCompare(pa)
+        }
+        if (sortCol === 'speed') {
+          return sortAsc
+            ? a.speed_limit_kbps - b.speed_limit_kbps
+            : b.speed_limit_kbps - a.speed_limit_kbps
+        }
+        if (sortCol === 'server') {
+          const sa = (serverByIp.get(a.ip) || '').toLowerCase()
+          const sb = (serverByIp.get(b.ip) || '').toLowerCase()
+          return sortAsc ? sa.localeCompare(sb) : sb.localeCompare(sa)
+        }
+        return 0
+      })
+    },
+    [sortCol, sortAsc, serverByIp],
+  )
+
+  const sortedOnline = useMemo(() => sortDevices(onlineDevices), [onlineDevices, sortDevices])
+  const sortedOffline = useMemo(() => sortDevices(offlineDevices), [offlineDevices, sortDevices])
+
+  // Превью имён в аккордеоне офлайн-устройств
+  const offlinePreview = useMemo(() => {
+    if (offlineDevices.length === 0) return 'No offline devices'
+    const names = offlineDevices.map((d) => d.name)
+    if (names.length <= 3) return names.join(', ')
+    return `${names.slice(0, 3).join(', ')} and ${names.length - 3} more...`
+  }, [offlineDevices])
+
+  // Выбор всех устройств в текущем виде
+  const visibleDevices = useMemo(() => {
+    if (statusFilter === 'online') return sortedOnline
+    if (statusFilter === 'offline') return sortedOffline
+    return offlineExpanded ? [...sortedOnline, ...sortedOffline] : sortedOnline
+  }, [statusFilter, sortedOnline, sortedOffline, offlineExpanded])
+
+  const allVisibleSelected =
+    visibleDevices.length > 0 && visibleDevices.every((d) => selected.has(d.mac))
+
+  const toggleSelectAll = (on: boolean) => {
+    setSelected((prev) => {
+      const next = new Set(prev)
+      for (const d of visibleDevices) {
+        if (on) next.add(d.mac)
+        else next.delete(d.mac)
+      }
+      return next
+    })
+  }
 
   const toggleSelect = (mac: string, on: boolean) => {
     setSelected((prev) => {
@@ -91,15 +185,28 @@ export default function Devices({ notify }: Props) {
     })
   }
 
+  const handleSort = (col: SortColumn) => {
+    if (sortCol === col) {
+      if (sortAsc) setSortAsc(false)
+      else {
+        setSortCol(null)
+        setSortAsc(true)
+      }
+    } else {
+      setSortCol(col)
+      setSortAsc(true)
+    }
+  }
+
   const applyPolicy = async (macs: string[], policy_id: string) => {
     if (!macs.length || !policy_id) return
     setBusy(true)
     try {
       const data = await apiPost<{ applied: number; errors: string[] }>('devices/policy', { macs, policy_id })
-      notify(`Политика применена к ${data.applied} устр.${data.errors.length ? `, ошибок: ${data.errors.length}` : ''}`, data.errors.length > 0)
+      notify(`Policy applied to ${data.applied} device(s)${data.errors.length ? `, errors: ${data.errors.length}` : ''}`, data.errors.length > 0)
       load()
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка', true)
+      notify(e instanceof Error ? e.message : 'Error applying policy', true)
     } finally {
       setBusy(false)
     }
@@ -110,10 +217,10 @@ export default function Devices({ notify }: Props) {
     setBusy(true)
     try {
       const data = await apiPost<{ applied: number }>('devices/speed', { macs, kbps })
-      notify(`Скорость применена к ${data.applied} устр.`)
+      notify(`Speed limit applied to ${data.applied} device(s)`)
       load()
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка', true)
+      notify(e instanceof Error ? e.message : 'Error applying speed', true)
     } finally {
       setBusy(false)
     }
@@ -125,20 +232,19 @@ export default function Devices({ notify }: Props) {
       const data = await apiPost<{ applied: number }>('routing', {
         assignments: [{ ip, name, server: server === 'default' ? null : server }],
       })
-      notify(`Маршрутизация обновлена (${data.applied})`)
+      notify(`Routing updated (${data.applied})`)
       load()
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка', true)
+      notify(e instanceof Error ? e.message : 'Error updating routing', true)
     } finally {
       setBusy(false)
     }
   }
 
-  // Подпись сервера с пингом для дропдаунов.
   const serverLabel = (id: string) => {
     const s = servers.find((x) => x.id === id)
     if (!s) return id
-    return s.ping_ms > 0 ? `${s.name} · ${s.ping_ms} мс` : `${s.name} · —`
+    return s.ping_ms > 0 ? `${s.name} · ${s.ping_ms} ms` : `${s.name} · —`
   }
 
   const openDrModal = (d: DeviceInfo, assigned?: string) => {
@@ -163,125 +269,392 @@ export default function Devices({ notify }: Props) {
         ping_threshold_ms: drModal.threshold,
         auto_restore: drModal.autoRestore,
       })
-      notify(drModal.servers.length ? `Цепочка сохранена: ${drModal.servers.length} сервер(ов)` : 'Маршрутизация снята')
+      notify(drModal.servers.length ? `Failover chain saved: ${drModal.servers.length} server(s)` : 'Routing cleared')
       setDrModal(null)
       load()
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка сохранения', true)
+      notify(e instanceof Error ? e.message : 'Error saving failover chain', true)
     } finally {
       setBusy(false)
     }
   }
 
-  const toggleDevFailover = async (on: boolean) => {
-    setDevFailover(on)
+  // Пакетные действия
+  const handleBatchPolicyApply = async (policyId: string) => {
+    await applyPolicy([...selected], policyId)
+    setBatchPolicyOpen(false)
+    setSelected(new Set())
+  }
+
+  const handleBatchServerApply = async (serverId: string) => {
+    setBusy(true)
     try {
-      await apiPut('settings', { failover: { device_failover_enabled: on } })
-      notify(on ? 'Per-device failover включён' : 'Per-device failover выключен')
+      const assignments = [...selected]
+        .map((mac) => {
+          const d = devices.find((x) => x.mac === mac)
+          return {
+            ip: d ? d.ip : '',
+            name: d ? d.name : '',
+            server: serverId === 'default' ? null : serverId,
+          }
+        })
+        .filter((a) => !!a.ip)
+      await apiPost('routing', { assignments })
+      notify(`Server updated for ${assignments.length} device(s)`)
+      setBatchServerOpen(false)
+      setSelected(new Set())
+      load()
     } catch (e) {
-      setDevFailover(!on)
-      notify(e instanceof Error ? e.message : 'Ошибка', true)
+      notify(e instanceof Error ? e.message : 'Error changing server', true)
+    } finally {
+      setBusy(false)
     }
   }
 
-  const selectedMacs = [...selected]
+  const handleBatchDelete = async () => {
+    if (!confirm(`Reset custom server routing for ${selected.size} selected device(s)?`)) return
+    setBusy(true)
+    try {
+      const assignments = [...selected]
+        .map((mac) => {
+          const d = devices.find((x) => x.mac === mac)
+          return {
+            ip: d ? d.ip : '',
+            name: d ? d.name : '',
+            server: null,
+          }
+        })
+        .filter((a) => !!a.ip)
+      await apiPost('routing', { assignments })
+      notify(`Routing reset for ${assignments.length} device(s)`)
+      setSelected(new Set())
+      load()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Error resetting routing', true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const sortIndicator = (col: SortColumn) => {
+    if (sortCol !== col) return ' ⇅'
+    return sortAsc ? ' ↑' : ' ↓'
+  }
 
   return (
-    <section className="card">
-      <div className="toolbar">
-        <input
-          className="input"
-          placeholder="Поиск: имя / IP / MAC…"
-          value={filter}
-          onChange={(e) => {
-            setFilter(e.target.value)
-            setLimit(25)
-          }}
-        />
-        <label className="check">
-          <input type="checkbox" checked={showOffline} onChange={(e) => setShowOffline(e.target.checked)} />
-          показывать офлайн
-        </label>
-        <label className="check" title="Мониторинг цепочек сервер+резерв: смена сервера при отвале или пинге выше порога">
-          <input type="checkbox" checked={devFailover} onChange={(e) => toggleDevFailover(e.target.checked)} />
-          ⚡ failover устройств
-        </label>
-        <button className="btn" onClick={load} disabled={busy}>🔄 Обновить</button>
-        <span className="muted">{filtered.length} шт.</span>
+    <section className="devices-card">
+      {/* Шапка вкладки */}
+      <div className="devices-tab-bar">
+        <div className="devices-tab-title">Devices</div>
       </div>
 
-      {selectedMacs.length > 0 && (
-        <div className="batch-bar">
-          <b>Выбрано: {selectedMacs.length}</b>
-          <select className="select" value={batchPolicy} onChange={(e) => setBatchPolicy(e.target.value)}>
-            <option value="">— политика —</option>
-            {policies.map((p) => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </select>
-          <button className="btn sm" disabled={busy || !batchPolicy} onClick={() => applyPolicy(selectedMacs, batchPolicy)}>
-            Применить политику
+      <div className="devices-toolbar-wrap">
+        {/* Верхняя строка управления */}
+        <div className="devices-toolbar">
+          <div className="devices-search-box">
+            <span className="devices-search-icon">🔍</span>
+            <input
+              type="text"
+              className="devices-search-input"
+              placeholder="Search devices..."
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+          </div>
+
+          <div className="devices-filter-pills">
+            <button
+              type="button"
+              className={`devices-pill-btn ${statusFilter === 'online' ? 'active' : ''}`}
+              onClick={() => setStatusFilter('online')}
+            >
+              <span className="devices-pill-dot online" />
+              <span>Online</span>
+              <span className="devices-pill-count">{onlineTotal}</span>
+            </button>
+            <button
+              type="button"
+              className={`devices-pill-btn ${statusFilter === 'offline' ? 'active' : ''}`}
+              onClick={() => setStatusFilter('offline')}
+            >
+              <span className="devices-pill-dot offline" />
+              <span>Offline</span>
+              <span className="devices-pill-count">{offlineTotal}</span>
+            </button>
+            <button
+              type="button"
+              className={`devices-pill-btn ${statusFilter === 'all' ? 'active' : ''}`}
+              onClick={() => setStatusFilter('all')}
+            >
+              <span>All</span>
+              <span className="devices-pill-count">{devices.length}</span>
+            </button>
+          </div>
+
+          <button
+            type="button"
+            className="devices-refresh-btn"
+            onClick={load}
+            disabled={busy}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
+            </svg>
+            <span>Refresh</span>
           </button>
-          <select className="select" value={batchSpeed} onChange={(e) => setBatchSpeed(Number(e.target.value))}>
-            {SPEED_PRESETS.map((s) => (
-              <option key={s.value} value={s.value}>{s.label}</option>
-            ))}
-          </select>
-          <button className="btn sm" disabled={busy} onClick={() => applySpeed(selectedMacs, batchSpeed)}>
-            Применить скорость
-          </button>
-          <button className="btn sm ghost" onClick={() => setSelected(new Set())}>Снять выбор</button>
         </div>
-      )}
+
+        {/* Сводка количества */}
+        <div className="devices-summary-text">
+          {onlineTotal} online / {offlineTotal} offline out of {devices.length} devices
+        </div>
+      </div>
 
       {loading ? (
-        <p className="muted">Загрузка…</p>
+        <p className="muted" style={{ padding: '20px 18px' }}>Загрузка устройств…</p>
       ) : (
-        <>
-          <table className="devices">
+        <div className="devices-table-wrap">
+          <table className="devices-table">
             <thead>
               <tr>
-                <th></th>
-                <th>Устройство</th>
-                <th>IP</th>
-                <th>Политика</th>
-                <th>Скорость</th>
-                <th>Сервер (раздельная)</th>
+                <th>
+                  <input
+                    type="checkbox"
+                    checked={allVisibleSelected}
+                    onChange={(e) => toggleSelectAll(e.target.checked)}
+                  />
+                </th>
+                <th className="sortable" onClick={() => handleSort('device')}>
+                  Device{sortIndicator('device')}
+                </th>
+                <th className="sortable" onClick={() => handleSort('ip')}>
+                  IP{sortIndicator('ip')}
+                </th>
+                <th className="sortable" onClick={() => handleSort('policy')}>
+                  Policy{sortIndicator('policy')}
+                </th>
+                <th className="sortable" onClick={() => handleSort('speed')}>
+                  Speed{sortIndicator('speed')}
+                </th>
+                <th className="sortable" onClick={() => handleSort('server')}>
+                  Server{sortIndicator('server')}
+                </th>
+                <th />
               </tr>
             </thead>
             <tbody>
-              {filtered.slice(0, limit).map((d) => {
-                const assigned = serverByIp.get(d.ip)
-                return (
-                  <DeviceRow
-                    key={d.mac}
-                    d={d}
-                    policies={policies}
-                    servers={servers}
-                    assigned={assigned}
-                    drEntry={drMap[d.ip]}
-                    devFailover={devFailover}
-                    busy={busy}
-                    selected={selected.has(d.mac)}
-                    onToggleSelect={toggleSelect}
-                    applyPolicy={applyPolicy}
-                    applySpeed={applySpeed}
-                    applyServer={applyServer}
-                    serverLabel={serverLabel}
-                    openDrModal={openDrModal}
-                  />
-                )
-              })}
+              {/* Секция Online */}
+              {(statusFilter === 'all' || statusFilter === 'online') && (
+                <>
+                  <tr>
+                    <td colSpan={7} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
+                      <span className="devices-group-header online">
+                        Online ({sortedOnline.length})
+                      </span>
+                    </td>
+                  </tr>
+                  {sortedOnline.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="muted small" style={{ padding: '10px 14px' }}>
+                        Нет устройств в сети
+                      </td>
+                    </tr>
+                  )}
+                  {sortedOnline.map((d) => (
+                    <DeviceRow
+                      key={d.mac}
+                      d={d}
+                      policies={policies}
+                      servers={servers}
+                      assigned={serverByIp.get(d.ip)}
+                      drEntry={drMap[d.ip]}
+                      devFailover={devFailover}
+                      busy={busy}
+                      selected={selected.has(d.mac)}
+                      onToggleSelect={toggleSelect}
+                      applyPolicy={applyPolicy}
+                      applySpeed={applySpeed}
+                      applyServer={applyServer}
+                      serverLabel={serverLabel}
+                      openDrModal={openDrModal}
+                    />
+                  ))}
+                </>
+              )}
+
+              {/* Секция Offline */}
+              {statusFilter === 'all' && (
+                <>
+                  <tr>
+                    <td colSpan={7} style={{ padding: '16px 14px 4px', borderBottom: 'none' }}>
+                      <div className="offline-section-title">OFFLINE SECTION</div>
+                      <div
+                        className="offline-accordion-row"
+                        onClick={() => setOfflineExpanded((prev) => !prev)}
+                      >
+                        <span className={`offline-accordion-chevron ${offlineExpanded ? 'expanded' : ''}`}>
+                          {offlineExpanded ? '⌄' : '›'}
+                        </span>
+                        <div className="offline-accordion-info">
+                          <span className="offline-accordion-heading">
+                            Offline ({sortedOffline.length})
+                          </span>
+                          <span className="offline-accordion-preview">
+                            {offlinePreview}
+                          </span>
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                  {offlineExpanded &&
+                    sortedOffline.map((d) => (
+                      <DeviceRow
+                        key={d.mac}
+                        d={d}
+                        policies={policies}
+                        servers={servers}
+                        assigned={serverByIp.get(d.ip)}
+                        drEntry={drMap[d.ip]}
+                        devFailover={devFailover}
+                        busy={busy}
+                        selected={selected.has(d.mac)}
+                        onToggleSelect={toggleSelect}
+                        applyPolicy={applyPolicy}
+                        applySpeed={applySpeed}
+                        applyServer={applyServer}
+                        serverLabel={serverLabel}
+                        openDrModal={openDrModal}
+                      />
+                    ))}
+                </>
+              )}
+
+              {statusFilter === 'offline' && (
+                <>
+                  <tr>
+                    <td colSpan={7} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
+                      <span className="devices-group-header">
+                        Offline ({sortedOffline.length})
+                      </span>
+                    </td>
+                  </tr>
+                  {sortedOffline.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="muted small" style={{ padding: '10px 14px' }}>
+                        Нет офлайн-устройств
+                      </td>
+                    </tr>
+                  )}
+                  {sortedOffline.map((d) => (
+                    <DeviceRow
+                      key={d.mac}
+                      d={d}
+                      policies={policies}
+                      servers={servers}
+                      assigned={serverByIp.get(d.ip)}
+                      drEntry={drMap[d.ip]}
+                      devFailover={devFailover}
+                      busy={busy}
+                      selected={selected.has(d.mac)}
+                      onToggleSelect={toggleSelect}
+                      applyPolicy={applyPolicy}
+                      applySpeed={applySpeed}
+                      applyServer={applyServer}
+                      serverLabel={serverLabel}
+                      openDrModal={openDrModal}
+                    />
+                  ))}
+                </>
+              )}
             </tbody>
           </table>
-          {filtered.length > limit && (
-            <button className="btn wide" onClick={() => setLimit(limit + 25)}>
-              Показать ещё ({filtered.length - limit})
-            </button>
-          )}
-        </>
+        </div>
       )}
 
+      {/* Плавающая нижняя панель действий при выборе устройств */}
+      {selected.size > 0 && (
+        <div className="floating-batch-bar">
+          <span className="floating-batch-text">{selected.size} selected</span>
+          <button
+            type="button"
+            className="floating-batch-btn"
+            onClick={() => setBatchPolicyOpen(true)}
+          >
+            Change Policy
+          </button>
+          <button
+            type="button"
+            className="floating-batch-btn"
+            onClick={() => setBatchServerOpen(true)}
+          >
+            Change Server
+          </button>
+          <button
+            type="button"
+            className="floating-batch-btn danger"
+            onClick={handleBatchDelete}
+          >
+            Delete
+          </button>
+        </div>
+      )}
+
+      {/* Модальное окно смены политики для выбранных */}
+      {batchPolicyOpen && (
+        <div className="modal-overlay" onClick={() => setBatchPolicyOpen(false)}>
+          <div className="modal sm" onClick={(e) => e.stopPropagation()}>
+            <h2>Change Policy ({selected.size} devices)</h2>
+            <div className="modal-list">
+              {policies.map((p) => (
+                <button
+                  key={p.id}
+                  className="btn wide"
+                  style={{ textAlign: 'left', marginBottom: 4 }}
+                  onClick={() => handleBatchPolicyApply(p.id)}
+                >
+                  {p.name}
+                </button>
+              ))}
+            </div>
+            <div className="modal-actions">
+              <button className="btn" onClick={() => setBatchPolicyOpen(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Модальное окно смены сервера для выбранных */}
+      {batchServerOpen && (
+        <div className="modal-overlay" onClick={() => setBatchServerOpen(false)}>
+          <div className="modal sm" onClick={(e) => e.stopPropagation()}>
+            <h2>Change Server ({selected.size} devices)</h2>
+            <div className="modal-list">
+              <button
+                className="btn wide"
+                style={{ textAlign: 'left', marginBottom: 4 }}
+                onClick={() => handleBatchServerApply('default')}
+              >
+                Default (PROXY)
+              </button>
+              {servers.map((s) => (
+                <button
+                  key={s.id}
+                  className="btn wide"
+                  style={{ textAlign: 'left', marginBottom: 4 }}
+                  onClick={() => handleBatchServerApply(s.id)}
+                >
+                  {s.name} · {s.ping_ms > 0 ? `${s.ping_ms} ms` : '—'}
+                </button>
+              ))}
+            </div>
+            <div className="modal-actions">
+              <button className="btn" onClick={() => setBatchServerOpen(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Модальное окно резервирования и failover устройства */}
       {drModal && (
         <DeviceRoutingModal
           modal={drModal}
@@ -297,5 +670,3 @@ export default function Devices({ notify }: Props) {
     </section>
   )
 }
-
-

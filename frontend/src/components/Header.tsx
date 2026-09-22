@@ -213,9 +213,11 @@ export default function Header({ status, notify, refresh, onSwitchTab }: HeaderP
   const cpuPercent = currentMetrics?.cpu_percent ?? 0
   const appMemMb = currentMetrics?.app_memory_mb ?? 0
   const appCpu = currentMetrics?.app_cpu_percent ?? 0
+  const coreMemMb = currentMetrics?.core_memory_mb ?? 0
+  const totalXkeenMem = currentMetrics?.total_xkeen_memory_mb ?? (appMemMb + coreMemMb)
 
   const mihomoVersion = status?.mihomo_version || 'v1.19.29'
-  const appVersion = status?.version ? status.version.replace(/^v/, '') : '1.0.24'
+  const appVersion = status?.version ? status.version.replace(/^v/, '') : '1.0.25'
 
   const handleRestart = async () => {
     if (pending) return
@@ -267,15 +269,15 @@ export default function Header({ status, notify, refresh, onSwitchTab }: HeaderP
                 <IconGauge />
                 <span>{cpuPercent}%</span>
               </span>
-              {appMemMb > 0 && (
+              {(totalXkeenMem > 0 || appMemMb > 0) && (
                 <>
                   <span className="status-stat-sep">|</span>
                   <span
                     className="status-stat"
-                    title={`Потребление процесса XKeen Route: ${appMemMb} МБ RAM (RSS), CPU: ${appCpu}%`}
+                    title={`Потребление XKeen: всего ${totalXkeenMem > 0 ? totalXkeenMem : appMemMb} МБ RAM (Панель XR: ${appMemMb} МБ, Ядро Mihomo: ${coreMemMb > 0 ? coreMemMb + ' МБ' : '—'}), CPU: ${appCpu}%`}
                   >
-                    <span className="status-xr-label">XR:</span>
-                    <span>{appMemMb} МБ</span>
+                    <span className="status-xr-label">XKeen:</span>
+                    <span>{totalXkeenMem > 0 ? totalXkeenMem : appMemMb} МБ</span>
                   </span>
                 </>
               )}

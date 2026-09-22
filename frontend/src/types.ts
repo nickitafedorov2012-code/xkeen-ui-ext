@@ -4,6 +4,8 @@ export interface SystemStats {
   memory_total_mb: number
   app_memory_mb?: number
   app_cpu_percent?: number
+  core_memory_mb?: number
+  total_xkeen_memory_mb?: number
 }
 
 export interface StatusInfo {
