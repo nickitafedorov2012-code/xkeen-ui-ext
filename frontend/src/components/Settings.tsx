@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
 import { pingClass, type AppSettings, type ServerInfo, type StatusInfo } from '../types'
 
@@ -28,8 +28,11 @@ export default function Settings({ notify, status, refresh }: Props) {
   const [logsBusy, setLogsBusy] = useState(false)
   const [logsAuto, setLogsAuto] = useState(false)
   const [logsLive, setLogsLive] = useState(false)
-  // --- Глобальная цепочка приоритетов ---
-  const [chainBusy, setChainBusy] = useState(false)
+  // --- Автосохранение failover ---
+  const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const initialFailoverRef = useRef<string | null>(null)
+  const autoSaveTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const savedTimerRef = useRef<NodeJS.Timeout | null>(null)
   // --- Обновление панели ---
   interface UpdateInfo { current: string; latest: string; update_available: boolean; notes: string[] }
   const [upd, setUpd] = useState<UpdateInfo | null>(null)
@@ -148,6 +151,68 @@ export default function Settings({ notify, status, refresh }: Props) {
     }
   }, [logsLive])
 
+  const failoverJson = settings ? JSON.stringify(settings.failover) : ''
+
+  useEffect(() => {
+    if (!settings) return
+
+    // Инициализация при первой загрузке: фиксируем начальное состояние без сохранения
+    if (initialFailoverRef.current === null) {
+      initialFailoverRef.current = failoverJson
+      return
+    }
+
+    // Если настройки failover не менялись, ничего не сохраняем
+    if (failoverJson === initialFailoverRef.current) {
+      return
+    }
+
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current)
+    }
+
+    setAutoSaveStatus('saving')
+
+    autoSaveTimerRef.current = setTimeout(async () => {
+      try {
+        const currentFailover = JSON.parse(failoverJson)
+        await apiPost<{ message?: string }>('settings/priority', {
+          server_ids: currentFailover.priority_chain ?? [],
+          enabled: currentFailover.enabled,
+        })
+        await apiPut('settings', {
+          failover: currentFailover,
+        })
+        initialFailoverRef.current = failoverJson
+        setAutoSaveStatus('saved')
+        if (savedTimerRef.current) clearTimeout(savedTimerRef.current)
+        savedTimerRef.current = setTimeout(() => {
+          setAutoSaveStatus('idle')
+        }, 3000)
+        refresh?.()
+      } catch (e) {
+        setAutoSaveStatus('error')
+        notify(e instanceof Error ? e.message : 'Ошибка автосохранения Failover', true)
+      }
+    }, 400)
+
+    return () => {
+      if (autoSaveTimerRef.current) {
+        clearTimeout(autoSaveTimerRef.current)
+        try {
+          const currentFailover = JSON.parse(failoverJson)
+          apiPost('settings/priority', {
+            server_ids: currentFailover.priority_chain ?? [],
+            enabled: currentFailover.enabled,
+          })
+          apiPut('settings', {
+            failover: currentFailover,
+          })
+        } catch {}
+      }
+    }
+  }, [failoverJson, refresh, notify])
+
   if (!settings) return <section className="card"><p className="muted">Загрузка…</p></section>
 
   const patch = (fn: (s: AppSettings) => void) => {
@@ -157,12 +222,25 @@ export default function Settings({ notify, status, refresh }: Props) {
   }
 
   const toggleFailoverEnabled = async (enabled: boolean) => {
-    patch((s) => (s.failover.enabled = enabled))
+    const copy: AppSettings = JSON.parse(JSON.stringify(settings))
+    copy.failover.enabled = enabled
+    setSettings(copy)
+    initialFailoverRef.current = JSON.stringify(copy.failover)
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current)
+    setAutoSaveStatus('saving')
     try {
-      await apiPut('settings', { failover: { enabled } })
+      await apiPost('settings/priority', {
+        server_ids: copy.failover.priority_chain ?? [],
+        enabled,
+      })
+      await apiPut('settings', { failover: copy.failover })
+      setAutoSaveStatus('saved')
       notify(enabled ? 'Failover включён' : 'Failover выключен')
+      if (savedTimerRef.current) clearTimeout(savedTimerRef.current)
+      savedTimerRef.current = setTimeout(() => setAutoSaveStatus('idle'), 3000)
       refresh?.()
     } catch (e) {
+      setAutoSaveStatus('error')
       patch((s) => (s.failover.enabled = !enabled))
       notify(e instanceof Error ? e.message : 'Ошибка переключения failover', true)
     }
@@ -201,32 +279,6 @@ export default function Settings({ notify, status, refresh }: Props) {
     if (j < 0 || j >= next.length) return
     ;[next[idx], next[j]] = [next[j], next[idx]]
     patch((s) => (s.failover.priority_chain = next))
-  }
-
-  const saveFailover = async () => {
-    if (!settings) return
-    setChainBusy(true)
-    try {
-      const data = await apiPost<{ message?: string }>('settings/priority', {
-        server_ids: chain,
-        enabled: settings.failover.enabled,
-      })
-      await apiPut('settings', {
-        failover: {
-          enabled: settings.failover.enabled,
-          ping_threshold_ms: settings.failover.ping_threshold_ms,
-          auto_restore_priority: settings.failover.auto_restore_priority,
-          interval_secs: settings.failover.interval_secs,
-          priority_chain: chain,
-        },
-      })
-      notify(data.message || 'Настройки Failover сохранены')
-      refresh?.()
-    } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка сохранения настроек Failover', true)
-    } finally {
-      setChainBusy(false)
-    }
   }
 
   const addPreset = (domain: string) => {
@@ -333,7 +385,14 @@ export default function Settings({ notify, status, refresh }: Props) {
     <div className="grid2">
       <section className="card">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-          <h2 style={{ margin: 0 }}>Failover</h2>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <h2 style={{ margin: 0 }}>Failover</h2>
+            {autoSaveStatus === 'saving' && (
+              <span className="badge" style={{ borderColor: 'rgba(0, 211, 242, 0.4)', color: '#00D3F2', fontSize: 11 }}>
+                сохранение…
+              </span>
+            )}
+          </div>
           <span className={`badge ${settings.failover.enabled ? 'badge-online' : ''}`}>
             {settings.failover.enabled ? '🟢 включён' : '⚪ выключен'}
           </span>
@@ -413,11 +472,30 @@ export default function Settings({ notify, status, refresh }: Props) {
           <input className="input" type="number" min={15} max={3600} value={settings.failover.interval_secs}
             onChange={(e) => patch((s) => (s.failover.interval_secs = Number(e.target.value) || 60))} />
         </label>
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center', marginTop: 10, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center', marginTop: 12, flexWrap: 'wrap' }}>
           <button className="btn" onClick={testCheck}>🔍 Тестовая проверка сейчас</button>
-          <button className="btn primary" disabled={chainBusy} onClick={saveFailover}>
-            {chainBusy ? 'Сохранение…' : '💾 Сохранить настройки Failover'}
-          </button>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+            {autoSaveStatus === 'saving' && (
+              <span style={{ color: '#00D3F2', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                ⏳ Сохранение…
+              </span>
+            )}
+            {autoSaveStatus === 'saved' && (
+              <span style={{ color: '#34d399', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                ✓ Сохранено автоматически
+              </span>
+            )}
+            {autoSaveStatus === 'error' && (
+              <span style={{ color: '#f87171', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                ⚠️ Ошибка автосохранения
+              </span>
+            )}
+            {autoSaveStatus === 'idle' && (
+              <span className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                ⚡ Автосохранение активно
+              </span>
+            )}
+          </div>
         </div>
       </section>
 

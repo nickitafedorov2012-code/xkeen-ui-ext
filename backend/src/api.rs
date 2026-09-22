@@ -88,10 +88,11 @@ pub async fn put_settings(
     let _cfg_guard = state.config_lock.lock().await;
     let mut merged = serde_json::to_value(&**state.config.read().await).unwrap_or_default();
     crate::config::merge_value(&mut merged, &body);
-    let new_cfg: config::AppConfig = match serde_json::from_value(merged) {
+    let mut new_cfg: config::AppConfig = match serde_json::from_value(merged) {
         Ok(c) => c,
         Err(e) => return api_err(format!("Некорректные настройки: {}", e)),
     };
+    new_cfg.failover.migrate_priority();
     if let Err(e) = config::save(&state.config_path, &new_cfg).await {
         return api_err(format!("Ошибка сохранения конфига: {}", e));
     }
