@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
 import { pingClass, type AppSettings, type ServerInfo, type StatusInfo } from '../types'
+import NumberInput from './NumberInput'
 
 interface Props {
   notify: (msg: string, isError?: boolean) => void
@@ -405,8 +406,14 @@ export default function Settings({ notify, status, refresh }: Props) {
           </div>
         </div>
         <label className="row"><span>Порог пинга, мс</span>
-          <input className="input" type="number" min={50} max={5000} value={settings.failover.ping_threshold_ms}
-            onChange={(e) => patch((s) => (s.failover.ping_threshold_ms = Number(e.target.value) || 300))} />
+          <NumberInput
+            min={50}
+            max={5000}
+            step={50}
+            fallback={300}
+            value={settings.failover.ping_threshold_ms}
+            onChange={(val) => patch((s) => (s.failover.ping_threshold_ms = val))}
+          />
         </label>
         <div className="row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
           <span>Цепочка приоритетов (первый — основной)</span>
@@ -484,8 +491,14 @@ export default function Settings({ notify, status, refresh }: Props) {
           </div>
         </div>
         <label className="row"><span>Интервал проверки, сек</span>
-          <input className="input" type="number" min={15} max={3600} value={settings.failover.interval_secs}
-            onChange={(e) => patch((s) => (s.failover.interval_secs = Number(e.target.value) || 60))} />
+          <NumberInput
+            min={15}
+            max={3600}
+            step={5}
+            fallback={60}
+            value={settings.failover.interval_secs}
+            onChange={(val) => patch((s) => (s.failover.interval_secs = val))}
+          />
         </label>
         <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center', marginTop: 12, flexWrap: 'wrap' }}>
           <button className="btn" onClick={testCheck}>🔍 Тестовая проверка сейчас</button>
@@ -515,7 +528,13 @@ export default function Settings({ notify, status, refresh }: Props) {
           <input className="input" value={settings.rci.host} onChange={(e) => patch((s) => (s.rci.host = e.target.value))} />
         </label>
         <label className="row"><span>Порт</span>
-          <input className="input" type="number" value={settings.rci.port} onChange={(e) => patch((s) => (s.rci.port = Number(e.target.value) || 79))} />
+          <NumberInput
+            min={1}
+            max={65535}
+            fallback={79}
+            value={settings.rci.port}
+            onChange={(val) => patch((s) => (s.rci.port = val))}
+          />
         </label>
         <label className="row"><span>Логин</span>
           <input className="input" value={settings.rci.login} onChange={(e) => patch((s) => (s.rci.login = e.target.value))} />
@@ -536,7 +555,13 @@ export default function Settings({ notify, status, refresh }: Props) {
           <input className="input" value={settings.mihomo.host} onChange={(e) => patch((s) => (s.mihomo.host = e.target.value))} />
         </label>
         <label className="row"><span>Порт</span>
-          <input className="input" type="number" value={settings.mihomo.port} onChange={(e) => patch((s) => (s.mihomo.port = Number(e.target.value) || 9090))} />
+          <NumberInput
+            min={1}
+            max={65535}
+            fallback={9090}
+            value={settings.mihomo.port}
+            onChange={(val) => patch((s) => (s.mihomo.port = val))}
+          />
         </label>
         <label className="row"><span>Secret</span>
           <input className="input" value={settings.mihomo.secret} onChange={(e) => patch((s) => (s.mihomo.secret = e.target.value))} />
@@ -558,8 +583,14 @@ export default function Settings({ notify, status, refresh }: Props) {
       <section className="card">
         <h2>Панель</h2>
         <label className="row"><span>Интервал автообновления, сек</span>
-          <input className="input" type="number" min={3} max={300} value={settings.refresh_interval_sec}
-            onChange={(e) => patch((s) => (s.refresh_interval_sec = Number(e.target.value) || 10))} />
+          <NumberInput
+            min={3}
+            max={300}
+            step={1}
+            fallback={10}
+            value={settings.refresh_interval_sec}
+            onChange={(val) => patch((s) => (s.refresh_interval_sec = val))}
+          />
         </label>
         <label className="row"><span>Уровень логов</span>
           <select className="select" value={settings.logs?.level ?? 'info'}

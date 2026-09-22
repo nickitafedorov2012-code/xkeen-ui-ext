@@ -1,4 +1,5 @@
 import { pingClass, type ServerInfo } from '../types'
+import NumberInput from './NumberInput'
 
 export interface DrModalState {
   ip: string
@@ -88,14 +89,13 @@ export default function DeviceRoutingModal({
         <div className="modal-actions" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
           <label className="check" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             Порог пинга, мс:
-            <input
-              className="input"
-              type="number"
-              min={50}
+            <NumberInput
+              min={0}
               max={5000}
               step={50}
+              fallback={0}
               value={modal.threshold}
-              onChange={(e) => onChange({ ...modal, threshold: Number(e.target.value) || 0 })}
+              onChange={(val) => onChange({ ...modal, threshold: val })}
             />
           </label>
           <label className="check" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
