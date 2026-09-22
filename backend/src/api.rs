@@ -13,7 +13,13 @@ pub async fn status(State(state): State<AppState>) -> Response {
     let active = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain)
         .await
         .ok()
-        .and_then(|servers| servers.into_iter().find(|s| s.is_active))
+        .and_then(|servers| {
+            servers
+                .iter()
+                .find(|s| s.is_active && s.id != "Fastest" && s.id != "Fallback")
+                .or_else(|| servers.iter().find(|s| s.is_active))
+                .cloned()
+        })
         .map(|s| json!({ "id": s.id, "name": s.name, "ping_ms": s.ping_ms }));
 
     api_ok(json!({
@@ -26,10 +32,15 @@ pub async fn status(State(state): State<AppState>) -> Response {
         "failover": {
             "enabled": cfg.failover.enabled,
             "ping_threshold_ms": cfg.failover.ping_threshold_ms,
-            "priority_server": cfg.failover.priority_server,
+            "priority_server": if !cfg.failover.priority_server.is_empty() {
+                cfg.failover.priority_server.clone()
+            } else {
+                cfg.failover.priority_chain.first().cloned().unwrap_or_default()
+            },
             "priority_chain": cfg.failover.priority_chain,
             "auto_restore_priority": cfg.failover.auto_restore_priority,
             "interval_secs": cfg.failover.interval_secs,
+            "device_failover_enabled": cfg.failover.device_failover_enabled,
         },
         "refresh_interval_sec": cfg.refresh_interval_sec,
     }))
@@ -169,6 +180,8 @@ pub struct PriorityReq {
     /// Цепочка приоритетов: [основной, резерв1, ...]. Пустой массив = снять.
     #[serde(default)]
     pub server_ids: Vec<String>,
+    /// Опционально: включить/выключить failover вместе с цепочкой
+    pub enabled: Option<bool>,
 }
 
 /// POST /api/settings/priority — задать/снять глобальную цепочку приоритетов.
@@ -188,6 +201,9 @@ pub async fn set_priority(State(state): State<AppState>, Json(req): Json<Priorit
     // trim() ломал совпадение с id серверов (эмодзи/пробелы в именах).
     cfg.failover.priority_chain = chain;
     cfg.failover.migrate_priority();
+    if let Some(en) = req.enabled {
+        cfg.failover.enabled = en;
+    }
     let message = if cfg.failover.priority_chain.is_empty() {
         "Приоритет снят".to_string()
     } else {

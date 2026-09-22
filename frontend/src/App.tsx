@@ -61,6 +61,9 @@ export default function App() {
   const switchTab = (t: TabId) => {
     setTab(t)
     history.replaceState(null, '', '#' + t)
+    if (t === 'dashboard' || t === 'settings') {
+      refresh()
+    }
   }
 
   const notify = useCallback((msg: string, error = false) => {
@@ -132,10 +135,10 @@ export default function App() {
 
       <main className="content">
         <ErrorBoundary>
-          {tab === 'dashboard' && <Dashboard status={status} notify={notify} />}
+          {tab === 'dashboard' && <Dashboard status={status} notify={notify} refresh={refresh} />}
           {tab === 'servers' && <Servers notify={notify} />}
           {tab === 'devices' && <Devices notify={notify} />}
-          {tab === 'settings' && <Settings notify={notify} status={status} />}
+          {tab === 'settings' && <Settings notify={notify} status={status} refresh={refresh} />}
           {tab === 'help' && <Help status={status} />}
         </ErrorBoundary>
       </main>

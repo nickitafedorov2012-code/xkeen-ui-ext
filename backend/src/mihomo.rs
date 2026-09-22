@@ -24,6 +24,12 @@ pub struct Server {
     pub ping_ms: i64,
 }
 
+impl AsRef<str> for Server {
+    fn as_ref(&self) -> &str {
+        &self.id
+    }
+}
+
 fn auth_header(secret: &str) -> Option<(&'static str, String)> {
     if secret.is_empty() {
         None
@@ -552,7 +558,7 @@ pub async fn switch_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &
     let target = match server_id.to_lowercase().as_str() {
         "fastest" => "Fastest".to_string(),
         "fallback" => "Fallback".to_string(),
-        _ => server_id.trim().to_string(),
+        _ => server_id.to_string(),
     };
     let proxies = get_proxies(http, cfg).await?;
     let mut groups: Vec<String> = Vec::new();

@@ -5,9 +5,10 @@ import type { AppSettings, ServerInfo, StatusInfo } from '../types'
 interface Props {
   notify: (msg: string, isError?: boolean) => void
   status?: StatusInfo | null
+  refresh?: () => void
 }
 
-export default function Settings({ notify, status }: Props) {
+export default function Settings({ notify, status, refresh }: Props) {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [servers, setServers] = useState<ServerInfo[]>([])
   const [saving, setSaving] = useState(false)
@@ -155,11 +156,24 @@ export default function Settings({ notify, status }: Props) {
     setSettings(copy)
   }
 
+  const toggleFailoverEnabled = async (enabled: boolean) => {
+    patch((s) => (s.failover.enabled = enabled))
+    try {
+      await apiPut('settings', { failover: { enabled } })
+      notify(enabled ? 'Failover включён' : 'Failover выключен')
+      refresh?.()
+    } catch (e) {
+      patch((s) => (s.failover.enabled = !enabled))
+      notify(e instanceof Error ? e.message : 'Ошибка переключения failover', true)
+    }
+  }
+
   const save = async () => {
     setSaving(true)
     try {
       await apiPut('settings', settings)
       notify('Настройки сохранены')
+      refresh?.()
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка сохранения', true)
     } finally {
@@ -171,6 +185,7 @@ export default function Settings({ notify, status }: Props) {
     try {
       const data = await apiPost<{ message: string }>('failover/check')
       notify(data.message)
+      refresh?.()
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка проверки', true)
     }
@@ -187,13 +202,27 @@ export default function Settings({ notify, status }: Props) {
     patch((s) => (s.failover.priority_chain = next))
   }
 
-  const saveChain = async () => {
+  const saveFailover = async () => {
+    if (!settings) return
     setChainBusy(true)
     try {
-      const data = await apiPost<{ message?: string }>('settings/priority', { server_ids: chain })
-      if (data.message) notify(data.message)
+      const data = await apiPost<{ message?: string }>('settings/priority', {
+        server_ids: chain,
+        enabled: settings.failover.enabled,
+      })
+      await apiPut('settings', {
+        failover: {
+          enabled: settings.failover.enabled,
+          ping_threshold_ms: settings.failover.ping_threshold_ms,
+          auto_restore_priority: settings.failover.auto_restore_priority,
+          interval_secs: settings.failover.interval_secs,
+          priority_chain: chain,
+        },
+      })
+      notify(data.message || 'Настройки Failover сохранены')
+      refresh?.()
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка сохранения цепочки', true)
+      notify(e instanceof Error ? e.message : 'Ошибка сохранения настроек Failover', true)
     } finally {
       setChainBusy(false)
     }
@@ -302,14 +331,19 @@ export default function Settings({ notify, status }: Props) {
   return (
     <div className="grid2">
       <section className="card">
-        <h2>Failover</h2>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+          <h2 style={{ margin: 0 }}>Failover</h2>
+          <span className={`badge ${settings.failover.enabled ? 'badge-online' : ''}`}>
+            {settings.failover.enabled ? '🟢 включён' : '⚪ выключен'}
+          </span>
+        </div>
         <label className="row">
           <input
             type="checkbox"
             checked={settings.failover.enabled}
-            onChange={(e) => patch((s) => (s.failover.enabled = e.target.checked))}
+            onChange={(e) => toggleFailoverEnabled(e.target.checked)}
           />
-          Включить автоматический failover
+          <b>Включить автоматический failover</b>
         </label>
         <label className="row"><span>Порог пинга, мс</span>
           <input className="input" type="number" min={50} max={5000} value={settings.failover.ping_threshold_ms}
@@ -354,14 +388,14 @@ export default function Settings({ notify, status }: Props) {
                 ))}
             </select>
           </div>
-          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 6 }}>
             {chain.length > 0 && (
               <button className="btn ghost" onClick={() => patch((s) => (s.failover.priority_chain = []))}>
                 Очистить
               </button>
             )}
-            <button className="btn primary" disabled={chainBusy} onClick={saveChain}>
-              {chainBusy ? 'Сохранение…' : 'Сохранить цепочку'}
+            <button className="btn primary" disabled={chainBusy} onClick={saveFailover}>
+              {chainBusy ? 'Сохранение…' : '💾 Сохранить настройки Failover'}
             </button>
           </div>
         </div>
@@ -374,7 +408,12 @@ export default function Settings({ notify, status }: Props) {
           <input className="input" type="number" min={15} max={3600} value={settings.failover.interval_secs}
             onChange={(e) => patch((s) => (s.failover.interval_secs = Number(e.target.value) || 60))} />
         </label>
-        <button className="btn" onClick={testCheck}>🔍 Тестовая проверка сейчас</button>
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center', marginTop: 10, flexWrap: 'wrap' }}>
+          <button className="btn" onClick={testCheck}>🔍 Тестовая проверка сейчас</button>
+          <button className="btn primary" disabled={chainBusy} onClick={saveFailover}>
+            {chainBusy ? 'Сохранение…' : '💾 Сохранить настройки Failover'}
+          </button>
+        </div>
       </section>
 
       <section className="card">

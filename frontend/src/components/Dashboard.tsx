@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useState } from 'react'
-import { apiGet, apiPost } from '../api'
+import { apiGet, apiPost, apiPut } from '../api'
 import { pingClass, type FailoverEventInfo, type StatusInfo } from '../types'
 
 interface Props {
   status: StatusInfo | null
   notify: (msg: string, isError?: boolean) => void
+  refresh?: () => void
 }
 
-export default function Dashboard({ status, notify }: Props) {
+export default function Dashboard({ status, notify, refresh }: Props) {
   const [events, setEvents] = useState<FailoverEventInfo[]>([])
   const [checking, setChecking] = useState(false)
+  const [togglingFailover, setTogglingFailover] = useState(false)
   // История пинга активного сервера (для sparkline): {значение, было ли измерение}
   const [pingHistory, setPingHistory] = useState<{ ms: number; ok: boolean }[]>([])
 
@@ -43,10 +45,24 @@ export default function Dashboard({ status, notify }: Props) {
       const data = await apiPost<{ message: string }>('failover/check')
       notify(data.message)
       loadEvents()
+      refresh?.()
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка проверки', true)
     } finally {
       setChecking(false)
+    }
+  }
+
+  const toggleFailover = async (enabled: boolean) => {
+    setTogglingFailover(true)
+    try {
+      await apiPut('settings', { failover: { enabled } })
+      notify(enabled ? 'Failover включён' : 'Failover выключен')
+      refresh?.()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка переключения failover', true)
+    } finally {
+      setTogglingFailover(false)
     }
   }
 
@@ -91,9 +107,30 @@ export default function Dashboard({ status, notify }: Props) {
       </section>
 
       <section className="card">
-        <h2>Failover</h2>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <h2 style={{ margin: 0 }}>Failover</h2>
+          <button
+            className={`btn sm ${f?.enabled ? 'ghost' : 'primary'}`}
+            disabled={togglingFailover}
+            onClick={() => toggleFailover(!f?.enabled)}
+            title={f?.enabled ? 'Выключить failover' : 'Включить failover'}
+          >
+            {togglingFailover ? '…' : f?.enabled ? '⏹ Выключить' : '▶ Включить'}
+          </button>
+        </div>
         <ul className="kv">
-          <li><span>Состояние</span><b>{f?.enabled ? '🟢 включён' : '⚪ выключен'}</b></li>
+          <li>
+            <span>Состояние</span>
+            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={f?.enabled ?? false}
+                disabled={togglingFailover}
+                onChange={(e) => toggleFailover(e.target.checked)}
+              />
+              <b>{f?.enabled ? '🟢 включён' : '⚪ выключен'}</b>
+            </label>
+          </li>
           <li><span>Порог пинга</span><b>{f ? `${f.ping_threshold_ms} мс` : '—'}</b></li>
           <li><span>Приоритетный</span><b>{f?.priority_server || 'не задан'}</b></li>
           {(f?.priority_chain?.length ?? 0) > 1 && (

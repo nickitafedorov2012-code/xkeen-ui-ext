@@ -12,6 +12,7 @@ export interface StatusInfo {
     priority_chain?: string[]
     auto_restore_priority: boolean
     interval_secs: number
+    device_failover_enabled?: boolean
   }
   refresh_interval_sec: number
 }
