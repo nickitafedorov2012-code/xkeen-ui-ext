@@ -113,6 +113,8 @@ function IconGauge() {
 export default function Header({ status, notify, refresh, onSwitchTab }: HeaderProps) {
   const [pending, setPending] = useState(false)
   const [liveMetrics, setLiveMetrics] = useState<SystemStats | null>(null)
+  const [updateAvailable, setUpdateAvailable] = useState(false)
+  const [latestVersion, setLatestVersion] = useState('')
 
   const isRunning = status ? Boolean(status.failover?.enabled) : true
 
@@ -139,6 +141,30 @@ export default function Header({ status, notify, refresh, onSwitchTab }: HeaderP
     }
   }, [])
 
+  // Периодическая проверка наличия новой версии (при старте и раз в 60 сек)
+  useEffect(() => {
+    let active = true
+    const checkUpdate = async () => {
+      if (document.hidden) return
+      try {
+        const res = await apiGet<{ current: string; latest: string; update_available: boolean }>('update/check')
+        if (active && res) {
+          setUpdateAvailable(Boolean(res.update_available))
+          setLatestVersion(res.latest || '')
+        }
+      } catch {
+        /* игнорируем ошибку сети */
+      }
+    }
+
+    checkUpdate()
+    const timer = setInterval(checkUpdate, 60_000)
+    return () => {
+      active = false
+      clearInterval(timer)
+    }
+  }, [])
+
   // Память и CPU (живые из 1-секундного таймера либо из статуса)
   const currentMetrics = liveMetrics || status?.system
   const memUsed = currentMetrics?.memory_used_mb ?? 348
@@ -148,7 +174,7 @@ export default function Header({ status, notify, refresh, onSwitchTab }: HeaderP
   const appCpu = currentMetrics?.app_cpu_percent ?? 0
 
   const mihomoVersion = status?.mihomo_version || 'v1.19.29'
-  const appVersion = status?.version ? status.version.replace(/^v/, '') : '1.0.17'
+  const appVersion = status?.version ? status.version.replace(/^v/, '') : '1.0.18'
 
   const handleRestart = async () => {
     if (pending) return
@@ -267,12 +293,21 @@ export default function Header({ status, notify, refresh, onSwitchTab }: HeaderP
 
         <button
           type="button"
-          className="header-pill-btn"
-          onClick={() => onSwitchTab('dashboard')}
-          title="Версия XKeen Route"
+          className={`header-pill-btn ${updateAvailable ? 'header-pill-update' : ''}`}
+          onClick={() => onSwitchTab('settings')}
+          title={
+            updateAvailable
+              ? `Доступно обновление до ${latestVersion}! Нажмите для перехода в Настройки`
+              : `Версия XKeen Route: ${appVersion}`
+          }
         >
           <IconBox />
           <span className="header-pill-title">{appVersion}</span>
+          {updateAvailable && (
+            <span className="update-pill-badge" title={`Доступна новая версия ${latestVersion}`}>
+              ↑ {latestVersion.replace(/^v/, '')}
+            </span>
+          )}
         </button>
 
         <button

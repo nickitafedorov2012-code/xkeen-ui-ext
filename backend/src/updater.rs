@@ -21,12 +21,15 @@ const GITHUB_RELEASE: &str = "https://github.com/nickitafedorov2012-code/xkeen-u
 const BIN_PATH: &str = "/opt/sbin/xkeen-route";
 const INIT_SCRIPT: &str = "/opt/etc/init.d/S99xkeen-route";
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct GhRelease {
     tag_name: String,
     #[serde(default)]
     body: String,
 }
+
+static LAST_CHECK: tokio::sync::Mutex<Option<(std::time::Instant, GhRelease)>> =
+    tokio::sync::Mutex::const_new(None);
 
 #[derive(Deserialize)]
 struct JsDelivrResolved {
@@ -82,10 +85,27 @@ async fn fetch_latest(direct: &reqwest::Client) -> Result<GhRelease, String> {
     clients.push(direct);
 
     for http in clients {
-        // 1. jsDelivr
+        // 1. Быстрый редирект GitHub releases/latest (без лимитов API, мгновенно)
+        if let Ok(res) = http
+            .get("https://github.com/nickitafedorov2012-code/xkeen-ui-ext/releases/latest")
+            .timeout(Duration::from_secs(6))
+            .send()
+            .await
+        {
+            let final_url = res.url().to_string();
+            if let Some(tag) = final_url.split("/releases/tag/").nth(1) {
+                let tag = tag.trim_matches('/').to_string();
+                if !tag.is_empty() {
+                    let notes = fetch_notes(http, &tag).await;
+                    return Ok(GhRelease { tag_name: tag, body: notes });
+                }
+            }
+        }
+
+        // 2. jsDelivr CDN
         if let Ok(res) = http
             .get(JSDELIVR_RESOLVED)
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(8))
             .send()
             .await
         {
@@ -97,12 +117,13 @@ async fn fetch_latest(direct: &reqwest::Client) -> Result<GhRelease, String> {
                 }
             }
         }
-        // 2. GitHub API (список релизов поддерживает как стабильные, так и prerelease)
+
+        // 3. GitHub REST API (список релизов)
         if let Ok(res) = http
             .get(GITHUB_RELEASES)
             .header("Accept", "application/vnd.github+json")
             .header("User-Agent", "xkeen-route")
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(8))
             .send()
             .await
         {
@@ -116,6 +137,19 @@ async fn fetch_latest(direct: &reqwest::Client) -> Result<GhRelease, String> {
         }
     }
     Err("GitHub и jsDelivr недоступны (напрямую и через прокси)".into())
+}
+
+/// Кэшированное получение последнего релиза (кэш 30 секунд).
+async fn get_latest_cached(http: &reqwest::Client) -> Result<GhRelease, String> {
+    let mut guard = LAST_CHECK.lock().await;
+    if let Some((time, ref rel)) = *guard {
+        if time.elapsed() < Duration::from_secs(30) {
+            return Ok(rel.clone());
+        }
+    }
+    let fresh = fetch_latest(http).await?;
+    *guard = Some((std::time::Instant::now(), fresh.clone()));
+    Ok(fresh)
 }
 
 /// Список изменений: секция `### {tag}` из DEVELOPMENT.md через jsDelivr CDN.
@@ -147,7 +181,7 @@ async fn fetch_notes(http: &reqwest::Client, tag: &str) -> String {
 
 /// GET /api/update/check — текущая/последняя версия + список изменений.
 pub async fn check(State(state): State<AppState>) -> Response {
-    let rel = match fetch_latest(&state.http).await {
+    let rel = match get_latest_cached(&state.http).await {
         Ok(r) => r,
         Err(e) => return api_err(e),
     };
