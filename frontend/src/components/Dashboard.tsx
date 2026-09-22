@@ -6,9 +6,63 @@ interface Props {
   status: StatusInfo | null
   notify: (msg: string, isError?: boolean) => void
   refresh?: () => void
+  onSwitchTab?: (tab: 'dashboard' | 'servers' | 'devices' | 'settings' | 'help') => void
 }
 
-export default function Dashboard({ status, notify, refresh }: Props) {
+interface GroupedEvent {
+  time: string
+  message: string
+  switched: boolean
+  count: number
+  type: 'ok' | 'warn' | 'err' | 'switch'
+}
+
+function groupEvents(rawEvents: FailoverEventInfo[]): GroupedEvent[] {
+  if (!rawEvents || rawEvents.length === 0) return []
+
+  const classify = (e: FailoverEventInfo): 'ok' | 'warn' | 'err' | 'switch' => {
+    if (e.switched) return 'switch'
+    const m = e.message.toLowerCase()
+    if (
+      m.includes('ошибка') ||
+      m.includes('недоступен') ||
+      m.includes('таймаут') ||
+      m.includes('failed') ||
+      m.includes('timeout')
+    )
+      return 'err'
+    if (m.includes('превышен') || m.includes('высокий') || m.includes('задержк') || m.includes('резерв'))
+      return 'warn'
+    return 'ok'
+  }
+
+  const normMsg = (msg: string) => {
+    return msg.replace(/\(\d+\s*мс\)/i, '').trim()
+  }
+
+  const grouped: GroupedEvent[] = []
+  for (const ev of rawEvents) {
+    const t = classify(ev)
+    const norm = normMsg(ev.message)
+    const last = grouped[grouped.length - 1]
+    if (last && normMsg(last.message) === norm && last.type === t) {
+      last.count += 1
+      last.time = ev.time
+      last.message = ev.message
+    } else {
+      grouped.push({
+        time: ev.time,
+        message: ev.message,
+        switched: ev.switched,
+        count: 1,
+        type: t,
+      })
+    }
+  }
+  return grouped
+}
+
+export default function Dashboard({ status, notify, refresh, onSwitchTab }: Props) {
   const [events, setEvents] = useState<FailoverEventInfo[]>([])
   const [checking, setChecking] = useState(false)
   const [togglingFailover, setTogglingFailover] = useState(false)
@@ -67,119 +121,192 @@ export default function Dashboard({ status, notify, refresh }: Props) {
   }
 
   const f = status?.failover
-  return (
-    <div className="grid2">
-      <section className="card">
-        <h2>Роутер</h2>
-        {status?.router ? (
-          <ul className="kv">
-            <li><span>Модель</span><b>{status.router.model || '—'}</b></li>
-            <li><span>KeeneticOS</span><b>{status.router.version || '—'}</b></li>
-            <li><span>RCI</span><b>{status.rci.host}:{status.rci.port}</b></li>
-          </ul>
-        ) : (
-          <p className="muted">Роутер недоступен — проверьте настройки RCI.</p>
-        )}
-      </section>
+  const groupedEvents = groupEvents(events)
+  const mihomoVer = status?.mihomo_version || 'v1.19.29'
 
-      <section className="card">
-        <h2>Mihomo</h2>
-        <ul className="kv">
-          <li><span>API</span><b>{status ? `${status.mihomo.host}:${status.mihomo.port}` : '—'}</b></li>
-          <li>
-            <span>Активный сервер</span>
-            {status?.active_server ? (
-              <b style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+  return (
+    <div>
+      {/* 1.1 Компактная статусная полоска роутера и ядра вместо двух статичных карточек */}
+      <div className="dash-info-strip">
+        <div className="dash-info-group">
+          <span className="dash-info-badge" title="Информация об интернет-центре Keenetic">
+            <span>🌐 Роутер:</span>
+            <b>{status?.router?.model || 'Keenetic'}</b>
+            <span className="dash-info-sep">·</span>
+            <span>KeeneticOS {status?.router?.version || '—'}</span>
+            <span className="dash-info-sep">·</span>
+            <span className="muted">RCI {status?.rci ? `${status.rci.host}:${status.rci.port}` : '127.0.0.1:79'}</span>
+          </span>
+        </div>
+
+        <div className="dash-info-group">
+          <span className="dash-info-badge" title="Mihomo core proxy engine">
+            <span>⚙️ Ядро:</span>
+            <b>Mihomo {mihomoVer}</b>
+            <span className="dash-info-sep">·</span>
+            <span className="muted">API {status?.mihomo ? `${status.mihomo.host}:${status.mihomo.port}` : '127.0.0.1:9090'}</span>
+          </span>
+        </div>
+      </div>
+
+      {/* Оперативные виджеты */}
+      <div className="grid2">
+        {/* КАРТОЧКА 1: Активный сервер с историей пинга */}
+        <section className="card">
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+            <h2 style={{ margin: 0 }}>🛰 Активный сервер</h2>
+            {onSwitchTab && (
+              <button
+                type="button"
+                className="btn sm ghost"
+                onClick={() => onSwitchTab('servers')}
+                title="Перейти к полному списку серверов"
+              >
+                Все серверы →
+              </button>
+            )}
+          </div>
+
+          {status?.active_server ? (
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
                 {status.active_server.provider && (
                   <span className="tag-provider" style={{ cursor: 'default' }}>
                     📦 {status.active_server.provider_name || status.active_server.provider}
                   </span>
                 )}
-                <span>{status.active_server.name}</span>{' '}
+                <b style={{ fontSize: 15, color: '#f8fafc' }}>{status.active_server.name}</b>
                 <span className={'ping ' + pingClass(status.active_server.ping_ms)}>
                   {status.active_server.ping_ms > 0 ? `${status.active_server.ping_ms} мс` : '—'}
                 </span>
-              </b>
-            ) : (
-              <b className="muted">—</b>
-            )}
-          </li>
-        </ul>
-        {pingHistory.length >= 2 && <PingSparkline data={pingHistory} />}
-        {pingHistory.length >= 2 && (
-          <p className="muted small">Стабильность за последние {pingHistory.length} опросов (выше = хуже пинг)</p>
-        )}
-      </section>
-
-      <section className="card">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-          <h2 style={{ margin: 0 }}>Failover</h2>
-          <span className={`badge ${f?.enabled ? 'badge-online' : ''}`}>
-            {f?.enabled ? '🟢 включён' : '⚪ выключен'}
-          </span>
-        </div>
-        <ul className="kv">
-          <li>
-            <span>Автоматический failover</span>
-            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
-              <label className="switch" title={f?.enabled ? 'Выключить failover' : 'Включить failover'}>
-                <input
-                  type="checkbox"
-                  checked={f?.enabled ?? false}
-                  disabled={togglingFailover}
-                  onChange={(e) => toggleFailover(e.target.checked)}
-                />
-                <span className="slider" />
-              </label>
-              <b style={{ color: f?.enabled ? 'var(--green)' : 'var(--muted)', fontSize: 13 }}>
-                {togglingFailover ? 'Сохранение…' : f?.enabled ? 'Включён' : 'Выключен'}
-              </b>
+              </div>
+              {pingHistory.length >= 2 && <PingSparkline data={pingHistory} />}
+              {pingHistory.length >= 2 && (
+                <p className="muted small" style={{ marginTop: 6, marginBottom: 0 }}>
+                  Стабильность за последние {pingHistory.length} опросов (всплески = задержка)
+                </p>
+              )}
             </div>
-          </li>
-          <li><span>Порог пинга</span><b>{f ? `${f.ping_threshold_ms} мс` : '—'}</b></li>
-          <li>
-            <span>Приоритетный</span>
-            <b>
-              {f?.priority_server || 'не задан'}
-              {f?.priority_chain && f.priority_chain.length > 0 && status?.active_server?.id && f.priority_chain.indexOf(status.active_server.id) > 0 ? (
-                <span className="muted small" style={{ marginLeft: 6, fontWeight: 'normal' }}>(ожидает восстановления)</span>
-              ) : null}
-            </b>
-          </li>
-          {(f?.priority_chain?.length ?? 0) > 0 && status?.active_server?.id && f!.priority_chain!.indexOf(status.active_server.id) >= 0 && (
+          ) : (
+            <p className="muted">Сервер не выбран или Mihomo не запущен.</p>
+          )}
+        </section>
+
+        {/* КАРТОЧКА 2: Failover статус и управление */}
+        <section className="card">
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+            <h2 style={{ margin: 0 }}>⚡ Failover контроль</h2>
+            <span className={`badge ${f?.enabled ? 'badge-online' : ''}`} style={{ color: f?.enabled ? '#22c55e' : 'var(--muted)' }}>
+              {f?.enabled ? '🟢 включён' : '⚪ выключен'}
+            </span>
+          </div>
+          <ul className="kv">
             <li>
-              <span>Позиция в цепочке</span>
+              <span>Автоматический мониторинг</span>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+                <label className="switch" title={f?.enabled ? 'Выключить failover' : 'Включить failover'}>
+                  <input
+                    type="checkbox"
+                    checked={f?.enabled ?? false}
+                    disabled={togglingFailover}
+                    onChange={(e) => toggleFailover(e.target.checked)}
+                  />
+                  <span className="slider" />
+                </label>
+                <b style={{ color: f?.enabled ? '#22c55e' : 'var(--muted)', fontSize: 13 }}>
+                  {togglingFailover ? 'Сохранение…' : f?.enabled ? 'Включён' : 'Выключен'}
+                </b>
+              </div>
+            </li>
+            <li><span>Порог пинга</span><b>{f ? `${f.ping_threshold_ms} мс` : '—'}</b></li>
+            <li>
+              <span>Приоритетный</span>
               <b>
-                {f!.priority_chain!.indexOf(status.active_server.id) === 0 ? (
-                  <span style={{ color: 'var(--green)' }}>ОСН (основной)</span>
-                ) : (
-                  <span style={{ color: 'var(--yellow)' }}>РЕЗ{f!.priority_chain!.indexOf(status.active_server.id)} (резервный)</span>
-                )}
+                {f?.priority_server || 'не задан'}
+                {f?.priority_chain &&
+                f.priority_chain.length > 0 &&
+                status?.active_server?.id &&
+                f.priority_chain.indexOf(status.active_server.id) > 0 ? (
+                  <span className="muted small" style={{ marginLeft: 6, fontWeight: 'normal' }}>
+                    (ожидает восстановления)
+                  </span>
+                ) : null}
               </b>
             </li>
-          )}
-          {(f?.priority_chain?.length ?? 0) > 1 && (
-            <li><span>Резервы</span><b>{f!.priority_chain!.slice(1).length} сервер(ов)</b></li>
-          )}
-          <li><span>Интервал</span><b>{f ? `${f.interval_secs} с` : '—'}</b></li>
-        </ul>
-        <button className="btn primary" onClick={runCheck} disabled={checking}>
-          {checking ? 'Проверка…' : '🔍 Проверить сейчас'}
-        </button>
-      </section>
-
-      <section className="card">
-        <h2>События</h2>
-        {events.length === 0 ? (
-          <p className="muted">Пока пусто.</p>
-        ) : (
-          <ul className="events">
-            {events.map((e, i) => (
-              <li key={i} className={e.switched ? 'ev-switch' : ''}>
-                <span className="ev-time">{e.time}</span> {e.message}
-              </li>
-            ))}
+            {(f?.priority_chain?.length ?? 0) > 0 &&
+              status?.active_server?.id &&
+              f!.priority_chain!.indexOf(status.active_server.id) >= 0 && (
+                <li>
+                  <span>Позиция в цепочке</span>
+                  <b>
+                    {f!.priority_chain!.indexOf(status.active_server.id) === 0 ? (
+                      <span style={{ color: '#22c55e' }}>ОСН (основной)</span>
+                    ) : (
+                      <span style={{ color: '#eab308' }}>
+                        РЕЗ{f!.priority_chain!.indexOf(status.active_server.id)} (резервный)
+                      </span>
+                    )}
+                  </b>
+                </li>
+              )}
+            {(f?.priority_chain?.length ?? 0) > 1 && (
+              <li><span>Резервы</span><b>{f!.priority_chain!.slice(1).length} сервер(ов)</b></li>
+            )}
+            <li><span>Интервал проверки</span><b>{f ? `${f.interval_secs} с` : '—'}</b></li>
           </ul>
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button className="btn primary" onClick={runCheck} disabled={checking} style={{ flex: 1 }}>
+              {checking ? 'Проверка…' : '🔍 Проверить сейчас'}
+            </button>
+            {onSwitchTab && (
+              <button
+                type="button"
+                className="btn ghost"
+                onClick={() => onSwitchTab('settings')}
+                title="Настроить порог пинга и интервал"
+              >
+                ⚙️
+              </button>
+            )}
+          </div>
+        </section>
+      </div>
+
+      {/* КАРТОЧКА 3: Блок событий с группировкой и цветовой разметкой */}
+      <section className="card" style={{ marginTop: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+          <h2 style={{ margin: 0 }}>📋 Журнал событий Failover</h2>
+          {onSwitchTab && (
+            <button
+              type="button"
+              className="btn sm ghost"
+              onClick={() => onSwitchTab('settings')}
+              title="Открыть системный лог и настройки"
+            >
+              Системный журнал →
+            </button>
+          )}
+        </div>
+
+        {groupedEvents.length === 0 ? (
+          <p className="muted">Событий пока нет. Запустите проверку для получения данных.</p>
+        ) : (
+          <div className="events-container">
+            {groupedEvents.map((e, i) => (
+              <div key={i} className={`event-entry ev-${e.type}`}>
+                <span className="ev-type-icon">
+                  {e.type === 'switch' ? '🔵' : e.type === 'err' ? '🔴' : e.type === 'warn' ? '🟡' : '🟢'}
+                </span>
+                <span className="ev-time-pill">{e.time}</span>
+                <span className="ev-msg-text" title={e.message}>{e.message}</span>
+                {e.count > 1 && (
+                  <span className="ev-repeat-badge" title={`Повторено ${e.count} раз(а) подряд`}>
+                    ×{e.count}
+                  </span>
+                )}
+              </div>
+            ))}
+          </div>
         )}
       </section>
     </div>

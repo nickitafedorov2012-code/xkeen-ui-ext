@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiGet, apiPost } from '../api'
 import { pingClass, type ProviderInfo, type ServerInfo } from '../types'
 
@@ -6,23 +6,89 @@ interface Props {
   notify: (msg: string, isError?: boolean) => void
 }
 
-const PAGE = 15
+const PAGE = 20
+
+const PROVIDER_COLORS = [
+  '#22c55e', // green
+  '#a855f7', // purple
+  '#38bdf8', // sky blue
+  '#f59e0b', // amber
+  '#ec4899', // pink
+  '#14b8a6', // teal
+  '#6366f1', // indigo
+]
 
 export default function Servers({ notify }: Props) {
   const [servers, setServers] = useState<ServerInfo[]>([])
   const [providers, setProviders] = useState<ProviderInfo[]>([])
-  const [selectedProvider, setSelectedProvider] = useState('')
-  const [providersOpen, setProvidersOpen] = useState(false)
-  const [editingAliases, setEditingAliases] = useState<Record<string, string>>({})
-  const [updatingProvider, setUpdatingProvider] = useState<string | null>(null)
+  const [selectedProviders, setSelectedProviders] = useState<Set<string>>(new Set())
+  const [subDropdownOpen, setSubDropdownOpen] = useState(false)
+  const [viewMode, setViewMode] = useState<'detailed' | 'compact'>(() => {
+    return (localStorage.getItem('xr_servers_view') as 'detailed' | 'compact') || 'detailed'
+  })
+
   const [filter, setFilter] = useState('')
   const [limit, setLimit] = useState(PAGE)
   const [loading, setLoading] = useState(true)
   const [pinging, setPinging] = useState(false)
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false)
+
+  // Игнор-лист
   const [ignored, setIgnored] = useState<Set<string>>(new Set())
   const [ignoreOpen, setIgnoreOpen] = useState(false)
   const [ignoreDraft, setIgnoreDraft] = useState<Set<string>>(new Set())
+  const [initialIgnored, setInitialIgnored] = useState<Set<string>>(new Set())
+  const [ignoreSearch, setIgnoreSearch] = useState('')
+  const [ignoreProviderFilter, setIgnoreProviderFilter] = useState('')
   const [ignoreSaving, setIgnoreSaving] = useState(false)
+
+  // Управление подписками
+  const [providersOpen, setProvidersOpen] = useState(false)
+  const [editingAliases, setEditingAliases] = useState<Record<string, string>>({})
+  const [savedAliasFeedback, setSavedAliasFeedback] = useState<Record<string, boolean>>({})
+  const [updatingProvider, setUpdatingProvider] = useState<string | null>(null)
+  const [updatingAllProviders, setUpdatingAllProviders] = useState(false)
+  const [urlVisibility, setUrlVisibility] = useState<Record<string, boolean>>({})
+  const [copiedUrlId, setCopiedUrlId] = useState<string | null>(null)
+
+  // Добавление новой подписки
+  const [newSubOpen, setNewSubOpen] = useState(false)
+  const [newSubId, setNewSubId] = useState('')
+  const [newSubUrl, setNewSubUrl] = useState('')
+  const [newSubName, setNewSubName] = useState('')
+  const [addingSub, setAddingSub] = useState(false)
+
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const subDropdownRef = useRef<HTMLDivElement>(null)
+  const moreMenuRef = useRef<HTMLDivElement>(null)
+
+  // Закрытие выпадающих списков при клике вне их
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (subDropdownRef.current && !subDropdownRef.current.contains(e.target as Node)) {
+        setSubDropdownOpen(false)
+      }
+      if (moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node)) {
+        setMoreMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
+  // Цветовая карта подписок
+  const providerColorMap = useMemo(() => {
+    const m = new Map<string, string>()
+    providers.forEach((p, idx) => {
+      m.set(p.id, PROVIDER_COLORS[idx % PROVIDER_COLORS.length])
+    })
+    return m
+  }, [providers])
+
+  const setAndSaveViewMode = (mode: 'detailed' | 'compact') => {
+    setViewMode(mode)
+    localStorage.setItem('xr_servers_view', mode)
+  }
 
   const load = useCallback(async () => {
     try {
@@ -45,13 +111,42 @@ export default function Servers({ notify }: Props) {
     load()
   }, [load])
 
+  // Горячие клавиши и события переключения
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        searchInputRef.current?.focus()
+        searchInputRef.current?.select()
+      }
+    }
+    const handleFocusSearch = () => {
+      searchInputRef.current?.focus()
+      searchInputRef.current?.select()
+    }
+    const handlePingAll = () => {
+      pingAll()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('xr:focus-search', handleFocusSearch)
+    window.addEventListener('xr:ping-all', handlePingAll)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('xr:focus-search', handleFocusSearch)
+      window.removeEventListener('xr:ping-all', handlePingAll)
+    }
+  }, [pingAll])
+
+  // Фильтрация серверов
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase()
     return servers.filter((s) => {
-      if (selectedProvider) {
-        if (selectedProvider === '__static__') {
-          if (s.provider) return false
-        } else if (s.provider !== selectedProvider) {
+      if (selectedProviders.size > 0) {
+        if (selectedProviders.has('__static__') && !s.provider) {
+          // подходит статический
+        } else if (s.provider && selectedProviders.has(s.provider)) {
+          // подходит провайдер
+        } else {
           return false
         }
       }
@@ -63,14 +158,17 @@ export default function Servers({ notify }: Props) {
         s.host.toLowerCase().includes(q)
       )
     })
-  }, [servers, filter, selectedProvider])
+  }, [servers, filter, selectedProviders])
+
+  // Активный сервер для закрепления наверху
+  const activeServer = useMemo(() => servers.find((s) => s.is_active), [servers])
 
   const pingAll = async () => {
     setPinging(true)
     try {
       const data = await apiPost<{ pings: Record<string, number> }>('servers/ping', {})
       setServers((prev) => prev.map((s) => ({ ...s, ping_ms: data.pings[s.id] ?? s.ping_ms })))
-      notify('Пинг завершён')
+      notify('Пинг всех серверов завершён')
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка пинга', true)
     } finally {
@@ -81,7 +179,7 @@ export default function Servers({ notify }: Props) {
   const activate = async (s: ServerInfo) => {
     try {
       const data = await apiPost<{ message: string }>('servers/switch', { server_id: s.id })
-      notify(data.message)
+      notify(data.message || `Подключено: ${s.name}`)
       load()
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка переключения', true)
@@ -90,16 +188,21 @@ export default function Servers({ notify }: Props) {
 
   const setPriority = async (s: ServerInfo) => {
     try {
-      const data = await apiPost<{ message?: string }>('settings/priority', { server_id: s.is_priority ? '' : s.id })
-      if (data.message) notify(data.message)
+      const nextPriority = !s.is_priority
+      const data = await apiPost<{ message?: string }>('settings/priority', { server_id: nextPriority ? s.id : '' })
+      notify(data.message || (nextPriority ? `Сервер ${s.name} сделан приоритетным` : 'Приоритет снят'))
       load()
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка', true)
+      notify(e instanceof Error ? e.message : 'Ошибка установки приоритета', true)
     }
   }
 
+  // --- Игнор-лист ---
   const openIgnore = () => {
     setIgnoreDraft(new Set(ignored))
+    setInitialIgnored(new Set(ignored))
+    setIgnoreSearch('')
+    setIgnoreProviderFilter('')
     setIgnoreOpen(true)
   }
 
@@ -116,7 +219,7 @@ export default function Servers({ notify }: Props) {
     setIgnoreSaving(true)
     try {
       await apiPost<{ applied: number }>('ignore', { servers: [...ignoreDraft] })
-      notify(`Игнор-лист применён: исключено из Fastest/Fallback — ${ignoreDraft.size}`)
+      notify(`Игнор-лист обновлён: исключено серверов — ${ignoreDraft.size}`)
       setIgnoreOpen(false)
       load()
     } catch (e) {
@@ -126,9 +229,42 @@ export default function Servers({ notify }: Props) {
     }
   }
 
-  // для игнор-листа годятся только реальные серверы (не синтетические Fastest/Fallback)
-  const ignoreCandidates = servers.filter((s) => s.protocol !== 'URL-TEST' && s.protocol !== 'FALLBACK')
+  const ignoreCandidates = useMemo(() => {
+    return servers.filter((s) => s.protocol !== 'URL-TEST' && s.protocol !== 'FALLBACK')
+  }, [servers])
 
+  const filteredIgnoreCandidates = useMemo(() => {
+    const q = ignoreSearch.trim().toLowerCase()
+    return ignoreCandidates.filter((s) => {
+      if (ignoreProviderFilter) {
+        if (ignoreProviderFilter === '__static__') {
+          if (s.provider) return false
+        } else if (s.provider !== ignoreProviderFilter) {
+          return false
+        }
+      }
+      if (!q) return true
+      return s.name.toLowerCase().includes(q) || s.host.toLowerCase().includes(q)
+    })
+  }, [ignoreCandidates, ignoreSearch, ignoreProviderFilter])
+
+  const selectAllFilteredIgnore = () => {
+    setIgnoreDraft((prev) => {
+      const next = new Set(prev)
+      filteredIgnoreCandidates.forEach((s) => next.add(s.id))
+      return next
+    })
+  }
+
+  const unselectAllFilteredIgnore = () => {
+    setIgnoreDraft((prev) => {
+      const next = new Set(prev)
+      filteredIgnoreCandidates.forEach((s) => next.delete(s.id))
+      return next
+    })
+  }
+
+  // --- Исправление mojibake ---
   const [fixing, setFixing] = useState(false)
   const fixNames = async () => {
     setFixing(true)
@@ -144,21 +280,31 @@ export default function Servers({ notify }: Props) {
       notify(e instanceof Error ? e.message : 'Ошибка исправления имён', true)
     } finally {
       setFixing(false)
+      setMoreMenuOpen(false)
     }
   }
 
+  // --- Управление подписками ---
   const openProvidersModal = () => {
     const initial: Record<string, string> = {}
     for (const p of providers) {
       initial[p.id] = p.name === p.id ? '' : p.name
     }
     setEditingAliases(initial)
+    setSavedAliasFeedback({})
+    setUrlVisibility({})
+    setCopiedUrlId(null)
+    setNewSubOpen(false)
     setProvidersOpen(true)
   }
 
   const saveProviderAlias = async (id: string, alias: string) => {
     try {
       await apiPost('providers/rename', { id, alias: alias.trim() })
+      setSavedAliasFeedback((prev) => ({ ...prev, [id]: true }))
+      setTimeout(() => {
+        setSavedAliasFeedback((prev) => ({ ...prev, [id]: false }))
+      }, 2000)
       notify(`Подписка сохранена: ${alias.trim() || id}`)
       load()
     } catch (e) {
@@ -179,133 +325,607 @@ export default function Servers({ notify }: Props) {
     }
   }
 
+  const updateAllProvidersNow = async () => {
+    setUpdatingAllProviders(true)
+    try {
+      const res = await apiPost<{ message: string }>('providers/update', {})
+      notify(res.message || 'Все подписки обновлены')
+      load()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка обновления всех подписок', true)
+    } finally {
+      setUpdatingAllProviders(false)
+    }
+  }
+
+  const copySubUrl = (id: string, url: string) => {
+    navigator.clipboard.writeText(url)
+    setCopiedUrlId(id)
+    notify('URL подписки скопирован в буфер обмена')
+    setTimeout(() => setCopiedUrlId(null), 2500)
+  }
+
+  const handleAddSubscription = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!newSubId.trim() || !newSubUrl.trim()) {
+      notify('Заполните ID и URL подписки', true)
+      return
+    }
+    setAddingSub(true)
+    try {
+      await apiPost('providers/add', {
+        id: newSubId.trim(),
+        url: newSubUrl.trim(),
+        name: newSubName.trim() || undefined,
+      })
+      notify(`Подписка '${newSubId.trim()}' успешно добавлена`)
+      setNewSubId('')
+      setNewSubUrl('')
+      setNewSubName('')
+      setNewSubOpen(false)
+      load()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка добавления подписки', true)
+    } finally {
+      setAddingSub(false)
+    }
+  }
+
+  const handleDeleteSubscription = async (id: string, name: string) => {
+    if (!window.confirm(`Вы уверены, что хотите удалить подписку "${name}" (${id}) из config.yaml?`)) {
+      return
+    }
+    try {
+      await apiPost('providers/delete', { id })
+      notify(`Подписка "${name}" удалена`)
+      load()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка удаления подписки', true)
+    }
+  }
+
+  const toggleProviderFilter = (provId: string) => {
+    setSelectedProviders((prev) => {
+      const next = new Set(prev)
+      if (next.has(provId)) next.delete(provId)
+      else next.add(provId)
+      return next
+    })
+    setLimit(PAGE)
+  }
+
+  const clearProviderFilter = () => {
+    setSelectedProviders(new Set())
+    setLimit(PAGE)
+  }
+
   return (
     <section className="card">
+      {/* ПАНЕЛЬ ИНСТРУМЕНТОВ */}
       <div className="toolbar">
-        <input
-          className="input"
-          placeholder="Поиск сервера…"
-          value={filter}
-          onChange={(e) => {
-            setFilter(e.target.value)
-            setLimit(PAGE)
-          }}
-        />
-        {providers.length > 0 && (
-          <select
+        {/* Поле поиска */}
+        <div style={{ position: 'relative', flex: '1 1 220px', minWidth: 180 }}>
+          <input
+            ref={searchInputRef}
             className="input"
-            value={selectedProvider}
+            style={{ width: '100%', paddingRight: 60 }}
+            placeholder="Поиск сервера… (Ctrl+K)"
+            value={filter}
             onChange={(e) => {
-              setSelectedProvider(e.target.value)
+              setFilter(e.target.value)
               setLimit(PAGE)
             }}
-            title="Фильтр по подписке"
-            style={{ maxWidth: 180 }}
-          >
-            <option value="">Все подписки ({servers.length})</option>
-            {providers.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name} ({p.count})
-              </option>
-            ))}
-          </select>
+          />
+          {filter && (
+            <button
+              type="button"
+              onClick={() => {
+                setFilter('')
+                setLimit(PAGE)
+              }}
+              style={{
+                position: 'absolute',
+                right: 8,
+                top: '50%',
+                transform: 'translateY(-50%)',
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--muted)',
+                cursor: 'pointer',
+                fontSize: 14,
+              }}
+              title="Очистить поиск"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+
+        {/* Счётчик найденных */}
+        <span className="muted" style={{ fontWeight: 600, fontSize: 13 }}>
+          {filtered.length} шт.
+        </span>
+
+        {/* Мультивыбор фильтра подписок */}
+        {providers.length > 0 && (
+          <div className="subscription-dropdown" ref={subDropdownRef}>
+            <button
+              type="button"
+              className="subscription-dropdown-btn"
+              onClick={() => setSubDropdownOpen((prev) => !prev)}
+              title="Фильтр по подпискам (поддерживается мультивыбор)"
+            >
+              <span>📦</span>
+              <span>
+                {selectedProviders.size === 0
+                  ? 'Все подписки'
+                  : selectedProviders.size === 1
+                  ? providers.find((p) => selectedProviders.has(p.id))?.name || '1 подписка'
+                  : `Подписки (${selectedProviders.size})`}
+              </span>
+              <span style={{ fontSize: 10, opacity: 0.7 }}>▾</span>
+            </button>
+
+            {subDropdownOpen && (
+              <div className="subscription-dropdown-panel">
+                <div
+                  className="sub-dropdown-item"
+                  onClick={clearProviderFilter}
+                  style={{ fontWeight: selectedProviders.size === 0 ? 700 : 400 }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selectedProviders.size === 0}
+                    onChange={clearProviderFilter}
+                    style={{ pointerEvents: 'none' }}
+                  />
+                  <span>Все подписки</span>
+                  <span className="sub-count-badge">({servers.length})</span>
+                </div>
+
+                <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+
+                {providers.map((p) => {
+                  const isChecked = selectedProviders.has(p.id)
+                  const dotColor = providerColorMap.get(p.id) || '#a855f7'
+                  return (
+                    <div
+                      key={p.id}
+                      className="sub-dropdown-item"
+                      onClick={() => toggleProviderFilter(p.id)}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => {}}
+                        style={{ pointerEvents: 'none' }}
+                      />
+                      <span className="sub-marker-dot" style={{ backgroundColor: dotColor }} />
+                      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {p.name}
+                      </span>
+                      <span className="sub-count-badge">({p.count})</span>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
         )}
-        <button className="btn" onClick={pingAll} disabled={pinging}>
-          {pinging ? 'Пинг…' : '📡 Пинг всех'}
+
+        {/* Пинг всех */}
+        <button className="btn" onClick={pingAll} disabled={pinging} title="Измерить пинг всех серверов">
+          {pinging ? '📡 Пинг…' : '📡 Пинг всех'}
         </button>
+
+        {/* Обновить */}
+        <button className="btn" onClick={load} title="Обновить список">
+          🔄 Обновить
+        </button>
+
+        {/* Переключатель вида (Компактный / Подробный) */}
+        <div className="view-toggle" title="Режим отображения списка">
+          <button
+            type="button"
+            className={`view-toggle-btn ${viewMode === 'detailed' ? 'active' : ''}`}
+            onClick={() => setAndSaveViewMode('detailed')}
+            title="Подробный карточный вид"
+          >
+            ☷ Карточки
+          </button>
+          <button
+            type="button"
+            className={`view-toggle-btn ${viewMode === 'compact' ? 'active' : ''}`}
+            onClick={() => setAndSaveViewMode('compact')}
+            title="Компактный табличный вид"
+          >
+            ☰ Компактно
+          </button>
+        </div>
+
+        {/* Управление списками */}
         {providers.length > 0 && (
           <button className="btn" onClick={openProvidersModal} title="Управление и переименование подписок">
             📦 Подписки ({providers.length})
           </button>
         )}
-        <button className="btn" onClick={openIgnore}>
+
+        <button className="btn" onClick={openIgnore} title="Исключить серверы из Fastest / Fallback">
           🚫 Игнор-лист{ignored.size > 0 ? ` (${ignored.size})` : ''}
         </button>
-        <button className="btn" onClick={fixNames} disabled={fixing} title="Починить битые (mojibake) имена серверов в config.yaml">
-          {fixing ? 'Исправление…' : '🩹 Исправить имена'}
-        </button>
-        <button className="btn" onClick={load}>🔄 Обновить</button>
-        <span className="muted">{filtered.length} шт.</span>
+
+        {/* Меню дополнительных действий (⋯ Ещё) */}
+        <div style={{ position: 'relative' }} ref={moreMenuRef}>
+          <button
+            type="button"
+            className="btn ghost"
+            onClick={() => setMoreMenuOpen((prev) => !prev)}
+            title="Дополнительные действия"
+          >
+            ⋯
+          </button>
+          {moreMenuOpen && (
+            <div
+              style={{
+                position: 'absolute',
+                right: 0,
+                top: 'calc(100% + 4px)',
+                background: '#181d28',
+                border: '1px solid var(--border)',
+                borderRadius: 8,
+                padding: '6px',
+                minWidth: 200,
+                zIndex: 60,
+                boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+              }}
+            >
+              <button
+                type="button"
+                className="btn sm ghost"
+                style={{ width: '100%', justifyContent: 'flex-start', textAlign: 'left' }}
+                onClick={fixNames}
+                disabled={fixing}
+                title="Починить битые (mojibake) имена серверов в config.yaml"
+              >
+                {fixing ? 'Исправление…' : '🩹 Исправить битые имена'}
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {loading ? (
-        <p className="muted">Загрузка…</p>
+        <p className="muted">Загрузка серверов…</p>
       ) : (
-        <div className="server-list">
-          {filtered.slice(0, limit).map((s) => (
-            <div key={s.id} className={'server-card' + (s.is_active ? ' active' : '')}>
-              <div className="server-head">
-                <span className="badge">{s.protocol}</span>
-                {s.provider && (
+        <div>
+          {/* 2.6 ЗАКРЕПЛЁННЫЙ АКТИВНЫЙ СЕРВЕР НАВЕРХУ СПИСКА */}
+          {activeServer && (
+            <div style={{ marginBottom: 16 }}>
+              {viewMode === 'detailed' ? (
+                <div className="server-card pinned">
+                  <div className="server-head">
+                    <span className="pinned-header-tag">✓ ТЕКУЩИЙ СЕРВЕР</span>
+                    <span className="badge">{activeServer.protocol}</span>
+                    {activeServer.provider && (
+                      <span
+                        className="tag-provider"
+                        title={`Подписка: ${activeServer.provider_name || activeServer.provider}`}
+                        onClick={openProvidersModal}
+                      >
+                        <span
+                          className="sub-marker-dot"
+                          style={{ backgroundColor: providerColorMap.get(activeServer.provider) || '#a855f7' }}
+                        />
+                        {activeServer.provider_name || activeServer.provider}
+                      </span>
+                    )}
+                    <span
+                      className="server-name"
+                      title={`${activeServer.name}\nХост: ${activeServer.host}${activeServer.port ? `:${activeServer.port}` : ''}`}
+                    >
+                      {activeServer.name}
+                    </span>
+                    {ignored.has(activeServer.id) && (
+                      <span className="tag ignored" title="Сервер исключён из авто-выбора (Fastest/Fallback)">
+                        🚫 Исключён
+                      </span>
+                    )}
+                    <span className={'ping ' + pingClass(activeServer.ping_ms)}>
+                      {activeServer.ping_ms > 0 ? `${activeServer.ping_ms} мс` : '—'}
+                    </span>
+                  </div>
+                  <div className="server-actions" style={{ marginTop: 8 }}>
+                    <span className="muted small">
+                      Хост: {activeServer.host}{activeServer.port ? `:${activeServer.port}` : ''}
+                    </span>
+                    <span className="spacer" />
+                    <button
+                      className={`btn sm ghost btn-priority ${activeServer.is_priority ? 'is-priority' : ''}`}
+                      onClick={() => setPriority(activeServer)}
+                      title={activeServer.is_priority ? 'Снять приоритет' : 'Сделать приоритетным'}
+                    >
+                      {activeServer.is_priority ? '★ В приоритете' : '☆ Приоритет'}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="server-compact-row pinned">
+                  <span className="pinned-header-tag" style={{ fontSize: 10 }}>✓ ТЕКУЩИЙ</span>
+                  <span className="badge">{activeServer.protocol}</span>
+                  {activeServer.provider && (
+                    <span
+                      className="sub-marker-dot"
+                      title={activeServer.provider_name || activeServer.provider}
+                      style={{ backgroundColor: providerColorMap.get(activeServer.provider) || '#a855f7' }}
+                    />
+                  )}
                   <span
-                    className="tag-provider"
-                    title={`Подписка: ${s.provider_name || s.provider} (кликните для управления подписками)`}
-                    onClick={openProvidersModal}
+                    className="server-compact-name"
+                    title={`${activeServer.name}\nХост: ${activeServer.host}:${activeServer.port}`}
                   >
-                    📦 {s.provider_name || s.provider}
+                    {activeServer.name}
                   </span>
-                )}
-                <span className="server-name" title={s.name}>{s.name}</span>
-                {ignored.has(s.id) && <span className="tag ignored">ИГНОР</span>}
-                <span className={'ping ' + pingClass(s.ping_ms)}>
-                  {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
-                </span>
-              </div>
-              <div className="server-host">{s.host}{s.port ? `:${s.port}` : ''}</div>
-              <div className="server-actions">
-                {s.is_active && <span className="tag current">ТЕКУЩИЙ</span>}
-                {s.is_priority && <span className="tag priority">ПРИОРИТЕТ</span>}
-                <span className="spacer" />
-                {!s.is_active && (
-                  <button className="btn sm" onClick={() => activate(s)}>Подключить</button>
-                )}
-                <button className="btn sm ghost" onClick={() => setPriority(s)}>
-                  {s.is_priority ? 'Снять приоритет' : '★ Приоритет'}
-                </button>
+                  {ignored.has(activeServer.id) && (
+                    <span className="tag ignored" style={{ fontSize: 10 }}>🚫</span>
+                  )}
+                  <span className={'ping ' + pingClass(activeServer.ping_ms)}>
+                    {activeServer.ping_ms > 0 ? `${activeServer.ping_ms} мс` : '—'}
+                  </span>
+                  <button
+                    className={`btn sm ghost btn-priority ${activeServer.is_priority ? 'is-priority' : ''}`}
+                    onClick={() => setPriority(activeServer)}
+                  >
+                    {activeServer.is_priority ? '★' : '☆'}
+                  </button>
+                </div>
+              )}
+
+              <div className="pinned-divider">
+                <span>Список всех серверов ({filtered.length})</span>
               </div>
             </div>
-          ))}
-          {filtered.length > limit && (
-            <button className="btn wide" onClick={() => setLimit(limit + PAGE)}>
-              Показать ещё ({filtered.length - limit})
-            </button>
+          )}
+
+          {/* ОСНОВНОЙ СПИСОК СЕРВЕРОВ */}
+          {filtered.length === 0 ? (
+            <p className="muted">Серверов по заданному фильтру не найдено.</p>
+          ) : viewMode === 'detailed' ? (
+            /* ПОДРОБНЫЙ ВИД (КАРТОЧКИ) */
+            <div className="server-list">
+              {filtered.slice(0, limit).map((s) => (
+                <div key={s.id} className={'server-card' + (s.is_active ? ' active' : '')}>
+                  <div className="server-head">
+                    <span className="badge">{s.protocol}</span>
+                    {s.provider && (
+                      <span
+                        className="tag-provider"
+                        title={`Подписка: ${s.provider_name || s.provider} (кликните для управления)`}
+                        onClick={openProvidersModal}
+                      >
+                        <span
+                          className="sub-marker-dot"
+                          style={{ backgroundColor: providerColorMap.get(s.provider) || '#a855f7' }}
+                        />
+                        {s.provider_name || s.provider}
+                      </span>
+                    )}
+                    <span
+                      className="server-name"
+                      title={`${s.name}\nХост: ${s.host}${s.port ? `:${s.port}` : ''}\nПротокол: ${s.protocol}`}
+                    >
+                      {s.name}
+                    </span>
+                    {ignored.has(s.id) && (
+                      <span className="tag ignored" title="Сервер исключён из авто-выбора (Fastest / Fallback)">
+                        🚫 Исключён
+                      </span>
+                    )}
+                    <span className={'ping ' + pingClass(s.ping_ms)}>
+                      {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
+                    </span>
+                  </div>
+
+                  {/* Кнопки действий */}
+                  <div className="server-actions" style={{ marginTop: 8 }}>
+                    {s.is_active && <span className="tag current">✓ ПОДКЛЮЧЁН</span>}
+                    {s.is_priority && <span className="tag priority">★ ПРИОРИТЕТ</span>}
+                    <span className="spacer" />
+                    {!s.is_active && (
+                      <button className="btn sm btn-connect" onClick={() => activate(s)}>
+                        🔌 Подключить
+                      </button>
+                    )}
+                    <button
+                      className={`btn sm ghost btn-priority ${s.is_priority ? 'is-priority' : ''}`}
+                      onClick={() => setPriority(s)}
+                      title={s.is_priority ? 'Снять приоритет' : 'Сделать приоритетным'}
+                    >
+                      {s.is_priority ? '★ В приоритете' : '☆ Приоритет'}
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {filtered.length > limit && (
+                <button className="btn wide" onClick={() => setLimit(limit + PAGE)}>
+                  Показать ещё ({filtered.length - limit})
+                </button>
+              )}
+            </div>
+          ) : (
+            /* КОМПАКТНЫЙ ВИД (ОДНОСТРОЧНАЯ ТАБЛИЦА) */
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {filtered.slice(0, limit).map((s) => (
+                <div key={s.id} className={'server-compact-row' + (s.is_active ? ' active' : '')}>
+                  <span className="badge" style={{ minWidth: 46, textAlign: 'center' }}>
+                    {s.protocol}
+                  </span>
+                  {s.provider && (
+                    <span
+                      className="sub-marker-dot"
+                      title={s.provider_name || s.provider}
+                      style={{ backgroundColor: providerColorMap.get(s.provider) || '#a855f7' }}
+                    />
+                  )}
+                  <span
+                    className="server-compact-name"
+                    title={`${s.name}\nХост: ${s.host}${s.port ? `:${s.port}` : ''}`}
+                  >
+                    {s.name}
+                  </span>
+                  {ignored.has(s.id) && (
+                    <span className="tag ignored" style={{ fontSize: 10, padding: '1px 5px' }} title="Исключён из авто-выбора">
+                      🚫 Исключён
+                    </span>
+                  )}
+                  <span
+                    className={'ping ' + pingClass(s.ping_ms)}
+                    style={{ minWidth: 60, textAlign: 'right' }}
+                  >
+                    {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
+                  </span>
+                  <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                    {s.is_active ? (
+                      <span className="tag current" style={{ fontSize: 10, padding: '2px 6px' }}>✓</span>
+                    ) : (
+                      <button className="btn sm btn-connect" onClick={() => activate(s)} style={{ padding: '3px 8px' }}>
+                        🔌
+                      </button>
+                    )}
+                    <button
+                      className={`btn sm ghost btn-priority ${s.is_priority ? 'is-priority' : ''}`}
+                      onClick={() => setPriority(s)}
+                      style={{ padding: '3px 8px' }}
+                      title={s.is_priority ? 'Снять приоритет' : 'Сделать приоритетным'}
+                    >
+                      {s.is_priority ? '★' : '☆'}
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {filtered.length > limit && (
+                <button className="btn wide" onClick={() => setLimit(limit + PAGE)}>
+                  Показать ещё ({filtered.length - limit})
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}
 
+      {/* МОДАЛЬНОЕ ОКНО ИГНОР-ЛИСТА */}
       {ignoreOpen && (
         <div className="modal-overlay" onClick={() => setIgnoreOpen(false)}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h2>🚫 Игнор-лист серверов</h2>
-            <p className="muted small">
-              Отмеченные серверы будут исключены из авто-групп <b>Fastest</b> (url-test) и <b>Fallback</b> —
-              они не будут выбираться автоматически. Ручное подключение к ним остаётся доступным.
-            </p>
-            <div className="modal-list">
-              {ignoreCandidates.length === 0 && <p className="muted">Нет реальных серверов.</p>}
-              {ignoreCandidates.map((s) => (
-                <label key={s.id} className="check-row">
-                  <input
-                    type="checkbox"
-                    checked={ignoreDraft.has(s.id)}
-                    onChange={(e) => toggleIgnoreDraft(s.id, e.target.checked)}
-                  />
-                  <span className="badge">{s.protocol}</span>
-                  {s.provider && (
-                    <span className="tag-provider" style={{ fontSize: 10, padding: '1px 5px' }}>
-                      📦 {s.provider_name || s.provider}
-                    </span>
-                  )}
-                  <span className="server-name" title={s.name}>{s.name}</span>
-                  {s.ping_ms > 0 && <span className={'ping ' + pingClass(s.ping_ms)}>{s.ping_ms} мс</span>}
-                </label>
-              ))}
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <h2>🚫 Игнор-лист серверов</h2>
+              <button
+                type="button"
+                className="btn sm ghost"
+                onClick={() => setIgnoreOpen(false)}
+                style={{ fontSize: 16, padding: '2px 8px' }}
+              >
+                ✕
+              </button>
             </div>
-            <div className="modal-actions">
-              <button className="btn" onClick={() => setIgnoreOpen(false)}>Отмена</button>
-              <button className="btn ghost" disabled={ignoreSaving || ignoreDraft.size === 0}
-                onClick={() => { setIgnoreDraft(new Set()); }}>
+            <p className="muted small" style={{ margin: '0 0 6px' }}>
+              Отмеченные серверы исключаются из авто-групп <b>Fastest</b> и <b>Fallback</b>. Ручное подключение остаётся доступным.
+            </p>
+
+            {/* Поиск и фильтр по подписке внутри модалки */}
+            <div className="modal-filter-row">
+              <input
+                className="input sm"
+                placeholder="Поиск серверов в модалке…"
+                value={ignoreSearch}
+                onChange={(e) => setIgnoreSearch(e.target.value)}
+                style={{ flex: 1 }}
+              />
+              {providers.length > 0 && (
+                <select
+                  className="input sm"
+                  value={ignoreProviderFilter}
+                  onChange={(e) => setIgnoreProviderFilter(e.target.value)}
+                  style={{ maxWidth: 180 }}
+                >
+                  <option value="">Все подписки ({ignoreCandidates.length})</option>
+                  {providers.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name} ({p.count})
+                    </option>
+                  ))}
+                  <option value="__static__">Статические</option>
+                </select>
+              )}
+              <button
+                type="button"
+                className="btn sm ghost"
+                onClick={selectAllFilteredIgnore}
+                title="Отметить все отфильтрованные серверы"
+              >
+                Выбрать все
+              </button>
+              <button
+                type="button"
+                className="btn sm ghost"
+                onClick={unselectAllFilteredIgnore}
+                title="Снять отметки с отфильтрованных"
+              >
                 Снять все
+              </button>
+            </div>
+
+            {/* Список серверов */}
+            <div className="modal-list">
+              {filteredIgnoreCandidates.length === 0 ? (
+                <p className="muted">Серверов не найдено.</p>
+              ) : (
+                filteredIgnoreCandidates.map((s) => {
+                  const isChecked = ignoreDraft.has(s.id)
+                  const wasInitiallyChecked = initialIgnored.has(s.id)
+                  return (
+                    <label key={s.id} className="check-row">
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={(e) => toggleIgnoreDraft(s.id, e.target.checked)}
+                      />
+                      <span className="badge">{s.protocol}</span>
+                      {s.provider && (
+                        <span
+                          className="sub-marker-dot"
+                          style={{ backgroundColor: providerColorMap.get(s.provider) || '#a855f7' }}
+                        />
+                      )}
+                      <span className="server-name" title={s.name}>
+                        {s.name}
+                      </span>
+                      {/* Индикация изменений сессии */}
+                      {isChecked && !wasInitiallyChecked && (
+                        <span className="diff-added-badge">+добавлен</span>
+                      )}
+                      {!isChecked && wasInitiallyChecked && (
+                        <span className="diff-removed-badge">-снят</span>
+                      )}
+                      {s.ping_ms > 0 && (
+                        <span className={'ping ' + pingClass(s.ping_ms)}>{s.ping_ms} мс</span>
+                      )}
+                    </label>
+                  )
+                })
+              )}
+            </div>
+
+            {/* Липкий футер (Sticky actions) */}
+            <div className="modal-actions">
+              <button className="btn" onClick={() => setIgnoreOpen(false)}>
+                Отмена
+              </button>
+              <button
+                className="btn ghost"
+                disabled={ignoreSaving || ignoreDraft.size === 0}
+                onClick={() => setIgnoreDraft(new Set())}
+              >
+                Сбросить всё
               </button>
               <button className="btn primary" onClick={saveIgnore} disabled={ignoreSaving}>
                 {ignoreSaving ? 'Применение…' : `Применить (${ignoreDraft.size})`}
@@ -315,32 +935,88 @@ export default function Servers({ notify }: Props) {
         </div>
       )}
 
+      {/* МОДАЛЬНОЕ ОКНО УПРАВЛЕНИЯ ПОДПИСКАМИ */}
       {providersOpen && (
         <div className="modal-overlay" onClick={() => setProvidersOpen(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h2>📦 Управление подписками</h2>
-            <p className="muted small">
-              Вы можете переименовать подписки (proxy-providers), чтобы легко различать их в списке серверов,
-              фильтрах, цепочке failover и на дашборде.
+          <div className="modal" style={{ width: 'min(720px, 94vw)' }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <h2>📦 Управление подписками</h2>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  type="button"
+                  className="btn sm"
+                  onClick={updateAllProvidersNow}
+                  disabled={updatingAllProviders}
+                  title="Принудительно обновить все подписки"
+                >
+                  {updatingAllProviders ? 'Обновление…' : '↻ Обновить все'}
+                </button>
+                <button
+                  type="button"
+                  className="btn sm ghost"
+                  onClick={() => setProvidersOpen(false)}
+                  style={{ fontSize: 16, padding: '2px 8px' }}
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            <p className="muted small" style={{ margin: '0 0 8px' }}>
+              Вы можете переименовывать подписки, копировать их URL, добавлять новые или удалять неиспользуемые.
             </p>
-            <div className="modal-list">
+
+            <div className="modal-list" style={{ maxHeight: '52vh' }}>
               {providers.length === 0 && <p className="muted">Нет активных подписок.</p>}
               {providers.map((p) => {
                 const draft = editingAliases[p.id] ?? (p.name === p.id ? '' : p.name)
                 const isChanged = (p.name === p.id ? '' : p.name) !== draft.trim()
+                const isSaved = savedAliasFeedback[p.id]
+                const dotColor = providerColorMap.get(p.id) || '#a855f7'
+                const showUrl = urlVisibility[p.id]
+
                 return (
-                  <div key={p.id} className="provider-edit-row">
-                    <div className="provider-meta">
-                      <b style={{ fontSize: 13 }}>{p.name}</b>
-                      <span className="provider-meta-id">{p.id}</span>
-                      <span className="provider-meta-count">
-                        {p.count} серв.{p.updated_at ? ` · ${p.updated_at.slice(0, 10)}` : ''}
-                      </span>
+                  <div key={p.id} className="provider-edit-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6, padding: '10px 0', borderBottom: '1px solid var(--border)' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+                      <div className="provider-meta" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span className="sub-marker-dot" style={{ backgroundColor: dotColor }} />
+                        <b style={{ fontSize: 14 }}>{p.name}</b>
+                        <span className="provider-meta-id" style={{ fontFamily: 'Consolas, monospace', fontSize: 12, color: 'var(--muted)' }}>
+                          ({p.id})
+                        </span>
+                        <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+                          · {p.count} серв.{p.updated_at ? ` · ${p.updated_at.slice(0, 10)}` : ''}
+                        </span>
+                      </div>
+
+                      {/* Кнопки обновления и удаления */}
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        <button
+                          type="button"
+                          className="btn sm ghost"
+                          title="Загрузить свежие серверы из этой подписки"
+                          disabled={updatingProvider === p.id}
+                          onClick={() => updateProviderNow(p.id)}
+                        >
+                          {updatingProvider === p.id ? '…' : '↻ Обновить'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn sm ghost"
+                          style={{ color: '#ef4444' }}
+                          title="Удалить подписку"
+                          onClick={() => handleDeleteSubscription(p.id, p.name)}
+                        >
+                          🗑
+                        </button>
+                      </div>
                     </div>
-                    <div className="provider-inputs">
+
+                    {/* Поле переименования */}
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                       <input
                         className="input sm"
-                        placeholder="Своё название…"
+                        placeholder="Своё название подписки…"
                         value={draft}
                         onChange={(e) =>
                           setEditingAliases((prev) => ({ ...prev, [p.id]: e.target.value }))
@@ -348,27 +1024,102 @@ export default function Servers({ notify }: Props) {
                         onKeyDown={(e) => {
                           if (e.key === 'Enter') saveProviderAlias(p.id, draft)
                         }}
+                        style={{ flex: 1 }}
                       />
                       <button
-                        className="btn sm primary"
-                        disabled={!isChanged}
+                        type="button"
+                        className={`btn sm ${isSaved ? 'primary' : ''}`}
+                        disabled={!isChanged && !isSaved}
                         onClick={() => saveProviderAlias(p.id, draft)}
+                        style={{ minWidth: 95 }}
                       >
-                        Сохранить
-                      </button>
-                      <button
-                        className="btn sm ghost"
-                        title="Обновить подписку (скачать свежие серверы)"
-                        disabled={updatingProvider === p.id}
-                        onClick={() => updateProviderNow(p.id)}
-                      >
-                        {updatingProvider === p.id ? '…' : '🔄'}
+                        {isSaved ? '✓ Сохранено' : 'Сохранить'}
                       </button>
                     </div>
+
+                    {/* Строка URL подписки */}
+                    {p.url && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(0,0,0,0.2)', padding: '4px 8px', borderRadius: 6 }}>
+                        <span className="muted small" style={{ flexShrink: 0 }}>URL:</span>
+                        <span style={{ flex: 1, fontFamily: 'Consolas, monospace', fontSize: 11.5, color: showUrl ? 'var(--text)' : 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {showUrl ? p.url : '••••••••••••••••••••••••••••••••••••••••••••'}
+                        </span>
+                        <button
+                          type="button"
+                          className="btn sm ghost"
+                          onClick={() => setUrlVisibility((prev) => ({ ...prev, [p.id]: !showUrl }))}
+                          title={showUrl ? 'Скрыть URL' : 'Показать URL'}
+                          style={{ padding: '2px 6px', fontSize: 11 }}
+                        >
+                          {showUrl ? '🙈 Скрыть' : '👁 Показать'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn sm ghost"
+                          onClick={() => copySubUrl(p.id, p.url!)}
+                          title="Скопировать URL в буфер обмена"
+                          style={{ padding: '2px 6px', fontSize: 11 }}
+                        >
+                          {copiedUrlId === p.id ? '✓ Скопировано' : '📋 Копировать'}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )
               })}
+
+              {/* Форма добавления новой подписки */}
+              <div style={{ marginTop: 12, padding: '10px 12px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 8 }}>
+                {!newSubOpen ? (
+                  <button
+                    type="button"
+                    className="btn sm ghost"
+                    onClick={() => setNewSubOpen(true)}
+                    style={{ width: '100%', color: 'var(--accent)' }}
+                  >
+                    ➕ Добавить новую подписку
+                  </button>
+                ) : (
+                  <form onSubmit={handleAddSubscription} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <b style={{ fontSize: 13 }}>➕ Добавление подписки</b>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      <input
+                        className="input sm"
+                        placeholder="ID (латиница, напр. sub_work)"
+                        value={newSubId}
+                        onChange={(e) => setNewSubId(e.target.value)}
+                        style={{ flex: '1 1 180px' }}
+                        required
+                      />
+                      <input
+                        className="input sm"
+                        placeholder="Отображаемое имя (напр. Рабочая)"
+                        value={newSubName}
+                        onChange={(e) => setNewSubName(e.target.value)}
+                        style={{ flex: '1 1 180px' }}
+                      />
+                    </div>
+                    <input
+                      className="input sm"
+                      placeholder="URL подписки (https://...)"
+                      value={newSubUrl}
+                      onChange={(e) => setNewSubUrl(e.target.value)}
+                      required
+                    />
+                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, marginTop: 4 }}>
+                      <button type="button" className="btn sm ghost" onClick={() => setNewSubOpen(false)}>
+                        Отмена
+                      </button>
+                      <button type="submit" className="btn sm primary" disabled={addingSub}>
+                        {addingSub ? 'Добавление…' : 'Добавить подписку'}
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
             </div>
+
+            {/* Липкий футер */}
             <div className="modal-actions">
               <button className="btn primary" onClick={() => setProvidersOpen(false)}>
                 Закрыть

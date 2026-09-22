@@ -260,14 +260,37 @@ export default function Header({ status, notify, refresh, onSwitchTab }: HeaderP
               <span className="status-label">{isRunning ? 'Сервис запущен' : 'Сервис остановлен'}</span>
             </div>
             <div className="status-badge-row2">
-              <span className="status-stat" title="Оперативная память роутера">
+              <span
+                className="status-stat"
+                title={`Оперативная память роутера: ${memUsed} из ${memTotal} МБ (${Math.round((memUsed / (memTotal || 1)) * 100)}%)\nПотребление XKeen: всего ${totalXkeenMem > 0 ? totalXkeenMem : appMemMb} МБ (XR: ${appMemMb} МБ, Mihomo: ${coreMemMb > 0 ? coreMemMb + ' МБ' : '—'})`}
+              >
                 <IconDisk />
                 <span>{memUsed}/{memTotal} МБ</span>
+                <span className="mini-progress-bar">
+                  <span
+                    className={`mini-progress-fill ${
+                      (memUsed / (memTotal || 1)) > 0.85
+                        ? 'fill-red'
+                        : (memUsed / (memTotal || 1)) > 0.65
+                        ? 'fill-yellow'
+                        : 'fill-green'
+                    }`}
+                    style={{ width: `${Math.min(100, Math.round((memUsed / (memTotal || 1)) * 100))}%` }}
+                  />
+                </span>
               </span>
               <span className="status-stat-sep">|</span>
-              <span className="status-stat" title="Нагрузка на процессор роутера">
+              <span className="status-stat" title={`Нагрузка на процессор роутера: ${cpuPercent}%`}>
                 <IconGauge />
                 <span>{cpuPercent}%</span>
+                <span className="mini-progress-bar">
+                  <span
+                    className={`mini-progress-fill ${
+                      cpuPercent > 80 ? 'fill-red' : cpuPercent > 45 ? 'fill-yellow' : 'fill-blue'
+                    }`}
+                    style={{ width: `${Math.min(100, cpuPercent)}%` }}
+                  />
+                </span>
               </span>
               {(totalXkeenMem > 0 || appMemMb > 0) && (
                 <>

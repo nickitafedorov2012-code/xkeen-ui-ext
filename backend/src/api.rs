@@ -1055,5 +1055,101 @@ pub async fn update_provider(State(state): State<AppState>, Json(req): Json<Upda
     }
 }
 
+#[derive(Deserialize)]
+pub struct AddProviderReq {
+    pub id: String,
+    pub url: String,
+    pub name: Option<String>,
+}
+
+/// POST /api/providers/add — добавление новой подписки в config.yaml
+pub async fn add_provider(State(state): State<AppState>, Json(req): Json<AddProviderReq>) -> Response {
+    let id = req.id.trim();
+    let url = req.url.trim();
+    if id.is_empty() || url.is_empty() {
+        return api_err("ID и URL подписки не могут быть пустыми");
+    }
+
+    let cfg = state.config.read().await.clone();
+    let yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+        Ok(y) => y,
+        Err(e) => return api_err(format!("Ошибка чтения {}: {e}", cfg.mihomo.config_path)),
+    };
+
+    let new_yaml = match crate::routing::add_provider_to_yaml(&yaml, id, url) {
+        Ok(y) => y,
+        Err(e) => return api_err(e),
+    };
+
+    let tmp = format!("{}.tmp", cfg.mihomo.config_path);
+    if let Err(e) = tokio::fs::write(&tmp, &new_yaml).await {
+        return api_err(format!("Ошибка записи: {e}"));
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, &cfg.mihomo.config_path).await {
+        return api_err(format!("Ошибка переименования: {e}"));
+    }
+
+    // Если указано пользовательское имя — сохраняем псевдоним
+    if let Some(alias) = req.name.filter(|n| !n.trim().is_empty()) {
+        let _guard = state.config_lock.lock().await;
+        let mut new_cfg = (**state.config.read().await).clone();
+        new_cfg.provider_aliases.insert(id.to_string(), alias.trim().to_string());
+        let _ = config::save(&state.config_path, &new_cfg).await;
+        *state.config.write().await = std::sync::Arc::new(new_cfg);
+    }
+
+    let _ = mihomo::reload_config(&state.http, &cfg).await;
+    let _ = mihomo::force_update_provider(&state.http, &cfg, id).await;
+
+    api_ok(json!({ "added": true, "message": format!("Подписка '{id}' успешно добавлена") }))
+}
+
+#[derive(Deserialize)]
+pub struct DeleteProviderReq {
+    #[serde(alias = "provider_id")]
+    pub id: String,
+}
+
+/// POST /api/providers/delete — удаление подписки из config.yaml
+pub async fn delete_provider(State(state): State<AppState>, Json(req): Json<DeleteProviderReq>) -> Response {
+    let id = req.id.trim();
+    if id.is_empty() {
+        return api_err("ID подписки не может быть пустым");
+    }
+
+    let cfg = state.config.read().await.clone();
+    let yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+        Ok(y) => y,
+        Err(e) => return api_err(format!("Ошибка чтения {}: {e}", cfg.mihomo.config_path)),
+    };
+
+    let new_yaml = match crate::routing::delete_provider_from_yaml(&yaml, id) {
+        Ok(y) => y,
+        Err(e) => return api_err(e),
+    };
+
+    let tmp = format!("{}.tmp", cfg.mihomo.config_path);
+    if let Err(e) = tokio::fs::write(&tmp, &new_yaml).await {
+        return api_err(format!("Ошибка записи: {e}"));
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, &cfg.mihomo.config_path).await {
+        return api_err(format!("Ошибка переименования: {e}"));
+    }
+
+    // Удаляем псевдоним
+    {
+        let _guard = state.config_lock.lock().await;
+        let mut new_cfg = (**state.config.read().await).clone();
+        if new_cfg.provider_aliases.remove(id).is_some() {
+            let _ = config::save(&state.config_path, &new_cfg).await;
+            *state.config.write().await = std::sync::Arc::new(new_cfg);
+        }
+    }
+
+    let _ = mihomo::reload_config(&state.http, &cfg).await;
+
+    api_ok(json!({ "deleted": true, "message": format!("Подписка '{id}' удалена") }))
+}
+
 
 

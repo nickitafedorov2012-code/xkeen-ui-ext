@@ -54,6 +54,7 @@ export interface ProviderInfo {
   count: number
   vehicle_type: string
   updated_at?: string
+  url?: string
 }
 
 export interface PolicyInfo {
@@ -106,8 +107,8 @@ export interface AppSettings {
 
 export function pingClass(ms: number): string {
   if (ms <= 0) return 'ping-none'
-  if (ms < 100) return 'ping-good'
-  if (ms < 250) return 'ping-mid'
+  if (ms < 50) return 'ping-good'
+  if (ms <= 100) return 'ping-mid'
   return 'ping-bad'
 }
 

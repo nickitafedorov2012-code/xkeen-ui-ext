@@ -90,6 +90,39 @@ export default function App() {
     return () => clearInterval(interval)
   }, [refresh, status?.refresh_interval_sec])
 
+  // Глобальные горячие клавиши (Ctrl+K, Ctrl+P, Alt+R)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement
+      const isInput = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+
+      // Ctrl+K (или Cmd+K): мгновенный переход к поиску серверов
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        switchTab('servers')
+        setTimeout(() => {
+          window.dispatchEvent(new CustomEvent('xr:focus-search'))
+        }, 50)
+      }
+      // Ctrl+P (или Cmd+P): пинг всех серверов
+      else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') {
+        e.preventDefault()
+        switchTab('servers')
+        setTimeout(() => {
+          window.dispatchEvent(new CustomEvent('xr:ping-all'))
+        }, 50)
+      }
+      // Alt+R или Shift+R: быстрое обновление панели (когда не в инпуте)
+      else if (!isInput && ((e.altKey && e.key.toLowerCase() === 'r') || (e.shiftKey && e.key === 'R'))) {
+        e.preventDefault()
+        refresh()
+        notify('Данные обновлены')
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [refresh, notify])
+
   return (
     <div className="app">
       <ErrorBoundary>
@@ -125,7 +158,7 @@ export default function App() {
 
       <main className="content">
         <ErrorBoundary>
-          {tab === 'dashboard' && <Dashboard status={status} notify={notify} refresh={refresh} />}
+          {tab === 'dashboard' && <Dashboard status={status} notify={notify} refresh={refresh} onSwitchTab={switchTab} />}
           {tab === 'servers' && <Servers notify={notify} />}
           {tab === 'devices' && <Devices notify={notify} />}
           {tab === 'settings' && <Settings notify={notify} status={status} refresh={refresh} />}
@@ -135,7 +168,10 @@ export default function App() {
 
       <div className="toasts">
         {toasts.map((t) => (
-          <div key={t.id} className={'toast' + (t.error ? ' err' : '')}>{t.msg}</div>
+          <div key={t.id} className={'toast' + (t.error ? ' err' : '')}>
+            <span className="toast-icon">{t.error ? '❌' : '✅'}</span>
+            <span>{t.msg}</span>
+          </div>
         ))}
       </div>
     </div>

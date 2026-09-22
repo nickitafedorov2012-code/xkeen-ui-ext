@@ -269,6 +269,8 @@ async fn main() {
         .route("/api/providers", get(api::get_providers))
         .route("/api/providers/rename", post(api::rename_provider))
         .route("/api/providers/update", post(api::update_provider))
+        .route("/api/providers/add", post(api::add_provider))
+        .route("/api/providers/delete", post(api::delete_provider))
         .route("/api/settings", get(api::get_settings).put(api::put_settings))
         .route("/api/settings/priority", post(api::set_priority))
         .route("/api/logs", get(api::logs_tail))

@@ -110,6 +110,137 @@ pub fn parse_provider_names(yaml: &str) -> Vec<String> {
     out
 }
 
+/// Карта id провайдера -> url из блока proxy-providers в YAML
+pub fn parse_provider_urls(yaml: &str) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut in_providers = false;
+    let mut cur_provider: Option<String> = None;
+
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+
+        if line.trim_end() == "proxy-providers:" {
+            in_providers = true;
+            cur_provider = None;
+            continue;
+        }
+        if in_providers && is_top {
+            break;
+        }
+        if in_providers {
+            if line.starts_with("  ") && !line.starts_with("   ") && trimmed.ends_with(':') && !trimmed.starts_with('-') {
+                cur_provider = Some(trimmed.trim_end_matches(':').to_string());
+                continue;
+            }
+            if trimmed.starts_with("url:") {
+                if let Some(ref p) = cur_provider {
+                    let val = trimmed.trim_start_matches("url:").trim().trim_matches('"').trim_matches('\'').to_string();
+                    if !val.is_empty() {
+                        out.insert(p.clone(), val);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Добавить новую HTTP-подписку в блок proxy-providers в config.yaml
+pub fn add_provider_to_yaml(yaml: &str, id: &str, url: &str) -> Result<String, String> {
+    let id = id.trim();
+    let url = url.trim();
+    if id.is_empty() || url.is_empty() {
+        return Err("ID подписки и URL не могут быть пустыми".into());
+    }
+
+    let existing = parse_provider_names(yaml);
+    if existing.iter().any(|p| p.eq_ignore_ascii_case(id)) {
+        return Err(format!("Подписка с ID '{id}' уже существует"));
+    }
+
+    let new_block = format!(
+        "  {id}:\n    type: http\n    url: \"{url}\"\n    interval: 86400\n    health-check:\n      enable: true\n      url: \"https://www.gstatic.com/generate_204\"\n      interval: 300\n      expected-status: 204"
+    );
+
+    let mut out = Vec::new();
+    let mut in_providers = false;
+    let mut inserted = false;
+
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+
+        if line.trim_end() == "proxy-providers:" {
+            in_providers = true;
+            out.push(line.to_string());
+            out.push(new_block.clone());
+            inserted = true;
+            continue;
+        }
+        if in_providers && is_top {
+            in_providers = false;
+        }
+        out.push(line.to_string());
+    }
+
+    if !inserted {
+        out.push("\nproxy-providers:".to_string());
+        out.push(new_block);
+    }
+
+    Ok(out.join("\n"))
+}
+
+/// Удалить подписку из блока proxy-providers в config.yaml
+pub fn delete_provider_from_yaml(yaml: &str, id: &str) -> Result<String, String> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err("ID подписки не может быть пустым".into());
+    }
+
+    let mut out = Vec::new();
+    let mut in_providers = false;
+    let mut skipping_target = false;
+
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+
+        if line.trim_end() == "proxy-providers:" {
+            in_providers = true;
+            skipping_target = false;
+            out.push(line.to_string());
+            continue;
+        }
+        if in_providers && is_top {
+            in_providers = false;
+            skipping_target = false;
+            out.push(line.to_string());
+            continue;
+        }
+        if in_providers {
+            if line.starts_with("  ") && !line.starts_with("   ") && trimmed.ends_with(':') && !trimmed.starts_with('-') {
+                let pname = trimmed.trim_end_matches(':');
+                if pname.eq_ignore_ascii_case(id) {
+                    skipping_target = true;
+                    continue;
+                } else {
+                    skipping_target = false;
+                }
+            }
+            if skipping_target {
+                continue;
+            }
+            out.push(line.to_string());
+        } else {
+            out.push(line.to_string());
+        }
+    }
+
+    Ok(out.join("\n"))
+}
+
 /// Домены: очистка и нормализация (нижний регистр, без пробелов/протоколов/путей).
 pub fn sanitize_domains(list: &[String]) -> Vec<String> {
     let mut out: Vec<String> = list
