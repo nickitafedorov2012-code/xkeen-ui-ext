@@ -92,12 +92,14 @@ export default function App() {
 
   return (
     <div className="app">
-      <Header
-        status={status}
-        notify={notify}
-        refresh={refresh}
-        onSwitchTab={switchTab}
-      />
+      <ErrorBoundary>
+        <Header
+          status={status}
+          notify={notify}
+          refresh={refresh}
+          onSwitchTab={switchTab}
+        />
+      </ErrorBoundary>
 
       <nav className="tabs">
         {TABS.map((t) => (

@@ -101,6 +101,7 @@ jobs:
       - name: Inject frontend dist for cross
         working-directory: backend
         run: |
+          rm -rf ./dist
           cp -r ../frontend/dist ./dist
           sed -i 's|\.\./frontend/dist|./dist|' src/frontend.rs
 
