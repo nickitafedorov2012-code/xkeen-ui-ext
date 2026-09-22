@@ -637,7 +637,8 @@ pub async fn ping_group(
         cfg.mihomo_url(),
         "http%3A%2F%2Fwww.gstatic.com%2Fgenerate_204"
     );
-    let mut req = http.get(&url).timeout(std::time::Duration::from_millis(timeout_ms + 2500));
+    let req_timeout = std::cmp::max(timeout_ms + 6000, 12000);
+    let mut req = http.get(&url).timeout(std::time::Duration::from_millis(req_timeout));
     if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
         req = req.header(k, v);
     }
@@ -669,7 +670,7 @@ pub async fn ping_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &st
         cfg.mihomo_url(),
         "http%3A%2F%2Fwww.gstatic.com%2Fgenerate_204"
     );
-    let mut req = http.get(&url).timeout(std::time::Duration::from_millis(timeout_ms + 1500));
+    let mut req = http.get(&url).timeout(std::time::Duration::from_millis(std::cmp::max(timeout_ms + 2000, 5000)));
     if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
         req = req.header(k, v);
     }
@@ -703,7 +704,8 @@ pub async fn ping_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &st
                     cfg.mihomo_url(),
                     "http%3A%2F%2Fwww.gstatic.com%2Fgenerate_204"
                 );
-                let mut g_req = http.get(&g_url).timeout(std::time::Duration::from_millis(timeout_ms + 1500));
+                let g_req_timeout = std::cmp::max(timeout_ms + 2000, 5000);
+                let mut g_req = http.get(&g_url).timeout(std::time::Duration::from_millis(g_req_timeout));
                 if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
                     g_req = g_req.header(k, v);
                 }
