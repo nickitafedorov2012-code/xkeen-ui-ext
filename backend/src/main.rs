@@ -246,6 +246,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/api/status", get(api::status))
+        .route("/api/system/metrics", get(api::get_system_metrics))
         .route("/api/servers", get(api::get_servers))
         .route("/api/servers/switch", post(api::switch_server))
         .route("/api/servers/ping", post(api::ping_servers))

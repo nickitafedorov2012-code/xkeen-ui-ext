@@ -56,6 +56,15 @@ pub async fn status(State(state): State<AppState>) -> Response {
     .into_response()
 }
 
+/// GET /api/system/metrics — сверхлёгкий эндпоинт для обновления метрик каждую секунду: CPU роутера, RAM роутера, RAM/CPU процесса панели.
+pub async fn get_system_metrics(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    match rci::get_system(&state.http, &cfg).await {
+        Ok(stats) => api_ok(serde_json::to_value(stats).unwrap_or_default()).into_response(),
+        Err(e) => api_err(e).into_response(),
+    }
+}
+
 
 /// Вспомогательное: единый формат ответа API.
 pub fn api_ok(data: serde_json::Value) -> axum::response::Response {

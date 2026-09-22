@@ -348,9 +348,65 @@ pub struct SystemStats {
     pub cpu_percent: u32,
     pub memory_used_mb: u32,
     pub memory_total_mb: u32,
+    #[serde(default)]
+    pub app_memory_mb: f64,
+    #[serde(default)]
+    pub app_cpu_percent: f64,
 }
 
-/// Статистика нагрузки CPU и RAM из /rci/show/system.
+/// Получение показателей потребления собственного процесса (память RSS в МБ и CPU%).
+pub fn get_proc_stats() -> (f64, f64) {
+    #[cfg(target_os = "linux")]
+    {
+        let mut rss_mb = 0.0;
+        if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
+            for line in s.lines() {
+                if line.starts_with("VmRSS:") {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        if let Ok(kb) = parts[1].parse::<f64>() {
+                            rss_mb = (kb / 1024.0 * 10.0).round() / 10.0;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        static LAST_CPU: std::sync::Mutex<Option<(std::time::Instant, u64)>> = std::sync::Mutex::new(None);
+        let mut cpu_pct = 0.0;
+
+        if let Ok(stat_line) = std::fs::read_to_string("/proc/self/stat") {
+            let tokens: Vec<&str> = stat_line.split_whitespace().collect();
+            if tokens.len() >= 15 {
+                let utime: u64 = tokens[13].parse().unwrap_or(0);
+                let stime: u64 = tokens[14].parse().unwrap_or(0);
+                let current_ticks = utime + stime;
+                let now = std::time::Instant::now();
+
+                if let Ok(mut guard) = LAST_CPU.lock() {
+                    if let Some((prev_time, prev_ticks)) = *guard {
+                        let elapsed = now.duration_since(prev_time).as_secs_f64();
+                        if elapsed >= 0.2 && current_ticks >= prev_ticks {
+                            let delta_ticks = (current_ticks - prev_ticks) as f64;
+                            let p = (delta_ticks / (100.0 * elapsed)) * 100.0;
+                            cpu_pct = (p * 10.0).round() / 10.0;
+                        }
+                    }
+                    *guard = Some((now, current_ticks));
+                }
+            }
+        }
+
+        (rss_mb, cpu_pct)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        (0.0, 0.0)
+    }
+}
+
+/// Статистика нагрузки CPU и RAM из /rci/show/system + процесс xkeen-route.
 pub async fn get_system(http: &reqwest::Client, cfg: &AppConfig) -> Result<SystemStats, String> {
     let token = ensure_auth(http, cfg).await?;
     let v = as_object(rci_get(http, cfg, &token, "/rci/show/system").await?);
@@ -372,10 +428,13 @@ pub async fn get_system(http: &reqwest::Client, cfg: &AppConfig) -> Result<Syste
                 memory_total_mb = (tot_kb / 1024) as u32;
             }
         }
+        let (app_memory_mb, app_cpu_percent) = get_proc_stats();
         return Ok(SystemStats {
             cpu_percent,
             memory_used_mb,
             memory_total_mb,
+            app_memory_mb,
+            app_cpu_percent,
         });
     }
     Err("Invalid system response".into())

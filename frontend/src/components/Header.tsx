@@ -1,6 +1,6 @@
-import { useState } from 'react'
-import { apiPost } from '../api'
-import type { StatusInfo } from '../types'
+import { useState, useEffect } from 'react'
+import { apiGet, apiPost } from '../api'
+import type { StatusInfo, SystemStats } from '../types'
 
 interface HeaderProps {
   status: StatusInfo | null
@@ -112,16 +112,43 @@ function IconGauge() {
 
 export default function Header({ status, notify, refresh, onSwitchTab }: HeaderProps) {
   const [pending, setPending] = useState(false)
+  const [liveMetrics, setLiveMetrics] = useState<SystemStats | null>(null)
 
   const isRunning = status ? Boolean(status.failover?.enabled) : true
 
-  // Память и CPU из RCI
-  const memUsed = status?.system?.memory_used_mb ?? 348
-  const memTotal = status?.system?.memory_total_mb ?? 512
-  const cpuPercent = status?.system?.cpu_percent ?? 7
+  // Периодическое обновление метрик каждую секунду (1 сек)
+  useEffect(() => {
+    let active = true
+    const fetchMetrics = async () => {
+      if (document.hidden) return
+      try {
+        const data = await apiGet<SystemStats>('system/metrics')
+        if (active && data) {
+          setLiveMetrics(data)
+        }
+      } catch {
+        /* временный сбой соединения — не прерываем таймер */
+      }
+    }
+
+    fetchMetrics()
+    const timer = setInterval(fetchMetrics, 1000)
+    return () => {
+      active = false
+      clearInterval(timer)
+    }
+  }, [])
+
+  // Память и CPU (живые из 1-секундного таймера либо из статуса)
+  const currentMetrics = liveMetrics || status?.system
+  const memUsed = currentMetrics?.memory_used_mb ?? 348
+  const memTotal = currentMetrics?.memory_total_mb ?? 512
+  const cpuPercent = currentMetrics?.cpu_percent ?? 0
+  const appMemMb = currentMetrics?.app_memory_mb ?? 0
+  const appCpu = currentMetrics?.app_cpu_percent ?? 0
 
   const mihomoVersion = status?.mihomo_version || 'v1.19.29'
-  const appVersion = status?.version ? status.version.replace(/^v/, '') : '1.0.14'
+  const appVersion = status?.version ? status.version.replace(/^v/, '') : '1.0.17'
 
   const handleRestart = async () => {
     if (pending) return
@@ -154,7 +181,7 @@ export default function Header({ status, notify, refresh, onSwitchTab }: HeaderP
 
   return (
     <header className="header-bar">
-      {/* ЛЕВАЯ ЧАСТЬ: Статус сервиса + RAM/CPU + Кнопки перезапуска/остановки */}
+      {/* ЛЕВАЯ ЧАСТЬ: Статус сервиса + RAM/CPU + Потребление XKeen Route + Кнопки */}
       <div className="header-left">
         <div className={`status-badge-custom ${isRunning ? 'status-badge-running' : 'status-badge-stopped'}`}>
           <StatusWaveform isRunning={isRunning} />
@@ -164,15 +191,27 @@ export default function Header({ status, notify, refresh, onSwitchTab }: HeaderP
               <span className="status-label">{isRunning ? 'Сервис запущен' : 'Сервис остановлен'}</span>
             </div>
             <div className="status-badge-row2">
-              <span className="status-stat">
+              <span className="status-stat" title="Оперативная память роутера">
                 <IconDisk />
                 <span>{memUsed}/{memTotal} МБ</span>
               </span>
               <span className="status-stat-sep">|</span>
-              <span className="status-stat">
+              <span className="status-stat" title="Нагрузка на процессор роутера">
                 <IconGauge />
                 <span>{cpuPercent}%</span>
               </span>
+              {appMemMb > 0 && (
+                <>
+                  <span className="status-stat-sep">|</span>
+                  <span
+                    className="status-stat"
+                    title={`Потребление процесса XKeen Route: ${appMemMb} МБ RAM (RSS), CPU: ${appCpu}%`}
+                  >
+                    <span className="status-xr-label">XR:</span>
+                    <span>{appMemMb} МБ</span>
+                  </span>
+                </>
+              )}
             </div>
           </div>
         </div>
