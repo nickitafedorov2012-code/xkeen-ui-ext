@@ -353,26 +353,29 @@ impl AntigravityManager {
             st.state_status = "working".into();
             st.consecutive_failures = 0;
 
-            if prev_ip != Some(ip) {
+            let ip_changed = prev_ip != Some(ip);
+            if ip_changed {
                 st.log(
                     format!("Выбран рабочий подменный IP {ip} от {prov_name} (задержка {lat} мс)"),
                     "success",
                 );
+            }
+            drop(st);
+
+            if ip_changed {
                 // Применяем правила в Keenetic
                 self.apply_keenetic_rules(ip, &targets, prev_ip).await;
             }
         } else {
             st.consecutive_failures += 1;
-            st.state_status = if st.consecutive_failures >= 3 {
+            let fails = st.consecutive_failures;
+            st.state_status = if fails >= 3 {
                 "error".into()
             } else {
                 "healing".into()
             };
             st.log(
-                format!(
-                    "Внимание: не найдено доступных подменных IP (ошибок подряд: {})",
-                    st.consecutive_failures
-                ),
+                format!("Внимание: не найдено доступных подменных IP (ошибок подряд: {fails})"),
                 "warn",
             );
         }
