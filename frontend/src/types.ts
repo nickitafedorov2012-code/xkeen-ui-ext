@@ -12,7 +12,13 @@ export interface StatusInfo {
   router: { model?: string; version?: string; hostname?: string; uptime?: string } | null
   system?: SystemStats | null
   mihomo_version?: string | null
-  active_server: { id: string; name: string; ping_ms: number } | null
+  active_server: {
+    id: string
+    name: string
+    ping_ms: number
+    provider?: string
+    provider_name?: string
+  } | null
   mihomo: { host: string; port: number }
   rci: { host: string; port: number }
   failover: {
@@ -36,6 +42,16 @@ export interface ServerInfo {
   is_active: boolean
   is_priority: boolean
   ping_ms: number
+  provider?: string
+  provider_name?: string
+}
+
+export interface ProviderInfo {
+  id: string
+  name: string
+  count: number
+  vehicle_type: string
+  updated_at?: string
 }
 
 export interface PolicyInfo {

@@ -22,6 +22,8 @@ pub struct Server {
     pub is_active: bool,
     pub is_priority: bool,
     pub ping_ms: i64,
+    pub provider: Option<String>,
+    pub provider_name: Option<String>,
 }
 
 impl AsRef<str> for Server {
@@ -86,19 +88,58 @@ pub async fn get_provider_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Re
     let v = m_get(http, cfg, "/providers/proxies").await?;
     let mut out = BTreeMap::new();
     if let Some(map) = v.get("providers").and_then(|p| p.as_object()) {
-        for (_pname, prov) in map {
+        for (pname, prov) in map {
             if prov.get("vehicleType").and_then(|t| t.as_str()) == Some("Compatible") {
                 continue;
             }
             if let Some(list) = prov.get("proxies").and_then(|p| p.as_array()) {
                 for p in list {
                     if let Some(name) = p.get("name").and_then(|n| n.as_str()) {
-                        out.insert(name.to_string(), p.clone());
+                        let mut p_val = p.clone();
+                        if let Some(obj) = p_val.as_object_mut() {
+                            obj.insert("_provider".to_string(), Value::String(pname.clone()));
+                        }
+                        out.insert(name.to_string(), p_val);
                     }
                 }
             }
         }
     }
+    Ok(out)
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderInfo {
+    pub id: String,
+    pub name: String,
+    pub count: usize,
+    pub vehicle_type: String,
+    pub updated_at: Option<String>,
+}
+
+/// Список всех подписок (proxy-providers) с метаданными и пользовательскими псевдонимами.
+pub async fn get_providers_info(http: &reqwest::Client, cfg: &AppConfig) -> Result<Vec<ProviderInfo>, String> {
+    let v = m_get(http, cfg, "/providers/proxies").await?;
+    let mut out = Vec::new();
+    if let Some(map) = v.get("providers").and_then(|p| p.as_object()) {
+        for (pname, prov) in map {
+            if prov.get("vehicleType").and_then(|t| t.as_str()) == Some("Compatible") {
+                continue;
+            }
+            let count = prov.get("proxies").and_then(|p| p.as_array()).map(|a| a.len()).unwrap_or(0);
+            let vtype = prov.get("vehicleType").and_then(|t| t.as_str()).unwrap_or("HTTP").to_string();
+            let updated = prov.get("updatedAt").and_then(|u| u.as_str()).map(|s| s.to_string());
+            let display_name = cfg.provider_aliases.get(pname).cloned().unwrap_or_else(|| pname.clone());
+            out.push(ProviderInfo {
+                id: pname.clone(),
+                name: display_name,
+                count,
+                vehicle_type: vtype,
+                updated_at: updated,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
 }
 
@@ -448,6 +489,8 @@ pub async fn get_servers(
                 is_active: proxy_now == id,
                 is_priority: priority_chain.iter().any(|p| p == id),
                 ping_ms: last_delay(p),
+                provider: None,
+                provider_name: None,
             });
         }
     }
@@ -470,6 +513,8 @@ pub async fn get_servers(
             is_active: *name == active,
             is_priority: priority_chain.iter().any(|p| p == name),
             ping_ms: last_delay(p),
+            provider: None,
+            provider_name: None,
         });
     }
 
@@ -484,6 +529,10 @@ pub async fn get_servers(
                 continue;
             }
             seen_names.insert(name.clone());
+            let provider_id = p.get("_provider").and_then(|pr| pr.as_str()).map(|pr| pr.to_string());
+            let provider_name = provider_id.as_ref().map(|pid| {
+                cfg.provider_aliases.get(pid).cloned().unwrap_or_else(|| pid.clone())
+            });
             servers.push(Server {
                 id: name.clone(),
                 name: display_name(name),
@@ -493,6 +542,8 @@ pub async fn get_servers(
                 is_active: *name == active,
                 is_priority: priority_chain.iter().any(|p| p == name),
                 ping_ms: last_delay(p),
+                provider: provider_id,
+                provider_name,
             });
         }
     }

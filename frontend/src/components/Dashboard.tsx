@@ -89,8 +89,13 @@ export default function Dashboard({ status, notify, refresh }: Props) {
           <li>
             <span>Активный сервер</span>
             {status?.active_server ? (
-              <b>
-                {status.active_server.name}{' '}
+              <b style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                {status.active_server.provider && (
+                  <span className="tag-provider" style={{ cursor: 'default' }}>
+                    📦 {status.active_server.provider_name || status.active_server.provider}
+                  </span>
+                )}
+                <span>{status.active_server.name}</span>{' '}
                 <span className={'ping ' + pingClass(status.active_server.ping_ms)}>
                   {status.active_server.ping_ms > 0 ? `${status.active_server.ping_ms} мс` : '—'}
                 </span>

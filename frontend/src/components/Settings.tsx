@@ -426,6 +426,11 @@ export default function Settings({ notify, status, refresh }: Props) {
               return (
                 <div key={id} className="check-row" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                   <span className="badge">{i === 0 ? 'ОСН' : `РЕЗ${i}`}</span>
+                  {sv?.provider && (
+                    <span className="tag-provider" style={{ fontSize: 10, padding: '1px 5px', cursor: 'default' }}>
+                      📦 {sv.provider_name || sv.provider}
+                    </span>
+                  )}
                   <span className="server-name" style={{ flex: 1 }} title={id}>{sv ? sv.name : `${id} (сейчас недоступен)`}</span>
                   {sv && (
                     <span className={'ping ' + pingClass(sv.ping_ms)}>
@@ -458,7 +463,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                 .filter((s) => !chain.includes(s.id))
                 .map((s) => (
                   <option key={s.id} value={s.id}>
-                    {s.name} · {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
+                    {s.provider_name ? `[${s.provider_name}] ` : s.provider ? `[${s.provider}] ` : ''}{s.name} · {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
                   </option>
                 ))}
             </select>

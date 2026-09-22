@@ -567,5 +567,70 @@ table.devices tr.me { background: rgba(79, 140, 255, 0.05); }
   cursor: not-allowed;
 }
 
+/* --- Бейдж подписки (Provider Tag) --- */
+.tag-provider {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(168, 85, 247, 0.12);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.3);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  user-select: none;
+}
+.tag-provider:hover {
+  background: rgba(168, 85, 247, 0.22);
+  border-color: rgba(168, 85, 247, 0.55);
+  color: #e9d5ff;
+  transform: translateY(-1px);
+}
+.tag-provider.static {
+  background: rgba(148, 163, 184, 0.1);
+  color: #94a3b8;
+  border-color: rgba(148, 163, 184, 0.25);
+  cursor: default;
+}
+.tag-provider.static:hover {
+  transform: none;
+}
 
-
+/* Строка управления подпиской в модальном окне */
+.provider-edit-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.provider-edit-row:last-child {
+  border-bottom: none;
+}
+.provider-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 140px;
+}
+.provider-meta-id {
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
+.provider-meta-count {
+  font-size: 11px;
+  color: #64748b;
+}
+.provider-inputs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+}
+.provider-inputs .input {
+  flex: 1;
+}

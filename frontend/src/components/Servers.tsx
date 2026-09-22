@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { apiGet, apiPost } from '../api'
-import { pingClass, type ServerInfo } from '../types'
+import { pingClass, type ProviderInfo, type ServerInfo } from '../types'
 
 interface Props {
   notify: (msg: string, isError?: boolean) => void
@@ -10,6 +10,11 @@ const PAGE = 15
 
 export default function Servers({ notify }: Props) {
   const [servers, setServers] = useState<ServerInfo[]>([])
+  const [providers, setProviders] = useState<ProviderInfo[]>([])
+  const [selectedProvider, setSelectedProvider] = useState('')
+  const [providersOpen, setProvidersOpen] = useState(false)
+  const [editingAliases, setEditingAliases] = useState<Record<string, string>>({})
+  const [updatingProvider, setUpdatingProvider] = useState<string | null>(null)
   const [filter, setFilter] = useState('')
   const [limit, setLimit] = useState(PAGE)
   const [loading, setLoading] = useState(true)
@@ -21,12 +26,14 @@ export default function Servers({ notify }: Props) {
 
   const load = useCallback(async () => {
     try {
-      const [data, ig] = await Promise.all([
+      const [data, ig, provData] = await Promise.all([
         apiGet<{ servers: ServerInfo[] }>('servers'),
         apiGet<{ servers: string[] }>('ignore').catch(() => ({ servers: [] as string[] })),
+        apiGet<{ providers: ProviderInfo[] }>('providers').catch(() => ({ providers: [] as ProviderInfo[] })),
       ])
       setServers(data.servers)
       setIgnored(new Set(ig.servers))
+      setProviders(provData.providers)
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка загрузки серверов', true)
     } finally {
@@ -40,8 +47,23 @@ export default function Servers({ notify }: Props) {
 
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase()
-    return q ? servers.filter((s) => s.name.toLowerCase().includes(q)) : servers
-  }, [servers, filter])
+    return servers.filter((s) => {
+      if (selectedProvider) {
+        if (selectedProvider === '__static__') {
+          if (s.provider) return false
+        } else if (s.provider !== selectedProvider) {
+          return false
+        }
+      }
+      if (!q) return true
+      return (
+        s.name.toLowerCase().includes(q) ||
+        (s.provider_name && s.provider_name.toLowerCase().includes(q)) ||
+        (s.provider && s.provider.toLowerCase().includes(q)) ||
+        s.host.toLowerCase().includes(q)
+      )
+    })
+  }, [servers, filter, selectedProvider])
 
   const pingAll = async () => {
     setPinging(true)
@@ -125,6 +147,38 @@ export default function Servers({ notify }: Props) {
     }
   }
 
+  const openProvidersModal = () => {
+    const initial: Record<string, string> = {}
+    for (const p of providers) {
+      initial[p.id] = p.name === p.id ? '' : p.name
+    }
+    setEditingAliases(initial)
+    setProvidersOpen(true)
+  }
+
+  const saveProviderAlias = async (id: string, alias: string) => {
+    try {
+      await apiPost('providers/rename', { id, alias: alias.trim() })
+      notify(`Подписка сохранена: ${alias.trim() || id}`)
+      load()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка сохранения названия', true)
+    }
+  }
+
+  const updateProviderNow = async (id: string) => {
+    setUpdatingProvider(id)
+    try {
+      const res = await apiPost<{ message: string }>('providers/update', { id })
+      notify(res.message || 'Подписка обновлена')
+      load()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка обновления подписки', true)
+    } finally {
+      setUpdatingProvider(null)
+    }
+  }
+
   return (
     <section className="card">
       <div className="toolbar">
@@ -137,9 +191,33 @@ export default function Servers({ notify }: Props) {
             setLimit(PAGE)
           }}
         />
+        {providers.length > 0 && (
+          <select
+            className="input"
+            value={selectedProvider}
+            onChange={(e) => {
+              setSelectedProvider(e.target.value)
+              setLimit(PAGE)
+            }}
+            title="Фильтр по подписке"
+            style={{ maxWidth: 180 }}
+          >
+            <option value="">Все подписки ({servers.length})</option>
+            {providers.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name} ({p.count})
+              </option>
+            ))}
+          </select>
+        )}
         <button className="btn" onClick={pingAll} disabled={pinging}>
           {pinging ? 'Пинг…' : '📡 Пинг всех'}
         </button>
+        {providers.length > 0 && (
+          <button className="btn" onClick={openProvidersModal} title="Управление и переименование подписок">
+            📦 Подписки ({providers.length})
+          </button>
+        )}
         <button className="btn" onClick={openIgnore}>
           🚫 Игнор-лист{ignored.size > 0 ? ` (${ignored.size})` : ''}
         </button>
@@ -158,6 +236,15 @@ export default function Servers({ notify }: Props) {
             <div key={s.id} className={'server-card' + (s.is_active ? ' active' : '')}>
               <div className="server-head">
                 <span className="badge">{s.protocol}</span>
+                {s.provider && (
+                  <span
+                    className="tag-provider"
+                    title={`Подписка: ${s.provider_name || s.provider} (кликните для управления подписками)`}
+                    onClick={openProvidersModal}
+                  >
+                    📦 {s.provider_name || s.provider}
+                  </span>
+                )}
                 <span className="server-name" title={s.name}>{s.name}</span>
                 {ignored.has(s.id) && <span className="tag ignored">ИГНОР</span>}
                 <span className={'ping ' + pingClass(s.ping_ms)}>
@@ -204,6 +291,11 @@ export default function Servers({ notify }: Props) {
                     onChange={(e) => toggleIgnoreDraft(s.id, e.target.checked)}
                   />
                   <span className="badge">{s.protocol}</span>
+                  {s.provider && (
+                    <span className="tag-provider" style={{ fontSize: 10, padding: '1px 5px' }}>
+                      📦 {s.provider_name || s.provider}
+                    </span>
+                  )}
                   <span className="server-name" title={s.name}>{s.name}</span>
                   {s.ping_ms > 0 && <span className={'ping ' + pingClass(s.ping_ms)}>{s.ping_ms} мс</span>}
                 </label>
@@ -217,6 +309,69 @@ export default function Servers({ notify }: Props) {
               </button>
               <button className="btn primary" onClick={saveIgnore} disabled={ignoreSaving}>
                 {ignoreSaving ? 'Применение…' : `Применить (${ignoreDraft.size})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {providersOpen && (
+        <div className="modal-overlay" onClick={() => setProvidersOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>📦 Управление подписками</h2>
+            <p className="muted small">
+              Вы можете переименовать подписки (proxy-providers), чтобы легко различать их в списке серверов,
+              фильтрах, цепочке failover и на дашборде.
+            </p>
+            <div className="modal-list">
+              {providers.length === 0 && <p className="muted">Нет активных подписок.</p>}
+              {providers.map((p) => {
+                const draft = editingAliases[p.id] ?? (p.name === p.id ? '' : p.name)
+                const isChanged = (p.name === p.id ? '' : p.name) !== draft.trim()
+                return (
+                  <div key={p.id} className="provider-edit-row">
+                    <div className="provider-meta">
+                      <b style={{ fontSize: 13 }}>{p.name}</b>
+                      <span className="provider-meta-id">{p.id}</span>
+                      <span className="provider-meta-count">
+                        {p.count} серв.{p.updated_at ? ` · ${p.updated_at.slice(0, 10)}` : ''}
+                      </span>
+                    </div>
+                    <div className="provider-inputs">
+                      <input
+                        className="input sm"
+                        placeholder="Своё название…"
+                        value={draft}
+                        onChange={(e) =>
+                          setEditingAliases((prev) => ({ ...prev, [p.id]: e.target.value }))
+                        }
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') saveProviderAlias(p.id, draft)
+                        }}
+                      />
+                      <button
+                        className="btn sm primary"
+                        disabled={!isChanged}
+                        onClick={() => saveProviderAlias(p.id, draft)}
+                      >
+                        Сохранить
+                      </button>
+                      <button
+                        className="btn sm ghost"
+                        title="Обновить подписку (скачать свежие серверы)"
+                        disabled={updatingProvider === p.id}
+                        onClick={() => updateProviderNow(p.id)}
+                      >
+                        {updatingProvider === p.id ? '…' : '🔄'}
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+            <div className="modal-actions">
+              <button className="btn primary" onClick={() => setProvidersOpen(false)}>
+                Закрыть
               </button>
             </div>
           </div>

@@ -26,8 +26,10 @@ pub async fn status(State(state): State<AppState>) -> Response {
                 .find(|s| s.is_active && s.id != "Fastest" && s.id != "Fallback")
                 .or_else(|| servers.iter().find(|s| s.is_active))
                 .cloned()
-        })
-        .map(|s| json!({ "id": s.id, "name": s.name, "ping_ms": s.ping_ms }));
+        .map(|s| json!({
+            "id": s.id, "name": s.name, "ping_ms": s.ping_ms,
+            "provider": s.provider, "provider_name": s.provider_name,
+        }));
 
     api_ok(json!({
         "version": VERSION,
@@ -115,6 +117,8 @@ pub async fn get_servers(State(state): State<AppState>) -> Response {
                         "host": s.host, "port": s.port,
                         "is_active": s.is_active, "is_priority": s.is_priority,
                         "ping_ms": s.ping_ms,
+                        "provider": s.provider,
+                        "provider_name": s.provider_name,
                     })
                 })
                 .collect();
@@ -986,6 +990,67 @@ pub async fn apply_routing(State(state): State<AppState>, Json(req): Json<Routin
         }
     }
     api_ok(json!({ "applied": assignments.len(), "reselected": reselected }))
+}
+
+#[derive(Deserialize)]
+pub struct RenameProviderReq {
+    #[serde(alias = "id")]
+    pub provider_id: String,
+    pub alias: String,
+}
+
+/// GET /api/providers — список подписок с именами и метаданными
+pub async fn get_providers(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    match mihomo::get_providers_info(&state.http, &cfg).await {
+        Ok(providers) => api_ok(json!({ "providers": providers })),
+        Err(e) => api_err(e),
+    }
+}
+
+/// POST /api/providers/rename — переименование подписки
+pub async fn rename_provider(State(state): State<AppState>, Json(req): Json<RenameProviderReq>) -> Response {
+    let pid = req.provider_id.trim().to_string();
+    if pid.is_empty() {
+        return api_err("ID подписки не может быть пустым");
+    }
+    let alias = req.alias.trim().to_string();
+    let mut new_cfg = state.config.read().await.clone();
+    if alias.is_empty() {
+        new_cfg.provider_aliases.remove(&pid);
+    } else {
+        new_cfg.provider_aliases.insert(pid.clone(), alias.clone());
+    }
+    if let Err(e) = state.save_config(&new_cfg).await {
+        return api_err(format!("Ошибка сохранения: {e}"));
+    }
+    *state.config.write().await = new_cfg;
+    let label = if alias.is_empty() {
+        format!("Сброшено имя подписки '{pid}'")
+    } else {
+        format!("Подписка '{pid}' переименована в '{alias}'")
+    };
+    api_ok(json!({ "saved": true, "message": label, "provider_id": pid, "alias": alias }))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateProviderReq {
+    #[serde(alias = "id")]
+    pub provider_id: Option<String>,
+}
+
+/// POST /api/providers/update — принудительное обновление подписки/подписок
+pub async fn update_provider(State(state): State<AppState>, Json(req): Json<UpdateProviderReq>) -> Response {
+    let cfg = state.config.read().await.clone();
+    if let Some(pid) = req.provider_id.filter(|p| !p.trim().is_empty()) {
+        match mihomo::force_update_provider(&state.http, &cfg, &pid).await {
+            Ok(_) => api_ok(json!({ "updated": 1, "message": format!("Подписка '{pid}' обновлена") })),
+            Err(e) => api_err(format!("Ошибка обновления подписки '{pid}': {e}")),
+        }
+    } else {
+        let count = mihomo::force_update_all_providers(&state.http, &cfg).await;
+        api_ok(json!({ "updated": count, "message": format!("Обновлено подписок: {count}") }))
+    }
 }
 
 

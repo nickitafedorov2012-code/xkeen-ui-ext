@@ -187,6 +187,8 @@ pub struct AppConfig {
     pub system: SystemConfig,
     /// Логирование.
     pub logs: LogsConfig,
+    /// Пользовательские названия подписок (провайдеров): provider_id -> alias.
+    pub provider_aliases: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for AppConfig {
@@ -203,6 +205,7 @@ impl Default for AppConfig {
             force_domains: Vec::new(),
             system: SystemConfig::default(),
             logs: LogsConfig::default(),
+            provider_aliases: std::collections::BTreeMap::new(),
         }
     }
 }
