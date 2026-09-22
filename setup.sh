@@ -77,10 +77,15 @@ do_install() {
     msg "${RED} ❌ Не удалось загрузить бинарник${NC}"; return 1
   }
 
-  msg "${GREEN}🧩 Init-скрипт...${NC}"
+  msg "${GREEN}🧩 Init-скрипт и Watchdog...${NC}"
   "$BIN" create-init || { msg "${RED} ❌ Ошибка создания init${NC}"; return 1; }
 
   mkdir -p "$CONF_DIR"
+
+  # Настройка cron watchdog (перезапуск панели в случае падения или ночного обновления XKeen)
+  if which crontab >/dev/null 2>&1; then
+    (crontab -l 2>/dev/null | grep -v 'xkeen-route'; echo "*/5 * * * * pidof xkeen-route >/dev/null || /opt/etc/init.d/S99xkeen-route start >/dev/null 2>&1") | crontab -
+  fi
 
   msg "${GREEN}🚀 Запуск...${NC}"
   if [ -f "$INIT" ]; then
@@ -100,6 +105,9 @@ do_uninstall() {
   msg "${GREEN}🛑 Остановка сервиса...${NC}"
   [ -f "$INIT" ] && sh "$INIT" stop 2>/dev/null
   rm -f "$INIT" "$BIN"
+  if which crontab >/dev/null 2>&1; then
+    (crontab -l 2>/dev/null | grep -v 'xkeen-route') | crontab -
+  fi
   if [ "$PURGE" = "purge" ]; then
     rm -rf "$CONF_DIR"
     msg "${GREEN}✅ XKeen Route полностью удалён (бинарь, init-скрипт, конфиги).${NC}"

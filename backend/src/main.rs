@@ -101,6 +101,11 @@ fn create_init() -> std::io::Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(INIT_SCRIPT, std::fs::Permissions::from_mode(0o755))?;
+        // Добавление сторожевого таймера (watchdog) в crontab для автоперезапуска
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("(crontab -l 2>/dev/null | grep -v 'xkeen-route'; echo '*/5 * * * * pidof xkeen-route >/dev/null || /opt/etc/init.d/S99xkeen-route start >/dev/null 2>&1') | crontab -")
+            .status();
     }
     println!("[OK] Init-скрипт создан: {}", INIT_SCRIPT);
     Ok(())
