@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
-import type { AppSettings, ServerInfo, StatusInfo } from '../types'
+import { pingClass, type AppSettings, type ServerInfo, type StatusInfo } from '../types'
 
 interface Props {
   notify: (msg: string, isError?: boolean) => void
@@ -186,6 +186,7 @@ export default function Settings({ notify, status, refresh }: Props) {
       const data = await apiPost<{ message: string }>('failover/check')
       notify(data.message)
       refresh?.()
+      apiGet<{ servers: ServerInfo[] }>('servers').then((d) => setServers(d.servers)).catch(() => {})
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка проверки', true)
     }
@@ -359,6 +360,11 @@ export default function Settings({ notify, status, refresh }: Props) {
                 <div key={id} className="check-row" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                   <span className="badge">{i === 0 ? 'ОСН' : `РЕЗ${i}`}</span>
                   <span className="server-name" style={{ flex: 1 }} title={id}>{sv ? sv.name : `${id} (сейчас недоступен)`}</span>
+                  {sv && (
+                    <span className={'ping ' + pingClass(sv.ping_ms)}>
+                      {sv.ping_ms > 0 ? `${sv.ping_ms} мс` : '—'}
+                    </span>
+                  )}
                   <button className="btn sm ghost" disabled={i === 0} onClick={() => chainMove(i, -1)}>↑</button>
                   <button className="btn sm ghost" disabled={i === chain.length - 1} onClick={() => chainMove(i, 1)}>↓</button>
                   <button
@@ -384,7 +390,9 @@ export default function Settings({ notify, status, refresh }: Props) {
               {servers
                 .filter((s) => !chain.includes(s.id))
                 .map((s) => (
-                  <option key={s.id} value={s.id}>{s.name}</option>
+                  <option key={s.id} value={s.id}>
+                    {s.name} · {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
+                  </option>
                 ))}
             </select>
           </div>

@@ -54,7 +54,7 @@ export default function DeviceRoutingModal({
             return (
               <div key={id} className="check-row" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                 <span className="badge">{i === 0 ? 'ОСН' : `РЕЗ${i}`}</span>
-                <span className="server-name" style={{ flex: 1 }} title={id}>{serverLabel(id)}</span>
+                <span className="server-name" style={{ flex: 1 }} title={id}>{s ? s.name : id}</span>
                 {s && <span className={'ping ' + pingClass(s.ping_ms)}>{s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}</span>}
                 <button className="btn sm ghost" disabled={i === 0} onClick={() => drMove(i, -1)}>↑</button>
                 <button className="btn sm ghost" disabled={i === modal.servers.length - 1} onClick={() => drMove(i, 1)}>↓</button>
