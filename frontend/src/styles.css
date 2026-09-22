@@ -197,11 +197,24 @@ body {
   text-decoration: none;
   display: inline-flex;
   align-items: center;
-  transition: opacity 0.15s ease;
+  gap: 10px;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .header-brand-link:hover {
-  opacity: 0.85;
+  opacity: 0.95;
+  transform: translateY(-1px);
+}
+
+.header-brand-icon {
+  flex-shrink: 0;
+  transition: all 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+  filter: drop-shadow(0 0 6px rgba(0, 211, 242, 0.35));
+}
+
+.header-brand-link:hover .header-brand-icon {
+  filter: drop-shadow(0 0 12px rgba(0, 211, 242, 0.75));
+  transform: rotate(20deg) scale(1.08);
 }
 
 .header-brand-text {

@@ -110,6 +110,47 @@ function IconGauge() {
   )
 }
 
+function BrandLogoIcon() {
+  return (
+    <svg
+      className="header-brand-icon"
+      width="28"
+      height="28"
+      viewBox="0 0 28 28"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <defs>
+        <linearGradient id="brandIconGrad" x1="2" y1="2" x2="26" y2="26" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#00D3F2" />
+          <stop offset="50%" stopColor="#2B7FFF" />
+          <stop offset="100%" stopColor="#155DFC" />
+        </linearGradient>
+        <linearGradient id="brandGlowGrad" x1="0" y1="0" x2="28" y2="28" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#00D3F2" stopOpacity="0.25" />
+          <stop offset="100%" stopColor="#155DFC" stopOpacity="0.08" />
+        </linearGradient>
+      </defs>
+      {/* Мягкая фоновая сфера */}
+      <circle cx="14" cy="14" r="13" fill="url(#brandGlowGrad)" />
+      <circle cx="14" cy="14" r="12.5" stroke="url(#brandIconGrad)" strokeWidth="1.6" />
+      {/* Меридиан и экватор глобуса */}
+      <ellipse cx="14" cy="14" rx="5.2" ry="12.5" stroke="#00D3F2" strokeWidth="1.1" strokeOpacity="0.4" />
+      <path d="M 2 14 H 26" stroke="#00D3F2" strokeWidth="1.1" strokeOpacity="0.4" />
+      {/* Динамическая кривая маршрутизации трафика (route flow) */}
+      <path
+        d="M 5 19.5 C 8.5 24, 18.5 24, 22.5 18 C 25.5 13, 22 6, 14 5 C 8.5 4.5, 4.5 9, 6.5 15 C 8 19, 14 19.5, 18 16"
+        stroke="url(#brandIconGrad)"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+      />
+      {/* Узлы сети (active nodes) */}
+      <circle cx="18" cy="16" r="2" fill="#00D3F2" />
+      <circle cx="6.5" cy="15" r="1.3" fill="#2B7FFF" />
+    </svg>
+  )
+}
+
 export default function Header({ status, notify, refresh, onSwitchTab }: HeaderProps) {
   const [pending, setPending] = useState(false)
   const [liveMetrics, setLiveMetrics] = useState<SystemStats | null>(null)
@@ -174,7 +215,7 @@ export default function Header({ status, notify, refresh, onSwitchTab }: HeaderP
   const appCpu = currentMetrics?.app_cpu_percent ?? 0
 
   const mihomoVersion = status?.mihomo_version || 'v1.19.29'
-  const appVersion = status?.version ? status.version.replace(/^v/, '') : '1.0.18'
+  const appVersion = status?.version ? status.version.replace(/^v/, '') : '1.0.19'
 
   const handleRestart = async () => {
     if (pending) return
@@ -274,6 +315,7 @@ export default function Header({ status, notify, refresh, onSwitchTab }: HeaderP
             onSwitchTab('dashboard')
           }}
         >
+          <BrandLogoIcon />
           <span className="header-brand-text">XKeen Route</span>
         </a>
       </div>
