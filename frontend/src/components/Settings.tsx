@@ -281,15 +281,6 @@ export default function Settings({ notify, status, refresh }: Props) {
     patch((s) => (s.failover.priority_chain = next))
   }
 
-  const addPreset = (domain: string) => {
-    const list = forceDomains.split('\n').map((s) => s.trim()).filter(Boolean)
-    if (!list.includes(domain)) {
-      list.push(domain)
-      setForceDomains(list.join('\n'))
-      notify(`Добавлен пресет: ${domain}`)
-    }
-  }
-
   const saveDomains = async () => {
     setSavingDomains(true)
     try {
@@ -724,18 +715,8 @@ export default function Settings({ notify, status, refresh }: Props) {
             style={{ fontFamily: 'Consolas, monospace', fontSize: 12.5, resize: 'vertical' }}
           />
         </label>
-        <div style={{ marginTop: 8 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4, flexWrap: 'wrap', gap: 4 }}>
-            <span style={{ fontWeight: 500 }}>🔒 Принудительно через прокси (→ PROXY)</span>
-            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-              <span className="muted small" style={{ alignSelf: 'center', marginRight: 2 }}>Пресеты:</span>
-              <button type="button" className="btn small ghost" onClick={() => addPreset('mysku.club')}>+ Муська</button>
-              <button type="button" className="btn small ghost" onClick={() => addPreset('habr.com')}>+ Хабр</button>
-              <button type="button" className="btn small ghost" onClick={() => addPreset('rutracker.org')}>+ Rutracker</button>
-              <button type="button" className="btn small ghost" onClick={() => addPreset('x.com')}>+ X/Twitter</button>
-              <button type="button" className="btn small ghost" onClick={() => addPreset('instagram.com')}>+ Instagram</button>
-            </div>
-          </div>
+        <label className="row" style={{ flexDirection: 'column', alignItems: 'stretch', marginTop: 8 }}>
+          <span>🔒 Принудительно через прокси (→ PROXY)</span>
           <textarea
             className="input"
             rows={6}
@@ -744,21 +725,21 @@ export default function Settings({ notify, status, refresh }: Props) {
             onChange={(e) => setForceDomains(e.target.value)}
             style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'Consolas, monospace', fontSize: 12.5, resize: 'vertical' }}
           />
-          {autoCdns.length > 0 && (
-            <div style={{ marginTop: 8, padding: '8px 10px', background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.2)', borderRadius: 6, fontSize: 12 }}>
-              <div style={{ color: '#38bdf8', fontWeight: 600, marginBottom: 4 }}>
-                ⚡ Автоматически подключенные CDN и медиа-сервера ({autoCdns.length}):
-              </div>
-              <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                {autoCdns.map((cdn) => (
-                  <span key={cdn} style={{ fontSize: 11, background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace' }}>
-                    {cdn}
-                  </span>
-                ))}
-              </div>
+        </label>
+        {autoCdns.length > 0 && (
+          <div style={{ marginTop: 8, padding: '8px 10px', background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.2)', borderRadius: 6, fontSize: 12 }}>
+            <div style={{ color: '#38bdf8', fontWeight: 600, marginBottom: 4 }}>
+              ⚡ Автоматически подключенные CDN и медиа-сервера ({autoCdns.length}):
             </div>
-          )}
-        </div>
+            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+              {autoCdns.map((cdn) => (
+                <span key={cdn} style={{ fontSize: 11, background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace' }}>
+                  {cdn}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
         <button className="btn primary" style={{ marginTop: 12 }} onClick={saveDomains} disabled={savingDomains}>
           {savingDomains ? 'Применение и поиск CDN…' : '🌐 Применить домены'}
         </button>
