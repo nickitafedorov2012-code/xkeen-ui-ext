@@ -343,6 +343,44 @@ pub async fn get_version(http: &reqwest::Client, cfg: &AppConfig) -> Result<BTre
     Ok(out)
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct SystemStats {
+    pub cpu_percent: u32,
+    pub memory_used_mb: u32,
+    pub memory_total_mb: u32,
+}
+
+/// Статистика нагрузки CPU и RAM из /rci/show/system.
+pub async fn get_system(http: &reqwest::Client, cfg: &AppConfig) -> Result<SystemStats, String> {
+    let token = ensure_auth(http, cfg).await?;
+    let v = as_object(rci_get(http, cfg, &token, "/rci/show/system").await?);
+    if let Some(o) = v.as_object() {
+        let cpu_percent = o.get("cpuload").and_then(|c| c.as_u64()).unwrap_or(0) as u32;
+        let mut memory_used_mb = 0;
+        let mut memory_total_mb = 0;
+        if let Some(mem_str) = o.get("memory").and_then(|m| m.as_str()) {
+            let parts: Vec<&str> = mem_str.split('/').collect();
+            if parts.len() == 2 {
+                let used_kb: u64 = parts[0].parse().unwrap_or(0);
+                let total_kb: u64 = parts[1].parse().unwrap_or(0);
+                memory_used_mb = (used_kb / 1024) as u32;
+                memory_total_mb = (total_kb / 1024) as u32;
+            }
+        }
+        if memory_total_mb == 0 {
+            if let Some(tot_kb) = o.get("memtotal").and_then(|m| m.as_u64()) {
+                memory_total_mb = (tot_kb / 1024) as u32;
+            }
+        }
+        return Ok(SystemStats {
+            cpu_percent,
+            memory_used_mb,
+            memory_total_mb,
+        });
+    }
+    Err("Invalid system response".into())
+}
+
 /// Список политик доступа (+default, +block) с иконками — как в десктопе.
 pub async fn get_policies(http: &reqwest::Client, cfg: &AppConfig) -> Result<Vec<Policy>, String> {
     let token = ensure_auth(http, cfg).await?;

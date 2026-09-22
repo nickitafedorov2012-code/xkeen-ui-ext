@@ -2,6 +2,8 @@ export interface StatusInfo {
   version: string
   config_path: string
   router: { model?: string; version?: string; hostname?: string; uptime?: string } | null
+  system?: { cpu_percent: number; memory_used_mb: number; memory_total_mb: number } | null
+  mihomo_version?: string | null
   active_server: { id: string; name: string; ping_ms: number } | null
   mihomo: { host: string; port: number }
   rci: { host: string; port: number }

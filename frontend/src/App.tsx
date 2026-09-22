@@ -5,6 +5,7 @@ import Devices from './components/Devices'
 import Servers from './components/Servers'
 import Settings from './components/Settings'
 import Help from './components/Help'
+import Header from './components/Header'
 import { apiGet } from './api'
 import type { StatusInfo } from './types'
 
@@ -91,25 +92,12 @@ export default function App() {
 
   return (
     <div className="app">
-      <header className="header">
-        <div className="header-title">
-          <span className="logo">🛣️</span>
-          <div>
-            <h1>XKeen Route</h1>
-            <p className="subtitle">
-              {status
-                ? `панель ${status.version}${status.router?.model ? ` · ${status.router.model}` : ''}`
-                : 'подключение…'}
-            </p>
-          </div>
-        </div>
-        {status?.active_server && (
-          <div className="active-pill">
-            {status.active_server.name}
-            <span className="muted"> · {status.active_server.ping_ms > 0 ? `${status.active_server.ping_ms} мс` : '—'}</span>
-          </div>
-        )}
-      </header>
+      <Header
+        status={status}
+        notify={notify}
+        refresh={refresh}
+        onSwitchTab={switchTab}
+      />
 
       <nav className="tabs">
         {TABS.map((t) => (

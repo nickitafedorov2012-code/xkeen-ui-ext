@@ -263,6 +263,7 @@ async fn main() {
         .route("/api/backups/delete", post(api::delete_backup))
         .route("/api/ignore", get(api::get_ignore).post(api::set_ignore))
         .route("/api/failover/check", post(api::failover_check))
+        .route("/api/failover/toggle", post(api::failover_toggle))
         .route("/api/failover/events", get(api::failover_events))
         .route("/api/settings", get(api::get_settings).put(api::put_settings))
         .route("/api/settings/priority", post(api::set_priority))

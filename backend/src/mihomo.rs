@@ -791,6 +791,17 @@ pub async fn switch_group(http: &reqwest::Client, cfg: &AppConfig, group: &str, 
     m_put(http, cfg, &format!("/proxies/{enc}"), json!({ "name": server }), 5).await
 }
 
+/// Версия ядра Mihomo из GET /version.
+pub async fn get_version(http: &reqwest::Client, cfg: &AppConfig) -> Option<String> {
+    let url = format!("{}/version", cfg.mihomo_url());
+    let mut req = http.get(&url).timeout(std::time::Duration::from_millis(1500));
+    if !cfg.mihomo.secret.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", cfg.mihomo.secret));
+    }
+    let resp = req.send().await.ok()?;
+    let v: serde_json::Value = resp.json().await.ok()?;
+    v.get("version").and_then(|v| v.as_str()).map(|s| s.to_string())
+}
 
 /// Минимальный percent-encoding для имён прокси в URL.
 fn urlencoding_lite(s: &str) -> String {

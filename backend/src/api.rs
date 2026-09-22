@@ -9,7 +9,14 @@ use crate::{config, failover, log_e, log_i, mihomo, rci, routing, AppState, VERS
 pub async fn status(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
 
-    let router = rci::get_version(&state.http, &cfg).await.ok();
+    let (router_res, system_res, mihomo_ver) = tokio::join!(
+        rci::get_version(&state.http, &cfg),
+        rci::get_system(&state.http, &cfg),
+        mihomo::get_version(&state.http, &cfg)
+    );
+    let router = router_res.ok();
+    let system = system_res.ok();
+
     let active = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain)
         .await
         .ok()
@@ -26,6 +33,8 @@ pub async fn status(State(state): State<AppState>) -> Response {
         "version": VERSION,
         "config_path": state.config_path.display().to_string(),
         "router": router,
+        "system": system,
+        "mihomo_version": mihomo_ver,
         "active_server": active,
         "mihomo": { "host": cfg.mihomo.host, "port": cfg.mihomo.port },
         "rci": { "host": cfg.rci.host, "port": cfg.rci.port },
@@ -171,6 +180,24 @@ pub async fn failover_check(State(state): State<AppState>) -> Response {
 pub async fn failover_events(State(state): State<AppState>) -> Response {
     let events = state.failover_log.snapshot().await;
     api_ok(json!({ "events": events }))
+}
+
+#[derive(Deserialize)]
+pub struct FailoverToggleReq {
+    pub enabled: bool,
+}
+
+/// POST /api/failover/toggle — быстрое включение/отключение failover.
+pub async fn failover_toggle(State(state): State<AppState>, Json(req): Json<FailoverToggleReq>) -> Response {
+    let _cfg_guard = state.config_lock.lock().await;
+    let mut cfg = (**state.config.read().await).clone();
+    cfg.failover.enabled = req.enabled;
+    if let Err(e) = config::save(&state.config_path, &cfg).await {
+        return api_err(format!("Ошибка сохранения конфига: {e}"));
+    }
+    *state.config.write().await = std::sync::Arc::new(cfg);
+    log_i!("Failover переключён: enabled={}", req.enabled);
+    api_ok(json!({ "enabled": req.enabled }))
 }
 
 #[derive(Deserialize)]
