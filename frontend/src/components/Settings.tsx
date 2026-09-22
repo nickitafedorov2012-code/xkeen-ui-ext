@@ -31,8 +31,8 @@ export default function Settings({ notify, status, refresh }: Props) {
   // --- Автосохранение failover ---
   const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const initialFailoverRef = useRef<string | null>(null)
-  const autoSaveTimerRef = useRef<NodeJS.Timeout | null>(null)
-  const savedTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // --- Обновление панели ---
   interface UpdateInfo { current: string; latest: string; update_available: boolean; notes: string[] }
   const [upd, setUpd] = useState<UpdateInfo | null>(null)

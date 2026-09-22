@@ -215,7 +215,7 @@ export default function Header({ status, notify, refresh, onSwitchTab }: HeaderP
   const appCpu = currentMetrics?.app_cpu_percent ?? 0
 
   const mihomoVersion = status?.mihomo_version || 'v1.19.29'
-  const appVersion = status?.version ? status.version.replace(/^v/, '') : '1.0.21'
+  const appVersion = status?.version ? status.version.replace(/^v/, '') : '1.0.22'
 
   const handleRestart = async () => {
     if (pending) return
