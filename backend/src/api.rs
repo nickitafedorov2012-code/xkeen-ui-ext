@@ -26,6 +26,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
                 .find(|s| s.is_active && s.id != "Fastest" && s.id != "Fallback")
                 .or_else(|| servers.iter().find(|s| s.is_active))
                 .cloned()
+        })
         .map(|s| json!({
             "id": s.id, "name": s.name, "ping_ms": s.ping_ms,
             "provider": s.provider, "provider_name": s.provider_name,
