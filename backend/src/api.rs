@@ -1016,16 +1016,17 @@ pub async fn rename_provider(State(state): State<AppState>, Json(req): Json<Rena
         return api_err("ID подписки не может быть пустым");
     }
     let alias = req.alias.trim().to_string();
-    let mut new_cfg = state.config.read().await.clone();
+    let _cfg_guard = state.config_lock.lock().await;
+    let mut new_cfg = (**state.config.read().await).clone();
     if alias.is_empty() {
         new_cfg.provider_aliases.remove(&pid);
     } else {
         new_cfg.provider_aliases.insert(pid.clone(), alias.clone());
     }
-    if let Err(e) = state.save_config(&new_cfg).await {
+    if let Err(e) = config::save(&state.config_path, &new_cfg).await {
         return api_err(format!("Ошибка сохранения: {e}"));
     }
-    *state.config.write().await = new_cfg;
+    *state.config.write().await = std::sync::Arc::new(new_cfg);
     let label = if alias.is_empty() {
         format!("Сброшено имя подписки '{pid}'")
     } else {

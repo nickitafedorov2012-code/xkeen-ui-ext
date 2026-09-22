@@ -108,7 +108,7 @@ pub async fn get_provider_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Re
     Ok(out)
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct ProviderInfo {
     pub id: String,
     pub name: String,
