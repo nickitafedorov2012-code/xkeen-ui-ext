@@ -69,7 +69,7 @@ pub fn calc_hysteresis(threshold: i64) -> i64 {
 
 /// Таймаут для проверки пинга с учётом заданного порога.
 pub fn calc_ping_timeout(threshold: i64) -> u64 {
-    (threshold as u64 + 500).clamp(1500, 5000)
+    (threshold as u64 + 1000).clamp(2000, 6000)
 }
 
 /// Находит список кандидатов с более высоким приоритетом для автовозврата.
@@ -108,6 +108,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
 
     let hyst = calc_hysteresis(threshold);
     let ping_timeout = calc_ping_timeout(threshold);
+    let mut checked_higher_notes: Vec<String> = Vec::new();
 
     // 1. Возврат на более приоритетный сервер из цепочки, если восстановился
     if cfg.failover.auto_restore_priority && !chain.is_empty() {
@@ -135,6 +136,10 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                                 return Err(e);
                             }
                         }
+                    } else if ping > 0 {
+                        checked_higher_notes.push(format!("'{}': пинг {} мс", pri.name, ping));
+                    } else {
+                        checked_higher_notes.push(format!("'{}': недоступен", pri.name));
                     }
                 }
             }
@@ -149,7 +154,12 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
     };
     let current = mihomo::ping_server(&state.http, &cfg, &active.id, ping_timeout).await;
     if current > 0 && current <= threshold {
-        let msg = format!("Активный '{}' — пинг {current} мс (в норме)", active.name);
+        let note = if !checked_higher_notes.is_empty() {
+            format!("; приоритетные: {}", checked_higher_notes.join(", "))
+        } else {
+            String::new()
+        };
+        let msg = format!("Активный '{}' — пинг {current} мс (в норме{note})", active.name);
         state.failover_log.push(&msg, false).await;
         return Ok(msg);
     }
@@ -403,11 +413,11 @@ mod tests {
 
     #[test]
     fn test_calc_ping_timeout() {
-        assert_eq!(calc_ping_timeout(50), 1500); // clamp min 1500
-        assert_eq!(calc_ping_timeout(300), 1500); // 300 + 500 = 800 -> 1500
-        assert_eq!(calc_ping_timeout(1500), 2000); // 1500 + 500 = 2000
-        assert_eq!(calc_ping_timeout(3000), 3500);
-        assert_eq!(calc_ping_timeout(6000), 5000); // clamp max 5000
+        assert_eq!(calc_ping_timeout(50), 2000); // clamp min 2000
+        assert_eq!(calc_ping_timeout(300), 2000); // 300 + 1000 = 1300 -> clamp min 2000
+        assert_eq!(calc_ping_timeout(1500), 2500); // 1500 + 1000 = 2500
+        assert_eq!(calc_ping_timeout(3000), 4000);
+        assert_eq!(calc_ping_timeout(6000), 6000); // clamp max 6000
     }
 
     #[test]

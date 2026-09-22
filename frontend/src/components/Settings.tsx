@@ -397,14 +397,22 @@ export default function Settings({ notify, status, refresh }: Props) {
             {settings.failover.enabled ? '🟢 включён' : '⚪ выключен'}
           </span>
         </div>
-        <label className="row" style={{ justifyContent: 'flex-start', gap: 8, cursor: 'pointer' }}>
-          <input
-            type="checkbox"
-            checked={settings.failover.enabled}
-            onChange={(e) => toggleFailoverEnabled(e.target.checked)}
-          />
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
           <b>Включить автоматический failover</b>
-        </label>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+            <label className="switch" title={settings.failover.enabled ? 'Выключить failover' : 'Включить failover'}>
+              <input
+                type="checkbox"
+                checked={settings.failover.enabled}
+                onChange={(e) => toggleFailoverEnabled(e.target.checked)}
+              />
+              <span className="slider" />
+            </label>
+            <span style={{ fontSize: 13, minWidth: 64, color: settings.failover.enabled ? 'var(--green)' : 'var(--muted)' }}>
+              {settings.failover.enabled ? 'Включён' : 'Выключен'}
+            </span>
+          </div>
+        </div>
         <label className="row"><span>Порог пинга, мс</span>
           <input className="input" type="number" min={50} max={5000} value={settings.failover.ping_threshold_ms}
             onChange={(e) => patch((s) => (s.failover.ping_threshold_ms = Number(e.target.value) || 300))} />
@@ -463,11 +471,22 @@ export default function Settings({ notify, status, refresh }: Props) {
             </div>
           )}
         </div>
-        <label className="row" style={{ justifyContent: 'flex-start', gap: 8, cursor: 'pointer' }}>
-          <input type="checkbox" checked={settings.failover.auto_restore_priority}
-            onChange={(e) => patch((s) => (s.failover.auto_restore_priority = e.target.checked))} />
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
           <span>Возвращаться на приоритетный при восстановлении</span>
-        </label>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+            <label className="switch" title="Автовозврат при восстановлении связи">
+              <input
+                type="checkbox"
+                checked={settings.failover.auto_restore_priority}
+                onChange={(e) => patch((s) => (s.failover.auto_restore_priority = e.target.checked))}
+              />
+              <span className="slider" />
+            </label>
+            <span style={{ fontSize: 13, minWidth: 64, color: settings.failover.auto_restore_priority ? 'var(--green)' : 'var(--muted)' }}>
+              {settings.failover.auto_restore_priority ? 'Да' : 'Нет'}
+            </span>
+          </div>
+        </div>
         <label className="row"><span>Интервал проверки, сек</span>
           <input className="input" type="number" min={15} max={3600} value={settings.failover.interval_secs}
             onChange={(e) => patch((s) => (s.failover.interval_secs = Number(e.target.value) || 60))} />

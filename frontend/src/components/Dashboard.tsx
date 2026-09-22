@@ -107,32 +107,52 @@ export default function Dashboard({ status, notify, refresh }: Props) {
       </section>
 
       <section className="card">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
           <h2 style={{ margin: 0 }}>Failover</h2>
-          <button
-            className={`btn sm ${f?.enabled ? 'ghost' : 'primary'}`}
-            disabled={togglingFailover}
-            onClick={() => toggleFailover(!f?.enabled)}
-            title={f?.enabled ? 'Выключить failover' : 'Включить failover'}
-          >
-            {togglingFailover ? '…' : f?.enabled ? '⏹ Выключить' : '▶ Включить'}
-          </button>
+          <span className={`badge ${f?.enabled ? 'badge-online' : ''}`}>
+            {f?.enabled ? '🟢 включён' : '⚪ выключен'}
+          </span>
         </div>
         <ul className="kv">
           <li>
-            <span>Состояние</span>
-            <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                checked={f?.enabled ?? false}
-                disabled={togglingFailover}
-                onChange={(e) => toggleFailover(e.target.checked)}
-              />
-              <b>{f?.enabled ? '🟢 включён' : '⚪ выключен'}</b>
-            </label>
+            <span>Автоматический failover</span>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+              <label className="switch" title={f?.enabled ? 'Выключить failover' : 'Включить failover'}>
+                <input
+                  type="checkbox"
+                  checked={f?.enabled ?? false}
+                  disabled={togglingFailover}
+                  onChange={(e) => toggleFailover(e.target.checked)}
+                />
+                <span className="slider" />
+              </label>
+              <b style={{ color: f?.enabled ? 'var(--green)' : 'var(--muted)', fontSize: 13 }}>
+                {togglingFailover ? 'Сохранение…' : f?.enabled ? 'Включён' : 'Выключен'}
+              </b>
+            </div>
           </li>
           <li><span>Порог пинга</span><b>{f ? `${f.ping_threshold_ms} мс` : '—'}</b></li>
-          <li><span>Приоритетный</span><b>{f?.priority_server || 'не задан'}</b></li>
+          <li>
+            <span>Приоритетный</span>
+            <b>
+              {f?.priority_server || 'не задан'}
+              {f?.priority_chain && f.priority_chain.length > 0 && status?.active_server?.id && f.priority_chain.indexOf(status.active_server.id) > 0 ? (
+                <span className="muted small" style={{ marginLeft: 6, fontWeight: 'normal' }}>(ожидает восстановления)</span>
+              ) : null}
+            </b>
+          </li>
+          {(f?.priority_chain?.length ?? 0) > 0 && status?.active_server?.id && f!.priority_chain!.indexOf(status.active_server.id) >= 0 && (
+            <li>
+              <span>Позиция в цепочке</span>
+              <b>
+                {f!.priority_chain!.indexOf(status.active_server.id) === 0 ? (
+                  <span style={{ color: 'var(--green)' }}>ОСН (основной)</span>
+                ) : (
+                  <span style={{ color: 'var(--yellow)' }}>РЕЗ{f!.priority_chain!.indexOf(status.active_server.id)} (резервный)</span>
+                )}
+              </b>
+            </li>
+          )}
           {(f?.priority_chain?.length ?? 0) > 1 && (
             <li><span>Резервы</span><b>{f!.priority_chain!.slice(1).length} сервер(ов)</b></li>
           )}

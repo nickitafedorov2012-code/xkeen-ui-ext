@@ -637,7 +637,7 @@ pub async fn ping_group(
         cfg.mihomo_url(),
         "http%3A%2F%2Fwww.gstatic.com%2Fgenerate_204"
     );
-    let req_timeout = std::cmp::max(timeout_ms + 6000, 12000);
+    let req_timeout = std::cmp::max(timeout_ms + 15000, 25000);
     let mut req = http.get(&url).timeout(std::time::Duration::from_millis(req_timeout));
     if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
         req = req.header(k, v);
