@@ -111,6 +111,19 @@ export default function Servers({ notify }: Props) {
     load()
   }, [load])
 
+  const pingAll = useCallback(async () => {
+    setPinging(true)
+    try {
+      const data = await apiPost<{ pings: Record<string, number> }>('servers/ping', {})
+      setServers((prev) => prev.map((s) => ({ ...s, ping_ms: data.pings[s.id] ?? s.ping_ms })))
+      notify('Пинг всех серверов завершён')
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка пинга', true)
+    } finally {
+      setPinging(false)
+    }
+  }, [notify])
+
   // Горячие клавиши и события переключения
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -162,19 +175,6 @@ export default function Servers({ notify }: Props) {
 
   // Активный сервер для закрепления наверху
   const activeServer = useMemo(() => servers.find((s) => s.is_active), [servers])
-
-  const pingAll = async () => {
-    setPinging(true)
-    try {
-      const data = await apiPost<{ pings: Record<string, number> }>('servers/ping', {})
-      setServers((prev) => prev.map((s) => ({ ...s, ping_ms: data.pings[s.id] ?? s.ping_ms })))
-      notify('Пинг всех серверов завершён')
-    } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка пинга', true)
-    } finally {
-      setPinging(false)
-    }
-  }
 
   const activate = async (s: ServerInfo) => {
     try {
