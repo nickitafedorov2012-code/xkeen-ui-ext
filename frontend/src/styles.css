@@ -1468,3 +1468,457 @@ table.devices-table td {
   border-color: #ef4444;
   color: #fca5a5;
 }
+
+/* ==========================================================================
+   Вкладка Antigravity (Google Cloud Code Bypass)
+   ========================================================================== */
+
+.antigravity-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Главная карточка статуса */
+.ag-hero-card {
+  background: linear-gradient(135deg, rgba(26, 34, 52, 0.85) 0%, rgba(15, 20, 32, 0.95) 100%);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  position: relative;
+  overflow: hidden;
+}
+
+.ag-hero-card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0; height: 2px;
+  background: linear-gradient(90deg, #38bdf8, #818cf8, #34d399);
+}
+
+.ag-hero-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.ag-hero-title-group {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.ag-icon {
+  font-size: 28px;
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 16px rgba(56, 189, 248, 0.2);
+}
+
+.ag-title {
+  margin: 0 0 4px 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: #f8fafc;
+}
+
+.ag-subtitle {
+  font-size: 12.5px;
+  color: #94a3b8;
+}
+
+.ag-hero-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ag-status-badge {
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ag-status-badge.working {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.4);
+  box-shadow: 0 0 12px rgba(34, 197, 94, 0.2);
+}
+
+.ag-status-badge.healing {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
+.ag-status-badge.error {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+}
+
+.ag-status-badge.disabled {
+  background: rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+/* Инфо-полоса метрик */
+.ag-metrics-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 12px;
+  background: rgba(15, 23, 42, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 14px;
+}
+
+.ag-metric-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ag-metric-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.ag-metric-value {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #e2e8f0;
+}
+
+.ag-metric-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Целевые домены */
+.ag-targets-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  padding-top: 4px;
+}
+
+.ag-targets-label {
+  color: #94a3b8;
+  font-weight: 500;
+}
+
+.ag-targets-list {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ag-target-chip {
+  background: rgba(99, 102, 241, 0.12);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  color: #a5b4fc;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-family: Consolas, monospace;
+  font-size: 11.5px;
+}
+
+/* Сетка карточек */
+.ag-grid {
+  display: grid;
+  grid-template-columns: 3fr 2fr;
+  gap: 16px;
+}
+
+@media (max-width: 900px) {
+  .ag-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.ag-card-header {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 14px;
+}
+
+.ag-card-header h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #f1f5f9;
+}
+
+.ag-card-hint {
+  font-size: 12px;
+  color: #64748b;
+}
+
+/* Таблица DNS */
+.ag-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.ag-table th {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: #64748b;
+  font-weight: 600;
+  font-size: 11.5px;
+}
+
+.ag-table td {
+  padding: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  vertical-align: middle;
+}
+
+.ag-type-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.ag-type-badge.udp {
+  background: rgba(56, 189, 248, 0.12);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+}
+
+.ag-type-badge.doh {
+  background: rgba(168, 85, 247, 0.12);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.3);
+}
+
+.ag-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.ag-pill.success {
+  background: rgba(34, 197, 94, 0.14);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.ag-pill.danger {
+  background: rgba(239, 68, 68, 0.14);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.ag-pill.neutral {
+  background: rgba(148, 163, 184, 0.1);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.ag-ip-list {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.ag-ip-chip {
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  padding: 2px 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  color: #cbd5e1;
+}
+
+.ag-ip-chip.active-ip {
+  background: rgba(34, 197, 94, 0.15);
+  border-color: rgba(34, 197, 94, 0.5);
+  color: #86efac;
+  font-weight: 600;
+}
+
+/* Форма параметров */
+.ag-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ag-form-row {
+  display: flex;
+  gap: 12px;
+}
+
+.ag-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+/* Карточка инструкций */
+.ag-instructions-card {
+  background: #111622;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.ag-instructions-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+@media (max-width: 768px) {
+  .ag-instructions-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.ag-instruction-box {
+  background: rgba(15, 23, 42, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.ag-instruction-box h4 {
+  margin: 0 0 8px 0;
+  font-size: 13.5px;
+  color: #f1f5f9;
+}
+
+.ag-instruction-box p {
+  font-size: 12px;
+  color: #94a3b8;
+  margin: 0 0 10px 0;
+  line-height: 1.5;
+}
+
+.ag-badge-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ag-code-snippets {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ag-code-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.ag-code-label {
+  color: #64748b;
+  font-size: 11px;
+  min-width: 125px;
+}
+
+.ag-code-row code {
+  flex: 1;
+  background: #090d16;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-family: Consolas, monospace;
+  color: #38bdf8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-note-banner {
+  background: rgba(59, 130, 246, 0.08);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 12px;
+  color: #93c5fd;
+  line-height: 1.5;
+}
+
+/* Журнал событий */
+.ag-events-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.ag-event-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  background: rgba(15, 23, 42, 0.4);
+  border-left: 3px solid #64748b;
+}
+
+.ag-event-item.success {
+  border-left-color: #22c55e;
+}
+
+.ag-event-item.info {
+  border-left-color: #38bdf8;
+}
+
+.ag-event-item.warn {
+  border-left-color: #f59e0b;
+}
+
+.ag-event-item.error {
+  border-left-color: #ef4444;
+}
+
+.ag-event-time {
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  color: #64748b;
+  flex-shrink: 0;
+}
+
+.ag-event-msg {
+  color: #e2e8f0;
+  flex: 1;
+}

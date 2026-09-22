@@ -1151,5 +1151,72 @@ pub async fn delete_provider(State(state): State<AppState>, Json(req): Json<Dele
     api_ok(json!({ "deleted": true, "message": format!("Подписка '{id}' удалена") }))
 }
 
+/// GET /api/antigravity/status
+pub async fn get_antigravity_status(State(state): State<AppState>) -> Response {
+    let status = state.antigravity.get_status().await;
+    api_ok(serde_json::to_value(status).unwrap_or_default()).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct AntigravitySettingsReq {
+    pub enabled: Option<bool>,
+    pub mode: Option<String>,
+    pub proxy_port: Option<u16>,
+    pub proxy_enabled: Option<bool>,
+    pub health_check_interval: Option<u64>,
+    pub own_proxy: Option<String>,
+}
+
+/// POST /api/antigravity/settings
+pub async fn set_antigravity_settings(
+    State(state): State<AppState>,
+    Json(req): Json<AntigravitySettingsReq>,
+) -> Response {
+    let _guard = state.config_lock.lock().await;
+    let mut new_cfg = (**state.config.read().await).clone();
+
+    if let Some(enabled) = req.enabled {
+        new_cfg.antigravity.enabled = enabled;
+    }
+    if let Some(mode) = req.mode {
+        new_cfg.antigravity.mode = mode;
+    }
+    if let Some(port) = req.proxy_port {
+        new_cfg.antigravity.proxy_port = port;
+    }
+    if let Some(pe) = req.proxy_enabled {
+        new_cfg.antigravity.proxy_enabled = pe;
+    }
+    if let Some(interval) = req.health_check_interval {
+        new_cfg.antigravity.health_check_interval = interval.max(30);
+    }
+    if let Some(own_proxy) = req.own_proxy {
+        new_cfg.antigravity.own_proxy = own_proxy;
+    }
+
+    if let Err(e) = config::save(&state.config_path, &new_cfg).await {
+        return api_err(format!("Ошибка сохранения: {e}")).into_response();
+    }
+    *state.config.write().await = std::sync::Arc::new(new_cfg);
+
+    // Фоновая проверка сразу после смены настроек
+    let ag = state.antigravity.clone();
+    tokio::spawn(async move {
+        ag.check_and_update().await;
+    });
+
+    api_ok(json!({ "message": "Настройки Antigravity обновлены" })).into_response()
+}
+
+/// POST /api/antigravity/check
+pub async fn check_antigravity(State(state): State<AppState>) -> Response {
+    state.antigravity.check_and_update().await;
+    let status = state.antigravity.get_status().await;
+    api_ok(json!({
+        "message": "Проверка Antigravity завершена",
+        "status": status,
+    })).into_response()
+}
+
 
 

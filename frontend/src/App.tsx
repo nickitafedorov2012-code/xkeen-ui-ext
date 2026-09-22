@@ -6,15 +6,17 @@ import Servers from './components/Servers'
 import Settings from './components/Settings'
 import Help from './components/Help'
 import Header from './components/Header'
+import Antigravity from './components/Antigravity'
 import { apiGet } from './api'
 import type { StatusInfo } from './types'
 
-type TabId = 'dashboard' | 'servers' | 'devices' | 'settings' | 'help'
+type TabId = 'dashboard' | 'servers' | 'devices' | 'settings' | 'help' | 'antigravity'
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'dashboard', label: '📊 Дашборд' },
   { id: 'servers', label: '🛰 Серверы' },
   { id: 'devices', label: '📱 Устройства' },
+  { id: 'antigravity', label: '⚡ Antigravity' },
   { id: 'settings', label: '⚙️ Настройки' },
   { id: 'help', label: '📖 Справка' },
 ]
@@ -161,6 +163,7 @@ export default function App() {
           {tab === 'dashboard' && <Dashboard status={status} notify={notify} refresh={refresh} onSwitchTab={switchTab} />}
           {tab === 'servers' && <Servers notify={notify} />}
           {tab === 'devices' && <Devices notify={notify} />}
+          {tab === 'antigravity' && <Antigravity notify={notify} />}
           {tab === 'settings' && <Settings notify={notify} status={status} refresh={refresh} />}
           {tab === 'help' && <Help status={status} />}
         </ErrorBoundary>

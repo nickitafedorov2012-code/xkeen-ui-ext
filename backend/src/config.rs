@@ -189,6 +189,42 @@ pub struct AppConfig {
     pub logs: LogsConfig,
     /// Пользовательские названия подписок (провайдеров): provider_id -> alias.
     pub provider_aliases: std::collections::BTreeMap<String, String>,
+    /// Настройки обхода блокировки Google Antigravity (Cloud Code API).
+    pub antigravity: AntigravityConfig,
+}
+
+/// Настройки обхода блокировки Google Antigravity / Cloud Code API.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct AntigravityConfig {
+    pub enabled: bool,
+    pub mode: String, // "auto" | "direct" | "vpn" | "proxy"
+    pub proxy_port: u16,
+    pub proxy_enabled: bool,
+    pub health_check_interval: u64,
+    pub wan_interface: String,
+    pub vpn_interface: String,
+    pub own_proxy: String,
+    pub targets: Vec<String>,
+}
+
+impl Default for AntigravityConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: "auto".into(),
+            proxy_port: 53129,
+            proxy_enabled: true,
+            health_check_interval: 120,
+            wan_interface: "apcli1".into(),
+            vpn_interface: "nwg0".into(),
+            own_proxy: String::new(),
+            targets: vec![
+                "cloudcode-pa.googleapis.com".into(),
+                "daily-cloudcode-pa.googleapis.com".into(),
+            ],
+        }
+    }
 }
 
 impl Default for AppConfig {
@@ -206,6 +242,7 @@ impl Default for AppConfig {
             system: SystemConfig::default(),
             logs: LogsConfig::default(),
             provider_aliases: std::collections::BTreeMap::new(),
+            antigravity: AntigravityConfig::default(),
         }
     }
 }

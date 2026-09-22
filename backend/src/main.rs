@@ -9,6 +9,7 @@ mod routing;
 mod updater;
 mod override_sync;
 mod cdn_discovery;
+mod antigravity;
 
 use axum::extract::Request;
 use axum::middleware::{self, Next};
@@ -88,6 +89,8 @@ pub struct AppState {
     pub routing_lock: Arc<tokio::sync::Mutex<()>>,
     /// Сериализация read-modify-write конфига панели (config.json) — против TOCTOU.
     pub config_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Менеджер обхода блокировок Google Antigravity.
+    pub antigravity: Arc<antigravity::AntigravityManager>,
 }
 
 
@@ -191,8 +194,19 @@ async fn main() {
     }
 
     let port = cli.port;
+    let config = Arc::new(RwLock::new(Arc::new(cfg)));
+    let ag_mgr = Arc::new(antigravity::AntigravityManager::new(Arc::clone(&config)));
+
+    {
+        let c = config.read().await;
+        if c.antigravity.enabled && c.antigravity.proxy_enabled {
+            ag_mgr.clone().start_proxy(c.antigravity.proxy_port);
+        }
+        ag_mgr.clone().start_warm_loop();
+    }
+
     let state = AppState {
-        config: Arc::new(RwLock::new(Arc::new(cfg))),
+        config,
         config_path: Arc::new(config_path),
         http: reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
@@ -202,6 +216,7 @@ async fn main() {
         failover_log: Arc::new(failover::FailoverLog::default()),
         routing_lock: Arc::new(tokio::sync::Mutex::new(())),
         config_lock: Arc::new(tokio::sync::Mutex::new(())),
+        antigravity: ag_mgr,
     };
 
     failover::spawn(state.clone());
@@ -279,6 +294,9 @@ async fn main() {
         .route("/api/logs/ws", get(api::logs_ws))
         .route("/api/update/check", get(crate::updater::check))
         .route("/api/update/install", post(crate::updater::install))
+        .route("/api/antigravity/status", get(api::get_antigravity_status))
+        .route("/api/antigravity/settings", post(api::set_antigravity_settings))
+        .route("/api/antigravity/check", post(api::check_antigravity))
         .fallback(frontend::serve)
         .layer(middleware::from_fn(no_cache))
         .layer(middleware::from_fn(log_requests))

@@ -131,3 +131,34 @@ export const SPEED_PRESETS: { label: string; value: number }[] = [
   { label: '30 Мбит/с', value: 30720 },
   { label: '100 Мбит/с', value: 102400 },
 ]
+
+export interface DnsProviderStatus {
+  name: string
+  provider_type: string
+  is_substituting: boolean
+  last_latency_ms?: number
+  resolved_ips: string[]
+  error?: string
+  last_check?: string
+}
+
+export interface AntigravityEvent {
+  time: string
+  message: string
+  level: 'info' | 'warn' | 'error' | 'success'
+}
+
+export interface AntigravityStatus {
+  enabled: boolean
+  state: 'working' | 'healing' | 'disabled' | 'error'
+  current_route: string
+  active_ip?: string
+  latency_ms?: number
+  proxy_port: number
+  proxy_running: boolean
+  mode: string
+  providers: DnsProviderStatus[]
+  events: AntigravityEvent[]
+  targets: string[]
+  own_proxy: string
+}
