@@ -505,11 +505,6 @@ export default function Settings({ notify, status, refresh }: Props) {
                 ⚠️ Ошибка автосохранения
               </span>
             )}
-            {autoSaveStatus === 'idle' && (
-              <span className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                ⚡ Автосохранение активно
-              </span>
-            )}
           </div>
         </div>
       </section>
