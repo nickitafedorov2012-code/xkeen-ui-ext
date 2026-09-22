@@ -140,7 +140,11 @@ pub async fn scan_html_cdns(domain: &str) -> Vec<String> {
     let html = match resp.text().await {
         Ok(t) => {
             if t.len() > 150_000 {
-                t[..150_000].to_string()
+                let mut end = 150_000;
+                while end > 0 && !t.is_char_boundary(end) {
+                    end -= 1;
+                }
+                t[..end].to_string()
             } else {
                 t
             }
