@@ -337,7 +337,7 @@ export default function Settings({ notify, status, refresh }: Props) {
             {settings.failover.enabled ? '🟢 включён' : '⚪ выключен'}
           </span>
         </div>
-        <label className="row">
+        <label className="row" style={{ justifyContent: 'flex-start', gap: 8, cursor: 'pointer' }}>
           <input
             type="checkbox"
             checked={settings.failover.enabled}
@@ -388,21 +388,18 @@ export default function Settings({ notify, status, refresh }: Props) {
                 ))}
             </select>
           </div>
-          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 6 }}>
-            {chain.length > 0 && (
-              <button className="btn ghost" onClick={() => patch((s) => (s.failover.priority_chain = []))}>
-                Очистить
+          {chain.length > 0 && (
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 6 }}>
+              <button className="btn sm ghost" onClick={() => patch((s) => (s.failover.priority_chain = []))}>
+                Очистить цепочку
               </button>
-            )}
-            <button className="btn primary" disabled={chainBusy} onClick={saveFailover}>
-              {chainBusy ? 'Сохранение…' : '💾 Сохранить настройки Failover'}
-            </button>
-          </div>
+            </div>
+          )}
         </div>
-        <label className="row">
+        <label className="row" style={{ justifyContent: 'flex-start', gap: 8, cursor: 'pointer' }}>
           <input type="checkbox" checked={settings.failover.auto_restore_priority}
             onChange={(e) => patch((s) => (s.failover.auto_restore_priority = e.target.checked))} />
-          Возвращаться на приоритетный при восстановлении
+          <span>Возвращаться на приоритетный при восстановлении</span>
         </label>
         <label className="row"><span>Интервал проверки, сек</span>
           <input className="input" type="number" min={15} max={3600} value={settings.failover.interval_secs}
@@ -476,10 +473,10 @@ export default function Settings({ notify, status, refresh }: Props) {
             <option value="error">error (только ошибки)</option>
           </select>
         </label>
-        <label className="row">
+        <label className="row" style={{ justifyContent: 'flex-start', gap: 8, cursor: 'pointer' }}>
           <input type="checkbox" checked={settings.logs?.log_requests ?? true}
             onChange={(e) => patch((s) => (s.logs.log_requests = e.target.checked))} />
-          Логировать HTTP-запросы к панели
+          <span>Логировать HTTP-запросы к панели</span>
         </label>
         <label className="row"><span>Удалённый syslog (host:port, UDP)</span>
           <input className="input" placeholder="пусто = не отправлять, напр. 192.168.2.10:514"

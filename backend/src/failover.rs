@@ -113,23 +113,27 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
     if cfg.failover.auto_restore_priority && !chain.is_empty() {
         if let Some(act) = &active {
             let higher = get_higher_priority_candidates(&chain, &act.id);
-            for pri in higher {
-                let ping = mihomo::ping_server(&state.http, &cfg, &pri.id, ping_timeout).await;
-                if ping > 0 && ping <= hyst {
-                    let is_main = pri.id == chain[0].id;
-                    let label = if is_main { "Основной" } else { "Более приоритетный" };
-                    let msg = format!(
-                        "{label} '{}' восстановился (пинг {ping} мс, порог {hyst} мс) — возврат с '{}'",
-                        pri.name, act.name
-                    );
-                    match mihomo::switch_server(&state.http, &cfg, &pri.id).await {
-                        Ok(_) => {
-                            state.failover_log.push(&msg, true).await;
-                            return Ok(msg);
-                        }
-                        Err(e) => {
-                            state.failover_log.push(format!("{msg}, но переключение не удалось: {e}"), false).await;
-                            return Err(e);
+            if !higher.is_empty() {
+                let higher_ids: Vec<String> = higher.iter().map(|s| s.id.clone()).collect();
+                let pings = mihomo::ping_all(&state.http, &cfg, &higher_ids, ping_timeout).await;
+                for pri in higher {
+                    let ping = pings.get(&pri.id).copied().unwrap_or(-1);
+                    if ping > 0 && ping <= hyst {
+                        let is_main = pri.id == chain[0].id;
+                        let label = if is_main { "Основной" } else { "Более приоритетный" };
+                        let msg = format!(
+                            "{label} '{}' восстановился (пинг {ping} мс, порог {hyst} мс) — возврат с '{}'",
+                            pri.name, act.name
+                        );
+                        match mihomo::switch_server(&state.http, &cfg, &pri.id).await {
+                            Ok(_) => {
+                                state.failover_log.push(&msg, true).await;
+                                return Ok(msg);
+                            }
+                            Err(e) => {
+                                state.failover_log.push(format!("{msg}, но переключение не удалось: {e}"), false).await;
+                                return Err(e);
+                            }
                         }
                     }
                 }
@@ -272,24 +276,27 @@ pub async fn run_device_check(state: &AppState) -> Result<String, String> {
             // В норме: автовозврат на более приоритетный сервер из цепочки, если восстановился.
             if dr.auto_restore {
                 let higher = get_higher_priority_candidates(&dr.servers, cur);
-                for target_server in higher {
-                    let p = mihomo::ping_server(&state.http, &cfg, target_server, ping_timeout).await;
-                    if p > 0 && p <= hyst {
-                        let is_main = target_server == &dr.servers[0];
-                        let label = if is_main { "основной" } else { "приоритетный" };
-                        match mihomo::switch_group(&state.http, &cfg, group, target_server).await {
-                            Ok(_) => actions.push((
-                                format!(
-                                    "[{ip}] {label} '{target_server}' восстановился ({p} мс, порог {hyst} мс) — возврат с резерва '{cur}'"
-                                ),
-                                true,
-                            )),
-                            Err(e) => actions.push((
-                                format!("[{ip}] возврат на {label} '{target_server}' не удался: {e}"),
-                                false,
-                            )),
+                if !higher.is_empty() {
+                    let pings = mihomo::ping_all(&state.http, &cfg, higher, ping_timeout).await;
+                    for target_server in higher {
+                        let p = pings.get(target_server).copied().unwrap_or(-1);
+                        if p > 0 && p <= hyst {
+                            let is_main = target_server == &dr.servers[0];
+                            let label = if is_main { "основной" } else { "приоритетный" };
+                            match mihomo::switch_group(&state.http, &cfg, group, target_server).await {
+                                Ok(_) => actions.push((
+                                    format!(
+                                        "[{ip}] {label} '{target_server}' восстановился ({p} мс, порог {hyst} мс) — возврат с резерва '{cur}'"
+                                    ),
+                                    true,
+                                )),
+                                Err(e) => actions.push((
+                                    format!("[{ip}] возврат на {label} '{target_server}' не удался: {e}"),
+                                    false,
+                                )),
+                            }
+                            break;
                         }
-                        break;
                     }
                 }
             }

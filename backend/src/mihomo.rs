@@ -398,6 +398,25 @@ fn last_delay(p: &Value) -> i64 {
 }
 
 /// Список серверов с синтетическими Fastest/Fallback и активным листом.
+/// Определение основной селекторной группы прокси (PROXY, GLOBAL, Proxy или первый selector).
+pub fn find_primary_group(proxies: &BTreeMap<String, Value>) -> Option<String> {
+    ["PROXY", "GLOBAL", "Proxy"]
+        .iter()
+        .find(|g| proxies.contains_key(**g))
+        .map(|g| g.to_string())
+        .or_else(|| {
+            proxies
+                .iter()
+                .find(|(name, p)| {
+                    p.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase() == "selector"
+                        && ip_from_group_name(name).is_none()
+                        && *name != "Fastest"
+                        && *name != "Fallback"
+                })
+                .map(|(name, _)| name.clone())
+        })
+}
+
 pub async fn get_servers(
     http: &reqwest::Client,
     cfg: &AppConfig,
@@ -406,16 +425,7 @@ pub async fn get_servers(
     let proxies = get_proxies(http, cfg).await?;
     let active = resolve_active_leaf(&proxies);
     // Активная группа: привычные имена, иначе первый selector (универсальность).
-    let proxy_group: Option<String> = ["PROXY", "GLOBAL", "Proxy"]
-        .iter()
-        .find(|g| proxies.contains_key(**g))
-        .map(|g| g.to_string())
-        .or_else(|| {
-            proxies
-                .iter()
-                .find(|(_, p)| p.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase() == "selector")
-                .map(|(name, _)| name.clone())
-        });
+    let proxy_group = find_primary_group(&proxies);
     let proxy_now = proxy_group
         .as_deref()
         .and_then(|g| proxies.get(g))
@@ -613,7 +623,45 @@ pub async fn switch_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &
     }
 }
 
+/// Пинг всех участников селекторной группы через /group/{group}/delay (мс по каждому серверу в группе).
+/// Возвращает карту: server_id -> delay_ms.
+pub async fn ping_group(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    group: &str,
+    timeout_ms: u64,
+) -> BTreeMap<String, i64> {
+    let enc = urlencoding_lite(group);
+    let url = format!(
+        "{}/group/{enc}/delay?timeout={timeout_ms}&url={}",
+        cfg.mihomo_url(),
+        "http%3A%2F%2Fwww.gstatic.com%2Fgenerate_204"
+    );
+    let mut req = http.get(&url).timeout(std::time::Duration::from_millis(timeout_ms + 2500));
+    if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
+        req = req.header(k, v);
+    }
+    let mut out = BTreeMap::new();
+    if let Ok(resp) = req.send().await {
+        if resp.status().is_success() {
+            if let Ok(map) = resp.json::<BTreeMap<String, Value>>().await {
+                for (k, v) in map {
+                    if let Some(d) = v.as_i64() {
+                        if d > 0 {
+                            out.insert(k, d);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Пинг сервера через delay-API Mihomo (мс; -1 = недоступен).
+/// 1) Попытка через /proxies/{id}/delay (работает для статических прокси и групп).
+/// 2) Если сервер является текущим активным в основной группе (PROXY) -> /proxies/{group}/delay
+/// 3) Если сервер из proxy-provider (на 1) пришёл 404) -> опрос группы /group/{group}/delay
 pub async fn ping_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &str, timeout_ms: u64) -> i64 {
     let enc = urlencoding_lite(server_id);
     let url = format!(
@@ -626,35 +674,107 @@ pub async fn ping_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &st
         req = req.header(k, v);
     }
     if let Ok(resp) = req.send().await {
-        if let Ok(v) = resp.json::<Value>().await {
-            if let Some(d) = v.get("delay").and_then(|d| d.as_i64()) {
+        if resp.status().is_success() {
+            if let Ok(v) = resp.json::<Value>().await {
+                if let Some(d) = v.get("delay").and_then(|d| d.as_i64()) {
+                    if d > 0 {
+                        return d;
+                    }
+                }
+            }
+        }
+    }
+
+    // Для серверов из proxy-providers одиночный /proxies/{id}/delay отдаёт 404.
+    // Проверяем через селекторную группу (PROXY):
+    if let Ok(proxies) = get_proxies(http, cfg).await {
+        if let Some(group) = find_primary_group(&proxies) {
+            let is_now = proxies
+                .get(&group)
+                .and_then(|p| p.get("now"))
+                .and_then(|n| n.as_str())
+                .map(|now| now == server_id)
+                .unwrap_or(false);
+
+            if is_now {
+                let g_enc = urlencoding_lite(&group);
+                let g_url = format!(
+                    "{}/proxies/{g_enc}/delay?timeout={timeout_ms}&url={}",
+                    cfg.mihomo_url(),
+                    "http%3A%2F%2Fwww.gstatic.com%2Fgenerate_204"
+                );
+                let mut g_req = http.get(&g_url).timeout(std::time::Duration::from_millis(timeout_ms + 1500));
+                if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
+                    g_req = g_req.header(k, v);
+                }
+                if let Ok(resp) = g_req.send().await {
+                    if resp.status().is_success() {
+                        if let Ok(v) = resp.json::<Value>().await {
+                            if let Some(d) = v.get("delay").and_then(|d| d.as_i64()) {
+                                if d > 0 {
+                                    return d;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Опрашиваем группу /group/{group}/delay
+            let group_pings = ping_group(http, cfg, &group, timeout_ms).await;
+            if let Some(&d) = group_pings.get(server_id) {
                 if d > 0 {
                     return d;
                 }
             }
         }
     }
+
     -1
 }
 
-/// Параллельный пинг списка серверов.
+/// Параллельный пинг списка серверов:
+/// 1) Если есть основная группа (PROXY), сначала запускаем групповой пинг /group/{group}/delay,
+///    который опрашивает всех участников провайдеров параллельно внутри Mihomo.
+/// 2) Для серверов, не попавших в ответ группы (статические прокси или группы), опрашиваем через ping_server.
 pub async fn ping_all(http: &reqwest::Client, cfg: &AppConfig, ids: &[String], timeout_ms: u64) -> BTreeMap<String, i64> {
-    let mut handles = Vec::new();
-    for id in ids {
-        let http = http.clone();
-        let cfg = cfg.clone();
-        let id = id.clone();
-        handles.push(tokio::spawn(async move {
-            let ms = ping_server(&http, &cfg, &id, timeout_ms).await;
-            (id, ms)
-        }));
-    }
     let mut out = BTreeMap::new();
-    for h in handles {
-        if let Ok((id, ms)) = h.await {
-            out.insert(id, ms);
+    let mut remaining = Vec::new();
+
+    if let Ok(proxies) = get_proxies(http, cfg).await {
+        if let Some(group) = find_primary_group(&proxies) {
+            let group_pings = ping_group(http, cfg, &group, timeout_ms).await;
+            for id in ids {
+                if let Some(&ms) = group_pings.get(id) {
+                    out.insert(id.clone(), ms);
+                } else {
+                    remaining.push(id.clone());
+                }
+            }
+        } else {
+            remaining.extend_from_slice(ids);
+        }
+    } else {
+        remaining.extend_from_slice(ids);
+    }
+
+    if !remaining.is_empty() {
+        let mut handles = Vec::new();
+        for id in remaining {
+            let http = http.clone();
+            let cfg = cfg.clone();
+            handles.push(tokio::spawn(async move {
+                let ms = ping_server(&http, &cfg, &id, timeout_ms).await;
+                (id, ms)
+            }));
+        }
+        for h in handles {
+            if let Ok((id, ms)) = h.await {
+                out.insert(id, ms);
+            }
         }
     }
+
     out
 }
 
