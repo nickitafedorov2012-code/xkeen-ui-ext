@@ -286,7 +286,7 @@ pub async fn run_device_check(state: &AppState) -> Result<String, String> {
     let rules = match mihomo::m_get(&state.http, &cfg, "/rules").await {
         Ok(r) => r,
         Err(e) => {
-            log_w!("Ошибка получения правил Mihomo (/rules) при per-device failover: {}", e);
+            crate::log_w!("Ошибка получения правил Mihomo (/rules) при per-device failover: {}", e);
             Value::Null
         }
     };

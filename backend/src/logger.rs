@@ -25,18 +25,20 @@ pub fn subscribe() -> Option<tokio::sync::broadcast::Receiver<String>> {
 
 fn level_num(level: &str) -> u8 {
     match level {
-        "WARN" => 1,
-        "ERROR" => 2,
-        _ => 0,
+        "DEBUG" => 0,
+        "WARN" => 2,
+        "ERROR" => 3,
+        _ => 1,
     }
 }
 
-/// Установить минимальный уровень ("info"|"warn"|"error").
+/// Установить минимальный уровень ("debug"|"info"|"warn"|"error").
 pub fn set_level(level: &str) {
     let n = match level.to_ascii_lowercase().as_str() {
-        "warn" | "warning" => 1,
-        "error" => 2,
-        _ => 0,
+        "debug" => 0,
+        "warn" | "warning" => 2,
+        "error" => 3,
+        _ => 1,
     };
     MIN_LEVEL.store(n, std::sync::atomic::Ordering::Relaxed);
 }
@@ -195,6 +197,10 @@ pub fn read_all() -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| e.to_string())
 }
 
+#[macro_export]
+macro_rules! log_d {
+    ($($arg:tt)*) => { $crate::logger::log("DEBUG", &format!($($arg)*)) };
+}
 #[macro_export]
 macro_rules! log_i {
     ($($arg:tt)*) => { $crate::logger::log("INFO", &format!($($arg)*)) };
