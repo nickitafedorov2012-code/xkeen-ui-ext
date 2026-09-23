@@ -293,7 +293,7 @@ pub async fn install(State(state): State<AppState>) -> Response {
     }
     if magic != [0x7F, b'E', b'L', b'F'] {
         let _ = tokio::fs::remove_file(&tmp).await;
-        return api_err("Файл не является ELF-бинарём — отменено".into());
+        return api_err("Файл не является ELF-бинарём — отменено");
     }
 
     // Замена бинаря.
