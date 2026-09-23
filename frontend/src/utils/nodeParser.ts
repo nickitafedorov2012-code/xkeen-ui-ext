@@ -431,3 +431,79 @@ function objectToYamlNode(obj: Record<string, any>): string {
 
   return lines.join('\n')
 }
+
+/**
+ * Экспорт параметров сервера в стандартную URI-ссылку подключения (VLESS, VMess, SS, Trojan, Hysteria2)
+ */
+export function exportServerToLink(server: {
+  name: string
+  protocol: string
+  host: string
+  port: number
+  raw?: Record<string, any>
+}): string {
+  const name = encodeURIComponent(server.name)
+  const host = server.host
+  const port = server.port || 443
+  const proto = (server.protocol || '').toLowerCase()
+  const raw = server.raw || {}
+
+  if (proto === 'vless' || raw.type?.toLowerCase() === 'vless') {
+    const uuid = raw.uuid || '00000000-0000-0000-0000-000000000000'
+    const security = raw.tls ? (raw['reality-opts'] ? 'reality' : 'tls') : (raw.security || 'none')
+    const sni = raw.servername || raw.sni || ''
+    const flow = raw.flow || ''
+    const network = raw.network || 'tcp'
+    const pbk = raw['reality-opts']?.['public-key'] || ''
+    const sid = raw['reality-opts']?.['short-id'] || ''
+    const fp = raw['client-fingerprint'] || 'chrome'
+
+    let query = `security=${security}&type=${network}`
+    if (sni) query += `&sni=${encodeURIComponent(sni)}`
+    if (flow) query += `&flow=${encodeURIComponent(flow)}`
+    if (pbk) query += `&pbk=${encodeURIComponent(pbk)}`
+    if (sid) query += `&sid=${encodeURIComponent(sid)}`
+    if (fp) query += `&fp=${encodeURIComponent(fp)}`
+
+    return `vless://${uuid}@${host}:${port}?${query}#${name}`
+  }
+
+  if (proto === 'vmess' || raw.type?.toLowerCase() === 'vmess') {
+    const vmessObj = {
+      v: '2',
+      ps: server.name,
+      add: host,
+      port: port,
+      id: raw.uuid || '00000000-0000-0000-0000-000000000000',
+      aid: raw.alterId || '0',
+      net: raw.network || 'tcp',
+      type: 'none',
+      host: raw.servername || raw.sni || '',
+      path: raw['ws-opts']?.path || '',
+      tls: raw.tls ? 'tls' : '',
+    }
+    return `vmess://${btoa(unescape(encodeURIComponent(JSON.stringify(vmessObj))))}`
+  }
+
+  if (proto === 'shadowsocks' || proto === 'ss' || raw.type?.toLowerCase() === 'ss') {
+    const cipher = raw.cipher || 'chacha20-ietf-poly1305'
+    const password = raw.password || 'password'
+    const userinfo = btoa(`${cipher}:${password}`)
+    return `ss://${userinfo}@${host}:${port}#${name}`
+  }
+
+  if (proto === 'trojan' || raw.type?.toLowerCase() === 'trojan') {
+    const password = raw.password || 'password'
+    const sni = raw.servername || raw.sni || ''
+    return `trojan://${password}@${host}:${port}?security=tls&sni=${encodeURIComponent(sni)}#${name}`
+  }
+
+  if (proto === 'hysteria2' || proto === 'hy2' || raw.type?.toLowerCase() === 'hysteria2') {
+    const auth = raw.password || raw.auth || ''
+    const sni = raw.servername || raw.sni || ''
+    return `hysteria2://${auth}@${host}:${port}?sni=${encodeURIComponent(sni)}#${name}`
+  }
+
+  return `${proto}://${host}:${port}#${name}`
+}
+

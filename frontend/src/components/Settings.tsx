@@ -666,6 +666,37 @@ export default function Settings({ notify, status, refresh }: Props) {
         </div>
       </section>
 
+      {/* СТОРОЖЕВОЙ ТАЙМЕР ЯДРА (WATCHDOG & AUTO-HEALING) */}
+      <section className="card">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <h2 style={{ margin: 0 }}>🛡️ Сторожевой таймер ядра (Watchdog)</h2>
+          <span className="badge badge-online" style={{ color: '#22c55e' }}>
+            🟢 Активен (авто-лечение)
+          </span>
+        </div>
+        <p className="muted small">
+          Фоновый сторожевой процесс демона непрерывно контролирует целостность правил маршрутизации в <code>config.yaml</code>.
+        </p>
+        <ul className="kv" style={{ margin: '8px 0 0' }}>
+          <li>
+            <span>Статус сторожа</span>
+            <b style={{ color: '#22c55e' }}>✓ Авто-восстановление включено</b>
+          </li>
+          <li>
+            <span>Интервал проверки config.yaml</span>
+            <b>4 сек</b>
+          </li>
+          <li>
+            <span>Защита блоков маршрутизации</span>
+            <span style={{ color: 'var(--accent)' }}>AUTO-DEVICE, AUTO-FORCE, AUTO-IGNORE</span>
+          </li>
+          <li>
+            <span>Поведение при рестарте XKeen</span>
+            <b>Автоматическое накатывание правил без разрыва связи</b>
+          </li>
+        </ul>
+      </section>
+
       {/* БЕЗОПАСНОСТЬ И ПАРОЛЬ */}
       <section className="card">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>

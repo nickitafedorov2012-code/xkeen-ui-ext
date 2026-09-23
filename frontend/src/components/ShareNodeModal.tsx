@@ -1,0 +1,137 @@
+import { useState, useMemo } from 'react'
+import type { ServerInfo } from '../types'
+import { exportServerToLink } from '../utils/nodeParser'
+import { generateQrSvg } from '../utils/qrCode'
+
+interface ShareNodeModalProps {
+  server: ServerInfo | null
+  isOpen?: boolean
+  onClose: () => void
+  notify: (msg: string, error?: boolean) => void
+}
+
+export default function ShareNodeModal({
+  server,
+  isOpen = true,
+  onClose,
+  notify,
+}: ShareNodeModalProps) {
+  if (!isOpen || !server) return null
+
+  const [copied, setCopied] = useState(false)
+
+  // Генерация ссылки подключения
+  const link = useMemo(() => {
+    return exportServerToLink({
+      name: server.name,
+      protocol: server.protocol,
+      host: server.host,
+      port: server.port,
+    })
+  }, [server])
+
+  const qrImageUrl = useMemo(() => {
+    return generateQrSvg(link, 220)
+  }, [link])
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(link)
+    setCopied(true)
+    notify('Ссылка подключения скопирована в буфер обмена')
+    setTimeout(() => setCopied(false), 2500)
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-card share-node-card" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <div className="modal-title-group">
+            <span className="modal-icon">🔗</span>
+            <div>
+              <h2 style={{ margin: 0, fontSize: 16 }}>Ссылка подключения</h2>
+              <p className="muted small" style={{ margin: '2px 0 0' }}>
+                Экспорт прокси для телефона, ноутбука или роутера
+              </p>
+            </div>
+          </div>
+          <button type="button" className="btn btn-sm" onClick={onClose} title="Закрыть">
+            ✕
+          </button>
+        </div>
+
+        <div className="share-node-body">
+          {/* Инфо о ноде */}
+          <div className="share-node-info">
+            <span className="badge" style={{ fontSize: 12, padding: '3px 8px' }}>
+              {server.protocol.toUpperCase()}
+            </span>
+            <span className="share-node-name" title={server.name}>
+              {server.name}
+            </span>
+            <span className="muted small mono">
+              {server.host}:{server.port}
+            </span>
+          </div>
+
+          <div className="share-node-grid">
+            {/* Левая колонка: QR-код */}
+            <div className="share-qr-box">
+              <div className="share-qr-wrapper">
+                <img
+                  src={qrImageUrl}
+                  alt="QR Code"
+                  className="share-qr-img"
+                  width={200}
+                  height={200}
+                />
+              </div>
+              <p className="muted small" style={{ textAlign: 'center', margin: '8px 0 0' }}>
+                Отсканируйте камерой телефона (v2rayNG / Streisand / Shadowrocket / Sing-box)
+              </p>
+            </div>
+
+            {/* Правая колонка: Ссылка и быстрое копирование */}
+            <div className="share-link-box">
+              <label className="form-label" style={{ fontWeight: 600, fontSize: 12 }}>
+                Готовая ссылка конфигурации:
+              </label>
+              <textarea
+                readOnly
+                className="input share-link-textarea mono"
+                value={link}
+                rows={4}
+                onClick={(e) => (e.target as HTMLTextAreaElement).select()}
+              />
+
+              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                <button
+                  type="button"
+                  className="btn primary"
+                  style={{ flex: 1 }}
+                  onClick={handleCopy}
+                >
+                  {copied ? '✓ Скопировано!' : '📋 Скопировать ссылку'}
+                </button>
+              </div>
+
+              <div className="share-instructions">
+                <b>💡 Как использовать:</b>
+                <ul>
+                  <li><b>Android:</b> v2rayNG, NekoBox, Happ, Clash Meta (импорт из буфера/QR).</li>
+                  <li><b>iOS / macOS:</b> Streisand, Shadowrocket, Sing-box, V2Box.</li>
+                  <li><b>Windows / Linux:</b> Hiddify, Nekoray, v2rayN, Clash Verge.</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="modal-footer" style={{ justifyContent: 'flex-end' }}>
+          <button type="button" className="btn" onClick={onClose}>
+            Закрыть
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiGet, apiPost } from '../api'
 import { pingClass, getFlowStatus, type ProviderInfo, type ServerInfo, type SpeedtestResult } from '../types'
 import OutboundGeneratorModal from './OutboundGeneratorModal'
+import ShareNodeModal from './ShareNodeModal'
 
 interface Props {
   notify: (msg: string, isError?: boolean) => void
@@ -37,6 +38,7 @@ export default function Servers({ notify }: Props) {
 
   // Генератор и импорт ссылок
   const [generatorOpen, setGeneratorOpen] = useState(false)
+  const [shareServer, setShareServer] = useState<ServerInfo | null>(null)
 
   // Speedtest
   const [speedtestingId, setSpeedtestingId] = useState<string | null>(null)
@@ -755,6 +757,14 @@ export default function Servers({ notify }: Props) {
                   </span>
                   <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
                     <button
+                      className="btn sm ghost"
+                      onClick={() => setShareServer(activeServer)}
+                      style={{ padding: '3px 6px' }}
+                      title="Ссылка подключения и QR-код"
+                    >
+                      🔗
+                    </button>
+                    <button
                       className={`btn sm ghost btn-speedtest ${speedtestingId === activeServer.id ? 'loading' : ''}`}
                       onClick={() => runSpeedtest(activeServer)}
                       disabled={speedtestingId !== null}
@@ -837,6 +847,13 @@ export default function Servers({ notify }: Props) {
                     {s.is_active && <span className="tag current">✓ ПОДКЛЮЧЁН</span>}
                     <span className="spacer" />
                     <button
+                      className="btn sm ghost"
+                      onClick={() => setShareServer(s)}
+                      title="Сгенерировать ссылку подключения (vless/vmess/ss) и QR-код"
+                    >
+                      🔗 Ссылка
+                    </button>
+                    <button
                       className={`btn sm ghost btn-speedtest ${speedtestingId === s.id ? 'loading' : ''}`}
                       onClick={() => runSpeedtest(s)}
                       disabled={speedtestingId !== null}
@@ -912,6 +929,14 @@ export default function Servers({ notify }: Props) {
                     {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
                   </span>
                   <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                    <button
+                      className="btn sm ghost"
+                      onClick={() => setShareServer(s)}
+                      style={{ padding: '3px 6px' }}
+                      title="Ссылка подключения и QR-код"
+                    >
+                      🔗
+                    </button>
                     <button
                       className={`btn sm ghost btn-speedtest ${speedtestingId === s.id ? 'loading' : ''}`}
                       onClick={() => runSpeedtest(s)}
@@ -1266,7 +1291,7 @@ export default function Servers({ notify }: Props) {
         </div>
       )}
 
-      {/* Модальное окно импорта и генерации ссылок */}
+      {/* Модальное окно импорта ссылок */}
       <OutboundGeneratorModal
         isOpen={generatorOpen}
         onClose={() => setGeneratorOpen(false)}
@@ -1274,6 +1299,14 @@ export default function Servers({ notify }: Props) {
           load()
           notify('Прокси успешно импортированы')
         }}
+        notify={notify}
+      />
+
+      {/* Модальное окно экспорта и генерации ссылки / QR-кода */}
+      <ShareNodeModal
+        server={shareServer}
+        isOpen={!!shareServer}
+        onClose={() => setShareServer(null)}
         notify={notify}
       />
     </section>

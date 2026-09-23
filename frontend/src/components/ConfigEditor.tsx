@@ -254,11 +254,9 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
           ) : (
             <div className="editor-container">
               <div className="editor-line-numbers" ref={lineNumbersRef}>
-                {lineNumbers.map((num) => (
-                  <div key={num} className="line-num">
-                    {num}
-                  </div>
-                ))}
+                <pre style={{ margin: 0, padding: 0, fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit', color: 'inherit' }}>
+                  {lineNumbers.join('\n')}
+                </pre>
               </div>
 
               <textarea
