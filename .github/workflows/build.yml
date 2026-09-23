@@ -21,7 +21,13 @@ jobs:
           node-version: 20
       - name: Build frontend
         working-directory: frontend
-        run: npm install && npm run build
+        run: |
+          npm install
+          if ! npm run build; then
+            echo "### ❌ Frontend build failed" >> $GITHUB_STEP_SUMMARY
+            npm run build 2>&1 | tail -n 50 >> $GITHUB_STEP_SUMMARY || true
+            exit 1
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: frontend-dist

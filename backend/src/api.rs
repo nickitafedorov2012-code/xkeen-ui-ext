@@ -29,6 +29,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
         })
         .map(|s| json!({
             "id": s.id, "name": s.name, "ping_ms": s.ping_ms,
+            "protocol": s.protocol, "host": s.host, "port": s.port,
             "provider": s.provider, "provider_name": s.provider_name,
         }));
 

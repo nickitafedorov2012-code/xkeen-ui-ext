@@ -17,6 +17,9 @@ export interface StatusInfo {
   active_server: {
     id: string
     name: string
+    protocol?: string
+    host?: string
+    port?: number
     ping_ms: number
     provider?: string
     provider_name?: string
