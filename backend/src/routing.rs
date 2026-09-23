@@ -738,6 +738,49 @@ fn extract_filter_value(trimmed: &str) -> String {
     let v = v.strip_prefix('\'').unwrap_or(v);
     v.strip_suffix('\'').unwrap_or(v).to_string()
 }
+
+/// Применение всей сохраненной в AppConfig маршрутизации к сырому YAML Mihomo.
+pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> (String, usize) {
+    let mut current = yaml.to_string();
+
+    // 1. Доменные правила (DIRECT / FORCE / PER-DEVICE DOMAINS)
+    if let Ok(with_domains) = apply_domain_rules(&current, &cfg.direct_domains, &cfg.force_domains, &cfg.device_domain_rules) {
+        current = with_domains;
+    }
+
+    // 2. Игнор-лист
+    if let Ok(with_ig) = apply_ignore_to_groups(&current, &cfg.ignore_servers) {
+        current = with_ig;
+    }
+    let mut filters = cfg.provider_filters.clone();
+    current = apply_ignore_to_providers(&current, &cfg.ignore_servers, &mut filters);
+
+    // 3. Per-device назначения
+    let providers = if !cfg.mihomo.device_providers.is_empty() {
+        cfg.mihomo.device_providers.clone()
+    } else {
+        parse_provider_names(&current)
+    };
+
+    let mut assignments = Vec::new();
+    for (ip, dr) in &cfg.device_routing {
+        if let Some(srv) = dr.servers.first() {
+            assignments.push(Assignment {
+                ip: ip.clone(),
+                name: String::new(),
+                server: Some(srv.clone()),
+            });
+        }
+    }
+
+    let count = assignments.len();
+    if let Ok(with_devices) = apply_assignments(&current, &assignments, &providers) {
+        current = with_devices;
+    }
+
+    (current, count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -844,54 +887,6 @@ mod tests {
         let out = sanitize_domains(&[" https://WWW.Example.com/path ".to_string(), "example.com".to_string(), "notadomain".to_string()]);
         assert_eq!(out, vec!["example.com".to_string()]);
     }
-
-/// Применение всей сохраненной в AppConfig маршрутизации к сырому YAML Mihomo.
-pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> (String, usize) {
-    let mut current = yaml.to_string();
-
-    // 1. Доменные правила (DIRECT / FORCE / PER-DEVICE DOMAINS)
-    if let Ok(with_domains) = apply_domain_rules(&current, &cfg.direct_domains, &cfg.force_domains, &cfg.device_domain_rules) {
-        current = with_domains;
-    }
-
-    // 2. Игнор-лист
-    if let Ok(with_ig) = apply_ignore_to_groups(&current, &cfg.ignore_servers) {
-        current = with_ig;
-    }
-    let mut filters = cfg.provider_filters.clone();
-    current = apply_ignore_to_providers(&current, &cfg.ignore_servers, &mut filters);
-
-    // 3. Per-device назначения
-    let providers = if !cfg.mihomo.device_providers.is_empty() {
-        cfg.mihomo.device_providers.clone()
-    } else {
-        parse_provider_names(&current)
-    };
-
-    let mut assignments = Vec::new();
-    for (ip, dr) in &cfg.device_routing {
-        if let Some(srv) = dr.servers.first() {
-            assignments.push(Assignment {
-                ip: ip.clone(),
-                name: String::new(),
-                server: Some(srv.clone()),
-            });
-        }
-    }
-
-    let count = assignments.len();
-    if let Ok(with_devices) = apply_assignments(&current, &assignments, &providers) {
-        current = with_devices;
-    }
-
-    (current, count)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const BASE_YAML: &str = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - GEOIP,RU,DIRECT\n  - MATCH,PROXY\n";
 
     #[test]
     fn domain_rules_inserted_and_removed() {
