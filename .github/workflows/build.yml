@@ -41,6 +41,7 @@ jobs:
     permissions:
       contents: write
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: aarch64-unknown-linux-musl
@@ -81,7 +82,7 @@ jobs:
           tool: cross
 
       - name: Install Rust target
-        run: rustup target add ${{ matrix.target }}
+        run: rustup target add ${{ matrix.target }} || true
 
 
       - name: Inject frontend dist for cross
@@ -132,9 +133,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
+          pattern: xkeen-route-*
+          merge-multiple: true
           path: artifacts
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.version || github.ref_name }}
           prerelease: false
-          files: artifacts/xkeen-route-*/*
+          files: artifacts/*
