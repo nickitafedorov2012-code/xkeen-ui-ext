@@ -170,6 +170,20 @@ pub fn parse_dns_a_records(buf: &[u8]) -> Vec<Ipv4Addr> {
     ips
 }
 
+async fn run_cmd(program: &str, args: &[&str]) {
+    match tokio::process::Command::new(program).args(args).output().await {
+        Ok(out) => {
+            if !out.status.success() {
+                let err = String::from_utf8_lossy(&out.stderr);
+                crate::log_d!("[ANTIGRAVITY] Команда {} {:?} завершилась с кодом {:?}: {}", program, args, out.status.code(), err.trim());
+            }
+        }
+        Err(e) => {
+            crate::log_w!("[ANTIGRAVITY] Ошибка запуска команды {} {:?}: {}", program, args, e);
+        }
+    }
+}
+
 impl AntigravityManager {
     pub fn new(config: Arc<RwLock<Arc<crate::config::AppConfig>>>) -> Self {
         let http = reqwest::Client::builder()
@@ -387,21 +401,6 @@ impl AntigravityManager {
         }
     }
 
-async fn run_cmd(program: &str, args: &[&str]) {
-    match tokio::process::Command::new(program).args(args).output().await {
-        Ok(out) => {
-            if !out.status.success() {
-                let err = String::from_utf8_lossy(&out.stderr);
-                crate::log_d!("[ANTIGRAVITY] Команда {} {:?} завершилась с кодом {:?}: {}", program, args, out.status.code(), err.trim());
-            }
-        }
-        Err(e) => {
-            crate::log_w!("[ANTIGRAVITY] Ошибка запуска команды {} {:?}: {}", program, args, e);
-        }
-    }
-}
-
-impl AntigravityManager {
     /// Применение DNS-записей в KeeneticOS и добавление маршрута мимо VPN
     async fn apply_keenetic_rules(&self, ip: Ipv4Addr, targets: &[String], prev_ip: Option<Ipv4Addr>) {
         // 1. Очистка прошлого IP из маршрутизации и ipset
