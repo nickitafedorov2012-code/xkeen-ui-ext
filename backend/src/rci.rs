@@ -51,13 +51,13 @@ fn sha256_hex(s: &str) -> String {
 }
 
 /// Поиск RCI-токена: config.rci.token → /opt/etc/xkeen/xkeen.json (xkeen.rci_token).
-pub fn token_from_files(cfg: &AppConfig) -> String {
+pub async fn token_from_files(cfg: &AppConfig) -> String {
     if !cfg.rci.token.is_empty() {
         return cfg.rci.token.clone();
     }
     #[cfg(target_os = "linux")]
     {
-        if let Ok(content) = std::fs::read_to_string("/opt/etc/xkeen/xkeen.json") {
+        if let Ok(content) = tokio::fs::read_to_string("/opt/etc/xkeen/xkeen.json").await {
             if let Ok(v) = serde_json::from_str::<Value>(&content) {
                 if let Some(t) = v.get("xkeen").and_then(|x| x.get("rci_token")).and_then(|t| t.as_str()) {
                     return t.to_string();
@@ -146,7 +146,7 @@ async fn challenge_auth(
 /// Гарантирует авторизацию: токен из файлов → challenge-auth → попытка без авторизации
 /// (на многих прошивках RCI с localhost отвечает без auth). Возвращает токен (может быть пустым).
 pub async fn ensure_auth(http: &reqwest::Client, cfg: &AppConfig) -> Result<String, String> {
-    let token = token_from_files(cfg);
+    let token = token_from_files(cfg).await;
     // Быстрый путь без блокировки (Acquire ordering)
     if !token.is_empty() && TOKEN_OK.load(Ordering::Acquire) {
         return Ok(token);

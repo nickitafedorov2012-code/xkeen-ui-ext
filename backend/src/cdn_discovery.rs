@@ -184,9 +184,10 @@ pub async fn scan_html_cdns(domain: &str, proxy_url: &str) -> Vec<String> {
 
     // Извлекаем URL из src="..." и href="..."
     let root_keyword = clean.split('.').next().unwrap_or(&clean);
-    let url_pattern = regex_lite::Regex::new(r#"(?i)(?:src|href)=["']https?://([^/"':\s]+)"#).ok();
+    static URL_PATTERN: std::sync::LazyLock<Option<regex_lite::Regex>> =
+        std::sync::LazyLock::new(|| regex_lite::Regex::new(r#"(?i)(?:src|href)=["']https?://([^/"':\s]+)"#).ok());
 
-    if let Some(re) = url_pattern {
+    if let Some(re) = URL_PATTERN.as_ref() {
         for cap in re.captures_iter(&html) {
             if let Some(m) = cap.get(1) {
                 let d = m.as_str().to_lowercase();

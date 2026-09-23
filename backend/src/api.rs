@@ -154,6 +154,7 @@ pub async fn get_servers(State(state): State<AppState>) -> Response {
 
 #[derive(Deserialize)]
 pub struct SwitchReq {
+    #[serde(alias = "id")]
     pub server_id: String,
 }
 
@@ -841,8 +842,8 @@ pub async fn restore_backup(State(state): State<AppState>, Json(req): Json<Backu
     if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
         return api_err(format!("Конфиги восстановлены, но reload Mihomo не удался: {e}"));
     }
-    // Перечитать конфиг панели в состояние.
-    *state.config.write().await = std::sync::Arc::new(config::load(&state.config_path));
+    // Перечитать конфиг панели в состояние асинхронно без блокировки.
+    *state.config.write().await = std::sync::Arc::new(config::load_async(&state.config_path).await);
     log_i!("Конфиги восстановлены из бэкапа {}", req.name);
     api_ok(json!({ "restored": req.name }))
 }
@@ -1530,7 +1531,7 @@ pub async fn save_config_file(
     log_i!("Файл {} успешно сохранён через веб-редактор", path.display());
 
     if body.file == "route" {
-        *state.config.write().await = std::sync::Arc::new(config::load(&state.config_path));
+        *state.config.write().await = std::sync::Arc::new(config::load_async(&state.config_path).await);
     }
 
     if body.file == "override" {
@@ -1808,6 +1809,18 @@ pub async fn speedtest_server(
     }
 }
 
+/// POST /api/servers/speedtest/{id} или GET /api/servers/speedtest/{id}
+pub async fn speedtest_server_by_id(
+    State(state): State<AppState>,
+    axum::extract::Path(server_id): axum::extract::Path<String>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    match crate::speedtest::run_speedtest(&state.http, &cfg, &server_id).await {
+        Ok(res) => api_ok(serde_json::to_value(res).unwrap_or_default()),
+        Err(e) => api_err(e),
+    }
+}
+
 // ==================== ТЕСТ УВЕДОМЛЕНИЙ (TELEGRAM / WEBHOOK) ====================
 
 #[derive(Deserialize)]
@@ -1960,8 +1973,9 @@ pub async fn get_dns_mode(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
     let config_yaml = tokio::fs::read_to_string(&cfg.mihomo.config_path).await.unwrap_or_default();
 
-    let re_redir = regex_lite::Regex::new(r#"(?m)^\s*enhanced-mode:\s*['"]?redir-host['"]?"#).unwrap();
-    let enhanced_mode = if re_redir.is_match(&config_yaml) {
+    static RE_REDIR: std::sync::LazyLock<regex_lite::Regex> =
+        std::sync::LazyLock::new(|| regex_lite::Regex::new(r#"(?m)^\s*enhanced-mode:\s*['"]?redir-host['"]?"#).unwrap());
+    let enhanced_mode = if RE_REDIR.is_match(&config_yaml) {
         "redir-host"
     } else {
         "fake-ip"
@@ -1992,9 +2006,10 @@ pub async fn set_dns_mode(
     };
 
     let target_mode = if body.enhanced_mode == "redir-host" { "redir-host" } else { "fake-ip" };
-    let re = regex_lite::Regex::new(r"(?m)^(\s*enhanced-mode:\s*)[^\r\n]+").unwrap();
-    let new_yaml = if re.is_match(&config_yaml) {
-        re.replace(&config_yaml, format!("${{1}}{target_mode}")).into_owned()
+    static RE_ENHANCED_MODE: std::sync::LazyLock<regex_lite::Regex> =
+        std::sync::LazyLock::new(|| regex_lite::Regex::new(r"(?m)^(\s*enhanced-mode:\s*)[^\r\n]+").unwrap());
+    let new_yaml = if RE_ENHANCED_MODE.is_match(&config_yaml) {
+        RE_ENHANCED_MODE.replace(&config_yaml, format!("${{1}}{target_mode}")).into_owned()
     } else {
         config_yaml
     };

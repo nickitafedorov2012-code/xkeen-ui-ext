@@ -30,11 +30,7 @@ pub fn spawn(state: AppState) {
             };
 
             let path = Path::new(&config_path_str);
-            if !path.exists() {
-                continue;
-            }
-
-            let meta = match std::fs::metadata(path) {
+            let meta = match tokio::fs::metadata(path).await {
                 Ok(m) => m,
                 Err(_) => continue,
             };
@@ -54,7 +50,7 @@ pub fn spawn(state: AppState) {
                 last_len = len;
 
                 // Читаем содержимое и проверяем наличие сохраненных маркер-блоков
-                if let Ok(content) = std::fs::read_to_string(path) {
+                if let Ok(content) = tokio::fs::read_to_string(path).await {
                     let needs_device = !device_routing.is_empty() || !device_domains.is_empty();
                     let needs_force = !force_domains.is_empty();
                     let needs_ignore = !ignore_servers.is_empty();
@@ -70,7 +66,7 @@ pub fn spawn(state: AppState) {
                         let cfg = state.config.read().await.clone();
 
                         // Повторное применение маршрутизации
-                        let raw_yaml = match std::fs::read_to_string(path) {
+                        let raw_yaml = match tokio::fs::read_to_string(path).await {
                             Ok(c) => c,
                             Err(e) => {
                                 log_w!("[WATCHDOG] Ошибка чтения config.yaml: {}", e);
@@ -80,7 +76,12 @@ pub fn spawn(state: AppState) {
 
                         let (new_yaml, _applied) = routing::apply_routing(&raw_yaml, &cfg);
                         let tmp = format!("{}.tmp", path.display());
-                        if let Err(e) = std::fs::write(&tmp, &new_yaml).and_then(|_| std::fs::rename(&tmp, path)) {
+                        let write_res = async {
+                            tokio::fs::write(&tmp, &new_yaml).await?;
+                            tokio::fs::rename(&tmp, path).await
+                        }.await;
+                        if let Err(e) = write_res {
+                            let _ = tokio::fs::remove_file(&tmp).await;
                             log_w!("[WATCHDOG] Ошибка записи config.yaml: {}", e);
                             continue;
                         }
@@ -101,7 +102,7 @@ pub fn spawn(state: AppState) {
                         }
 
                         // Обновляем зафиксированные метаданные
-                        if let Ok(new_meta) = std::fs::metadata(path) {
+                        if let Ok(new_meta) = tokio::fs::metadata(path).await {
                             last_mtime = new_meta.modified().ok();
                             last_len = new_meta.len() as usize;
                         }

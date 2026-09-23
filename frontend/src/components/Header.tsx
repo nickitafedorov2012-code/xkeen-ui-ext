@@ -174,7 +174,7 @@ export default function Header({
 
   const isRunning = status ? Boolean(status.failover?.enabled) : true
 
-  // Периодическое обновление метрик каждую секунду (1 сек)
+  // Периодическое обновление метрик (раз в 3 сек для минимизации нагрузки на CPU роутера)
   useEffect(() => {
     let active = true
     const fetchMetrics = async () => {
@@ -190,7 +190,7 @@ export default function Header({
     }
 
     fetchMetrics()
-    const timer = setInterval(fetchMetrics, 1000)
+    const timer = setInterval(fetchMetrics, 3000)
     return () => {
       active = false
       clearInterval(timer)

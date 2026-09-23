@@ -1010,6 +1010,24 @@ mod tests {
     }
 
     #[test]
+    fn resolve_leaf_deep_chain() {
+        let p = map(vec![
+            ("PROXY", json!({"type": "selector", "now": "G1"})),
+            ("G1", json!({"type": "selector", "now": "G2"})),
+            ("G2", json!({"type": "fallback", "now": "G3"})),
+            ("G3", json!({"type": "urltest", "now": "FinalServer"})),
+            ("FinalServer", json!({"type": "vless", "server": "1.2.3.4"})),
+        ]);
+        assert_eq!(resolve_active_leaf(&p), "FinalServer");
+    }
+
+    #[test]
+    fn resolve_leaf_empty_map() {
+        let p = BTreeMap::new();
+        assert_eq!(resolve_active_leaf(&p), "");
+    }
+
+    #[test]
     fn ip_from_group_name_variants() {
         assert_eq!(ip_from_group_name("Big PC 192_168_2_118").as_deref(), Some("192.168.2.118"));
         assert_eq!(ip_from_group_name("DEV_aa_bb_cc_dd_ee_ff").as_deref(), Some("aa:bb:cc:dd:ee:ff"));

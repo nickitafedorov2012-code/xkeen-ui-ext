@@ -131,17 +131,11 @@ pub async fn sync_geo_override(domains: &[String]) -> Result<usize, String> {
     let (v4, v6) = resolve_domains(domains).await;
     let total_ips = v4.len() + v6.len();
 
-    // 1. Обновляем файл ru_exclude_override.lst
-    let existing = tokio::fs::read_to_string(OVERRIDE_FILE)
-        .await
-        .unwrap_or_default();
-    let new_content = update_override_file_content(&existing, &v4, &v6);
-
+    // 1. Потоково обновляем файл ru_exclude_override.lst без буферизации всего содержимого в RAM
     let tmp_file = format!("{OVERRIDE_FILE}.tmp");
-    if let Err(e) = tokio::fs::write(&tmp_file, &new_content).await {
-        return Err(format!("Не удалось записать {tmp_file}: {e}"));
-    }
+    write_override_file_streaming(OVERRIDE_FILE, &tmp_file, &v4, &v6).await?;
     if let Err(e) = tokio::fs::rename(&tmp_file, OVERRIDE_FILE).await {
+        let _ = tokio::fs::remove_file(&tmp_file).await;
         return Err(format!("Не удалось переименовать {tmp_file}: {e}"));
     }
 
@@ -157,6 +151,72 @@ pub async fn sync_geo_override(domains: &[String]) -> Result<usize, String> {
 
     crate::log_i!("[OVERRIDE] Синхронизировано {total_ips} IP для {} доменов", domains.len());
     Ok(total_ips)
+}
+
+async fn write_override_file_streaming(
+    src_path: &str,
+    dst_path: &str,
+    v4_ips: &BTreeSet<Ipv4Addr>,
+    v6_ips: &BTreeSet<Ipv6Addr>,
+) -> Result<(), String> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    let dst_file = tokio::fs::File::create(dst_path)
+        .await
+        .map_err(|e| format!("Не удалось создать {dst_path}: {e}"))?;
+    let mut writer = tokio::io::BufWriter::new(dst_file);
+
+    let mut had_block = false;
+
+    if let Ok(src_file) = tokio::fs::File::open(src_path).await {
+        let reader = tokio::io::BufReader::new(src_file);
+        let mut lines = reader.lines();
+        let mut in_block = false;
+
+        while let Ok(Some(line)) = lines.next_line().await {
+            let t = line.trim();
+            if t == MARKER_BEGIN {
+                in_block = true;
+                had_block = true;
+                write_ips_block(&mut writer, v4_ips, v6_ips).await.map_err(|e| format!("Ошибка записи {dst_path}: {e}"))?;
+                continue;
+            }
+            if t == MARKER_END {
+                in_block = false;
+                continue;
+            }
+            if in_block {
+                continue;
+            }
+            writer.write_all(format!("{line}\n").as_bytes()).await.map_err(|e| format!("Ошибка записи {dst_path}: {e}"))?;
+        }
+    }
+
+    if !had_block {
+        write_ips_block(&mut writer, v4_ips, v6_ips).await.map_err(|e| format!("Ошибка записи {dst_path}: {e}"))?;
+    }
+
+    writer.flush().await.map_err(|e| format!("Ошибка сброса буфера {dst_path}: {e}"))?;
+    Ok(())
+}
+
+async fn write_ips_block(
+    w: &mut tokio::io::BufWriter<tokio::fs::File>,
+    v4_ips: &BTreeSet<Ipv4Addr>,
+    v6_ips: &BTreeSet<Ipv6Addr>,
+) -> Result<(), std::io::Error> {
+    use tokio::io::AsyncWriteExt;
+    if !v4_ips.is_empty() || !v6_ips.is_empty() {
+        w.write_all(format!("{MARKER_BEGIN}\n").as_bytes()).await?;
+        for ip in v4_ips {
+            w.write_all(format!("{ip}\n").as_bytes()).await?;
+        }
+        for ip in v6_ips {
+            w.write_all(format!("{ip}\n").as_bytes()).await?;
+        }
+        w.write_all(format!("{MARKER_END}\n").as_bytes()).await?;
+    }
+    Ok(())
 }
 
 async fn run_ipset(args: &[&str]) -> Result<(), String> {
@@ -189,8 +249,11 @@ async fn sync_ipset_family(set_name: &str, family: &str) -> Result<(), String> {
 
     let _ = run_ipset(&["flush", &tmp]).await;
 
-    if let Ok(content) = tokio::fs::read_to_string(OVERRIDE_FILE).await {
-        for line in content.lines() {
+    if let Ok(file) = tokio::fs::File::open(OVERRIDE_FILE).await {
+        use tokio::io::AsyncBufReadExt;
+        let reader = tokio::io::BufReader::new(file);
+        let mut lines = reader.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
             let t = line.trim();
             if t.is_empty() || t.starts_with('#') {
                 continue;
@@ -245,5 +308,34 @@ mod tests {
         assert!(cleared.contains("1.2.3.4"));
         assert!(!cleared.contains(MARKER_BEGIN));
         assert!(!cleared.contains("77.246.157.212"));
+    }
+
+    #[tokio::test]
+    async fn test_streaming_override_file() {
+        let temp_src = std::env::temp_dir().join(format!("test_src_{}.lst", std::process::id()));
+        let temp_dst = std::env::temp_dir().join(format!("test_dst_{}.lst", std::process::id()));
+
+        tokio::fs::write(&temp_src, "# Header line\n10.0.0.1\n").await.unwrap();
+
+        let mut v4 = BTreeSet::new();
+        v4.insert("1.1.1.1".parse().unwrap());
+        let v6 = BTreeSet::new();
+
+        write_override_file_streaming(
+            temp_src.to_str().unwrap(),
+            temp_dst.to_str().unwrap(),
+            &v4,
+            &v6,
+        ).await.unwrap();
+
+        let read_back = tokio::fs::read_to_string(&temp_dst).await.unwrap();
+        assert!(read_back.contains("# Header line"));
+        assert!(read_back.contains("10.0.0.1"));
+        assert!(read_back.contains(MARKER_BEGIN));
+        assert!(read_back.contains("1.1.1.1"));
+        assert!(read_back.contains(MARKER_END));
+
+        let _ = tokio::fs::remove_file(&temp_src).await;
+        let _ = tokio::fs::remove_file(&temp_dst).await;
     }
 }

@@ -13,4 +13,8 @@ export default defineConfig({
     outDir: 'dist',
     chunkSizeWarningLimit: 700,
   },
+  // @ts-ignore vitest config
+  test: {
+    environment: 'happy-dom',
+  },
 })

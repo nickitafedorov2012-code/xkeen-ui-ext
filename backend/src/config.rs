@@ -361,15 +361,11 @@ pub fn merge_value(base: &mut serde_json::Value, over: &serde_json::Value) {
     }
 }
 
-/// Загрузка конфига с deep-merge поверх дефолтов.
-pub fn load(path: &Path) -> AppConfig {
+fn parse_config_content(content: &str, path_display: &str) -> AppConfig {
     let mut base = serde_json::to_value(AppConfig::default()).unwrap_or_default();
-    match std::fs::read_to_string(path) {
-        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
-            Ok(over) => merge_value(&mut base, &over),
-            Err(e) => eprintln!("[WARN] {} не JSON: {} — использую дефолты", path.display(), e),
-        },
-        Err(_) => {}
+    match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(over) => merge_value(&mut base, &over),
+        Err(e) => eprintln!("[WARN] {} не JSON: {} — использую дефолты", path_display, e),
     }
     serde_json::from_value::<AppConfig>(base)
         .map(|mut c| {
@@ -377,9 +373,25 @@ pub fn load(path: &Path) -> AppConfig {
             c
         })
         .unwrap_or_else(|e| {
-            eprintln!("[WARN] Ошибка конфига {}: {} — использую дефолты", path.display(), e);
+            eprintln!("[WARN] Ошибка конфига {}: {} — использую дефолты", path_display, e);
             AppConfig::default()
         })
+}
+
+/// Синхронная загрузка конфига с deep-merge поверх дефолтов (для инициализации CLI/main).
+pub fn load(path: &Path) -> AppConfig {
+    match std::fs::read_to_string(path) {
+        Ok(content) => parse_config_content(&content, &path.display().to_string()),
+        Err(_) => AppConfig::default(),
+    }
+}
+
+/// Асинхронная загрузка конфига (не блокирует воркеры Tokio в обработчиках API).
+pub async fn load_async(path: &Path) -> AppConfig {
+    match tokio::fs::read_to_string(path).await {
+        Ok(content) => parse_config_content(&content, &path.display().to_string()),
+        Err(_) => AppConfig::default(),
+    }
 }
 
 /// Сохранение конфига атомарно (tmp + rename).
@@ -446,5 +458,26 @@ mod tests {
         assert_eq!(loaded.failover.ping_threshold_ms, 250);
         assert_eq!(loaded.mihomo.secret, "s3cret");
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_broken_json_returns_default() {
+        let path = std::env::temp_dir().join("xr-test-broken.json");
+        std::fs::write(&path, "{ invalid json structure ...").unwrap();
+        let cfg = load(&path);
+        assert_eq!(cfg.refresh_interval_sec, 10);
+        assert_eq!(cfg.rci.port, 79);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn load_async_roundtrip() {
+        let path = std::env::temp_dir().join("xr-test-async-cfg.json");
+        let mut cfg = AppConfig::default();
+        cfg.refresh_interval_sec = 42;
+        save(&path, &cfg).await.unwrap();
+        let loaded = load_async(&path).await;
+        assert_eq!(loaded.refresh_interval_sec, 42);
+        let _ = tokio::fs::remove_file(&path).await;
     }
 }

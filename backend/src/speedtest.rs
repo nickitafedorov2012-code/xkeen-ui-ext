@@ -80,7 +80,7 @@ pub async fn run_speedtest(
     }
 
     let duration_secs = start.elapsed().as_secs_f64().max(0.001);
-    let speed_mbps = ((total_bytes as f64 * 8.0) / (duration_secs * 1_000_000.0) * 100.0).round() / 100.0;
+    let speed_mbps = calculate_speed(total_bytes, duration_secs);
 
     log_i!(
         "Тест скорости для '{}' завершён: {} Мбит/с ({} байт за {:.2} с, отклик {} мс)",
@@ -98,4 +98,35 @@ pub async fn run_speedtest(
         bytes_downloaded: total_bytes,
         duration_secs: (duration_secs * 100.0).round() / 100.0,
     })
+}
+
+/// Расчет скорости в Мбит/с с защитой от деления на ноль.
+pub fn calculate_speed(total_bytes: u64, duration_secs: f64) -> f64 {
+    let dur = duration_secs.max(0.001);
+    ((total_bytes as f64 * 8.0) / (dur * 1_000_000.0) * 100.0).round() / 100.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calculate_speed_normal() {
+        let speed = calculate_speed(5242880, 2.0);
+        assert_eq!(speed, 20.97);
+    }
+
+    #[test]
+    fn test_calculate_speed_zero_duration_safe() {
+        let speed = calculate_speed(1_000_000, 0.0);
+        assert!(!speed.is_nan());
+        assert!(!speed.is_infinite());
+        assert!(speed > 0.0);
+    }
+
+    #[test]
+    fn test_calculate_speed_zero_bytes() {
+        let speed = calculate_speed(0, 1.0);
+        assert_eq!(speed, 0.0);
+    }
 }

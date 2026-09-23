@@ -61,7 +61,7 @@ export default function Devices({ notify }: Props) {
     }
 
     pollTraffic()
-    const timer = setInterval(pollTraffic, 2000)
+    const timer = setInterval(pollTraffic, 3000)
     return () => {
       active = false
       clearInterval(timer)

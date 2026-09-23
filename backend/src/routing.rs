@@ -1071,4 +1071,20 @@ proxy-groups:
         assert!(out.contains("url: \"http://cp.cloudflare.com/generate_204\""));
         assert!(out.contains("interval: 600"));
     }
+
+    #[test]
+    fn apply_ignore_to_groups_4_space_indentation() {
+        let yaml = "proxy-groups:\n    - name: Fastest\n      type: url-test\n      proxies:\n        - Server1\n        - Server2\n";
+        let ignore = vec!["Server1".to_string()];
+        let out = apply_ignore_to_groups(yaml, &ignore).unwrap();
+        assert!(out.contains("exclude-filter: 'Server1'"));
+    }
+
+    #[test]
+    fn apply_routing_empty_config_yaml() {
+        let cfg = crate::config::AppConfig::default();
+        let (out, count) = apply_routing("", &cfg);
+        assert_eq!(out, "");
+        assert_eq!(count, 0);
+    }
 }

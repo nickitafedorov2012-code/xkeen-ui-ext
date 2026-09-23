@@ -319,3 +319,37 @@ pub async fn install(State(state): State<AppState>) -> Response {
         api_err(format!("{ver} установлена, но {INIT_SCRIPT} не найден — перезапустите вручную"))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_newer_versions() {
+        assert!(is_newer("v1.2.6", "v1.2.5"));
+        assert!(!is_newer("v1.2.5", "v1.2.6"));
+        assert!(!is_newer("v1.2.5", "v1.2.5"));
+        assert!(is_newer("1.3.0", "1.2.9"));
+        assert!(is_newer("v2.0.0", "v1.99.99"));
+        assert!(!is_newer("v1.2.4", "v1.2.5"));
+    }
+
+    #[test]
+    fn test_prerelease_comparison() {
+        // Стабильный релиз всегда новее пререлиза с тем же номером
+        assert!(is_newer("v1.2.5", "v1.2.5-beta.1"));
+        assert!(!is_newer("v1.2.5-beta.1", "v1.2.5"));
+        // Более старшая версия даже в виде pre-release новее старого релиза
+        assert!(is_newer("v1.2.6-rc1", "v1.2.5"));
+    }
+
+    #[test]
+    fn test_notes_lines_formatting() {
+        let body = "<!-- Comment -->\n- **Первое**: изменение\n* Второе: исправление\nОбычная строка\n\n- Еще пункт";
+        let lines = notes_lines(body, 3);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "**Первое**: изменение");
+        assert_eq!(lines[1], "Второе: исправление");
+        assert_eq!(lines[2], "Обычная строка");
+    }
+}

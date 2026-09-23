@@ -388,4 +388,23 @@ mod tests {
         assert!(!verify_session_token(&token, "wrong_secret"));
         assert!(!verify_session_token("invalid.token", &secret));
     }
+
+    #[test]
+    fn empty_password_rejection() {
+        let path = std::env::temp_dir().join(format!("xr-auth-test-{}.json", std::process::id()));
+        let res = cli_set_password(&path, "   ");
+        assert!(res.is_err());
+        assert_eq!(res.unwrap_err().to_string(), "Empty password");
+    }
+
+    #[test]
+    fn password_salt_isolation() {
+        let salt1 = generate_salt();
+        let salt2 = generate_salt();
+        let pass = "secret123";
+        let hash1 = hash_password(pass, &salt1);
+        let hash2 = hash_password(pass, &salt2);
+        assert_ne!(hash1, hash2, "Разная соль должна давать разный хэш");
+        assert!(!verify_password(pass, &salt2, &hash1));
+    }
 }

@@ -307,10 +307,12 @@ async fn main() {
         // Серверы
         .route("/api/servers", get(api::get_servers))
         .route("/api/servers/switch", post(api::switch_server))
+        .route("/api/servers/active", put(api::switch_server))
         .route("/api/servers/ping", post(api::ping_servers))
         .route("/api/servers/fix-names", post(api::fix_names))
         .route("/api/servers/google-check", get(api::check_google_geo))
         .route("/api/servers/speedtest", post(api::speedtest_server))
+        .route("/api/servers/speedtest/{id}", post(api::speedtest_server_by_id).get(api::speedtest_server_by_id))
         .route("/api/servers/import-node", post(api::import_node))
         // Устройства и маршрутизация
         .route("/api/devices", get(api::get_devices))
@@ -336,7 +338,7 @@ async fn main() {
         .route("/api/ignore", get(api::get_ignore).post(api::set_ignore))
         // Failover и уведомления
         .route("/api/failover/check", post(api::failover_check))
-        .route("/api/failover/toggle", post(api::failover_toggle))
+        .route("/api/failover/toggle", post(api::failover_toggle).put(api::failover_toggle))
         .route("/api/failover/events", get(api::failover_events))
         .route("/api/notifications/test", post(api::test_notification))
         // Провайдеры
