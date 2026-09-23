@@ -673,8 +673,12 @@
 - **Исправление кодировки скрипта разблокировки Antigravity**:
   - Устранена проблема отображения знаков вопроса (`??????`) вместо русских букв в Windows CMD/PowerShell.
   - В начало `ANTIGRAVITY_PATCH_SCRIPT` и команды вызова в `.cmd` добавлен принудительный вывод в UTF-8 (`[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`).
-- **Поддержка Google Flow / Labs AI**:
-  - Обеспечена корректная маршрутизация доменов Google Flow (`flow.google.com`, `labs.google`, `aisandbox-pa.googleapis.com`) через зарубежный VLESS-прокси.
+
+## v1.1.3
+- **Встроенные бандлы Google Flow & Labs в CDN Discovery**:
+  - В каталог `KNOWN_BUNDLES` добавлены `flow.google.com` и `labs.google` вместе со всеми сопутствующими API и медиа-серверами (`aisandbox-pa.googleapis.com`, `alkalimakersuite-pa.googleapis.com`, `deepmind.google`, `genai-media.googleusercontent.com`, `video-downloads.googleusercontent.com`).
+  - Теперь при добавлении `flow.google.com` в force-домены система автоматически подхватывает всю инфраструктуру генерации видео и графики.
+
 
 
 

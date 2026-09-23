@@ -43,6 +43,27 @@ pub const KNOWN_BUNDLES: &[(&str, &[&str])] = &[
     ("x.com", &["twimg.com", "t.co", "twitter.com"]),
     ("instagram.com", &["cdninstagram.com", "ig.me"]),
     ("ntc.party", &["ntc-party.discourse-cdn.com"]),
+    (
+        "flow.google.com",
+        &[
+            "labs.google",
+            "aisandbox-pa.googleapis.com",
+            "aisandbox-pa.google",
+            "alkalimakersuite-pa.googleapis.com",
+            "deepmind.google",
+            "genai-media.googleusercontent.com",
+            "video-downloads.googleusercontent.com",
+        ],
+    ),
+    (
+        "labs.google",
+        &[
+            "flow.google.com",
+            "aisandbox-pa.googleapis.com",
+            "genai-media.googleusercontent.com",
+            "video-downloads.googleusercontent.com",
+        ],
+    ),
 ];
 
 /// Типовые префиксы CDN-поддоменов.
