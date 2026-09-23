@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiGet, apiPost } from '../api'
-import type { AntigravityStatus } from '../types'
+import { getFlowStatus, type AntigravityStatus, type ServerInfo } from '../types'
 
 interface Props {
   notify: (msg: string, isError?: boolean) => void
@@ -13,6 +13,19 @@ export default function Antigravity({ notify }: Props) {
   const [saving, setSaving] = useState(false)
   const [copiedProxy, setCopiedProxy] = useState(false)
   const [copiedEnv, setCopiedEnv] = useState<string | null>(null)
+
+  // Google Flow & AI Geo State
+  const [googleGeo, setGoogleGeo] = useState<{
+    server_name?: string
+    is_clean?: boolean
+    google_country?: string
+    google_domain?: string
+    client_ip?: string
+  } | null>(null)
+  const [checkingFlow, setCheckingFlow] = useState(false)
+  const [flowServers, setFlowServers] = useState<ServerInfo[]>([])
+  const [selectedFlowServer, setSelectedFlowServer] = useState<string>('')
+  const [switchingFlowServer, setSwitchingFlowServer] = useState(false)
 
   // Форма настроек
   const [enabled, setEnabled] = useState(true)
@@ -38,11 +51,59 @@ export default function Antigravity({ notify }: Props) {
     }
   }, [notify])
 
+  const loadFlowServers = useCallback(async () => {
+    try {
+      const data = await apiGet<{ servers: ServerInfo[] }>('servers')
+      const cleanNodes = (data.servers || []).filter((s) => getFlowStatus(s.name) === 'ok')
+      setFlowServers(cleanNodes)
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  const checkFlowAccess = useCallback(async () => {
+    setCheckingFlow(true)
+    try {
+      const data = await apiGet<{
+        server_name?: string
+        is_clean?: boolean
+        google_country?: string
+        google_domain?: string
+        client_ip?: string
+      }>('servers/google-check')
+      setGoogleGeo(data)
+      if (data.is_clean) {
+        notify(`Google Flow доступен! Регион: ${data.google_country || 'US'} (${data.google_domain || 'google.com'})`)
+      } else {
+        notify(`Google связывает узел с ${data.google_country || 'РФ'} — Flow может быть заблокирован!`, true)
+      }
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка проверки Google Flow', true)
+    } finally {
+      setCheckingFlow(false)
+    }
+  }, [notify])
+
+  const switchGoogleAiServer = async (serverId: string) => {
+    if (!serverId) return
+    setSwitchingFlowServer(true)
+    try {
+      await apiPost('servers/switch', { server_id: serverId })
+      notify('Узел Google AI переключен')
+      setTimeout(checkFlowAccess, 1200)
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка переключения узла', true)
+    } finally {
+      setSwitchingFlowServer(false)
+    }
+  }
+
   useEffect(() => {
     load()
+    loadFlowServers()
     const t = setInterval(load, 5000)
     return () => clearInterval(t)
-  }, [load])
+  }, [load, loadFlowServers])
 
   const runCheck = async () => {
     setChecking(true)
@@ -132,7 +193,134 @@ export default function Antigravity({ notify }: Props) {
 
   return (
     <div className="tab-pane antigravity-page">
-      {/* Главная карточка статуса */}
+      {/* СЕКЦИЯ 1: GOOGLE FLOW & GEMINI LABS */}
+      <section className="card" style={{ marginBottom: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ fontSize: 32 }}>✨</div>
+            <div>
+              <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: '#f8fafc' }}>
+                Google Flow & Gemini Labs
+              </h2>
+              <div style={{ color: 'var(--muted)', fontSize: 13, marginTop: 2 }}>
+                Выделенная маршрутизация и диагностика чистоты узлов для генератора видео и интерфейсов Google Flow
+              </div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button
+              className="btn"
+              onClick={checkFlowAccess}
+              disabled={checkingFlow}
+              title="Проверить, как Google определяет текущий узел"
+            >
+              {checkingFlow ? '⏳ Тестирование…' : '🧪 Проверить статус Flow'}
+            </button>
+            <a
+              href="https://flow.google.com"
+              target="_blank"
+              rel="noreferrer"
+              className="btn primary"
+              style={{ textDecoration: 'none' }}
+              title="Открыть генератор Google Flow в новой вкладке"
+            >
+              🚀 Открыть Flow ↗
+            </a>
+            <a
+              href="https://aistudio.google.com"
+              target="_blank"
+              rel="noreferrer"
+              className="btn"
+              style={{ textDecoration: 'none' }}
+              title="Открыть Google AI Studio в новой вкладке"
+            >
+              🪄 AI Studio ↗
+            </a>
+          </div>
+        </div>
+
+        {/* Статус чистоты Google */}
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+          gap: 12,
+          padding: '12px 16px',
+          background: 'var(--panel-2, rgba(255,255,255,0.03))',
+          borderRadius: 8,
+          border: '1px solid var(--border)',
+          marginBottom: 16
+        }}>
+          <div>
+            <div className="muted small">Статус доступа к Flow</div>
+            <div style={{ fontSize: 15, fontWeight: 600, marginTop: 4 }}>
+              {googleGeo ? (
+                googleGeo.is_clean ? (
+                  <span style={{ color: '#4ade80' }}>🟢 Разрешён (Чистый зарубежный IP)</span>
+                ) : (
+                  <span style={{ color: '#f87171' }}>🔴 Заблокирован ({googleGeo.google_country || 'RU'})</span>
+                )
+              ) : (
+                <span className="muted">Нажмите «Проверить статус Flow»</span>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <div className="muted small">Регион по Google Search / AI</div>
+            <div style={{ fontSize: 15, fontWeight: 600, marginTop: 4 }}>
+              {googleGeo?.google_country ? `${googleGeo.google_country} (${googleGeo.google_domain})` : '—'}
+            </div>
+          </div>
+
+          <div>
+            <div className="muted small">Быстрое переключение узла Flow</div>
+            <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
+              <select
+                className="input"
+                style={{ padding: '4px 8px', fontSize: 13, flex: 1 }}
+                value={selectedFlowServer}
+                onChange={(e) => {
+                  setSelectedFlowServer(e.target.value)
+                  switchGoogleAiServer(e.target.value)
+                }}
+                disabled={switchingFlowServer}
+              >
+                <option value="">-- Выберите Flow-узел ({flowServers.length}) --</option>
+                {flowServers.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} {s.ping_ms > 0 ? `(${s.ping_ms} мс)` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </div>
+
+        {/* Домены Google AI */}
+        <div>
+          <div className="muted small" style={{ marginBottom: 6 }}>
+            Маршрутизируемые домены Google AI & Flow (направляются через Flow-совместимый сервер):
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {[
+              'flow.google.com',
+              'labs.google',
+              'aisandbox-pa.googleapis.com',
+              'alkalimakersuite-pa.googleapis.com',
+              'generativelanguage.googleapis.com',
+              'aistudio.google.com',
+              'gemini.google.com',
+              'deepmind.google',
+            ].map((d) => (
+              <span key={d} className="badge" style={{ background: 'rgba(59, 130, 246, 0.1)', color: '#60a5fa', borderColor: 'rgba(59, 130, 246, 0.25)' }}>
+                ✨ {d}
+              </span>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Главная карточка статуса Antigravity */}
       <section className="card ag-hero-card">
         <div className="ag-hero-header">
           <div className="ag-hero-title-group">

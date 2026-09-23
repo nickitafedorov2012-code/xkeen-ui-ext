@@ -10,13 +10,13 @@ import Antigravity from './components/Antigravity'
 import { apiGet } from './api'
 import type { StatusInfo } from './types'
 
-type TabId = 'dashboard' | 'servers' | 'devices' | 'settings' | 'help' | 'antigravity'
+type TabId = 'dashboard' | 'servers' | 'devices' | 'settings' | 'help' | 'google-ai' | 'antigravity'
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'dashboard', label: '📊 Дашборд' },
   { id: 'servers', label: '🛰 Серверы' },
   { id: 'devices', label: '📱 Устройства' },
-  { id: 'antigravity', label: '⚡ Antigravity' },
+  { id: 'google-ai', label: '🤖 Google AI' },
   { id: 'settings', label: '⚙️ Настройки' },
   { id: 'help', label: '📖 Справка' },
 ]
@@ -54,6 +54,7 @@ class ErrorBoundary extends React.Component<
 export default function App() {
   const initial = (() => {
     const h = window.location.hash.replace('#', '')
+    if (h === 'antigravity') return 'google-ai'
     return (TABS.some((t) => t.id === h) ? h : 'dashboard') as TabId
   })()
   const [tab, setTab] = useState<TabId>(initial)
@@ -163,7 +164,7 @@ export default function App() {
           {tab === 'dashboard' && <Dashboard status={status} notify={notify} refresh={refresh} onSwitchTab={switchTab} />}
           {tab === 'servers' && <Servers notify={notify} />}
           {tab === 'devices' && <Devices notify={notify} />}
-          {tab === 'antigravity' && <Antigravity notify={notify} />}
+          {(tab === 'google-ai' || tab === 'antigravity') && <Antigravity notify={notify} />}
           {tab === 'settings' && <Settings notify={notify} status={status} refresh={refresh} />}
           {tab === 'help' && <Help status={status} />}
         </ErrorBoundary>

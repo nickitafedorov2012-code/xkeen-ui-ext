@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiGet, apiPost } from '../api'
-import { pingClass, getCountryFlag, type ProviderInfo, type ServerInfo } from '../types'
+import { pingClass, getFlowStatus, type ProviderInfo, type ServerInfo } from '../types'
 
 interface Props {
   notify: (msg: string, isError?: boolean) => void
@@ -28,6 +28,7 @@ export default function Servers({ notify }: Props) {
   })
 
   const [filter, setFilter] = useState('')
+  const [flowOnly, setFlowOnly] = useState(false)
   const [limit, setLimit] = useState(PAGE)
   const [loading, setLoading] = useState(true)
   const [pinging, setPinging] = useState(false)
@@ -150,10 +151,17 @@ export default function Servers({ notify }: Props) {
     }
   }, [pingAll])
 
+  const flowCount = useMemo(() => {
+    return servers.filter((s) => getFlowStatus(s.name) === 'ok').length
+  }, [servers])
+
   // Фильтрация серверов
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase()
     return servers.filter((s) => {
+      if (flowOnly && getFlowStatus(s.name) !== 'ok') {
+        return false
+      }
       if (selectedProviders.size > 0) {
         if (selectedProviders.has('__static__') && !s.provider) {
           // подходит статический
@@ -171,7 +179,7 @@ export default function Servers({ notify }: Props) {
         s.host.toLowerCase().includes(q)
       )
     })
-  }, [servers, filter, selectedProviders])
+  }, [servers, filter, selectedProviders, flowOnly])
 
   // Активный сервер для закрепления наверху
   const activeServer = useMemo(() => servers.find((s) => s.is_active), [servers])
@@ -523,6 +531,19 @@ export default function Servers({ notify }: Props) {
           🔄 Обновить
         </button>
 
+        {/* Фильтр Google Flow */}
+        <button
+          type="button"
+          className={`btn ${flowOnly ? 'primary' : ''}`}
+          onClick={() => {
+            setFlowOnly((prev) => !prev)
+            setLimit(PAGE)
+          }}
+          title="Показать только серверы, совместимые с Google Flow и Gemini Labs"
+        >
+          ✨ Только Flow ({flowCount})
+        </button>
+
         {/* Переключатель вида (Компактный / Подробный) */}
         <div className="view-toggle" title="Режим отображения списка">
           <button
@@ -623,11 +644,17 @@ export default function Servers({ notify }: Props) {
                       className="server-name"
                       title={`${activeServer.name}\nХост: ${activeServer.host}${activeServer.port ? `:${activeServer.port}` : ''}`}
                     >
-                      <span className="server-flag" style={{ marginRight: 7, fontSize: '1.2em', verticalAlign: 'middle' }}>
-                        {getCountryFlag(activeServer.name)}
-                      </span>
                       {activeServer.name}
                     </span>
+                    {getFlowStatus(activeServer.name) === 'ok' ? (
+                      <span className="badge badge-flow-ok" title="Сервер подходит для Google Flow и Gemini Labs">
+                        🟢 Flow OK
+                      </span>
+                    ) : getFlowStatus(activeServer.name) === 'blocked' ? (
+                      <span className="badge badge-flow-blocked" title="Заблокирован для Google Flow">
+                        🔴 Flow Блок
+                      </span>
+                    ) : null}
                     {ignored.has(activeServer.id) && (
                       <span className="tag ignored" title="Сервер исключён из авто-выбора (Fastest/Fallback)">
                         🚫 Исключён
@@ -666,11 +693,17 @@ export default function Servers({ notify }: Props) {
                     className="server-compact-name"
                     title={`${activeServer.name}\nХост: ${activeServer.host}:${activeServer.port}`}
                   >
-                    <span className="server-flag" style={{ marginRight: 6, fontSize: '1.15em', verticalAlign: 'middle' }}>
-                      {getCountryFlag(activeServer.name)}
-                    </span>
                     {activeServer.name}
                   </span>
+                  {getFlowStatus(activeServer.name) === 'ok' ? (
+                    <span className="badge badge-flow-ok" style={{ fontSize: 10, padding: '1px 5px' }} title="Подходит для Google Flow">
+                      🟢 Flow
+                    </span>
+                  ) : getFlowStatus(activeServer.name) === 'blocked' ? (
+                    <span className="badge badge-flow-blocked" style={{ fontSize: 10, padding: '1px 5px' }} title="Заблокирован для Flow">
+                      🔴 Блок
+                    </span>
+                  ) : null}
                   {ignored.has(activeServer.id) && (
                     <span className="tag ignored" style={{ fontSize: 10 }}>🚫</span>
                   )}
@@ -719,11 +752,17 @@ export default function Servers({ notify }: Props) {
                       className="server-name"
                       title={`${s.name}\nХост: ${s.host}${s.port ? `:${s.port}` : ''}\nПротокол: ${s.protocol}`}
                     >
-                      <span className="server-flag" style={{ marginRight: 7, fontSize: '1.2em', verticalAlign: 'middle' }}>
-                        {getCountryFlag(s.name)}
-                      </span>
                       {s.name}
                     </span>
+                    {getFlowStatus(s.name) === 'ok' ? (
+                      <span className="badge badge-flow-ok" title="Сервер подходит для Google Flow и Gemini Labs">
+                        🟢 Flow OK
+                      </span>
+                    ) : getFlowStatus(s.name) === 'blocked' ? (
+                      <span className="badge badge-flow-blocked" title="Заблокирован для Google Flow">
+                        🔴 Flow Блок
+                      </span>
+                    ) : null}
                     {ignored.has(s.id) && (
                       <span className="tag ignored" title="Сервер исключён из авто-выбора (Fastest / Fallback)">
                         🚫 Исключён
@@ -778,11 +817,17 @@ export default function Servers({ notify }: Props) {
                     className="server-compact-name"
                     title={`${s.name}\nХост: ${s.host}${s.port ? `:${s.port}` : ''}`}
                   >
-                    <span className="server-flag" style={{ marginRight: 6, fontSize: '1.15em', verticalAlign: 'middle' }}>
-                      {getCountryFlag(s.name)}
-                    </span>
                     {s.name}
                   </span>
+                  {getFlowStatus(s.name) === 'ok' ? (
+                    <span className="badge badge-flow-ok" style={{ fontSize: 10, padding: '1px 5px' }} title="Подходит для Google Flow">
+                      🟢 Flow
+                    </span>
+                  ) : getFlowStatus(s.name) === 'blocked' ? (
+                    <span className="badge badge-flow-blocked" style={{ fontSize: 10, padding: '1px 5px' }} title="Заблокирован для Flow">
+                      🔴 Блок
+                    </span>
+                  ) : null}
                   {ignored.has(s.id) && (
                     <span className="tag ignored" style={{ fontSize: 10, padding: '1px 5px' }} title="Исключён из авто-выбора">
                       🚫 Исключён
@@ -908,9 +953,6 @@ export default function Servers({ notify }: Props) {
                         />
                       )}
                       <span className="server-name" title={s.name}>
-                        <span className="server-flag" style={{ marginRight: 6, fontSize: '1.15em', verticalAlign: 'middle' }}>
-                          {getCountryFlag(s.name)}
-                        </span>
                         {s.name}
                       </span>
                       {/* Индикация изменений сессии */}
