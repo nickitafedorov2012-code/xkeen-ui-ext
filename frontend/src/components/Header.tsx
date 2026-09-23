@@ -232,7 +232,7 @@ export default function Header({
   const totalXkeenMem = currentMetrics?.total_xkeen_memory_mb ?? (appMemMb + coreMemMb)
 
   const mihomoVersion = status?.mihomo_version || 'v1.19.29'
-  const appVersion = status?.version ? status.version.replace(/^v/, '') : '1.0.25'
+  const appVersion = status?.version ? status.version.replace(/^v/, '') : '1.2.1'
 
   const handleRestart = async () => {
     if (pending) return

@@ -179,7 +179,7 @@ export default function Help({ status }: Props) {
             <h1 style={{ margin: '0 0 4px', fontSize: 20, color: 'var(--text)' }}>📖 Полное руководство пользователя XKeen Route</h1>
             <P>
               Исчерпывающая справка по всем функциям, кнопкам, механизмам маршрутизации, горячим клавишам и пошаговой настройке.
-              Текущая версия: <K>{status?.version || 'v1.2.0'}</K>.
+              Текущая версия: <K>{status?.version || 'v1.2.1'}</K>.
             </P>
           </div>
           <div style={{ minWidth: 260, flex: 1, maxWidth: 360 }}>
