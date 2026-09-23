@@ -921,15 +921,18 @@ pub async fn check_google_geo(http: &reqwest::Client, cfg: &AppConfig, active_se
 
     let text = resp.text().await.map_err(|e| format!("Ошибка чтения ответа Google: {e}"))?;
 
-    let lang = if let Some(pos) = text.find("<html") {
-        let snippet = &text[pos..std::cmp::min(text.len(), pos + 200)];
-        if let Some(l_pos) = snippet.find("lang=\"") {
-            let start = l_pos + 6;
-            let end = snippet[start..].find('"').map(|e| start + e).unwrap_or(start);
-            snippet[start..end].to_string()
+    let lower = text.to_ascii_lowercase();
+    let lang = if let Some(l_pos) = lower.find("lang=") {
+        let rest = &text[l_pos + 5..];
+        let quote = rest.chars().next().unwrap_or('"');
+        let inner = if quote == '"' || quote == '\'' {
+            &rest[1..]
         } else {
-            "unknown".to_string()
-        }
+            rest
+        };
+        let end = inner.find(|c: char| c == quote || c == ' ' || c == '>').unwrap_or(inner.len());
+        let val = inner[..end].trim().to_string();
+        if val.is_empty() { "unknown".to_string() } else { val }
     } else {
         "unknown".to_string()
     };
