@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
-import { pingClass, type FailoverEventInfo, type StatusInfo } from '../types'
+import { pingClass, type FailoverEventInfo, type StatusInfo, type GoogleGeoStatus } from '../types'
 
 interface Props {
   status: StatusInfo | null
@@ -82,6 +82,30 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
       return next
     })
   }, [status?.active_server?.ping_ms, status?.active_server?.name])
+
+  const [googleGeo, setGoogleGeo] = useState<GoogleGeoStatus | null>(null)
+  const [googleGeoLoading, setGoogleGeoLoading] = useState(false)
+
+  useEffect(() => {
+    setGoogleGeo(null)
+  }, [status?.active_server?.name])
+
+  const runGoogleCheck = useCallback(async () => {
+    setGoogleGeoLoading(true)
+    try {
+      const res = await apiGet<GoogleGeoStatus>('servers/google-check')
+      setGoogleGeo(res)
+      if (res.is_clean) {
+        notify(`Google AI: Сервер чистый (${res.google_lang})`)
+      } else {
+        notify(`Google AI: Сервер определен как ${res.google_lang}`, true)
+      }
+    } catch (e: any) {
+      notify(`Ошибка проверки Google: ${e.message}`, true)
+    } finally {
+      setGoogleGeoLoading(false)
+    }
+  }, [notify])
 
   const loadEvents = useCallback(async () => {
     try {
@@ -233,10 +257,46 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                   </b>
                 </li>
                 <li>
+                  <span>Google AI & Flow</span>
+                  <b>
+                    {googleGeoLoading ? (
+                      <span className="muted" style={{ fontSize: 12 }}>⏳ Проверка…</span>
+                    ) : googleGeo ? (
+                      <span
+                        style={{
+                          cursor: 'pointer',
+                          color: googleGeo.is_clean ? '#22c55e' : '#ef4444',
+                          fontSize: 12,
+                          fontWeight: 600,
+                        }}
+                        onClick={runGoogleCheck}
+                        title={googleGeo.message}
+                      >
+                        {googleGeo.is_clean ? `🟢 Чистый (${googleGeo.google_lang})` : `🔴 Flagged RU (${googleGeo.google_lang})`}
+                      </span>
+                    ) : (
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        style={{ padding: '1px 8px', fontSize: 11 }}
+                        onClick={runGoogleCheck}
+                      >
+                        Проверить гео
+                      </button>
+                    )}
+                  </b>
+                </li>
+                <li>
                   <span>Режим трафика</span>
                   <b>Rule (авто-маршрутизация)</b>
                 </li>
               </ul>
+
+              {googleGeo && !googleGeo.is_clean && (
+                <div style={{ margin: '6px 0 10px', padding: '8px 10px', background: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: 6, fontSize: 12, color: '#f87171', lineHeight: 1.4 }}>
+                  ⚠️ <b>Google определяет этот узел как РФ ({googleGeo.google_lang}).</b><br />
+                  Доступ к Google Flow и Gemini Labs будет заблокирован. Рекомендуется переключиться на чистый узел США (например, Вашингтон).
+                </div>
+              )}
 
               {/* График стабильности задержки */}
               {pingHistory.length >= 2 && (

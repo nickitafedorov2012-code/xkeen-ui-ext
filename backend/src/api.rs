@@ -169,6 +169,19 @@ pub async fn ping_servers(State(state): State<AppState>, Json(req): Json<PingReq
     api_ok(json!({ "pings": pings }))
 }
 
+/// GET /api/servers/google-check — диагностика чистоты активного узла в Google Search / AI.
+pub async fn check_google_geo(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let active_name = match mihomo::get_proxies(&state.http, &cfg).await {
+        Ok(proxies) => mihomo::resolve_active_leaf(&proxies),
+        Err(e) => return api_err(format!("Ошибка получения прокси: {e}")),
+    };
+    match mihomo::check_google_geo(&state.http, &cfg, &active_name).await {
+        Ok(status) => api_ok(status),
+        Err(e) => api_err(e),
+    }
+}
+
 /// GET /api/policies — политики доступа Keenetic.
 pub async fn get_policies(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();

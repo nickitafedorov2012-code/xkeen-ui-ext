@@ -165,3 +165,10 @@ export interface AntigravityStatus {
   targets: string[]
   own_proxy: string
 }
+
+export interface GoogleGeoStatus {
+  is_clean: boolean
+  google_lang: string
+  active_server: string
+  message: string
+}

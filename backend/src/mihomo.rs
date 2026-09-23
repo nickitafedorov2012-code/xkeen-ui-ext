@@ -71,6 +71,28 @@ pub async fn m_put(http: &reqwest::Client, cfg: &AppConfig, path: &str, body: Va
     Ok(())
 }
 
+pub async fn m_delete(http: &reqwest::Client, cfg: &AppConfig, path: &str, timeout: u64) -> Result<(), String> {
+    let url = format!("{}{}", cfg.mihomo_url(), path);
+    let mut req = http
+        .delete(&url)
+        .timeout(std::time::Duration::from_secs(timeout));
+    if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
+        req = req.header(k, v);
+    }
+    let resp = req.send().await.map_err(|e| format!("Mihomo {path}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Mihomo {path}: статус {}", resp.status()));
+    }
+    Ok(())
+}
+
+/// Сброс всех активных соединений ядра Mihomo, чтобы клиенты не держали сокеты в старый сервер.
+pub async fn close_all_connections(http: &reqwest::Client, cfg: &AppConfig) {
+    if let Err(e) = m_delete(http, cfg, "/connections", 3).await {
+        crate::log_w!("Не удалось закрыть активные соединения Mihomo: {e}");
+    }
+}
+
 /// Mihomo отвечает на /proxies объектом {"proxies": {...}} — достаём карту.
 pub async fn get_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Result<BTreeMap<String, Value>, String> {
     let v = m_get(http, cfg, "/proxies").await?;
@@ -672,6 +694,7 @@ pub async fn switch_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &
         }
     }
     if switched > 0 {
+        close_all_connections(http, cfg).await;
         let skip_note = if skipped > 0 { format!(", пропущено: {skipped}") } else { String::new() };
         Ok(format!("Активный сервер переключен на '{target}' (групп: {switched}{skip_note})"))
     } else if skipped > 0 && last_err.is_empty() {
@@ -846,7 +869,9 @@ pub async fn reload_config(http: &reqwest::Client, cfg: &AppConfig) -> Result<()
 /// Выбор сервера в конкретной группе (для AUTO-DEVICE групп после reload).
 pub async fn switch_group(http: &reqwest::Client, cfg: &AppConfig, group: &str, server: &str) -> Result<(), String> {
     let enc = urlencoding_lite(group);
-    m_put(http, cfg, &format!("/proxies/{enc}"), json!({ "name": server }), 5).await
+    m_put(http, cfg, &format!("/proxies/{enc}"), json!({ "name": server }), 5).await?;
+    close_all_connections(http, cfg).await;
+    Ok(())
 }
 
 /// Версия ядра Mihomo из GET /version.
@@ -859,6 +884,71 @@ pub async fn get_version(http: &reqwest::Client, cfg: &AppConfig) -> Option<Stri
     let resp = req.send().await.ok()?;
     let v: serde_json::Value = resp.json().await.ok()?;
     v.get("version").and_then(|v| v.as_str()).map(|s| s.to_string())
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct GoogleGeoStatus {
+    pub is_clean: bool,
+    pub google_lang: String,
+    pub active_server: String,
+    pub message: String,
+}
+
+/// Проверка Google GeoIP через смешанный порт Mihomo (127.0.0.1:{mixed_port})
+pub async fn check_google_geo(http: &reqwest::Client, cfg: &AppConfig, active_server: &str) -> Result<GoogleGeoStatus, String> {
+    let mixed_port = m_get(http, cfg, "/configs")
+        .await
+        .ok()
+        .and_then(|v| v.get("mixed-port").and_then(|p| p.as_u64()))
+        .unwrap_or(7890);
+
+    let proxy_url = format!("http://127.0.0.1:{mixed_port}");
+    let client = match reqwest::Proxy::all(&proxy_url) {
+        Ok(p) => reqwest::Client::builder()
+            .proxy(p)
+            .timeout(std::time::Duration::from_secs(6))
+            .build()
+            .unwrap_or_else(|_| http.clone()),
+        Err(_) => http.clone(),
+    };
+
+    let resp = client
+        .get("https://www.google.com/search?q=test&hl=en")
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка запроса к Google: {e}"))?;
+
+    let text = resp.text().await.map_err(|e| format!("Ошибка чтения ответа Google: {e}"))?;
+
+    let lang = if let Some(pos) = text.find("<html") {
+        let snippet = &text[pos..std::cmp::min(text.len(), pos + 200)];
+        if let Some(l_pos) = snippet.find("lang=\"") {
+            let start = l_pos + 6;
+            let end = snippet[start..].find('"').map(|e| start + e).unwrap_or(start);
+            snippet[start..end].to_string()
+        } else {
+            "unknown".to_string()
+        }
+    } else {
+        "unknown".to_string()
+    };
+
+    let is_clean = !lang.ends_with("-RU") && !lang.eq_ignore_ascii_case("ru") && lang != "unknown";
+    let message = if is_clean {
+        format!("Google определяет сервер как чистый глобальный узел (язык: '{lang}'). Google Flow и AI-сервисы доступны.")
+    } else if lang == "unknown" {
+        "Не удалось определить язык страницы Google Search.".to_string()
+    } else {
+        format!("Google определяет этот сервер как российский (язык: '{lang}'). Доступ к Google Flow и Gemini Labs будет заблокирован. Рекомендуется переключиться на узел США.")
+    };
+
+    Ok(GoogleGeoStatus {
+        is_clean,
+        google_lang: lang,
+        active_server: active_server.to_string(),
+        message,
+    })
 }
 
 /// Минимальный percent-encoding для имён прокси в URL.
