@@ -283,7 +283,13 @@ pub async fn run_device_check(state: &AppState) -> Result<String, String> {
         return Ok("Нет устройств с резервными цепочками".to_string());
     }
     let proxies = mihomo::get_proxies(&state.http, &cfg).await?;
-    let rules = mihomo::m_get(&state.http, &cfg, "/rules").await.unwrap_or(Value::Null);
+    let rules = match mihomo::m_get(&state.http, &cfg, "/rules").await {
+        Ok(r) => r,
+        Err(e) => {
+            log_w!("Ошибка получения правил Mihomo (/rules) при per-device failover: {}", e);
+            Value::Null
+        }
+    };
     let groups_by_ip = mihomo::ip_groups_from_rules(&rules);
 
     let mut actions: Vec<(String, bool)> = Vec::new(); // (текст, было ли реальное переключение)

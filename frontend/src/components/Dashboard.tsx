@@ -128,7 +128,7 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
 
   const f = status?.failover
   const groupedEvents = groupEvents(events)
-  const mihomoVer = status?.mihomo_version || 'v1.19.29'
+  const mihomoVer = status?.mihomo_version || '—'
 
   const okPings = pingHistory.filter((p) => p.ok).map((p) => p.ms)
   const minPing = okPings.length > 0 ? okPings.reduce((a, b) => Math.min(a, b)) : 0

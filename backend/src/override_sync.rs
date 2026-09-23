@@ -6,8 +6,10 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use std::time::Duration;
 
-const OVERRIDE_FILE: &str = "/opt/etc/xkeen/ipset/ru_exclude_override.lst";
-const OVERRIDE_DIR: &str = "/opt/etc/xkeen/ipset";
+pub const OVERRIDE_FILE: &str = "/opt/etc/xkeen/ipset/ru_exclude_override.lst";
+pub const OVERRIDE_DIR: &str = "/opt/etc/xkeen/ipset";
+pub const XKEEN_CONF_FILE: &str = "/opt/etc/xkeen/xkeen.conf";
+pub const SYSTEM_CRONTAB_FILE: &str = "/opt/etc/crontab";
 pub const MARKER_BEGIN: &str = "# --- XKEEN-ROUTE-OVERRIDE-BEGIN ---";
 pub const MARKER_END: &str = "# --- XKEEN-ROUTE-OVERRIDE-END ---";
 
@@ -155,14 +157,25 @@ pub async fn sync_geo_override(domains: &[String]) -> Result<usize, String> {
     Ok(total_ips)
 }
 
+async fn run_ipset(args: &[&str]) {
+    match tokio::process::Command::new("ipset").args(args).output().await {
+        Ok(out) => {
+            if !out.status.success() {
+                let err = String::from_utf8_lossy(&out.stderr);
+                crate::log_d!("[OVERRIDE] ipset {:?} завершился с кодом {:?}: {}", args, out.status.code(), err.trim());
+            }
+        }
+        Err(e) => {
+            crate::log_w!("[OVERRIDE] Ошибка вызова ipset {:?}: {}", args, e);
+        }
+    }
+}
+
 async fn sync_ipset_family(set_name: &str, family: &str) -> Result<(), String> {
     let tmp = format!("{set_name}_tmp");
 
     // Уничтожаем возможный старый временный ipset от прерванного swap
-    let _ = tokio::process::Command::new("ipset")
-        .args(["destroy", &tmp])
-        .output()
-        .await;
+    run_ipset(&["destroy", &tmp]).await;
 
     let create_tmp = tokio::process::Command::new("ipset")
         .args(["create", &tmp, "hash:net", "family", family, "-exist"])
@@ -174,10 +187,7 @@ async fn sync_ipset_family(set_name: &str, family: &str) -> Result<(), String> {
         }
     }
 
-    let _ = tokio::process::Command::new("ipset")
-        .args(["flush", &tmp])
-        .output()
-        .await;
+    run_ipset(&["flush", &tmp]).await;
 
     if let Ok(content) = tokio::fs::read_to_string(OVERRIDE_FILE).await {
         for line in content.lines() {
@@ -187,28 +197,19 @@ async fn sync_ipset_family(set_name: &str, family: &str) -> Result<(), String> {
             }
             let is_v6 = t.contains(':');
             if (family == "inet" && !is_v6) || (family == "inet6" && is_v6) {
-                let _ = tokio::process::Command::new("ipset")
-                    .args(["add", &tmp, t, "-exist"])
-                    .output()
-                    .await;
+                run_ipset(&["add", &tmp, t, "-exist"]).await;
             }
         }
     }
 
-    let _ = tokio::process::Command::new("ipset")
-        .args(["create", set_name, "hash:net", "family", family, "-exist"])
-        .output()
-        .await;
+    run_ipset(&["create", set_name, "hash:net", "family", family, "-exist"]).await;
 
     let swap = tokio::process::Command::new("ipset")
         .args(["swap", set_name, &tmp])
         .output()
         .await;
 
-    let _ = tokio::process::Command::new("ipset")
-        .args(["destroy", &tmp])
-        .output()
-        .await;
+    run_ipset(&["destroy", &tmp]).await;
 
     match swap {
         Ok(out) if !out.status.success() => {

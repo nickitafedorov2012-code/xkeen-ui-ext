@@ -305,7 +305,11 @@ async fn rci_post_once(
         let head: String = text.chars().take(200).collect();
         return Err(format!("RCI {path}: статус {status}: {head}"));
     }
-    Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    serde_json::from_str(&text).map_err(|e| {
+        let head: String = text.chars().take(200).collect();
+        crate::log_w!("Ошибка парсинга JSON RCI ответа {path}: {e} (ответ: {head})");
+        format!("RCI {path}: ошибка парсинга JSON: {e}")
+    })
 }
 
 /// Нормализация ответа: Keenetic иногда возвращает массив с одним объектом.

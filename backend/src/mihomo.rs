@@ -622,7 +622,13 @@ pub async fn live_device_servers(http: &reqwest::Client, cfg: &AppConfig) -> BTr
         Ok(p) => p,
         Err(_) => return out,
     };
-    let rules = m_get(http, cfg, "/rules").await.unwrap_or(Value::Null);
+    let rules = match m_get(http, cfg, "/rules").await {
+        Ok(r) => r,
+        Err(e) => {
+            crate::log_w!("Ошибка запроса правил Mihomo (/rules): {}", e);
+            Value::Null
+        }
+    };
 
     // 1. Из SRC-IP правил: ip → группа → now
     for (ip, group) in ip_groups_from_rules(&rules) {

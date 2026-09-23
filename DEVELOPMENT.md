@@ -700,6 +700,24 @@
   - `App.tsx`: добавлено логирование ошибок при выходе из веб-панели.
   - `LogsViewer.tsx`: усовершенствована логика WebSocket live-лога с авто-переподключением при разрыве соединения и изоляцией состояния паузы без пересоздания сокета.
 
+## v1.2.3 (Закрытие повторного аудита: устранение хардкода прокси, проверка shell-команд, логирование ошибок)
+- **Устранение хардкода прокси (`cdn_discovery.rs`)**:
+  - `proxied_client`, `scan_html_cdns` и `discover_all_cdns` теперь принимают динамический `proxy_url` (через `cfg.mihomo_proxy_url()`), полностью удалён последний оставшийся хардкод `127.0.0.1:7890`. Добавлено кэширование клиента в `RwLock`.
+- **Проверка результатов shell-команд (`antigravity.rs`, `override_sync.rs`)**:
+  - В `antigravity.rs` создан хелпер `run_cmd`, логирующий коды возврата и `stderr` всех 8 системных вызовов (`ip rule`, `ipset`, `ndmc`).
+  - В `override_sync.rs` создан хелпер `run_ipset`, проверяющий и логирующий вызовы `ipset destroy`, `flush`, `add`, `create`.
+- **Логирование ошибок вместо тихого проглатывания**:
+  - `failover.rs`: заменён `unwrap_or(Value::Null)` на `match` с логированием предупреждения `log_w!` при сбое запроса правил ядра `/rules`.
+  - `rci.rs`: `rci_get` теперь возвращает `Err` с логированием причины сбоя при невалидном ответе JSON вместо маскировки под `Ok(Value::Null)`.
+  - `mihomo.rs`: в `live_device_servers` добавлено логирование предупреждения при ошибке запроса `/rules`.
+- **Константы и стандартные библиотеки (`routing.rs`, `override_sync.rs`, `api.rs`)**:
+  - `routing.rs`: параметры health-check для провайдеров вынесены в типизированные константы (`PROVIDER_DEFAULT_INTERVAL_SECS`, `PROVIDER_HEALTH_CHECK_URL`, `PROVIDER_HEALTH_CHECK_INTERVAL_SECS`, `PROVIDER_HEALTH_CHECK_EXPECTED_STATUS`).
+  - `routing.rs`: кастомный цикл экранирования в `regex_escape` заменён на стандартный `regex_lite::escape`.
+  - `override_sync.rs` & `api.rs`: пути `/opt/etc/xkeen/...` и `/opt/etc/crontab` объединены в общие константы `OVERRIDE_FILE`, `XKEEN_CONF_FILE`, `SYSTEM_CRONTAB_FILE`.
+- **Фронтенд (`Dashboard.tsx`)**:
+  - Удалён последний оставшийся хардкод `status?.mihomo_version || 'v1.19.29'`, заменён на честный плейсхолдер `'—'`.
+
+
 
 
 

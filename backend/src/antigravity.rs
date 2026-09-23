@@ -387,52 +387,53 @@ impl AntigravityManager {
         }
     }
 
+async fn run_cmd(program: &str, args: &[&str]) {
+    match tokio::process::Command::new(program).args(args).output().await {
+        Ok(out) => {
+            if !out.status.success() {
+                let err = String::from_utf8_lossy(&out.stderr);
+                crate::log_d!("[ANTIGRAVITY] Команда {} {:?} завершилась с кодом {:?}: {}", program, args, out.status.code(), err.trim());
+            }
+        }
+        Err(e) => {
+            crate::log_w!("[ANTIGRAVITY] Ошибка запуска команды {} {:?}: {}", program, args, e);
+        }
+    }
+}
+
+impl AntigravityManager {
     /// Применение DNS-записей в KeeneticOS и добавление маршрута мимо VPN
     async fn apply_keenetic_rules(&self, ip: Ipv4Addr, targets: &[String], prev_ip: Option<Ipv4Addr>) {
         // 1. Очистка прошлого IP из маршрутизации и ipset
         if let Some(old) = prev_ip {
-            let _ = tokio::process::Command::new("ip")
-                .args(["rule", "del", "to", &format!("{old}/32"), "table", "main", "priority", "90"])
-                .output()
-                .await;
-            let _ = tokio::process::Command::new("ipset")
-                .args(["del", "user_exclude", &old.to_string()])
-                .output()
-                .await;
+            let old_str = old.to_string();
+            let old_rule = format!("{old}/32");
+            run_cmd("ip", &["rule", "del", "to", &old_rule, "table", "main", "priority", "90"]).await;
+            run_cmd("ipset", &["del", "user_exclude", &old_str]).await;
         }
 
         // 2. Исключение подменного IP из перехвата Mihomo (ipset user_exclude)
-        let _ = tokio::process::Command::new("ipset")
-            .args(["add", "user_exclude", &ip.to_string(), "-exist"])
-            .output()
-            .await;
+        let ip_str = ip.to_string();
+        run_cmd("ipset", &["add", "user_exclude", &ip_str, "-exist"]).await;
 
         // 3. Добавление правила маршрутизации напрямую через основной WAN (таблица main)
-        let _ = tokio::process::Command::new("ip")
-            .args(["rule", "add", "to", &format!("{ip}/32"), "table", "main", "priority", "90"])
-            .output()
-            .await;
+        let ip_rule = format!("{ip}/32");
+        run_cmd("ip", &["rule", "add", "to", &ip_rule, "table", "main", "priority", "90"]).await;
 
         // 4. Установка статических DNS-записей в Keenetic ndnproxy
         for target in targets {
-            let _ = tokio::process::Command::new("ndmc")
-                .args(["-c", &format!("ip host {target} {ip}")])
-                .output()
-                .await;
+            let cmd = format!("ip host {target} {ip}");
+            run_cmd("ndmc", &["-c", &cmd]).await;
         }
     }
 
     /// Очистка всех правил из Keenetic
     pub async fn clean_keenetic_rules(&self, active_ip: &Option<Ipv4Addr>) {
         if let Some(ip) = active_ip {
-            let _ = tokio::process::Command::new("ip")
-                .args(["rule", "del", "to", &format!("{ip}/32"), "table", "main", "priority", "90"])
-                .output()
-                .await;
-            let _ = tokio::process::Command::new("ipset")
-                .args(["del", "user_exclude", &ip.to_string()])
-                .output()
-                .await;
+            let ip_rule = format!("{ip}/32");
+            let ip_str = ip.to_string();
+            run_cmd("ip", &["rule", "del", "to", &ip_rule, "table", "main", "priority", "90"]).await;
+            run_cmd("ipset", &["del", "user_exclude", &ip_str]).await;
         }
 
         let targets = {
@@ -441,10 +442,8 @@ impl AntigravityManager {
         };
 
         for target in targets {
-            let _ = tokio::process::Command::new("ndmc")
-                .args(["-c", &format!("no ip host {target}")])
-                .output()
-                .await;
+            let cmd = format!("no ip host {target}");
+            run_cmd("ndmc", &["-c", &cmd]).await;
         }
     }
 

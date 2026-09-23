@@ -645,7 +645,7 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
     cfg.force_domains = routing::sanitize_domains(&req.force);
 
     // Автоматическое обнаружение сопутствующих CDN (бандлы + поддомены + HTML-сканер)
-    let auto_cdns = crate::cdn_discovery::discover_all_cdns(&cfg.force_domains).await;
+    let auto_cdns = crate::cdn_discovery::discover_all_cdns(&cfg.force_domains, &cfg.mihomo_proxy_url()).await;
     let mut all_force = cfg.force_domains.clone();
     for cdn in &auto_cdns {
         if !all_force.contains(cdn) {
@@ -1403,9 +1403,9 @@ fn resolve_config_file_path(id: &str, cfg: &config::AppConfig) -> Option<std::pa
         } else {
             std::path::PathBuf::from("xkeen-route.config.json")
         }),
-        "override" => Some(std::path::PathBuf::from("/opt/etc/xkeen/ipset/ru_exclude_override.lst")),
-        "xkeen_conf" => Some(std::path::PathBuf::from("/opt/etc/xkeen/xkeen.conf")),
-        "crontab" => Some(std::path::PathBuf::from("/opt/etc/crontab")),
+        "override" => Some(std::path::PathBuf::from(crate::override_sync::OVERRIDE_FILE)),
+        "xkeen_conf" => Some(std::path::PathBuf::from(crate::override_sync::XKEEN_CONF_FILE)),
+        "crontab" => Some(std::path::PathBuf::from(crate::override_sync::SYSTEM_CRONTAB_FILE)),
         other => {
             if let Some(name) = other.strip_prefix("provider:") {
                 Some(providers_dir.join(format!("{}.yaml", name)))
@@ -1427,9 +1427,9 @@ pub async fn list_config_files(State(state): State<AppState>) -> Response {
     let mut files = vec![
         json!({ "id": "mihomo", "name": "Mihomo Config (config.yaml)", "path": cfg.mihomo.config_path, "syntax": "yaml" }),
         json!({ "id": "route", "name": "XKeen Route Config (config.json)", "path": state.config_path.display().to_string(), "syntax": "json" }),
-        json!({ "id": "override", "name": "RU Override IP List (ru_exclude_override.lst)", "path": "/opt/etc/xkeen/ipset/ru_exclude_override.lst", "syntax": "text" }),
-        json!({ "id": "xkeen_conf", "name": "XKeen Settings (xkeen.conf)", "path": "/opt/etc/xkeen/xkeen.conf", "syntax": "shell" }),
-        json!({ "id": "crontab", "name": "System Crontab (/opt/etc/crontab)", "path": "/opt/etc/crontab", "syntax": "shell" }),
+        json!({ "id": "override", "name": "RU Override IP List (ru_exclude_override.lst)", "path": crate::override_sync::OVERRIDE_FILE, "syntax": "text" }),
+        json!({ "id": "xkeen_conf", "name": "XKeen Settings (xkeen.conf)", "path": crate::override_sync::XKEEN_CONF_FILE, "syntax": "shell" }),
+        json!({ "id": "crontab", "name": "System Crontab (/opt/etc/crontab)", "path": crate::override_sync::SYSTEM_CRONTAB_FILE, "syntax": "shell" }),
     ];
 
     if let Ok(mut entries) = tokio::fs::read_dir(&providers_dir).await {
@@ -1901,7 +1901,7 @@ pub async fn get_dns_mode(State(state): State<AppState>) -> Response {
         "fake-ip"
     };
 
-    let xkeen_conf = tokio::fs::read_to_string("/opt/etc/xkeen/xkeen.conf").await.unwrap_or_default();
+    let xkeen_conf = tokio::fs::read_to_string(crate::override_sync::XKEEN_CONF_FILE).await.unwrap_or_default();
     let proxy_dns = if xkeen_conf.contains("proxy_dns=\"on\"") || xkeen_conf.contains("proxy_dns='on'") {
         "on"
     } else {

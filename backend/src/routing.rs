@@ -23,6 +23,11 @@ pub const GROUPS_END: &str = "# --- AUTO-DEVICE-GROUPS-END ---";
 pub const RULES_BEGIN: &str = "# --- AUTO-DEVICE-RULES-BEGIN ---";
 pub const RULES_END: &str = "# --- AUTO-DEVICE-RULES-END ---";
 
+pub const PROVIDER_DEFAULT_INTERVAL_SECS: u32 = 86400;
+pub const PROVIDER_HEALTH_CHECK_URL: &str = "https://www.gstatic.com/generate_204";
+pub const PROVIDER_HEALTH_CHECK_INTERVAL_SECS: u32 = 300;
+pub const PROVIDER_HEALTH_CHECK_EXPECTED_STATUS: u16 = 204;
+
 #[derive(Clone, Debug)]
 pub struct Assignment {
     pub ip: String,
@@ -160,7 +165,7 @@ pub fn add_provider_to_yaml(yaml: &str, id: &str, url: &str) -> Result<String, S
     }
 
     let new_block = format!(
-        "  {id}:\n    type: http\n    url: \"{url}\"\n    interval: 86400\n    health-check:\n      enable: true\n      url: \"https://www.gstatic.com/generate_204\"\n      interval: 300\n      expected-status: 204"
+        "  {id}:\n    type: http\n    url: \"{url}\"\n    interval: {PROVIDER_DEFAULT_INTERVAL_SECS}\n    health-check:\n      enable: true\n      url: \"{PROVIDER_HEALTH_CHECK_URL}\"\n      interval: {PROVIDER_HEALTH_CHECK_INTERVAL_SECS}\n      expected-status: {PROVIDER_HEALTH_CHECK_EXPECTED_STATUS}"
     );
 
     let mut out = Vec::new();
@@ -490,14 +495,7 @@ pub fn apply_assignments(yaml: &str, assignments: &[Assignment], providers: &[St
 
 /// Экранирование имени сервера для regex (exclude-filter использует Go regexp).
 pub fn regex_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    for c in s.chars() {
-        if matches!(c, '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '|' | '[' | ']' | '{' | '}' | '^' | '$') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
+    regex_lite::escape(s)
 }
 
 /// Подстрочный OR-regex для exclude-filter провайдеров (надёжнее к эмодзи/вариант-селекторам).

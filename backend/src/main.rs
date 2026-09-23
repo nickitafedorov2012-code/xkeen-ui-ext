@@ -260,7 +260,7 @@ async fn main() {
         let cfg = sync_state.config.read().await;
         if !cfg.force_domains.is_empty() {
             log_i!("[STARTUP] Начало обнаружения CDN и синхронизации geo_override...");
-            let auto_cdns = cdn_discovery::discover_all_cdns(&cfg.force_domains).await;
+            let auto_cdns = cdn_discovery::discover_all_cdns(&cfg.force_domains, &cfg.mihomo_proxy_url()).await;
             let mut all_domains = cfg.force_domains.clone();
             all_domains.extend(auto_cdns);
             if let Err(e) = override_sync::sync_geo_override(&all_domains).await {
@@ -277,7 +277,7 @@ async fn main() {
             interval.tick().await;
             let cfg = periodic_state.config.read().await;
             if !cfg.force_domains.is_empty() {
-                let auto_cdns = cdn_discovery::discover_all_cdns(&cfg.force_domains).await;
+                let auto_cdns = cdn_discovery::discover_all_cdns(&cfg.force_domains, &cfg.mihomo_proxy_url()).await;
                 let mut all_domains = cfg.force_domains.clone();
                 all_domains.extend(auto_cdns);
                 if let Err(e) = override_sync::sync_geo_override(&all_domains).await {

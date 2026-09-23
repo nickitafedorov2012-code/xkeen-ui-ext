@@ -122,28 +122,37 @@ pub async fn probe_subdomains(domain: &str) -> Vec<String> {
     found
 }
 
-static PROXIED_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+static PROXIED_CLIENT: std::sync::RwLock<Option<(String, reqwest::Client)>> = std::sync::RwLock::new(None);
 
-fn proxied_client() -> &'static reqwest::Client {
-    PROXIED_CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .proxy(reqwest::Proxy::all("http://127.0.0.1:7890").unwrap_or_else(|_| reqwest::Proxy::custom(|_| None::<reqwest::Url>)))
-            .timeout(Duration::from_millis(2500))
-            .danger_accept_invalid_certs(true)
-            .build()
-            .unwrap_or_default()
-    })
+fn proxied_client(proxy_url: &str) -> reqwest::Client {
+    if let Ok(guard) = PROXIED_CLIENT.read() {
+        if let Some((ref cached_url, ref client)) = *guard {
+            if cached_url == proxy_url {
+                return client.clone();
+            }
+        }
+    }
+    let new_client = reqwest::Client::builder()
+        .proxy(reqwest::Proxy::all(proxy_url).unwrap_or_else(|_| reqwest::Proxy::custom(|_| None::<reqwest::Url>)))
+        .timeout(Duration::from_millis(2500))
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_default();
+    if let Ok(mut guard) = PROXIED_CLIENT.write() {
+        *guard = Some((proxy_url.to_string(), new_client.clone()));
+    }
+    new_client
 }
 
 /// Быстрый парсер HTML через локальный прокси роутера для выявления доменов статики.
-pub async fn scan_html_cdns(domain: &str) -> Vec<String> {
+pub async fn scan_html_cdns(domain: &str, proxy_url: &str) -> Vec<String> {
     let mut found = BTreeSet::new();
     let clean = domain.trim().trim_start_matches("www.").to_lowercase();
     if clean.is_empty() {
         return Vec::new();
     }
 
-    let client = proxied_client();
+    let client = proxied_client(proxy_url);
 
     let url = format!("https://{clean}/");
     let resp = match client.get(&url).send().await {
@@ -203,7 +212,7 @@ pub async fn scan_html_cdns(domain: &str) -> Vec<String> {
 }
 
 /// Полный цикл обнаружения CDN: бандлы + опрос поддоменов + фоновый HTML-сканер.
-pub async fn discover_all_cdns(domains: &[String]) -> BTreeSet<String> {
+pub async fn discover_all_cdns(domains: &[String], proxy_url: &str) -> BTreeSet<String> {
     let mut discovered = BTreeSet::new();
 
     // 1. Быстрые статические бандлы
@@ -215,7 +224,7 @@ pub async fn discover_all_cdns(domains: &[String]) -> BTreeSet<String> {
         let subdomains = probe_subdomains(d).await;
         discovered.extend(subdomains);
 
-        let html_cdns = scan_html_cdns(d).await;
+        let html_cdns = scan_html_cdns(d, proxy_url).await;
         discovered.extend(html_cdns);
     }
 
