@@ -18,7 +18,7 @@ mod notifications;
 use axum::extract::Request;
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use axum::routing::{any, get, post};
+use axum::routing::{any, get, post, put};
 use axum::Router;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
