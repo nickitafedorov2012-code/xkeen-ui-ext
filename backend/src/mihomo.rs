@@ -93,15 +93,6 @@ pub async fn close_all_connections(http: &reqwest::Client, cfg: &AppConfig) {
     }
 }
 
-/// Перезагрузка конфигурации ядра Mihomo.
-pub async fn reload_config(http: &reqwest::Client, cfg: &AppConfig) -> Result<(), String> {
-    let payload = json!({
-        "path": cfg.mihomo.config_path,
-        "payload": ""
-    });
-    m_put(http, cfg, "/configs?force=true", payload, 10).await
-}
-
 /// Mihomo отвечает на /proxies объектом {"proxies": {...}} — достаём карту.
 pub async fn get_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Result<BTreeMap<String, Value>, String> {
     let v = m_get(http, cfg, "/proxies").await?;
