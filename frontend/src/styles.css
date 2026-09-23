@@ -525,11 +525,54 @@ body {
   font-weight: 600;
 }
 
-/* карточки серверов */
-.server-list { display: flex; flex-direction: column; gap: 8px; }
+/* Карточки серверов и сетка колонок (1, 2, 3, 4 столбца) */
+.server-list {
+  display: grid;
+  gap: 10px;
+}
+.server-list.cols-1 {
+  grid-template-columns: 1fr;
+}
+.server-list.cols-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.server-list.cols-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.server-list.cols-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.server-compact-list {
+  display: grid;
+  gap: 6px;
+}
+.server-compact-list.cols-1 {
+  grid-template-columns: 1fr;
+}
+.server-compact-list.cols-2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.server-compact-list.cols-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.server-compact-list.cols-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.cols-toggle-label {
+  padding: 0 4px 0 6px;
+  font-size: 11px;
+  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  user-select: none;
+}
+
 .server-card {
   background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
   padding: 10px 14px; transition: all 0.18s ease;
+  min-width: 0;
 }
 .server-card:hover { border-color: rgba(255, 255, 255, 0.12); }
 .server-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
@@ -570,11 +613,11 @@ body {
   background: var(--border);
 }
 
-.server-head { display: flex; align-items: center; gap: 10px; }
-.server-name { flex: 1; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.server-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.server-name { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .server-host { color: var(--muted); font-size: 12px; margin: 4px 0 8px 2px; }
-.server-actions { display: flex; gap: 8px; align-items: center; }
-.spacer { flex: 1; }
+.server-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.spacer { flex: 1; min-width: 4px; }
 .active-pill {
   background: var(--panel); border: 1px solid var(--accent);
   border-radius: 999px; padding: 6px 14px; font-size: 12.5px; font-weight: 600;
@@ -633,11 +676,37 @@ body {
 }
 .server-compact-name {
   flex: 1;
+  min-width: 0;
   font-weight: 600;
   font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Компактность карточек при 3 и 4 столбцах */
+.cols-3 .server-card,
+.cols-4 .server-card {
+  padding: 8px 11px;
+}
+.cols-3 .server-card .server-head,
+.cols-4 .server-card .server-head {
+  gap: 6px;
+}
+.cols-3 .server-card .server-actions,
+.cols-4 .server-card .server-actions {
+  gap: 5px;
+  margin-top: 6px;
+}
+.cols-3 .server-card .server-actions .btn.sm,
+.cols-4 .server-card .server-actions .btn.sm {
+  padding: 3px 7px;
+  font-size: 11.5px;
+}
+.cols-3 .server-compact-row,
+.cols-4 .server-compact-row {
+  padding: 6px 10px;
+  gap: 6px;
 }
 
 /* Кнопки действий серверов */
@@ -2621,7 +2690,31 @@ table.devices-table td {
 /* ==========================================================================
    RESPONSIVE
    ========================================================================== */
+@media (max-width: 1400px) {
+  .server-list.cols-4,
+  .server-compact-list.cols-4 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 1050px) {
+  .server-list.cols-4,
+  .server-list.cols-3,
+  .server-compact-list.cols-4,
+  .server-compact-list.cols-3 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 768px) {
+  .server-list.cols-4,
+  .server-list.cols-3,
+  .server-list.cols-2,
+  .server-compact-list.cols-4,
+  .server-compact-list.cols-3,
+  .server-compact-list.cols-2 {
+    grid-template-columns: 1fr !important;
+  }
   .app {
     padding: 10px 10px 30px;
   }

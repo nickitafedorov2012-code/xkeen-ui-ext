@@ -9,7 +9,7 @@ interface Props {
   notify: (msg: string, isError?: boolean) => void
 }
 
-const PAGE = 20
+const PAGE = 24
 
 const PROVIDER_COLORS = [
   '#22c55e', // green
@@ -28,6 +28,14 @@ export default function Servers({ notify }: Props) {
   const [subDropdownOpen, setSubDropdownOpen] = useState(false)
   const [viewMode, setViewMode] = useState<'detailed' | 'compact'>(() => {
     return (localStorage.getItem('xr_servers_view') as 'detailed' | 'compact') || 'detailed'
+  })
+  const [columns, setColumns] = useState<number>(() => {
+    const saved = localStorage.getItem('xr_servers_columns')
+    if (saved) {
+      const n = parseInt(saved, 10)
+      if (n >= 1 && n <= 4) return n
+    }
+    return 2
   })
 
   const [filter, setFilter] = useState('')
@@ -100,6 +108,11 @@ export default function Servers({ notify }: Props) {
   const setAndSaveViewMode = (mode: 'detailed' | 'compact') => {
     setViewMode(mode)
     localStorage.setItem('xr_servers_view', mode)
+  }
+
+  const setAndSaveColumns = (cols: number) => {
+    setColumns(cols)
+    localStorage.setItem('xr_servers_columns', String(cols))
   }
 
   const load = useCallback(async () => {
@@ -588,6 +601,24 @@ export default function Servers({ notify }: Props) {
           </button>
         </div>
 
+        {/* Выбор количества столбцов (1, 2, 3, 4) */}
+        <div className="view-toggle cols-toggle" title="Количество столбцов в списке">
+          <span className="cols-toggle-label">
+            Столбцы:
+          </span>
+          {[1, 2, 3, 4].map((col) => (
+            <button
+              key={col}
+              type="button"
+              className={`view-toggle-btn ${columns === col ? 'active' : ''}`}
+              onClick={() => setAndSaveColumns(col)}
+              title={`${col} ${col === 1 ? 'столбец' : col < 5 ? 'столбца' : 'столбцов'}`}
+            >
+              {col}
+            </button>
+          ))}
+        </div>
+
         {/* Управление списками */}
         <button className="btn" onClick={() => setGeneratorOpen(true)} title="Импортировать vless/vmess/ss/trojan/hy2/tuic ссылки">
           🪄 Импорт ссылок
@@ -795,7 +826,7 @@ export default function Servers({ notify }: Props) {
             <p className="muted">Серверов по заданному фильтру не найдено.</p>
           ) : viewMode === 'detailed' ? (
             /* ПОДРОБНЫЙ ВИД (КАРТОЧКИ) */
-            <div className="server-list">
+            <div className={`server-list cols-${columns}`}>
               {filtered.slice(0, limit).map((s) => (
                 <div key={s.id} className={'server-card' + (s.is_active ? ' active' : '')}>
                   <div className="server-head">
@@ -878,14 +909,18 @@ export default function Servers({ notify }: Props) {
                 </div>
               ))}
               {filtered.length > limit && (
-                <button className="btn wide" onClick={() => setLimit(limit + PAGE)}>
+                <button
+                  className="btn wide"
+                  style={{ gridColumn: '1 / -1', marginTop: 8 }}
+                  onClick={() => setLimit(limit + PAGE)}
+                >
                   Показать ещё ({filtered.length - limit})
                 </button>
               )}
             </div>
           ) : (
             /* КОМПАКТНЫЙ ВИД (ОДНОСТРОЧНАЯ ТАБЛИЦА) */
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <div className={`server-compact-list cols-${columns}`}>
               {filtered.slice(0, limit).map((s) => (
                 <div key={s.id} className={'server-compact-row' + (s.is_active ? ' active' : '')}>
                   <span className="badge" style={{ minWidth: 46, textAlign: 'center' }}>
@@ -966,7 +1001,11 @@ export default function Servers({ notify }: Props) {
                 </div>
               ))}
               {filtered.length > limit && (
-                <button className="btn wide" onClick={() => setLimit(limit + PAGE)}>
+                <button
+                  className="btn wide"
+                  style={{ gridColumn: '1 / -1', marginTop: 8 }}
+                  onClick={() => setLimit(limit + PAGE)}
+                >
                   Показать ещё ({filtered.length - limit})
                 </button>
               )}
