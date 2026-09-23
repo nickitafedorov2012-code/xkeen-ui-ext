@@ -129,6 +129,10 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
   const groupedEvents = groupEvents(events)
   const mihomoVer = status?.mihomo_version || 'v1.19.29'
 
+  const okPings = pingHistory.filter((p) => p.ok).map((p) => p.ms)
+  const minPing = okPings.length > 0 ? okPings.reduce((a, b) => Math.min(a, b)) : 0
+  const maxPing = okPings.length > 0 ? okPings.reduce((a, b) => Math.max(a, b)) : 0
+
   return (
     <div>
       {/* 1.1 Компактная статусная полоска роутера и ядра вместо двух статичных карточек */}
@@ -240,7 +244,7 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
                     <span className="muted small" style={{ fontSize: 11 }}>Стабильность пинга ({pingHistory.length} точек):</span>
                     <span className="muted small" style={{ fontSize: 11, fontFamily: 'monospace' }}>
-                      мин: {Math.min(...(pingHistory.filter((p) => p.ok).map((p) => p.ms).length > 0 ? pingHistory.filter((p) => p.ok).map((p) => p.ms) : [0]))} мс / макс: {Math.max(...(pingHistory.filter((p) => p.ok).map((p) => p.ms).length > 0 ? pingHistory.filter((p) => p.ok).map((p) => p.ms) : [0]))} мс
+                      мин: {minPing} мс / макс: {maxPing} мс
                     </span>
                   </div>
                   <PingSparkline data={pingHistory} />
@@ -438,8 +442,10 @@ function PingSparkline({ data }: { data: { ms: number; ok: boolean }[] }) {
   const W = 280
   const H = 40
   const okVals = data.filter((d) => d.ok).map((d) => d.ms)
-  const max = Math.max(100, ...okVals) * 1.15
-  const min = Math.max(0, Math.min(...(okVals.length > 0 ? okVals : [0])) * 0.85)
+  const maxVal = okVals.length > 0 ? okVals.reduce((a, b) => Math.max(a, b)) : 100
+  const minVal = okVals.length > 0 ? okVals.reduce((a, b) => Math.min(a, b)) : 0
+  const max = Math.max(100, maxVal) * 1.15
+  const min = Math.max(0, minVal * 0.85)
   const range = max - min || 1
   const step = data.length > 1 ? W / (data.length - 1) : W
   const y = (d: { ms: number; ok: boolean }) =>
