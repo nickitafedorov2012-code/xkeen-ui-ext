@@ -11,13 +11,14 @@ use std::time::Duration;
 use crate::api::{api_err, api_ok};
 use crate::AppState;
 
-const PROXY_ADDR: &str = "http://127.0.0.1:7890";
+const REPO: &str = "nickitafedorov2012-code/xkeen-ui-ext";
 const JSDELIVR_RESOLVED: &str =
     "https://data.jsdelivr.com/v1/packages/gh/nickitafedorov2012-code/xkeen-ui-ext/resolved";
 const JSDELIVR_CDN: &str = "https://cdn.jsdelivr.net/gh/nickitafedorov2012-code/xkeen-ui-ext";
 const GITHUB_RELEASES: &str =
     "https://api.github.com/repos/nickitafedorov2012-code/xkeen-ui-ext/releases?per_page=1";
 const GITHUB_RELEASE: &str = "https://github.com/nickitafedorov2012-code/xkeen-ui-ext/releases/download";
+const GITHUB_LATEST: &str = "https://github.com/nickitafedorov2012-code/xkeen-ui-ext/releases/latest";
 const BIN_PATH: &str = "/opt/sbin/xkeen-route";
 const INIT_SCRIPT: &str = "/opt/etc/init.d/S99xkeen-route";
 
@@ -37,8 +38,8 @@ struct JsDelivrResolved {
 }
 
 /// Клиент с проксированием через Mihomo mixed-port (обход блокировок ТСПУ для локальных процессов).
-fn proxied_client() -> Option<reqwest::Client> {
-    let proxy = reqwest::Proxy::all(PROXY_ADDR).ok()?;
+fn proxied_client(proxy_addr: &str) -> Option<reqwest::Client> {
+    let proxy = reqwest::Proxy::all(proxy_addr).ok()?;
     reqwest::Client::builder()
         .proxy(proxy)
         .danger_accept_invalid_certs(true)
@@ -76,8 +77,8 @@ fn notes_lines(body: &str, max: usize) -> Vec<String> {
         .collect()
 }
 
-async fn fetch_latest(direct: &reqwest::Client) -> Result<GhRelease, String> {
-    let proxied = proxied_client();
+async fn fetch_latest(direct: &reqwest::Client, proxy_url: &str) -> Result<GhRelease, String> {
+    let proxied = proxied_client(proxy_url);
     let mut clients = Vec::new();
     if let Some(ref p) = proxied {
         clients.push(p);
@@ -87,7 +88,7 @@ async fn fetch_latest(direct: &reqwest::Client) -> Result<GhRelease, String> {
     for http in clients {
         // 1. Быстрый редирект GitHub releases/latest (без лимитов API, мгновенно)
         if let Ok(res) = http
-            .get("https://github.com/nickitafedorov2012-code/xkeen-ui-ext/releases/latest")
+            .get(GITHUB_LATEST)
             .timeout(Duration::from_secs(6))
             .send()
             .await
@@ -140,14 +141,14 @@ async fn fetch_latest(direct: &reqwest::Client) -> Result<GhRelease, String> {
 }
 
 /// Кэшированное получение последнего релиза (кэш 30 секунд).
-async fn get_latest_cached(http: &reqwest::Client) -> Result<GhRelease, String> {
+async fn get_latest_cached(http: &reqwest::Client, proxy_url: &str) -> Result<GhRelease, String> {
     let mut guard = LAST_CHECK.lock().await;
     if let Some((time, ref rel)) = *guard {
         if time.elapsed() < Duration::from_secs(30) {
             return Ok(rel.clone());
         }
     }
-    let fresh = fetch_latest(http).await?;
+    let fresh = fetch_latest(http, proxy_url).await?;
     *guard = Some((std::time::Instant::now(), fresh.clone()));
     Ok(fresh)
 }
@@ -181,7 +182,11 @@ async fn fetch_notes(http: &reqwest::Client, tag: &str) -> String {
 
 /// GET /api/update/check — текущая/последняя версия + список изменений.
 pub async fn check(State(state): State<AppState>) -> Response {
-    let rel = match get_latest_cached(&state.http).await {
+    let proxy_url = {
+        let cfg = state.config.read().await;
+        cfg.mihomo_proxy_url()
+    };
+    let rel = match get_latest_cached(&state.http, &proxy_url).await {
         Ok(r) => r,
         Err(e) => return api_err(e),
     };
@@ -197,7 +202,11 @@ pub async fn check(State(state): State<AppState>) -> Response {
 
 /// POST /api/update/install — скачать бинарь релиза, заменить, перезапустить сервис.
 pub async fn install(State(state): State<AppState>) -> Response {
-    let rel = match fetch_latest(&state.http).await {
+    let proxy_url = {
+        let cfg = state.config.read().await;
+        cfg.mihomo_proxy_url()
+    };
+    let rel = match fetch_latest(&state.http, &proxy_url).await {
         Ok(r) => r,
         Err(e) => return api_err(e),
     };
@@ -222,7 +231,7 @@ pub async fn install(State(state): State<AppState>) -> Response {
     let tmp = tmp_dir.join("xkeen-route.update");
     let tmp_for_check = tmp.clone();
 
-    let proxied = proxied_client();
+    let proxied = proxied_client(&proxy_url);
     let http = proxied.as_ref().unwrap_or(&state.http);
     let res = match http
         .get(&url)

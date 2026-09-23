@@ -226,65 +226,30 @@ export interface GoogleGeoStatus {
 
 export type FlowStatus = 'ok' | 'blocked' | 'unknown'
 
+export const FLOW_OK_KEYWORDS: readonly string[] = [
+  'сша', 'usa', 'united states', 'us ', '[us]', 'us-',
+  'вашингтон', 'washington', 'chicago', 'чикаго', 'miami', 'майами',
+  'seattle', 'сиэтл', 'лос-анджелес', 'los angeles', 'атланта', 'atlanta',
+  'феникс', 'phoenix', 'канад', 'canada', 'великобритан', 'united kingdom',
+  'london', 'лондон',
+]
+
+export const FLOW_BLOCKED_KEYWORDS: readonly string[] = [
+  'росси', 'russia', 'ru ', '[ru]', 'мобильный',
+  'финлянд', 'finland', 'fi ', '[fi]',
+  'казахстан', 'kazakhstan', 'беларус', 'belarus',
+  'таджикистан', 'узбекистан', 'азербайджан', 'армени', 'грузи',
+]
+
 export function getFlowStatus(name: string): FlowStatus {
   if (!name) return 'unknown'
   const n = name.toLowerCase()
 
-  // 1. Узлы, где Google Flow и Gemini Labs гарантированно РАБОТАЮТ (США, Канада, Великобритания)
-  if (
-    n.includes('сша') ||
-    n.includes('usa') ||
-    n.includes('united states') ||
-    n.includes('us ') ||
-    n.includes('[us]') ||
-    n.includes('us-') ||
-    n.includes('вашингтон') ||
-    n.includes('washington') ||
-    n.includes('chicago') ||
-    n.includes('чикаго') ||
-    n.includes('miami') ||
-    n.includes('майами') ||
-    n.includes('seattle') ||
-    n.includes('сиэтл') ||
-    n.includes('лос-анджелес') ||
-    n.includes('los angeles') ||
-    n.includes('атланта') ||
-    n.includes('atlanta') ||
-    n.includes('феникс') ||
-    n.includes('phoenix') ||
-    n.includes('канад') ||
-    n.includes('canada') ||
-    n.includes('великобритан') ||
-    n.includes('united kingdom') ||
-    n.includes('london') ||
-    n.includes('лондон')
-  ) {
+  if (FLOW_OK_KEYWORDS.some((kw) => n.includes(kw))) {
     return 'ok'
   }
-
-  // 2. Узлы, которые Google Search/AI связывает с РФ и БЛОКИРУЕТ для Flow
-  if (
-    n.includes('росси') ||
-    n.includes('russia') ||
-    n.includes('ru ') ||
-    n.includes('[ru]') ||
-    n.includes('мобильный') ||
-    n.includes('финлянд') ||
-    n.includes('finland') ||
-    n.includes('fi ') ||
-    n.includes('[fi]') ||
-    n.includes('казахстан') ||
-    n.includes('kazakhstan') ||
-    n.includes('беларус') ||
-    n.includes('belarus') ||
-    n.includes('таджикистан') ||
-    n.includes('узбекистан') ||
-    n.includes('азербайджан') ||
-    n.includes('армени') ||
-    n.includes('грузи')
-  ) {
+  if (FLOW_BLOCKED_KEYWORDS.some((kw) => n.includes(kw))) {
     return 'blocked'
   }
-
   return 'unknown'
 }

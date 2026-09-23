@@ -102,7 +102,9 @@ export default function App() {
   const handleLogout = async () => {
     try {
       await apiPost('auth/logout')
-    } catch {}
+    } catch (err) {
+      console.warn('Ошибка при вызове logout API:', err)
+    }
     setAuthStatus((prev) => ({ ...prev, authenticated: false }))
     notify('Вы вышли из веб-панели')
   }

@@ -223,16 +223,16 @@ export default function Header({
 
   // Память и CPU (живые из 1-секундного таймера либо из статуса)
   const currentMetrics = liveMetrics || status?.system
-  const memUsed = currentMetrics?.memory_used_mb ?? 348
-  const memTotal = currentMetrics?.memory_total_mb ?? 512
+  const memUsed = currentMetrics?.memory_used_mb ?? 0
+  const memTotal = currentMetrics?.memory_total_mb ?? 0
   const cpuPercent = currentMetrics?.cpu_percent ?? 0
   const appMemMb = currentMetrics?.app_memory_mb ?? 0
   const appCpu = currentMetrics?.app_cpu_percent ?? 0
   const coreMemMb = currentMetrics?.core_memory_mb ?? 0
   const totalXkeenMem = currentMetrics?.total_xkeen_memory_mb ?? (appMemMb + coreMemMb)
 
-  const mihomoVersion = status?.mihomo_version || 'v1.19.29'
-  const appVersion = status?.version ? status.version.replace(/^v/, '') : '1.2.1'
+  const mihomoVersion = status?.mihomo_version || '—'
+  const appVersion = status?.version ? status.version.replace(/^v/, '') : '—'
 
   const handleRestart = async () => {
     if (pending) return
@@ -277,22 +277,26 @@ export default function Header({
             <div className="status-badge-row2">
               <span
                 className="status-stat"
-                title={`Оперативная память роутера: ${memUsed} из ${memTotal} МБ (${Math.round((memUsed / (memTotal || 1)) * 100)}%)\nПотребление XKeen: всего ${totalXkeenMem > 0 ? totalXkeenMem : appMemMb} МБ (XR: ${appMemMb} МБ, Mihomo: ${coreMemMb > 0 ? coreMemMb + ' МБ' : '—'})`}
+                title={memTotal > 0
+                  ? `Оперативная память роутера: ${memUsed} из ${memTotal} МБ (${Math.round((memUsed / memTotal) * 100)}%)\nПотребление XKeen: всего ${totalXkeenMem > 0 ? totalXkeenMem : appMemMb} МБ (XR: ${appMemMb} МБ, Mihomo: ${coreMemMb > 0 ? coreMemMb + ' МБ' : '—'})`
+                  : 'Оперативная память роутера'}
               >
                 <IconDisk />
-                <span>{memUsed}/{memTotal} МБ</span>
-                <span className="mini-progress-bar">
-                  <span
-                    className={`mini-progress-fill ${
-                      (memUsed / (memTotal || 1)) > 0.85
-                        ? 'fill-red'
-                        : (memUsed / (memTotal || 1)) > 0.65
-                        ? 'fill-yellow'
-                        : 'fill-green'
-                    }`}
-                    style={{ width: `${Math.min(100, Math.round((memUsed / (memTotal || 1)) * 100))}%` }}
-                  />
-                </span>
+                <span>{memTotal > 0 ? `${memUsed}/${memTotal} МБ` : '—'}</span>
+                {memTotal > 0 && (
+                  <span className="mini-progress-bar">
+                    <span
+                      className={`mini-progress-fill ${
+                        (memUsed / memTotal) > 0.85
+                          ? 'fill-red'
+                          : (memUsed / memTotal) > 0.65
+                          ? 'fill-yellow'
+                          : 'fill-green'
+                      }`}
+                      style={{ width: `${Math.min(100, Math.round((memUsed / memTotal) * 100))}%` }}
+                    />
+                  </span>
+                )}
               </span>
               <span className="status-stat-sep">|</span>
               <span className="status-stat" title={`Нагрузка на процессор роутера: ${cpuPercent}%`}>

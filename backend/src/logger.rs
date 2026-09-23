@@ -147,6 +147,9 @@ pub fn tail(lines: usize) -> Result<String, String> {
     let take = lines.clamp(1, 5000);
     let want = (take * 200) as u64; // ~200 байт на строку с запасом
     let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if len == 0 {
+        return Ok(String::new());
+    }
     let start = len.saturating_sub(want);
 
     let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;

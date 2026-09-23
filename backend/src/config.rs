@@ -36,9 +36,14 @@ impl Default for RciConfig {
 pub struct MihomoConfig {
     pub host: String,
     pub port: u16,
+    pub mixed_port: u16,
     pub secret: String,
     /// Путь к конфигу Mihomo на роутере (для AUTO-DEVICE маршрутизации).
     pub config_path: String,
+    /// Путь к файлу логов Mihomo.
+    pub log_path: String,
+    /// Имя процесса Mihomo в системе (mihomo / clash / clash-meta).
+    pub process_name: String,
     /// Провайдеры, подключаемые к группам устройств (use:). Пусто = взять все
     /// proxy-providers из config.yaml автоматически.
     pub device_providers: Vec<String>,
@@ -49,8 +54,11 @@ impl Default for MihomoConfig {
         Self {
             host: "127.0.0.1".into(),
             port: 9090,
+            mixed_port: 7890,
             secret: String::new(),
             config_path: "/opt/etc/mihomo/config.yaml".into(),
+            log_path: "/opt/var/log/mihomo.log".into(),
+            process_name: "mihomo".into(),
             device_providers: Vec::new(),
         }
     }
@@ -310,6 +318,10 @@ impl AppConfig {
 
     pub fn mihomo_url(&self) -> String {
         format!("http://{}:{}", self.mihomo.host, self.mihomo.port)
+    }
+
+    pub fn mihomo_proxy_url(&self) -> String {
+        format!("http://{}:{}", self.mihomo.host, self.mihomo.mixed_port)
     }
 }
 

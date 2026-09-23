@@ -79,6 +79,18 @@ pub fn api_err(error: impl Into<String>) -> axum::response::Response {
     Json(json!({ "success": false, "error": error.into() })).into_response()
 }
 
+/// Атомарная запись файла на диск (tmp + rename)
+pub async fn atomic_write_file(path: impl AsRef<std::path::Path>, content: &str) -> Result<(), String> {
+    let p = path.as_ref();
+    if let Some(parent) = p.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let tmp = format!("{}.tmp.{}", p.display(), std::process::id());
+    tokio::fs::write(&tmp, content).await.map_err(|e| format!("Ошибка записи {tmp}: {e}"))?;
+    tokio::fs::rename(&tmp, p).await.map_err(|e| format!("Ошибка атомарного сохранения {}: {e}", p.display()))?;
+    Ok(())
+}
+
 /// Заготовка настроек: GET/PUT будут добавлены в следующих фазах.
 pub async fn get_settings(State(state): State<AppState>) -> impl IntoResponse {
     let cfg = state.config.read().await.clone();
@@ -1379,6 +1391,11 @@ pub struct SaveConfigFileRequest {
 }
 
 fn resolve_config_file_path(id: &str, cfg: &config::AppConfig) -> Option<std::path::PathBuf> {
+    let providers_dir = std::path::Path::new(&cfg.mihomo.config_path)
+        .parent()
+        .map(|p| p.join("providers"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/opt/etc/mihomo/providers"));
+
     match id {
         "mihomo" => Some(std::path::PathBuf::from(&cfg.mihomo.config_path)),
         "route" => Some(if cfg!(target_os = "linux") {
@@ -1391,7 +1408,7 @@ fn resolve_config_file_path(id: &str, cfg: &config::AppConfig) -> Option<std::pa
         "crontab" => Some(std::path::PathBuf::from("/opt/etc/crontab")),
         other => {
             if let Some(name) = other.strip_prefix("provider:") {
-                Some(std::path::PathBuf::from(format!("/opt/etc/mihomo/providers/{}.yaml", name)))
+                Some(providers_dir.join(format!("{}.yaml", name)))
             } else {
                 None
             }
@@ -1402,6 +1419,11 @@ fn resolve_config_file_path(id: &str, cfg: &config::AppConfig) -> Option<std::pa
 /// GET /api/config-files/list — список доступных для редактирования файлов
 pub async fn list_config_files(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
+    let providers_dir = std::path::Path::new(&cfg.mihomo.config_path)
+        .parent()
+        .map(|p| p.join("providers"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/opt/etc/mihomo/providers"));
+
     let mut files = vec![
         json!({ "id": "mihomo", "name": "Mihomo Config (config.yaml)", "path": cfg.mihomo.config_path, "syntax": "yaml" }),
         json!({ "id": "route", "name": "XKeen Route Config (config.json)", "path": state.config_path.display().to_string(), "syntax": "json" }),
@@ -1410,7 +1432,7 @@ pub async fn list_config_files(State(state): State<AppState>) -> Response {
         json!({ "id": "crontab", "name": "System Crontab (/opt/etc/crontab)", "path": "/opt/etc/crontab", "syntax": "shell" }),
     ];
 
-    if let Ok(mut entries) = tokio::fs::read_dir("/opt/etc/mihomo/providers").await {
+    if let Ok(mut entries) = tokio::fs::read_dir(&providers_dir).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("yaml") {
@@ -1587,7 +1609,7 @@ pub async fn mihomo_logs_tail(
     let cfg = state.config.read().await.clone();
     let lines_count = q.lines.unwrap_or(200);
 
-    let log_path = std::path::Path::new("/opt/var/log/mihomo.log");
+    let log_path = std::path::Path::new(&cfg.mihomo.log_path);
     if log_path.exists() {
         if let Ok(content) = tokio::fs::read_to_string(log_path).await {
             let lines: Vec<&str> = content.lines().collect();
@@ -1800,14 +1822,18 @@ pub async fn import_node(
 
     if body.target == "provider" {
         let prov_name = body.provider_name.unwrap_or_else(|| "custom".to_string());
-        let prov_file = format!("/opt/etc/mihomo/providers/{}.yaml", prov_name);
-        let path = std::path::Path::new(&prov_file);
+        let providers_dir = std::path::Path::new(&cfg.mihomo.config_path)
+            .parent()
+            .map(|p| p.join("providers"))
+            .unwrap_or_else(|| std::path::PathBuf::from("/opt/etc/mihomo/providers"));
+        let path = providers_dir.join(format!("{}.yaml", prov_name));
+        let prov_file = path.display().to_string();
 
         if let Some(parent) = path.parent() {
             let _ = tokio::fs::create_dir_all(parent).await;
         }
 
-        let mut current_content = tokio::fs::read_to_string(path).await.unwrap_or_else(|_| "proxies:\n".to_string());
+        let mut current_content = tokio::fs::read_to_string(&path).await.unwrap_or_else(|_| "proxies:\n".to_string());
         if !current_content.contains("proxies:") {
             current_content = format!("proxies:\n{}", current_content);
         }
@@ -1815,7 +1841,7 @@ pub async fn import_node(
         current_content.push_str(yaml);
         current_content.push_str("\n");
 
-        if let Err(e) = tokio::fs::write(path, &current_content).await {
+        if let Err(e) = atomic_write_file(&path, &current_content).await {
             return api_err(format!("Ошибка записи провайдера {}: {}", prov_file, e));
         }
 
@@ -1848,7 +1874,7 @@ pub async fn import_node(
     lines.insert(proxies_idx + 1, yaml.to_string());
     let new_yaml = lines.join("\n");
 
-    if let Err(e) = tokio::fs::write(config_path, &new_yaml).await {
+    if let Err(e) = atomic_write_file(config_path, &new_yaml).await {
         return api_err(format!("Ошибка сохранения config.yaml: {}", e));
     }
 
@@ -1911,7 +1937,7 @@ pub async fn set_dns_mode(
     };
 
     let _guard = state.routing_lock.lock().await;
-    if let Err(e) = tokio::fs::write(&cfg.mihomo.config_path, &new_yaml).await {
+    if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
         return api_err(format!("Ошибка сохранения config.yaml: {}", e));
     }
 
@@ -1956,7 +1982,7 @@ pub async fn set_device_domain_rules(
 
     if let Ok(raw_yaml) = tokio::fs::read_to_string(&cur.mihomo.config_path).await {
         let (new_yaml, _) = crate::routing::apply_routing(&raw_yaml, &cur);
-        let _ = tokio::fs::write(&cur.mihomo.config_path, &new_yaml).await;
+        let _ = atomic_write_file(&cur.mihomo.config_path, &new_yaml).await;
         let _ = mihomo::reload_config(&state.http, &cur).await;
     }
 
@@ -1974,7 +2000,7 @@ pub async fn clash_proxy(
     let cfg = state.config.read().await.clone();
     let path = req.uri().path().strip_prefix("/clash").unwrap_or("");
     let query = req.uri().query().map(|q| format!("?{}", q)).unwrap_or_default();
-    let target_url = format!("http://127.0.0.1:{}{}{}", cfg.mihomo.port, path, query);
+    let target_url = format!("{}{}{}", cfg.mihomo_url(), path, query);
 
     let method = req.method().clone();
     let mut proxy_req = state.http.request(method, &target_url);

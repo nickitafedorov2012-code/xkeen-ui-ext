@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from 'react'
-import { apiGet, apiPost } from '../api'
+import { apiGet, apiPost, getWsUrl } from '../api'
 
 interface LogsViewerProps {
   notify: (msg: string, error?: boolean) => void
@@ -13,11 +13,39 @@ export default function LogsViewer({ notify }: LogsViewerProps) {
   const [filterLevel, setFilterLevel] = useState<'all' | 'error' | 'warn' | 'info'>('all')
   const [filterQuery, setFilterQuery] = useState<string>('')
   const terminalRef = useRef<HTMLDivElement>(null)
+  const pausedRef = useRef<boolean>(paused)
+
+  useEffect(() => {
+    pausedRef.current = paused
+  }, [paused])
 
   // Загрузка логов демона или Mihomo
   useEffect(() => {
     let ws: WebSocket | null = null
+    let reconnectTimer: any = null
     let active = true
+
+    const connectWs = () => {
+      if (!active || source !== 'daemon') return
+      try {
+        const wsUrl = getWsUrl('logs/ws?lines=0')
+        ws = new WebSocket(wsUrl)
+        ws.onmessage = (e) => {
+          if (!pausedRef.current && active) {
+            setLines((prev) => [...prev.slice(-500), e.data])
+          }
+        }
+        ws.onclose = () => {
+          if (active && source === 'daemon') {
+            reconnectTimer = setTimeout(connectWs, 3000)
+          }
+        }
+      } catch {
+        if (active && source === 'daemon') {
+          reconnectTimer = setTimeout(connectWs, 5000)
+        }
+      }
+    }
 
     const fetchLogs = async () => {
       setLoading(true)
@@ -27,16 +55,7 @@ export default function LogsViewer({ notify }: LogsViewerProps) {
           if (active) {
             setLines(res.text ? res.text.split('\n') : [])
           }
-
-          // Подключаем WebSocket для live-лога
-          const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-          const wsUrl = `${protocol}//${window.location.host}/api/logs/ws?lines=0`
-          ws = new WebSocket(wsUrl)
-          ws.onmessage = (e) => {
-            if (!paused && active) {
-              setLines((prev) => [...prev.slice(-500), e.data])
-            }
-          }
+          connectWs()
         } else {
           const res = await apiGet<{ text: string }>('logs/mihomo?lines=300')
           if (active) {
@@ -57,10 +76,11 @@ export default function LogsViewer({ notify }: LogsViewerProps) {
 
     return () => {
       active = false
+      if (reconnectTimer) clearTimeout(reconnectTimer)
       if (ws) ws.close()
       if (interval) clearInterval(interval)
     }
-  }, [source, paused, notify])
+  }, [source, notify])
 
   // Автопрокрутка вниз при новых строках (если не на паузе)
   useEffect(() => {

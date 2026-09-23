@@ -42,18 +42,6 @@ pub const INIT_SCRIPT: &str = "/opt/etc/init.d/S99xkeen-route";
 #[cfg(not(target_os = "linux"))]
 pub const INIT_SCRIPT: &str = "S99xkeen-route";
 
-const INIT_SCRIPT_CONTENT: &str = r#"#!/bin/sh
-
-ENABLED=yes
-PROCS=xkeen-route
-ARGS="-p 1001"
-PREARGS=""
-DESC=$PROCS
-PATH=/opt/sbin:/opt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-. /opt/etc/init.d/rc.func
-"#;
-
 #[derive(Parser)]
 #[command(
     name = "xkeen-route",
@@ -62,6 +50,10 @@ PATH=/opt/sbin:/opt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:
     disable_help_subcommand = true
 )]
 struct Cli {
+    /// Хост веб-панели (по умолчанию 0.0.0.0)
+    #[arg(short = 'H', long = "host", default_value = "0.0.0.0")]
+    host: String,
+
     /// Порт веб-панели
     #[arg(short = 'p', long = "port", default_value = "1001")]
     port: u16,
@@ -104,13 +96,24 @@ pub struct AppState {
     pub antigravity: Arc<antigravity::AntigravityManager>,
 }
 
-
-
-fn create_init() -> std::io::Result<()> {
+fn create_init(port: u16) -> std::io::Result<()> {
     if let Some(dir) = PathBuf::from(INIT_SCRIPT).parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    std::fs::write(INIT_SCRIPT, INIT_SCRIPT_CONTENT)?;
+    let content = format!(
+        r#"#!/bin/sh
+
+ENABLED=yes
+PROCS=xkeen-route
+ARGS="-p {port}"
+PREARGS=""
+DESC=$PROCS
+PATH=/opt/sbin:/opt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+. /opt/etc/init.d/rc.func
+"#
+    );
+    std::fs::write(INIT_SCRIPT, content)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -187,7 +190,7 @@ async fn main() {
             return;
         }
         Some(Command::CreateInit) => {
-            if let Err(e) = create_init() {
+            if let Err(e) = create_init(cli.port) {
                 eprintln!("[ERROR] {}", e);
                 std::process::exit(1);
             }
@@ -360,7 +363,8 @@ async fn main() {
         .layer(middleware::from_fn(log_requests))
         .with_state(state);
 
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+    let host_ip: std::net::IpAddr = cli.host.parse().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)));
+    let addr = std::net::SocketAddr::new(host_ip, port);
     let listener = {
         let mut attempts = 0;
         loop {
@@ -377,13 +381,13 @@ async fn main() {
                     attempts += 1;
                 }
                 Err(e) => {
-                    log_e!("Критическая ошибка: не удалось занять порт {} после 10 попыток: {}", port, e);
-                    panic!("Не удалось занять порт {}: {}", port, e);
+                    log_e!("Критическая ошибка: не удалось занять адрес {} после 10 попыток: {}", addr, e);
+                    panic!("Не удалось занять адрес {}: {}", addr, e);
                 }
             }
         }
     };
-    log_i!("Панель доступна на http://0.0.0.0:{}", port);
+    log_i!("Панель доступна на http://{}:{}", host_ip, port);
     if let Err(e) = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -394,6 +398,7 @@ async fn main() {
         log_e!("Ошибка работы HTTP сервера: {}", e);
     }
     log_i!("Остановка: новые соединения закрыты, завершаю фоновые задачи…");
+    antigravity::shutdown();
     failover::shutdown();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     log_i!("XKeen Route остановлен");

@@ -6,6 +6,12 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::RwLock;
 
+static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn shutdown() {
+    SHUTDOWN.store(true, std::sync::atomic::Ordering::Release);
+}
+
 /// Статус отдельного DNS-провайдера
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsProviderStatus {
@@ -459,6 +465,9 @@ impl AntigravityManager {
             };
 
             loop {
+                if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
                 let (stream, _) = match listener.accept().await {
                     Ok(res) => res,
                     Err(_) => continue,
@@ -474,11 +483,16 @@ impl AntigravityManager {
         });
     }
 
-    /// Запуск периодического warm-loop
+    /// Запуск периодического warm-loop с поддержкой graceful shutdown
     pub fn start_warm_loop(self: Arc<Self>) {
         tokio::spawn(async move {
             // Начальная проверка через 2 секунды после старта
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            for _ in 0..2 {
+                if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
             self.check_and_update().await;
 
             loop {
@@ -486,7 +500,12 @@ impl AntigravityManager {
                     let c = self.config.read().await;
                     c.antigravity.health_check_interval.max(30)
                 };
-                tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+                for _ in 0..interval {
+                    if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
                 self.check_and_update().await;
             }
         });

@@ -79,7 +79,8 @@ pub fn spawn(state: AppState) {
                         };
 
                         let (new_yaml, _applied) = routing::apply_routing(&raw_yaml, &cfg);
-                        if let Err(e) = std::fs::write(path, &new_yaml) {
+                        let tmp = format!("{}.tmp", path.display());
+                        if let Err(e) = std::fs::write(&tmp, &new_yaml).and_then(|_| std::fs::rename(&tmp, path)) {
                             log_w!("[WATCHDOG] Ошибка записи config.yaml: {}", e);
                             continue;
                         }

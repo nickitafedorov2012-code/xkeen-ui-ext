@@ -900,9 +900,9 @@ pub async fn check_google_geo(http: &reqwest::Client, cfg: &AppConfig, active_se
         .await
         .ok()
         .and_then(|v| v.get("mixed-port").and_then(|p| p.as_u64()))
-        .unwrap_or(7890);
+        .unwrap_or(cfg.mihomo.mixed_port as u64);
 
-    let proxy_url = format!("http://127.0.0.1:{mixed_port}");
+    let proxy_url = format!("http://{}:{mixed_port}", cfg.mihomo.host);
     let client = match reqwest::Proxy::all(&proxy_url) {
         Ok(p) => reqwest::Client::builder()
             .proxy(p)

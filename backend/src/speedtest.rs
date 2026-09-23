@@ -32,7 +32,7 @@ pub async fn run_speedtest(
     ];
 
     // Настраиваем HTTP клиент через локальный HTTP/SOCKS5 прокси Mihomo
-    let proxy_url = format!("http://127.0.0.1:7890");
+    let proxy_url = _cfg.mihomo_proxy_url();
     let proxy = reqwest::Proxy::all(&proxy_url)
         .map_err(|e| format!("Ошибка создания прокси: {}", e))?;
 

@@ -11,6 +11,21 @@ use std::path::Path;
 use crate::{api::{api_err, api_ok}, config, log_i, log_w, AppState};
 
 pub const COOKIE_NAME: &str = "xr_session";
+pub const SESSION_TTL_SECS: u64 = 30 * 24 * 60 * 60; // 30 days
+
+static SEED_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn rand_seed() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let count = SEED_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let state = RandomState::new().build_hasher().finish();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    now.wrapping_add(state).wrapping_add(count)
+}
 
 #[derive(Deserialize)]
 pub struct LoginRequest {
@@ -106,8 +121,8 @@ pub fn verify_session_token(token: &str, secret: &str) -> bool {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            // Токен валиден 30 дней (2592000 сек)
-            if now >= ts && (now - ts) <= 2592000 {
+            // Токен валиден SESSION_TTL_SECS (30 дней)
+            if now >= ts && (now - ts) <= SESSION_TTL_SECS {
                 return true;
             }
         }
@@ -124,19 +139,6 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
         diff |= x ^ y;
     }
     diff == 0
-}
-
-fn rand_seed() -> u64 {
-    let p = Box::into_raw(Box::new(123u8));
-    let addr = p as usize as u64;
-    unsafe {
-        let _ = Box::from_raw(p);
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
-    now.wrapping_add(addr)
 }
 
 /// Извлечение токена из Cookie или Authorization Bearer заголовка.
@@ -217,8 +219,8 @@ pub async fn login(State(state): State<AppState>, Json(body): Json<LoginRequest>
     log_i!("Успешный вход в веб-панель");
 
     let cookie_val = format!(
-        "{}={}; Path=/; Max-Age=2592000; HttpOnly; SameSite=Lax",
-        COOKIE_NAME, token
+        "{}={}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax",
+        COOKIE_NAME, token, SESSION_TTL_SECS
     );
 
     let mut response = api_ok(json!({ "authenticated": true, "token": token }));

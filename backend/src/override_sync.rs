@@ -158,12 +158,23 @@ pub async fn sync_geo_override(domains: &[String]) -> Result<usize, String> {
 async fn sync_ipset_family(set_name: &str, family: &str) -> Result<(), String> {
     let tmp = format!("{set_name}_tmp");
 
-    _ = tokio::process::Command::new("ipset")
-        .args(["create", &tmp, "hash:net", "family", family, "-exist"])
+    // Уничтожаем возможный старый временный ipset от прерванного swap
+    let _ = tokio::process::Command::new("ipset")
+        .args(["destroy", &tmp])
         .output()
         .await;
 
-    _ = tokio::process::Command::new("ipset")
+    let create_tmp = tokio::process::Command::new("ipset")
+        .args(["create", &tmp, "hash:net", "family", family, "-exist"])
+        .output()
+        .await;
+    if let Ok(out) = create_tmp {
+        if !out.status.success() {
+            crate::log_w!("ipset create {tmp} failed: {}", String::from_utf8_lossy(&out.stderr));
+        }
+    }
+
+    let _ = tokio::process::Command::new("ipset")
         .args(["flush", &tmp])
         .output()
         .await;
@@ -176,7 +187,7 @@ async fn sync_ipset_family(set_name: &str, family: &str) -> Result<(), String> {
             }
             let is_v6 = t.contains(':');
             if (family == "inet" && !is_v6) || (family == "inet6" && is_v6) {
-                _ = tokio::process::Command::new("ipset")
+                let _ = tokio::process::Command::new("ipset")
                     .args(["add", &tmp, t, "-exist"])
                     .output()
                     .await;
@@ -184,7 +195,7 @@ async fn sync_ipset_family(set_name: &str, family: &str) -> Result<(), String> {
         }
     }
 
-    _ = tokio::process::Command::new("ipset")
+    let _ = tokio::process::Command::new("ipset")
         .args(["create", set_name, "hash:net", "family", family, "-exist"])
         .output()
         .await;
@@ -194,15 +205,20 @@ async fn sync_ipset_family(set_name: &str, family: &str) -> Result<(), String> {
         .output()
         .await;
 
-    _ = tokio::process::Command::new("ipset")
+    let _ = tokio::process::Command::new("ipset")
         .args(["destroy", &tmp])
         .output()
         .await;
 
-    if let Err(e) = swap {
-        return Err(format!("ipset swap {set_name}: {e}"));
+    match swap {
+        Ok(out) if !out.status.success() => {
+            let err_msg = String::from_utf8_lossy(&out.stderr);
+            crate::log_w!("ipset swap {set_name} failed: {err_msg}");
+            Err(format!("ipset swap {set_name}: {err_msg}"))
+        }
+        Err(e) => Err(format!("ipset swap {set_name}: {e}")),
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 #[cfg(test)]

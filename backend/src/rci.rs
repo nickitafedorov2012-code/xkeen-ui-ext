@@ -103,7 +103,7 @@ async fn challenge_auth(
             .await
             .map_err(|e| format!("Проверка сессии: {e}"))?;
         if check.status().is_success() {
-            AUTHED.store(true, Ordering::Relaxed);
+            AUTHED.store(true, Ordering::Release);
             return Ok(());
         }
         return Err("Роутер не выдал challenge — задайте rci.token в конфиге".into());
@@ -119,7 +119,7 @@ async fn challenge_auth(
         .await
         .map_err(|e| e.to_string())?;
     if resp.status().is_success() {
-        AUTHED.store(true, Ordering::Relaxed);
+        AUTHED.store(true, Ordering::Release);
         return Ok(());
     }
 
@@ -133,7 +133,7 @@ async fn challenge_auth(
         .await
         .map_err(|e| e.to_string())?;
     if resp.status().is_success() {
-        AUTHED.store(true, Ordering::Relaxed);
+        AUTHED.store(true, Ordering::Release);
         return Ok(());
     }
 
@@ -147,11 +147,11 @@ async fn challenge_auth(
 /// (на многих прошивках RCI с localhost отвечает без auth). Возвращает токен (может быть пустым).
 pub async fn ensure_auth(http: &reqwest::Client, cfg: &AppConfig) -> Result<String, String> {
     let token = token_from_files(cfg);
-    // Быстрый путь без блокировки
-    if !token.is_empty() && TOKEN_OK.load(Ordering::Relaxed) {
+    // Быстрый путь без блокировки (Acquire ordering)
+    if !token.is_empty() && TOKEN_OK.load(Ordering::Acquire) {
         return Ok(token);
     }
-    if token.is_empty() && AUTHED.load(Ordering::Relaxed) {
+    if token.is_empty() && AUTHED.load(Ordering::Acquire) {
         return Ok(String::new());
     }
 
@@ -160,7 +160,7 @@ pub async fn ensure_auth(http: &reqwest::Client, cfg: &AppConfig) -> Result<Stri
 
     // Повторная проверка под блокировкой (double-check)
     if !token.is_empty() {
-        if TOKEN_OK.load(Ordering::Relaxed) {
+        if TOKEN_OK.load(Ordering::Acquire) {
             return Ok(token);
         }
         // Токен из файла может устареть (RCI-сессии истекают по времени) —
@@ -174,13 +174,13 @@ pub async fn ensure_auth(http: &reqwest::Client, cfg: &AppConfig) -> Result<Stri
             .map(|r| r.status().is_success())
             .unwrap_or(false);
         if ok {
-            TOKEN_OK.store(true, Ordering::Relaxed);
+            TOKEN_OK.store(true, Ordering::Release);
             return Ok(token);
         }
-        TOKEN_OK.store(false, Ordering::Relaxed);
+        TOKEN_OK.store(false, Ordering::Release);
         // Токен невалиден — пробуем challenge-auth ниже.
     }
-    if AUTHED.load(Ordering::Relaxed) {
+    if AUTHED.load(Ordering::Acquire) {
         let check = http
             .get(format!("{}/rci/show/version", cfg.base_url()))
             .timeout(std::time::Duration::from_secs(3))
@@ -191,7 +191,7 @@ pub async fn ensure_auth(http: &reqwest::Client, cfg: &AppConfig) -> Result<Stri
                 return Ok(String::new());
             }
         }
-        AUTHED.store(false, Ordering::Relaxed);
+        AUTHED.store(false, Ordering::Release);
     }
     if !cfg.rci.password.is_empty() {
         if challenge_auth(http, &cfg.base_url(), &cfg.rci.login, &cfg.rci.password)
@@ -209,7 +209,7 @@ pub async fn ensure_auth(http: &reqwest::Client, cfg: &AppConfig) -> Result<Stri
         .await
         .map_err(|e| format!("RCI недоступен: {e}"))?;
     if probe.status().is_success() {
-        AUTHED.store(true, Ordering::Relaxed);
+        AUTHED.store(true, Ordering::Release);
         return Ok(String::new());
     }
     Err("RCI требует авторизацию: задайте rci.token или rci.password в конфиге".into())
@@ -219,8 +219,8 @@ pub async fn ensure_auth(http: &reqwest::Client, cfg: &AppConfig) -> Result<Stri
 /// (если задан пароль) или повторный ensure_auth. Возвращает новый токен.
 async fn reauth(http: &reqwest::Client, cfg: &AppConfig, _had_token: bool) -> Result<String, String> {
     let _guard = AUTH_LOCK.lock().await;
-    TOKEN_OK.store(false, Ordering::Relaxed);
-    AUTHED.store(false, Ordering::Relaxed);
+    TOKEN_OK.store(false, Ordering::Release);
+    AUTHED.store(false, Ordering::Release);
     if !cfg.rci.password.is_empty()
         && challenge_auth(http, &cfg.base_url(), &cfg.rci.login, &cfg.rci.password)
             .await
