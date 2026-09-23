@@ -383,21 +383,31 @@ impl AntigravityManager {
 
     /// Применение DNS-записей в KeeneticOS и добавление маршрута мимо VPN
     async fn apply_keenetic_rules(&self, ip: Ipv4Addr, targets: &[String], prev_ip: Option<Ipv4Addr>) {
-        // 1. Очистка прошлого IP из маршрутизации
+        // 1. Очистка прошлого IP из маршрутизации и ipset
         if let Some(old) = prev_ip {
             let _ = tokio::process::Command::new("ip")
-                .args(["rule", "del", "to", &format!("{old}/32"), "table", "4096", "priority", "90"])
+                .args(["rule", "del", "to", &format!("{old}/32"), "table", "main", "priority", "90"])
+                .output()
+                .await;
+            let _ = tokio::process::Command::new("ipset")
+                .args(["del", "user_exclude", &old.to_string()])
                 .output()
                 .await;
         }
 
-        // 2. Добавление правила маршрутизации через основной WAN (таблица 4096 на Keenetic)
-        let _ = tokio::process::Command::new("ip")
-            .args(["rule", "add", "to", &format!("{ip}/32"), "table", "4096", "priority", "90"])
+        // 2. Исключение подменного IP из перехвата Mihomo (ipset user_exclude)
+        let _ = tokio::process::Command::new("ipset")
+            .args(["add", "user_exclude", &ip.to_string(), "-exist"])
             .output()
             .await;
 
-        // 3. Установка статических DNS-записей в Keenetic ndnproxy
+        // 3. Добавление правила маршрутизации напрямую через основной WAN (таблица main)
+        let _ = tokio::process::Command::new("ip")
+            .args(["rule", "add", "to", &format!("{ip}/32"), "table", "main", "priority", "90"])
+            .output()
+            .await;
+
+        // 4. Установка статических DNS-записей в Keenetic ndnproxy
         for target in targets {
             let _ = tokio::process::Command::new("ndmc")
                 .args(["-c", &format!("ip host {target} {ip}")])
@@ -410,7 +420,11 @@ impl AntigravityManager {
     pub async fn clean_keenetic_rules(&self, active_ip: &Option<Ipv4Addr>) {
         if let Some(ip) = active_ip {
             let _ = tokio::process::Command::new("ip")
-                .args(["rule", "del", "to", &format!("{ip}/32"), "table", "4096", "priority", "90"])
+                .args(["rule", "del", "to", &format!("{ip}/32"), "table", "main", "priority", "90"])
+                .output()
+                .await;
+            let _ = tokio::process::Command::new("ipset")
+                .args(["del", "user_exclude", &ip.to_string()])
                 .output()
                 .await;
         }

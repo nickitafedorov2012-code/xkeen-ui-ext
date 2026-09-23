@@ -1219,5 +1219,134 @@ pub async fn check_antigravity(State(state): State<AppState>) -> Response {
     })).into_response()
 }
 
+/// Сырой PowerShell скрипт разблокировки входа в Antigravity
+pub const ANTIGRAVITY_PATCH_SCRIPT: &str = r#"Write-Host "=======================================================" -ForegroundColor Cyan
+Write-Host "   Antigravity & Cloud Code Login Patch (xkeen route)  " -ForegroundColor Cyan
+Write-Host "=======================================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "[1/3] Завершение процессов Antigravity..." -ForegroundColor Yellow
+$procs = @("language_server", "language_server_windows_x64", "Antigravity", "Antigravity CLI")
+foreach ($p in $procs) {
+    Get-Process -Name $p -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+}
+Start-Sleep -Milliseconds 800
+Write-Host "[2/3] Поиск language_server.exe..." -ForegroundColor Yellow
+$candidates = @(
+    "$env:LOCALAPPDATA\Programs\antigravity\resources\bin\language_server.exe",
+    "$env:LOCALAPPDATA\Programs\antigravity\resources\app\extensions\antigravity\bin\language_server.exe",
+    "$env:LOCALAPPDATA\Programs\antigravity\resources\app\extensions\antigravity\bin\language_server_windows_x64.exe",
+    "$env:LOCALAPPDATA\Programs\Antigravity IDE\resources\bin\language_server.exe",
+    "$env:USERPROFILE\.antigravity\bin\language_server.exe"
+)
+$found = @()
+foreach ($c in $candidates) {
+    if (Test-Path $c) { $found += $c }
+}
+if ($found.Count -eq 0) {
+    $searchDir = "$env:LOCALAPPDATA\Programs\antigravity"
+    if (Test-Path $searchDir) {
+        Get-ChildItem -Path $searchDir -Filter "*language_server*.exe" -Recurse -ErrorAction SilentlyContinue | ForEach-Object { $found += $_.FullName }
+    }
+}
+$found = $found | Select-Object -Unique
+if ($found.Count -eq 0) {
+    Write-Host "[!] Файлы language_server.exe не найдены!" -ForegroundColor Red
+} else {
+    Write-Host "[3/3] Патчинг сигнатуры (ineligible -> inexigible)..." -ForegroundColor Yellow
+    $enc = [System.Text.Encoding]::GetEncoding(28591)
+    $patchedCount = 0
+    foreach ($file in $found) {
+        Write-Host "  -> $file" -ForegroundColor Gray
+        try {
+            $bytes = [System.IO.File]::ReadAllBytes($file)
+            $text = $enc.GetString($bytes)
+            if ($text.Contains('ineligible')) {
+                $bak = "$file.bak"
+                if (-not (Test-Path $bak)) { [System.IO.File]::Copy($file, $bak) }
+                $newText = $text.Replace('ineligible', 'inexigible')
+                [System.IO.File]::WriteAllBytes($file, $enc.GetBytes($newText))
+                Write-Host "     [OK] Успешно пропатчен!" -ForegroundColor Green
+                $patchedCount++
+            } elseif ($text.Contains('inexigible')) {
+                Write-Host "     [OK] Уже пропатчен (inexigible)." -ForegroundColor Yellow
+                $patchedCount++
+            } else {
+                Write-Host "     [?] Сигнатура ineligible не найдена." -ForegroundColor DarkYellow
+            }
+        } catch {
+            Write-Host "     [!] Ошибка доступа: $_" -ForegroundColor Red
+        }
+    }
+    if ($patchedCount -gt 0) {
+        Write-Host ""
+        Write-Host "[SUCCESS] Разблокировка завершена! Перезапустите Antigravity." -ForegroundColor Green
+    }
+}
+Write-Host ""
+"#;
+
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as usize } else { 0 };
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[(n >> 18) & 63] as char);
+        out.push(TABLE[(n >> 12) & 63] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(n >> 6) & 63] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[n & 63] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// GET /patch — отдавать сырой PowerShell-скрипт (text/plain; charset=utf-8)
+pub async fn get_antigravity_patch_script() -> impl IntoResponse {
+    (
+        [
+            ("Content-Type", "text/plain; charset=utf-8"),
+            ("Cache-Control", "no-cache, no-store, must-revalidate"),
+        ],
+        ANTIGRAVITY_PATCH_SCRIPT,
+    )
+        .into_response()
+}
+
+/// GET /api/antigravity/fix.cmd — отдавать обертку .cmd с заголовком Content-Disposition: attachment; filename="fix_antigravity.cmd"
+pub async fn get_antigravity_fix_cmd() -> impl IntoResponse {
+    let b64 = base64_encode(ANTIGRAVITY_PATCH_SCRIPT.as_bytes());
+    let cmd = format!(
+        "@echo off\r\n\
+         chcp 65001 >nul\r\n\
+         title Antigravity Login Fix (xkeen route)\r\n\
+         powershell -NoProfile -ExecutionPolicy Bypass -Command \"[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{}')) | iex\"\r\n\
+         echo.\r\n\
+         pause\r\n",
+        b64
+    );
+    (
+        [
+            ("Content-Type", "application/x-bat; charset=utf-8"),
+            (
+                "Content-Disposition",
+                "attachment; filename=\"fix_antigravity.cmd\"",
+            ),
+            ("Cache-Control", "no-cache, no-store, must-revalidate"),
+        ],
+        cmd,
+    )
+        .into_response()
+}
+
+
 
 

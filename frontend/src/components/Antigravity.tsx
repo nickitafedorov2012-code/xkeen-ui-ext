@@ -106,6 +106,8 @@ export default function Antigravity({ notify }: Props) {
   }
 
   const routerIp = window.location.hostname || '192.168.2.1'
+  const patchHost = window.location.host || `${routerIp}:1001`
+  const patchCommand = `irm http://${patchHost}/patch | iex`
   const proxyUrl = `http://${routerIp}:${proxyPort}`
 
   const getStatusBadge = () => {
@@ -335,6 +337,80 @@ export default function Antigravity({ notify }: Props) {
           </div>
         </section>
       </div>
+
+      {/* Карточка разблокировки входа на ПК */}
+      <section className="card ag-unlock-card">
+        <div className="ag-card-header">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 20 }}>🔓</span>
+            <div>
+              <h3 style={{ margin: 0 }}>Разблокировка входа на ПК</h3>
+              <span className="ag-card-hint">
+                Устранение ошибки «account is ineligible» путём патчинга language_server.exe на клиентском компьютере
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div style={{ background: 'rgba(59, 130, 246, 0.06)', border: '1px solid rgba(59, 130, 246, 0.25)', borderRadius: 10, padding: '16px 20px', marginBottom: 16 }}>
+          <p style={{ margin: 0, color: '#e2e8f0', fontSize: 13, lineHeight: 1.5 }}>
+            Если при входе в Google Antigravity возникает ошибка <em>«Sorry, this account is ineligible to use Antigravity. Your current account is not eligible for Antigravity, because it is not currently available in your location»</em>, локальный бинарный файл <code>language_server.exe</code> блокирует вход по флагу Protobuf. Выберите один из способов разблокировки:
+          </p>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>
+          {/* Способ 1: Скачать .cmd */}
+          <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border)', borderRadius: 8, padding: '16px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span>📥</span> Способ 1: Готовый скрипт (.cmd)
+              </div>
+              <p className="muted small" style={{ marginBottom: 16 }}>
+                Скачайте готовый файл и запустите его в Windows. Скрипт сам закроет процессы Antigravity и пропатчит сигнатуру <code>ineligible</code> &rarr; <code>inexigible</code>.
+              </p>
+            </div>
+            <a
+              href="/api/antigravity/fix.cmd"
+              download="fix_antigravity.cmd"
+              className="btn primary"
+              style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 8, textDecoration: 'none', padding: '10px 16px' }}
+            >
+              📥 Скачать фикс для Windows (.cmd)
+            </a>
+          </div>
+
+          {/* Способ 2: PowerShell однострочник */}
+          <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border)', borderRadius: 8, padding: '16px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span>⚡</span> Способ 2: Команда PowerShell
+              </div>
+              <p className="muted small" style={{ marginBottom: 16 }}>
+                Выполните команду в окне PowerShell на ПК. Скрипт загрузится с роутера и выполнит моментальный патчинг без сохранения файлов на диск.
+              </p>
+            </div>
+            <div>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <input
+                  type="text"
+                  readOnly
+                  className="input mono small"
+                  value={patchCommand}
+                  style={{ flex: 1, fontSize: 12, padding: '8px 10px', background: 'rgba(0, 0, 0, 0.2)' }}
+                  onClick={(e) => (e.target as HTMLInputElement).select()}
+                />
+                <button
+                  className="btn primary"
+                  onClick={() => copyToClipboard(patchCommand, 'patch')}
+                  style={{ whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                >
+                  {copiedEnv === 'patch' ? '✓ Скопировано' : '📋 Скопировать команду'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
 
       {/* Инструкции по настройке клиентов */}
       <section className="card ag-instructions-card">

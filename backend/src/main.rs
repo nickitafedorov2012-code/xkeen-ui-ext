@@ -297,6 +297,8 @@ async fn main() {
         .route("/api/antigravity/status", get(api::get_antigravity_status))
         .route("/api/antigravity/settings", post(api::set_antigravity_settings))
         .route("/api/antigravity/check", post(api::check_antigravity))
+        .route("/api/antigravity/fix.cmd", get(api::get_antigravity_fix_cmd))
+        .route("/patch", get(api::get_antigravity_patch_script))
         .fallback(frontend::serve)
         .layer(middleware::from_fn(no_cache))
         .layer(middleware::from_fn(log_requests))
