@@ -1220,7 +1220,10 @@ pub async fn check_antigravity(State(state): State<AppState>) -> Response {
 }
 
 /// Сырой PowerShell скрипт разблокировки входа в Antigravity
-pub const ANTIGRAVITY_PATCH_SCRIPT: &str = r#"Write-Host "=======================================================" -ForegroundColor Cyan
+pub const ANTIGRAVITY_PATCH_SCRIPT: &str = r#"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+Write-Host "=======================================================" -ForegroundColor Cyan
 Write-Host "   Antigravity & Cloud Code Login Patch (xkeen route)  " -ForegroundColor Cyan
 Write-Host "=======================================================" -ForegroundColor Cyan
 Write-Host ""
@@ -1328,7 +1331,7 @@ pub async fn get_antigravity_fix_cmd() -> impl IntoResponse {
         "@echo off\r\n\
          chcp 65001 >nul\r\n\
          title Antigravity Login Fix (xkeen route)\r\n\
-         powershell -NoProfile -ExecutionPolicy Bypass -Command \"[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{}')) | iex\"\r\n\
+         powershell -NoProfile -ExecutionPolicy Bypass -Command \"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{}')) | iex\"\r\n\
          echo.\r\n\
          pause\r\n",
         b64
