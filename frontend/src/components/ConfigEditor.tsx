@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react'
 import { apiGet, apiPost } from '../api'
 import type { ConfigFile } from '../types'
+import { copyToClipboard } from '../utils/clipboard'
 
 interface ConfigEditorProps {
   isOpen?: boolean
@@ -223,8 +224,8 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
             <button
               className="btn btn-sm"
               title="Копировать всё в буфер"
-              onClick={() => {
-                navigator.clipboard.writeText(content)
+              onClick={async () => {
+                await copyToClipboard(content)
                 notify('Скопировано в буфер обмена')
               }}
             >

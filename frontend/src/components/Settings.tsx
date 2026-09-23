@@ -186,16 +186,6 @@ export default function Settings({ notify, status, refresh }: Props) {
     return () => {
       if (autoSaveTimerRef.current) {
         clearTimeout(autoSaveTimerRef.current)
-        try {
-          const currentFailover = JSON.parse(failoverJson)
-          apiPost('settings/priority', {
-            server_ids: currentFailover.priority_chain ?? [],
-            enabled: currentFailover.enabled,
-          })
-          apiPut('settings', {
-            failover: currentFailover,
-          })
-        } catch {}
       }
     }
   }, [failoverJson, refresh, notify])

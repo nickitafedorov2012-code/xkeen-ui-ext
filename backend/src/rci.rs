@@ -605,17 +605,15 @@ pub async fn get_devices(
     }
 
     // Runtime-хосты
-    let runtime_hosts = match runtime {
-        Some(v) => {
-            if let Some(hosts) = v.get("host").and_then(|h| h.as_array()) {
-                hosts.clone()
-            } else if let Some(hosts) = v.as_array() {
-                hosts.clone()
-            } else {
-                Vec::new()
-            }
-        }
-        None => Vec::new(),
+    let runtime_val = runtime.ok_or_else(|| {
+        "Таймаут или ошибка получения списка устройств через RCI (/rci/show/ip/hotspot)".to_string()
+    })?;
+    let runtime_hosts = if let Some(hosts) = runtime_val.get("host").and_then(|h| h.as_array()) {
+        hosts.clone()
+    } else if let Some(hosts) = runtime_val.as_array() {
+        hosts.clone()
+    } else {
+        Vec::new()
     };
 
     let mut devices: Vec<Device> = Vec::new();

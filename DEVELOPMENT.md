@@ -737,6 +737,29 @@
   - **Reduced Motion**: добавлен медиа-запрос `@media (prefers-reduced-motion: reduce)` для пользователей с чувствительностью к анимациям.
   - **CSS-токены**: в `:root` и `[data-theme="light"]` добавлены токены `--text-bright`, `--text-dim`, `--muted-dim`, `--border-focus`.
 
+## v1.2.5 (Функциональный аудит: надежность, OOM-защита, безопасность WAN и синхронизация состояния)
+- **Безопасность и фильтрация WAN (`antigravity.rs`)**:
+  - В HTTP CONNECT прокси добавлен строгий фильтр клиентов: запросы с внешних WAN IP отклоняются с HTTP 403 Forbidden, доступ открыт только для LAN (RFC 1918 / ULA) и loopback.
+- **Предотвращение OOM и потоковая передача (`updater.rs`, `api.rs`)**:
+  - `updater.rs`: скачивание бинарного файла обновления переведено на потоковую запись чанков на диск (`res.chunk().await`), устранено потребление 15+ МБ ОЗУ на роутере.
+  - `api.rs`: эндпоинт `mihomo_logs_tail` переведён на чтение фиксированного хвоста файла (seek до последних 256 КБ), исключая чтение многомегабайтных логов в память.
+  - `api.rs`: добавлен эндпоинт `POST /api/logs/mihomo/clear` для очистки и усечения файла журнала ядра.
+- **Надёжность ядра и парсеров (`mihomo.rs`, `updater.rs`, `speedtest.rs`, `rci.rs`, `routing.rs`)**:
+  - `mihomo.rs`: добавлен лимит глубины обхода групп (`visited.len() >= 32`) в `resolve_active_leaf` для защиты от циклических зависимостей групп; добавлена проверка наличия объекта `proxies` в `get_proxies`.
+  - `updater.rs`: `version_tuple` очищает суффиксы предрелизов (`-beta`, `-rc`), корректно сравнивая версии.
+  - `speedtest.rs`: предотвращено деление на ноль при микросекундных замерах (`duration_secs.max(0.001)`).
+  - `rci.rs`: `get_devices` возвращает явный `Err` при таймауте запроса `/rci/show/ip/hotspot` вместо ложного отчёта об отсутствии устройств.
+  - `routing.rs`: `apply_ignore_to_groups` стал устойчивым к любому уровню отступов (2 или 4 пробела) в секциях `- name:`.
+  - `auth.rs`: команды CLI `reset-password` и `set-password` автоматически перезапускают сервис `S99xkeen-route` для немедленного вступления в силу.
+  - `api.rs`: сохранение `config.json` валидирует синтаксис JSON перед записью; переключение режима DNS `enhanced-mode` использует надёжное регулярное выражение; `set_ignore`, `set_domains`, `set_device_routing` сохраняют согласованность состояния и диска при ошибке reload.
+  - `config.rs` & `api.rs`: атомарная запись файлов `atomic_write_file` использует уникальный nonce (`PID + timestamp`) и удаляет временные файлы при сбоях.
+- **Фронтенд (`clipboard.ts`, `nodeParser.ts`, `Settings.tsx`, `api.ts`, `App.tsx`)**:
+  - Создана утилита `clipboard.ts` с безопасным fallback через `document.execCommand('copy')` для HTTP соединений без TLS.
+  - `nodeParser.ts`: реализован безопасный парсинг `parseHostPort` с полной поддержкой IPv6 адресов в квадратных скобках `[::1]:port` для всех протоколов (VLESS, SS, Trojan, Hy2, TUIC).
+  - `Settings.tsx`: устранены преждевременные не-debounced вызовы API из `useEffect` cleanup.
+  - `api.ts`: добавлена корректная обработка HTTP 204 No Content.
+  - `App.tsx`: добавлена синхронизация активной вкладки с историей браузера через события `popstate` и `hashchange`.
+
 
 
 

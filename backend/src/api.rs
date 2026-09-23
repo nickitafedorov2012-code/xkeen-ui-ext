@@ -85,9 +85,19 @@ pub async fn atomic_write_file(path: impl AsRef<std::path::Path>, content: &str)
     if let Some(parent) = p.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
-    let tmp = format!("{}.tmp.{}", p.display(), std::process::id());
-    tokio::fs::write(&tmp, content).await.map_err(|e| format!("Ошибка записи {tmp}: {e}"))?;
-    tokio::fs::rename(&tmp, p).await.map_err(|e| format!("Ошибка атомарного сохранения {}: {e}", p.display()))?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = format!("{}.{}.{}.tmp", p.display(), std::process::id(), nonce);
+    if let Err(e) = tokio::fs::write(&tmp, content).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(format!("Ошибка записи {tmp}: {e}"));
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, p).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(format!("Ошибка атомарного сохранения {}: {e}", p.display()));
+    }
     Ok(())
 }
 
@@ -428,16 +438,11 @@ pub async fn set_ignore(State(state): State<AppState>, Json(req): Json<IgnoreReq
     let mut saved = cfg.provider_filters.clone();
     let new_yaml = routing::apply_ignore_to_providers(&new_yaml, &servers, &mut saved);
     cfg.provider_filters = saved;
-    let tmp = format!("{}.tmp", cfg.mihomo.config_path);
-    if let Err(e) = tokio::fs::write(&tmp, &new_yaml).await {
-        return api_err(format!("Ошибка записи: {e}"));
+    if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
+        return api_err(format!("Ошибка сохранения config.yaml: {e}"));
     }
-    if let Err(e) = tokio::fs::rename(&tmp, &cfg.mihomo.config_path).await {
-        return api_err(format!("Ошибка переименования: {e}"));
-    }
-    if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
-        return api_err(format!("exclude-filter записан, но reload Mihomo не удался: {e}"));
-    }
+
+    let reload_err = mihomo::reload_config(&state.http, &cfg).await.err();
     // exclude-filter провайдера применяется только при его загрузке — принудительно
     // перечитываем провайдеры, иначе игнор не подействует до планового обновления.
     let updated = mihomo::force_update_all_providers(&state.http, &cfg).await;
@@ -445,6 +450,14 @@ pub async fn set_ignore(State(state): State<AppState>, Json(req): Json<IgnoreReq
         return api_err(format!("Ошибка сохранения конфига: {e}"));
     }
     *state.config.write().await = std::sync::Arc::new(cfg);
+
+    if let Some(err) = reload_err {
+        return api_ok(json!({
+            "applied": servers.len(),
+            "providers_updated": updated,
+            "warning": format!("Игнор-лист сохранён, но reload Mihomo вернул ошибку: {err}")
+        }));
+    }
     api_ok(json!({ "applied": servers.len(), "providers_updated": updated }))
 }
 
@@ -573,16 +586,11 @@ pub async fn set_device_routing(State(state): State<AppState>, Json(req): Json<D
         Ok(y) => y,
         Err(e) => return api_err(e),
     };
-    let tmp = format!("{}.tmp", cfg.mihomo.config_path);
-    if let Err(e) = tokio::fs::write(&tmp, &new_yaml).await {
-        return api_err(format!("Ошибка записи: {e}"));
+    if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
+        return api_err(format!("Ошибка сохранения config.yaml: {e}"));
     }
-    if let Err(e) = tokio::fs::rename(&tmp, &cfg.mihomo.config_path).await {
-        return api_err(format!("Ошибка переименования: {e}"));
-    }
-    if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
-        return api_err(format!("Конфиг записан, но reload Mihomo не удался: {e}"));
-    }
+
+    let reload_err = mihomo::reload_config(&state.http, &cfg).await.err();
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
 
     // 3. Перевыбор основного сервера в новой группе
@@ -598,6 +606,15 @@ pub async fn set_device_routing(State(state): State<AppState>, Json(req): Json<D
         return api_err(format!("Ошибка сохранения конфига: {e}"));
     }
     *state.config.write().await = std::sync::Arc::new(cfg);
+
+    if let Some(err) = reload_err {
+        return api_ok(json!({
+            "applied": !servers.is_empty(),
+            "servers": servers,
+            "reselected": reselected,
+            "warning": format!("Маршрутизация сохранена, но reload Mihomo вернул ошибку: {err}")
+        }));
+    }
     api_ok(json!({
         "applied": !servers.is_empty(),
         "servers": servers,
@@ -661,16 +678,11 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
         Ok(y) => y,
         Err(e) => return api_err(e),
     };
-    let tmp = format!("{}.tmp", cfg.mihomo.config_path);
-    if let Err(e) = tokio::fs::write(&tmp, &new_yaml).await {
-        return api_err(format!("Ошибка записи: {e}"));
+    if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
+        return api_err(format!("Ошибка сохранения config.yaml: {e}"));
     }
-    if let Err(e) = tokio::fs::rename(&tmp, &cfg.mihomo.config_path).await {
-        return api_err(format!("Ошибка переименования: {e}"));
-    }
-    if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
-        return api_err(format!("Правила записаны, но reload Mihomo не удался: {e}"));
-    }
+
+    let reload_err = mihomo::reload_config(&state.http, &cfg).await.err();
     if let Err(e) = config::save(&state.config_path, &cfg).await {
         return api_err(format!("Ошибка сохранения конфига: {e}"));
     }
@@ -687,6 +699,16 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
     let (n_direct, n_force) = (cfg.direct_domains.len(), cfg.force_domains.len());
     *state.config.write().await = std::sync::Arc::new(cfg);
     let auto_cdns_list: Vec<String> = auto_cdns.into_iter().collect();
+
+    if let Some(err) = reload_err {
+        return api_ok(json!({
+            "direct": n_direct,
+            "force": n_force,
+            "auto_cdns": auto_cdns_list,
+            "overridden_ips": overridden,
+            "warning": format!("Правила доменов сохранены, но reload Mihomo вернул ошибку: {err}")
+        }));
+    }
     api_ok(json!({
         "direct": n_direct,
         "force": n_force,
@@ -1489,18 +1511,20 @@ pub async fn save_config_file(
         None => return api_err("Недопустимый идентификатор файла"),
     };
 
+    if body.file == "route" {
+        if let Err(e) = serde_json::from_str::<serde_json::Value>(&body.content) {
+            return api_err(format!("Ошибка синтаксиса JSON в файле config.json: {e}"));
+        }
+    }
+
     if path.exists() {
         let bak = format!("{}.bak", path.display());
         let _ = tokio::fs::copy(&path, &bak).await;
     }
 
     let _guard = state.routing_lock.lock().await;
-    let tmp = format!("{}.tmp", path.display());
-    if let Err(e) = tokio::fs::write(&tmp, &body.content).await {
-        return api_err(format!("Ошибка записи временного файла: {}", e));
-    }
-    if let Err(e) = tokio::fs::rename(&tmp, &path).await {
-        return api_err(format!("Ошибка сохранения файла {}: {}", path.display(), e));
+    if let Err(e) = atomic_write_file(&path, &body.content).await {
+        return api_err(format!("Ошибка сохранения файла {}: {e}", path.display()));
     }
 
     log_i!("Файл {} успешно сохранён через веб-редактор", path.display());
@@ -1617,15 +1641,31 @@ pub async fn mihomo_logs_tail(
 
     let log_path = std::path::Path::new(&cfg.mihomo.log_path);
     if log_path.exists() {
-        if let Ok(content) = tokio::fs::read_to_string(log_path).await {
-            let lines: Vec<&str> = content.lines().collect();
-            let start = lines.len().saturating_sub(lines_count);
-            let tail = lines[start..].join("\n");
-            return api_ok(json!({
-                "text": tail,
-                "source": "file",
-                "path": log_path.display().to_string()
-            }));
+        if let Ok(mut f) = tokio::fs::File::open(log_path).await {
+            if let Ok(meta) = f.metadata().await {
+                use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
+                let file_len = meta.len();
+                let max_bytes = 256 * 1024u64;
+                let seek_pos = file_len.saturating_sub(max_bytes);
+                if seek_pos > 0 {
+                    let _ = f.seek(SeekFrom::Start(seek_pos)).await;
+                }
+                let mut buf = Vec::with_capacity((file_len - seek_pos) as usize);
+                if f.read_to_end(&mut buf).await.is_ok() {
+                    let content = String::from_utf8_lossy(&buf);
+                    let mut lines: Vec<&str> = content.lines().collect();
+                    if seek_pos > 0 && !lines.is_empty() {
+                        lines.remove(0);
+                    }
+                    let start = lines.len().saturating_sub(lines_count);
+                    let tail = lines[start..].join("\n");
+                    return api_ok(json!({
+                        "text": tail,
+                        "source": "file",
+                        "path": log_path.display().to_string()
+                    }));
+                }
+            }
         }
     }
 
@@ -1650,6 +1690,19 @@ pub async fn mihomo_logs_tail(
             "path": ""
         })),
     }
+}
+
+/// POST /api/logs/mihomo/clear — усечение файла журнала Mihomo
+pub async fn mihomo_logs_clear(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let log_path = std::path::Path::new(&cfg.mihomo.log_path);
+    if log_path.exists() {
+        if let Err(e) = tokio::fs::write(log_path, b"").await {
+            return api_err(format!("Не удалось очистить лог Mihomo: {e}"));
+        }
+    }
+    log_i!("Журнал Mihomo очищен пользователем");
+    api_ok(json!({ "cleared": true }))
 }
 
 // ==================== МОНИТОРИНГ ТРАФИКА УСТРОЙСТВ ====================
@@ -1907,7 +1960,8 @@ pub async fn get_dns_mode(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
     let config_yaml = tokio::fs::read_to_string(&cfg.mihomo.config_path).await.unwrap_or_default();
 
-    let enhanced_mode = if config_yaml.contains("enhanced-mode: redir-host") || config_yaml.contains("enhanced-mode: 'redir-host'") {
+    let re_redir = regex_lite::Regex::new(r#"(?m)^\s*enhanced-mode:\s*['"]?redir-host['"]?"#).unwrap();
+    let enhanced_mode = if re_redir.is_match(&config_yaml) {
         "redir-host"
     } else {
         "fake-ip"
@@ -1938,12 +1992,9 @@ pub async fn set_dns_mode(
     };
 
     let target_mode = if body.enhanced_mode == "redir-host" { "redir-host" } else { "fake-ip" };
-    let new_yaml = if config_yaml.contains("enhanced-mode:") {
-        config_yaml
-            .replace("enhanced-mode: fake-ip", &format!("enhanced-mode: {}", target_mode))
-            .replace("enhanced-mode: redir-host", &format!("enhanced-mode: {}", target_mode))
-            .replace("enhanced-mode: 'fake-ip'", &format!("enhanced-mode: '{}'", target_mode))
-            .replace("enhanced-mode: 'redir-host'", &format!("enhanced-mode: '{}'", target_mode))
+    let re = regex_lite::Regex::new(r"(?m)^(\s*enhanced-mode:\s*)[^\r\n]+").unwrap();
+    let new_yaml = if re.is_match(&config_yaml) {
+        re.replace(&config_yaml, format!("${{1}}{target_mode}")).into_owned()
     } else {
         config_yaml
     };

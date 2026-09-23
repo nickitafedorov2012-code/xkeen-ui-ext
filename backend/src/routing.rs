@@ -573,11 +573,18 @@ pub fn apply_ignore_to_groups(yaml: &str, ignore: &[String]) -> Result<String, S
     let mut in_old_proxies_list = false;
 
     for line in yaml.lines() {
+        let indent_len = line.len() - line.trim_start().len();
         let trimmed = line.trim();
-        let is_target_start = matches!(
+        let is_group_start = trimmed.starts_with("- name:") && indent_len <= 2;
+        let is_target_start = is_group_start && matches!(
             trimmed,
-            "- name: Fastest" | "- name: Fallback" | "- name: 'Fastest'" | "- name: 'Fallback'"
-        ) && !line.starts_with("    ");
+            "- name: Fastest"
+                | "- name: Fallback"
+                | "- name: 'Fastest'"
+                | "- name: 'Fallback'"
+                | "- name: \"Fastest\""
+                | "- name: \"Fallback\""
+        );
 
         if is_target_start {
             if in_target {
@@ -601,7 +608,7 @@ pub fn apply_ignore_to_groups(yaml: &str, ignore: &[String]) -> Result<String, S
         }
 
         if in_target {
-            let is_new_group = trimmed.starts_with("- name:") && !line.starts_with("    ");
+            let is_new_group = is_group_start;
             let is_new_section = !line.starts_with(' ') && !trimmed.is_empty();
             if is_new_group || is_new_section {
                 if !filter_done && !filter.is_empty() {
@@ -620,7 +627,7 @@ pub fn apply_ignore_to_groups(yaml: &str, ignore: &[String]) -> Result<String, S
             }
 
             if in_old_proxies_list {
-                if line.starts_with("      - ") {
+                if trimmed.starts_with("- ") && indent_len > 2 {
                     continue;
                 }
                 in_old_proxies_list = false;
@@ -634,7 +641,7 @@ pub fn apply_ignore_to_groups(yaml: &str, ignore: &[String]) -> Result<String, S
                 continue;
             }
 
-            if trimmed == "proxies:" && line.starts_with("    ") {
+            if trimmed == "proxies:" && indent_len >= 2 {
                 if use_explicit && !proxies_done && !kept.is_empty() {
                     push_proxies_block(&mut out, &kept);
                     proxies_done = true;

@@ -4,7 +4,6 @@ use axum::extract::State;
 use axum::response::Response;
 use serde::Deserialize;
 use serde_json::json;
-use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
@@ -47,12 +46,16 @@ fn proxied_client(proxy_addr: &str) -> Option<reqwest::Client> {
         .ok()
 }
 
-fn version_tuple(v: &str) -> Vec<u64> {
-    v.trim_start_matches('v')
-        .split(|c: char| !c.is_ascii_digit())
+fn version_tuple(v: &str) -> (Vec<u64>, bool) {
+    let clean = v.trim_start_matches('v');
+    let is_prerelease = clean.contains('-');
+    let main_part = clean.split('-').next().unwrap_or(clean);
+    let parts: Vec<u64> = main_part
+        .split('.')
         .filter(|s| !s.is_empty())
         .filter_map(|s| s.parse::<u64>().ok())
-        .collect()
+        .collect();
+    (parts, !is_prerelease)
 }
 
 fn is_newer(latest: &str, current: &str) -> bool {
@@ -229,11 +232,10 @@ pub async fn install(State(state): State<AppState>) -> Response {
     let tmp_dir = Path::new("/opt/tmp");
     let _ = tokio::fs::create_dir_all(tmp_dir).await;
     let tmp = tmp_dir.join("xkeen-route.update");
-    let tmp_for_check = tmp.clone();
 
     let proxied = proxied_client(&proxy_url);
     let http = proxied.as_ref().unwrap_or(&state.http);
-    let res = match http
+    let mut res = match http
         .get(&url)
         .header("User-Agent", "xkeen-route")
         .timeout(Duration::from_secs(300))
@@ -244,32 +246,54 @@ pub async fn install(State(state): State<AppState>) -> Response {
         Ok(r) => return api_err(format!("Загрузка: HTTP {}", r.status())),
         Err(e) => return api_err(format!("Загрузка: {e}")),
     };
-    let bytes = match res.bytes().await {
-        Ok(b) => b,
-        Err(e) => return api_err(format!("Загрузка: {e}")),
+
+    use tokio::io::AsyncWriteExt;
+    let mut file = match tokio::fs::File::create(&tmp).await {
+        Ok(f) => f,
+        Err(e) => return api_err(format!("Создание временного файла: {e}")),
     };
 
-    // Проверка целостности: размер и ELF-магия.
-    let check = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        if bytes.len() < 1024 * 1024 {
-            return Err(format!("Файл слишком мал ({} байт) — повреждённый артефакт", bytes.len()));
-        }
-        let mut magic = [0u8; 4];
-        let mut cur = std::io::Cursor::new(&bytes[..]);
-        cur.read_exact(&mut magic).map_err(|e| e.to_string())?;
-        if magic != [0x7F, b'E', b'L', b'F'] {
-            return Err("Файл не является ELF-бинарём — отменено".into());
-        }
-        std::fs::write(&tmp_for_check, &bytes).map_err(|e| format!("Запись: {e}"))?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("Проверка: {e}"))
-    .and_then(|r| r);
+    let mut total_bytes = 0usize;
+    let mut magic = [0u8; 4];
+    let mut magic_len = 0usize;
 
-    if let Err(e) = check {
+    loop {
+        match res.chunk().await {
+            Ok(Some(chunk)) => {
+                if magic_len < 4 {
+                    let needed = 4 - magic_len;
+                    let take = chunk.len().min(needed);
+                    magic[magic_len..magic_len + take].copy_from_slice(&chunk[..take]);
+                    magic_len += take;
+                }
+                total_bytes += chunk.len();
+                if let Err(e) = file.write_all(&chunk).await {
+                    let _ = tokio::fs::remove_file(&tmp).await;
+                    return api_err(format!("Запись: {e}"));
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return api_err(format!("Загрузка: {e}"));
+            }
+        }
+    }
+
+    if let Err(e) = file.flush().await {
         let _ = tokio::fs::remove_file(&tmp).await;
-        return api_err(e);
+        return api_err(format!("Сброс буфера: {e}"));
+    }
+    drop(file);
+
+    // Проверка целостности: размер и ELF-магия
+    if total_bytes < 1024 * 1024 {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return api_err(format!("Файл слишком мал ({total_bytes} байт) — повреждённый артефакт"));
+    }
+    if magic != [0x7F, b'E', b'L', b'F'] {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return api_err("Файл не является ELF-бинарём — отменено".into());
     }
 
     // Замена бинаря.

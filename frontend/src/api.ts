@@ -15,6 +15,9 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
   if (res.status === 401) {
     window.dispatchEvent(new CustomEvent('xr:auth-required'))
   }
+  if (res.status === 204) {
+    return {} as T
+  }
   const env: ApiEnvelope<T> = await res.json().catch(() => ({ success: false, error: `HTTP ${res.status}` }))
   if (!env.success) throw new Error(env.error || 'Ошибка API')
   return env.data as T

@@ -3,6 +3,7 @@ import { apiGet, apiPost } from '../api'
 import { pingClass, getFlowStatus, type ProviderInfo, type ServerInfo, type SpeedtestResult } from '../types'
 import OutboundGeneratorModal from './OutboundGeneratorModal'
 import ShareNodeModal from './ShareNodeModal'
+import { copyToClipboard } from '../utils/clipboard'
 
 interface Props {
   notify: (msg: string, isError?: boolean) => void
@@ -369,8 +370,8 @@ export default function Servers({ notify }: Props) {
     }
   }
 
-  const copySubUrl = (id: string, url: string) => {
-    navigator.clipboard.writeText(url)
+  const copySubUrl = async (id: string, url: string) => {
+    await copyToClipboard(url)
     setCopiedUrlId(id)
     notify('URL подписки скопирован в буфер обмена')
     setTimeout(() => setCopiedUrlId(null), 2500)

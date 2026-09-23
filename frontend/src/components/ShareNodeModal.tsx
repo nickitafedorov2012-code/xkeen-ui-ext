@@ -2,6 +2,7 @@ import { useState, useMemo } from 'react'
 import type { ServerInfo } from '../types'
 import { exportServerToLink } from '../utils/nodeParser'
 import { generateQrSvg } from '../utils/qrCode'
+import { copyToClipboard } from '../utils/clipboard'
 
 interface ShareNodeModalProps {
   server: ServerInfo | null
@@ -34,11 +35,15 @@ export default function ShareNodeModal({
     return generateQrSvg(link, 220)
   }, [link])
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(link)
-    setCopied(true)
-    notify('Ссылка подключения скопирована в буфер обмена')
-    setTimeout(() => setCopied(false), 2500)
+  const handleCopy = async () => {
+    const ok = await copyToClipboard(link)
+    if (ok) {
+      setCopied(true)
+      notify('Ссылка подключения скопирована в буфер обмена')
+      setTimeout(() => setCopied(false), 2500)
+    } else {
+      notify('Не удалось скопировать в буфер обмена', true)
+    }
   }
 
   return (

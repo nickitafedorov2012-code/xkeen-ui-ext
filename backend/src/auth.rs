@@ -325,6 +325,14 @@ pub async fn auth_middleware(
     }
 }
 
+fn restart_service_if_exists() {
+    let init_path = Path::new("/opt/etc/init.d/S99xkeen-route");
+    if init_path.exists() {
+        println!("[INFO] Перезапуск сервиса xkeen-route для применения настроек...");
+        let _ = std::process::Command::new(init_path).arg("restart").status();
+    }
+}
+
 /// CLI сброс пароля (xkeen-route reset-password)
 pub fn cli_reset_password(config_path: &Path) -> std::io::Result<()> {
     let mut cfg = config::load(config_path);
@@ -335,6 +343,7 @@ pub fn cli_reset_password(config_path: &Path) -> std::io::Result<()> {
     let serialized = serde_json::to_string_pretty(&cfg).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     std::fs::write(config_path, serialized)?;
     println!("[OK] Пароль успешно сброшен. Авторизация отключена.");
+    restart_service_if_exists();
     Ok(())
 }
 
@@ -354,6 +363,7 @@ pub fn cli_set_password(config_path: &Path, password: &str) -> std::io::Result<(
     let serialized = serde_json::to_string_pretty(&cfg).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     std::fs::write(config_path, serialized)?;
     println!("[OK] Новый пароль установлен. Авторизация включена.");
+    restart_service_if_exists();
     Ok(())
 }
 

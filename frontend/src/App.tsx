@@ -99,6 +99,23 @@ export default function App() {
     return () => window.removeEventListener('xr:auth-required', handleAuthRequired)
   }, [checkAuth])
 
+  // Синхронизация активной вкладки при навигации назад/вперед в браузере
+  useEffect(() => {
+    const handleLocationChange = () => {
+      const h = window.location.hash.replace('#', '')
+      const targetTab = (h === 'antigravity' ? 'google-ai' : h) as TabId
+      if (TABS.some((t) => t.id === targetTab)) {
+        setTab(targetTab)
+      }
+    }
+    window.addEventListener('popstate', handleLocationChange)
+    window.addEventListener('hashchange', handleLocationChange)
+    return () => {
+      window.removeEventListener('popstate', handleLocationChange)
+      window.removeEventListener('hashchange', handleLocationChange)
+    }
+  }, [])
+
   const handleLogout = async () => {
     try {
       await apiPost('auth/logout')
@@ -111,7 +128,9 @@ export default function App() {
 
   const switchTab = (t: TabId) => {
     setTab(t)
-    history.replaceState(null, '', '#' + t)
+    if (window.location.hash !== '#' + t) {
+      window.location.hash = t
+    }
     if (t === 'dashboard' || t === 'settings') {
       refresh()
     }

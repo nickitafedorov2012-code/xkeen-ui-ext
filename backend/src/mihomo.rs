@@ -96,11 +96,15 @@ pub async fn close_all_connections(http: &reqwest::Client, cfg: &AppConfig) {
 /// Mihomo отвечает на /proxies объектом {"proxies": {...}} — достаём карту.
 pub async fn get_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Result<BTreeMap<String, Value>, String> {
     let v = m_get(http, cfg, "/proxies").await?;
+    let proxies_val = v
+        .get("proxies")
+        .ok_or_else(|| "Ответ Mihomo не содержит объект 'proxies' (ядро перезагружается)".to_string())?;
+    let map = proxies_val
+        .as_object()
+        .ok_or_else(|| "Поле 'proxies' ответа Mihomo не является объектом".to_string())?;
     let mut out = BTreeMap::new();
-    if let Some(map) = v.get("proxies").and_then(|p| p.as_object()) {
-        for (k, val) in map {
-            out.insert(k.clone(), val.clone());
-        }
+    for (k, val) in map {
+        out.insert(k.clone(), val.clone());
     }
     Ok(out)
 }
@@ -250,7 +254,7 @@ pub fn resolve_active_leaf(proxies: &BTreeMap<String, Value>) -> String {
     let mut cur = initial;
     let mut visited = std::collections::HashSet::new();
     while let Some(sub) = proxies.get(&cur) {
-        if visited.contains(&cur) {
+        if visited.len() >= 32 || visited.contains(&cur) {
             break;
         }
         visited.insert(cur.clone());
@@ -994,6 +998,15 @@ mod tests {
     fn resolve_leaf_empty_when_no_groups() {
         let p = map(vec![("X", json!({"type": "vless"}))]);
         assert_eq!(resolve_active_leaf(&p), "");
+    }
+
+    #[test]
+    fn resolve_leaf_cyclic_group() {
+        let p = map(vec![
+            ("PROXY", json!({"type": "selector", "now": "Fallback"})),
+            ("Fallback", json!({"type": "fallback", "now": "PROXY"})),
+        ]);
+        assert_eq!(resolve_active_leaf(&p), "PROXY");
     }
 
     #[test]

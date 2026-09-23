@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiGet, apiPost } from '../api'
 import { getFlowStatus, type AntigravityStatus, type ServerInfo } from '../types'
+import { copyToClipboard as doCopy } from '../utils/clipboard'
 
 interface Props {
   notify: (msg: string, isError?: boolean) => void
@@ -154,8 +155,8 @@ export default function Antigravity({ notify }: Props) {
     }
   }
 
-  const copyToClipboard = (text: string, id: string) => {
-    navigator.clipboard.writeText(text)
+  const copyToClipboard = async (text: string, id: string) => {
+    await doCopy(text)
     if (id === 'proxy') {
       setCopiedProxy(true)
       setTimeout(() => setCopiedProxy(false), 2000)

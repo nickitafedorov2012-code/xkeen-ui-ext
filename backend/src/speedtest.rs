@@ -79,7 +79,7 @@ pub async fn run_speedtest(
         return Err("Не удалось выполнить тест скорости: тестовые узлы недоступны".to_string());
     }
 
-    let duration_secs = start.elapsed().as_secs_f64();
+    let duration_secs = start.elapsed().as_secs_f64().max(0.001);
     let speed_mbps = ((total_bytes as f64 * 8.0) / (duration_secs * 1_000_000.0) * 100.0).round() / 100.0;
 
     log_i!(

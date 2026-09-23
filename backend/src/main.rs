@@ -236,11 +236,17 @@ async fn main() {
     let state = AppState {
         config,
         config_path: Arc::new(config_path),
-        http: reqwest::Client::builder()
+        http: match reqwest::Client::builder()
             .danger_accept_invalid_certs(true)
             .cookie_store(true)
             .build()
-            .expect("http client"),
+        {
+            Ok(c) => c,
+            Err(e) => {
+                log_e!("Не удалось инициализировать HTTP клиент: {e}");
+                std::process::exit(1);
+            }
+        },
         failover_log: Arc::new(failover::FailoverLog::default()),
         routing_lock: Arc::new(tokio::sync::Mutex::new(())),
         config_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -344,6 +350,7 @@ async fn main() {
         .route("/api/settings/priority", post(api::set_priority))
         .route("/api/logs", get(api::logs_tail))
         .route("/api/logs/mihomo", get(api::mihomo_logs_tail))
+        .route("/api/logs/mihomo/clear", post(api::mihomo_logs_clear))
         .route("/api/logs/download", get(api::logs_download))
         .route("/api/logs/clear", post(api::logs_clear))
         .route("/api/logs/ws", get(api::logs_ws))
@@ -382,7 +389,7 @@ async fn main() {
                 }
                 Err(e) => {
                     log_e!("Критическая ошибка: не удалось занять адрес {} после 10 попыток: {}", addr, e);
-                    panic!("Не удалось занять адрес {}: {}", addr, e);
+                    std::process::exit(1);
                 }
             }
         }

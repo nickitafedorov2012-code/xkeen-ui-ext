@@ -385,12 +385,24 @@ pub fn load(path: &Path) -> AppConfig {
 /// Сохранение конфига атомарно (tmp + rename).
 pub async fn save(path: &Path, cfg: &AppConfig) -> Result<(), String> {
     let serialized = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
-    if let Some(dir) = path.parent() {
-        let _ = tokio::fs::create_dir_all(dir).await;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let _ = tokio::fs::create_dir_all(parent).await;
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_name = format!("config.{}.{}.tmp", std::process::id(), nonce);
+    let tmp = parent.join(tmp_name);
+
+    if let Err(e) = tokio::fs::write(&tmp, serialized).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e.to_string());
     }
-    let tmp = path.with_extension("json.tmp");
-    tokio::fs::write(&tmp, serialized).await.map_err(|e| e.to_string())?;
-    tokio::fs::rename(&tmp, path).await.map_err(|e| e.to_string())?;
+    if let Err(e) = tokio::fs::rename(&tmp, path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e.to_string());
+    }
     Ok(())
 }
 

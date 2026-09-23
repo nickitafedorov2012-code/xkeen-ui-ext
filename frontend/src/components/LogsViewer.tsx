@@ -99,7 +99,13 @@ export default function LogsViewer({ notify }: LogsViewerProps) {
         notify('Ошибка очистки лога: ' + err.message, true)
       }
     } else {
-      setLines([])
+      try {
+        await apiPost('logs/mihomo/clear', {})
+        setLines([])
+        notify('Журнал Mihomo очищен')
+      } catch (err: any) {
+        notify('Ошибка очистки лога Mihomo: ' + err.message, true)
+      }
     }
   }
 

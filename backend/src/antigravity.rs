@@ -556,6 +556,24 @@ impl AntigravityManager {
 
 /// Обработка клиентского HTTP CONNECT запроса (TCP splice без MITM)
 async fn handle_proxy_conn(mut client: TcpStream, mgr: Arc<AntigravityManager>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Безопасность: доступ разрешён только с loopback и локальной сети (RFC 1918 / ULA)
+    if let Ok(peer_addr) = client.peer_addr() {
+        let ip = peer_addr.ip();
+        let is_private = match ip {
+            std::net::IpAddr::V4(ipv4) => ipv4.is_loopback() || ipv4.is_private() || ipv4.is_link_local(),
+            std::net::IpAddr::V6(ipv6) => {
+                ipv6.is_loopback()
+                    || ((ipv6.segments()[0] & 0xfe00) == 0xfc00)
+                    || ((ipv6.segments()[0] & 0xffc0) == 0xfe80)
+            }
+        };
+        if !is_private {
+            crate::log_w!("[ANTIGRAVITY] Отклонён внешний запрос к прокси с WAN IP: {ip}");
+            let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await;
+            return Ok(());
+        }
+    }
+
     let mut buf = [0u8; 1024];
     let n = client.read(&mut buf).await?;
     if n == 0 {

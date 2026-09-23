@@ -80,6 +80,45 @@ export function parseMultipleLinks(text: string): ParsedNode[] {
   return results
 }
 
+/**
+ * Безопасный парсинг host:port с поддержкой IPv6 [::1]:port и доменных имен.
+ */
+function parseHostPort(hostPort: string, defaultPort = 443): { server: string; port: number } {
+  const hp = hostPort.trim()
+  if (!hp) return { server: '', port: defaultPort }
+
+  // Case 1: Bracketed IPv6, e.g. [2001:db8::1]:8443 or [2001:db8::1]
+  if (hp.startsWith('[')) {
+    const closeBracketIdx = hp.indexOf(']')
+    if (closeBracketIdx !== -1) {
+      const server = hp.slice(1, closeBracketIdx)
+      const after = hp.slice(closeBracketIdx + 1)
+      if (after.startsWith(':')) {
+        const port = parseInt(after.slice(1), 10) || defaultPort
+        return { server, port }
+      }
+      return { server, port: defaultPort }
+    }
+  }
+
+  // Case 2: standard host:port or bare IPv6 without brackets
+  const lastColon = hp.lastIndexOf(':')
+  if (lastColon === -1) {
+    return { server: hp, port: defaultPort }
+  }
+
+  const firstColon = hp.indexOf(':')
+  if (firstColon !== lastColon) {
+    // Multiple colons: likely bare IPv6 without port
+    return { server: hp, port: defaultPort }
+  }
+
+  const server = hp.slice(0, lastColon)
+  const portStr = hp.slice(lastColon + 1)
+  const port = parseInt(portStr, 10) || defaultPort
+  return { server, port }
+}
+
 // -------------------------------------------------------------
 // VLESS Parser
 // -------------------------------------------------------------
@@ -98,8 +137,7 @@ function parseVless(link: string): ParsedNode | null {
   const hostPort = qIdx !== -1 ? rest.slice(0, qIdx) : rest
   const queryStr = qIdx !== -1 ? rest.slice(qIdx + 1) : ''
 
-  const [server, portStr] = hostPort.split(':')
-  const port = parseInt(portStr, 10) || 443
+  const { server, port } = parseHostPort(hostPort, 443)
 
   const params = new URLSearchParams(queryStr)
   const security = params.get('security') || 'none'
@@ -229,9 +267,9 @@ function parseShadowsocks(link: string): ParsedNode | null {
     const colonIdx = decodedUser.indexOf(':')
     cipher = decodedUser.slice(0, colonIdx)
     password = decodedUser.slice(colonIdx + 1)
-    const [s, p] = hostport.split(':')
-    server = s
-    port = parseInt(p, 10) || 8388
+    const hp = parseHostPort(hostport, 8388)
+    server = hp.server
+    port = hp.port
   } else {
     const decoded = decodeBase64Safe(mainPart)
     if (decoded.includes('@')) {
@@ -239,9 +277,9 @@ function parseShadowsocks(link: string): ParsedNode | null {
       const colonIdx = userinfo.indexOf(':')
       cipher = userinfo.slice(0, colonIdx)
       password = userinfo.slice(colonIdx + 1)
-      const [s, p] = hostport.split(':')
-      server = s
-      port = parseInt(p, 10) || 8388
+      const hp = parseHostPort(hostport, 8388)
+      server = hp.server
+      port = hp.port
     }
   }
 
@@ -282,8 +320,7 @@ function parseTrojan(link: string): ParsedNode | null {
   const hostPort = qIdx !== -1 ? rest.slice(0, qIdx) : rest
   const queryStr = qIdx !== -1 ? rest.slice(qIdx + 1) : ''
 
-  const [server, portStr] = hostPort.split(':')
-  const port = parseInt(portStr, 10) || 443
+  const { server, port } = parseHostPort(hostPort, 443)
   const params = new URLSearchParams(queryStr)
   const sni = params.get('sni') || params.get('peer') || ''
 
@@ -323,8 +360,7 @@ function parseHysteria2(link: string): ParsedNode | null {
   const hostPort = qIdx !== -1 ? rest.slice(0, qIdx) : rest
   const queryStr = qIdx !== -1 ? rest.slice(qIdx + 1) : ''
 
-  const [server, portStr] = hostPort.split(':')
-  const port = parseInt(portStr, 10) || 443
+  const { server, port } = parseHostPort(hostPort, 443)
   const params = new URLSearchParams(queryStr)
   const sni = params.get('sni') || ''
   const obfs = params.get('obfs') || ''
@@ -368,9 +404,10 @@ function parseTuic(link: string): ParsedNode | null {
   const hostPort = qIdx !== -1 ? rest.slice(0, qIdx) : rest
   const queryStr = qIdx !== -1 ? rest.slice(qIdx + 1) : ''
 
-  const [uuid, password] = userpass.split(':')
-  const [server, portStr] = hostPort.split(':')
-  const port = parseInt(portStr, 10) || 443
+  const colonIdx = userpass.indexOf(':')
+  const uuid = colonIdx !== -1 ? userpass.slice(0, colonIdx) : userpass
+  const password = colonIdx !== -1 ? userpass.slice(colonIdx + 1) : ''
+  const { server, port } = parseHostPort(hostPort, 443)
   const params = new URLSearchParams(queryStr)
   const sni = params.get('sni') || ''
   const congestion = params.get('congestion_control') || 'bbr'
@@ -443,7 +480,8 @@ export function exportServerToLink(server: {
   raw?: Record<string, any>
 }): string {
   const name = encodeURIComponent(server.name)
-  const host = server.host
+  const rawHost = server.host || ''
+  const host = rawHost.includes(':') && !rawHost.startsWith('[') ? `[${rawHost}]` : rawHost
   const port = server.port || 443
   const proto = (server.protocol || '').toLowerCase()
   const raw = server.raw || {}

@@ -1,6 +1,7 @@
 import { useState, useMemo } from 'react'
 import { parseMultipleLinks, type ParsedNode } from '../utils/nodeParser'
 import { apiPost } from '../api'
+import { copyToClipboard } from '../utils/clipboard'
 
 interface OutboundGeneratorModalProps {
   isOpen?: boolean
@@ -30,13 +31,17 @@ export default function OutboundGeneratorModal({
     return parsedNodes.map((n) => n.yaml).join('\n\n')
   }, [parsedNodes])
 
-  const handleCopyYaml = () => {
+  const handleCopyYaml = async () => {
     if (!combinedYaml) {
       notify('Нет распознанных нод для копирования', true)
       return
     }
-    navigator.clipboard.writeText(combinedYaml)
-    notify(`Скопирован YAML для ${parsedNodes.length} нод(ы)`)
+    const ok = await copyToClipboard(combinedYaml)
+    if (ok) {
+      notify(`Скопирован YAML для ${parsedNodes.length} нод(ы)`)
+    } else {
+      notify('Не удалось скопировать в буфер обмена', true)
+    }
   }
 
   const handleImport = async () => {
