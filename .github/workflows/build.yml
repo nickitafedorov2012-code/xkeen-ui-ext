@@ -41,17 +41,10 @@ jobs:
     permissions:
       contents: write
     strategy:
-      fail-fast: false
       matrix:
         include:
           - target: aarch64-unknown-linux-musl
             name: arm64-v8a
-            rustflags: "-C target-feature=+crt-static"
-          - target: mipsel-unknown-linux-musl
-            name: mips32le
-            rustflags: "-C target-feature=+crt-static"
-          - target: mips-unknown-linux-musl
-            name: mips32
             rustflags: "-C target-feature=+crt-static"
           - target: armv7-unknown-linux-musleabihf
             name: armv7-v7a
