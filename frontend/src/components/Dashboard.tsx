@@ -37,7 +37,12 @@ function groupEvents(rawEvents: FailoverEventInfo[]): GroupedEvent[] {
   }
 
   const normMsg = (msg: string) => {
-    return msg.replace(/\(\d+\s*мс\)/i, '').trim()
+    return msg
+      .replace(/пинг\s*\d+\s*мс/gi, '')
+      .replace(/\(\d+\s*мс\)/gi, '')
+      .replace(/\(в норме[^)]*\)/gi, '')
+      .replace(/\s+/g, ' ')
+      .trim()
   }
 
   const grouped: GroupedEvent[] = []
@@ -151,41 +156,120 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
 
       {/* Оперативные виджеты */}
       <div className="grid2">
-        {/* КАРТОЧКА 1: Активный сервер с историей пинга */}
-        <section className="card">
+        {/* КАРТОЧКА 1: Активный сервер */}
+        <section className="card active-server-card">
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
             <h2 style={{ margin: 0 }}>🛰 Активный сервер</h2>
-            {onSwitchTab && (
-              <button
-                type="button"
-                className="btn sm ghost"
-                onClick={() => onSwitchTab('servers')}
-                title="Перейти к полному списку серверов"
-              >
-                Все серверы →
-              </button>
-            )}
+            <span className="badge badge-online" style={{ color: '#22c55e' }}>
+              🟢 В сети
+            </span>
           </div>
 
           {status?.active_server ? (
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-                {status.active_server.provider && (
-                  <span className="tag-provider" style={{ cursor: 'default' }}>
-                    📦 {status.active_server.provider_name || status.active_server.provider}
+            <div className="active-server-hero">
+              {/* Верхняя идентичность: флаг, имя, протокол, подписка */}
+              <div className="active-server-top">
+                <div className="active-server-identity">
+                  <span className="active-server-flag">
+                    {getCountryFlag(status.active_server.name)}
                   </span>
-                )}
-                <b style={{ fontSize: 15, color: '#f8fafc' }}>{status.active_server.name}</b>
-                <span className={'ping ' + pingClass(status.active_server.ping_ms)}>
-                  {status.active_server.ping_ms > 0 ? `${status.active_server.ping_ms} мс` : '—'}
-                </span>
+                  <div className="active-server-title">
+                    <span className="active-server-name">{status.active_server.name}</span>
+                    <div className="active-server-badges">
+                      {status.active_server.protocol && (
+                        <span className="badge" style={{ fontSize: 10, padding: '1px 6px' }}>
+                          {status.active_server.protocol}
+                        </span>
+                      )}
+                      {status.active_server.provider && (
+                        <span className="tag-provider" style={{ cursor: 'default', fontSize: 11, padding: '1px 7px' }}>
+                          📁 {status.active_server.provider_name || status.active_server.provider}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{ textAlign: 'right' }}>
+                  <div className={'ping ' + pingClass(status.active_server.ping_ms)} style={{ fontSize: 15, fontWeight: 700 }}>
+                    {status.active_server.ping_ms > 0 ? `${status.active_server.ping_ms} мс` : '—'}
+                  </div>
+                  <div className="muted small" style={{ fontSize: 11 }}>
+                    {status.active_server.ping_ms > 0 && status.active_server.ping_ms <= 100
+                      ? 'отличный отклик'
+                      : status.active_server.ping_ms > 100 && status.active_server.ping_ms <= 250
+                      ? 'хороший отклик'
+                      : status.active_server.ping_ms > 250
+                      ? 'высокая задержка'
+                      : 'проверка…'}
+                  </div>
+                </div>
               </div>
-              {pingHistory.length >= 2 && <PingSparkline data={pingHistory} />}
+
+              {/* Таблица параметров в едином стиле с соседней карточкой */}
+              <ul className="kv" style={{ margin: '4px 0 8px' }}>
+                <li>
+                  <span>Хост и порт</span>
+                  <b className="mono" style={{ fontSize: 12 }}>
+                    {status.active_server.host ? `${status.active_server.host}${status.active_server.port ? `:${status.active_server.port}` : ''}` : '—'}
+                  </b>
+                </li>
+                <li>
+                  <span>Роль в Failover</span>
+                  <b>
+                    {f?.priority_server && f.priority_server === status.active_server.name ? (
+                      <span style={{ color: '#22c55e' }}>★ Основной (приоритетный)</span>
+                    ) : f?.priority_chain && f.priority_chain.indexOf(status.active_server.id) === 0 ? (
+                      <span style={{ color: '#22c55e' }}>★ Основной (в цепочке)</span>
+                    ) : f?.priority_chain && f.priority_chain.indexOf(status.active_server.id) > 0 ? (
+                      <span style={{ color: '#eab308' }}>⚡ Резервный (РЕЗ{f.priority_chain.indexOf(status.active_server.id)})</span>
+                    ) : (
+                      <span style={{ color: 'var(--muted)' }}>Обычный сервер</span>
+                    )}
+                  </b>
+                </li>
+                <li>
+                  <span>Режим трафика</span>
+                  <b>Rule (авто-маршрутизация)</b>
+                </li>
+              </ul>
+
+              {/* График стабильности задержки */}
               {pingHistory.length >= 2 && (
-                <p className="muted small" style={{ marginTop: 6, marginBottom: 0 }}>
-                  Стабильность за последние {pingHistory.length} опросов (всплески = задержка)
-                </p>
+                <div className="active-server-sparkline-box">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+                    <span className="muted small" style={{ fontSize: 11 }}>Стабильность пинга ({pingHistory.length} точек):</span>
+                    <span className="muted small" style={{ fontSize: 11, fontFamily: 'monospace' }}>
+                      мин: {Math.min(...(pingHistory.filter((p) => p.ok).map((p) => p.ms).length > 0 ? pingHistory.filter((p) => p.ok).map((p) => p.ms) : [0]))} мс / макс: {Math.max(...(pingHistory.filter((p) => p.ok).map((p) => p.ms).length > 0 ? pingHistory.filter((p) => p.ok).map((p) => p.ms) : [0]))} мс
+                    </span>
+                  </div>
+                  <PingSparkline data={pingHistory} />
+                </div>
               )}
+
+              {/* Кнопки перехода и действий */}
+              <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                {onSwitchTab && (
+                  <button
+                    type="button"
+                    className="btn ghost sm"
+                    onClick={() => onSwitchTab('servers')}
+                    style={{ flex: 1 }}
+                    title="Выбрать другой сервер из списка"
+                  >
+                    🔌 Сменить сервер →
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn ghost sm"
+                  onClick={runCheck}
+                  disabled={checking}
+                  title="Измерить текущую задержку"
+                >
+                  ⚡ Проверить пинг
+                </button>
+              </div>
             </div>
           ) : (
             <p className="muted">Сервер не выбран или Mihomo не запущен.</p>
@@ -275,7 +359,14 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
       {/* КАРТОЧКА 3: Блок событий с группировкой и цветовой разметкой */}
       <section className="card" style={{ marginTop: 14 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-          <h2 style={{ margin: 0 }}>📋 Журнал событий Failover</h2>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <h2 style={{ margin: 0 }}>📋 Журнал событий Failover</h2>
+            {groupedEvents.length > 0 && (
+              <span className="badge" style={{ fontSize: 11, background: 'rgba(255,255,255,0.06)' }}>
+                {groupedEvents.length} {groupedEvents.length === 1 ? 'запись' : 'записей'}
+              </span>
+            )}
+          </div>
           {onSwitchTab && (
             <button
               type="button"
@@ -289,7 +380,13 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
         </div>
 
         {groupedEvents.length === 0 ? (
-          <p className="muted">Событий пока нет. Запустите проверку для получения данных.</p>
+          <div style={{ padding: '16px 20px', background: 'rgba(34, 197, 94, 0.04)', border: '1px solid rgba(34, 197, 94, 0.15)', borderRadius: 8, display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span style={{ fontSize: 22 }}>🟢</span>
+            <div>
+              <div style={{ fontWeight: 600, color: '#f8fafc', fontSize: 13 }}>Сбоев и переключений не зафиксировано</div>
+              <div className="muted small">Автоматический мониторинг активен. Все серверы работают в штатном режиме.</div>
+            </div>
+          </div>
         ) : (
           <div className="events-container">
             {groupedEvents.map((e, i) => (
@@ -313,26 +410,59 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
   )
 }
 
+function getCountryFlag(name: string): string {
+  const n = name.toLowerCase()
+  if (n.includes('германи') || n.includes('germany') || n.includes('de ') || n.includes('[de]')) return '🇩🇪'
+  if (n.includes('финлянд') || n.includes('finland') || n.includes('fi ') || n.includes('[fi]')) return '🇫🇮'
+  if (n.includes('нидерланд') || n.includes('netherlands') || n.includes('nl ') || n.includes('[nl]')) return '🇳🇱'
+  if (n.includes('швеци') || n.includes('sweden') || n.includes('se ') || n.includes('[se]')) return '🇸🇪'
+  if (n.includes('сша') || n.includes('usa') || n.includes('united states') || n.includes('us ') || n.includes('[us]')) return '🇺🇸'
+  if (n.includes('великобритан') || n.includes('uk ') || n.includes('united kingdom') || n.includes('gb ') || n.includes('[gb]')) return '🇬🇧'
+  if (n.includes('франци') || n.includes('france') || n.includes('fr ') || n.includes('[fr]')) return '🇫🇷'
+  if (n.includes('польш') || n.includes('poland') || n.includes('pl ') || n.includes('[pl]')) return '🇵🇱'
+  if (n.includes('эстони') || n.includes('estonia') || n.includes('ee ') || n.includes('[ee]')) return '🇪🇪'
+  if (n.includes('латви') || n.includes('latvia') || n.includes('lv ') || n.includes('[lv]')) return '🇱🇻'
+  if (n.includes('литв') || n.includes('lithuania') || n.includes('lt ') || n.includes('[lt]')) return '🇱🇹'
+  if (n.includes('турци') || n.includes('turkey') || n.includes('tr ') || n.includes('[tr]')) return '🇹🇷'
+  if (n.includes('казахстан') || n.includes('kazakhstan') || n.includes('kz ') || n.includes('[kz]')) return '🇰🇿'
+  if (n.includes('япони') || n.includes('japan') || n.includes('jp ') || n.includes('[jp]')) return '🇯🇵'
+  if (n.includes('сингапур') || n.includes('singapore') || n.includes('sg ') || n.includes('[sg]')) return '🇸🇬'
+  if (n.includes('швейцари') || n.includes('switzerland') || n.includes('ch ') || n.includes('[ch]')) return '🇨🇭'
+  if (n.includes('австри') || n.includes('austria') || n.includes('at ') || n.includes('[at]')) return '🇦🇹'
+  if (n.includes('чехи') || n.includes('czech') || n.includes('cz ') || n.includes('[cz]')) return '🇨🇿'
+  return '🌐'
+}
+
 /// Мини-график пинга (SVG sparkline): последняя точка справа, провалы — красные.
 function PingSparkline({ data }: { data: { ms: number; ok: boolean }[] }) {
   const W = 280
-  const H = 46
+  const H = 40
   const okVals = data.filter((d) => d.ok).map((d) => d.ms)
   const max = Math.max(100, ...okVals) * 1.15
+  const min = Math.max(0, Math.min(...(okVals.length > 0 ? okVals : [0])) * 0.85)
+  const range = max - min || 1
   const step = data.length > 1 ? W / (data.length - 1) : W
   const y = (d: { ms: number; ok: boolean }) =>
-    d.ok ? H - 4 - (d.ms / max) * (H - 10) : H - 2
+    d.ok ? H - 4 - ((d.ms - min) / range) * (H - 8) : H - 2
   const pts = data.map((d, i) => `${(i * step).toFixed(1)},${y(d).toFixed(1)}`).join(' ')
+  const areaPts = `0,${H} ` + pts + ` ${W},${H}`
   const last = data[data.length - 1]
   return (
-    <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: 'block', marginTop: 8 }}>
-      <polyline points={pts} fill="none" stroke="var(--accent)" strokeWidth="1.6" />
+    <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: 'block' }}>
+      <defs>
+        <linearGradient id="dashSparkGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#22c55e" stopOpacity="0.25" />
+          <stop offset="100%" stopColor="#22c55e" stopOpacity="0.0" />
+        </linearGradient>
+      </defs>
+      <polygon points={areaPts} fill="url(#dashSparkGrad)" />
+      <polyline points={pts} fill="none" stroke="#22c55e" strokeWidth="1.8" />
       {data.map((d, i) =>
         d.ok ? null : (
           <circle key={i} cx={i * step} cy={y(d)} r="2.6" fill="var(--red, #e5484d)" />
         ),
       )}
-      <circle cx={(data.length - 1) * step} cy={y(last)} r="2.6" fill="var(--accent)" />
+      <circle cx={(data.length - 1) * step} cy={y(last)} r="3" fill="#22c55e" />
     </svg>
   )
 }

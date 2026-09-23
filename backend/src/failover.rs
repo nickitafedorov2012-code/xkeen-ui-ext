@@ -160,7 +160,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             String::new()
         };
         let msg = format!("Активный '{}' — пинг {current} мс (в норме{note})", active.name);
-        state.failover_log.push(&msg, false).await;
+        // Не засоряем журнал событий при штатном пинге каждые 15 сек.
         return Ok(msg);
     }
     let reason = if current > 0 {

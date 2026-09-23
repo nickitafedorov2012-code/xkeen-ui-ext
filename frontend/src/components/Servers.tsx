@@ -728,7 +728,6 @@ export default function Servers({ notify }: Props) {
                   {/* Кнопки действий */}
                   <div className="server-actions" style={{ marginTop: 8 }}>
                     {s.is_active && <span className="tag current">✓ ПОДКЛЮЧЁН</span>}
-                    {s.is_priority && <span className="tag priority">★ ПРИОРИТЕТ</span>}
                     <span className="spacer" />
                     {!s.is_active && (
                       <button className="btn sm btn-connect" onClick={() => activate(s)}>

@@ -339,29 +339,37 @@ export default function Antigravity({ notify }: Props) {
       {/* Инструкции по настройке клиентов */}
       <section className="card ag-instructions-card">
         <div className="ag-card-header">
-          <h3>💻 Настройка клиентских устройств и IDE</h3>
-          <span className="ag-card-hint">Два способа использования разблокировки в вашей сети</span>
+          <h3>💻 Как это работает в вашей сети</h3>
+          <span className="ag-card-hint">Прозрачная маршрутизация на уровне интернет-центра Keenetic</span>
         </div>
 
-        <div className="ag-instructions-grid">
-          <div className="ag-instruction-box">
-            <h4>Способ 1: Прозрачный режим (по умолчанию)</h4>
-            <p>
-              Роутер Keenetic через собственный DNS-сервер <code>ndnproxy</code> автоматически перехватывает запросы
-              к целевым доменам и подставляет проверенные IP-адреса.
-            </p>
-            <div className="ag-badge-row">
-              <span className="ag-pill success">✓ Настройка на клиентах НЕ требуется</span>
-              <span className="ag-pill success">✓ Работает для всех ПК, ноутбуков и телефонов в сети</span>
+        <div style={{ background: 'rgba(34, 197, 94, 0.05)', border: '1px solid rgba(34, 197, 94, 0.25)', borderRadius: 10, padding: '16px 20px', marginBottom: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
+            <span style={{ fontSize: 24 }}>✅</span>
+            <div>
+              <h4 style={{ margin: 0, color: '#22c55e', fontSize: 16 }}>Автоматический прозрачный режим активен</h4>
+              <p style={{ margin: '4px 0 0', color: '#e2e8f0', fontSize: 13 }}>
+                <strong>Настройка клиентских устройств НЕ ТРЕБУЕТСЯ.</strong> Никаких скриптов, переменных окружения и приложений на ПК запускать не нужно.
+              </p>
             </div>
           </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 10 }}>
+            <span className="ag-pill success">✓ Авто-перехват DNS (ndnproxy)</span>
+            <span className="ag-pill success">✓ Все ПК, ноутбуки и смартфоны в сети</span>
+            <span className="ag-pill success">✓ Сквозное шифрование TLS (Zero-MITM)</span>
+            <span className="ag-pill success">✓ WAN Direct без утечки в VPN</span>
+          </div>
+        </div>
 
-          <div className="ag-instruction-box">
-            <h4>Способ 2: Через переменную окружения AG_LS_PROXY</h4>
-            <p>
-              Если на вашем ПК установлен бинарный патч Antigravity с переменной <code>AG_LS_PROXY</code>:
+        {/* Сворачиваемый блок для разработчиков */}
+        <details style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 14px' }}>
+          <summary style={{ cursor: 'pointer', fontWeight: 600, color: 'var(--muted)', fontSize: 13, userSelect: 'none' }}>
+            🛠 Для разработчиков: альтернативный доступ через локальный HTTP CONNECT прокси (:53129)
+          </summary>
+          <div style={{ marginTop: 12 }}>
+            <p className="muted small" style={{ marginBottom: 10 }}>
+              Используйте только в том случае, если ваше локальное ПО не использует системный DNS роутера и требует явного указания HTTP-прокси:
             </p>
-
             <div className="ag-code-snippets">
               <div className="ag-code-row">
                 <span className="ag-code-label">Windows PowerShell:</span>
@@ -397,13 +405,7 @@ export default function Antigravity({ notify }: Props) {
               </div>
             </div>
           </div>
-        </div>
-
-        <div className="ag-note-banner">
-          ℹ️ <strong>Обратите внимание:</strong> Бинарный патч самого Antigravity (замена <code>ineligible</code> →{' '}
-          <code>inexigible</code>) выполняется на клиентском компьютере в исполняемом файле IDE / расширения. Роутер
-          обеспечивает надёжную сетевую доставку запросов в обход гео-блокировок.
-        </div>
+        </details>
       </section>
 
       {/* Журнал событий */}
