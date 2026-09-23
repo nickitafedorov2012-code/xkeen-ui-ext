@@ -645,7 +645,7 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
         Ok(y) => y,
         Err(e) => return api_err(format!("Не удалось прочитать config.yaml: {e}")),
     };
-    let new_yaml = match routing::apply_domain_rules(&yaml, &cfg.direct_domains, &all_force) {
+    let new_yaml = match routing::apply_domain_rules(&yaml, &cfg.direct_domains, &all_force, &cfg.device_domain_rules) {
         Ok(y) => y,
         Err(e) => return api_err(e),
     };
@@ -1742,9 +1742,9 @@ pub async fn test_notification(
     Json(body): Json<TestNotificationRequest>,
 ) -> Response {
     let cfg = state.config.read().await.clone();
-    let bot_token = body.telegram_bot_token.unwrap_or(cfg.notifications.telegram_bot_token);
-    let chat_id = body.telegram_chat_id.unwrap_or(cfg.notifications.telegram_chat_id);
-    let webhook = body.webhook_url.unwrap_or(cfg.notifications.webhook_url);
+    let bot_token = body.telegram_bot_token.unwrap_or_else(|| cfg.notifications.telegram_bot_token.clone());
+    let chat_id = body.telegram_chat_id.unwrap_or_else(|| cfg.notifications.telegram_chat_id.clone());
+    let webhook = body.webhook_url.unwrap_or_else(|| cfg.notifications.webhook_url.clone());
 
     let mut results = Vec::new();
 

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
-use crate::{config::AppConfig, log_i, log_w, mihomo};
+use crate::{config::AppConfig, log_i, log_w};
 
 #[derive(Deserialize)]
 pub struct SpeedtestRequest {
@@ -19,7 +19,7 @@ pub struct SpeedtestResponse {
 /// Выполнение замера скорости загрузки через выбранный прокси-сервер.
 pub async fn run_speedtest(
     _http: &reqwest::Client,
-    cfg: &AppConfig,
+    _cfg: &AppConfig,
     server_id: &str,
 ) -> Result<SpeedtestResponse, String> {
     log_i!("Запуск теста скорости для сервера '{}'", server_id);

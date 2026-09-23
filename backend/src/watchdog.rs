@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
 use crate::{log_i, log_w, mihomo, override_sync, routing, AppState};
@@ -86,7 +85,7 @@ pub fn spawn(state: AppState) {
                         }
 
                         // Перезагрузка ядра Mihomo
-                        if let Err(e) = mihomo::reload(&state.http, &cfg).await {
+                        if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
                             log_w!("[WATCHDOG] Ошибка перезагрузки Mihomo: {}", e);
                         } else {
                             log_i!("[WATCHDOG] ✓ Правила маршрутизации успешно восстановлены и применены в ядре");
@@ -109,5 +108,5 @@ pub fn spawn(state: AppState) {
                 }
             }
         }
-    })
+    });
 }
