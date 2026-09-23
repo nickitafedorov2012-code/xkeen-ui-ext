@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiGet, apiPost } from '../api'
-import { pingClass, type ProviderInfo, type ServerInfo } from '../types'
+import { pingClass, getCountryFlag, type ProviderInfo, type ServerInfo } from '../types'
 
 interface Props {
   notify: (msg: string, isError?: boolean) => void
@@ -623,6 +623,9 @@ export default function Servers({ notify }: Props) {
                       className="server-name"
                       title={`${activeServer.name}\nХост: ${activeServer.host}${activeServer.port ? `:${activeServer.port}` : ''}`}
                     >
+                      <span className="server-flag" style={{ marginRight: 7, fontSize: '1.2em', verticalAlign: 'middle' }}>
+                        {getCountryFlag(activeServer.name)}
+                      </span>
                       {activeServer.name}
                     </span>
                     {ignored.has(activeServer.id) && (
@@ -663,6 +666,9 @@ export default function Servers({ notify }: Props) {
                     className="server-compact-name"
                     title={`${activeServer.name}\nХост: ${activeServer.host}:${activeServer.port}`}
                   >
+                    <span className="server-flag" style={{ marginRight: 6, fontSize: '1.15em', verticalAlign: 'middle' }}>
+                      {getCountryFlag(activeServer.name)}
+                    </span>
                     {activeServer.name}
                   </span>
                   {ignored.has(activeServer.id) && (
@@ -713,6 +719,9 @@ export default function Servers({ notify }: Props) {
                       className="server-name"
                       title={`${s.name}\nХост: ${s.host}${s.port ? `:${s.port}` : ''}\nПротокол: ${s.protocol}`}
                     >
+                      <span className="server-flag" style={{ marginRight: 7, fontSize: '1.2em', verticalAlign: 'middle' }}>
+                        {getCountryFlag(s.name)}
+                      </span>
                       {s.name}
                     </span>
                     {ignored.has(s.id) && (
@@ -769,6 +778,9 @@ export default function Servers({ notify }: Props) {
                     className="server-compact-name"
                     title={`${s.name}\nХост: ${s.host}${s.port ? `:${s.port}` : ''}`}
                   >
+                    <span className="server-flag" style={{ marginRight: 6, fontSize: '1.15em', verticalAlign: 'middle' }}>
+                      {getCountryFlag(s.name)}
+                    </span>
                     {s.name}
                   </span>
                   {ignored.has(s.id) && (
@@ -896,6 +908,9 @@ export default function Servers({ notify }: Props) {
                         />
                       )}
                       <span className="server-name" title={s.name}>
+                        <span className="server-flag" style={{ marginRight: 6, fontSize: '1.15em', verticalAlign: 'middle' }}>
+                          {getCountryFlag(s.name)}
+                        </span>
                         {s.name}
                       </span>
                       {/* Индикация изменений сессии */}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
-import { pingClass, type FailoverEventInfo, type StatusInfo, type GoogleGeoStatus } from '../types'
+import { pingClass, getCountryFlag, type FailoverEventInfo, type StatusInfo, type GoogleGeoStatus } from '../types'
 
 interface Props {
   status: StatusInfo | null
@@ -472,29 +472,6 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
       </section>
     </div>
   )
-}
-
-function getCountryFlag(name: string): string {
-  const n = name.toLowerCase()
-  if (n.includes('германи') || n.includes('germany') || n.includes('de ') || n.includes('[de]')) return '🇩🇪'
-  if (n.includes('финлянд') || n.includes('finland') || n.includes('fi ') || n.includes('[fi]')) return '🇫🇮'
-  if (n.includes('нидерланд') || n.includes('netherlands') || n.includes('nl ') || n.includes('[nl]')) return '🇳🇱'
-  if (n.includes('швеци') || n.includes('sweden') || n.includes('se ') || n.includes('[se]')) return '🇸🇪'
-  if (n.includes('сша') || n.includes('usa') || n.includes('united states') || n.includes('us ') || n.includes('[us]')) return '🇺🇸'
-  if (n.includes('великобритан') || n.includes('uk ') || n.includes('united kingdom') || n.includes('gb ') || n.includes('[gb]')) return '🇬🇧'
-  if (n.includes('франци') || n.includes('france') || n.includes('fr ') || n.includes('[fr]')) return '🇫🇷'
-  if (n.includes('польш') || n.includes('poland') || n.includes('pl ') || n.includes('[pl]')) return '🇵🇱'
-  if (n.includes('эстони') || n.includes('estonia') || n.includes('ee ') || n.includes('[ee]')) return '🇪🇪'
-  if (n.includes('латви') || n.includes('latvia') || n.includes('lv ') || n.includes('[lv]')) return '🇱🇻'
-  if (n.includes('литв') || n.includes('lithuania') || n.includes('lt ') || n.includes('[lt]')) return '🇱🇹'
-  if (n.includes('турци') || n.includes('turkey') || n.includes('tr ') || n.includes('[tr]')) return '🇹🇷'
-  if (n.includes('казахстан') || n.includes('kazakhstan') || n.includes('kz ') || n.includes('[kz]')) return '🇰🇿'
-  if (n.includes('япони') || n.includes('japan') || n.includes('jp ') || n.includes('[jp]')) return '🇯🇵'
-  if (n.includes('сингапур') || n.includes('singapore') || n.includes('sg ') || n.includes('[sg]')) return '🇸🇬'
-  if (n.includes('швейцари') || n.includes('switzerland') || n.includes('ch ') || n.includes('[ch]')) return '🇨🇭'
-  if (n.includes('австри') || n.includes('austria') || n.includes('at ') || n.includes('[at]')) return '🇦🇹'
-  if (n.includes('чехи') || n.includes('czech') || n.includes('cz ') || n.includes('[cz]')) return '🇨🇿'
-  return '🌐'
 }
 
 /// Мини-график пинга (SVG sparkline): последняя точка справа, провалы — красные.

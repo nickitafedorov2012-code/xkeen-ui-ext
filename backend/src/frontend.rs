@@ -1,6 +1,7 @@
 use axum::http::{header, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use rust_embed::Embed;
+use std::path::Path;
 
 #[derive(Embed)]
 #[folder = "../frontend/dist"]
@@ -10,6 +11,27 @@ struct Assets;
 pub async fn serve(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let path = if path.is_empty() { "index.html" } else { path };
+
+    // 0. Проверяем наличие внешней папки dist на диске (для горячих обновлений без пересборки бинарника)
+    let disk_dist = Path::new("/opt/share/xkeen-route/dist");
+    if disk_dist.is_dir() {
+        let candidate = disk_dist.join(path);
+        if candidate.is_file() {
+            if let Ok(data) = tokio::fs::read(&candidate).await {
+                let mime = mime_guess::from_path(&candidate).first_or_octet_stream();
+                return ([(header::CONTENT_TYPE, mime.as_ref())], data).into_response();
+            }
+        }
+        let is_asset = path.contains('.') && !path.ends_with(".html");
+        if !is_asset {
+            let idx = disk_dist.join("index.html");
+            if idx.is_file() {
+                if let Ok(data) = tokio::fs::read(&idx).await {
+                    return ([(header::CONTENT_TYPE, "text/html")], data).into_response();
+                }
+            }
+        }
+    }
 
     // 1. Прямой поиск в Assets
     if let Some(content) = Assets::get(path) {
