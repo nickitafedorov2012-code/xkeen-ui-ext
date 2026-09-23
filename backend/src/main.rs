@@ -10,11 +10,15 @@ mod updater;
 mod override_sync;
 mod cdn_discovery;
 mod antigravity;
+mod auth;
+mod watchdog;
+mod speedtest;
+mod notifications;
 
 use axum::extract::Request;
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::Router;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -76,6 +80,13 @@ enum Command {
     CreateInit,
     /// Показать версию
     Version,
+    /// Сбросить пароль панели (отключить авторизацию)
+    ResetPassword,
+    /// Установить новый пароль панели
+    SetPassword {
+        /// Новый пароль
+        password: String,
+    },
 }
 
 #[derive(Clone)]
@@ -131,7 +142,7 @@ async fn log_requests(req: Request, next: Next) -> Response {
     let start = std::time::Instant::now();
     let res = next.run(req).await;
     // Не логируем частые опросы статуса — шум.
-    if path != "/api/status" {
+    if path != "/api/status" && path != "/api/system/metrics" {
         log_i!(
             "{} {}{} -> {} ({} мс)",
             method,
@@ -168,6 +179,7 @@ async fn wait_for_router_ready(state: &AppState) {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+    let config_path = PathBuf::from(cli.config.clone().unwrap_or_else(|| CONFIG_PATH.to_string()));
 
     match cli.command {
         Some(Command::Version) => {
@@ -181,10 +193,23 @@ async fn main() {
             }
             return;
         }
+        Some(Command::ResetPassword) => {
+            if let Err(e) = auth::cli_reset_password(&config_path) {
+                eprintln!("[ERROR] Не удалось сбросить пароль: {}", e);
+                std::process::exit(1);
+            }
+            return;
+        }
+        Some(Command::SetPassword { password }) => {
+            if let Err(e) = auth::cli_set_password(&config_path, &password) {
+                eprintln!("[ERROR] Не удалось установить пароль: {}", e);
+                std::process::exit(1);
+            }
+            return;
+        }
         None => {}
     }
 
-    let config_path = PathBuf::from(cli.config.clone().unwrap_or_else(|| CONFIG_PATH.to_string()));
     let cfg = config::load(&config_path);
     logger::init(&config_path, &cfg.logs.remote_syslog);
     logger::set_level(&cfg.logs.level);
@@ -220,6 +245,7 @@ async fn main() {
     };
 
     failover::spawn(state.clone());
+    watchdog::spawn(state.clone());
 
     // Начальная и периодическая синхронизация IP принудительно проксируемых доменов и их CDN с geo_override
     let sync_state = state.clone();
@@ -258,41 +284,67 @@ async fn main() {
         }
     });
 
+    let auth_state = state.clone();
 
     let app = Router::new()
+        // Авторизация
+        .route("/api/auth/status", get(auth::auth_status))
+        .route("/api/auth/login", post(auth::login))
+        .route("/api/auth/logout", post(auth::logout))
+        .route("/api/auth/password", post(auth::change_password))
+        // Статус и метрики
         .route("/api/status", get(api::status))
         .route("/api/system/metrics", get(api::get_system_metrics))
+        // Серверы
         .route("/api/servers", get(api::get_servers))
         .route("/api/servers/switch", post(api::switch_server))
         .route("/api/servers/ping", post(api::ping_servers))
         .route("/api/servers/fix-names", post(api::fix_names))
         .route("/api/servers/google-check", get(api::check_google_geo))
+        .route("/api/servers/speedtest", post(api::speedtest_server))
+        .route("/api/servers/import-node", post(api::import_node))
+        // Устройства и маршрутизация
         .route("/api/devices", get(api::get_devices))
+        .route("/api/devices/traffic", get(api::get_devices_traffic))
         .route("/api/devices/policy", post(api::set_device_policy))
         .route("/api/devices/speed", post(api::set_device_speed))
+        .route("/api/devices/domain-rules", get(api::get_device_domain_rules).post(api::set_device_domain_rules))
         .route("/api/policies", get(api::get_policies))
         .route("/api/routing", get(api::get_routing).post(api::apply_routing))
         .route("/api/device-routing", get(api::get_device_routing).post(api::set_device_routing))
         .route("/api/domains", get(api::get_domains).post(api::set_domains))
+        .route("/api/dns/mode", get(api::get_dns_mode).post(api::set_dns_mode))
+        // Сервис XKeen, бэкапы, конфиги
         .route("/api/xkeen/service", post(api::xkeen_service))
+        .route("/api/config-files/list", get(api::list_config_files))
+        .route("/api/config-files/read", get(api::read_config_file))
+        .route("/api/config-files/save", post(api::save_config_file))
         .route("/api/backups", get(api::list_backups).post(api::create_backup))
         .route("/api/backups/restore", post(api::restore_backup))
         .route("/api/backups/delete", post(api::delete_backup))
+        .route("/api/backups/export/{name}", get(api::export_backup))
+        .route("/api/backups/import", post(api::import_backup))
         .route("/api/ignore", get(api::get_ignore).post(api::set_ignore))
+        // Failover и уведомления
         .route("/api/failover/check", post(api::failover_check))
         .route("/api/failover/toggle", post(api::failover_toggle))
         .route("/api/failover/events", get(api::failover_events))
+        .route("/api/notifications/test", post(api::test_notification))
+        // Провайдеры
         .route("/api/providers", get(api::get_providers))
         .route("/api/providers/rename", post(api::rename_provider))
         .route("/api/providers/update", post(api::update_provider))
         .route("/api/providers/add", post(api::add_provider))
         .route("/api/providers/delete", post(api::delete_provider))
+        // Настройки и логи
         .route("/api/settings", get(api::get_settings).put(api::put_settings))
         .route("/api/settings/priority", post(api::set_priority))
         .route("/api/logs", get(api::logs_tail))
+        .route("/api/logs/mihomo", get(api::mihomo_logs_tail))
         .route("/api/logs/download", get(api::logs_download))
         .route("/api/logs/clear", post(api::logs_clear))
         .route("/api/logs/ws", get(api::logs_ws))
+        // Обновление и Antigravity
         .route("/api/update/check", get(crate::updater::check))
         .route("/api/update/install", post(crate::updater::install))
         .route("/api/antigravity/status", get(api::get_antigravity_status))
@@ -300,7 +352,10 @@ async fn main() {
         .route("/api/antigravity/check", post(api::check_antigravity))
         .route("/api/antigravity/fix.cmd", get(api::get_antigravity_fix_cmd))
         .route("/patch", get(api::get_antigravity_patch_script))
+        // Reverse-Proxy Clash API
+        .route("/clash/{*path}", any(api::clash_proxy))
         .fallback(frontend::serve)
+        .layer(middleware::from_fn_with_state(auth_state, auth::auth_middleware))
         .layer(middleware::from_fn(no_cache))
         .layer(middleware::from_fn(log_requests))
         .with_state(state);

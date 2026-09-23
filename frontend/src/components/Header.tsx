@@ -6,7 +6,12 @@ interface HeaderProps {
   status: StatusInfo | null
   notify: (msg: string, isError?: boolean) => void
   refresh: () => Promise<void>
-  onSwitchTab: (tab: 'dashboard' | 'servers' | 'devices' | 'settings' | 'help') => void
+  onSwitchTab: (tab: 'dashboard' | 'servers' | 'devices' | 'settings' | 'help' | 'google-ai') => void
+  theme?: 'dark' | 'light'
+  onToggleTheme?: () => void
+  onOpenEditor?: () => void
+  authStatus?: { enabled: boolean; authenticated: boolean }
+  onLogout?: () => void
 }
 
 function StatusWaveform({ isRunning }: { isRunning: boolean }) {
@@ -151,7 +156,17 @@ function BrandLogoIcon() {
   )
 }
 
-export default function Header({ status, notify, refresh, onSwitchTab }: HeaderProps) {
+export default function Header({
+  status,
+  notify,
+  refresh,
+  onSwitchTab,
+  theme = 'dark',
+  onToggleTheme,
+  onOpenEditor,
+  authStatus,
+  onLogout,
+}: HeaderProps) {
   const [pending, setPending] = useState(false)
   const [liveMetrics, setLiveMetrics] = useState<SystemStats | null>(null)
   const [updateAvailable, setUpdateAvailable] = useState(false)
@@ -377,6 +392,28 @@ export default function Header({ status, notify, refresh, onSwitchTab }: HeaderP
           )}
         </button>
 
+        {onOpenEditor && (
+          <button
+            type="button"
+            className="header-action-btn"
+            onClick={onOpenEditor}
+            title="Редактор конфигов"
+          >
+            <span style={{ fontSize: '15px' }}>📝</span>
+          </button>
+        )}
+
+        {onToggleTheme && (
+          <button
+            type="button"
+            className="header-action-btn"
+            onClick={onToggleTheme}
+            title={theme === 'dark' ? 'Переключить на светлую тему' : 'Переключить на тёмную тему'}
+          >
+            <span style={{ fontSize: '15px' }}>{theme === 'dark' ? '🌙' : '☀️'}</span>
+          </button>
+        )}
+
         <button
           type="button"
           className="header-action-btn"
@@ -385,6 +422,17 @@ export default function Header({ status, notify, refresh, onSwitchTab }: HeaderP
         >
           <IconSettings />
         </button>
+
+        {authStatus?.enabled && authStatus?.authenticated && onLogout && (
+          <button
+            type="button"
+            className="header-action-btn"
+            onClick={onLogout}
+            title="Выйти из панели"
+          >
+            <span style={{ fontSize: '15px' }}>🚪</span>
+          </button>
+        )}
       </div>
     </header>
   )

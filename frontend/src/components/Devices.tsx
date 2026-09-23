@@ -5,6 +5,8 @@ import DeviceRoutingModal from './DeviceRoutingModal'
 import {
   type DeviceInfo,
   type DeviceRoutingEntry,
+  type DeviceTraffic,
+  type DeviceTrafficResponse,
   type PolicyInfo,
   type RoutingAssignmentInfo,
   type ServerInfo,
@@ -14,7 +16,15 @@ interface Props {
   notify: (msg: string, isError?: boolean) => void
 }
 
-type SortColumn = 'device' | 'ip' | 'policy' | 'speed' | 'server'
+type SortColumn = 'device' | 'ip' | 'policy' | 'speed' | 'traffic' | 'server'
+
+function fmtBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return '0 B'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
 
 export default function Devices({ notify }: Props) {
   const [devices, setDevices] = useState<DeviceInfo[]>([])
@@ -23,12 +33,40 @@ export default function Devices({ notify }: Props) {
   const [routing, setRouting] = useState<RoutingAssignmentInfo[]>([])
   const [drMap, setDrMap] = useState<Record<string, DeviceRoutingEntry>>({})
   const [devFailover, setDevFailover] = useState(false)
+  const [trafficMap, setTrafficMap] = useState<Record<string, DeviceTraffic>>({})
+  const [totalDownBytes, setTotalDownBytes] = useState(0)
+  const [totalUpBytes, setTotalUpBytes] = useState(0)
   const [filter, setFilter] = useState('')
   const [statusFilter, setStatusFilter] = useState<'all' | 'online' | 'offline'>('all')
   const [offlineExpanded, setOfflineExpanded] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
+
+  // Периодический опрос трафика (каждые 2 сек)
+  useEffect(() => {
+    let active = true
+    const pollTraffic = async () => {
+      if (document.hidden) return
+      try {
+        const res = await apiGet<DeviceTrafficResponse>('devices/traffic')
+        if (active && res) {
+          setTrafficMap(res.devices || {})
+          setTotalDownBytes(res.download_total || 0)
+          setTotalUpBytes(res.upload_total || 0)
+        }
+      } catch {
+        /* опрос трафика не критичен */
+      }
+    }
+
+    pollTraffic()
+    const timer = setInterval(pollTraffic, 2000)
+    return () => {
+      active = false
+      clearInterval(timer)
+    }
+  }, [])
 
   // Сортировка колонок
   const [sortCol, setSortCol] = useState<SortColumn | null>(null)
@@ -132,6 +170,11 @@ export default function Devices({ notify }: Props) {
           return sortAsc
             ? a.speed_limit_kbps - b.speed_limit_kbps
             : b.speed_limit_kbps - a.speed_limit_kbps
+        }
+        if (sortCol === 'traffic') {
+          const ta = (trafficMap[a.ip]?.download_bytes || 0) + (trafficMap[a.ip]?.upload_bytes || 0)
+          const tb = (trafficMap[b.ip]?.download_bytes || 0) + (trafficMap[b.ip]?.upload_bytes || 0)
+          return sortAsc ? ta - tb : tb - ta
         }
         if (sortCol === 'server') {
           const sa = (serverByIp.get(a.ip) || '').toLowerCase()
@@ -404,9 +447,14 @@ export default function Devices({ notify }: Props) {
           </button>
         </div>
 
-        {/* Сводка количества */}
-        <div className="devices-summary-text">
-          {onlineTotal} online / {offlineTotal} offline out of {devices.length} devices
+        {/* Сводка количества и трафика */}
+        <div className="devices-summary-text" style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span>{onlineTotal} online / {offlineTotal} offline out of {devices.length} devices</span>
+          {(totalDownBytes > 0 || totalUpBytes > 0) && (
+            <span style={{ fontFamily: 'Consolas, monospace', fontSize: 12, color: 'var(--accent)' }}>
+              ⚡ Трафик: ↓ {fmtBytes(totalDownBytes)} · ↑ {fmtBytes(totalUpBytes)}
+            </span>
+          )}
         </div>
       </div>
 
@@ -436,6 +484,9 @@ export default function Devices({ notify }: Props) {
                 <th className="sortable" onClick={() => handleSort('speed')}>
                   Speed{sortIndicator('speed')}
                 </th>
+                <th className="sortable" onClick={() => handleSort('traffic')}>
+                  Traffic{sortIndicator('traffic')}
+                </th>
                 <th className="sortable" onClick={() => handleSort('server')}>
                   Server{sortIndicator('server')}
                 </th>
@@ -447,7 +498,7 @@ export default function Devices({ notify }: Props) {
               {(statusFilter === 'all' || statusFilter === 'online') && (
                 <>
                   <tr>
-                    <td colSpan={7} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
+                    <td colSpan={8} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
                       <span className="devices-group-header online">
                         Online ({sortedOnline.length})
                       </span>
@@ -455,7 +506,7 @@ export default function Devices({ notify }: Props) {
                   </tr>
                   {sortedOnline.length === 0 && (
                     <tr>
-                      <td colSpan={7} className="muted small" style={{ padding: '10px 14px' }}>
+                      <td colSpan={8} className="muted small" style={{ padding: '10px 14px' }}>
                         Нет устройств в сети
                       </td>
                     </tr>
@@ -469,6 +520,7 @@ export default function Devices({ notify }: Props) {
                       assigned={serverByIp.get(d.ip)}
                       drEntry={drMap[d.ip]}
                       devFailover={devFailover}
+                      traffic={trafficMap[d.ip]}
                       busy={busy}
                       selected={selected.has(d.mac)}
                       onToggleSelect={toggleSelect}
@@ -486,7 +538,7 @@ export default function Devices({ notify }: Props) {
               {statusFilter === 'all' && (
                 <>
                   <tr>
-                    <td colSpan={7} style={{ padding: '16px 14px 4px', borderBottom: 'none' }}>
+                    <td colSpan={8} style={{ padding: '16px 14px 4px', borderBottom: 'none' }}>
                       <div className="offline-section-title">OFFLINE SECTION</div>
                       <div
                         className="offline-accordion-row"
@@ -516,6 +568,7 @@ export default function Devices({ notify }: Props) {
                         assigned={serverByIp.get(d.ip)}
                         drEntry={drMap[d.ip]}
                         devFailover={devFailover}
+                        traffic={trafficMap[d.ip]}
                         busy={busy}
                         selected={selected.has(d.mac)}
                         onToggleSelect={toggleSelect}
@@ -532,7 +585,7 @@ export default function Devices({ notify }: Props) {
               {statusFilter === 'offline' && (
                 <>
                   <tr>
-                    <td colSpan={7} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
+                    <td colSpan={8} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
                       <span className="devices-group-header">
                         Offline ({sortedOffline.length})
                       </span>
@@ -540,7 +593,7 @@ export default function Devices({ notify }: Props) {
                   </tr>
                   {sortedOffline.length === 0 && (
                     <tr>
-                      <td colSpan={7} className="muted small" style={{ padding: '10px 14px' }}>
+                      <td colSpan={8} className="muted small" style={{ padding: '10px 14px' }}>
                         Нет офлайн-устройств
                       </td>
                     </tr>
@@ -554,6 +607,7 @@ export default function Devices({ notify }: Props) {
                       assigned={serverByIp.get(d.ip)}
                       drEntry={drMap[d.ip]}
                       devFailover={devFailover}
+                      traffic={trafficMap[d.ip]}
                       busy={busy}
                       selected={selected.has(d.mac)}
                       onToggleSelect={toggleSelect}

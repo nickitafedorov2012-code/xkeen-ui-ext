@@ -261,24 +261,26 @@ pub fn sanitize_domains(list: &[String]) -> Vec<String> {
     out
 }
 
-// --- Доменные списки: AUTO-DIRECT / AUTO-FORCE блоки в rules ---
+// --- Доменные списки: AUTO-DIRECT / AUTO-FORCE / AUTO-DEVICE-DOMAINS блоки в rules ---
 
 pub const DIRECT_BEGIN: &str = "# --- AUTO-DIRECT-BEGIN ---";
 pub const DIRECT_END: &str = "# --- AUTO-DIRECT-END ---";
 pub const FORCE_BEGIN: &str = "# --- AUTO-FORCE-BEGIN ---";
 pub const FORCE_END: &str = "# --- AUTO-FORCE-END ---";
+pub const DEV_DOMAINS_BEGIN: &str = "# --- AUTO-DEVICE-DOMAINS-BEGIN ---";
+pub const DEV_DOMAINS_END: &str = "# --- AUTO-DEVICE-DOMAINS-END ---";
 
-/// Удаление доменных блоков (DIRECT/FORCE) из YAML.
+/// Удаление доменных блоков (DIRECT/FORCE/DEVICE-DOMAINS) из YAML.
 pub fn remove_domain_blocks(yaml: &str) -> String {
     let mut out = Vec::new();
     let mut skip = false;
     for line in yaml.lines() {
         let t = line.trim();
-        if t == DIRECT_BEGIN || t == FORCE_BEGIN {
+        if t == DIRECT_BEGIN || t == FORCE_BEGIN || t == DEV_DOMAINS_BEGIN {
             skip = true;
             continue;
         }
-        if t == DIRECT_END || t == FORCE_END {
+        if t == DIRECT_END || t == FORCE_END || t == DEV_DOMAINS_END {
             skip = false;
             continue;
         }
@@ -291,11 +293,18 @@ pub fn remove_domain_blocks(yaml: &str) -> String {
 
 /// Вставка доменных правил в rules: (сразу после строки rules:, чтобы они имели
 /// приоритет над остальными правилами). Пустые списки = блоки удаляются.
-pub fn apply_domain_rules(yaml: &str, direct: &[String], force: &[String]) -> Result<String, String> {
+pub fn apply_domain_rules(
+    yaml: &str,
+    direct: &[String],
+    force: &[String],
+    device_domains: &std::collections::BTreeMap<String, Vec<crate::config::DeviceDomainRule>>,
+) -> Result<String, String> {
     let content = remove_domain_blocks(yaml);
     let direct = sanitize_domains(direct);
     let force = sanitize_domains(force);
-    if direct.is_empty() && force.is_empty() {
+    let has_dev_domains = !device_domains.is_empty() && device_domains.values().any(|v| !v.is_empty());
+
+    if direct.is_empty() && force.is_empty() && !has_dev_domains {
         return Ok(content);
     }
     let lines: Vec<&str> = content.lines().collect();
@@ -304,10 +313,29 @@ pub fn apply_domain_rules(yaml: &str, direct: &[String], force: &[String]) -> Re
         .position(|l| l.trim_end() == "rules:")
         .ok_or("В config.yaml нет секции rules:")?;
 
-    let mut out = Vec::with_capacity(lines.len() + direct.len() + force.len() + 6);
+    let mut out = Vec::with_capacity(lines.len() + direct.len() + force.len() + 12);
     for (i, line) in lines.iter().enumerate() {
         out.push(line.to_string());
         if i == rules_idx {
+            // 1. Персональные доменные правила устройств (наивысший приоритет)
+            if has_dev_domains {
+                out.push(DEV_DOMAINS_BEGIN.to_string());
+                for (ip, rules) in device_domains {
+                    for r in rules {
+                        let dom = r.domain.trim().to_lowercase();
+                        let target = r.target.trim();
+                        if !dom.is_empty() && !target.is_empty() {
+                            out.push(format!(
+                                "  - AND,((SRC-IP-CIDR,{}/32),(DOMAIN-SUFFIX,{})),{},no-resolve",
+                                ip, dom, target
+                            ));
+                        }
+                    }
+                }
+                out.push(DEV_DOMAINS_END.to_string());
+            }
+
+            // 2. Прямые домены (DIRECT)
             if !direct.is_empty() {
                 out.push(DIRECT_BEGIN.to_string());
                 for d in &direct {
@@ -315,6 +343,8 @@ pub fn apply_domain_rules(yaml: &str, direct: &[String], force: &[String]) -> Re
                 }
                 out.push(DIRECT_END.to_string());
             }
+
+            // 3. Принудительные домены (PROXY)
             if !force.is_empty() {
                 out.push(FORCE_BEGIN.to_string());
                 for d in &force {
@@ -815,9 +845,58 @@ mod tests {
         assert_eq!(out, vec!["example.com".to_string()]);
     }
 
+/// Применение всей сохраненной в AppConfig маршрутизации к сырому YAML Mihomo.
+pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> (String, usize) {
+    let mut current = yaml.to_string();
+
+    // 1. Доменные правила (DIRECT / FORCE / PER-DEVICE DOMAINS)
+    if let Ok(with_domains) = apply_domain_rules(&current, &cfg.direct_domains, &cfg.force_domains, &cfg.device_domain_rules) {
+        current = with_domains;
+    }
+
+    // 2. Игнор-лист
+    if let Ok(with_ig) = apply_ignore_to_groups(&current, &cfg.ignore_servers) {
+        current = with_ig;
+    }
+    let mut filters = cfg.provider_filters.clone();
+    current = apply_ignore_to_providers(&current, &cfg.ignore_servers, &mut filters);
+
+    // 3. Per-device назначения
+    let providers = if !cfg.mihomo.device_providers.is_empty() {
+        cfg.mihomo.device_providers.clone()
+    } else {
+        parse_provider_names(&current)
+    };
+
+    let mut assignments = Vec::new();
+    for (ip, dr) in &cfg.device_routing {
+        if let Some(srv) = dr.servers.first() {
+            assignments.push(Assignment {
+                ip: ip.clone(),
+                name: String::new(),
+                server: Some(srv.clone()),
+            });
+        }
+    }
+
+    let count = assignments.len();
+    if let Ok(with_devices) = apply_assignments(&current, &assignments, &providers) {
+        current = with_devices;
+    }
+
+    (current, count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BASE_YAML: &str = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - GEOIP,RU,DIRECT\n  - MATCH,PROXY\n";
+
     #[test]
     fn domain_rules_inserted_and_removed() {
-        let out = apply_domain_rules(BASE_YAML, &["example.com".to_string()], &["forced.org".to_string()]).unwrap();
+        let empty_map = std::collections::BTreeMap::new();
+        let out = apply_domain_rules(BASE_YAML, &["example.com".to_string()], &["forced.org".to_string()], &empty_map).unwrap();
         assert!(out.contains(DIRECT_BEGIN));
         assert!(out.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
         assert!(out.contains("DOMAIN-SUFFIX,forced.org,PROXY"));
@@ -826,24 +905,36 @@ mod tests {
         let dpos = out.find("DOMAIN-SUFFIX,example.com").unwrap();
         assert!(dpos > rpos && dpos - rpos < 80);
         // повторное применение — без дублей
-        let out2 = apply_domain_rules(&out, &["example.com".to_string()], &["forced.org".to_string()]).unwrap();
+        let out2 = apply_domain_rules(&out, &["example.com".to_string()], &["forced.org".to_string()], &empty_map).unwrap();
         assert_eq!(out2.matches("DOMAIN-SUFFIX,example.com").count(), 1);
         // очистка — блоки удалены
-        let cleared = apply_domain_rules(&out2, &[], &[]).unwrap();
+        let cleared = apply_domain_rules(&out2, &[], &[], &empty_map).unwrap();
         assert!(!cleared.contains("DOMAIN-SUFFIX,example.com"));
         assert!(cleared.contains("GEOIP,RU,DIRECT"));
     }
 
     #[test]
     fn domain_rules_work_with_crlf() {
+        let empty_map = std::collections::BTreeMap::new();
         let crlf_yaml = BASE_YAML.replace('\n', "\r\n");
-        let out = apply_domain_rules(&crlf_yaml, &["example.com".to_string()], &["forced.org".to_string()]).unwrap();
+        let out = apply_domain_rules(&crlf_yaml, &["example.com".to_string()], &["forced.org".to_string()], &empty_map).unwrap();
         assert!(out.contains(DIRECT_BEGIN));
         assert!(out.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
         assert!(out.contains("DOMAIN-SUFFIX,forced.org,PROXY"));
         let rpos = out.find("rules:").unwrap();
         let dpos = out.find("DOMAIN-SUFFIX,example.com").unwrap();
         assert!(dpos > rpos && dpos - rpos < 80);
+    }
+
+    #[test]
+    fn device_domain_rules_and_syntax() {
+        let mut dev_map = std::collections::BTreeMap::new();
+        dev_map.insert("192.168.2.118".to_string(), vec![
+            crate::config::DeviceDomainRule { domain: "youtube.com".into(), target: "Netherlands".into() }
+        ]);
+        let out = apply_domain_rules(BASE_YAML, &[], &[], &dev_map).unwrap();
+        assert!(out.contains(DEV_DOMAINS_BEGIN));
+        assert!(out.contains("AND,((SRC-IP-CIDR,192.168.2.118/32),(DOMAIN-SUFFIX,youtube.com)),Netherlands,no-resolve"));
     }
 
     #[test]

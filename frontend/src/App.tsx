@@ -7,8 +7,10 @@ import Settings from './components/Settings'
 import Help from './components/Help'
 import Header from './components/Header'
 import Antigravity from './components/Antigravity'
-import { apiGet } from './api'
-import type { StatusInfo } from './types'
+import LoginModal from './components/LoginModal'
+import ConfigEditor from './components/ConfigEditor'
+import { apiGet, apiPost } from './api'
+import type { AuthStatus, StatusInfo } from './types'
 
 type TabId = 'dashboard' | 'servers' | 'devices' | 'settings' | 'help' | 'google-ai' | 'antigravity'
 
@@ -61,6 +63,49 @@ export default function App() {
   const [status, setStatus] = useState<StatusInfo | null>(null)
   const [connected, setConnected] = useState(true)
   const [toasts, setToasts] = useState<Toast[]>([])
+
+  // Авторизация
+  const [authStatus, setAuthStatus] = useState<AuthStatus>({ enabled: false, authenticated: true })
+
+  // Тема (Dark / Light)
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    return (localStorage.getItem('xr_theme') as 'dark' | 'light') || 'dark'
+  })
+
+  // Глобальный редактор конфигов
+  const [globalEditorOpen, setGlobalEditorOpen] = useState(false)
+
+  // Применение темы
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+    localStorage.setItem('xr_theme', theme)
+  }, [theme])
+
+  const checkAuth = useCallback(async () => {
+    try {
+      const res = await apiGet<AuthStatus>('auth/status')
+      setAuthStatus(res)
+    } catch {
+      /* при ошибке проверки не блокируем */
+    }
+  }, [])
+
+  useEffect(() => {
+    checkAuth()
+    const handleAuthRequired = () => {
+      setAuthStatus((prev) => ({ ...prev, enabled: true, authenticated: false }))
+    }
+    window.addEventListener('xr:auth-required', handleAuthRequired)
+    return () => window.removeEventListener('xr:auth-required', handleAuthRequired)
+  }, [checkAuth])
+
+  const handleLogout = async () => {
+    try {
+      await apiPost('auth/logout')
+    } catch {}
+    setAuthStatus((prev) => ({ ...prev, authenticated: false }))
+    notify('Вы вышли из веб-панели')
+  }
 
   const switchTab = (t: TabId) => {
     setTab(t)
@@ -134,6 +179,11 @@ export default function App() {
           notify={notify}
           refresh={refresh}
           onSwitchTab={switchTab}
+          theme={theme}
+          onToggleTheme={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
+          onOpenEditor={() => setGlobalEditorOpen(true)}
+          authStatus={authStatus}
+          onLogout={handleLogout}
         />
       </ErrorBoundary>
 
@@ -178,7 +228,25 @@ export default function App() {
           </div>
         ))}
       </div>
+
+      {/* Модальное окно авторизации */}
+      <LoginModal
+        isOpen={authStatus.enabled && !authStatus.authenticated}
+        onSuccess={() => {
+          checkAuth()
+          refresh()
+          notify('Успешная авторизация')
+        }}
+      />
+
+      {/* Глобальное модальное окно редактора конфигов */}
+      <ConfigEditor
+        isOpen={globalEditorOpen}
+        onClose={() => setGlobalEditorOpen(false)}
+        notify={notify}
+      />
     </div>
   )
 }
+
 

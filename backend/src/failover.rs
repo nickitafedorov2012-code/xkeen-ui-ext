@@ -129,6 +129,13 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                         match mihomo::switch_server(&state.http, &cfg, &pri.id).await {
                             Ok(_) => {
                                 state.failover_log.push(&msg, true).await;
+                                crate::notifications::notify_failover(
+                                    &state.http,
+                                    &cfg.notifications,
+                                    "restore",
+                                    "Восстановление основного сервера",
+                                    &msg,
+                                ).await;
                                 return Ok(msg);
                             }
                             Err(e) => {
@@ -191,6 +198,13 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             return match mihomo::switch_server(&state.http, &cfg, id).await {
                 Ok(_) => {
                     state.failover_log.push(&msg, true).await;
+                    crate::notifications::notify_failover(
+                        &state.http,
+                        &cfg.notifications,
+                        "switch",
+                        "Сбой сервера — переключение на резерв",
+                        &msg,
+                    ).await;
                     Ok(msg)
                 }
                 Err(e) => {
@@ -230,6 +244,13 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             match mihomo::switch_server(&state.http, &cfg, best_id).await {
                 Ok(_) => {
                     state.failover_log.push(&msg, true).await;
+                    crate::notifications::notify_failover(
+                        &state.http,
+                        &cfg.notifications,
+                        "switch",
+                        "Сбой сервера — переключение на резерв",
+                        &msg,
+                    ).await;
                     Ok(msg)
                 }
                 Err(e) => {
@@ -241,6 +262,13 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         None => {
             let msg = "Все резервные серверы недоступны".to_string();
             state.failover_log.push(&msg, false).await;
+            crate::notifications::notify_failover(
+                &state.http,
+                &cfg.notifications,
+                "all_down",
+                "Критический сбой: Все серверы недоступны!",
+                &msg,
+            ).await;
             Err(msg)
         }
     }

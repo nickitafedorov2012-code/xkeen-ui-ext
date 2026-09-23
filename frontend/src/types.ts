@@ -108,6 +108,55 @@ export interface AppSettings {
   refresh_interval_sec: number
   system: { xkeen_init: string; backup_dir: string }
   logs: { level: string; remote_syslog: string; log_requests: boolean }
+  auth?: { enabled: boolean; password_hash: string; salt: string; session_secret: string }
+  notifications?: { telegram_enabled: boolean; telegram_bot_token: string; telegram_chat_id: string; webhook_url: string }
+}
+
+export interface AuthStatus {
+  enabled: boolean
+  authenticated: boolean
+}
+
+export interface ConfigFile {
+  id: string
+  name: string
+  path: string
+  syntax: 'yaml' | 'json' | 'shell' | 'text'
+}
+
+export interface DeviceTraffic {
+  ip: string
+  download_bytes: number
+  upload_bytes: number
+  active_connections: number
+  active_server: string
+  recent_hosts: string[]
+}
+
+export interface DeviceTrafficResponse {
+  download_total: number
+  upload_total: number
+  devices: Record<string, DeviceTraffic>
+}
+
+export interface DeviceDomainRule {
+  domain: string
+  target: string
+}
+
+export interface SpeedtestResult {
+  server_id: string
+  latency_ms: number
+  speed_mbps: number
+  bytes_downloaded: number
+  duration_secs: number
+}
+
+export type DnsEnhancedMode = 'fake-ip' | 'redir-host'
+
+export interface DnsMode {
+  enhanced_mode: DnsEnhancedMode
+  proxy_dns: string
 }
 
 export function pingClass(ms: number): string {

@@ -1363,6 +1363,659 @@ pub async fn get_antigravity_fix_cmd() -> impl IntoResponse {
         .into_response()
 }
 
+// ==================== ВСТРОЕННЫЙ РЕДАКТОР КОНФИГОВ ====================
+
+#[derive(Deserialize)]
+pub struct ConfigFileQuery {
+    pub file: String,
+}
+
+#[derive(Deserialize)]
+pub struct SaveConfigFileRequest {
+    pub file: String,
+    pub content: String,
+    #[serde(default)]
+    pub reload_mihomo: bool,
+}
+
+fn resolve_config_file_path(id: &str, cfg: &config::AppConfig) -> Option<std::path::PathBuf> {
+    match id {
+        "mihomo" => Some(std::path::PathBuf::from(&cfg.mihomo.config_path)),
+        "route" => Some(if cfg!(target_os = "linux") {
+            std::path::PathBuf::from(crate::CONFIG_PATH)
+        } else {
+            std::path::PathBuf::from("xkeen-route.config.json")
+        }),
+        "override" => Some(std::path::PathBuf::from("/opt/etc/xkeen/ipset/ru_exclude_override.lst")),
+        "xkeen_conf" => Some(std::path::PathBuf::from("/opt/etc/xkeen/xkeen.conf")),
+        "crontab" => Some(std::path::PathBuf::from("/opt/etc/crontab")),
+        other => {
+            if let Some(name) = other.strip_prefix("provider:") {
+                Some(std::path::PathBuf::from(format!("/opt/etc/mihomo/providers/{}.yaml", name)))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// GET /api/config-files/list — список доступных для редактирования файлов
+pub async fn list_config_files(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let mut files = vec![
+        json!({ "id": "mihomo", "name": "Mihomo Config (config.yaml)", "path": cfg.mihomo.config_path, "syntax": "yaml" }),
+        json!({ "id": "route", "name": "XKeen Route Config (config.json)", "path": state.config_path.display().to_string(), "syntax": "json" }),
+        json!({ "id": "override", "name": "RU Override IP List (ru_exclude_override.lst)", "path": "/opt/etc/xkeen/ipset/ru_exclude_override.lst", "syntax": "text" }),
+        json!({ "id": "xkeen_conf", "name": "XKeen Settings (xkeen.conf)", "path": "/opt/etc/xkeen/xkeen.conf", "syntax": "shell" }),
+        json!({ "id": "crontab", "name": "System Crontab (/opt/etc/crontab)", "path": "/opt/etc/crontab", "syntax": "shell" }),
+    ];
+
+    if let Ok(mut entries) = tokio::fs::read_dir("/opt/etc/mihomo/providers").await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("yaml") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    files.push(json!({
+                        "id": format!("provider:{}", stem),
+                        "name": format!("Provider: {}.yaml", stem),
+                        "path": path.display().to_string(),
+                        "syntax": "yaml"
+                    }));
+                }
+            }
+        }
+    }
+
+    api_ok(json!(files))
+}
+
+/// GET /api/config-files/read?file=mihomo
+pub async fn read_config_file(
+    State(state): State<AppState>,
+    Query(q): Query<ConfigFileQuery>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    let path = match resolve_config_file_path(&q.file, &cfg) {
+        Some(p) => p,
+        None => return api_err("Недопустимый идентификатор файла"),
+    };
+
+    match tokio::fs::read_to_string(&path).await {
+        Ok(content) => api_ok(json!({
+            "file": q.file,
+            "path": path.display().to_string(),
+            "content": content
+        })),
+        Err(e) => api_err(format!("Ошибка чтения файла {}: {}", path.display(), e)),
+    }
+}
+
+/// POST /api/config-files/save
+pub async fn save_config_file(
+    State(state): State<AppState>,
+    Json(body): Json<SaveConfigFileRequest>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    let path = match resolve_config_file_path(&body.file, &cfg) {
+        Some(p) => p,
+        None => return api_err("Недопустимый идентификатор файла"),
+    };
+
+    if path.exists() {
+        let bak = format!("{}.bak", path.display());
+        let _ = tokio::fs::copy(&path, &bak).await;
+    }
+
+    let _guard = state.routing_lock.lock().await;
+    let tmp = format!("{}.tmp", path.display());
+    if let Err(e) = tokio::fs::write(&tmp, &body.content).await {
+        return api_err(format!("Ошибка записи временного файла: {}", e));
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, &path).await {
+        return api_err(format!("Ошибка сохранения файла {}: {}", path.display(), e));
+    }
+
+    log_i!("Файл {} успешно сохранён через веб-редактор", path.display());
+
+    if body.file == "route" {
+        *state.config.write().await = std::sync::Arc::new(config::load(&state.config_path));
+    }
+
+    if body.file == "override" {
+        let _ = crate::override_sync::sync_geo_override(&cfg.force_domains).await;
+    }
+
+    if body.reload_mihomo || body.file == "mihomo" {
+        if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
+            return api_ok(json!({
+                "saved": true,
+                "warning": format!("Файл сохранен, но reload Mihomo вернул ошибку: {}", e)
+            }));
+        }
+    }
+
+    api_ok(json!({ "saved": true, "path": path.display().to_string() }))
+}
+
+// ==================== ЭКСПОРТ И ИМПОРТ БЭКАПОВ В БРАУЗЕРЕ ====================
+
+/// GET /api/backups/export/:name — экспорт снимка конфигурации в формате JSON
+pub async fn export_backup(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> Response {
+    if !valid_backup_name(&name) {
+        return api_err("Некорректное имя бэкапа");
+    }
+    let cfg = state.config.read().await.clone();
+    let dir = backup_root(&cfg).join(&name);
+    if !dir.exists() {
+        return api_err("Бэкап не найден");
+    }
+
+    let mihomo_yaml = tokio::fs::read_to_string(dir.join("config.yaml")).await.unwrap_or_default();
+    let route_json = tokio::fs::read_to_string(dir.join("config.json")).await.unwrap_or_default();
+
+    let backup_bundle = json!({
+        "version": "1.0",
+        "name": name,
+        "exported_at": chrono::Local::now().to_rfc3339(),
+        "files": {
+            "config.yaml": mihomo_yaml,
+            "config.json": route_json
+        }
+    });
+
+    let filename = format!("{}.xkbak", name);
+    let payload = serde_json::to_string_pretty(&backup_bundle).unwrap_or_default();
+
+    (
+        [
+            ("Content-Type", "application/json; charset=utf-8"),
+            ("Content-Disposition", &format!("attachment; filename=\"{}\"", filename)),
+            ("Cache-Control", "no-cache, no-store, must-revalidate"),
+        ],
+        payload,
+    )
+        .into_response()
+}
+
+/// POST /api/backups/import — импорт снимка с ПК в хранилище бэкапов
+pub async fn import_backup(
+    State(state): State<AppState>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let files = match body.get("files").and_then(|f| f.as_object()) {
+        Some(f) => f,
+        None => return api_err("Некорректный формат архива бэкапа: отсутствует секция files"),
+    };
+
+    let base_name = body.get("name")
+        .and_then(|n| n.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("imported_{}", chrono::Local::now().format("%Y%m%d_%H%M%S")));
+
+    let safe_name: String = base_name.chars()
+        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .collect();
+
+    let cfg = state.config.read().await.clone();
+    let dir = backup_root(&cfg).join(&safe_name);
+
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        return api_err(format!("Ошибка создания каталога бэкапа: {}", e));
+    }
+
+    if let Some(yaml) = files.get("config.yaml").and_then(|y| y.as_str()) {
+        let _ = tokio::fs::write(dir.join("config.yaml"), yaml).await;
+    }
+    if let Some(json_val) = files.get("config.json").and_then(|j| j.as_str()) {
+        let _ = tokio::fs::write(dir.join("config.json"), json_val).await;
+    }
+
+    log_i!("Импортирован бэкап '{}' в {}", safe_name, dir.display());
+    api_ok(json!({ "imported": safe_name }))
+}
+
+// ==================== СТРИМИНГ ЛОГОВ ЯДРА MIHOMO ====================
+
+/// GET /api/logs/mihomo — получение хвоста логов ядра Mihomo
+pub async fn mihomo_logs_tail(
+    State(state): State<AppState>,
+    Query(q): Query<LogsQuery>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    let lines_count = q.lines.unwrap_or(200);
+
+    let log_path = std::path::Path::new("/opt/var/log/mihomo.log");
+    if log_path.exists() {
+        if let Ok(content) = tokio::fs::read_to_string(log_path).await {
+            let lines: Vec<&str> = content.lines().collect();
+            let start = lines.len().saturating_sub(lines_count);
+            let tail = lines[start..].join("\n");
+            return api_ok(json!({
+                "text": tail,
+                "source": "file",
+                "path": log_path.display().to_string()
+            }));
+        }
+    }
+
+    let url = format!("{}/logs?level=info", cfg.mihomo_url());
+    let mut req = state.http.get(&url);
+    if !cfg.mihomo.secret.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", cfg.mihomo.secret));
+    }
+
+    match req.timeout(std::time::Duration::from_secs(2)).send().await {
+        Ok(resp) => {
+            let body = resp.text().await.unwrap_or_default();
+            api_ok(json!({
+                "text": body,
+                "source": "api",
+                "path": url
+            }))
+        }
+        Err(_) => api_ok(json!({
+            "text": "(Журнал ядра Mihomo пуст или пишется в системный консольный лог)",
+            "source": "none",
+            "path": ""
+        })),
+    }
+}
+
+// ==================== МОНИТОРИНГ ТРАФИКА УСТРОЙСТВ ====================
+
+/// GET /api/devices/traffic — активные соединения и трафик per-device из Mihomo /connections
+pub async fn get_devices_traffic(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let url = format!("{}/connections", cfg.mihomo_url());
+    let mut req = state.http.get(&url);
+    if !cfg.mihomo.secret.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", cfg.mihomo.secret));
+    }
+
+    let resp_val = match req.timeout(std::time::Duration::from_secs(3)).send().await {
+        Ok(res) => res.json::<serde_json::Value>().await.unwrap_or_default(),
+        Err(e) => return api_err(format!("Ошибка опроса /connections: {}", e)),
+    };
+
+    let download_total = resp_val.get("downloadTotal").and_then(|v| v.as_u64()).unwrap_or(0);
+    let upload_total = resp_val.get("uploadTotal").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    let mut per_device: std::collections::BTreeMap<String, serde_json::Value> = std::collections::BTreeMap::new();
+
+    if let Some(connections) = resp_val.get("connections").and_then(|c| c.as_array()) {
+        for conn in connections {
+            let src_ip = conn.get("metadata")
+                .and_then(|m| m.get("sourceIP"))
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            if src_ip.is_empty() {
+                continue;
+            }
+
+            let dl = conn.get("download").and_then(|v| v.as_u64()).unwrap_or(0);
+            let ul = conn.get("upload").and_then(|v| v.as_u64()).unwrap_or(0);
+            let host = conn.get("metadata")
+                .and_then(|m| m.get("host"))
+                .and_then(|h| h.as_str())
+                .unwrap_or("")
+                .to_string();
+            let chain = conn.get("chains")
+                .and_then(|c| c.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let entry = per_device.entry(src_ip.clone()).or_insert_with(|| {
+                json!({
+                    "ip": src_ip,
+                    "download_bytes": 0,
+                    "upload_bytes": 0,
+                    "active_connections": 0,
+                    "active_server": "",
+                    "recent_hosts": Vec::<String>::new()
+                })
+            });
+
+            if let Some(obj) = entry.as_object_mut() {
+                if let Some(d) = obj.get_mut("download_bytes").and_then(|v| v.as_u64()) {
+                    obj.insert("download_bytes".into(), json!(d + dl));
+                }
+                if let Some(u) = obj.get_mut("upload_bytes").and_then(|v| v.as_u64()) {
+                    obj.insert("upload_bytes".into(), json!(u + ul));
+                }
+                if let Some(c) = obj.get_mut("active_connections").and_then(|v| v.as_u64()) {
+                    obj.insert("active_connections".into(), json!(c + 1));
+                }
+                if !chain.is_empty() {
+                    obj.insert("active_server".into(), json!(chain));
+                }
+                if !host.is_empty() {
+                    if let Some(hosts_arr) = obj.get_mut("recent_hosts").and_then(|v| v.as_array_mut()) {
+                        if !hosts_arr.iter().any(|h| h.as_str() == Some(&host)) && hosts_arr.len() < 10 {
+                            hosts_arr.push(json!(host));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    api_ok(json!({
+        "download_total": download_total,
+        "upload_total": upload_total,
+        "devices": per_device
+    }))
+}
+
+// ==================== ЗАМЕР СКОРОСТИ (SPEEDTEST) ====================
+
+/// POST /api/servers/speedtest
+pub async fn speedtest_server(
+    State(state): State<AppState>,
+    Json(body): Json<crate::speedtest::SpeedtestRequest>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    match crate::speedtest::run_speedtest(&state.http, &cfg, &body.server_id).await {
+        Ok(res) => api_ok(serde_json::to_value(res).unwrap_or_default()),
+        Err(e) => api_err(e),
+    }
+}
+
+// ==================== ТЕСТ УВЕДОМЛЕНИЙ (TELEGRAM / WEBHOOK) ====================
+
+#[derive(Deserialize)]
+pub struct TestNotificationRequest {
+    pub telegram_bot_token: Option<String>,
+    pub telegram_chat_id: Option<String>,
+    pub webhook_url: Option<String>,
+}
+
+/// POST /api/notifications/test
+pub async fn test_notification(
+    State(state): State<AppState>,
+    Json(body): Json<TestNotificationRequest>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    let bot_token = body.telegram_bot_token.unwrap_or(cfg.notifications.telegram_bot_token);
+    let chat_id = body.telegram_chat_id.unwrap_or(cfg.notifications.telegram_chat_id);
+    let webhook = body.webhook_url.unwrap_or(cfg.notifications.webhook_url);
+
+    let mut results = Vec::new();
+
+    if !bot_token.is_empty() && !chat_id.is_empty() {
+        let test_msg = "<b>🔔 Тестовое уведомление XKeen Route</b>\n\nСвязь с Telegram Bot API успешно установлена!\nВы будете получать оповещения при сбоях и переключениях серверов Failover.";
+        match crate::notifications::send_telegram(&state.http, &bot_token, &chat_id, test_msg).await {
+            Ok(_) => results.push("Telegram: ✓ Сообщение успешно отправлено".to_string()),
+            Err(e) => results.push(format!("Telegram: ❌ {}", e)),
+        }
+    }
+
+    if !webhook.is_empty() {
+        match crate::notifications::send_webhook(
+            &state.http,
+            &webhook,
+            "test",
+            "Тестовое уведомление",
+            "Тестовая проверка Webhook из веб-панели XKeen Route",
+        ).await {
+            Ok(_) => results.push("Webhook: ✓ Запрос успешно доставлен".to_string()),
+            Err(e) => results.push(format!("Webhook: ❌ {}", e)),
+        }
+    }
+
+    if results.is_empty() {
+        return api_err("Укажите Telegram Bot Token и Chat ID или Webhook URL для теста");
+    }
+
+    api_ok(json!({ "results": results }))
+}
+
+// ==================== ИМПОРТ НОД (OUTBOUND GENERATOR) ====================
+
+#[derive(Deserialize)]
+pub struct ImportNodeRequest {
+    pub yaml_content: String,
+    pub target: String, // "config" | "provider"
+    pub provider_name: Option<String>,
+}
+
+/// POST /api/servers/import-node
+pub async fn import_node(
+    State(state): State<AppState>,
+    Json(body): Json<ImportNodeRequest>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    let yaml = body.yaml_content.trim();
+    if yaml.is_empty() {
+        return api_err("YAML ноды не может быть пустым");
+    }
+
+    let _guard = state.routing_lock.lock().await;
+
+    if body.target == "provider" {
+        let prov_name = body.provider_name.unwrap_or_else(|| "custom".to_string());
+        let prov_file = format!("/opt/etc/mihomo/providers/{}.yaml", prov_name);
+        let path = std::path::Path::new(&prov_file);
+
+        if let Some(parent) = path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+
+        let mut current_content = tokio::fs::read_to_string(path).await.unwrap_or_else(|_| "proxies:\n".to_string());
+        if !current_content.contains("proxies:") {
+            current_content = format!("proxies:\n{}", current_content);
+        }
+        current_content.push_str("\n");
+        current_content.push_str(yaml);
+        current_content.push_str("\n");
+
+        if let Err(e) = tokio::fs::write(path, &current_content).await {
+            return api_err(format!("Ошибка записи провайдера {}: {}", prov_file, e));
+        }
+
+        if let Ok(config_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+            if !config_yaml.contains(&format!("{}:", prov_name)) {
+                let _ = crate::routing::add_provider_to_yaml(&config_yaml, &prov_name, &format!("file:///opt/etc/mihomo/providers/{}.yaml", prov_name));
+            }
+        }
+
+        let _ = mihomo::reload_config(&state.http, &cfg).await;
+        log_i!("Импортирована нода в провайдер {}", prov_name);
+        return api_ok(json!({ "imported": true, "target": "provider", "file": prov_file }));
+    }
+
+    let config_path = &cfg.mihomo.config_path;
+    let config_yaml = match tokio::fs::read_to_string(config_path).await {
+        Ok(y) => y,
+        Err(e) => return api_err(format!("Ошибка чтения config.yaml: {}", e)),
+    };
+
+    let mut lines: Vec<String> = config_yaml.lines().map(|s| s.to_string()).collect();
+    let proxies_idx = match lines.iter().position(|l| l.trim_end() == "proxies:") {
+        Some(idx) => idx,
+        None => {
+            lines.insert(0, "proxies:".to_string());
+            0
+        }
+    };
+
+    lines.insert(proxies_idx + 1, yaml.to_string());
+    let new_yaml = lines.join("\n");
+
+    if let Err(e) = tokio::fs::write(config_path, &new_yaml).await {
+        return api_err(format!("Ошибка сохранения config.yaml: {}", e));
+    }
+
+    let _ = mihomo::reload_config(&state.http, &cfg).await;
+    log_i!("Нода успешно импортирована в proxies config.yaml");
+    api_ok(json!({ "imported": true, "target": "config" }))
+}
+
+// ==================== УПРАВЛЕНИЕ РЕЖИМАМИ DNS РОУТЕРА ====================
+
+#[derive(Deserialize)]
+pub struct SetDnsModeRequest {
+    pub enhanced_mode: String, // "fake-ip" | "redir-host"
+}
+
+/// GET /api/dns/mode
+pub async fn get_dns_mode(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let config_yaml = tokio::fs::read_to_string(&cfg.mihomo.config_path).await.unwrap_or_default();
+
+    let enhanced_mode = if config_yaml.contains("enhanced-mode: redir-host") || config_yaml.contains("enhanced-mode: 'redir-host'") {
+        "redir-host"
+    } else {
+        "fake-ip"
+    };
+
+    let xkeen_conf = tokio::fs::read_to_string("/opt/etc/xkeen/xkeen.conf").await.unwrap_or_default();
+    let proxy_dns = if xkeen_conf.contains("proxy_dns=\"on\"") || xkeen_conf.contains("proxy_dns='on'") {
+        "on"
+    } else {
+        "off"
+    };
+
+    api_ok(json!({
+        "enhanced_mode": enhanced_mode,
+        "proxy_dns": proxy_dns
+    }))
+}
+
+/// POST /api/dns/mode
+pub async fn set_dns_mode(
+    State(state): State<AppState>,
+    Json(body): Json<SetDnsModeRequest>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    let config_yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+        Ok(y) => y,
+        Err(e) => return api_err(format!("Ошибка чтения config.yaml: {}", e)),
+    };
+
+    let target_mode = if body.enhanced_mode == "redir-host" { "redir-host" } else { "fake-ip" };
+    let new_yaml = if config_yaml.contains("enhanced-mode:") {
+        config_yaml
+            .replace("enhanced-mode: fake-ip", &format!("enhanced-mode: {}", target_mode))
+            .replace("enhanced-mode: redir-host", &format!("enhanced-mode: {}", target_mode))
+            .replace("enhanced-mode: 'fake-ip'", &format!("enhanced-mode: '{}'", target_mode))
+            .replace("enhanced-mode: 'redir-host'", &format!("enhanced-mode: '{}'", target_mode))
+    } else {
+        config_yaml
+    };
+
+    let _guard = state.routing_lock.lock().await;
+    if let Err(e) = tokio::fs::write(&cfg.mihomo.config_path, &new_yaml).await {
+        return api_err(format!("Ошибка сохранения config.yaml: {}", e));
+    }
+
+    let _ = mihomo::reload_config(&state.http, &cfg).await;
+    log_i!("Режим DNS Mihomo переключен на {}", target_mode);
+    api_ok(json!({ "saved": true, "enhanced_mode": target_mode }))
+}
+
+// ==================== PER-DEVICE DOMAIN RULES ====================
+
+#[derive(Deserialize)]
+pub struct SetDeviceDomainRulesRequest {
+    pub ip: String,
+    pub rules: Vec<crate::config::DeviceDomainRule>,
+}
+
+/// GET /api/devices/domain-rules
+pub async fn get_device_domain_rules(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    api_ok(json!(cfg.device_domain_rules))
+}
+
+/// POST /api/devices/domain-rules
+pub async fn set_device_domain_rules(
+    State(state): State<AppState>,
+    Json(body): Json<SetDeviceDomainRulesRequest>,
+) -> Response {
+    let _cfg_guard = state.config_lock.lock().await;
+    let _guard = state.routing_lock.lock().await;
+
+    let mut cur = (**state.config.read().await).clone();
+    if body.rules.is_empty() {
+        cur.device_domain_rules.remove(&body.ip);
+    } else {
+        cur.device_domain_rules.insert(body.ip.clone(), body.rules);
+    }
+
+    if let Err(e) = config::save(&state.config_path, &cur).await {
+        return api_err(format!("Ошибка сохранения config.json: {}", e));
+    }
+    *state.config.write().await = std::sync::Arc::new(cur.clone());
+
+    if let Ok(raw_yaml) = tokio::fs::read_to_string(&cur.mihomo.config_path).await {
+        let (new_yaml, _) = crate::routing::apply_routing(&raw_yaml, &cur);
+        let _ = tokio::fs::write(&cur.mihomo.config_path, &new_yaml).await;
+        let _ = mihomo::reload_config(&state.http, &cur).await;
+    }
+
+    log_i!("Обновлены индивидуальные доменные правила для устройства {}", body.ip);
+    api_ok(json!({ "saved": true, "ip": body.ip }))
+}
+
+// ==================== СКВОЗНОЙ РЕЛЕЙ CLASH API (REVERSE PROXY) ====================
+
+/// Сквозной Reverse-Proxy для Clash REST API (/clash/{*path})
+pub async fn clash_proxy(
+    State(state): State<AppState>,
+    req: axum::extract::Request,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    let path = req.uri().path().strip_prefix("/clash").unwrap_or("");
+    let query = req.uri().query().map(|q| format!("?{}", q)).unwrap_or_default();
+    let target_url = format!("http://127.0.0.1:{}{}{}", cfg.mihomo.port, path, query);
+
+    let method = req.method().clone();
+    let mut proxy_req = state.http.request(method, &target_url);
+
+    if !cfg.mihomo.secret.is_empty() {
+        proxy_req = proxy_req.header("Authorization", format!("Bearer {}", cfg.mihomo.secret));
+    }
+
+    for (k, v) in req.headers() {
+        if k != "host" && k != "authorization" {
+            proxy_req = proxy_req.header(k, v);
+        }
+    }
+
+    let body_bytes = match axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return api_err("Ошибка чтения тела запроса"),
+    };
+    if !body_bytes.is_empty() {
+        proxy_req = proxy_req.body(body_bytes);
+    }
+
+    match proxy_req.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let headers = resp.headers().clone();
+            let bytes = resp.bytes().await.unwrap_or_default();
+
+            let mut response = (status, bytes).into_response();
+            for (k, v) in headers {
+                if let Some(key) = k {
+                    response.headers_mut().insert(key, v);
+                }
+            }
+            response
+        }
+        Err(e) => api_err(format!("Ошибка проксирования к Clash API: {}", e)),
+    }
+}
+
+
 
 
 

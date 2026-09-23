@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiGet, apiPost } from '../api'
-import { pingClass, getFlowStatus, type ProviderInfo, type ServerInfo } from '../types'
+import { pingClass, getFlowStatus, type ProviderInfo, type ServerInfo, type SpeedtestResult } from '../types'
+import OutboundGeneratorModal from './OutboundGeneratorModal'
 
 interface Props {
   notify: (msg: string, isError?: boolean) => void
@@ -33,6 +34,13 @@ export default function Servers({ notify }: Props) {
   const [loading, setLoading] = useState(true)
   const [pinging, setPinging] = useState(false)
   const [moreMenuOpen, setMoreMenuOpen] = useState(false)
+
+  // Генератор и импорт ссылок
+  const [generatorOpen, setGeneratorOpen] = useState(false)
+
+  // Speedtest
+  const [speedtestingId, setSpeedtestingId] = useState<string | null>(null)
+  const [speedResults, setSpeedResults] = useState<Record<string, SpeedtestResult>>({})
 
   // Игнор-лист
   const [ignored, setIgnored] = useState<Set<string>>(new Set())
@@ -124,6 +132,19 @@ export default function Servers({ notify }: Props) {
       setPinging(false)
     }
   }, [notify])
+
+  const runSpeedtest = async (s: ServerInfo) => {
+    setSpeedtestingId(s.id)
+    try {
+      const res = await apiPost<SpeedtestResult>('servers/speedtest', { server_id: s.id })
+      setSpeedResults((prev) => ({ ...prev, [s.id]: res }))
+      notify(`Скорость ${s.name}: ${res.speed_mbps.toFixed(1)} Мбит/с (${res.latency_ms} мс)`)
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка замера скорости', true)
+    } finally {
+      setSpeedtestingId(null)
+    }
+  }
 
   // Горячие клавиши и события переключения
   useEffect(() => {
@@ -565,6 +586,10 @@ export default function Servers({ notify }: Props) {
         </div>
 
         {/* Управление списками */}
+        <button className="btn" onClick={() => setGeneratorOpen(true)} title="Импортировать vless/vmess/ss/trojan/hy2/tuic ссылки">
+          🪄 Импорт ссылок
+        </button>
+
         {providers.length > 0 && (
           <button className="btn" onClick={openProvidersModal} title="Управление и переименование подписок">
             📦 Подписки ({providers.length})
@@ -660,6 +685,11 @@ export default function Servers({ notify }: Props) {
                         🚫 Исключён
                       </span>
                     )}
+                    {speedResults[activeServer.id] && (
+                      <span className="badge badge-speed" title={`Замер скорости: ${speedResults[activeServer.id].speed_mbps.toFixed(2)} Мбит/с (${speedResults[activeServer.id].latency_ms} мс)`}>
+                        ⚡ {speedResults[activeServer.id].speed_mbps.toFixed(1)} Мбит/с
+                      </span>
+                    )}
                     <span className={'ping ' + pingClass(activeServer.ping_ms)}>
                       {activeServer.ping_ms > 0 ? `${activeServer.ping_ms} мс` : '—'}
                     </span>
@@ -669,6 +699,14 @@ export default function Servers({ notify }: Props) {
                       Хост: {activeServer.host}{activeServer.port ? `:${activeServer.port}` : ''}
                     </span>
                     <span className="spacer" />
+                    <button
+                      className={`btn sm ghost btn-speedtest ${speedtestingId === activeServer.id ? 'loading' : ''}`}
+                      onClick={() => runSpeedtest(activeServer)}
+                      disabled={speedtestingId !== null}
+                      title="Замерить реальную скорость загрузки через этот прокси"
+                    >
+                      {speedtestingId === activeServer.id ? '⏳ Замер…' : '🚀 Скорость'}
+                    </button>
                     <button
                       className={`btn sm ghost btn-priority ${activeServer.is_priority ? 'is-priority' : ''}`}
                       onClick={() => setPriority(activeServer)}
@@ -707,15 +745,31 @@ export default function Servers({ notify }: Props) {
                   {ignored.has(activeServer.id) && (
                     <span className="tag ignored" style={{ fontSize: 10 }}>🚫</span>
                   )}
+                  {speedResults[activeServer.id] && (
+                    <span className="badge badge-speed" style={{ fontSize: 10, padding: '1px 5px' }}>
+                      ⚡ {speedResults[activeServer.id].speed_mbps.toFixed(1)}M
+                    </span>
+                  )}
                   <span className={'ping ' + pingClass(activeServer.ping_ms)}>
                     {activeServer.ping_ms > 0 ? `${activeServer.ping_ms} мс` : '—'}
                   </span>
-                  <button
-                    className={`btn sm ghost btn-priority ${activeServer.is_priority ? 'is-priority' : ''}`}
-                    onClick={() => setPriority(activeServer)}
-                  >
-                    {activeServer.is_priority ? '★' : '☆'}
-                  </button>
+                  <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                    <button
+                      className={`btn sm ghost btn-speedtest ${speedtestingId === activeServer.id ? 'loading' : ''}`}
+                      onClick={() => runSpeedtest(activeServer)}
+                      disabled={speedtestingId !== null}
+                      style={{ padding: '3px 6px' }}
+                      title="Замерить скорость"
+                    >
+                      {speedtestingId === activeServer.id ? '⏳' : '🚀'}
+                    </button>
+                    <button
+                      className={`btn sm ghost btn-priority ${activeServer.is_priority ? 'is-priority' : ''}`}
+                      onClick={() => setPriority(activeServer)}
+                    >
+                      {activeServer.is_priority ? '★' : '☆'}
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -768,6 +822,11 @@ export default function Servers({ notify }: Props) {
                         🚫 Исключён
                       </span>
                     )}
+                    {speedResults[s.id] && (
+                      <span className="badge badge-speed" title={`Замер скорости: ${speedResults[s.id].speed_mbps.toFixed(2)} Мбит/с (${speedResults[s.id].latency_ms} мс)`}>
+                        ⚡ {speedResults[s.id].speed_mbps.toFixed(1)} Мбит/с
+                      </span>
+                    )}
                     <span className={'ping ' + pingClass(s.ping_ms)}>
                       {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
                     </span>
@@ -777,6 +836,14 @@ export default function Servers({ notify }: Props) {
                   <div className="server-actions" style={{ marginTop: 8 }}>
                     {s.is_active && <span className="tag current">✓ ПОДКЛЮЧЁН</span>}
                     <span className="spacer" />
+                    <button
+                      className={`btn sm ghost btn-speedtest ${speedtestingId === s.id ? 'loading' : ''}`}
+                      onClick={() => runSpeedtest(s)}
+                      disabled={speedtestingId !== null}
+                      title="Замерить реальную скорость загрузки через этот прокси"
+                    >
+                      {speedtestingId === s.id ? '⏳ Замер…' : '🚀 Скорость'}
+                    </button>
                     {!s.is_active && (
                       <button className="btn sm btn-connect" onClick={() => activate(s)}>
                         🔌 Подключить
@@ -833,6 +900,11 @@ export default function Servers({ notify }: Props) {
                       🚫 Исключён
                     </span>
                   )}
+                  {speedResults[s.id] && (
+                    <span className="badge badge-speed" style={{ fontSize: 10, padding: '1px 5px' }}>
+                      ⚡ {speedResults[s.id].speed_mbps.toFixed(1)}M
+                    </span>
+                  )}
                   <span
                     className={'ping ' + pingClass(s.ping_ms)}
                     style={{ minWidth: 60, textAlign: 'right' }}
@@ -840,6 +912,15 @@ export default function Servers({ notify }: Props) {
                     {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
                   </span>
                   <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                    <button
+                      className={`btn sm ghost btn-speedtest ${speedtestingId === s.id ? 'loading' : ''}`}
+                      onClick={() => runSpeedtest(s)}
+                      disabled={speedtestingId !== null}
+                      style={{ padding: '3px 6px' }}
+                      title="Замерить скорость"
+                    >
+                      {speedtestingId === s.id ? '⏳' : '🚀'}
+                    </button>
                     {s.is_active ? (
                       <span className="tag current" style={{ fontSize: 10, padding: '2px 6px' }}>✓</span>
                     ) : (
@@ -1184,6 +1265,17 @@ export default function Servers({ notify }: Props) {
           </div>
         </div>
       )}
+
+      {/* Модальное окно импорта и генерации ссылок */}
+      <OutboundGeneratorModal
+        isOpen={generatorOpen}
+        onClose={() => setGeneratorOpen(false)}
+        onImportSuccess={() => {
+          load()
+          notify('Прокси успешно импортированы')
+        }}
+        notify={notify}
+      />
     </section>
   )
 }

@@ -168,6 +168,52 @@ impl Default for LogsConfig {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
+pub struct AuthConfig {
+    pub enabled: bool,
+    pub password_hash: String,
+    pub salt: String,
+    pub session_secret: String,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            password_hash: String::new(),
+            salt: String::new(),
+            session_secret: String::new(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct NotificationsConfig {
+    pub telegram_enabled: bool,
+    pub telegram_bot_token: String,
+    pub telegram_chat_id: String,
+    pub webhook_url: String,
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            telegram_enabled: false,
+            telegram_bot_token: String::new(),
+            telegram_chat_id: String::new(),
+            webhook_url: String::new(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeviceDomainRule {
+    pub domain: String,
+    pub target: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
 pub struct AppConfig {
     pub rci: RciConfig,
     pub mihomo: MihomoConfig,
@@ -179,6 +225,8 @@ pub struct AppConfig {
     pub provider_filters: std::collections::BTreeMap<String, String>,
     /// Per-device цепочки серверов (основной + резервы). Ключ — IP устройства.
     pub device_routing: std::collections::BTreeMap<String, DeviceRouting>,
+    /// Кастомные привязки доменов к устройствам: IP -> [ { domain, target } ]
+    pub device_domain_rules: std::collections::BTreeMap<String, Vec<DeviceDomainRule>>,
     /// Домены, которые всегда идут напрямую (мимо прокси).
     pub direct_domains: Vec<String>,
     /// Домены, которые всегда принудительно через прокси.
@@ -187,6 +235,10 @@ pub struct AppConfig {
     pub system: SystemConfig,
     /// Логирование.
     pub logs: LogsConfig,
+    /// Авторизация и безопасность.
+    pub auth: AuthConfig,
+    /// Уведомления (Telegram / Webhook).
+    pub notifications: NotificationsConfig,
     /// Пользовательские названия подписок (провайдеров): provider_id -> alias.
     pub provider_aliases: std::collections::BTreeMap<String, String>,
     /// Настройки обхода блокировки Google Antigravity (Cloud Code API).
@@ -237,10 +289,13 @@ impl Default for AppConfig {
             ignore_servers: Vec::new(),
             provider_filters: std::collections::BTreeMap::new(),
             device_routing: std::collections::BTreeMap::new(),
+            device_domain_rules: std::collections::BTreeMap::new(),
             direct_domains: Vec::new(),
             force_domains: Vec::new(),
             system: SystemConfig::default(),
             logs: LogsConfig::default(),
+            auth: AuthConfig::default(),
+            notifications: NotificationsConfig::default(),
             provider_aliases: std::collections::BTreeMap::new(),
             antigravity: AntigravityConfig::default(),
         }

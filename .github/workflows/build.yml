@@ -46,11 +46,15 @@ jobs:
           - target: aarch64-unknown-linux-musl
             name: arm64-v8a
             rustflags: "-C target-feature=+crt-static"
-          # TODO: mips/mipsel требуют nightly + muslsf (soft-float) — добавить позже:
-          # - target: mipsel-unknown-linux-musl
-          #   name: mips32le
-          # - target: mips-unknown-linux-musl
-          #   name: mips32
+          - target: mipsel-unknown-linux-musl
+            name: mips32le
+            rustflags: "-C target-feature=+crt-static"
+          - target: mips-unknown-linux-musl
+            name: mips32
+            rustflags: "-C target-feature=+crt-static"
+          - target: armv7-unknown-linux-musleabihf
+            name: armv7-v7a
+            rustflags: "-C target-feature=+crt-static"
     steps:
       - uses: actions/checkout@v4
 

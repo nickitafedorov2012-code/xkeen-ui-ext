@@ -4,6 +4,7 @@ import {
   SPEED_PRESETS,
   type DeviceInfo,
   type DeviceRoutingEntry,
+  type DeviceTraffic,
   type PolicyInfo,
   type ServerInfo,
 } from '../types'
@@ -15,6 +16,7 @@ interface Props {
   assigned?: string
   drEntry?: DeviceRoutingEntry
   devFailover: boolean
+  traffic?: DeviceTraffic
   busy: boolean
   selected: boolean
   onToggleSelect: (mac: string, on: boolean) => void
@@ -25,6 +27,14 @@ interface Props {
   openDrModal: (d: DeviceInfo, assigned?: string) => void
 }
 
+function fmtBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return '0 B'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
 /// Строка таблицы устройств по эталонному макету.
 const DeviceRow = memo(function DeviceRow({
   d,
@@ -33,6 +43,7 @@ const DeviceRow = memo(function DeviceRow({
   assigned,
   drEntry,
   devFailover,
+  traffic,
   busy,
   selected,
   onToggleSelect,
@@ -92,6 +103,24 @@ const DeviceRow = memo(function DeviceRow({
             </option>
           ))}
         </select>
+      </td>
+      <td>
+        {traffic && (traffic.download_bytes > 0 || traffic.upload_bytes > 0 || traffic.active_connections > 0) ? (
+          <div
+            className="device-traffic-cell"
+            title={`Всего скачано: ${fmtBytes(traffic.download_bytes)}\nВсего отдано: ${fmtBytes(traffic.upload_bytes)}\nАктивных соединений: ${traffic.active_connections}${traffic.recent_hosts?.length ? '\nХосты: ' + traffic.recent_hosts.slice(0, 5).join(', ') : ''}`}
+            style={{ display: 'flex', flexDirection: 'column', gap: 2, fontSize: 11, fontFamily: 'Consolas, monospace' }}
+          >
+            <span style={{ color: traffic.download_bytes > 0 ? '#38bdf8' : 'var(--muted)' }}>
+              ↓ {fmtBytes(traffic.download_bytes)}
+            </span>
+            <span style={{ color: traffic.upload_bytes > 0 ? '#a855f7' : 'var(--muted)' }}>
+              ↑ {fmtBytes(traffic.upload_bytes)}
+            </span>
+          </div>
+        ) : (
+          <span className="muted small" style={{ fontSize: 11 }}>—</span>
+        )}
       </td>
       <td>
         <select

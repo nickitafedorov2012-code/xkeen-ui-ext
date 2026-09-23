@@ -35,6 +35,7 @@ get_arch() {
     *aarch64*) echo 'arm64-v8a' ;;
     *mipsel*)  echo 'mips32le' ;;
     *mips*)    echo 'mips32' ;;
+    *armv7*|*cortex-a9*|*cortex-a7*|*arm_*) echo 'armv7-v7a' ;;
     *) msg "${RED} ❌ Не удалось определить архитектуру${NC}"; exit 1 ;;
   esac
 }

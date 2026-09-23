@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
-import { pingClass, type AppSettings, type ServerInfo, type StatusInfo } from '../types'
+import { pingClass, type AppSettings, type DnsMode, type DnsEnhancedMode, type ServerInfo, type StatusInfo } from '../types'
 import NumberInput from './NumberInput'
+import ConfigEditor from './ConfigEditor'
+import PresetCatalogModal from './PresetCatalogModal'
+import LogsViewer from './LogsViewer'
 
 interface Props {
   notify: (msg: string, isError?: boolean) => void
@@ -17,18 +20,38 @@ export default function Settings({ notify, status, refresh }: Props) {
   const [forceDomains, setForceDomains] = useState('')
   const [autoCdns, setAutoCdns] = useState<string[]>([])
   const [savingDomains, setSavingDomains] = useState(false)
+
+  // Модальные окна
+  const [configEditorOpen, setConfigEditorOpen] = useState(false)
+  const [presetCatalogOpen, setPresetCatalogOpen] = useState(false)
+
+  // --- DNS режим ---
+  const [dnsMode, setDnsMode] = useState<DnsEnhancedMode>('fake-ip')
+  const [dnsModeBusy, setDnsModeBusy] = useState(false)
+
+  // --- Безопасность и пароль ---
+  const [authEnabled, setAuthEnabled] = useState(false)
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [authSaving, setAuthSaving] = useState(false)
+
+  // --- Оповещения (Telegram / Webhook) ---
+  const [telegramEnabled, setTelegramEnabled] = useState(false)
+  const [telegramBotToken, setTelegramBotToken] = useState('')
+  const [telegramChatId, setTelegramChatId] = useState('')
+  const [webhookUrl, setWebhookUrl] = useState('')
+  const [notifTesting, setNotifTesting] = useState(false)
+  const [notifSaving, setNotifSaving] = useState(false)
+
   // --- Сервис XKeen ---
   const [svcBusy, setSvcBusy] = useState('')
   // --- Бэкапы ---
   const [backups, setBackups] = useState<string[]>([])
   const [backupDir, setBackupDir] = useState('')
   const [backupBusy, setBackupBusy] = useState(false)
-  // --- Журнал ---
-  const [logText, setLogText] = useState('')
-  const [logPath, setLogPath] = useState('')
-  const [logsBusy, setLogsBusy] = useState(false)
-  const [logsAuto, setLogsAuto] = useState(false)
-  const [logsLive, setLogsLive] = useState(false)
+  const backupFileRef = useRef<HTMLInputElement>(null)
+
   // --- Автосохранение failover ---
   const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const initialFailoverRef = useRef<string | null>(null)
@@ -44,7 +67,15 @@ export default function Settings({ notify, status, refresh }: Props) {
   const [showUpdNotes, setShowUpdNotes] = useState(false)
 
   useEffect(() => {
-    apiGet<AppSettings>('settings').then(setSettings).catch((e) => notify(e instanceof Error ? e.message : 'Ошибка', true))
+    apiGet<AppSettings>('settings').then((s) => {
+      setSettings(s)
+      setAuthEnabled(s.auth?.enabled ?? false)
+      setTelegramEnabled(s.notifications?.telegram_enabled ?? false)
+      setTelegramBotToken(s.notifications?.telegram_bot_token ?? '')
+      setTelegramChatId(s.notifications?.telegram_chat_id ?? '')
+      setWebhookUrl(s.notifications?.webhook_url ?? '')
+    }).catch((e) => notify(e instanceof Error ? e.message : 'Ошибка', true))
+
     apiGet<{ servers: ServerInfo[] }>('servers')
       .then((d) => setServers(d.servers))
       .catch(() => {})
@@ -54,6 +85,9 @@ export default function Settings({ notify, status, refresh }: Props) {
         setForceDomains(d.force.join('\n'))
         if (d.auto_cdns) setAutoCdns(d.auto_cdns)
       })
+      .catch(() => {})
+    apiGet<DnsMode>('dns/mode')
+      .then((d) => setDnsMode(d.enhanced_mode))
       .catch(() => {})
   }, [notify])
 
@@ -70,20 +104,6 @@ export default function Settings({ notify, status, refresh }: Props) {
   useEffect(() => {
     loadBackups()
   }, [loadBackups])
-
-  const loadLogs = useCallback(async () => {
-    try {
-      const d = await apiGet<{ text: string; path: string }>('logs?lines=800')
-      setLogText(d.text)
-      setLogPath(d.path)
-    } catch {
-      /* журнал не критичен */
-    }
-  }, [])
-
-  useEffect(() => {
-    loadLogs()
-  }, [loadLogs])
 
   // Проверка новой версии панели.
   const checkUpdate = useCallback(async () => {
@@ -117,40 +137,6 @@ export default function Settings({ notify, status, refresh }: Props) {
       notify(e instanceof Error ? e.message : 'Ошибка обновления', true)
     }
   }
-
-  useEffect(() => {
-    if (!logsAuto) return
-    const t = setInterval(loadLogs, 5000)
-    return () => clearInterval(t)
-  }, [logsAuto, loadLogs])
-
-  // Живой режим: WebSocket-поток новых строк журнала.
-  useEffect(() => {
-    if (!logsLive) return
-    let ws: WebSocket | null = null
-    let closed = false
-    let retry: ReturnType<typeof setTimeout>
-    const connect = () => {
-      if (closed) return
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-      ws = new WebSocket(`${proto}://${location.host}/api/logs/ws?lines=300`)
-      ws.onmessage = (ev) => {
-        setLogText((prev) => {
-          const lines = (prev ? prev.split('\n') : []).concat(ev.data as string)
-          return lines.slice(-500).join('\n')
-        })
-      }
-      ws.onclose = () => {
-        if (!closed) retry = setTimeout(connect, 3000)
-      }
-    }
-    connect()
-    return () => {
-      closed = true
-      clearTimeout(retry)
-      ws?.close()
-    }
-  }, [logsLive])
 
   const failoverJson = settings ? JSON.stringify(settings.failover) : ''
 
@@ -319,19 +305,6 @@ export default function Settings({ notify, status, refresh }: Props) {
     }
   }
 
-  const clearLogs = async () => {
-    setLogsBusy(true)
-    try {
-      await apiPost('logs/clear')
-      setLogText('')
-      notify('Журнал очищен')
-    } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка', true)
-    } finally {
-      setLogsBusy(false)
-    }
-  }
-
   const createBackup = async () => {
     setBackupBusy(true)
     try {
@@ -342,6 +315,26 @@ export default function Settings({ notify, status, refresh }: Props) {
       notify(e instanceof Error ? e.message : 'Ошибка', true)
     } finally {
       setBackupBusy(false)
+    }
+  }
+
+  const handleImportBackup = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setBackupBusy(true)
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+      const res = await fetch('/api/backups/import', { method: 'POST', body: formData })
+      const data = await res.json()
+      if (!data.success) throw new Error(data.error || 'Ошибка импорта')
+      notify(`Бэкап '${file.name}' успешно импортирован`)
+      loadBackups()
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Ошибка импорта бэкапа', true)
+    } finally {
+      setBackupBusy(false)
+      if (backupFileRef.current) backupFileRef.current.value = ''
     }
   }
 
@@ -373,8 +366,115 @@ export default function Settings({ notify, status, refresh }: Props) {
     }
   }
 
+  const handleSetDnsMode = async (mode: DnsEnhancedMode) => {
+    setDnsModeBusy(true)
+    try {
+      await apiPost('dns/mode', { enhanced_mode: mode })
+      setDnsMode(mode)
+      notify(`DNS режим переключен на ${mode === 'fake-ip' ? 'Fake-IP' : 'Redir-Host'}`)
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Ошибка переключения DNS', true)
+    } finally {
+      setDnsModeBusy(false)
+    }
+  }
+
+  const handleSaveAuth = async () => {
+    if (authEnabled && newPassword && newPassword !== confirmPassword) {
+      notify('Пароли не совпадают', true)
+      return
+    }
+    setAuthSaving(true)
+    try {
+      await apiPost('auth/change-password', {
+        enabled: authEnabled,
+        current_password: currentPassword || undefined,
+        new_password: newPassword,
+      })
+      notify(authEnabled ? 'Защита паролем сохранена' : 'Авторизация отключена')
+      setCurrentPassword('')
+      setNewPassword('')
+      setConfirmPassword('')
+      refresh?.()
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Ошибка сохранения настроек безопасности', true)
+    } finally {
+      setAuthSaving(false)
+    }
+  }
+
+  const handleSaveNotifications = async () => {
+    setNotifSaving(true)
+    try {
+      await apiPut('settings', {
+        notifications: {
+          telegram_enabled: telegramEnabled,
+          telegram_bot_token: telegramBotToken.trim(),
+          telegram_chat_id: telegramChatId.trim(),
+          webhook_url: webhookUrl.trim(),
+        },
+      })
+      notify('Настройки оповещений сохранены')
+      refresh?.()
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Ошибка сохранения оповещений', true)
+    } finally {
+      setNotifSaving(false)
+    }
+  }
+
+  const handleTestNotification = async () => {
+    setNotifTesting(true)
+    try {
+      const res = await apiPost<{ message: string }>('notifications/test', {
+        telegram_bot_token: telegramBotToken.trim() || undefined,
+        telegram_chat_id: telegramChatId.trim() || undefined,
+        webhook_url: webhookUrl.trim() || undefined,
+      })
+      notify(res.message || 'Тестовое оповещение успешно отправлено')
+    } catch (err) {
+      notify(err instanceof Error ? err.message : 'Ошибка отправки тестового сообщения', true)
+    } finally {
+      setNotifTesting(false)
+    }
+  }
+
+  const handleApplyPreset = (domains: string[], target: 'force' | 'direct') => {
+    if (target === 'force') {
+      const existing = new Set(forceDomains.split('\n').map((d) => d.trim()).filter(Boolean))
+      domains.forEach((d) => existing.add(d))
+      setForceDomains(Array.from(existing).join('\n'))
+      notify(`Добавлено ${domains.length} доменов в 'Через прокси'`)
+    } else {
+      const existing = new Set(directDomains.split('\n').map((d) => d.trim()).filter(Boolean))
+      domains.forEach((d) => existing.add(d))
+      setDirectDomains(Array.from(existing).join('\n'))
+      notify(`Добавлено ${domains.length} доменов в 'Напрямую'`)
+    }
+  }
+
   return (
     <div className="grid2">
+      {/* ПАНЕЛЬ БЫСТРЫХ ИНСТРУМЕНТОВ */}
+      <div className="card" style={{ gridColumn: '1 / -1', display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', padding: '12px 18px', background: 'linear-gradient(90deg, rgba(0, 211, 242, 0.08) 0%, rgba(43, 127, 255, 0.05) 100%)', border: '1px solid rgba(0, 211, 242, 0.2)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 20 }}>🛠️</span>
+          <div>
+            <b style={{ fontSize: 14 }}>Инструменты конфигурации</b>
+            <div className="muted small">Прямой доступ к файлам конфигов (Web-Editor) и каталогу проверенных правил</div>
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button type="button" className="btn primary" onClick={() => setConfigEditorOpen(true)} title="Открыть редактор config.yaml и других файлов">
+            📝 Редактор конфигов
+          </button>
+          <button type="button" className="btn" onClick={() => setPresetCatalogOpen(true)} title="Каталог готовых пресетов доменов">
+            ✨ Каталог пресетов
+          </button>
+        </div>
+      </div>
+
+      {/* FAILOVER КАРТОЧКА */}
       <section className="card">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -522,6 +622,174 @@ export default function Settings({ notify, status, refresh }: Props) {
         </div>
       </section>
 
+      {/* DNS РЕЖИМ (MIHOMO) */}
+      <section className="card">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <h2 style={{ margin: 0 }}>🧭 DNS Режим (Mihomo)</h2>
+          <span className="badge" style={{ textTransform: 'uppercase' }}>{dnsMode}</span>
+        </div>
+        <p className="muted small">Режим обработки DNS-запросов ядром. Изменение режима перезапускает службу DNS.</p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
+          <label className="check-row" style={{ padding: '10px 12px', background: dnsMode === 'fake-ip' ? 'rgba(56, 189, 248, 0.1)' : 'rgba(255,255,255,0.02)', border: `1px solid ${dnsMode === 'fake-ip' ? '#38bdf8' : 'var(--border)'}`, borderRadius: 8, cursor: 'pointer', display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+            <input
+              type="radio"
+              name="dns_mode_setting"
+              checked={dnsMode === 'fake-ip'}
+              onChange={() => handleSetDnsMode('fake-ip')}
+              disabled={dnsModeBusy}
+              style={{ marginTop: 3 }}
+            />
+            <div>
+              <b style={{ color: dnsMode === 'fake-ip' ? '#38bdf8' : 'inherit' }}>⚡ Fake-IP (Рекомендуется)</b>
+              <div className="muted small" style={{ marginTop: 2 }}>
+                Мгновенный отклик DNS (~1 мс), эффективный обход DPI и блокировок, идеален для стримов, мессенджеров и игр.
+              </div>
+            </div>
+          </label>
+
+          <label className="check-row" style={{ padding: '10px 12px', background: dnsMode === 'redir-host' ? 'rgba(56, 189, 248, 0.1)' : 'rgba(255,255,255,0.02)', border: `1px solid ${dnsMode === 'redir-host' ? '#38bdf8' : 'var(--border)'}`, borderRadius: 8, cursor: 'pointer', display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+            <input
+              type="radio"
+              name="dns_mode_setting"
+              checked={dnsMode === 'redir-host'}
+              onChange={() => handleSetDnsMode('redir-host')}
+              disabled={dnsModeBusy}
+              style={{ marginTop: 3 }}
+            />
+            <div>
+              <b style={{ color: dnsMode === 'redir-host' ? '#38bdf8' : 'inherit' }}>🌐 Redir-Host (Прямой резолв)</b>
+              <div className="muted small" style={{ marginTop: 2 }}>
+                Классический резолв реальных IP-адресов. Используйте, если требуются локальные домены роутера (.keenetic.io / Home LAN).
+              </div>
+            </div>
+          </label>
+        </div>
+      </section>
+
+      {/* БЕЗОПАСНОСТЬ И ПАРОЛЬ */}
+      <section className="card">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <h2 style={{ margin: 0 }}>🔐 Безопасность и пароль</h2>
+          <span className={`badge ${authEnabled ? 'badge-online' : ''}`}>
+            {authEnabled ? '🟢 защита включена' : '⚪ без пароля'}
+          </span>
+        </div>
+        <p className="muted small">Защита веб-панели паролем с постоянной сессией (30 дней).</p>
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+          <b>Включить защиту паролем</b>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={authEnabled}
+              onChange={(e) => setAuthEnabled(e.target.checked)}
+            />
+            <span className="slider" />
+          </label>
+        </div>
+
+        {authEnabled && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
+            {settings?.auth?.enabled && (
+              <label className="row">
+                <span>Текущий пароль</span>
+                <input
+                  className="input"
+                  type="password"
+                  placeholder="Текущий пароль (для подтверждения)"
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                />
+              </label>
+            )}
+            <label className="row">
+              <span>Новый пароль</span>
+              <input
+                className="input"
+                type="password"
+                placeholder="Введите новый пароль"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+              />
+            </label>
+            <label className="row">
+              <span>Повторите пароль</span>
+              <input
+                className="input"
+                type="password"
+                placeholder="Повторите новый пароль"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+              />
+            </label>
+          </div>
+        )}
+
+        <button className="btn primary" style={{ marginTop: 10 }} onClick={handleSaveAuth} disabled={authSaving}>
+          {authSaving ? 'Сохранение…' : '💾 Сохранить настройки доступа'}
+        </button>
+        <p className="muted small" style={{ marginTop: 8 }}>
+          💡 Сброс пароля при утере через SSH: <code style={{ color: 'var(--accent)' }}>xkeen-route reset-password</code>
+        </p>
+      </section>
+
+      {/* ОПОВЕЩЕНИЯ (TELEGRAM / WEBHOOK) */}
+      <section className="card">
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+          <h2 style={{ margin: 0 }}>🔔 Оповещения о сбоях</h2>
+          <span className={`badge ${telegramEnabled ? 'badge-online' : ''}`}>
+            {telegramEnabled ? '🟢 Telegram вкл' : '⚪ выкл'}
+          </span>
+        </div>
+        <p className="muted small">Мгновенные уведомления в Telegram при падении серверов и переключении Failover.</p>
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+          <b>Telegram оповещения</b>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={telegramEnabled}
+              onChange={(e) => setTelegramEnabled(e.target.checked)}
+            />
+            <span className="slider" />
+          </label>
+        </div>
+        <label className="row">
+          <span>Bot Token</span>
+          <input
+            className="input"
+            placeholder="123456789:ABCdefGhIJKlmNoPQRstuVWXyz"
+            value={telegramBotToken}
+            onChange={(e) => setTelegramBotToken(e.target.value)}
+          />
+        </label>
+        <label className="row">
+          <span>Chat ID</span>
+          <input
+            className="input"
+            placeholder="123456789 или -1001234567890"
+            value={telegramChatId}
+            onChange={(e) => setTelegramChatId(e.target.value)}
+          />
+        </label>
+        <label className="row">
+          <span>Webhook URL</span>
+          <input
+            className="input"
+            placeholder="https://my-server.com/api/failover-hook"
+            value={webhookUrl}
+            onChange={(e) => setWebhookUrl(e.target.value)}
+          />
+        </label>
+        <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+          <button className="btn primary" onClick={handleSaveNotifications} disabled={notifSaving}>
+            {notifSaving ? 'Сохранение…' : '💾 Сохранить оповещения'}
+          </button>
+          <button className="btn" onClick={handleTestNotification} disabled={notifTesting}>
+            {notifTesting ? 'Отправка…' : '💬 Тестовое сообщение'}
+          </button>
+        </div>
+      </section>
+
+      {/* RCI (KEENETIC) */}
       <section className="card">
         <h2>RCI (Keenetic)</h2>
         <label className="row"><span>Host</span>
@@ -549,6 +817,7 @@ export default function Settings({ notify, status, refresh }: Props) {
         <p className="muted small">Если токен не задан, панель возьмёт его из /opt/etc/xkeen/xkeen.json; иначе — challenge-auth.</p>
       </section>
 
+      {/* MIHOMO */}
       <section className="card">
         <h2>Mihomo</h2>
         <label className="row"><span>Host</span>
@@ -580,6 +849,7 @@ export default function Settings({ notify, status, refresh }: Props) {
         <p className="muted small">Имена proxy-providers, подключаемые к per-device группам (use:). Пусто — берутся все из config.yaml автоматически.</p>
       </section>
 
+      {/* ПАНЕЛЬ */}
       <section className="card">
         <h2>Панель</h2>
         <label className="row"><span>Интервал автообновления, сек</span>
@@ -690,6 +960,7 @@ export default function Settings({ notify, status, refresh }: Props) {
         </div>
       </section>
 
+      {/* СЕРВИС XKEEN */}
       <section className="card">
         <h2>🖥 Сервис XKeen</h2>
         <p className="muted small">Restart перегенерирует config.yaml — настройки маршрутизации возвращаются к исходным (до любых изменений из панели).</p>
@@ -705,18 +976,36 @@ export default function Settings({ notify, status, refresh }: Props) {
         </label>
       </section>
 
+      {/* БЭКАПЫ */}
       <section className="card">
-        <h2>💾 Бэкапы</h2>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+          <h2 style={{ margin: 0 }}>💾 Бэкапы (.xkbak)</h2>
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button className="btn sm primary" onClick={createBackup} disabled={backupBusy}>
+              {backupBusy ? 'Создание…' : '＋ Создать бэкап'}
+            </button>
+            <button className="btn sm" onClick={() => backupFileRef.current?.click()} disabled={backupBusy} title="Загрузить архив бэкапа с компьютера">
+              📤 Загрузить архив
+            </button>
+            <input
+              ref={backupFileRef}
+              type="file"
+              accept=".xkbak,.tar.gz,.tar,.zip"
+              style={{ display: 'none' }}
+              onChange={handleImportBackup}
+            />
+          </div>
+        </div>
         <p className="muted small">Снимок config.yaml (Mihomo) + config.json (панель). Каталог: {backupDir || '…'}</p>
-        <button className="btn primary" onClick={createBackup} disabled={backupBusy}>
-          {backupBusy ? 'Работаю…' : '＋ Создать бэкап'}
-        </button>
         <div className="modal-list" style={{ marginTop: 10 }}>
           {backups.length === 0 && <p className="muted small">Бэкапов пока нет.</p>}
           {backups.map((b) => (
             <div key={b} className="check-row" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
               <span className="server-name" style={{ flex: 1 }}>{b}</span>
               <button className="btn sm" disabled={backupBusy} onClick={() => restoreBackup(b)}>Восстановить</button>
+              <a className="btn sm ghost" href={`/api/backups/export/${encodeURIComponent(b)}`} download title="Скачать архив бэкапа (.xkbak)">
+                ⬇ .xkbak
+              </a>
               <button className="btn sm ghost" disabled={backupBusy} onClick={() => deleteBackup(b)}>✕</button>
             </div>
           ))}
@@ -727,8 +1016,14 @@ export default function Settings({ notify, status, refresh }: Props) {
         </label>
       </section>
 
+      {/* ДОМЕНЫ */}
       <section className="card">
-        <h2>🌐 Домены</h2>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+          <h2 style={{ margin: 0 }}>🌐 Домены</h2>
+          <button type="button" className="btn sm" onClick={() => setPresetCatalogOpen(true)} title="Добавить готовые списки (YouTube, Discord, AI...)">
+            ✨ Каталог пресетов
+          </button>
+        </div>
         <p className="muted small">По одному домену в строке. Правила вставляются в начало rules: (DOMAIN-SUFFIX) и имеют приоритет. Сопутствующие CDN и медиа-сервера подтягиваются автоматически.</p>
         <label className="row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
           <span>⏭ Напрямую (мимо прокси → DIRECT)</span>
@@ -771,36 +1066,25 @@ export default function Settings({ notify, status, refresh }: Props) {
         </button>
       </section>
 
-      <section className="card" style={{ gridColumn: '1 / -1' }}>
-        <h2>📄 Журнал (логи)</h2>
-        <p className="muted small">Файл: {logPath || '…'} · ротация при 2 МБ (старая копия — .log.old)</p>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', marginBottom: 10 }}>
-          <button className="btn" onClick={loadLogs} disabled={logsBusy}>🔄 Обновить</button>
-          <a className="btn" href="/api/logs/download" download>⬇ Скачать</a>
-          <button
-            className="btn ghost"
-            style={{ borderColor: 'var(--red)', color: 'var(--red)' }}
-            onClick={() => { if (confirm('Очистить журнал?')) clearLogs() }}
-            disabled={logsBusy}
-          >🗑 Очистить</button>
-          <label className="check" style={{ marginLeft: 'auto' }}>
-            <input type="checkbox" checked={logsLive} onChange={(e) => { setLogsLive(e.target.checked); if (e.target.checked) setLogsAuto(false) }} />
-            🔴 live (WebSocket)
-          </label>
-          <label className="check">
-            <input type="checkbox" checked={logsAuto} onChange={(e) => { setLogsAuto(e.target.checked); if (e.target.checked) setLogsLive(false) }} />
-            автообновление 5 сек
-          </label>
-        </div>
-        <textarea
-          className="input"
-          rows={16}
-          readOnly
-          value={logText}
-          placeholder="Журнал пуст"
-          style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'Consolas, monospace', fontSize: 12, whiteSpace: 'pre', overflow: 'auto' }}
-        />
+      {/* ЖУРНАЛ ЛОГОВ С ПОЛНЫМ ФУНКЦИОНАЛОМ LOGSVIEWER */}
+      <section className="card" style={{ gridColumn: '1 / -1', padding: 16 }}>
+        <LogsViewer notify={notify} />
       </section>
+
+      {/* МОДАЛЬНОЕ ОКНО КОНФИГ-РЕДАКТОРА */}
+      <ConfigEditor
+        isOpen={configEditorOpen}
+        onClose={() => setConfigEditorOpen(false)}
+        notify={notify}
+      />
+
+      {/* МОДАЛЬНОЕ ОКНО КАТАЛОГА ПРЕСЕТОВ */}
+      <PresetCatalogModal
+        isOpen={presetCatalogOpen}
+        onClose={() => setPresetCatalogOpen(false)}
+        onApplyPreset={handleApplyPreset}
+        notify={notify}
+      />
     </div>
   )
 }
