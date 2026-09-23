@@ -170,16 +170,20 @@ pub fn parse_dns_a_records(buf: &[u8]) -> Vec<Ipv4Addr> {
     ips
 }
 
-async fn run_cmd(program: &str, args: &[&str]) {
+async fn run_cmd(program: &str, args: &[&str]) -> Result<(), String> {
     match tokio::process::Command::new(program).args(args).output().await {
         Ok(out) => {
             if !out.status.success() {
                 let err = String::from_utf8_lossy(&out.stderr);
                 crate::log_d!("[ANTIGRAVITY] Команда {} {:?} завершилась с кодом {:?}: {}", program, args, out.status.code(), err.trim());
+                Err(format!("Команда {program} {:?} статус {:?}: {}", args, out.status.code(), err.trim()))
+            } else {
+                Ok(())
             }
         }
         Err(e) => {
             crate::log_w!("[ANTIGRAVITY] Ошибка запуска команды {} {:?}: {}", program, args, e);
+            Err(format!("Ошибка запуска {program} {:?}: {e}", args))
         }
     }
 }
@@ -403,26 +407,32 @@ impl AntigravityManager {
 
     /// Применение DNS-записей в KeeneticOS и добавление маршрута мимо VPN
     async fn apply_keenetic_rules(&self, ip: Ipv4Addr, targets: &[String], prev_ip: Option<Ipv4Addr>) {
-        // 1. Очистка прошлого IP из маршрутизации и ipset
+        // 1. Очистка прошлого IP из маршрутизации и ipset (ошибки ожидаемы, если правила не было)
         if let Some(old) = prev_ip {
             let old_str = old.to_string();
             let old_rule = format!("{old}/32");
-            run_cmd("ip", &["rule", "del", "to", &old_rule, "table", "main", "priority", "90"]).await;
-            run_cmd("ipset", &["del", "user_exclude", &old_str]).await;
+            let _ = run_cmd("ip", &["rule", "del", "to", &old_rule, "table", "main", "priority", "90"]).await;
+            let _ = run_cmd("ipset", &["del", "user_exclude", &old_str]).await;
         }
 
         // 2. Исключение подменного IP из перехвата Mihomo (ipset user_exclude)
         let ip_str = ip.to_string();
-        run_cmd("ipset", &["add", "user_exclude", &ip_str, "-exist"]).await;
+        if let Err(e) = run_cmd("ipset", &["add", "user_exclude", &ip_str, "-exist"]).await {
+            crate::log_w!("[ANTIGRAVITY] Не удалось добавить {ip_str} в ipset user_exclude: {e}");
+        }
 
         // 3. Добавление правила маршрутизации напрямую через основной WAN (таблица main)
         let ip_rule = format!("{ip}/32");
-        run_cmd("ip", &["rule", "add", "to", &ip_rule, "table", "main", "priority", "90"]).await;
+        if let Err(e) = run_cmd("ip", &["rule", "add", "to", &ip_rule, "table", "main", "priority", "90"]).await {
+            crate::log_w!("[ANTIGRAVITY] Не удалось добавить ip rule для {ip_rule}: {e}");
+        }
 
         // 4. Установка статических DNS-записей в Keenetic ndnproxy
         for target in targets {
             let cmd = format!("ip host {target} {ip}");
-            run_cmd("ndmc", &["-c", &cmd]).await;
+            if let Err(e) = run_cmd("ndmc", &["-c", &cmd]).await {
+                crate::log_w!("[ANTIGRAVITY] Не удалось установить DNS запись {target} -> {ip}: {e}");
+            }
         }
     }
 
@@ -431,8 +441,8 @@ impl AntigravityManager {
         if let Some(ip) = active_ip {
             let ip_rule = format!("{ip}/32");
             let ip_str = ip.to_string();
-            run_cmd("ip", &["rule", "del", "to", &ip_rule, "table", "main", "priority", "90"]).await;
-            run_cmd("ipset", &["del", "user_exclude", &ip_str]).await;
+            let _ = run_cmd("ip", &["rule", "del", "to", &ip_rule, "table", "main", "priority", "90"]).await;
+            let _ = run_cmd("ipset", &["del", "user_exclude", &ip_str]).await;
         }
 
         let targets = {
@@ -442,7 +452,7 @@ impl AntigravityManager {
 
         for target in targets {
             let cmd = format!("no ip host {target}");
-            run_cmd("ndmc", &["-c", &cmd]).await;
+            let _ = run_cmd("ndmc", &["-c", &cmd]).await;
         }
     }
 

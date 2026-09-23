@@ -1102,7 +1102,13 @@ pub async fn add_provider(State(state): State<AppState>, Json(req): Json<AddProv
         Err(e) => return api_err(format!("Ошибка чтения {}: {e}", cfg.mihomo.config_path)),
     };
 
-    let new_yaml = match crate::routing::add_provider_to_yaml(&yaml, id, url) {
+    let new_yaml = match crate::routing::add_provider_to_yaml(
+        &yaml,
+        id,
+        url,
+        Some(cfg.health_check_url()),
+        Some(cfg.mihomo.health_check_interval),
+    ) {
         Ok(y) => y,
         Err(e) => return api_err(e),
     };
@@ -1847,7 +1853,13 @@ pub async fn import_node(
 
         if let Ok(config_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
             if !config_yaml.contains(&format!("{}:", prov_name)) {
-                let _ = crate::routing::add_provider_to_yaml(&config_yaml, &prov_name, &format!("file:///opt/etc/mihomo/providers/{}.yaml", prov_name));
+                let _ = crate::routing::add_provider_to_yaml(
+                    &config_yaml,
+                    &prov_name,
+                    &format!("file:///opt/etc/mihomo/providers/{}.yaml", prov_name),
+                    Some(cfg.health_check_url()),
+                    Some(cfg.mihomo.health_check_interval),
+                );
             }
         }
 

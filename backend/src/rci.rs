@@ -314,10 +314,10 @@ async fn rci_post_once(
 
 /// Нормализация ответа: Keenetic иногда возвращает массив с одним объектом.
 fn as_object(v: Value) -> Value {
-    if v.is_array() {
-        v.as_array().and_then(|a| a.first().cloned()).unwrap_or(Value::Null)
-    } else {
-        v
+    match v {
+        Value::Array(mut arr) if !arr.is_empty() => arr.swap_remove(0),
+        Value::Array(_) => Value::Object(Default::default()),
+        other => other,
     }
 }
 

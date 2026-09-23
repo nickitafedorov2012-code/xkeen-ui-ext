@@ -717,6 +717,27 @@
 - **Фронтенд (`Dashboard.tsx`)**:
   - Удалён последний оставшийся хардкод `status?.mihomo_version || 'v1.19.29'`, заменён на честный плейсхолдер `'—'`.
 
+## v1.2.4 (Финализация аудита: настраиваемый health-check, проверка возвратов команд, WCAG AA контрастность и доступность)
+- **Настраиваемый Health-Check (`config.rs`, `mihomo.rs`, `routing.rs`, `api.rs`)**:
+  - В `MihomoConfig` добавлены поля `health_check_url` (по умолчанию `http://www.gstatic.com/generate_204`) и `health_check_interval` (300 сек).
+  - В `AppConfig` добавлены методы `health_check_url()` и `health_check_url_encoded()`.
+  - В `mihomo.rs` функции `ping_group` и `ping_server` переведены на использование динамического URL проверки доступности из конфигурации вместо захардкоженного `http%3A%2F%2Fwww.gstatic.com%2Fgenerate_204`.
+  - В `routing.rs` функция `add_provider_to_yaml` теперь принимает опциональные `health_check_url` и `health_check_interval` (с дефолтом из констант), вызывается из `api.rs` с текущими параметрами конфига.
+- **Очистка обработки результатов системных команд (`antigravity.rs`, `override_sync.rs`)**:
+  - `antigravity.rs`: `run_cmd` возвращает `Result<(), String>`, все вызовы проверяются с выводом `log_w!` при сбоях добавления правил; операции очистки удалений корректно и безопасно обрабатывают отсутствие старых правил.
+  - `override_sync.rs`: `run_ipset` возвращает `Result<(), String>`, атомарный swap и flush наборов ipset теперь типизированы и проверяют результат; при ошибке синхронизации IPv6 наборов пишется предупреждение `log_w!`.
+- **Оптимизация нормализации RCI (`rci.rs`)**:
+  - Функция `as_object` переписана на `match v` без избыточного клонирования массива через `swap_remove(0)` и без генерации `Value::Null` для пустых массивов.
+- **UI / CSS / Стили и Доступность (A11y & Contrast)**:
+  - **Контрастность по WCAG AA**: заменён тусклый цвет `#64748b` (3.2:1) на `#94a3b8` (>5.5:1) во всех элементах тёмной темы (метки устройств, аккордеоны, бейджи, заголовки таблиц, статус-бары Antigravity).
+  - **Типографика**: увеличены микроскопические шрифты `10px` и `10.5px` до `11px` в `.tag`, `.diff-added-badge`, `.diff-removed-badge`, `.pinned-header-tag`, `.ag-type-badge`, `.status-badge-row2`, `.status-stat-sep`.
+  - **Специфичность**: удалены директивы `!important` в `.btn.btn-connect` и `.btn.btn-speedtest` благодаря каскадной специфичности.
+  - **Унификация модальных окон**: `.modal-overlay` приведён к единому `z-index: 1000` и эффекту `backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px);`.
+  - **Клавиатурная доступность**: добавлены явные фокус-контуры `:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }` для инпутов, селектов, текстовых редакторов, табов и кнопок.
+  - **Reduced Motion**: добавлен медиа-запрос `@media (prefers-reduced-motion: reduce)` для пользователей с чувствительностью к анимациям.
+  - **CSS-токены**: в `:root` и `[data-theme="light"]` добавлены токены `--text-bright`, `--text-dim`, `--muted-dim`, `--border-focus`.
+
+
 
 
 

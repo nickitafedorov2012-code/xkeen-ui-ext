@@ -150,23 +150,29 @@ pub async fn sync_geo_override(domains: &[String]) -> Result<usize, String> {
 
     // 3. Атомарно обновляем ipset ядра geo_override6 (IPv6)
     if !v6.is_empty() {
-        let _ = sync_ipset_family("geo_override6", "inet6").await;
+        if let Err(e) = sync_ipset_family("geo_override6", "inet6").await {
+            crate::log_w!("[OVERRIDE] Ошибка синхронизации IPv6 ipset: {e}");
+        }
     }
 
     crate::log_i!("[OVERRIDE] Синхронизировано {total_ips} IP для {} доменов", domains.len());
     Ok(total_ips)
 }
 
-async fn run_ipset(args: &[&str]) {
+async fn run_ipset(args: &[&str]) -> Result<(), String> {
     match tokio::process::Command::new("ipset").args(args).output().await {
         Ok(out) => {
             if !out.status.success() {
                 let err = String::from_utf8_lossy(&out.stderr);
                 crate::log_d!("[OVERRIDE] ipset {:?} завершился с кодом {:?}: {}", args, out.status.code(), err.trim());
+                Err(format!("ipset {:?} статус {:?}: {}", args, out.status.code(), err.trim()))
+            } else {
+                Ok(())
             }
         }
         Err(e) => {
             crate::log_w!("[OVERRIDE] Ошибка вызова ipset {:?}: {}", args, e);
+            Err(format!("Ошибка вызова ipset {:?}: {e}", args))
         }
     }
 }
@@ -174,20 +180,14 @@ async fn run_ipset(args: &[&str]) {
 async fn sync_ipset_family(set_name: &str, family: &str) -> Result<(), String> {
     let tmp = format!("{set_name}_tmp");
 
-    // Уничтожаем возможный старый временный ipset от прерванного swap
-    run_ipset(&["destroy", &tmp]).await;
+    // Уничтожаем возможный старый временный ipset от прерванного swap (ошибка ожидаема, если не существовал)
+    let _ = run_ipset(&["destroy", &tmp]).await;
 
-    let create_tmp = tokio::process::Command::new("ipset")
-        .args(["create", &tmp, "hash:net", "family", family, "-exist"])
-        .output()
-        .await;
-    if let Ok(out) = create_tmp {
-        if !out.status.success() {
-            crate::log_w!("ipset create {tmp} failed: {}", String::from_utf8_lossy(&out.stderr));
-        }
+    if let Err(e) = run_ipset(&["create", &tmp, "hash:net", "family", family, "-exist"]).await {
+        crate::log_w!("[OVERRIDE] ipset create {tmp} failed: {e}");
     }
 
-    run_ipset(&["flush", &tmp]).await;
+    let _ = run_ipset(&["flush", &tmp]).await;
 
     if let Ok(content) = tokio::fs::read_to_string(OVERRIDE_FILE).await {
         for line in content.lines() {
@@ -197,29 +197,21 @@ async fn sync_ipset_family(set_name: &str, family: &str) -> Result<(), String> {
             }
             let is_v6 = t.contains(':');
             if (family == "inet" && !is_v6) || (family == "inet6" && is_v6) {
-                run_ipset(&["add", &tmp, t, "-exist"]).await;
+                let _ = run_ipset(&["add", &tmp, t, "-exist"]).await;
             }
         }
     }
 
-    run_ipset(&["create", set_name, "hash:net", "family", family, "-exist"]).await;
+    let _ = run_ipset(&["create", set_name, "hash:net", "family", family, "-exist"]).await;
 
-    let swap = tokio::process::Command::new("ipset")
-        .args(["swap", set_name, &tmp])
-        .output()
-        .await;
+    let swap_res = run_ipset(&["swap", set_name, &tmp]).await;
+    let _ = run_ipset(&["destroy", &tmp]).await;
 
-    run_ipset(&["destroy", &tmp]).await;
-
-    match swap {
-        Ok(out) if !out.status.success() => {
-            let err_msg = String::from_utf8_lossy(&out.stderr);
-            crate::log_w!("ipset swap {set_name} failed: {err_msg}");
-            Err(format!("ipset swap {set_name}: {err_msg}"))
-        }
-        Err(e) => Err(format!("ipset swap {set_name}: {e}")),
-        _ => Ok(()),
+    if let Err(e) = swap_res {
+        crate::log_w!("[OVERRIDE] ipset swap {set_name} failed: {e}");
+        return Err(format!("ipset swap {set_name}: {e}"));
     }
+    Ok(())
 }
 
 #[cfg(test)]

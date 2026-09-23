@@ -3,13 +3,17 @@
   --panel: #161a22;
   --panel-2: #1c2130;
   --border: #262c3b;
+  --border-focus: #4f8cff;
   --text: #e6e9ef;
+  --text-bright: #f8fafc;
+  --text-dim: #94a3b8;
   --muted: #8b93a7;
+  --muted-dim: #64748b;
   --accent: #4f8cff;
   --accent-2: #2f6fe0;
-  --green: #3fbf6f;
-  --yellow: #e6b84f;
-  --red: #e05f5f;
+  --green: #22c55e;
+  --yellow: #eab308;
+  --red: #ef4444;
 }
 
 * { box-sizing: border-box; }
@@ -127,7 +131,7 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
@@ -142,7 +146,7 @@ body {
 
 .status-stat-sep {
   opacity: 0.35;
-  font-size: 10px;
+  font-size: 11px;
   margin: 0 1px;
 }
 
@@ -455,7 +459,7 @@ body {
   font-weight: 500;
   white-space: nowrap;
 }
-.tag { border-radius: 5px; padding: 2px 7px; font-size: 10.5px; font-weight: 700; }
+.tag { border-radius: 5px; padding: 2px 7px; font-size: 11px; font-weight: 700; }
 .tag.current { background: rgba(79, 140, 255, 0.15); color: var(--accent); }
 .tag.priority { background: rgba(230, 184, 79, 0.15); color: var(--yellow); }
 .tag.ignored {
@@ -468,7 +472,19 @@ body {
 }
 
 /* модальное окно */
-.modal-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.65); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; z-index: 50; }
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(5px);
+  -webkit-backdrop-filter: blur(5px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 16px;
+  animation: modal-fade-in 0.18s ease-out;
+}
 .modal { background: var(--card, #171a21); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; padding: 18px 20px; width: min(660px, 92vw); max-height: 86vh; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6); position: relative; }
 .modal h2 { margin: 0; font-size: 17px; }
 .modal-filter-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
@@ -491,7 +507,7 @@ body {
 .diff-added-badge {
   background: rgba(34, 197, 94, 0.18);
   color: #4ade80;
-  font-size: 10px;
+  font-size: 11px;
   padding: 1px 5px;
   border-radius: 4px;
   margin-left: 6px;
@@ -501,7 +517,7 @@ body {
 .diff-removed-badge {
   background: rgba(239, 68, 68, 0.18);
   color: #f87171;
-  font-size: 10px;
+  font-size: 11px;
   padding: 1px 5px;
   border-radius: 4px;
   margin-left: 6px;
@@ -532,7 +548,7 @@ body {
   border: 1px solid rgba(56, 189, 248, 0.35);
   border-radius: 6px;
   padding: 2px 8px;
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.5px;
 }
@@ -625,10 +641,11 @@ body {
 }
 
 /* Кнопки действий серверов */
+.btn.btn-connect,
 .btn-connect {
   background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
   border-color: #3b82f6;
-  color: #fff !important;
+  color: #fff;
   font-weight: 600;
   display: inline-flex;
   align-items: center;
@@ -1098,7 +1115,7 @@ table.devices tr.me { background: rgba(79, 140, 255, 0.05); }
 }
 .provider-meta-count {
   font-size: 11px;
-  color: #64748b;
+  color: #94a3b8;
 }
 .provider-inputs {
   display: flex;
@@ -1164,7 +1181,7 @@ table.devices tr.me { background: rgba(79, 140, 255, 0.05); }
   left: 10px;
   top: 50%;
   transform: translateY(-50%);
-  color: #64748b;
+  color: #94a3b8;
   font-size: 12px;
   pointer-events: none;
 }
@@ -1236,12 +1253,12 @@ table.devices tr.me { background: rgba(79, 140, 255, 0.05); }
   box-shadow: 0 0 6px rgba(34, 197, 94, 0.6);
 }
 .devices-pill-dot.offline {
-  background: #64748b;
+  background: #94a3b8;
 }
 
 .devices-pill-count {
   font-size: 11px;
-  color: #64748b;
+  color: #94a3b8;
   font-weight: 600;
   margin-left: 2px;
 }
@@ -1272,7 +1289,7 @@ table.devices tr.me { background: rgba(79, 140, 255, 0.05); }
 
 .devices-summary-text {
   font-size: 12px;
-  color: #64748b;
+  color: #94a3b8;
   margin-top: 8px;
 }
 
@@ -1292,7 +1309,7 @@ table.devices-table {
 
 table.devices-table th {
   text-align: left;
-  color: #64748b;
+  color: #94a3b8;
   font-size: 12px;
   font-weight: 600;
   padding: 10px 12px;
@@ -1410,7 +1427,7 @@ table.devices-table td {
 
 .device-reserve-hint {
   font-size: 11px;
-  color: #64748b;
+  color: #94a3b8;
   margin-top: 3px;
   white-space: nowrap;
   overflow: hidden;
@@ -1444,7 +1461,7 @@ table.devices-table td {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.8px;
-  color: #64748b;
+  color: #94a3b8;
   border-top: 1px solid #182030;
   margin-top: 6px;
 }
@@ -1465,7 +1482,7 @@ table.devices-table td {
 
 .offline-accordion-chevron {
   font-size: 16px;
-  color: #64748b;
+  color: #94a3b8;
   line-height: 1;
   transition: transform 0.2s ease;
   margin-top: 2px;
@@ -1486,7 +1503,7 @@ table.devices-table td {
 }
 .offline-accordion-preview {
   font-size: 12px;
-  color: #64748b;
+  color: #94a3b8;
 }
 
 /* --- Плавающая нижняя панель массовых действий (Floating batch bar) --- */
@@ -1675,7 +1692,7 @@ table.devices-table td {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #64748b;
+  color: #94a3b8;
   font-weight: 600;
 }
 
@@ -1751,7 +1768,7 @@ table.devices-table td {
 
 .ag-card-hint {
   font-size: 12px;
-  color: #64748b;
+  color: #94a3b8;
 }
 
 /* Таблица DNS */
@@ -1765,7 +1782,7 @@ table.devices-table td {
   text-align: left;
   padding: 8px 10px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  color: #64748b;
+  color: #94a3b8;
   font-weight: 600;
   font-size: 11.5px;
 }
@@ -1777,7 +1794,7 @@ table.devices-table td {
 }
 
 .ag-type-badge {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   padding: 2px 6px;
   border-radius: 4px;
@@ -1924,7 +1941,7 @@ table.devices-table td {
 }
 
 .ag-code-label {
-  color: #64748b;
+  color: #94a3b8;
   font-size: 11px;
   min-width: 125px;
 }
@@ -1969,7 +1986,7 @@ table.devices-table td {
   border-radius: 6px;
   font-size: 12.5px;
   background: rgba(15, 23, 42, 0.4);
-  border-left: 3px solid #64748b;
+  border-left: 3px solid #94a3b8;
 }
 
 .ag-event-item.success {
@@ -1991,7 +2008,7 @@ table.devices-table td {
 .ag-event-time {
   font-family: Consolas, monospace;
   font-size: 11px;
-  color: #64748b;
+  color: #94a3b8;
   flex-shrink: 0;
 }
 
@@ -2010,7 +2027,10 @@ table.devices-table td {
   --border: #cbd5e1;
   --border-focus: #2563eb;
   --text: #0f172a;
+  --text-bright: #020617;
+  --text-dim: #475569;
   --muted: #64748b;
+  --muted-dim: #94a3b8;
   --accent: #2563eb;
   --accent-2: #1d4ed8;
   --green: #16a34a;
@@ -2529,14 +2549,16 @@ table.devices-table td {
   font-family: Consolas, monospace;
 }
 
+.btn.btn-speedtest,
 .btn-speedtest {
-  color: #f59e0b !important;
-  border-color: rgba(245, 158, 11, 0.3) !important;
+  color: #f59e0b;
+  border-color: rgba(245, 158, 11, 0.3);
 }
 
+.btn.btn-speedtest:hover,
 .btn-speedtest:hover {
-  background: rgba(245, 158, 11, 0.1) !important;
-  border-color: #f59e0b !important;
+  background: rgba(245, 158, 11, 0.1);
+  border-color: #f59e0b;
 }
 
 .btn-speedtest.loading {
@@ -2636,6 +2658,32 @@ table.devices-table td {
     max-width: 95vw !important;
     padding: 12px;
     max-height: 92vh;
+  }
+}
+
+/* ==========================================================================
+   ДОСТУПНОСТЬ (ACCESSIBILITY: FOCUS & REDUCED MOTION)
+   ========================================================================== */
+.input:focus-visible,
+.devices-search-input:focus-visible,
+.device-select:focus-visible,
+.editor-textarea:focus-visible,
+.btn:focus-visible,
+.tab:focus-visible,
+.header-pill-btn:focus-visible,
+.header-action-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }
 

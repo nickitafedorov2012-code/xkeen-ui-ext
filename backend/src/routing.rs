@@ -152,7 +152,13 @@ pub fn parse_provider_urls(yaml: &str) -> std::collections::BTreeMap<String, Str
 }
 
 /// Добавить новую HTTP-подписку в блок proxy-providers в config.yaml
-pub fn add_provider_to_yaml(yaml: &str, id: &str, url: &str) -> Result<String, String> {
+pub fn add_provider_to_yaml(
+    yaml: &str,
+    id: &str,
+    url: &str,
+    health_check_url: Option<&str>,
+    health_check_interval: Option<u32>,
+) -> Result<String, String> {
     let id = id.trim();
     let url = url.trim();
     if id.is_empty() || url.is_empty() {
@@ -164,8 +170,11 @@ pub fn add_provider_to_yaml(yaml: &str, id: &str, url: &str) -> Result<String, S
         return Err(format!("Подписка с ID '{id}' уже существует"));
     }
 
+    let hc_url = health_check_url.unwrap_or(PROVIDER_HEALTH_CHECK_URL);
+    let hc_interval = health_check_interval.unwrap_or(PROVIDER_HEALTH_CHECK_INTERVAL_SECS);
+
     let new_block = format!(
-        "  {id}:\n    type: http\n    url: \"{url}\"\n    interval: {PROVIDER_DEFAULT_INTERVAL_SECS}\n    health-check:\n      enable: true\n      url: \"{PROVIDER_HEALTH_CHECK_URL}\"\n      interval: {PROVIDER_HEALTH_CHECK_INTERVAL_SECS}\n      expected-status: {PROVIDER_HEALTH_CHECK_EXPECTED_STATUS}"
+        "  {id}:\n    type: http\n    url: \"{url}\"\n    interval: {PROVIDER_DEFAULT_INTERVAL_SECS}\n    health-check:\n      enable: true\n      url: \"{hc_url}\"\n      interval: {hc_interval}\n      expected-status: {PROVIDER_HEALTH_CHECK_EXPECTED_STATUS}"
     );
 
     let mut out = Vec::new();
@@ -1039,5 +1048,20 @@ proxy-groups:
         for line in out.lines() {
             assert!(!line.starts_with("proxy-groups:#") && !line.starts_with("rules:#"));
         }
+    }
+
+    #[test]
+    fn test_add_provider_to_yaml_custom_health_check() {
+        let yaml = "proxy-providers:\n  old_sub:\n    type: http\n    url: \"https://old.sub/sub\"\n";
+        let out = add_provider_to_yaml(
+            yaml,
+            "new_sub",
+            "https://my.provider/sub",
+            Some("http://cp.cloudflare.com/generate_204"),
+            Some(600),
+        ).unwrap();
+        assert!(out.contains("new_sub:"));
+        assert!(out.contains("url: \"http://cp.cloudflare.com/generate_204\""));
+        assert!(out.contains("interval: 600"));
     }
 }

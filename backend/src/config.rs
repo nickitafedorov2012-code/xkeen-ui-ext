@@ -47,6 +47,10 @@ pub struct MihomoConfig {
     /// Провайдеры, подключаемые к группам устройств (use:). Пусто = взять все
     /// proxy-providers из config.yaml автоматически.
     pub device_providers: Vec<String>,
+    /// URL проверки доступности (health-check) для прокси и подписок.
+    pub health_check_url: String,
+    /// Интервал health-check для подписок (сек).
+    pub health_check_interval: u32,
 }
 
 impl Default for MihomoConfig {
@@ -60,6 +64,8 @@ impl Default for MihomoConfig {
             log_path: "/opt/var/log/mihomo.log".into(),
             process_name: "mihomo".into(),
             device_providers: Vec::new(),
+            health_check_url: "http://www.gstatic.com/generate_204".into(),
+            health_check_interval: 300,
         }
     }
 }
@@ -322,6 +328,19 @@ impl AppConfig {
 
     pub fn mihomo_proxy_url(&self) -> String {
         format!("http://{}:{}", self.mihomo.host, self.mihomo.mixed_port)
+    }
+
+    pub fn health_check_url(&self) -> &str {
+        let u = self.mihomo.health_check_url.trim();
+        if u.is_empty() {
+            "http://www.gstatic.com/generate_204"
+        } else {
+            u
+        }
+    }
+
+    pub fn health_check_url_encoded(&self) -> String {
+        crate::mihomo::urlencoding_lite(self.health_check_url())
     }
 }
 

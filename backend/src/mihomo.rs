@@ -719,10 +719,10 @@ pub async fn ping_group(
     timeout_ms: u64,
 ) -> BTreeMap<String, i64> {
     let enc = urlencoding_lite(group);
+    let check_url = cfg.health_check_url_encoded();
     let url = format!(
-        "{}/group/{enc}/delay?timeout={timeout_ms}&url={}",
-        cfg.mihomo_url(),
-        "http%3A%2F%2Fwww.gstatic.com%2Fgenerate_204"
+        "{}/group/{enc}/delay?timeout={timeout_ms}&url={check_url}",
+        cfg.mihomo_url()
     );
     let req_timeout = std::cmp::max(timeout_ms + 15000, 25000);
     let mut req = http.get(&url).timeout(std::time::Duration::from_millis(req_timeout));
@@ -752,10 +752,10 @@ pub async fn ping_group(
 /// 3) Если сервер из proxy-provider (на 1) пришёл 404) -> опрос группы /group/{group}/delay
 pub async fn ping_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &str, timeout_ms: u64) -> i64 {
     let enc = urlencoding_lite(server_id);
+    let check_url = cfg.health_check_url_encoded();
     let url = format!(
-        "{}/proxies/{enc}/delay?timeout={timeout_ms}&url={}",
-        cfg.mihomo_url(),
-        "http%3A%2F%2Fwww.gstatic.com%2Fgenerate_204"
+        "{}/proxies/{enc}/delay?timeout={timeout_ms}&url={check_url}",
+        cfg.mihomo_url()
     );
     let mut req = http.get(&url).timeout(std::time::Duration::from_millis(std::cmp::max(timeout_ms + 2000, 5000)));
     if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
@@ -787,9 +787,8 @@ pub async fn ping_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &st
             if is_now {
                 let g_enc = urlencoding_lite(&group);
                 let g_url = format!(
-                    "{}/proxies/{g_enc}/delay?timeout={timeout_ms}&url={}",
-                    cfg.mihomo_url(),
-                    "http%3A%2F%2Fwww.gstatic.com%2Fgenerate_204"
+                    "{}/proxies/{g_enc}/delay?timeout={timeout_ms}&url={check_url}",
+                    cfg.mihomo_url()
                 );
                 let g_req_timeout = std::cmp::max(timeout_ms + 2000, 5000);
                 let mut g_req = http.get(&g_url).timeout(std::time::Duration::from_millis(g_req_timeout));
@@ -961,7 +960,7 @@ pub async fn check_google_geo(http: &reqwest::Client, cfg: &AppConfig, active_se
 }
 
 /// Минимальный percent-encoding для имён прокси в URL.
-fn urlencoding_lite(s: &str) -> String {
+pub fn urlencoding_lite(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
