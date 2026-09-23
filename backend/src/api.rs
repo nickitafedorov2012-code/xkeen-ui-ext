@@ -177,7 +177,7 @@ pub async fn check_google_geo(State(state): State<AppState>) -> Response {
         Err(e) => return api_err(format!("Ошибка получения прокси: {e}")),
     };
     match mihomo::check_google_geo(&state.http, &cfg, &active_name).await {
-        Ok(status) => api_ok(status),
+        Ok(status) => api_ok(serde_json::to_value(status).unwrap_or_default()),
         Err(e) => api_err(e),
     }
 }
