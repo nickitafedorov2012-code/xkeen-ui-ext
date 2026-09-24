@@ -378,33 +378,60 @@ pub async fn repair_flow(State(state): State<AppState>) -> Response {
     }))
 }
 
-pub const FLOW_USERSCRIPT: &str = include_str!("../../frontend/public/flow-unlock.user.js");
-pub const FLOW_EXTENSION_ZIP: &[u8] = include_bytes!("../../frontend/public/flow-unlock-extension.zip");
-
 /// GET /api/flow/unlock.user.js — отдача готового скрипта для Tampermonkey / Violentmonkey
 pub async fn get_flow_userscript() -> Response {
-    (
-        [
-            ("Content-Type", "application/javascript; charset=utf-8"),
-            ("Content-Disposition", "inline; filename=\"xkeen-flow-unlock.user.js\""),
-            ("Cache-Control", "no-cache, no-store, must-revalidate"),
-        ],
-        FLOW_USERSCRIPT,
-    )
-        .into_response()
+    let disk_file = std::path::Path::new("/opt/share/xkeen-route/dist/flow-unlock.user.js");
+    if let Ok(data) = tokio::fs::read(disk_file).await {
+        return (
+            [
+                ("Content-Type", "application/javascript; charset=utf-8"),
+                ("Content-Disposition", "inline; filename=\"xkeen-flow-unlock.user.js\""),
+                ("Cache-Control", "no-cache, no-store, must-revalidate"),
+            ],
+            data,
+        )
+            .into_response();
+    }
+    if let Some(asset) = crate::frontend::Assets::get("flow-unlock.user.js") {
+        return (
+            [
+                ("Content-Type", "application/javascript; charset=utf-8"),
+                ("Content-Disposition", "inline; filename=\"xkeen-flow-unlock.user.js\""),
+                ("Cache-Control", "no-cache, no-store, must-revalidate"),
+            ],
+            asset.data,
+        )
+            .into_response();
+    }
+    (axum::http::StatusCode::NOT_FOUND, "flow-unlock.user.js not found").into_response()
 }
 
 /// GET /api/flow/extension.zip — отдача готового запакованного расширения для Chrome/Edge
 pub async fn get_flow_extension() -> Response {
-    (
-        [
-            ("Content-Type", "application/zip"),
-            ("Content-Disposition", "attachment; filename=\"xkeen-flow-unlock.zip\""),
-            ("Cache-Control", "no-cache, no-store, must-revalidate"),
-        ],
-        FLOW_EXTENSION_ZIP,
-    )
-        .into_response()
+    let disk_file = std::path::Path::new("/opt/share/xkeen-route/dist/flow-unlock-extension.zip");
+    if let Ok(data) = tokio::fs::read(disk_file).await {
+        return (
+            [
+                ("Content-Type", "application/zip"),
+                ("Content-Disposition", "attachment; filename=\"xkeen-flow-unlock.zip\""),
+                ("Cache-Control", "no-cache, no-store, must-revalidate"),
+            ],
+            data,
+        )
+            .into_response();
+    }
+    if let Some(asset) = crate::frontend::Assets::get("flow-unlock-extension.zip") {
+        return (
+            [
+                ("Content-Type", "application/zip"),
+                ("Content-Disposition", "attachment; filename=\"xkeen-flow-unlock.zip\""),
+                ("Cache-Control", "no-cache, no-store, must-revalidate"),
+            ],
+            asset.data,
+        )
+            .into_response();
+    }
+    (axum::http::StatusCode::NOT_FOUND, "flow-unlock-extension.zip not found").into_response()
 }
 
 /// GET /api/policies — политики доступа Keenetic.

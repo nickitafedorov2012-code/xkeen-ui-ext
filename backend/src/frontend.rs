@@ -5,7 +5,7 @@ use std::path::Path;
 
 #[derive(Embed)]
 #[folder = "../frontend/dist"]
-struct Assets;
+pub struct Assets;
 
 /// Раздача встроенного SPA с fallback на index.html (роутинг на стороне клиента).
 pub async fn serve(uri: Uri) -> Response {
