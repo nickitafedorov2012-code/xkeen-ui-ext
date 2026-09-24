@@ -2864,39 +2864,99 @@ pub const S51ZAPRET_SCRIPT: &str = r#"#!/bin/sh
 
 PIDFILE="/var/run/nfqws.pid"
 CONF="/opt/etc/zapret/zapret.conf"
-BIN="/opt/zapret/nfq/nfqws"
-[ ! -x "$BIN" ] && BIN="/opt/zapret/binaries/linux-arm64/nfqws"
+
+find_bin() {
+  if [ -x "/opt/zapret/nfq/nfqws" ]; then
+    echo "/opt/zapret/nfq/nfqws"
+  elif [ -x "/opt/zapret/binaries/linux-arm64/nfqws" ]; then
+    echo "/opt/zapret/binaries/linux-arm64/nfqws"
+  elif [ -x "/opt/zapret/binaries/linux-arm/nfqws" ]; then
+    echo "/opt/zapret/binaries/linux-arm/nfqws"
+  elif [ -x "/opt/zapret/binaries/linux-mips32r2-lsb/nfqws" ]; then
+    echo "/opt/zapret/binaries/linux-mips32r2-lsb/nfqws"
+  elif [ -x "/opt/zapret/binaries/linux-mips32r2-msb/nfqws" ]; then
+    echo "/opt/zapret/binaries/linux-mips32r2-msb/nfqws"
+  elif [ -x "/opt/zapret/binaries/linux-x86_64/nfqws" ]; then
+    echo "/opt/zapret/binaries/linux-x86_64/nfqws"
+  elif [ -x "/opt/bin/nfqws" ]; then
+    echo "/opt/bin/nfqws"
+  elif [ -x "/opt/usr/bin/nfqws" ]; then
+    echo "/opt/usr/bin/nfqws"
+  fi
+}
+
+BIN=$(find_bin)
 
 # Fallback default
-NFQWS_ARGS="--daemon --qnum=200 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-cutoff=d4"
+NFQWS_ARGS="--daemon --qnum=200 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-cutoff=d4"
 
 [ -f "$CONF" ] && . "$CONF"
 
 add_fw() {
   del_fw
 
-  # Client LAN TCP (80, 443) -> NFQUEUE 200 with bypass
-  iptables -t mangle -I PREROUTING 1 -i br+ -p tcp -m multiport --dports 80,443 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass
+  # Dedicated zapret chain in mangle
+  iptables -t mangle -N zapret 2>/dev/null
+  iptables -t mangle -F zapret 2>/dev/null
 
-  # Client LAN UDP (443 - QUIC / HTTP3) -> NFQUEUE 200 with bypass
-  iptables -t mangle -I PREROUTING 2 -i br+ -p udp --dport 443 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass
+  # 1. CRITICAL: Skip private/local subnets & router IP so Keenetic Web UI / LAN are NEVER touched
+  iptables -t mangle -A zapret -d 0.0.0.0/8 -j RETURN
+  iptables -t mangle -A zapret -d 10.0.0.0/8 -j RETURN
+  iptables -t mangle -A zapret -d 100.64.0.0/10 -j RETURN
+  iptables -t mangle -A zapret -d 127.0.0.0/8 -j RETURN
+  iptables -t mangle -A zapret -d 169.254.0.0/16 -j RETURN
+  iptables -t mangle -A zapret -d 172.16.0.0/12 -j RETURN
+  iptables -t mangle -A zapret -d 192.168.0.0/16 -j RETURN
+  iptables -t mangle -A zapret -d 224.0.0.0/4 -j RETURN
+  iptables -t mangle -A zapret -d 240.0.0.0/4 -j RETURN
+  iptables -t mangle -A zapret -d 255.255.255.255/32 -j RETURN
 
-  # Discord Voice RTC UDP (50000:65535) if voice enabled
+  # 2. Skip packets already marked by nfqws
+  iptables -t mangle -A zapret -m mark --mark 0x40000000/0x40000000 -j RETURN
+
+  # 3. Queue WAN TCP (80, 443) -> NFQUEUE 200 with bypass
+  iptables -t mangle -A zapret -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass
+
+  # 4. Queue WAN UDP (443 - QUIC / HTTP3) -> NFQUEUE 200 with bypass
+  iptables -t mangle -A zapret -p udp --dport 443 -j NFQUEUE --queue-num 200 --queue-bypass
+
+  # 5. Discord Voice RTC UDP (50000:65535) if voice enabled
   if [ "$DISCORD_VOICE_ENABLED" = "1" ]; then
-    iptables -t mangle -I PREROUTING 3 -i br+ -p udp -m multiport --dports 50000:65535 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass
+    iptables -t mangle -A zapret -p udp -m multiport --dports 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass
   fi
+
+  # Hook into PREROUTING for client LAN bridge interfaces (br+)
+  iptables -t mangle -I PREROUTING 1 -i br+ -j zapret
+
+  # FAILSAFE: через 30 сек проверяем интернет, при потере — откатываем всё
+  (sleep 30 && \
+    if ! curl -s -m 5 -o /dev/null http://www.gstatic.com/generate_204 2>/dev/null && \
+       ! curl -s -m 5 -o /dev/null http://cp.cloudflare.com 2>/dev/null; then
+      del_fw
+      killall nfqws 2>/dev/null
+      logger -t zapret "FAILSAFE: internet connectivity lost after enabling zapret, iptables rules rolled back"
+    fi
+  ) &
 }
 
 del_fw() {
+  # Remove hooks
+  while iptables -t mangle -D PREROUTING -i br+ -j zapret 2>/dev/null; do :; done
+  while iptables -t mangle -D PREROUTING -j zapret 2>/dev/null; do :; done
+  while iptables -t mangle -D OUTPUT -j zapret 2>/dev/null; do :; done
+
+  # Flush and delete chain
+  iptables -t mangle -F zapret 2>/dev/null
+  iptables -t mangle -X zapret 2>/dev/null
+
+  # Clean legacy direct rules without chain
   while iptables -t mangle -D PREROUTING -i br+ -p tcp -m multiport --dports 80,443 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
   while iptables -t mangle -D PREROUTING -i br+ -p udp --dport 443 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
   while iptables -t mangle -D PREROUTING -i br+ -p udp -m multiport --dports 50000:65535 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
-
-  # Clean legacy rules without -i br+
   while iptables -t mangle -D PREROUTING -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
   while iptables -t mangle -D PREROUTING -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
 
-  # CRITICAL: Clean OUTPUT rules to prevent router agent / healthcheck drop
+  # Clean legacy OUTPUT rules
   while iptables -t mangle -D OUTPUT -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
   while iptables -t mangle -D OUTPUT -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
   while iptables -t mangle -D OUTPUT -p udp -m multiport --dports 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
@@ -2909,9 +2969,19 @@ case "$1" in
       exit 0
     fi
     mkdir -p /opt/etc/zapret
-    if [ -x "$BIN" ]; then
+    if [ -n "$BIN" ] && [ -x "$BIN" ]; then
       $BIN $NFQWS_ARGS
-      add_fw
+      sleep 1
+      if pidof nfqws >/dev/null 2>&1; then
+        add_fw
+      else
+        logger -t zapret "ERROR: nfqws failed to start with args: $NFQWS_ARGS"
+        del_fw
+        exit 1
+      fi
+    else
+      logger -t zapret "ERROR: nfqws binary not found or not executable"
+      exit 1
     fi
     ;;
   stop)
@@ -2923,9 +2993,19 @@ case "$1" in
     del_fw
     killall nfqws 2>/dev/null
     sleep 1
-    if [ -x "$BIN" ]; then
+    if [ -n "$BIN" ] && [ -x "$BIN" ]; then
       $BIN $NFQWS_ARGS
-      add_fw
+      sleep 1
+      if pidof nfqws >/dev/null 2>&1; then
+        add_fw
+      else
+        logger -t zapret "ERROR: nfqws failed to restart with args: $NFQWS_ARGS"
+        del_fw
+        exit 1
+      fi
+    else
+      logger -t zapret "ERROR: nfqws binary not found"
+      exit 1
     fi
     ;;
   status)
@@ -2950,10 +3030,10 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
         let yt_desync = if cfg.aggressive_dpi {
             "--dpi-desync=fake,disorder2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=midsld --dpi-desync-fooling=badseq,md5sig --dpi-desync-cutoff=d4"
         } else {
-            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-cutoff=d4"
         };
         profiles.push(format!(
-            "--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be {yt_desync}"
+            "--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com {yt_desync}"
         ));
     }
 
@@ -2962,16 +3042,16 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
         let dc_desync = if cfg.aggressive_dpi {
             "--dpi-desync=fake,disorder2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=midsld --dpi-desync-fooling=badseq,md5sig --dpi-desync-cutoff=d4"
         } else {
-            "--dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,split2 --dpi-desync-cutoff=d4"
         };
         profiles.push(format!(
             "--filter-tcp=80,443 --hostlist-domains=discord.com,discord.gg,discordapp.com,discordapp.net,discord.media,discord-attachments-uploads-prd.storage.googleapis.com {dc_desync}"
         ));
     }
 
-    // Discord Voice UDP profile
+    // Discord Voice UDP profile — корректный синтаксис без недопустимого --filter-l7
     if cfg.discord_voice_udp {
-        profiles.push("--filter-udp=50000-65535 --filter-l7=discord,stun --dpi-desync=fake".to_string());
+        profiles.push("--filter-udp=50000-65535 --dpi-desync=fake".to_string());
     }
 
     // General Web Hostlist profile
@@ -2979,7 +3059,7 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
         let gen_desync = if cfg.aggressive_dpi {
             "--dpi-desync=fake,disorder2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=midsld --dpi-desync-fooling=badseq,md5sig --dpi-desync-cutoff=d4"
         } else {
-            "--dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,split2 --dpi-desync-cutoff=d4"
         };
         profiles.push(format!(
             "--filter-tcp=80,443 --hostlist=/opt/etc/zapret/zapret-hosts.txt {gen_desync}"
@@ -2988,7 +3068,7 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
 
     // If no specific profiles enabled, provide safe basic profile
     if profiles.is_empty() {
-        profiles.push("--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-cutoff=d4".to_string());
+        profiles.push("--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-cutoff=d4".to_string());
     }
 
     let args = format!("--daemon --qnum=200 {}", profiles.join(" --new "));
@@ -3067,7 +3147,7 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
 
     let iptables_active = tokio::process::Command::new("sh")
         .arg("-c")
-        .arg("iptables -t mangle -C PREROUTING -i br+ -p tcp -m multiport --dports 80,443 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null")
+        .arg("iptables -t mangle -C PREROUTING -i br+ -j zapret 2>/dev/null || iptables -t mangle -C PREROUTING -i br+ -p tcp -m multiport --dports 80,443 -j NFQUEUE 2>/dev/null")
         .output()
         .await
         .map(|o| o.status.success())

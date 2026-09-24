@@ -358,7 +358,9 @@ pub const YOUTUBE_HYBRID_DOMAINS: &[&str] = &[
     "youtube.com",
     "ytimg.com",
     "youtu.be",
+    "yt.be",
     "ggpht.com",
+    "youtube-nocookie.com",
 ];
 
 pub const DISCORD_HYBRID_DOMAINS: &[&str] = &[
@@ -366,6 +368,7 @@ pub const DISCORD_HYBRID_DOMAINS: &[&str] = &[
     "discord.gg",
     "discordapp.com",
     "discordapp.net",
+    "discord.media",
 ];
 
 pub const ISOLATED_PROXIED_DOMAINS: &[&str] = &[
@@ -559,6 +562,16 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
 
     let mut rules_to_add: Vec<String> = Vec::new();
 
+    // 0. Safeguard: Защита критических Google API доменов от перехвата на DIRECT.
+    //    Без этого правила домены вроде googleapis.com, google.com и т.д.
+    //    могут быть пойманы широкими DIRECT-правилами ниже, что обрывает
+    //    связь с Antigravity AI-агентом и другими Google сервисами.
+    if zapret_cfg.hybrid_youtube || zapret_cfg.hybrid_discord {
+        for d in FLOW_DOMAINS {
+            rules_to_add.push(format!("  - DOMAIN-SUFFIX,{d},PROXY"));
+        }
+    }
+
     // 1. Изоляция IP-блокировок (ChatGPT, Claude, X/Twitter, Instagram -> PROXY)
     if zapret_cfg.isolated_proxy {
         for d in ISOLATED_PROXIED_DOMAINS {
@@ -571,7 +584,6 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
         for d in YOUTUBE_HYBRID_DOMAINS {
             rules_to_add.push(format!("  - DOMAIN-SUFFIX,{d},DIRECT"));
         }
-        rules_to_add.push("  - DOMAIN-KEYWORD,youtube,DIRECT".to_string());
     }
 
     // 3. Discord -> DIRECT (минимальный пинг, прямые шлюзы)
@@ -579,7 +591,6 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
         for d in DISCORD_HYBRID_DOMAINS {
             rules_to_add.push(format!("  - DOMAIN-SUFFIX,{d},DIRECT"));
         }
-        rules_to_add.push("  - DOMAIN-KEYWORD,discord,DIRECT".to_string());
     }
 
     if rules_to_add.is_empty() {
@@ -1482,6 +1493,8 @@ proxy-groups:
             hybrid_discord: true,
             discord_voice_udp: true,
             youtube_turbo: false,
+            general_bypass: false,
+            aggressive_dpi: false,
             isolated_proxy: true,
         };
 
@@ -1492,24 +1505,33 @@ proxy-groups:
         assert!(with_zapret.contains("DOMAIN-SUFFIX,discord.com,DIRECT"));
         assert!(with_zapret.contains("DOMAIN-SUFFIX,openai.com,PROXY"));
         assert!(with_zapret.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
+        // Safeguard: Google AI/Flow домены защищены как PROXY
+        assert!(with_zapret.contains("DOMAIN-SUFFIX,generativelanguage.googleapis.com,PROXY"));
+        assert!(with_zapret.contains("DOMAIN-SUFFIX,gemini.google.com,PROXY"));
+        // DOMAIN-KEYWORD правила НЕ должны присутствовать (слишком широкие)
+        assert!(!with_zapret.contains("DOMAIN-KEYWORD,youtube"));
+        assert!(!with_zapret.contains("DOMAIN-KEYWORD,discord"));
 
         // 2. Идемпотентность
         let dup = apply_zapret_hybrid_rules(&with_zapret, &zapret_cfg).unwrap();
         assert_eq!(dup.matches(ZAPRET_HYBRID_BEGIN).count(), 1);
 
-        // 3. Выключение YouTube (возврат в PROXY)
+        // 3. Выключение YouTube (возврат в PROXY) — Discord и safeguard остаются
         zapret_cfg.hybrid_youtube = false;
         let no_yt = apply_zapret_hybrid_rules(&dup, &zapret_cfg).unwrap();
-        assert!(!no_yt.contains("googlevideo.com"));
+        assert!(!no_yt.contains("googlevideo.com,DIRECT"));
         assert!(no_yt.contains("discord.com"));
         assert!(no_yt.contains("openai.com"));
+        // Safeguard всё ещё на месте (потому что hybrid_discord включён)
+        assert!(no_yt.contains("generativelanguage.googleapis.com,PROXY"));
 
         // 4. Полное отключение службы Zapret
         zapret_cfg.enabled = false;
         let disabled = apply_zapret_hybrid_rules(&no_yt, &zapret_cfg).unwrap();
         assert!(!disabled.contains(ZAPRET_HYBRID_BEGIN));
-        assert!(!disabled.contains("discord.com"));
+        assert!(!disabled.contains("discord.com,DIRECT"));
         assert!(!disabled.contains("openai.com"));
+        assert!(!disabled.contains("generativelanguage.googleapis.com,PROXY"));
         assert!(disabled.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
     }
 }
