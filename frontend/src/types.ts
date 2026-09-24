@@ -231,8 +231,7 @@ export const FLOW_OK_KEYWORDS: readonly string[] = [
   'сша', 'usa', 'united states', 'us ', '[us]', 'us-',
   'вашингтон', 'washington', 'chicago', 'чикаго', 'miami', 'майами',
   'seattle', 'сиэтл', 'лос-анджелес', 'los angeles', 'атланта', 'atlanta',
-  'феникс', 'phoenix', 'канад', 'canada', 'великобритан', 'united kingdom',
-  'london', 'лондон',
+  'феникс', 'phoenix', 'канад', 'canada',
 ]
 
 export const FLOW_BLOCKED_KEYWORDS: readonly string[] = [

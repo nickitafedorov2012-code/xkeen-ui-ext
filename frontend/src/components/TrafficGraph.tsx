@@ -251,22 +251,6 @@ export default function TrafficGraph() {
           <line x1="0" y1={height * 0.5} x2={width} y2={height * 0.5} className="traffic-grid-line" strokeDasharray="3 3" />
           <line x1="0" y1={height * 0.75} x2={width} y2={height * 0.75} className="traffic-grid-line" strokeDasharray="3 3" />
 
-          {/* Метка шкалы пика с подложкой */}
-          <g className="traffic-scale-badge">
-            <rect x={6} y={5} width={80} height={16} rx={4} className="traffic-scale-bg" />
-            <text x={10} y={17} className="traffic-scale-text" fontSize="10.5" fontFamily="Consolas, monospace">
-              {formatSpeed(maxVal)}
-            </text>
-          </g>
-
-          {/* Метка середины шкалы с подложкой */}
-          <g className="traffic-scale-badge">
-            <rect x={6} y={height * 0.5 - 7} width={80} height={15} rx={4} className="traffic-scale-bg" />
-            <text x={10} y={height * 0.5 + 4} className="traffic-scale-text-dim" fontSize="9.5" fontFamily="Consolas, monospace">
-              {formatSpeed(maxVal * 0.5)}
-            </text>
-          </g>
-
           {/* Заливки областей */}
           <path d={areaD(directPoints)} fill="url(#directGrad)" />
           <path d={areaD(proxyPoints)} fill="url(#proxyGrad)" />
@@ -291,8 +275,17 @@ export default function TrafficGraph() {
             strokeLinejoin="round"
           />
         </svg>
+
+        {/* Бейджи шкалы скорости (HTML оверлей — без горизонтального растяжения) */}
+        <div className="traffic-scale-badge top">
+          <span className="traffic-scale-text">{formatSpeed(maxVal)}</span>
+        </div>
+        <div className="traffic-scale-badge mid">
+          <span className="traffic-scale-text-dim">{formatSpeed(maxVal * 0.5)}</span>
+        </div>
       </div>
     </div>
   )
 }
+
 

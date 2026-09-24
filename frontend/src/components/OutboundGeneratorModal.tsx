@@ -75,7 +75,7 @@ export default function OutboundGeneratorModal({
       <div className="modal-card generator-card">
         <div className="modal-header">
           <div className="modal-title-group">
-            <span className="modal-icon">🪄</span>
+            <span className="modal-icon">📥</span>
             <h2>Импорт серверов из ссылок (Outbound Generator)</h2>
           </div>
           <button className="btn btn-sm" onClick={onClose}>

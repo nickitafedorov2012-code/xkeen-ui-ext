@@ -696,7 +696,7 @@ export default function Settings({ notify, status, refresh }: Props) {
           <span className="badge" style={{ textTransform: 'uppercase' }}>{dnsMode}</span>
         </div>
         <p className="muted small">Режим обработки DNS-запросов ядром. Изменение режима перезапускает службу DNS.</p>
-        <div className="tile-options-grid four-col">
+        <div className="tile-options-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
           <label className={`option-tile-card ${dnsMode === 'fake-ip' ? 'active' : ''}`}>
             <div className="option-tile-header">
               <input

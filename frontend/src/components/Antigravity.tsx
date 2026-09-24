@@ -64,17 +64,19 @@ export default function Antigravity({ notify }: Props) {
   const loadFlowServers = useCallback(async () => {
     try {
       const data = await apiGet<{ servers: ServerInfo[] }>('servers')
-      const cleanNodes = (data.servers || []).filter((s) => getFlowStatus(s.name) === 'ok')
-      setFlowServers(cleanNodes)
+      const all = data.servers || []
+      const cleanNodes = all.filter((s) => getFlowStatus(s.name) === 'ok')
+      setFlowServers(all)
 
       const saved = localStorage.getItem('xr_flow_server')
-      const activeFlow = data.servers?.find((s) => s.is_active && getFlowStatus(s.name) === 'ok')
+      const activeServer = all.find((s) => s.is_active)
 
-      if (saved && cleanNodes.some((s) => s.id === saved)) {
+      if (saved && all.some((s) => s.id === saved)) {
         setSelectedFlowServer(saved)
-      } else if (activeFlow) {
-        setSelectedFlowServer(activeFlow.id)
-        localStorage.setItem('xr_flow_server', activeFlow.id)
+      } else if (activeServer) {
+        setSelectedFlowServer(activeServer.id)
+      } else if (cleanNodes.length > 0) {
+        setSelectedFlowServer(cleanNodes[0].id)
       }
     } catch {
       // ignore
@@ -260,7 +262,7 @@ export default function Antigravity({ notify }: Props) {
               style={{ textDecoration: 'none' }}
               title="Открыть Google AI Studio в новой вкладке"
             >
-              🪄 AI Studio ↗
+              ⚡ AI Studio ↗
             </a>
           </div>
         </div>
@@ -311,19 +313,40 @@ export default function Antigravity({ notify }: Props) {
                 }}
                 disabled={switchingFlowServer}
               >
-                <option value="">-- Выберите Flow-узел ({flowServers.length}) --</option>
-                {selectedFlowServer && !flowServers.some((s) => s.id === selectedFlowServer) && (
-                  <option value={selectedFlowServer}>{selectedFlowServer}</option>
-                )}
-                {flowServers.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name} {s.ping_ms > 0 ? `(${s.ping_ms} мс)` : ''}
-                  </option>
-                ))}
+                <option value="">-- Выберите сервер для AI ({flowServers.length}) --</option>
+                {flowServers.map((s) => {
+                  const isClean = getFlowStatus(s.name) === 'ok'
+                  return (
+                    <option key={s.id} value={s.id}>
+                      {isClean ? '🇺🇸 [США] ' : ''}{s.name} {s.ping_ms > 0 ? `(${s.ping_ms} мс)` : ''}{isClean ? ' ★ Flow' : ''}
+                    </option>
+                  )
+                })}
               </select>
             </div>
           </div>
         </div>
+
+        {/* Предупреждение о блокировке */}
+        {googleGeo && !googleGeo.is_clean && (
+          <div style={{
+            background: 'rgba(239, 68, 68, 0.1)',
+            border: '1px solid rgba(239, 68, 68, 0.3)',
+            borderRadius: 8,
+            padding: '10px 14px',
+            marginBottom: 14,
+            fontSize: 13,
+            color: '#fca5a5',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8
+          }}>
+            <span>⚠️</span>
+            <div>
+              Текущий активный узел определяется Google как <b>{googleGeo.google_country || 'RU'}</b>. Сервисы Flow и Gemini будут заблокированы. Выберите узел с пометкой <b>🇺🇸 [США]</b> в списке выше!
+            </div>
+          </div>
+        )}
 
         {/* Домены Google AI */}
         <div>

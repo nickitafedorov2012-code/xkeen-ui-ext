@@ -975,7 +975,7 @@ export default function Help({ status }: Props) {
             ]}
           />
 
-          <h3 style={{ margin: '16px 0 8px', fontSize: 14.5, color: 'var(--text)' }}>🪄 Как применить готовый пресет за 2 секунды</h3>
+          <h3 style={{ margin: '16px 0 8px', fontSize: 14.5, color: 'var(--text)' }}>✨ Как применить готовый пресет за 2 секунды</h3>
           <StepList
             steps={[
               {
