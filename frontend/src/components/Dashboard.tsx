@@ -427,7 +427,7 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
           <div style={{ padding: '16px 20px', background: 'rgba(34, 197, 94, 0.04)', border: '1px solid rgba(34, 197, 94, 0.15)', borderRadius: 8, display: 'flex', alignItems: 'center', gap: 12 }}>
             <span style={{ fontSize: 22 }}>🟢</span>
             <div>
-              <div style={{ fontWeight: 600, color: '#f8fafc', fontSize: 13 }}>Сбоев и переключений не зафиксировано</div>
+              <div style={{ fontWeight: 600, color: 'var(--text)', fontSize: 13 }}>Сбоев и переключений не зафиксировано</div>
               <div className="muted small">Автоматический мониторинг активен. Все серверы работают в штатном режиме.</div>
             </div>
           </div>

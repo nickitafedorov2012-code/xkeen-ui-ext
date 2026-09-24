@@ -1,4 +1,4 @@
-﻿import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { apiGet } from '../api'
 
 interface SpeedPair {
@@ -221,15 +221,15 @@ export default function TrafficGraph() {
           </defs>
 
           {/* Сетка графика */}
-          <line x1="0" y1={height * 0.25} x2={width} y2={height * 0.25} stroke="rgba(255,255,255,0.06)" strokeDasharray="3 3" />
-          <line x1="0" y1={height * 0.5} x2={width} y2={height * 0.5} stroke="rgba(255,255,255,0.06)" strokeDasharray="3 3" />
-          <line x1="0" y1={height * 0.75} x2={width} y2={height * 0.75} stroke="rgba(255,255,255,0.06)" strokeDasharray="3 3" />
+          <line x1="0" y1={height * 0.25} x2={width} y2={height * 0.25} className="traffic-grid-line" strokeDasharray="3 3" />
+          <line x1="0" y1={height * 0.5} x2={width} y2={height * 0.5} className="traffic-grid-line" strokeDasharray="3 3" />
+          <line x1="0" y1={height * 0.75} x2={width} y2={height * 0.75} className="traffic-grid-line" strokeDasharray="3 3" />
 
           {/* Метка шкалы пика */}
-          <text x={8} y={16} fill="rgba(255,255,255,0.35)" fontSize="10" fontFamily="Consolas, monospace">
+          <text x={8} y={16} className="traffic-scale-text" fontSize="10" fontFamily="Consolas, monospace">
             {formatSpeed(maxVal)}
           </text>
-          <text x={8} y={height * 0.5 + 4} fill="rgba(255,255,255,0.22)" fontSize="9" fontFamily="Consolas, monospace">
+          <text x={8} y={height * 0.5 + 4} className="traffic-scale-text-dim" fontSize="9" fontFamily="Consolas, monospace">
             {formatSpeed(maxVal * 0.5)}
           </text>
 

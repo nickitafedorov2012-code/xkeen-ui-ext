@@ -225,7 +225,7 @@ export default function Antigravity({ notify }: Props) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <div style={{ fontSize: 32 }}>✨</div>
             <div>
-              <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: '#f8fafc' }}>
+              <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: 'var(--text)' }}>
                 Google Flow & Gemini Labs
               </h2>
               <div style={{ color: 'var(--muted)', fontSize: 13, marginTop: 2 }}>
@@ -570,7 +570,7 @@ export default function Antigravity({ notify }: Props) {
         </div>
 
         <div style={{ background: 'rgba(59, 130, 246, 0.06)', border: '1px solid rgba(59, 130, 246, 0.25)', borderRadius: 10, padding: '16px 20px', marginBottom: 16 }}>
-          <p style={{ margin: 0, color: '#e2e8f0', fontSize: 13, lineHeight: 1.5 }}>
+          <p style={{ margin: 0, color: 'var(--text)', fontSize: 13, lineHeight: 1.5 }}>
             Если при входе в Google Antigravity возникает ошибка <em>«Sorry, this account is ineligible to use Antigravity. Your current account is not eligible for Antigravity, because it is not currently available in your location»</em>, локальный бинарный файл <code>language_server.exe</code> блокирует вход по флагу Protobuf. Выберите один из способов разблокировки:
           </p>
         </div>
@@ -613,7 +613,7 @@ export default function Antigravity({ notify }: Props) {
                   readOnly
                   className="input mono small"
                   value={patchCommand}
-                  style={{ flex: 1, fontSize: 12, padding: '8px 10px', background: 'rgba(0, 0, 0, 0.2)' }}
+                  style={{ flex: 1, fontSize: 12, padding: '8px 10px' }}
                   onClick={(e) => (e.target as HTMLInputElement).select()}
                 />
                 <button
@@ -641,7 +641,7 @@ export default function Antigravity({ notify }: Props) {
             <span style={{ fontSize: 24 }}>✅</span>
             <div>
               <h4 style={{ margin: 0, color: '#22c55e', fontSize: 16 }}>Автоматический прозрачный режим активен</h4>
-              <p style={{ margin: '4px 0 0', color: '#e2e8f0', fontSize: 13 }}>
+              <p style={{ margin: '4px 0 0', color: 'var(--text)', fontSize: 13 }}>
                 <strong>Настройка клиентских устройств НЕ ТРЕБУЕТСЯ.</strong> Никаких скриптов, переменных окружения и приложений на ПК запускать не нужно.
               </p>
             </div>
