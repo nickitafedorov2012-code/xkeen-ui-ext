@@ -917,6 +917,43 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
     }))
 }
 
+/// POST /api/domains/scan-cdn — ручной запуск глубокого сканирования CDN и синхронизации geo_override
+pub async fn scan_cdn_manual(State(state): State<AppState>) -> Response {
+    let _guard = state.routing_lock.lock().await;
+    let cfg = state.config.read().await.clone();
+    if cfg.force_domains.is_empty() {
+        return api_ok(json!({
+            "auto_cdns": [],
+            "overridden_ips": 0,
+            "message": "Список принудительно проксируемых доменов пуст"
+        }));
+    }
+
+    crate::log_i!("[MANUAL] Ручной запуск глубокого сканирования CDN...");
+    let auto_cdns = crate::cdn_discovery::discover_all_cdns(&cfg.force_domains, &cfg.mihomo_proxy_url()).await;
+    let mut all_domains = cfg.force_domains.clone();
+    for cdn in &auto_cdns {
+        if !all_domains.contains(cdn) {
+            all_domains.push(cdn.clone());
+        }
+    }
+
+    let overridden = match crate::override_sync::sync_geo_override(&all_domains).await {
+        Ok(count) => count,
+        Err(e) => {
+            crate::log_w!("[MANUAL] Ошибка синхронизации geo_override: {e}");
+            0
+        }
+    };
+
+    crate::log_i!("[MANUAL] ✓ Ручное сканирование CDN завершено. Найдено CDN: {}, IP: {}", auto_cdns.len(), overridden);
+    let auto_cdns_list: Vec<String> = auto_cdns.into_iter().collect();
+    api_ok(json!({
+        "auto_cdns": auto_cdns_list,
+        "overridden_ips": overridden
+    }))
+}
+
 // --- Сервис XKeen и бэкапы ---
 
 #[derive(Deserialize)]

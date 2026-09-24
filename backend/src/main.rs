@@ -258,7 +258,7 @@ async fn main() {
     watchdog::spawn(state.clone());
     traffic::spawn(state.clone());
 
-    // Начальная и периодическая синхронизация IP принудительно проксируемых доменов и их CDN с geo_override
+    // Начальная быстрая синхронизация известных бандлов IP принудительно проксируемых доменов с geo_override
     let sync_state = state.clone();
     tokio::spawn(async move {
         // Задержка и ожидание готовности роутера/DNS после перезагрузки
@@ -267,29 +267,42 @@ async fn main() {
 
         let cfg = sync_state.config.read().await;
         if !cfg.force_domains.is_empty() {
-            log_i!("[STARTUP] Начало обнаружения CDN и синхронизации geo_override...");
-            let auto_cdns = cdn_discovery::discover_all_cdns(&cfg.force_domains, &cfg.mihomo_proxy_url()).await;
+            log_i!("[STARTUP] Быстрая синхронизация известных CDN бандлов с geo_override (без сетевого сканирования)...");
+            let static_cdns = cdn_discovery::expand_bundles(&cfg.force_domains);
             let mut all_domains = cfg.force_domains.clone();
-            all_domains.extend(auto_cdns);
+            all_domains.extend(static_cdns);
             if let Err(e) = override_sync::sync_geo_override(&all_domains).await {
-                log_w!("[STARTUP] Ошибка синхронизации geo_override: {}", e);
+                log_w!("[STARTUP] Ошибка быстрой синхронизации geo_override: {}", e);
+            } else {
+                log_i!("[STARTUP] ✓ Быстрая синхронизация geo_override завершена");
             }
         }
     });
 
-    let periodic_state = state.clone();
+    // Еженедельное плановое сканирование CDN (каждый понедельник в 05:00 утра)
+    let weekly_state = state.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1800));
-        interval.tick().await; // пропускаем немедленный первый тик, т.к. начальная синхронизация уже запущена
         loop {
-            interval.tick().await;
-            let cfg = periodic_state.config.read().await;
+            let wait_dur = duration_until_next_monday_5am();
+            let next_run = chrono::Local::now() + chrono::Duration::from_std(wait_dur).unwrap_or_default();
+            log_i!("[CDN-SCHEDULE] Следующее еженедельное сканирование CDN запланировано на {}", next_run.format("%Y-%m-%d %H:%M:%S"));
+
+            tokio::time::sleep(wait_dur).await;
+
+            let cfg = weekly_state.config.read().await;
             if !cfg.force_domains.is_empty() {
+                log_i!("[CDN-SCHEDULE] ⏰ Запуск планового еженедельного сканирования CDN (понедельник 05:00)...");
                 let auto_cdns = cdn_discovery::discover_all_cdns(&cfg.force_domains, &cfg.mihomo_proxy_url()).await;
                 let mut all_domains = cfg.force_domains.clone();
-                all_domains.extend(auto_cdns);
+                for cdn in &auto_cdns {
+                    if !all_domains.contains(cdn) {
+                        all_domains.push(cdn.clone());
+                    }
+                }
                 if let Err(e) = override_sync::sync_geo_override(&all_domains).await {
-                    log_w!("[PERIODIC] Ошибка периодической синхронизации geo_override: {}", e);
+                    log_w!("[CDN-SCHEDULE] Ошибка плановой синхронизации geo_override: {}", e);
+                } else {
+                    log_i!("[CDN-SCHEDULE] ✓ Плановое еженедельное сканирование CDN успешно завершено");
                 }
             }
         }
@@ -331,6 +344,7 @@ async fn main() {
         .route("/api/routing", get(api::get_routing).post(api::apply_routing))
         .route("/api/device-routing", get(api::get_device_routing).post(api::set_device_routing))
         .route("/api/domains", get(api::get_domains).post(api::set_domains))
+        .route("/api/domains/scan-cdn", post(api::scan_cdn_manual))
         .route("/api/dns/mode", get(api::get_dns_mode).post(api::set_dns_mode))
         // Сервис XKeen, бэкапы, конфиги
         .route("/api/xkeen/service", post(api::xkeen_service))
@@ -466,4 +480,33 @@ async fn shutdown_signal() {
 
 pub fn chrono_ts() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+/// Вычисление интервала ожидания до следующего понедельника 05:00:00 (по местному времени роутера)
+pub fn duration_until_next_monday_5am() -> std::time::Duration {
+    use chrono::{Datelike, Local, NaiveTime, Timelike};
+    let now = Local::now();
+    let today = now.date_naive();
+    let target_time = NaiveTime::from_hms_opt(5, 0, 0).unwrap_or_default();
+    let weekday = now.weekday().num_days_from_monday(); // 0 = Mon, ..., 6 = Sun
+
+    let target_date = if weekday == 0 && now.time() < target_time {
+        today
+    } else {
+        let days_ahead = if weekday == 0 { 7 } else { 7 - weekday };
+        today + chrono::Duration::days(days_ahead as i64)
+    };
+
+    let target_dt = target_date
+        .and_time(target_time)
+        .and_local_timezone(Local)
+        .single()
+        .unwrap_or_else(|| now + chrono::Duration::days(7));
+
+    let diff = target_dt.signed_duration_since(now);
+    if diff.num_seconds() > 0 {
+        std::time::Duration::from_secs(diff.num_seconds() as u64)
+    } else {
+        std::time::Duration::from_secs(7 * 86400)
+    }
 }

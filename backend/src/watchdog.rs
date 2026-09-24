@@ -93,9 +93,9 @@ pub fn spawn(state: AppState) {
                             log_i!("[WATCHDOG] ✓ Правила маршрутизации успешно восстановлены и применены в ядре");
                         }
 
-                        // Синхронизация ipset geo_override
+                        // Синхронизация ipset geo_override (быстрые статические бандлы без сетевой нагрузки)
                         if !cfg.force_domains.is_empty() {
-                            let auto_cdns = crate::cdn_discovery::discover_all_cdns(&cfg.force_domains, &cfg.mihomo_proxy_url()).await;
+                            let auto_cdns = crate::cdn_discovery::expand_bundles(&cfg.force_domains);
                             let mut all_domains = cfg.force_domains.clone();
                             all_domains.extend(auto_cdns);
                             let _ = override_sync::sync_geo_override(&all_domains).await;

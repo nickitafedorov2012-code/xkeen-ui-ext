@@ -20,6 +20,7 @@ export default function Settings({ notify, status, refresh }: Props) {
   const [forceDomains, setForceDomains] = useState('')
   const [autoCdns, setAutoCdns] = useState<string[]>([])
   const [savingDomains, setSavingDomains] = useState(false)
+  const [scanningCdn, setScanningCdn] = useState(false)
 
   // Модальные окна
   const [configEditorOpen, setConfigEditorOpen] = useState(false)
@@ -359,6 +360,23 @@ export default function Settings({ notify, status, refresh }: Props) {
       notify(e instanceof Error ? e.message : 'Ошибка сохранения доменов', true)
     } finally {
       setSavingDomains(false)
+    }
+  }
+
+  const scanCdnManual = async () => {
+    setScanningCdn(true)
+    try {
+      const data = await apiPost<{
+        auto_cdns?: string[]
+        overridden_ips?: number
+        message?: string
+      }>('domains/scan-cdn', {})
+      if (data.auto_cdns) setAutoCdns(data.auto_cdns)
+      notify(`✓ Сканирование CDN завершено: найдено CDN: ${data.auto_cdns?.length ?? 0}, IP: ${data.overridden_ips ?? 0}`)
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка сканирования CDN', true)
+    } finally {
+      setScanningCdn(false)
     }
   }
 
@@ -741,9 +759,17 @@ export default function Settings({ notify, status, refresh }: Props) {
                 </div>
               </div>
             )}
-            <button className="btn primary" style={{ marginTop: 12 }} onClick={saveDomains} disabled={savingDomains}>
-              {savingDomains ? 'Применение и поиск CDN…' : '🌐 Применить домены'}
-            </button>
+            <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+              <button className="btn primary" onClick={saveDomains} disabled={savingDomains}>
+                {savingDomains ? 'Применение и поиск CDN…' : '🌐 Применить домены'}
+              </button>
+              <button className="btn" onClick={scanCdnManual} disabled={scanningCdn || savingDomains}>
+                {scanningCdn ? '🔍 Поиск CDN…' : '🔍 Сканировать CDN сейчас'}
+              </button>
+            </div>
+            <p className="muted small" style={{ marginTop: 6, marginBottom: 0 }}>
+              💡 Фоновое сканирование выполняется автоматически 1 раз в неделю (в понедельник в 05:00) или вручную кнопкой выше, чтобы не нагружать процессор роутера.
+            </p>
           </section>
 
           {/* ОПОВЕЩЕНИЯ (TELEGRAM / WEBHOOK) */}
