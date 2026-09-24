@@ -1109,16 +1109,29 @@ export default function Settings({ notify, status, refresh }: Props) {
             )}
 
             {!updChecking && upd?.update_available && (
-              <>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 <span className="upd-dot" title="Доступна новая версия" />
                 <button
-                  className="btn upd-glow"
+                  type="button"
+                  className="btn btn-primary upd-glow"
                   disabled={updBusy}
-                  onClick={() => setShowUpdNotes((prev) => !prev)}
+                  onClick={doUpdate}
+                  title={`Установить обновление ${upd.latest} в один клик`}
+                  style={{ fontWeight: 600, padding: '5px 12px' }}
                 >
-                  ⬆ Доступна {upd.latest} — {showUpdNotes ? 'скрыть' : 'что нового'}
+                  {updBusy ? '⏳ Установка…' : `🚀 Установить ${upd.latest}`}
                 </button>
-              </>
+                {upd.notes.length > 0 && (
+                  <button
+                    type="button"
+                    className="btn sm ghost"
+                    disabled={updBusy}
+                    onClick={() => setShowUpdNotes((prev) => !prev)}
+                  >
+                    {showUpdNotes ? 'Скрыть список изменений' : 'Что нового'}
+                  </button>
+                )}
+              </div>
             )}
 
             {!updChecking && updError && (
@@ -1141,32 +1154,40 @@ export default function Settings({ notify, status, refresh }: Props) {
             <div
               style={{
                 margin: '10px 0 0',
-                padding: '10px 12px',
-                background: 'var(--bg-elem, rgba(255,255,255,.04))',
+                padding: '10px 14px',
+                background: 'rgba(0, 0, 0, 0.2)',
                 borderRadius: 8,
+                border: '1px solid var(--border)',
               }}
             >
-              <p className="small" style={{ margin: '0 0 6px' }}>
-                <b>Что нового в {upd.latest}:</b>
+              <p className="small" style={{ margin: '0 0 6px', fontWeight: 600 }}>
+                Что нового в {upd.latest}:
               </p>
-              <ul className="small" style={{ margin: 0, paddingLeft: 18 }}>
+              <ul className="small" style={{ margin: 0, paddingLeft: 18, lineHeight: 1.5 }}>
                 {upd.notes.map((n, i) => (
                   <li key={i} style={{ marginBottom: 4 }}>
                     {n}
                   </li>
                 ))}
               </ul>
-              <button
-                className="btn primary upd-glow"
-                style={{ marginTop: 10 }}
-                disabled={updBusy}
-                onClick={doUpdate}
-              >
-                ⬆ Обновить до {upd.latest}
-              </button>
             </div>
           )}
-          {updStage && <p className="small" style={{ margin: '8px 0 0' }}>⏳ {updStage}</p>}
+          {updStage && (
+            <div
+              style={{
+                margin: '10px 0 0',
+                padding: '8px 12px',
+                background: 'rgba(34, 197, 94, 0.12)',
+                border: '1px solid rgba(34, 197, 94, 0.3)',
+                borderRadius: 6,
+                color: '#22c55e',
+                fontWeight: 600,
+                fontSize: 13,
+              }}
+            >
+              ⏳ {updStage}
+            </div>
+          )}
         </div>
       </section>
 

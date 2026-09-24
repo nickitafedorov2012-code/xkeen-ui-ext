@@ -10,6 +10,7 @@ interface HeaderProps {
   theme?: 'dark' | 'light'
   onToggleTheme?: () => void
   onOpenEditor?: () => void
+  onOpenUpdateModal?: () => void
   authStatus?: { enabled: boolean; authenticated: boolean }
   onLogout?: () => void
 }
@@ -164,6 +165,7 @@ export default function Header({
   theme = 'dark',
   onToggleTheme,
   onOpenEditor,
+  onOpenUpdateModal,
   authStatus,
   onLogout,
 }: HeaderProps) {
@@ -380,10 +382,16 @@ export default function Header({
         <button
           type="button"
           className={`header-pill-btn ${updateAvailable ? 'header-pill-update' : ''}`}
-          onClick={() => onSwitchTab('settings')}
+          onClick={() => {
+            if (updateAvailable && onOpenUpdateModal) {
+              onOpenUpdateModal()
+            } else {
+              onSwitchTab('settings')
+            }
+          }}
           title={
             updateAvailable
-              ? `Доступно обновление до ${latestVersion}! Нажмите для перехода в Настройки`
+              ? `Доступно обновление до ${latestVersion}! Нажмите для быстрой установки`
               : `Версия XKeen Route: ${appVersion}`
           }
         >

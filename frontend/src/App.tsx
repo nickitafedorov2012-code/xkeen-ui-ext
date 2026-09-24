@@ -12,6 +12,7 @@ import ConfigEditor from './components/ConfigEditor'
 import ConnectionsViewer from './components/ConnectionsViewer'
 import RulesViewer from './components/RulesViewer'
 import Diagnostics from './components/Diagnostics'
+import UpdateModal from './components/UpdateModal'
 import { apiGet, apiPost } from './api'
 import type { AuthStatus, StatusInfo } from './types'
 
@@ -90,6 +91,35 @@ export default function App() {
 
   // Глобальный редактор конфигов
   const [globalEditorOpen, setGlobalEditorOpen] = useState(false)
+
+  // Обновление XKeen Route
+  const [updateModalOpen, setUpdateModalOpen] = useState(false)
+  const [updateInfo, setUpdateInfo] = useState<{ current: string; latest: string; notes: string[]; update_available: boolean } | null>(null)
+
+  useEffect(() => {
+    let active = true
+    const checkUpd = async () => {
+      try {
+        const res = await apiGet<{ current: string; latest: string; notes?: string[]; update_available: boolean }>('update/check')
+        if (active && res) {
+          setUpdateInfo({
+            current: res.current,
+            latest: res.latest,
+            notes: res.notes || [],
+            update_available: Boolean(res.update_available),
+          })
+        }
+      } catch {
+        /* игнорируем ошибку сети */
+      }
+    }
+    checkUpd()
+    const timer = setInterval(checkUpd, 60_000)
+    return () => {
+      active = false
+      clearInterval(timer)
+    }
+  }, [])
 
   // Применение темы
   useEffect(() => {
@@ -219,6 +249,7 @@ export default function App() {
           theme={theme}
           onToggleTheme={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
           onOpenEditor={() => setGlobalEditorOpen(true)}
+          onOpenUpdateModal={() => setUpdateModalOpen(true)}
           authStatus={authStatus}
           onLogout={handleLogout}
         />
@@ -283,6 +314,16 @@ export default function App() {
       <ConfigEditor
         isOpen={globalEditorOpen}
         onClose={() => setGlobalEditorOpen(false)}
+        notify={notify}
+      />
+
+      {/* Модальное окно 1-клик обновления XKeen Route */}
+      <UpdateModal
+        isOpen={updateModalOpen}
+        onClose={() => setUpdateModalOpen(false)}
+        currentVersion={updateInfo?.current || status?.version || ''}
+        latestVersion={updateInfo?.latest || ''}
+        notes={updateInfo?.notes || []}
         notify={notify}
       />
     </div>
