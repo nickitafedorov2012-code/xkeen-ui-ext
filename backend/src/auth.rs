@@ -295,8 +295,6 @@ pub async fn auth_middleware(
         || path == "/api/auth/status"
         || path == "/patch"
         || path == "/api/antigravity/fix.cmd"
-        || path == "/api/flow/unlock.user.js"
-        || path == "/api/flow/flow-unlock.user.js"
         || path == "/api/flow/extension.zip"
     {
         return next.run(req).await;
