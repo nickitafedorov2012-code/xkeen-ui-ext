@@ -810,8 +810,22 @@ pub async fn ping_group(
     group: &str,
     timeout_ms: u64,
 ) -> BTreeMap<String, i64> {
+    ping_group_url(http, cfg, group, timeout_ms, None).await
+}
+
+/// Пинг участников группы с произвольным URL проверки.
+pub async fn ping_group_url(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    group: &str,
+    timeout_ms: u64,
+    test_url: Option<&str>,
+) -> BTreeMap<String, i64> {
     let enc = urlencoding_lite(group);
-    let check_url = cfg.health_check_url_encoded();
+    let check_url = match test_url {
+        Some(u) => urlencoding_lite(u),
+        None => cfg.health_check_url_encoded(),
+    };
     let url = format!(
         "{}/group/{enc}/delay?timeout={timeout_ms}&url={check_url}",
         cfg.mihomo_url()
@@ -839,12 +853,23 @@ pub async fn ping_group(
 }
 
 /// Пинг сервера через delay-API Mihomo (мс; -1 = недоступен).
-/// 1) Попытка через /proxies/{id}/delay (работает для статических прокси и групп).
-/// 2) Если сервер является текущим активным в основной группе (PROXY) -> /proxies/{group}/delay
-/// 3) Если сервер из proxy-provider (на 1) пришёл 404) -> опрос группы /group/{group}/delay
 pub async fn ping_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &str, timeout_ms: u64) -> i64 {
+    ping_server_url(http, cfg, server_id, timeout_ms, None).await
+}
+
+/// Пинг сервера с произвольным тестовым URL.
+pub async fn ping_server_url(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    server_id: &str,
+    timeout_ms: u64,
+    test_url: Option<&str>,
+) -> i64 {
     let enc = urlencoding_lite(server_id);
-    let check_url = cfg.health_check_url_encoded();
+    let check_url = match test_url {
+        Some(u) => urlencoding_lite(u),
+        None => cfg.health_check_url_encoded(),
+    };
     let url = format!(
         "{}/proxies/{enc}/delay?timeout={timeout_ms}&url={check_url}",
         cfg.mihomo_url()
@@ -901,7 +926,7 @@ pub async fn ping_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &st
             }
 
             // Опрашиваем группу /group/{group}/delay
-            let group_pings = ping_group(http, cfg, &group, timeout_ms).await;
+            let group_pings = ping_group_url(http, cfg, &group, timeout_ms, test_url).await;
             if let Some(&d) = group_pings.get(server_id) {
                 if d > 0 {
                     return d;
@@ -913,17 +938,25 @@ pub async fn ping_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &st
     -1
 }
 
-/// Параллельный пинг списка серверов:
-/// 1) Если есть основная группа (PROXY), сначала запускаем групповой пинг /group/{group}/delay,
-///    который опрашивает всех участников провайдеров параллельно внутри Mihomo.
-/// 2) Для серверов, не попавших в ответ группы (статические прокси или группы), опрашиваем через ping_server.
+/// Параллельный пинг списка серверов
 pub async fn ping_all(http: &reqwest::Client, cfg: &AppConfig, ids: &[String], timeout_ms: u64) -> BTreeMap<String, i64> {
+    ping_all_url(http, cfg, ids, timeout_ms, None).await
+}
+
+/// Параллельный пинг списка серверов с произвольным тестовым URL
+pub async fn ping_all_url(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    ids: &[String],
+    timeout_ms: u64,
+    test_url: Option<&str>,
+) -> BTreeMap<String, i64> {
     let mut out = BTreeMap::new();
     let mut remaining = Vec::new();
 
     if let Ok(proxies) = get_proxies(http, cfg).await {
         if let Some(group) = find_primary_group(&proxies) {
-            let group_pings = ping_group(http, cfg, &group, timeout_ms).await;
+            let group_pings = ping_group_url(http, cfg, &group, timeout_ms, test_url).await;
             for id in ids {
                 if let Some(&ms) = group_pings.get(id) {
                     out.insert(id.clone(), ms);
@@ -940,11 +973,13 @@ pub async fn ping_all(http: &reqwest::Client, cfg: &AppConfig, ids: &[String], t
 
     if !remaining.is_empty() {
         let mut handles = Vec::new();
+        let url_owned = test_url.map(|s| s.to_string());
         for id in remaining {
             let http = http.clone();
             let cfg = cfg.clone();
+            let url_opt = url_owned.clone();
             handles.push(tokio::spawn(async move {
-                let ms = ping_server(&http, &cfg, &id, timeout_ms).await;
+                let ms = ping_server_url(&http, &cfg, &id, timeout_ms, url_opt.as_deref()).await;
                 (id, ms)
             }));
         }
@@ -956,6 +991,29 @@ pub async fn ping_all(http: &reqwest::Client, cfg: &AppConfig, ids: &[String], t
     }
 
     out
+}
+
+/// Пинг участников Google AI группы и всех серверов специально по Google Flow URL (https://flow.google.com).
+pub async fn ping_flow_servers(http: &reqwest::Client, cfg: &AppConfig, timeout_ms: u64) -> BTreeMap<String, i64> {
+    let test_url = "https://flow.google.com";
+    let proxies = get_proxies(http, cfg).await.unwrap_or_default();
+
+    // 1. Если есть группа 'Google AI' / 'Flow', пингуем её
+    for gname in ["Google AI", "Google-AI", "GoogleFlow", "Flow", "AI"] {
+        if proxies.contains_key(gname) {
+            let pings = ping_group_url(http, cfg, gname, timeout_ms, Some(test_url)).await;
+            if !pings.is_empty() {
+                return pings;
+            }
+        }
+    }
+
+    // 2. Иначе пингуем через основную группу PROXY
+    if let Some(group) = find_primary_group(&proxies) {
+        return ping_group_url(http, cfg, &group, timeout_ms, Some(test_url)).await;
+    }
+
+    BTreeMap::new()
 }
 
 /// Reload конфига Mihomo (после правки config.yaml). Путь — из настроек.

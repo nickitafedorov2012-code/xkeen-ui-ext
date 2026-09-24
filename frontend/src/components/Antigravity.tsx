@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiGet, apiPost } from '../api'
-import { getFlowStatus, type AntigravityStatus, type ServerInfo } from '../types'
+import { getFlowStatus, getFlowRegion, type AntigravityStatus, type ServerInfo } from '../types'
 import { copyToClipboard as doCopy } from '../utils/clipboard'
 
 interface Props {
@@ -31,6 +31,7 @@ export default function Antigravity({ notify }: Props) {
     }
   })
   const [checkingFlow, setCheckingFlow] = useState(false)
+  const [pingingFlow, setPingingFlow] = useState(false)
   const [flowServers, setFlowServers] = useState<ServerInfo[]>([])
   const [selectedFlowServer, setSelectedFlowServer] = useState<string>(() => {
     return localStorage.getItem('xr_flow_server') || ''
@@ -89,6 +90,30 @@ export default function Antigravity({ notify }: Props) {
       // ignore
     }
   }, [])
+
+  const pingFlowNodes = useCallback(async () => {
+    setPingingFlow(true)
+    try {
+      const res = await apiPost<{ pings: Record<string, number>; best_server?: string }>('flow/ping', {})
+      if (res && res.pings) {
+        setFlowServers((prev) =>
+          prev.map((s) => ({
+            ...s,
+            ping_ms: res.pings[s.id] ?? res.pings[s.name] ?? s.ping_ms,
+          }))
+        )
+        if (res.best_server) {
+          notify(`Пинг Flow завершён. Рекомендуемый узел: ${res.best_server}`)
+        } else {
+          notify('Замер задержки Google Flow по всем серверам завершён')
+        }
+      }
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка пинга узлов Flow', true)
+    } finally {
+      setPingingFlow(false)
+    }
+  }, [notify])
 
   const checkFlowAccess = useCallback(async () => {
     setCheckingFlow(true)
@@ -226,6 +251,19 @@ export default function Antigravity({ notify }: Props) {
     return 'ping-bad'
   }
 
+  const usCaServers = flowServers.filter((s) => getFlowStatus(s.name) === 'ok')
+  const otherServers = flowServers.filter((s) => getFlowStatus(s.name) !== 'ok')
+  const bestFlowServer = usCaServers
+    .filter((s) => s.ping_ms > 0)
+    .sort((a, b) => a.ping_ms - b.ping_ms)[0] || usCaServers[0]
+
+  const activeFlowServerObj = flowServers.find((s) => s.id === selectedFlowServer)
+  const isCurrentBlocked = googleGeo
+    ? !googleGeo.is_clean
+    : activeFlowServerObj
+    ? getFlowStatus(activeFlowServerObj.name) === 'blocked'
+    : false
+
   return (
     <div className="tab-pane antigravity-page">
       {/* СЕКЦИЯ 1: GOOGLE FLOW & GEMINI LABS */}
@@ -250,6 +288,14 @@ export default function Antigravity({ notify }: Props) {
               title="Проверить, как Google определяет текущий узел"
             >
               {checkingFlow ? '⏳ Тестирование…' : '🧪 Проверить статус Flow'}
+            </button>
+            <button
+              className="btn"
+              onClick={pingFlowNodes}
+              disabled={pingingFlow}
+              title="Замерить пинг по flow.google.com для всех узлов"
+            >
+              {pingingFlow ? '⏳ Пинг Flow…' : '⚡ Пинг узлов Flow'}
             </button>
             <a
               href="https://flow.google.com"
@@ -280,7 +326,7 @@ export default function Antigravity({ notify }: Props) {
           gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
           gap: 12,
           padding: '12px 16px',
-          background: 'var(--panel-2, rgba(255,255,255,0.03))',
+          background: 'var(--panel-2, rgba(255,255,200,0.02))',
           borderRadius: 8,
           border: '1px solid var(--border)',
           marginBottom: 16
@@ -290,7 +336,7 @@ export default function Antigravity({ notify }: Props) {
             <div style={{ fontSize: 15, fontWeight: 600, marginTop: 4 }}>
               {googleGeo ? (
                 googleGeo.is_clean ? (
-                  <span style={{ color: '#4ade80' }}>🟢 Разрешён (Чистый зарубежный IP)</span>
+                  <span style={{ color: '#4ade80' }}>🟢 Разрешён (Чистый IP)</span>
                 ) : (
                   <span style={{ color: '#f87171' }}>🔴 Заблокирован ({googleGeo.google_country || 'RU'})</span>
                 )
@@ -319,40 +365,84 @@ export default function Antigravity({ notify }: Props) {
                   setSelectedFlowServer(e.target.value)
                   switchGoogleAiServer(e.target.value)
                 }}
-                disabled={switchingFlowServer}
+                disabled={switchingFlowServer || pingingFlow}
               >
                 <option value="">-- Выберите сервер для AI ({flowServers.length}) --</option>
-                {flowServers.map((s) => {
-                  const isClean = getFlowStatus(s.name) === 'ok'
-                  return (
-                    <option key={s.id} value={s.id}>
-                      {isClean ? '🇺🇸 [США] ' : ''}{s.name} {s.ping_ms > 0 ? `(${s.ping_ms} мс)` : ''}{isClean ? ' ★ Flow' : ''}
-                    </option>
-                  )
-                })}
+                {usCaServers.length > 0 && (
+                  <optgroup label="🇺🇸 🇨🇦 Проверенные для Google Flow (США / Канада)">
+                    {usCaServers.map((s) => {
+                      const region = getFlowRegion(s.name)
+                      const prefix = region === 'ca' ? '🇨🇦 [Канада] ' : '🇺🇸 [США] '
+                      return (
+                        <option key={s.id} value={s.id}>
+                          {prefix}{s.name} {s.ping_ms > 0 ? `(${s.ping_ms} мс)` : ''} ★ Flow
+                        </option>
+                      )
+                    })}
+                  </optgroup>
+                )}
+                {otherServers.length > 0 && (
+                  <optgroup label="🌐 Все остальные серверы">
+                    {otherServers.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name} {s.ping_ms > 0 ? `(${s.ping_ms} мс)` : ''}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
             </div>
           </div>
         </div>
 
         {/* Предупреждение о блокировке */}
-        {googleGeo && !googleGeo.is_clean && (
+        {isCurrentBlocked && (
           <div style={{
             background: 'rgba(239, 68, 68, 0.1)',
             border: '1px solid rgba(239, 68, 68, 0.3)',
             borderRadius: 8,
-            padding: '10px 14px',
+            padding: '12px 16px',
             marginBottom: 14,
             fontSize: 13,
             color: '#fca5a5',
             display: 'flex',
-            alignItems: 'center',
-            gap: 8
+            flexDirection: 'column',
+            gap: 10,
           }}>
-            <span>⚠️</span>
-            <div>
-              Текущий активный узел определяется Google как <b>{googleGeo.google_country || 'RU'}</b>. Сервисы Flow и Gemini будут заблокированы. Выберите узел с пометкой <b>🇺🇸 [США]</b> в списке выше!
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 20 }}>⚠️</span>
+              <div>
+                Текущий активный узел определяется Google как <b>{googleGeo?.google_country || 'RU / Неподдерживаемый регион'}</b>. Сервисы Google Flow, Gemini Labs и AI Studio будут заблокированы.
+              </div>
             </div>
+            {bestFlowServer && (
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                flexWrap: 'wrap',
+                gap: 10,
+                padding: '8px 12px',
+                background: 'rgba(0, 0, 0, 0.3)',
+                borderRadius: 6,
+              }}>
+                <div>
+                  💡 Рекомендуемый чистый узел:{' '}
+                  <b>🇺🇸 [США] {bestFlowServer.name}</b>{' '}
+                  {bestFlowServer.ping_ms > 0 && (
+                    <span style={{ color: '#4ade80' }}>({bestFlowServer.ping_ms} мс)</span>
+                  )}
+                </div>
+                <button
+                  className="btn primary small"
+                  style={{ padding: '5px 12px', fontSize: 12 }}
+                  onClick={() => switchGoogleAiServer(bestFlowServer.id)}
+                  disabled={switchingFlowServer}
+                >
+                  ⚡ Переключить на {bestFlowServer.name}
+                </button>
+              </div>
+            )}
           </div>
         )}
 

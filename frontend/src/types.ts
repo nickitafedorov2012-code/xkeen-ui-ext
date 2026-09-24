@@ -228,28 +228,44 @@ export interface GoogleGeoStatus {
 export type FlowStatus = 'ok' | 'blocked' | 'unknown'
 
 export const FLOW_OK_KEYWORDS: readonly string[] = [
-  'сша', 'usa', 'united states', 'us ', '[us]', 'us-',
+  'сша', 'usa', 'united states', 'us ', '[us]', 'us-', 'us_',
   'вашингтон', 'washington', 'chicago', 'чикаго', 'miami', 'майами',
   'seattle', 'сиэтл', 'лос-анджелес', 'los angeles', 'атланта', 'atlanta',
-  'феникс', 'phoenix', 'канад', 'canada',
+  'феникс', 'phoenix', 'канад', 'canada', 'ca ', '[ca]', 'ca-', 'ca_',
 ]
 
 export const FLOW_BLOCKED_KEYWORDS: readonly string[] = [
   'росси', 'russia', 'ru ', '[ru]', 'мобильный',
   'финлянд', 'finland', 'fi ', '[fi]',
-  'казахстан', 'kazakhstan', 'беларус', 'belarus',
+  'казахстан', 'kazakhstan', 'kz ', '[kz]', 'беларус', 'belarus', 'by ', '[by]',
   'таджикистан', 'узбекистан', 'азербайджан', 'армени', 'грузи',
 ]
+
+export function getFlowRegion(name: string): 'us' | 'ca' | null {
+  if (!name) return null
+  const n = name.toLowerCase()
+  if (FLOW_BLOCKED_KEYWORDS.some((kw) => n.includes(kw))) return null
+  const usKws = [
+    'сша', 'usa', 'united states', 'us ', '[us]', 'us-', 'us_',
+    'вашингтон', 'washington', 'chicago', 'чикаго', 'miami', 'майами',
+    'seattle', 'сиэтл', 'лос-анджелес', 'los angeles', 'атланта', 'atlanta',
+    'феникс', 'phoenix',
+  ]
+  if (usKws.some((kw) => n.includes(kw))) return 'us'
+  const caKws = ['канад', 'canada', 'ca ', '[ca]', 'ca-', 'ca_']
+  if (caKws.some((kw) => n.includes(kw))) return 'ca'
+  return null
+}
 
 export function getFlowStatus(name: string): FlowStatus {
   if (!name) return 'unknown'
   const n = name.toLowerCase()
 
-  if (FLOW_OK_KEYWORDS.some((kw) => n.includes(kw))) {
-    return 'ok'
-  }
   if (FLOW_BLOCKED_KEYWORDS.some((kw) => n.includes(kw))) {
     return 'blocked'
+  }
+  if (FLOW_OK_KEYWORDS.some((kw) => n.includes(kw))) {
+    return 'ok'
   }
   return 'unknown'
 }

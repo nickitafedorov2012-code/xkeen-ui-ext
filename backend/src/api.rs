@@ -194,6 +194,7 @@ pub async fn switch_server(State(state): State<AppState>, Json(req): Json<Switch
 #[derive(Deserialize)]
 pub struct PingReq {
     pub server_id: Option<String>,
+    pub url: Option<String>,
 }
 
 /// POST /api/servers/ping — один сервер или все (параллельно).
@@ -206,8 +207,40 @@ pub async fn ping_servers(State(state): State<AppState>, Json(req): Json<PingReq
             Err(e) => return api_err(e),
         },
     };
-    let pings = mihomo::ping_all(&state.http, &cfg, &ids, 2000).await;
+    let pings = mihomo::ping_all_url(&state.http, &cfg, &ids, 2500, req.url.as_deref()).await;
     api_ok(json!({ "pings": pings }))
+}
+
+/// POST /api/flow/ping — специализированный пинг серверов по Google Flow (https://flow.google.com).
+pub async fn ping_flow_servers(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let pings = mihomo::ping_flow_servers(&state.http, &cfg, 3500).await;
+
+    let mut best_server: Option<String> = None;
+    let mut min_ping = i64::MAX;
+
+    for (name, &ping) in &pings {
+        if ping > 0 && ping < min_ping {
+            let lower = name.to_lowercase();
+            let is_us_ca = lower.contains("сша") || lower.contains("usa") || lower.contains("us ") ||
+                lower.contains("chicago") || lower.contains("чикаго") || lower.contains("канад") ||
+                lower.contains("canada") || lower.contains("вашингтон") || lower.contains("washington") ||
+                lower.contains("майами") || lower.contains("miami") || lower.contains("сиэтл") ||
+                lower.contains("seattle") || lower.contains("атланта") || lower.contains("atlanta") ||
+                lower.contains("феникс") || lower.contains("phoenix") || lower.contains("лос-анджелес") ||
+                lower.contains("los angeles");
+            if is_us_ca {
+                min_ping = ping;
+                best_server = Some(name.clone());
+            }
+        }
+    }
+
+    api_ok(json!({
+        "pings": pings,
+        "best_server": best_server,
+        "min_ping": if min_ping == i64::MAX { None } else { Some(min_ping) },
+    }))
 }
 
 /// GET /api/servers/google-check — диагностика чистоты узла в Google Search / AI.
