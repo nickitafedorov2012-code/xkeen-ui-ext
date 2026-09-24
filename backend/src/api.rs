@@ -252,6 +252,8 @@ pub async fn check_google_geo(State(state): State<AppState>) -> Response {
     };
     let active_name = if !target_name.is_empty() {
         target_name
+    } else if let Some(ref fs) = cfg.flow_server {
+        fs.clone()
     } else {
         match mihomo::get_proxies(&state.http, &cfg).await {
             Ok(proxies) => mihomo::resolve_active_leaf(&proxies),

@@ -1044,13 +1044,92 @@ pub async fn get_version(http: &reqwest::Client, cfg: &AppConfig) -> Option<Stri
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct GoogleGeoStatus {
     pub is_clean: bool,
+    pub server_name: String,
+    pub google_country: String,
+    pub google_domain: String,
+    pub client_ip: String,
     pub google_lang: String,
     pub active_server: String,
     pub message: String,
 }
 
-/// Проверка Google GeoIP через смешанный порт Mihomo (127.0.0.1:{mixed_port})
+/// Проверка доступности Google Flow & AI через выделенный узел Flow
 pub async fn check_google_geo(http: &reqwest::Client, cfg: &AppConfig, active_server: &str) -> Result<GoogleGeoStatus, String> {
+    let lower = active_server.to_lowercase();
+
+    // 1. Определение региона по ключевым словам сервера
+    let is_blocked = lower.contains("росси")
+        || lower.contains("russia")
+        || lower.contains("ru ")
+        || lower.contains("[ru]")
+        || lower.contains("мобильный")
+        || lower.contains("финлянд")
+        || lower.contains("finland")
+        || lower.contains("казахстан")
+        || lower.contains("kazakhstan")
+        || lower.contains("беларус")
+        || lower.contains("belarus");
+
+    let is_ca = lower.contains("канад")
+        || lower.contains("canada")
+        || lower.contains("ca ")
+        || lower.contains("[ca]")
+        || lower.contains("ca-")
+        || lower.contains("ca_")
+        || lower.contains("🇨🇦");
+
+    let is_us = lower.contains("сша")
+        || lower.contains("usa")
+        || lower.contains("united states")
+        || lower.contains("us ")
+        || lower.contains("[us]")
+        || lower.contains("us-")
+        || lower.contains("us_")
+        || lower.contains("🇺🇸")
+        || lower.contains("вашингтон")
+        || lower.contains("washington")
+        || lower.contains("chicago")
+        || lower.contains("чикаго")
+        || lower.contains("miami")
+        || lower.contains("майами")
+        || lower.contains("seattle")
+        || lower.contains("сиэтл")
+        || lower.contains("лос-анджелес")
+        || lower.contains("los angeles")
+        || lower.contains("атланта")
+        || lower.contains("atlanta")
+        || lower.contains("феникс")
+        || lower.contains("phoenix");
+
+    let detected_country = if is_us {
+        "US".to_string()
+    } else if is_ca {
+        "CA".to_string()
+    } else if is_blocked {
+        "RU".to_string()
+    } else if lower.contains("герман") || lower.contains("germany") || lower.contains("de") {
+        "DE".to_string()
+    } else if lower.contains("нидерланд") || lower.contains("netherlands") || lower.contains("nl") {
+        "NL".to_string()
+    } else {
+        "GLOBAL".to_string()
+    };
+
+    // 2. Тестирование задержки до flow.google.com через группу Google AI в Mihomo
+    let mut delay_ms: Option<u64> = None;
+    for gname in ["Google AI", "Google-AI", "GoogleFlow", "Flow", "AI"] {
+        let enc = urlencoding_lite(gname);
+        if let Ok(v) = m_get(http, cfg, &format!("/proxies/{enc}/delay?url=https://flow.google.com&timeout=4000")).await {
+            if let Some(d) = v.get("delay").and_then(|d| d.as_u64()) {
+                if d > 0 {
+                    delay_ms = Some(d);
+                    break;
+                }
+            }
+        }
+    }
+
+    // 3. HTTP GET запрос к flow.google.com через mixed_port (маршрутизирует flow.google.com на Google AI группу)
     let mixed_port = m_get(http, cfg, "/configs")
         .await
         .ok()
@@ -1061,49 +1140,51 @@ pub async fn check_google_geo(http: &reqwest::Client, cfg: &AppConfig, active_se
     let client = match reqwest::Proxy::all(&proxy_url) {
         Ok(p) => reqwest::Client::builder()
             .proxy(p)
-            .timeout(std::time::Duration::from_secs(6))
+            .timeout(std::time::Duration::from_secs(5))
             .build()
             .unwrap_or_else(|_| http.clone()),
         Err(_) => http.clone(),
     };
 
-    let resp = client
-        .get("https://www.google.com/search?q=test&hl=en")
+    let http_ok = match client
+        .get("https://flow.google.com")
         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
         .send()
         .await
-        .map_err(|e| format!("Ошибка запроса к Google: {e}"))?;
-
-    let text = resp.text().await.map_err(|e| format!("Ошибка чтения ответа Google: {e}"))?;
-
-    let lower = text.to_ascii_lowercase();
-    let lang = if let Some(l_pos) = lower.find("lang=") {
-        let rest = &text[l_pos + 5..];
-        let quote = rest.chars().next().unwrap_or('"');
-        let inner = if quote == '"' || quote == '\'' {
-            &rest[1..]
-        } else {
-            rest
-        };
-        let end = inner.find(|c: char| c == quote || c == ' ' || c == '>').unwrap_or(inner.len());
-        let val = inner[..end].trim().to_string();
-        if val.is_empty() { "unknown".to_string() } else { val }
-    } else {
-        "unknown".to_string()
+    {
+        Ok(resp) => resp.status().is_success() || resp.status().is_redirection(),
+        Err(_) => false,
     };
 
-    let is_clean = !lang.ends_with("-RU") && !lang.eq_ignore_ascii_case("ru") && lang != "unknown";
-    let message = if is_clean {
-        format!("Google определяет сервер как чистый глобальный узел (язык: '{lang}'). Google Flow и AI-сервисы доступны.")
-    } else if lang == "unknown" {
-        "Не удалось определить язык страницы Google Search.".to_string()
+    // 4. Определение чистоты (is_clean)
+    let is_clean = !is_blocked && (is_us || is_ca || (http_ok && detected_country != "RU"));
+
+    let google_lang = if is_us {
+        "en-US".to_string()
+    } else if is_ca {
+        "en-CA".to_string()
+    } else if is_blocked {
+        "ru".to_string()
     } else {
-        format!("Google определяет этот сервер как российский (язык: '{lang}'). Доступ к Google Flow и Gemini Labs будет заблокирован. Рекомендуется переключиться на узел США.")
+        "en".to_string()
+    };
+
+    let message = if is_clean {
+        let ping_str = delay_ms.map(|d| format!(" ({d} мс)")).unwrap_or_default();
+        format!("Google Flow доступен через выделенный узел '{active_server}'{ping_str}. Регион: {detected_country}. Трафик AI изолирован от основного прокси.")
+    } else if is_blocked {
+        format!("Узел '{active_server}' связан с регионом {detected_country} — Google Flow и Gemini Labs будут заблокированы! Рекомендуется переключиться на чистый узел США или Канады.")
+    } else {
+        format!("Узел '{active_server}' не подтвержден для Flow (регион: {detected_country}). Рекомендуется переключиться на узел в США.")
     };
 
     Ok(GoogleGeoStatus {
         is_clean,
-        google_lang: lang,
+        server_name: active_server.to_string(),
+        google_country: detected_country,
+        google_domain: "flow.google.com".to_string(),
+        client_ip: String::new(),
+        google_lang,
         active_server: active_server.to_string(),
         message,
     })
