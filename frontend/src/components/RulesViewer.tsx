@@ -85,9 +85,6 @@ export default function RulesViewer({ notify }: RulesViewerProps) {
             Активные правила ядра Mihomo: доменные списки, AdBlock, маршрутизация по устройствам и финальный выбор прокси.
           </p>
         </div>
-        <button className="btn btn-sm btn-secondary" onClick={loadRules}>
-          🔄 Обновить список
-        </button>
       </div>
 
       {/* Интерактивный симулятор «Куда пойдёт?» */}
@@ -177,6 +174,12 @@ export default function RulesViewer({ notify }: RulesViewerProps) {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
+
+          <div className="rules-actions-group">
+            <button className="btn btn-sm btn-secondary" onClick={loadRules} title="Обновить список правил">
+              🔄 Обновить список
+            </button>
+          </div>
 
           <div className="rules-types">
             {['all', 'geosite', 'domain-suffix', 'src-ip-cidr', 'match'].map((t) => (

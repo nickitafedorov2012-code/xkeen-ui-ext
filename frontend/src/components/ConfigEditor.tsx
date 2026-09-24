@@ -9,6 +9,35 @@ interface ConfigEditorProps {
   notify: (msg: string, error?: boolean) => void
 }
 
+function IconFileCode() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
+      <polyline points="14 2 14 8 20 8" />
+      <path d="m10 13-2 2 2 2" />
+      <path d="m14 17 2-2-2-2" />
+    </svg>
+  )
+}
+
+function IconSearch() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="11" cy="11" r="8" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+    </svg>
+  )
+}
+
+function IconCopy() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  )
+}
+
 export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigEditorProps) {
   if (!isOpen) return null
   const [files, setFiles] = useState<ConfigFile[]>([])
@@ -170,6 +199,7 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
     }
   }
 
+  const curFile = files.find((f) => f.id === selectedFile)
   const isDirty = content !== originalContent
   const linesCount = content ? content.split('\n').length : 1
   const lineNumbers = Array.from({ length: linesCount }, (_, i) => i + 1)
@@ -179,10 +209,25 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
       <div className="modal-card editor-card">
         <div className="editor-header">
           <div className="editor-title-group">
-            <span className="editor-icon">📝</span>
-            <h2>Редактор конфигураций</h2>
+            <div
+              style={{
+                width: 36,
+                height: 36,
+                borderRadius: 9,
+                background: 'linear-gradient(135deg, rgba(56, 189, 248, 0.2), rgba(37, 99, 235, 0.2))',
+                border: '1px solid rgba(56, 189, 248, 0.35)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#38bdf8',
+                flexShrink: 0,
+              }}
+            >
+              <IconFileCode />
+            </div>
+            <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Редактор конфигураций</h3>
             <select
-              className="editor-select"
+              className="select editor-select"
               value={selectedFile}
               onChange={(e) => {
                 if (isDirty && !window.confirm('У вас есть несохранённые изменения. Переключить файл?')) {
@@ -214,39 +259,53 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
             )}
 
             <button
-              className="btn btn-sm"
-              title="Поиск"
+              className="btn btn-sm btn-secondary"
+              title="Поиск в файле (Ctrl+F)"
               onClick={() => setShowSearch(!showSearch)}
             >
-              🔍
+              <IconSearch />
             </button>
 
             <button
-              className="btn btn-sm"
+              className="btn btn-sm btn-secondary"
               title="Копировать всё в буфер"
               onClick={async () => {
                 await copyToClipboard(content)
                 notify('Скопировано в буфер обмена')
               }}
             >
-              📋
+              <IconCopy />
             </button>
 
-            <button className="btn btn-sm" title="Закрыть" onClick={onClose}>
+            <button
+              className="btn btn-sm ghost"
+              title="Закрыть"
+              onClick={onClose}
+              style={{ fontSize: 16, width: 32, height: 32, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderRadius: 8, padding: 0 }}
+            >
               ✕
             </button>
           </div>
         </div>
 
         <div className="editor-meta-bar">
-          <span className="editor-path" title={filePath}>
-            📁 <code>{filePath || 'Загрузка…'}</code>
-          </span>
-          {isDirty && <span className="editor-badge-dirty">● Не сохранено</span>}
-          {syntaxError && <span className="editor-badge-err">{syntaxError}</span>}
-          <span className="editor-stats">
-            Строк: {linesCount} | Символов: {content.length}
-          </span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
+            <span className="editor-path" title={filePath}>
+              📁 <code>{filePath || 'Загрузка…'}</code>
+            </span>
+            {curFile?.syntax && (
+              <span className="badge" style={{ fontSize: 10, background: 'rgba(56, 189, 248, 0.12)', color: '#38bdf8', borderColor: 'rgba(56, 189, 248, 0.3)' }}>
+                {curFile.syntax.toUpperCase()}
+              </span>
+            )}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+            {isDirty && <span className="editor-badge-dirty">● Не сохранено</span>}
+            {syntaxError && <span className="editor-badge-err">{syntaxError}</span>}
+            <span className="editor-stats">
+              Строк: {linesCount} · Символов: {content.length}
+            </span>
+          </div>
         </div>
 
         <div className="editor-body">

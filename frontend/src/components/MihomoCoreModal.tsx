@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { apiGet, apiPost } from '../api'
 
 interface MihomoReleaseItem {
@@ -96,13 +96,32 @@ export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: 
 
   return (
     <div className="modal-backdrop">
-      <div className="modal-card" style={{ maxWidth: 640, width: '94vw', maxHeight: '88vh', display: 'flex', flexDirection: 'column' }}>
+      <div className="modal-card" style={{ maxWidth: 660, width: '94vw', maxHeight: '88vh', display: 'flex', flexDirection: 'column' }}>
         {/* Заголовок */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 24 }}>⚙️</span>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div
+              style={{
+                width: 38,
+                height: 38,
+                borderRadius: 10,
+                background: 'linear-gradient(135deg, rgba(56, 189, 248, 0.2), rgba(37, 99, 235, 0.2))',
+                border: '1px solid rgba(56, 189, 248, 0.35)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#38bdf8',
+                flexShrink: 0,
+              }}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="4" y="4" width="16" height="16" rx="2" />
+                <rect x="9" y="9" width="6" height="6" />
+                <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3" />
+              </svg>
+            </div>
             <div>
-              <h3 style={{ margin: 0, fontSize: 18 }}>Управление ядром Mihomo</h3>
+              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Управление ядром Mihomo</h3>
               <div className="muted small">Релизы MetaCubeX, переключение версий и обновление в 1 клик</div>
             </div>
           </div>
@@ -111,7 +130,7 @@ export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: 
               type="button"
               className="btn sm ghost"
               onClick={onClose}
-              style={{ fontSize: 16, padding: '2px 8px', borderRadius: 6 }}
+              style={{ fontSize: 16, width: 32, height: 32, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderRadius: 8, padding: 0 }}
               title="Закрыть"
             >
               ✕
@@ -122,33 +141,40 @@ export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: 
         {/* Карточка текущей версии и архитектуры */}
         <div
           style={{
-            background: 'var(--panel-2, rgba(255, 255, 255, 0.04))',
-            border: '1px solid var(--border)',
-            borderRadius: 8,
-            padding: '12px 16px',
+            background: 'linear-gradient(135deg, rgba(30, 41, 59, 0.5) 0%, rgba(15, 23, 42, 0.6) 100%)',
+            border: '1px solid rgba(56, 189, 248, 0.2)',
+            borderRadius: 10,
+            padding: '14px 16px',
             marginBottom: 14,
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
             flexWrap: 'wrap',
             gap: 12,
+            boxShadow: '0 4px 16px rgba(0, 0, 0, 0.2)',
           }}
         >
           <div>
-            <div className="muted small">Текущая версия на роутере</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
-              <span style={{ fontWeight: 700, fontSize: 16, color: '#22c55e' }}>
-                🟢 {currentVer || 'Определяется…'}
+            <div className="muted small" style={{ marginBottom: 4 }}>Текущая версия на роутере</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <span className="upd-dot" style={{ background: '#38bdf8', boxShadow: '0 0 8px #38bdf8' }} />
+              <span style={{ fontWeight: 700, fontSize: 16, color: '#f8fafc' }}>
+                {currentVer || 'Определяется…'}
               </span>
               {data?.arch && (
-                <span className="badge" style={{ fontSize: 11, background: 'rgba(59, 130, 246, 0.15)', color: '#60a5fa' }}>
+                <span className="badge" style={{ fontSize: 11, background: 'rgba(56, 189, 248, 0.12)', color: '#38bdf8', borderColor: 'rgba(56, 189, 248, 0.3)' }}>
                   {data.arch}
+                </span>
+              )}
+              {hasUpdate && (
+                <span className="badge" style={{ fontSize: 11, background: 'rgba(56, 189, 248, 0.18)', color: '#38bdf8', borderColor: 'rgba(56, 189, 248, 0.4)' }}>
+                  Доступна {latestVer}
                 </span>
               )}
             </div>
           </div>
 
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <button
               className="btn sm"
               onClick={loadReleases}
@@ -162,6 +188,12 @@ export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: 
                 className="btn primary sm"
                 onClick={() => handleInstall(latestVer)}
                 title={`Обновить ядро до последней стабильной версии ${latestVer}`}
+                style={{
+                  background: 'linear-gradient(135deg, #0284c7, #2563eb)',
+                  boxShadow: '0 2px 10px rgba(37, 99, 235, 0.4)',
+                  borderColor: '#38bdf8',
+                  fontWeight: 600,
+                }}
               >
                 🚀 Обновить до {latestVer}
               </button>
@@ -173,9 +205,9 @@ export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: 
         {installingTag && (
           <div
             style={{
-              background: 'rgba(34, 197, 94, 0.12)',
-              border: '1px solid rgba(34, 197, 94, 0.35)',
-              borderRadius: 8,
+              background: 'linear-gradient(135deg, rgba(2, 132, 199, 0.15) 0%, rgba(37, 99, 235, 0.15) 100%)',
+              border: '1px solid rgba(56, 189, 248, 0.4)',
+              borderRadius: 10,
               padding: '12px 16px',
               marginBottom: 14,
               display: 'flex',
@@ -183,9 +215,9 @@ export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: 
               gap: 12,
             }}
           >
-            <span className="spin-icon" style={{ fontSize: 18 }}>⏳</span>
+            <span className="spin-icon" style={{ fontSize: 18, color: '#38bdf8' }}>⏳</span>
             <div>
-              <div style={{ fontWeight: 600, color: '#22c55e' }}>{stage || 'Установка ядра…'}</div>
+              <div style={{ fontWeight: 600, color: '#38bdf8' }}>{stage || 'Установка ядра…'}</div>
               <div className="muted small">Служба XKeen будет автоматически перезапущена с новым бинарником</div>
             </div>
           </div>
@@ -212,21 +244,21 @@ export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: 
             flex: 1,
             overflowY: 'auto',
             border: '1px solid var(--border)',
-            borderRadius: 8,
-            background: 'rgba(0, 0, 0, 0.2)',
+            borderRadius: 10,
+            background: 'rgba(0, 0, 0, 0.25)',
             padding: '6px 8px',
             marginBottom: 14,
             maxHeight: 340,
           }}
         >
           {loading && (
-            <div style={{ padding: '30px 0', textAlign: 'center' }} className="muted">
+            <div style={{ padding: '36px 0', textAlign: 'center' }} className="muted">
               ⏳ Загрузка списка релизов из GitHub MetaCubeX…
             </div>
           )}
 
           {!loading && filteredReleases.length === 0 && (
-            <div style={{ padding: '30px 0', textAlign: 'center' }} className="muted">
+            <div style={{ padding: '36px 0', textAlign: 'center' }} className="muted">
               Релизы не найдены. Проверьте интернет-соединение роутера.
             </div>
           )}
@@ -243,30 +275,33 @@ export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: 
                 key={rel.tag_name}
                 style={{
                   padding: '10px 12px',
-                  borderBottom: '1px solid var(--border)',
-                  background: isCur ? 'rgba(34, 197, 94, 0.05)' : 'transparent',
+                  borderRadius: 8,
+                  marginBottom: 4,
+                  border: isCur ? '1px solid rgba(56, 189, 248, 0.35)' : '1px solid transparent',
+                  background: isCur ? 'rgba(56, 189, 248, 0.08)' : 'rgba(255, 255, 255, 0.02)',
                   display: 'flex',
                   flexDirection: 'column',
                   gap: 6,
+                  transition: 'background 0.15s ease',
                 }}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                    <span style={{ fontWeight: 700, fontSize: 14, color: isCur ? '#22c55e' : 'var(--text)' }}>
+                    <span style={{ fontWeight: 700, fontSize: 14, color: isCur ? '#38bdf8' : 'var(--text-bright)' }}>
                       {rel.tag_name}
                     </span>
                     {isCur && (
-                      <span className="badge" style={{ background: 'rgba(34, 197, 94, 0.2)', color: '#22c55e', fontSize: 11 }}>
+                      <span className="badge" style={{ background: 'rgba(56, 189, 248, 0.2)', color: '#38bdf8', borderColor: 'rgba(56, 189, 248, 0.35)', fontSize: 11 }}>
                         ✓ Установлена
                       </span>
                     )}
                     {isLatest && !isCur && (
-                      <span className="badge" style={{ background: 'rgba(59, 130, 246, 0.2)', color: '#60a5fa', fontSize: 11 }}>
+                      <span className="badge" style={{ background: 'rgba(59, 130, 246, 0.25)', color: '#60a5fa', borderColor: 'rgba(59, 130, 246, 0.4)', fontSize: 11 }}>
                         ★ Последний релиз
                       </span>
                     )}
                     {rel.prerelease && (
-                      <span className="badge" style={{ background: 'rgba(234, 179, 8, 0.2)', color: '#eab308', fontSize: 11 }}>
+                      <span className="badge" style={{ background: 'rgba(234, 179, 8, 0.2)', color: '#eab308', borderColor: 'rgba(234, 179, 8, 0.35)', fontSize: 11 }}>
                         Alpha / Pre-release
                       </span>
                     )}
@@ -277,7 +312,7 @@ export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: 
                     {rel.body && rel.body.length > 0 && (
                       <button
                         className="btn ghost sm"
-                        style={{ fontSize: 11, padding: '2px 8px' }}
+                        style={{ fontSize: 11, padding: '3px 8px' }}
                         onClick={() => toggleNotes(rel.tag_name)}
                       >
                         {expanded ? 'Скрыть инфо' : 'Список изменений'}
@@ -285,7 +320,11 @@ export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: 
                     )}
                     <button
                       className={`btn sm ${isCur ? 'ghost' : isLatest ? 'primary' : ''}`}
-                      style={{ fontSize: 12, padding: '4px 10px' }}
+                      style={{
+                        fontSize: 12,
+                        padding: '4px 12px',
+                        ...(isLatest && !isCur ? { background: 'linear-gradient(135deg, #0284c7, #2563eb)', borderColor: '#38bdf8' } : {})
+                      }}
                       disabled={Boolean(installingTag)}
                       onClick={() => handleInstall(rel.tag_name, rel.download_url)}
                     >
@@ -295,10 +334,10 @@ export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: 
                 </div>
 
                 {expanded && rel.body && rel.body.length > 0 && (
-                  <div style={{ padding: '6px 10px', background: 'rgba(0,0,0,0.3)', borderRadius: 6, fontSize: 12, marginTop: 4 }}>
+                  <div style={{ padding: '8px 12px', background: 'rgba(0, 0, 0, 0.35)', border: '1px solid var(--border)', borderRadius: 6, fontSize: 12, marginTop: 4 }}>
                     <ul style={{ margin: 0, paddingLeft: 16 }}>
                       {rel.body.map((b, idx) => (
-                        <li key={idx} style={{ marginBottom: 2 }}>{b}</li>
+                        <li key={idx} style={{ marginBottom: 3 }}>{b}</li>
                       ))}
                     </ul>
                   </div>
@@ -312,7 +351,7 @@ export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: 
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
           <input
             className="input"
-            style={{ flex: 1, padding: '6px 10px', fontSize: 13 }}
+            style={{ flex: 1, padding: '7px 12px', fontSize: 13 }}
             placeholder="Ввести версию вручную (например: v1.19.31)"
             value={customTag}
             onChange={(e) => setCustomTag(e.target.value)}
@@ -320,7 +359,7 @@ export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: 
           />
           <button
             className="btn"
-            style={{ padding: '6px 14px', fontSize: 13 }}
+            style={{ padding: '7px 16px', fontSize: 13 }}
             disabled={!customTag.trim() || Boolean(installingTag)}
             onClick={() => handleInstall(customTag.trim())}
           >

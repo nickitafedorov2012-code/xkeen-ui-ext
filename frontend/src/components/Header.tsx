@@ -225,6 +225,36 @@ export default function Header({
     }
   }, [])
 
+  // Периодическая проверка обновления ядра Mihomo
+  const [mihomoUpdateAvailable, setMihomoUpdateAvailable] = useState(false)
+  const [mihomoLatestVersion, setMihomoLatestVersion] = useState('')
+
+  useEffect(() => {
+    let active = true
+    const checkMihomoUpdate = async () => {
+      if (document.hidden) return
+      try {
+        const res = await apiGet<{ current_version: string; latest_version: string }>('mihomo/releases')
+        if (active && res) {
+          const cur = res.current_version || ''
+          const lat = res.latest_version || ''
+          const hasUpd = Boolean(lat && cur && lat !== cur && !cur.includes(lat))
+          setMihomoUpdateAvailable(hasUpd)
+          setMihomoLatestVersion(lat)
+        }
+      } catch {
+        /* игнорируем ошибку сети */
+      }
+    }
+
+    checkMihomoUpdate()
+    const timer = setInterval(checkMihomoUpdate, 90_000)
+    return () => {
+      active = false
+      clearInterval(timer)
+    }
+  }, [])
+
   // Память и CPU (живые из 1-секундного таймера либо из статуса)
   const currentMetrics = liveMetrics || status?.system
   const memUsed = currentMetrics?.memory_used_mb ?? 0
@@ -372,7 +402,7 @@ export default function Header({
       <div className="header-right">
         <button
           type="button"
-          className="header-pill-btn"
+          className={`header-pill-btn ${mihomoUpdateAvailable ? 'header-pill-update-blue' : ''}`}
           onClick={() => {
             if (onOpenMihomoModal) {
               onOpenMihomoModal()
@@ -380,33 +410,40 @@ export default function Header({
               onSwitchTab('servers')
             }
           }}
-          title="Управление ядром Mihomo (версии, релизы, обновление)"
+          title={
+            mihomoUpdateAvailable
+              ? `Доступно обновление ядра Mihomo до ${mihomoLatestVersion}! Нажмите для установки`
+              : `Управление ядром Mihomo (версия: ${mihomoVersion})`
+          }
         >
           <IconCpu />
           <span className="header-pill-title">Mihomo</span>
           <span className="header-pill-subtitle">{mihomoVersion}</span>
+          {mihomoUpdateAvailable && (
+            <span className="update-pill-badge update-pill-badge-blue" title={`Доступна новая версия ${mihomoLatestVersion}`}>
+              ↑ {mihomoLatestVersion.replace(/^v/, '')}
+            </span>
+          )}
         </button>
 
         <button
           type="button"
-          className={`header-pill-btn ${updateAvailable ? 'header-pill-update' : ''}`}
+          className={`header-pill-btn ${updateAvailable ? 'header-pill-update-blue' : ''}`}
           onClick={() => {
-            if (updateAvailable && onOpenUpdateModal) {
+            if (onOpenUpdateModal) {
               onOpenUpdateModal()
-            } else {
-              onSwitchTab('settings')
             }
           }}
           title={
             updateAvailable
-              ? `Доступно обновление до ${latestVersion}! Нажмите для быстрой установки`
-              : `Версия XKeen Route: ${appVersion}`
+              ? `Доступно обновление XKeen Route до ${latestVersion}! Нажмите для установки`
+              : `Версия XKeen Route: ${appVersion}. Нажмите для управления версией`
           }
         >
           <IconBox />
           <span className="header-pill-title">{appVersion}</span>
           {updateAvailable && (
-            <span className="update-pill-badge" title={`Доступна новая версия ${latestVersion}`}>
+            <span className="update-pill-badge update-pill-badge-blue" title={`Доступна новая версия ${latestVersion}`}>
               ↑ {latestVersion.replace(/^v/, '')}
             </span>
           )}

@@ -102,8 +102,13 @@ export default function App() {
 
   useEffect(() => {
     const handleOpenMihomo = () => setMihomoModalOpen(true)
+    const handleOpenUpdate = () => setUpdateModalOpen(true)
     window.addEventListener('xr:open-mihomo-modal', handleOpenMihomo)
-    return () => window.removeEventListener('xr:open-mihomo-modal', handleOpenMihomo)
+    window.addEventListener('xr:open-update-modal', handleOpenUpdate)
+    return () => {
+      window.removeEventListener('xr:open-mihomo-modal', handleOpenMihomo)
+      window.removeEventListener('xr:open-update-modal', handleOpenUpdate)
+    }
   }, [])
 
   useEffect(() => {

@@ -58,14 +58,6 @@ export default function Settings({ notify, status, refresh }: Props) {
   const initialFailoverRef = useRef<string | null>(null)
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // --- Обновление панели ---
-  interface UpdateInfo { current: string; latest: string; update_available: boolean; notes: string[] }
-  const [upd, setUpd] = useState<UpdateInfo | null>(null)
-  const [updBusy, setUpdBusy] = useState(false)
-  const [updStage, setUpdStage] = useState('')
-  const [updError, setUpdError] = useState('')
-  const [updChecking, setUpdChecking] = useState(false)
-  const [showUpdNotes, setShowUpdNotes] = useState(false)
 
   // --- AdBlock ---
   const [adblockEnabled, setAdblockEnabled] = useState(false)
@@ -186,39 +178,6 @@ export default function Settings({ notify, status, refresh }: Props) {
   useEffect(() => {
     loadBackups()
   }, [loadBackups])
-
-  // Проверка новой версии панели.
-  const checkUpdate = useCallback(async () => {
-    setUpdChecking(true)
-    setUpdError('')
-    try {
-      const data = await apiGet<UpdateInfo>('update/check')
-      setUpd(data)
-    } catch (e) {
-      setUpdError(e instanceof Error ? e.message : 'Ошибка проверки')
-    } finally {
-      setUpdChecking(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    checkUpdate()
-  }, [checkUpdate])
-
-  const doUpdate = async () => {
-    if (!confirm(`Установить обновление ${upd?.latest}? Панель перезапустится автоматически.`)) return
-    setUpdBusy(true)
-    setUpdStage('Загрузка и установка…')
-    try {
-      await apiPost<{ installed: string; restarting: boolean }>('update/install')
-      setUpdStage(`Установлена ${upd?.latest}. Перезапуск панели…`)
-      setTimeout(() => location.reload(), 8000)
-    } catch (e) {
-      setUpdBusy(false)
-      setUpdStage('')
-      notify(e instanceof Error ? e.message : 'Ошибка обновления', true)
-    }
-  }
 
   const failoverJson = settings ? JSON.stringify(settings.failover) : ''
 
@@ -1243,97 +1202,19 @@ export default function Settings({ notify, status, refresh }: Props) {
             <p className="muted small">Конфиг хранится в /opt/etc/xkeen-route/config.json (путь — на дашборде).</p>
 
             <div style={{ marginTop: 14, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
                 <span className="muted small">
-                  Версия панели: <b>{upd?.current || status?.version || '…'}</b>
+                  Версия панели: <b style={{ color: 'var(--text-bright)' }}>{status?.version || '…'}</b>
                 </span>
-
-                {updChecking && <span className="muted small">⏳ Проверка…</span>}
-
-                {!updChecking && upd && !upd.update_available && (
-                  <span className="muted small">✓ актуальная</span>
-                )}
-
-                {!updChecking && upd?.update_available && (
-                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                    <span className="upd-dot" title="Доступна новая версия" />
-                    <button
-                      type="button"
-                      className="btn btn-primary upd-glow"
-                      disabled={updBusy}
-                      onClick={doUpdate}
-                      title={`Установить обновление ${upd.latest} в один клик`}
-                      style={{ fontWeight: 600, padding: '5px 12px' }}
-                    >
-                      {updBusy ? '⏳ Установка…' : `🚀 Установить ${upd.latest}`}
-                    </button>
-                    {upd.notes.length > 0 && (
-                      <button
-                        type="button"
-                        className="btn sm ghost"
-                        disabled={updBusy}
-                        onClick={() => setShowUpdNotes((prev) => !prev)}
-                      >
-                        {showUpdNotes ? 'Скрыть список изменений' : 'Что нового'}
-                      </button>
-                    )}
-                  </div>
-                )}
-
-                {!updChecking && updError && (
-                  <span className="small" style={{ color: 'var(--red, #e53935)' }}>
-                    ⚠ {updError}
-                  </span>
-                )}
-
                 <button
-                  className="btn sm ghost"
-                  disabled={updChecking || updBusy}
-                  onClick={checkUpdate}
-                  title="Проверить наличие обновлений"
+                  type="button"
+                  className="btn sm"
+                  onClick={() => window.dispatchEvent(new CustomEvent('xr:open-update-modal'))}
+                  title="Открыть окно управления версией и обновления панели"
                 >
-                  🔄 Проверить
+                  🚀 Меню обновления панели
                 </button>
               </div>
-
-              {upd?.update_available && upd.notes.length > 0 && showUpdNotes && (
-                <div
-                  style={{
-                    margin: '10px 0 0',
-                    padding: '10px 14px',
-                    background: 'rgba(0, 0, 0, 0.2)',
-                    borderRadius: 8,
-                    border: '1px solid var(--border)',
-                  }}
-                >
-                  <p className="small" style={{ margin: '0 0 6px', fontWeight: 600 }}>
-                    Что нового в {upd.latest}:
-                  </p>
-                  <ul className="small" style={{ margin: 0, paddingLeft: 18, lineHeight: 1.5 }}>
-                    {upd.notes.map((n, i) => (
-                      <li key={i} style={{ marginBottom: 4 }}>
-                        {n}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {updStage && (
-                <div
-                  style={{
-                    margin: '10px 0 0',
-                    padding: '8px 12px',
-                    background: 'rgba(34, 197, 94, 0.12)',
-                    border: '1px solid rgba(34, 197, 94, 0.3)',
-                    borderRadius: 6,
-                    color: '#22c55e',
-                    fontWeight: 600,
-                    fontSize: 13,
-                  }}
-                >
-                  ⏳ {updStage}
-                </div>
-              )}
             </div>
           </section>
         </div>

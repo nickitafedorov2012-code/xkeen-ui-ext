@@ -128,14 +128,6 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
             Мониторинг сетевых сессий ядра Mihomo в реальном времени: кто, куда и сколько трафика передает.
           </p>
         </div>
-        <div className="header-actions">
-          <button className="btn btn-sm btn-secondary" onClick={() => loadData(true)}>
-            🔄 Обновить
-          </button>
-          <button className="btn btn-sm btn-danger" onClick={handleCloseAll} disabled={connections.length === 0}>
-            💥 Закрыть все ({connections.length})
-          </button>
-        </div>
       </div>
 
       {/* Метрики (плитки в 1/4 ширины) */}
@@ -162,7 +154,7 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
         </div>
       </div>
 
-      {/* Панель фильтров */}
+      {/* Панель фильтров и управления */}
       <div className="card toolbar-card">
         <div className="connections-controls">
           <input
@@ -172,6 +164,15 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
+
+          <div className="connections-actions-group">
+            <button className="btn btn-sm btn-secondary" onClick={() => loadData(true)} title="Обновить список соединений вручную">
+              🔄 Обновить
+            </button>
+            <button className="btn btn-sm btn-danger" onClick={handleCloseAll} disabled={connections.length === 0} title="Закрыть все открытые соединения">
+              💥 Закрыть все ({connections.length})
+            </button>
+          </div>
 
           <div className="controls-group">
             <label className="checkbox-label">
@@ -184,7 +185,7 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
             </label>
 
             <select
-              className="editor-select"
+              className="select editor-select"
               value={sortBy}
               onChange={(e: any) => setSortBy(e.target.value)}
             >
