@@ -689,71 +689,105 @@ export default function Servers({ notify }: Props) {
             <div style={{ marginBottom: 16 }}>
               {viewMode === 'detailed' ? (
                 <div className="server-card pinned">
-                  <div className="server-head">
-                    <span className="pinned-header-tag">✓ ТЕКУЩИЙ СЕРВЕР</span>
-                    <span className="badge">{activeServer.protocol}</span>
-                    {activeServer.provider && (
-                      <span
-                        className="tag-provider"
-                        title={`Подписка: ${activeServer.provider_name || activeServer.provider}`}
-                        onClick={openProvidersModal}
-                      >
+                  <div className="server-card-top">
+                    <div className="server-card-badges">
+                      <span className="pinned-header-tag">✓ ТЕКУЩИЙ СЕРВЕР</span>
+                      <span className="badge protocol-badge">{activeServer.protocol}</span>
+                      {activeServer.provider && (
                         <span
-                          className="sub-marker-dot"
-                          style={{ backgroundColor: providerColorMap.get(activeServer.provider) || '#a855f7' }}
-                        />
-                        {activeServer.provider_name || activeServer.provider}
+                          className="tag-provider"
+                          title={`Подписка: ${activeServer.provider_name || activeServer.provider}`}
+                          onClick={openProvidersModal}
+                        >
+                          <span
+                            className="sub-marker-dot"
+                            style={{ backgroundColor: providerColorMap.get(activeServer.provider) || '#a855f7' }}
+                          />
+                          <span className="tag-provider-name">{activeServer.provider_name || activeServer.provider}</span>
+                        </span>
+                      )}
+                      {ignored.has(activeServer.id) && (
+                        <span className="tag ignored" title="Сервер исключён из авто-выбора (Fastest/Fallback)">
+                          🚫 Исключён
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="server-card-metrics">
+                      {getFlowStatus(activeServer.name) === 'ok' ? (
+                        <span className="badge badge-flow-ok" title="Сервер подходит для Google Flow и Gemini Labs">
+                          🟢 Flow OK
+                        </span>
+                      ) : getFlowStatus(activeServer.name) === 'blocked' ? (
+                        <span className="badge badge-flow-blocked" title="Заблокирован для Google Flow">
+                          🔴 Flow Блок
+                        </span>
+                      ) : null}
+                      {speedResults[activeServer.id] && (
+                        <span
+                          className="badge badge-speed"
+                          title={`Замер скорости: ${speedResults[activeServer.id].speed_mbps.toFixed(2)} Мбит/с (${speedResults[activeServer.id].latency_ms} мс)`}
+                        >
+                          ⚡ {speedResults[activeServer.id].speed_mbps.toFixed(1)} М
+                        </span>
+                      )}
+                      <span className={'ping ' + pingClass(activeServer.ping_ms)}>
+                        {activeServer.ping_ms > 0 ? `${activeServer.ping_ms} мс` : '—'}
                       </span>
-                    )}
-                    <span
-                      className="server-name"
+                    </div>
+                  </div>
+
+                  <div className="server-card-main">
+                    <div
+                      className="server-card-name"
                       title={`${activeServer.name}\nХост: ${activeServer.host}${activeServer.port ? `:${activeServer.port}` : ''}`}
                     >
                       {activeServer.name}
-                    </span>
-                    {getFlowStatus(activeServer.name) === 'ok' ? (
-                      <span className="badge badge-flow-ok" title="Сервер подходит для Google Flow и Gemini Labs">
-                        🟢 Flow OK
-                      </span>
-                    ) : getFlowStatus(activeServer.name) === 'blocked' ? (
-                      <span className="badge badge-flow-blocked" title="Заблокирован для Google Flow">
-                        🔴 Flow Блок
-                      </span>
-                    ) : null}
-                    {ignored.has(activeServer.id) && (
-                      <span className="tag ignored" title="Сервер исключён из авто-выбора (Fastest/Fallback)">
-                        🚫 Исключён
-                      </span>
+                    </div>
+                    {activeServer.host && activeServer.host !== activeServer.name && !activeServer.name.includes(activeServer.host) && (
+                      <div className="server-card-host mono muted small" title={`Хост: ${activeServer.host}${activeServer.port ? `:${activeServer.port}` : ''}`}>
+                        {activeServer.host}{activeServer.port ? `:${activeServer.port}` : ''}
+                      </div>
                     )}
-                    {speedResults[activeServer.id] && (
-                      <span className="badge badge-speed" title={`Замер скорости: ${speedResults[activeServer.id].speed_mbps.toFixed(2)} Мбит/с (${speedResults[activeServer.id].latency_ms} мс)`}>
-                        ⚡ {speedResults[activeServer.id].speed_mbps.toFixed(1)} Мбит/с
-                      </span>
-                    )}
-                    <span className={'ping ' + pingClass(activeServer.ping_ms)}>
-                      {activeServer.ping_ms > 0 ? `${activeServer.ping_ms} мс` : '—'}
-                    </span>
                   </div>
-                  <div className="server-actions" style={{ marginTop: 8 }}>
-                    <span className="muted small">
-                      Хост: {activeServer.host}{activeServer.port ? `:${activeServer.port}` : ''}
-                    </span>
-                    <span className="spacer" />
-                    <button
-                      className={`btn sm ghost btn-speedtest ${speedtestingId === activeServer.id ? 'loading' : ''}`}
-                      onClick={() => runSpeedtest(activeServer)}
-                      disabled={speedtestingId !== null}
-                      title="Замерить реальную скорость загрузки через этот прокси"
-                    >
-                      {speedtestingId === activeServer.id ? '⏳ Замер…' : '🚀 Скорость'}
-                    </button>
-                    <button
-                      className={`btn sm ghost btn-priority ${activeServer.is_priority ? 'is-priority' : ''}`}
-                      onClick={() => setPriority(activeServer)}
-                      title={activeServer.is_priority ? 'Снять приоритет' : 'Сделать приоритетным'}
-                    >
-                      {activeServer.is_priority ? '★ В приоритете' : '☆ Приоритет'}
-                    </button>
+
+                  <div className="server-card-actions">
+                    <div className="server-card-action-primary">
+                      <span className="tag current-active-badge">✓ ПОДКЛЮЧЁН</span>
+                    </div>
+
+                    <div className="server-card-action-secondary">
+                      <button
+                        type="button"
+                        className={`btn sm ghost btn-speedtest ${speedtestingId === activeServer.id ? 'loading' : ''}`}
+                        onClick={() => runSpeedtest(activeServer)}
+                        disabled={speedtestingId !== null}
+                        title="Замерить реальную скорость загрузки через этот прокси"
+                      >
+                        <span>{speedtestingId === activeServer.id ? '⏳' : '🚀'}</span>
+                        <span>{speedtestingId === activeServer.id ? 'Замер…' : 'Скорость'}</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        className="btn sm ghost"
+                        onClick={() => setShareServer(activeServer)}
+                        title="Сгенерировать ссылку подключения (vless/vmess/ss) и QR-код"
+                      >
+                        <span>🔗</span>
+                        <span className="btn-label-optional">Ссылка</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        className={`btn sm ghost btn-priority ${activeServer.is_priority ? 'is-priority' : ''}`}
+                        onClick={() => setPriority(activeServer)}
+                        title={activeServer.is_priority ? 'Снять приоритет' : 'Сделать приоритетным'}
+                      >
+                        <span>{activeServer.is_priority ? '★' : '☆'}</span>
+                        <span className="btn-label-optional">{activeServer.is_priority ? 'В приоритете' : 'Приоритет'}</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
               ) : (
@@ -835,92 +869,118 @@ export default function Servers({ notify }: Props) {
             <div className={`server-list cols-${columns}`}>
               {filtered.slice(0, limit).map((s) => (
                 <div key={s.id} className={'server-card' + (s.is_active ? ' active' : '')}>
-                  <div className="server-head">
-                    <span className="badge">{s.protocol}</span>
-                    {s.provider && (
-                      <span
-                        className="tag-provider"
-                        title={`Подписка: ${s.provider_name || s.provider} (кликните для управления)`}
-                        onClick={openProvidersModal}
-                      >
+                  {/* 1. Верхняя строка: метаданные слева, метрики справа */}
+                  <div className="server-card-top">
+                    <div className="server-card-badges">
+                      <span className="badge protocol-badge">{s.protocol}</span>
+                      {s.provider && (
                         <span
-                          className="sub-marker-dot"
-                          style={{ backgroundColor: providerColorMap.get(s.provider) || '#a855f7' }}
-                        />
-                        {s.provider_name || s.provider}
+                          className="tag-provider"
+                          title={`Подписка: ${s.provider_name || s.provider} (кликните для управления)`}
+                          onClick={openProvidersModal}
+                        >
+                          <span
+                            className="sub-marker-dot"
+                            style={{ backgroundColor: providerColorMap.get(s.provider) || '#a855f7' }}
+                          />
+                          <span className="tag-provider-name">{s.provider_name || s.provider}</span>
+                        </span>
+                      )}
+                      {ignored.has(s.id) && (
+                        <span className="tag ignored" title="Сервер исключён из авто-выбора (Fastest / Fallback)">
+                          🚫 Исключён
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="server-card-metrics">
+                      {getFlowStatus(s.name) === 'ok' ? (
+                        <span className="badge badge-flow-ok" title="Сервер подходит для Google Flow и Gemini Labs">
+                          🟢 Flow OK
+                        </span>
+                      ) : getFlowStatus(s.name) === 'blocked' ? (
+                        <span className="badge badge-flow-blocked" title="Заблокирован для Google Flow">
+                          🔴 Flow Блок
+                        </span>
+                      ) : null}
+                      {speedResults[s.id] && (
+                        <span
+                          className="badge badge-speed"
+                          title={`Замер скорости: ${speedResults[s.id].speed_mbps.toFixed(2)} Мбит/с (${speedResults[s.id].latency_ms} мс)`}
+                        >
+                          ⚡ {speedResults[s.id].speed_mbps.toFixed(1)} М
+                        </span>
+                      )}
+                      <span className={'ping ' + pingClass(s.ping_ms)}>
+                        {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
                       </span>
-                    )}
-                    <span
-                      className="server-name"
+                    </div>
+                  </div>
+
+                  {/* 2. Средняя строка: Название сервера во всю ширину */}
+                  <div className="server-card-main">
+                    <div
+                      className="server-card-name"
                       title={`${s.name}\nХост: ${s.host}${s.port ? `:${s.port}` : ''}\nПротокол: ${s.protocol}`}
                     >
                       {s.name}
-                    </span>
-                    {getFlowStatus(s.name) === 'ok' ? (
-                      <span className="badge badge-flow-ok" title="Сервер подходит для Google Flow и Gemini Labs">
-                        🟢 Flow OK
-                      </span>
-                    ) : getFlowStatus(s.name) === 'blocked' ? (
-                      <span className="badge badge-flow-blocked" title="Заблокирован для Google Flow">
-                        🔴 Flow Блок
-                      </span>
-                    ) : null}
-                    {ignored.has(s.id) && (
-                      <span className="tag ignored" title="Сервер исключён из авто-выбора (Fastest / Fallback)">
-                        🚫 Исключён
-                      </span>
+                    </div>
+                    {s.host && s.host !== s.name && !s.name.includes(s.host) && (
+                      <div className="server-card-host mono muted small" title={`Хост: ${s.host}${s.port ? `:${s.port}` : ''}`}>
+                        {s.host}{s.port ? `:${s.port}` : ''}
+                      </div>
                     )}
-                    {speedResults[s.id] && (
-                      <span className="badge badge-speed" title={`Замер скорости: ${speedResults[s.id].speed_mbps.toFixed(2)} Мбит/с (${speedResults[s.id].latency_ms} мс)`}>
-                        ⚡ {speedResults[s.id].speed_mbps.toFixed(1)} Мбит/с
-                      </span>
-                    )}
-                    <span className={'ping ' + pingClass(s.ping_ms)}>
-                      {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
-                    </span>
                   </div>
 
-                  {/* Кнопки действий */}
-                  <div className="server-actions" style={{ marginTop: 8 }}>
-                    {s.is_active ? (
-                      <span className="tag current">✓ ПОДКЛЮЧЁН</span>
-                    ) : (
-                      <span
-                        className="server-host-tag mono muted small"
-                        title={`Хост сервера: ${s.host}${s.port ? `:${s.port}` : ''}`}
-                        style={{ fontSize: 11, opacity: 0.75, maxWidth: 170, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                  {/* 3. Нижняя строка: Кнопки действий без разрыва строк */}
+                  <div className="server-card-actions">
+                    <div className="server-card-action-primary">
+                      {s.is_active ? (
+                        <span className="tag current-active-badge">✓ ПОДКЛЮЧЁН</span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn sm btn-connect"
+                          onClick={() => activate(s)}
+                          title="Сделать этот сервер активным"
+                        >
+                          🔌 Подключить
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="server-card-action-secondary">
+                      <button
+                        type="button"
+                        className={`btn sm ghost btn-speedtest ${speedtestingId === s.id ? 'loading' : ''}`}
+                        onClick={() => runSpeedtest(s)}
+                        disabled={speedtestingId !== null}
+                        title="Замерить реальную скорость загрузки через этот прокси"
                       >
-                        {s.host}{s.port ? `:${s.port}` : ''}
-                      </span>
-                    )}
-                    <span className="spacer" />
-                    <button
-                      className="btn sm ghost"
-                      onClick={() => setShareServer(s)}
-                      title="Сгенерировать ссылку подключения (vless/vmess/ss) и QR-код"
-                    >
-                      🔗 Ссылка
-                    </button>
-                    <button
-                      className={`btn sm ghost btn-speedtest ${speedtestingId === s.id ? 'loading' : ''}`}
-                      onClick={() => runSpeedtest(s)}
-                      disabled={speedtestingId !== null}
-                      title="Замерить реальную скорость загрузки через этот прокси"
-                    >
-                      {speedtestingId === s.id ? '⏳ Замер…' : '🚀 Скорость'}
-                    </button>
-                    {!s.is_active && (
-                      <button className="btn sm btn-connect" onClick={() => activate(s)}>
-                        🔌 Подключить
+                        <span>{speedtestingId === s.id ? '⏳' : '🚀'}</span>
+                        <span>{speedtestingId === s.id ? 'Замер…' : 'Скорость'}</span>
                       </button>
-                    )}
-                    <button
-                      className={`btn sm ghost btn-priority ${s.is_priority ? 'is-priority' : ''}`}
-                      onClick={() => setPriority(s)}
-                      title={s.is_priority ? 'Снять приоритет' : 'Сделать приоритетным'}
-                    >
-                      {s.is_priority ? '★ В приоритете' : '☆ Приоритет'}
-                    </button>
+
+                      <button
+                        type="button"
+                        className="btn sm ghost"
+                        onClick={() => setShareServer(s)}
+                        title="Сгенерировать ссылку подключения (vless/vmess/ss) и QR-код"
+                      >
+                        <span>🔗</span>
+                        <span className="btn-label-optional">Ссылка</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        className={`btn sm ghost btn-priority ${s.is_priority ? 'is-priority' : ''}`}
+                        onClick={() => setPriority(s)}
+                        title={s.is_priority ? 'Снять приоритет' : 'Сделать приоритетным'}
+                      >
+                        <span>{s.is_priority ? '★' : '☆'}</span>
+                        <span className="btn-label-optional">{s.is_priority ? 'В приоритете' : 'Приоритет'}</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}

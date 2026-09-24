@@ -576,12 +576,22 @@ body {
 }
 
 .server-card {
-  background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
-  padding: 10px 14px; transition: all 0.18s ease;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 13px;
+  transition: all 0.18s ease;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-sizing: border-box;
 }
-.server-card:hover { border-color: rgba(255, 255, 255, 0.12); }
-.server-card.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.server-card:hover { border-color: rgba(255, 255, 255, 0.14); }
+.server-card.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 4px 16px rgba(56, 189, 248, 0.08);
+}
 .server-card.pinned {
   border-color: rgba(56, 189, 248, 0.6);
   background: linear-gradient(135deg, rgba(56, 189, 248, 0.08) 0%, var(--panel-2) 100%);
@@ -596,10 +606,12 @@ body {
   color: #38bdf8;
   border: 1px solid rgba(56, 189, 248, 0.35);
   border-radius: 6px;
-  padding: 2px 8px;
-  font-size: 11px;
+  padding: 2px 7px;
+  font-size: 10.5px;
   font-weight: 700;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .pinned-divider {
   display: flex;
@@ -619,10 +631,144 @@ body {
   background: var(--border);
 }
 
+/* 1. Верхняя строка карточки: Метаданные (слева) + Метрики (справа) */
+.server-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.server-card-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+.server-card-badges .badge.protocol-badge {
+  font-size: 10.5px;
+  padding: 2px 6px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  flex-shrink: 0;
+}
+.server-card-badges .tag-provider {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  flex-shrink: 1;
+}
+.tag-provider-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.server-card-metrics {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.server-card-metrics .ping {
+  font-weight: 700;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+/* 2. Средняя строка: Название сервера во всю ширину */
+.server-card-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 1px 0;
+}
+.server-card-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text, #f8fafc);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.35;
+}
+.server-card-host {
+  font-size: 11px;
+  color: var(--muted, #94a3b8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.8;
+}
+
+/* 3. Нижняя строка: Кнопки действий (никогда не переносятся беспорядочно) */
+.server-card-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  min-width: 0;
+}
+.server-card-action-primary {
+  flex-shrink: 0;
+}
+.server-card-action-secondary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+.current-active-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(34, 197, 94, 0.16);
+  color: #22c55e;
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  font-weight: 700;
+  font-size: 11px;
+  padding: 4px 9px;
+  border-radius: 6px;
+  letter-spacing: 0.3px;
+  user-select: none;
+}
+.btn-label-optional {
+  display: inline;
+}
+.cols-0 .btn-label-optional,
+.cols-2 .btn-label-optional,
+.cols-3 .btn-label-optional,
+.cols-4 .btn-label-optional {
+  display: none;
+}
+@media (min-width: 1440px) {
+  .cols-2 .btn-label-optional {
+    display: inline;
+  }
+}
+
+/* Обратная совместимость для старых классов */
 .server-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .server-name { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .server-host { color: var(--muted); font-size: 12px; margin: 4px 0 8px 2px; }
-.server-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.server-actions { display: flex; gap: 6px; align-items: center; }
 .spacer { flex: 1; min-width: 4px; }
 .active-pill {
   background: var(--panel); border: 1px solid var(--accent);
@@ -694,24 +840,21 @@ body {
 .cols-0 .server-card,
 .cols-3 .server-card,
 .cols-4 .server-card {
-  padding: 8px 11px;
-}
-.cols-0 .server-card .server-head,
-.cols-3 .server-card .server-head,
-.cols-4 .server-card .server-head {
+  padding: 8px 10px;
   gap: 6px;
 }
-.cols-0 .server-card .server-actions,
-.cols-3 .server-card .server-actions,
-.cols-4 .server-card .server-actions {
-  gap: 5px;
-  margin-top: 6px;
+.cols-0 .server-card-actions,
+.cols-3 .server-card-actions,
+.cols-4 .server-card-actions {
+  gap: 4px;
+  margin-top: 1px;
+  padding-top: 6px;
 }
-.cols-0 .server-card .server-actions .btn.sm,
-.cols-3 .server-card .server-actions .btn.sm,
-.cols-4 .server-card .server-actions .btn.sm {
-  padding: 3px 7px;
-  font-size: 11.5px;
+.cols-0 .server-card-actions .btn.sm,
+.cols-3 .server-card-actions .btn.sm,
+.cols-4 .server-card-actions .btn.sm {
+  padding: 3px 6px;
+  font-size: 11px;
 }
 .cols-0 .server-compact-row,
 .cols-3 .server-compact-row,
