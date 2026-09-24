@@ -19,7 +19,7 @@ pub fn spawn(state: AppState) {
         loop {
             sleep(Duration::from_secs(4)).await;
 
-            let (config_path_str, force_domains, device_routing, ignore_servers, device_domains, adblock_enabled) = {
+            let (config_path_str, force_domains, device_routing, ignore_servers, device_domains, adblock_enabled, flow_server) = {
                 let cfg = state.config.read().await;
                 (
                     cfg.mihomo.config_path.clone(),
@@ -28,6 +28,7 @@ pub fn spawn(state: AppState) {
                     cfg.ignore_servers.clone(),
                     cfg.device_domain_rules.clone(),
                     cfg.adblock_enabled,
+                    cfg.flow_server.clone(),
                 )
             };
 
@@ -56,13 +57,15 @@ pub fn spawn(state: AppState) {
                     let needs_device = !device_routing.is_empty() || !device_domains.is_empty();
                     let needs_force = !force_domains.is_empty();
                     let needs_ignore = !ignore_servers.is_empty();
+                    let needs_flow = flow_server.as_ref().map_or(false, |s| !s.trim().is_empty());
 
                     let missing_device = needs_device && !content.contains("AUTO-DEVICE");
                     let missing_force = needs_force && !content.contains("AUTO-FORCE");
-                    let missing_ignore = needs_ignore && !content.contains("AUTO-IGNORE");
+                    let missing_ignore = needs_ignore && !content.contains("exclude-filter:");
                     let missing_adblock = adblock_enabled && !content.contains("AUTO-ADBLOCK");
+                    let missing_flow = needs_flow && !content.contains("AUTO-GOOGLE-AI");
 
-                    if missing_device || missing_force || missing_ignore || missing_adblock {
+                    if missing_device || missing_force || missing_ignore || missing_adblock || missing_flow {
                         log_w!("[WATCHDOG] Обнаружена перезапись config.yaml (рестарт XKeen)! Восстановление маршрутизации...");
 
                         let _guard = state.routing_lock.lock().await;
@@ -78,13 +81,7 @@ pub fn spawn(state: AppState) {
                         };
 
                         let (new_yaml, _applied) = routing::apply_routing(&raw_yaml, &cfg);
-                        let tmp = format!("{}.tmp", path.display());
-                        let write_res = async {
-                            tokio::fs::write(&tmp, &new_yaml).await?;
-                            tokio::fs::rename(&tmp, path).await
-                        }.await;
-                        if let Err(e) = write_res {
-                            let _ = tokio::fs::remove_file(&tmp).await;
+                        if let Err(e) = crate::api::atomic_write_file(path, &new_yaml).await {
                             log_w!("[WATCHDOG] Ошибка записи config.yaml: {}", e);
                             continue;
                         }
@@ -142,13 +139,19 @@ pub fn spawn_schedules_monitor(state: AppState) {
             let now_hm = now.format("%H:%M").to_string();
             let weekday = now.weekday().number_from_monday() as u8; // 1=Пн..7=Вс
 
+            let rules = mihomo::m_get(&state.http, &cfg, "/rules").await.unwrap_or(serde_json::Value::Null);
+            let groups_by_ip = mihomo::ip_groups_from_rules(&rules);
+
             for s in &cfg.schedules {
                 if !s.enabled || !s.days.contains(&weekday) {
                     continue;
                 }
                 let in_range = is_time_in_range(&now_hm, &s.time_start, &s.time_end);
                 if in_range {
-                    let group_name = routing::group_name_for(&s.ip, "");
+                    let group_name = match groups_by_ip.get(&s.ip) {
+                        Some(g) => g.clone(),
+                        None => routing::group_name_for(&s.ip, ""),
+                    };
                     let target_node = match s.action.as_str() {
                         "block" => "REJECT",
                         "direct" => "DIRECT",

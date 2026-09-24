@@ -21,8 +21,8 @@ export default function ShareNodeModal({
 
   const [copied, setCopied] = useState(false)
 
-  // Генерация ссылки подключения
-  const link = useMemo(() => {
+  // Базовая генерация ссылки подключения
+  const defaultLink = useMemo(() => {
     return exportServerToLink({
       name: server.name,
       protocol: server.protocol,
@@ -30,6 +30,20 @@ export default function ShareNodeModal({
       port: server.port,
     })
   }, [server])
+
+  const [customLink, setCustomLink] = useState<string>('')
+
+  // Актуальная ссылка (пользовательская или базовая)
+  const link = customLink.trim() ? customLink : defaultLink
+
+  // Проверка на наличие placeholder UUID / паролей из ядра
+  const isPlaceholder = useMemo(() => {
+    return (
+      link.includes('00000000-0000-0000-0000-000000000000') ||
+      link.includes(':password@') ||
+      link.includes('auth=password')
+    )
+  }, [link])
 
   const qrImageUrl = useMemo(() => {
     return generateQrSvg(link, 220)
@@ -78,6 +92,22 @@ export default function ShareNodeModal({
             </span>
           </div>
 
+          {isPlaceholder && (
+            <div
+              style={{
+                background: 'rgba(234, 179, 8, 0.1)',
+                border: '1px solid rgba(234, 179, 8, 0.3)',
+                borderRadius: 8,
+                padding: '8px 12px',
+                fontSize: 12,
+                color: '#eab308',
+                lineHeight: 1.4,
+              }}
+            >
+              ℹ️ <b>Безопасность ядра:</b> Mihomo скрывает секретные UUID/пароли серверов. Вы можете вставить свой реальный ключ в поле ссылки ниже — QR-код обновится автоматически.
+            </div>
+          )}
+
           <div className="share-node-grid">
             {/* Левая колонка: QR-код */}
             <div className="share-qr-box">
@@ -97,15 +127,27 @@ export default function ShareNodeModal({
 
             {/* Правая колонка: Ссылка и быстрое копирование */}
             <div className="share-link-box">
-              <label className="form-label" style={{ fontWeight: 600, fontSize: 12 }}>
-                Готовая ссылка конфигурации:
-              </label>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <label className="form-label" style={{ fontWeight: 600, fontSize: 12, margin: 0 }}>
+                  Ссылка конфигурации:
+                </label>
+                {customLink && (
+                  <button
+                    type="button"
+                    className="btn btn-sm ghost"
+                    style={{ fontSize: 11, padding: '2px 6px' }}
+                    onClick={() => setCustomLink('')}
+                  >
+                    Сброс
+                  </button>
+                )}
+              </div>
               <textarea
-                readOnly
                 className="input share-link-textarea mono"
-                value={link}
+                value={customLink || defaultLink}
+                onChange={(e) => setCustomLink(e.target.value)}
                 rows={4}
-                onClick={(e) => (e.target as HTMLTextAreaElement).select()}
+                placeholder="Вставьте ссылку конфигурации..."
               />
 
               <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>

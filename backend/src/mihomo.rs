@@ -1053,22 +1053,33 @@ pub struct GoogleGeoStatus {
     pub message: String,
 }
 
-/// Проверка доступности Google Flow & AI через выделенный узел Flow
-pub async fn check_google_geo(http: &reqwest::Client, cfg: &AppConfig, active_server: &str) -> Result<GoogleGeoStatus, String> {
-    let lower = active_server.to_lowercase();
-
-    // 1. Определение региона по ключевым словам сервера
+/// Определение региона сервера по названию
+pub fn detect_server_country(name: &str) -> String {
+    let lower = name.to_lowercase();
     let is_blocked = lower.contains("росси")
         || lower.contains("russia")
         || lower.contains("ru ")
         || lower.contains("[ru]")
+        || lower.contains("ru-")
+        || lower.contains("ru_")
         || lower.contains("мобильный")
         || lower.contains("финлянд")
         || lower.contains("finland")
+        || lower.contains("fi ")
+        || lower.contains("[fi]")
         || lower.contains("казахстан")
         || lower.contains("kazakhstan")
+        || lower.contains("kz ")
+        || lower.contains("[kz]")
         || lower.contains("беларус")
-        || lower.contains("belarus");
+        || lower.contains("belarus")
+        || lower.contains("by ")
+        || lower.contains("[by]")
+        || lower.contains("таджикистан")
+        || lower.contains("узбекистан")
+        || lower.contains("азербайджан")
+        || lower.contains("армени")
+        || lower.contains("грузи");
 
     let is_ca = lower.contains("канад")
         || lower.contains("canada")
@@ -1101,19 +1112,76 @@ pub async fn check_google_geo(http: &reqwest::Client, cfg: &AppConfig, active_se
         || lower.contains("феникс")
         || lower.contains("phoenix");
 
-    let detected_country = if is_us {
+    let is_de = lower.contains("герман")
+        || lower.contains("germany")
+        || lower.contains(" de ")
+        || lower.contains("[de]")
+        || lower.contains("de-")
+        || lower.contains("de_")
+        || lower.contains("🇩🇪")
+        || lower.contains("frankfurt")
+        || lower.contains("франкфурт")
+        || lower.contains("berlin")
+        || lower.contains("берлин")
+        || lower.starts_with("de ")
+        || lower.starts_with("de-")
+        || lower.starts_with("de_")
+        || lower.ends_with(" de")
+        || lower.ends_with("-de")
+        || lower.ends_with("_de");
+
+    let is_nl = lower.contains("нидерланд")
+        || lower.contains("netherlands")
+        || lower.contains("holland")
+        || lower.contains("амстердам")
+        || lower.contains("amsterdam")
+        || lower.contains(" nl ")
+        || lower.contains("[nl]")
+        || lower.contains("nl-")
+        || lower.contains("nl_")
+        || lower.contains("🇳🇱")
+        || lower.starts_with("nl ")
+        || lower.starts_with("nl-")
+        || lower.starts_with("nl_")
+        || lower.ends_with(" nl")
+        || lower.ends_with("-nl")
+        || lower.ends_with("_nl");
+
+    if is_us {
         "US".to_string()
     } else if is_ca {
         "CA".to_string()
     } else if is_blocked {
         "RU".to_string()
-    } else if lower.contains("герман") || lower.contains("germany") || lower.contains("de") {
+    } else if is_de {
         "DE".to_string()
-    } else if lower.contains("нидерланд") || lower.contains("netherlands") || lower.contains("nl") {
+    } else if is_nl {
         "NL".to_string()
     } else {
         "GLOBAL".to_string()
-    };
+    }
+}
+
+/// Быстрая оценка статуса Flow для сервера ("ok" | "blocked" | "unknown")
+pub fn eval_flow_status(raw_id: &str, display_name: &str) -> &'static str {
+    let country_raw = detect_server_country(raw_id);
+    let country_disp = detect_server_country(display_name);
+
+    if country_raw == "RU" || country_disp == "RU" {
+        "blocked"
+    } else if country_raw == "US" || country_raw == "CA" || country_disp == "US" || country_disp == "CA" {
+        "ok"
+    } else {
+        "unknown"
+    }
+}
+
+/// Проверка доступности Google Flow & AI через выделенный узел Flow
+pub async fn check_google_geo(http: &reqwest::Client, cfg: &AppConfig, active_server: &str) -> Result<GoogleGeoStatus, String> {
+    let detected_country = detect_server_country(active_server);
+    let is_blocked = detected_country == "RU";
+    let is_us = detected_country == "US";
+    let is_ca = detected_country == "CA";
 
     // 2. Тестирование задержки до flow.google.com через группу Google AI в Mihomo
     let mut delay_ms: Option<u64> = None;
@@ -1156,8 +1224,8 @@ pub async fn check_google_geo(http: &reqwest::Client, cfg: &AppConfig, active_se
         Err(_) => false,
     };
 
-    // 4. Определение чистоты (is_clean)
-    let is_clean = !is_blocked && (is_us || is_ca || (http_ok && detected_country != "RU"));
+    // 4. Определение чистоты (is_clean): только при отсутствии блокировки и при подтверждении связи (HTTP или замер задержки)
+    let is_clean = !is_blocked && (http_ok || delay_ms.is_some());
 
     let google_lang = if is_us {
         "en-US".to_string()
@@ -1175,7 +1243,7 @@ pub async fn check_google_geo(http: &reqwest::Client, cfg: &AppConfig, active_se
     } else if is_blocked {
         format!("Узел '{active_server}' связан с регионом {detected_country} — Google Flow и Gemini Labs будут заблокированы! Рекомендуется переключиться на чистый узел США или Канады.")
     } else {
-        format!("Узел '{active_server}' не подтвержден для Flow (регион: {detected_country}). Рекомендуется переключиться на узел в США.")
+        format!("Узел '{active_server}' не смог подтвердить доступ к Google Flow (регион: {detected_country}). Проверьте соединение или выберите чистый узел США.")
     };
 
     Ok(GoogleGeoStatus {
@@ -1275,6 +1343,33 @@ mod tests {
     #[test]
     fn urlencoding_encodes_non_unreserved() {
         assert_eq!(urlencoding_lite("a b/c.d-e~f_g"), "a%20b%2Fc.d-e~f_g");
+        // UTF-8 multibyte characters (Cyrillic & emoji)
+        assert_eq!(
+            urlencoding_lite("🇺🇸 США"),
+            "%F0%9F%87%BA%F0%9F%87%B8%20%D0%A1%D0%A8%D0%90"
+        );
+    }
+
+    #[test]
+    fn detect_server_country_prevents_false_positives() {
+        assert_eq!(detect_server_country("🇺🇸 USA Denver"), "US");
+        assert_eq!(detect_server_country("Node-default"), "GLOBAL");
+        assert_eq!(detect_server_country("Provider-demo"), "GLOBAL");
+        assert_eq!(detect_server_country("Sweden"), "GLOBAL");
+        assert_eq!(detect_server_country("Download-Node"), "GLOBAL");
+        assert_eq!(detect_server_country("Only-NL-Proxy"), "GLOBAL");
+        assert_eq!(detect_server_country("🇩🇪 Germany Frankfurt"), "DE");
+        assert_eq!(detect_server_country("🇳🇱 Netherlands Amsterdam"), "NL");
+        assert_eq!(detect_server_country("🇨🇦 Canada"), "CA");
+        assert_eq!(detect_server_country("🇷🇺 Россия"), "RU");
+    }
+
+    #[test]
+    fn eval_flow_status_works_correctly() {
+        assert_eq!(eval_flow_status("🇺🇸 USA Denver", "USA Denver"), "ok");
+        assert_eq!(eval_flow_status("🇨🇦 Canada Fast", "Canada Fast"), "ok");
+        assert_eq!(eval_flow_status("🇷🇺 Россия", "Россия"), "blocked");
+        assert_eq!(eval_flow_status("🇩🇪 Germany", "Germany"), "unknown");
     }
 
     #[test]

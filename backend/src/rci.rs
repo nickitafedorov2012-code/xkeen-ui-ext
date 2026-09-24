@@ -481,7 +481,7 @@ pub async fn get_system(http: &reqwest::Client, cfg: &AppConfig) -> Result<Syste
             }
         }
         let (app_memory_mb, app_cpu_percent) = get_proc_stats();
-        let core_memory_mb = get_process_rss("mihomo");
+        let core_memory_mb = get_process_rss(&cfg.mihomo.process_name);
         let total_xkeen_memory_mb = ((app_memory_mb + core_memory_mb) * 10.0).round() / 10.0;
         return Ok(SystemStats {
             cpu_percent,

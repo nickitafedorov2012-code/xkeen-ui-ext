@@ -81,4 +81,36 @@ describe('Google Flow keywords and region detection', () => {
     expect(getFlowRegion('')).toBeNull()
     expect(formatFlowServerName('')).toBe('')
   })
+
+  it('correctly detects flow status from ServerInfo objects even with stripped display names', () => {
+    const serverObj = {
+      id: '🇺🇸 New York VLESS',
+      name: 'New York VLESS', // display_name() stripped the flag emoji
+      protocol: 'VLESS',
+      host: '1.2.3.4',
+      port: 443,
+      is_active: true,
+      is_priority: false,
+      ping_ms: 45,
+    }
+
+    expect(getFlowStatus(serverObj)).toBe('ok')
+    expect(getFlowRegion(serverObj)).toBe('us')
+  })
+
+  it('respects backend flow_status property on ServerInfo when present', () => {
+    const serverObj = {
+      id: 'custom-node-1',
+      name: 'My Custom Node',
+      protocol: 'VMESS',
+      host: '1.2.3.4',
+      port: 443,
+      is_active: false,
+      is_priority: false,
+      flow_status: 'ok' as const,
+      ping_ms: 60,
+    }
+
+    expect(getFlowStatus(serverObj)).toBe('ok')
+  })
 })

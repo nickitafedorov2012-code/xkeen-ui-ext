@@ -241,8 +241,9 @@ export const FLOW_BLOCKED_KEYWORDS: readonly string[] = [
   'таджикистан', 'узбекистан', 'азербайджан', 'армени', 'грузи',
 ]
 
-export function getFlowRegion(name: string): 'us' | 'ca' | null {
-  if (!name) return null
+export function getFlowRegion(serverOrName: ServerInfo | string | undefined | null): 'us' | 'ca' | null {
+  if (!serverOrName) return null
+  const name = typeof serverOrName === 'object' ? `${serverOrName.id} ${serverOrName.name}` : serverOrName
   const n = name.toLowerCase()
   if (FLOW_BLOCKED_KEYWORDS.some((kw) => n.includes(kw))) return null
   const caKws = ['канад', 'canada', 'ca ', '[ca]', 'ca-', 'ca_', '🇨🇦']
@@ -281,9 +282,15 @@ export function formatFlowServerName(name: string): string {
   return name
 }
 
-export function getFlowStatus(name: string): FlowStatus {
-  if (!name) return 'unknown'
-  const n = name.toLowerCase()
+export function getFlowStatus(serverOrName: ServerInfo | string | undefined | null): FlowStatus {
+  if (!serverOrName) return 'unknown'
+  if (typeof serverOrName === 'object') {
+    if (serverOrName.flow_status) return serverOrName.flow_status
+    const fromId = getFlowStatus(serverOrName.id)
+    if (fromId !== 'unknown') return fromId
+    return getFlowStatus(serverOrName.name)
+  }
+  const n = serverOrName.toLowerCase()
 
   if (FLOW_BLOCKED_KEYWORDS.some((kw) => n.includes(kw))) {
     return 'blocked'

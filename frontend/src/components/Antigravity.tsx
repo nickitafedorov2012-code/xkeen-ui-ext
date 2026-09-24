@@ -66,7 +66,7 @@ export default function Antigravity({ notify }: Props) {
     try {
       const data = await apiGet<{ servers: ServerInfo[] }>('servers')
       const all = data.servers || []
-      const cleanNodes = all.filter((s) => getFlowStatus(s.name) === 'ok')
+      const cleanNodes = all.filter((s) => getFlowStatus(s) === 'ok')
       setFlowServers(all)
 
       let flowSrv = ''
@@ -251,8 +251,8 @@ export default function Antigravity({ notify }: Props) {
     return 'ping-bad'
   }
 
-  const usCaServers = flowServers.filter((s) => getFlowStatus(s.name) === 'ok')
-  const otherServers = flowServers.filter((s) => getFlowStatus(s.name) !== 'ok')
+  const usCaServers = flowServers.filter((s) => getFlowStatus(s) === 'ok')
+  const otherServers = flowServers.filter((s) => getFlowStatus(s) !== 'ok')
   const bestFlowServer = usCaServers
     .filter((s) => s.ping_ms > 0)
     .sort((a, b) => a.ping_ms - b.ping_ms)[0] || usCaServers[0]
@@ -261,7 +261,7 @@ export default function Antigravity({ notify }: Props) {
   const isCurrentBlocked = googleGeo
     ? !googleGeo.is_clean
     : activeFlowServerObj
-    ? getFlowStatus(activeFlowServerObj.name) === 'blocked'
+    ? getFlowStatus(activeFlowServerObj) === 'blocked'
     : false
 
   return (
@@ -774,7 +774,7 @@ export default function Antigravity({ notify }: Props) {
         {/* Сворачиваемый блок для разработчиков */}
         <details style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 14px' }}>
           <summary style={{ cursor: 'pointer', fontWeight: 600, color: 'var(--muted)', fontSize: 13, userSelect: 'none' }}>
-            🛠 Для разработчиков: альтернативный доступ через локальный HTTP CONNECT прокси (:53129)
+            🛠 Для разработчиков: альтернативный доступ через локальный HTTP CONNECT прокси (:{proxyPort})
           </summary>
           <div style={{ marginTop: 12 }}>
             <p className="muted small" style={{ marginBottom: 10 }}>

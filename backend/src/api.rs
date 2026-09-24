@@ -134,13 +134,20 @@ pub async fn get_servers(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
     match mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
         Ok(servers) => {
+            let flow_server = cfg.flow_server.clone();
             let list: Vec<serde_json::Value> = servers
                 .iter()
                 .map(|s| {
+                    let flow_status = mihomo::eval_flow_status(&s.id, &s.name);
+                    let is_google_ai = flow_server
+                        .as_ref()
+                        .map_or(s.is_active, |fs| fs == &s.id);
                     json!({
                         "id": s.id, "name": s.name, "protocol": s.protocol,
                         "host": s.host, "port": s.port,
                         "is_active": s.is_active, "is_priority": s.is_priority,
+                        "is_google_ai": is_google_ai,
+                        "flow_status": flow_status,
                         "ping_ms": s.ping_ms,
                         "provider": s.provider,
                         "provider_name": s.provider_name,
@@ -594,12 +601,8 @@ pub async fn fix_names(State(state): State<AppState>) -> Response {
     if fixed.is_empty() {
         return api_ok(json!({ "fixed": 0, "names": fixed }));
     }
-    let tmp = format!("{}.tmp", cfg.mihomo.config_path);
-    if let Err(e) = tokio::fs::write(&tmp, &new_yaml).await {
-        return api_err(format!("Ошибка записи: {e}"));
-    }
-    if let Err(e) = tokio::fs::rename(&tmp, &cfg.mihomo.config_path).await {
-        return api_err(format!("Ошибка переименования: {e}"));
+    if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
+        return api_err(format!("Ошибка сохранения config.yaml: {e}"));
     }
     if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
         return api_err(format!("Имена исправлены, но reload Mihomo не удался: {e}"));
@@ -1124,12 +1127,8 @@ pub async fn apply_routing(State(state): State<AppState>, Json(req): Json<Routin
         Err(e) => return api_err(e),
     };
 
-    let tmp = format!("{}.tmp", cfg.mihomo.config_path);
-    if let Err(e) = tokio::fs::write(&tmp, &new_yaml).await {
-        return api_err(format!("Ошибка записи: {e}"));
-    }
-    if let Err(e) = tokio::fs::rename(&tmp, &cfg.mihomo.config_path).await {
-        return api_err(format!("Ошибка переименования: {e}"));
+    if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
+        return api_err(format!("Ошибка сохранения config.yaml: {e}"));
     }
 
     // Reload Mihomo и перевыбор серверов в новых группах (порт логики десктопа)
@@ -1246,12 +1245,8 @@ pub async fn add_provider(State(state): State<AppState>, Json(req): Json<AddProv
         Err(e) => return api_err(e),
     };
 
-    let tmp = format!("{}.tmp", cfg.mihomo.config_path);
-    if let Err(e) = tokio::fs::write(&tmp, &new_yaml).await {
-        return api_err(format!("Ошибка записи: {e}"));
-    }
-    if let Err(e) = tokio::fs::rename(&tmp, &cfg.mihomo.config_path).await {
-        return api_err(format!("Ошибка переименования: {e}"));
+    if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
+        return api_err(format!("Ошибка сохранения config.yaml: {e}"));
     }
 
     // Если указано пользовательское имя — сохраняем псевдоним
@@ -1293,12 +1288,8 @@ pub async fn delete_provider(State(state): State<AppState>, Json(req): Json<Dele
         Err(e) => return api_err(e),
     };
 
-    let tmp = format!("{}.tmp", cfg.mihomo.config_path);
-    if let Err(e) = tokio::fs::write(&tmp, &new_yaml).await {
-        return api_err(format!("Ошибка записи: {e}"));
-    }
-    if let Err(e) = tokio::fs::rename(&tmp, &cfg.mihomo.config_path).await {
-        return api_err(format!("Ошибка переименования: {e}"));
+    if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
+        return api_err(format!("Ошибка сохранения config.yaml: {e}"));
     }
 
     // Удаляем псевдоним
@@ -2029,13 +2020,17 @@ pub async fn import_node(
 
         if let Ok(config_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
             if !config_yaml.contains(&format!("{}:", prov_name)) {
-                let _ = crate::routing::add_provider_to_yaml(
+                if let Ok(new_yaml) = crate::routing::add_provider_to_yaml(
                     &config_yaml,
                     &prov_name,
                     &format!("file:///opt/etc/mihomo/providers/{}.yaml", prov_name),
                     Some(cfg.health_check_url()),
                     Some(cfg.mihomo.health_check_interval),
-                );
+                ) {
+                    if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
+                        log_e!("Ошибка сохранения config.yaml при добавлении провайдера: {}", e);
+                    }
+                }
             }
         }
 
@@ -2266,12 +2261,7 @@ pub async fn toggle_adblock(
     };
 
     let (new_yaml, _) = routing::apply_routing(&raw_yaml, &cfg);
-    let tmp = format!("{}.tmp", path.display());
-    if let Err(e) = tokio::fs::write(&tmp, &new_yaml).await {
-        return api_err(format!("Ошибка записи временного файла: {}", e));
-    }
-    if let Err(e) = tokio::fs::rename(&tmp, path).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
+    if let Err(e) = atomic_write_file(path, &new_yaml).await {
         return api_err(format!("Ошибка сохранения config.yaml: {}", e));
     }
 

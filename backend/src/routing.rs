@@ -329,6 +329,28 @@ pub fn remove_flow_rules(yaml: &str) -> String {
     out.join("\n")
 }
 
+/// Поиск существующей группы Flow / Google AI в YAML конфиге Mihomo.
+pub fn find_flow_group_name(yaml: &str) -> Option<String> {
+    for gname in ["Google AI", "Google-AI", "GoogleFlow", "Flow", "AI"] {
+        let pattern_unquoted = format!("- name: {gname}");
+        let pattern_single = format!("- name: '{gname}'");
+        let pattern_double = format!("- name: \"{gname}\"");
+        for line in yaml.lines() {
+            let t = line.trim();
+            if t == pattern_unquoted
+                || t == pattern_single
+                || t == pattern_double
+                || t.starts_with(&format!("- name: {gname} "))
+                || t.starts_with(&format!("- name: '{gname}'"))
+                || t.starts_with(&format!("- name: \"{gname}\""))
+            {
+                return Some(gname.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Применение выделенного маршрута Google Flow & AI в rules: (после AdBlock).
 pub fn apply_flow_rules(yaml: &str, target: &str, group_name: Option<&str>) -> Result<String, String> {
     let content = remove_flow_rules(yaml);
@@ -888,7 +910,8 @@ pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> (String, usi
     // 1b. Выделенный маршрут Google Flow & AI
     if let Some(ref flow_srv) = cfg.flow_server {
         if !flow_srv.trim().is_empty() {
-            if let Ok(with_flow) = apply_flow_rules(&current, flow_srv.trim(), None) {
+            let flow_group = find_flow_group_name(&current);
+            if let Ok(with_flow) = apply_flow_rules(&current, flow_srv.trim(), flow_group.as_deref()) {
                 current = with_flow;
             }
         }

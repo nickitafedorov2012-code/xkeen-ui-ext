@@ -170,6 +170,23 @@ pub fn parse_dns_a_records(buf: &[u8]) -> Vec<Ipv4Addr> {
     ips
 }
 
+/// Проверка, принадлежит ли IPv4-адрес официальным подсетям Google (Google APIs / Cloud Code)
+pub fn is_google_ip(ip: &Ipv4Addr) -> bool {
+    let o = ip.octets();
+    match o[0] {
+        172 => o[1] == 217,
+        142 => o[1] == 250 || o[1] == 251,
+        216 => o[1] == 58 || o[1] == 239,
+        74 => o[1] == 125,
+        173 => o[1] == 194,
+        209 => o[1] == 85,
+        108 => o[1] == 177,
+        64 => o[1] == 233,
+        66 => o[1] == 102 || o[1] == 249,
+        _ => false,
+    }
+}
+
 async fn run_cmd(program: &str, args: &[&str]) -> Result<(), String> {
     match tokio::process::Command::new(program).args(args).output().await {
         Ok(out) => {
@@ -312,13 +329,9 @@ impl AntigravityManager {
 
             match res {
                 Ok((ips, lat)) => {
-                    // Проверка: подменяет ли IP
+                    // Проверка: подменяет ли IP (не входит в оригинальные Google IP)
                     let is_sub = !ips.is_empty()
-                        && !ips.iter().any(|ip| {
-                            ref_ips.contains(ip)
-                                || ip.octets()[0] == 172 && ip.octets()[1] == 217
-                                || ip.octets()[0] == 142 && ip.octets()[1] == 250
-                        });
+                        && !ips.iter().any(|ip| ref_ips.contains(ip) || is_google_ip(ip));
 
                     if is_sub {
                         for ip in &ips {
@@ -462,8 +475,9 @@ impl AntigravityManager {
             let addr = format!("0.0.0.0:{port}");
             let listener = match TcpListener::bind(&addr).await {
                 Ok(l) => {
-                    self.state.write().await.proxy_running = true;
-                    self.state.write().await.log(format!("HTTP CONNECT прокси запущен на порту {port}"), "info");
+                    let mut st = self.state.write().await;
+                    st.proxy_running = true;
+                    st.log(format!("HTTP CONNECT прокси запущен на порту {port}"), "info");
                     l
                 }
                 Err(e) => {
@@ -624,4 +638,31 @@ async fn handle_proxy_conn(mut client: TcpStream, mgr: Arc<AntigravityManager>) 
     // Прозрачный бидирекционный байтовый обмен (TCP splice)
     let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_google_ip() {
+        assert!(is_google_ip(&Ipv4Addr::new(172, 217, 16, 206)));
+        assert!(is_google_ip(&Ipv4Addr::new(142, 250, 185, 206)));
+        assert!(is_google_ip(&Ipv4Addr::new(142, 251, 36, 14)));
+        assert!(is_google_ip(&Ipv4Addr::new(216, 239, 38, 120)));
+        assert!(is_google_ip(&Ipv4Addr::new(216, 58, 214, 206)));
+        assert!(is_google_ip(&Ipv4Addr::new(74, 125, 200, 100)));
+        assert!(is_google_ip(&Ipv4Addr::new(173, 194, 76, 138)));
+        assert!(is_google_ip(&Ipv4Addr::new(209, 85, 233, 101)));
+        assert!(is_google_ip(&Ipv4Addr::new(108, 177, 14, 100)));
+        assert!(is_google_ip(&Ipv4Addr::new(64, 233, 165, 100)));
+        assert!(is_google_ip(&Ipv4Addr::new(66, 102, 1, 1)));
+        assert!(is_google_ip(&Ipv4Addr::new(66, 249, 80, 1)));
+
+        // Non-Google IPs (e.g. SmartDNS / GeoHide proxy IP)
+        assert!(!is_google_ip(&Ipv4Addr::new(83, 220, 169, 155)));
+        assert!(!is_google_ip(&Ipv4Addr::new(45, 155, 204, 190)));
+        assert!(!is_google_ip(&Ipv4Addr::new(192, 168, 1, 1)));
+        assert!(!is_google_ip(&Ipv4Addr::new(1, 1, 1, 1)));
+    }
 }

@@ -132,7 +132,7 @@ pub async fn sync_geo_override(domains: &[String]) -> Result<usize, String> {
     let total_ips = v4.len() + v6.len();
 
     // 1. Потоково обновляем файл ru_exclude_override.lst без буферизации всего содержимого в RAM
-    let tmp_file = format!("{OVERRIDE_FILE}.tmp");
+    let tmp_file = format!("{OVERRIDE_FILE}.{}.tmp", std::process::id());
     write_override_file_streaming(OVERRIDE_FILE, &tmp_file, &v4, &v6).await?;
     if let Err(e) = tokio::fs::rename(&tmp_file, OVERRIDE_FILE).await {
         let _ = tokio::fs::remove_file(&tmp_file).await;

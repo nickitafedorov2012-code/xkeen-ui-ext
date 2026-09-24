@@ -189,14 +189,14 @@ export default function Servers({ notify }: Props) {
   }, [pingAll])
 
   const flowCount = useMemo(() => {
-    return servers.filter((s) => getFlowStatus(s.name) === 'ok').length
+    return servers.filter((s) => getFlowStatus(s) === 'ok').length
   }, [servers])
 
   // Фильтрация серверов
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase()
     return servers.filter((s) => {
-      if (flowOnly && getFlowStatus(s.name) !== 'ok') {
+      if (flowOnly && getFlowStatus(s) !== 'ok') {
         return false
       }
       if (selectedProviders.size > 0) {
@@ -714,11 +714,11 @@ export default function Servers({ notify }: Props) {
                     </div>
 
                     <div className="server-card-metrics">
-                      {getFlowStatus(activeServer.name) === 'ok' ? (
+                      {getFlowStatus(activeServer) === 'ok' ? (
                         <span className="badge badge-flow-ok" title="Сервер подходит для Google Flow и Gemini Labs">
                           🟢 Flow OK
                         </span>
-                      ) : getFlowStatus(activeServer.name) === 'blocked' ? (
+                      ) : getFlowStatus(activeServer) === 'blocked' ? (
                         <span className="badge badge-flow-blocked" title="Заблокирован для Google Flow">
                           🔴 Flow Блок
                         </span>
@@ -802,11 +802,11 @@ export default function Servers({ notify }: Props) {
                   >
                     {activeServer.name}
                   </span>
-                  {getFlowStatus(activeServer.name) === 'ok' ? (
+                  {getFlowStatus(activeServer) === 'ok' ? (
                     <span className="badge badge-flow-ok" style={{ fontSize: 10, padding: '1px 5px' }} title="Подходит для Google Flow">
                       🟢 Flow
                     </span>
-                  ) : getFlowStatus(activeServer.name) === 'blocked' ? (
+                  ) : getFlowStatus(activeServer) === 'blocked' ? (
                     <span className="badge badge-flow-blocked" style={{ fontSize: 10, padding: '1px 5px' }} title="Заблокирован для Flow">
                       🔴 Блок
                     </span>
@@ -889,11 +889,11 @@ export default function Servers({ notify }: Props) {
                     </div>
 
                     <div className="server-card-metrics">
-                      {getFlowStatus(s.name) === 'ok' ? (
+                      {getFlowStatus(s) === 'ok' ? (
                         <span className="badge badge-flow-ok" title="Сервер подходит для Google Flow и Gemini Labs">
                           🟢 Flow OK
                         </span>
-                      ) : getFlowStatus(s.name) === 'blocked' ? (
+                      ) : getFlowStatus(s) === 'blocked' ? (
                         <span className="badge badge-flow-blocked" title="Заблокирован для Google Flow">
                           🔴 Flow Блок
                         </span>
@@ -1005,11 +1005,11 @@ export default function Servers({ notify }: Props) {
                   >
                     {s.name}
                   </span>
-                  {getFlowStatus(s.name) === 'ok' ? (
+                  {getFlowStatus(s) === 'ok' ? (
                     <span className="badge badge-flow-ok" style={{ fontSize: 10, padding: '1px 5px' }} title="Подходит для Google Flow">
                       🟢 Flow
                     </span>
-                  ) : getFlowStatus(s.name) === 'blocked' ? (
+                  ) : getFlowStatus(s) === 'blocked' ? (
                     <span className="badge badge-flow-blocked" style={{ fontSize: 10, padding: '1px 5px' }} title="Заблокирован для Flow">
                       🔴 Блок
                     </span>
