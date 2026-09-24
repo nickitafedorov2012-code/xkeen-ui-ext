@@ -8,6 +8,7 @@ use crate::{log_i, log_w, mihomo, override_sync, routing, AppState};
 /// XKeen перегенерирует config.yaml, затирая блоки AUTO-DEVICE и AUTO-FORCE.
 /// Watchdog отслеживает изменения и мгновенно восстанавливает правила маршрутизации.
 pub fn spawn(state: AppState) {
+    spawn_schedules_monitor(state.clone());
     tokio::spawn(async move {
         // Начальная пауза перед запуском монитора
         sleep(Duration::from_secs(10)).await;
@@ -113,8 +114,6 @@ pub fn spawn(state: AppState) {
             }
         }
     });
-
-    spawn_schedules_monitor(state);
 }
 
 /// Проверка, попадает ли текущее время now_hm ("HH:MM") в интервал start..end.
@@ -156,7 +155,7 @@ pub fn spawn_schedules_monitor(state: AppState) {
                         "proxy" => s.target_server.as_deref().unwrap_or("PROXY"),
                         _ => continue,
                     };
-                    let _ = mihomo::switch_server_in_group(&state.http, &cfg, &group_name, target_node).await;
+                    let _ = mihomo::switch_group(&state.http, &cfg, &group_name, target_node).await;
                 }
             }
         }

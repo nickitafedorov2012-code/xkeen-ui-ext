@@ -2183,7 +2183,7 @@ pub async fn toggle_adblock(
         return api_err(format!("Ошибка сохранения config.yaml: {}", e));
     }
 
-    if let Err(e) = config::save(&state.config_path, &cfg) {
+    if let Err(e) = config::save(&state.config_path, &cfg).await {
         log_e!("Ошибка сохранения config.json: {}", e);
     }
     *state.config.write().await = std::sync::Arc::new(cfg.clone());
@@ -2478,15 +2478,18 @@ pub async fn get_diagnostics_health(State(state): State<AppState>) -> Response {
     // 1. Проверка шлюза Keenetic (RCI)
     let gateway_res = rci::get_version(&state.http, &cfg).await;
     let (gw_status, gw_msg) = match gateway_res {
-        Ok(v) => ("ok", format!("KeeneticOS {} доступна", v)),
+        Ok(v) => {
+            let ver = v.get("version").cloned().unwrap_or_else(|| "доступна".into());
+            ("ok", format!("KeeneticOS {}", ver))
+        }
         Err(e) => ("fail", format!("Keenetic RCI недоступен: {}", e)),
     };
 
     // 2. Проверка ядра Mihomo
     let mihomo_res = mihomo::get_version(&state.http, &cfg).await;
     let (mihomo_status, mihomo_msg) = match mihomo_res {
-        Ok(v) => ("ok", format!("Mihomo {} работает штатно", v)),
-        Err(e) => ("fail", format!("Mihomo API недоступен: {}", e)),
+        Some(v) => ("ok", format!("Mihomo {} работает штатно", v)),
+        None => ("fail", "Mihomo API недоступен".into()),
     };
 
     // 3. Проверка DNS резолва
@@ -2609,8 +2612,7 @@ pub async fn get_policies_map(State(state): State<AppState>) -> Response {
         nodes_policies.push(json!({
             "id": p.id,
             "name": p.name,
-            "description": p.description,
-            "is_main": p.is_main,
+            "is_default": p.is_default,
         }));
     }
 
@@ -2714,7 +2716,7 @@ pub async fn save_schedules(
     let mut cfg = state.config.read().await.as_ref().clone();
     cfg.schedules = body.schedules;
 
-    if let Err(e) = config::save(&state.config_path, &cfg) {
+    if let Err(e) = config::save(&state.config_path, &cfg).await {
         return api_err(format!("Ошибка сохранения расписаний: {}", e));
     }
     *state.config.write().await = std::sync::Arc::new(cfg);
