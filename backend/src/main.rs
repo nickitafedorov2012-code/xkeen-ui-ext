@@ -316,6 +316,7 @@ async fn main() {
         .route("/api/flow/status", get(api::get_flow_status))
         .route("/api/flow/switch", post(api::switch_flow_server))
         .route("/api/flow/ping", post(api::ping_flow_servers))
+        .route("/api/flow/repair", post(api::repair_flow))
         .route("/api/servers/speedtest", post(api::speedtest_server))
         .route("/api/servers/speedtest/{id}", post(api::speedtest_server_by_id).get(api::speedtest_server_by_id))
         .route("/api/servers/import-node", post(api::import_node))

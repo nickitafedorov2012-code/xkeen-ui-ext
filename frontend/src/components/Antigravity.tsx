@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { apiGet, apiPost } from '../api'
 import { getFlowStatus, formatFlowServerName, type AntigravityStatus, type ServerInfo } from '../types'
 import { copyToClipboard as doCopy } from '../utils/clipboard'
+import FlowRepairModal from './FlowRepairModal'
 
 interface Props {
   notify: (msg: string, isError?: boolean) => void
@@ -37,6 +38,7 @@ export default function Antigravity({ notify }: Props) {
     return localStorage.getItem('xr_flow_server') || ''
   })
   const [switchingFlowServer, setSwitchingFlowServer] = useState(false)
+  const [repairModalOpen, setRepairModalOpen] = useState(false)
 
   // Форма настроек
   const [enabled, setEnabled] = useState(true)
@@ -281,6 +283,21 @@ export default function Antigravity({ notify }: Props) {
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              className="btn"
+              style={{
+                background: 'linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%)',
+                border: 'none',
+                color: '#fff',
+                fontWeight: 600,
+                boxShadow: '0 2px 8px rgba(236, 72, 153, 0.25)',
+              }}
+              onClick={() => setRepairModalOpen(true)}
+              title="Устранить зависший редирект на unsupported-country в обычном окне браузера"
+            >
+              🛠️ Починить Flow
+            </button>
             <button
               className="btn"
               onClick={checkFlowAccess}
@@ -838,6 +855,18 @@ export default function Antigravity({ notify }: Props) {
           )}
         </div>
       </section>
+
+      {/* Модальное окно починки Google Flow */}
+      <FlowRepairModal
+        isOpen={repairModalOpen}
+        onClose={() => setRepairModalOpen(false)}
+        notify={notify}
+        onRepaired={(srv) => {
+          setSelectedFlowServer(srv)
+          localStorage.setItem('xr_flow_server', srv)
+          load()
+        }}
+      />
     </div>
   )
 }

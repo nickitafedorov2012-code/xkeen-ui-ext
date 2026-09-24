@@ -322,6 +322,62 @@ pub async fn switch_flow_server(
     }
 }
 
+/// POST /api/flow/repair — комплексная починка Google Flow:
+/// 1) Находит лучший узел США
+/// 2) Переключает маршрут Google AI на этот узел
+/// 3) Сбрасывает сокеты и соединения ядра Mihomo
+pub async fn repair_flow(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+
+    // 1. Поиск лучшего сервера США
+    let pings = mihomo::ping_flow_servers(&state.http, &cfg, 3500).await;
+    let mut best_server: Option<String> = None;
+    let mut min_ping = i64::MAX;
+
+    for (name, &ping) in &pings {
+        if ping > 0 && ping < min_ping {
+            let lower = name.to_lowercase();
+            let is_us_ca = lower.contains("сша") || lower.contains("usa") || lower.contains("us ") ||
+                lower.contains("chicago") || lower.contains("чикаго") || lower.contains("канад") ||
+                lower.contains("canada") || lower.contains("вашингтон") || lower.contains("washington") ||
+                lower.contains("майами") || lower.contains("miami") || lower.contains("сиэтл") ||
+                lower.contains("seattle") || lower.contains("атланта") || lower.contains("atlanta") ||
+                lower.contains("феникс") || lower.contains("phoenix") || lower.contains("лос-анджелес") ||
+                lower.contains("los angeles");
+            if is_us_ca {
+                min_ping = ping;
+                best_server = Some(name.clone());
+            }
+        }
+    }
+
+    let target_server = best_server
+        .or_else(|| cfg.flow_server.clone())
+        .unwrap_or_else(|| "🇺🇸 США Вашингтон".to_string());
+
+    // 2. Переключение Flow сервера и обновление правил
+    let _ = mihomo::switch_flow_server(&state.http, &cfg, &target_server).await;
+
+    // 3. Сохранение в config.json
+    {
+        let _cfg_guard = state.config_lock.lock().await;
+        let mut mut_cfg = (**state.config.read().await).clone();
+        mut_cfg.flow_server = Some(target_server.clone());
+        let _ = config::save(&state.config_path, &mut_cfg).await;
+        *state.config.write().await = std::sync::Arc::new(mut_cfg);
+    }
+
+    // 4. Сброс всех активных соединений ядра
+    mihomo::close_all_connections(&state.http, &cfg).await;
+
+    api_ok(json!({
+        "success": true,
+        "flow_server": target_server,
+        "min_ping": if min_ping == i64::MAX { None } else { Some(min_ping) },
+        "message": format!("Маршрут Google Flow переключен на '{target_server}', сокеты сброшены"),
+    }))
+}
+
 /// GET /api/policies — политики доступа Keenetic.
 pub async fn get_policies(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();

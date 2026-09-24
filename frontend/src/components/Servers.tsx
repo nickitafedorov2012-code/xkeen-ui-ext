@@ -3,6 +3,7 @@ import { apiGet, apiPost } from '../api'
 import { pingClass, getFlowStatus, type ProviderInfo, type ServerInfo, type SpeedtestResult } from '../types'
 import OutboundGeneratorModal from './OutboundGeneratorModal'
 import ShareNodeModal from './ShareNodeModal'
+import FlowRepairModal from './FlowRepairModal'
 import { copyToClipboard } from '../utils/clipboard'
 
 interface Props {
@@ -48,6 +49,7 @@ export default function Servers({ notify }: Props) {
   // Генератор и импорт ссылок
   const [generatorOpen, setGeneratorOpen] = useState(false)
   const [shareServer, setShareServer] = useState<ServerInfo | null>(null)
+  const [flowRepairOpen, setFlowRepairOpen] = useState(false)
 
   // Speedtest
   const [speedtestingId, setSpeedtestingId] = useState<string | null>(null)
@@ -580,6 +582,23 @@ export default function Servers({ notify }: Props) {
         >
           ✨ Только Flow ({flowCount})
         </button>
+
+        {flowOnly && (
+          <button
+            type="button"
+            className="btn"
+            style={{
+              background: 'linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%)',
+              border: 'none',
+              color: '#fff',
+              fontWeight: 600,
+            }}
+            onClick={() => setFlowRepairOpen(true)}
+            title="Устранить зависший редирект на unsupported-country в обычном окне браузера"
+          >
+            🛠️ Починить Flow
+          </button>
+        )}
 
         {/* Переключатель вида (Компактный / Подробный) */}
         <div className="view-toggle" title="Режим отображения списка">
@@ -1414,6 +1433,14 @@ export default function Servers({ notify }: Props) {
         isOpen={!!shareServer}
         onClose={() => setShareServer(null)}
         notify={notify}
+      />
+
+      {/* Модальное окно починки Google Flow */}
+      <FlowRepairModal
+        isOpen={flowRepairOpen}
+        onClose={() => setFlowRepairOpen(false)}
+        notify={notify}
+        onRepaired={() => load()}
       />
     </section>
   )
