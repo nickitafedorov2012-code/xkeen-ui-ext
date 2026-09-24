@@ -97,11 +97,37 @@ export default function TrafficGraph() {
     }
   }
 
-  // Максимальное значение для масштабирования графика
-  const maxVal = Math.max(
+  // Стабильное квантование шкалы скорости без скачков и дрожания
+  const rawMax = Math.max(
     ...history.map((h) => Math.max(getValue(h, 'direct'), getValue(h, 'proxy'))),
-    1024 * 32 // Минимум 32 KB/s для красивой сетки в покое
+    1024 * 32
   )
+
+  const getQuantizedMax = (val: number): number => {
+    const tiers = [
+      32 * 1024,
+      64 * 1024,
+      128 * 1024,
+      256 * 1024,
+      512 * 1024,
+      1024 * 1024,
+      2 * 1024 * 1024,
+      5 * 1024 * 1024,
+      10 * 1024 * 1024,
+      25 * 1024 * 1024,
+      50 * 1024 * 1024,
+      100 * 1024 * 1024,
+      250 * 1024 * 1024,
+      500 * 1024 * 1024,
+      1024 * 1024 * 1024,
+    ]
+    for (const t of tiers) {
+      if (val <= t) return t
+    }
+    return Math.ceil(val / (100 * 1024 * 1024)) * 100 * 1024 * 1024
+  }
+
+  const maxVal = getQuantizedMax(rawMax)
 
   const width = 640
   const height = 130
@@ -225,13 +251,21 @@ export default function TrafficGraph() {
           <line x1="0" y1={height * 0.5} x2={width} y2={height * 0.5} className="traffic-grid-line" strokeDasharray="3 3" />
           <line x1="0" y1={height * 0.75} x2={width} y2={height * 0.75} className="traffic-grid-line" strokeDasharray="3 3" />
 
-          {/* Метка шкалы пика */}
-          <text x={8} y={16} className="traffic-scale-text" fontSize="10" fontFamily="Consolas, monospace">
-            {formatSpeed(maxVal)}
-          </text>
-          <text x={8} y={height * 0.5 + 4} className="traffic-scale-text-dim" fontSize="9" fontFamily="Consolas, monospace">
-            {formatSpeed(maxVal * 0.5)}
-          </text>
+          {/* Метка шкалы пика с подложкой */}
+          <g className="traffic-scale-badge">
+            <rect x={6} y={5} width={80} height={16} rx={4} className="traffic-scale-bg" />
+            <text x={10} y={17} className="traffic-scale-text" fontSize="10.5" fontFamily="Consolas, monospace">
+              {formatSpeed(maxVal)}
+            </text>
+          </g>
+
+          {/* Метка середины шкалы с подложкой */}
+          <g className="traffic-scale-badge">
+            <rect x={6} y={height * 0.5 - 7} width={80} height={15} rx={4} className="traffic-scale-bg" />
+            <text x={10} y={height * 0.5 + 4} className="traffic-scale-text-dim" fontSize="9.5" fontFamily="Consolas, monospace">
+              {formatSpeed(maxVal * 0.5)}
+            </text>
+          </g>
 
           {/* Заливки областей */}
           <path d={areaD(directPoints)} fill="url(#directGrad)" />
@@ -261,3 +295,4 @@ export default function TrafficGraph() {
     </div>
   )
 }
+

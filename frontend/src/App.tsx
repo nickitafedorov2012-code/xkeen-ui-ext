@@ -257,7 +257,11 @@ export default function App() {
 
       <nav className="tabs">
         {TABS.map((t) => (
-          <button key={t.id} className={'tab' + (tab === t.id ? ' active' : '')} onClick={() => switchTab(t.id)}>
+          <button
+            key={t.id}
+            className={'tab' + (tab === t.id ? ' active' : '') + (t.id === 'help' ? ' tab-help' : '')}
+            onClick={() => switchTab(t.id)}
+          >
             {t.label}
           </button>
         ))}

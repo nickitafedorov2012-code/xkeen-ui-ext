@@ -128,10 +128,12 @@ type SectionKey =
   | 'shortcuts'
   | 'arch'
   | 'dashboard'
+  | 'traffic'
   | 'servers'
-  | 'editor'
   | 'devices'
+  | 'rules'
   | 'google-ai'
+  | 'editor'
   | 'failover'
   | 'domains'
   | 'settings'
@@ -157,14 +159,16 @@ export default function Help({ status }: Props) {
     { key: 'shortcuts' as SectionKey, label: '⌨️ Горячие клавиши' },
     { key: 'arch' as SectionKey, label: '🏛 Архитектура' },
     { key: 'dashboard' as SectionKey, label: '📊 Дашборд & Шапка' },
+    { key: 'traffic' as SectionKey, label: '📈 График трафика' },
     { key: 'servers' as SectionKey, label: '🛰 Серверы & QR' },
+    { key: 'devices' as SectionKey, label: '📱 Устройства & Расписание' },
+    { key: 'rules' as SectionKey, label: '🧭 Правила & Симулятор' },
+    { key: 'google-ai' as SectionKey, label: '🤖 Antigravity AI Flow' },
     { key: 'editor' as SectionKey, label: '📝 Редактор конфигов' },
-    { key: 'devices' as SectionKey, label: '📱 Устройства' },
-    { key: 'google-ai' as SectionKey, label: '🤖 Google AI & Proxy' },
     { key: 'failover' as SectionKey, label: '⚡ Failover & Telegram' },
     { key: 'domains' as SectionKey, label: '🌐 Домены & Пресеты' },
     { key: 'settings' as SectionKey, label: '⚙️ Настройки & Бэкапы' },
-    { key: 'dns' as SectionKey, label: '🧭 DNS (Fake-IP/Redir)' },
+    { key: 'dns' as SectionKey, label: '🧭 DNS & Smart Fake-IP' },
     { key: 'ram' as SectionKey, label: '🧠 Оптимизация RAM' },
     { key: 'logs' as SectionKey, label: '📄 Логи & Syslog' },
     { key: 'api' as SectionKey, label: '🔌 REST API' },
@@ -418,6 +422,62 @@ export default function Help({ status }: Props) {
         </SectionCard>
       )}
 
+      {/* 4.1. ГРАФИК ТРАФИКА В РЕАЛЬНОМ ВРЕМЕНИ */}
+      {shouldShow('traffic', 'трафик график traffic graph direct proxy wan прямой проксированный загрузка отдача скорость kb/s mb/s gb/s шкала квантование пик') && (
+        <SectionCard title="График трафика в реальном времени (Direct vs Proxy)" icon="📈" badge="Мониторинг канала">
+          <P>
+            Интерактивный высокоточный SVG-график раздельного учёта сетевой активности в реальном времени (опрос каждую 1 секунду):
+          </P>
+          <FeatureList
+            items={[
+              {
+                name: '🔵 Прямой трафик роутера (Direct)',
+                desc: (
+                  <>
+                    Отображается синей линией и градиентом. Включает весь трафик локальной сети и роутера, который идёт напрямую в интернет через физический WAN-интерфейс провайдера мимо прокси (российские сайты, торренты, локальные сервисы, банковские приложения).
+                  </>
+                ),
+              },
+              {
+                name: '🟢 Проксированный трафик (Proxy)',
+                desc: (
+                  <>
+                    Отображается зелёной линией и градиентом. Показывает объём данных, проходящий через прокси-ядро Mihomo и текущий активный сервер/туннель (YouTube, Discord, зарубежные сервисы, AI-платформы).
+                  </>
+                ),
+              },
+              {
+                name: '🎯 Стабильная квантованная шкала скорости',
+                desc: (
+                  <>
+                    Шкала графика автоматически квантуется по фиксированным порогам (32 КБ/с, 64 КБ/с, 128 КБ/с, 256 КБ/с, 512 КБ/с, 1 МБ/с, 2 МБ/с, 5 МБ/с, 10 МБ/с, 25 МБ/с, 50 МБ/с, 100 МБ/с, 250 МБ/с, 500 МБ/с, 1 ГБ/с). Это предотвращает скачки сетки, дрожание графика и «плавание» меток при мелких флуктуациях скорости. Метки слева снабжены контрастными подложками для идеальной читаемости на тёмном и светлом фоне.
+                  </>
+                ),
+              },
+              {
+                name: '🎛 Режимы отображения (Загрузка / Отдача / Сумма)',
+                desc: (
+                  <>
+                    Кнопки над графиком позволяют мгновенно переключать фильтр метрик:<br />
+                    - <b>↓ Загрузка</b>: только входящий трафик (Downlink).<br />
+                    - <b>↑ Отдача</b>: только исходящий трафик (Uplink).<br />
+                    - <b>↓+↑ Сумма</b>: совокупная скорость канала.
+                  </>
+                ),
+              },
+              {
+                name: '📊 Мгновенные бейджи и пиковые скорости',
+                desc: (
+                  <>
+                    Информационные плашки в шапке графика отображают текущие раздельные скорости скачивания/отдачи (↓/↑) для Direct и Proxy каналов, а также суммарную нагрузку на интерфейс.
+                  </>
+                ),
+              },
+            ]}
+          />
+        </SectionCard>
+      )}
+
       {/* 5. СЕРВЕРЫ И ПОДПИСКИ + ССЫЛКИ И QR-КОДЫ */}
       {shouldShow('servers', 'серверы подписки proxy-providers провайдеры переименование алиасы пинг игнор qr ссылка генератор импорт share outbound избранное pinned') && (
         <SectionCard title="Серверы, Подписки, Ссылки и QR-коды" icon="🛰" badge="Прокси & Шеринг">
@@ -443,10 +503,10 @@ export default function Help({ status }: Props) {
                 ),
               },
               {
-                name: '🪄 Импорт серверов (Outbound Generator)',
+                name: '📥 Импорт серверов (Outbound Generator)',
                 desc: (
                   <>
-                    Кнопка <b>«+ Добавить серверы»</b> позволяет вставить одну или пачку ссылок (<K>vless://</K>, <K>vmess://</K>, <K>ss://</K>, <K>trojan://</K>, <K>hysteria2://</K>). Панель автоматически валидирует параметры и добавляет узлы в конфигурацию ядра.
+                    Кнопка <b>«📥 Импорт ссылок»</b> позволяет вставить одну или пачку ссылок (<K>vless://</K>, <K>vmess://</K>, <K>ss://</K>, <K>trojan://</K>, <K>hysteria2://</K>). Панель автоматически валидирует параметры и добавляет узлы в конфигурацию ядра.
                   </>
                 ),
               },
@@ -621,6 +681,14 @@ export default function Help({ status }: Props) {
                 ),
               },
               {
+                name: '📅 Расписание доступа и родительский контроль (Schedule)',
+                desc: (
+                  <>
+                    Возможность гибкой настройки расписания для каждого клиентского устройства (например, отключение доступа в интернет или блокировка развлекательных сервисов в ночное время / учебные часы).
+                  </>
+                ),
+              },
+              {
                 name: '✨ Плавающая панель массовых действий (Batch Bar)',
                 desc: (
                   <>
@@ -654,11 +722,48 @@ export default function Help({ status }: Props) {
         </SectionCard>
       )}
 
-      {/* 8. GOOGLE AI И ANTIGRAVITY */}
-      {shouldShow('google-ai', 'google ai antigravity gemini flow studio ai studio proxy 53129 socks http proxy env переменные') && (
-        <SectionCard title="Google AI, Gemini Labs и служба Antigravity" icon="🤖" badge="AI Acceleration">
+      {/* 7.1. МАРШРУТИЗАЦИЯ И СИМУЛЯТОР ПРАВИЛ */}
+      {shouldShow('rules', 'правила маршрутизация симулятор правил test rule simulator domain-suffix ip-cidr geosite match zapret dpi обход nfqws tpws') && (
+        <SectionCard title="Маршрутизация, Симулятор правил и Zapret DPI" icon="🧭" badge="Правила & Тестирование">
           <P>
-            Специализированный модуль для гарантированного и стабильного доступа к сервисам искусственного интеллекта Google (Google AI Studio, Gemini API, Google Flow, Vertex AI):
+            Контроль и тестирование правил раздельной маршрутизации трафика:
+          </P>
+          <FeatureList
+            items={[
+              {
+                name: '🧪 Симулятор правил маршрутизации (Rule Simulator)',
+                desc: (
+                  <>
+                    Инструмент на вкладке <b>«🧭 Маршрутизация»</b> позволяет ввести любой целевой домен, хост или IP-адрес (например, <K>youtube.com</K>, <K>api.openai.com</K>, <K>gosuslugi.ru</K>) и мгновенно проверить, какое именно правило ядра (<K>DOMAIN-SUFFIX</K>, <K>DOMAIN-KEYWORD</K>, <K>IP-CIDR</K>, <K>GEOSITE</K>, <K>GEOIP</K>, <K>MATCH</K>) сработает и в какой целевой селектор (<K>DIRECT</K>, <K>PROXY</K>, <K>REJECT</K>) попадёт трафик.
+                  </>
+                ),
+              },
+              {
+                name: '🛡️ Интеграция с Zapret (Обход блокировок DPI)',
+                desc: (
+                  <>
+                    XKeen Route полностью совместим с пакетом Zapret (nfqws/tpws). Трафик российских ресурсов направляется напрямую через интерфейс WAN с десинхронизацией пакетов, а трафик заблокированных сервисов заворачивается в прокси-туннель Mihomo.
+                  </>
+                ),
+              },
+              {
+                name: '⚡ Иерархия и приоритет правил',
+                desc: (
+                  <>
+                    Правила обрабатываются сверху вниз: сначала персональные правила устройств (<K>AUTO-ip</K>), затем списки принудительного проксирования (<K>DOMAIN-SUFFIX</K>), затем списки исключений (<K>ru_exclude_override</K>), и в самом конце — правило по умолчанию (<K>MATCH,DIRECT</K>).
+                  </>
+                ),
+              },
+            ]}
+          />
+        </SectionCard>
+      )}
+
+      {/* 8. GOOGLE AI И ANTIGRAVITY */}
+      {shouldShow('google-ai', 'google ai antigravity gemini flow studio ai studio proxy 53129 socks http proxy env переменные llm openai claude deepseek') && (
+        <SectionCard title="Antigravity AI Flow, Gemini Labs и AI Proxy" icon="🤖" badge="AI Acceleration">
+          <P>
+            Специализированный модуль для гарантированного и стабильного доступа к сервисам искусственного интеллекта (Google AI Studio, Gemini API, OpenAI ChatGPT, Anthropic Claude, DeepSeek):
           </P>
           <FeatureList
             items={[

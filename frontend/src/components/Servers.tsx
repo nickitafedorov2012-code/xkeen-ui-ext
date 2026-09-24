@@ -627,7 +627,7 @@ export default function Servers({ notify }: Props) {
 
         {/* Управление списками */}
         <button className="btn" onClick={() => setGeneratorOpen(true)} title="Импортировать vless/vmess/ss/trojan/hy2/tuic ссылки">
-          🪄 Импорт ссылок
+          📥 Импорт ссылок
         </button>
 
         {providers.length > 0 && (

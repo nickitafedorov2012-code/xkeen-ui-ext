@@ -365,23 +365,28 @@ body {
 
 .tabs {
   display: flex;
-  gap: 8px;
+  gap: 6px;
   margin-bottom: 20px;
-  padding-bottom: 14px;
+  padding-bottom: 12px;
   border-bottom: 1px solid var(--border);
   flex-wrap: wrap;
+  align-items: center;
 }
 .tab {
   background: var(--panel);
   color: var(--muted);
   border: 1px solid var(--border);
-  border-radius: 9px;
-  padding: 8px 18px;
+  border-radius: 8px;
+  padding: 7px 13px;
   cursor: pointer;
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 500;
   transition: transform 0.1s ease, border-color 0.1s ease, box-shadow 0.1s ease, color 0.1s ease, background 0.1s ease;
   user-select: none;
+  white-space: nowrap;
+}
+.tab.tab-help {
+  margin-left: auto;
 }
 .tab:hover {
   color: var(--text);
@@ -396,6 +401,7 @@ body {
   font-weight: 600;
   box-shadow: 0 4px 14px rgba(79, 140, 255, 0.35);
 }
+
 
 .card {
   background: var(--panel); border: 1px solid var(--border);
@@ -4254,6 +4260,43 @@ table.devices-table td {
   height: 100%;
   display: block;
 }
+.traffic-grid-line {
+  stroke: rgba(255, 255, 255, 0.08);
+  stroke-width: 1;
+}
+[data-theme="light"] .traffic-grid-line {
+  stroke: rgba(0, 0, 0, 0.08);
+}
+[data-theme="light"] .traffic-svg-wrapper {
+  background: rgba(0, 0, 0, 0.03);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+.traffic-scale-bg {
+  fill: rgba(15, 23, 42, 0.85);
+  stroke: rgba(255, 255, 255, 0.15);
+  stroke-width: 1;
+}
+[data-theme="light"] .traffic-scale-bg {
+  fill: rgba(255, 255, 255, 0.92);
+  stroke: rgba(0, 0, 0, 0.15);
+}
+.traffic-scale-text {
+  fill: #f8fafc;
+  font-weight: 700;
+}
+.traffic-scale-text-dim {
+  fill: #cbd5e1;
+  font-weight: 600;
+}
+[data-theme="light"] .traffic-scale-text {
+  fill: #0f172a;
+  font-weight: 700;
+}
+[data-theme="light"] .traffic-scale-text-dim {
+  fill: #475569;
+  font-weight: 600;
+}
+
 
 /* ==========================================================================
    STATS GRID & METRIC TILES (1/4 WIDTH GRID)
