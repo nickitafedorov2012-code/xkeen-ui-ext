@@ -68,15 +68,22 @@ export default function Antigravity({ notify }: Props) {
       const cleanNodes = all.filter((s) => getFlowStatus(s.name) === 'ok')
       setFlowServers(all)
 
-      const saved = localStorage.getItem('xr_flow_server')
-      const activeServer = all.find((s) => s.is_active)
+      let flowSrv = ''
+      try {
+        const fStatus = await apiGet<{ flow_server?: string }>('flow/status')
+        if (fStatus.flow_server) flowSrv = fStatus.flow_server
+      } catch {}
 
-      if (saved && all.some((s) => s.id === saved)) {
-        setSelectedFlowServer(saved)
-      } else if (activeServer) {
-        setSelectedFlowServer(activeServer.id)
+      if (!flowSrv) {
+        flowSrv = localStorage.getItem('xr_flow_server') || ''
+      }
+
+      if (flowSrv && all.some((s) => s.id === flowSrv)) {
+        setSelectedFlowServer(flowSrv)
       } else if (cleanNodes.length > 0) {
         setSelectedFlowServer(cleanNodes[0].id)
+      } else if (all.length > 0) {
+        setSelectedFlowServer(all[0].id)
       }
     } catch {
       // ignore
@@ -116,11 +123,11 @@ export default function Antigravity({ notify }: Props) {
     setSwitchingFlowServer(true)
     try {
       localStorage.setItem('xr_flow_server', serverId)
-      await apiPost('servers/switch', { server_id: serverId })
-      notify('Узел Google AI переключен и сохранён')
+      await apiPost('flow/switch', { server_id: serverId })
+      notify(`Выделенный узел Google Flow переключен на '${serverId}'. Основной прокси и Failover сохранены.`)
       setTimeout(checkFlowAccess, 1200)
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка переключения узла', true)
+      notify(e instanceof Error ? e.message : 'Ошибка переключения узла Flow', true)
     } finally {
       setSwitchingFlowServer(false)
     }
@@ -301,12 +308,13 @@ export default function Antigravity({ notify }: Props) {
           </div>
 
           <div>
-            <div className="muted small">Быстрое переключение узла Flow</div>
+            <div className="muted small">Выделенный узел Google Flow & AI (только AI)</div>
             <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
               <select
                 className="input"
                 style={{ padding: '4px 8px', fontSize: 13, flex: 1 }}
                 value={selectedFlowServer}
+                title="Трафик Google Flow, Gemini, AI Studio и Labs пойдет через этот узел. Основной прокси и Failover не изменяются."
                 onChange={(e) => {
                   setSelectedFlowServer(e.target.value)
                   switchGoogleAiServer(e.target.value)

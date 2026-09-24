@@ -210,16 +210,73 @@ pub async fn ping_servers(State(state): State<AppState>, Json(req): Json<PingReq
     api_ok(json!({ "pings": pings }))
 }
 
-/// GET /api/servers/google-check — диагностика чистоты активного узла в Google Search / AI.
+/// GET /api/servers/google-check — диагностика чистоты узла в Google Search / AI.
 pub async fn check_google_geo(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
-    let active_name = match mihomo::get_proxies(&state.http, &cfg).await {
-        Ok(proxies) => mihomo::resolve_active_leaf(&proxies),
-        Err(e) => return api_err(format!("Ошибка получения прокси: {e}")),
+    let target_name = match mihomo::get_flow_status(&state.http, &cfg).await {
+        Ok(val) => val.get("flow_server").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+        Err(_) => String::new(),
+    };
+    let active_name = if !target_name.is_empty() {
+        target_name
+    } else {
+        match mihomo::get_proxies(&state.http, &cfg).await {
+            Ok(proxies) => mihomo::resolve_active_leaf(&proxies),
+            Err(e) => return api_err(format!("Ошибка получения прокси: {e}")),
+        }
     };
     match mihomo::check_google_geo(&state.http, &cfg, &active_name).await {
         Ok(status) => api_ok(serde_json::to_value(status).unwrap_or_default()),
         Err(e) => api_err(e),
+    }
+}
+
+/// GET /api/flow/status — получить текущий сервер Google Flow & AI
+pub async fn get_flow_status(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    match mihomo::get_flow_status(&state.http, &cfg).await {
+        Ok(val) => api_ok(val),
+        Err(e) => api_err(e),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct FlowSwitchReq {
+    #[serde(alias = "id")]
+    pub server_id: String,
+}
+
+/// POST /api/flow/switch — переключить ТОЛЬКО сервер для Google Flow & AI (не затрагивая PROXY / Failover)
+pub async fn switch_flow_server(
+    State(state): State<AppState>,
+    axum::extract::Json(body): axum::extract::Json<FlowSwitchReq>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    let srv_id = body.server_id.trim();
+    if srv_id.is_empty() {
+        return api_err("Не указан server_id для Google Flow");
+    }
+
+    match mihomo::switch_flow_server(&state.http, &cfg, srv_id).await {
+        Ok(msg) => {
+            log_i!("[Google Flow] {}", msg);
+            // Сохраняем flow_server в config.json БЕЗ изменения failover.priority_server / priority_chain!
+            {
+                let _cfg_guard = state.config_lock.lock().await;
+                let mut mut_cfg = (**state.config.read().await).clone();
+                mut_cfg.flow_server = Some(srv_id.to_string());
+                if let Err(e) = config::save(&state.config_path, &mut_cfg).await {
+                    log_e!("Ошибка сохранения flow_server в config.json: {e}");
+                } else {
+                    *state.config.write().await = std::sync::Arc::new(mut_cfg);
+                }
+            }
+            api_ok(json!({ "message": msg, "flow_server": srv_id }))
+        }
+        Err(e) => {
+            log_e!("Ошибка переключения Google Flow на {}: {}", srv_id, e);
+            api_err(e)
+        }
     }
 }
 

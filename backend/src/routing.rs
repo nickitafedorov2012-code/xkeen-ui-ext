@@ -288,6 +288,74 @@ pub const ADBLOCK_BEGIN: &str = "# --- AUTO-ADBLOCK-RULES-BEGIN ---";
 pub const ADBLOCK_END: &str = "# --- AUTO-ADBLOCK-RULES-END ---";
 pub const ADBLOCK_RULE: &str = "  - GEOSITE,category-ads-all,REJECT";
 
+pub const GOOGLE_AI_BEGIN: &str = "# --- AUTO-GOOGLE-AI-BEGIN ---";
+pub const GOOGLE_AI_END: &str = "# --- AUTO-GOOGLE-AI-END ---";
+
+pub const FLOW_DOMAINS: &[&str] = &[
+    "flow.google.com",
+    "labs.google",
+    "aisandbox-pa.googleapis.com",
+    "aisandbox-pa.google",
+    "alkalimakersuite-pa.googleapis.com",
+    "generativelanguage.googleapis.com",
+    "aistudio.google.com",
+    "gemini.google.com",
+    "proactivebackend-pa.googleapis.com",
+    "cloudaicompanion.googleapis.com",
+    "deepmind.google",
+    "deepmind.com",
+    "genai-media.googleusercontent.com",
+    "video-downloads.googleusercontent.com",
+];
+
+/// Удаление блока Google Flow & AI правил из YAML.
+pub fn remove_flow_rules(yaml: &str) -> String {
+    let mut out = Vec::new();
+    let mut skip = false;
+    for line in yaml.lines() {
+        let t = line.trim();
+        if t == GOOGLE_AI_BEGIN {
+            skip = true;
+            continue;
+        }
+        if t == GOOGLE_AI_END {
+            skip = false;
+            continue;
+        }
+        if !skip {
+            out.push(line);
+        }
+    }
+    out.join("\n")
+}
+
+/// Применение выделенного маршрута Google Flow & AI в rules: (после AdBlock).
+pub fn apply_flow_rules(yaml: &str, target: &str, group_name: Option<&str>) -> Result<String, String> {
+    let content = remove_flow_rules(yaml);
+    let target_dest = if let Some(g) = group_name { g } else { target };
+    if target_dest.is_empty() {
+        return Ok(content);
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let rules_idx = lines
+        .iter()
+        .position(|l| l.trim_end() == "rules:")
+        .ok_or("В config.yaml нет секции rules:")?;
+
+    let mut out = Vec::with_capacity(lines.len() + FLOW_DOMAINS.len() + 4);
+    for (i, line) in lines.iter().enumerate() {
+        out.push(line.to_string());
+        if i == rules_idx {
+            out.push(GOOGLE_AI_BEGIN.to_string());
+            for d in FLOW_DOMAINS {
+                out.push(format!("  - DOMAIN-SUFFIX,{d},{target_dest}"));
+            }
+            out.push(GOOGLE_AI_END.to_string());
+        }
+    }
+    Ok(out.join("\n"))
+}
+
 /// Удаление блока AdBlock из YAML.
 pub fn remove_adblock_rules(yaml: &str) -> String {
     let mut out = Vec::new();
@@ -815,6 +883,15 @@ pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> (String, usi
     // 1. Доменные правила (DIRECT / FORCE / PER-DEVICE DOMAINS)
     if let Ok(with_domains) = apply_domain_rules(&current, &cfg.direct_domains, &cfg.force_domains, &cfg.device_domain_rules) {
         current = with_domains;
+    }
+
+    // 1b. Выделенный маршрут Google Flow & AI
+    if let Some(ref flow_srv) = cfg.flow_server {
+        if !flow_srv.trim().is_empty() {
+            if let Ok(with_flow) = apply_flow_rules(&current, flow_srv.trim(), None) {
+                current = with_flow;
+            }
+        }
     }
 
     // 2. Игнор-лист

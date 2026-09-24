@@ -313,6 +313,8 @@ async fn main() {
         .route("/api/servers/ping", post(api::ping_servers))
         .route("/api/servers/fix-names", post(api::fix_names))
         .route("/api/servers/google-check", get(api::check_google_geo))
+        .route("/api/flow/status", get(api::get_flow_status))
+        .route("/api/flow/switch", post(api::switch_flow_server))
         .route("/api/servers/speedtest", post(api::speedtest_server))
         .route("/api/servers/speedtest/{id}", post(api::speedtest_server_by_id).get(api::speedtest_server_by_id))
         .route("/api/servers/import-node", post(api::import_node))

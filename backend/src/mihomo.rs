@@ -667,8 +667,14 @@ pub async fn switch_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &
         if typ != "selector" {
             continue;
         }
-        // исключаем авто-группы и группы устройств (в имени есть IP/MAC)
-        if name == "Fastest" || name == "Fallback" || ip_from_group_name(name).is_some() {
+        // исключаем авто-группы, специализированные AI/Flow группы и группы устройств
+        let lower_g = name.to_lowercase();
+        if name == "Fastest"
+            || name == "Fallback"
+            || lower_g.contains("google ai")
+            || lower_g.contains("flow")
+            || ip_from_group_name(name).is_some()
+        {
             continue;
         }
         groups.push(name.clone());
@@ -712,6 +718,88 @@ pub async fn switch_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &
     } else {
         Err(format!("Не удалось изменить активный сервер в Mihomo: {last_err}"))
     }
+}
+
+/// Получить текущий сервер, назначенный для Google Flow & AI
+pub async fn get_flow_status(http: &reqwest::Client, cfg: &AppConfig) -> Result<serde_json::Value, String> {
+    let proxies = get_proxies(http, cfg).await.unwrap_or_default();
+    let mut active_server = String::new();
+    let mut group_found: Option<String> = None;
+
+    for gname in ["Google AI", "Google-AI", "GoogleFlow", "Flow", "AI"] {
+        if let Some(p) = proxies.get(gname) {
+            group_found = Some(gname.to_string());
+            if let Some(now) = p.get("now").and_then(|n| n.as_str()) {
+                if !now.is_empty() {
+                    active_server = now.to_string();
+                    break;
+                }
+            }
+        }
+    }
+
+    if active_server.is_empty() {
+        if let Some(ref s) = cfg.flow_server {
+            active_server = s.clone();
+        }
+    }
+
+    if active_server.is_empty() {
+        active_server = resolve_active_leaf(&proxies);
+    }
+
+    Ok(json!({
+        "flow_server": active_server,
+        "group_name": group_found,
+    }))
+}
+
+/// Переключить выделенный сервер для Google Flow & AI без изменения глобального PROXY / Failover
+pub async fn switch_flow_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &str) -> Result<String, String> {
+    let target = server_id.trim();
+    if target.is_empty() {
+        return Err("Имя сервера не может быть пустым".into());
+    }
+    let proxies = get_proxies(http, cfg).await.unwrap_or_default();
+
+    let mut flow_group: Option<String> = None;
+    for gname in ["Google AI", "Google-AI", "GoogleFlow", "Flow", "AI"] {
+        if proxies.contains_key(gname) {
+            flow_group = Some(gname.to_string());
+            break;
+        }
+    }
+
+    if let Some(ref g) = flow_group {
+        let member = proxies
+            .get(g)
+            .and_then(|p| p.get("all"))
+            .and_then(|a| a.as_array())
+            .map(|members| members.iter().any(|m| m.as_str() == Some(target)));
+
+        if member == Some(true) {
+            m_put(http, cfg, &format!("/proxies/{}", urlencoding_lite(g)), json!({ "name": target }), 3).await?;
+            close_all_connections(http, cfg).await;
+            return Ok(format!("Выделенный маршрут Google Flow & AI переключен на '{target}'"));
+        }
+    }
+
+    // Если группы нет в Mihomo или сервер в неё не входит, прописываем правила напрямую в config.yaml
+    let yaml_path = &cfg.mihomo.config_path;
+    if let Ok(yaml) = tokio::fs::read_to_string(yaml_path).await {
+        let new_yaml = crate::routing::apply_flow_rules(&yaml, target, flow_group.as_deref())?;
+        if new_yaml != yaml {
+            crate::api::atomic_write_file(yaml_path, &new_yaml).await?;
+            let _ = reload_config(http, cfg).await;
+        }
+    }
+
+    if let Some(ref g) = flow_group {
+        let _ = m_put(http, cfg, &format!("/proxies/{}", urlencoding_lite(g)), json!({ "name": target }), 3).await;
+    }
+
+    close_all_connections(http, cfg).await;
+    Ok(format!("Выделенный маршрут Google Flow & AI переключен на '{target}'"))
 }
 
 /// Пинг всех участников селекторной группы через /group/{group}/delay (мс по каждому серверу в группе).

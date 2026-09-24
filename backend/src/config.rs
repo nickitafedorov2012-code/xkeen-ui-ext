@@ -257,6 +257,8 @@ pub struct AppConfig {
     pub provider_aliases: std::collections::BTreeMap<String, String>,
     /// Настройки обхода блокировки Google Antigravity (Cloud Code API).
     pub antigravity: AntigravityConfig,
+    /// Выделенный сервер для Google Flow & AI сервисов (не затрагивает основной PROXY / Failover).
+    pub flow_server: Option<String>,
     /// Блокировка рекламы на роутере через Mihomo (GEOSITE,category-ads-all,REJECT).
     pub adblock_enabled: bool,
     /// Расписания работы устройств (блокировка/прокси/direct по часам).
@@ -345,6 +347,7 @@ impl Default for AppConfig {
             notifications: NotificationsConfig::default(),
             provider_aliases: std::collections::BTreeMap::new(),
             antigravity: AntigravityConfig::default(),
+            flow_server: None,
             adblock_enabled: false,
             schedules: Vec::new(),
         }
