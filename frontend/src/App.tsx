@@ -9,15 +9,31 @@ import Header from './components/Header'
 import Antigravity from './components/Antigravity'
 import LoginModal from './components/LoginModal'
 import ConfigEditor from './components/ConfigEditor'
+import ConnectionsViewer from './components/ConnectionsViewer'
+import RulesViewer from './components/RulesViewer'
+import Diagnostics from './components/Diagnostics'
 import { apiGet, apiPost } from './api'
 import type { AuthStatus, StatusInfo } from './types'
 
-type TabId = 'dashboard' | 'servers' | 'devices' | 'settings' | 'help' | 'google-ai' | 'antigravity'
+type TabId =
+  | 'dashboard'
+  | 'servers'
+  | 'devices'
+  | 'connections'
+  | 'rules'
+  | 'diagnostics'
+  | 'google-ai'
+  | 'settings'
+  | 'help'
+  | 'antigravity'
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'dashboard', label: '📊 Дашборд' },
   { id: 'servers', label: '🛰 Серверы' },
   { id: 'devices', label: '📱 Устройства' },
+  { id: 'connections', label: '🌐 Соединения' },
+  { id: 'rules', label: '📋 Правила' },
+  { id: 'diagnostics', label: '🩺 Диагностика' },
   { id: 'google-ai', label: '🤖 Google AI' },
   { id: 'settings', label: '⚙️ Настройки' },
   { id: 'help', label: '📖 Справка' },
@@ -235,6 +251,9 @@ export default function App() {
           {tab === 'dashboard' && <Dashboard status={status} notify={notify} refresh={refresh} onSwitchTab={switchTab} />}
           {tab === 'servers' && <Servers notify={notify} />}
           {tab === 'devices' && <Devices notify={notify} />}
+          {tab === 'connections' && <ConnectionsViewer notify={notify} />}
+          {tab === 'rules' && <RulesViewer notify={notify} />}
+          {tab === 'diagnostics' && <Diagnostics notify={notify} />}
           {(tab === 'google-ai' || tab === 'antigravity') && <Antigravity notify={notify} />}
           {tab === 'settings' && <Settings notify={notify} status={status} refresh={refresh} />}
           {tab === 'help' && <Help status={status} />}

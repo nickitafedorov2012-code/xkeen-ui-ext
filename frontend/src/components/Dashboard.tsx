@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
 import { pingClass, type FailoverEventInfo, type StatusInfo } from '../types'
+import TrafficGraph from './TrafficGraph'
 
 interface Props {
   status: StatusInfo | null
@@ -83,6 +84,24 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
     })
   }, [status?.active_server?.ping_ms, status?.active_server?.name])
 
+  const [adblockEnabled, setAdblockEnabled] = useState<boolean>(() => !!status?.adblock_enabled)
+
+  useEffect(() => {
+    if (status?.adblock_enabled !== undefined) {
+      setAdblockEnabled(status.adblock_enabled)
+    }
+  }, [status?.adblock_enabled])
+
+  const handleToggleAdblock = async () => {
+    try {
+      const res = await apiPost<{ enabled: boolean }>('adblock/toggle', { enabled: !adblockEnabled })
+      setAdblockEnabled(res.enabled)
+      notify(res.enabled ? 'Блокировка рекламы (AdBlock) включена' : 'Блокировка рекламы отключена')
+      refresh?.()
+    } catch (e: any) {
+      notify('Ошибка переключения AdBlock: ' + e.message, true)
+    }
+  }
 
   const loadEvents = useCallback(async () => {
     try {
@@ -157,7 +176,29 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
             <span className="muted">API {status?.mihomo ? `${status.mihomo.host}:${status.mihomo.port}` : '127.0.0.1:9090'}</span>
           </span>
         </div>
+
+        <div className="dash-info-group">
+          <button
+            type="button"
+            className="dash-info-badge"
+            onClick={handleToggleAdblock}
+            title="Быстрое включение/отключение сетевого фильтра рекламы"
+            style={{
+              cursor: 'pointer',
+              background: adblockEnabled ? 'rgba(16, 185, 129, 0.15)' : 'rgba(255, 255, 255, 0.05)',
+              border: adblockEnabled ? '1px solid #10b981' : '1px solid var(--border)',
+            }}
+          >
+            <span>🛡️ AdBlock:</span>
+            <b style={{ color: adblockEnabled ? '#10b981' : 'var(--text-secondary)' }}>
+              {adblockEnabled ? 'ВКЛ 🟢' : 'ВЫКЛ ⚪'}
+            </b>
+          </button>
+        </div>
       </div>
+
+      {/* График трафика в реальном времени */}
+      <TrafficGraph />
 
       {/* Оперативные виджеты */}
       <div className="grid2">

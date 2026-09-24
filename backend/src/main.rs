@@ -18,7 +18,7 @@ mod notifications;
 use axum::extract::Request;
 use axum::middleware::{self, Next};
 use axum::response::Response;
-use axum::routing::{any, get, post, put};
+use axum::routing::{any, delete, get, post, put};
 use axum::Router;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -366,6 +366,30 @@ async fn main() {
         .route("/patch", get(api::get_antigravity_patch_script))
         // Reverse-Proxy Clash API
         .route("/clash/{*path}", any(api::clash_proxy))
+        // AdBlock (Блокировка рекламы)
+        .route("/api/adblock", get(api::get_adblock))
+        .route("/api/adblock/toggle", post(api::toggle_adblock))
+        // GeoIP & GeoSite
+        .route("/api/system/geo-info", get(api::get_geo_info))
+        .route("/api/system/geo-update", post(api::update_geo_databases))
+        // Connections Viewer
+        .route("/api/connections", get(api::get_connections).delete(api::close_connections))
+        .route("/api/connections/{id}", delete(api::close_single_connection))
+        // Монитор трафика
+        .route("/api/traffic/poll", get(api::get_traffic_poll))
+        // Rules Viewer и «Куда пойдёт?»
+        .route("/api/rules", get(api::get_rules))
+        .route("/api/rules/test", post(api::test_rule_match))
+        // Network Diagnostics & Smart DNS
+        .route("/api/diagnostics/health", get(api::get_diagnostics_health))
+        .route("/api/diagnostics/dns-test", post(api::test_dns_domain))
+        // Keenetic Policies Map
+        .route("/api/policies/map", get(api::get_policies_map))
+        // Zapret / DPI
+        .route("/api/zapret/status", get(api::get_zapret_status))
+        .route("/api/zapret/action", post(api::zapret_action))
+        // Расписания устройств
+        .route("/api/schedules", get(api::get_schedules).post(api::save_schedules))
         .fallback(frontend::serve)
         .layer(middleware::from_fn_with_state(auth_state, auth::auth_middleware))
         .layer(middleware::from_fn(no_cache))

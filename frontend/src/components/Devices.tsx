@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { apiGet, apiPost } from '../api'
 import DeviceRow from './DeviceRow'
 import DeviceRoutingModal from './DeviceRoutingModal'
+import DeviceScheduleModal from './DeviceScheduleModal'
+import PoliciesMap from './PoliciesMap'
 import {
   type DeviceInfo,
   type DeviceRoutingEntry,
@@ -75,6 +77,12 @@ export default function Devices({ notify }: Props) {
   // Модальные окна массовых действий
   const [batchPolicyOpen, setBatchPolicyOpen] = useState(false)
   const [batchServerOpen, setBatchServerOpen] = useState(false)
+
+  // Переключение вида (Таблица / Карта)
+  const [activeView, setActiveView] = useState<'table' | 'map'>('table')
+
+  // Модальное окно расписания (⏰)
+  const [scheduleTarget, setScheduleTarget] = useState<{ ip: string; name: string } | null>(null)
 
   // Модальное окно резервирования (⚙ Edit)
   const [drModal, setDrModal] = useState<{
@@ -440,6 +448,25 @@ export default function Devices({ notify }: Props) {
             </svg>
             <span>Refresh</span>
           </button>
+
+          <div className="devices-view-switcher" style={{ display: 'inline-flex', gap: 4, background: 'rgba(0,0,0,0.25)', padding: 3, borderRadius: 8 }}>
+            <button
+              type="button"
+              className={`btn btn-xs ${activeView === 'table' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setActiveView('table')}
+              title="Таблица устройств"
+            >
+              📋 Таблица
+            </button>
+            <button
+              type="button"
+              className={`btn btn-xs ${activeView === 'map' ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setActiveView('map')}
+              title="Интерактивная карта политик Keenetic"
+            >
+              🗺️ Карта политик
+            </button>
+          </div>
         </div>
 
         {/* Сводка количества и трафика */}
@@ -455,6 +482,8 @@ export default function Devices({ notify }: Props) {
 
       {loading ? (
         <p className="muted" style={{ padding: '20px 18px' }}>Загрузка устройств…</p>
+      ) : activeView === 'map' ? (
+        <PoliciesMap notify={notify} />
       ) : (
         <div className="devices-table-wrap">
           <table className="devices-table">
@@ -524,6 +553,7 @@ export default function Devices({ notify }: Props) {
                       applyServer={applyServer}
                       serverLabel={serverLabel}
                       openDrModal={openDrModal}
+                      onOpenSchedule={(d) => setScheduleTarget({ ip: d.ip, name: d.name })}
                     />
                   ))}
                 </>
@@ -572,6 +602,7 @@ export default function Devices({ notify }: Props) {
                         applyServer={applyServer}
                         serverLabel={serverLabel}
                         openDrModal={openDrModal}
+                        onOpenSchedule={(d) => setScheduleTarget({ ip: d.ip, name: d.name })}
                       />
                     ))}
                 </>
@@ -611,6 +642,7 @@ export default function Devices({ notify }: Props) {
                       applyServer={applyServer}
                       serverLabel={serverLabel}
                       openDrModal={openDrModal}
+                      onOpenSchedule={(d) => setScheduleTarget({ ip: d.ip, name: d.name })}
                     />
                   ))}
                 </>
@@ -714,6 +746,18 @@ export default function Devices({ notify }: Props) {
           onClose={() => setDrModal(null)}
           onSave={saveDr}
           serverLabel={serverLabel}
+        />
+      )}
+
+      {/* Модальное окно расписания устройства */}
+      {scheduleTarget && (
+        <DeviceScheduleModal
+          isOpen={true}
+          deviceIp={scheduleTarget.ip}
+          deviceName={scheduleTarget.name}
+          availableServers={servers.map((s) => s.name)}
+          onClose={() => setScheduleTarget(null)}
+          notify={notify}
         />
       )}
     </section>

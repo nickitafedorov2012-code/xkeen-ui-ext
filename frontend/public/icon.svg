@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#12161f"/>
+      <stop offset="100%" stop-color="#0a0c10"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#2563eb"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)" stroke="#1e293b" stroke-width="8"/>
+  <circle cx="256" cy="256" r="180" fill="none" stroke="url(#accent)" stroke-width="4" stroke-opacity="0.25" stroke-dasharray="8 8"/>
+  <circle cx="256" cy="256" r="130" fill="none" stroke="url(#accent)" stroke-width="6" stroke-opacity="0.4"/>
+  <circle cx="256" cy="256" r="80" fill="none" stroke="url(#accent)" stroke-width="8" stroke-opacity="0.6"/>
+  <path d="M256 120 L370 170 V280 C370 350 256 410 256 410 C256 410 142 350 142 280 V170 Z" fill="url(#accent)" opacity="0.95"/>
+  <path d="M256 150 L346 190 V275 C346 330 256 380 256 380 C256 380 166 330 166 275 V190 Z" fill="#0f172a"/>
+  <path d="M270 190 L210 270 H260 L240 340 L310 250 H260 Z" fill="#38bdf8"/>
+</svg>

@@ -18,7 +18,7 @@ pub fn spawn(state: AppState) {
         loop {
             sleep(Duration::from_secs(4)).await;
 
-            let (config_path_str, force_domains, device_routing, ignore_servers, device_domains) = {
+            let (config_path_str, force_domains, device_routing, ignore_servers, device_domains, adblock_enabled) = {
                 let cfg = state.config.read().await;
                 (
                     cfg.mihomo.config_path.clone(),
@@ -26,6 +26,7 @@ pub fn spawn(state: AppState) {
                     cfg.device_routing.clone(),
                     cfg.ignore_servers.clone(),
                     cfg.device_domain_rules.clone(),
+                    cfg.adblock_enabled,
                 )
             };
 
@@ -58,8 +59,9 @@ pub fn spawn(state: AppState) {
                     let missing_device = needs_device && !content.contains("AUTO-DEVICE");
                     let missing_force = needs_force && !content.contains("AUTO-FORCE");
                     let missing_ignore = needs_ignore && !content.contains("AUTO-IGNORE");
+                    let missing_adblock = adblock_enabled && !content.contains("AUTO-ADBLOCK");
 
-                    if missing_device || missing_force || missing_ignore {
+                    if missing_device || missing_force || missing_ignore || missing_adblock {
                         log_w!("[WATCHDOG] Обнаружена перезапись config.yaml (рестарт XKeen)! Восстановление маршрутизации...");
 
                         let _guard = state.routing_lock.lock().await;
@@ -111,4 +113,53 @@ pub fn spawn(state: AppState) {
             }
         }
     });
+
+    spawn_schedules_monitor(state);
 }
+
+/// Проверка, попадает ли текущее время now_hm ("HH:MM") в интервал start..end.
+pub fn is_time_in_range(now_hm: &str, start_hm: &str, end_hm: &str) -> bool {
+    if start_hm <= end_hm {
+        now_hm >= start_hm && now_hm < end_hm
+    } else {
+        // Переход через полночь (например, с 23:00 до 07:00)
+        now_hm >= start_hm || now_hm < end_hm
+    }
+}
+
+/// Фоновый монитор расписаний устройств (автоматическая блокировка / переключение).
+pub fn spawn_schedules_monitor(state: AppState) {
+    tokio::spawn(async move {
+        sleep(Duration::from_secs(15)).await;
+        loop {
+            sleep(Duration::from_secs(30)).await;
+            let cfg = state.config.read().await.clone();
+            if cfg.schedules.is_empty() {
+                continue;
+            }
+
+            use chrono::Datelike;
+            let now = chrono::Local::now();
+            let now_hm = now.format("%H:%M").to_string();
+            let weekday = now.weekday().number_from_monday() as u8; // 1=Пн..7=Вс
+
+            for s in &cfg.schedules {
+                if !s.enabled || !s.days.contains(&weekday) {
+                    continue;
+                }
+                let in_range = is_time_in_range(&now_hm, &s.time_start, &s.time_end);
+                if in_range {
+                    let group_name = routing::group_name_for(&s.ip, "");
+                    let target_node = match s.action.as_str() {
+                        "block" => "REJECT",
+                        "direct" => "DIRECT",
+                        "proxy" => s.target_server.as_deref().unwrap_or("PROXY"),
+                        _ => continue,
+                    };
+                    let _ = mihomo::switch_server_in_group(&state.http, &cfg, &group_name, target_node).await;
+                }
+            }
+        }
+    });
+}
+

@@ -284,6 +284,56 @@ pub const FORCE_END: &str = "# --- AUTO-FORCE-END ---";
 pub const DEV_DOMAINS_BEGIN: &str = "# --- AUTO-DEVICE-DOMAINS-BEGIN ---";
 pub const DEV_DOMAINS_END: &str = "# --- AUTO-DEVICE-DOMAINS-END ---";
 
+pub const ADBLOCK_BEGIN: &str = "# --- AUTO-ADBLOCK-RULES-BEGIN ---";
+pub const ADBLOCK_END: &str = "# --- AUTO-ADBLOCK-RULES-END ---";
+pub const ADBLOCK_RULE: &str = "  - GEOSITE,category-ads-all,REJECT";
+
+/// Удаление блока AdBlock из YAML.
+pub fn remove_adblock_rules(yaml: &str) -> String {
+    let mut out = Vec::new();
+    let mut skip = false;
+    for line in yaml.lines() {
+        let t = line.trim();
+        if t == ADBLOCK_BEGIN {
+            skip = true;
+            continue;
+        }
+        if t == ADBLOCK_END {
+            skip = false;
+            continue;
+        }
+        if !skip {
+            out.push(line);
+        }
+    }
+    out.join("\n")
+}
+
+/// Применение правила AdBlock: если включено — вставка сразу под rules:.
+/// Если выключено — удаление блока.
+pub fn apply_adblock_rules(yaml: &str, enabled: bool) -> Result<String, String> {
+    let content = remove_adblock_rules(yaml);
+    if !enabled {
+        return Ok(content);
+    }
+    let lines: Vec<&str> = content.lines().collect();
+    let rules_idx = lines
+        .iter()
+        .position(|l| l.trim_end() == "rules:")
+        .ok_or("В config.yaml нет секции rules:")?;
+
+    let mut out = Vec::with_capacity(lines.len() + 4);
+    for (i, line) in lines.iter().enumerate() {
+        out.push(line.to_string());
+        if i == rules_idx {
+            out.push(ADBLOCK_BEGIN.to_string());
+            out.push(ADBLOCK_RULE.to_string());
+            out.push(ADBLOCK_END.to_string());
+        }
+    }
+    Ok(out.join("\n"))
+}
+
 /// Удаление доменных блоков (DIRECT/FORCE/DEVICE-DOMAINS) из YAML.
 pub fn remove_domain_blocks(yaml: &str) -> String {
     let mut out = Vec::new();
@@ -757,6 +807,11 @@ fn extract_filter_value(trimmed: &str) -> String {
 pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> (String, usize) {
     let mut current = yaml.to_string();
 
+    // 0. Блокировка рекламы на роутере (AdBlock)
+    if let Ok(with_adblock) = apply_adblock_rules(&current, cfg.adblock_enabled) {
+        current = with_adblock;
+    }
+
     // 1. Доменные правила (DIRECT / FORCE / PER-DEVICE DOMAINS)
     if let Ok(with_domains) = apply_domain_rules(&current, &cfg.direct_domains, &cfg.force_domains, &cfg.device_domain_rules) {
         current = with_domains;
@@ -1087,4 +1142,26 @@ proxy-groups:
         assert_eq!(out, "");
         assert_eq!(count, 0);
     }
+
+    #[test]
+    fn test_apply_adblock_rules_lifecycle() {
+        let yaml = "port: 7890\nrules:\n  - DOMAIN-SUFFIX,google.com,DIRECT\n  - MATCH,PROXY\n";
+        // 1. Включение
+        let with_adblock = apply_adblock_rules(yaml, true).unwrap();
+        assert!(with_adblock.contains(ADBLOCK_BEGIN));
+        assert!(with_adblock.contains(ADBLOCK_RULE));
+        assert!(with_adblock.contains(ADBLOCK_END));
+        assert!(with_adblock.contains("DOMAIN-SUFFIX,google.com,DIRECT"));
+
+        // 2. Идемпотентность (повторное включение не плодит блоки)
+        let dup = apply_adblock_rules(&with_adblock, true).unwrap();
+        assert_eq!(dup.matches(ADBLOCK_BEGIN).count(), 1);
+
+        // 3. Выключение
+        let disabled = apply_adblock_rules(&dup, false).unwrap();
+        assert!(!disabled.contains(ADBLOCK_BEGIN));
+        assert!(!disabled.contains("GEOSITE,category-ads-all,REJECT"));
+        assert!(disabled.contains("DOMAIN-SUFFIX,google.com,DIRECT"));
+    }
 }
+

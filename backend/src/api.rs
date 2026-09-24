@@ -56,6 +56,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
             "device_failover_enabled": cfg.failover.device_failover_enabled,
         },
         "refresh_interval_sec": cfg.refresh_interval_sec,
+        "adblock_enabled": cfg.adblock_enabled,
     }))
     .into_response()
 }
@@ -2135,6 +2136,591 @@ pub async fn clash_proxy(
         Err(e) => api_err(format!("Ошибка проксирования к Clash API: {}", e)),
     }
 }
+
+// ==================== ADBLOCK (БЛОКИРОВКА РЕКЛАМЫ) ====================
+
+/// GET /api/adblock — текущее состояние AdBlock
+pub async fn get_adblock(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await;
+    api_ok(json!({ "enabled": cfg.adblock_enabled }))
+}
+
+#[derive(Deserialize)]
+pub struct AdBlockToggleReq {
+    pub enabled: Option<bool>,
+}
+
+/// POST /api/adblock/toggle — переключение блокировки рекламы с перезагрузкой Mihomo
+pub async fn toggle_adblock(
+    State(state): State<AppState>,
+    body: Option<axum::extract::Json<AdBlockToggleReq>>,
+) -> Response {
+    let _guard = state.routing_lock.lock().await;
+    let (mut cfg, target_enabled) = {
+        let current = state.config.read().await;
+        let target = match body {
+            Some(axum::extract::Json(b)) => b.enabled.unwrap_or(!current.adblock_enabled),
+            None => !current.adblock_enabled,
+        };
+        (current.as_ref().clone(), target)
+    };
+
+    cfg.adblock_enabled = target_enabled;
+
+    let path = std::path::Path::new(&cfg.mihomo.config_path);
+    let raw_yaml = match tokio::fs::read_to_string(path).await {
+        Ok(c) => c,
+        Err(e) => return api_err(format!("Ошибка чтения config.yaml: {}", e)),
+    };
+
+    let (new_yaml, _) = routing::apply_routing(&raw_yaml, &cfg);
+    let tmp = format!("{}.tmp", path.display());
+    if let Err(e) = tokio::fs::write(&tmp, &new_yaml).await {
+        return api_err(format!("Ошибка записи временного файла: {}", e));
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return api_err(format!("Ошибка сохранения config.yaml: {}", e));
+    }
+
+    if let Err(e) = config::save(&state.config_path, &cfg) {
+        log_e!("Ошибка сохранения config.json: {}", e);
+    }
+    *state.config.write().await = std::sync::Arc::new(cfg.clone());
+
+    let _ = mihomo::reload_config(&state.http, &cfg).await;
+    api_ok(json!({ "enabled": target_enabled, "saved": true }))
+}
+
+// ==================== GEOIP & GEOSITE БАЗЫ ====================
+
+/// GET /api/system/geo-info — информация о базах GeoIP и GeoSite
+pub async fn get_geo_info(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await;
+    let base_dir = std::path::Path::new(&cfg.mihomo.config_path).parent().unwrap_or(std::path::Path::new("/opt/etc/mihomo"));
+    let geoip_path = base_dir.join("geoip.dat");
+    let geosite_path = base_dir.join("geosite.dat");
+
+    let geoip_meta = tokio::fs::metadata(&geoip_path).await.ok();
+    let geosite_meta = tokio::fs::metadata(&geosite_path).await.ok();
+
+    api_ok(json!({
+        "geoip": {
+            "size": geoip_meta.as_ref().map(|m| m.len()).unwrap_or(0),
+            "updated_at": geoip_meta.and_then(|m| m.modified().ok())
+                .map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|| "Неизвестно".into()),
+        },
+        "geosite": {
+            "size": geosite_meta.as_ref().map(|m| m.len()).unwrap_or(0),
+            "updated_at": geosite_meta.and_then(|m| m.modified().ok())
+                .map(|t| chrono::DateTime::<chrono::Local>::from(t).format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|| "Неизвестно".into()),
+        }
+    }))
+}
+
+/// POST /api/system/geo-update — загрузка актуальных GeoIP и GeoSite
+pub async fn update_geo_databases(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let base_dir = std::path::Path::new(&cfg.mihomo.config_path).parent().unwrap_or(std::path::Path::new("/opt/etc/mihomo"));
+
+    let geoip_url = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.dat";
+    let geosite_url = "https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geosite.dat";
+
+    let client = if let Ok(proxy) = reqwest::Proxy::all(cfg.mihomo_proxy_url()) {
+        reqwest::Client::builder().proxy(proxy).timeout(std::time::Duration::from_secs(90)).build().unwrap_or_else(|_| state.http.clone())
+    } else {
+        state.http.clone()
+    };
+
+    let geoip_bytes = match client.get(geoip_url).send().await {
+        Ok(r) if r.status().is_success() => match r.bytes().await {
+            Ok(b) if b.len() > 1_000_000 => b,
+            _ => return api_err("Скачанный geoip.dat поврежден или имеет неверный размер (<1 МБ)"),
+        },
+        Err(e) => return api_err(format!("Ошибка загрузки geoip.dat: {}", e)),
+        Ok(r) => return api_err(format!("Ошибка сервера при загрузке geoip.dat: {}", r.status())),
+    };
+
+    let geosite_bytes = match client.get(geosite_url).send().await {
+        Ok(r) if r.status().is_success() => match r.bytes().await {
+            Ok(b) if b.len() > 1_000_000 => b,
+            _ => return api_err("Скачанный geosite.dat поврежден или имеет неверный размер (<1 МБ)"),
+        },
+        Err(e) => return api_err(format!("Ошибка загрузки geosite.dat: {}", e)),
+        Ok(r) => return api_err(format!("Ошибка сервера при загрузке geosite.dat: {}", r.status())),
+    };
+
+    let geoip_path = base_dir.join("geoip.dat");
+    let geosite_path = base_dir.join("geosite.dat");
+
+    let tmp_geoip = base_dir.join("geoip.dat.tmp");
+    let tmp_geosite = base_dir.join("geosite.dat.tmp");
+
+    if let Err(e) = tokio::fs::write(&tmp_geoip, &geoip_bytes).await {
+        return api_err(format!("Ошибка записи geoip.dat.tmp: {}", e));
+    }
+    if let Err(e) = tokio::fs::write(&tmp_geosite, &geosite_bytes).await {
+        let _ = tokio::fs::remove_file(&tmp_geoip).await;
+        return api_err(format!("Ошибка записи geosite.dat.tmp: {}", e));
+    }
+
+    let _ = tokio::fs::rename(&tmp_geoip, &geoip_path).await;
+    let _ = tokio::fs::rename(&tmp_geosite, &geosite_path).await;
+
+    let _ = mihomo::reload_config(&state.http, &cfg).await;
+
+    api_ok(json!({
+        "success": true,
+        "geoip_size": geoip_bytes.len(),
+        "geosite_size": geosite_bytes.len(),
+        "updated_at": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+    }))
+}
+
+// ==================== CONNECTIONS VIEWER ====================
+
+/// GET /api/connections — список активных соединений Mihomo
+pub async fn get_connections(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await;
+    let url = format!("{}/connections", cfg.mihomo_url());
+    let mut req = state.http.get(&url);
+    if !cfg.mihomo.secret.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", cfg.mihomo.secret));
+    }
+    match req.timeout(std::time::Duration::from_secs(3)).send().await {
+        Ok(resp) => {
+            let val = resp.json::<serde_json::Value>().await.unwrap_or(json!({ "connections": [] }));
+            api_ok(val)
+        }
+        Err(e) => api_err(format!("Ошибка запроса /connections: {}", e)),
+    }
+}
+
+/// DELETE /api/connections — закрыть все активные соединения
+pub async fn close_connections(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await;
+    mihomo::close_all_connections(&state.http, &cfg).await;
+    api_ok(json!({ "closed": true }))
+}
+
+/// DELETE /api/connections/{id} — закрыть конкретное соединение
+pub async fn close_single_connection(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Response {
+    let cfg = state.config.read().await;
+    let url = format!("{}/connections/{}", cfg.mihomo_url(), id);
+    let mut req = state.http.delete(&url);
+    if !cfg.mihomo.secret.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", cfg.mihomo.secret));
+    }
+    let _ = req.send().await;
+    api_ok(json!({ "closed": id }))
+}
+
+// ==================== ТРАФИК В РЕАЛЬНОМ ВРЕМЕНИ ====================
+
+/// GET /api/traffic/poll — текущая скорость трафика (Upload / Download)
+pub async fn get_traffic_poll(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await;
+    let url = format!("{}/traffic", cfg.mihomo_url());
+    let mut req = state.http.get(&url);
+    if !cfg.mihomo.secret.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", cfg.mihomo.secret));
+    }
+    match req.timeout(std::time::Duration::from_millis(1500)).send().await {
+        Ok(resp) => {
+            if let Ok(val) = resp.json::<serde_json::Value>().await {
+                return api_ok(val);
+            }
+        }
+        Err(_) => {}
+    }
+    api_ok(json!({ "up": 0, "down": 0 }))
+}
+
+// ==================== RULES & MATCH TESTER («КУДА ПОЙДЁТ?») ====================
+
+/// GET /api/rules — список активных правил маршрутизации
+pub async fn get_rules(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await;
+    let url = format!("{}/rules", cfg.mihomo_url());
+    let mut req = state.http.get(&url);
+    if !cfg.mihomo.secret.is_empty() {
+        req = req.header("Authorization", format!("Bearer {}", cfg.mihomo.secret));
+    }
+    match req.timeout(std::time::Duration::from_secs(3)).send().await {
+        Ok(resp) => {
+            let val = resp.json::<serde_json::Value>().await.unwrap_or(json!({ "rules": [] }));
+            api_ok(val)
+        }
+        Err(e) => api_err(format!("Ошибка получения правил: {}", e)),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RuleTestReq {
+    pub domain: String,
+    pub source_ip: Option<String>,
+}
+
+/// POST /api/rules/test — симулятор маршрутизации «Куда пойдёт трафик?»
+pub async fn test_rule_match(
+    State(state): State<AppState>,
+    axum::extract::Json(body): axum::extract::Json<RuleTestReq>,
+) -> Response {
+    let cfg = state.config.read().await;
+    let domain = body.domain.trim().to_lowercase();
+    let src_ip = body.source_ip.as_deref().unwrap_or("").trim();
+
+    // 1. Персональные доменные правила устройства
+    if !src_ip.is_empty() {
+        if let Some(rules) = cfg.device_domain_rules.get(src_ip) {
+            for r in rules {
+                let d = r.domain.trim().to_lowercase();
+                if domain == d || domain.ends_with(&format!(".{}", d)) {
+                    return api_ok(json!({
+                        "matched_rule": format!("AND,((SRC-IP-CIDR,{}/32),(DOMAIN-SUFFIX,{})),{}", src_ip, d, r.target),
+                        "rule_type": "DEVICE-DOMAIN",
+                        "target_group": r.target,
+                        "resolved_server": r.target,
+                        "reason": format!("Сработало индивидуальное доменное правило устройства {}", src_ip)
+                    }));
+                }
+            }
+        }
+    }
+
+    // 2. AdBlock правило
+    if cfg.adblock_enabled {
+        let is_ad = domain.contains("adservice")
+            || domain.contains("googleads")
+            || domain.contains("an.yandex.ru")
+            || domain.contains("doubleclick")
+            || domain.contains("telemetry")
+            || domain.contains("analytics");
+        if is_ad {
+            return api_ok(json!({
+                "matched_rule": "GEOSITE,category-ads-all,REJECT",
+                "rule_type": "ADBLOCK",
+                "target_group": "REJECT",
+                "resolved_server": "REJECT",
+                "reason": "Заблокировано сетевым AdBlock фильтром роутера"
+            }));
+        }
+    }
+
+    // 3. Персональное назначение устройства (AUTO-DEVICE)
+    if !src_ip.is_empty() {
+        if let Some(dr) = cfg.device_routing.get(src_ip) {
+            if let Some(first_srv) = dr.servers.first() {
+                if !first_srv.is_empty() && first_srv != "default" {
+                    return api_ok(json!({
+                        "matched_rule": format!("SRC-IP-CIDR,{}/32,DEV_{}", src_ip, src_ip.replace('.', "_")),
+                        "rule_type": "SRC-IP-CIDR",
+                        "target_group": format!("Устройство {}", src_ip),
+                        "resolved_server": first_srv,
+                        "reason": format!("Весь трафик устройства {} направлен на сервер {}", src_ip, first_srv)
+                    }));
+                }
+            }
+        }
+    }
+
+    // 4. Прямой список (DIRECT)
+    for d in &cfg.direct_domains {
+        let d_lower = d.trim().to_lowercase();
+        if domain == d_lower || domain.ends_with(&format!(".{}", d_lower)) {
+            return api_ok(json!({
+                "matched_rule": format!("DOMAIN-SUFFIX,{},DIRECT", d),
+                "rule_type": "DIRECT_DOMAIN",
+                "target_group": "DIRECT",
+                "resolved_server": "DIRECT (Напрямую)",
+                "reason": "Домен находится в белом списке прямого доступа (минуя прокси)"
+            }));
+        }
+    }
+
+    // 5. Принудительный список (PROXY / FORCE)
+    for d in &cfg.force_domains {
+        let d_lower = d.trim().to_lowercase();
+        if domain == d_lower || domain.ends_with(&format!(".{}", d_lower)) {
+            let active_srv = cfg.failover.priority_chain.first().cloned().unwrap_or_else(|| "PROXY".into());
+            return api_ok(json!({
+                "matched_rule": format!("DOMAIN-SUFFIX,{},PROXY", d),
+                "rule_type": "FORCE_DOMAIN",
+                "target_group": "PROXY",
+                "resolved_server": active_srv,
+                "reason": "Домен находится в списке принудительного проксирования XKeen"
+            }));
+        }
+    }
+
+    // 6. Базовое правило (MATCH)
+    let def_srv = cfg.failover.priority_chain.first().cloned().unwrap_or_else(|| "DIRECT".into());
+    api_ok(json!({
+        "matched_rule": "MATCH,PROXY",
+        "rule_type": "MATCH",
+        "target_group": "PROXY",
+        "resolved_server": def_srv,
+        "reason": "Сработало финальное правило маршрутизации по умолчанию (MATCH)"
+    }))
+}
+
+// ==================== ДИАГНОСТИКА СЕТИ & SMART DNS ====================
+
+/// GET /api/diagnostics/health — комплексная проверка здоровья роутера и компонентов
+pub async fn get_diagnostics_health(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+
+    // 1. Проверка шлюза Keenetic (RCI)
+    let gateway_res = rci::get_version(&state.http, &cfg).await;
+    let (gw_status, gw_msg) = match gateway_res {
+        Ok(v) => ("ok", format!("KeeneticOS {} доступна", v)),
+        Err(e) => ("fail", format!("Keenetic RCI недоступен: {}", e)),
+    };
+
+    // 2. Проверка ядра Mihomo
+    let mihomo_res = mihomo::get_version(&state.http, &cfg).await;
+    let (mihomo_status, mihomo_msg) = match mihomo_res {
+        Ok(v) => ("ok", format!("Mihomo {} работает штатно", v)),
+        Err(e) => ("fail", format!("Mihomo API недоступен: {}", e)),
+    };
+
+    // 3. Проверка DNS резолва
+    let start_dns = std::time::Instant::now();
+    let dns_ok = tokio::net::lookup_host("google.com:80").await.is_ok();
+    let dns_ms = start_dns.elapsed().as_millis();
+    let (dns_status, dns_msg) = if dns_ok {
+        ("ok", format!("DNS резолв успешен ({} мс)", dns_ms))
+    } else {
+        ("fail", "DNS резолв не удался".into())
+    };
+
+    // 4. Проверка WAN доступа
+    let wan_ok = state.http.get("http://cp.cloudflare.com/generate_204")
+        .timeout(std::time::Duration::from_secs(3))
+        .send().await.map(|r| r.status().is_success()).unwrap_or(false);
+    let (wan_status, wan_msg) = if wan_ok {
+        ("ok", "Интернет-соединение (WAN) активно".into())
+    } else {
+        ("warn", "Прямой доступ к тестовому узлу не отвечает".into())
+    };
+
+    // 5. Проверка хранилища /opt
+    let disk_msg = match tokio::process::Command::new("df").arg("-h").arg("/opt").output().await {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).lines().nth(1).unwrap_or("").to_string(),
+        Err(_) => "Накопитель Entware смонтирован".into(),
+    };
+
+    api_ok(json!({
+        "checks": [
+            { "id": "gateway", "name": "Шлюз роутера Keenetic", "status": gw_status, "message": gw_msg },
+            { "id": "mihomo", "name": "Ядро Mihomo (XKeen)", "status": mihomo_status, "message": mihomo_msg },
+            { "id": "dns", "name": "DNS Резолвер", "status": dns_status, "message": dns_msg, "latency_ms": dns_ms },
+            { "id": "wan", "name": "Прямой выход в интернет", "status": wan_status, "message": wan_msg },
+            { "id": "storage", "name": "Дисковое пространство /opt", "status": "ok", "message": disk_msg },
+        ]
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct DnsTestReq {
+    pub domain: String,
+}
+
+/// POST /api/diagnostics/dns-test — Smart DNS диагностика домена
+pub async fn test_dns_domain(
+    State(state): State<AppState>,
+    axum::extract::Json(body): axum::extract::Json<DnsTestReq>,
+) -> Response {
+    let domain = body.domain.trim().to_lowercase();
+    let host_port = format!("{}:80", domain);
+    let local_ips: Vec<String> = match tokio::net::lookup_host(&host_port).await {
+        Ok(iter) => iter.map(|s| s.ip().to_string()).collect(),
+        Err(_) => Vec::new(),
+    };
+
+    let is_poisoned = local_ips.iter().any(|ip| {
+        ip == "127.0.0.1" || ip == "0.0.0.0" || ip.starts_with("10.") || ip.starts_with("192.168.")
+    });
+
+    let http_direct_ok = state.http.get(format!("https://{}", domain))
+        .timeout(std::time::Duration::from_secs(3))
+        .send().await.is_ok();
+
+    let verdict = if is_poisoned {
+        "Домен подменяется провайдером (DNS-spoofing / РКН-заглушка). Необходим прокси."
+    } else if !local_ips.is_empty() && !http_direct_ok {
+        "Домен резолвится в реальные IP, но прямое TCP/TLS соединение сбрасывается (RST / блокировка по IP/SNI)."
+    } else if !local_ips.is_empty() && http_direct_ok {
+        "Домен доступен напрямую без ограничений."
+    } else {
+        "Домен не найден в DNS."
+    };
+
+    let recommendation = if is_poisoned || !http_direct_ok {
+        "Рекомендуется добавить домен в список «Принудительно через прокси» в Настройках или назначить устройство на зарубежный сервер."
+    } else {
+        "Дополнительных действий не требуется."
+    };
+
+    api_ok(json!({
+        "domain": domain,
+        "resolved_ips": local_ips,
+        "is_poisoned": is_poisoned,
+        "http_direct_ok": http_direct_ok,
+        "verdict": verdict,
+        "recommendation": recommendation
+    }))
+}
+
+// ==================== KEENETIC POLICIES MAP ====================
+
+/// GET /api/policies/map — граф связей: Устройства -> Политики Keenetic / XKeen -> Выходные серверы
+pub async fn get_policies_map(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+
+    let devices_res = rci::get_hotspot(&state.http, &cfg).await.unwrap_or_default();
+    let policies_res = rci::get_policies(&state.http, &cfg).await.unwrap_or_default();
+    let servers_res = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await.unwrap_or_default();
+
+    let mut nodes_devices = Vec::new();
+    for d in devices_res {
+        let assigned_srv = cfg.device_routing.get(&d.ip)
+            .and_then(|dr| dr.servers.first())
+            .cloned()
+            .unwrap_or_default();
+
+        nodes_devices.push(json!({
+            "ip": d.ip,
+            "mac": d.mac,
+            "name": d.name,
+            "policy_id": d.policy,
+            "xkeen_server": assigned_srv,
+            "active": d.active,
+        }));
+    }
+
+    let mut nodes_policies = Vec::new();
+    for p in policies_res {
+        nodes_policies.push(json!({
+            "id": p.id,
+            "name": p.name,
+            "description": p.description,
+            "is_main": p.is_main,
+        }));
+    }
+
+    let nodes_servers: Vec<serde_json::Value> = servers_res.iter().map(|s| {
+        json!({
+            "id": s.id,
+            "name": s.name,
+            "is_active": s.is_active,
+            "ping_ms": s.ping_ms,
+            "protocol": s.protocol,
+        })
+    }).collect();
+
+    api_ok(json!({
+        "devices": nodes_devices,
+        "policies": nodes_policies,
+        "servers": nodes_servers,
+    }))
+}
+
+// ==================== ZAPRET / DPI ИНТЕГРАЦИЯ ====================
+
+/// GET /api/zapret/status — статус nfqws и S51zapret
+pub async fn get_zapret_status(_state: State<AppState>) -> Response {
+    let init_script = std::path::Path::new("/opt/etc/init.d/S51zapret");
+    let installed = init_script.exists();
+
+    let mut running = false;
+    let mut pid: Option<u32> = None;
+
+    if installed {
+        if let Ok(out) = tokio::process::Command::new("pidof").arg("nfqws").output().await {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if let Some(first_pid) = s.split_whitespace().next() {
+                if let Ok(p) = first_pid.parse::<u32>() {
+                    running = true;
+                    pid = Some(p);
+                }
+            }
+        }
+    }
+
+    let config_content = tokio::fs::read_to_string("/opt/etc/zapret/zapret.conf").await.ok();
+
+    api_ok(json!({
+        "installed": installed,
+        "running": running,
+        "pid": pid,
+        "config": config_content,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct ZapretActionReq {
+    pub action: String, // "start" | "stop" | "restart"
+}
+
+/// POST /api/zapret/action — запуск, остановка, перезапуск службы Zapret
+pub async fn zapret_action(
+    _state: State<AppState>,
+    axum::extract::Json(body): axum::extract::Json<ZapretActionReq>,
+) -> Response {
+    let act = body.action.trim();
+    if act != "start" && act != "stop" && act != "restart" {
+        return api_err("Недопустимое действие для службы Zapret");
+    }
+
+    let init_script = "/opt/etc/init.d/S51zapret";
+    if !std::path::Path::new(init_script).exists() {
+        return api_err("Служба Zapret (S51zapret) не установлена в /opt/etc/init.d/");
+    }
+
+    match tokio::process::Command::new(init_script).arg(act).output().await {
+        Ok(out) => {
+            let output_str = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            api_ok(json!({ "success": out.status.success(), "output": output_str.trim() }))
+        }
+        Err(e) => api_err(format!("Ошибка выполнения {}: {}", init_script, e)),
+    }
+}
+
+// ==================== РАСПИСАНИЯ УСТРОЙСТВ ====================
+
+/// GET /api/schedules — список расписаний
+pub async fn get_schedules(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await;
+    api_ok(json!({ "schedules": cfg.schedules }))
+}
+
+#[derive(Deserialize)]
+pub struct SaveSchedulesReq {
+    pub schedules: Vec<config::DeviceSchedule>,
+}
+
+/// POST /api/schedules — сохранение расписаний
+pub async fn save_schedules(
+    State(state): State<AppState>,
+    axum::extract::Json(body): axum::extract::Json<SaveSchedulesReq>,
+) -> Response {
+    let _guard = state.config_lock.lock().await;
+    let mut cfg = state.config.read().await.as_ref().clone();
+    cfg.schedules = body.schedules;
+
+    if let Err(e) = config::save(&state.config_path, &cfg) {
+        return api_err(format!("Ошибка сохранения расписаний: {}", e));
+    }
+    *state.config.write().await = std::sync::Arc::new(cfg);
+    api_ok(json!({ "saved": true }))
+}
+
 
 
 

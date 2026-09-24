@@ -257,6 +257,39 @@ pub struct AppConfig {
     pub provider_aliases: std::collections::BTreeMap<String, String>,
     /// Настройки обхода блокировки Google Antigravity (Cloud Code API).
     pub antigravity: AntigravityConfig,
+    /// Блокировка рекламы на роутере через Mihomo (GEOSITE,category-ads-all,REJECT).
+    pub adblock_enabled: bool,
+    /// Расписания работы устройств (блокировка/прокси/direct по часам).
+    pub schedules: Vec<DeviceSchedule>,
+}
+
+/// Расписание работы устройства (блокировка/прокси/direct по времени).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct DeviceSchedule {
+    pub id: String,
+    pub ip: String,
+    pub enabled: bool,
+    pub time_start: String, // "23:00"
+    pub time_end: String,   // "07:00"
+    pub days: Vec<u8>,      // 1..=7 (1=Пн, 7=Вс)
+    pub action: String,     // "block" | "direct" | "proxy"
+    pub target_server: Option<String>,
+}
+
+impl Default for DeviceSchedule {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            ip: String::new(),
+            enabled: true,
+            time_start: "23:00".into(),
+            time_end: "07:00".into(),
+            days: vec![1, 2, 3, 4, 5, 6, 7],
+            action: "block".into(),
+            target_server: None,
+        }
+    }
 }
 
 /// Настройки обхода блокировки Google Antigravity / Cloud Code API.
@@ -312,6 +345,8 @@ impl Default for AppConfig {
             notifications: NotificationsConfig::default(),
             provider_aliases: std::collections::BTreeMap::new(),
             antigravity: AntigravityConfig::default(),
+            adblock_enabled: false,
+            schedules: Vec::new(),
         }
     }
 }

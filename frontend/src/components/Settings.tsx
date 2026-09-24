@@ -66,7 +66,84 @@ export default function Settings({ notify, status, refresh }: Props) {
   const [updChecking, setUpdChecking] = useState(false)
   const [showUpdNotes, setShowUpdNotes] = useState(false)
 
+  // --- AdBlock ---
+  const [adblockEnabled, setAdblockEnabled] = useState(false)
+  const [adblockBusy, setAdblockBusy] = useState(false)
+
+  // --- GeoIP & GeoSite ---
+  interface GeoInfo {
+    geoip: { size: number; updated_at: string }
+    geosite: { size: number; updated_at: string }
+  }
+  const [geoInfo, setGeoInfo] = useState<GeoInfo | null>(null)
+  const [geoUpdating, setGeoUpdating] = useState(false)
+
+  // --- Zapret ---
+  interface ZapretStatus {
+    installed: boolean
+    running: boolean
+    pid?: number | null
+  }
+  const [zapretStatus, setZapretStatus] = useState<ZapretStatus | null>(null)
+  const [zapretBusy, setZapretBusy] = useState(false)
+
+  const loadQuickWins = useCallback(async () => {
+    try {
+      const adb = await apiGet<{ enabled: boolean }>('adblock')
+      setAdblockEnabled(adb.enabled)
+    } catch {}
+    try {
+      const geo = await apiGet<GeoInfo>('system/geo-info')
+      setGeoInfo(geo)
+    } catch {}
+    try {
+      const zap = await apiGet<ZapretStatus>('zapret/status')
+      setZapretStatus(zap)
+    } catch {}
+  }, [])
+
+  const handleToggleAdblock = async (enabled: boolean) => {
+    setAdblockBusy(true)
+    try {
+      const res = await apiPost<{ enabled: boolean }>('adblock/toggle', { enabled })
+      setAdblockEnabled(res.enabled)
+      notify(res.enabled ? 'Блокировка рекламы на роутере включена' : 'Блокировка рекламы отключена')
+      if (refresh) refresh()
+    } catch (e: any) {
+      notify('Ошибка: ' + e.message, true)
+    } finally {
+      setAdblockBusy(false)
+    }
+  }
+
+  const handleUpdateGeo = async () => {
+    setGeoUpdating(true)
+    try {
+      await apiPost<{ success: boolean }>('system/geo-update')
+      notify('Базы GeoIP и GeoSite успешно обновлены')
+      loadQuickWins()
+    } catch (e: any) {
+      notify('Ошибка обновления баз: ' + e.message, true)
+    } finally {
+      setGeoUpdating(false)
+    }
+  }
+
+  const handleZapretAction = async (action: 'start' | 'stop' | 'restart') => {
+    setZapretBusy(true)
+    try {
+      await apiPost('zapret/action', { action })
+      notify(`Команда Zapret '${action}' выполнена`)
+      loadQuickWins()
+    } catch (e: any) {
+      notify('Ошибка Zapret: ' + e.message, true)
+    } finally {
+      setZapretBusy(false)
+    }
+  }
+
   useEffect(() => {
+    loadQuickWins()
     apiGet<AppSettings>('settings').then((s) => {
       setSettings(s)
       setAuthEnabled(s.auth?.enabled ?? false)
@@ -808,6 +885,107 @@ export default function Settings({ notify, status, refresh }: Props) {
             {notifTesting ? 'Отправка…' : '💬 Тестовое сообщение'}
           </button>
         </div>
+      </section>
+
+      {/* ADBLOCK */}
+      <section className="card">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <h2 style={{ margin: 0 }}>🛡️ Блокировка рекламы (AdBlock)</h2>
+          <span className={`badge ${adblockEnabled ? 'badge-online' : ''}`} style={{ color: adblockEnabled ? '#22c55e' : 'var(--muted)' }}>
+            {adblockEnabled ? '🟢 Активно на роутере' : '⚪ Отключено'}
+          </span>
+        </div>
+        <p className="muted small">
+          Блокирует рекламные баннеры, видеовставки, счетчики трекеров и аналитику для всех устройств в сети без установки расширений в браузеры (правило <code>category-ads-all</code> из базы GeoSite).
+        </p>
+        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>Включить AdBlock для всех устройств</span>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={adblockEnabled}
+                disabled={adblockBusy}
+                onChange={(e) => handleToggleAdblock(e.target.checked)}
+              />
+              <span className="slider" />
+            </label>
+            <span style={{ fontSize: 13, minWidth: 64, color: adblockEnabled ? 'var(--green)' : 'var(--muted)' }}>
+              {adblockBusy ? '⏳…' : adblockEnabled ? 'Да' : 'Нет'}
+            </span>
+          </div>
+        </div>
+      </section>
+
+      {/* GEOIP / GEOSITE */}
+      <section className="card">
+        <h2>🔄 Базы данных GeoIP и GeoSite</h2>
+        <p className="muted small">
+          Используются ядром Mihomo для точного определения стран и категорий сайтов (включая списки рекламы AdBlock). Загрузка выполняется через прокси Mihomo для стабильности.
+        </p>
+        <div className="stats-grid" style={{ marginBottom: 12 }}>
+          <div className="stat-card">
+            <div className="stat-label">База GeoIP</div>
+            <div className="stat-value" style={{ fontSize: 16 }}>
+              {geoInfo ? `${(geoInfo.geoip.size / (1024 * 1024)).toFixed(1)} МБ` : '—'}
+            </div>
+            <div className="muted small">{geoInfo?.geoip.updated_at || ''}</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">База GeoSite</div>
+            <div className="stat-value" style={{ fontSize: 16 }}>
+              {geoInfo ? `${(geoInfo.geosite.size / (1024 * 1024)).toFixed(1)} МБ` : '—'}
+            </div>
+            <div className="muted small">{geoInfo?.geosite.updated_at || ''}</div>
+          </div>
+        </div>
+        <button
+          type="button"
+          className="btn primary"
+          onClick={handleUpdateGeo}
+          disabled={geoUpdating}
+        >
+          {geoUpdating ? '⏳ Загрузка баз (может занять до 1 мин)…' : '🔄 Обновить GeoIP / GeoSite базы'}
+        </button>
+      </section>
+
+      {/* ZAPRET / DPI */}
+      <section className="card">
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <h2 style={{ margin: 0 }}>⚡ Обход замедлений Zapret (nfqws)</h2>
+          <span className="badge" style={{ color: zapretStatus?.running ? '#22c55e' : zapretStatus?.installed ? '#f59e0b' : 'var(--muted)' }}>
+            {zapretStatus?.running ? `🟢 Запущен (PID: ${zapretStatus.pid})` : zapretStatus?.installed ? '🟡 Остановлен' : '⚪ Не установлен'}
+          </span>
+        </div>
+        <p className="muted small">
+          Локальный сервис для обхода DPI-замедлений YouTube, Discord и других сервисов без расхода трафика VPS (/opt/etc/init.d/S51zapret).
+        </p>
+        {zapretStatus?.installed ? (
+          <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              className="btn sm"
+              disabled={zapretBusy}
+              onClick={() => handleZapretAction(zapretStatus.running ? 'restart' : 'start')}
+            >
+              {zapretBusy ? '⏳…' : zapretStatus.running ? '🔄 Перезапустить' : '▶ Запустить'}
+            </button>
+            {zapretStatus.running && (
+              <button
+                type="button"
+                className="btn sm btn-danger"
+                disabled={zapretBusy}
+                onClick={() => handleZapretAction('stop')}
+              >
+                ⏹ Остановить
+              </button>
+            )}
+          </div>
+        ) : (
+          <p className="muted small">
+            Пакет Zapret не обнаружен в /opt/etc/init.d/S51zapret. Его можно установить через Entware (opkg install zapret) при необходимости.
+          </p>
+        )}
       </section>
 
       {/* RCI (KEENETIC) */}

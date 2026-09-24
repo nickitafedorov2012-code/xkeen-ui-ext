@@ -110,20 +110,23 @@ export default function LogsViewer({ notify }: LogsViewerProps) {
   }
 
   // Фильтрация строк
+  const isErr = (l: string) => l.toLowerCase().includes('error') || l.toLowerCase().includes('err') || l.includes('❌') || l.includes('🔴')
+  const isWarn = (l: string) => l.toLowerCase().includes('warn') || l.includes('⚠️') || l.includes('🟡')
+  const isInfo = (l: string) => l.toLowerCase().includes('info') || l.includes('✓') || l.includes('🟢')
+
+  const countAll = lines.filter((l) => l.trim()).length
+  const countErr = lines.filter(isErr).length
+  const countWarn = lines.filter(isWarn).length
+  const countInfo = lines.filter(isInfo).length
+
   const filteredLines = lines.filter((l) => {
     if (!l.trim()) return false
     if (filterQuery && !l.toLowerCase().includes(filterQuery.toLowerCase())) {
       return false
     }
-    if (filterLevel === 'error') {
-      return l.toLowerCase().includes('error') || l.toLowerCase().includes('err') || l.includes('❌') || l.includes('🔴')
-    }
-    if (filterLevel === 'warn') {
-      return l.toLowerCase().includes('warn') || l.includes('⚠️') || l.includes('🟡')
-    }
-    if (filterLevel === 'info') {
-      return l.toLowerCase().includes('info') || l.includes('✓') || l.includes('🟢')
-    }
+    if (filterLevel === 'error') return isErr(l)
+    if (filterLevel === 'warn') return isWarn(l)
+    if (filterLevel === 'info') return isInfo(l)
     return true
   })
 
@@ -150,21 +153,41 @@ export default function LogsViewer({ notify }: LogsViewerProps) {
           <input
             type="text"
             className="input-text logs-search"
-            placeholder="🔍 Фильтр по тексту…"
+            placeholder="🔍 Поиск в логах…"
             value={filterQuery}
             onChange={(e) => setFilterQuery(e.target.value)}
           />
 
-          <select
-            className="editor-select"
-            value={filterLevel}
-            onChange={(e: any) => setFilterLevel(e.target.value)}
-          >
-            <option value="all">Все уровни</option>
-            <option value="info">🟢 Info</option>
-            <option value="warn">🟡 Warn</option>
-            <option value="error">🔴 Error</option>
-          </select>
+          <div className="logs-level-pills">
+            <button
+              type="button"
+              className={`logs-pill ${filterLevel === 'all' ? 'active' : ''}`}
+              onClick={() => setFilterLevel('all')}
+            >
+              Все <span className="logs-pill-badge">{countAll}</span>
+            </button>
+            <button
+              type="button"
+              className={`logs-pill logs-pill-info ${filterLevel === 'info' ? 'active' : ''}`}
+              onClick={() => setFilterLevel('info')}
+            >
+              🟢 INFO <span className="logs-pill-badge">{countInfo}</span>
+            </button>
+            <button
+              type="button"
+              className={`logs-pill logs-pill-warn ${filterLevel === 'warn' ? 'active' : ''}`}
+              onClick={() => setFilterLevel('warn')}
+            >
+              🟡 WARN <span className="logs-pill-badge">{countWarn}</span>
+            </button>
+            <button
+              type="button"
+              className={`logs-pill logs-pill-error ${filterLevel === 'error' ? 'active' : ''}`}
+              onClick={() => setFilterLevel('error')}
+            >
+              🔴 ERROR <span className="logs-pill-badge">{countErr}</span>
+            </button>
+          </div>
 
           <button
             className={`btn btn-sm ${paused ? 'btn-warn' : 'btn-secondary'}`}

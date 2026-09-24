@@ -36,6 +36,7 @@ export interface StatusInfo {
     device_failover_enabled?: boolean
   }
   refresh_interval_sec: number
+  adblock_enabled?: boolean
 }
 
 export interface ServerInfo {

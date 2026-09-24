@@ -23,6 +23,7 @@ interface Props {
   applyServer: (ip: string, name: string, server: string) => void
   serverLabel: (id: string) => string
   openDrModal: (d: DeviceInfo, assigned?: string) => void
+  onOpenSchedule?: (d: DeviceInfo) => void
 }
 
 function fmtBytes(bytes: number): string {
@@ -141,6 +142,7 @@ const DeviceRow = memo(function DeviceRow({
   applyServer,
   serverLabel,
   openDrModal,
+  onOpenSchedule,
 }: Props) {
   return (
     <tr className={`device-row ${selected ? 'selected' : ''} ${d.is_current_device ? 'me' : ''}`}>
@@ -230,11 +232,11 @@ const DeviceRow = memo(function DeviceRow({
           </div>
         )}
       </td>
-      <td style={{ textAlign: 'center' }}>
+      <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>
         <button
           type="button"
           className="device-gear-btn"
-          title="Edit"
+          title="Настройка резервирования (Failover)"
           disabled={busy}
           onClick={() => openDrModal(d, assigned)}
         >
@@ -251,6 +253,16 @@ const DeviceRow = memo(function DeviceRow({
             <circle cx="12" cy="12" r="3" />
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
           </svg>
+        </button>
+        <button
+          type="button"
+          className="device-gear-btn"
+          title="Расписание (автоблокировка/переключение по времени)"
+          disabled={busy}
+          onClick={() => onOpenSchedule?.(d)}
+          style={{ marginLeft: 6 }}
+        >
+          ⏰
         </button>
       </td>
     </tr>
