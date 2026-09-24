@@ -78,7 +78,6 @@ export default function Settings({ notify, status, refresh }: Props) {
     pid?: number | null
   }
   const [zapretStatus, setZapretStatus] = useState<ZapretStatus | null>(null)
-  const [zapretBusy, setZapretBusy] = useState(false)
 
   const loadQuickWins = useCallback(async () => {
     try {
@@ -122,22 +121,6 @@ export default function Settings({ notify, status, refresh }: Props) {
     }
   }
 
-  const handleZapretAction = async (action: 'start' | 'stop' | 'restart' | 'install') => {
-    setZapretBusy(true)
-    try {
-      await apiPost('zapret/action', { action })
-      notify(action === 'install' ? 'Установка Zapret завершена' : `Команда Zapret '${action}' выполнена`)
-      try {
-        const zap = await apiGet<ZapretStatus>('zapret/status')
-        setZapretStatus(zap)
-      } catch {}
-      loadQuickWins()
-    } catch (e: any) {
-      notify('Ошибка Zapret: ' + e.message, true)
-    } finally {
-      setZapretBusy(false)
-    }
-  }
 
   useEffect(() => {
     loadQuickWins()
@@ -968,26 +951,16 @@ export default function Settings({ notify, status, refresh }: Props) {
               </span>
             </div>
             <p className="muted small">
-              Управление обходом DPI для YouTube и Discord вынесено в отдельную вкладку <b>«🛡️ Запрет (DPI)»</b> с главным выключателем, пресетами для провайдеров и онлайн-тестом соединения.
+              Все параметры обхода DPI (мульти-стратегии для YouTube, Discord, списки доменов и онлайн-тест) сосредоточены во вкладке <b>«🛡️ Запрет (DPI)»</b>.
             </p>
-            <div style={{ display: 'flex', gap: 10, marginTop: 12, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
               <button
                 type="button"
                 className="btn primary sm"
                 onClick={() => window.dispatchEvent(new CustomEvent('xr:switch-tab', { detail: 'zapret' }))}
               >
-                🛡️ Открыть управление Zapret
+                🛡️ Перейти в настройки Zapret →
               </button>
-              {zapretStatus?.installed && (
-                <button
-                  type="button"
-                  className="btn sm"
-                  disabled={zapretBusy}
-                  onClick={() => handleZapretAction(zapretStatus.running ? 'stop' : 'start')}
-                >
-                  {zapretBusy ? '⏳…' : zapretStatus.running ? '⏹ Выключить' : '▶ Включить'}
-                </button>
-              )}
             </div>
           </section>
 

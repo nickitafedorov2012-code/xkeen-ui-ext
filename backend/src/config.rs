@@ -280,6 +280,10 @@ pub struct ZapretConfig {
     pub discord_voice_udp: bool,
     /// Турбо-десинхронизация YouTube (disorder2 вместо split2)
     pub youtube_turbo: bool,
+    /// Универсальный обход DPI (fake,split2 на портах 80,443)
+    pub general_bypass: bool,
+    /// Агрессивный режим DPI для жестких ТСПУ (seqovl=1, midsld, badseq)
+    pub aggressive_dpi: bool,
     /// Принудительная изоляция заблокированных ресурсов (ChatGPT, Claude, X/Twitter, Instagram) через PROXY
     pub isolated_proxy: bool,
 }
@@ -292,6 +296,8 @@ impl Default for ZapretConfig {
             hybrid_discord: false,
             discord_voice_udp: false,
             youtube_turbo: false,
+            general_bypass: true,
+            aggressive_dpi: false,
             isolated_proxy: false,
         }
     }

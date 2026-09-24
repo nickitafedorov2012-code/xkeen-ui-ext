@@ -2843,6 +2843,182 @@ pub async fn get_policies_map(State(state): State<AppState>) -> Response {
 
 // ==================== ZAPRET / DPI ИНТЕГРАЦИЯ ====================
 
+pub const DEFAULT_ZAPRET_HOSTS: &str = "# zapret-hosts.txt — Список доменов для универсального обхода DPI\n\
+# Поддомены применяются автоматически (subdomains auto apply)\n\
+rutracker.org\n\
+ntc.party\n\
+kinozal.tv\n\
+flibusta.is\n\
+hdrezka.ag\n\
+lostfilm.tv\n\
+nnmclub.to\n\
+torlook.info\n\
+medium.com\n\
+linkedin.com\n\
+notion.so\n\
+canva.com\n\
+intel.com\n\
+dell.com\n";
+
+pub const S51ZAPRET_SCRIPT: &str = r#"#!/bin/sh
+
+PIDFILE="/var/run/nfqws.pid"
+CONF="/opt/etc/zapret/zapret.conf"
+BIN="/opt/zapret/nfq/nfqws"
+[ ! -x "$BIN" ] && BIN="/opt/zapret/binaries/linux-arm64/nfqws"
+
+# Fallback default
+NFQWS_ARGS="--daemon --qnum=200 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-cutoff=d4"
+
+[ -f "$CONF" ] && . "$CONF"
+
+add_fw() {
+  del_fw
+
+  # Client LAN TCP (80, 443) -> NFQUEUE 200 with bypass
+  iptables -t mangle -I PREROUTING 1 -i br+ -p tcp -m multiport --dports 80,443 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass
+
+  # Client LAN UDP (443 - QUIC / HTTP3) -> NFQUEUE 200 with bypass
+  iptables -t mangle -I PREROUTING 2 -i br+ -p udp --dport 443 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass
+
+  # Discord Voice RTC UDP (50000:65535) if voice enabled
+  if [ "$DISCORD_VOICE_ENABLED" = "1" ]; then
+    iptables -t mangle -I PREROUTING 3 -i br+ -p udp -m multiport --dports 50000:65535 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass
+  fi
+}
+
+del_fw() {
+  while iptables -t mangle -D PREROUTING -i br+ -p tcp -m multiport --dports 80,443 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
+  while iptables -t mangle -D PREROUTING -i br+ -p udp --dport 443 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
+  while iptables -t mangle -D PREROUTING -i br+ -p udp -m multiport --dports 50000:65535 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
+
+  # Clean legacy rules without -i br+
+  while iptables -t mangle -D PREROUTING -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
+  while iptables -t mangle -D PREROUTING -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
+
+  # CRITICAL: Clean OUTPUT rules to prevent router agent / healthcheck drop
+  while iptables -t mangle -D OUTPUT -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
+  while iptables -t mangle -D OUTPUT -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
+  while iptables -t mangle -D OUTPUT -p udp -m multiport --dports 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
+}
+
+case "$1" in
+  start)
+    if pidof nfqws >/dev/null 2>&1; then
+      add_fw
+      exit 0
+    fi
+    mkdir -p /opt/etc/zapret
+    if [ -x "$BIN" ]; then
+      $BIN $NFQWS_ARGS
+      add_fw
+    fi
+    ;;
+  stop)
+    del_fw
+    killall nfqws 2>/dev/null
+    rm -f "$PIDFILE"
+    ;;
+  restart)
+    del_fw
+    killall nfqws 2>/dev/null
+    sleep 1
+    if [ -x "$BIN" ]; then
+      $BIN $NFQWS_ARGS
+      add_fw
+    fi
+    ;;
+  status)
+    if pidof nfqws >/dev/null 2>&1; then
+      exit 0
+    else
+      exit 1
+    fi
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status}"
+    exit 1
+    ;;
+esac
+"#;
+
+pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
+    let mut profiles: Vec<String> = Vec::new();
+
+    // YouTube profile
+    if cfg.youtube_turbo || cfg.hybrid_youtube {
+        let yt_desync = if cfg.aggressive_dpi {
+            "--dpi-desync=fake,disorder2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=midsld --dpi-desync-fooling=badseq,md5sig --dpi-desync-cutoff=d4"
+        } else {
+            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig --dpi-desync-cutoff=d4"
+        };
+        profiles.push(format!(
+            "--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be {yt_desync}"
+        ));
+    }
+
+    // Discord Web/Chat profile
+    if cfg.hybrid_discord {
+        let dc_desync = if cfg.aggressive_dpi {
+            "--dpi-desync=fake,disorder2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=midsld --dpi-desync-fooling=badseq,md5sig --dpi-desync-cutoff=d4"
+        } else {
+            "--dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig --dpi-desync-cutoff=d4"
+        };
+        profiles.push(format!(
+            "--filter-tcp=80,443 --hostlist-domains=discord.com,discord.gg,discordapp.com,discordapp.net,discord.media,discord-attachments-uploads-prd.storage.googleapis.com {dc_desync}"
+        ));
+    }
+
+    // Discord Voice UDP profile
+    if cfg.discord_voice_udp {
+        profiles.push("--filter-udp=50000-65535 --filter-l7=discord,stun --dpi-desync=fake".to_string());
+    }
+
+    // General Web Hostlist profile
+    if cfg.general_bypass {
+        let gen_desync = if cfg.aggressive_dpi {
+            "--dpi-desync=fake,disorder2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=midsld --dpi-desync-fooling=badseq,md5sig --dpi-desync-cutoff=d4"
+        } else {
+            "--dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig --dpi-desync-cutoff=d4"
+        };
+        profiles.push(format!(
+            "--filter-tcp=80,443 --hostlist=/opt/etc/zapret/zapret-hosts.txt {gen_desync}"
+        ));
+    }
+
+    // If no specific profiles enabled, provide safe basic profile
+    if profiles.is_empty() {
+        profiles.push("--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-cutoff=d4".to_string());
+    }
+
+    let args = format!("--daemon --qnum=200 {}", profiles.join(" --new "));
+    let voice_enabled = cfg.discord_voice_udp;
+    (args, voice_enabled)
+}
+
+pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) {
+    let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
+    let _ = tokio::fs::create_dir_all("/opt/etc/init.d").await;
+
+    // 1. S51zapret script
+    let _ = tokio::fs::write("/opt/etc/init.d/S51zapret", S51ZAPRET_SCRIPT).await;
+    let _ = tokio::process::Command::new("chmod").arg("+x").arg("/opt/etc/init.d/S51zapret").output().await;
+
+    // 2. Default hostlist if missing
+    if !std::path::Path::new("/opt/etc/zapret/zapret-hosts.txt").exists() {
+        let _ = tokio::fs::write("/opt/etc/zapret/zapret-hosts.txt", DEFAULT_ZAPRET_HOSTS).await;
+    }
+
+    // 3. zapret.conf with multi-strategy args
+    let (args, voice_enabled) = build_nfqws_args(cfg);
+    let conf_data = format!(
+        "NFQWS_ARGS=\"{}\"\nDISCORD_VOICE_ENABLED=\"{}\"\n",
+        args,
+        if voice_enabled { "1" } else { "0" }
+    );
+    let _ = tokio::fs::write("/opt/etc/zapret/zapret.conf", conf_data).await;
+}
+
 /// GET /api/zapret/status — статус nfqws, iptables и S51zapret
 pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
     let init_script = std::path::Path::new("/opt/etc/init.d/S51zapret");
@@ -2891,22 +3067,25 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
 
     let iptables_active = tokio::process::Command::new("sh")
         .arg("-c")
-        .arg("iptables -t mangle -C PREROUTING -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null")
+        .arg("iptables -t mangle -C PREROUTING -i br+ -p tcp -m multiport --dports 80,443 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null")
         .output()
         .await
         .map(|o| o.status.success())
         .unwrap_or(false);
 
     let config_content = tokio::fs::read_to_string("/opt/etc/zapret/zapret.conf").await.ok();
+    let hosts_content = tokio::fs::read_to_string("/opt/etc/zapret/zapret-hosts.txt").await.ok();
 
     // Определение текущего пресета
     let check_str = cmdline.as_deref().or(config_content.as_deref()).unwrap_or("");
-    let preset = if check_str.contains("disorder2") && check_str.contains("split-pos=1") {
-        "youtube"
-    } else if check_str.contains("any-protocol") || check_str.contains("cutoff=d4") {
-        "discord"
+    let preset = if check_str.contains("disorder2") && check_str.contains("split-pos=1") && check_str.contains("discord") {
+        "gamer"
     } else if check_str.contains("badseq") {
         "aggressive"
+    } else if check_str.contains("disorder2") && check_str.contains("split-pos=1") {
+        "youtube"
+    } else if check_str.contains("discord") {
+        "discord"
     } else if check_str.contains("fake,split2") {
         "general"
     } else {
@@ -2924,16 +3103,18 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
         "preset": preset,
         "cmdline": cmdline,
         "config": config_content,
+        "hosts": hosts_content,
         "features": &cfg.zapret,
     }))
 }
 
 #[derive(Deserialize)]
 pub struct ZapretActionReq {
-    pub action: String, // "start" | "stop" | "restart" | "toggle" | "install" | "set_preset" | "save_config" | "test_dpi" | "toggle_feature" | "set_features" | "reset_features"
+    pub action: String, // "start" | "stop" | "restart" | "toggle" | "install" | "set_preset" | "save_config" | "save_hosts" | "test_dpi" | "toggle_feature" | "set_features" | "reset_features"
     pub preset: Option<String>,
     pub custom_args: Option<String>,
     pub config_content: Option<String>,
+    pub hosts_content: Option<String>,
     pub feature: Option<String>,
     pub enabled: Option<bool>,
     pub features: Option<crate::config::ZapretConfig>,
@@ -2949,8 +3130,8 @@ pub async fn zapret_action(
     // 1. Тестирование обхода DPI
     if act == "test_dpi" {
         let test_cmd = r#"
-            yt_res=$(curl -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" https://www.youtube.com 2>/dev/null || echo "000:0")
-            dc_res=$(curl -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" https://discord.com 2>/dev/null || echo "000:0")
+            yt_res=$(curl -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" https://www.youtube.com 2>/dev/null || curl -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" -x http://127.0.0.1:7890 https://www.youtube.com 2>/dev/null || echo "000:0")
+            dc_res=$(curl -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" https://discord.com 2>/dev/null || curl -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" -x http://127.0.0.1:7890 https://discord.com 2>/dev/null || echo "000:0")
             echo "$yt_res|$dc_res"
         "#;
         let out = tokio::process::Command::new("sh").arg("-c").arg(test_cmd).output().await;
@@ -2986,22 +3167,112 @@ pub async fn zapret_action(
         return api_err("Отсутствует содержимое config_content");
     }
 
-    // 3. Выбор пресета
+    // 2.1 Сохранение списка доменов zapret-hosts.txt
+    if act == "save_hosts" {
+        if let Some(content) = body.hosts_content {
+            let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
+            if let Err(e) = tokio::fs::write("/opt/etc/zapret/zapret-hosts.txt", &content).await {
+                return api_err(format!("Ошибка записи zapret-hosts.txt: {e}"));
+            }
+            let is_running = tokio::process::Command::new("pidof")
+                .arg("nfqws")
+                .output()
+                .await
+                .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+                .unwrap_or(false);
+            if is_running {
+                let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+            }
+            return api_ok(json!({ "saved": true, "message": "Список доменов zapret-hosts.txt сохранен" }));
+        }
+        return api_err("Отсутствует содержимое hosts_content");
+    }
+
+    // 3. Выбор пресета / быстрых бандлов стратегий
     if act == "set_preset" {
         let p = body.preset.as_deref().unwrap_or("general");
-        let args = match p {
-            "youtube" => "--daemon --qnum=200 --dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig",
-            "discord" => "--daemon --qnum=200 --dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-any-protocol --dpi-desync-cutoff=d4",
-            "aggressive" => "--daemon --qnum=200 --dpi-desync=fake,disorder2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=midsld --dpi-desync-fooling=badseq,md5sig",
-            "custom" => body.custom_args.as_deref().unwrap_or("--daemon --qnum=200 --dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig"),
-            _ => "--daemon --qnum=200 --dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig",
-        };
+        let _cfg_guard = state.config_lock.lock().await;
+        let mut cfg = (**state.config.read().await).clone();
 
-        let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
-        let conf_data = format!("NFQWS_ARGS=\"{args}\"\n");
-        let _ = tokio::fs::write("/opt/etc/zapret/zapret.conf", conf_data).await;
-        let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
-        return api_ok(json!({ "preset": p, "args": args, "message": format!("Применен пресет '{p}'") }));
+        match p {
+            "youtube" => {
+                cfg.zapret.youtube_turbo = true;
+                cfg.zapret.hybrid_youtube = true;
+                cfg.zapret.hybrid_discord = false;
+                cfg.zapret.discord_voice_udp = false;
+                cfg.zapret.general_bypass = false;
+                cfg.zapret.aggressive_dpi = false;
+            }
+            "discord" => {
+                cfg.zapret.youtube_turbo = false;
+                cfg.zapret.hybrid_youtube = false;
+                cfg.zapret.hybrid_discord = true;
+                cfg.zapret.discord_voice_udp = true;
+                cfg.zapret.general_bypass = false;
+                cfg.zapret.aggressive_dpi = false;
+            }
+            "gamer" | "media" => {
+                cfg.zapret.youtube_turbo = true;
+                cfg.zapret.hybrid_youtube = true;
+                cfg.zapret.hybrid_discord = true;
+                cfg.zapret.discord_voice_udp = true;
+                cfg.zapret.general_bypass = true;
+                cfg.zapret.aggressive_dpi = false;
+            }
+            "aggressive" => {
+                cfg.zapret.youtube_turbo = true;
+                cfg.zapret.hybrid_youtube = true;
+                cfg.zapret.hybrid_discord = true;
+                cfg.zapret.discord_voice_udp = true;
+                cfg.zapret.general_bypass = true;
+                cfg.zapret.aggressive_dpi = true;
+            }
+            "custom" => {
+                if let Some(custom) = &body.custom_args {
+                    let conf_data = format!("NFQWS_ARGS=\"{custom}\"\nDISCORD_VOICE_ENABLED=\"0\"\n");
+                    let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
+                    let _ = tokio::fs::write("/opt/etc/zapret/zapret.conf", conf_data).await;
+                }
+            }
+            _ => {
+                // "general" / "all"
+                cfg.zapret.youtube_turbo = false;
+                cfg.zapret.hybrid_youtube = true;
+                cfg.zapret.hybrid_discord = true;
+                cfg.zapret.discord_voice_udp = true;
+                cfg.zapret.general_bypass = true;
+                cfg.zapret.aggressive_dpi = false;
+            }
+        }
+
+        if p != "custom" {
+            sync_zapret_files(&cfg.zapret).await;
+        }
+
+        // Обновляем правила в config.yaml ядра Mihomo
+        if std::path::Path::new(&cfg.mihomo.config_path).exists() {
+            if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+                if let Ok(new_yaml) = routing::apply_zapret_hybrid_rules(&yaml, &cfg.zapret) {
+                    let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
+                    let _ = mihomo::reload_config(&state.http, &cfg).await;
+                }
+            }
+        }
+
+        let is_running = tokio::process::Command::new("pidof")
+            .arg("nfqws")
+            .output()
+            .await
+            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+            .unwrap_or(false);
+        if is_running {
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+        }
+
+        let _ = config::save(&state.config_path, &cfg).await;
+        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+
+        return api_ok(json!({ "preset": p, "features": cfg.zapret, "message": format!("Применен пресет '{p}'") }));
     }
 
     // 4. Установка службы Zapret
@@ -3016,85 +3287,14 @@ pub async fn zapret_action(
             rm -rf /opt/zapret && \
             mv zapret-v* /opt/zapret && \
             cd /opt/zapret && \
-            ./install_bin.sh && \
-            cat << 'EOF' > /opt/etc/init.d/S51zapret
-#!/bin/sh
-
-PIDFILE="/var/run/nfqws.pid"
-CONF="/opt/etc/zapret/zapret.conf"
-BIN="/opt/zapret/nfq/nfqws"
-[ ! -x "$BIN" ] && BIN="/opt/zapret/binaries/linux-arm64/nfqws"
-
-NFQWS_ARGS="--daemon --qnum=200 --dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig"
-
-[ -f "$CONF" ] && . "$CONF"
-
-add_fw() {
-  iptables -t mangle -C PREROUTING -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
-    iptables -t mangle -I PREROUTING -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass
-
-  iptables -t mangle -C OUTPUT -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
-    iptables -t mangle -I OUTPUT -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass
-
-  iptables -t mangle -C PREROUTING -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
-    iptables -t mangle -I PREROUTING -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass
-
-  iptables -t mangle -C OUTPUT -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
-    iptables -t mangle -I OUTPUT -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass
-}
-
-del_fw() {
-  iptables -t mangle -D PREROUTING -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null
-  iptables -t mangle -D OUTPUT -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null
-  iptables -t mangle -D PREROUTING -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null
-  iptables -t mangle -D OUTPUT -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null
-}
-
-case "$1" in
-  start)
-    if pidof nfqws >/dev/null 2>&1; then
-      add_fw
-      exit 0
-    fi
-    mkdir -p /opt/etc/zapret
-    if [ -x "$BIN" ]; then
-      $BIN $NFQWS_ARGS
-      add_fw
-    fi
-    ;;
-  stop)
-    del_fw
-    killall nfqws 2>/dev/null
-    rm -f "$PIDFILE"
-    ;;
-  restart)
-    del_fw
-    killall nfqws 2>/dev/null
-    sleep 1
-    if [ -x "$BIN" ]; then
-      $BIN $NFQWS_ARGS
-      add_fw
-    fi
-    ;;
-  status)
-    if pidof nfqws >/dev/null 2>&1; then
-      exit 0
-    else
-      exit 1
-    fi
-    ;;
-  *)
-    echo "Usage: $0 {start|stop|restart|status}"
-    exit 1
-    ;;
-esac
-EOF
-            chmod +x /opt/etc/init.d/S51zapret && \
-            /opt/etc/init.d/S51zapret start
+            ./install_bin.sh
         "#;
         match tokio::process::Command::new("sh").arg("-c").arg(install_cmd).output().await {
             Ok(out) => {
                 let output_str = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+                let _cfg = state.config.read().await;
+                sync_zapret_files(&_cfg.zapret).await;
+                let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("start").output().await;
                 let installed = std::path::Path::new("/opt/etc/init.d/S51zapret").exists();
                 return api_ok(json!({ "success": installed, "output": output_str.trim() }));
             }
@@ -3116,11 +3316,16 @@ EOF
                 "hybrid_discord" => cfg.zapret.hybrid_discord = val,
                 "discord_voice_udp" => cfg.zapret.discord_voice_udp = val,
                 "youtube_turbo" => cfg.zapret.youtube_turbo = val,
+                "general_bypass" => cfg.zapret.general_bypass = val,
+                "aggressive_dpi" => cfg.zapret.aggressive_dpi = val,
                 "isolated_proxy" => cfg.zapret.isolated_proxy = val,
                 "enabled" => cfg.zapret.enabled = val,
                 _ => return api_err(format!("Неизвестный параметр функции: {feat}")),
             }
         }
+
+        // Обновляем файлы zapret.conf и S51zapret
+        sync_zapret_files(&cfg.zapret).await;
 
         // Обновляем правила в config.yaml ядра Mihomo
         if std::path::Path::new(&cfg.mihomo.config_path).exists() {
@@ -3132,30 +3337,14 @@ EOF
             }
         }
 
-        // При изменении youtube_turbo обновляем конфигурацию nfqws
-        if cfg.zapret.youtube_turbo {
-            let turbo_args = "NFQWS_ARGS=\"--daemon --qnum=200 --dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig\"\n";
-            let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
-            let _ = tokio::fs::write("/opt/etc/zapret/zapret.conf", turbo_args).await;
+        let is_running = tokio::process::Command::new("pidof")
+            .arg("nfqws")
+            .output()
+            .await
+            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+            .unwrap_or(false);
+        if is_running {
             let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
-        } else if act == "toggle_feature" && body.feature.as_deref() == Some("youtube_turbo") {
-            let general_args = "NFQWS_ARGS=\"--daemon --qnum=200 --dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig\"\n";
-            let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
-            let _ = tokio::fs::write("/opt/etc/zapret/zapret.conf", general_args).await;
-            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
-        }
-
-        // При изменении discord_voice_udp динамически настраиваем mangle UDP порты
-        if cfg.zapret.discord_voice_udp {
-            let cmd = "iptables -t mangle -C PREROUTING -p udp -m multiport --dports 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
-                       iptables -t mangle -I PREROUTING -p udp -m multiport --dports 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass; \
-                       iptables -t mangle -C OUTPUT -p udp -m multiport --dports 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
-                       iptables -t mangle -I OUTPUT -p udp -m multiport --dports 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass";
-            let _ = tokio::process::Command::new("sh").arg("-c").arg(cmd).output().await;
-        } else if act == "toggle_feature" && body.feature.as_deref() == Some("discord_voice_udp") {
-            let cmd = "iptables -t mangle -D PREROUTING -p udp -m multiport --dports 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; \
-                       iptables -t mangle -D OUTPUT -p udp -m multiport --dports 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null";
-            let _ = tokio::process::Command::new("sh").arg("-c").arg(cmd).output().await;
         }
 
         let _ = config::save(&state.config_path, &cfg).await;
@@ -3173,7 +3362,7 @@ EOF
         return api_err("Служба Zapret (S51zapret) не установлена в /opt/etc/init.d/");
     }
 
-    // 5. Toggle (Включение / Выключение)
+    // 6. Toggle (Включение / Выключение)
     let action_to_run = if act == "toggle" {
         let is_running = tokio::process::Command::new("pidof")
             .arg("nfqws")
@@ -3188,6 +3377,12 @@ EOF
 
     if action_to_run != "start" && action_to_run != "stop" && action_to_run != "restart" {
         return api_err("Недопустимое действие для службы Zapret");
+    }
+
+    // Перед стартом гарантируем актуальные и безопасные правила
+    if action_to_run == "start" || action_to_run == "restart" {
+        let _cfg = state.config.read().await;
+        sync_zapret_files(&_cfg.zapret).await;
     }
 
     match tokio::process::Command::new(init_script).arg(action_to_run).output().await {

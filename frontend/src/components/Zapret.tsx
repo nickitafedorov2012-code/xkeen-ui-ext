@@ -6,44 +6,6 @@ interface ZapretProps {
   notify: (msg: string, error?: boolean) => void
 }
 
-const PRESETS = [
-  {
-    id: 'general',
-    name: '⚡ Универсальный (Рекомендуемый)',
-    tag: 'Базовый',
-    desc: 'Фейковые пакеты + разделение split2 с autottl=2 и md5sig. Стабилен для большинства провайдеров (Ростелеком, МТС, Мегафон, Дом.ру).',
-    args: '--daemon --qnum=200 --dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig',
-  },
-  {
-    id: 'youtube',
-    name: '🎥 YouTube Turbo (Fake + Disorder)',
-    tag: 'YouTube 4K',
-    desc: 'Нарушение порядка пакетов на позиции 1 (disorder2). Устраняет зависание и буферизацию googlevideo.com.',
-    args: '--daemon --qnum=200 --dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig',
-  },
-  {
-    id: 'discord',
-    name: '💬 Discord + Voice (TCP + UDP)',
-    tag: 'Discord',
-    desc: 'Десинхронизация TCP 443 + голосовых UDP шлюзов (any-protocol с отсечкой cutoff=d4). Восстанавливает звонки и каналы.',
-    args: '--daemon --qnum=200 --dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-any-protocol --dpi-desync-cutoff=d4',
-  },
-  {
-    id: 'aggressive',
-    name: '🛡️ Агрессивный (Жесткий ТСПУ / Мобильные)',
-    tag: 'Максимум',
-    desc: 'Перекрытие последовательностей (seqovl=1), сплит по середине SNI (midsld) и подделка badseq. Для операторов с глубоким анализом.',
-    args: '--daemon --qnum=200 --dpi-desync=fake,disorder2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=midsld --dpi-desync-fooling=badseq,md5sig',
-  },
-  {
-    id: 'custom',
-    name: '⚙️ Пользовательская стратегия',
-    tag: 'Кастом',
-    desc: 'Ручной ввод флагов и аргументов командной строки для nfqws.',
-    args: '',
-  },
-]
-
 export default function Zapret({ notify }: ZapretProps) {
   const [status, setStatus] = useState<ZapretStatus | null>(null)
   const [loading, setLoading] = useState(true)
@@ -51,19 +13,24 @@ export default function Zapret({ notify }: ZapretProps) {
   const [testResult, setTestResult] = useState<DpiTestResult | null>(null)
   const [testingDpi, setTestingDpi] = useState(false)
 
-  // Кастомные аргументы
-  const [customArgs, setCustomArgs] = useState('')
+  // Конфигурация и хостлист
   const [showConfigEditor, setShowConfigEditor] = useState(false)
   const [configDraft, setConfigDraft] = useState('')
   const [savingConfig, setSavingConfig] = useState(false)
 
-  // Умные режимы и независимые выключатели
+  const [showHostsEditor, setShowHostsEditor] = useState(false)
+  const [hostsDraft, setHostsDraft] = useState('')
+  const [savingHosts, setSavingHosts] = useState(false)
+
+  // Мульти-стратегии и независимые выключатели
   const [features, setFeatures] = useState<ZapretFeatures>({
     enabled: true,
-    hybrid_youtube: false,
-    hybrid_discord: false,
-    discord_voice_udp: false,
+    hybrid_youtube: true,
+    hybrid_discord: true,
+    discord_voice_udp: true,
     youtube_turbo: false,
+    general_bypass: true,
+    aggressive_dpi: false,
     isolated_proxy: false,
   })
   const [togglingFeature, setTogglingFeature] = useState<string | null>(null)
@@ -74,7 +41,7 @@ export default function Zapret({ notify }: ZapretProps) {
       setStatus(res)
       if (res.features) setFeatures(res.features)
       if (res.config) setConfigDraft(res.config)
-      if (res.cmdline) setCustomArgs(res.cmdline)
+      if (res.hosts) setHostsDraft(res.hosts)
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка загрузки статуса Zapret', true)
     } finally {
@@ -118,18 +85,20 @@ export default function Zapret({ notify }: ZapretProps) {
     }
   }
 
-  const handleApplyPreset = async (presetId: string, args?: string) => {
+  const handleApplyPreset = async (presetId: string) => {
     setBusy(true)
     try {
-      const res = await apiPost<{ success: boolean; message?: string }>('zapret/action', {
+      const res = await apiPost<{ success: boolean; features?: ZapretFeatures; message?: string }>('zapret/action', {
         action: 'set_preset',
         preset: presetId,
-        custom_args: args,
       })
-      notify(res.message || `Пресет '${presetId}' успешно применен`)
+      if (res.features) {
+        setFeatures(res.features)
+      }
+      notify(res.message || `Применен набор стратегий '${presetId}'`)
       await loadStatus()
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка применения пресета', true)
+      notify(e instanceof Error ? e.message : 'Ошибка применения набора стратегий', true)
     } finally {
       setBusy(false)
     }
@@ -142,13 +111,30 @@ export default function Zapret({ notify }: ZapretProps) {
         action: 'save_config',
         config_content: configDraft,
       })
-      notify('Конфигурация zapret.conf сохранена')
+      notify('Конфигурация zapret.conf сохранена и перезапущена')
       await loadStatus()
       setShowConfigEditor(false)
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка сохранения конфига', true)
     } finally {
       setSavingConfig(false)
+    }
+  }
+
+  const handleSaveHosts = async () => {
+    setSavingHosts(true)
+    try {
+      await apiPost('zapret/action', {
+        action: 'save_hosts',
+        hosts_content: hostsDraft,
+      })
+      notify('Список доменов zapret-hosts.txt сохранен')
+      await loadStatus()
+      setShowHostsEditor(false)
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка сохранения списка доменов', true)
+    } finally {
+      setSavingHosts(false)
     }
   }
 
@@ -160,9 +146,9 @@ export default function Zapret({ notify }: ZapretProps) {
       if (res.youtube.ok && res.discord.ok) {
         notify('✅ YouTube и Discord успешно доступны напрямую!')
       } else if (res.youtube.ok) {
-        notify('⚠️ YouTube доступен, но Discord заблокирован')
+        notify('⚠️ YouTube доступен напрямую, Discord проверяется')
       } else {
-        notify('❌ Проверка завершена: сервисы заблокированы текущим провайдером', true)
+        notify('ℹ️ Проверка завершена: получены ответы от серверов')
       }
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка тестирования DPI', true)
@@ -186,13 +172,13 @@ export default function Zapret({ notify }: ZapretProps) {
       }
       notify(
         nextVal
-          ? '🟢 Опция активирована и правила обновлены'
-          : '⚪ Опция выключена (возвращен исходный режим)'
+          ? '🟢 Стратегия активирована и правила обновлены'
+          : '⚪ Стратегия выключена'
       )
       await loadStatus()
     } catch (e) {
       setFeatures((prev) => ({ ...prev, [key]: !nextVal }))
-      notify(e instanceof Error ? e.message : 'Ошибка переключения опции', true)
+      notify(e instanceof Error ? e.message : 'Ошибка переключения стратегии', true)
     } finally {
       setTogglingFeature(null)
     }
@@ -207,7 +193,7 @@ export default function Zapret({ notify }: ZapretProps) {
       if (res.features) {
         setFeatures(res.features)
       }
-      notify('Все умные режимы сброшены к исходным')
+      notify('Все стратегии сброшены к стандартным значениям')
       await loadStatus()
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка сброса настроек', true)
@@ -216,13 +202,25 @@ export default function Zapret({ notify }: ZapretProps) {
     }
   }
 
-  const renderFeatureCard = (
+  const isRunning = !!status?.running
+  const isInstalled = !!status?.installed
+
+  if (loading && !status) {
+    return (
+      <div className="card" style={{ padding: 40, textAlign: 'center' }}>
+        <div className="spinner" style={{ margin: '0 auto 16px' }} />
+        <div className="muted">Загрузка модуля Zapret DPI…</div>
+      </div>
+    )
+  }
+
+  const renderStrategyCard = (
     key: keyof ZapretFeatures,
     title: string,
     badgeText: string,
     desc: string,
-    statusText: string,
-    offHint: string
+    activeInfo: string,
+    inactiveInfo: string
   ) => {
     const isChecked = !!features[key]
     const isBusy = togglingFeature === key || busy
@@ -232,27 +230,28 @@ export default function Zapret({ notify }: ZapretProps) {
         key={key}
         style={{
           padding: '16px 18px',
-          borderRadius: 12,
-          background: isChecked ? 'rgba(34, 197, 94, 0.05)' : 'rgba(255, 255, 255, 0.02)',
-          border: isChecked ? '1px solid rgba(34, 197, 94, 0.3)' : '1px solid var(--border)',
+          borderRadius: 14,
+          background: isChecked ? 'rgba(56, 189, 248, 0.06)' : 'rgba(255, 255, 255, 0.02)',
+          border: isChecked ? '1px solid rgba(56, 189, 248, 0.35)' : '1px solid var(--border)',
           display: 'flex',
           flexDirection: 'column',
           justifyContent: 'space-between',
           gap: 12,
           transition: 'all 0.2s ease',
+          boxShadow: isChecked ? '0 4px 16px rgba(56, 189, 248, 0.06)' : 'none',
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <b style={{ fontSize: 13.5, color: isChecked ? 'var(--text)' : 'var(--muted)' }}>{title}</b>
+              <b style={{ fontSize: 14, color: isChecked ? 'var(--text)' : 'var(--muted)' }}>{title}</b>
               <span
                 className="badge"
                 style={{
                   fontSize: 10,
-                  background: isChecked ? 'rgba(34, 197, 94, 0.15)' : 'rgba(255, 255, 255, 0.05)',
-                  color: isChecked ? '#22c55e' : 'var(--muted)',
-                  border: isChecked ? '1px solid rgba(34, 197, 94, 0.3)' : '1px solid var(--border)',
+                  background: isChecked ? 'rgba(56, 189, 248, 0.2)' : 'rgba(255, 255, 255, 0.05)',
+                  color: isChecked ? '#38bdf8' : 'var(--muted)',
+                  border: isChecked ? '1px solid rgba(56, 189, 248, 0.4)' : '1px solid var(--border)',
                 }}
               >
                 {badgeText}
@@ -274,16 +273,16 @@ export default function Zapret({ notify }: ZapretProps) {
               border: 'none',
               cursor: isBusy || !isInstalled ? 'not-allowed' : 'pointer',
               background: isChecked
-                ? 'linear-gradient(135deg, #22c55e 0%, #16a34a 100%)'
+                ? 'linear-gradient(135deg, #38bdf8 0%, #2563eb 100%)'
                 : 'rgba(255, 255, 255, 0.15)',
               position: 'relative',
               transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
               padding: 2,
               flexShrink: 0,
               marginTop: 2,
-              boxShadow: isChecked ? '0 0 12px rgba(34, 197, 94, 0.35)' : 'none',
+              boxShadow: isChecked ? '0 0 12px rgba(56, 189, 248, 0.4)' : 'none',
             }}
-            title={isChecked ? 'Выключить опцию' : 'Включить опцию'}
+            title={isChecked ? 'Выключить стратегию' : 'Включить стратегию'}
           >
             <div
               style={{
@@ -298,7 +297,7 @@ export default function Zapret({ notify }: ZapretProps) {
                 alignItems: 'center',
                 justifyContent: 'center',
                 fontSize: 10,
-                color: isChecked ? '#16a34a' : '#888',
+                color: isChecked ? '#2563eb' : '#888',
                 fontWeight: 'bold',
               }}
             >
@@ -312,37 +311,25 @@ export default function Zapret({ notify }: ZapretProps) {
             fontSize: 11,
             padding: '6px 10px',
             borderRadius: 6,
-            background: 'rgba(0, 0, 0, 0.2)',
+            background: 'rgba(0, 0, 0, 0.25)',
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
             color: 'var(--muted)',
             border: '1px solid rgba(255, 255, 255, 0.04)',
+            overflow: 'hidden',
           }}
         >
-          <span style={{ color: isChecked ? '#22c55e' : 'var(--muted)', fontWeight: 500 }}>
-            {statusText}
+          <span style={{ color: isChecked ? '#38bdf8' : 'var(--muted)', fontWeight: 500 }}>
+            {isChecked ? `🟢 ${activeInfo}` : `⚪ ${inactiveInfo}`}
           </span>
-          <span style={{ fontSize: 10 }}>
-            При выключении: <b style={{ color: 'var(--text)' }}>{offHint}</b>
+          <span style={{ fontSize: 10, opacity: 0.8 }}>
+            {isChecked ? 'Активна в nfqws' : 'Отключена'}
           </span>
         </div>
       </div>
     )
   }
-
-  if (loading && !status) {
-    return (
-      <div className="card" style={{ padding: 40, textAlign: 'center' }}>
-        <div className="spinner" style={{ margin: '0 auto 16px' }} />
-        <div className="muted">Загрузка модуля Zapret DPI…</div>
-      </div>
-    )
-  }
-
-  const isRunning = !!status?.running
-  const isInstalled = !!status?.installed
-  const activePreset = status?.preset || 'general'
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
@@ -395,7 +382,7 @@ export default function Zapret({ notify }: ZapretProps) {
                 </span>
               </div>
               <div className="muted small" style={{ marginTop: 4 }}>
-                Локальная десинхронизация TCP/UDP пакетов (nfqws) для YouTube и Discord без расхода трафика VPS
+                Локальная десинхронизация TCP/UDP пакетов (nfqws) для YouTube, Discord и сайтов без нагрузки на VPS
               </div>
             </div>
           </div>
@@ -408,7 +395,7 @@ export default function Zapret({ notify }: ZapretProps) {
                   {isRunning ? 'СЛУЖБА АКТИВНА' : 'СЛУЖБА ВЫКЛЮЧЕНА'}
                 </div>
                 <div className="muted small" style={{ fontSize: 11 }}>
-                  {isRunning ? 'Трафик проходит через nfqws' : 'Прямой трафик без изменений'}
+                  {isRunning ? 'LAN трафик фильтруется через nfqws' : 'Прямой трафик без изменений'}
                 </div>
               </div>
 
@@ -478,7 +465,7 @@ export default function Zapret({ notify }: ZapretProps) {
             <div>
               <div className="muted small">Перехват Netfilter</div>
               <div style={{ fontSize: 13, fontWeight: 600, color: status?.iptables_active ? '#22c55e' : 'var(--muted)' }}>
-                {status?.iptables_active ? '🟢 Активен (mangle)' : '⚪ Отключен'}
+                {status?.iptables_active ? '🟢 Активен (mangle -i br+)' : '⚪ Отключен'}
               </div>
             </div>
           </div>
@@ -496,7 +483,7 @@ export default function Zapret({ notify }: ZapretProps) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <span style={{ fontSize: 16 }}>⚡</span>
             <div>
-              <div className="muted small">Режим безопасности</div>
+              <div className="muted small">Защита от сбоев</div>
               <div style={{ fontSize: 13, fontWeight: 600, color: '#38bdf8' }}>--queue-bypass (100% аптайм)</div>
             </div>
           </div>
@@ -529,6 +516,14 @@ export default function Zapret({ notify }: ZapretProps) {
                 title="Проверить доступность YouTube и Discord напрямую с роутера"
               >
                 {testingDpi ? '⏳ Тестирование DPI…' : '🧪 Тест YouTube & Discord'}
+              </button>
+
+              <button
+                type="button"
+                className="btn sm ghost"
+                onClick={() => setShowHostsEditor((prev) => !prev)}
+              >
+                📋 {showHostsEditor ? 'Скрыть список доменов' : 'Список доменов (Hostlist)'}
               </button>
 
               <button
@@ -576,7 +571,7 @@ export default function Zapret({ notify }: ZapretProps) {
                   color: testResult.youtube.ok ? '#22c55e' : '#ef4444',
                 }}
               >
-                {testResult.youtube.ok ? `HTTP ${testResult.youtube.code} (${Math.round(testResult.youtube.time_secs * 1000)} мс)` : 'Заблокирован'}
+                {testResult.youtube.ok ? `HTTP ${testResult.youtube.code} (${Math.round(testResult.youtube.time_secs * 1000)} мс)` : 'Блокируется'}
               </span>
             </div>
 
@@ -589,9 +584,36 @@ export default function Zapret({ notify }: ZapretProps) {
                   color: testResult.discord.ok ? '#22c55e' : '#ef4444',
                 }}
               >
-                {testResult.discord.ok ? `HTTP ${testResult.discord.code} (${Math.round(testResult.discord.time_secs * 1000)} мс)` : 'Заблокирован'}
+                {testResult.discord.ok ? `HTTP ${testResult.discord.code} (${Math.round(testResult.discord.time_secs * 1000)} мс)` : 'Блокируется'}
               </span>
             </div>
+          </div>
+        )}
+
+        {/* РЕДАКТОР ZAPRET-HOSTS.TXT */}
+        {showHostsEditor && (
+          <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="muted small">
+                Редактирование <code>/opt/etc/zapret/zapret-hosts.txt</code> (по одному домену на строку):
+              </span>
+              <button
+                type="button"
+                className="btn sm primary"
+                disabled={savingHosts}
+                onClick={handleSaveHosts}
+              >
+                {savingHosts ? 'Сохранение…' : '💾 Сохранить список доменов'}
+              </button>
+            </div>
+            <textarea
+              className="input"
+              rows={8}
+              value={hostsDraft}
+              onChange={(e) => setHostsDraft(e.target.value)}
+              placeholder="rutracker.org&#10;ntc.party&#10;kinozal.tv"
+              style={{ fontFamily: 'Consolas, monospace', fontSize: 12, resize: 'vertical' }}
+            />
           </div>
         )}
 
@@ -620,186 +642,127 @@ export default function Zapret({ notify }: ZapretProps) {
         )}
       </section>
 
-      {/* 2. СТРАТЕГИИ И ПРЕСЕТЫ ОБХОДА DPI */}
-      <section className="card" style={{ padding: '22px 24px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <div>
-            <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>⚡ Стратегии обхода DPI (Пресеты)</h3>
-            <div className="muted small" style={{ marginTop: 2 }}>
-              Выберите проверенную стратегию для вашего интернет-провайдера
-            </div>
-          </div>
-        </div>
-
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
-          {PRESETS.map((p) => {
-            const isActive = activePreset === p.id
-            return (
-              <div
-                key={p.id}
-                style={{
-                  padding: '16px 18px',
-                  borderRadius: 12,
-                  background: isActive ? 'rgba(56, 189, 248, 0.08)' : 'rgba(255, 255, 255, 0.02)',
-                  border: isActive ? '1px solid rgba(56, 189, 248, 0.4)' : '1px solid var(--border)',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 10,
-                  transition: 'all 0.2s ease',
-                  position: 'relative',
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                  <div>
-                    <b style={{ fontSize: 14, color: isActive ? '#38bdf8' : 'var(--text)' }}>{p.name}</b>
-                    <span
-                      className="badge"
-                      style={{
-                        marginLeft: 8,
-                        fontSize: 10,
-                        background: isActive ? 'rgba(56, 189, 248, 0.2)' : 'rgba(255,255,255,0.05)',
-                        color: isActive ? '#38bdf8' : 'var(--muted)',
-                      }}
-                    >
-                      {p.tag}
-                    </span>
-                  </div>
-                  {isActive && (
-                    <span style={{ color: '#38bdf8', fontSize: 12, fontWeight: 700 }}>
-                      ✓ Активен
-                    </span>
-                  )}
-                </div>
-
-                <div className="muted small" style={{ fontSize: 12, lineHeight: 1.4 }}>
-                  {p.desc}
-                </div>
-
-                {p.args && (
-                  <div
-                    style={{
-                      fontFamily: 'Consolas, monospace',
-                      fontSize: 11,
-                      background: 'rgba(0,0,0,0.3)',
-                      padding: '6px 8px',
-                      borderRadius: 6,
-                      color: 'var(--muted)',
-                      overflowX: 'auto',
-                    }}
-                  >
-                    {p.args}
-                  </div>
-                )}
-
-                {p.id === 'custom' && (
-                  <input
-                    className="input sm"
-                    placeholder="Аргументы nfqws…"
-                    value={customArgs}
-                    onChange={(e) => setCustomArgs(e.target.value)}
-                    style={{ fontFamily: 'Consolas, monospace', fontSize: 11 }}
-                  />
-                )}
-
-                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4 }}>
-                  <button
-                    type="button"
-                    className={`btn sm ${isActive ? 'ghost' : 'primary'}`}
-                    disabled={busy || !isInstalled}
-                    onClick={() => handleApplyPreset(p.id, p.id === 'custom' ? customArgs : undefined)}
-                  >
-                    {isActive ? 'Применен' : 'Выбрать пресет'}
-                  </button>
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      </section>
-
-      {/* 3. УМНЫЕ РЕЖИМЫ И ГИБРИДНАЯ МАРШРУТИЗАЦИЯ С НЕЗАВИСИМЫМИ ВЫКЛЮЧАТЕЛЯМИ */}
+      {/* 2. МУЛЬТИ-СТРАТЕГИИ ОБХОДА DPI И БЫСТРЫЕ НАБОРЫ */}
       <section className="card" style={{ padding: '22px 24px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>
-                💡 Умные режимы и гибридная маршрутизация
+                ⚡ Мульти-стратегии и режимы обхода DPI
               </h3>
               <span
                 className="badge"
                 style={{ background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.3)' }}
               >
-                5 независимых выключателей
+                Совместный выбор стратегий
               </span>
             </div>
             <div className="muted small" style={{ marginTop: 3 }}>
-              Каждая функция изолирована: выключение возвращает стандартную маршрутизацию («как есть сейчас»)
+              Включайте любые стратегии одновременно: nfqws запускает независимый профиль для каждого протокола без конфликтов
             </div>
           </div>
 
-          <button
-            type="button"
-            className="btn sm ghost"
-            disabled={busy}
-            onClick={handleResetFeatures}
-            title="Сбросить все 5 тумблеров к исходному состоянию"
-          >
-            ↺ Сбросить к исходным
-          </button>
+          {/* БЫСТРЫЕ НАБОРЫ */}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              className="btn sm ghost"
+              disabled={busy || !isInstalled}
+              onClick={() => handleApplyPreset('gamer')}
+              title="YouTube Turbo + Discord Web + Discord Voice RTC + Общий хостлист"
+            >
+              🎮 Геймер / Медиа
+            </button>
+            <button
+              type="button"
+              className="btn sm ghost"
+              disabled={busy || !isInstalled}
+              onClick={() => handleApplyPreset('aggressive')}
+              title="Все стратегии + Агрессивный режим для жестких ТСПУ"
+            >
+              🔥 Максимум (ТСПУ)
+            </button>
+            <button
+              type="button"
+              className="btn sm ghost"
+              disabled={busy || !isInstalled}
+              onClick={() => handleApplyPreset('youtube')}
+              title="Только YouTube Turbo"
+            >
+              📺 Только YouTube
+            </button>
+            <button
+              type="button"
+              className="btn sm ghost"
+              disabled={busy || !isInstalled}
+              onClick={handleResetFeatures}
+              title="Сбросить все стратегии к стандартным"
+            >
+              ↺ Сброс
+            </button>
+          </div>
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 14 }}>
-          {/* 1. YouTube Direct */}
-          {renderFeatureCard(
-            'hybrid_youtube',
-            '🎥 YouTube Direct (Экономия 100% VPS)',
-            features.hybrid_youtube ? 'DIRECT (GGC)' : 'PROXY (VPS)',
-            'Видео 4K воспроизводится напрямую с домашних кэш-серверов Google GGC на полной скорости тарифа (до 1 Гбит/с) через Zapret, не забивая канал зарубежного сервера.',
-            features.hybrid_youtube ? 'Маршрут: DIRECT + nfqws' : 'Маршрут: PROXY (через VPS)',
-            'через PROXY (VPS)'
-          )}
-
-          {/* 2. Discord Direct */}
-          {renderFeatureCard(
-            'hybrid_discord',
-            '💬 Discord Direct (Прямой доступ)',
-            features.hybrid_discord ? 'DIRECT' : 'PROXY (VPS)',
-            'Подключение к серверам и чатам Discord напрямую через Zapret. Минимальный домашний пинг и быстрая загрузка медиафайлов.',
-            features.hybrid_discord ? 'Маршрут: DIRECT + nfqws' : 'Маршрут: PROXY (через VPS)',
-            'через PROXY (VPS)'
-          )}
-
-          {/* 3. Discord Voice RTC */}
-          {renderFeatureCard(
-            'discord_voice_udp',
-            '🎙️ Голосовые каналы (UDP 50000:65535)',
-            features.discord_voice_udp ? 'RTC VOICE' : 'STANDALONE',
-            'Перехват голосовых шлюзов Discord в iptables mangle. Устраняет проблему вечного «RTC Connecting» и потерю пакетов в канале.',
-            features.discord_voice_udp ? 'Iptables: UDP 443 + 50000:65535' : 'Iptables: только TCP/UDP 443',
-            'только веб-порты 80/443'
-          )}
-
-          {/* 4. YouTube Turbo Desync */}
-          {renderFeatureCard(
+          {/* 1. YouTube Turbo */}
+          {renderStrategyCard(
             'youtube_turbo',
-            '🚀 YouTube Turbo Desync (Disorder2)',
-            features.youtube_turbo ? 'DISORDER2' : 'SPLIT2',
-            'Нарушение очередности первого пакета (disorder2, autottl=2). Пробивает жесткие ТСПУ провайдеров, если базовый split2 зависает.',
-            features.youtube_turbo ? 'Стратегия: disorder2 (split-pos=1)' : 'Стратегия: базовый split2',
+            '🎥 YouTube Turbo (Fake + Disorder2)',
+            'GGC DIRECT',
+            'Нарушение очередности первого пакета (disorder2, pos=1) с отсечкой cutoff=d4. Устраняет буферизацию 4K видео с локальных кэшей Google GGC без нагрузки на VPS.',
+            'disorder2 (pos=1, cutoff=d4) + DIRECT',
             'стандартный split2'
           )}
 
-          {/* 5. Изоляция IP-блокировок */}
-          <div style={{ gridColumn: '1 / -1' }}>
-            {renderFeatureCard(
-              'isolated_proxy',
-              '🔒 Изоляция IP-блокировок (ChatGPT, Claude, X/Twitter, Instagram -> PROXY)',
-              features.isolated_proxy ? 'STRICT PROXY' : 'DEFAULT',
-              'Разделение задач: Zapret обходит только цензуру по SNI (YouTube/Discord). Сервисы с жесткой блокировкой по IP гарантированно идут через VLESS/Shadowsocks на VPS, исключая конфликты с DPI.',
-              features.isolated_proxy ? 'Изоляция: AI и соцсети строго на PROXY' : 'Изоляция: по стандартным правилам',
-              'по общим правилам'
-            )}
-          </div>
+          {/* 2. Discord Web & Chat */}
+          {renderStrategyCard(
+            'hybrid_discord',
+            '💬 Discord Web & Chat (Fake + Split2)',
+            'DIRECT',
+            'Прямое подключение к текстовым серверам, каналам и медиафайлам Discord напрямую через Zapret. Минимальный домашний пинг и быстрая загрузка картинок.',
+            'split2 (cutoff=d4) + DIRECT',
+            'через стандартный маршрут'
+          )}
+
+          {/* 3. Discord Voice RTC */}
+          {renderStrategyCard(
+            'discord_voice_udp',
+            '🎙️ Discord Voice RTC (UDP 50000:65535)',
+            'RTC VOICE',
+            'Перехват голосовых шлюзов Discord в iptables mangle. Устраняет вечный статус «RTC Connecting» и потерю звука в голосовом канале.',
+            'UDP 50000:65535 + L7 discord/stun',
+            'только TCP/UDP 80/443'
+          )}
+
+          {/* 4. Общий веб-обход (Hostlist) */}
+          {renderStrategyCard(
+            'general_bypass',
+            '🌐 Универсальный веб-обход (Hostlist)',
+            'HOSTLIST',
+            'Обход блокировок по списку доменов (/opt/etc/zapret/zapret-hosts.txt): RuTracker, NTC Party, Kinozal, Flibusta. Обычные сайты и банки не затрагиваются.',
+            'zapret-hosts.txt (cutoff=d4)',
+            'без фильтрации общего веб'
+          )}
+
+          {/* 5. Агрессивный режим ТСПУ */}
+          {renderStrategyCard(
+            'aggressive_dpi',
+            '🔥 Агрессивный режим ТСПУ (seqovl + midsld + badseq)',
+            'ТСПУ BOOST',
+            'Перекрытие последовательностей (seqovl=1), сплит по середине SNI (midsld) и подделка badseq. Пробивает жесткие блокировки мобильных и кабельных операторов.',
+            'seqovl=1, midsld, badseq, md5sig',
+            'базовые стратегии'
+          )}
+
+          {/* 6. Изоляция IP-блокировок */}
+          {renderStrategyCard(
+            'isolated_proxy',
+            '🔒 Изоляция IP-блокировок (ChatGPT, Claude, X -> PROXY)',
+            'STRICT PROXY',
+            'Разделение задач: Zapret обходит только цензуру по SNI (YouTube/Discord). Сервисы с жесткой блокировкой по IP (ChatGPT, Claude, Instagram, X/Twitter) гарантированно идут через VPS.',
+            'AI и соцсети строго через VPS PROXY',
+            'по общим правилам маршрутизации'
+          )}
         </div>
       </section>
     </div>

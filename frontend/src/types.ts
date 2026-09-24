@@ -70,6 +70,8 @@ export interface ZapretFeatures {
   hybrid_discord: boolean
   discord_voice_udp: boolean
   youtube_turbo: boolean
+  general_bypass: boolean
+  aggressive_dpi: boolean
   isolated_proxy: boolean
 }
 
@@ -82,6 +84,7 @@ export interface ZapretStatus {
   preset?: string
   cmdline?: string
   config?: string
+  hosts?: string
   features?: ZapretFeatures
 }
 
