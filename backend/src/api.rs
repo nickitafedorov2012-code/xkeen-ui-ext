@@ -2499,7 +2499,7 @@ pub async fn get_diagnostics_health(State(state): State<AppState>) -> Response {
     let (dns_status, dns_msg) = if dns_ok {
         ("ok", format!("DNS резолв успешен ({} мс)", dns_ms))
     } else {
-        ("fail", "DNS резолв не удался".into())
+        ("fail", "DNS резолв не удался".to_string())
     };
 
     // 4. Проверка WAN доступа
@@ -2507,15 +2507,15 @@ pub async fn get_diagnostics_health(State(state): State<AppState>) -> Response {
         .timeout(std::time::Duration::from_secs(3))
         .send().await.map(|r| r.status().is_success()).unwrap_or(false);
     let (wan_status, wan_msg) = if wan_ok {
-        ("ok", "Интернет-соединение (WAN) активно".into())
+        ("ok", "Интернет-соединение (WAN) активно".to_string())
     } else {
-        ("warn", "Прямой доступ к тестовому узлу не отвечает".into())
+        ("warn", "Прямой доступ к тестовому узлу не отвечает".to_string())
     };
 
     // 5. Проверка хранилища /opt
     let disk_msg = match tokio::process::Command::new("df").arg("-h").arg("/opt").output().await {
         Ok(out) => String::from_utf8_lossy(&out.stdout).lines().nth(1).unwrap_or("").to_string(),
-        Err(_) => "Накопитель Entware смонтирован".into(),
+        Err(_) => "Накопитель Entware смонтирован".to_string(),
     };
 
     api_ok(json!({
@@ -2586,8 +2586,8 @@ pub async fn test_dns_domain(
 pub async fn get_policies_map(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
 
-    let devices_res = rci::get_hotspot(&state.http, &cfg).await.unwrap_or_default();
     let policies_res = rci::get_policies(&state.http, &cfg).await.unwrap_or_default();
+    let devices_res = rci::get_devices(&state.http, &cfg, &policies_res, "").await.unwrap_or_default();
     let servers_res = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await.unwrap_or_default();
 
     let mut nodes_devices = Vec::new();
@@ -2603,7 +2603,7 @@ pub async fn get_policies_map(State(state): State<AppState>) -> Response {
             "name": d.name,
             "policy_id": d.policy,
             "xkeen_server": assigned_srv,
-            "active": d.active,
+            "active": d.online,
         }));
     }
 
