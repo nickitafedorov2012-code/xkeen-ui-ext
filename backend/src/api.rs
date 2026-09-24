@@ -2669,14 +2669,16 @@ pub async fn zapret_action(
     if act == "install" {
         let install_cmd = r#"
             mkdir -p /opt/zapret /opt/etc/init.d /opt/etc/zapret
-            cd /opt/zapret
-            (curl -kLs -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret/archive/refs/heads/master.tar.gz" -o z.tar.gz || \
-             curl -kLs "https://ghproxy.net/https://github.com/bol-van/zapret/archive/refs/heads/master.tar.gz" -o z.tar.gz) && \
-            tar -xzf z.tar.gz --strip-components=1 2>/dev/null && \
+            cd /opt
+            (curl -kLs -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" -o z.tar.gz || \
+             curl -kLs "https://ghproxy.net/https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" -o z.tar.gz) && \
+            tar -xzf z.tar.gz && \
             rm -f z.tar.gz && \
-            chmod +x install_bin.sh binaries/*/* 2>/dev/null && \
-            ./install_bin.sh 2>/dev/null && \
-            (cp -f init.d/sysv/zapret /opt/etc/init.d/S51zapret 2>/dev/null || cp -f init.d/openwrt/zapret /opt/etc/init.d/S51zapret 2>/dev/null) && \
+            rm -rf /opt/zapret && \
+            mv zapret-v* /opt/zapret && \
+            cd /opt/zapret && \
+            ./install_bin.sh && \
+            echo 'IyEvYmluL3NoCgpjYXNlICIkMSIgaW4KICBzdGFydCkKICAgIGlmIHBpZG9mIG5mcXdzID4vZGV2L251bGwgMj4mMTsgdGhlbgogICAgICBleGl0IDAKICAgIGZpCiAgICBta2RpciAtcCAvb3B0L2V0Yy96YXByZXQKICAgIFsgISAtZiAvb3B0L2V0Yy96YXByZXQvemFwcmV0LmNvbmYgXSAmJiBjcCAtZiAvb3B0L3phcHJldC9jb25maWcuZGVmYXVsdCAvb3B0L2V0Yy96YXByZXQvemFwcmV0LmNvbmYgMj4vZGV2L251bGwKICAgIGlmIFsgLXggL29wdC96YXByZXQvbmZxL25mcXdzIF07IHRoZW4KICAgICAgL29wdC96YXByZXQvbmZxL25mcXdzIC0tZGFlbW9uIC0tcW51bT0yMDAgLS1kcGktZGVzeW5jPWZha2Usc3BsaXQyIC0tZHBpLWRlc3luYy1hdXRvdHRsPTIgLS1kcGktZGVzeW5jLWZvb2xpbmc9bWQ1c2lnCiAgICBlbGlmIFsgLXggL29wdC96YXByZXQvYmluYXJpZXMvbGludXgtYXJtNjQvbmZxd3MgXTsgdGhlbgogICAgICAvb3B0L3phcHJldC9iaW5hcmllcy9saW51eC1hcm02NC9uZnF3cyAtLWRhZW1vbiAtLXFudW09MjAwIC0tZHBpLWRlc3luYz1mYWtlLHNwbGl0MiAtLWRwaS1kZXN5bmMtYXV0b3R0bD0yIC0tZHBpLWRlc3luYy1mb29saW5nPW1kNXNpZwogICAgZmkKICAgIDs7CiAgc3RvcCkKICAgIGtpbGxhbGwgbmZxd3MgMj4vZGV2L251bGwKICAgIDs7CiAgcmVzdGFydCkKICAgIC9vcHQvZXRjL2luaXQuZC9TNTF6YXByZXQgc3RvcAogICAgc2xlZXAgMQogICAgL29wdC9ldGMvaW5pdC5kL1M1MXphcHJldCBzdGFydAogICAgOzsKICBzdGF0dXMpCiAgICBpZiBwaWRvZiBuZnF3cyA+L2Rldi9udWxsIDI+JjE7IHRoZW4KICAgICAgZXhpdCAwCiAgICBlbHNlCiAgICAgIGV4aXQgMQogICAgZmkKICAgIDs7CiAgKikKICAgIGVjaG8gIlVzYWdlOiAkMCB7c3RhcnR8c3RvcHxyZXN0YXJ0fHN0YXR1c30iCiAgICBleGl0IDEKICAgIDs7CmVzYWMK' | base64 -d > /opt/etc/init.d/S51zapret && \
             chmod +x /opt/etc/init.d/S51zapret && \
             /opt/etc/init.d/S51zapret start
         "#;

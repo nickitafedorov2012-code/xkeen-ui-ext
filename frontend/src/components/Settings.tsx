@@ -134,6 +134,10 @@ export default function Settings({ notify, status, refresh }: Props) {
     try {
       await apiPost('zapret/action', { action })
       notify(action === 'install' ? 'Установка Zapret завершена' : `Команда Zapret '${action}' выполнена`)
+      try {
+        const zap = await apiGet<ZapretStatus>('zapret/status')
+        setZapretStatus(zap)
+      } catch {}
       loadQuickWins()
     } catch (e: any) {
       notify('Ошибка Zapret: ' + e.message, true)
@@ -521,9 +525,9 @@ export default function Settings({ notify, status, refresh }: Props) {
   }
 
   return (
-    <div className="grid2">
+    <div className="settings-container">
       {/* ПАНЕЛЬ БЫСТРЫХ ИНСТРУМЕНТОВ */}
-      <div className="card" style={{ gridColumn: '1 / -1', display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', padding: '12px 18px', background: 'linear-gradient(90deg, rgba(0, 211, 242, 0.08) 0%, rgba(43, 127, 255, 0.05) 100%)', border: '1px solid rgba(0, 211, 242, 0.2)' }}>
+      <div className="card settings-toolbar-card" style={{ display: 'flex', gap: 12, alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', padding: '12px 18px', background: 'linear-gradient(90deg, rgba(0, 211, 242, 0.08) 0%, rgba(43, 127, 255, 0.05) 100%)', border: '1px solid rgba(0, 211, 242, 0.2)' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span style={{ fontSize: 20 }}>🛠️</span>
           <div>
@@ -541,246 +545,765 @@ export default function Settings({ notify, status, refresh }: Props) {
         </div>
       </div>
 
-      {/* FAILOVER КАРТОЧКА */}
-      <section className="card">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <h2 style={{ margin: 0 }}>Failover</h2>
-            {autoSaveStatus === 'saving' && (
-              <span className="badge" style={{ borderColor: 'rgba(0, 211, 242, 0.4)', color: '#00D3F2', fontSize: 11 }}>
-                сохранение…
+      <div className="settings-columns">
+        {/* ЛЕВАЯ КОЛОНКА */}
+        <div className="settings-col">
+          {/* FAILOVER КАРТОЧКА */}
+          <section className="card">
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <h2 style={{ margin: 0 }}>Failover</h2>
+                {autoSaveStatus === 'saving' && (
+                  <span className="badge" style={{ borderColor: 'rgba(0, 211, 242, 0.4)', color: '#00D3F2', fontSize: 11 }}>
+                    сохранение…
+                  </span>
+                )}
+              </div>
+              <span className={`badge ${settings.failover.enabled ? 'badge-online' : ''}`}>
+                {settings.failover.enabled ? '🟢 включён' : '⚪ выключен'}
               </span>
-            )}
-          </div>
-          <span className={`badge ${settings.failover.enabled ? 'badge-online' : ''}`}>
-            {settings.failover.enabled ? '🟢 включён' : '⚪ выключен'}
-          </span>
-        </div>
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-          <b>Включить автоматический failover</b>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
-            <label className="switch" title={settings.failover.enabled ? 'Выключить failover' : 'Включить failover'}>
-              <input
-                type="checkbox"
-                checked={settings.failover.enabled}
-                onChange={(e) => toggleFailoverEnabled(e.target.checked)}
+            </div>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <b>Включить автоматический failover</b>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+                <label className="switch" title={settings.failover.enabled ? 'Выключить failover' : 'Включить failover'}>
+                  <input
+                    type="checkbox"
+                    checked={settings.failover.enabled}
+                    onChange={(e) => toggleFailoverEnabled(e.target.checked)}
+                  />
+                  <span className="slider" />
+                </label>
+                <span style={{ fontSize: 13, minWidth: 64, color: settings.failover.enabled ? 'var(--green)' : 'var(--muted)' }}>
+                  {settings.failover.enabled ? 'Включён' : 'Выключен'}
+                </span>
+              </div>
+            </div>
+            <label className="row"><span>Порог пинга, мс</span>
+              <NumberInput
+                min={50}
+                max={5000}
+                step={50}
+                fallback={300}
+                value={settings.failover.ping_threshold_ms}
+                onChange={(val) => patch((s) => (s.failover.ping_threshold_ms = val))}
               />
-              <span className="slider" />
             </label>
-            <span style={{ fontSize: 13, minWidth: 64, color: settings.failover.enabled ? 'var(--green)' : 'var(--muted)' }}>
-              {settings.failover.enabled ? 'Включён' : 'Выключен'}
-            </span>
-          </div>
-        </div>
-        <label className="row"><span>Порог пинга, мс</span>
-          <NumberInput
-            min={50}
-            max={5000}
-            step={50}
-            fallback={300}
-            value={settings.failover.ping_threshold_ms}
-            onChange={(val) => patch((s) => (s.failover.ping_threshold_ms = val))}
-          />
-        </label>
-        <div className="row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
-          <span>Цепочка приоритетов (первый — основной)</span>
-          <div className="modal-list" style={{ maxHeight: 260 }}>
-            {chain.length === 0 && <p className="muted small" style={{ margin: 0 }}>Цепочка не задана — failover выбирает лучший доступный сервер.</p>}
-            {chain.map((id, i) => {
-              const sv = servers.find((x) => x.id === id)
-              return (
-                <div key={id} className="check-row" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                  <span className="badge">{i === 0 ? 'ОСН' : `РЕЗ${i}`}</span>
-                  {sv?.provider && (
-                    <span className="tag-provider" style={{ fontSize: 10, padding: '1px 5px', cursor: 'default' }}>
-                      📦 {sv.provider_name || sv.provider}
-                    </span>
-                  )}
-                  <span className="server-name" style={{ flex: 1 }} title={id}>{sv ? sv.name : `${id} (сейчас недоступен)`}</span>
-                  {sv && (
-                    <span className={'ping ' + pingClass(sv.ping_ms)}>
-                      {sv.ping_ms > 0 ? `${sv.ping_ms} мс` : '—'}
-                    </span>
-                  )}
-                  <button className="btn sm ghost" disabled={i === 0} onClick={() => chainMove(i, -1)}>↑</button>
-                  <button className="btn sm ghost" disabled={i === chain.length - 1} onClick={() => chainMove(i, 1)}>↓</button>
-                  <button
-                    className="btn sm ghost"
-                    onClick={() => patch((s) => (s.failover.priority_chain = chain.filter((x) => x !== id)))}
-                  >
-                    ✕
+            <div className="row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
+              <span>Цепочка приоритетов (первый — основной)</span>
+              <div className="modal-list" style={{ maxHeight: 260 }}>
+                {chain.length === 0 && <p className="muted small" style={{ margin: 0 }}>Цепочка не задана — failover выбирает лучший доступный сервер.</p>}
+                {chain.map((id, i) => {
+                  const sv = servers.find((x) => x.id === id)
+                  return (
+                    <div key={id} className="check-row" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <span className="badge">{i === 0 ? 'ОСН' : `РЕЗ${i}`}</span>
+                      {sv?.provider && (
+                        <span className="tag-provider" style={{ fontSize: 10, padding: '1px 5px', cursor: 'default' }}>
+                          📦 {sv.provider_name || sv.provider}
+                        </span>
+                      )}
+                      <span className="server-name" style={{ flex: 1 }} title={id}>{sv ? sv.name : `${id} (сейчас недоступен)`}</span>
+                      {sv && (
+                        <span className={'ping ' + pingClass(sv.ping_ms)}>
+                          {sv.ping_ms > 0 ? `${sv.ping_ms} мс` : '—'}
+                        </span>
+                      )}
+                      <button className="btn sm ghost" disabled={i === 0} onClick={() => chainMove(i, -1)}>↑</button>
+                      <button className="btn sm ghost" disabled={i === chain.length - 1} onClick={() => chainMove(i, 1)}>↓</button>
+                      <button
+                        className="btn sm ghost"
+                        onClick={() => patch((s) => (s.failover.priority_chain = chain.filter((x) => x !== id)))}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  )
+                })}
+                <select
+                  className="select"
+                  value=""
+                  onChange={(e) => {
+                    if (!e.target.value) return
+                    if (!chain.includes(e.target.value)) {
+                      patch((s) => (s.failover.priority_chain = [...chain, e.target.value]))
+                    }
+                  }}
+                >
+                  <option value="">+ добавить сервер в цепочку…</option>
+                  {servers
+                    .filter((s) => !chain.includes(s.id))
+                    .map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.provider_name ? `[${s.provider_name}] ` : s.provider ? `[${s.provider}] ` : ''}{s.name} · {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
+                      </option>
+                    ))}
+                </select>
+              </div>
+              {chain.length > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 6 }}>
+                  <button className="btn sm ghost" onClick={() => patch((s) => (s.failover.priority_chain = []))}>
+                    Очистить цепочку
                   </button>
                 </div>
-              )
-            })}
-            <select
-              className="select"
-              value=""
-              onChange={(e) => {
-                if (!e.target.value) return
-                if (!chain.includes(e.target.value)) {
-                  patch((s) => (s.failover.priority_chain = [...chain, e.target.value]))
-                }
-              }}
-            >
-              <option value="">+ добавить сервер в цепочку…</option>
-              {servers
-                .filter((s) => !chain.includes(s.id))
-                .map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.provider_name ? `[${s.provider_name}] ` : s.provider ? `[${s.provider}] ` : ''}{s.name} · {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
-                  </option>
-                ))}
-            </select>
-          </div>
-          {chain.length > 0 && (
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 6 }}>
-              <button className="btn sm ghost" onClick={() => patch((s) => (s.failover.priority_chain = []))}>
-                Очистить цепочку
+              )}
+            </div>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>Возвращаться на приоритетный при восстановлении</span>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+                <label className="switch" title="Автовозврат при восстановлении связи">
+                  <input
+                    type="checkbox"
+                    checked={settings.failover.auto_restore_priority}
+                    onChange={(e) => patch((s) => (s.failover.auto_restore_priority = e.target.checked))}
+                  />
+                  <span className="slider" />
+                </label>
+                <span style={{ fontSize: 13, minWidth: 64, color: settings.failover.auto_restore_priority ? 'var(--green)' : 'var(--muted)' }}>
+                  {settings.failover.auto_restore_priority ? 'Да' : 'Нет'}
+                </span>
+              </div>
+            </div>
+            <label className="row"><span>Интервал проверки, сек</span>
+              <NumberInput
+                min={15}
+                max={3600}
+                step={5}
+                fallback={60}
+                value={settings.failover.interval_secs}
+                onChange={(val) => patch((s) => (s.failover.interval_secs = val))}
+              />
+            </label>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center', marginTop: 12, flexWrap: 'wrap' }}>
+              <button className="btn" onClick={testCheck}>🔍 Тестовая проверка сейчас</button>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+                {autoSaveStatus === 'saving' && (
+                  <span style={{ color: '#00D3F2', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                    ⏳ Сохранение…
+                  </span>
+                )}
+                {autoSaveStatus === 'saved' && (
+                  <span style={{ color: '#34d399', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                    ✓ Сохранено автоматически
+                  </span>
+                )}
+                {autoSaveStatus === 'error' && (
+                  <span style={{ color: '#f87171', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                    ⚠️ Ошибка автосохранения
+                  </span>
+                )}
+              </div>
+            </div>
+          </section>
+
+          {/* ДОМЕНЫ */}
+          <section className="card">
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <h2 style={{ margin: 0 }}>🌐 Домены</h2>
+              <button type="button" className="btn sm" onClick={() => setPresetCatalogOpen(true)} title="Добавить готовые списки (YouTube, Discord, AI...)">
+                ✨ Каталог пресетов
               </button>
             </div>
-          )}
-        </div>
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-          <span>Возвращаться на приоритетный при восстановлении</span>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
-            <label className="switch" title="Автовозврат при восстановлении связи">
-              <input
-                type="checkbox"
-                checked={settings.failover.auto_restore_priority}
-                onChange={(e) => patch((s) => (s.failover.auto_restore_priority = e.target.checked))}
+            <p className="muted small">По одному домену в строке. Правила вставляются в начало rules: (DOMAIN-SUFFIX) и имеют приоритет. Сопутствующие CDN и медиа-сервера подтягиваются автоматически.</p>
+            <label className="row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+              <span>⏭ Напрямую (мимо прокси → DIRECT)</span>
+              <textarea
+                className="input"
+                rows={6}
+                placeholder={'example.com\nlocal-service.net\nw3.org'}
+                value={directDomains}
+                onChange={(e) => setDirectDomains(e.target.value)}
+                style={{ fontFamily: 'Consolas, monospace', fontSize: 12.5, resize: 'vertical' }}
               />
-              <span className="slider" />
             </label>
-            <span style={{ fontSize: 13, minWidth: 64, color: settings.failover.auto_restore_priority ? 'var(--green)' : 'var(--muted)' }}>
-              {settings.failover.auto_restore_priority ? 'Да' : 'Нет'}
-            </span>
-          </div>
-        </div>
-        <label className="row"><span>Интервал проверки, сек</span>
-          <NumberInput
-            min={15}
-            max={3600}
-            step={5}
-            fallback={60}
-            value={settings.failover.interval_secs}
-            onChange={(val) => patch((s) => (s.failover.interval_secs = val))}
-          />
-        </label>
-        <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center', marginTop: 12, flexWrap: 'wrap' }}>
-          <button className="btn" onClick={testCheck}>🔍 Тестовая проверка сейчас</button>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
-            {autoSaveStatus === 'saving' && (
-              <span style={{ color: '#00D3F2', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                ⏳ Сохранение…
-              </span>
-            )}
-            {autoSaveStatus === 'saved' && (
-              <span style={{ color: '#34d399', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                ✓ Сохранено автоматически
-              </span>
-            )}
-            {autoSaveStatus === 'error' && (
-              <span style={{ color: '#f87171', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                ⚠️ Ошибка автосохранения
-              </span>
-            )}
-          </div>
-        </div>
-      </section>
-
-      {/* DNS РЕЖИМ (MIHOMO) */}
-      <section className="card">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-          <h2 style={{ margin: 0 }}>🧭 DNS Режим (Mihomo)</h2>
-          <span className="badge" style={{ textTransform: 'uppercase' }}>{dnsMode}</span>
-        </div>
-        <p className="muted small">Режим обработки DNS-запросов ядром. Изменение режима перезапускает службу DNS.</p>
-        <div className="tile-options-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
-          <label className={`option-tile-card ${dnsMode === 'fake-ip' ? 'active' : ''}`}>
-            <div className="option-tile-header">
-              <input
-                type="radio"
-                name="dns_mode_setting"
-                checked={dnsMode === 'fake-ip'}
-                onChange={() => handleSetDnsMode('fake-ip')}
-                disabled={dnsModeBusy}
+            <label className="row" style={{ flexDirection: 'column', alignItems: 'stretch', marginTop: 8 }}>
+              <span>🔒 Принудительно через прокси (→ PROXY)</span>
+              <textarea
+                className="input"
+                rows={6}
+                placeholder={'openai.com\nyoutube.com\ngithub.com'}
+                value={forceDomains}
+                onChange={(e) => setForceDomains(e.target.value)}
+                style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'Consolas, monospace', fontSize: 12.5, resize: 'vertical' }}
               />
-              <span className="option-tile-title">⚡ Fake-IP</span>
-              <span className="badge badge-accent" style={{ fontSize: 10, padding: '1px 5px', marginLeft: 'auto' }}>
-                Рекомендуется
+            </label>
+            {autoCdns.length > 0 && (
+              <div style={{ marginTop: 8, padding: '8px 10px', background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.2)', borderRadius: 6, fontSize: 12 }}>
+                <div style={{ color: '#38bdf8', fontWeight: 600, marginBottom: 4 }}>
+                  ⚡ Автоматически подключенные CDN и медиа-сервера ({autoCdns.length}):
+                </div>
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                  {autoCdns.map((cdn) => (
+                    <span key={cdn} style={{ fontSize: 11, background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace' }}>
+                      {cdn}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            <button className="btn primary" style={{ marginTop: 12 }} onClick={saveDomains} disabled={savingDomains}>
+              {savingDomains ? 'Применение и поиск CDN…' : '🌐 Применить домены'}
+            </button>
+          </section>
+
+          {/* ОПОВЕЩЕНИЯ (TELEGRAM / WEBHOOK) */}
+          <section className="card">
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <h2 style={{ margin: 0 }}>🔔 Оповещения о сбоях</h2>
+              <span className={`badge ${telegramEnabled ? 'badge-online' : ''}`}>
+                {telegramEnabled ? '🟢 Telegram вкл' : '⚪ выкл'}
               </span>
             </div>
-            <div className="option-tile-desc">
-              Мгновенный отклик DNS (~1 мс), эффективный обход DPI и блокировок, идеален для стримов, мессенджеров и игр.
+            <p className="muted small">Мгновенные уведомления в Telegram при падении серверов и переключении Failover.</p>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <b>Telegram оповещения</b>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={telegramEnabled}
+                  onChange={(e) => setTelegramEnabled(e.target.checked)}
+                />
+                <span className="slider" />
+              </label>
             </div>
-          </label>
-
-          <label className={`option-tile-card ${dnsMode === 'redir-host' ? 'active' : ''}`}>
-            <div className="option-tile-header">
+            <label className="row">
+              <span>Bot Token</span>
               <input
-                type="radio"
-                name="dns_mode_setting"
-                checked={dnsMode === 'redir-host'}
-                onChange={() => handleSetDnsMode('redir-host')}
-                disabled={dnsModeBusy}
+                className="input"
+                placeholder="123456789:ABCdefGhIJKlmNoPQRstuVWXyz"
+                value={telegramBotToken}
+                onChange={(e) => setTelegramBotToken(e.target.value)}
               />
-              <span className="option-tile-title">🌐 Redir-Host</span>
-              <span className="badge" style={{ fontSize: 10, padding: '1px 5px', marginLeft: 'auto' }}>
-                Прямой
+            </label>
+            <label className="row">
+              <span>Chat ID</span>
+              <input
+                className="input"
+                placeholder="123456789 или -1001234567890"
+                value={telegramChatId}
+                onChange={(e) => setTelegramChatId(e.target.value)}
+              />
+            </label>
+            <label className="row">
+              <span>Webhook URL</span>
+              <input
+                className="input"
+                placeholder="https://my-server.com/api/failover-hook"
+                value={webhookUrl}
+                onChange={(e) => setWebhookUrl(e.target.value)}
+              />
+            </label>
+            <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+              <button className="btn primary" onClick={handleSaveNotifications} disabled={notifSaving}>
+                {notifSaving ? 'Сохранение…' : '💾 Сохранить оповещения'}
+              </button>
+              <button className="btn" onClick={handleTestNotification} disabled={notifTesting}>
+                {notifTesting ? 'Отправка…' : '💬 Тестовое сообщение'}
+              </button>
+            </div>
+          </section>
+
+          {/* ADBLOCK */}
+          <section className="card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <h2 style={{ margin: 0 }}>🛡️ Блокировка рекламы (AdBlock)</h2>
+              <span className={`badge ${adblockEnabled ? 'badge-online' : ''}`} style={{ color: adblockEnabled ? '#22c55e' : 'var(--muted)' }}>
+                {adblockEnabled ? '🟢 Активно на роутере' : '⚪ Отключено'}
               </span>
             </div>
-            <div className="option-tile-desc">
-              Классический резолв реальных IP-адресов. Используйте, если требуются локальные домены роутера (.keenetic.io / Home LAN).
+            <p className="muted small">
+              Блокирует рекламные баннеры, видеовставки, счетчики трекеров и аналитику для всех устройств в сети без установки расширений в браузеры (правило <code>category-ads-all</code> из базы GeoSite).
+            </p>
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>Включить AdBlock для всех устройств</span>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+                <label className="switch">
+                  <input
+                    type="checkbox"
+                    checked={adblockEnabled}
+                    disabled={adblockBusy}
+                    onChange={(e) => handleToggleAdblock(e.target.checked)}
+                  />
+                  <span className="slider" />
+                </label>
+                <span style={{ fontSize: 13, minWidth: 64, color: adblockEnabled ? 'var(--green)' : 'var(--muted)' }}>
+                  {adblockBusy ? '⏳…' : adblockEnabled ? 'Да' : 'Нет'}
+                </span>
+              </div>
             </div>
-          </label>
-        </div>
-      </section>
+          </section>
 
-      {/* СТОРОЖЕВОЙ ТАЙМЕР ЯДРА (WATCHDOG & AUTO-HEALING) */}
-      <section className="card">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-          <h2 style={{ margin: 0 }}>🛡️ Сторожевой таймер ядра (Watchdog)</h2>
-          <span className="badge badge-online" style={{ color: '#22c55e' }}>
-            🟢 Активен (авто-лечение)
-          </span>
-        </div>
-        <p className="muted small">
-          Фоновый сторожевой процесс демона непрерывно контролирует целостность правил маршрутизации в <code>config.yaml</code>.
-        </p>
-        <div className="stats-grid four-col" style={{ marginTop: 12 }}>
-          <div className="stat-card">
-            <div className="stat-label">Статус сторожа</div>
-            <div className="stat-value" style={{ fontSize: 14, color: '#22c55e' }}>
-              ✓ Авто-лечение
-            </div>
-            <div className="muted small">Контроль config.yaml</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">Интервал проверки</div>
-            <div className="stat-value" style={{ fontSize: 18 }}>
-              4 сек
-            </div>
-            <div className="muted small">Фоновый демон</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">Защита блоков</div>
-            <div className="stat-value" style={{ fontSize: 13, color: 'var(--accent)', fontFamily: 'monospace' }}>
-              DEVICE, FORCE, IGNORE
-            </div>
-            <div className="muted small">Авто-восстановление</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">При рестарте XKeen</div>
-            <div className="stat-value" style={{ fontSize: 13, color: '#38bdf8' }}>
-              Без разрыва связи
-            </div>
-            <div className="muted small">Бесшовный накат правил</div>
-          </div>
-        </div>
-      </section>
+          {/* RCI (KEENETIC) */}
+          <section className="card">
+            <h2>🔌 RCI (Keenetic)</h2>
+            <label className="row"><span>Host</span>
+              <input className="input" value={settings.rci.host} onChange={(e) => patch((s) => (s.rci.host = e.target.value))} />
+            </label>
+            <label className="row"><span>Порт</span>
+              <NumberInput
+                min={1}
+                max={65535}
+                fallback={79}
+                value={settings.rci.port}
+                onChange={(val) => patch((s) => (s.rci.port = val))}
+              />
+            </label>
+            <label className="row"><span>Логин</span>
+              <input className="input" value={settings.rci.login} onChange={(e) => patch((s) => (s.rci.login = e.target.value))} />
+            </label>
+            <label className="row"><span>Пароль (fallback)</span>
+              <input className="input" type="password" value={settings.rci.password} onChange={(e) => patch((s) => (s.rci.password = e.target.value))} />
+            </label>
+            <label className="row"><span>Токен (X-Ndma-Tkn)</span>
+              <input className="input" value={settings.rci.token} placeholder="пусто = из /opt/etc/xkeen/xkeen.json"
+                onChange={(e) => patch((s) => (s.rci.token = e.target.value))} />
+            </label>
+            <p className="muted small">Если токен не задан, панель возьмёт его из /opt/etc/xkeen/xkeen.json; иначе — challenge-auth.</p>
+          </section>
 
-      {/* БЕЗОПАСНОСТЬ И ПАРОЛЬ */}
+          {/* СЕРВИС XKEEN */}
+          <section className="card">
+            <h2>🖥 Сервис XKeen</h2>
+            <p className="muted small">Restart перегенерирует config.yaml — настройки маршрутизации возвращаются к исходным (до любых изменений из панели).</p>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button className="btn" disabled={svcBusy !== ''} onClick={() => svc('status')}>📊 Статус</button>
+              <button className="btn" disabled={svcBusy !== ''} onClick={() => svc('start')}>▶ Старт</button>
+              <button className="btn" disabled={svcBusy !== ''} onClick={() => svc('restart')}>🔄 Рестарт</button>
+              <button className="btn" style={{ borderColor: 'var(--red)', color: 'var(--red)' }} disabled={svcBusy !== ''} onClick={() => { if (confirm('Остановить сервис XKeen? Интернет через прокси пропадёт.')) svc('stop') }}>⏹ Стоп</button>
+            </div>
+            <label className="row" style={{ marginTop: 10 }}><span>Init-скрипт XKeen</span>
+              <input className="input" value={settings.system?.xkeen_init ?? '/opt/etc/init.d/S05xkeen'}
+                onChange={(e) => patch((s) => (s.system.xkeen_init = e.target.value))} />
+            </label>
+          </section>
+        </div>
+
+        {/* ПРАВАЯ КОЛОНКА */}
+        <div className="settings-col">
+          {/* DNS РЕЖИМ (MIHOMO) */}
+          <section className="card">
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <h2 style={{ margin: 0 }}>🧭 DNS Режим (Mihomo)</h2>
+              <span className="badge" style={{ textTransform: 'uppercase' }}>{dnsMode}</span>
+            </div>
+            <p className="muted small">Режим обработки DNS-запросов ядром. Изменение режима перезапускает службу DNS.</p>
+            <div className="tile-options-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
+              <label className={`option-tile-card ${dnsMode === 'fake-ip' ? 'active' : ''}`}>
+                <div className="option-tile-header">
+                  <input
+                    type="radio"
+                    name="dns_mode_setting"
+                    checked={dnsMode === 'fake-ip'}
+                    onChange={() => handleSetDnsMode('fake-ip')}
+                    disabled={dnsModeBusy}
+                  />
+                  <span className="option-tile-title">⚡ Fake-IP</span>
+                  <span className="badge badge-accent" style={{ fontSize: 10, padding: '1px 5px', marginLeft: 'auto' }}>
+                    Рекомендуется
+                  </span>
+                </div>
+                <div className="option-tile-desc">
+                  Мгновенный отклик DNS (~1 мс), эффективный обход DPI и блокировок, идеален для стримов, мессенджеров и игр.
+                </div>
+              </label>
+
+              <label className={`option-tile-card ${dnsMode === 'redir-host' ? 'active' : ''}`}>
+                <div className="option-tile-header">
+                  <input
+                    type="radio"
+                    name="dns_mode_setting"
+                    checked={dnsMode === 'redir-host'}
+                    onChange={() => handleSetDnsMode('redir-host')}
+                    disabled={dnsModeBusy}
+                  />
+                  <span className="option-tile-title">🌐 Redir-Host</span>
+                  <span className="badge" style={{ fontSize: 10, padding: '1px 5px', marginLeft: 'auto' }}>
+                    Прямой
+                  </span>
+                </div>
+                <div className="option-tile-desc">
+                  Классический резолв реальных IP-адресов. Используйте, если требуются локальные домены роутера (.keenetic.io / Home LAN).
+                </div>
+              </label>
+            </div>
+          </section>
+
+          {/* СТОРОЖЕВОЙ ТАЙМЕР ЯДРА (WATCHDOG & AUTO-HEALING) */}
+          <section className="card">
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <h2 style={{ margin: 0 }}>🛡️ Сторожевой таймер ядра (Watchdog)</h2>
+              <span className="badge badge-online" style={{ color: '#22c55e' }}>
+                🟢 Активен (авто-лечение)
+              </span>
+            </div>
+            <p className="muted small">
+              Фоновый сторожевой процесс демона непрерывно контролирует целостность правил маршрутизации в <code>config.yaml</code>.
+            </p>
+            <div className="stats-grid four-col" style={{ marginTop: 12 }}>
+              <div className="stat-card">
+                <div className="stat-label">Статус сторожа</div>
+                <div className="stat-value" style={{ fontSize: 14, color: '#22c55e' }}>
+                  ✓ Авто-лечение
+                </div>
+                <div className="muted small">Контроль config.yaml</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-label">Интервал проверки</div>
+                <div className="stat-value" style={{ fontSize: 18 }}>
+                  4 сек
+                </div>
+                <div className="muted small">Фоновый демон</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-label">Защита блоков</div>
+                <div className="stat-value" style={{ fontSize: 13, color: 'var(--accent)', fontFamily: 'monospace' }}>
+                  DEVICE, FORCE, IGNORE
+                </div>
+                <div className="muted small">Авто-восстановление</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-label">При рестарте XKeen</div>
+                <div className="stat-value" style={{ fontSize: 13, color: '#38bdf8' }}>
+                  Без разрыва связи
+                </div>
+                <div className="muted small">Бесшовный накат правил</div>
+              </div>
+            </div>
+          </section>
+
+          {/* ZAPRET / DPI */}
+          <section className="card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <h2 style={{ margin: 0 }}>⚡ Обход замедлений Zapret (nfqws)</h2>
+              <span className="badge" style={{ color: zapretStatus?.running ? '#22c55e' : zapretStatus?.installed ? '#f59e0b' : 'var(--muted)' }}>
+                {zapretStatus?.running ? `🟢 Запущен (PID: ${zapretStatus.pid})` : zapretStatus?.installed ? '🟡 Остановлен' : '⚪ Не установлен'}
+              </span>
+            </div>
+            <p className="muted small">
+              Локальный сервис для обхода DPI-замедлений YouTube, Discord и других сервисов без расхода трафика VPS (/opt/etc/init.d/S51zapret).
+            </p>
+            <div className="stats-grid four-col" style={{ marginTop: 10, marginBottom: 12 }}>
+              <div className="stat-card">
+                <div className="stat-label">Статус службы</div>
+                <div className="stat-value" style={{ fontSize: 14, color: zapretStatus?.running ? '#22c55e' : zapretStatus?.installed ? '#f59e0b' : 'var(--muted)' }}>
+                  {zapretStatus?.running ? '🟢 Запущен' : zapretStatus?.installed ? '🟡 Остановлен' : '⚪ Не установлен'}
+                </div>
+                <div className="muted small">{zapretStatus?.running ? `PID: ${zapretStatus.pid}` : 'Служба DPI'}</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-label">Исполняемый демон</div>
+                <div className="stat-value" style={{ fontSize: 14, fontFamily: 'monospace' }}>
+                  nfqws
+                </div>
+                <div className="muted small">S51zapret</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-label">Расход VPS</div>
+                <div className="stat-value" style={{ fontSize: 14, color: '#10b981' }}>
+                  0 байт (Direct)
+                </div>
+                <div className="muted small">Прямой поток роутера</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-label">Назначение</div>
+                <div className="stat-value" style={{ fontSize: 13, color: 'var(--accent)' }}>
+                  YouTube, Discord
+                </div>
+                <div className="muted small">Обход замедлений</div>
+              </div>
+            </div>
+            {zapretStatus?.installed ? (
+              <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn sm"
+                  disabled={zapretBusy}
+                  onClick={() => handleZapretAction(zapretStatus.running ? 'restart' : 'start')}
+                >
+                  {zapretBusy ? '⏳…' : zapretStatus.running ? '🔄 Перезапустить' : '▶ Запустить'}
+                </button>
+                {zapretStatus.running && (
+                  <button
+                    type="button"
+                    className="btn sm btn-danger"
+                    disabled={zapretBusy}
+                    onClick={() => handleZapretAction('stop')}
+                  >
+                    ⏹ Остановить
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div style={{ marginTop: 10 }}>
+                <p className="muted small">
+                  Пакет Zapret не обнаружен в /opt/etc/init.d/S51zapret. Вы можете установить его в один клик.
+                </p>
+                <button
+                  type="button"
+                  className="btn sm btn-primary"
+                  disabled={zapretBusy}
+                  onClick={() => handleZapretAction('install')}
+                  style={{ marginTop: 8 }}
+                >
+                  {zapretBusy ? '⏳ Установка Zapret…' : '📥 Установить Zapret в 1 клик'}
+                </button>
+              </div>
+            )}
+          </section>
+
+          {/* GEOIP / GEOSITE */}
+          <section className="card">
+            <h2>🔄 Базы данных GeoIP и GeoSite</h2>
+            <p className="muted small">
+              Используются ядром Mihomo для точного определения стран и категорий сайтов (включая списки рекламы AdBlock). Загрузка выполняется через прокси Mihomo для стабильности.
+            </p>
+            <div className="stats-grid four-col" style={{ marginBottom: 12 }}>
+              <div className="stat-card">
+                <div className="stat-label">База GeoIP</div>
+                <div className="stat-value" style={{ fontSize: 16 }}>
+                  {geoInfo ? `${(geoInfo.geoip.size / (1024 * 1024)).toFixed(1)} МБ` : '—'}
+                </div>
+                <div className="muted small">{geoInfo?.geoip.updated_at || 'Mihomo Core'}</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-label">База GeoSite</div>
+                <div className="stat-value" style={{ fontSize: 16 }}>
+                  {geoInfo ? `${(geoInfo.geosite.size / (1024 * 1024)).toFixed(1)} МБ` : '—'}
+                </div>
+                <div className="muted small">{geoInfo?.geosite.updated_at || 'Meta Rules Dat'}</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-label">Источник баз</div>
+                <div className="stat-value" style={{ fontSize: 14, color: '#38bdf8' }}>
+                  MetaCubeX
+                </div>
+                <div className="muted small">Загрузка через прокси</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-label">Интеграция</div>
+                <div className="stat-value" style={{ fontSize: 14, color: '#22c55e' }}>
+                  ✓ Активны
+                </div>
+                <div className="muted small">Маршрутизация & AdBlock</div>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="btn primary"
+              onClick={handleUpdateGeo}
+              disabled={geoUpdating}
+            >
+              {geoUpdating ? '⏳ Загрузка баз (может занять до 1 мин)…' : '🔄 Обновить GeoIP / GeoSite базы'}
+            </button>
+          </section>
+
+          {/* MIHOMO */}
+          <section className="card">
+            <h2>⚙️ Mihomo</h2>
+            <label className="row"><span>Host</span>
+              <input className="input" value={settings.mihomo.host} onChange={(e) => patch((s) => (s.mihomo.host = e.target.value))} />
+            </label>
+            <label className="row"><span>Порт</span>
+              <NumberInput
+                min={1}
+                max={65535}
+                fallback={9090}
+                value={settings.mihomo.port}
+                onChange={(val) => patch((s) => (s.mihomo.port = val))}
+              />
+            </label>
+            <label className="row"><span>Secret</span>
+              <input className="input" value={settings.mihomo.secret} onChange={(e) => patch((s) => (s.mihomo.secret = e.target.value))} />
+            </label>
+            <label className="row"><span>Путь к config.yaml</span>
+              <input className="input" value={settings.mihomo.config_path} onChange={(e) => patch((s) => (s.mihomo.config_path = e.target.value))} />
+            </label>
+            <label className="row"><span>Провайдеры групп устройств</span>
+              <input
+                className="input"
+                placeholder="пусто = авто из config.yaml"
+                value={(settings.mihomo.device_providers ?? []).join(', ')}
+                onChange={(e) => patch((s) => (s.mihomo.device_providers = e.target.value.split(',').map((x) => x.trim()).filter(Boolean)))}
+              />
+            </label>
+            <p className="muted small">Имена proxy-providers, подключаемые к per-device группам (use:). Пусто — берутся все из config.yaml автоматически.</p>
+          </section>
+
+          {/* БЭКАПЫ */}
+          <section className="card">
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <h2 style={{ margin: 0 }}>💾 Бэкапы (.xkbak)</h2>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button className="btn sm primary" onClick={createBackup} disabled={backupBusy}>
+                  {backupBusy ? 'Создание…' : '＋ Создать бэкап'}
+                </button>
+                <button className="btn sm" onClick={() => backupFileRef.current?.click()} disabled={backupBusy} title="Загрузить архив бэкапа с компьютера">
+                  📤 Загрузить архив
+                </button>
+                <input
+                  ref={backupFileRef}
+                  type="file"
+                  accept=".xkbak,.tar.gz,.tar,.zip"
+                  style={{ display: 'none' }}
+                  onChange={handleImportBackup}
+                />
+              </div>
+            </div>
+            <p className="muted small">Снимок config.yaml (Mihomo) + config.json (панель). Каталог: {backupDir || '…'}</p>
+            <div className="modal-list" style={{ marginTop: 10 }}>
+              {backups.length === 0 && <p className="muted small">Бэкапов пока нет.</p>}
+              {backups.map((b) => (
+                <div key={b} className="check-row" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  <span className="server-name" style={{ flex: 1 }}>{b}</span>
+                  <button className="btn sm" disabled={backupBusy} onClick={() => restoreBackup(b)}>Восстановить</button>
+                  <a className="btn sm ghost" href={`/api/backups/export/${encodeURIComponent(b)}`} download title="Скачать архив бэкапа (.xkbak)">
+                    ⬇ .xkbak
+                  </a>
+                  <button className="btn sm ghost" disabled={backupBusy} onClick={() => deleteBackup(b)}>✕</button>
+                </div>
+              ))}
+            </div>
+            <label className="row" style={{ marginTop: 10 }}><span>Каталог бэкапов</span>
+              <input className="input" value={settings.system?.backup_dir ?? ''}
+                onChange={(e) => patch((s) => (s.system.backup_dir = e.target.value))} />
+            </label>
+          </section>
+
+          {/* ПАНЕЛЬ */}
+          <section className="card">
+            <h2>🖥 Панель</h2>
+            <label className="row"><span>Интервал автообновления, сек</span>
+              <NumberInput
+                min={3}
+                max={300}
+                step={1}
+                fallback={10}
+                value={settings.refresh_interval_sec}
+                onChange={(val) => patch((s) => (s.refresh_interval_sec = val))}
+              />
+            </label>
+            <label className="row"><span>Уровень логов</span>
+              <select className="select" value={settings.logs?.level ?? 'info'}
+                onChange={(e) => patch((s) => { s.logs.level = e.target.value })}>
+                <option value="info">info (подробно)</option>
+                <option value="warn">warn (предупреждения и ошибки)</option>
+                <option value="error">error (только ошибки)</option>
+              </select>
+            </label>
+            <label className="row" style={{ justifyContent: 'flex-start', gap: 8, cursor: 'pointer' }}>
+              <input type="checkbox" checked={settings.logs?.log_requests ?? true}
+                onChange={(e) => patch((s) => (s.logs.log_requests = e.target.checked))} />
+              <span>Логировать HTTP-запросы к панели</span>
+            </label>
+            <label className="row"><span>Удалённый syslog (host:port, UDP)</span>
+              <input className="input" placeholder="пусто = не отправлять, напр. 192.168.2.10:514"
+                value={settings.logs?.remote_syslog ?? ''}
+                onChange={(e) => patch((s) => (s.logs.remote_syslog = e.target.value))} />
+            </label>
+            <p className="muted small">Syslog начнёт работать после перезапуска панели (restart в разделе «Сервис XKeen» не нужен — перезапуск S99xkeen-route).</p>
+            <button className="btn primary" onClick={save} disabled={saving}>
+              {saving ? 'Сохранение…' : '💾 Сохранить настройки'}
+            </button>
+            <p className="muted small">Конфиг хранится в /opt/etc/xkeen-route/config.json (путь — на дашборде).</p>
+
+            <div style={{ marginTop: 14, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span className="muted small">
+                  Версия панели: <b>{upd?.current || status?.version || '…'}</b>
+                </span>
+
+                {updChecking && <span className="muted small">⏳ Проверка…</span>}
+
+                {!updChecking && upd && !upd.update_available && (
+                  <span className="muted small">✓ актуальная</span>
+                )}
+
+                {!updChecking && upd?.update_available && (
+                  <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <span className="upd-dot" title="Доступна новая версия" />
+                    <button
+                      type="button"
+                      className="btn btn-primary upd-glow"
+                      disabled={updBusy}
+                      onClick={doUpdate}
+                      title={`Установить обновление ${upd.latest} в один клик`}
+                      style={{ fontWeight: 600, padding: '5px 12px' }}
+                    >
+                      {updBusy ? '⏳ Установка…' : `🚀 Установить ${upd.latest}`}
+                    </button>
+                    {upd.notes.length > 0 && (
+                      <button
+                        type="button"
+                        className="btn sm ghost"
+                        disabled={updBusy}
+                        onClick={() => setShowUpdNotes((prev) => !prev)}
+                      >
+                        {showUpdNotes ? 'Скрыть список изменений' : 'Что нового'}
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {!updChecking && updError && (
+                  <span className="small" style={{ color: 'var(--red, #e53935)' }}>
+                    ⚠ {updError}
+                  </span>
+                )}
+
+                <button
+                  className="btn sm ghost"
+                  disabled={updChecking || updBusy}
+                  onClick={checkUpdate}
+                  title="Проверить наличие обновлений"
+                >
+                  🔄 Проверить
+                </button>
+              </div>
+
+              {upd?.update_available && upd.notes.length > 0 && showUpdNotes && (
+                <div
+                  style={{
+                    margin: '10px 0 0',
+                    padding: '10px 14px',
+                    background: 'rgba(0, 0, 0, 0.2)',
+                    borderRadius: 8,
+                    border: '1px solid var(--border)',
+                  }}
+                >
+                  <p className="small" style={{ margin: '0 0 6px', fontWeight: 600 }}>
+                    Что нового в {upd.latest}:
+                  </p>
+                  <ul className="small" style={{ margin: 0, paddingLeft: 18, lineHeight: 1.5 }}>
+                    {upd.notes.map((n, i) => (
+                      <li key={i} style={{ marginBottom: 4 }}>
+                        {n}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {updStage && (
+                <div
+                  style={{
+                    margin: '10px 0 0',
+                    padding: '8px 12px',
+                    background: 'rgba(34, 197, 94, 0.12)',
+                    border: '1px solid rgba(34, 197, 94, 0.3)',
+                    borderRadius: 6,
+                    color: '#22c55e',
+                    fontWeight: 600,
+                    fontSize: 13,
+                  }}
+                >
+                  ⏳ {updStage}
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+      </div>
+
+      {/* БЕЗОПАСНОСТЬ И ПАРОЛЬ (В САМЫЙ КОНЕЦ НАСТРОЕК) */}
       <section className="card">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
           <h2 style={{ margin: 0 }}>🔐 Безопасность и пароль</h2>
@@ -846,519 +1369,8 @@ export default function Settings({ notify, status, refresh }: Props) {
         </p>
       </section>
 
-      {/* ОПОВЕЩЕНИЯ (TELEGRAM / WEBHOOK) */}
-      <section className="card">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-          <h2 style={{ margin: 0 }}>🔔 Оповещения о сбоях</h2>
-          <span className={`badge ${telegramEnabled ? 'badge-online' : ''}`}>
-            {telegramEnabled ? '🟢 Telegram вкл' : '⚪ выкл'}
-          </span>
-        </div>
-        <p className="muted small">Мгновенные уведомления в Telegram при падении серверов и переключении Failover.</p>
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-          <b>Telegram оповещения</b>
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={telegramEnabled}
-              onChange={(e) => setTelegramEnabled(e.target.checked)}
-            />
-            <span className="slider" />
-          </label>
-        </div>
-        <label className="row">
-          <span>Bot Token</span>
-          <input
-            className="input"
-            placeholder="123456789:ABCdefGhIJKlmNoPQRstuVWXyz"
-            value={telegramBotToken}
-            onChange={(e) => setTelegramBotToken(e.target.value)}
-          />
-        </label>
-        <label className="row">
-          <span>Chat ID</span>
-          <input
-            className="input"
-            placeholder="123456789 или -1001234567890"
-            value={telegramChatId}
-            onChange={(e) => setTelegramChatId(e.target.value)}
-          />
-        </label>
-        <label className="row">
-          <span>Webhook URL</span>
-          <input
-            className="input"
-            placeholder="https://my-server.com/api/failover-hook"
-            value={webhookUrl}
-            onChange={(e) => setWebhookUrl(e.target.value)}
-          />
-        </label>
-        <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
-          <button className="btn primary" onClick={handleSaveNotifications} disabled={notifSaving}>
-            {notifSaving ? 'Сохранение…' : '💾 Сохранить оповещения'}
-          </button>
-          <button className="btn" onClick={handleTestNotification} disabled={notifTesting}>
-            {notifTesting ? 'Отправка…' : '💬 Тестовое сообщение'}
-          </button>
-        </div>
-      </section>
-
-      {/* ADBLOCK */}
-      <section className="card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-          <h2 style={{ margin: 0 }}>🛡️ Блокировка рекламы (AdBlock)</h2>
-          <span className={`badge ${adblockEnabled ? 'badge-online' : ''}`} style={{ color: adblockEnabled ? '#22c55e' : 'var(--muted)' }}>
-            {adblockEnabled ? '🟢 Активно на роутере' : '⚪ Отключено'}
-          </span>
-        </div>
-        <p className="muted small">
-          Блокирует рекламные баннеры, видеовставки, счетчики трекеров и аналитику для всех устройств в сети без установки расширений в браузеры (правило <code>category-ads-all</code> из базы GeoSite).
-        </p>
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-          <span>Включить AdBlock для всех устройств</span>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
-            <label className="switch">
-              <input
-                type="checkbox"
-                checked={adblockEnabled}
-                disabled={adblockBusy}
-                onChange={(e) => handleToggleAdblock(e.target.checked)}
-              />
-              <span className="slider" />
-            </label>
-            <span style={{ fontSize: 13, minWidth: 64, color: adblockEnabled ? 'var(--green)' : 'var(--muted)' }}>
-              {adblockBusy ? '⏳…' : adblockEnabled ? 'Да' : 'Нет'}
-            </span>
-          </div>
-        </div>
-      </section>
-
-      {/* GEOIP / GEOSITE */}
-      <section className="card">
-        <h2>🔄 Базы данных GeoIP и GeoSite</h2>
-        <p className="muted small">
-          Используются ядром Mihomo для точного определения стран и категорий сайтов (включая списки рекламы AdBlock). Загрузка выполняется через прокси Mihomo для стабильности.
-        </p>
-        <div className="stats-grid four-col" style={{ marginBottom: 12 }}>
-          <div className="stat-card">
-            <div className="stat-label">База GeoIP</div>
-            <div className="stat-value" style={{ fontSize: 16 }}>
-              {geoInfo ? `${(geoInfo.geoip.size / (1024 * 1024)).toFixed(1)} МБ` : '—'}
-            </div>
-            <div className="muted small">{geoInfo?.geoip.updated_at || 'Mihomo Core'}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">База GeoSite</div>
-            <div className="stat-value" style={{ fontSize: 16 }}>
-              {geoInfo ? `${(geoInfo.geosite.size / (1024 * 1024)).toFixed(1)} МБ` : '—'}
-            </div>
-            <div className="muted small">{geoInfo?.geosite.updated_at || 'Meta Rules Dat'}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">Источник баз</div>
-            <div className="stat-value" style={{ fontSize: 14, color: '#38bdf8' }}>
-              MetaCubeX
-            </div>
-            <div className="muted small">Загрузка через прокси</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">Интеграция</div>
-            <div className="stat-value" style={{ fontSize: 14, color: '#22c55e' }}>
-              ✓ Активны
-            </div>
-            <div className="muted small">Маршрутизация & AdBlock</div>
-          </div>
-        </div>
-        <button
-          type="button"
-          className="btn primary"
-          onClick={handleUpdateGeo}
-          disabled={geoUpdating}
-        >
-          {geoUpdating ? '⏳ Загрузка баз (может занять до 1 мин)…' : '🔄 Обновить GeoIP / GeoSite базы'}
-        </button>
-      </section>
-
-      {/* ZAPRET / DPI */}
-      <section className="card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-          <h2 style={{ margin: 0 }}>⚡ Обход замедлений Zapret (nfqws)</h2>
-          <span className="badge" style={{ color: zapretStatus?.running ? '#22c55e' : zapretStatus?.installed ? '#f59e0b' : 'var(--muted)' }}>
-            {zapretStatus?.running ? `🟢 Запущен (PID: ${zapretStatus.pid})` : zapretStatus?.installed ? '🟡 Остановлен' : '⚪ Не установлен'}
-          </span>
-        </div>
-        <p className="muted small">
-          Локальный сервис для обхода DPI-замедлений YouTube, Discord и других сервисов без расхода трафика VPS (/opt/etc/init.d/S51zapret).
-        </p>
-        <div className="stats-grid four-col" style={{ marginTop: 10, marginBottom: 12 }}>
-          <div className="stat-card">
-            <div className="stat-label">Статус службы</div>
-            <div className="stat-value" style={{ fontSize: 14, color: zapretStatus?.running ? '#22c55e' : zapretStatus?.installed ? '#f59e0b' : 'var(--muted)' }}>
-              {zapretStatus?.running ? '🟢 Запущен' : zapretStatus?.installed ? '🟡 Остановлен' : '⚪ Не установлен'}
-            </div>
-            <div className="muted small">{zapretStatus?.running ? `PID: ${zapretStatus.pid}` : 'Служба DPI'}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">Исполняемый демон</div>
-            <div className="stat-value" style={{ fontSize: 14, fontFamily: 'monospace' }}>
-              nfqws
-            </div>
-            <div className="muted small">S51zapret</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">Расход VPS</div>
-            <div className="stat-value" style={{ fontSize: 14, color: '#10b981' }}>
-              0 байт (Direct)
-            </div>
-            <div className="muted small">Прямой поток роутера</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">Назначение</div>
-            <div className="stat-value" style={{ fontSize: 13, color: 'var(--accent)' }}>
-              YouTube, Discord
-            </div>
-            <div className="muted small">Обход замедлений</div>
-          </div>
-        </div>
-        {zapretStatus?.installed ? (
-          <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
-            <button
-              type="button"
-              className="btn sm"
-              disabled={zapretBusy}
-              onClick={() => handleZapretAction(zapretStatus.running ? 'restart' : 'start')}
-            >
-              {zapretBusy ? '⏳…' : zapretStatus.running ? '🔄 Перезапустить' : '▶ Запустить'}
-            </button>
-            {zapretStatus.running && (
-              <button
-                type="button"
-                className="btn sm btn-danger"
-                disabled={zapretBusy}
-                onClick={() => handleZapretAction('stop')}
-              >
-                ⏹ Остановить
-              </button>
-            )}
-          </div>
-        ) : (
-          <div style={{ marginTop: 10 }}>
-            <p className="muted small">
-              Пакет Zapret не обнаружен в /opt/etc/init.d/S51zapret. Вы можете установить его в один клик.
-            </p>
-            <button
-              type="button"
-              className="btn sm btn-primary"
-              disabled={zapretBusy}
-              onClick={() => handleZapretAction('install')}
-              style={{ marginTop: 8 }}
-            >
-              {zapretBusy ? '⏳ Установка Zapret…' : '📥 Установить Zapret в 1 клик'}
-            </button>
-          </div>
-        )}
-      </section>
-
-      {/* RCI (KEENETIC) */}
-      <section className="card">
-        <h2>RCI (Keenetic)</h2>
-        <label className="row"><span>Host</span>
-          <input className="input" value={settings.rci.host} onChange={(e) => patch((s) => (s.rci.host = e.target.value))} />
-        </label>
-        <label className="row"><span>Порт</span>
-          <NumberInput
-            min={1}
-            max={65535}
-            fallback={79}
-            value={settings.rci.port}
-            onChange={(val) => patch((s) => (s.rci.port = val))}
-          />
-        </label>
-        <label className="row"><span>Логин</span>
-          <input className="input" value={settings.rci.login} onChange={(e) => patch((s) => (s.rci.login = e.target.value))} />
-        </label>
-        <label className="row"><span>Пароль (fallback)</span>
-          <input className="input" type="password" value={settings.rci.password} onChange={(e) => patch((s) => (s.rci.password = e.target.value))} />
-        </label>
-        <label className="row"><span>Токен (X-Ndma-Tkn)</span>
-          <input className="input" value={settings.rci.token} placeholder="пусто = из /opt/etc/xkeen/xkeen.json"
-            onChange={(e) => patch((s) => (s.rci.token = e.target.value))} />
-        </label>
-        <p className="muted small">Если токен не задан, панель возьмёт его из /opt/etc/xkeen/xkeen.json; иначе — challenge-auth.</p>
-      </section>
-
-      {/* MIHOMO */}
-      <section className="card">
-        <h2>Mihomo</h2>
-        <label className="row"><span>Host</span>
-          <input className="input" value={settings.mihomo.host} onChange={(e) => patch((s) => (s.mihomo.host = e.target.value))} />
-        </label>
-        <label className="row"><span>Порт</span>
-          <NumberInput
-            min={1}
-            max={65535}
-            fallback={9090}
-            value={settings.mihomo.port}
-            onChange={(val) => patch((s) => (s.mihomo.port = val))}
-          />
-        </label>
-        <label className="row"><span>Secret</span>
-          <input className="input" value={settings.mihomo.secret} onChange={(e) => patch((s) => (s.mihomo.secret = e.target.value))} />
-        </label>
-        <label className="row"><span>Путь к config.yaml</span>
-          <input className="input" value={settings.mihomo.config_path} onChange={(e) => patch((s) => (s.mihomo.config_path = e.target.value))} />
-        </label>
-        <label className="row"><span>Провайдеры групп устройств</span>
-          <input
-            className="input"
-            placeholder="пусто = авто из config.yaml"
-            value={(settings.mihomo.device_providers ?? []).join(', ')}
-            onChange={(e) => patch((s) => (s.mihomo.device_providers = e.target.value.split(',').map((x) => x.trim()).filter(Boolean)))}
-          />
-        </label>
-        <p className="muted small">Имена proxy-providers, подключаемые к per-device группам (use:). Пусто — берутся все из config.yaml автоматически.</p>
-      </section>
-
-      {/* ПАНЕЛЬ */}
-      <section className="card">
-        <h2>Панель</h2>
-        <label className="row"><span>Интервал автообновления, сек</span>
-          <NumberInput
-            min={3}
-            max={300}
-            step={1}
-            fallback={10}
-            value={settings.refresh_interval_sec}
-            onChange={(val) => patch((s) => (s.refresh_interval_sec = val))}
-          />
-        </label>
-        <label className="row"><span>Уровень логов</span>
-          <select className="select" value={settings.logs?.level ?? 'info'}
-            onChange={(e) => patch((s) => { s.logs.level = e.target.value })}>
-            <option value="info">info (подробно)</option>
-            <option value="warn">warn (предупреждения и ошибки)</option>
-            <option value="error">error (только ошибки)</option>
-          </select>
-        </label>
-        <label className="row" style={{ justifyContent: 'flex-start', gap: 8, cursor: 'pointer' }}>
-          <input type="checkbox" checked={settings.logs?.log_requests ?? true}
-            onChange={(e) => patch((s) => (s.logs.log_requests = e.target.checked))} />
-          <span>Логировать HTTP-запросы к панели</span>
-        </label>
-        <label className="row"><span>Удалённый syslog (host:port, UDP)</span>
-          <input className="input" placeholder="пусто = не отправлять, напр. 192.168.2.10:514"
-            value={settings.logs?.remote_syslog ?? ''}
-            onChange={(e) => patch((s) => (s.logs.remote_syslog = e.target.value))} />
-        </label>
-        <p className="muted small">Syslog начнёт работать после перезапуска панели (restart в разделе «Сервис XKeen» не нужен — перезапуск S99xkeen-route).</p>
-        <button className="btn primary" onClick={save} disabled={saving}>
-          {saving ? 'Сохранение…' : '💾 Сохранить настройки'}
-        </button>
-        <p className="muted small">Конфиг хранится в /opt/etc/xkeen-route/config.json (путь — на дашборде).</p>
-
-        <div style={{ marginTop: 14, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <span className="muted small">
-              Версия панели: <b>{upd?.current || status?.version || '…'}</b>
-            </span>
-
-            {updChecking && <span className="muted small">⏳ Проверка…</span>}
-
-            {!updChecking && upd && !upd.update_available && (
-              <span className="muted small">✓ актуальная</span>
-            )}
-
-            {!updChecking && upd?.update_available && (
-              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <span className="upd-dot" title="Доступна новая версия" />
-                <button
-                  type="button"
-                  className="btn btn-primary upd-glow"
-                  disabled={updBusy}
-                  onClick={doUpdate}
-                  title={`Установить обновление ${upd.latest} в один клик`}
-                  style={{ fontWeight: 600, padding: '5px 12px' }}
-                >
-                  {updBusy ? '⏳ Установка…' : `🚀 Установить ${upd.latest}`}
-                </button>
-                {upd.notes.length > 0 && (
-                  <button
-                    type="button"
-                    className="btn sm ghost"
-                    disabled={updBusy}
-                    onClick={() => setShowUpdNotes((prev) => !prev)}
-                  >
-                    {showUpdNotes ? 'Скрыть список изменений' : 'Что нового'}
-                  </button>
-                )}
-              </div>
-            )}
-
-            {!updChecking && updError && (
-              <span className="small" style={{ color: 'var(--red, #e53935)' }}>
-                ⚠ {updError}
-              </span>
-            )}
-
-            <button
-              className="btn sm ghost"
-              disabled={updChecking || updBusy}
-              onClick={checkUpdate}
-              title="Проверить наличие обновлений"
-            >
-              🔄 Проверить
-            </button>
-          </div>
-
-          {upd?.update_available && upd.notes.length > 0 && showUpdNotes && (
-            <div
-              style={{
-                margin: '10px 0 0',
-                padding: '10px 14px',
-                background: 'rgba(0, 0, 0, 0.2)',
-                borderRadius: 8,
-                border: '1px solid var(--border)',
-              }}
-            >
-              <p className="small" style={{ margin: '0 0 6px', fontWeight: 600 }}>
-                Что нового в {upd.latest}:
-              </p>
-              <ul className="small" style={{ margin: 0, paddingLeft: 18, lineHeight: 1.5 }}>
-                {upd.notes.map((n, i) => (
-                  <li key={i} style={{ marginBottom: 4 }}>
-                    {n}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {updStage && (
-            <div
-              style={{
-                margin: '10px 0 0',
-                padding: '8px 12px',
-                background: 'rgba(34, 197, 94, 0.12)',
-                border: '1px solid rgba(34, 197, 94, 0.3)',
-                borderRadius: 6,
-                color: '#22c55e',
-                fontWeight: 600,
-                fontSize: 13,
-              }}
-            >
-              ⏳ {updStage}
-            </div>
-          )}
-        </div>
-      </section>
-
-      {/* СЕРВИС XKEEN */}
-      <section className="card">
-        <h2>🖥 Сервис XKeen</h2>
-        <p className="muted small">Restart перегенерирует config.yaml — настройки маршрутизации возвращаются к исходным (до любых изменений из панели).</p>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button className="btn" disabled={svcBusy !== ''} onClick={() => svc('status')}>📊 Статус</button>
-          <button className="btn" disabled={svcBusy !== ''} onClick={() => svc('start')}>▶ Старт</button>
-          <button className="btn" disabled={svcBusy !== ''} onClick={() => svc('restart')}>🔄 Рестарт</button>
-          <button className="btn" style={{ borderColor: 'var(--red)', color: 'var(--red)' }} disabled={svcBusy !== ''} onClick={() => { if (confirm('Остановить сервис XKeen? Интернет через прокси пропадёт.')) svc('stop') }}>⏹ Стоп</button>
-        </div>
-        <label className="row" style={{ marginTop: 10 }}><span>Init-скрипт XKeen</span>
-          <input className="input" value={settings.system?.xkeen_init ?? '/opt/etc/init.d/S05xkeen'}
-            onChange={(e) => patch((s) => (s.system.xkeen_init = e.target.value))} />
-        </label>
-      </section>
-
-      {/* БЭКАПЫ */}
-      <section className="card">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-          <h2 style={{ margin: 0 }}>💾 Бэкапы (.xkbak)</h2>
-          <div style={{ display: 'flex', gap: 6 }}>
-            <button className="btn sm primary" onClick={createBackup} disabled={backupBusy}>
-              {backupBusy ? 'Создание…' : '＋ Создать бэкап'}
-            </button>
-            <button className="btn sm" onClick={() => backupFileRef.current?.click()} disabled={backupBusy} title="Загрузить архив бэкапа с компьютера">
-              📤 Загрузить архив
-            </button>
-            <input
-              ref={backupFileRef}
-              type="file"
-              accept=".xkbak,.tar.gz,.tar,.zip"
-              style={{ display: 'none' }}
-              onChange={handleImportBackup}
-            />
-          </div>
-        </div>
-        <p className="muted small">Снимок config.yaml (Mihomo) + config.json (панель). Каталог: {backupDir || '…'}</p>
-        <div className="modal-list" style={{ marginTop: 10 }}>
-          {backups.length === 0 && <p className="muted small">Бэкапов пока нет.</p>}
-          {backups.map((b) => (
-            <div key={b} className="check-row" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-              <span className="server-name" style={{ flex: 1 }}>{b}</span>
-              <button className="btn sm" disabled={backupBusy} onClick={() => restoreBackup(b)}>Восстановить</button>
-              <a className="btn sm ghost" href={`/api/backups/export/${encodeURIComponent(b)}`} download title="Скачать архив бэкапа (.xkbak)">
-                ⬇ .xkbak
-              </a>
-              <button className="btn sm ghost" disabled={backupBusy} onClick={() => deleteBackup(b)}>✕</button>
-            </div>
-          ))}
-        </div>
-        <label className="row" style={{ marginTop: 10 }}><span>Каталог бэкапов</span>
-          <input className="input" value={settings.system?.backup_dir ?? ''}
-            onChange={(e) => patch((s) => (s.system.backup_dir = e.target.value))} />
-        </label>
-      </section>
-
-      {/* ДОМЕНЫ */}
-      <section className="card">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-          <h2 style={{ margin: 0 }}>🌐 Домены</h2>
-          <button type="button" className="btn sm" onClick={() => setPresetCatalogOpen(true)} title="Добавить готовые списки (YouTube, Discord, AI...)">
-            ✨ Каталог пресетов
-          </button>
-        </div>
-        <p className="muted small">По одному домену в строке. Правила вставляются в начало rules: (DOMAIN-SUFFIX) и имеют приоритет. Сопутствующие CDN и медиа-сервера подтягиваются автоматически.</p>
-        <label className="row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
-          <span>⏭ Напрямую (мимо прокси → DIRECT)</span>
-          <textarea
-            className="input"
-            rows={6}
-            placeholder={'example.com\nlocal-service.net\nw3.org'}
-            value={directDomains}
-            onChange={(e) => setDirectDomains(e.target.value)}
-            style={{ fontFamily: 'Consolas, monospace', fontSize: 12.5, resize: 'vertical' }}
-          />
-        </label>
-        <label className="row" style={{ flexDirection: 'column', alignItems: 'stretch', marginTop: 8 }}>
-          <span>🔒 Принудительно через прокси (→ PROXY)</span>
-          <textarea
-            className="input"
-            rows={6}
-            placeholder={'openai.com\nyoutube.com\ngithub.com'}
-            value={forceDomains}
-            onChange={(e) => setForceDomains(e.target.value)}
-            style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'Consolas, monospace', fontSize: 12.5, resize: 'vertical' }}
-          />
-        </label>
-        {autoCdns.length > 0 && (
-          <div style={{ marginTop: 8, padding: '8px 10px', background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.2)', borderRadius: 6, fontSize: 12 }}>
-            <div style={{ color: '#38bdf8', fontWeight: 600, marginBottom: 4 }}>
-              ⚡ Автоматически подключенные CDN и медиа-сервера ({autoCdns.length}):
-            </div>
-            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-              {autoCdns.map((cdn) => (
-                <span key={cdn} style={{ fontSize: 11, background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace' }}>
-                  {cdn}
-                </span>
-              ))}
-            </div>
-          </div>
-        )}
-        <button className="btn primary" style={{ marginTop: 12 }} onClick={saveDomains} disabled={savingDomains}>
-          {savingDomains ? 'Применение и поиск CDN…' : '🌐 Применить домены'}
-        </button>
-      </section>
-
       {/* ЖУРНАЛ ЛОГОВ С ПОЛНЫМ ФУНКЦИОНАЛОМ LOGSVIEWER */}
-      <section className="card" style={{ gridColumn: '1 / -1', padding: 16 }}>
+      <section className="card" style={{ padding: 16 }}>
         <LogsViewer notify={notify} />
       </section>
 
