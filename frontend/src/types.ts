@@ -61,6 +61,23 @@ export interface ProviderInfo {
   vehicle_type: string
   updated_at?: string
   url?: string
+  hwid?: string
+}
+
+export interface ZapretStatus {
+  installed: boolean
+  running: boolean
+  pid?: number
+  autostart?: boolean
+  iptables_active?: boolean
+  preset?: string
+  cmdline?: string
+  config?: string
+}
+
+export interface DpiTestResult {
+  youtube: { code: number; time_secs: number; ok: boolean }
+  discord: { code: number; time_secs: number; ok: boolean }
 }
 
 export interface PolicyInfo {

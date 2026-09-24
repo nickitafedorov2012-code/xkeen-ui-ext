@@ -151,13 +151,55 @@ pub fn parse_provider_urls(yaml: &str) -> std::collections::BTreeMap<String, Str
     out
 }
 
-/// Добавить новую HTTP-подписку в блок proxy-providers в config.yaml
-pub fn add_provider_to_yaml(
+/// Карта id провайдера -> x-hwid из блока proxy-providers в YAML
+pub fn parse_provider_hwids(yaml: &str) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut in_providers = false;
+    let mut cur_provider: Option<String> = None;
+
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+
+        if line.trim_end() == "proxy-providers:" {
+            in_providers = true;
+            cur_provider = None;
+            continue;
+        }
+        if in_providers && is_top {
+            break;
+        }
+        if in_providers {
+            if line.starts_with("  ") && !line.starts_with("   ") && trimmed.ends_with(':') && !trimmed.starts_with('-') {
+                cur_provider = Some(trimmed.trim_end_matches(':').to_string());
+                continue;
+            }
+            if trimmed.starts_with("x-hwid:") {
+                if let Some(ref p) = cur_provider {
+                    let val = trimmed
+                        .trim_start_matches("x-hwid:")
+                        .trim()
+                        .trim_matches(|c| c == '[' || c == ']' || c == '"' || c == '\'' || c == ' ')
+                        .to_string();
+                    if !val.is_empty() {
+                        out.insert(p.clone(), val);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Добавить новую HTTP-подписку в блок proxy-providers в config.yaml с поддержкой HWID и User-Agent
+pub fn add_provider_to_yaml_full(
     yaml: &str,
     id: &str,
     url: &str,
     health_check_url: Option<&str>,
     health_check_interval: Option<u32>,
+    hwid: Option<&str>,
+    user_agent: Option<&str>,
 ) -> Result<String, String> {
     let id = id.trim();
     let url = url.trim();
@@ -173,8 +215,14 @@ pub fn add_provider_to_yaml(
     let hc_url = health_check_url.unwrap_or(PROVIDER_HEALTH_CHECK_URL);
     let hc_interval = health_check_interval.unwrap_or(PROVIDER_HEALTH_CHECK_INTERVAL_SECS);
 
+    let ua = user_agent.unwrap_or("ClashMeta/1.19.24; mihomo/1.19.24");
+    let mut header_lines = format!("    header:\n      User-Agent: [\"{ua}\"]");
+    if let Some(h) = hwid.map(str::trim).filter(|h| !h.is_empty()) {
+        header_lines.push_str(&format!("\n      x-hwid: [\"{h}\"]"));
+    }
+
     let new_block = format!(
-        "  {id}:\n    type: http\n    url: \"{url}\"\n    interval: {PROVIDER_DEFAULT_INTERVAL_SECS}\n    health-check:\n      enable: true\n      url: \"{hc_url}\"\n      interval: {hc_interval}\n      expected-status: {PROVIDER_HEALTH_CHECK_EXPECTED_STATUS}"
+        "  {id}:\n    type: http\n    url: \"{url}\"\n    interval: {PROVIDER_DEFAULT_INTERVAL_SECS}\n    health-check:\n      enable: true\n      lazy: true\n      url: \"{hc_url}\"\n      interval: {hc_interval}\n      expected-status: {PROVIDER_HEALTH_CHECK_EXPECTED_STATUS}\n{header_lines}\n    override:\n      udp: true\n      tfo: true"
     );
 
     let mut out = Vec::new();
@@ -204,6 +252,17 @@ pub fn add_provider_to_yaml(
     }
 
     Ok(out.join("\n"))
+}
+
+/// Добавить новую HTTP-подписку в блок proxy-providers в config.yaml
+pub fn add_provider_to_yaml(
+    yaml: &str,
+    id: &str,
+    url: &str,
+    health_check_url: Option<&str>,
+    health_check_interval: Option<u32>,
+) -> Result<String, String> {
+    add_provider_to_yaml_full(yaml, id, url, health_check_url, health_check_interval, None, None)
 }
 
 /// Удалить подписку из блока proxy-providers в config.yaml
@@ -1241,6 +1300,26 @@ proxy-groups:
         assert!(out.contains("new_sub:"));
         assert!(out.contains("url: \"http://cp.cloudflare.com/generate_204\""));
         assert!(out.contains("interval: 600"));
+    }
+
+    #[test]
+    fn test_add_provider_to_yaml_with_hwid() {
+        let yaml = "proxy-providers:\n  old_sub:\n    type: http\n    url: \"https://old.sub/sub\"\n";
+        let out = add_provider_to_yaml_full(
+            yaml,
+            "geodema_test",
+            "https://my.provider/sub?hwid=test-123",
+            None,
+            None,
+            Some("test-123"),
+            None,
+        ).unwrap();
+        assert!(out.contains("geodema_test:"));
+        assert!(out.contains("x-hwid: [\"test-123\"]"));
+        assert!(out.contains("User-Agent: [\"ClashMeta/1.19.24; mihomo/1.19.24\"]"));
+
+        let hwids = parse_provider_hwids(&out);
+        assert_eq!(hwids.get("geodema_test").map(String::as_str), Some("test-123"));
     }
 
     #[test]

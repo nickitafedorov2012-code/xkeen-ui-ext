@@ -142,15 +142,19 @@ pub struct ProviderInfo {
     pub vehicle_type: String,
     pub updated_at: Option<String>,
     pub url: Option<String>,
+    pub hwid: Option<String>,
 }
 
 /// Список всех подписок (proxy-providers) с метаданными и пользовательскими псевдонимами.
 pub async fn get_providers_info(http: &reqwest::Client, cfg: &AppConfig) -> Result<Vec<ProviderInfo>, String> {
     let v = m_get(http, cfg, "/providers/proxies").await?;
-    let urls = if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-        crate::routing::parse_provider_urls(&yaml)
+    let (urls, hwids) = if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+        (
+            crate::routing::parse_provider_urls(&yaml),
+            crate::routing::parse_provider_hwids(&yaml),
+        )
     } else {
-        std::collections::BTreeMap::new()
+        (std::collections::BTreeMap::new(), std::collections::BTreeMap::new())
     };
     let mut out = Vec::new();
     if let Some(map) = v.get("providers").and_then(|p| p.as_object()) {
@@ -169,6 +173,7 @@ pub async fn get_providers_info(http: &reqwest::Client, cfg: &AppConfig) -> Resu
                 vehicle_type: vtype,
                 updated_at: updated,
                 url: urls.get(pname).cloned(),
+                hwid: hwids.get(pname).cloned(),
             });
         }
     }

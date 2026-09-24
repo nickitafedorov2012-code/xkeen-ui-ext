@@ -1341,14 +1341,29 @@ pub struct AddProviderReq {
     pub id: String,
     pub url: String,
     pub name: Option<String>,
+    pub hwid: Option<String>,
+    pub user_agent: Option<String>,
+    pub append_hwid_to_url: Option<bool>,
 }
 
 /// POST /api/providers/add — добавление новой подписки в config.yaml
 pub async fn add_provider(State(state): State<AppState>, Json(req): Json<AddProviderReq>) -> Response {
     let id = req.id.trim();
-    let url = req.url.trim();
-    if id.is_empty() || url.is_empty() {
+    let raw_url = req.url.trim();
+    if id.is_empty() || raw_url.is_empty() {
         return api_err("ID и URL подписки не могут быть пустыми");
+    }
+
+    let hwid_trimmed = req.hwid.as_deref().map(str::trim).filter(|h| !h.is_empty());
+    let mut final_url = raw_url.to_string();
+    if req.append_hwid_to_url.unwrap_or(false) {
+        if let Some(h) = hwid_trimmed {
+            if !final_url.contains("hwid=") {
+                let sep = if final_url.contains('?') { '&' } else { '?' };
+                final_url.push(sep);
+                final_url.push_str(&format!("hwid={h}"));
+            }
+        }
     }
 
     let cfg = state.config.read().await.clone();
@@ -1357,12 +1372,14 @@ pub async fn add_provider(State(state): State<AppState>, Json(req): Json<AddProv
         Err(e) => return api_err(format!("Ошибка чтения {}: {e}", cfg.mihomo.config_path)),
     };
 
-    let new_yaml = match crate::routing::add_provider_to_yaml(
+    let new_yaml = match crate::routing::add_provider_to_yaml_full(
         &yaml,
         id,
-        url,
+        &final_url,
         Some(cfg.health_check_url()),
         Some(cfg.mihomo.health_check_interval),
+        hwid_trimmed,
+        req.user_agent.as_deref(),
     ) {
         Ok(y) => y,
         Err(e) => return api_err(e),
@@ -2826,13 +2843,14 @@ pub async fn get_policies_map(State(state): State<AppState>) -> Response {
 
 // ==================== ZAPRET / DPI ИНТЕГРАЦИЯ ====================
 
-/// GET /api/zapret/status — статус nfqws и S51zapret
+/// GET /api/zapret/status — статус nfqws, iptables и S51zapret
 pub async fn get_zapret_status(_state: State<AppState>) -> Response {
     let init_script = std::path::Path::new("/opt/etc/init.d/S51zapret");
     let installed = init_script.exists();
 
     let mut running = false;
     let mut pid: Option<u32> = None;
+    let mut cmdline: Option<String> = None;
 
     if installed {
         if let Ok(out) = tokio::process::Command::new("pidof").arg("nfqws").output().await {
@@ -2841,36 +2859,146 @@ pub async fn get_zapret_status(_state: State<AppState>) -> Response {
                 if let Ok(p) = first_pid.parse::<u32>() {
                     running = true;
                     pid = Some(p);
+
+                    let proc_cmd = format!("/proc/{p}/cmdline");
+                    if let Ok(raw) = tokio::fs::read(&proc_cmd).await {
+                        let c = raw
+                            .split(|&b| b == 0)
+                            .filter(|s| !s.is_empty())
+                            .map(|s| String::from_utf8_lossy(s))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if !c.is_empty() {
+                            cmdline = Some(c);
+                        }
+                    }
                 }
             }
         }
     }
 
+    let autostart = if installed {
+        tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("[ -x /opt/etc/init.d/S51zapret ]")
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    let iptables_active = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg("iptables -t mangle -C PREROUTING -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
     let config_content = tokio::fs::read_to_string("/opt/etc/zapret/zapret.conf").await.ok();
+
+    // Определение текущего пресета
+    let check_str = cmdline.as_deref().or(config_content.as_deref()).unwrap_or("");
+    let preset = if check_str.contains("disorder2") && check_str.contains("split-pos=1") {
+        "youtube"
+    } else if check_str.contains("any-protocol") || check_str.contains("cutoff=d4") {
+        "discord"
+    } else if check_str.contains("badseq") {
+        "aggressive"
+    } else if check_str.contains("fake,split2") {
+        "general"
+    } else {
+        "custom"
+    };
 
     api_ok(json!({
         "installed": installed,
         "running": running,
         "pid": pid,
+        "autostart": autostart,
+        "iptables_active": iptables_active,
+        "preset": preset,
+        "cmdline": cmdline,
         "config": config_content,
     }))
 }
 
 #[derive(Deserialize)]
 pub struct ZapretActionReq {
-    pub action: String, // "start" | "stop" | "restart"
+    pub action: String, // "start" | "stop" | "restart" | "toggle" | "install" | "set_preset" | "save_config" | "test_dpi"
+    pub preset: Option<String>,
+    pub custom_args: Option<String>,
+    pub config_content: Option<String>,
 }
 
-/// POST /api/zapret/action — запуск, остановка, перезапуск и установка службы Zapret
+/// POST /api/zapret/action — запуск, остановка, переключение, пресеты и тест DPI
 pub async fn zapret_action(
     _state: State<AppState>,
     axum::extract::Json(body): axum::extract::Json<ZapretActionReq>,
 ) -> Response {
     let act = body.action.trim();
-    if act != "start" && act != "stop" && act != "restart" && act != "install" {
-        return api_err("Недопустимое действие для службы Zapret");
+
+    // 1. Тестирование обхода DPI
+    if act == "test_dpi" {
+        let test_cmd = r#"
+            yt_res=$(curl -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" https://www.youtube.com 2>/dev/null || echo "000:0")
+            dc_res=$(curl -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" https://discord.com 2>/dev/null || echo "000:0")
+            echo "$yt_res|$dc_res"
+        "#;
+        let out = tokio::process::Command::new("sh").arg("-c").arg(test_cmd).output().await;
+        let line = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+        let parts: Vec<&str> = line.split('|').collect();
+
+        let parse_part = |s: &str| -> (u16, f64) {
+            let mut split = s.split(':');
+            let code = split.next().and_then(|c| c.parse().ok()).unwrap_or(0);
+            let time = split.next().and_then(|t| t.parse().ok()).unwrap_or(0.0);
+            (code, time)
+        };
+
+        let (yt_code, yt_time) = parts.get(0).map(|s| parse_part(s)).unwrap_or((0, 0.0));
+        let (dc_code, dc_time) = parts.get(1).map(|s| parse_part(s)).unwrap_or((0, 0.0));
+
+        return api_ok(json!({
+            "youtube": { "code": yt_code, "time_secs": yt_time, "ok": yt_code >= 200 && yt_code < 400 },
+            "discord": { "code": dc_code, "time_secs": dc_time, "ok": dc_code >= 200 && dc_code < 400 },
+        }));
     }
 
+    // 2. Сохранение конфигурации zapret.conf
+    if act == "save_config" {
+        if let Some(content) = body.config_content {
+            let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
+            if let Err(e) = tokio::fs::write("/opt/etc/zapret/zapret.conf", &content).await {
+                return api_err(format!("Ошибка записи zapret.conf: {e}"));
+            }
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+            return api_ok(json!({ "saved": true, "message": "Конфигурация Zapret сохранена и служба перезапущена" }));
+        }
+        return api_err("Отсутствует содержимое config_content");
+    }
+
+    // 3. Выбор пресета
+    if act == "set_preset" {
+        let p = body.preset.as_deref().unwrap_or("general");
+        let args = match p {
+            "youtube" => "--daemon --qnum=200 --dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig",
+            "discord" => "--daemon --qnum=200 --dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-any-protocol --dpi-desync-cutoff=d4",
+            "aggressive" => "--daemon --qnum=200 --dpi-desync=fake,disorder2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=midsld --dpi-desync-fooling=badseq,md5sig",
+            "custom" => body.custom_args.as_deref().unwrap_or("--daemon --qnum=200 --dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig"),
+            _ => "--daemon --qnum=200 --dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig",
+        };
+
+        let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
+        let conf_data = format!("NFQWS_ARGS=\"{args}\"\n");
+        let _ = tokio::fs::write("/opt/etc/zapret/zapret.conf", conf_data).await;
+        let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+        return api_ok(json!({ "preset": p, "args": args, "message": format!("Применен пресет '{p}'") }));
+    }
+
+    // 4. Установка службы Zapret
     if act == "install" {
         let install_cmd = r#"
             mkdir -p /opt/zapret /opt/etc/init.d /opt/etc/zapret
@@ -2883,7 +3011,78 @@ pub async fn zapret_action(
             mv zapret-v* /opt/zapret && \
             cd /opt/zapret && \
             ./install_bin.sh && \
-            echo 'IyEvYmluL3NoCgpjYXNlICIkMSIgaW4KICBzdGFydCkKICAgIGlmIHBpZG9mIG5mcXdzID4vZGV2L251bGwgMj4mMTsgdGhlbgogICAgICBleGl0IDAKICAgIGZpCiAgICBta2RpciAtcCAvb3B0L2V0Yy96YXByZXQKICAgIFsgISAtZiAvb3B0L2V0Yy96YXByZXQvemFwcmV0LmNvbmYgXSAmJiBjcCAtZiAvb3B0L3phcHJldC9jb25maWcuZGVmYXVsdCAvb3B0L2V0Yy96YXByZXQvemFwcmV0LmNvbmYgMj4vZGV2L251bGwKICAgIGlmIFsgLXggL29wdC96YXByZXQvbmZxL25mcXdzIF07IHRoZW4KICAgICAgL29wdC96YXByZXQvbmZxL25mcXdzIC0tZGFlbW9uIC0tcW51bT0yMDAgLS1kcGktZGVzeW5jPWZha2Usc3BsaXQyIC0tZHBpLWRlc3luYy1hdXRvdHRsPTIgLS1kcGktZGVzeW5jLWZvb2xpbmc9bWQ1c2lnCiAgICBlbGlmIFsgLXggL29wdC96YXByZXQvYmluYXJpZXMvbGludXgtYXJtNjQvbmZxd3MgXTsgdGhlbgogICAgICAvb3B0L3phcHJldC9iaW5hcmllcy9saW51eC1hcm02NC9uZnF3cyAtLWRhZW1vbiAtLXFudW09MjAwIC0tZHBpLWRlc3luYz1mYWtlLHNwbGl0MiAtLWRwaS1kZXN5bmMtYXV0b3R0bD0yIC0tZHBpLWRlc3luYy1mb29saW5nPW1kNXNpZwogICAgZmkKICAgIDs7CiAgc3RvcCkKICAgIGtpbGxhbGwgbmZxd3MgMj4vZGV2L251bGwKICAgIDs7CiAgcmVzdGFydCkKICAgIC9vcHQvZXRjL2luaXQuZC9TNTF6YXByZXQgc3RvcAogICAgc2xlZXAgMQogICAgL29wdC9ldGMvaW5pdC5kL1M1MXphcHJldCBzdGFydAogICAgOzsKICBzdGF0dXMpCiAgICBpZiBwaWRvZiBuZnF3cyA+L2Rldi9udWxsIDI+JjE7IHRoZW4KICAgICAgZXhpdCAwCiAgICBlbHNlCiAgICAgIGV4aXQgMQogICAgZmkKICAgIDs7CiAgKikKICAgIGVjaG8gIlVzYWdlOiAkMCB7c3RhcnR8c3RvcHxyZXN0YXJ0fHN0YXR1c30iCiAgICBleGl0IDEKICAgIDs7CmVzYWMK' | base64 -d > /opt/etc/init.d/S51zapret && \
+            cat << 'EOF' > /opt/etc/init.d/S51zapret
+#!/bin/sh
+
+PIDFILE="/var/run/nfqws.pid"
+CONF="/opt/etc/zapret/zapret.conf"
+BIN="/opt/zapret/nfq/nfqws"
+[ ! -x "$BIN" ] && BIN="/opt/zapret/binaries/linux-arm64/nfqws"
+
+NFQWS_ARGS="--daemon --qnum=200 --dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig"
+
+[ -f "$CONF" ] && . "$CONF"
+
+add_fw() {
+  iptables -t mangle -C PREROUTING -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
+    iptables -t mangle -I PREROUTING -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass
+
+  iptables -t mangle -C OUTPUT -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
+    iptables -t mangle -I OUTPUT -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass
+
+  iptables -t mangle -C PREROUTING -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
+    iptables -t mangle -I PREROUTING -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass
+
+  iptables -t mangle -C OUTPUT -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
+    iptables -t mangle -I OUTPUT -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass
+}
+
+del_fw() {
+  iptables -t mangle -D PREROUTING -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null
+  iptables -t mangle -D OUTPUT -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null
+  iptables -t mangle -D PREROUTING -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null
+  iptables -t mangle -D OUTPUT -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null
+}
+
+case "$1" in
+  start)
+    if pidof nfqws >/dev/null 2>&1; then
+      add_fw
+      exit 0
+    fi
+    mkdir -p /opt/etc/zapret
+    if [ -x "$BIN" ]; then
+      $BIN $NFQWS_ARGS
+      add_fw
+    fi
+    ;;
+  stop)
+    del_fw
+    killall nfqws 2>/dev/null
+    rm -f "$PIDFILE"
+    ;;
+  restart)
+    del_fw
+    killall nfqws 2>/dev/null
+    sleep 1
+    if [ -x "$BIN" ]; then
+      $BIN $NFQWS_ARGS
+      add_fw
+    fi
+    ;;
+  status)
+    if pidof nfqws >/dev/null 2>&1; then
+      exit 0
+    else
+      exit 1
+    fi
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart|status}"
+    exit 1
+    ;;
+esac
+EOF
             chmod +x /opt/etc/init.d/S51zapret && \
             /opt/etc/init.d/S51zapret start
         "#;
@@ -2902,13 +3101,31 @@ pub async fn zapret_action(
         return api_err("Служба Zapret (S51zapret) не установлена в /opt/etc/init.d/");
     }
 
-    match tokio::process::Command::new(init_script).arg(act).output().await {
+    // 5. Toggle (Включение / Выключение)
+    let action_to_run = if act == "toggle" {
+        let is_running = tokio::process::Command::new("pidof")
+            .arg("nfqws")
+            .output()
+            .await
+            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+            .unwrap_or(false);
+        if is_running { "stop" } else { "start" }
+    } else {
+        act
+    };
+
+    if action_to_run != "start" && action_to_run != "stop" && action_to_run != "restart" {
+        return api_err("Недопустимое действие для службы Zapret");
+    }
+
+    match tokio::process::Command::new(init_script).arg(action_to_run).output().await {
         Ok(out) => {
             let output_str = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-            api_ok(json!({ "success": out.status.success(), "output": output_str.trim() }))
+            api_ok(json!({ "success": out.status.success(), "output": output_str.trim(), "action": action_to_run }))
         }
         Err(e) => api_err(format!("Ошибка выполнения {}: {}", init_script, e)),
     }
+}
 }
 
 // ==================== РАСПИСАНИЯ УСТРОЙСТВ ====================

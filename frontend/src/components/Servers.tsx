@@ -78,6 +78,8 @@ export default function Servers({ notify }: Props) {
   const [newSubId, setNewSubId] = useState('')
   const [newSubUrl, setNewSubUrl] = useState('')
   const [newSubName, setNewSubName] = useState('')
+  const [newSubHwid, setNewSubHwid] = useState('')
+  const [newSubAppendHwid, setNewSubAppendHwid] = useState(false)
   const [addingSub, setAddingSub] = useState(false)
 
   const searchInputRef = useRef<HTMLInputElement>(null)
@@ -392,6 +394,11 @@ export default function Servers({ notify }: Props) {
     setTimeout(() => setCopiedUrlId(null), 2500)
   }
 
+  const generateHwid = () => {
+    const num = Math.floor(100 + Math.random() * 900)
+    setNewSubHwid(`keenetic-router-${num}`)
+  }
+
   const handleAddSubscription = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!newSubId.trim() || !newSubUrl.trim()) {
@@ -404,11 +411,15 @@ export default function Servers({ notify }: Props) {
         id: newSubId.trim(),
         url: newSubUrl.trim(),
         name: newSubName.trim() || undefined,
+        hwid: newSubHwid.trim() || undefined,
+        append_hwid_to_url: newSubAppendHwid,
       })
       notify(`Подписка '${newSubId.trim()}' успешно добавлена`)
       setNewSubId('')
       setNewSubUrl('')
       setNewSubName('')
+      setNewSubHwid('')
+      setNewSubAppendHwid(false)
       setNewSubOpen(false)
       load()
     } catch (e) {
@@ -1324,6 +1335,16 @@ export default function Servers({ notify }: Props) {
                       </button>
                     </div>
 
+                    {/* Строка HWID подписки */}
+                    {p.hwid && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#38bdf8' }}>
+                        <span style={{ opacity: 0.7 }}>🔑 HWID:</span>
+                        <span style={{ fontFamily: 'Consolas, monospace', background: 'rgba(56, 189, 248, 0.12)', padding: '2px 6px', borderRadius: 4, border: '1px solid rgba(56, 189, 248, 0.25)' }}>
+                          {p.hwid}
+                        </span>
+                      </div>
+                    )}
+
                     {/* Строка URL подписки */}
                     {p.url && (
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(0,0,0,0.2)', padding: '4px 8px', borderRadius: 6 }}>
@@ -1356,23 +1377,30 @@ export default function Servers({ notify }: Props) {
               })}
 
               {/* Форма добавления новой подписки */}
-              <div style={{ marginTop: 12, padding: '10px 12px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 8 }}>
+              <div style={{ marginTop: 12, padding: '12px 14px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 8 }}>
                 {!newSubOpen ? (
                   <button
                     type="button"
                     className="btn sm ghost"
-                    onClick={() => setNewSubOpen(true)}
+                    onClick={() => {
+                      setNewSubOpen(true)
+                      if (!newSubHwid) generateHwid()
+                    }}
                     style={{ width: '100%', color: 'var(--accent)' }}
                   >
-                    ➕ Добавить новую подписку
+                    ➕ Добавить новую подписку (с HWID / https sub)
                   </button>
                 ) : (
-                  <form onSubmit={handleAddSubscription} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    <b style={{ fontSize: 13 }}>➕ Добавление подписки</b>
+                  <form onSubmit={handleAddSubscription} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <b style={{ fontSize: 13, color: 'var(--accent)' }}>➕ Добавление подписки с HWID</b>
+                      <span className="muted small">HTTPS Sub & Mihomo Provider</span>
+                    </div>
+
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                       <input
                         className="input sm"
-                        placeholder="ID (латиница, напр. sub_work)"
+                        placeholder="ID (латиница, напр. geodema, sub_main)"
                         value={newSubId}
                         onChange={(e) => setNewSubId(e.target.value)}
                         style={{ flex: '1 1 180px' }}
@@ -1380,19 +1408,66 @@ export default function Servers({ notify }: Props) {
                       />
                       <input
                         className="input sm"
-                        placeholder="Отображаемое имя (напр. Рабочая)"
+                        placeholder="Отображаемое имя (напр. Основная подписка)"
                         value={newSubName}
                         onChange={(e) => setNewSubName(e.target.value)}
                         style={{ flex: '1 1 180px' }}
                       />
                     </div>
+
                     <input
                       className="input sm"
-                      placeholder="URL подписки (https://...)"
+                      placeholder="URL подписки (https://domain.com/sub/...)"
                       value={newSubUrl}
-                      onChange={(e) => setNewSubUrl(e.target.value)}
+                      onChange={(e) => {
+                        const val = e.target.value
+                        setNewSubUrl(val)
+                        if (!newSubId && val.startsWith('http')) {
+                          try {
+                            const u = new URL(val)
+                            const seg = u.pathname.split('/').filter(Boolean).pop()
+                            const cleanHost = u.hostname.replace(/^(sub|account|api|vpn)\./, '').split('.')[0]
+                            setNewSubId((cleanHost || seg || 'sub').replace(/[^a-zA-Z0-9_]/g, '').toLowerCase())
+                          } catch {}
+                        }
+                      }}
                       required
                     />
+
+                    {/* Поле HWID и генератор */}
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <input
+                        className="input sm"
+                        placeholder="HWID устройства (напр. keenetic-router-228)"
+                        value={newSubHwid}
+                        onChange={(e) => setNewSubHwid(e.target.value)}
+                        style={{ flex: 1, fontFamily: 'Consolas, monospace' }}
+                      />
+                      <button
+                        type="button"
+                        className="btn sm ghost"
+                        onClick={generateHwid}
+                        title="Сгенерировать случайный HWID"
+                        style={{ whiteSpace: 'nowrap' }}
+                      >
+                        🎲 Сгенерировать
+                      </button>
+                    </div>
+
+                    {/* Опция добавления HWID в URL */}
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, cursor: 'pointer', userSelect: 'none' }}>
+                      <input
+                        type="checkbox"
+                        checked={newSubAppendHwid}
+                        onChange={(e) => setNewSubAppendHwid(e.target.checked)}
+                      />
+                      <span>Добавить параметр <code style={{ color: '#38bdf8' }}>?hwid=...</code> в URL подписки (формат https sub)</span>
+                    </label>
+
+                    <div style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.4 }}>
+                      💡 Заголовок <code style={{ color: '#38bdf8' }}>x-hwid</code> и User-Agent ClashMeta прописываются автоматически в <code style={{ color: 'var(--accent)' }}>config.yaml</code>.
+                    </div>
+
                     <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, marginTop: 4 }}>
                       <button type="button" className="btn sm ghost" onClick={() => setNewSubOpen(false)}>
                         Отмена

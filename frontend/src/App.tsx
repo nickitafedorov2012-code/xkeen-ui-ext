@@ -14,6 +14,7 @@ import RulesViewer from './components/RulesViewer'
 import Diagnostics from './components/Diagnostics'
 import UpdateModal from './components/UpdateModal'
 import MihomoCoreModal from './components/MihomoCoreModal'
+import Zapret from './components/Zapret'
 import { apiGet, apiPost } from './api'
 import type { AuthStatus, StatusInfo } from './types'
 
@@ -25,6 +26,7 @@ type TabId =
   | 'rules'
   | 'diagnostics'
   | 'google-ai'
+  | 'zapret'
   | 'settings'
   | 'help'
   | 'antigravity'
@@ -37,6 +39,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'rules', label: '📋 Правила' },
   { id: 'diagnostics', label: '🩺 Диагностика' },
   { id: 'google-ai', label: '🤖 Google AI' },
+  { id: 'zapret', label: '🛡️ Запрет (DPI)' },
   { id: 'settings', label: '⚙️ Настройки' },
   { id: 'help', label: '📖 Справка' },
 ]
@@ -251,7 +254,19 @@ export default function App() {
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [refresh, notify])
+  }, [refresh, notify, switchTab])
+
+  // Слушатель смены вкладки по событию xr:switch-tab
+  useEffect(() => {
+    const handleSwitchTab = (e: Event) => {
+      const ce = e as CustomEvent<TabId>
+      if (ce.detail && TABS.some((t) => t.id === ce.detail)) {
+        switchTab(ce.detail)
+      }
+    }
+    window.addEventListener('xr:switch-tab', handleSwitchTab)
+    return () => window.removeEventListener('xr:switch-tab', handleSwitchTab)
+  }, [switchTab])
 
   return (
     <div className="app">
@@ -306,6 +321,7 @@ export default function App() {
           {tab === 'rules' && <RulesViewer notify={notify} />}
           {tab === 'diagnostics' && <Diagnostics notify={notify} />}
           {(tab === 'google-ai' || tab === 'antigravity') && <Antigravity notify={notify} />}
+          {tab === 'zapret' && <Zapret notify={notify} />}
           {tab === 'settings' && <Settings notify={notify} status={status} refresh={refresh} />}
           {tab === 'help' && <Help status={status} />}
         </ErrorBoundary>

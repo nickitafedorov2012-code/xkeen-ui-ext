@@ -959,81 +959,36 @@ export default function Settings({ notify, status, refresh }: Props) {
           {/* ZAPRET / DPI */}
           <section className="card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <h2 style={{ margin: 0 }}>⚡ Обход замедлений Zapret (nfqws)</h2>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <span style={{ fontSize: 20 }}>🛡️</span>
+                <h2 style={{ margin: 0 }}>Zapret — Обход замедлений DPI</h2>
+              </div>
               <span className="badge" style={{ color: zapretStatus?.running ? '#22c55e' : zapretStatus?.installed ? '#f59e0b' : 'var(--muted)' }}>
-                {zapretStatus?.running ? `🟢 Запущен (PID: ${zapretStatus.pid})` : zapretStatus?.installed ? '🟡 Остановлен' : '⚪ Не установлен'}
+                {zapretStatus?.running ? `🟢 Активен (PID: ${zapretStatus.pid})` : zapretStatus?.installed ? '⚪ Выключен' : '🔴 Не установлен'}
               </span>
             </div>
             <p className="muted small">
-              Локальный сервис для обхода DPI-замедлений YouTube, Discord и других сервисов без расхода трафика VPS (/opt/etc/init.d/S51zapret).
+              Управление обходом DPI для YouTube и Discord вынесено в отдельную вкладку <b>«🛡️ Запрет (DPI)»</b> с главным выключателем, пресетами для провайдеров и онлайн-тестом соединения.
             </p>
-            <div className="stats-grid four-col" style={{ marginTop: 10, marginBottom: 12 }}>
-              <div className="stat-card">
-                <div className="stat-label">Статус службы</div>
-                <div className="stat-value" style={{ fontSize: 14, color: zapretStatus?.running ? '#22c55e' : zapretStatus?.installed ? '#f59e0b' : 'var(--muted)' }}>
-                  {zapretStatus?.running ? '🟢 Запущен' : zapretStatus?.installed ? '🟡 Остановлен' : '⚪ Не установлен'}
-                </div>
-                <div className="muted small">{zapretStatus?.running ? `PID: ${zapretStatus.pid}` : 'Служба DPI'}</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-label">Исполняемый демон</div>
-                <div className="stat-value" style={{ fontSize: 14, fontFamily: 'monospace' }}>
-                  nfqws
-                </div>
-                <div className="muted small">S51zapret</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-label">Расход VPS</div>
-                <div className="stat-value" style={{ fontSize: 14, color: '#10b981' }}>
-                  0 байт (Direct)
-                </div>
-                <div className="muted small">Прямой поток роутера</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-label">Назначение</div>
-                <div className="stat-value" style={{ fontSize: 13, color: 'var(--accent)' }}>
-                  YouTube, Discord
-                </div>
-                <div className="muted small">Обход замедлений</div>
-              </div>
-            </div>
-            {zapretStatus?.installed ? (
-              <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+            <div style={{ display: 'flex', gap: 10, marginTop: 12, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="btn primary sm"
+                onClick={() => window.dispatchEvent(new CustomEvent('xr:switch-tab', { detail: 'zapret' }))}
+              >
+                🛡️ Открыть управление Zapret
+              </button>
+              {zapretStatus?.installed && (
                 <button
                   type="button"
                   className="btn sm"
                   disabled={zapretBusy}
-                  onClick={() => handleZapretAction(zapretStatus.running ? 'restart' : 'start')}
+                  onClick={() => handleZapretAction(zapretStatus.running ? 'stop' : 'start')}
                 >
-                  {zapretBusy ? '⏳…' : zapretStatus.running ? '🔄 Перезапустить' : '▶ Запустить'}
+                  {zapretBusy ? '⏳…' : zapretStatus.running ? '⏹ Выключить' : '▶ Включить'}
                 </button>
-                {zapretStatus.running && (
-                  <button
-                    type="button"
-                    className="btn sm btn-danger"
-                    disabled={zapretBusy}
-                    onClick={() => handleZapretAction('stop')}
-                  >
-                    ⏹ Остановить
-                  </button>
-                )}
-              </div>
-            ) : (
-              <div style={{ marginTop: 10 }}>
-                <p className="muted small">
-                  Пакет Zapret не обнаружен в /opt/etc/init.d/S51zapret. Вы можете установить его в один клик.
-                </p>
-                <button
-                  type="button"
-                  className="btn sm btn-primary"
-                  disabled={zapretBusy}
-                  onClick={() => handleZapretAction('install')}
-                  style={{ marginTop: 8 }}
-                >
-                  {zapretBusy ? '⏳ Установка Zapret…' : '📥 Установить Zapret в 1 клик'}
-                </button>
-              </div>
-            )}
+              )}
+            </div>
           </section>
 
           {/* GEOIP / GEOSITE */}
