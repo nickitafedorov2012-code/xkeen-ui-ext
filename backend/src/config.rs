@@ -312,7 +312,7 @@ pub struct AntigravityConfig {
 impl Default for AntigravityConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             mode: "auto".into(),
             proxy_port: 53129,
             proxy_enabled: true,
@@ -322,7 +322,6 @@ impl Default for AntigravityConfig {
             own_proxy: String::new(),
             targets: vec![
                 "cloudcode-pa.googleapis.com".into(),
-                "daily-cloudcode-pa.googleapis.com".into(),
             ],
         }
     }

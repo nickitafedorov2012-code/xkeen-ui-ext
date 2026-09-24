@@ -549,7 +549,7 @@ export default function Antigravity({ notify }: Props) {
         <div className="ag-targets-row">
           <span className="ag-targets-label">Целевые домены (перехват):</span>
           <div className="ag-targets-list">
-            {(status?.targets || ['cloudcode-pa.googleapis.com', 'daily-cloudcode-pa.googleapis.com']).map((t) => (
+            {(status?.targets || ['cloudcode-pa.googleapis.com']).map((t) => (
               <span key={t} className="ag-target-chip">
                 🔒 {t}
               </span>

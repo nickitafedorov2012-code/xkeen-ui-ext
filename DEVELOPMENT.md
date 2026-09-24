@@ -835,3 +835,11 @@
   - Добавлен REST API эндпоинт `POST /api/domains/scan-cdn` для мгновенного ручного запуска сканирования CDN и синхронизации `geo_override` по требованию.
   - В веб-интерфейсе в разделе настроек доменов добавлена кнопка **«🔍 Сканировать CDN сейчас»** с индикацией прогресса и подсказкой о расписании.
 
+## v1.3.11 (Fix Antigravity Script encoding and Google AI routing priority)
+- **Устранение знаков вопроса в `fix_antigravity.cmd` и `/patch` (`api.rs`)**:
+  - Все сообщения скрипта патчинга переведены на чистый английский язык (ASCII), исключая любые искажения кодировки (`???????`) в стандартной консоли Windows.
+- **Приоритет маршрутизации Google AI / Antigravity (`routing.rs`, `config.rs`, `antigravity.rs`)**:
+  - Домены `GOOGLE_AI_DOMAINS` исключены из блока принудительной маршрутизации `AUTO-FORCE-BEGIN ... PROXY`, чтобы они гарантированно направлялись через выделенный селектор `Google AI` (Канада/США), а не через общий `PROXY` (Германия/Польша).
+  - В `AntigravityConfig::default()` отключен по умолчанию модуль подмены DNS (`enabled: false`), а `daily-cloudcode-pa.googleapis.com` исключен из списка `targets`, устраняя сброс TLS-сессий (`EOF`).
+  - В `apply_keenetic_rules` добавлена обязательная предварительная очистка старых `ip host` записей в KeeneticOS.
+

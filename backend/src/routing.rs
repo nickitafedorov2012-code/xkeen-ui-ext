@@ -512,11 +512,13 @@ pub fn apply_domain_rules(
                 out.push(DIRECT_END.to_string());
             }
 
-            // 3. Принудительные домены (PROXY)
+            // 3. Принудительные домены (PROXY, исключая специализированные Google AI домены)
             if !force.is_empty() {
                 out.push(FORCE_BEGIN.to_string());
                 for d in &force {
-                    out.push(format!("  - DOMAIN-SUFFIX,{d},PROXY"));
+                    if !GOOGLE_AI_DOMAINS.iter().any(|g| g.eq_ignore_ascii_case(d)) {
+                        out.push(format!("  - DOMAIN-SUFFIX,{d},PROXY"));
+                    }
                 }
                 out.push(FORCE_END.to_string());
             }

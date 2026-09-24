@@ -1505,13 +1505,13 @@ Write-Host "=======================================================" -Foreground
 Write-Host "   Antigravity & Cloud Code Login Patch (xkeen route)  " -ForegroundColor Cyan
 Write-Host "=======================================================" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "[1/3] Завершение процессов Antigravity..." -ForegroundColor Yellow
+Write-Host "[1/3] Terminating Antigravity processes..." -ForegroundColor Yellow
 $procs = @("language_server", "language_server_windows_x64", "Antigravity", "Antigravity CLI")
 foreach ($p in $procs) {
     Get-Process -Name $p -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 Start-Sleep -Milliseconds 800
-Write-Host "[2/3] Поиск language_server.exe..." -ForegroundColor Yellow
+Write-Host "[2/3] Searching for language_server.exe..." -ForegroundColor Yellow
 $candidates = @(
     "$env:LOCALAPPDATA\Programs\antigravity\resources\bin\language_server.exe",
     "$env:LOCALAPPDATA\Programs\antigravity\resources\app\extensions\antigravity\bin\language_server.exe",
@@ -1531,9 +1531,9 @@ if ($found.Count -eq 0) {
 }
 $found = $found | Select-Object -Unique
 if ($found.Count -eq 0) {
-    Write-Host "[!] Файлы language_server.exe не найдены!" -ForegroundColor Red
+    Write-Host "[!] language_server.exe files not found!" -ForegroundColor Red
 } else {
-    Write-Host "[3/3] Патчинг сигнатуры (ineligible -> inexigible)..." -ForegroundColor Yellow
+    Write-Host "[3/3] Patching binary signature (ineligible -> inexigible)..." -ForegroundColor Yellow
     $enc = [System.Text.Encoding]::GetEncoding(28591)
     $patchedCount = 0
     foreach ($file in $found) {
@@ -1546,21 +1546,21 @@ if ($found.Count -eq 0) {
                 if (-not (Test-Path $bak)) { [System.IO.File]::Copy($file, $bak) }
                 $newText = $text.Replace('ineligible', 'inexigible')
                 [System.IO.File]::WriteAllBytes($file, $enc.GetBytes($newText))
-                Write-Host "     [OK] Успешно пропатчен!" -ForegroundColor Green
+                Write-Host "     [OK] Successfully patched!" -ForegroundColor Green
                 $patchedCount++
             } elseif ($text.Contains('inexigible')) {
-                Write-Host "     [OK] Уже пропатчен (inexigible)." -ForegroundColor Yellow
+                Write-Host "     [OK] Already patched (inexigible)." -ForegroundColor Yellow
                 $patchedCount++
             } else {
-                Write-Host "     [?] Сигнатура ineligible не найдена." -ForegroundColor DarkYellow
+                Write-Host "     [?] Signature 'ineligible' not found." -ForegroundColor DarkYellow
             }
         } catch {
-            Write-Host "     [!] Ошибка доступа: $_" -ForegroundColor Red
+            Write-Host "     [!] Access error: $_" -ForegroundColor Red
         }
     }
     if ($patchedCount -gt 0) {
         Write-Host ""
-        Write-Host "[SUCCESS] Разблокировка завершена! Перезапустите Antigravity." -ForegroundColor Green
+        Write-Host "[SUCCESS] Unlock completed! Please restart Antigravity." -ForegroundColor Green
     }
 }
 Write-Host ""

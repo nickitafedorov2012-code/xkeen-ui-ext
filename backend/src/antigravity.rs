@@ -440,8 +440,10 @@ impl AntigravityManager {
             crate::log_w!("[ANTIGRAVITY] Не удалось добавить ip rule для {ip_rule}: {e}");
         }
 
-        // 4. Установка статических DNS-записей в Keenetic ndnproxy
+        // 4. Установка статических DNS-записей в Keenetic ndnproxy (с предварительной очисткой старых записей)
         for target in targets {
+            let clean_cmd = format!("no ip host {target}");
+            let _ = run_cmd("ndmc", &["-c", &clean_cmd]).await;
             let cmd = format!("ip host {target} {ip}");
             if let Err(e) = run_cmd("ndmc", &["-c", &cmd]).await {
                 crate::log_w!("[ANTIGRAVITY] Не удалось установить DNS запись {target} -> {ip}: {e}");
