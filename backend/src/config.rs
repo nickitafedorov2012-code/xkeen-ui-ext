@@ -263,6 +263,38 @@ pub struct AppConfig {
     pub adblock_enabled: bool,
     /// Расписания работы устройств (блокировка/прокси/direct по часам).
     pub schedules: Vec<DeviceSchedule>,
+    /// Умные режимы и гибридная маршрутизация Zapret DPI.
+    pub zapret: ZapretConfig,
+}
+
+/// Умные режимы и гибридная маршрутизация Zapret DPI.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct ZapretConfig {
+    pub enabled: bool,
+    /// Гибридный режим: YouTube -> DIRECT (максимальная скорость с локальных кэшей GGC без расхода VPS)
+    pub hybrid_youtube: bool,
+    /// Гибридный режим: Discord -> DIRECT (минимальный пинг, прямые шлюзы)
+    pub hybrid_discord: bool,
+    /// Перехват голосовых каналов Discord (UDP 50000:65535) в iptables
+    pub discord_voice_udp: bool,
+    /// Турбо-десинхронизация YouTube (disorder2 вместо split2)
+    pub youtube_turbo: bool,
+    /// Принудительная изоляция заблокированных ресурсов (ChatGPT, Claude, X/Twitter, Instagram) через PROXY
+    pub isolated_proxy: bool,
+}
+
+impl Default for ZapretConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hybrid_youtube: false,
+            hybrid_discord: false,
+            discord_voice_udp: false,
+            youtube_turbo: false,
+            isolated_proxy: false,
+        }
+    }
 }
 
 /// Расписание работы устройства (блокировка/прокси/direct по времени).
@@ -349,6 +381,7 @@ impl Default for AppConfig {
             flow_server: None,
             adblock_enabled: false,
             schedules: Vec::new(),
+            zapret: ZapretConfig::default(),
         }
     }
 }

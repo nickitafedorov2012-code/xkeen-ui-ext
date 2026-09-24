@@ -64,6 +64,15 @@ export interface ProviderInfo {
   hwid?: string
 }
 
+export interface ZapretFeatures {
+  enabled: boolean
+  hybrid_youtube: boolean
+  hybrid_discord: boolean
+  discord_voice_udp: boolean
+  youtube_turbo: boolean
+  isolated_proxy: boolean
+}
+
 export interface ZapretStatus {
   installed: boolean
   running: boolean
@@ -73,6 +82,7 @@ export interface ZapretStatus {
   preset?: string
   cmdline?: string
   config?: string
+  features?: ZapretFeatures
 }
 
 export interface DpiTestResult {

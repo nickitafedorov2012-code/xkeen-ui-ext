@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { apiGet, apiPost } from '../api'
-import type { ZapretStatus, DpiTestResult } from '../types'
+import type { ZapretStatus, DpiTestResult, ZapretFeatures } from '../types'
 
 interface ZapretProps {
   notify: (msg: string, error?: boolean) => void
@@ -57,10 +57,22 @@ export default function Zapret({ notify }: ZapretProps) {
   const [configDraft, setConfigDraft] = useState('')
   const [savingConfig, setSavingConfig] = useState(false)
 
+  // Умные режимы и независимые выключатели
+  const [features, setFeatures] = useState<ZapretFeatures>({
+    enabled: true,
+    hybrid_youtube: false,
+    hybrid_discord: false,
+    discord_voice_udp: false,
+    youtube_turbo: false,
+    isolated_proxy: false,
+  })
+  const [togglingFeature, setTogglingFeature] = useState<string | null>(null)
+
   const loadStatus = async () => {
     try {
       const res = await apiGet<ZapretStatus>('zapret/status')
       setStatus(res)
+      if (res.features) setFeatures(res.features)
       if (res.config) setConfigDraft(res.config)
       if (res.cmdline) setCustomArgs(res.cmdline)
     } catch (e) {
@@ -157,6 +169,166 @@ export default function Zapret({ notify }: ZapretProps) {
     } finally {
       setTestingDpi(false)
     }
+  }
+
+  const handleToggleFeature = async (key: keyof ZapretFeatures) => {
+    const nextVal = !features[key]
+    setTogglingFeature(key)
+    setFeatures((prev) => ({ ...prev, [key]: nextVal }))
+    try {
+      const res = await apiPost<{ success: boolean; features?: ZapretFeatures; message?: string }>('zapret/action', {
+        action: 'toggle_feature',
+        feature: key,
+        enabled: nextVal,
+      })
+      if (res.features) {
+        setFeatures(res.features)
+      }
+      notify(
+        nextVal
+          ? '🟢 Опция активирована и правила обновлены'
+          : '⚪ Опция выключена (возвращен исходный режим)'
+      )
+      await loadStatus()
+    } catch (e) {
+      setFeatures((prev) => ({ ...prev, [key]: !nextVal }))
+      notify(e instanceof Error ? e.message : 'Ошибка переключения опции', true)
+    } finally {
+      setTogglingFeature(null)
+    }
+  }
+
+  const handleResetFeatures = async () => {
+    setBusy(true)
+    try {
+      const res = await apiPost<{ success: boolean; features?: ZapretFeatures; message?: string }>('zapret/action', {
+        action: 'reset_features',
+      })
+      if (res.features) {
+        setFeatures(res.features)
+      }
+      notify('Все умные режимы сброшены к исходным')
+      await loadStatus()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка сброса настроек', true)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const renderFeatureCard = (
+    key: keyof ZapretFeatures,
+    title: string,
+    badgeText: string,
+    desc: string,
+    statusText: string,
+    offHint: string
+  ) => {
+    const isChecked = !!features[key]
+    const isBusy = togglingFeature === key || busy
+
+    return (
+      <div
+        key={key}
+        style={{
+          padding: '16px 18px',
+          borderRadius: 12,
+          background: isChecked ? 'rgba(34, 197, 94, 0.05)' : 'rgba(255, 255, 255, 0.02)',
+          border: isChecked ? '1px solid rgba(34, 197, 94, 0.3)' : '1px solid var(--border)',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'space-between',
+          gap: 12,
+          transition: 'all 0.2s ease',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <b style={{ fontSize: 13.5, color: isChecked ? 'var(--text)' : 'var(--muted)' }}>{title}</b>
+              <span
+                className="badge"
+                style={{
+                  fontSize: 10,
+                  background: isChecked ? 'rgba(34, 197, 94, 0.15)' : 'rgba(255, 255, 255, 0.05)',
+                  color: isChecked ? '#22c55e' : 'var(--muted)',
+                  border: isChecked ? '1px solid rgba(34, 197, 94, 0.3)' : '1px solid var(--border)',
+                }}
+              >
+                {badgeText}
+              </span>
+            </div>
+            <p className="muted small" style={{ margin: '6px 0 0', lineHeight: 1.45 }}>
+              {desc}
+            </p>
+          </div>
+
+          <button
+            type="button"
+            disabled={isBusy || !isInstalled}
+            onClick={() => handleToggleFeature(key)}
+            style={{
+              width: 50,
+              height: 28,
+              borderRadius: 16,
+              border: 'none',
+              cursor: isBusy || !isInstalled ? 'not-allowed' : 'pointer',
+              background: isChecked
+                ? 'linear-gradient(135deg, #22c55e 0%, #16a34a 100%)'
+                : 'rgba(255, 255, 255, 0.15)',
+              position: 'relative',
+              transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+              padding: 2,
+              flexShrink: 0,
+              marginTop: 2,
+              boxShadow: isChecked ? '0 0 12px rgba(34, 197, 94, 0.35)' : 'none',
+            }}
+            title={isChecked ? 'Выключить опцию' : 'Включить опцию'}
+          >
+            <div
+              style={{
+                width: 24,
+                height: 24,
+                borderRadius: '50%',
+                background: '#fff',
+                transform: isChecked ? 'translateX(22px)' : 'translateX(0)',
+                transition: 'transform 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+                boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 10,
+                color: isChecked ? '#16a34a' : '#888',
+                fontWeight: 'bold',
+              }}
+            >
+              {isBusy ? '…' : isChecked ? '✓' : '✕'}
+            </div>
+          </button>
+        </div>
+
+        <div
+          style={{
+            fontSize: 11,
+            padding: '6px 10px',
+            borderRadius: 6,
+            background: 'rgba(0, 0, 0, 0.2)',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            color: 'var(--muted)',
+            border: '1px solid rgba(255, 255, 255, 0.04)',
+          }}
+        >
+          <span style={{ color: isChecked ? '#22c55e' : 'var(--muted)', fontWeight: 500 }}>
+            {statusText}
+          </span>
+          <span style={{ fontSize: 10 }}>
+            При выключении: <b style={{ color: 'var(--text)' }}>{offHint}</b>
+          </span>
+        </div>
+      </div>
+    )
   }
 
   if (loading && !status) {
@@ -545,41 +717,88 @@ export default function Zapret({ notify }: ZapretProps) {
         </div>
       </section>
 
-      {/* 3. ЛУЧШИЕ СПОСОБЫ ИСПОЛЬЗОВАНИЯ И ГИБРИДНЫЙ РЕЖИМ */}
+      {/* 3. УМНЫЕ РЕЖИМЫ И ГИБРИДНАЯ МАРШРУТИЗАЦИЯ С НЕЗАВИСИМЫМИ ВЫКЛЮЧАТЕЛЯМИ */}
       <section className="card" style={{ padding: '22px 24px' }}>
-        <h3 style={{ margin: '0 0 14px 0', fontSize: 16, fontWeight: 700 }}>
-          💡 Лучшие способы использования Zapret в связке с XKeen Route
-        </h3>
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-            <span style={{ fontSize: 20 }}>🚀</span>
-            <div>
-              <b style={{ fontSize: 13.5 }}>1. Гибридная маршрутизация (Экономия 100% трафика VPS)</b>
-              <p className="muted small" style={{ margin: '4px 0 0', lineHeight: 1.5 }}>
-                Направляйте <b>YouTube</b> и <b>Discord</b> напрямую через интернет провайдера (селектор <code>DIRECT</code>), включив Zapret. Так видео 4K воспроизводится без буферизации на полной гигабитной скорости домашнего тарифа, минуя узкий канал зарубежного сервера.
-              </p>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>
+                💡 Умные режимы и гибридная маршрутизация
+              </h3>
+              <span
+                className="badge"
+                style={{ background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.3)' }}
+              >
+                5 независимых выключателей
+              </span>
+            </div>
+            <div className="muted small" style={{ marginTop: 3 }}>
+              Каждая функция изолирована: выключение возвращает стандартную маршрутизацию («как есть сейчас»)
             </div>
           </div>
 
-          <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-            <span style={{ fontSize: 20 }}>🔒</span>
-            <div>
-              <b style={{ fontSize: 13.5 }}>2. Разделение обязанностей: Zapret для SNI, Mihomo для IP-блоков</b>
-              <p className="muted small" style={{ margin: '4px 0 0', lineHeight: 1.5 }}>
-                Запрет эффективен против замедлений по доменному имени (SNI). Для сервисов с жесткими блокировками по IP (Instagram, Twitter/X, OpenAI, Claude, Google AI) используйте селектор <code>PROXY</code> (VLESS/Shadowsocks).
-              </p>
-            </div>
-          </div>
+          <button
+            type="button"
+            className="btn sm ghost"
+            disabled={busy}
+            onClick={handleResetFeatures}
+            title="Сбросить все 5 тумблеров к исходному состоянию"
+          >
+            ↺ Сбросить к исходным
+          </button>
+        </div>
 
-          <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-            <span style={{ fontSize: 20 }}>🛡️</span>
-            <div>
-              <b style={{ fontSize: 13.5 }}>3. Безопасность и отказоустойчивость (--queue-bypass)</b>
-              <p className="muted small" style={{ margin: '4px 0 0', lineHeight: 1.5 }}>
-                Правила перехвата на роутере Keenetic настроены с флагом <code>--queue-bypass</code>. Если служба остановлена выключателем выше или процесс завершился, трафик автоматически идёт напрямую, и интернет на устройствах не пропадет.
-              </p>
-            </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 14 }}>
+          {/* 1. YouTube Direct */}
+          {renderFeatureCard(
+            'hybrid_youtube',
+            '🎥 YouTube Direct (Экономия 100% VPS)',
+            features.hybrid_youtube ? 'DIRECT (GGC)' : 'PROXY (VPS)',
+            'Видео 4K воспроизводится напрямую с домашних кэш-серверов Google GGC на полной скорости тарифа (до 1 Гбит/с) через Zapret, не забивая канал зарубежного сервера.',
+            features.hybrid_youtube ? 'Маршрут: DIRECT + nfqws' : 'Маршрут: PROXY (через VPS)',
+            'через PROXY (VPS)'
+          )}
+
+          {/* 2. Discord Direct */}
+          {renderFeatureCard(
+            'hybrid_discord',
+            '💬 Discord Direct (Прямой доступ)',
+            features.hybrid_discord ? 'DIRECT' : 'PROXY (VPS)',
+            'Подключение к серверам и чатам Discord напрямую через Zapret. Минимальный домашний пинг и быстрая загрузка медиафайлов.',
+            features.hybrid_discord ? 'Маршрут: DIRECT + nfqws' : 'Маршрут: PROXY (через VPS)',
+            'через PROXY (VPS)'
+          )}
+
+          {/* 3. Discord Voice RTC */}
+          {renderFeatureCard(
+            'discord_voice_udp',
+            '🎙️ Голосовые каналы (UDP 50000:65535)',
+            features.discord_voice_udp ? 'RTC VOICE' : 'STANDALONE',
+            'Перехват голосовых шлюзов Discord в iptables mangle. Устраняет проблему вечного «RTC Connecting» и потерю пакетов в канале.',
+            features.discord_voice_udp ? 'Iptables: UDP 443 + 50000:65535' : 'Iptables: только TCP/UDP 443',
+            'только веб-порты 80/443'
+          )}
+
+          {/* 4. YouTube Turbo Desync */}
+          {renderFeatureCard(
+            'youtube_turbo',
+            '🚀 YouTube Turbo Desync (Disorder2)',
+            features.youtube_turbo ? 'DISORDER2' : 'SPLIT2',
+            'Нарушение очередности первого пакета (disorder2, autottl=2). Пробивает жесткие ТСПУ провайдеров, если базовый split2 зависает.',
+            features.youtube_turbo ? 'Стратегия: disorder2 (split-pos=1)' : 'Стратегия: базовый split2',
+            'стандартный split2'
+          )}
+
+          {/* 5. Изоляция IP-блокировок */}
+          <div style={{ gridColumn: '1 / -1' }}>
+            {renderFeatureCard(
+              'isolated_proxy',
+              '🔒 Изоляция IP-блокировок (ChatGPT, Claude, X/Twitter, Instagram -> PROXY)',
+              features.isolated_proxy ? 'STRICT PROXY' : 'DEFAULT',
+              'Разделение задач: Zapret обходит только цензуру по SNI (YouTube/Discord). Сервисы с жесткой блокировкой по IP гарантированно идут через VLESS/Shadowsocks на VPS, исключая конфликты с DPI.',
+              features.isolated_proxy ? 'Изоляция: AI и соцсети строго на PROXY' : 'Изоляция: по стандартным правилам',
+              'по общим правилам'
+            )}
           </div>
         </div>
       </section>

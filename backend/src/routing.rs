@@ -350,6 +350,38 @@ pub const ADBLOCK_RULE: &str = "  - GEOSITE,category-ads-all,REJECT";
 pub const GOOGLE_AI_BEGIN: &str = "# --- AUTO-GOOGLE-AI-BEGIN ---";
 pub const GOOGLE_AI_END: &str = "# --- AUTO-GOOGLE-AI-END ---";
 
+pub const ZAPRET_HYBRID_BEGIN: &str = "# --- AUTO-ZAPRET-HYBRID-BEGIN ---";
+pub const ZAPRET_HYBRID_END: &str = "# --- AUTO-ZAPRET-HYBRID-END ---";
+
+pub const YOUTUBE_HYBRID_DOMAINS: &[&str] = &[
+    "googlevideo.com",
+    "youtube.com",
+    "ytimg.com",
+    "youtu.be",
+    "ggpht.com",
+];
+
+pub const DISCORD_HYBRID_DOMAINS: &[&str] = &[
+    "discord.com",
+    "discord.gg",
+    "discordapp.com",
+    "discordapp.net",
+];
+
+pub const ISOLATED_PROXIED_DOMAINS: &[&str] = &[
+    "openai.com",
+    "chatgpt.com",
+    "oaistatic.com",
+    "oaiusercontent.com",
+    "anthropic.com",
+    "claude.ai",
+    "instagram.com",
+    "cdninstagram.com",
+    "twitter.com",
+    "x.com",
+    "twimg.com",
+];
+
 pub const FLOW_DOMAINS: &[&str] = &[
     "flow.google.com",
     "labs.google",
@@ -492,6 +524,83 @@ pub fn apply_adblock_rules(yaml: &str, enabled: bool) -> Result<String, String> 
             out.push(ADBLOCK_BEGIN.to_string());
             out.push(ADBLOCK_RULE.to_string());
             out.push(ADBLOCK_END.to_string());
+        }
+    }
+    Ok(out.join("\n"))
+}
+
+/// Удаление блока правил Zapret Hybrid из YAML.
+pub fn remove_zapret_hybrid_rules(yaml: &str) -> String {
+    let mut out = Vec::new();
+    let mut skip = false;
+    for line in yaml.lines() {
+        let t = line.trim();
+        if t == ZAPRET_HYBRID_BEGIN {
+            skip = true;
+            continue;
+        }
+        if t == ZAPRET_HYBRID_END {
+            skip = false;
+            continue;
+        }
+        if !skip {
+            out.push(line);
+        }
+    }
+    out.join("\n")
+}
+
+/// Применение правил Zapret Hybrid (YouTube DIRECT, Discord DIRECT, Изоляция PROXY).
+pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretConfig) -> Result<String, String> {
+    let content = remove_zapret_hybrid_rules(yaml);
+    if !zapret_cfg.enabled {
+        return Ok(content);
+    }
+
+    let mut rules_to_add: Vec<String> = Vec::new();
+
+    // 1. Изоляция IP-блокировок (ChatGPT, Claude, X/Twitter, Instagram -> PROXY)
+    if zapret_cfg.isolated_proxy {
+        for d in ISOLATED_PROXIED_DOMAINS {
+            rules_to_add.push(format!("  - DOMAIN-SUFFIX,{d},PROXY"));
+        }
+    }
+
+    // 2. YouTube -> DIRECT (максимальная скорость с локальных кэшей GGC)
+    if zapret_cfg.hybrid_youtube {
+        for d in YOUTUBE_HYBRID_DOMAINS {
+            rules_to_add.push(format!("  - DOMAIN-SUFFIX,{d},DIRECT"));
+        }
+        rules_to_add.push("  - DOMAIN-KEYWORD,youtube,DIRECT".to_string());
+    }
+
+    // 3. Discord -> DIRECT (минимальный пинг, прямые шлюзы)
+    if zapret_cfg.hybrid_discord {
+        for d in DISCORD_HYBRID_DOMAINS {
+            rules_to_add.push(format!("  - DOMAIN-SUFFIX,{d},DIRECT"));
+        }
+        rules_to_add.push("  - DOMAIN-KEYWORD,discord,DIRECT".to_string());
+    }
+
+    if rules_to_add.is_empty() {
+        return Ok(content);
+    }
+
+    let lines: Vec<&str> = content.lines().collect();
+    let rules_idx = lines
+        .iter()
+        .position(|l| l.trim_end() == "rules:")
+        .ok_or("В config.yaml нет секции rules:")?;
+
+    let mut out = Vec::with_capacity(lines.len() + rules_to_add.len() + 4);
+    for (i, line) in lines.iter().enumerate() {
+        out.push(line.to_string());
+        if i == rules_idx {
+            out.push(ZAPRET_HYBRID_BEGIN.to_string());
+            for r in &rules_to_add {
+                out.push(r.clone());
+            }
+            out.push(ZAPRET_HYBRID_END.to_string());
         }
     }
     Ok(out.join("\n"))
@@ -992,6 +1101,11 @@ pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> (String, usi
         }
     }
 
+    // 1c. Умные гибридные правила Zapret (YouTube / Discord -> DIRECT, AI -> PROXY)
+    if let Ok(with_zapret) = apply_zapret_hybrid_rules(&current, &cfg.zapret) {
+        current = with_zapret;
+    }
+
     // 2. Игнор-лист
     if let Ok(with_ig) = apply_ignore_to_groups(&current, &cfg.ignore_servers) {
         current = with_ig;
@@ -1357,6 +1471,46 @@ proxy-groups:
         assert!(!disabled.contains(ADBLOCK_BEGIN));
         assert!(!disabled.contains("GEOSITE,category-ads-all,REJECT"));
         assert!(disabled.contains("DOMAIN-SUFFIX,google.com,DIRECT"));
+    }
+
+    #[test]
+    fn test_apply_zapret_hybrid_rules_lifecycle() {
+        let yaml = "port: 7890\nrules:\n  - DOMAIN-SUFFIX,example.com,DIRECT\n  - MATCH,PROXY\n";
+        let mut zapret_cfg = crate::config::ZapretConfig {
+            enabled: true,
+            hybrid_youtube: true,
+            hybrid_discord: true,
+            discord_voice_udp: true,
+            youtube_turbo: false,
+            isolated_proxy: true,
+        };
+
+        // 1. Включение всех гибридных правил
+        let with_zapret = apply_zapret_hybrid_rules(yaml, &zapret_cfg).unwrap();
+        assert!(with_zapret.contains(ZAPRET_HYBRID_BEGIN));
+        assert!(with_zapret.contains("DOMAIN-SUFFIX,googlevideo.com,DIRECT"));
+        assert!(with_zapret.contains("DOMAIN-SUFFIX,discord.com,DIRECT"));
+        assert!(with_zapret.contains("DOMAIN-SUFFIX,openai.com,PROXY"));
+        assert!(with_zapret.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
+
+        // 2. Идемпотентность
+        let dup = apply_zapret_hybrid_rules(&with_zapret, &zapret_cfg).unwrap();
+        assert_eq!(dup.matches(ZAPRET_HYBRID_BEGIN).count(), 1);
+
+        // 3. Выключение YouTube (возврат в PROXY)
+        zapret_cfg.hybrid_youtube = false;
+        let no_yt = apply_zapret_hybrid_rules(&dup, &zapret_cfg).unwrap();
+        assert!(!no_yt.contains("googlevideo.com"));
+        assert!(no_yt.contains("discord.com"));
+        assert!(no_yt.contains("openai.com"));
+
+        // 4. Полное отключение службы Zapret
+        zapret_cfg.enabled = false;
+        let disabled = apply_zapret_hybrid_rules(&no_yt, &zapret_cfg).unwrap();
+        assert!(!disabled.contains(ZAPRET_HYBRID_BEGIN));
+        assert!(!disabled.contains("discord.com"));
+        assert!(!disabled.contains("openai.com"));
+        assert!(disabled.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
     }
 }
 

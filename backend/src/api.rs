@@ -2913,6 +2913,8 @@ pub async fn get_zapret_status(_state: State<AppState>) -> Response {
         "custom"
     };
 
+    let cfg = state.config.read().await;
+
     api_ok(json!({
         "installed": installed,
         "running": running,
@@ -2922,20 +2924,24 @@ pub async fn get_zapret_status(_state: State<AppState>) -> Response {
         "preset": preset,
         "cmdline": cmdline,
         "config": config_content,
+        "features": &cfg.zapret,
     }))
 }
 
 #[derive(Deserialize)]
 pub struct ZapretActionReq {
-    pub action: String, // "start" | "stop" | "restart" | "toggle" | "install" | "set_preset" | "save_config" | "test_dpi"
+    pub action: String, // "start" | "stop" | "restart" | "toggle" | "install" | "set_preset" | "save_config" | "test_dpi" | "toggle_feature" | "set_features" | "reset_features"
     pub preset: Option<String>,
     pub custom_args: Option<String>,
     pub config_content: Option<String>,
+    pub feature: Option<String>,
+    pub enabled: Option<bool>,
+    pub features: Option<crate::config::ZapretConfig>,
 }
 
 /// POST /api/zapret/action — запуск, остановка, переключение, пресеты и тест DPI
 pub async fn zapret_action(
-    _state: State<AppState>,
+    state: State<AppState>,
     axum::extract::Json(body): axum::extract::Json<ZapretActionReq>,
 ) -> Response {
     let act = body.action.trim();
@@ -3096,6 +3102,71 @@ EOF
         }
     }
 
+    // 5. Управление независимыми режимами и выключателями (toggle_feature / set_features / reset_features)
+    if act == "toggle_feature" || act == "set_features" || act == "reset_features" {
+        let mut cfg = state.config.read().await.clone();
+        if act == "reset_features" {
+            cfg.zapret = crate::config::ZapretConfig::default();
+        } else if let Some(new_features) = body.features {
+            cfg.zapret = new_features;
+        } else if let (Some(feat), Some(val)) = (body.feature.as_deref(), body.enabled) {
+            match feat {
+                "hybrid_youtube" => cfg.zapret.hybrid_youtube = val,
+                "hybrid_discord" => cfg.zapret.hybrid_discord = val,
+                "discord_voice_udp" => cfg.zapret.discord_voice_udp = val,
+                "youtube_turbo" => cfg.zapret.youtube_turbo = val,
+                "isolated_proxy" => cfg.zapret.isolated_proxy = val,
+                "enabled" => cfg.zapret.enabled = val,
+                _ => return api_err(format!("Неизвестный параметр функции: {feat}")),
+            }
+        }
+
+        // Обновляем правила в config.yaml ядра Mihomo
+        if std::path::Path::new(&cfg.mihomo.config_path).exists() {
+            if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+                if let Ok(new_yaml) = routing::apply_zapret_hybrid_rules(&yaml, &cfg.zapret) {
+                    let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
+                    let _ = mihomo::reload_config(&state.http, &cfg).await;
+                }
+            }
+        }
+
+        // При изменении youtube_turbo обновляем конфигурацию nfqws
+        if cfg.zapret.youtube_turbo {
+            let turbo_args = "NFQWS_ARGS=\"--daemon --qnum=200 --dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig\"\n";
+            let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
+            let _ = tokio::fs::write("/opt/etc/zapret/zapret.conf", turbo_args).await;
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+        } else if act == "toggle_feature" && body.feature.as_deref() == Some("youtube_turbo") {
+            let general_args = "NFQWS_ARGS=\"--daemon --qnum=200 --dpi-desync=fake,split2 --dpi-desync-autottl=2 --dpi-desync-fooling=md5sig\"\n";
+            let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
+            let _ = tokio::fs::write("/opt/etc/zapret/zapret.conf", general_args).await;
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+        }
+
+        // При изменении discord_voice_udp динамически настраиваем mangle UDP порты
+        if cfg.zapret.discord_voice_udp {
+            let cmd = "iptables -t mangle -C PREROUTING -p udp -m multiport --dports 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
+                       iptables -t mangle -I PREROUTING -p udp -m multiport --dports 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass; \
+                       iptables -t mangle -C OUTPUT -p udp -m multiport --dports 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
+                       iptables -t mangle -I OUTPUT -p udp -m multiport --dports 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass";
+            let _ = tokio::process::Command::new("sh").arg("-c").arg(cmd).output().await;
+        } else if act == "toggle_feature" && body.feature.as_deref() == Some("discord_voice_udp") {
+            let cmd = "iptables -t mangle -D PREROUTING -p udp -m multiport --dports 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; \
+                       iptables -t mangle -D OUTPUT -p udp -m multiport --dports 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null";
+            let _ = tokio::process::Command::new("sh").arg("-c").arg(cmd).output().await;
+        }
+
+        let _ = config::save(&state.config_path, &cfg).await;
+        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+
+        return api_ok(json!({
+            "success": true,
+            "features": cfg.zapret,
+            "message": "Параметры и правила маршрутизации успешно обновлены"
+        }));
+    }
+
     let init_script = "/opt/etc/init.d/S51zapret";
     if !std::path::Path::new(init_script).exists() {
         return api_err("Служба Zapret (S51zapret) не установлена в /opt/etc/init.d/");
@@ -3121,6 +3192,24 @@ EOF
     match tokio::process::Command::new(init_script).arg(action_to_run).output().await {
         Ok(out) => {
             let output_str = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            if out.status.success() {
+                let mut cfg = state.config.read().await.clone();
+                if action_to_run == "start" {
+                    cfg.zapret.enabled = true;
+                } else if action_to_run == "stop" {
+                    cfg.zapret.enabled = false;
+                }
+                if std::path::Path::new(&cfg.mihomo.config_path).exists() {
+                    if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+                        if let Ok(new_yaml) = routing::apply_zapret_hybrid_rules(&yaml, &cfg.zapret) {
+                            let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
+                            let _ = mihomo::reload_config(&state.http, &cfg).await;
+                        }
+                    }
+                }
+                let _ = config::save(&state.config_path, &cfg).await;
+                *state.config.write().await = std::sync::Arc::new(cfg);
+            }
             api_ok(json!({ "success": out.status.success(), "output": output_str.trim(), "action": action_to_run }))
         }
         Err(e) => api_err(format!("Ошибка выполнения {}: {}", init_script, e)),
