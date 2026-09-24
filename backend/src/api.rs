@@ -2928,6 +2928,9 @@ add_fw() {
   # Hook into PREROUTING for client LAN bridge interfaces (br+)
   iptables -t mangle -I PREROUTING 1 -i br+ -j zapret
 
+  # Hook into OUTPUT for router-originated direct traffic (Mihomo DIRECT routing)
+  iptables -t mangle -I OUTPUT 1 -j zapret
+
   # FAILSAFE: через 30 сек проверяем интернет, при потере — откатываем всё
   (sleep 30 && \
     if ! curl -s -m 5 -o /dev/null http://www.gstatic.com/generate_204 2>/dev/null && \
