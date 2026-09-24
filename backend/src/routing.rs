@@ -369,6 +369,9 @@ pub const DISCORD_HYBRID_DOMAINS: &[&str] = &[
     "discordapp.com",
     "discordapp.net",
     "discord.media",
+    "discord.co",
+    "dis.gd",
+    "discord-activities.com",
 ];
 
 pub const ISOLATED_PROXIED_DOMAINS: &[&str] = &[

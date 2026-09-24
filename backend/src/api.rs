@@ -2887,8 +2887,8 @@ find_bin() {
 
 BIN=$(find_bin)
 
-# Fallback default
-NFQWS_ARGS="--daemon --qnum=200 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-cutoff=d4"
+# Fallback default with fwmark to prevent loops
+NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
 
 [ -f "$CONF" ] && . "$CONF"
 
@@ -2899,7 +2899,10 @@ add_fw() {
   iptables -t mangle -N zapret 2>/dev/null
   iptables -t mangle -F zapret 2>/dev/null
 
-  # 1. CRITICAL: Skip private/local subnets & router IP so Keenetic Web UI / LAN are NEVER touched
+  # 1. CRITICAL: Skip packets already marked by nfqws to prevent infinite packet looping
+  iptables -t mangle -A zapret -m mark --mark 0x40000000/0x40000000 -j RETURN
+
+  # 2. CRITICAL: Skip private/local subnets & router IP so Keenetic Web UI / LAN are NEVER touched
   iptables -t mangle -A zapret -d 0.0.0.0/8 -j RETURN
   iptables -t mangle -A zapret -d 10.0.0.0/8 -j RETURN
   iptables -t mangle -A zapret -d 100.64.0.0/10 -j RETURN
@@ -2910,9 +2913,6 @@ add_fw() {
   iptables -t mangle -A zapret -d 224.0.0.0/4 -j RETURN
   iptables -t mangle -A zapret -d 240.0.0.0/4 -j RETURN
   iptables -t mangle -A zapret -d 255.255.255.255/32 -j RETURN
-
-  # 2. Skip packets already marked by nfqws
-  iptables -t mangle -A zapret -m mark --mark 0x40000000/0x40000000 -j RETURN
 
   # 3. Queue WAN TCP (80, 443) -> NFQUEUE 200 with bypass
   iptables -t mangle -A zapret -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass
@@ -2925,11 +2925,11 @@ add_fw() {
     iptables -t mangle -A zapret -p udp -m multiport --dports 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass
   fi
 
+  # Hook into POSTROUTING for all outbound WAN packets (LAN forwarded + router local direct)
+  iptables -t mangle -I POSTROUTING 1 ! -o br+ ! -o lo -j zapret
+
   # Hook into PREROUTING for client LAN bridge interfaces (br+)
   iptables -t mangle -I PREROUTING 1 -i br+ -j zapret
-
-  # Hook into OUTPUT for router-originated direct traffic (Mihomo DIRECT routing)
-  iptables -t mangle -I OUTPUT 1 -j zapret
 
   # FAILSAFE: через 30 сек проверяем интернет, при потере — откатываем всё
   (sleep 30 && \
@@ -2944,6 +2944,8 @@ add_fw() {
 
 del_fw() {
   # Remove hooks
+  while iptables -t mangle -D POSTROUTING ! -o br+ ! -o lo -j zapret 2>/dev/null; do :; done
+  while iptables -t mangle -D POSTROUTING -j zapret 2>/dev/null; do :; done
   while iptables -t mangle -D PREROUTING -i br+ -j zapret 2>/dev/null; do :; done
   while iptables -t mangle -D PREROUTING -j zapret 2>/dev/null; do :; done
   while iptables -t mangle -D OUTPUT -j zapret 2>/dev/null; do :; done
@@ -2958,11 +2960,10 @@ del_fw() {
   while iptables -t mangle -D PREROUTING -i br+ -p udp -m multiport --dports 50000:65535 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
   while iptables -t mangle -D PREROUTING -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
   while iptables -t mangle -D PREROUTING -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
-
-  # Clean legacy OUTPUT rules
+  while iptables -t mangle -D POSTROUTING -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
+  while iptables -t mangle -D POSTROUTING -p udp --dport 443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
   while iptables -t mangle -D OUTPUT -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
   while iptables -t mangle -D OUTPUT -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
-  while iptables -t mangle -D OUTPUT -p udp -m multiport --dports 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
 }
 
 case "$1" in
@@ -3054,7 +3055,7 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
             "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         };
         profiles.push(format!(
-            "--filter-tcp=80,443 --hostlist-domains=discord.com,discord.gg,discordapp.com,discordapp.net,discord.media,discord-attachments-uploads-prd.storage.googleapis.com {dc_desync}"
+            "--filter-tcp=80,443 --hostlist-domains=discord.com,discord.gg,discordapp.com,discordapp.net,discord.media,discord-attachments-uploads-prd.storage.googleapis.com,dis.gd,discord-activities.com {dc_desync}"
         ));
     }
 
@@ -3080,7 +3081,7 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
         profiles.push("--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4".to_string());
     }
 
-    let args = format!("--daemon --qnum=200 {}", profiles.join(" --new "));
+    let args = format!("--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 {}", profiles.join(" --new "));
     let voice_enabled = cfg.discord_voice_udp;
     (args, voice_enabled)
 }
@@ -3156,7 +3157,7 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
 
     let iptables_active = tokio::process::Command::new("sh")
         .arg("-c")
-        .arg("iptables -t mangle -C PREROUTING -i br+ -j zapret 2>/dev/null || iptables -t mangle -C PREROUTING -i br+ -p tcp -m multiport --dports 80,443 -j NFQUEUE 2>/dev/null")
+        .arg("iptables -t mangle -C POSTROUTING ! -o br+ ! -o lo -j zapret 2>/dev/null || iptables -t mangle -C PREROUTING -i br+ -j zapret 2>/dev/null || iptables -t mangle -C PREROUTING -i br+ -p tcp -m multiport --dports 80,443 -j NFQUEUE 2>/dev/null")
         .output()
         .await
         .map(|o| o.status.success())
