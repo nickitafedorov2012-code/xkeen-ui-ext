@@ -744,11 +744,6 @@ export default function Servers({ notify }: Props) {
                     >
                       {activeServer.name}
                     </div>
-                    {activeServer.host && activeServer.host !== activeServer.name && !activeServer.name.includes(activeServer.host) && (
-                      <div className="server-card-host mono muted small" title={`Хост: ${activeServer.host}${activeServer.port ? `:${activeServer.port}` : ''}`}>
-                        {activeServer.host}{activeServer.port ? `:${activeServer.port}` : ''}
-                      </div>
-                    )}
                   </div>
 
                   <div className="server-card-actions">
@@ -925,11 +920,6 @@ export default function Servers({ notify }: Props) {
                     >
                       {s.name}
                     </div>
-                    {s.host && s.host !== s.name && !s.name.includes(s.host) && (
-                      <div className="server-card-host mono muted small" title={`Хост: ${s.host}${s.port ? `:${s.port}` : ''}`}>
-                        {s.host}{s.port ? `:${s.port}` : ''}
-                      </div>
-                    )}
                   </div>
 
                   {/* 3. Нижняя строка: Кнопки действий без разрыва строк */}

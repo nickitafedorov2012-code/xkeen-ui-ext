@@ -689,30 +689,19 @@ body {
   white-space: nowrap;
 }
 
-/* 2. Средняя строка: Название сервера во всю ширину */
+/* 2. Средняя строка: Название сервера во всю ширину (только один раз) */
 .server-card-main {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
   min-width: 0;
-  padding: 1px 0;
+  padding: 2px 0 3px;
 }
 .server-card-name {
-  font-size: 14px;
+  font-size: 14.5px;
   font-weight: 600;
   color: var(--text, #f8fafc);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   line-height: 1.35;
-}
-.server-card-host {
-  font-size: 11px;
-  color: var(--muted, #94a3b8);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  opacity: 0.8;
 }
 
 /* 3. Нижняя строка: Кнопки действий (никогда не переносятся беспорядочно) */
