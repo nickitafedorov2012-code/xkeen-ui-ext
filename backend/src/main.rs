@@ -484,7 +484,7 @@ pub fn chrono_ts() -> String {
 
 /// Вычисление интервала ожидания до следующего понедельника 05:00:00 (по местному времени роутера)
 pub fn duration_until_next_monday_5am() -> std::time::Duration {
-    use chrono::{Datelike, Local, NaiveTime, Timelike};
+    use chrono::{Datelike, Local, NaiveTime};
     let now = Local::now();
     let today = now.date_naive();
     let target_time = NaiveTime::from_hms_opt(5, 0, 0).unwrap_or_default();

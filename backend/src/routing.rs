@@ -516,7 +516,7 @@ pub fn apply_domain_rules(
             if !force.is_empty() {
                 out.push(FORCE_BEGIN.to_string());
                 for d in &force {
-                    if !GOOGLE_AI_DOMAINS.iter().any(|g| g.eq_ignore_ascii_case(d)) {
+                    if !FLOW_DOMAINS.iter().any(|g| g.eq_ignore_ascii_case(d)) {
                         out.push(format!("  - DOMAIN-SUFFIX,{d},PROXY"));
                     }
                 }
