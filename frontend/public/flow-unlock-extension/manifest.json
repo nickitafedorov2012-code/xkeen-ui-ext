@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Flow Unlocker (RU)",
+  "name": "Flow Unlocker",
   "version": "2.1.0",
-  "description": "Разблокировка Google Flow (flow.google.com) и включение русского языка. Автор: nickitafedorov2012",
+  "description": "Разблокировка Google Flow (flow.google.com). Автор: nickitafedorov2012",
   "author": "nickitafedorov2012-code",
   "homepage_url": "https://github.com/nickitafedorov2012-code/xkeen-ui-ext",
   "permissions": [
@@ -16,7 +16,7 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "Flow Unlocker (RU) — nickitafedorov2012",
+    "default_title": "Flow Unlocker — nickitafedorov2012",
     "default_popup": "popup.html"
   },
   "content_scripts": [
