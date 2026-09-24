@@ -14,6 +14,7 @@ mod auth;
 mod watchdog;
 mod speedtest;
 mod notifications;
+pub mod traffic;
 
 use axum::extract::Request;
 use axum::middleware::{self, Next};
@@ -255,6 +256,7 @@ async fn main() {
 
     failover::spawn(state.clone());
     watchdog::spawn(state.clone());
+    traffic::spawn(state.clone());
 
     // Начальная и периодическая синхронизация IP принудительно проксируемых доменов и их CDN с geo_override
     let sync_state = state.clone();

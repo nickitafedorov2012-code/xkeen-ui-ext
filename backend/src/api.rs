@@ -2322,23 +2322,9 @@ pub async fn close_single_connection(
 
 // ==================== ТРАФИК В РЕАЛЬНОМ ВРЕМЕНИ ====================
 
-/// GET /api/traffic/poll — текущая скорость трафика (Upload / Download)
-pub async fn get_traffic_poll(State(state): State<AppState>) -> Response {
-    let cfg = state.config.read().await;
-    let url = format!("{}/traffic", cfg.mihomo_url());
-    let mut req = state.http.get(&url);
-    if !cfg.mihomo.secret.is_empty() {
-        req = req.header("Authorization", format!("Bearer {}", cfg.mihomo.secret));
-    }
-    match req.timeout(std::time::Duration::from_millis(1500)).send().await {
-        Ok(resp) => {
-            if let Ok(val) = resp.json::<serde_json::Value>().await {
-                return api_ok(val);
-            }
-        }
-        Err(_) => {}
-    }
-    api_ok(json!({ "up": 0, "down": 0 }))
+/// GET /api/traffic/poll — текущая скорость прямого и проксированного трафика
+pub async fn get_traffic_poll(_state: State<AppState>) -> Response {
+    api_ok(crate::traffic::get_snapshot_json())
 }
 
 // ==================== RULES & MATCH TESTER («КУДА ПОЙДЁТ?») ====================
