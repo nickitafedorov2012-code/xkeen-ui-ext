@@ -563,6 +563,28 @@ pub fn remove_zapret_hybrid_rules(yaml: &str) -> String {
     out.join("\n")
 }
 
+/// Поиск имени основной прокси-группы в YAML (PROXY, Proxy, Fastest, Auto, Fallback и т.д.).
+pub fn find_proxy_target_group(yaml: &str) -> String {
+    for gname in ["PROXY", "Proxy", "proxy", "Google AI", "Google-AI", "GoogleFlow", "Flow", "AI", "Fastest", "Auto", "Fallback"] {
+        let pattern_unquoted = format!("- name: {gname}");
+        let pattern_single = format!("- name: '{gname}'");
+        let pattern_double = format!("- name: \"{gname}\"");
+        for line in yaml.lines() {
+            let t = line.trim();
+            if t == pattern_unquoted
+                || t == pattern_single
+                || t == pattern_double
+                || t.starts_with(&format!("- name: {gname} "))
+                || t.starts_with(&format!("- name: '{gname}'"))
+                || t.starts_with(&format!("- name: \"{gname}\""))
+            {
+                return gname.to_string();
+            }
+        }
+    }
+    "PROXY".to_string()
+}
+
 /// Применение правил Zapret Hybrid (YouTube DIRECT, Discord DIRECT, Изоляция PROXY).
 pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretConfig) -> Result<String, String> {
     let content = remove_zapret_hybrid_rules(yaml);
@@ -570,6 +592,7 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
         return Ok(content);
     }
 
+    let proxy_target = find_proxy_target_group(yaml);
     let mut rules_to_add: Vec<String> = Vec::new();
 
     // 0. Safeguard: Защита критических Google API доменов от перехвата на DIRECT.
@@ -578,14 +601,14 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
     //    связь с Antigravity AI-агентом и другими Google сервисами.
     if zapret_cfg.hybrid_youtube || zapret_cfg.hybrid_discord {
         for d in FLOW_DOMAINS {
-            rules_to_add.push(format!("  - DOMAIN-SUFFIX,{d},PROXY"));
+            rules_to_add.push(format!("  - DOMAIN-SUFFIX,{d},{proxy_target}"));
         }
     }
 
     // 1. Изоляция IP-блокировок (ChatGPT, Claude, X/Twitter, Instagram -> PROXY)
     if zapret_cfg.isolated_proxy {
         for d in ISOLATED_PROXIED_DOMAINS {
-            rules_to_add.push(format!("  - DOMAIN-SUFFIX,{d},PROXY"));
+            rules_to_add.push(format!("  - DOMAIN-SUFFIX,{d},{proxy_target}"));
         }
     }
 

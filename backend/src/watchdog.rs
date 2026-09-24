@@ -19,7 +19,7 @@ pub fn spawn(state: AppState) {
         loop {
             sleep(Duration::from_secs(4)).await;
 
-            let (config_path_str, force_domains, device_routing, ignore_servers, device_domains, adblock_enabled, flow_server) = {
+            let (config_path_str, force_domains, device_routing, ignore_servers, device_domains, adblock_enabled, flow_server, zapret_cfg) = {
                 let cfg = state.config.read().await;
                 (
                     cfg.mihomo.config_path.clone(),
@@ -29,6 +29,7 @@ pub fn spawn(state: AppState) {
                     cfg.device_domain_rules.clone(),
                     cfg.adblock_enabled,
                     cfg.flow_server.clone(),
+                    cfg.zapret.clone(),
                 )
             };
 
@@ -58,14 +59,16 @@ pub fn spawn(state: AppState) {
                     let needs_force = !force_domains.is_empty();
                     let needs_ignore = !ignore_servers.is_empty();
                     let needs_flow = flow_server.as_ref().map_or(false, |s| !s.trim().is_empty());
+                    let needs_zapret = zapret_cfg.enabled && (zapret_cfg.hybrid_youtube || zapret_cfg.hybrid_discord || zapret_cfg.isolated_proxy);
 
                     let missing_device = needs_device && !content.contains("AUTO-DEVICE");
                     let missing_force = needs_force && !content.contains("AUTO-FORCE");
                     let missing_ignore = needs_ignore && !content.contains("exclude-filter:");
                     let missing_adblock = adblock_enabled && !content.contains("AUTO-ADBLOCK");
                     let missing_flow = needs_flow && !content.contains("AUTO-GOOGLE-AI");
+                    let missing_zapret = needs_zapret && !content.contains("AUTO-ZAPRET-HYBRID");
 
-                    if missing_device || missing_force || missing_ignore || missing_adblock || missing_flow {
+                    if missing_device || missing_force || missing_ignore || missing_adblock || missing_flow || missing_zapret {
                         log_w!("[WATCHDOG] Обнаружена перезапись config.yaml (рестарт XKeen)! Восстановление маршрутизации...");
 
                         let _guard = state.routing_lock.lock().await;
