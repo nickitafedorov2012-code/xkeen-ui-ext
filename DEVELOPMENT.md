@@ -126,6 +126,25 @@
 - Из-за этого в коде появлялись литеральные `$1` и обрезанные строки — после
   скриптовых правок всегда `cargo test` + просмотр места правки.
 
+### 🌐 Раздача фронтенда: Embedded Assets vs /opt/share/xkeen-route/dist (v1.3.14)
+
+- **Встроенные в бинарник ассеты (`Assets`) ОБЯЗАНЫ иметь приоритет над диском**:
+  В `frontend.rs` проверка `/opt/share/xkeen-route/dist` не должна выполняться первой. Если на диске роутера осталась старая сборка от предыдущих версий, сервер отдаст устаревший `index.html` и старый `.js` бандл, из-за чего новые вкладки (например, «Запрет (DPI)») не появятся в браузере даже после успешного обновления бинарника!
+- **Папка на диске — только fallback**: в `serve()` сначала вызывается `Assets::get(path)`, и только если файл во встроенных ассетах отсутствует — проверяется диск.
+- **Очистка роутера**: при расхождениях удалить старый каталог: `rm -rf /opt/share/xkeen-route/dist`.
+- **Кэш браузера / PWA**: после обновления фронтенда обязательно сбросить кэш в браузере (`Ctrl + F5` / `Shift + F5`).
+
+### 🦀 Rust: Разыменование Arc<RwLock<Arc<AppConfig>>> в Axum
+
+- **Двойное разыменование `(**state.config.read().await).clone()`**:
+  Поскольку `state.config` имеет тип `Arc<RwLock<Arc<AppConfig>>>`, вызов `state.config.read().await.clone()` клонирует внешний `Arc`, приводя к ошибке `error[E0308]: mismatched types` при сохранении `*state.config.write().await = Arc::new(cfg)`.
+  Для изменения конфига всегда:
+  1. Захватывать лок: `let _cfg_guard = state.config_lock.lock().await;`
+  2. Разыменовывать: `let mut cfg = (**state.config.read().await).clone();`
+  3. Сохранять на диск: `config::save(&state.config_path, &cfg).await?;`
+  4. Атомарно обновлять: `*state.config.write().await = std::sync::Arc::new(cfg);`
+- **Сигнатура State в хэндлерах**: всегда писать `State(state): State<AppState>`, не `_state` и не `state: State<AppState>`.
+
 ### Деплой-пайплайн (отработан, порядок обязателен)
 
 1. `cargo test` локально (PATH: `%USERPROFILE%\.cargo\bin;%USERPROFILE%\mingw64\bin`;
