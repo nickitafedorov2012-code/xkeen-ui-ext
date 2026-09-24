@@ -389,6 +389,8 @@ pub const ISOLATED_PROXIED_DOMAINS: &[&str] = &[
 ];
 
 pub const FLOW_DOMAINS: &[&str] = &[
+    "google.com",
+    "google.dev",
     "googleapis.com",
     "googleusercontent.com",
     "gstatic.com",
@@ -597,16 +599,6 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
 
     let proxy_target = find_proxy_target_group(yaml);
     let mut rules_to_add: Vec<String> = Vec::new();
-
-    // 0. Safeguard: Защита критических Google API доменов от перехвата на DIRECT.
-    //    Без этого правила домены вроде googleapis.com, google.com и т.д.
-    //    могут быть пойманы широкими DIRECT-правилами ниже, что обрывает
-    //    связь с Antigravity AI-агентом и другими Google сервисами.
-    if zapret_cfg.hybrid_youtube || zapret_cfg.hybrid_discord {
-        for d in FLOW_DOMAINS {
-            rules_to_add.push(format!("  - DOMAIN-SUFFIX,{d},{proxy_target}"));
-        }
-    }
 
     // 1. Изоляция IP-блокировок (ChatGPT, Claude, X/Twitter, Instagram -> PROXY)
     if zapret_cfg.isolated_proxy {
@@ -1133,24 +1125,21 @@ pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> (String, usi
         current = with_adblock;
     }
 
-    // 1. Доменные правила (DIRECT / FORCE / PER-DEVICE DOMAINS)
+    // 1. Умные гибридные правила Zapret (YouTube / Discord -> DIRECT, AI -> PROXY)
+    if let Ok(with_zapret) = apply_zapret_hybrid_rules(&current, &cfg.zapret) {
+        current = with_zapret;
+    }
+
+    // 2. Доменные правила (DIRECT / FORCE / PER-DEVICE DOMAINS)
     if let Ok(with_domains) = apply_domain_rules(&current, &cfg.direct_domains, &cfg.force_domains, &cfg.device_domain_rules) {
         current = with_domains;
     }
 
-    // 1b. Выделенный маршрут Google Flow & AI
-    if let Some(ref flow_srv) = cfg.flow_server {
-        if !flow_srv.trim().is_empty() {
-            let flow_group = find_flow_group_name(&current);
-            if let Ok(with_flow) = apply_flow_rules(&current, flow_srv.trim(), flow_group.as_deref()) {
-                current = with_flow;
-            }
-        }
-    }
-
-    // 1c. Умные гибридные правила Zapret (YouTube / Discord -> DIRECT, AI -> PROXY)
-    if let Ok(with_zapret) = apply_zapret_hybrid_rules(&current, &cfg.zapret) {
-        current = with_zapret;
+    // 3. Выделенный маршрут Google Flow & AI (высший приоритет — на самом верху секции rules)
+    let flow_target = cfg.flow_server.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or("PROXY");
+    let flow_group = find_flow_group_name(&current);
+    if let Ok(with_flow) = apply_flow_rules(&current, flow_target.trim(), flow_group.as_deref()) {
+        current = with_flow;
     }
 
     // 2. Игнор-лист
@@ -1541,11 +1530,6 @@ proxy-groups:
         assert!(with_zapret.contains("DOMAIN-SUFFIX,discord.com,DIRECT"));
         assert!(with_zapret.contains("DOMAIN-SUFFIX,openai.com,PROXY"));
         assert!(with_zapret.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
-        // Safeguard: Google AI/Flow домены защищены как PROXY
-        assert!(with_zapret.contains("DOMAIN-SUFFIX,googleapis.com,PROXY"));
-        assert!(with_zapret.contains("DOMAIN-SUFFIX,generativelanguage.googleapis.com,PROXY"));
-        assert!(with_zapret.contains("DOMAIN-SUFFIX,gemini.google.com,PROXY"));
-        assert!(with_zapret.contains("DOMAIN-SUFFIX,anthropic.com,PROXY"));
         // DOMAIN-KEYWORD правила НЕ должны присутствовать (слишком широкие)
         assert!(!with_zapret.contains("DOMAIN-KEYWORD,youtube"));
         assert!(!with_zapret.contains("DOMAIN-KEYWORD,discord"));
@@ -1554,14 +1538,12 @@ proxy-groups:
         let dup = apply_zapret_hybrid_rules(&with_zapret, &zapret_cfg).unwrap();
         assert_eq!(dup.matches(ZAPRET_HYBRID_BEGIN).count(), 1);
 
-        // 3. Выключение YouTube (возврат в PROXY) — Discord и safeguard остаются
+        // 3. Выключение YouTube (возврат в PROXY) — Discord и isolated_proxy остаются
         zapret_cfg.hybrid_youtube = false;
         let no_yt = apply_zapret_hybrid_rules(&dup, &zapret_cfg).unwrap();
         assert!(!no_yt.contains("googlevideo.com,DIRECT"));
-        assert!(no_yt.contains("discord.com"));
-        assert!(no_yt.contains("openai.com"));
-        // Safeguard всё ещё на месте (потому что hybrid_discord включён)
-        assert!(no_yt.contains("generativelanguage.googleapis.com,PROXY"));
+        assert!(no_yt.contains("discord.com,DIRECT"));
+        assert!(no_yt.contains("openai.com,PROXY"));
 
         // 4. Полное отключение службы Zapret
         zapret_cfg.enabled = false;
@@ -1569,7 +1551,6 @@ proxy-groups:
         assert!(!disabled.contains(ZAPRET_HYBRID_BEGIN));
         assert!(!disabled.contains("discord.com,DIRECT"));
         assert!(!disabled.contains("openai.com"));
-        assert!(!disabled.contains("generativelanguage.googleapis.com,PROXY"));
         assert!(disabled.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
     }
 }

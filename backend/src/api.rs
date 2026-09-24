@@ -3029,12 +3029,10 @@ esac
 pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
     let mut profiles: Vec<String> = Vec::new();
 
-    // YouTube profile (TCP 80/443 + UDP 443 QUIC)
+    // YouTube profile (TCP 80/443 + UDP 443 QUIC) - split2 with badseq is the fastest strategy for 4K video
     if cfg.youtube_turbo || cfg.hybrid_youtube {
         let yt_desync = if cfg.aggressive_dpi {
-            "--dpi-desync=fake,disorder2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=midsld --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
-        } else if cfg.youtube_turbo {
-            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=2 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         } else {
             "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         };
@@ -3050,7 +3048,7 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
     // Discord Web/Chat profile
     if cfg.hybrid_discord {
         let dc_desync = if cfg.aggressive_dpi {
-            "--dpi-desync=fake,disorder2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=midsld --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=2 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         } else {
             "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         };
@@ -3067,7 +3065,7 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
     // General Web Hostlist profile
     if cfg.general_bypass {
         let gen_desync = if cfg.aggressive_dpi {
-            "--dpi-desync=fake,disorder2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=midsld --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=2 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         } else {
             "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         };
@@ -3414,27 +3412,31 @@ pub async fn zapret_action(
             }
         }
 
-        // Обновляем файлы zapret.conf и S51zapret
-        sync_zapret_files(&cfg.zapret).await;
-
-        // Обновляем правила в config.yaml ядра Mihomo
-        if std::path::Path::new(&cfg.mihomo.config_path).exists() {
-            if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-                if let Ok(new_yaml) = routing::apply_zapret_hybrid_rules(&yaml, &cfg.zapret) {
-                    let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
-                    let _ = mihomo::reload_config(&state.http, &cfg).await;
-                }
-            }
-        }
-
         let is_running = tokio::process::Command::new("pidof")
             .arg("nfqws")
             .output()
             .await
             .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
             .unwrap_or(false);
+
+        if !is_running {
+            cfg.zapret.enabled = false;
+        }
+
+        // Обновляем файлы zapret.conf и S51zapret
+        sync_zapret_files(&cfg.zapret).await;
+
         if is_running {
             let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+        }
+
+        // Обновляем правила в config.yaml ядра Mihomo через apply_routing
+        if std::path::Path::new(&cfg.mihomo.config_path).exists() {
+            if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+                let (new_yaml, _) = routing::apply_routing(&raw_yaml, &cfg);
+                let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
+                let _ = mihomo::reload_config(&state.http, &cfg).await;
+            }
         }
 
         let _ = config::save(&state.config_path, &cfg).await;
@@ -3487,11 +3489,10 @@ pub async fn zapret_action(
                     cfg.zapret.enabled = false;
                 }
                 if std::path::Path::new(&cfg.mihomo.config_path).exists() {
-                    if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-                        if let Ok(new_yaml) = routing::apply_zapret_hybrid_rules(&yaml, &cfg.zapret) {
-                            let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
-                            let _ = mihomo::reload_config(&state.http, &cfg).await;
-                        }
+                    if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+                        let (new_yaml, _) = routing::apply_routing(&raw_yaml, &cfg);
+                        let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
+                        let _ = mihomo::reload_config(&state.http, &cfg).await;
                     }
                 }
                 let _ = config::save(&state.config_path, &cfg).await;
