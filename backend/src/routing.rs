@@ -386,6 +386,9 @@ pub const ISOLATED_PROXIED_DOMAINS: &[&str] = &[
 ];
 
 pub const FLOW_DOMAINS: &[&str] = &[
+    "googleapis.com",
+    "googleusercontent.com",
+    "gstatic.com",
     "flow.google.com",
     "labs.google",
     "aisandbox-pa.googleapis.com",
@@ -406,6 +409,7 @@ pub const FLOW_DOMAINS: &[&str] = &[
     "cloudaicompanion.googleapis.com",
     "cloudcode-pa.googleapis.com",
     "daily-cloudcode-pa.googleapis.com",
+    "developerconnect.googleapis.com",
     "deepmind.google",
     "deepmind.com",
     "notebooklm.google",
@@ -414,6 +418,12 @@ pub const FLOW_DOMAINS: &[&str] = &[
     "ai.google",
     "genai-media.googleusercontent.com",
     "video-downloads.googleusercontent.com",
+    "anthropic.com",
+    "claude.ai",
+    "openai.com",
+    "chatgpt.com",
+    "oaistatic.com",
+    "oaiusercontent.com",
 ];
 
 /// Удаление блока Google Flow & AI правил из YAML.
@@ -1506,8 +1516,10 @@ proxy-groups:
         assert!(with_zapret.contains("DOMAIN-SUFFIX,openai.com,PROXY"));
         assert!(with_zapret.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
         // Safeguard: Google AI/Flow домены защищены как PROXY
+        assert!(with_zapret.contains("DOMAIN-SUFFIX,googleapis.com,PROXY"));
         assert!(with_zapret.contains("DOMAIN-SUFFIX,generativelanguage.googleapis.com,PROXY"));
         assert!(with_zapret.contains("DOMAIN-SUFFIX,gemini.google.com,PROXY"));
+        assert!(with_zapret.contains("DOMAIN-SUFFIX,anthropic.com,PROXY"));
         // DOMAIN-KEYWORD правила НЕ должны присутствовать (слишком широкие)
         assert!(!with_zapret.contains("DOMAIN-KEYWORD,youtube"));
         assert!(!with_zapret.contains("DOMAIN-KEYWORD,discord"));

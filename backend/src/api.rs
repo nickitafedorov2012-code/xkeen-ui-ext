@@ -3025,41 +3025,47 @@ esac
 pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
     let mut profiles: Vec<String> = Vec::new();
 
-    // YouTube profile
+    // YouTube profile (TCP 80/443 + UDP 443 QUIC)
     if cfg.youtube_turbo || cfg.hybrid_youtube {
         let yt_desync = if cfg.aggressive_dpi {
-            "--dpi-desync=fake,disorder2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=midsld --dpi-desync-fooling=badseq,md5sig --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,disorder2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=midsld --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+        } else if cfg.youtube_turbo {
+            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         } else {
-            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         };
         profiles.push(format!(
             "--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com {yt_desync}"
         ));
+        // QUIC (UDP 443) bypass for YouTube streaming
+        profiles.push(
+            "--filter-udp=443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com --dpi-desync=fake --dpi-desync-cutoff=d4".to_string()
+        );
     }
 
     // Discord Web/Chat profile
     if cfg.hybrid_discord {
         let dc_desync = if cfg.aggressive_dpi {
-            "--dpi-desync=fake,disorder2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=midsld --dpi-desync-fooling=badseq,md5sig --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,disorder2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=midsld --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         } else {
-            "--dpi-desync=fake,split2 --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         };
         profiles.push(format!(
             "--filter-tcp=80,443 --hostlist-domains=discord.com,discord.gg,discordapp.com,discordapp.net,discord.media,discord-attachments-uploads-prd.storage.googleapis.com {dc_desync}"
         ));
     }
 
-    // Discord Voice UDP profile — корректный синтаксис без недопустимого --filter-l7
+    // Discord Voice UDP profile
     if cfg.discord_voice_udp {
-        profiles.push("--filter-udp=50000-65535 --dpi-desync=fake".to_string());
+        profiles.push("--filter-udp=50000-65535 --dpi-desync=fake --dpi-desync-cutoff=d4".to_string());
     }
 
     // General Web Hostlist profile
     if cfg.general_bypass {
         let gen_desync = if cfg.aggressive_dpi {
-            "--dpi-desync=fake,disorder2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=midsld --dpi-desync-fooling=badseq,md5sig --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,disorder2 --dpi-desync-split-seqovl=1 --dpi-desync-split-pos=midsld --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         } else {
-            "--dpi-desync=fake,split2 --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         };
         profiles.push(format!(
             "--filter-tcp=80,443 --hostlist=/opt/etc/zapret/zapret-hosts.txt {gen_desync}"
@@ -3068,7 +3074,7 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
 
     // If no specific profiles enabled, provide safe basic profile
     if profiles.is_empty() {
-        profiles.push("--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-cutoff=d4".to_string());
+        profiles.push("--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4".to_string());
     }
 
     let args = format!("--daemon --qnum=200 {}", profiles.join(" --new "));
