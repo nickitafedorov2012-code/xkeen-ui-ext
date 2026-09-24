@@ -364,6 +364,8 @@ async fn main() {
         // Обновление и Antigravity
         .route("/api/update/check", get(crate::updater::check))
         .route("/api/update/install", post(crate::updater::install))
+        .route("/api/mihomo/releases", get(crate::updater::mihomo_releases))
+        .route("/api/mihomo/install", post(crate::updater::mihomo_install))
         .route("/api/antigravity/status", get(api::get_antigravity_status))
         .route("/api/antigravity/settings", post(api::set_antigravity_settings))
         .route("/api/antigravity/check", post(api::check_antigravity))

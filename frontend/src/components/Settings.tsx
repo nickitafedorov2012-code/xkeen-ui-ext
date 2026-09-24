@@ -1099,7 +1099,17 @@ export default function Settings({ notify, status, refresh }: Props) {
 
           {/* MIHOMO */}
           <section className="card">
-            <h2>⚙️ Mihomo</h2>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+              <h2 style={{ margin: 0 }}>⚙️ Mihomo</h2>
+              <button
+                type="button"
+                className="btn sm primary"
+                onClick={() => window.dispatchEvent(new CustomEvent('xr:open-mihomo-modal'))}
+                title="Открыть список релизов MetaCubeX и обновить ядро Mihomo"
+              >
+                🚀 Релизы и обновление ядра
+              </button>
+            </div>
             <label className="row"><span>Host</span>
               <input className="input" value={settings.mihomo.host} onChange={(e) => patch((s) => (s.mihomo.host = e.target.value))} />
             </label>

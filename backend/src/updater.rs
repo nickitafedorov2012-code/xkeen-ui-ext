@@ -320,6 +320,422 @@ pub async fn install(State(state): State<AppState>) -> Response {
     }
 }
 
+// ==================== УПРАВЛЕНИЕ И ОБНОВЛЕНИЕ ЯДРА MIHOMO ====================
+
+const MIHOMO_REPO_RELEASES: &str = "https://api.github.com/repos/MetaCubeX/mihomo/releases?per_page=15";
+const MIHOMO_REPO_MIRROR: &str = "https://ghproxy.net/https://api.github.com/repos/MetaCubeX/mihomo/releases?per_page=15";
+
+#[derive(Deserialize, serde::Serialize, Clone, Debug)]
+pub struct MihomoReleaseAsset {
+    pub name: String,
+    pub browser_download_url: String,
+    #[serde(default)]
+    pub size: u64,
+}
+
+#[derive(Deserialize, serde::Serialize, Clone, Debug)]
+pub struct MihomoRelease {
+    pub tag_name: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub published_at: Option<String>,
+    #[serde(default)]
+    pub prerelease: bool,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub assets: Vec<MihomoReleaseAsset>,
+}
+
+static MIHOMO_RELEASES_CACHE: tokio::sync::Mutex<Option<(std::time::Instant, Vec<MihomoRelease>)>> =
+    tokio::sync::Mutex::const_new(None);
+
+pub async fn detect_mihomo_arch() -> &'static str {
+    #[cfg(unix)]
+    {
+        if let Ok(out) = tokio::process::Command::new("uname").arg("-m").output().await {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_lowercase();
+            if s.contains("aarch64") || s.contains("arm64") {
+                return "arm64";
+            }
+            if s.contains("mips") {
+                if s.contains("el") || s.contains("le") {
+                    return "mipsle-softfloat";
+                }
+                return "mips-hardfloat";
+            }
+            if s.contains("x86_64") || s.contains("amd64") {
+                return "amd64";
+            }
+            if s.contains("armv7") || s.contains("armv6") || s.contains("arm") {
+                return "armv7";
+            }
+        }
+    }
+
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "mipsel" => "mipsle-softfloat",
+        "mips" => "mips-hardfloat",
+        "arm" => "armv7",
+        "x86_64" => "amd64",
+        _ => "arm64",
+    }
+}
+
+pub fn find_mihomo_asset<'a>(assets: &'a [MihomoReleaseAsset], arch: &str) -> Option<&'a MihomoReleaseAsset> {
+    let candidates: Vec<&MihomoReleaseAsset> = assets
+        .iter()
+        .filter(|a| a.name.ends_with(".gz") && a.name.contains("linux"))
+        .collect();
+
+    match arch {
+        "arm64" => {
+            candidates.iter().find(|a| a.name.contains("arm64") && !a.name.contains("armv")).copied()
+        }
+        "mipsle" | "mipsle-softfloat" => {
+            candidates.iter().find(|a| a.name.contains("mipsle-softfloat") || a.name.contains("mipsle")).copied()
+        }
+        "mipsle-hardfloat" => {
+            candidates.iter().find(|a| a.name.contains("mipsle-hardfloat") || a.name.contains("mipsle")).copied()
+        }
+        "mips" | "mips-hardfloat" => {
+            candidates.iter().find(|a| a.name.contains("mips-hardfloat") || (a.name.contains("linux-mips-") && !a.name.contains("mips64") && !a.name.contains("mipsle"))).copied()
+        }
+        "mips-softfloat" => {
+            candidates.iter().find(|a| a.name.contains("mips-softfloat")).copied()
+        }
+        "amd64" => {
+            candidates.iter().find(|a| a.name.contains("amd64-compatible") || a.name.contains("amd64-v1") || a.name.contains("amd64")).copied()
+        }
+        "armv7" => {
+            candidates.iter().find(|a| a.name.contains("armv7")).copied()
+        }
+        _ => candidates.into_iter().next(),
+    }
+}
+
+async fn fetch_mihomo_releases(direct: &reqwest::Client, proxy_url: &str) -> Result<Vec<MihomoRelease>, String> {
+    let proxied = proxied_client(proxy_url);
+    let mut clients = Vec::new();
+    if let Some(ref p) = proxied {
+        clients.push(p);
+    }
+    clients.push(direct);
+
+    let urls = [MIHOMO_REPO_RELEASES, MIHOMO_REPO_MIRROR];
+
+    for http in &clients {
+        for url in &urls {
+            if let Ok(res) = http
+                .get(*url)
+                .header("Accept", "application/vnd.github+json")
+                .header("User-Agent", "xkeen-route")
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await
+            {
+                if res.status().is_success() {
+                    if let Ok(list) = res.json::<Vec<MihomoRelease>>().await {
+                        if !list.is_empty() {
+                            return Ok(list);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Err("Не удалось получить список релизов Mihomo с GitHub".into())
+}
+
+async fn fetch_mihomo_releases_cached(direct: &reqwest::Client, proxy_url: &str) -> Result<Vec<MihomoRelease>, String> {
+    let mut guard = MIHOMO_RELEASES_CACHE.lock().await;
+    if let Some((time, ref list)) = *guard {
+        if time.elapsed() < Duration::from_secs(45) {
+            return Ok(list.clone());
+        }
+    }
+    let fresh = fetch_mihomo_releases(direct, proxy_url).await?;
+    *guard = Some((std::time::Instant::now(), fresh.clone()));
+    Ok(fresh)
+}
+
+/// GET /api/mihomo/releases — список релизов ядра Mihomo
+pub async fn mihomo_releases(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let proxy_url = cfg.mihomo_proxy_url();
+    let arch = detect_mihomo_arch().await;
+
+    // Определяем текущую установленную версию Mihomo
+    let mut current_ver = crate::mihomo::get_version(&state.http, &cfg).await.unwrap_or_default();
+    let mut full_ver = current_ver.clone();
+
+    #[cfg(unix)]
+    {
+        if let Ok(out) = tokio::process::Command::new("/opt/sbin/mihomo").arg("-v").output().await {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() {
+                full_ver = s.clone();
+                for part in s.split_whitespace() {
+                    if part.starts_with('v') && part.chars().nth(1).map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                        current_ver = part.to_string();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let raw_releases = match fetch_mihomo_releases_cached(&state.http, &proxy_url).await {
+        Ok(r) => r,
+        Err(e) => return api_err(e),
+    };
+
+    let clean_current = current_ver.trim_start_matches('v');
+    let mut items = Vec::new();
+    let mut latest_stable = String::new();
+
+    for r in &raw_releases {
+        let clean_tag = r.tag_name.trim_start_matches('v');
+        let is_cur = !clean_current.is_empty() && (clean_tag == clean_current || r.tag_name == current_ver);
+        let asset = find_mihomo_asset(&r.assets, arch);
+
+        if latest_stable.is_empty() && !r.prerelease && r.tag_name.starts_with('v') {
+            latest_stable = r.tag_name.clone();
+        }
+
+        items.push(json!({
+            "tag_name": r.tag_name,
+            "name": r.name.as_deref().unwrap_or(&r.tag_name),
+            "published_at": r.published_at,
+            "prerelease": r.prerelease,
+            "body": notes_lines(&r.body, 6),
+            "is_current": is_cur,
+            "download_url": asset.map(|a| a.browser_download_url.clone()),
+            "file_size": asset.map(|a| a.size).unwrap_or(0),
+        }));
+    }
+
+    api_ok(json!({
+        "current_version": current_ver,
+        "current_full": full_ver,
+        "latest_version": latest_stable,
+        "arch": arch,
+        "releases": items,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct MihomoInstallReq {
+    pub tag: String,
+    pub custom_url: Option<String>,
+}
+
+/// POST /api/mihomo/install — загрузка и установка выбранной версии ядра Mihomo
+pub async fn mihomo_install(
+    State(state): State<AppState>,
+    axum::extract::Json(req): axum::extract::Json<MihomoInstallReq>,
+) -> Response {
+    let tag = req.tag.trim();
+    if tag.is_empty() {
+        return api_err("Не указана версия ядра Mihomo для установки");
+    }
+
+    let cfg = state.config.read().await.clone();
+    let proxy_url = cfg.mihomo_proxy_url();
+    let arch = detect_mihomo_arch().await;
+
+    // Определяем URL для загрузки
+    let download_url = if let Some(ref cu) = req.custom_url {
+        cu.clone()
+    } else {
+        let rels = fetch_mihomo_releases_cached(&state.http, &proxy_url).await.unwrap_or_default();
+        let matched = rels.iter()
+            .find(|r| r.tag_name.eq_ignore_ascii_case(tag) || r.tag_name.trim_start_matches('v') == tag.trim_start_matches('v'))
+            .and_then(|r| find_mihomo_asset(&r.assets, arch));
+
+        if let Some(asset) = matched {
+            asset.browser_download_url.clone()
+        } else {
+            let clean_tag = if tag.starts_with('v') || tag == "Prerelease-Alpha" { tag.to_string() } else { format!("v{tag}") };
+            format!("https://github.com/MetaCubeX/mihomo/releases/download/{clean_tag}/mihomo-linux-{arch}-{clean_tag}.gz")
+        }
+    };
+
+    crate::log_i!("[Mihomo Update] Начало загрузки ядра {} ({arch}) из {download_url}", tag);
+
+    let tmp_dir = Path::new("/opt/tmp");
+    let _ = tokio::fs::create_dir_all(tmp_dir).await;
+    let gz_path = tmp_dir.join("mihomo_update.gz");
+    let bin_path = tmp_dir.join("mihomo_update.bin");
+    let _ = tokio::fs::remove_file(&gz_path).await;
+    let _ = tokio::fs::remove_file(&bin_path).await;
+
+    let proxied = proxied_client(&proxy_url);
+    let http = proxied.as_ref().unwrap_or(&state.http);
+
+    let mut dl_resp = http.get(&download_url)
+        .header("User-Agent", "xkeen-route")
+        .timeout(Duration::from_secs(180))
+        .send()
+        .await;
+
+    if dl_resp.is_err() || dl_resp.as_ref().map(|r| !r.status().is_success()).unwrap_or(false) {
+        let mirror_url = format!("https://ghproxy.net/{download_url}");
+        if let Ok(m_res) = http.get(&mirror_url).header("User-Agent", "xkeen-route").timeout(Duration::from_secs(180)).send().await {
+            if m_res.status().is_success() {
+                dl_resp = Ok(m_res);
+            }
+        }
+    }
+
+    let mut res = match dl_resp {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => return api_err(format!("Ошибка загрузки ядра: HTTP {}", r.status())),
+        Err(e) => return api_err(format!("Ошибка сети при загрузке: {e}")),
+    };
+
+    use tokio::io::AsyncWriteExt;
+    let mut file = match tokio::fs::File::create(&gz_path).await {
+        Ok(f) => f,
+        Err(e) => return api_err(format!("Ошибка создания временного файла: {e}")),
+    };
+
+    let mut total_bytes = 0usize;
+    while let Ok(Some(chunk)) = res.chunk().await {
+        total_bytes += chunk.len();
+        if let Err(e) = file.write_all(&chunk).await {
+            let _ = tokio::fs::remove_file(&gz_path).await;
+            return api_err(format!("Ошибка записи архива: {e}"));
+        }
+    }
+    let _ = file.flush().await;
+    drop(file);
+
+    if total_bytes < 1024 * 1024 {
+        let _ = tokio::fs::remove_file(&gz_path).await;
+        return api_err(format!("Загруженный архив слишком мал ({total_bytes} байт)"));
+    }
+
+    // Распаковка .gz
+    let decompress_status = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("gunzip -c '{}' > '{}' || gzip -dc '{}' > '{}'", gz_path.display(), bin_path.display(), gz_path.display(), bin_path.display()))
+        .status()
+        .await;
+
+    let _ = tokio::fs::remove_file(&gz_path).await;
+
+    if decompress_status.is_err() || !bin_path.exists() {
+        let _ = tokio::fs::remove_file(&bin_path).await;
+        return api_err("Ошибка распаковки архива ядра Mihomo (gunzip)");
+    }
+
+    let meta = match tokio::fs::metadata(&bin_path).await {
+        Ok(m) => m,
+        Err(e) => return api_err(format!("Ошибка чтения файла ядра: {e}")),
+    };
+
+    if meta.len() < 3 * 1024 * 1024 {
+        let _ = tokio::fs::remove_file(&bin_path).await;
+        return api_err("Распакованный бинарник слишком мал");
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755)).await;
+    }
+
+    // Проверка исполнения бинарника
+    let test_run = tokio::process::Command::new(&bin_path)
+        .arg("-v")
+        .output()
+        .await;
+
+    let mut new_ver_str = tag.to_string();
+    match test_run {
+        Ok(out) if out.status.success() => {
+            let out_str = String::from_utf8_lossy(&out.stdout);
+            crate::log_i!("[Mihomo Update] Проверка бинарника успешна: {}", out_str.trim());
+            if let Some(v_line) = out_str.lines().next() {
+                new_ver_str = v_line.trim().to_string();
+            }
+        }
+        Ok(out) => {
+            let err_str = String::from_utf8_lossy(&out.stderr);
+            let _ = tokio::fs::remove_file(&bin_path).await;
+            return api_err(format!("Бинарник не совместим с роутером: {err_str}"));
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&bin_path).await;
+            return api_err(format!("Не удалось запустить новый бинарник: {e}"));
+        }
+    }
+
+    // Бэкап и замена /opt/sbin/mihomo
+    let target_bin = Path::new("/opt/sbin/mihomo");
+    let bak_bin = Path::new("/opt/sbin/mihomo.bak");
+
+    if target_bin.exists() {
+        let _ = tokio::fs::copy(target_bin, bak_bin).await;
+    }
+
+    if let Err(e) = tokio::fs::rename(&bin_path, target_bin).await {
+        if let Err(copy_err) = tokio::fs::copy(&bin_path, target_bin).await {
+            let _ = tokio::fs::remove_file(&bin_path).await;
+            return api_err(format!("Ошибка установки бинарника в /opt/sbin/mihomo: {copy_err} (rename: {e})"));
+        }
+        let _ = tokio::fs::remove_file(&bin_path).await;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(target_bin, std::fs::Permissions::from_mode(0o755)).await;
+    }
+
+    // Перезапуск службы XKeen / Mihomo
+    let _ = tokio::process::Command::new("sh")
+        .arg(&cfg.system.xkeen_init)
+        .arg("restart")
+        .status()
+        .await;
+
+    crate::log_i!("[Mihomo Update] Служба XKeen перезапущена с новым ядром");
+
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    let check_ok = match crate::mihomo::get_version(&state.http, &cfg).await {
+        Some(_) => true,
+        None => {
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+            crate::mihomo::get_version(&state.http, &cfg).await.is_some()
+        }
+    };
+
+    if !check_ok {
+        crate::log_w!("[Mihomo Update] Ядро не ответило после обновления. Выполняется откат...");
+        if bak_bin.exists() {
+            let _ = tokio::fs::copy(bak_bin, target_bin).await;
+            let _ = tokio::process::Command::new("sh")
+                .arg(&cfg.system.xkeen_init)
+                .arg("restart")
+                .status()
+                .await;
+        }
+        return api_err("Ядро Mihomo не запустилось после обновления. Выполнен автоматический откат на предыдущую версию.");
+    }
+
+    api_ok(json!({
+        "success": true,
+        "version": tag,
+        "full_version": new_ver_str,
+        "message": format!("Ядро Mihomo успешно обновлено до {tag}")
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,5 +767,34 @@ mod tests {
         assert_eq!(lines[0], "**Первое**: изменение");
         assert_eq!(lines[1], "Второе: исправление");
         assert_eq!(lines[2], "Обычная строка");
+    }
+
+    #[test]
+    fn test_find_mihomo_asset() {
+        let assets = vec![
+            MihomoReleaseAsset {
+                name: "mihomo-linux-amd64-v1.19.31.gz".into(),
+                browser_download_url: "https://example.com/amd64".into(),
+                size: 10000000,
+            },
+            MihomoReleaseAsset {
+                name: "mihomo-linux-arm64-v1.19.31.gz".into(),
+                browser_download_url: "https://example.com/arm64".into(),
+                size: 10000000,
+            },
+            MihomoReleaseAsset {
+                name: "mihomo-linux-mipsle-softfloat-v1.19.31.gz".into(),
+                browser_download_url: "https://example.com/mipsle".into(),
+                size: 10000000,
+            },
+        ];
+
+        let arm = find_mihomo_asset(&assets, "arm64");
+        assert!(arm.is_some());
+        assert_eq!(arm.unwrap().name, "mihomo-linux-arm64-v1.19.31.gz");
+
+        let mips = find_mihomo_asset(&assets, "mipsle");
+        assert!(mips.is_some());
+        assert_eq!(mips.unwrap().name, "mihomo-linux-mipsle-softfloat-v1.19.31.gz");
     }
 }

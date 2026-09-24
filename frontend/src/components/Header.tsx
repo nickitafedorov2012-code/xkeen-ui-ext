@@ -11,6 +11,7 @@ interface HeaderProps {
   onToggleTheme?: () => void
   onOpenEditor?: () => void
   onOpenUpdateModal?: () => void
+  onOpenMihomoModal?: () => void
   authStatus?: { enabled: boolean; authenticated: boolean }
   onLogout?: () => void
 }
@@ -166,6 +167,7 @@ export default function Header({
   onToggleTheme,
   onOpenEditor,
   onOpenUpdateModal,
+  onOpenMihomoModal,
   authStatus,
   onLogout,
 }: HeaderProps) {
@@ -371,8 +373,14 @@ export default function Header({
         <button
           type="button"
           className="header-pill-btn"
-          onClick={() => onSwitchTab('servers')}
-          title="Управление ядром / серверы"
+          onClick={() => {
+            if (onOpenMihomoModal) {
+              onOpenMihomoModal()
+            } else {
+              onSwitchTab('servers')
+            }
+          }}
+          title="Управление ядром Mihomo (версии, релизы, обновление)"
         >
           <IconCpu />
           <span className="header-pill-title">Mihomo</span>

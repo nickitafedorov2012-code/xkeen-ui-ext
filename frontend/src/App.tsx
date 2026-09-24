@@ -13,6 +13,7 @@ import ConnectionsViewer from './components/ConnectionsViewer'
 import RulesViewer from './components/RulesViewer'
 import Diagnostics from './components/Diagnostics'
 import UpdateModal from './components/UpdateModal'
+import MihomoCoreModal from './components/MihomoCoreModal'
 import { apiGet, apiPost } from './api'
 import type { AuthStatus, StatusInfo } from './types'
 
@@ -95,6 +96,15 @@ export default function App() {
   // Обновление XKeen Route
   const [updateModalOpen, setUpdateModalOpen] = useState(false)
   const [updateInfo, setUpdateInfo] = useState<{ current: string; latest: string; notes: string[]; update_available: boolean } | null>(null)
+
+  // Управление ядром Mihomo (релизы и обновление)
+  const [mihomoModalOpen, setMihomoModalOpen] = useState(false)
+
+  useEffect(() => {
+    const handleOpenMihomo = () => setMihomoModalOpen(true)
+    window.addEventListener('xr:open-mihomo-modal', handleOpenMihomo)
+    return () => window.removeEventListener('xr:open-mihomo-modal', handleOpenMihomo)
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -250,6 +260,7 @@ export default function App() {
           onToggleTheme={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
           onOpenEditor={() => setGlobalEditorOpen(true)}
           onOpenUpdateModal={() => setUpdateModalOpen(true)}
+          onOpenMihomoModal={() => setMihomoModalOpen(true)}
           authStatus={authStatus}
           onLogout={handleLogout}
         />
@@ -329,6 +340,14 @@ export default function App() {
         latestVersion={updateInfo?.latest || ''}
         notes={updateInfo?.notes || []}
         notify={notify}
+      />
+
+      {/* Модальное окно управления и обновления ядра Mihomo */}
+      <MihomoCoreModal
+        isOpen={mihomoModalOpen}
+        onClose={() => setMihomoModalOpen(false)}
+        notify={notify}
+        onUpdated={refresh}
       />
     </div>
   )
