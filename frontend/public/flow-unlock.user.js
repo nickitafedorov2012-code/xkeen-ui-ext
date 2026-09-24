@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         XKeen Flow Unlocker
-// @namespace    xkeen-route
-// @version      2.0.0
-// @description  Разблокировка Google Flow (flow.google.com): обход регионального фильтра cPZSdc, подмена локали и подавление редиректа на unsupported-country
-// @author       XKeen Route
+// @name         Flow Unlocker (RU) — nickitafedorov2012
+// @namespace    https://github.com/nickitafedorov2012-code/xkeen-ui-ext
+// @version      2.1.0
+// @description  Разблокировка Google Flow (flow.google.com) на русском языке: обход регионального фильтра cPZSdc, установка русской локали и подавление редиректа на unsupported-country
+// @author       nickitafedorov2012-code
 // @match        https://flow.google.com/*
 // @match        http://flow.google.com/*
 // @run-at       document-start
@@ -13,23 +13,30 @@
 (function() {
   'use strict';
 
-  console.info('[XKeen Flow Unlocker] Инициализация хуков обхода региональных ограничений...');
+  console.info('[Flow Unlocker by nickitafedorov2012] Инициализация хуков обхода региональных ограничений и русификации...');
 
-  // 1. Спуфинг языка и локали (Google Flow проверяет язык системы/браузера)
+  // 1. Установка русского языка интерфейса и локали (ru-RU)
   try {
-    Object.defineProperty(navigator, 'language', { get: () => 'en-US', configurable: true });
-    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'], configurable: true });
+    Object.defineProperty(navigator, 'language', { get: () => 'ru-RU', configurable: true });
+    Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru', 'en-US', 'en'], configurable: true });
 
     if (window.Intl && Intl.DateTimeFormat) {
       const origResolved = Intl.DateTimeFormat.prototype.resolvedOptions;
       Intl.DateTimeFormat.prototype.resolvedOptions = function() {
         const opts = origResolved.call(this);
-        opts.locale = 'en-US';
+        opts.locale = 'ru-RU';
         return opts;
       };
     }
+
+    // Если в URL указан другой язык или параметр hl отсутствует, переключаем на русский hl=ru
+    const curUrl = new URL(window.location.href);
+    if (curUrl.searchParams.get('hl') !== 'ru' && !window.location.pathname.includes('unsupported-country')) {
+      curUrl.searchParams.set('hl', 'ru');
+      window.history.replaceState(null, '', curUrl.pathname + curUrl.search + curUrl.hash);
+    }
   } catch (e) {
-    console.warn('[XKeen Flow Unlocker] Ошибка подмены navigator.language:', e);
+    console.warn('[Flow Unlocker by nickitafedorov2012] Ошибка настройки локали:', e);
   }
 
   // 2. Блокировка клиентского редиректа на /unsupported-country
@@ -38,7 +45,7 @@
     const origPushState = history.pushState;
     history.pushState = function(state, title, url) {
       if (url && String(url).includes(BLOCKED_PATH)) {
-        console.warn('[XKeen Flow Unlocker] Заблокирован pushState на:', url);
+        console.warn('[Flow Unlocker by nickitafedorov2012] Заблокирован pushState на:', url);
         return;
       }
       return origPushState.apply(this, arguments);
@@ -47,7 +54,7 @@
     const origReplaceState = history.replaceState;
     history.replaceState = function(state, title, url) {
       if (url && String(url).includes(BLOCKED_PATH)) {
-        console.warn('[XKeen Flow Unlocker] Заблокирован replaceState на:', url);
+        console.warn('[Flow Unlocker by nickitafedorov2012] Заблокирован replaceState на:', url);
         return;
       }
       return origReplaceState.apply(this, arguments);
@@ -56,16 +63,16 @@
     if (window.navigation) {
       window.navigation.addEventListener('navigate', (e) => {
         if (e.destination && e.destination.url && e.destination.url.includes(BLOCKED_PATH)) {
-          console.warn('[XKeen Flow Unlocker] Заблокирована навигация на:', e.destination.url);
+          console.warn('[Flow Unlocker by nickitafedorov2012] Заблокирована навигация на:', e.destination.url);
           e.preventDefault();
         }
       });
     }
   } catch (e) {
-    console.warn('[XKeen Flow Unlocker] Ошибка перехвата History API:', e);
+    console.warn('[Flow Unlocker by nickitafedorov2012] Ошибка перехвата History API:', e);
   }
 
-  // 3. Функция модификации внутреннего батчевого RPC-протокола Google (batchexecute?rpcids=cPZSdc)
+  // 3. Модификация внутреннего батчевого RPC-протокола Google (batchexecute?rpcids=cPZSdc)
   function patchGoogleBatchExecute(responseText) {
     const lines = responseText.split('\n');
     let beforeValue = null;
@@ -99,6 +106,9 @@
 
         beforeValue = config[1];
         config[1] = true; // ПРИНУДИТЕЛЬНО ВКЛЮЧАЕМ ДОСТУПНОСТЬ (isSupported = true)
+        if (config[0] === 'RU' || !config[0]) {
+          config[0] = 'US';
+        }
         item[2] = JSON.stringify(config);
         lineModified = true;
         modifiedCount++;
@@ -133,7 +143,7 @@
     };
   }
 
-  // 4. Перехват XMLHttpRequest (именно его использует Angular для batchexecute)
+  // 4. Перехват XMLHttpRequest (batchexecute в Angular)
   const targetXHRs = new WeakMap();
   const patchedBodies = new WeakMap();
 
@@ -171,11 +181,12 @@
           try {
             const res = patchGoogleBatchExecute(origVal);
             patchedBodies.set(this, res.body);
-            console.info('[XKeen Flow Unlocker] ✓ Успешно подменен ответ RPC cPZSdc (ранее:', res.before, '-> теперь: true)');
+            console.info('[Flow Unlocker by nickitafedorov2012] ✓ Успешно подменен ответ RPC cPZSdc (ранее:', res.before, '-> теперь: true)');
+            document.documentElement.setAttribute('data-flow-unlock', 'applied');
             document.documentElement.setAttribute('data-xkeen-flow-unlock', 'applied');
           } catch (e) {
             patchedBodies.set(this, origVal);
-            console.debug('[XKeen Flow Unlocker] Без изменений:', e.message);
+            console.debug('[Flow Unlocker by nickitafedorov2012] Без изменений:', e.message);
           }
         }
 
@@ -191,7 +202,7 @@
       const url = (typeof input === 'string') ? input : (input?.url || '');
       return origFetch.apply(this, arguments).then(response => {
         if (response.url && response.url.includes(BLOCKED_PATH)) {
-          console.warn('[XKeen Flow Unlocker] Заблокирован fetch редирект на:', response.url);
+          console.warn('[Flow Unlocker by nickitafedorov2012] Заблокирован fetch редирект на:', response.url);
           return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
         }
 
@@ -199,7 +210,7 @@
           const clone = response.clone();
           return clone.text().then(text => {
             if (text.includes('"isSupported":false') || text.includes('"eligible":false') || text.includes('"RU"')) {
-              console.info('[XKeen Flow Unlocker] Модификация JSON fetch ответа для:', url);
+              console.info('[Flow Unlocker by nickitafedorov2012] Модификация JSON fetch ответа для:', url);
               const modified = text
                 .replace(/"isSupported"\s*:\s*false/gi, '"isSupported":true')
                 .replace(/"eligible"\s*:\s*false/gi, '"eligible":true')
@@ -219,15 +230,15 @@
       });
     };
   } catch (e) {
-    console.warn('[XKeen Flow Unlocker] Ошибка перехвата fetch:', e);
+    console.warn('[Flow Unlocker by nickitafedorov2012] Ошибка перехвата fetch:', e);
   }
 
-  // 6. Если страница уже открылась на /unsupported-country — возвращаем на главную
+  // 6. Если страница уже открылась на /unsupported-country — возвращаем на главную на русском языке
   if (location.pathname.includes(BLOCKED_PATH)) {
-    console.info('[XKeen Flow Unlocker] Текущий URL unsupported-country, возврат на главную...');
-    history.replaceState(null, '', '/');
-    location.replace('https://flow.google.com/');
+    console.info('[Flow Unlocker by nickitafedorov2012] Текущий URL unsupported-country, возврат на главную (ru)...');
+    history.replaceState(null, '', '/?authuser=0&hl=ru');
+    location.replace('https://flow.google.com/?authuser=0&hl=ru');
   }
 
-  console.info('[XKeen Flow Unlocker] Все хуки активны. Проверка страны успешно деактивирована.');
+  console.info('[Flow Unlocker by nickitafedorov2012] Все хуки активны. Проверка региона отключена, русский язык включен.');
 })();

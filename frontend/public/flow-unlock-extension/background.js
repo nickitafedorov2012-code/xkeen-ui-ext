@@ -1,4 +1,4 @@
-const SCRIPT_ID = 'xkeen-flow-unlock-hook';
+const SCRIPT_ID = 'flow-unlock-hook';
 
 async function registerHook() {
   try {
@@ -12,10 +12,10 @@ async function registerHook() {
         world: "MAIN",
         persistAcrossSessions: true
       }]);
-      console.info('[XKeen Flow Unlocker] Хук успешно зарегистрирован в MAIN world');
+      console.info('[Flow Unlocker by nickitafedorov2012] Хук успешно зарегистрирован в MAIN world');
     }
   } catch (e) {
-    console.warn('[XKeen Flow Unlocker] Регистрация хука:', e.message);
+    console.warn('[Flow Unlocker by nickitafedorov2012] Регистрация хука:', e.message);
   }
 }
 

@@ -26,13 +26,13 @@ export default function FlowRepairModal({
   const [copiedBookmark, setCopiedBookmark] = useState(false)
   const [copiedLink, setCopiedLink] = useState(false)
 
-  const cleanUrl = 'https://flow.google.com/?authuser=0&hl=en'
+  const cleanUrl = 'https://flow.google.com/?authuser=0&hl=ru'
   const userscriptUrl = '/api/flow/flow-unlock.user.js'
   const extensionZipUrl = '/api/flow/extension.zip'
 
   const resetScript = `(async () => { if ('serviceWorker' in navigator) { const regs = await navigator.serviceWorker.getRegistrations(); for (const r of regs) await r.unregister(); } if ('caches' in window) { const keys = await caches.keys(); for (const k of keys) await caches.delete(k); } localStorage.clear(); sessionStorage.clear(); if (window.indexedDB && indexedDB.databases) { try { const dbs = await indexedDB.databases(); for (const db of dbs) if (db.name) indexedDB.deleteDatabase(db.name); } catch(e){} } location.replace('${cleanUrl}'); })();`
 
-  const bookmarkletCode = `javascript:(function(){try{Object.defineProperty(navigator,'language',{get:()=>'en-US',configurable:true});Object.defineProperty(navigator,'languages',{get:()=>['en-US','en'],configurable:true});}catch(e){}if(location.pathname.includes('unsupported-country')){history.replaceState(null,'','/');location.replace('https://flow.google.com/?authuser=0&hl=en');}else{alert('✓ Спуфинг языка en-US применён!');}})();`
+  const bookmarkletCode = `javascript:(function(){try{Object.defineProperty(navigator,'language',{get:()=>'ru-RU',configurable:true});Object.defineProperty(navigator,'languages',{get:()=>['ru-RU','ru'],configurable:true});if(window.Intl&&Intl.DateTimeFormat){const o=Intl.DateTimeFormat.prototype.resolvedOptions;Intl.DateTimeFormat.prototype.resolvedOptions=function(){const opts=o.call(this);opts.locale='ru-RU';return opts;};}}catch(e){}if(location.pathname.includes('unsupported-country')){history.replaceState(null,'','/');location.replace('https://flow.google.com/?authuser=0&hl=ru');}else{alert('✓ Русский язык ru-RU и обход региональных ограничений применены!');}})();`
 
   const handleRepair = async () => {
     setRepairing(true)
@@ -287,7 +287,7 @@ export default function FlowRepairModal({
               >
                 <div>
                   <div style={{ fontWeight: 600, fontSize: 13 }}>
-                    Шаг 2: Установите скрипт XKeen Flow Unlocker
+                    Шаг 2: Установите скрипт Flow Unlocker от nickitafedorov2012
                   </div>
                   <p style={{ margin: '4px 0 0', fontSize: 11.5, color: 'var(--muted)', lineHeight: 1.45 }}>
                     После установки Tampermonkey нажмите кнопку ниже. Откроется вкладка Tampermonkey — нажмите кнопку <b>«Установить»</b> (Install). Скрипт будет работать автоматически навсегда.
@@ -315,7 +315,7 @@ export default function FlowRepairModal({
 
                 <div style={{ fontSize: 11, color: 'var(--muted)', display: 'flex', gap: 6, alignItems: 'center' }}>
                   <span>ℹ️</span>
-                  <span>Скрипт перехватывает сетевой ответ <code>cPZSdc</code>, ставит <code>isSupported: true</code> и сменяет язык на <code>en-US</code>.</span>
+                  <span>Скрипт перехватывает сетевой ответ <code>cPZSdc</code>, активирует доступ (<code>isSupported: true</code>) и включает русский язык (<code>ru-RU</code>).</span>
                 </div>
               </div>
             </div>
@@ -415,7 +415,7 @@ export default function FlowRepairModal({
                     📦 Готовое расширение для Chrome / Edge / Яндекс (ZIP)
                   </div>
                   <p style={{ margin: '4px 0 0', fontSize: 11.5, color: 'var(--muted)', lineHeight: 1.45 }}>
-                    Если вы не хотите использовать Tampermonkey, скачайте автономное расширение <b>XKeen Flow Unlocker</b> прямо из панели.
+                    Если вы не хотите использовать Tampermonkey, скачайте автономное расширение <b>Flow Unlocker (RU)</b> от <b>nickitafedorov2012</b> прямо из панели.
                   </p>
                 </div>
 
@@ -470,7 +470,7 @@ export default function FlowRepairModal({
               style={{ textDecoration: 'none' }}
               onClick={onClose}
             >
-              🚀 Открыть чистый Flow ↗
+              🚀 Открыть Google Flow (RU) ↗
             </a>
           </div>
         </div>
