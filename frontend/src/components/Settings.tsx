@@ -696,38 +696,42 @@ export default function Settings({ notify, status, refresh }: Props) {
           <span className="badge" style={{ textTransform: 'uppercase' }}>{dnsMode}</span>
         </div>
         <p className="muted small">Режим обработки DNS-запросов ядром. Изменение режима перезапускает службу DNS.</p>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
-          <label className="check-row" style={{ padding: '10px 12px', background: dnsMode === 'fake-ip' ? 'rgba(56, 189, 248, 0.1)' : 'rgba(255,255,255,0.02)', border: `1px solid ${dnsMode === 'fake-ip' ? '#38bdf8' : 'var(--border)'}`, borderRadius: 8, cursor: 'pointer', display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-            <input
-              type="radio"
-              name="dns_mode_setting"
-              checked={dnsMode === 'fake-ip'}
-              onChange={() => handleSetDnsMode('fake-ip')}
-              disabled={dnsModeBusy}
-              style={{ marginTop: 3 }}
-            />
-            <div>
-              <b style={{ color: dnsMode === 'fake-ip' ? '#38bdf8' : 'inherit' }}>⚡ Fake-IP (Рекомендуется)</b>
-              <div className="muted small" style={{ marginTop: 2 }}>
-                Мгновенный отклик DNS (~1 мс), эффективный обход DPI и блокировок, идеален для стримов, мессенджеров и игр.
-              </div>
+        <div className="tile-options-grid four-col">
+          <label className={`option-tile-card ${dnsMode === 'fake-ip' ? 'active' : ''}`}>
+            <div className="option-tile-header">
+              <input
+                type="radio"
+                name="dns_mode_setting"
+                checked={dnsMode === 'fake-ip'}
+                onChange={() => handleSetDnsMode('fake-ip')}
+                disabled={dnsModeBusy}
+              />
+              <span className="option-tile-title">⚡ Fake-IP</span>
+              <span className="badge badge-accent" style={{ fontSize: 10, padding: '1px 5px', marginLeft: 'auto' }}>
+                Рекомендуется
+              </span>
+            </div>
+            <div className="option-tile-desc">
+              Мгновенный отклик DNS (~1 мс), эффективный обход DPI и блокировок, идеален для стримов, мессенджеров и игр.
             </div>
           </label>
 
-          <label className="check-row" style={{ padding: '10px 12px', background: dnsMode === 'redir-host' ? 'rgba(56, 189, 248, 0.1)' : 'rgba(255,255,255,0.02)', border: `1px solid ${dnsMode === 'redir-host' ? '#38bdf8' : 'var(--border)'}`, borderRadius: 8, cursor: 'pointer', display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-            <input
-              type="radio"
-              name="dns_mode_setting"
-              checked={dnsMode === 'redir-host'}
-              onChange={() => handleSetDnsMode('redir-host')}
-              disabled={dnsModeBusy}
-              style={{ marginTop: 3 }}
-            />
-            <div>
-              <b style={{ color: dnsMode === 'redir-host' ? '#38bdf8' : 'inherit' }}>🌐 Redir-Host (Прямой резолв)</b>
-              <div className="muted small" style={{ marginTop: 2 }}>
-                Классический резолв реальных IP-адресов. Используйте, если требуются локальные домены роутера (.keenetic.io / Home LAN).
-              </div>
+          <label className={`option-tile-card ${dnsMode === 'redir-host' ? 'active' : ''}`}>
+            <div className="option-tile-header">
+              <input
+                type="radio"
+                name="dns_mode_setting"
+                checked={dnsMode === 'redir-host'}
+                onChange={() => handleSetDnsMode('redir-host')}
+                disabled={dnsModeBusy}
+              />
+              <span className="option-tile-title">🌐 Redir-Host</span>
+              <span className="badge" style={{ fontSize: 10, padding: '1px 5px', marginLeft: 'auto' }}>
+                Прямой
+              </span>
+            </div>
+            <div className="option-tile-desc">
+              Классический резолв реальных IP-адресов. Используйте, если требуются локальные домены роутера (.keenetic.io / Home LAN).
             </div>
           </label>
         </div>
@@ -744,24 +748,36 @@ export default function Settings({ notify, status, refresh }: Props) {
         <p className="muted small">
           Фоновый сторожевой процесс демона непрерывно контролирует целостность правил маршрутизации в <code>config.yaml</code>.
         </p>
-        <ul className="kv" style={{ margin: '8px 0 0' }}>
-          <li>
-            <span>Статус сторожа</span>
-            <b style={{ color: '#22c55e' }}>✓ Авто-восстановление включено</b>
-          </li>
-          <li>
-            <span>Интервал проверки config.yaml</span>
-            <b>4 сек</b>
-          </li>
-          <li>
-            <span>Защита блоков маршрутизации</span>
-            <span style={{ color: 'var(--accent)' }}>AUTO-DEVICE, AUTO-FORCE, AUTO-IGNORE</span>
-          </li>
-          <li>
-            <span>Поведение при рестарте XKeen</span>
-            <b>Автоматическое накатывание правил без разрыва связи</b>
-          </li>
-        </ul>
+        <div className="stats-grid four-col" style={{ marginTop: 12 }}>
+          <div className="stat-card">
+            <div className="stat-label">Статус сторожа</div>
+            <div className="stat-value" style={{ fontSize: 14, color: '#22c55e' }}>
+              ✓ Авто-лечение
+            </div>
+            <div className="muted small">Контроль config.yaml</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">Интервал проверки</div>
+            <div className="stat-value" style={{ fontSize: 18 }}>
+              4 сек
+            </div>
+            <div className="muted small">Фоновый демон</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">Защита блоков</div>
+            <div className="stat-value" style={{ fontSize: 13, color: 'var(--accent)', fontFamily: 'monospace' }}>
+              DEVICE, FORCE, IGNORE
+            </div>
+            <div className="muted small">Авто-восстановление</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">При рестарте XKeen</div>
+            <div className="stat-value" style={{ fontSize: 13, color: '#38bdf8' }}>
+              Без разрыва связи
+            </div>
+            <div className="muted small">Бесшовный накат правил</div>
+          </div>
+        </div>
       </section>
 
       {/* БЕЗОПАСНОСТЬ И ПАРОЛЬ */}
@@ -923,20 +939,34 @@ export default function Settings({ notify, status, refresh }: Props) {
         <p className="muted small">
           Используются ядром Mihomo для точного определения стран и категорий сайтов (включая списки рекламы AdBlock). Загрузка выполняется через прокси Mihomo для стабильности.
         </p>
-        <div className="stats-grid" style={{ marginBottom: 12 }}>
+        <div className="stats-grid four-col" style={{ marginBottom: 12 }}>
           <div className="stat-card">
             <div className="stat-label">База GeoIP</div>
             <div className="stat-value" style={{ fontSize: 16 }}>
               {geoInfo ? `${(geoInfo.geoip.size / (1024 * 1024)).toFixed(1)} МБ` : '—'}
             </div>
-            <div className="muted small">{geoInfo?.geoip.updated_at || ''}</div>
+            <div className="muted small">{geoInfo?.geoip.updated_at || 'Mihomo Core'}</div>
           </div>
           <div className="stat-card">
             <div className="stat-label">База GeoSite</div>
             <div className="stat-value" style={{ fontSize: 16 }}>
               {geoInfo ? `${(geoInfo.geosite.size / (1024 * 1024)).toFixed(1)} МБ` : '—'}
             </div>
-            <div className="muted small">{geoInfo?.geosite.updated_at || ''}</div>
+            <div className="muted small">{geoInfo?.geosite.updated_at || 'Meta Rules Dat'}</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">Источник баз</div>
+            <div className="stat-value" style={{ fontSize: 14, color: '#38bdf8' }}>
+              MetaCubeX
+            </div>
+            <div className="muted small">Загрузка через прокси</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">Интеграция</div>
+            <div className="stat-value" style={{ fontSize: 14, color: '#22c55e' }}>
+              ✓ Активны
+            </div>
+            <div className="muted small">Маршрутизация & AdBlock</div>
           </div>
         </div>
         <button
@@ -960,6 +990,36 @@ export default function Settings({ notify, status, refresh }: Props) {
         <p className="muted small">
           Локальный сервис для обхода DPI-замедлений YouTube, Discord и других сервисов без расхода трафика VPS (/opt/etc/init.d/S51zapret).
         </p>
+        <div className="stats-grid four-col" style={{ marginTop: 10, marginBottom: 12 }}>
+          <div className="stat-card">
+            <div className="stat-label">Статус службы</div>
+            <div className="stat-value" style={{ fontSize: 14, color: zapretStatus?.running ? '#22c55e' : zapretStatus?.installed ? '#f59e0b' : 'var(--muted)' }}>
+              {zapretStatus?.running ? '🟢 Запущен' : zapretStatus?.installed ? '🟡 Остановлен' : '⚪ Не установлен'}
+            </div>
+            <div className="muted small">{zapretStatus?.running ? `PID: ${zapretStatus.pid}` : 'Служба DPI'}</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">Исполняемый демон</div>
+            <div className="stat-value" style={{ fontSize: 14, fontFamily: 'monospace' }}>
+              nfqws
+            </div>
+            <div className="muted small">S51zapret</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">Расход VPS</div>
+            <div className="stat-value" style={{ fontSize: 14, color: '#10b981' }}>
+              0 байт (Direct)
+            </div>
+            <div className="muted small">Прямой поток роутера</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">Назначение</div>
+            <div className="stat-value" style={{ fontSize: 13, color: 'var(--accent)' }}>
+              YouTube, Discord
+            </div>
+            <div className="muted small">Обход замедлений</div>
+          </div>
+        </div>
         {zapretStatus?.installed ? (
           <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
             <button

@@ -3025,6 +3025,12 @@ table.devices-table td {
   gap: 8px;
 }
 
+.logs-search {
+  max-width: 280px;
+  flex: 1;
+  min-width: 160px;
+}
+
 .logs-tabs {
   display: flex;
   gap: 6px;
@@ -3352,6 +3358,113 @@ table.devices-table td {
 }
 
 /* ==========================================================================
+   STATS GRID & METRIC TILES (1/4 WIDTH GRID)
+   ========================================================================== */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+@media (min-width: 900px) {
+  .stats-grid.four-col {
+    grid-template-columns: repeat(4, 1fr);
+  }
+  .stats-grid.three-col {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+.stat-card {
+  background: var(--card-bg, #161a23);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+  transition: border-color 0.15s, transform 0.15s;
+}
+.stat-card:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+}
+.stat-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted, #94a3b8);
+  font-weight: 600;
+}
+.stat-value {
+  font-size: 18px;
+  font-weight: 700;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  color: var(--text, #f1f5f9);
+}
+
+/* ==========================================================================
+   OPTION TILES GRID (1/4 WIDTH TILES INSTEAD OF HUGE BANNERS)
+   ========================================================================== */
+.tile-options-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+@media (min-width: 960px) {
+  .tile-options-grid.four-col {
+    grid-template-columns: repeat(4, 1fr);
+  }
+  .tile-options-grid.two-col-compact {
+    grid-template-columns: repeat(auto-fill, minmax(260px, 320px));
+  }
+}
+.option-tile-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  padding: 14px 16px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  user-select: none;
+}
+.option-tile-card:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(56, 189, 248, 0.4);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+.option-tile-card.active {
+  background: rgba(56, 189, 248, 0.09);
+  border-color: #38bdf8;
+  box-shadow: 0 0 16px rgba(56, 189, 248, 0.16);
+}
+.option-tile-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.option-tile-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--text, #f1f5f9);
+}
+.option-tile-card.active .option-tile-title {
+  color: #38bdf8;
+}
+.option-tile-desc {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted, #94a3b8);
+  margin-top: 2px;
+}
+
+/* ==========================================================================
    CONNECTIONS VIEWER
    ========================================================================== */
 .connections-view {
@@ -3368,7 +3481,8 @@ table.devices-table td {
 }
 .connections-search {
   flex: 1;
-  min-width: 260px;
+  min-width: 240px;
+  max-width: 440px;
 }
 .controls-group {
   display: flex;
@@ -3451,10 +3565,14 @@ table.devices-table td {
 }
 .simulator-inputs .input-group {
   flex: 1;
-  min-width: 200px;
+  min-width: 180px;
+  max-width: 380px;
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+.simulator-inputs .input-group:nth-child(2) {
+  max-width: 240px;
 }
 .simulator-result {
   margin-top: 16px;
@@ -3508,7 +3626,8 @@ table.devices-table td {
 }
 .rules-search {
   flex: 1;
-  min-width: 260px;
+  min-width: 240px;
+  max-width: 420px;
 }
 .rules-types {
   display: flex;
@@ -3602,6 +3721,7 @@ table.devices-table td {
 .input-group-horizontal {
   display: flex;
   gap: 10px;
+  max-width: 580px;
 }
 .input-group-horizontal input {
   flex: 1;

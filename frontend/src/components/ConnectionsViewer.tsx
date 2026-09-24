@@ -138,19 +138,27 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
         </div>
       </div>
 
-      {/* Метрики */}
-      <div className="stats-grid">
+      {/* Метрики (плитки в 1/4 ширины) */}
+      <div className="stats-grid four-col">
         <div className="stat-card">
           <div className="stat-label">Активных сессий</div>
           <div className="stat-value">{connections.length}</div>
+          <div className="muted small">Открытых сетевых сокетов</div>
         </div>
         <div className="stat-card">
           <div className="stat-label">Всего скачано (Down)</div>
           <div className="stat-value down-color">↓ {formatBytes(downloadTotal)}</div>
+          <div className="muted small">Входящий трафик сессий</div>
         </div>
         <div className="stat-card">
           <div className="stat-label">Всего отдано (Up)</div>
           <div className="stat-value up-color">↑ {formatBytes(uploadTotal)}</div>
+          <div className="muted small">Исходящий трафик сессий</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">В таблице</div>
+          <div className="stat-value" style={{ color: 'var(--accent)' }}>{filtered.length}</div>
+          <div className="muted small">{search ? 'С учётом поиска' : 'Все соединения'}</div>
         </div>
       </div>
 
