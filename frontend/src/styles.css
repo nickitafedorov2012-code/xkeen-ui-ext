@@ -194,12 +194,13 @@ body {
 }
 
 .header-center {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
+  position: static;
+  transform: none;
   display: flex;
   align-items: center;
   justify-content: center;
+  flex: 1;
+  min-width: 0;
   z-index: 2;
 }
 
@@ -228,9 +229,10 @@ body {
 }
 
 .header-brand-text {
-  font-size: 26px;
+  font-size: 22px;
   font-weight: 700;
   letter-spacing: -0.5px;
+  white-space: nowrap;
   background: linear-gradient(90deg, #00D3F2 0%, #2B7FFF 50%, #155DFC 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
