@@ -11,15 +11,31 @@ export function getWsUrl(path: string): string {
 }
 
 async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const res = await fetch(`/api/${path.replace(/^\//, '')}`, options)
+  const cleanPath = path.replace(/^\//, '')
+  const res = await fetch(`/api/${cleanPath}`, options)
   if (res.status === 401) {
     window.dispatchEvent(new CustomEvent('xr:auth-required'))
   }
   if (res.status === 204) {
     return {} as T
   }
-  const env: ApiEnvelope<T> = await res.json().catch(() => ({ success: false, error: `HTTP ${res.status}` }))
-  if (!env.success) throw new Error(env.error || 'Ошибка API')
+  const ct = res.headers?.get?.('content-type') || ''
+  if (ct && !ct.includes('application/json') && !ct.includes('text/json')) {
+    if (res.ok) {
+      throw new Error(`Эндпоинт /api/${cleanPath} недоступен на текущей версии бэкенда`)
+    }
+    throw new Error(`HTTP ${res.status}: ${res.statusText || 'Ошибка сервера'}`)
+  }
+  let env: ApiEnvelope<T>
+  try {
+    env = await res.json()
+  } catch {
+    if (res.ok) {
+      throw new Error(`Эндпоинт /api/${cleanPath} вернул некорректный ответ`)
+    }
+    throw new Error(`HTTP ${res.status}: ${res.statusText || 'Ошибка сервера'}`)
+  }
+  if (!env || !env.success) throw new Error(env?.error || 'Ошибка API')
   return env.data as T
 }
 

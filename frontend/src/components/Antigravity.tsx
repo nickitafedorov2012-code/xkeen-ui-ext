@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiGet, apiPost } from '../api'
-import { getFlowStatus, getFlowRegion, type AntigravityStatus, type ServerInfo } from '../types'
+import { getFlowStatus, formatFlowServerName, type AntigravityStatus, type ServerInfo } from '../types'
 import { copyToClipboard as doCopy } from '../utils/clipboard'
 
 interface Props {
@@ -370,15 +370,11 @@ export default function Antigravity({ notify }: Props) {
                 <option value="">-- Выберите сервер для AI ({flowServers.length}) --</option>
                 {usCaServers.length > 0 && (
                   <optgroup label="🇺🇸 🇨🇦 Проверенные для Google Flow (США / Канада)">
-                    {usCaServers.map((s) => {
-                      const region = getFlowRegion(s.name)
-                      const prefix = region === 'ca' ? '🇨🇦 [Канада] ' : '🇺🇸 [США] '
-                      return (
-                        <option key={s.id} value={s.id}>
-                          {prefix}{s.name} {s.ping_ms > 0 ? `(${s.ping_ms} мс)` : ''} ★ Flow
-                        </option>
-                      )
-                    })}
+                    {usCaServers.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {formatFlowServerName(s.name)} {s.ping_ms > 0 ? `(${s.ping_ms} мс)` : ''} ★ Flow
+                      </option>
+                    ))}
                   </optgroup>
                 )}
                 {otherServers.length > 0 && (
@@ -428,7 +424,7 @@ export default function Antigravity({ notify }: Props) {
               }}>
                 <div>
                   💡 Рекомендуемый чистый узел:{' '}
-                  <b>🇺🇸 [США] {bestFlowServer.name}</b>{' '}
+                  <b>{formatFlowServerName(bestFlowServer.name)}</b>{' '}
                   {bestFlowServer.ping_ms > 0 && (
                     <span style={{ color: '#4ade80' }}>({bestFlowServer.ping_ms} мс)</span>
                   )}
@@ -439,7 +435,7 @@ export default function Antigravity({ notify }: Props) {
                   onClick={() => switchGoogleAiServer(bestFlowServer.id)}
                   disabled={switchingFlowServer}
                 >
-                  ⚡ Переключить на {bestFlowServer.name}
+                  ⚡ Переключить на {formatFlowServerName(bestFlowServer.name)}
                 </button>
               </div>
             )}

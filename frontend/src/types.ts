@@ -245,16 +245,40 @@ export function getFlowRegion(name: string): 'us' | 'ca' | null {
   if (!name) return null
   const n = name.toLowerCase()
   if (FLOW_BLOCKED_KEYWORDS.some((kw) => n.includes(kw))) return null
+  const caKws = ['канад', 'canada', 'ca ', '[ca]', 'ca-', 'ca_', '🇨🇦']
+  if (caKws.some((kw) => n.includes(kw))) return 'ca'
   const usKws = [
-    'сша', 'usa', 'united states', 'us ', '[us]', 'us-', 'us_',
+    'сша', 'usa', 'united states', 'us ', '[us]', 'us-', 'us_', '🇺🇸',
     'вашингтон', 'washington', 'chicago', 'чикаго', 'miami', 'майами',
     'seattle', 'сиэтл', 'лос-анджелес', 'los angeles', 'атланта', 'atlanta',
     'феникс', 'phoenix',
   ]
   if (usKws.some((kw) => n.includes(kw))) return 'us'
-  const caKws = ['канад', 'canada', 'ca ', '[ca]', 'ca-', 'ca_']
-  if (caKws.some((kw) => n.includes(kw))) return 'ca'
   return null
+}
+
+export function formatFlowServerName(name: string): string {
+  if (!name) return ''
+  const region = getFlowRegion(name)
+  const clean = name
+    .replace(/[\u{1F1E6}-\u{1F1FF}]{2}/gu, '') // remove country flag emojis
+    .trim()
+    .replace(/^\[(США|US|Канада|CA)\]\s*/i, '')
+    .trim()
+    .replace(/^(США|USA|US|Канада|Canada)\s+/i, '')
+    .trim()
+
+  if (region === 'ca') {
+    return clean && clean.toLowerCase() !== 'канада' && clean.toLowerCase() !== 'canada'
+      ? `🇨🇦 [Канада] ${clean}`
+      : '🇨🇦 [Канада]'
+  }
+  if (region === 'us') {
+    return clean && clean.toLowerCase() !== 'сша' && clean.toLowerCase() !== 'usa' && clean.toLowerCase() !== 'us'
+      ? `🇺🇸 [США] ${clean}`
+      : '🇺🇸 [США]'
+  }
+  return name
 }
 
 export function getFlowStatus(name: string): FlowStatus {
@@ -264,7 +288,7 @@ export function getFlowStatus(name: string): FlowStatus {
   if (FLOW_BLOCKED_KEYWORDS.some((kw) => n.includes(kw))) {
     return 'blocked'
   }
-  if (FLOW_OK_KEYWORDS.some((kw) => n.includes(kw))) {
+  if (FLOW_OK_KEYWORDS.some((kw) => n.includes(kw)) || n.includes('🇨🇦') || n.includes('🇺🇸')) {
     return 'ok'
   }
   return 'unknown'

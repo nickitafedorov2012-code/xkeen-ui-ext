@@ -1,5 +1,5 @@
-﻿import { describe, it, expect } from 'vitest'
-import { getFlowStatus, getFlowRegion } from './types'
+import { describe, it, expect } from 'vitest'
+import { getFlowStatus, getFlowRegion, formatFlowServerName } from './types'
 
 describe('Google Flow keywords and region detection', () => {
   it('identifies US servers correctly', () => {
@@ -36,6 +36,15 @@ describe('Google Flow keywords and region detection', () => {
     }
   })
 
+  it('formats Flow server names without duplicate country prefixes', () => {
+    expect(formatFlowServerName('🇺🇸 США Лос-Анджелес')).toBe('🇺🇸 [США] Лос-Анджелес')
+    expect(formatFlowServerName('США Чикаго')).toBe('🇺🇸 [США] Чикаго')
+    expect(formatFlowServerName('Канада')).toBe('🇨🇦 [Канада]')
+    expect(formatFlowServerName('🇨🇦 Канада')).toBe('🇨🇦 [Канада]')
+    expect(formatFlowServerName('Canada Toronto')).toBe('🇨🇦 [Канада] Toronto')
+    expect(formatFlowServerName('🇩🇪 Германия')).toBe('🇩🇪 Германия')
+  })
+
   it('identifies blocked regions correctly', () => {
     const blockedNodes = [
       '🇷🇺 Россия',
@@ -70,5 +79,6 @@ describe('Google Flow keywords and region detection', () => {
   it('handles empty or null-like inputs safely', () => {
     expect(getFlowStatus('')).toBe('unknown')
     expect(getFlowRegion('')).toBeNull()
+    expect(formatFlowServerName('')).toBe('')
   })
 })
