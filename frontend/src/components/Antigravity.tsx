@@ -294,9 +294,9 @@ export default function Antigravity({ notify }: Props) {
                 boxShadow: '0 2px 8px rgba(236, 72, 153, 0.25)',
               }}
               onClick={() => setRepairModalOpen(true)}
-              title="Устранить зависший редирект на unsupported-country в обычном окне браузера"
+              title="Обход регионального фильтра cPZSdc (Tampermonkey) и сброс зависшего редиректа"
             >
-              🛠️ Починить Flow
+              🔓 Анлок и починка Flow
             </button>
             <button
               className="btn"

@@ -378,6 +378,35 @@ pub async fn repair_flow(State(state): State<AppState>) -> Response {
     }))
 }
 
+pub const FLOW_USERSCRIPT: &str = include_str!("../../frontend/public/flow-unlock.user.js");
+pub const FLOW_EXTENSION_ZIP: &[u8] = include_bytes!("../../frontend/public/flow-unlock-extension.zip");
+
+/// GET /api/flow/unlock.user.js — отдача готового скрипта для Tampermonkey / Violentmonkey
+pub async fn get_flow_userscript() -> Response {
+    (
+        [
+            ("Content-Type", "application/javascript; charset=utf-8"),
+            ("Content-Disposition", "inline; filename=\"xkeen-flow-unlock.user.js\""),
+            ("Cache-Control", "no-cache, no-store, must-revalidate"),
+        ],
+        FLOW_USERSCRIPT,
+    )
+        .into_response()
+}
+
+/// GET /api/flow/extension.zip — отдача готового запакованного расширения для Chrome/Edge
+pub async fn get_flow_extension() -> Response {
+    (
+        [
+            ("Content-Type", "application/zip"),
+            ("Content-Disposition", "attachment; filename=\"xkeen-flow-unlock.zip\""),
+            ("Cache-Control", "no-cache, no-store, must-revalidate"),
+        ],
+        FLOW_EXTENSION_ZIP,
+    )
+        .into_response()
+}
+
 /// GET /api/policies — политики доступа Keenetic.
 pub async fn get_policies(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();

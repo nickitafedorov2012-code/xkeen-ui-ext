@@ -41,6 +41,7 @@ export default function Servers({ notify }: Props) {
 
   const [filter, setFilter] = useState('')
   const [flowOnly, setFlowOnly] = useState(false)
+  const [flowRepairOpen, setFlowRepairOpen] = useState(false)
   const [limit, setLimit] = useState(PAGE)
   const [loading, setLoading] = useState(true)
   const [pinging, setPinging] = useState(false)
@@ -49,7 +50,6 @@ export default function Servers({ notify }: Props) {
   // Генератор и импорт ссылок
   const [generatorOpen, setGeneratorOpen] = useState(false)
   const [shareServer, setShareServer] = useState<ServerInfo | null>(null)
-  const [flowRepairOpen, setFlowRepairOpen] = useState(false)
 
   // Speedtest
   const [speedtestingId, setSpeedtestingId] = useState<string | null>(null)
@@ -594,9 +594,9 @@ export default function Servers({ notify }: Props) {
               fontWeight: 600,
             }}
             onClick={() => setFlowRepairOpen(true)}
-            title="Устранить зависший редирект на unsupported-country в обычном окне браузера"
+            title="Обход регионального фильтра cPZSdc (Tampermonkey) и сброс зависшего редиректа"
           >
-            🛠️ Починить Flow
+            🔓 Анлок и починка Flow
           </button>
         )}
 

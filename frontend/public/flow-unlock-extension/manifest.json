@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "XKeen Flow Unlocker",
+  "version": "2.0.0",
+  "description": "Разблокировка Google Flow (flow.google.com) для веб-панели XKeen Route",
+  "permissions": [
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://flow.google.com/*",
+    "http://flow.google.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "XKeen Flow Unlocker",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://flow.google.com/*",
+        "http://flow.google.com/*"
+      ],
+      "js": [
+        "hook.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    }
+  ]
+}
