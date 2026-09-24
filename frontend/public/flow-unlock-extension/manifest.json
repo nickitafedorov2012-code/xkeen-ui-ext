@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Flow Unlocker",
-  "version": "2.1.0",
+  "version": "1.0.0",
+  "minimum_chrome_version": "111",
   "description": "Разблокировка Google Flow (flow.google.com). Автор: nickitafedorov2012",
   "author": "nickitafedorov2012-code",
   "homepage_url": "https://github.com/nickitafedorov2012-code/xkeen-ui-ext",
@@ -9,8 +10,7 @@
     "scripting"
   ],
   "host_permissions": [
-    "https://flow.google.com/*",
-    "http://flow.google.com/*"
+    "https://flow.google.com/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -22,15 +22,12 @@
   "content_scripts": [
     {
       "matches": [
-        "https://flow.google.com/*",
-        "http://flow.google.com/*"
+        "https://flow.google.com/*"
       ],
       "js": [
-        "hook.js"
+        "status.js"
       ],
-      "run_at": "document_start",
-      "world": "MAIN",
-      "all_frames": true
+      "run_at": "document_idle"
     }
   ]
 }

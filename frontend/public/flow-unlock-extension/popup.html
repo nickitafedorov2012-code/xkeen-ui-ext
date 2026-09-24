@@ -8,32 +8,66 @@
 </head>
 <body>
   <div class="card">
-    <div class="header">
-      <div class="brand">🔓 Flow <span>Unlocker</span></div>
-      <span class="badge">v2.1</span>
+    <!-- Header -->
+    <header class="header">
+      <div class="brand">
+        <span class="icon">🔓</span>
+        <div class="brand-text">
+          <span class="name">Flow <span class="highlight">Unlocker</span></span>
+          <span class="sub">Google AI Sandbox Bypass</span>
+        </div>
+      </div>
+      <span class="badge">v1.0.0</span>
+    </header>
+
+    <!-- Switch control card -->
+    <div class="control-box">
+      <div class="control-meta">
+        <span class="control-label">Разблокировка Flow</span>
+        <span class="control-hint">Обход проверки региона cPZSdc</span>
+      </div>
+      <label class="switch" for="enabled" title="Включить / отключить разблокировку">
+        <input id="enabled" type="checkbox" role="switch" disabled>
+        <span class="slider"></span>
+      </label>
     </div>
-    
+
+    <!-- Status display box -->
     <div class="status-box">
-      <div class="dot active"></div>
-      <div class="status-text">
-        <div class="status-title">Обход cPZSdc активен</div>
-        <div class="status-desc">Региональный фильтр отключён</div>
+      <div id="status-dot" class="dot loading"></div>
+      <div class="status-content">
+        <div class="status-title">Статус плагина</div>
+        <p id="status" role="status">Проверка статуса…</p>
       </div>
     </div>
 
-    <p class="info">
-      Расширение автоматически перехватывает запросы к <code>batchexecute</code> и подменяет локаль на <code>en-US</code>.
-    </p>
+    <!-- Error message banner -->
+    <p id="error" role="alert" class="error-msg" hidden></p>
 
-    <div class="actions">
-      <button id="btnOpen" class="btn primary">🚀 Открыть Google Flow</button>
-      <button id="btnReload" class="btn secondary">🔄 Обновить вкладку</button>
+    <!-- Information tip -->
+    <div class="info-note">
+      <span class="info-icon">💡</span>
+      <span>Внедряется в главный контекст (MAIN world) браузера и обеспечивает доступ к Flow без ограничений.</span>
     </div>
 
-    <footer>
-      <span>Автор: <a href="https://github.com/nickitafedorov2012-code" target="_blank">nickitafedorov2012</a></span>
+    <!-- Actions -->
+    <div class="actions">
+      <button id="open" type="button" class="btn btn-primary">
+        <span>🚀</span> Открыть Google Flow
+      </button>
+      <button id="reload" type="button" class="btn btn-secondary">
+        <span>🔄</span> Перезагрузить вкладку Flow
+      </button>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <span>Автор: <a href="https://github.com/nickitafedorov2012-code" target="_blank" rel="noopener noreferrer">nickitafedorov2012</a></span>
+      <span class="sep">•</span>
+      <a href="https://github.com/nickitafedorov2012-code/xkeen-ui-ext" target="_blank" rel="noopener noreferrer">XKeen Route</a>
     </footer>
   </div>
+
   <script src="popup.js"></script>
 </body>
 </html>
