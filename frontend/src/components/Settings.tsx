@@ -129,11 +129,11 @@ export default function Settings({ notify, status, refresh }: Props) {
     }
   }
 
-  const handleZapretAction = async (action: 'start' | 'stop' | 'restart') => {
+  const handleZapretAction = async (action: 'start' | 'stop' | 'restart' | 'install') => {
     setZapretBusy(true)
     try {
       await apiPost('zapret/action', { action })
-      notify(`Команда Zapret '${action}' выполнена`)
+      notify(action === 'install' ? 'Установка Zapret завершена' : `Команда Zapret '${action}' выполнена`)
       loadQuickWins()
     } catch (e: any) {
       notify('Ошибка Zapret: ' + e.message, true)
@@ -982,9 +982,20 @@ export default function Settings({ notify, status, refresh }: Props) {
             )}
           </div>
         ) : (
-          <p className="muted small">
-            Пакет Zapret не обнаружен в /opt/etc/init.d/S51zapret. Его можно установить через Entware (opkg install zapret) при необходимости.
-          </p>
+          <div style={{ marginTop: 10 }}>
+            <p className="muted small">
+              Пакет Zapret не обнаружен в /opt/etc/init.d/S51zapret. Вы можете установить его в один клик.
+            </p>
+            <button
+              type="button"
+              className="btn sm btn-primary"
+              disabled={zapretBusy}
+              onClick={() => handleZapretAction('install')}
+              style={{ marginTop: 8 }}
+            >
+              {zapretBusy ? '⏳ Установка Zapret…' : '📥 Установить Zapret в 1 клик'}
+            </button>
+          </div>
         )}
       </section>
 

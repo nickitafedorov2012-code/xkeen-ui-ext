@@ -33,9 +33,9 @@ export default function Servers({ notify }: Props) {
     const saved = localStorage.getItem('xr_servers_columns')
     if (saved) {
       const n = parseInt(saved, 10)
-      if (n >= 1 && n <= 4) return n
+      if (n >= 0 && n <= 4) return n
     }
-    return 2
+    return 0 // 0 = Автоматическое заполнение (Auto-fill)
   })
 
   const [filter, setFilter] = useState('')
@@ -601,20 +601,26 @@ export default function Servers({ notify }: Props) {
           </button>
         </div>
 
-        {/* Выбор количества столбцов (1, 2, 3, 4) */}
+        {/* Выбор количества столбцов (Авто, 1, 2, 3, 4) */}
         <div className="view-toggle cols-toggle" title="Количество столбцов в списке">
           <span className="cols-toggle-label">
             Столбцы:
           </span>
-          {[1, 2, 3, 4].map((col) => (
+          {[
+            { id: 0, label: 'Авто' },
+            { id: 1, label: '1' },
+            { id: 2, label: '2' },
+            { id: 3, label: '3' },
+            { id: 4, label: '4' },
+          ].map((col) => (
             <button
-              key={col}
+              key={col.id}
               type="button"
-              className={`view-toggle-btn ${columns === col ? 'active' : ''}`}
-              onClick={() => setAndSaveColumns(col)}
-              title={`${col} ${col === 1 ? 'столбец' : col < 5 ? 'столбца' : 'столбцов'}`}
+              className={`view-toggle-btn ${columns === col.id ? 'active' : ''}`}
+              onClick={() => setAndSaveColumns(col.id)}
+              title={col.id === 0 ? 'Адаптивное заполнение экрана' : `${col.id} ${col.id === 1 ? 'столбец' : col.id < 5 ? 'столбца' : 'столбцов'}`}
             >
-              {col}
+              {col.label}
             </button>
           ))}
         </div>
@@ -876,7 +882,17 @@ export default function Servers({ notify }: Props) {
 
                   {/* Кнопки действий */}
                   <div className="server-actions" style={{ marginTop: 8 }}>
-                    {s.is_active && <span className="tag current">✓ ПОДКЛЮЧЁН</span>}
+                    {s.is_active ? (
+                      <span className="tag current">✓ ПОДКЛЮЧЁН</span>
+                    ) : (
+                      <span
+                        className="server-host-tag mono muted small"
+                        title={`Хост сервера: ${s.host}${s.port ? `:${s.port}` : ''}`}
+                        style={{ fontSize: 11, opacity: 0.75, maxWidth: 170, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                      >
+                        {s.host}{s.port ? `:${s.port}` : ''}
+                      </span>
+                    )}
                     <span className="spacer" />
                     <button
                       className="btn sm ghost"

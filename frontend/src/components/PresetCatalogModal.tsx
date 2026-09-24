@@ -122,12 +122,13 @@ export default function PresetCatalogModal({
           </button>
         </div>
 
-        <p className="muted" style={{ margin: '4px 0 16px' }}>
-          Выберите популярные сервисы для добавления их доменов и CDN в правила маршрутизации в 1 клик.
-        </p>
+        <div className="presets-card-body">
+          <p className="muted" style={{ margin: '0 0 14px' }}>
+            Выберите популярные сервисы для добавления их доменов и CDN в правила маршрутизации в 1 клик.
+          </p>
 
-        {/* Навигация по категориям */}
-        <div className="presets-category-tabs">
+          {/* Навигация по категориям */}
+          <div className="presets-category-tabs">
           {PRESET_CATEGORIES.map((cat) => (
             <button
               key={cat.id}
@@ -207,6 +208,7 @@ export default function PresetCatalogModal({
               </div>
             )
           })}
+        </div>
         </div>
 
         {/* Футер модалки */}

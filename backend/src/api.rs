@@ -2670,14 +2670,38 @@ pub struct ZapretActionReq {
     pub action: String, // "start" | "stop" | "restart"
 }
 
-/// POST /api/zapret/action — запуск, остановка, перезапуск службы Zapret
+/// POST /api/zapret/action — запуск, остановка, перезапуск и установка службы Zapret
 pub async fn zapret_action(
     _state: State<AppState>,
     axum::extract::Json(body): axum::extract::Json<ZapretActionReq>,
 ) -> Response {
     let act = body.action.trim();
-    if act != "start" && act != "stop" && act != "restart" {
+    if act != "start" && act != "stop" && act != "restart" && act != "install" {
         return api_err("Недопустимое действие для службы Zapret");
+    }
+
+    if act == "install" {
+        let install_cmd = r#"
+            mkdir -p /opt/zapret /opt/etc/init.d /opt/etc/zapret
+            cd /opt/zapret
+            (curl -kLs -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret/archive/refs/heads/master.tar.gz" -o z.tar.gz || \
+             curl -kLs "https://ghproxy.net/https://github.com/bol-van/zapret/archive/refs/heads/master.tar.gz" -o z.tar.gz) && \
+            tar -xzf z.tar.gz --strip-components=1 2>/dev/null && \
+            rm -f z.tar.gz && \
+            chmod +x install_bin.sh binaries/*/* 2>/dev/null && \
+            ./install_bin.sh 2>/dev/null && \
+            (cp -f init.d/sysv/zapret /opt/etc/init.d/S51zapret 2>/dev/null || cp -f init.d/openwrt/zapret /opt/etc/init.d/S51zapret 2>/dev/null) && \
+            chmod +x /opt/etc/init.d/S51zapret && \
+            /opt/etc/init.d/S51zapret start
+        "#;
+        match tokio::process::Command::new("sh").arg("-c").arg(install_cmd).output().await {
+            Ok(out) => {
+                let output_str = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+                let installed = std::path::Path::new("/opt/etc/init.d/S51zapret").exists();
+                return api_ok(json!({ "success": installed, "output": output_str.trim() }));
+            }
+            Err(e) => return api_err(format!("Ошибка установки Zapret: {}", e)),
+        }
     }
 
     let init_script = "/opt/etc/init.d/S51zapret";
