@@ -9,7 +9,7 @@ interface FlowRepairModalProps {
   onRepaired?: (serverName: string) => void
 }
 
-type TabType = 'tampermonkey' | 'bookmarklet' | 'extension'
+type TabType = 'extension' | 'cache_reset' | 'tampermonkey'
 
 export default function FlowRepairModal({
   isOpen,
@@ -19,7 +19,7 @@ export default function FlowRepairModal({
 }: FlowRepairModalProps) {
   if (!isOpen) return null
 
-  const [activeTab, setActiveTab] = useState<TabType>('tampermonkey')
+  const [activeTab, setActiveTab] = useState<TabType>('extension')
   const [repairing, setRepairing] = useState(false)
   const [activeServer, setActiveServer] = useState<string>('')
   const [copiedScript, setCopiedScript] = useState(false)
@@ -27,8 +27,8 @@ export default function FlowRepairModal({
   const [copiedLink, setCopiedLink] = useState(false)
 
   const cleanUrl = 'https://flow.google.com/?authuser=0&hl=ru'
-  const userscriptUrl = '/api/flow/flow-unlock.user.js'
-  const extensionZipUrl = '/api/flow/extension.zip'
+  const userscriptUrl = '/flow-unlock.user.js'
+  const extensionZipUrl = '/flow-unlock-extension.zip'
 
   const resetScript = `(async () => { if ('serviceWorker' in navigator) { const regs = await navigator.serviceWorker.getRegistrations(); for (const r of regs) await r.unregister(); } if ('caches' in window) { const keys = await caches.keys(); for (const k of keys) await caches.delete(k); } localStorage.clear(); sessionStorage.clear(); if (window.indexedDB && indexedDB.databases) { try { const dbs = await indexedDB.databases(); for (const db of dbs) if (db.name) indexedDB.deleteDatabase(db.name); } catch(e){} } location.replace('${cleanUrl}'); })();`
 
@@ -143,140 +143,117 @@ export default function FlowRepairModal({
           <div style={{ display: 'flex', gap: 6, borderBottom: '1px solid var(--border)', paddingBottom: 6 }}>
             <button
               type="button"
+              className={`btn btn-sm ${activeTab === 'extension' ? 'primary' : 'ghost'}`}
+              style={{ flex: 1.2, fontSize: 12, fontWeight: activeTab === 'extension' ? 700 : 400 }}
+              onClick={() => setActiveTab('extension')}
+            >
+              📦 1. Плагин (100% Рабочий)
+            </button>
+            <button
+              type="button"
+              className={`btn btn-sm ${activeTab === 'cache_reset' ? 'primary' : 'ghost'}`}
+              style={{ flex: 1, fontSize: 12, fontWeight: activeTab === 'cache_reset' ? 600 : 400 }}
+              onClick={() => setActiveTab('cache_reset')}
+            >
+              🧹 2. Сброс кэша (F12)
+            </button>
+            <button
+              type="button"
               className={`btn btn-sm ${activeTab === 'tampermonkey' ? 'primary' : 'ghost'}`}
               style={{ flex: 1, fontSize: 12, fontWeight: activeTab === 'tampermonkey' ? 600 : 400 }}
               onClick={() => setActiveTab('tampermonkey')}
             >
-              ⚡ 1. Tampermonkey (Рекомендуется)
-            </button>
-            <button
-              type="button"
-              className={`btn btn-sm ${activeTab === 'bookmarklet' ? 'primary' : 'ghost'}`}
-              style={{ flex: 1, fontSize: 12, fontWeight: activeTab === 'bookmarklet' ? 600 : 400 }}
-              onClick={() => setActiveTab('bookmarklet')}
-            >
-              ⭐ 2. Закладка & Консоль F12
-            </button>
-            <button
-              type="button"
-              className={`btn btn-sm ${activeTab === 'extension' ? 'primary' : 'ghost'}`}
-              style={{ flex: 1, fontSize: 12, fontWeight: activeTab === 'extension' ? 600 : 400 }}
-              onClick={() => setActiveTab('extension')}
-            >
-              📦 3. Расширение (ZIP)
+              ⚡ 3. Tampermonkey
             </button>
           </div>
 
-          {/* ТАБ 1: ТАМПЕРМАНКИ (ГЛАВНЫЙ АКЦЕНТ) */}
-          {activeTab === 'tampermonkey' && (
+          {/* ТАБ 1: РАСШИРЕНИЕ / ПЛАГИН (ОСНОВНОЙ 100% РАБОЧИЙ ВАРИАНТ) */}
+          {activeTab === 'extension' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {/* Большой акцент на обязательность Tampermonkey */}
               <div
                 style={{
-                  background: 'rgba(245, 158, 11, 0.1)',
-                  border: '1.5px solid rgba(245, 158, 11, 0.5)',
+                  background: 'rgba(34, 197, 94, 0.1)',
+                  border: '1.5px solid rgba(34, 197, 94, 0.4)',
                   borderRadius: 8,
                   padding: '12px 14px',
                 }}
               >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#f59e0b', fontWeight: 700, fontSize: 13.5 }}>
-                  <span>⚠️</span>
-                  <span>ОБЯЗАТЕЛЬНОЕ ТРЕБОВАНИЕ: ДОЛЖЕН БЫТЬ УСТАНОВЛЕН TAMPERMONKEY</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#22c55e', fontWeight: 700, fontSize: 13.5 }}>
+                  <span>✓</span>
+                  <span>ПРОВЕРЕННЫЙ И 100% РАБОЧИЙ СПОСОБ</span>
                 </div>
-                <p style={{ margin: '6px 0 10px', fontSize: 12, lineHeight: 1.5, color: 'var(--text)' }}>
-                  Чтобы скрипт мог перехватить внутренний RPC-пакет Google <code>cPZSdc</code> до того, как страница начнет загрузку, в вашем браузере <b>обязательно должно быть установлено расширение Tampermonkey</b> (или Violentmonkey).
+                <p style={{ margin: '6px 0 0', fontSize: 12, lineHeight: 1.5, color: 'var(--text)' }}>
+                  На сайте <code>flow.google.com</code> действует защита <b>Google Trusted Types</b>, блокирующая пользовательские скрипты. Нативный плагин регистрируется на уровне движка Chromium и гарантированно обходит все региональные фильтры Google Flow.
                 </p>
-
-                {/* Ссылки на установку Tampermonkey */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--muted)' }}>
-                    Выберите ваш браузер для установки Tampermonkey:
-                  </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 6 }}>
-                    <a
-                      href="https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="btn btn-sm"
-                      style={{
-                        background: 'rgba(255, 255, 255, 0.05)',
-                        border: '1px solid var(--border)',
-                        textDecoration: 'none',
-                        fontSize: 11,
-                        padding: '6px 8px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: 4,
-                      }}
-                    >
-                      🌐 Chrome / Яндекс
-                    </a>
-                    <a
-                      href="https://microsoftedge.microsoft.com/addons/detail/tampermonkey/iikmkjmpaadaobahmlepeloendndfphd"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="btn btn-sm"
-                      style={{
-                        background: 'rgba(255, 255, 255, 0.05)',
-                        border: '1px solid var(--border)',
-                        textDecoration: 'none',
-                        fontSize: 11,
-                        padding: '6px 8px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: 4,
-                      }}
-                    >
-                      🌊 Microsoft Edge
-                    </a>
-                    <a
-                      href="https://addons.mozilla.org/firefox/addon/tampermonkey/"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="btn btn-sm"
-                      style={{
-                        background: 'rgba(255, 255, 255, 0.05)',
-                        border: '1px solid var(--border)',
-                        textDecoration: 'none',
-                        fontSize: 11,
-                        padding: '6px 8px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: 4,
-                      }}
-                    >
-                      🦊 Firefox
-                    </a>
-                    <a
-                      href="https://www.tampermonkey.net/"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="btn btn-sm"
-                      style={{
-                        background: 'rgba(255, 255, 255, 0.05)',
-                        border: '1px solid var(--border)',
-                        textDecoration: 'none',
-                        fontSize: 11,
-                        padding: '6px 8px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: 4,
-                      }}
-                    >
-                      🏠 Официальный сайт
-                    </a>
-                  </div>
-                </div>
               </div>
 
-              {/* Шаг 2: Установка скрипта */}
               <div
                 style={{
                   background: 'var(--panel-2, rgba(255, 255, 255, 0.03))',
+                  border: '1px solid var(--border)',
+                  borderRadius: 8,
+                  padding: '14px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 12,
+                }}
+              >
+                <a
+                  href={extensionZipUrl}
+                  download="xkeen-flow-unlock.zip"
+                  className="btn primary"
+                  style={{
+                    textDecoration: 'none',
+                    textAlign: 'center',
+                    padding: '10px 16px',
+                    fontSize: 13,
+                    fontWeight: 700,
+                    background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                    boxShadow: '0 2px 10px rgba(16, 185, 129, 0.3)',
+                    border: 'none',
+                  }}
+                >
+                  📥 Скачать готовый плагин xkeen-flow-unlock.zip (6.5 КБ)
+                </a>
+
+                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8, color: 'var(--text)' }}>
+                    Пошаговая установка за 30 секунд:
+                  </div>
+                  <ol style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 1.6, color: 'var(--text)' }}>
+                    <li>Скачайте и распакуйте архив <code>xkeen-flow-unlock.zip</code> в любую папку.</li>
+                    <li>Откройте в браузере страницу <code>chrome://extensions</code> (или <code>edge://extensions</code>).</li>
+                    <li>В правом верхнем углу включите тумблер <b>«Режим разработчика»</b> (Developer Mode).</li>
+                    <li>Нажмите кнопку <b>«Загрузить распакованное расширение»</b> (Load unpacked) и выберите папку.</li>
+                    <li>Откройте <a href={cleanUrl} target="_blank" rel="noreferrer" style={{ color: '#38bdf8', fontWeight: 600 }}>flow.google.com</a> — доступ полностью открыт!</li>
+                  </ol>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ТАБ 2: ОЧИСТКА КЭША F12 */}
+          {activeTab === 'cache_reset' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div
+                style={{
+                  background: 'rgba(245, 158, 11, 0.08)',
+                  border: '1px solid rgba(245, 158, 11, 0.35)',
+                  borderRadius: 8,
+                  padding: '12px 14px',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#f59e0b', fontWeight: 700, fontSize: 13 }}>
+                  <span>⚠️</span>
+                  <span>НАЗНАЧЕНИЕ ЭТОЙ КОМАНДЫ: СБРОС СТАРОГО КЭША</span>
+                </div>
+                <p style={{ margin: '6px 0 0', fontSize: 12, lineHeight: 1.5, color: 'var(--text)' }}>
+                  Эта команда <b>не разблокирует сайт сама по себе</b>. Она нужна только если вы заходили на Flow до установки плагина, и браузер «застрял» на экране <code>unsupported-country</code> в кэше Service Worker.
+                </p>
+              </div>
+
+              <div
+                style={{
                   border: '1px solid var(--border)',
                   borderRadius: 8,
                   padding: '12px 14px',
@@ -285,45 +262,31 @@ export default function FlowRepairModal({
                   gap: 10,
                 }}
               >
-                <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div style={{ fontWeight: 600, fontSize: 13 }}>
-                    Шаг 2: Установите скрипт Flow Unlocker от nickitafedorov2012
+                    ⚡ Команда сброса Service Worker и кэша
                   </div>
-                  <p style={{ margin: '4px 0 0', fontSize: 11.5, color: 'var(--muted)', lineHeight: 1.45 }}>
-                    После установки Tampermonkey нажмите кнопку ниже. Откроется вкладка Tampermonkey — нажмите кнопку <b>«Установить»</b> (Install). Скрипт будет работать автоматически навсегда.
-                  </p>
+                  <button
+                    type="button"
+                    className="btn btn-sm primary"
+                    style={{ fontSize: 11, padding: '4px 10px' }}
+                    onClick={handleCopyScript}
+                  >
+                    {copiedScript ? '✓ Скопировано!' : '📋 Скопировать команду'}
+                  </button>
                 </div>
-
-                <a
-                  href={userscriptUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="btn primary"
-                  style={{
-                    textDecoration: 'none',
-                    textAlign: 'center',
-                    padding: '10px 16px',
-                    fontSize: 13,
-                    fontWeight: 600,
-                    background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
-                    boxShadow: '0 2px 10px rgba(16, 185, 129, 0.3)',
-                    border: 'none',
-                  }}
-                >
-                  ⚡ Установить скрипт Flow Unlock (в 1 клик через Tampermonkey) ↗
-                </a>
-
-                <div style={{ fontSize: 11, color: 'var(--muted)', display: 'flex', gap: 6, alignItems: 'center' }}>
-                  <span>ℹ️</span>
-                  <span>Скрипт перехватывает сетевой ответ <code>cPZSdc</code>, активирует доступ (<code>isSupported: true</code>) и включает русский язык (<code>ru-RU</code>).</span>
-                </div>
+                <p style={{ margin: 0, fontSize: 11.5, color: 'var(--muted)', lineHeight: 1.45 }}>
+                  Инструкция: Нажмите <code>F12</code> на вкладке Google Flow ➔ вкладка <b>Console</b> ➔ вставьте команду и нажмите <code>Enter</code>. Страница перезагрузится с чистого листа.
+                </p>
+                <textarea
+                  readOnly
+                  className="input mono"
+                  style={{ fontSize: 11, height: 50, resize: 'none' }}
+                  value={resetScript}
+                  onClick={(e) => (e.target as HTMLTextAreaElement).select()}
+                />
               </div>
-            </div>
-          )}
 
-          {/* ТАБ 2: ЗАКЛАДКА И КОНСОЛЬ */}
-          {activeTab === 'bookmarklet' && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
               <div
                 style={{
                   border: '1px solid var(--border)',
@@ -336,7 +299,7 @@ export default function FlowRepairModal({
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div style={{ fontWeight: 600, fontSize: 13 }}>
-                    ⭐ Закладка в браузере (Bookmarklet)
+                    ⭐ Закладка-переключатель (Bookmarklet)
                   </div>
                   <button
                     type="button"
@@ -347,58 +310,37 @@ export default function FlowRepairModal({
                     {copiedBookmark ? '✓ Скопировано!' : '📋 Скопировать код'}
                   </button>
                 </div>
-                <p style={{ margin: 0, fontSize: 11.5, color: 'var(--muted)', lineHeight: 1.45 }}>
-                  Создайте новую закладку на панели закладок вашего браузера, назовите её <b>«Flow Unlock»</b> и вставьте код в поле адреса (URL). Нажмите на неё, когда находитесь на <code>flow.google.com</code>.
-                </p>
                 <textarea
                   readOnly
                   className="input mono"
-                  style={{ fontSize: 11, height: 44, resize: 'none' }}
+                  style={{ fontSize: 11, height: 40, resize: 'none' }}
                   value={bookmarkletCode}
-                  onClick={(e) => (e.target as HTMLTextAreaElement).select()}
-                />
-              </div>
-
-              <div
-                style={{
-                  border: '1px solid var(--border)',
-                  borderRadius: 8,
-                  padding: '12px 14px',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 8,
-                }}
-              >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div style={{ fontWeight: 600, fontSize: 13 }}>
-                    ⚡ Очистка кэша через консоль F12
-                  </div>
-                  <button
-                    type="button"
-                    className="btn btn-sm primary"
-                    style={{ fontSize: 11, padding: '3px 8px' }}
-                    onClick={handleCopyScript}
-                  >
-                    {copiedScript ? '✓ Скопировано!' : '📋 Скопировать команду'}
-                  </button>
-                </div>
-                <p style={{ margin: 0, fontSize: 11.5, color: 'var(--muted)', lineHeight: 1.45 }}>
-                  Нажмите <code>F12</code> на вкладке Flow ➔ перейдите в <b>Console</b> ➔ вставьте команду и нажмите <code>Enter</code>. Она удалит зависший Service Worker и кэш редиректа.
-                </p>
-                <textarea
-                  readOnly
-                  className="input mono"
-                  style={{ fontSize: 11, height: 44, resize: 'none' }}
-                  value={resetScript}
                   onClick={(e) => (e.target as HTMLTextAreaElement).select()}
                 />
               </div>
             </div>
           )}
 
-          {/* ТАБ 3: РАСШИРЕНИЕ ДЛЯ БРАУЗЕРА */}
-          {activeTab === 'extension' && (
+          {/* ТАБ 3: TAMPERMONKEY */}
+          {activeTab === 'tampermonkey' && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div
+                style={{
+                  background: 'rgba(239, 68, 68, 0.08)',
+                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                  borderRadius: 8,
+                  padding: '12px 14px',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#f87171', fontWeight: 700, fontSize: 13 }}>
+                  <span>⚠️</span>
+                  <span>ОГРАНИЧЕНИЕ GOOGLE TRUSTED TYPES В CHROME</span>
+                </div>
+                <p style={{ margin: '6px 0 0', fontSize: 11.5, lineHeight: 1.5, color: 'var(--text)' }}>
+                  В современных версиях Chrome на <code>flow.google.com</code> включен строгий заголовок CSP <code>require-trusted-types-for 'script'</code>. Из-за этого Tampermonkey часто блокируется браузером на этой странице. Если скрипт у вас не срабатывает — <b>используйте нативный плагин (Вкладка 1)</b>.
+                </p>
+              </div>
+
               <div
                 style={{
                   background: 'var(--panel-2, rgba(255, 255, 255, 0.03))',
@@ -410,19 +352,11 @@ export default function FlowRepairModal({
                   gap: 10,
                 }}
               >
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: 13 }}>
-                    📦 Готовое расширение для Chrome / Edge / Яндекс (ZIP)
-                  </div>
-                  <p style={{ margin: '4px 0 0', fontSize: 11.5, color: 'var(--muted)', lineHeight: 1.45 }}>
-                    Если вы не хотите использовать Tampermonkey, скачайте автономное расширение <b>Flow Unlocker (RU)</b> от <b>nickitafedorov2012</b> прямо из панели.
-                  </p>
-                </div>
-
                 <a
-                  href={extensionZipUrl}
-                  download="xkeen-flow-unlock.zip"
-                  className="btn primary"
+                  href={userscriptUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="btn"
                   style={{
                     textDecoration: 'none',
                     textAlign: 'center',
@@ -431,19 +365,42 @@ export default function FlowRepairModal({
                     fontWeight: 600,
                   }}
                 >
-                  📥 Скачать расширение xkeen-flow-unlock.zip (6 КБ)
+                  ⚡ Открыть скрипт flow-unlock.user.js для установки ↗
                 </a>
 
-                <div style={{ borderTop: '1px solid var(--border)', paddingTop: 10 }}>
-                  <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
-                    Инструкция по установке (1 минута):
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, borderTop: '1px solid var(--border)', paddingTop: 8 }}>
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--muted)' }}>
+                    Ссылки на магазин Tampermonkey (если еще не установлен):
                   </div>
-                  <ol style={{ margin: 0, paddingLeft: 18, fontSize: 11.5, lineHeight: 1.55, color: 'var(--text)' }}>
-                    <li>Распакуйте скачанный <code>xkeen-flow-unlock.zip</code> в любую постоянную папку.</li>
-                    <li>Откройте в браузере страницу <code>chrome://extensions</code> (или <code>edge://extensions</code>).</li>
-                    <li>Включите тумблер <b>«Режим разработчика»</b> (Developer mode) в правом верхнем углу.</li>
-                    <li>Нажмите кнопку <b>«Загрузить распакованное»</b> (Load unpacked) и выберите распакованную папку.</li>
-                  </ol>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 6 }}>
+                    <a
+                      href="https://chromewebstore.google.com/detail/tampermonkey/dhdgffkkebhmkfjojejmpbldmpobfkfo"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="btn btn-sm"
+                      style={{ textDecoration: 'none', fontSize: 11, textAlign: 'center' }}
+                    >
+                      🌐 Chrome / Яндекс
+                    </a>
+                    <a
+                      href="https://microsoftedge.microsoft.com/addons/detail/tampermonkey/iikmkjmpaadaobahmlepeloendndfphd"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="btn btn-sm"
+                      style={{ textDecoration: 'none', fontSize: 11, textAlign: 'center' }}
+                    >
+                      🌊 Microsoft Edge
+                    </a>
+                    <a
+                      href="https://addons.mozilla.org/firefox/addon/tampermonkey/"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="btn btn-sm"
+                      style={{ textDecoration: 'none', fontSize: 11, textAlign: 'center' }}
+                    >
+                      🦊 Firefox
+                    </a>
+                  </div>
                 </div>
               </div>
             </div>

@@ -1,19 +1,21 @@
 // ==UserScript==
 // @name         Flow Unlocker (RU) — nickitafedorov2012
 // @namespace    https://github.com/nickitafedorov2012-code/xkeen-ui-ext
-// @version      2.1.0
-// @description  Разблокировка Google Flow (flow.google.com) на русском языке: обход регионального фильтра cPZSdc, установка русской локали и подавление редиректа на unsupported-country
+// @version      2.2.0
+// @description  Разблокировка Google Flow (flow.google.com): обход регионального фильтра cPZSdc и подавление редиректа на unsupported-country
 // @author       nickitafedorov2012-code
 // @match        https://flow.google.com/*
 // @match        http://flow.google.com/*
 // @run-at       document-start
-// @grant        none
+// @grant        unsafeWindow
+// @inject-into  page
 // ==/UserScript==
 
 (function() {
   'use strict';
 
-  console.info('[Flow Unlocker by nickitafedorov2012] Инициализация хуков обхода региональных ограничений и русификации...');
+  const win = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);
+  console.info('[Flow Unlocker by nickitafedorov2012] Инициализация хуков обхода региональных ограничений...');
 
   // 1. Установка русского языка интерфейса и локали (ru-RU)
   try {
@@ -144,11 +146,12 @@
   }
 
   // 4. Перехват XMLHttpRequest (batchexecute в Angular)
+  const TargetXHR = win.XMLHttpRequest || XMLHttpRequest;
   const targetXHRs = new WeakMap();
   const patchedBodies = new WeakMap();
 
-  const origOpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function(method, url, ...args) {
+  const origOpen = TargetXHR.prototype.open;
+  TargetXHR.prototype.open = function(method, url, ...args) {
     let isTarget = false;
     try {
       const fullUrl = new URL(url, location.href);
@@ -162,10 +165,10 @@
   };
 
   for (const prop of ['responseText', 'response']) {
-    const desc = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, prop);
+    const desc = Object.getOwnPropertyDescriptor(TargetXHR.prototype, prop);
     if (!desc || !desc.get) continue;
 
-    Object.defineProperty(XMLHttpRequest.prototype, prop, {
+    Object.defineProperty(TargetXHR.prototype, prop, {
       ...desc,
       get() {
         const origVal = desc.get.call(this);
@@ -197,8 +200,8 @@
 
   // 5. Перехват fetch (для сопутствующих API boq-labs / aisandbox)
   try {
-    const origFetch = window.fetch;
-    window.fetch = function(input, init) {
+    const origFetch = win.fetch || window.fetch;
+    win.fetch = function(input, init) {
       const url = (typeof input === 'string') ? input : (input?.url || '');
       return origFetch.apply(this, arguments).then(response => {
         if (response.url && response.url.includes(BLOCKED_PATH)) {
