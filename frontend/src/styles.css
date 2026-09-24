@@ -416,28 +416,113 @@ body {
 .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
 
 /* инпуты/кнопки */
-.input, .select {
-  background: var(--panel-2); color: var(--text);
-  border: 1px solid var(--border); border-radius: 8px;
-  padding: 7px 10px; font-size: 13px; outline: none;
+.input, .input-text, .select {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 13px;
+  outline: none;
+  font-family: inherit;
+  transition: border-color 0.1s ease, box-shadow 0.1s ease;
 }
-.input:focus, .select:focus { border-color: var(--accent); }
-.btn {
-  background: var(--panel-2); color: var(--text);
-  border: 1px solid var(--border); border-radius: 8px;
-  padding: 7px 14px; cursor: pointer; font-size: 13px;
+.input:focus, .input-text:focus, .select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(79, 140, 255, 0.2);
+}
+.input-text {
+  width: 100%;
+}
+.btn, a.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  text-decoration: none;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 14px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.4;
+  font-family: inherit;
   transition: transform 0.1s ease, border-color 0.1s ease, box-shadow 0.1s ease, color 0.1s ease, background 0.1s ease;
+  user-select: none;
 }
-.btn:hover:not(:disabled) { border-color: var(--accent); color: #fff; }
-.btn:disabled { opacity: 0.5; cursor: default; }
-.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+.btn:hover:not(:disabled), a.btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: #fff;
+  text-decoration: none;
+}
+.btn:disabled, a.btn.disabled {
+  opacity: 0.5;
+  cursor: default;
+  pointer-events: none;
+}
+.btn.primary, .btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+.btn.primary:hover:not(:disabled), .btn-primary:hover:not(:disabled) {
+  background: var(--accent-2);
+  border-color: var(--accent-2);
+  color: #fff;
+}
+.btn.btn-secondary, .btn-secondary {
+  background: var(--panel-2);
+  color: var(--text);
+  border-color: var(--border);
+}
+.btn.btn-secondary:hover:not(:disabled), .btn-secondary:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: #fff;
+}
 .btn.ghost { background: transparent; }
-.btn.sm { padding: 4px 10px; font-size: 12px; }
+.btn.btn-sm, .btn-sm, .btn.sm { padding: 4px 10px; font-size: 12px; border-radius: 6px; }
+.btn.btn-xs, .btn-xs { padding: 2px 7px; font-size: 11px; border-radius: 5px; }
+.btn.btn-danger, .btn-danger {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #f87171;
+}
+.btn.btn-danger:hover:not(:disabled), .btn-danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.28);
+  border-color: #ef4444;
+  color: #fca5a5;
+}
+.btn.btn-warn, .btn-warn {
+  background: rgba(234, 179, 8, 0.15);
+  border-color: rgba(234, 179, 8, 0.35);
+  color: #fbbf24;
+}
+.btn.btn-warn:hover:not(:disabled), .btn-warn:hover:not(:disabled) {
+  background: rgba(234, 179, 8, 0.28);
+  border-color: #eab308;
+  color: #fde68a;
+}
+.btn-icon-danger {
+  background: transparent;
+  border: 1px solid transparent;
+  color: #f87171;
+  padding: 3px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn-icon-danger:hover {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.4);
+}
 .btn.wide { width: 100%; margin-top: 10px; }
 .check { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 13px; }
 .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
 .row span { color: var(--muted); font-size: 13px; }
-.row .input, .row .select { max-width: 55%; }
+.row .input, .row .input-text, .row .select { max-width: 55%; }
 
 /* пинг и метки */
 .ping { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; }
