@@ -1207,27 +1207,8 @@ table.devices tr.me { background: rgba(79, 140, 255, 0.05); }
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
 }
 
-.devices-tab-bar {
-  display: flex;
-  align-items: center;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  padding: 12px 18px 0;
-}
-
-.devices-tab-title {
-  background: #161c28;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-bottom: none;
-  border-radius: 8px 8px 0 0;
-  padding: 8px 18px;
-  font-size: 14px;
-  font-weight: 600;
-  color: #f1f5f9;
-  margin-bottom: -1px;
-}
-
 .devices-toolbar-wrap {
-  padding: 14px 18px 8px;
+  padding: 16px 18px 8px;
 }
 
 .devices-toolbar {
@@ -1366,14 +1347,11 @@ table.devices tr.me { background: rgba(79, 140, 255, 0.05); }
 .devices-table-wrap {
   width: 100%;
   overflow-x: auto;
-  padding-bottom: 20px;
 }
 
 table.devices-table {
   width: 100%;
   border-collapse: collapse;
-  table-layout: fixed;
-  min-width: 860px;
 }
 
 table.devices-table th {
@@ -1381,9 +1359,10 @@ table.devices-table th {
   color: #94a3b8;
   font-size: 12px;
   font-weight: 600;
-  padding: 10px 12px;
+  padding: 10px 10px;
   border-bottom: 1px solid #1e2638;
   user-select: none;
+  white-space: nowrap;
 }
 table.devices-table th.sortable {
   cursor: pointer;
@@ -1391,13 +1370,70 @@ table.devices-table th.sortable {
 table.devices-table th.sortable:hover {
   color: #cbd5e1;
 }
-table.devices-table th:nth-child(1) { width: 36px; } /* checkbox */
-table.devices-table th:nth-child(2) { width: 23%; } /* device */
-table.devices-table th:nth-child(3) { width: 14%; } /* IP */
-table.devices-table th:nth-child(4) { width: 18%; } /* policy */
-table.devices-table th:nth-child(5) { width: 16%; } /* speed */
-table.devices-table th:nth-child(6) { width: 22%; } /* server */
-table.devices-table th:nth-child(7) { width: 44px; text-align: center; } /* gear */
+table.devices-table th:nth-child(1) { width: 34px; } /* checkbox */
+table.devices-table th:nth-child(2) { width: 20%; min-width: 120px; } /* device */
+table.devices-table th:nth-child(3) { width: 12%; min-width: 100px; } /* IP */
+table.devices-table th:nth-child(4) { width: 14%; min-width: 105px; } /* policy */
+table.devices-table th:nth-child(5) { width: 13%; min-width: 95px; } /* speed */
+table.devices-table th:nth-child(6) { width: 12%; min-width: 85px; } /* traffic */
+table.devices-table th:nth-child(7) { width: 25%; min-width: 135px; } /* server */
+table.devices-table th:nth-child(8) { width: 38px; text-align: center; } /* gear */
+
+/* Ввод ограничения скорости (Мбит/с) */
+.device-speed-input-wrap {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+  background: #141923;
+  border: 1px solid #232c3f;
+  border-radius: 8px;
+  padding: 0 6px 0 8px;
+  height: 32px;
+  max-width: 105px;
+  width: 100%;
+  transition: all 0.15s ease;
+  box-sizing: border-box;
+}
+.device-speed-input-wrap:focus-within {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+.device-speed-input {
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: #f1f5f9;
+  font-size: 13px;
+  font-weight: 500;
+  outline: none;
+  padding: 0;
+  min-width: 0;
+}
+.device-speed-unit {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-left: 2px;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+.device-speed-clear-btn {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 4px;
+  margin-left: 2px;
+  border-radius: 4px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+}
+.device-speed-clear-btn:hover {
+  color: #f87171;
+  background: rgba(239, 68, 68, 0.15);
+}
 
 /* Секция Online */
 .devices-group-header {

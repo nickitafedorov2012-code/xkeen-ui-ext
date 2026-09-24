@@ -250,13 +250,13 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
               )}
 
               {/* Кнопки перехода и действий */}
-              <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: onSwitchTab ? '1fr 1fr' : '1fr', gap: 10, marginTop: 8 }}>
                 {onSwitchTab && (
                   <button
                     type="button"
                     className="btn ghost sm"
                     onClick={() => onSwitchTab('servers')}
-                    style={{ flex: 1 }}
+                    style={{ justifyContent: 'center', width: '100%', padding: '7px 12px' }}
                     title="Выбрать другой сервер из списка"
                   >
                     🔌 Сменить сервер →
@@ -267,9 +267,10 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                   className="btn ghost sm"
                   onClick={runCheck}
                   disabled={checking}
+                  style={{ justifyContent: 'center', width: '100%', padding: '7px 12px' }}
                   title="Измерить текущую задержку"
                 >
-                  ⚡ Проверить пинг
+                  {checking ? '⏳ Проверка…' : '⚡ Проверить пинг'}
                 </button>
               </div>
             </div>

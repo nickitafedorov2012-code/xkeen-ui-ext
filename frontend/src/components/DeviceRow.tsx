@@ -1,7 +1,5 @@
-import { memo } from 'react'
+import { memo, useEffect, useState } from 'react'
 import {
-  fmtSpeed,
-  SPEED_PRESETS,
   type DeviceInfo,
   type DeviceRoutingEntry,
   type DeviceTraffic,
@@ -33,6 +31,97 @@ function fmtBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
+function SpeedCell({
+  mac,
+  kbps,
+  busy,
+  applySpeed,
+}: {
+  mac: string
+  kbps?: number
+  busy: boolean
+  applySpeed: (macs: string[], kbps: number) => void
+}) {
+  const formatInitial = (k?: number) => {
+    if (!k || k <= 0) return ''
+    const mbps = k / 1024
+    return k % 1024 === 0 ? String(mbps) : mbps.toFixed(1)
+  }
+
+  const [val, setVal] = useState(() => formatInitial(kbps))
+  const [editing, setEditing] = useState(false)
+
+  useEffect(() => {
+    if (!editing) {
+      setVal(formatInitial(kbps))
+    }
+  }, [kbps, editing])
+
+  const commit = () => {
+    setEditing(false)
+    const trimmed = val.trim()
+    if (!trimmed || trimmed === '0') {
+      if (kbps && kbps > 0) {
+        applySpeed([mac], 0)
+      }
+      return
+    }
+    const num = parseFloat(trimmed.replace(',', '.'))
+    if (!isNaN(num) && num > 0) {
+      const nextKbps = Math.round(num * 1024)
+      if (nextKbps !== kbps) {
+        applySpeed([mac], nextKbps)
+      }
+    } else {
+      setVal(formatInitial(kbps))
+    }
+  }
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      e.currentTarget.blur()
+    } else if (e.key === 'Escape') {
+      setVal(formatInitial(kbps))
+      setEditing(false)
+    }
+  }
+
+  const clearLimit = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setVal('')
+    applySpeed([mac], 0)
+  }
+
+  return (
+    <div className="device-speed-input-wrap">
+      <input
+        type="text"
+        inputMode="decimal"
+        className="device-speed-input"
+        placeholder="—"
+        value={val}
+        disabled={busy}
+        onFocus={() => setEditing(true)}
+        onChange={(e) => setVal(e.target.value)}
+        onBlur={commit}
+        onKeyDown={handleKeyDown}
+        title="Ограничение скорости в Мбит/с. Введите число (например, 10, 50, 100) и нажмите Enter или кликните вне поля. 0 или пусто = без лимита."
+      />
+      <span className="device-speed-unit">Мб/с</span>
+      {kbps && kbps > 0 && !busy ? (
+        <button
+          type="button"
+          className="device-speed-clear-btn"
+          title="Снять ограничение скорости (без лимита)"
+          onClick={clearLimit}
+        >
+          ✕
+        </button>
+      ) : null}
+    </div>
+  )
 }
 
 /// Строка таблицы устройств по эталонному макету.
@@ -90,19 +179,12 @@ const DeviceRow = memo(function DeviceRow({
         </select>
       </td>
       <td>
-        <select
-          className="device-select"
-          value={d.speed_limit_kbps ? String(d.speed_limit_kbps) : ''}
-          disabled={busy}
-          onChange={(e) => applySpeed([d.mac], Number(e.target.value))}
-        >
-          <option value="">{d.speed_limit_kbps ? fmtSpeed(d.speed_limit_kbps) : '-'}</option>
-          {SPEED_PRESETS.map((s) => (
-            <option key={s.value} value={s.value}>
-              {s.label}
-            </option>
-          ))}
-        </select>
+        <SpeedCell
+          mac={d.mac}
+          kbps={d.speed_limit_kbps}
+          busy={busy}
+          applySpeed={applySpeed}
+        />
       </td>
       <td>
         {traffic && (traffic.download_bytes > 0 || traffic.upload_bytes > 0 || traffic.active_connections > 0) ? (

@@ -386,11 +386,6 @@ export default function Devices({ notify }: Props) {
 
   return (
     <section className="devices-card">
-      {/* Шапка вкладки */}
-      <div className="devices-tab-bar">
-        <div className="devices-tab-title">Devices</div>
-      </div>
-
       <div className="devices-toolbar-wrap">
         {/* Верхняя строка управления */}
         <div className="devices-toolbar">

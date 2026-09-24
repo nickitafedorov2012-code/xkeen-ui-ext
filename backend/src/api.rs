@@ -164,6 +164,23 @@ pub async fn switch_server(State(state): State<AppState>, Json(req): Json<Switch
     match mihomo::switch_server(&state.http, &cfg, &req.server_id).await {
         Ok(msg) => {
             log_i!("Смена сервера: {} — {}", req.server_id, msg);
+            // Если переключен конкретный сервер, обновляем его как основной в цепочке приоритетов,
+            // чтобы фоновый failover не откатывал выбор пользователя обратно через 30-60 секунд.
+            if !req.server_id.is_empty() && req.server_id != "Fastest" && req.server_id != "Fallback" {
+                let _cfg_guard = state.config_lock.lock().await;
+                let mut mut_cfg = (**state.config.read().await).clone();
+                let id = req.server_id.clone();
+                if let Some(pos) = mut_cfg.failover.priority_chain.iter().position(|s| s == &id) {
+                    mut_cfg.failover.priority_chain.remove(pos);
+                }
+                mut_cfg.failover.priority_chain.insert(0, id.clone());
+                mut_cfg.failover.priority_server = id;
+                if let Err(e) = config::save(&state.config_path, &mut_cfg).await {
+                    log_e!("Ошибка сохранения приоритета в config.json: {e}");
+                } else {
+                    *state.config.write().await = std::sync::Arc::new(mut_cfg);
+                }
+            }
             api_ok(json!({ "message": msg }))
         }
         Err(e) => {

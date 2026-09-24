@@ -22,10 +22,19 @@ export default function Antigravity({ notify }: Props) {
     google_country?: string
     google_domain?: string
     client_ip?: string
-  } | null>(null)
+  } | null>(() => {
+    try {
+      const saved = localStorage.getItem('xr_google_geo')
+      return saved ? JSON.parse(saved) : null
+    } catch {
+      return null
+    }
+  })
   const [checkingFlow, setCheckingFlow] = useState(false)
   const [flowServers, setFlowServers] = useState<ServerInfo[]>([])
-  const [selectedFlowServer, setSelectedFlowServer] = useState<string>('')
+  const [selectedFlowServer, setSelectedFlowServer] = useState<string>(() => {
+    return localStorage.getItem('xr_flow_server') || ''
+  })
   const [switchingFlowServer, setSwitchingFlowServer] = useState(false)
 
   // Форма настроек
@@ -57,6 +66,16 @@ export default function Antigravity({ notify }: Props) {
       const data = await apiGet<{ servers: ServerInfo[] }>('servers')
       const cleanNodes = (data.servers || []).filter((s) => getFlowStatus(s.name) === 'ok')
       setFlowServers(cleanNodes)
+
+      const saved = localStorage.getItem('xr_flow_server')
+      const activeFlow = data.servers?.find((s) => s.is_active && getFlowStatus(s.name) === 'ok')
+
+      if (saved && cleanNodes.some((s) => s.id === saved)) {
+        setSelectedFlowServer(saved)
+      } else if (activeFlow) {
+        setSelectedFlowServer(activeFlow.id)
+        localStorage.setItem('xr_flow_server', activeFlow.id)
+      }
     } catch {
       // ignore
     }
@@ -73,6 +92,11 @@ export default function Antigravity({ notify }: Props) {
         client_ip?: string
       }>('servers/google-check')
       setGoogleGeo(data)
+      try {
+        localStorage.setItem('xr_google_geo', JSON.stringify(data))
+      } catch {
+        // ignore
+      }
       if (data.is_clean) {
         notify(`Google Flow доступен! Регион: ${data.google_country || 'US'} (${data.google_domain || 'google.com'})`)
       } else {
@@ -89,8 +113,9 @@ export default function Antigravity({ notify }: Props) {
     if (!serverId) return
     setSwitchingFlowServer(true)
     try {
+      localStorage.setItem('xr_flow_server', serverId)
       await apiPost('servers/switch', { server_id: serverId })
-      notify('Узел Google AI переключен')
+      notify('Узел Google AI переключен и сохранён')
       setTimeout(checkFlowAccess, 1200)
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка переключения узла', true)
@@ -287,6 +312,9 @@ export default function Antigravity({ notify }: Props) {
                 disabled={switchingFlowServer}
               >
                 <option value="">-- Выберите Flow-узел ({flowServers.length}) --</option>
+                {selectedFlowServer && !flowServers.some((s) => s.id === selectedFlowServer) && (
+                  <option value={selectedFlowServer}>{selectedFlowServer}</option>
+                )}
                 {flowServers.map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.name} {s.ping_ms > 0 ? `(${s.ping_ms} мс)` : ''}
