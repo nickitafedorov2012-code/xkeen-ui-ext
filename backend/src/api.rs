@@ -2844,7 +2844,7 @@ pub async fn get_policies_map(State(state): State<AppState>) -> Response {
 // ==================== ZAPRET / DPI ИНТЕГРАЦИЯ ====================
 
 /// GET /api/zapret/status — статус nfqws, iptables и S51zapret
-pub async fn get_zapret_status(_state: State<AppState>) -> Response {
+pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
     let init_script = std::path::Path::new("/opt/etc/init.d/S51zapret");
     let installed = init_script.exists();
 
@@ -2941,7 +2941,7 @@ pub struct ZapretActionReq {
 
 /// POST /api/zapret/action — запуск, остановка, переключение, пресеты и тест DPI
 pub async fn zapret_action(
-    state: State<AppState>,
+    State(state): State<AppState>,
     axum::extract::Json(body): axum::extract::Json<ZapretActionReq>,
 ) -> Response {
     let act = body.action.trim();
@@ -3104,7 +3104,8 @@ EOF
 
     // 5. Управление независимыми режимами и выключателями (toggle_feature / set_features / reset_features)
     if act == "toggle_feature" || act == "set_features" || act == "reset_features" {
-        let mut cfg = state.config.read().await.clone();
+        let _cfg_guard = state.config_lock.lock().await;
+        let mut cfg = (**state.config.read().await).clone();
         if act == "reset_features" {
             cfg.zapret = crate::config::ZapretConfig::default();
         } else if let Some(new_features) = body.features {
@@ -3193,7 +3194,8 @@ EOF
         Ok(out) => {
             let output_str = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
             if out.status.success() {
-                let mut cfg = state.config.read().await.clone();
+                let _cfg_guard = state.config_lock.lock().await;
+                let mut cfg = (**state.config.read().await).clone();
                 if action_to_run == "start" {
                     cfg.zapret.enabled = true;
                 } else if action_to_run == "stop" {
