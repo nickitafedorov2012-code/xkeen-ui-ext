@@ -1,7 +1,8 @@
 /**
- * Легковесный синтаксический валидатор YAML для ConfigEditor.
+ * Легковесный структурный линтер YAML для ConfigEditor.
  * Проверяет наличие табуляций, баланс кавычек и скобок, пробелы после двоеточий,
  * а также корректность отступов без внешних зависимостей.
+ * Является базовой эвристикой целостности структуры, не валидирует схему Mihomo.
  */
 
 export interface YamlValidationResult {
@@ -75,6 +76,10 @@ export function validateYaml(content: string): YamlValidationResult {
       }
 
       if (ch === "'" && !inDoubleQuote) {
+        if (inSingleQuote && c + 1 < rawLine.length && rawLine[c + 1] === "'") {
+          c++ // экранированная одинарная кавычка '' внутри строки
+          continue
+        }
         inSingleQuote = !inSingleQuote
       } else if (ch === '"' && !inSingleQuote) {
         inDoubleQuote = !inDoubleQuote

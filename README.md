@@ -8,7 +8,7 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/Платформа-Entware%20(MIPS%20%7C%20ARM)-success.svg)](https://entware.net/)
 [![KeeneticOS](https://img.shields.io/badge/KeeneticOS-4.x%20%7C%205.x-00D3F2.svg)](https://keenetic.ru/)
-[![Backend: Rust](https://img.shields.io/badge/Backend-Rust%20(Axum%200.7)-DEA584?logo=rust)](backend/)
+[![Backend: Rust](https://img.shields.io/badge/Backend-Rust%20(Axum%200.8)-DEA584?logo=rust)](backend/)
 [![Frontend: React](https://img.shields.io/badge/Frontend-React%2018%20%2B%20TypeScript-61DAFB?logo=react)](frontend/)
 
 [✨ Возможности](#-возможности) • [📸 Обзор функций и интерфейса](#-обзор-функций-и-интерфейса) • [⌨️ Горячие клавиши](#️-горячие-клавиши) • [⚡ Быстрая установка](#-быстрая-установка-entware) • [⚙️ Конфигурация](#️-конфигурация) • [🔧 Сборка](#-сборка-из-исходников)
@@ -21,7 +21,7 @@
 
 **XKeen Route** — это современная панель управления для роутеров Keenetic и Netcraze с установленным пакетом [XKeen](https://github.com/jameszeroX/XKeen).
 
-Она работает автономно прямо на роутере в среде **Entware** в виде единого бинарного файла, скомпилированного на Rust. Веб-сервер на базе Axum 0.7 и Tokio потребляет всего ~6–12 МБ оперативной памяти и практически нулевое количество CPU, отдавая встроенный React SPA веб-интерфейс в любом браузере на порту `1001`.
+Она работает автономно прямо на роутере в среде **Entware** в виде единого бинарного файла, скомпилированного на Rust. Веб-сервер на базе Axum 0.8 и Tokio потребляет всего ~6–12 МБ оперативной памяти и практически нулевое количество CPU, отдавая встроенный React SPA веб-интерфейс в любом браузере на порту `1001`.
 
 ### 🌟 Ключевые архитектурные преимущества:
 1. **Двухуровневая маршрутизация (Mihomo + iptables/ipset)**: автоматическое преодоление блокировок ТСПУ и российских IP (`geo_override`), параллельный CDN-сканер статики и фоновая синхронизация поддоменов.

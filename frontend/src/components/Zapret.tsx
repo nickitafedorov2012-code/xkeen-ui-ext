@@ -655,6 +655,9 @@ export default function Zapret({ notify }: ZapretProps) {
                 {savingConfig ? 'Сохранение…' : '💾 Сохранить и применить'}
               </button>
             </div>
+            <div style={{ fontSize: 12, padding: '6px 10px', background: 'rgba(234, 179, 8, 0.1)', border: '1px solid rgba(234, 179, 8, 0.3)', borderRadius: 6, color: '#eab308' }}>
+              ⚠️ Прямое редактирование конфигурации демона Zapret. Изменяйте параметры только если уверены в их назначении. Спецсимволы командной строки запрещены.
+            </div>
             <textarea
               className="input"
               rows={6}

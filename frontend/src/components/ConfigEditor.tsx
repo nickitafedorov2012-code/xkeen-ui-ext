@@ -107,7 +107,7 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
     } else if (curFile?.syntax === 'yaml') {
       const res = validateYaml(content)
       if (!res.valid) {
-        setSyntaxError(res.error || 'Ошибка синтаксиса YAML')
+        setSyntaxError(res.error || 'Предупреждение структуры YAML')
       } else {
         setSyntaxError(null)
       }

@@ -94,6 +94,8 @@ pub struct AppState {
     pub routing_lock: Arc<tokio::sync::Mutex<()>>,
     /// Сериализация read-modify-write конфига панели (config.json) — против TOCTOU.
     pub config_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Сериализация speedtest для исключения гонок при переключении узлов.
+    pub speedtest_lock: Arc<tokio::sync::Mutex<()>>,
     /// Менеджер обхода блокировок Google Antigravity.
     pub antigravity: Arc<antigravity::AntigravityManager>,
 }
@@ -251,6 +253,7 @@ async fn main() {
         failover_log: Arc::new(failover::FailoverLog::default()),
         routing_lock: Arc::new(tokio::sync::Mutex::new(())),
         config_lock: Arc::new(tokio::sync::Mutex::new(())),
+        speedtest_lock: Arc::new(tokio::sync::Mutex::new(())),
         antigravity: ag_mgr,
     };
 
@@ -433,6 +436,8 @@ async fn main() {
         .route("/api/gaming/save", post(api::save_gaming_config))
         .route("/api/gaming/toggle", post(api::toggle_gaming))
         .route("/api/gaming/ping", post(api::ping_gaming_targets))
+        // 404 JSON для несуществующих маршрутов API (вместо отдачи HTML через SPA fallback)
+        .route("/api/{*path}", any(api::api_not_found))
         .fallback(frontend::serve)
         .layer(middleware::from_fn_with_state(auth_state, auth::auth_middleware))
         .layer(middleware::from_fn(no_cache))
@@ -464,6 +469,12 @@ async fn main() {
         }
     };
     log_i!("Панель доступна на http://{}:{}", host_ip, port);
+    {
+        let cfg = state.config.read().await;
+        if !cfg.auth.enabled {
+            log_w!("⚠️ ВНИМАНИЕ: Авторизация отключена! Панель слушает http://{}:{} без пароля. Рекомендуется настроить пароль в интерфейсе.", host_ip, port);
+        }
+    }
     if let Err(e) = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),

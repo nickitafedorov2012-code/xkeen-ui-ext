@@ -1,11 +1,12 @@
 #!/bin/sh
 # XKeen Route — установочный скрипт для Entware (Keenetic/Netcraze)
-# Установка одной командой:
-#   curl -Ls https://raw.githubusercontent.com/nickitafedorov2012-code/xkeen-ui-ext/main/setup.sh | sh
-# Бета:      ... | sh -s -- beta
-# Удаление:  ... | sh -s -- uninstall            (конфиги сохраняются)
+# Рекомендуемый способ установки (с проверкой):
+#   curl -fLs -o setup.sh https://raw.githubusercontent.com/nickitafedorov2012-code/xkeen-ui-ext/main/setup.sh
+#   sh setup.sh
+# Бета:      sh setup.sh beta
+# Удаление:  sh setup.sh uninstall            (конфиги сохраняются)
 # Удаление полностью (с конфигами):
-#            ... | sh -s -- uninstall purge
+#            sh setup.sh uninstall purge
 
 GREEN=$'\033[32m'
 RED=$'\033[31m'
@@ -56,10 +57,15 @@ do_install() {
   [ -z "$DOWNLOAD_URL" ] && { msg "${RED} ❌ Не удалось определить ссылку загрузки${NC}"; return 1; }
 
   msg "${GREEN}⬇️ Загрузка бинарника...${NC}"
-  # Прямая ссылка + зеркала (github может быть недоступен с некоторых сетей).
-  # -k: на Entware часто нет CA-бандла (иначе curl отвечает rc=60).
+  # Проверяем наличие CA-сертификатов в Entware
+  if [ ! -f /opt/etc/ssl/certs/ca-certificates.crt ] && which opkg >/dev/null 2>&1; then
+    opkg update >/dev/null 2>&1
+    opkg install ca-bundle ca-certificates >/dev/null 2>&1
+  fi
+
+  # Прямая ссылка + доверенные HTTPS-зеркала
   OK=0
-  for P in "" "https://ghproxy.net/" "https://ghfast.top/" "http://ghproxy.net/"; do
+  for P in "" "https://ghproxy.net/" "https://ghfast.top/"; do
     if [ -z "$P" ]; then
       msg "${NC}   пробую github.com (до 20 сек)...${NC}"
       T=20
@@ -67,16 +73,45 @@ do_install() {
       msg "${NC}   пробую зеркало ${P} (до 60 сек)...${NC}"
       T=60
     fi
-    curl -Lsk --max-time "$T" --connect-timeout 10 "${P}${DOWNLOAD_URL}" -o "$BIN.tmp" </dev/null
+    curl -Ls --max-time "$T" --connect-timeout 10 "${P}${DOWNLOAD_URL}" -o "$BIN.tmp" </dev/null
     if [ -f "$BIN.tmp" ] && [ "$(wc -c < "$BIN.tmp")" -gt 1000000 ]; then
       OK=1
       break
     fi
     msg "${RED}   не удалось, пробую следующий источник...${NC}"
   done
-  [ "$OK" = 1 ] && chmod +x "$BIN.tmp" && mv "$BIN.tmp" "$BIN" || {
-    msg "${RED} ❌ Не удалось загрузить бинарник${NC}"; return 1
-  }
+
+  if [ "$OK" = 1 ]; then
+    # Проверка SHA-256 контрольной суммы если доступен файл .sha256 в релизе
+    SHA_URL="${DOWNLOAD_URL}.sha256"
+    curl -sSL --max-time 15 "${SHA_URL}" -o "$BIN.tmp.sha256" 2>/dev/null
+    if [ -s "$BIN.tmp.sha256" ] && which sha256sum >/dev/null 2>&1; then
+      EXPECTED_SHA=$(awk '{print $1}' "$BIN.tmp.sha256")
+      ACTUAL_SHA=$(sha256sum "$BIN.tmp" | awk '{print $1}')
+      if [ -n "$EXPECTED_SHA" ] && [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+        msg "${RED} ❌ Ошибка проверки целостности SHA-256:${NC}"
+        msg "${RED}    Ожидалось: $EXPECTED_SHA${NC}"
+        msg "${RED}    Получено:  $ACTUAL_SHA${NC}"
+        rm -f "$BIN.tmp" "$BIN.tmp.sha256"
+        return 1
+      fi
+      msg "${GREEN}✅ Контрольная сумма SHA-256 проверена успешно${NC}"
+      rm -f "$BIN.tmp.sha256"
+    fi
+
+    # Проверка ELF-заголовка (\x7fELF)
+    ELF_MAGIC=$(head -c 4 "$BIN.tmp" 2>/dev/null)
+    if [ "$ELF_MAGIC" != "$(printf '\x7fELF')" ]; then
+      msg "${RED} ❌ Загруженный файл поврежден или не является корректным ELF-бинарником${NC}"
+      rm -f "$BIN.tmp"
+      return 1
+    fi
+    chmod +x "$BIN.tmp" && mv "$BIN.tmp" "$BIN"
+  else
+    msg "${RED} ❌ Не удалось загрузить бинарник${NC}"
+    rm -f "$BIN.tmp"
+    return 1
+  fi
 
   msg "${GREEN}🧩 Init-скрипт и Watchdog...${NC}"
   "$BIN" create-init || { msg "${RED} ❌ Ошибка создания init${NC}"; return 1; }

@@ -171,6 +171,8 @@ pub fn spawn_schedules_monitor(state: AppState) {
             }
             sleep(Duration::from_secs(1)).await;
         }
+        let mut active_schedules: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
         loop {
             for _ in 0..30 {
                 if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
@@ -180,6 +182,18 @@ pub fn spawn_schedules_monitor(state: AppState) {
             }
             let cfg = state.config.read().await.clone();
             if cfg.schedules.is_empty() {
+                // Если все расписания удалены, восстанавливаем исходные ноды для тех, что были активны
+                if !active_schedules.is_empty() {
+                    let rules = mihomo::m_get(&state.http, &cfg, "/rules").await.unwrap_or(serde_json::Value::Null);
+                    let groups_by_ip = mihomo::ip_groups_from_rules(&rules);
+                    for (key, orig_node) in active_schedules.drain() {
+                        let group_name = match groups_by_ip.get(&key) {
+                            Some(g) => g.clone(),
+                            None => routing::group_name_for(&key, ""),
+                        };
+                        let _ = mihomo::switch_group(&state.http, &cfg, &group_name, &orig_node).await;
+                    }
+                }
                 continue;
             }
 
@@ -190,24 +204,44 @@ pub fn spawn_schedules_monitor(state: AppState) {
 
             let rules = mihomo::m_get(&state.http, &cfg, "/rules").await.unwrap_or(serde_json::Value::Null);
             let groups_by_ip = mihomo::ip_groups_from_rules(&rules);
+            let proxies_opt = mihomo::get_proxies(&state.http, &cfg).await.ok();
 
             for s in &cfg.schedules {
-                if !s.enabled || !s.days.contains(&weekday) {
-                    continue;
-                }
-                let in_range = is_time_in_range(&now_hm, &s.time_start, &s.time_end);
+                let key = if s.id.is_empty() { s.ip.clone() } else { s.id.clone() };
+                let matches_day = s.days.contains(&weekday);
+                let in_range = s.enabled && matches_day && is_time_in_range(&now_hm, &s.time_start, &s.time_end);
+
+                let group_name = match groups_by_ip.get(&s.ip) {
+                    Some(g) => g.clone(),
+                    None => routing::group_name_for(&s.ip, ""),
+                };
+
                 if in_range {
-                    let group_name = match groups_by_ip.get(&s.ip) {
-                        Some(g) => g.clone(),
-                        None => routing::group_name_for(&s.ip, ""),
-                    };
-                    let target_node = match s.action.as_str() {
-                        "block" => "REJECT",
-                        "direct" => "DIRECT",
-                        "proxy" => s.target_server.as_deref().unwrap_or("PROXY"),
-                        _ => continue,
-                    };
-                    let _ = mihomo::switch_group(&state.http, &cfg, &group_name, target_node).await;
+                    if !active_schedules.contains_key(&key) {
+                        let current_node = proxies_opt
+                            .as_ref()
+                            .and_then(|p| p.get(&group_name))
+                            .and_then(|v| v.get("now"))
+                            .and_then(|n| n.as_str())
+                            .unwrap_or("DIRECT")
+                            .to_string();
+
+                        let target_node = match s.action.as_str() {
+                            "block" => "REJECT",
+                            "direct" => "DIRECT",
+                            "proxy" => s.target_server.as_deref().unwrap_or("PROXY"),
+                            _ => continue,
+                        };
+
+                        if current_node != target_node {
+                            log_i!("[SCHEDULE] ⏰ Активация расписания '{}' ({}) для {}: {} -> {}", s.id, s.action, s.ip, current_node, target_node);
+                            let _ = mihomo::switch_group(&state.http, &cfg, &group_name, target_node).await;
+                        }
+                        active_schedules.insert(key, current_node);
+                    }
+                } else if let Some(orig_node) = active_schedules.remove(&key) {
+                    log_i!("[SCHEDULE] ⏰ Окончание действия расписания '{}' для {}: возврат к исходному узлу '{}'", s.id, s.ip, orig_node);
+                    let _ = mihomo::switch_group(&state.http, &cfg, &group_name, &orig_node).await;
                 }
             }
         }

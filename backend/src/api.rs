@@ -120,10 +120,69 @@ pub async fn atomic_write_file(path: impl AsRef<std::path::Path>, content: &str)
     Ok(())
 }
 
-/// Заготовка настроек: GET/PUT будут добавлены в следующих фазах.
+/// Обработчик 404 для несуществующих API-эндпоинтов
+pub async fn api_not_found() -> Response {
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        Json(json!({
+            "success": false,
+            "error": "API endpoint not found"
+        })),
+    )
+        .into_response()
+}
+
+/// GET /api/settings — получение настроек панели с маскированием конфиденциальных данных
 pub async fn get_settings(State(state): State<AppState>) -> impl IntoResponse {
     let cfg = state.config.read().await.clone();
-    api_ok(serde_json::to_value(&*cfg).unwrap_or_default())
+    let mut val = serde_json::to_value(&*cfg).unwrap_or_default();
+
+    // Маскируем секретные поля при отдаче в UI
+    if let Some(auth) = val.get_mut("auth") {
+        if let Some(pw) = auth.get_mut("password_hash") {
+            if !pw.as_str().unwrap_or("").is_empty() {
+                *pw = serde_json::Value::String("******".into());
+            }
+        }
+        if let Some(salt) = auth.get_mut("salt") {
+            if !salt.as_str().unwrap_or("").is_empty() {
+                *salt = serde_json::Value::String("******".into());
+            }
+        }
+        if let Some(sec) = auth.get_mut("session_secret") {
+            if !sec.as_str().unwrap_or("").is_empty() {
+                *sec = serde_json::Value::String("******".into());
+            }
+        }
+    }
+    if let Some(rci) = val.get_mut("rci") {
+        if let Some(pw) = rci.get_mut("password") {
+            if !pw.as_str().unwrap_or("").is_empty() {
+                *pw = serde_json::Value::String("******".into());
+            }
+        }
+        if let Some(tok) = rci.get_mut("token") {
+            if !tok.as_str().unwrap_or("").is_empty() {
+                *tok = serde_json::Value::String("******".into());
+            }
+        }
+    }
+    if let Some(mihomo) = val.get_mut("mihomo") {
+        if let Some(sec) = mihomo.get_mut("secret") {
+            if !sec.as_str().unwrap_or("").is_empty() {
+                *sec = serde_json::Value::String("******".into());
+            }
+        }
+    }
+    if let Some(notif) = val.get_mut("notifications") {
+        if let Some(bot) = notif.get_mut("telegram_bot_token") {
+            if !bot.as_str().unwrap_or("").is_empty() {
+                *bot = serde_json::Value::String("******".into());
+            }
+        }
+    }
+
+    api_ok(val)
 }
 
 pub async fn put_settings(
@@ -144,7 +203,7 @@ pub async fn put_settings(
     *state.config.write().await = std::sync::Arc::new(new_cfg);
     crate::logger::set_level(&state.config.read().await.logs.level);
     log_i!("Настройки сохранены");
-    api_ok(json!({ "saved": true }))
+    api_ok(json!({ "saved": true, "applied": true }))
 }
 
 /// GET /api/servers — карточки серверов.
@@ -699,8 +758,25 @@ pub async fn fix_names(State(state): State<AppState>) -> Response {
     for name in routing::parse_static_proxy_names(&yaml) {
         let repaired = mihomo::fix_mojibake_smart(&name);
         if repaired != name {
-            new_yaml = new_yaml.replace(&name, &repaired);
-            fixed.push(format!("{name} → {repaired}"));
+            let patterns = [
+                format!("name: \"{}\"", name),
+                format!("name: '{}'", name),
+                format!("name: {}", name),
+                format!("- \"{}\"", name),
+                format!("- '{}'", name),
+                format!("- {}", name),
+            ];
+            let mut did_fix = false;
+            for p in patterns {
+                if new_yaml.contains(&p) {
+                    let rep = p.replace(&name, &repaired);
+                    new_yaml = new_yaml.replace(&p, &rep);
+                    did_fix = true;
+                }
+            }
+            if did_fix {
+                fixed.push(format!("{name} → {repaired}"));
+            }
         }
     }
     if fixed.is_empty() {
@@ -1022,15 +1098,22 @@ pub async fn force_add_domain(
             });
         }
 
-        if let Err(e) = config::save(&state.config_path, &cfg).await {
-            return api_err(format!("Ошибка сохранения config.json: {}", e));
+        let raw_yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+            Ok(y) => y,
+            Err(e) => return api_err(format!("Не удалось прочитать config.yaml: {e}")),
+        };
+        let (new_yaml, _) = match crate::routing::apply_routing(&raw_yaml, &cfg) {
+            Ok(res) => res,
+            Err(e) => return api_err(format!("Ошибка генерации правил роутинга: {e}")),
+        };
+        if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
+            return api_err(format!("Ошибка сохранения config.yaml: {e}"));
         }
-
-        if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-            if let Ok((new_yaml, _)) = crate::routing::apply_routing(&raw_yaml, &cfg) {
-                let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
-                let _ = mihomo::reload_config(&state.http, &cfg).await;
-            }
+        if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
+            return api_err(format!("Ошибка перезагрузки конфигурации ядра Mihomo: {e}"));
+        }
+        if let Err(e) = config::save(&state.config_path, &cfg).await {
+            return api_err(format!("Ошибка сохранения config.json: {e}"));
         }
 
         *state.config.write().await = std::sync::Arc::new(cfg.clone());
@@ -1216,6 +1299,8 @@ pub struct BackupReq {
 /// POST /api/backups/restore — восстановить конфиги из бэкапа, reload Mihomo.
 pub async fn restore_backup(State(state): State<AppState>, Json(req): Json<BackupReq>) -> Response {
     let _cfg_guard = state.config_lock.lock().await;
+    let _routing_guard = state.routing_lock.lock().await;
+
     if !valid_backup_name(&req.name) {
         return api_err("Некорректное имя бэкапа");
     }
@@ -1230,69 +1315,55 @@ pub async fn restore_backup(State(state): State<AppState>, Json(req): Json<Backu
         return api_err(format!("В бэкапе {} отсутствуют необходимые файлы (config.yaml / config.json)", req.name));
     }
 
-    let bak_yaml = format!("{}.bak", cfg.mihomo.config_path);
-    let bak_json = format!("{}.bak", state.config_path.display());
-    let had_yaml = tokio::fs::metadata(&cfg.mihomo.config_path).await.is_ok();
-    let had_json = tokio::fs::metadata(state.config_path.as_path()).await.is_ok();
+    // 1. Предварительное чтение и валидация файлов бэкапа ДО каких-либо изменений на диске
+    let new_yaml_content = match tokio::fs::read_to_string(&src_yaml).await {
+        Ok(s) if !s.trim().is_empty() => s,
+        Ok(_) => return api_err("Файл config.yaml в бэкапе пуст"),
+        Err(e) => return api_err(format!("Не удалось прочитать config.yaml из бэкапа: {e}")),
+    };
 
-    if had_yaml {
-        let _ = tokio::fs::copy(&cfg.mihomo.config_path, &bak_yaml).await;
-    }
-    if had_json {
-        let _ = tokio::fs::copy(state.config_path.as_path(), &bak_json).await;
-    }
+    let new_json_content = match tokio::fs::read_to_string(&src_json).await {
+        Ok(s) => s,
+        Err(e) => return api_err(format!("Не удалось прочитать config.json из бэкапа: {e}")),
+    };
 
-    // Восстанавливаем config.yaml
-    if let Err(e) = tokio::fs::copy(&src_yaml, &cfg.mihomo.config_path).await {
-        if had_yaml {
-            let _ = tokio::fs::copy(&bak_yaml, &cfg.mihomo.config_path).await;
-            let _ = tokio::fs::remove_file(&bak_yaml).await;
-        }
-        if had_json {
-            let _ = tokio::fs::remove_file(&bak_json).await;
-        }
-        return api_err(format!("Не удалось восстановить config.yaml: {e}"));
-    }
+    let new_cfg: config::AppConfig = match serde_json::from_str(&new_json_content) {
+        Ok(c) => c,
+        Err(e) => return api_err(format!("Файл config.json в бэкапе поврежден: {e}")),
+    };
 
-    // Восстанавливаем config.json
-    if let Err(e) = tokio::fs::copy(&src_json, state.config_path.as_path()).await {
-        if had_yaml {
-            let _ = tokio::fs::copy(&bak_yaml, &cfg.mihomo.config_path).await;
-            let _ = tokio::fs::remove_file(&bak_yaml).await;
-        }
-        if had_json {
-            let _ = tokio::fs::copy(&bak_json, state.config_path.as_path()).await;
-            let _ = tokio::fs::remove_file(&bak_json).await;
-        }
-        return api_err(format!("Не удалось восстановить config.json: {e}"));
+    // 2. Снимаем текущие копии файлов в памяти для надёжного и быстрого отката
+    let old_yaml_content = tokio::fs::read_to_string(&cfg.mihomo.config_path).await.ok();
+    let old_json_content = tokio::fs::read_to_string(state.config_path.as_path()).await.ok();
+
+    // 3. Атомарно записываем config.yaml (tmp + rename)
+    if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml_content).await {
+        return api_err(format!("Не удалось атомарно записать config.yaml: {e}"));
     }
 
-    // Перезагрузка ядра Mihomo
-    if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
-        // Откат при неудачной перезагрузке ядра
-        if had_yaml {
-            let _ = tokio::fs::copy(&bak_yaml, &cfg.mihomo.config_path).await;
-            let _ = tokio::fs::remove_file(&bak_yaml).await;
+    // 4. Атомарно записываем config.json (tmp + rename)
+    if let Err(e) = atomic_write_file(state.config_path.as_path(), &new_json_content).await {
+        if let Some(ref old_y) = old_yaml_content {
+            let _ = atomic_write_file(&cfg.mihomo.config_path, old_y).await;
         }
-        if had_json {
-            let _ = tokio::fs::copy(&bak_json, state.config_path.as_path()).await;
-            let _ = tokio::fs::remove_file(&bak_json).await;
+        return api_err(format!("Не удалось атомарно записать config.json: {e}"));
+    }
+
+    // 5. Перезагрузка ядра Mihomo
+    if let Err(e) = mihomo::reload_config(&state.http, &new_cfg).await {
+        if let Some(ref old_y) = old_yaml_content {
+            let _ = atomic_write_file(&cfg.mihomo.config_path, old_y).await;
+        }
+        if let Some(ref old_j) = old_json_content {
+            let _ = atomic_write_file(state.config_path.as_path(), old_j).await;
         }
         let _ = mihomo::reload_config(&state.http, &cfg).await;
-        return api_err(format!("Ошибка применения конфигурации Mihomo ({e}), изменения откатаны"));
+        return api_err(format!("Ошибка применения конфигурации Mihomo ({e}), изменения полностью откатаны"));
     }
 
-    // Очищаем .bak файлы при успешном применении
-    if had_yaml {
-        let _ = tokio::fs::remove_file(&bak_yaml).await;
-    }
-    if had_json {
-        let _ = tokio::fs::remove_file(&bak_json).await;
-    }
-
-    // Перечитать конфиг панели в состояние асинхронно без блокировки.
-    *state.config.write().await = std::sync::Arc::new(config::load_async(&state.config_path).await);
-    log_i!("Конфиги восстановлены из бэкапа {}", req.name);
+    // 6. Обновляем состояние в памяти
+    *state.config.write().await = std::sync::Arc::new(new_cfg);
+    log_i!("Конфиги атомарно восстановлены из бэкапа {}", req.name);
     api_ok(json!({ "restored": req.name }))
 }
 
@@ -2374,6 +2445,7 @@ pub async fn speedtest_server(
     State(state): State<AppState>,
     Json(body): Json<crate::speedtest::SpeedtestRequest>,
 ) -> Response {
+    let _speedtest_guard = state.speedtest_lock.lock().await;
     let cfg = state.config.read().await.clone();
     match crate::speedtest::run_speedtest(&state.http, &cfg, &body.server_id).await {
         Ok(res) => api_ok(serde_json::to_value(res).unwrap_or_default()),
@@ -2386,6 +2458,7 @@ pub async fn speedtest_server_by_id(
     State(state): State<AppState>,
     axum::extract::Path(server_id): axum::extract::Path<String>,
 ) -> Response {
+    let _speedtest_guard = state.speedtest_lock.lock().await;
     let cfg = state.config.read().await.clone();
     match crate::speedtest::run_speedtest(&state.http, &cfg, &server_id).await {
         Ok(res) => api_ok(serde_json::to_value(res).unwrap_or_default()),
@@ -2595,9 +2668,13 @@ pub async fn set_dns_mode(
         return api_err(format!("Ошибка сохранения config.yaml: {}", e));
     }
 
-    let _ = mihomo::reload_config(&state.http, &cfg).await;
+    if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
+        let _ = atomic_write_file(&cfg.mihomo.config_path, &config_yaml).await;
+        log_e!("Ошибка reload Mihomo при смене DNS-режима: {e}");
+        return api_err(format!("Не удалось применить DNS-режим в Mihomo: {e}. Конфиг откаткан."));
+    }
     log_i!("Режим DNS Mihomo переключен на {}", target_mode);
-    api_ok(json!({ "saved": true, "enhanced_mode": target_mode }))
+    api_ok(json!({ "saved": true, "applied": true, "enhanced_mode": target_mode }))
 }
 
 /// POST /api/dns/clean-servers — принудительная установка чистых DNS-серверов в KeeneticOS
@@ -2638,22 +2715,37 @@ pub async fn set_device_domain_rules(
         cur.device_domain_rules.insert(body.ip.clone(), body.rules);
     }
 
+    // 1. Сначала подготавливаем и проверяем YAML для ядра Mihomo
+    let raw_yaml = match tokio::fs::read_to_string(&cur.mihomo.config_path).await {
+        Ok(y) => y,
+        Err(e) => return api_err(format!("Ошибка чтения config.yaml: {e}")),
+    };
+    let (new_yaml, _) = match crate::routing::apply_routing(&raw_yaml, &cur) {
+        Ok(res) => res,
+        Err(e) => return api_err(format!("Ошибка формирования маршрутов: {e}")),
+    };
+
+    // 2. Атомарно записываем YAML
+    if let Err(e) = atomic_write_file(&cur.mihomo.config_path, &new_yaml).await {
+        return api_err(format!("Ошибка сохранения config.yaml: {e}"));
+    }
+
+    // 3. Перезагружаем ядро Mihomo и при сбое откатываем YAML назад
+    if let Err(e) = mihomo::reload_config(&state.http, &cur).await {
+        let _ = atomic_write_file(&cur.mihomo.config_path, &raw_yaml).await;
+        log_e!("Ошибка reload Mihomo при установке правил доменов: {e}");
+        return api_err(format!("Ядро Mihomo отклонило новые правила: {e}. Конфиг откаткан."));
+    }
+
+    // 4. Только после успешного применения в ядре сохраняем config.json
     if let Err(e) = config::save(&state.config_path, &cur).await {
-        return api_err(format!("Ошибка сохранения config.json: {}", e));
+        log_e!("Ошибка сохранения config.json: {e}");
+        return api_err(format!("Правила применены в ядре, но не записаны в config.json: {e}"));
     }
     *state.config.write().await = std::sync::Arc::new(cur.clone());
 
-    if let Ok(raw_yaml) = tokio::fs::read_to_string(&cur.mihomo.config_path).await {
-        let (new_yaml, _) = match crate::routing::apply_routing(&raw_yaml, &cur) {
-            Ok(res) => res,
-            Err(e) => return api_err(format!("Ошибка роутинга: {}", e)),
-        };
-        let _ = atomic_write_file(&cur.mihomo.config_path, &new_yaml).await;
-        let _ = mihomo::reload_config(&state.http, &cur).await;
-    }
-
     log_i!("Обновлены индивидуальные доменные правила для устройства {}", body.ip);
-    api_ok(json!({ "saved": true, "ip": body.ip }))
+    api_ok(json!({ "saved": true, "applied": true, "ip": body.ip }))
 }
 
 // ==================== СКВОЗНОЙ РЕЛЕЙ CLASH API (REVERSE PROXY) ====================
@@ -2757,11 +2849,18 @@ pub async fn toggle_adblock(
 
     if let Err(e) = config::save(&state.config_path, &cfg).await {
         log_e!("Ошибка сохранения config.json: {}", e);
+        return api_err(format!("Ошибка сохранения настроек AdBlock в config.json: {e}"));
     }
     *state.config.write().await = std::sync::Arc::new(cfg.clone());
 
-    let _ = mihomo::reload_config(&state.http, &cfg).await;
-    api_ok(json!({ "enabled": target_enabled, "saved": true }))
+    let applied = match mihomo::reload_config(&state.http, &cfg).await {
+        Ok(_) => true,
+        Err(e) => {
+            log_w!("Ошибка reload Mihomo после переключения AdBlock: {e}");
+            false
+        }
+    };
+    api_ok(json!({ "enabled": target_enabled, "saved": true, "applied": applied }))
 }
 
 // ==================== GEOIP & GEOSITE БАЗЫ ====================
@@ -2873,8 +2972,10 @@ pub async fn get_connections(State(state): State<AppState>) -> Response {
 /// DELETE /api/connections — закрыть все активные соединения
 pub async fn close_connections(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await;
-    mihomo::close_all_connections(&state.http, &cfg).await;
-    api_ok(json!({ "closed": true }))
+    match mihomo::close_all_connections(&state.http, &cfg).await {
+        Ok(_) => api_ok(json!({ "closed": true })),
+        Err(e) => api_err(format!("Не удалось закрыть активные соединения: {e}")),
+    }
 }
 
 /// DELETE /api/connections/{id} — закрыть конкретное соединение
@@ -2888,8 +2989,16 @@ pub async fn close_single_connection(
     if !cfg.mihomo.secret.is_empty() {
         req = req.header("Authorization", format!("Bearer {}", cfg.mihomo.secret));
     }
-    let _ = req.send().await;
-    api_ok(json!({ "closed": id }))
+    match req.send().await {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                api_ok(json!({ "closed": id }))
+            } else {
+                api_err(format!("Mihomo вернул статус {}: соединение {} не найдено", resp.status(), id))
+            }
+        }
+        Err(e) => api_err(format!("Ошибка отправки запроса в Mihomo для соединения {}: {e}", id)),
+    }
 }
 
 // ==================== ТРАФИК В РЕАЛЬНОМ ВРЕМЕНИ ====================
@@ -3236,6 +3345,20 @@ pub async fn test_dns_domain(
     axum::extract::Json(body): axum::extract::Json<DnsTestReq>,
 ) -> Response {
     let domain = body.domain.trim().to_lowercase();
+    if domain.is_empty() || domain.len() > 253 {
+        return api_err("Некорректная длина доменного имени (1-253 символа)");
+    }
+    // Проверка допустимых символов домена (RFC 1035 / RFC 1123)
+    if !domain.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        || domain.starts_with('.')
+        || domain.ends_with('.')
+        || domain.contains("..")
+        || domain == "localhost"
+        || domain.starts_with("127.")
+    {
+        return api_err("Недопустимый формат домена. Укажите корректное FQDN-имя, например: example.com");
+    }
+
     let host_port = format!("{}:80", domain);
     let local_ips: Vec<String> = match tokio::net::lookup_host(&host_port).await {
         Ok(iter) => iter.map(|s| s.ip().to_string()).collect(),
@@ -3378,8 +3501,56 @@ BIN=$(find_bin)
 
 # Fallback default with fwmark to prevent loops
 NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+DISCORD_VOICE_ENABLED="1"
+BLOCK_QUIC="0"
 
-[ -f "$CONF" ] && . "$CONF"
+# Safe key-value parser for zapret.conf (no source / eval)
+if [ -f "$CONF" ]; then
+  while IFS='=' read -r key val || [ -n "$key" ]; do
+    case "$key" in
+      NFQWS_ARGS)
+        val="${val#\"}"
+        val="${val%\"}"
+        val="${val#\'}"
+        val="${val%\'}"
+        NFQWS_ARGS="$val"
+        ;;
+      DISCORD_VOICE_ENABLED)
+        val="${val#\"}"
+        val="${val%\"}"
+        DISCORD_VOICE_ENABLED="$val"
+        ;;
+      BLOCK_QUIC)
+        val="${val#\"}"
+        val="${val%\"}"
+        BLOCK_QUIC="$val"
+        ;;
+    esac
+  done < "$CONF"
+fi
+
+stop_nfqws() {
+  if [ -f "$PIDFILE" ]; then
+    PID=$(cat "$PIDFILE" 2>/dev/null)
+    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+      CMD=$(tr '\0' ' ' < "/proc/$PID/cmdline" 2>/dev/null)
+      case "$CMD" in
+        *nfqws*qnum=200*)
+          kill "$PID" 2>/dev/null
+          for _i in 1 2 3 4; do
+            kill -0 "$PID" 2>/dev/null || break
+            usleep 500000 2>/dev/null || sleep 1
+          done
+          kill -0 "$PID" 2>/dev/null && kill -9 "$PID" 2>/dev/null
+          ;;
+        *)
+          logger -t zapret "WARNING: PID $PID in $PIDFILE does not match expected nfqws qnum=200, skipping"
+          ;;
+      esac
+    fi
+    rm -f "$PIDFILE"
+  fi
+}
 
 add_fw() {
   del_fw
@@ -3389,47 +3560,47 @@ add_fw() {
   iptables -t mangle -F zapret 2>/dev/null
 
   # 1. CRITICAL: Skip packets already marked by nfqws to prevent infinite packet looping
-  iptables -t mangle -A zapret -m mark --mark 0x40000000/0x40000000 -j RETURN
+  iptables -t mangle -A zapret -m mark --mark 0x40000000/0x40000000 -m comment --comment "xkeen-route-zapret" -j RETURN
 
   # Exclude loopback and LAN bridge (OpenWrt br+ and Keenetic Bridge+)
-  iptables -t mangle -A zapret -o lo -j RETURN
-  iptables -t mangle -A zapret -i lo -j RETURN
-  iptables -t mangle -A zapret -o br+ -j RETURN
-  iptables -t mangle -A zapret -o Bridge+ -j RETURN
+  iptables -t mangle -A zapret -o lo -m comment --comment "xkeen-route-zapret" -j RETURN
+  iptables -t mangle -A zapret -i lo -m comment --comment "xkeen-route-zapret" -j RETURN
+  iptables -t mangle -A zapret -o br+ -m comment --comment "xkeen-route-zapret" -j RETURN
+  iptables -t mangle -A zapret -o Bridge+ -m comment --comment "xkeen-route-zapret" -j RETURN
 
   # 2. CRITICAL: Skip private/local subnets & router IP so Keenetic Web UI / LAN are NEVER touched
-  iptables -t mangle -A zapret -d 0.0.0.0/8 -j RETURN
-  iptables -t mangle -A zapret -d 10.0.0.0/8 -j RETURN
-  iptables -t mangle -A zapret -d 100.64.0.0/10 -j RETURN
-  iptables -t mangle -A zapret -d 127.0.0.0/8 -j RETURN
-  iptables -t mangle -A zapret -d 169.254.0.0/16 -j RETURN
-  iptables -t mangle -A zapret -d 172.16.0.0/12 -j RETURN
-  iptables -t mangle -A zapret -d 192.168.0.0/16 -j RETURN
-  iptables -t mangle -A zapret -d 224.0.0.0/4 -j RETURN
-  iptables -t mangle -A zapret -d 240.0.0.0/4 -j RETURN
-  iptables -t mangle -A zapret -d 255.255.255.255/32 -j RETURN
+  iptables -t mangle -A zapret -d 0.0.0.0/8 -m comment --comment "xkeen-route-zapret" -j RETURN
+  iptables -t mangle -A zapret -d 10.0.0.0/8 -m comment --comment "xkeen-route-zapret" -j RETURN
+  iptables -t mangle -A zapret -d 100.64.0.0/10 -m comment --comment "xkeen-route-zapret" -j RETURN
+  iptables -t mangle -A zapret -d 127.0.0.0/8 -m comment --comment "xkeen-route-zapret" -j RETURN
+  iptables -t mangle -A zapret -d 169.254.0.0/16 -m comment --comment "xkeen-route-zapret" -j RETURN
+  iptables -t mangle -A zapret -d 172.16.0.0/12 -m comment --comment "xkeen-route-zapret" -j RETURN
+  iptables -t mangle -A zapret -d 192.168.0.0/16 -m comment --comment "xkeen-route-zapret" -j RETURN
+  iptables -t mangle -A zapret -d 224.0.0.0/4 -m comment --comment "xkeen-route-zapret" -j RETURN
+  iptables -t mangle -A zapret -d 240.0.0.0/4 -m comment --comment "xkeen-route-zapret" -j RETURN
+  iptables -t mangle -A zapret -d 255.255.255.255/32 -m comment --comment "xkeen-route-zapret" -j RETURN
 
   # 3. Queue WAN TCP (80, 443) -> NFQUEUE 200 with bypass
-  iptables -t mangle -A zapret -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass
+  iptables -t mangle -A zapret -p tcp -m multiport --dports 80,443 -m comment --comment "xkeen-route-zapret" -j NFQUEUE --queue-num 200 --queue-bypass
 
-  # 4. Reject UDP 443 (QUIC / HTTP3) so YouTube immediately falls back to TCP without endless buffering
-  iptables -t mangle -A zapret -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable 2>/dev/null || iptables -t mangle -A zapret -p udp --dport 443 -j DROP
+  # 4. Reject UDP 443 (QUIC / HTTP3) only if explicitly enabled
+  if [ "$BLOCK_QUIC" = "1" ]; then
+    iptables -t mangle -A zapret -p udp --dport 443 -m comment --comment "xkeen-route-zapret" -j REJECT --reject-with icmp-port-unreachable 2>/dev/null || iptables -t mangle -A zapret -p udp --dport 443 -m comment --comment "xkeen-route-zapret" -j DROP
+  fi
 
   # 5. Discord Voice RTC UDP (50000:65535) if voice enabled
   if [ "$DISCORD_VOICE_ENABLED" = "1" ]; then
-    iptables -t mangle -A zapret -p udp -m multiport --dports 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass
+    iptables -t mangle -A zapret -p udp -m multiport --dports 50000:65535 -m comment --comment "xkeen-route-zapret" -j NFQUEUE --queue-num 200 --queue-bypass
   fi
 
   # Hook into POSTROUTING for all outbound WAN packets (LAN forwarded + router local direct)
-  iptables -t mangle -I POSTROUTING 1 -j zapret || { del_fw; return 1; }
+  iptables -t mangle -I POSTROUTING 1 -m comment --comment "xkeen-route-zapret" -j zapret || { del_fw; return 1; }
 
-  # Redirect client LAN DNS queries to Mihomo DNS (port 1053) to eliminate ISP DNS poisoning (NXDOMAIN)
-  iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null
-  iptables -t nat -A PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null
-  iptables -t nat -A PREROUTING -i br+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null
-  iptables -t nat -A PREROUTING -i br+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null
-  iptables -t nat -A PREROUTING -i Bridge+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null
-  iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null
+  # Redirect client LAN DNS queries to Mihomo DNS (port 1053) only for LAN bridge interfaces (br+, Bridge+)
+  iptables -t nat -A PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null
+  iptables -t nat -A PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null
+  iptables -t nat -A PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null
+  iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null
 
   # Stop previous failsafe if running
   if [ -f "$FAILSAFE_PID" ]; then
@@ -3442,10 +3613,7 @@ add_fw() {
     if ! curl -s -m 5 -o /dev/null http://www.gstatic.com/generate_204 2>/dev/null && \
        ! curl -s -m 5 -o /dev/null http://cp.cloudflare.com 2>/dev/null; then
       del_fw
-      if [ -f "$PIDFILE" ]; then
-        kill $(cat "$PIDFILE") 2>/dev/null
-      fi
-      killall -q nfqws 2>/dev/null
+      stop_nfqws
       logger -t zapret "FAILSAFE: internet connectivity lost after enabling zapret, iptables rules rolled back"
     fi
     rm -f "$FAILSAFE_PID"
@@ -3460,70 +3628,49 @@ del_fw() {
     rm -f "$FAILSAFE_PID"
   fi
 
-  # Remove DNS redirects
-  while iptables -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i br+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i br+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  # Remove DNS redirects with explicit comment
+  while iptables -t nat -D PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
 
   # Remove hooks
-  while iptables -t mangle -D POSTROUTING ! -o br+ ! -o lo -j zapret 2>/dev/null; do :; done
-  while iptables -t mangle -D POSTROUTING ! -o Bridge+ ! -o lo -j zapret 2>/dev/null; do :; done
+  while iptables -t mangle -D POSTROUTING -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null; do :; done
   while iptables -t mangle -D POSTROUTING -j zapret 2>/dev/null; do :; done
-  while iptables -t mangle -D PREROUTING -i br+ -j zapret 2>/dev/null; do :; done
-  while iptables -t mangle -D PREROUTING -i Bridge+ -j zapret 2>/dev/null; do :; done
   while iptables -t mangle -D PREROUTING -j zapret 2>/dev/null; do :; done
   while iptables -t mangle -D OUTPUT -j zapret 2>/dev/null; do :; done
 
   # Flush and delete chain
   iptables -t mangle -F zapret 2>/dev/null
   iptables -t mangle -X zapret 2>/dev/null
-
-  # Clean legacy direct rules without chain
-  while iptables -t mangle -D PREROUTING -i br+ -p tcp -m multiport --dports 80,443 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
-  while iptables -t mangle -D PREROUTING -i br+ -p udp --dport 443 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
-  while iptables -t mangle -D PREROUTING -i br+ -p udp -m multiport --dports 50000:65535 -m mark ! --mark 0x40000000/0x40000000 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
-  while iptables -t mangle -D PREROUTING -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
-  while iptables -t mangle -D PREROUTING -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
-  while iptables -t mangle -D POSTROUTING -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
-  while iptables -t mangle -D POSTROUTING -p udp --dport 443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
-  while iptables -t mangle -D PREROUTING -p udp --dport 443 -j REJECT 2>/dev/null; do :; done
-  while iptables -t mangle -D POSTROUTING -p udp --dport 443 -j REJECT 2>/dev/null; do :; done
-  while iptables -t mangle -D PREROUTING -p udp --dport 443 -j DROP 2>/dev/null; do :; done
-  while iptables -t mangle -D POSTROUTING -p udp --dport 443 -j DROP 2>/dev/null; do :; done
-  while iptables -t mangle -D OUTPUT -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
-  while iptables -t mangle -D OUTPUT -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
   return 0
 }
 
 case "$1" in
   start)
     mkdir -p /opt/var/run /opt/etc/zapret
-    if [ -f "$PIDFILE" ] && kill -0 $(cat "$PIDFILE") 2>/dev/null; then
-      add_fw
-      exit 0
-    elif pidof nfqws >/dev/null 2>&1; then
-      pidof nfqws | awk '{print $1}' > "$PIDFILE"
-      add_fw
-      exit 0
+    if [ -f "$PIDFILE" ]; then
+      PID=$(cat "$PIDFILE" 2>/dev/null)
+      if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        add_fw
+        exit 0
+      fi
     fi
     if [ -n "$BIN" ] && [ -x "$BIN" ]; then
+      set -f
       $BIN --pidfile="$PIDFILE" $NFQWS_ARGS
+      set +f
       sleep 1
-      if [ -f "$PIDFILE" ] && kill -0 $(cat "$PIDFILE") 2>/dev/null; then
-        add_fw
-        exit 0
-      elif pidof nfqws >/dev/null 2>&1; then
-        pidof nfqws | awk '{print $1}' > "$PIDFILE"
-        add_fw
-        exit 0
-      else
-        logger -t zapret "ERROR: nfqws failed to start with args: $NFQWS_ARGS"
-        del_fw
-        exit 1
+      if [ -f "$PIDFILE" ]; then
+        PID=$(cat "$PIDFILE" 2>/dev/null)
+        if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+          add_fw
+          exit 0
+        fi
       fi
+      logger -t zapret "ERROR: nfqws failed to start with args: $NFQWS_ARGS"
+      del_fw
+      exit 1
     else
       logger -t zapret "ERROR: nfqws binary not found or not executable"
       exit 1
@@ -3531,50 +3678,42 @@ case "$1" in
     ;;
   stop)
     del_fw
-    if [ -f "$PIDFILE" ]; then
-      kill $(cat "$PIDFILE") 2>/dev/null
-      rm -f "$PIDFILE"
-    fi
-    killall -q nfqws 2>/dev/null
+    stop_nfqws
     exit 0
     ;;
   restart)
     del_fw
-    if [ -f "$PIDFILE" ]; then
-      kill $(cat "$PIDFILE") 2>/dev/null
-      rm -f "$PIDFILE"
-    fi
-    killall -q nfqws 2>/dev/null
+    stop_nfqws
     sleep 1
     mkdir -p /opt/var/run /opt/etc/zapret
     if [ -n "$BIN" ] && [ -x "$BIN" ]; then
+      set -f
       $BIN --pidfile="$PIDFILE" $NFQWS_ARGS
+      set +f
       sleep 1
-      if [ -f "$PIDFILE" ] && kill -0 $(cat "$PIDFILE") 2>/dev/null; then
-        add_fw
-        exit 0
-      elif pidof nfqws >/dev/null 2>&1; then
-        pidof nfqws | awk '{print $1}' > "$PIDFILE"
-        add_fw
-        exit 0
-      else
-        logger -t zapret "ERROR: nfqws failed to restart with args: $NFQWS_ARGS"
-        del_fw
-        exit 1
+      if [ -f "$PIDFILE" ]; then
+        PID=$(cat "$PIDFILE" 2>/dev/null)
+        if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+          add_fw
+          exit 0
+        fi
       fi
+      logger -t zapret "ERROR: nfqws failed to restart with args: $NFQWS_ARGS"
+      del_fw
+      exit 1
     else
       logger -t zapret "ERROR: nfqws binary not found"
       exit 1
     fi
     ;;
   status)
-    if [ -f "$PIDFILE" ] && kill -0 $(cat "$PIDFILE") 2>/dev/null; then
-      exit 0
-    elif pidof nfqws >/dev/null 2>&1; then
-      exit 0
-    else
-      exit 1
+    if [ -f "$PIDFILE" ]; then
+      PID=$(cat "$PIDFILE" 2>/dev/null)
+      if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        exit 0
+      fi
     fi
+    exit 1
     ;;
   *)
     echo "Usage: $0 {start|stop|restart|status}"
@@ -3637,6 +3776,36 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
     (args, voice_enabled)
 }
 
+pub fn validate_custom_args(args: &str) -> Result<(), String> {
+    for ch in args.chars() {
+        if ch == ';' || ch == '&' || ch == '|' || ch == '`' || ch == '$' || ch == '\n' || ch == '\r' || ch == '(' || ch == ')' || ch == '<' || ch == '>' || ch == '!' {
+            return Err(format!("Недопустимый спецсимвол в аргументах Zapret: '{}'. Разрешены только флаги nfqws", ch));
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_zapret_conf(content: &str) -> Result<(), String> {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((key, val)) = trimmed.split_once('=') {
+            let k = key.trim();
+            if k == "NFQWS_ARGS" {
+                let clean_val = val.trim().trim_matches('"').trim_matches('\'');
+                validate_custom_args(clean_val)?;
+            } else if k != "DISCORD_VOICE_ENABLED" && k != "BLOCK_QUIC" {
+                return Err(format!("Неизвестный параметр в zapret.conf: '{k}'. Разрешены только NFQWS_ARGS, DISCORD_VOICE_ENABLED, BLOCK_QUIC"));
+            }
+        } else {
+            return Err("Некорректная строка в zapret.conf: должна быть в формате КЛЮЧ=\"ЗНАЧЕНИЕ\"".to_string());
+        }
+    }
+    Ok(())
+}
+
 pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), String> {
     tokio::fs::create_dir_all("/opt/etc/zapret")
         .await
@@ -3663,13 +3832,15 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
 
     // 3. zapret.conf with multi-strategy args or custom_args
     let (args, voice_enabled) = if let Some(custom) = &cfg.custom_args {
+        validate_custom_args(custom)?;
         (custom.clone(), cfg.discord_voice_udp)
     } else {
         build_nfqws_args(cfg)
     };
+    let sanitized_args = args.replace('\r', " ").replace('\n', " ").replace('"', "");
     let conf_data = format!(
-        "NFQWS_ARGS=\"{}\"\nDISCORD_VOICE_ENABLED=\"{}\"\n",
-        args,
+        "NFQWS_ARGS=\"{}\"\nDISCORD_VOICE_ENABLED=\"{}\"\nBLOCK_QUIC=\"0\"\n",
+        sanitized_args.trim(),
         if voice_enabled { "1" } else { "0" }
     );
     tokio::fs::write("/opt/etc/zapret/zapret.conf", conf_data)
@@ -3847,6 +4018,9 @@ pub async fn zapret_action(
     // 2. Сохранение конфигурации zapret.conf
     if act == "save_config" {
         if let Some(content) = body.config_content {
+            if let Err(e) = validate_zapret_conf(&content) {
+                return api_err(format!("Ошибка валидации zapret.conf: {e}"));
+            }
             let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
             if let Err(e) = tokio::fs::write("/opt/etc/zapret/zapret.conf", &content).await {
                 return api_err(format!("Ошибка записи zapret.conf: {e}"));
@@ -4012,6 +4186,11 @@ pub async fn zapret_action(
         if act == "reset_features" {
             cfg.zapret = crate::config::ZapretConfig::default();
         } else if let Some(new_features) = body.features {
+            if let Some(ref ca) = new_features.custom_args {
+                if let Err(e) = validate_custom_args(ca) {
+                    return api_err(e);
+                }
+            }
             cfg.zapret = new_features;
         } else if let (Some(feat), Some(val)) = (body.feature.as_deref(), body.enabled) {
             match feat {
@@ -4049,15 +4228,22 @@ pub async fn zapret_action(
         if std::path::Path::new(&cfg.mihomo.config_path).exists() {
             if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
                 let (new_yaml, _) = match routing::apply_routing(&raw_yaml, &cfg) {
-            Ok(res) => res,
-            Err(e) => return api_err(format!("Ошибка роутинга: {}", e)),
-        };
-                let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
-                let _ = mihomo::reload_config(&state.http, &cfg).await;
+                    Ok(res) => res,
+                    Err(e) => return api_err(format!("Ошибка формирования маршрутов Zapret: {e}")),
+                };
+                if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
+                    return api_err(format!("Ошибка сохранения config.yaml: {e}"));
+                }
+                if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
+                    log_w!("Ошибка reload Mihomo после изменения настроек Zapret: {e}");
+                }
             }
         }
 
-        let _ = config::save(&state.config_path, &cfg).await;
+        if let Err(e) = config::save(&state.config_path, &cfg).await {
+            log_e!("Ошибка сохранения config.json: {e}");
+            return api_err(format!("Настройки Zapret применены, но не сохранены в config.json: {e}"));
+        }
         *state.config.write().await = std::sync::Arc::new(cfg.clone());
 
         return api_ok(json!({
@@ -4196,22 +4382,26 @@ pub async fn save_gaming_config(
     Json(body): Json<SaveGamingReq>,
 ) -> Response {
     let _cfg_guard = state.config_lock.lock().await;
+    let _routing_guard = state.routing_lock.lock().await;
     let mut cfg = (**state.config.read().await).clone();
     cfg.gaming = body.gaming;
 
-    // 1. Применяем правила в config.yaml ядра Mihomo
+    // 1. Применяем правила в config.yaml ядра Mihomo (под блокировкой routing_lock)
     let path = std::path::Path::new(&cfg.mihomo.config_path);
     if path.exists() {
-        if let Ok(raw_yaml) = tokio::fs::read_to_string(path).await {
-            let (new_yaml, _) = match routing::apply_routing(&raw_yaml, &cfg) {
-                Ok(res) => res,
-                Err(e) => return api_err(format!("Ошибка генерации правил роутинга: {}", e)),
-            };
-            let _routing_guard = state.routing_lock.lock().await;
-            if let Err(e) = atomic_write_file(path, &new_yaml).await {
-                return api_err(format!("Ошибка записи config.yaml: {}", e));
-            }
-            let _ = mihomo::reload_config(&state.http, &cfg).await;
+        let raw_yaml = match tokio::fs::read_to_string(path).await {
+            Ok(y) => y,
+            Err(e) => return api_err(format!("Ошибка чтения config.yaml: {e}")),
+        };
+        let (new_yaml, _) = match routing::apply_routing(&raw_yaml, &cfg) {
+            Ok(res) => res,
+            Err(e) => return api_err(format!("Ошибка генерации правил роутинга: {}", e)),
+        };
+        if let Err(e) = atomic_write_file(path, &new_yaml).await {
+            return api_err(format!("Ошибка записи config.yaml: {}", e));
+        }
+        if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
+            return api_err(format!("Ошибка перезагрузки Mihomo: {}", e));
         }
     }
 
@@ -4244,19 +4434,25 @@ pub async fn toggle_gaming(
     Json(body): Json<ToggleGamingReq>,
 ) -> Response {
     let _cfg_guard = state.config_lock.lock().await;
+    let _routing_guard = state.routing_lock.lock().await;
     let mut cfg = (**state.config.read().await).clone();
     cfg.gaming.enabled = body.enabled;
 
     let path = std::path::Path::new(&cfg.mihomo.config_path);
     if path.exists() {
-        if let Ok(raw_yaml) = tokio::fs::read_to_string(path).await {
-            let (new_yaml, _) = match routing::apply_routing(&raw_yaml, &cfg) {
-                Ok(res) => res,
-                Err(e) => return api_err(format!("Ошибка роутинга: {}", e)),
-            };
-            let _routing_guard = state.routing_lock.lock().await;
-            let _ = atomic_write_file(path, &new_yaml).await;
-            let _ = mihomo::reload_config(&state.http, &cfg).await;
+        let raw_yaml = match tokio::fs::read_to_string(path).await {
+            Ok(y) => y,
+            Err(e) => return api_err(format!("Ошибка чтения config.yaml: {e}")),
+        };
+        let (new_yaml, _) = match routing::apply_routing(&raw_yaml, &cfg) {
+            Ok(res) => res,
+            Err(e) => return api_err(format!("Ошибка роутинга: {}", e)),
+        };
+        if let Err(e) = atomic_write_file(path, &new_yaml).await {
+            return api_err(format!("Ошибка записи config.yaml: {e}"));
+        }
+        if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
+            return api_err(format!("Ошибка перезагрузки Mihomo: {e}"));
         }
     }
 
@@ -4267,14 +4463,16 @@ pub async fn toggle_gaming(
         let _ = crate::override_sync::sync_geo_override(&all_domains).await;
     }
 
-    let _ = config::save(&state.config_path, &cfg).await;
+    if let Err(e) = config::save(&state.config_path, &cfg).await {
+        return api_err(format!("Ошибка сохранения config.json: {e}"));
+    }
     *state.config.write().await = std::sync::Arc::new(cfg);
 
     log_i!("Игровой режим {}", if body.enabled { "включен" } else { "отключен" });
     api_ok(json!({ "enabled": body.enabled }))
 }
 
-/// POST /api/gaming/ping — замер задержки до популярных игровых серверов
+/// POST /api/gaming/ping — замер реальной сетевой задержки (TCP 443) до популярных игровых серверов
 pub async fn ping_gaming_targets(State(_state): State<AppState>) -> Response {
     let targets = [
         ("Steam", "steamcommunity.com"),
@@ -4292,8 +4490,11 @@ pub async fn ping_gaming_targets(State(_state): State<AppState>) -> Response {
         let n = name.to_string();
         set.spawn(async move {
             let start = tokio::time::Instant::now();
-            let success = tokio::net::lookup_host(format!("{h}:443")).await.is_ok();
+            let addr = format!("{h}:443");
+            let connect_fut = tokio::net::TcpStream::connect(&addr);
+            let res = tokio::time::timeout(std::time::Duration::from_millis(2500), connect_fut).await;
             let elapsed_ms = start.elapsed().as_millis() as u64;
+            let success = matches!(res, Ok(Ok(_)));
             (n, h, elapsed_ms, success)
         });
     }

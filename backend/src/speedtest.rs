@@ -16,6 +16,28 @@ pub struct SpeedtestResponse {
     pub duration_secs: f64,
 }
 
+async fn restore_server_if_active(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    original: Option<&str>,
+    tested_server: &str,
+) {
+    if let Some(orig) = original {
+        if !orig.is_empty() && orig != tested_server {
+            if let Ok(current_proxies) = crate::mihomo::get_proxies(http, cfg).await {
+                let current_leaf = crate::mihomo::resolve_active_leaf(&current_proxies);
+                if current_leaf == tested_server {
+                    let _ = crate::mihomo::switch_server(http, cfg, orig).await;
+                } else {
+                    log_i!("Восстановление сервера после speedtest отменено: активный сервер был переключен во время замера ('{}')", current_leaf);
+                }
+            } else {
+                let _ = crate::mihomo::switch_server(http, cfg, orig).await;
+            }
+        }
+    }
+}
+
 /// Выполнение замера скорости загрузки через выбранный прокси-сервер.
 pub async fn run_speedtest(
     _http: &reqwest::Client,
@@ -59,9 +81,7 @@ pub async fn run_speedtest(
         Ok(p) => p,
         Err(e) => {
             if need_restore {
-                if let Some(orig) = &original_server {
-                    let _ = crate::mihomo::switch_server(_http, _cfg, orig).await;
-                }
+                restore_server_if_active(_http, _cfg, original_server.as_deref(), server_id).await;
             }
             return Err(format!("Ошибка создания прокси: {}", e));
         }
@@ -75,9 +95,7 @@ pub async fn run_speedtest(
         Ok(c) => c,
         Err(e) => {
             if need_restore {
-                if let Some(orig) = &original_server {
-                    let _ = crate::mihomo::switch_server(_http, _cfg, orig).await;
-                }
+                restore_server_if_active(_http, _cfg, original_server.as_deref(), server_id).await;
             }
             return Err(format!("Ошибка инициализации HTTP клиента: {}", e));
         }
@@ -116,11 +134,9 @@ pub async fn run_speedtest(
         }
     }
 
-    // Восстанавливаем исходный сервер после замера
+    // Восстанавливаем исходный сервер после замера только если активным всё ещё является тестируемый узел
     if need_restore {
-        if let Some(orig) = &original_server {
-            let _ = crate::mihomo::switch_server(_http, _cfg, orig).await;
-        }
+        restore_server_if_active(_http, _cfg, original_server.as_deref(), server_id).await;
     }
 
     if !success || total_bytes == 0 {

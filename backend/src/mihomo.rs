@@ -88,10 +88,11 @@ pub async fn m_delete(http: &reqwest::Client, cfg: &AppConfig, path: &str, timeo
 }
 
 /// Сброс всех активных соединений ядра Mihomo, чтобы клиенты не держали сокеты в старый сервер.
-pub async fn close_all_connections(http: &reqwest::Client, cfg: &AppConfig) {
-    if let Err(e) = m_delete(http, cfg, "/connections", 3).await {
+pub async fn close_all_connections(http: &reqwest::Client, cfg: &AppConfig) -> Result<(), String> {
+    m_delete(http, cfg, "/connections", 3).await.map_err(|e| {
         crate::log_w!("Не удалось закрыть активные соединения Mihomo: {e}");
-    }
+        e
+    })
 }
 
 /// Mihomo отвечает на /proxies объектом {"proxies": {...}} — достаём карту.
@@ -755,7 +756,7 @@ pub async fn switch_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &
         }
     }
     if switched > 0 {
-        close_all_connections(http, cfg).await;
+        let _ = close_all_connections(http, cfg).await;
         let skip_note = if skipped > 0 { format!(", пропущено: {skipped}") } else { String::new() };
         Ok(format!("Активный сервер переключен на '{target}' (групп: {switched}{skip_note})"))
     } else if skipped > 0 && last_err.is_empty() {
@@ -824,7 +825,7 @@ pub async fn switch_flow_server(http: &reqwest::Client, cfg: &AppConfig, server_
 
         if member == Some(true) {
             m_put(http, cfg, &format!("/proxies/{}", urlencoding_lite(g)), json!({ "name": target }), 3).await?;
-            close_all_connections(http, cfg).await;
+            let _ = close_all_connections(http, cfg).await;
             return Ok(format!("Выделенный маршрут Google Flow & AI переключен на '{target}'"));
         }
     }
@@ -843,7 +844,7 @@ pub async fn switch_flow_server(http: &reqwest::Client, cfg: &AppConfig, server_
         let _ = m_put(http, cfg, &format!("/proxies/{}", urlencoding_lite(g)), json!({ "name": target }), 3).await;
     }
 
-    close_all_connections(http, cfg).await;
+    let _ = close_all_connections(http, cfg).await;
     Ok(format!("Выделенный маршрут Google Flow & AI переключен на '{target}'"))
 }
 
@@ -1017,13 +1018,17 @@ pub async fn ping_all_url(
     }
 
     if !remaining.is_empty() {
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(6));
         let mut handles = Vec::new();
         let url_owned = test_url.map(|s| s.to_string());
+        let shared_cfg = std::sync::Arc::new(cfg.clone());
         for id in remaining {
             let http = http.clone();
-            let cfg = cfg.clone();
+            let cfg = shared_cfg.clone();
             let url_opt = url_owned.clone();
+            let sem_clone = sem.clone();
             handles.push(tokio::spawn(async move {
+                let _permit = sem_clone.acquire().await.ok();
                 let ms = ping_server_url(&http, &cfg, &id, timeout_ms, url_opt.as_deref()).await;
                 (id, ms)
             }));
@@ -1114,7 +1119,7 @@ pub async fn reload_config(http: &reqwest::Client, cfg: &AppConfig) -> Result<()
 pub async fn switch_group(http: &reqwest::Client, cfg: &AppConfig, group: &str, server: &str) -> Result<(), String> {
     let enc = urlencoding_lite(group);
     m_put(http, cfg, &format!("/proxies/{enc}"), json!({ "name": server }), 5).await?;
-    close_all_connections(http, cfg).await;
+    let _ = close_all_connections(http, cfg).await;
     Ok(())
 }
 

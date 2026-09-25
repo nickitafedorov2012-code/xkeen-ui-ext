@@ -102,11 +102,19 @@ pub fn detect_category(name: &str, cmdline: &str) -> &'static str {
     }
 }
 
+pub const PROTECTED_PROCESSES: &[&str] = &[
+    "ndm", "ndns", "ndnproxy", "dnsmasq", "hostapd", "wpa_supplicant",
+    "dropbear", "sshd", "udhcpc", "pppd", "netifd",
+    "init", "systemd", "procd", "kthreadd", "xkeen-route",
+    "cron", "crond", "mihomo", "transmissiond", "nfqws",
+];
+
 pub fn is_protected(pid: u32, name: &str) -> bool {
-    pid <= 1
-        || pid == std::process::id()
-        || name == "ndm"
-        || name == "xkeen-route"
+    if pid <= 2 || pid == std::process::id() {
+        return true;
+    }
+    let n = name.to_lowercase();
+    PROTECTED_PROCESSES.iter().any(|&p| n == p || n.starts_with(p))
 }
 
 /// Получение полного снимка диспетчера задач (ресурсы + процессы)
@@ -636,8 +644,8 @@ pub fn mock_snapshot() -> TaskManagerSnapshot {
 }
 
 pub async fn kill_process_by_pid(pid: u32, signal: Option<&str>) -> Result<String, String> {
-    if pid <= 1 {
-        return Err("Запрещено: процесс init/ndm (PID 1) является системным и защищён от завершения".into());
+    if pid <= 2 {
+        return Err("Запрещено: системные процессы ядра/init (PID <= 2) защищены от завершения".into());
     }
     if pid == std::process::id() {
         return Err("Запрещено: нельзя завершить процесс веб-панели".into());
@@ -651,16 +659,39 @@ pub async fn kill_process_by_pid(pid: u32, signal: Option<&str>) -> Result<Strin
         }
 
         if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", pid)) {
-            let comm_trim = comm.trim();
-            if comm_trim == "ndm" || comm_trim == "xkeen-route" {
-                return Err(format!("Процесс '{}' (PID {}) защищён от завершения", comm_trim, pid));
+            let comm_trim = comm.trim().to_lowercase();
+            if is_protected(pid, &comm_trim) {
+                return Err(format!("Запрещено: процесс '{}' (PID {}) является критически важным компонентом KeeneticOS/сети и защищён от завершения", comm.trim(), pid));
             }
         }
 
-        let sig_flag = match signal.unwrap_or("TERM").to_uppercase().as_str() {
-            "KILL" | "SIGKILL" | "9" => "-9",
-            _ => "-15",
-        };
+        if let Ok(cmdline_raw) = std::fs::read(format!("/proc/{}/cmdline", pid)) {
+            let cmdline = String::from_utf8_lossy(&cmdline_raw).replace('\0', " ").to_lowercase();
+            for &p in PROTECTED_PROCESSES {
+                if cmdline.contains(&format!("/{p}")) || cmdline.starts_with(p) || cmdline.contains(&format!(" {p}")) {
+                    return Err(format!("Запрещено: процесс (PID {}) относится к защищённой службе '{}' и не может быть завершён", pid, p));
+                }
+            }
+        }
+
+        // Проверяем PPID: запрещаем завершать демоны init (PPID <= 1)
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", pid)) {
+            if let Some(close_paren) = stat.rfind(')') {
+                let rest = stat[close_paren + 1..].trim();
+                let fields: Vec<&str> = rest.split_whitespace().collect();
+                if let Some(ppid_str) = fields.get(1) {
+                    if let Ok(ppid) = ppid_str.parse::<u32>() {
+                        if ppid <= 1 && pid != std::process::id() {
+                            return Err(format!("Запрещено: процесс PID {} является прямым системным потомком init (PPID {})", pid, ppid));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Принудительный SIGKILL (-9) через UI запрещен во избежание сбоев ядра, зависания сокетов и повреждения данных;
+        // допускается только штатный SIGTERM (-15).
+        let sig_flag = "-15";
 
         let output = tokio::process::Command::new("kill")
             .arg(sig_flag)

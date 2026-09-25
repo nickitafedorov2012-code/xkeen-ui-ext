@@ -52,4 +52,13 @@ key:value
     expect(res.valid).toBe(false)
     expect(res.error).toContain('пропущен пробел после двоеточия')
   })
+
+  it('correctly handles doubled single quotes inside strings', () => {
+    const yaml = `
+name: 'It''s a valid node name'
+port: 443
+`
+    const res = validateYaml(yaml)
+    expect(res.valid).toBe(true)
+  })
 })

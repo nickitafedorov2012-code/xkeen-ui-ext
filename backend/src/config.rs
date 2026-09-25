@@ -510,6 +510,10 @@ pub fn merge_value(base: &mut serde_json::Value, over: &serde_json::Value) {
     match (base, over) {
         (serde_json::Value::Object(base_map), serde_json::Value::Object(over_map)) => {
             for (k, v) in over_map {
+                // Если значение замаскировано звездочками, не перезаписываем существующий секрет
+                if v.as_str() == Some("******") {
+                    continue;
+                }
                 match base_map.get_mut(k) {
                     Some(slot) => merge_value(slot, v),
                     None => {
@@ -518,7 +522,11 @@ pub fn merge_value(base: &mut serde_json::Value, over: &serde_json::Value) {
                 }
             }
         }
-        (slot, over) => *slot = over.clone(),
+        (slot, over) => {
+            if over.as_str() != Some("******") {
+                *slot = over.clone();
+            }
+        }
     }
 }
 

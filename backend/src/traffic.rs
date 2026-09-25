@@ -170,13 +170,12 @@ fn read_wan_bytes(wan_ifaces: &[String]) -> (u64, u64) {
                 let is_wan = wan_ifaces.iter().any(|w| w == name)
                     || (wan_ifaces.is_empty() && (name.starts_with("apcli") || name.starts_with("wwan") || name.starts_with("eth3") || name.starts_with("ppp") || name.starts_with("qmi_br")));
                 if is_wan {
-                    let nums: Vec<u64> = stats_part
-                        .split_whitespace()
-                        .filter_map(|s| s.parse::<u64>().ok())
-                        .collect();
-                    if nums.len() >= 9 {
-                        rx += nums[0]; // RX bytes
-                        tx += nums[8]; // TX bytes
+                    let mut iter = stats_part.split_whitespace();
+                    let rx_val = iter.next().and_then(|s| s.parse::<u64>().ok());
+                    let tx_val = iter.nth(7).and_then(|s| s.parse::<u64>().ok());
+                    if let (Some(r), Some(t)) = (rx_val, tx_val) {
+                        rx += r;
+                        tx += t;
                     }
                 }
             }
@@ -202,7 +201,14 @@ async fn run_wan_polling() {
 
         // Периодическое обновление списка WAN интерфейсов (на случай переключения резервного канала)
         if now.duration_since(last_ifaces_update) > Duration::from_secs(15) {
-            last_ifaces = get_wan_interfaces();
+            let new_ifaces = get_wan_interfaces();
+            if new_ifaces != last_ifaces {
+                last_ifaces = new_ifaces;
+                // Сбрасываем счётчики, чтобы не было ложного всплеска при смене набора интерфейсов
+                let (cur_rx, cur_tx) = read_wan_bytes(&last_ifaces);
+                prev_rx = cur_rx;
+                prev_tx = cur_tx;
+            }
             last_ifaces_update = now;
         }
 
