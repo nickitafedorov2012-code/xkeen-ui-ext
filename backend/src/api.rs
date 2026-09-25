@@ -3067,7 +3067,7 @@ find_bin() {
 BIN=$(find_bin)
 
 # Fallback default with fwmark to prevent loops
-NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
 
 [ -f "$CONF" ] && . "$CONF"
 
@@ -3101,8 +3101,8 @@ add_fw() {
   # 3. Queue WAN TCP (80, 443) -> NFQUEUE 200 with bypass
   iptables -t mangle -A zapret -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass
 
-  # 4. Queue WAN UDP (443 - QUIC / HTTP3) -> NFQUEUE 200 with bypass
-  iptables -t mangle -A zapret -p udp --dport 443 -j NFQUEUE --queue-num 200 --queue-bypass
+  # 4. Reject UDP 443 (QUIC / HTTP3) so YouTube immediately falls back to TCP without endless buffering
+  iptables -t mangle -A zapret -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable 2>/dev/null || iptables -t mangle -A zapret -p udp --dport 443 -j DROP
 
   # 5. Discord Voice RTC UDP (50000:65535) if voice enabled
   if [ "$DISCORD_VOICE_ENABLED" = "1" ]; then
@@ -3162,6 +3162,10 @@ del_fw() {
   while iptables -t mangle -D PREROUTING -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
   while iptables -t mangle -D POSTROUTING -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
   while iptables -t mangle -D POSTROUTING -p udp --dport 443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
+  while iptables -t mangle -D PREROUTING -p udp --dport 443 -j REJECT 2>/dev/null; do :; done
+  while iptables -t mangle -D POSTROUTING -p udp --dport 443 -j REJECT 2>/dev/null; do :; done
+  while iptables -t mangle -D PREROUTING -p udp --dport 443 -j DROP 2>/dev/null; do :; done
+  while iptables -t mangle -D POSTROUTING -p udp --dport 443 -j DROP 2>/dev/null; do :; done
   while iptables -t mangle -D OUTPUT -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
   while iptables -t mangle -D OUTPUT -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
 }
@@ -3249,28 +3253,24 @@ esac
 pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
     let mut profiles: Vec<String> = Vec::new();
 
-    // YouTube profile (TCP 80/443 + UDP 443 QUIC) - split2 with badseq is the fastest strategy for 4K video
+    // YouTube profile (TCP 80/443) - fake,disorder2 with badseq is the proven strategy for 4K video on modern TSPU
     if cfg.youtube_turbo || cfg.hybrid_youtube {
         let yt_desync = if cfg.aggressive_dpi {
-            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=2 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-repeats=2 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         } else {
-            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         };
         profiles.push(format!(
             "--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com {yt_desync}"
         ));
-        // QUIC (UDP 443) bypass for YouTube streaming
-        profiles.push(
-            "--filter-udp=443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com --dpi-desync=fake --dpi-desync-cutoff=d4".to_string()
-        );
     }
 
-    // Discord Web/Chat profile
+    // Discord Web/Chat profile - fake,disorder2 for TLS 1.3
     if cfg.hybrid_discord {
         let dc_desync = if cfg.aggressive_dpi {
-            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=2 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-repeats=2 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         } else {
-            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         };
         profiles.push(format!(
             "--filter-tcp=80,443 --hostlist-domains=discord.com,discord.gg,discordapp.com,discordapp.net,discord.media,discord-attachments-uploads-prd.storage.googleapis.com,dis.gd,discord-activities.com {dc_desync}"
@@ -3285,9 +3285,9 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
     // General Web Hostlist profile
     if cfg.general_bypass {
         let gen_desync = if cfg.aggressive_dpi {
-            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=2 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-repeats=2 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         } else {
-            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         };
         profiles.push(format!(
             "--filter-tcp=80,443 --hostlist=/opt/etc/zapret/zapret-hosts.txt {gen_desync}"
@@ -3296,7 +3296,7 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
 
     // If no specific profiles enabled, provide safe basic profile
     if profiles.is_empty() {
-        profiles.push("--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4".to_string());
+        profiles.push("--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4".to_string());
     }
 
     let args = format!("--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 {}", profiles.join(" --new "));
@@ -3456,8 +3456,41 @@ pub async fn zapret_action(
     // 1. Тестирование обхода DPI
     if act == "test_dpi" {
         let test_cmd = r#"
-            yt_res=$(curl -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" https://www.youtube.com 2>/dev/null || curl -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" -x http://127.0.0.1:7890 https://www.youtube.com 2>/dev/null || echo "000:0")
-            dc_res=$(curl -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" https://discord.com 2>/dev/null || curl -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" -x http://127.0.0.1:7890 https://discord.com 2>/dev/null || echo "000:0")
+            check_target() {
+                target="$1"
+                # 1. Прямой curl probe
+                out=$(curl -m 3 -s -o /dev/null -w "%{http_code}:%{time_total}" "$target" 2>/dev/null)
+                code=$(echo "$out" | cut -d: -f1)
+                if [ "$code" -ge 200 ] 2>/dev/null && [ "$code" -lt 400 ] 2>/dev/null; then
+                    echo "$out"
+                    return
+                fi
+                # 2. DoH curl probe (на случай, если DNS провайдера сбрасывает домен)
+                out=$(curl -m 3 -s -o /dev/null -w "%{http_code}:%{time_total}" --doh-url https://1.1.1.1/dns-query "$target" 2>/dev/null)
+                code=$(echo "$out" | cut -d: -f1)
+                if [ "$code" -ge 200 ] 2>/dev/null && [ "$code" -lt 400 ] 2>/dev/null; then
+                    echo "$out"
+                    return
+                fi
+                # 3. Локальный прокси Mihomo mixed-port 7890 (Mihomo резолвит через собственный DNS)
+                out=$(curl -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" -x http://127.0.0.1:7890 "$target" 2>/dev/null)
+                code=$(echo "$out" | cut -d: -f1)
+                if [ "$code" -ge 200 ] 2>/dev/null && [ "$code" -lt 400 ] 2>/dev/null; then
+                    echo "$out"
+                    return
+                fi
+                if [ -n "$out" ]; then
+                    echo "$out"
+                else
+                    echo "000:0.0"
+                fi
+            }
+            yt_res=$(check_target https://www.youtube.com/generate_204)
+            code=$(echo "$yt_res" | cut -d: -f1)
+            if [ "$code" -lt 200 ] 2>/dev/null || [ "$code" -ge 400 ] 2>/dev/null; then
+                yt_res=$(check_target https://www.youtube.com)
+            fi
+            dc_res=$(check_target https://discord.com)
             echo "$yt_res|$dc_res"
         "#;
         let out = tokio::process::Command::new("sh").arg("-c").arg(test_cmd).output().await;
