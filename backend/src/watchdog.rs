@@ -50,7 +50,8 @@ pub fn spawn(state: AppState) {
             };
 
             if file_changed {
-                /* will update after successful reload */
+                last_mtime = mtime;
+                last_len = len;
 
                 // Читаем содержимое и проверяем наличие сохраненных маркер-блоков
                 if let Ok(content) = tokio::fs::read_to_string(path).await {
@@ -91,6 +92,7 @@ pub fn spawn(state: AppState) {
                         // Перезагрузка ядра Mihomo
                         if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
                             log_w!("[WATCHDOG] Ошибка перезагрузки Mihomo: {}", e);
+                            last_mtime = None; // Сброс для повторной попытки на следующем тике
                         } else {
                             log_i!("[WATCHDOG] ✓ Правила маршрутизации успешно восстановлены и применены в ядре");
                         }
