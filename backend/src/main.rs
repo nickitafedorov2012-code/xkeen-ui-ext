@@ -357,6 +357,7 @@ async fn main() {
         .route("/api/routing", get(api::get_routing).post(api::apply_routing))
         .route("/api/device-routing", get(api::get_device_routing).post(api::set_device_routing))
         .route("/api/domains", get(api::get_domains).post(api::set_domains))
+        .route("/api/domains/force-add", post(api::force_add_domain))
         .route("/api/domains/scan-cdn", post(api::scan_cdn_manual))
         .route("/api/dns/mode", get(api::get_dns_mode).post(api::set_dns_mode))
         // Сервис XKeen, бэкапы, конфиги
@@ -427,6 +428,11 @@ async fn main() {
         .route("/api/zapret/action", post(api::zapret_action))
         // Расписания устройств
         .route("/api/schedules", get(api::get_schedules).post(api::save_schedules))
+        // Игровой режим (Gaming Mode)
+        .route("/api/gaming/status", get(api::get_gaming_status))
+        .route("/api/gaming/save", post(api::save_gaming_config))
+        .route("/api/gaming/toggle", post(api::toggle_gaming))
+        .route("/api/gaming/ping", post(api::ping_gaming_targets))
         .fallback(frontend::serve)
         .layer(middleware::from_fn_with_state(auth_state, auth::auth_middleware))
         .layer(middleware::from_fn(no_cache))

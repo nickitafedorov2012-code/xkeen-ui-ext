@@ -39,7 +39,7 @@ pub fn spawn(state: AppState) {
                 sleep(Duration::from_secs(1)).await;
             }
 
-            let (config_path_str, force_domains, device_routing, ignore_servers, device_domains, adblock_enabled, flow_server, zapret_cfg) = {
+            let (config_path_str, force_domains, device_routing, ignore_servers, device_domains, adblock_enabled, flow_server, zapret_cfg, gaming_cfg) = {
                 let cfg = state.config.read().await;
                 (
                     cfg.mihomo.config_path.clone(),
@@ -50,6 +50,7 @@ pub fn spawn(state: AppState) {
                     cfg.adblock_enabled,
                     cfg.flow_server.clone(),
                     cfg.zapret.clone(),
+                    cfg.gaming.clone(),
                 )
             };
 
@@ -80,6 +81,7 @@ pub fn spawn(state: AppState) {
                     let needs_ignore = !ignore_servers.is_empty();
                     let needs_flow = flow_server.as_ref().map_or(false, |s| !s.trim().is_empty());
                     let needs_zapret = zapret_cfg.enabled && (zapret_cfg.hybrid_youtube || zapret_cfg.hybrid_discord || zapret_cfg.isolated_proxy);
+                    let needs_gaming = gaming_cfg.enabled;
 
                     let missing_device = needs_device && !content.contains("AUTO-DEVICE");
                     let missing_force = needs_force && !content.contains("AUTO-FORCE");
@@ -87,8 +89,9 @@ pub fn spawn(state: AppState) {
                     let missing_adblock = adblock_enabled && !content.contains("AUTO-ADBLOCK");
                     let missing_flow = needs_flow && !content.contains("AUTO-GOOGLE-AI");
                     let missing_zapret = needs_zapret && !content.contains("AUTO-ZAPRET-HYBRID");
+                    let missing_gaming = needs_gaming && !content.contains("AUTO-GAMING");
 
-                    if missing_device || missing_force || missing_ignore || missing_adblock || missing_flow || missing_zapret {
+                    if missing_device || missing_force || missing_ignore || missing_adblock || missing_flow || missing_zapret || missing_gaming {
                         log_w!("[WATCHDOG] Обнаружена перезапись config.yaml (рестарт XKeen)! Восстановление маршрутизации...");
 
                         let _guard = state.routing_lock.lock().await;
@@ -124,10 +127,16 @@ pub fn spawn(state: AppState) {
                         }
 
                         // Синхронизация ipset geo_override (быстрые статические бандлы без сетевой нагрузки)
+                        let mut all_domains = cfg.force_domains.clone();
                         if !cfg.force_domains.is_empty() {
                             let auto_cdns = crate::cdn_discovery::expand_bundles(&cfg.force_domains);
-                            let mut all_domains = cfg.force_domains.clone();
                             all_domains.extend(auto_cdns);
+                        }
+                        if cfg.gaming.enabled {
+                            let game_domains = routing::get_gaming_domains(&cfg.gaming);
+                            all_domains.extend(game_domains);
+                        }
+                        if !all_domains.is_empty() {
                             let _ = override_sync::sync_geo_override(&all_domains).await;
                         }
 

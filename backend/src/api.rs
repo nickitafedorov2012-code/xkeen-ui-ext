@@ -973,6 +973,130 @@ pub async fn scan_cdn_manual(State(state): State<AppState>) -> Response {
     }))
 }
 
+#[derive(Deserialize)]
+pub struct ForceAddDomainReq {
+    pub domain: String,
+    #[serde(default)]
+    pub client_ip: Option<String>,
+    #[serde(default)]
+    pub close_connection_id: Option<String>,
+}
+
+/// POST /api/domains/force-add — быстрое добавление домена принудительно в прокси (глобально или per-device)
+pub async fn force_add_domain(
+    State(state): State<AppState>,
+    Json(req): Json<ForceAddDomainReq>,
+) -> Response {
+    let clean_domain = req
+        .domain
+        .trim()
+        .to_lowercase()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("www.")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_string();
+
+    if clean_domain.is_empty() || !clean_domain.contains('.') {
+        return api_err(format!("Некорректный домен: {}", req.domain));
+    }
+
+    let _cfg_guard = state.config_lock.lock().await;
+    let _guard = state.routing_lock.lock().await;
+    let mut cfg = (**state.config.read().await).clone();
+
+    let client_ip = req.client_ip.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+
+    if let Some(ref ip) = client_ip {
+        // Добавление в персональные правила устройства
+        let rules = cfg.device_domain_rules.entry(ip.clone()).or_default();
+        if !rules.iter().any(|r| r.domain.eq_ignore_ascii_case(&clean_domain)) {
+            rules.push(crate::config::DeviceDomainRule {
+                domain: clean_domain.clone(),
+                target: "PROXY".into(),
+            });
+        }
+
+        if let Err(e) = config::save(&state.config_path, &cfg).await {
+            return api_err(format!("Ошибка сохранения config.json: {}", e));
+        }
+
+        if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+            if let Ok((new_yaml, _)) = crate::routing::apply_routing(&raw_yaml, &cfg) {
+                let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
+                let _ = mihomo::reload_config(&state.http, &cfg).await;
+            }
+        }
+
+        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+        log_i!("Домен {} жестко направлен в прокси для устройства {}", clean_domain, ip);
+    } else {
+        // Глобальное принудительное проксирование
+        if !cfg.force_domains.iter().any(|d| d.eq_ignore_ascii_case(&clean_domain)) {
+            cfg.force_domains.push(clean_domain.clone());
+            cfg.force_domains.sort();
+            cfg.force_domains.dedup();
+        }
+
+        // Обнаружение сопутствующих CDN
+        let auto_cdns = crate::cdn_discovery::discover_all_cdns(&cfg.force_domains, &cfg.mihomo_proxy_url()).await;
+        let mut all_force = cfg.force_domains.clone();
+        for cdn in &auto_cdns {
+            if !all_force.contains(cdn) {
+                all_force.push(cdn.clone());
+            }
+        }
+
+        let yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+            Ok(y) => y,
+            Err(e) => return api_err(format!("Не удалось прочитать config.yaml: {e}")),
+        };
+
+        let new_yaml = match routing::apply_domain_rules(&yaml, &cfg.direct_domains, &all_force, &cfg.device_domain_rules) {
+            Ok(y) => y,
+            Err(e) => return api_err(e),
+        };
+
+        if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
+            return api_err(format!("Ошибка сохранения config.yaml: {e}"));
+        }
+
+        let _ = mihomo::reload_config(&state.http, &cfg).await;
+
+        if let Err(e) = config::save(&state.config_path, &cfg).await {
+            return api_err(format!("Ошибка сохранения config.json: {e}"));
+        }
+
+        // Синхронизация IP-адресов домена с ipset geo_override ядра Linux
+        let _ = crate::override_sync::sync_geo_override(&all_force).await;
+
+        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+        log_i!("Домен {} жестко направлен в прокси глобально", clean_domain);
+    }
+
+    // Если передан ID конкретного соединения — закрываем его немедленно
+    if let Some(conn_id) = req.close_connection_id.as_deref().filter(|s| !s.is_empty()) {
+        let url = format!("{}/connections/{}", cfg.mihomo_url(), conn_id);
+        let mut req_del = state.http.delete(&url);
+        if !cfg.mihomo.secret.is_empty() {
+            req_del = req_del.header("Authorization", format!("Bearer {}", cfg.mihomo.secret));
+        }
+        let _ = req_del.send().await;
+    }
+
+    api_ok(json!({
+        "success": true,
+        "domain": clean_domain,
+        "client_ip": client_ip,
+        "forced": true
+    }))
+}
+
 // --- Сервис XKeen и бэкапы ---
 
 #[derive(Deserialize)]
@@ -4032,6 +4156,166 @@ pub async fn save_schedules(
     }
     *state.config.write().await = std::sync::Arc::new(cfg);
     api_ok(json!({ "saved": true }))
+}
+
+// ==================== ИГРОВОЙ РЕЖИМ (GAMING MODE) ====================
+
+/// GET /api/gaming/status — статус, конфиг и активный игровой узел
+pub async fn get_gaming_status(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let domains_count = routing::get_gaming_domains(&cfg.gaming).len();
+
+    // Пытаемся получить активный прокси для группы 🎮 Gaming из Mihomo
+    let active_server = match mihomo::get_proxies_raw(&state.http, &cfg).await {
+        Ok(val) => {
+            val.get("proxies")
+                .and_then(|p| p.get(routing::GAMING_GROUP_NAME).or_else(|| p.get("Gaming")))
+                .and_then(|g| g.get("now"))
+                .and_then(|n| n.as_str())
+                .unwrap_or(cfg.gaming.target_server.as_str())
+                .to_string()
+        }
+        Err(_) => cfg.gaming.target_server.clone(),
+    };
+
+    api_ok(json!({
+        "config": cfg.gaming,
+        "active_server": active_server,
+        "domains_count": domains_count,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct SaveGamingReq {
+    pub gaming: config::GamingConfig,
+}
+
+/// POST /api/gaming/save — сохранение настроек игрового режима и применение маршрутов
+pub async fn save_gaming_config(
+    State(state): State<AppState>,
+    Json(body): Json<SaveGamingReq>,
+) -> Response {
+    let _cfg_guard = state.config_lock.lock().await;
+    let mut cfg = (**state.config.read().await).clone();
+    cfg.gaming = body.gaming;
+
+    // 1. Применяем правила в config.yaml ядра Mihomo
+    let path = std::path::Path::new(&cfg.mihomo.config_path);
+    if path.exists() {
+        if let Ok(raw_yaml) = tokio::fs::read_to_string(path).await {
+            let (new_yaml, _) = match routing::apply_routing(&raw_yaml, &cfg) {
+                Ok(res) => res,
+                Err(e) => return api_err(format!("Ошибка генерации правил роутинга: {}", e)),
+            };
+            let _routing_guard = state.routing_lock.lock().await;
+            if let Err(e) = atomic_write_file(path, &new_yaml).await {
+                return api_err(format!("Ошибка записи config.yaml: {}", e));
+            }
+            let _ = mihomo::reload_config(&state.http, &cfg).await;
+        }
+    }
+
+    // 2. Синхронизируем ipset geo_override ядра Keenetic для игровых доменов
+    if cfg.gaming.enabled {
+        let game_domains = routing::get_gaming_domains(&cfg.gaming);
+        let mut all_domains = cfg.force_domains.clone();
+        all_domains.extend(game_domains);
+        let _ = crate::override_sync::sync_geo_override(&all_domains).await;
+    }
+
+    // 3. Сохраняем в config.json
+    if let Err(e) = config::save(&state.config_path, &cfg).await {
+        return api_err(format!("Ошибка сохранения config.json: {}", e));
+    }
+    *state.config.write().await = std::sync::Arc::new(cfg);
+
+    log_i!("Настройки игрового режима успешно сохранены и применены");
+    api_ok(json!({ "saved": true }))
+}
+
+#[derive(Deserialize)]
+pub struct ToggleGamingReq {
+    pub enabled: bool,
+}
+
+/// POST /api/gaming/toggle — быстрое включение/отключение игрового режима
+pub async fn toggle_gaming(
+    State(state): State<AppState>,
+    Json(body): Json<ToggleGamingReq>,
+) -> Response {
+    let _cfg_guard = state.config_lock.lock().await;
+    let mut cfg = (**state.config.read().await).clone();
+    cfg.gaming.enabled = body.enabled;
+
+    let path = std::path::Path::new(&cfg.mihomo.config_path);
+    if path.exists() {
+        if let Ok(raw_yaml) = tokio::fs::read_to_string(path).await {
+            let (new_yaml, _) = match routing::apply_routing(&raw_yaml, &cfg) {
+                Ok(res) => res,
+                Err(e) => return api_err(format!("Ошибка роутинга: {}", e)),
+            };
+            let _routing_guard = state.routing_lock.lock().await;
+            let _ = atomic_write_file(path, &new_yaml).await;
+            let _ = mihomo::reload_config(&state.http, &cfg).await;
+        }
+    }
+
+    if cfg.gaming.enabled {
+        let game_domains = routing::get_gaming_domains(&cfg.gaming);
+        let mut all_domains = cfg.force_domains.clone();
+        all_domains.extend(game_domains);
+        let _ = crate::override_sync::sync_geo_override(&all_domains).await;
+    }
+
+    let _ = config::save(&state.config_path, &cfg).await;
+    *state.config.write().await = std::sync::Arc::new(cfg);
+
+    log_i!("Игровой режим {}", if body.enabled { "включен" } else { "отключен" });
+    api_ok(json!({ "enabled": body.enabled }))
+}
+
+/// POST /api/gaming/ping — замер задержки до популярных игровых серверов
+pub async fn ping_gaming_targets(State(_state): State<AppState>) -> Response {
+    let targets = [
+        ("Steam", "steamcommunity.com"),
+        ("Discord", "discord.com"),
+        ("Xbox Live", "user.auth.xboxlive.com"),
+        ("PlayStation", "playstation.com"),
+        ("Brawl Stars", "brawlstars.com"),
+        ("Battle.net", "battle.net"),
+        ("EA App", "ea.com"),
+    ];
+
+    let mut set = tokio::task::JoinSet::new();
+    for (name, host) in targets {
+        let h = host.to_string();
+        let n = name.to_string();
+        set.spawn(async move {
+            let start = tokio::time::Instant::now();
+            let resolved = tokio::net::lookup_host((h.as_str(), 443)).await;
+            let elapsed_ms = start.elapsed().as_millis() as u64;
+            let success = resolved.is_ok();
+            (n, h, elapsed_ms, success)
+        });
+    }
+
+    let mut results = Vec::new();
+    while let Some(res) = set.join_next().await {
+        if let Ok((name, host, ping_ms, ok)) = res {
+            results.push(json!({
+                "name": name,
+                "host": host,
+                "ping_ms": ping_ms,
+                "available": ok,
+            }));
+        }
+    }
+
+    results.sort_by(|a, b| {
+        a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+    });
+
+    api_ok(json!({ "results": results }))
 }
 
 

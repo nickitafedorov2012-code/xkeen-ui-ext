@@ -14,6 +14,7 @@ import Diagnostics from './components/Diagnostics'
 import UpdateModal from './components/UpdateModal'
 import MihomoCoreModal from './components/MihomoCoreModal'
 import Zapret from './components/Zapret'
+import Gaming from './components/Gaming'
 import { apiGet, apiPost } from './api'
 import type { AuthStatus, StatusInfo } from './types'
 
@@ -26,6 +27,7 @@ type TabId =
   | 'diagnostics'
   | 'google-ai'
   | 'zapret'
+  | 'gaming'
   | 'settings'
   | 'antigravity'
 
@@ -38,6 +40,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'diagnostics', label: '🩺 Диагностика' },
   { id: 'google-ai', label: '🤖 Google AI' },
   { id: 'zapret', label: '🛡️ Запрет (DPI)' },
+  { id: 'gaming', label: '🎮 Игры' },
   { id: 'settings', label: '⚙️ Настройки' },
 ]
 
@@ -319,6 +322,7 @@ export default function App() {
           {tab === 'diagnostics' && <Diagnostics notify={notify} />}
           {(tab === 'google-ai' || tab === 'antigravity') && <Antigravity notify={notify} />}
           {tab === 'zapret' && <Zapret notify={notify} />}
+          {tab === 'gaming' && <Gaming notify={notify} />}
           {tab === 'settings' && <Settings notify={notify} status={status} refresh={refresh} />}
         </ErrorBoundary>
       </main>

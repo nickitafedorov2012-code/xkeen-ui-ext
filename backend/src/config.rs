@@ -276,6 +276,76 @@ pub struct AppConfig {
     pub schedules: Vec<DeviceSchedule>,
     /// Умные режимы и гибридная маршрутизация Zapret DPI.
     pub zapret: ZapretConfig,
+    /// Отдельный модуль игрового режима (обход игровых блокировок).
+    pub gaming: GamingConfig,
+}
+
+/// Платформы и сервисы для игрового режима.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct GamingPlatforms {
+    pub discord: bool,
+    pub steam: bool,
+    pub playstation: bool,
+    pub xbox: bool,
+    pub battlenet: bool,
+    pub epicgames: bool,
+    pub ea: bool,
+    pub riot: bool,
+    pub supercell: bool,
+    pub nintendo: bool,
+    pub roblox: bool,
+    pub category_games: bool,
+}
+
+impl Default for GamingPlatforms {
+    fn default() -> Self {
+        Self {
+            discord: true,
+            steam: true,
+            playstation: true,
+            xbox: true,
+            battlenet: true,
+            epicgames: true,
+            ea: true,
+            riot: true,
+            supercell: true,
+            nintendo: true,
+            roblox: true,
+            category_games: false,
+        }
+    }
+}
+
+/// Настройки игрового режима (обход блокировок игр через VPS/Mihomo).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct GamingConfig {
+    pub enabled: bool,
+    /// Выходной сервер: "Fastest", "PROXY", или имя конкретной ноды
+    pub target_server: String,
+    /// Умный Split-Tunneling: проксировать только авторизацию, магазины и заблокированные API,
+    /// сохраняя игровой матч на минимальном прямом пинге (DIRECT).
+    pub smart_split: bool,
+    /// Исправление проблем Strict NAT и античитов через Fake-IP
+    pub fix_nat_fake_ip: bool,
+    /// Флаги включения игровых платформ
+    pub platforms: GamingPlatforms,
+    /// Дополнительные пользовательские домены
+    pub custom_domains: Vec<String>,
+}
+
+impl Default for GamingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target_server: "Fastest".into(),
+            smart_split: true,
+            fix_nat_fake_ip: true,
+            platforms: GamingPlatforms::default(),
+            custom_domains: Vec::new(),
+        }
+    }
 }
 
 /// Умные режимы и гибридная маршрутизация Zapret DPI.
@@ -402,6 +472,7 @@ impl Default for AppConfig {
             adblock_enabled: false,
             schedules: Vec::new(),
             zapret: ZapretConfig::default(),
+            gaming: GamingConfig::default(),
         }
     }
 }

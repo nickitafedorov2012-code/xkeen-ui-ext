@@ -437,6 +437,57 @@ pub const GOOGLE_AI_END: &str = "# --- AUTO-GOOGLE-AI-END ---";
 pub const ZAPRET_HYBRID_BEGIN: &str = "# --- AUTO-ZAPRET-HYBRID-BEGIN ---";
 pub const ZAPRET_HYBRID_END: &str = "# --- AUTO-ZAPRET-HYBRID-END ---";
 
+pub const GAMING_BEGIN: &str = "# --- AUTO-GAMING-RULES-BEGIN ---";
+pub const GAMING_END: &str = "# --- AUTO-GAMING-RULES-END ---";
+pub const GAMING_GROUP_BEGIN: &str = "# --- AUTO-GAMING-GROUP-BEGIN ---";
+pub const GAMING_GROUP_END: &str = "# --- AUTO-GAMING-GROUP-END ---";
+pub const GAMING_GROUP_NAME: &str = "🎮 Gaming";
+
+pub const GAMING_DISCORD_DOMAINS: &[&str] = &[
+    "discord.com", "discordapp.com", "discord.gg", "discordapp.net", "discord.media", "discord.co", "dis.gd",
+];
+
+pub const GAMING_STEAM_DOMAINS: &[&str] = &[
+    "steamcommunity.com", "steampowered.com", "steamstatic.com", "steamserver.net", "valvesoftware.com", "steamcontent.com",
+];
+
+pub const GAMING_PSN_DOMAINS: &[&str] = &[
+    "playstation.com", "playstation.net", "sonyentertainmentnetwork.com", "playstationnetwork.com",
+];
+
+pub const GAMING_XBOX_DOMAINS: &[&str] = &[
+    "xbox.com", "xboxlive.com", "gamepass.com",
+    "user.auth.xboxlive.com", "device.auth.xboxlive.com", "title.auth.xboxlive.com", "xsts.auth.xboxlive.com",
+];
+
+pub const GAMING_BATTLENET_DOMAINS: &[&str] = &[
+    "battle.net", "blizzard.com", "blzstatic.com",
+];
+
+pub const GAMING_EPIC_DOMAINS: &[&str] = &[
+    "epicgames.com", "unrealengine.com", "epicgames.dev",
+];
+
+pub const GAMING_EA_DOMAINS: &[&str] = &[
+    "ea.com", "origin.com", "electronicarts.com",
+];
+
+pub const GAMING_RIOT_DOMAINS: &[&str] = &[
+    "riotgames.com", "leagueoflegends.com", "pvp.net", "riotcdn.net",
+];
+
+pub const GAMING_SUPERCELL_DOMAINS: &[&str] = &[
+    "supercell.com", "supercellid.com", "brawlstars.com", "brawlstarsgame.com", "clashofclans.com", "clashroyale.com",
+];
+
+pub const GAMING_NINTENDO_DOMAINS: &[&str] = &[
+    "nintendo.com", "nintendo.net", "nintendo.eu", "nintendo-europe.com",
+];
+
+pub const GAMING_ROBLOX_DOMAINS: &[&str] = &[
+    "roblox.com", "rbxcdn.com",
+];
+
 pub const YOUTUBE_HYBRID_DOMAINS: &[&str] = &[
     "googlevideo.com",
     "youtube.com",
@@ -747,6 +798,171 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
             out.push(ZAPRET_HYBRID_END.to_string());
         }
     }
+    Ok(out.join("\n"))
+}
+
+/// Сбор всех активных доменов игрового режима из GamingConfig.
+pub fn get_gaming_domains(cfg: &crate::config::GamingConfig) -> Vec<String> {
+    if !cfg.enabled {
+        return Vec::new();
+    }
+    let mut domains = Vec::new();
+    let p = &cfg.platforms;
+    if p.discord { domains.extend(GAMING_DISCORD_DOMAINS.iter().map(|&s| s.to_string())); }
+    if p.steam { domains.extend(GAMING_STEAM_DOMAINS.iter().map(|&s| s.to_string())); }
+    if p.playstation { domains.extend(GAMING_PSN_DOMAINS.iter().map(|&s| s.to_string())); }
+    if p.xbox { domains.extend(GAMING_XBOX_DOMAINS.iter().map(|&s| s.to_string())); }
+    if p.battlenet { domains.extend(GAMING_BATTLENET_DOMAINS.iter().map(|&s| s.to_string())); }
+    if p.epicgames { domains.extend(GAMING_EPIC_DOMAINS.iter().map(|&s| s.to_string())); }
+    if p.ea { domains.extend(GAMING_EA_DOMAINS.iter().map(|&s| s.to_string())); }
+    if p.riot { domains.extend(GAMING_RIOT_DOMAINS.iter().map(|&s| s.to_string())); }
+    if p.supercell { domains.extend(GAMING_SUPERCELL_DOMAINS.iter().map(|&s| s.to_string())); }
+    if p.nintendo { domains.extend(GAMING_NINTENDO_DOMAINS.iter().map(|&s| s.to_string())); }
+    if p.roblox { domains.extend(GAMING_ROBLOX_DOMAINS.iter().map(|&s| s.to_string())); }
+    for c in &cfg.custom_domains {
+        let t = c.trim().to_lowercase();
+        if !t.is_empty() && !domains.contains(&t) {
+            domains.push(t);
+        }
+    }
+    domains
+}
+
+/// Удаление игровых правил и группы 🎮 Gaming из YAML.
+pub fn remove_gaming_rules(yaml: &str) -> String {
+    let mut content = yaml.to_string();
+
+    // 1. Удаление блока правил в rules:
+    if content.contains(GAMING_BEGIN) {
+        if !content.contains(GAMING_END) {
+            content = content.lines().filter(|l| l.trim() != GAMING_BEGIN).collect::<Vec<_>>().join("\n");
+        } else {
+            let mut out = Vec::new();
+            let mut skip = false;
+            for line in content.lines() {
+                let t = line.trim();
+                if t == GAMING_BEGIN {
+                    skip = true;
+                    continue;
+                }
+                if t == GAMING_END {
+                    skip = false;
+                    continue;
+                }
+                if !skip {
+                    out.push(line);
+                }
+            }
+            content = out.join("\n");
+        }
+    }
+
+    // 2. Удаление селектор-группы в proxy-groups:
+    if content.contains(GAMING_GROUP_BEGIN) {
+        if !content.contains(GAMING_GROUP_END) {
+            content = content.lines().filter(|l| l.trim() != GAMING_GROUP_BEGIN).collect::<Vec<_>>().join("\n");
+        } else {
+            let mut out = Vec::new();
+            let mut skip = false;
+            for line in content.lines() {
+                let t = line.trim();
+                if t == GAMING_GROUP_BEGIN {
+                    skip = true;
+                    continue;
+                }
+                if t == GAMING_GROUP_END {
+                    skip = false;
+                    continue;
+                }
+                if !skip {
+                    out.push(line);
+                }
+            }
+            content = out.join("\n");
+        }
+    }
+
+    content
+}
+
+/// Применение выделенного маршрута игрового режима (селектор-группа 🎮 Gaming и правила rules:).
+pub fn apply_gaming_rules(
+    yaml: &str,
+    cfg: &crate::config::GamingConfig,
+    providers: &[String],
+) -> Result<String, String> {
+    crate::routing::validate_marker_pair(yaml, GAMING_BEGIN, GAMING_END)?;
+    crate::routing::validate_marker_pair(yaml, GAMING_GROUP_BEGIN, GAMING_GROUP_END)?;
+    let content = remove_gaming_rules(yaml);
+    if !cfg.enabled {
+        return Ok(content);
+    }
+
+    let target_srv = if cfg.target_server.trim().is_empty() {
+        "Fastest"
+    } else {
+        cfg.target_server.trim()
+    };
+
+    // 1. Вставка селектор-группы в proxy-groups:
+    let lines: Vec<&str> = content.lines().collect();
+    let pg_idx = lines
+        .iter()
+        .position(|l| l.trim_end() == "proxy-groups:")
+        .ok_or("В config.yaml нет секции proxy-groups:")?;
+
+    let mut with_group = Vec::with_capacity(lines.len() + 16);
+    for (i, line) in lines.iter().enumerate() {
+        with_group.push(line.to_string());
+        if i == pg_idx {
+            with_group.push(GAMING_GROUP_BEGIN.to_string());
+            with_group.push(format!("  - name: '{GAMING_GROUP_NAME}'"));
+            with_group.push("    type: select".to_string());
+            with_group.push("    proxies:".to_string());
+            if target_srv != "DIRECT" && target_srv != "Fastest" && target_srv != "Fallback" && target_srv != "PROXY" {
+                with_group.push(format!("      - {target_srv}"));
+            }
+            with_group.push("      - DIRECT".to_string());
+            with_group.push("      - Fastest".to_string());
+            with_group.push("      - Fallback".to_string());
+            with_group.push("      - PROXY".to_string());
+            if !providers.is_empty() {
+                with_group.push("    use:".to_string());
+                for p in providers {
+                    let p = p.trim();
+                    if !p.is_empty() {
+                        with_group.push(format!("      - {p}"));
+                    }
+                }
+            }
+            with_group.push(GAMING_GROUP_END.to_string());
+        }
+    }
+    let intermediate = with_group.join("\n");
+
+    // 2. Вставка правил в rules:
+    let lines2: Vec<&str> = intermediate.lines().collect();
+    let rules_idx = lines2
+        .iter()
+        .position(|l| l.trim_end() == "rules:")
+        .ok_or("В config.yaml нет секции rules:")?;
+
+    let domains = get_gaming_domains(cfg);
+    let mut out = Vec::with_capacity(lines2.len() + domains.len() + 8);
+    for (i, line) in lines2.iter().enumerate() {
+        out.push(line.to_string());
+        if i == rules_idx {
+            out.push(GAMING_BEGIN.to_string());
+            for d in &domains {
+                out.push(format!("  - DOMAIN-SUFFIX,{d},{GAMING_GROUP_NAME}"));
+            }
+            if cfg.platforms.category_games {
+                out.push(format!("  - GEOSITE,category-games,{GAMING_GROUP_NAME}"));
+            }
+            out.push(GAMING_END.to_string());
+        }
+    }
+
     Ok(out.join("\n"))
 }
 
@@ -1272,20 +1488,22 @@ pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> Result<(Stri
         current = with_flow;
     }
 
-    // 2. Игнор-лист
+    // 4. Игровой режим (селектор-группа 🎮 Gaming и правила обхода игровых платформ)
+    let providers = if !cfg.mihomo.device_providers.is_empty() {
+        cfg.mihomo.device_providers.clone()
+    } else {
+        parse_provider_names(&current)
+    };
+    current = apply_gaming_rules(&current, &cfg.gaming, &providers)?;
+
+    // 5. Игнор-лист
     if let Ok(with_ig) = apply_ignore_to_groups(&current, &cfg.ignore_servers) {
         current = with_ig;
     }
     let mut filters = cfg.provider_filters.clone();
     current = apply_ignore_to_providers(&current, &cfg.ignore_servers, &mut filters);
 
-    // 3. Per-device назначения
-    let providers = if !cfg.mihomo.device_providers.is_empty() {
-        cfg.mihomo.device_providers.clone()
-    } else {
-        parse_provider_names(&current)
-    };
-
+    // 6. Per-device назначения
     let mut assignments = Vec::new();
     for (ip, dr) in &cfg.device_routing {
         if let Some(srv) = dr.servers.first() {
@@ -1774,6 +1992,53 @@ proxy-providers:
 
         // Проверяем inline use: [geodema, subscription_1, other] -> [geodema, other]
         assert!(cleaned.contains("use: [geodema, other]"));
+    }
+
+    #[test]
+    fn test_apply_and_remove_gaming_rules() {
+        let yaml = r#"port: 7890
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - Fastest
+rules:
+  - GEOIP,RU,DIRECT
+  - MATCH,PROXY
+"#;
+        let mut cfg = crate::config::GamingConfig::default();
+        cfg.enabled = true;
+        cfg.target_server = "LowPingNode".into();
+        cfg.platforms.discord = true;
+        cfg.platforms.steam = true;
+        cfg.platforms.xbox = true;
+        cfg.platforms.supercell = true;
+        cfg.custom_domains = vec!["customgame.com".into()];
+
+        let providers = vec!["sub1".to_string()];
+        let applied = apply_gaming_rules(yaml, &cfg, &providers).expect("Must apply gaming rules");
+
+        assert!(applied.contains(GAMING_GROUP_BEGIN));
+        assert!(applied.contains(GAMING_GROUP_END));
+        assert!(applied.contains("- name: '🎮 Gaming'"));
+        assert!(applied.contains("- LowPingNode"));
+        assert!(applied.contains("- sub1"));
+
+        assert!(applied.contains(GAMING_BEGIN));
+        assert!(applied.contains(GAMING_END));
+        assert!(applied.contains("DOMAIN-SUFFIX,discord.com,🎮 Gaming"));
+        assert!(applied.contains("DOMAIN-SUFFIX,steamcommunity.com,🎮 Gaming"));
+        assert!(applied.contains("DOMAIN-SUFFIX,user.auth.xboxlive.com,🎮 Gaming"));
+        assert!(applied.contains("DOMAIN-SUFFIX,brawlstars.com,🎮 Gaming"));
+        assert!(applied.contains("DOMAIN-SUFFIX,customgame.com,🎮 Gaming"));
+
+        // Удаление при выключении
+        cfg.enabled = false;
+        let disabled = apply_gaming_rules(&applied, &cfg, &providers).expect("Must disable gaming rules");
+        assert!(!disabled.contains(GAMING_GROUP_BEGIN));
+        assert!(!disabled.contains(GAMING_BEGIN));
+        assert!(!disabled.contains("🎮 Gaming"));
+        assert!(disabled.contains("MATCH,PROXY"));
     }
 }
 

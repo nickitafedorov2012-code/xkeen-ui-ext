@@ -398,3 +398,40 @@ export interface TaskManagerSnapshot {
   processes: ProcessInfo[]
 }
 
+export interface GamingPlatforms {
+  discord: boolean
+  steam: boolean
+  playstation: boolean
+  xbox: boolean
+  battlenet: boolean
+  epicgames: boolean
+  ea: boolean
+  riot: boolean
+  supercell: boolean
+  nintendo: boolean
+  roblox: boolean
+  category_games: boolean
+}
+
+export interface GamingConfig {
+  enabled: boolean
+  target_server: string
+  smart_split: boolean
+  fix_nat_fake_ip: boolean
+  platforms: GamingPlatforms
+  custom_domains: string[]
+}
+
+export interface GamingPingResult {
+  name: string
+  host: string
+  ping_ms: number
+  available: boolean
+}
+
+export interface GamingStatus {
+  config: GamingConfig
+  active_server: string
+  domains_count: number
+}
+
