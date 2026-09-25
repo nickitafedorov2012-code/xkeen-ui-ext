@@ -2441,6 +2441,15 @@ pub async fn set_dns_mode(
     api_ok(json!({ "saved": true, "enhanced_mode": target_mode }))
 }
 
+/// POST /api/dns/clean-servers — принудительная установка чистых DNS-серверов в KeeneticOS
+pub async fn apply_clean_dns(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    match crate::rci::set_clean_dns_servers(&state.http, &cfg).await {
+        Ok(_) => api_ok(json!({ "success": true, "message": "Чистые DNS-серверы (77.88.8.8, 1.1.1.1) успешно настроены в KeeneticOS" })),
+        Err(e) => api_err(format!("Ошибка настройки DNS через RCI: {e}")),
+    }
+}
+
 // ==================== PER-DEVICE DOMAIN RULES ====================
 
 #[derive(Deserialize)]
@@ -3634,6 +3643,7 @@ pub async fn zapret_action(
         if let Err(e) = sync_zapret_files(&cfg.zapret).await {
             return api_err(format!("Ошибка синхронизации файлов Zapret: {e}"));
         }
+        let _ = crate::rci::set_clean_dns_servers(&state.http, &cfg).await;
 
         // Обновляем правила в config.yaml ядра Mihomo
         if std::path::Path::new(&cfg.mihomo.config_path).exists() {
@@ -3785,6 +3795,7 @@ pub async fn zapret_action(
     if action_to_run == "start" || action_to_run == "restart" {
         let _cfg = state.config.read().await;
         let _ = sync_zapret_files(&_cfg.zapret).await;
+        let _ = crate::rci::set_clean_dns_servers(&state.http, &_cfg).await;
     }
 
     match tokio::process::Command::new(init_script).arg(action_to_run).output().await {

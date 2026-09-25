@@ -768,6 +768,17 @@ pub async fn save_config(http: &reqwest::Client, cfg: &AppConfig) -> Result<(), 
     Ok(())
 }
 
+/// Настройка чистых DNS-серверов в KeeneticOS (Яндекс DNS 77.88.8.8, 77.88.8.1, Cloudflare 1.1.1.1)
+/// для устранения отравления DNS провайдером (NXDOMAIN для YouTube и сайтов).
+pub async fn set_clean_dns_servers(http: &reqwest::Client, cfg: &AppConfig) -> Result<(), String> {
+    let token = ensure_auth(http, cfg).await?;
+    let _ = rci_post(http, cfg, &token, "/rci/ip/name-server", json!({ "address": "77.88.8.8" })).await;
+    let _ = rci_post(http, cfg, &token, "/rci/ip/name-server", json!({ "address": "77.88.8.1" })).await;
+    let _ = rci_post(http, cfg, &token, "/rci/ip/name-server", json!({ "address": "1.1.1.1" })).await;
+    let _ = save_config(http, cfg).await;
+    Ok(())
+}
+
 
 
 

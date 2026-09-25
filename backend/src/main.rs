@@ -416,6 +416,7 @@ async fn main() {
         // Network Diagnostics & Smart DNS
         .route("/api/diagnostics/health", get(api::get_diagnostics_health))
         .route("/api/diagnostics/dns-test", post(api::test_dns_domain))
+        .route("/api/dns/clean-servers", post(api::apply_clean_dns))
         // Keenetic Policies Map
         .route("/api/policies/map", get(api::get_policies_map))
         // Zapret / DPI
