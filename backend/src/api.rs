@@ -981,6 +981,18 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
                 action,
                 o.status.code().unwrap_or(-1)
             );
+            if !o.status.success() && action != "status" {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let err_msg = if !stderr.trim().is_empty() {
+                    stderr.trim().to_string()
+                } else if !stdout.trim().is_empty() {
+                    stdout.trim().to_string()
+                } else {
+                    format!("Процесс завершился с кодом {}", o.status.code().unwrap_or(-1))
+                };
+                return api_err(format!("Команда '{}' завершилась с ошибкой: {}", action, err_msg));
+            }
             api_ok(json!({
                 "code": o.status.code(),
                 "stdout": String::from_utf8_lossy(&o.stdout),
@@ -1069,15 +1081,72 @@ pub async fn restore_backup(State(state): State<AppState>, Json(req): Json<Backu
     if !dir.is_dir() {
         return api_err(format!("Бэкап {} не найден", req.name));
     }
-    if let Err(e) = tokio::fs::copy(dir.join("config.yaml"), &cfg.mihomo.config_path).await {
+    let src_yaml = dir.join("config.yaml");
+    let src_json = dir.join("config.json");
+    if !src_yaml.exists() || !src_json.exists() {
+        return api_err(format!("В бэкапе {} отсутствуют необходимые файлы (config.yaml / config.json)", req.name));
+    }
+
+    let bak_yaml = format!("{}.bak", cfg.mihomo.config_path);
+    let bak_json = format!("{}.bak", state.config_path.display());
+    let had_yaml = tokio::fs::metadata(&cfg.mihomo.config_path).await.is_ok();
+    let had_json = tokio::fs::metadata(state.config_path.as_path()).await.is_ok();
+
+    if had_yaml {
+        let _ = tokio::fs::copy(&cfg.mihomo.config_path, &bak_yaml).await;
+    }
+    if had_json {
+        let _ = tokio::fs::copy(state.config_path.as_path(), &bak_json).await;
+    }
+
+    // Восстанавливаем config.yaml
+    if let Err(e) = tokio::fs::copy(&src_yaml, &cfg.mihomo.config_path).await {
+        if had_yaml {
+            let _ = tokio::fs::copy(&bak_yaml, &cfg.mihomo.config_path).await;
+            let _ = tokio::fs::remove_file(&bak_yaml).await;
+        }
+        if had_json {
+            let _ = tokio::fs::remove_file(&bak_json).await;
+        }
         return api_err(format!("Не удалось восстановить config.yaml: {e}"));
     }
-    if let Err(e) = tokio::fs::copy(dir.join("config.json"), state.config_path.as_path()).await {
+
+    // Восстанавливаем config.json
+    if let Err(e) = tokio::fs::copy(&src_json, state.config_path.as_path()).await {
+        if had_yaml {
+            let _ = tokio::fs::copy(&bak_yaml, &cfg.mihomo.config_path).await;
+            let _ = tokio::fs::remove_file(&bak_yaml).await;
+        }
+        if had_json {
+            let _ = tokio::fs::copy(&bak_json, state.config_path.as_path()).await;
+            let _ = tokio::fs::remove_file(&bak_json).await;
+        }
         return api_err(format!("Не удалось восстановить config.json: {e}"));
     }
+
+    // Перезагрузка ядра Mihomo
     if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
-        return api_err(format!("Конфиги восстановлены, но reload Mihomo не удался: {e}"));
+        // Откат при неудачной перезагрузке ядра
+        if had_yaml {
+            let _ = tokio::fs::copy(&bak_yaml, &cfg.mihomo.config_path).await;
+            let _ = tokio::fs::remove_file(&bak_yaml).await;
+        }
+        if had_json {
+            let _ = tokio::fs::copy(&bak_json, state.config_path.as_path()).await;
+            let _ = tokio::fs::remove_file(&bak_json).await;
+        }
+        let _ = mihomo::reload_config(&state.http, &cfg).await;
+        return api_err(format!("Ошибка применения конфигурации Mihomo ({e}), изменения откатаны"));
     }
+
+    // Очищаем .bak файлы при успешном применении
+    if had_yaml {
+        let _ = tokio::fs::remove_file(&bak_yaml).await;
+    }
+    if had_json {
+        let _ = tokio::fs::remove_file(&bak_json).await;
+    }
+
     // Перечитать конфиг панели в состояние асинхронно без блокировки.
     *state.config.write().await = std::sync::Arc::new(config::load_async(&state.config_path).await);
     log_i!("Конфиги восстановлены из бэкапа {}", req.name);
@@ -1167,18 +1236,35 @@ async fn ws_logs_stream(mut socket: axum::extract::ws::WebSocket, history_lines:
         return;
     };
     loop {
-        match rx.recv().await {
-            Ok(line) => {
-                if socket.send(axum::extract::ws::Message::text(line)).await.is_err() {
-                    break;
+        tokio::select! {
+            client_msg = socket.recv() => {
+                match client_msg {
+                    Some(Ok(axum::extract::ws::Message::Ping(payload))) => {
+                        if socket.send(axum::extract::ws::Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(axum::extract::ws::Message::Close(_))) | None => {
+                        break;
+                    }
+                    _ => {}
                 }
             }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                let _ = socket
-                    .send(axum::extract::ws::Message::text(format!("…пропущено {n} строк…")))
-                    .await;
+            log_res = rx.recv() => {
+                match log_res {
+                    Ok(line) => {
+                        if socket.send(axum::extract::ws::Message::text(line)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        let _ = socket
+                            .send(axum::extract::ws::Message::text(format!("…пропущено {n} строк…")))
+                            .await;
+                    }
+                    Err(_) => break,
+                }
             }
-            Err(_) => break,
         }
     }
 }
@@ -1745,6 +1831,79 @@ pub async fn read_config_file(
     }
 }
 
+fn validate_yaml_syntax(content: &str) -> Result<(), String> {
+    let mut bracket_stack = Vec::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+
+    for (line_num, line) in content.lines().enumerate() {
+        if line.contains('\t') {
+            return Err(format!("Строка {}: обнаружен символ табуляции (\\t). В YAML допускаются только пробелы.", line_num + 1));
+        }
+
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+
+        for (col, ch) in line.chars().enumerate() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' && in_double_quote {
+                escaped = true;
+                continue;
+            }
+            if ch == '\'' && !in_double_quote {
+                in_single_quote = !in_single_quote;
+                continue;
+            }
+            if ch == '"' && !in_single_quote {
+                in_double_quote = !in_double_quote;
+                continue;
+            }
+            if in_single_quote || in_double_quote {
+                continue;
+            }
+            if ch == '#' && (col == 0 || line[..col].ends_with(' ')) {
+                break;
+            }
+            match ch {
+                '[' | '{' => bracket_stack.push((ch, line_num + 1)),
+                ']' => match bracket_stack.pop() {
+                    Some(('[', _)) => {}
+                    Some((other, orig_line)) => {
+                        return Err(format!("Строка {}: несоответствие скобок — ожидалось закрытие '{}' из строки {}", line_num + 1, other, orig_line));
+                    }
+                    None => {
+                        return Err(format!("Строка {}: лишняя закрывающая скобка ']'", line_num + 1));
+                    }
+                },
+                '}' => match bracket_stack.pop() {
+                    Some(('{', _)) => {}
+                    Some((other, orig_line)) => {
+                        return Err(format!("Строка {}: несоответствие скобок — ожидалось закрытие '{}' из строки {}", line_num + 1, other, orig_line));
+                    }
+                    None => {
+                        return Err(format!("Строка {}: лишняя закрывающая фигурная скобка '}}'", line_num + 1));
+                    }
+                },
+                _ => {}
+            }
+        }
+    }
+
+    if let Some((ch, line)) = bracket_stack.pop() {
+        return Err(format!("Строка {}: незакрытая скобка '{}'", line, ch));
+    }
+    if in_single_quote || in_double_quote {
+        return Err("Обнаружена незакрытая кавычка в файле YAML".into());
+    }
+    Ok(())
+}
+
 /// POST /api/config-files/save
 pub async fn save_config_file(
     State(state): State<AppState>,
@@ -1759,6 +1918,12 @@ pub async fn save_config_file(
     if body.file == "route" {
         if let Err(e) = serde_json::from_str::<serde_json::Value>(&body.content) {
             return api_err(format!("Ошибка синтаксиса JSON в файле config.json: {e}"));
+        }
+    }
+
+    if body.file == "mihomo" || body.file.starts_with("provider:") {
+        if let Err(e) = validate_yaml_syntax(&body.content) {
+            return api_err(format!("Ошибка синтаксиса YAML: {e}"));
         }
     }
 
@@ -2875,7 +3040,8 @@ dell.com\n";
 
 pub const S51ZAPRET_SCRIPT: &str = r#"#!/bin/sh
 
-PIDFILE="/var/run/nfqws.pid"
+PIDFILE="/opt/var/run/zapret.pid"
+FAILSAFE_PID="/opt/var/run/zapret_failsafe.pid"
 CONF="/opt/etc/zapret/zapret.conf"
 
 find_bin() {
@@ -2915,6 +3081,11 @@ add_fw() {
   # 1. CRITICAL: Skip packets already marked by nfqws to prevent infinite packet looping
   iptables -t mangle -A zapret -m mark --mark 0x40000000/0x40000000 -j RETURN
 
+  # Exclude loopback and LAN bridge
+  iptables -t mangle -A zapret -o lo -j RETURN
+  iptables -t mangle -A zapret -i lo -j RETURN
+  iptables -t mangle -A zapret -o br+ -j RETURN
+
   # 2. CRITICAL: Skip private/local subnets & router IP so Keenetic Web UI / LAN are NEVER touched
   iptables -t mangle -A zapret -d 0.0.0.0/8 -j RETURN
   iptables -t mangle -A zapret -d 10.0.0.0/8 -j RETURN
@@ -2944,18 +3115,34 @@ add_fw() {
   # Hook into PREROUTING for client LAN bridge interfaces (br+)
   iptables -t mangle -I PREROUTING 1 -i br+ -j zapret
 
+  # Stop previous failsafe if running
+  if [ -f "$FAILSAFE_PID" ]; then
+    kill -9 $(cat "$FAILSAFE_PID") 2>/dev/null
+    rm -f "$FAILSAFE_PID"
+  fi
+
   # FAILSAFE: через 30 сек проверяем интернет, при потере — откатываем всё
   (sleep 30 && \
     if ! curl -s -m 5 -o /dev/null http://www.gstatic.com/generate_204 2>/dev/null && \
        ! curl -s -m 5 -o /dev/null http://cp.cloudflare.com 2>/dev/null; then
       del_fw
+      if [ -f "$PIDFILE" ]; then
+        kill $(cat "$PIDFILE") 2>/dev/null
+      fi
       killall -q nfqws 2>/dev/null
       logger -t zapret "FAILSAFE: internet connectivity lost after enabling zapret, iptables rules rolled back"
     fi
+    rm -f "$FAILSAFE_PID"
   ) &
+  echo $! > "$FAILSAFE_PID"
 }
 
 del_fw() {
+  if [ -f "$FAILSAFE_PID" ]; then
+    kill -9 $(cat "$FAILSAFE_PID") 2>/dev/null
+    rm -f "$FAILSAFE_PID"
+  fi
+
   # Remove hooks
   while iptables -t mangle -D POSTROUTING ! -o br+ ! -o lo -j zapret 2>/dev/null; do :; done
   while iptables -t mangle -D POSTROUTING -j zapret 2>/dev/null; do :; done
@@ -2981,15 +3168,22 @@ del_fw() {
 
 case "$1" in
   start)
-    if pidof nfqws >/dev/null 2>&1; then
+    mkdir -p /opt/var/run /opt/etc/zapret
+    if [ -f "$PIDFILE" ] && kill -0 $(cat "$PIDFILE") 2>/dev/null; then
+      add_fw
+      exit 0
+    elif pidof nfqws >/dev/null 2>&1; then
+      pidof nfqws | awk '{print $1}' > "$PIDFILE"
       add_fw
       exit 0
     fi
-    mkdir -p /opt/etc/zapret
     if [ -n "$BIN" ] && [ -x "$BIN" ]; then
-      $BIN $NFQWS_ARGS
+      $BIN --pidfile="$PIDFILE" $NFQWS_ARGS
       sleep 1
-      if pidof nfqws >/dev/null 2>&1; then
+      if [ -f "$PIDFILE" ] && kill -0 $(cat "$PIDFILE") 2>/dev/null; then
+        add_fw
+      elif pidof nfqws >/dev/null 2>&1; then
+        pidof nfqws | awk '{print $1}' > "$PIDFILE"
         add_fw
       else
         logger -t zapret "ERROR: nfqws failed to start with args: $NFQWS_ARGS"
@@ -3003,17 +3197,28 @@ case "$1" in
     ;;
   stop)
     del_fw
+    if [ -f "$PIDFILE" ]; then
+      kill $(cat "$PIDFILE") 2>/dev/null
+      rm -f "$PIDFILE"
+    fi
     killall -q nfqws 2>/dev/null
-    rm -f "$PIDFILE"
     ;;
   restart)
     del_fw
+    if [ -f "$PIDFILE" ]; then
+      kill $(cat "$PIDFILE") 2>/dev/null
+      rm -f "$PIDFILE"
+    fi
     killall -q nfqws 2>/dev/null
     sleep 1
+    mkdir -p /opt/var/run /opt/etc/zapret
     if [ -n "$BIN" ] && [ -x "$BIN" ]; then
-      $BIN $NFQWS_ARGS
+      $BIN --pidfile="$PIDFILE" $NFQWS_ARGS
       sleep 1
-      if pidof nfqws >/dev/null 2>&1; then
+      if [ -f "$PIDFILE" ] && kill -0 $(cat "$PIDFILE") 2>/dev/null; then
+        add_fw
+      elif pidof nfqws >/dev/null 2>&1; then
+        pidof nfqws | awk '{print $1}' > "$PIDFILE"
         add_fw
       else
         logger -t zapret "ERROR: nfqws failed to restart with args: $NFQWS_ARGS"
@@ -3026,7 +3231,9 @@ case "$1" in
     fi
     ;;
   status)
-    if pidof nfqws >/dev/null 2>&1; then
+    if [ -f "$PIDFILE" ] && kill -0 $(cat "$PIDFILE") 2>/dev/null; then
+      exit 0
+    elif pidof nfqws >/dev/null 2>&1; then
       exit 0
     else
       exit 1
@@ -3097,27 +3304,45 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
     (args, voice_enabled)
 }
 
-pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) {
-    let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
-    let _ = tokio::fs::create_dir_all("/opt/etc/init.d").await;
+pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), String> {
+    tokio::fs::create_dir_all("/opt/etc/zapret")
+        .await
+        .map_err(|e| format!("Не удалось создать /opt/etc/zapret: {e}"))?;
+    tokio::fs::create_dir_all("/opt/etc/init.d")
+        .await
+        .map_err(|e| format!("Не удалось создать /opt/etc/init.d: {e}"))?;
 
     // 1. S51zapret script
-    let _ = tokio::fs::write("/opt/etc/init.d/S51zapret", S51ZAPRET_SCRIPT).await;
-    let _ = tokio::process::Command::new("chmod").arg("+x").arg("/opt/etc/init.d/S51zapret").output().await;
+    tokio::fs::write("/opt/etc/init.d/S51zapret", S51ZAPRET_SCRIPT)
+        .await
+        .map_err(|e| format!("Не удалось записать /opt/etc/init.d/S51zapret: {e}"))?;
+    tokio::process::Command::new("chmod")
+        .arg("+x")
+        .arg("/opt/etc/init.d/S51zapret")
+        .output()
+        .await
+        .map_err(|e| format!("Не удалось сделать S51zapret исполняемым: {e}"))?;
 
     // 2. Default hostlist if missing
     if !std::path::Path::new("/opt/etc/zapret/zapret-hosts.txt").exists() {
         let _ = tokio::fs::write("/opt/etc/zapret/zapret-hosts.txt", DEFAULT_ZAPRET_HOSTS).await;
     }
 
-    // 3. zapret.conf with multi-strategy args
-    let (args, voice_enabled) = build_nfqws_args(cfg);
+    // 3. zapret.conf with multi-strategy args or custom_args
+    let (args, voice_enabled) = if let Some(custom) = &cfg.custom_args {
+        (custom.clone(), cfg.discord_voice_udp)
+    } else {
+        build_nfqws_args(cfg)
+    };
     let conf_data = format!(
         "NFQWS_ARGS=\"{}\"\nDISCORD_VOICE_ENABLED=\"{}\"\n",
         args,
         if voice_enabled { "1" } else { "0" }
     );
-    let _ = tokio::fs::write("/opt/etc/zapret/zapret.conf", conf_data).await;
+    tokio::fs::write("/opt/etc/zapret/zapret.conf", conf_data)
+        .await
+        .map_err(|e| format!("Не удалось записать /opt/etc/zapret/zapret.conf: {e}"))?;
+    Ok(())
 }
 
 /// GET /api/zapret/status — статус nfqws, iptables и S51zapret
@@ -3293,10 +3518,12 @@ pub async fn zapret_action(
     if act == "set_preset" {
         let p = body.preset.as_deref().unwrap_or("general");
         let _cfg_guard = state.config_lock.lock().await;
+        let _routing_guard = state.routing_lock.lock().await;
         let mut cfg = (**state.config.read().await).clone();
 
         match p {
             "youtube" => {
+                cfg.zapret.custom_args = None;
                 cfg.zapret.youtube_turbo = true;
                 cfg.zapret.hybrid_youtube = true;
                 cfg.zapret.hybrid_discord = false;
@@ -3305,6 +3532,7 @@ pub async fn zapret_action(
                 cfg.zapret.aggressive_dpi = false;
             }
             "discord" => {
+                cfg.zapret.custom_args = None;
                 cfg.zapret.youtube_turbo = false;
                 cfg.zapret.hybrid_youtube = false;
                 cfg.zapret.hybrid_discord = true;
@@ -3313,6 +3541,7 @@ pub async fn zapret_action(
                 cfg.zapret.aggressive_dpi = false;
             }
             "gamer" | "media" => {
+                cfg.zapret.custom_args = None;
                 cfg.zapret.youtube_turbo = true;
                 cfg.zapret.hybrid_youtube = true;
                 cfg.zapret.hybrid_discord = true;
@@ -3321,6 +3550,7 @@ pub async fn zapret_action(
                 cfg.zapret.aggressive_dpi = false;
             }
             "aggressive" => {
+                cfg.zapret.custom_args = None;
                 cfg.zapret.youtube_turbo = true;
                 cfg.zapret.hybrid_youtube = true;
                 cfg.zapret.hybrid_discord = true;
@@ -3330,13 +3560,12 @@ pub async fn zapret_action(
             }
             "custom" => {
                 if let Some(custom) = &body.custom_args {
-                    let conf_data = format!("NFQWS_ARGS=\"{custom}\"\nDISCORD_VOICE_ENABLED=\"0\"\n");
-                    let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
-                    let _ = tokio::fs::write("/opt/etc/zapret/zapret.conf", conf_data).await;
+                    cfg.zapret.custom_args = Some(custom.clone());
                 }
             }
             _ => {
                 // "general" / "all"
+                cfg.zapret.custom_args = None;
                 cfg.zapret.youtube_turbo = false;
                 cfg.zapret.hybrid_youtube = true;
                 cfg.zapret.hybrid_discord = true;
@@ -3346,8 +3575,8 @@ pub async fn zapret_action(
             }
         }
 
-        if p != "custom" {
-            sync_zapret_files(&cfg.zapret).await;
+        if let Err(e) = sync_zapret_files(&cfg.zapret).await {
+            return api_err(format!("Ошибка синхронизации файлов Zapret: {e}"));
         }
 
         // Обновляем правила в config.yaml ядра Mihomo
@@ -3394,7 +3623,7 @@ pub async fn zapret_action(
             Ok(out) => {
                 let output_str = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
                 let _cfg = state.config.read().await;
-                sync_zapret_files(&_cfg.zapret).await;
+                let _ = sync_zapret_files(&_cfg.zapret).await;
                 if let Ok(out) = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("start").output().await {
             if !out.status.success() {
                 return api_err(format!("Ошибка запуска Zapret: {}", String::from_utf8_lossy(&out.stderr)));
@@ -3410,6 +3639,7 @@ pub async fn zapret_action(
     // 5. Управление независимыми режимами и выключателями (toggle_feature / set_features / reset_features)
     if act == "toggle_feature" || act == "set_features" || act == "reset_features" {
         let _cfg_guard = state.config_lock.lock().await;
+        let _routing_guard = state.routing_lock.lock().await;
         let mut cfg = (**state.config.read().await).clone();
         if act == "reset_features" {
             cfg.zapret = crate::config::ZapretConfig::default();
@@ -3436,14 +3666,14 @@ pub async fn zapret_action(
             .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
             .unwrap_or(false);
 
-        if !is_running {
-            cfg.zapret.enabled = false;
+        // Обновляем файлы zapret.conf и S51zapret
+        if let Err(e) = sync_zapret_files(&cfg.zapret).await {
+            return api_err(format!("Ошибка синхронизации файлов Zapret: {e}"));
         }
 
-        // Обновляем файлы zapret.conf и S51zapret
-        sync_zapret_files(&cfg.zapret).await;
-
-        if is_running {
+        if is_running && !cfg.zapret.enabled {
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("stop").output().await;
+        } else if is_running && cfg.zapret.enabled {
             let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
         }
 
@@ -3494,7 +3724,7 @@ pub async fn zapret_action(
     // Перед стартом гарантируем актуальные и безопасные правила
     if action_to_run == "start" || action_to_run == "restart" {
         let _cfg = state.config.read().await;
-        sync_zapret_files(&_cfg.zapret).await;
+        let _ = sync_zapret_files(&_cfg.zapret).await;
     }
 
     match tokio::process::Command::new(init_script).arg(action_to_run).output().await {

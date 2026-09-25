@@ -430,9 +430,7 @@ body {
   user-select: none;
   white-space: nowrap;
 }
-.tab.tab-help {
-  margin-left: auto;
-}
+
 .tab:hover {
   color: var(--text);
   background: var(--panel-2);

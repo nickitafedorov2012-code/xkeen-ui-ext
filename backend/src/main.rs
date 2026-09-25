@@ -286,7 +286,18 @@ async fn main() {
             let next_run = chrono::Local::now() + chrono::Duration::from_std(wait_dur).unwrap_or_default();
             log_i!("[CDN-SCHEDULE] Следующее еженедельное сканирование CDN запланировано на {}", next_run.format("%Y-%m-%d %H:%M:%S"));
 
-            tokio::time::sleep(wait_dur).await;
+            let mut elapsed = std::time::Duration::ZERO;
+            while elapsed < wait_dur {
+                if failover::is_shutdown() {
+                    return;
+                }
+                let step = std::cmp::min(std::time::Duration::from_secs(10), wait_dur - elapsed);
+                tokio::time::sleep(step).await;
+                elapsed += step;
+            }
+            if failover::is_shutdown() {
+                return;
+            }
 
             let cfg = weekly_state.config.read().await;
             if !cfg.force_domains.is_empty() {
@@ -455,6 +466,8 @@ async fn main() {
     log_i!("Остановка: новые соединения закрыты, завершаю фоновые задачи…");
     antigravity::shutdown();
     failover::shutdown();
+    watchdog::shutdown();
+    traffic::shutdown();
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     log_i!("XKeen Route остановлен");
 }

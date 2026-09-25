@@ -314,7 +314,7 @@ function parseTrojan(link: string): ParsedNode | null {
   const atIdx = mainPart.indexOf('@')
   if (atIdx === -1) return null
 
-  const password = mainPart.slice(0, atIdx)
+  const password = decodeURIComponent(mainPart.slice(0, atIdx))
   const rest = mainPart.slice(atIdx + 1)
   const qIdx = rest.indexOf('?')
   const hostPort = qIdx !== -1 ? rest.slice(0, qIdx) : rest
@@ -405,12 +405,13 @@ function parseTuic(link: string): ParsedNode | null {
   const queryStr = qIdx !== -1 ? rest.slice(qIdx + 1) : ''
 
   const colonIdx = userpass.indexOf(':')
-  const uuid = colonIdx !== -1 ? userpass.slice(0, colonIdx) : userpass
-  const password = colonIdx !== -1 ? userpass.slice(colonIdx + 1) : ''
+  const uuid = decodeURIComponent(colonIdx !== -1 ? userpass.slice(0, colonIdx) : userpass)
+  const password = decodeURIComponent(colonIdx !== -1 ? userpass.slice(colonIdx + 1) : '')
   const { server, port } = parseHostPort(hostPort, 443)
   const params = new URLSearchParams(queryStr)
   const sni = params.get('sni') || ''
   const congestion = params.get('congestion_control') || 'bbr'
+  const alpn = params.get('alpn') || ''
 
   const node: Record<string, any> = {
     name,
@@ -422,6 +423,9 @@ function parseTuic(link: string): ParsedNode | null {
     'congestion-controller': congestion,
   }
   if (sni) node['sni'] = sni
+  if (alpn) {
+    node['alpn'] = alpn.split(',').map((s) => s.trim()).filter(Boolean)
+  }
 
   return {
     name,
@@ -470,7 +474,7 @@ function objectToYamlNode(obj: Record<string, any>): string {
 }
 
 /**
- * Экспорт параметров сервера в стандартную URI-ссылку подключения (VLESS, VMess, SS, Trojan, Hysteria2)
+ * Экспорт параметров сервера в стандартную URI-ссылку подключения (VLESS, VMess, SS, Trojan, Hysteria2, TUIC)
  */
 export function exportServerToLink(server: {
   name: string
@@ -502,6 +506,16 @@ export function exportServerToLink(server: {
     if (pbk) query += `&pbk=${encodeURIComponent(pbk)}`
     if (sid) query += `&sid=${encodeURIComponent(sid)}`
     if (fp) query += `&fp=${encodeURIComponent(fp)}`
+
+    if (network === 'ws' || raw['ws-opts']) {
+      const wsPath = raw['ws-opts']?.path || ''
+      const wsHost = raw['ws-opts']?.headers?.Host || raw['ws-opts']?.headers?.host || raw['ws-opts']?.host || ''
+      if (wsPath) query += `&path=${encodeURIComponent(wsPath)}`
+      if (wsHost) query += `&host=${encodeURIComponent(wsHost)}`
+    } else if (network === 'grpc' || raw['grpc-opts']) {
+      const grpcServiceName = raw['grpc-opts']?.['grpc-service-name'] || raw['grpc-opts']?.serviceName || ''
+      if (grpcServiceName) query += `&serviceName=${encodeURIComponent(grpcServiceName)}`
+    }
 
     return `vless://${uuid}@${host}:${port}?${query}#${name}`
   }
@@ -544,6 +558,21 @@ export function exportServerToLink(server: {
     if (raw.obfs) params.set('obfs', String(raw.obfs))
     if (raw['obfs-password']) params.set('obfs-password', String(raw['obfs-password']))
     return `hysteria2://${encodeURIComponent(String(auth))}@${host}:${port}?${params.toString()}#${name}`
+  }
+
+  if (proto === 'tuic' || raw.type?.toLowerCase() === 'tuic') {
+    const uuid = raw.uuid || ''
+    const password = raw.password || ''
+    const sni = raw.servername || raw.sni || ''
+    const congestion = raw['congestion-controller'] || raw.congestion_control || 'bbr'
+    const alpn = Array.isArray(raw.alpn) ? raw.alpn.join(',') : (raw.alpn || '')
+    const userinfo = password ? `${encodeURIComponent(uuid)}:${encodeURIComponent(password)}` : encodeURIComponent(uuid)
+    const params = new URLSearchParams()
+    if (congestion) params.set('congestion_control', congestion)
+    if (alpn) params.set('alpn', alpn)
+    if (sni) params.set('sni', sni)
+    const qs = params.toString() ? `?${params.toString()}` : ''
+    return `tuic://${userinfo}@${host}:${port}${qs}#${name}`
   }
 
   return `${proto}://${host}:${port}#${name}`

@@ -24,6 +24,28 @@ pub async fn run_speedtest(
 ) -> Result<SpeedtestResponse, String> {
     log_i!("Запуск теста скорости для сервера '{}'", server_id);
 
+    // 1. Замер задержки выбранного узла через API ядра Mihomo
+    let mut first_byte_ms = 0u32;
+    if !server_id.is_empty() {
+        let measured_ping = crate::mihomo::ping_server_url(_http, _cfg, server_id, 4000, Some("https://cp.cloudflare.com")).await;
+        if measured_ping > 0 {
+            first_byte_ms = measured_ping as u32;
+        }
+    }
+
+    // 2. Временное переключение активного сервера на целевой server_id для замера
+    let proxies_opt = crate::mihomo::get_proxies(_http, _cfg).await.ok();
+    let original_server = proxies_opt.as_ref().map(|p| crate::mihomo::resolve_active_leaf(p));
+    let need_restore = if let Some(orig) = &original_server {
+        if !orig.is_empty() && orig != server_id && !server_id.is_empty() {
+            crate::mihomo::switch_server(_http, _cfg, server_id).await.is_ok()
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     // Тестовые зеркала для скачивания чанка (5-10 МБ)
     let test_urls = [
         "https://speed.cloudflare.com/__down?bytes=5242880",
@@ -33,19 +55,36 @@ pub async fn run_speedtest(
 
     // Настраиваем HTTP клиент через локальный HTTP/SOCKS5 прокси Mihomo
     let proxy_url = _cfg.mihomo_proxy_url();
-    let proxy = reqwest::Proxy::all(&proxy_url)
-        .map_err(|e| format!("Ошибка создания прокси: {}", e))?;
+    let proxy = match reqwest::Proxy::all(&proxy_url) {
+        Ok(p) => p,
+        Err(e) => {
+            if need_restore {
+                if let Some(orig) = &original_server {
+                    let _ = crate::mihomo::switch_server(_http, _cfg, orig).await;
+                }
+            }
+            return Err(format!("Ошибка создания прокси: {}", e));
+        }
+    };
 
-    let client = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .proxy(proxy)
-        
         .timeout(std::time::Duration::from_secs(20))
         .build()
-        .map_err(|e| format!("Ошибка инициализации HTTP клиента: {}", e))?;
+    {
+        Ok(c) => c,
+        Err(e) => {
+            if need_restore {
+                if let Some(orig) = &original_server {
+                    let _ = crate::mihomo::switch_server(_http, _cfg, orig).await;
+                }
+            }
+            return Err(format!("Ошибка инициализации HTTP клиента: {}", e));
+        }
+    };
 
     let start = Instant::now();
     let mut total_bytes = 0u64;
-    let mut first_byte_ms = 0u32;
     let mut success = false;
 
     for url in &test_urls {
@@ -55,7 +94,9 @@ pub async fn run_speedtest(
                 if !resp.status().is_success() {
                     continue;
                 }
-                first_byte_ms = req_start.elapsed().as_millis() as u32;
+                if first_byte_ms == 0 {
+                    first_byte_ms = req_start.elapsed().as_millis() as u32;
+                }
 
                 while let Ok(Some(chunk)) = resp.chunk().await {
                     total_bytes += chunk.len() as u64;
@@ -72,6 +113,13 @@ pub async fn run_speedtest(
             Err(e) => {
                 log_w!("Ошибка скачивания с {}: {}", url, e);
             }
+        }
+    }
+
+    // Восстанавливаем исходный сервер после замера
+    if need_restore {
+        if let Some(orig) = &original_server {
+            let _ = crate::mihomo::switch_server(_http, _cfg, orig).await;
         }
     }
 

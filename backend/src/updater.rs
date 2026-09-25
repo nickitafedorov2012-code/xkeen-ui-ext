@@ -202,6 +202,37 @@ pub async fn check(State(state): State<AppState>) -> Response {
     }))
 }
 
+pub fn validate_elf_header(header: &[u8], target_arch: &str) -> Result<(), String> {
+    if header.len() < 20 || header[0..4] != [0x7F, b'E', b'L', b'F'] {
+        return Err("Файл не является ELF-бинарём".to_string());
+    }
+
+    let ei_class = header[4]; // 1 = 32-bit, 2 = 64-bit
+    let ei_data = header[5];  // 1 = LSB, 2 = MSB
+    let e_machine = if ei_data == 2 {
+        u16::from_be_bytes([header[18], header[19]])
+    } else {
+        u16::from_le_bytes([header[18], header[19]])
+    };
+
+    let valid_arch = match target_arch {
+        "aarch64" => ei_class == 2 && e_machine == 183,
+        "arm" => ei_class == 1 && e_machine == 40,
+        "mipsel" => ei_class == 1 && ei_data == 1 && e_machine == 8,
+        "mips" => ei_class == 1 && ei_data == 2 && e_machine == 8,
+        "x86_64" => ei_class == 2 && e_machine == 62,
+        "x86" => ei_class == 1 && e_machine == 3,
+        _ => true,
+    };
+
+    if !valid_arch {
+        return Err(format!(
+            "Архитектура скачанного ELF-файла (class={ei_class}, data={ei_data}, machine={e_machine:#x}) не соответствует целевой системе ({target_arch})"
+        ));
+    }
+    Ok(())
+}
+
 /// POST /api/update/install — скачать бинарь релиза, заменить, перезапустить сервис.
 pub async fn install(State(state): State<AppState>) -> Response {
     let proxy_url = {
@@ -253,17 +284,17 @@ pub async fn install(State(state): State<AppState>) -> Response {
     };
 
     let mut total_bytes = 0usize;
-    let mut magic = [0u8; 4];
-    let mut magic_len = 0usize;
+    let mut header = [0u8; 20];
+    let mut header_len = 0usize;
 
     loop {
         match res.chunk().await {
             Ok(Some(chunk)) => {
-                if magic_len < 4 {
-                    let needed = 4 - magic_len;
+                if header_len < 20 {
+                    let needed = 20 - header_len;
                     let take = chunk.len().min(needed);
-                    magic[magic_len..magic_len + take].copy_from_slice(&chunk[..take]);
-                    magic_len += take;
+                    header[header_len..header_len + take].copy_from_slice(&chunk[..take]);
+                    header_len += take;
                 }
                 total_bytes += chunk.len();
                 if let Err(e) = file.write_all(&chunk).await {
@@ -290,9 +321,9 @@ pub async fn install(State(state): State<AppState>) -> Response {
         let _ = tokio::fs::remove_file(&tmp).await;
         return api_err(format!("Файл слишком мал ({total_bytes} байт) — повреждённый артефакт"));
     }
-    if magic != [0x7F, b'E', b'L', b'F'] {
+    if let Err(e) = validate_elf_header(&header, arch) {
         let _ = tokio::fs::remove_file(&tmp).await;
-        return api_err("Файл не является ELF-бинарём — отменено");
+        return api_err(format!("{e} — отменено"));
     }
 
     // Замена бинаря.
@@ -795,5 +826,45 @@ mod tests {
         let mips = find_mihomo_asset(&assets, "mipsle");
         assert!(mips.is_some());
         assert_eq!(mips.unwrap().name, "mihomo-linux-mipsle-softfloat-v1.19.31.gz");
+    }
+
+    #[test]
+    fn test_validate_elf_header_architectures() {
+        // Valid AARCH64 (class=2, data=1, machine=183 / 0x00B7)
+        let mut arm64_hdr = [0u8; 20];
+        arm64_hdr[0..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+        arm64_hdr[4] = 2; // 64-bit
+        arm64_hdr[5] = 1; // little endian
+        arm64_hdr[18] = 0xB7; // 183 LE
+        arm64_hdr[19] = 0x00;
+        assert!(validate_elf_header(&arm64_hdr, "aarch64").is_ok());
+
+        // Alien test: arm64 header on arm32 (target "arm") -> MUST fail
+        assert!(validate_elf_header(&arm64_hdr, "arm").is_err());
+
+        // Valid ARM32 (class=1, data=1, machine=40 / 0x0028)
+        let mut arm32_hdr = [0u8; 20];
+        arm32_hdr[0..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+        arm32_hdr[4] = 1; // 32-bit
+        arm32_hdr[5] = 1; // little endian
+        arm32_hdr[18] = 40;
+        arm32_hdr[19] = 0;
+        assert!(validate_elf_header(&arm32_hdr, "arm").is_ok());
+        // Alien test: arm32 on aarch64 -> MUST fail
+        assert!(validate_elf_header(&arm32_hdr, "aarch64").is_err());
+
+        // Valid MIPSEL (class=1, data=1, machine=8)
+        let mut mipsel_hdr = [0u8; 20];
+        mipsel_hdr[0..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+        mipsel_hdr[4] = 1;
+        mipsel_hdr[5] = 1; // LSB
+        mipsel_hdr[18] = 8;
+        assert!(validate_elf_header(&mipsel_hdr, "mipsel").is_ok());
+        // Alien test: mipsel on mips (MSB) -> MUST fail
+        assert!(validate_elf_header(&mipsel_hdr, "mips").is_err());
+
+        // Corrupted / non-ELF header
+        let text_hdr = b"<!DOCTYPE html><html>";
+        assert!(validate_elf_header(text_hdr, "aarch64").is_err());
     }
 }

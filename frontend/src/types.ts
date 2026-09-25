@@ -52,6 +52,7 @@ export interface ServerInfo {
   ping_ms: number
   provider?: string
   provider_name?: string
+  raw?: Record<string, any>
 }
 
 export interface ProviderInfo {

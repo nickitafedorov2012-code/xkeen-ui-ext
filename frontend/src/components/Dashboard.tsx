@@ -7,7 +7,7 @@ interface Props {
   status: StatusInfo | null
   notify: (msg: string, isError?: boolean) => void
   refresh?: () => void
-  onSwitchTab?: (tab: 'dashboard' | 'servers' | 'devices' | 'settings' | 'help' | 'google-ai') => void
+  onSwitchTab?: (tab: 'dashboard' | 'servers' | 'devices' | 'settings' | 'google-ai') => void
 }
 
 interface GroupedEvent {

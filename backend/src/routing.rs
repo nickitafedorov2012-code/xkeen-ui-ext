@@ -471,6 +471,12 @@ pub const FLOW_DOMAINS: &[&str] = &[
 
 /// Удаление блока Google Flow & AI правил из YAML.
 pub fn remove_flow_rules(yaml: &str) -> String {
+    if !yaml.contains(GOOGLE_AI_BEGIN) {
+        return yaml.to_string();
+    }
+    if !yaml.contains(GOOGLE_AI_END) {
+        return yaml.lines().filter(|l| l.trim() != GOOGLE_AI_BEGIN).collect::<Vec<_>>().join("\n");
+    }
     let mut out = Vec::new();
     let mut skip = false;
     for line in yaml.lines() {
@@ -514,6 +520,7 @@ pub fn find_flow_group_name(yaml: &str) -> Option<String> {
 
 /// Применение выделенного маршрута Google Flow & AI в rules: (после AdBlock).
 pub fn apply_flow_rules(yaml: &str, target: &str, group_name: Option<&str>) -> Result<String, String> {
+    crate::routing::validate_marker_pair(yaml, GOOGLE_AI_BEGIN, GOOGLE_AI_END)?;
     let content = remove_flow_rules(yaml);
     let target_dest = if let Some(g) = group_name { g } else { target };
     if target_dest.is_empty() {
@@ -541,6 +548,12 @@ pub fn apply_flow_rules(yaml: &str, target: &str, group_name: Option<&str>) -> R
 
 /// Удаление блока AdBlock из YAML.
 pub fn remove_adblock_rules(yaml: &str) -> String {
+    if !yaml.contains(ADBLOCK_BEGIN) {
+        return yaml.to_string();
+    }
+    if !yaml.contains(ADBLOCK_END) {
+        return yaml.lines().filter(|l| l.trim() != ADBLOCK_BEGIN).collect::<Vec<_>>().join("\n");
+    }
     let mut out = Vec::new();
     let mut skip = false;
     for line in yaml.lines() {
@@ -563,6 +576,7 @@ pub fn remove_adblock_rules(yaml: &str) -> String {
 /// Применение правила AdBlock: если включено — вставка сразу под rules:.
 /// Если выключено — удаление блока.
 pub fn apply_adblock_rules(yaml: &str, enabled: bool) -> Result<String, String> {
+    crate::routing::validate_marker_pair(yaml, ADBLOCK_BEGIN, ADBLOCK_END)?;
     let content = remove_adblock_rules(yaml);
     if !enabled {
         return Ok(content);
@@ -587,6 +601,12 @@ pub fn apply_adblock_rules(yaml: &str, enabled: bool) -> Result<String, String> 
 
 /// Удаление блока правил Zapret Hybrid из YAML.
 pub fn remove_zapret_hybrid_rules(yaml: &str) -> String {
+    if !yaml.contains(ZAPRET_HYBRID_BEGIN) {
+        return yaml.to_string();
+    }
+    if !yaml.contains(ZAPRET_HYBRID_END) {
+        return yaml.lines().filter(|l| l.trim() != ZAPRET_HYBRID_BEGIN).collect::<Vec<_>>().join("\n");
+    }
     let mut out = Vec::new();
     let mut skip = false;
     for line in yaml.lines() {
@@ -686,19 +706,42 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
 
 /// Удаление доменных блоков (DIRECT/FORCE/DEVICE-DOMAINS) из YAML.
 pub fn remove_domain_blocks(yaml: &str) -> String {
+    let has_direct_end = yaml.contains(DIRECT_END);
+    let has_force_end = yaml.contains(FORCE_END);
+    let has_dev_end = yaml.contains(DEV_DOMAINS_END);
+
     let mut out = Vec::new();
-    let mut skip = false;
+    let mut in_direct = false;
+    let mut in_force = false;
+    let mut in_dev = false;
+
     for line in yaml.lines() {
         let t = line.trim();
-        if t == DIRECT_BEGIN || t == FORCE_BEGIN || t == DEV_DOMAINS_BEGIN {
-            skip = true;
+        if t == DIRECT_BEGIN {
+            if has_direct_end { in_direct = true; }
             continue;
         }
-        if t == DIRECT_END || t == FORCE_END || t == DEV_DOMAINS_END {
-            skip = false;
+        if t == DIRECT_END {
+            in_direct = false;
             continue;
         }
-        if !skip {
+        if t == FORCE_BEGIN {
+            if has_force_end { in_force = true; }
+            continue;
+        }
+        if t == FORCE_END {
+            in_force = false;
+            continue;
+        }
+        if t == DEV_DOMAINS_BEGIN {
+            if has_dev_end { in_dev = true; }
+            continue;
+        }
+        if t == DEV_DOMAINS_END {
+            in_dev = false;
+            continue;
+        }
+        if !in_direct && !in_force && !in_dev {
             out.push(line);
         }
     }
@@ -1593,6 +1636,51 @@ proxy-groups:
         assert!(!disabled.contains("discord.com,DIRECT"));
         assert!(!disabled.contains("openai.com"));
         assert!(disabled.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
+    }
+
+    #[test]
+    fn test_remove_adblock_missing_end_marker_does_not_truncate() {
+        let yaml_with_missing_end = format!(
+            "rules:\n{}\n  - GEOSITE,category-ads-all,REJECT\n  - GEOIP,RU,DIRECT\n  - MATCH,PROXY\n",
+            ADBLOCK_BEGIN
+        );
+        let result = remove_adblock_rules(&yaml_with_missing_end);
+        assert_eq!(result, yaml_with_missing_end);
+        assert!(result.contains("GEOIP,RU,DIRECT"));
+        assert!(result.contains("MATCH,PROXY"));
+    }
+
+    #[test]
+    fn test_remove_flow_missing_end_marker_does_not_truncate() {
+        let yaml_with_missing_end = format!(
+            "rules:\n{}\n  - DOMAIN-SUFFIX,google.com,FLOW\n  - GEOIP,RU,DIRECT\n",
+            FLOW_BEGIN
+        );
+        let result = remove_flow_rules(&yaml_with_missing_end);
+        assert_eq!(result, yaml_with_missing_end);
+        assert!(result.contains("GEOIP,RU,DIRECT"));
+    }
+
+    #[test]
+    fn test_remove_zapret_hybrid_missing_end_marker_does_not_truncate() {
+        let yaml_with_missing_end = format!(
+            "rules:\n{}\n  - DOMAIN-SUFFIX,youtube.com,DIRECT\n  - MATCH,PROXY\n",
+            ZAPRET_HYBRID_BEGIN
+        );
+        let result = remove_zapret_hybrid_rules(&yaml_with_missing_end);
+        assert_eq!(result, yaml_with_missing_end);
+        assert!(result.contains("MATCH,PROXY"));
+    }
+
+    #[test]
+    fn test_remove_domain_blocks_missing_end_marker_does_not_truncate() {
+        let yaml_with_missing_end = format!(
+            "rules:\n{}\n  - DOMAIN,blocked.com,REJECT\n  - MATCH,PROXY\n",
+            DOMAIN_BLOCKS_BEGIN
+        );
+        let result = remove_domain_blocks(&yaml_with_missing_end);
+        assert_eq!(result, yaml_with_missing_end);
+        assert!(result.contains("MATCH,PROXY"));
     }
 }
 

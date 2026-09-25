@@ -3,6 +3,16 @@ use tokio::time::{sleep, Duration};
 
 use crate::{log_i, log_w, mihomo, override_sync, routing, AppState};
 
+pub static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn shutdown() {
+    SHUTDOWN.store(true, std::sync::atomic::Ordering::Release);
+}
+
+pub fn is_shutdown() -> bool {
+    SHUTDOWN.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// Фоновый сторожевой процесс (watchdog) для защиты конфигурации config.yaml.
 /// Если служба XKeen перезапускается (S05xkeen restart или автообновление по расписанию),
 /// XKeen перегенерирует config.yaml, затирая блоки AUTO-DEVICE и AUTO-FORCE.
@@ -11,13 +21,23 @@ pub fn spawn(state: AppState) {
     spawn_schedules_monitor(state.clone());
     tokio::spawn(async move {
         // Начальная пауза перед запуском монитора
-        sleep(Duration::from_secs(10)).await;
+        for _ in 0..10 {
+            if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
 
         let mut last_mtime: Option<std::time::SystemTime> = None;
         let mut last_len: usize = 0;
 
         loop {
-            sleep(Duration::from_secs(4)).await;
+            for _ in 0..4 {
+                if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                sleep(Duration::from_secs(1)).await;
+            }
 
             let (config_path_str, force_domains, device_routing, ignore_servers, device_domains, adblock_enabled, flow_server, zapret_cfg) = {
                 let cfg = state.config.read().await;
@@ -136,9 +156,19 @@ pub fn is_time_in_range(now_hm: &str, start_hm: &str, end_hm: &str) -> bool {
 /// Фоновый монитор расписаний устройств (автоматическая блокировка / переключение).
 pub fn spawn_schedules_monitor(state: AppState) {
     tokio::spawn(async move {
-        sleep(Duration::from_secs(15)).await;
+        for _ in 0..15 {
+            if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
         loop {
-            sleep(Duration::from_secs(30)).await;
+            for _ in 0..30 {
+                if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                sleep(Duration::from_secs(1)).await;
+            }
             let cfg = state.config.read().await.clone();
             if cfg.schedules.is_empty() {
                 continue;
@@ -173,5 +203,17 @@ pub fn spawn_schedules_monitor(state: AppState) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_watchdog_shutdown_flag() {
+        assert!(!is_shutdown());
+        shutdown();
+        assert!(is_shutdown());
+    }
 }
 

@@ -6,7 +6,7 @@ interface HeaderProps {
   status: StatusInfo | null
   notify: (msg: string, isError?: boolean) => void
   refresh: () => Promise<void>
-  onSwitchTab: (tab: 'dashboard' | 'servers' | 'devices' | 'settings' | 'help' | 'google-ai') => void
+  onSwitchTab: (tab: 'dashboard' | 'servers' | 'devices' | 'settings' | 'google-ai') => void
   theme?: 'dark' | 'light'
   onToggleTheme?: () => void
   onOpenEditor?: () => void
@@ -463,14 +463,6 @@ export default function Header({
           </button>
         )}
 
-        <button
-          type="button"
-          className="header-action-btn"
-          onClick={() => onSwitchTab('help')}
-          title="Справка и база знаний"
-        >
-          <span style={{ fontSize: '15px' }}>📖</span>
-        </button>
 
         {authStatus?.enabled && authStatus?.authenticated && onLogout && (
           <button

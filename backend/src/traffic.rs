@@ -69,9 +69,18 @@ pub fn get_snapshot_json() -> serde_json::Value {
     })
 }
 
+pub static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn shutdown() {
+    SHUTDOWN.store(true, Ordering::Release);
+}
+
 /// Поток чтения /traffic из Mihomo (Server-Sent Chunks)
 async fn run_mihomo_stream(state: AppState) {
     loop {
+        if SHUTDOWN.load(Ordering::Acquire) {
+            break;
+        }
         let (mihomo_url, secret) = {
             let cfg = state.config.read().await;
             (cfg.mihomo_url(), cfg.mihomo.secret.clone())
@@ -86,10 +95,18 @@ async fn run_mihomo_stream(state: AppState) {
             Ok(mut resp) if resp.status().is_success() => {
                 let mut buffer = String::new();
                 loop {
+                    if SHUTDOWN.load(Ordering::Acquire) {
+                        break;
+                    }
                     match tokio::time::timeout(Duration::from_secs(5), resp.chunk()).await {
                         Ok(Ok(Some(chunk))) => {
                             let s = String::from_utf8_lossy(&chunk);
-                            buffer.push_str(&s);
+                            if buffer.len() + s.len() > 65536 {
+                                buffer.clear();
+                            }
+                            if s.len() <= 65536 {
+                                buffer.push_str(&s);
+                            }
                             while let Some(pos) = buffer.find('\n') {
                                 let line = buffer[..pos].trim().to_string();
                                 buffer.drain(..=pos);
@@ -111,7 +128,12 @@ async fn run_mihomo_stream(state: AppState) {
         }
         PROXY_DOWN.store(0, Ordering::Relaxed);
         PROXY_UP.store(0, Ordering::Relaxed);
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        for _ in 0..4 {
+            if SHUTDOWN.load(Ordering::Acquire) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
     }
 }
 
@@ -172,6 +194,9 @@ async fn run_wan_polling() {
 
     let mut interval = tokio::time::interval(Duration::from_millis(1000));
     loop {
+        if SHUTDOWN.load(Ordering::Acquire) {
+            break;
+        }
         interval.tick().await;
         let now = Instant::now();
 
@@ -208,4 +233,34 @@ async fn run_wan_polling() {
 pub fn spawn(state: AppState) {
     tokio::spawn(run_mihomo_stream(state.clone()));
     tokio::spawn(run_wan_polling());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_traffic_buffer_limit_without_newline() {
+        let mut buffer = String::new();
+        let chunk_without_newline = "x".repeat(10000);
+
+        for _ in 0..7 {
+            if buffer.len() + chunk_without_newline.len() > 65536 {
+                buffer.clear();
+            }
+            if chunk_without_newline.len() <= 65536 {
+                buffer.push_str(&chunk_without_newline);
+            }
+        }
+
+        assert!(buffer.len() <= 65536);
+        assert_eq!(buffer.len(), 10000);
+    }
+
+    #[test]
+    fn test_traffic_shutdown_flag() {
+        assert!(!is_shutdown());
+        shutdown();
+        assert!(is_shutdown());
+    }
 }

@@ -187,10 +187,6 @@ export default function Settings({ notify, status, refresh }: Props) {
     autoSaveTimerRef.current = setTimeout(async () => {
       try {
         const currentFailover = JSON.parse(failoverJson)
-        await apiPost<{ message?: string }>('settings/priority', {
-          server_ids: currentFailover.priority_chain ?? [],
-          enabled: currentFailover.enabled,
-        })
         await apiPut('settings', {
           failover: currentFailover,
         })
@@ -354,12 +350,21 @@ export default function Settings({ notify, status, refresh }: Props) {
     if (!file) return
     setBackupBusy(true)
     try {
-      const formData = new FormData()
-      formData.append('file', file)
-      const res = await fetch('/api/backups/import', { method: 'POST', body: formData })
-      const data = await res.json()
-      if (!data.success) throw new Error(data.error || 'Ошибка импорта')
-      notify(`Бэкап '${file.name}' успешно импортирован`)
+      const text = await file.text()
+      let payload: any
+      try {
+        payload = JSON.parse(text)
+      } catch {
+        throw new Error('Файл не является корректным JSON/xkbak архивом')
+      }
+      if (!payload || typeof payload !== 'object' || !payload.files || typeof payload.files !== 'object') {
+        throw new Error('Некорректный формат архива бэкапа: отсутствует секция files')
+      }
+      if (!payload.name) {
+        payload.name = file.name.replace(/\.[^/.]+$/, '')
+      }
+      const data = await apiPost<{ imported: string }>('backups/import', payload)
+      notify(`Бэкап '${data.imported || file.name}' успешно импортирован`)
       loadBackups()
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Ошибка импорта бэкапа', true)

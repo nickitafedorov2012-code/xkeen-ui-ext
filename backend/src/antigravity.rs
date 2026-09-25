@@ -289,13 +289,20 @@ impl AntigravityManager {
         };
 
         if !enabled {
-            let mut st = self.state.write().await;
-            if st.state_status != "disabled" {
-                st.state_status = "disabled".into();
-                st.log("Служба Antigravity отключена пользователем", "info");
-                self.clean_keenetic_rules(&st.active_ip).await;
-                st.active_ip = None;
-                st.latency_ms = None;
+            let old_ip = {
+                let mut st = self.state.write().await;
+                if st.state_status != "disabled" {
+                    st.state_status = "disabled".into();
+                    st.log("Служба Antigravity отключена пользователем", "info");
+                    let ip = st.active_ip.take();
+                    st.latency_ms = None;
+                    ip
+                } else {
+                    None
+                }
+            };
+            if let Some(ip) = old_ip {
+                self.clean_keenetic_rules(&Some(ip)).await;
             }
             return;
         }
@@ -471,15 +478,15 @@ impl AntigravityManager {
         }
     }
 
-    /// Запуск легковесного HTTP CONNECT прокси
+    /// Запуск легковесного HTTP CONNECT прокси (привязка к 127.0.0.1 для безопасности от WAN)
     pub fn start_proxy(self: Arc<Self>, port: u16) {
         tokio::spawn(async move {
-            let addr = format!("0.0.0.0:{port}");
+            let addr = format!("127.0.0.1:{port}");
             let listener = match TcpListener::bind(&addr).await {
                 Ok(l) => {
                     let mut st = self.state.write().await;
                     st.proxy_running = true;
-                    st.log(format!("HTTP CONNECT прокси запущен на порту {port}"), "info");
+                    st.log(format!("HTTP CONNECT прокси запущен на {addr}"), "info");
                     l
                 }
                 Err(e) => {
@@ -487,6 +494,8 @@ impl AntigravityManager {
                     return;
                 }
             };
+
+            let sem = Arc::new(tokio::sync::Semaphore::new(64));
 
             loop {
                 if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
@@ -497,11 +506,21 @@ impl AntigravityManager {
                     Err(_) => continue,
                 };
 
+                let permit = match sem.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        crate::log_w!("[ANTIGRAVITY] Превышен лимит параллельных подключений к прокси (64)");
+                        continue;
+                    }
+                };
+
                 let mgr = self.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_proxy_conn(stream, mgr).await {
-                        let _ = e;
-                    }
+                    let _permit = permit;
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(60),
+                        handle_proxy_conn(stream, mgr)
+                    ).await;
                 });
             }
         });
@@ -591,10 +610,10 @@ async fn handle_proxy_conn(mut client: TcpStream, mgr: Arc<AntigravityManager>) 
     }
 
     let mut buf = [0u8; 1024];
-    let n = client.read(&mut buf).await?;
-    if n == 0 {
-        return Ok(());
-    }
+    let n = match tokio::time::timeout(std::time::Duration::from_secs(10), client.read(&mut buf)).await {
+        Ok(Ok(n)) if n > 0 => n,
+        _ => return Ok(()),
+    };
 
     let req_str = String::from_utf8_lossy(&buf[..n]);
     let first_line = req_str.lines().next().unwrap_or("");
@@ -625,10 +644,15 @@ async fn handle_proxy_conn(mut client: TcpStream, mgr: Arc<AntigravityManager>) 
         target_host_port.to_string()
     };
 
-    let mut server = match TcpStream::connect(&destination).await {
-        Ok(s) => s,
-        Err(e) => {
+    let mut server = match tokio::time::timeout(std::time::Duration::from_secs(10), TcpStream::connect(&destination)).await {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
             let resp = format!("HTTP/1.1 502 Bad Gateway\r\nX-Error: {}\r\n\r\n", e);
+            client.write_all(resp.as_bytes()).await?;
+            return Ok(());
+        }
+        Err(_) => {
+            let resp = "HTTP/1.1 504 Gateway Timeout\r\n\r\n";
             client.write_all(resp.as_bytes()).await?;
             return Ok(());
         }

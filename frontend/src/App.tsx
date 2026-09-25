@@ -4,7 +4,6 @@ import Dashboard from './components/Dashboard'
 import Devices from './components/Devices'
 import Servers from './components/Servers'
 import Settings from './components/Settings'
-import Help from './components/Help'
 import Header from './components/Header'
 import Antigravity from './components/Antigravity'
 import LoginModal from './components/LoginModal'
@@ -28,7 +27,6 @@ type TabId =
   | 'google-ai'
   | 'zapret'
   | 'settings'
-  | 'help'
   | 'antigravity'
 
 const TABS: { id: TabId; label: string }[] = [
@@ -41,7 +39,6 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'google-ai', label: '🤖 Google AI' },
   { id: 'zapret', label: '🛡️ Запрет (DPI)' },
   { id: 'settings', label: '⚙️ Настройки' },
-  { id: 'help', label: '📖 Справка' },
 ]
 
 interface Toast {
@@ -290,7 +287,7 @@ export default function App() {
         {TABS.map((t) => (
           <button
             key={t.id}
-            className={'tab' + (tab === t.id ? ' active' : '') + (t.id === 'help' ? ' tab-help' : '')}
+            className={'tab' + (tab === t.id ? ' active' : '')}
             onClick={() => switchTab(t.id)}
           >
             {t.label}
@@ -323,7 +320,6 @@ export default function App() {
           {(tab === 'google-ai' || tab === 'antigravity') && <Antigravity notify={notify} />}
           {tab === 'zapret' && <Zapret notify={notify} />}
           {tab === 'settings' && <Settings notify={notify} status={status} refresh={refresh} />}
-          {tab === 'help' && <Help status={status} />}
         </ErrorBoundary>
       </main>
 

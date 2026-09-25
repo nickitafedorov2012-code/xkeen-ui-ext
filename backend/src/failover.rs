@@ -90,8 +90,21 @@ pub fn get_higher_priority_candidates<'a, T: AsRef<str>>(
     }
 }
 
+async fn record_switch() {
+    *LAST_SWITCH.lock().await = Some(Instant::now());
+}
+
 /// Одна итерация проверки. Возвращает текст решения (для ручного прогона).
 pub async fn run_check(state: &AppState) -> Result<String, String> {
+    {
+        let last = LAST_SWITCH.lock().await;
+        if let Some(t) = *last {
+            if t.elapsed() < Duration::from_secs(30) {
+                return Ok("Ожидание cooldown (30 сек) после предыдущего переключения".to_string());
+            }
+        }
+    }
+
     let cfg = state.config.read().await.clone();
     let threshold = cfg.failover.ping_threshold_ms as i64;
     let servers = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await?;
@@ -132,6 +145,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                         );
                         match mihomo::switch_server(&state.http, &cfg, &pri.id).await {
                             Ok(_) => {
+                                record_switch().await;
                                 state.failover_log.push(&msg, true).await;
                                 crate::notifications::notify_failover(
                                     &state.http,
@@ -164,14 +178,6 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         return Err(msg);
     };
     let current = mihomo::ping_server(&state.http, &cfg, &active.id, ping_timeout).await;
-    {
-        let last = LAST_SWITCH.lock().await;
-        if let Some(t) = *last {
-            if t.elapsed() < Duration::from_secs(30) {
-                return Ok("Ожидание cooldown (30 сек) после предыдущего переключения".to_string());
-            }
-        }
-    }
     if current > 0 && current <= threshold {
         let note = if !checked_higher_notes.is_empty() {
             format!("; приоритетные: {}", checked_higher_notes.join(", "))
@@ -209,6 +215,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             );
             return match mihomo::switch_server(&state.http, &cfg, id).await {
                 Ok(_) => {
+                    record_switch().await;
                     state.failover_log.push(&msg, true).await;
                     crate::notifications::notify_failover(
                         &state.http,
@@ -255,6 +262,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             );
             match mihomo::switch_server(&state.http, &cfg, best_id).await {
                 Ok(_) => {
+                    record_switch().await;
                     state.failover_log.push(&msg, true).await;
                     crate::notifications::notify_failover(
                         &state.http,
@@ -404,6 +412,10 @@ pub fn shutdown() {
     SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+pub fn is_shutdown() -> bool {
+    SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Фоновый цикл: каждые interval_secs (если enabled).
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
@@ -551,5 +563,21 @@ mod tests {
 
         // Лучший доступный — S2 (95 мс)
         assert_eq!(valid.first().map(|(id, ms)| (id.as_str(), *ms)), Some(("S2", 95)));
+    }
+
+    #[tokio::test]
+    async fn test_failover_cooldown_anti_flapping() {
+        record_switch().await;
+        let last = LAST_SWITCH.lock().await;
+        assert!(last.is_some());
+        let elapsed = last.unwrap().elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_failover_shutdown() {
+        assert!(!is_shutdown());
+        shutdown();
+        assert!(is_shutdown());
     }
 }

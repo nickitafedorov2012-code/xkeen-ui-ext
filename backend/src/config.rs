@@ -286,6 +286,8 @@ pub struct ZapretConfig {
     pub aggressive_dpi: bool,
     /// Принудительная изоляция заблокированных ресурсов (ChatGPT, Claude, X/Twitter, Instagram) через PROXY
     pub isolated_proxy: bool,
+    /// Кастомные аргументы nfqws (сохраняются при установке пресетов)
+    pub custom_args: Option<String>,
 }
 
 impl Default for ZapretConfig {
@@ -299,6 +301,7 @@ impl Default for ZapretConfig {
             general_bypass: true,
             aggressive_dpi: false,
             isolated_proxy: false,
+            custom_args: None,
         }
     }
 }

@@ -17,17 +17,17 @@ export default function ShareNodeModal({
   onClose,
   notify,
 }: ShareNodeModalProps) {
-  if (!isOpen || !server) return null
-
   const [copied, setCopied] = useState(false)
 
   // Базовая генерация ссылки подключения
   const defaultLink = useMemo(() => {
+    if (!server) return ''
     return exportServerToLink({
       name: server.name,
       protocol: server.protocol,
       host: server.host,
       port: server.port,
+      raw: server.raw,
     })
   }, [server])
 
@@ -59,6 +59,8 @@ export default function ShareNodeModal({
       notify('Не удалось скопировать в буфер обмена', true)
     }
   }
+
+  if (!isOpen || !server) return null
 
   return (
     <div className="modal-backdrop" onClick={onClose}>

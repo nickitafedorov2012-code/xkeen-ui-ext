@@ -2,6 +2,7 @@ import React, { useEffect, useState, useRef } from 'react'
 import { apiGet, apiPost } from '../api'
 import type { ConfigFile } from '../types'
 import { copyToClipboard } from '../utils/clipboard'
+import { validateYaml } from '../utils/yamlValidator'
 
 interface ConfigEditorProps {
   isOpen?: boolean
@@ -39,7 +40,6 @@ function IconCopy() {
 }
 
 export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigEditorProps) {
-  if (!isOpen) return null
   const [files, setFiles] = useState<ConfigFile[]>([])
   const [selectedFile, setSelectedFile] = useState<string>('mihomo')
   const [filePath, setFilePath] = useState<string>('')
@@ -105,9 +105,9 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
         setSyntaxError('Ошибка JSON: ' + e.message)
       }
     } else if (curFile?.syntax === 'yaml') {
-      // Базовая эвристическая проверка YAML (табы вместо пробелов, двоеточия)
-      if (content.includes('\t')) {
-        setSyntaxError('Внимание: YAML содержит символы табуляции (\\t), замените их на пробелы')
+      const res = validateYaml(content)
+      if (!res.valid) {
+        setSyntaxError(res.error || 'Ошибка синтаксиса YAML')
       } else {
         setSyntaxError(null)
       }
@@ -203,6 +203,8 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
   const isDirty = content !== originalContent
   const linesCount = content ? content.split('\n').length : 1
   const lineNumbers = Array.from({ length: linesCount }, (_, i) => i + 1)
+
+  if (!isOpen) return null
 
   return (
     <div className="modal-backdrop editor-backdrop">
