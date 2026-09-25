@@ -1159,7 +1159,7 @@ fn extract_filter_value(trimmed: &str) -> String {
 }
 
 /// Применение всей сохраненной в AppConfig маршрутизации к сырому YAML Mihomo.
-pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> (String, usize) {
+pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> Result<(String, usize), String> {
     let mut current = yaml.to_string();
 
     // 0. Блокировка рекламы на роутере (AdBlock)
@@ -1171,6 +1171,9 @@ pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> (String, usi
     current = apply_zapret_hybrid_rules(&current, &cfg.zapret)?;
 
     // 2. Доменные правила (DIRECT / FORCE / PER-DEVICE DOMAINS)
+    let direct = &cfg.direct_domains;
+    let force = &cfg.force_domains;
+    let device_domains = &cfg.device_domain_rules;
     current = apply_domain_rules(&current, direct, force, device_domains)?;
 
     // 3. Выделенный маршрут Google Flow & AI (высший приоритет — на самом верху секции rules)

@@ -2311,7 +2311,10 @@ pub async fn set_device_domain_rules(
     *state.config.write().await = std::sync::Arc::new(cur.clone());
 
     if let Ok(raw_yaml) = tokio::fs::read_to_string(&cur.mihomo.config_path).await {
-        let (new_yaml, _) = crate::routing::apply_routing(&raw_yaml, &cur);
+        let (new_yaml, _) = match crate::routing::apply_routing(&raw_yaml, &cur) {
+            Ok(res) => res,
+            Err(e) => return api_err(format!("Ошибка роутинга: {}", e)),
+        };
         let _ = atomic_write_file(&cur.mihomo.config_path, &new_yaml).await;
         let _ = mihomo::reload_config(&state.http, &cur).await;
     }
@@ -2407,7 +2410,10 @@ pub async fn toggle_adblock(
         Err(e) => return api_err(format!("Ошибка чтения config.yaml: {}", e)),
     };
 
-    let (new_yaml, _) = routing::apply_routing(&raw_yaml, &cfg);
+    let (new_yaml, _) = match routing::apply_routing(&raw_yaml, &cfg) {
+            Ok(res) => res,
+            Err(e) => return api_err(format!("Ошибка роутинга: {}", e)),
+        };
     if let Err(e) = atomic_write_file(path, &new_yaml).await {
         return api_err(format!("Ошибка сохранения config.yaml: {}", e));
     }
@@ -3444,7 +3450,10 @@ pub async fn zapret_action(
         // Обновляем правила в config.yaml ядра Mihomo через apply_routing
         if std::path::Path::new(&cfg.mihomo.config_path).exists() {
             if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-                let (new_yaml, _) = routing::apply_routing(&raw_yaml, &cfg);
+                let (new_yaml, _) = match routing::apply_routing(&raw_yaml, &cfg) {
+            Ok(res) => res,
+            Err(e) => return api_err(format!("Ошибка роутинга: {}", e)),
+        };
                 let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
                 let _ = mihomo::reload_config(&state.http, &cfg).await;
             }
@@ -3501,7 +3510,10 @@ pub async fn zapret_action(
                 }
                 if std::path::Path::new(&cfg.mihomo.config_path).exists() {
                     if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-                        let (new_yaml, _) = routing::apply_routing(&raw_yaml, &cfg);
+                        let (new_yaml, _) = match routing::apply_routing(&raw_yaml, &cfg) {
+            Ok(res) => res,
+            Err(e) => return api_err(format!("Ошибка роутинга: {}", e)),
+        };
                         let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
                         let _ = mihomo::reload_config(&state.http, &cfg).await;
                     }

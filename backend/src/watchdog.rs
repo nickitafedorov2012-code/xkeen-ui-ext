@@ -83,7 +83,13 @@ pub fn spawn(state: AppState) {
                             }
                         };
 
-                        let (new_yaml, _applied) = routing::apply_routing(&raw_yaml, &cfg);
+                        let (new_yaml, _applied) = match routing::apply_routing(&raw_yaml, &cfg) {
+                            Ok(res) => res,
+                            Err(e) => {
+                                log_w!("[WATCHDOG] Ошибка роутинга: {}", e);
+                                continue;
+                            }
+                        };
                         if let Err(e) = crate::api::atomic_write_file(path, &new_yaml).await {
                             log_w!("[WATCHDOG] Ошибка записи config.yaml: {}", e);
                             continue;
