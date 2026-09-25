@@ -1,3 +1,5 @@
+use std::time::{Instant, Duration};
+static LAST_SWITCH: tokio::sync::Mutex<Option<Instant>> = tokio::sync::Mutex::const_new(None);
 //! Фоновый failover-движок (порт check_and_failover из десктопа).
 //! 1) Если настроен приоритетный сервер и активен другой — проверить приоритетный;
 //!    восстановился (пинг < порог-50) → вернуться на него.
