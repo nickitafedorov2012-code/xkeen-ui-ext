@@ -5,6 +5,7 @@ import NumberInput from './NumberInput'
 import ConfigEditor from './ConfigEditor'
 import PresetCatalogModal from './PresetCatalogModal'
 import LogsViewer from './LogsViewer'
+import TaskManager from './TaskManager'
 
 interface Props {
   notify: (msg: string, isError?: boolean) => void
@@ -506,6 +507,14 @@ export default function Settings({ notify, status, refresh }: Props) {
           </button>
           <button type="button" className="btn" onClick={() => setPresetCatalogOpen(true)} title="Каталог готовых пресетов доменов">
             ✨ Каталог пресетов
+          </button>
+          <button
+            type="button"
+            className="btn"
+            onClick={() => document.getElementById('task-manager-section')?.scrollIntoView({ behavior: 'smooth' })}
+            title="Перейти к диспетчеру задач (htop) и мониторингу процессов"
+          >
+            📊 Диспетчер задач (htop)
           </button>
         </div>
       </div>
@@ -1217,6 +1226,11 @@ export default function Settings({ notify, status, refresh }: Props) {
         <p className="muted small" style={{ marginTop: 8 }}>
           💡 Сброс пароля при утере через SSH: <code style={{ color: 'var(--accent)' }}>xkeen-route reset-password</code>
         </p>
+      </section>
+
+      {/* ДИСПЕТЧЕР ЗАДАЧ (HTOP) */}
+      <section id="task-manager-section" className="card" style={{ padding: 16 }}>
+        <TaskManager notify={notify} />
       </section>
 
       {/* ЖУРНАЛ ЛОГОВ С ПОЛНЫМ ФУНКЦИОНАЛОМ LOGSVIEWER */}

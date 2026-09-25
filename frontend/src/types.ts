@@ -331,3 +331,54 @@ export function getFlowStatus(serverOrName: ServerInfo | string | undefined | nu
   }
   return 'unknown'
 }
+
+export type ProcessCategory = 'xkeen' | 'zapret' | 'keenetic' | 'system'
+
+export interface ProcessInfo {
+  pid: number
+  ppid: number
+  name: string
+  cmdline: string
+  user: string
+  state: string
+  cpu_percent: number
+  mem_percent: number
+  mem_rss_kb: number
+  threads: number
+  category: ProcessCategory
+  protected: boolean
+}
+
+export interface CpuCoreUsage {
+  core_id: number
+  usage_percent: number
+}
+
+export interface SystemResources {
+  cpu_total_percent: number
+  cpu_cores: CpuCoreUsage[]
+  memory_total_kb: number
+  memory_used_kb: number
+  memory_free_kb: number
+  memory_buffers_kb: number
+  memory_cached_kb: number
+  memory_available_kb: number
+  memory_percent: number
+  swap_total_kb: number
+  swap_used_kb: number
+  load_avg_1m: number
+  load_avg_5m: number
+  load_avg_15m: number
+  uptime_seconds: number
+  tasks_total: number
+  tasks_running: number
+  tasks_sleeping: number
+  tasks_stopped?: number
+  tasks_zombie?: number
+}
+
+export interface TaskManagerSnapshot {
+  resources: SystemResources
+  processes: ProcessInfo[]
+}
+

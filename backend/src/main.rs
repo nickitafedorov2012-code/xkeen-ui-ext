@@ -15,6 +15,7 @@ mod watchdog;
 mod speedtest;
 mod notifications;
 pub mod traffic;
+mod system;
 
 use axum::extract::Request;
 use axum::middleware::{self, Next};
@@ -146,7 +147,7 @@ async fn log_requests(req: Request, next: Next) -> Response {
     let start = std::time::Instant::now();
     let res = next.run(req).await;
     // Не логируем частые опросы статуса — шум.
-    if path != "/api/status" && path != "/api/system/metrics" {
+    if path != "/api/status" && path != "/api/system/metrics" && path != "/api/system/processes" {
         log_i!(
             "{} {}{} -> {} ({} мс)",
             method,
@@ -329,6 +330,8 @@ async fn main() {
         // Статус и метрики
         .route("/api/status", get(api::status))
         .route("/api/system/metrics", get(api::get_system_metrics))
+        .route("/api/system/processes", get(api::get_system_processes))
+        .route("/api/system/processes/kill", post(api::kill_process))
         // Серверы
         .route("/api/servers", get(api::get_servers))
         .route("/api/servers/switch", post(api::switch_server))

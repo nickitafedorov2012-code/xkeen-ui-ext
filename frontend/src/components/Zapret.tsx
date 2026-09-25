@@ -720,14 +720,24 @@ export default function Zapret({ notify }: ZapretProps) {
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 14 }}>
+          {/* 0. YouTube Direct (без VPS) */}
+          {renderStrategyCard(
+            'hybrid_youtube',
+            '🎥 YouTube Direct (без VPS)',
+            'YOUTUBE DIRECT',
+            'Направляет домены YouTube и серверы googlevideo напрямую через локальный nfqws в обход прокси. Экономит трафик на зарубежном сервере.',
+            'DIRECT через Zapret (без VPS)',
+            'через VLESS-прокси'
+          )}
+
           {/* 1. YouTube Turbo */}
           {renderStrategyCard(
             'youtube_turbo',
-            '🎥 YouTube Turbo (Fake + Disorder2)',
+            '⚡ YouTube Turbo (Split2)',
             'GGC DIRECT',
-            'Нарушение очередности первого пакета (disorder2, pos=1) с отсечкой cutoff=d4. Устраняет буферизацию 4K видео с локальных кэшей Google GGC без нагрузки на VPS.',
-            'disorder2 (pos=1, cutoff=d4) + DIRECT',
-            'стандартный split2'
+            'Сплит первого байта ClientHello (split2, pos=1) с отсечкой cutoff=d4. Устраняет буферизацию видео с локальных кэшей Google GGC без блокировок.',
+            'split2 (pos=1, cutoff=d4)',
+            'стандартный режим'
           )}
 
           {/* 2. Discord Web & Chat */}

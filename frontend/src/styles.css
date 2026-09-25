@@ -5191,6 +5191,24 @@ table.devices-table td {
   gap: 4px;
 }
 
+/* Task Manager (htop) Expanded Full-Screen Mode */
+.task-manager-expanded {
+  position: fixed !important;
+  inset: 16px !important;
+  z-index: 999 !important;
+  background: var(--bg-card, #0d1117) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 12px !important;
+  padding: 20px !important;
+  overflow-y: auto !important;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.8) !important;
+}
+
+[data-theme="light"] .task-manager-expanded {
+  background: #ffffff !important;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25) !important;
+}
+
 
 
 

@@ -70,6 +70,24 @@ pub async fn get_system_metrics(State(state): State<AppState>) -> Response {
     }
 }
 
+/// GET /api/system/processes — снимок диспетчера задач (ресурсы CPU/RAM/Swap + список процессов)
+pub async fn get_system_processes(State(_state): State<AppState>) -> Response {
+    let snapshot = crate::system::get_task_manager_snapshot().await;
+    api_ok(serde_json::to_value(snapshot).unwrap_or_default()).into_response()
+}
+
+/// POST /api/system/processes/kill — безопасное завершение процесса роутера
+pub async fn kill_process(
+    State(_state): State<AppState>,
+    Json(body): Json<crate::system::KillRequest>,
+) -> Response {
+    match crate::system::kill_process_by_pid(body.pid, body.signal.as_deref()).await {
+        Ok(msg) => api_ok(json!({ "pid": body.pid, "message": msg })).into_response(),
+        Err(err) => api_err(err).into_response(),
+    }
+}
+
+
 
 /// Вспомогательное: единый формат ответа API.
 pub fn api_ok(data: serde_json::Value) -> axum::response::Response {
