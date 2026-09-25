@@ -160,6 +160,14 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         return Err(msg);
     };
     let current = mihomo::ping_server(&state.http, &cfg, &active.id, ping_timeout).await;
+    {
+        let mut last = LAST_SWITCH.lock().await;
+        if let Some(t) = *last {
+            if t.elapsed() < Duration::from_secs(30) {
+                return Ok("Ожидание cooldown (30 сек) после предыдущего переключения".to_string());
+            }
+        }
+    }
     if current > 0 && current <= threshold {
         let note = if !checked_higher_notes.is_empty() {
             format!("; приоритетные: {}", checked_higher_notes.join(", "))

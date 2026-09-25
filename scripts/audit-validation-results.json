@@ -1,0 +1,151 @@
+[
+  {
+    "name": "vitest",
+    "status": 0,
+    "stdout": "\n\u001b[1m\u001b[7m\u001b[36m RUN \u001b[39m\u001b[27m\u001b[22m \u001b[36mv2.1.9 \u001b[39m\u001b[90mC:/Users/internet/Desktop/xkeen route/xkeen-ui-ext-main/frontend\u001b[39m\n\n \u001b[32m✓\u001b[39m src/deviceSpeed.test.ts \u001b[2m(\u001b[22m\u001b[2m4 tests\u001b[22m\u001b[2m)\u001b[22m\u001b[90m 11\u001b[2mms\u001b[22m\u001b[39m\n \u001b[32m✓\u001b[39m src/flowStatus.test.ts \u001b[2m(\u001b[22m\u001b[2m8 tests\u001b[22m\u001b[2m)\u001b[22m\u001b[90m 17\u001b[2mms\u001b[22m\u001b[39m\n \u001b[32m✓\u001b[39m src/serversLayout.test.ts \u001b[2m(\u001b[22m\u001b[2m4 tests\u001b[22m\u001b[2m)\u001b[22m\u001b[90m 11\u001b[2mms\u001b[22m\u001b[39m\n \u001b[32m✓\u001b[39m src/utils/nodeParser.test.ts \u001b[2m(\u001b[22m\u001b[2m7 tests\u001b[22m\u001b[2m)\u001b[22m\u001b[90m 18\u001b[2mms\u001b[22m\u001b[39m\n \u001b[32m✓\u001b[39m src/api.test.ts \u001b[2m(\u001b[22m\u001b[2m8 tests\u001b[22m\u001b[2m)\u001b[22m\u001b[90m 36\u001b[2mms\u001b[22m\u001b[39m\n \u001b[32m✓\u001b[39m src/utils/clipboard.test.ts \u001b[2m(\u001b[22m\u001b[2m3 tests\u001b[22m\u001b[2m)\u001b[22m\u001b[90m 31\u001b[2mms\u001b[22m\u001b[39m\n\n\u001b[2m Test Files \u001b[22m \u001b[1m\u001b[32m6 passed\u001b[39m\u001b[22m\u001b[90m (6)\u001b[39m\n\u001b[2m      Tests \u001b[22m \u001b[1m\u001b[32m34 passed\u001b[39m\u001b[22m\u001b[90m (34)\u001b[39m\n\u001b[2m   Start at \u001b[22m 04:00:44\n\u001b[2m   Duration \u001b[22m 3.23s\u001b[2m (transform 591ms, setup 0ms, collect 963ms, tests 124ms, environment 11.07s, prepare 2.07s)\u001b[22m\n\n",
+    "stderr": ""
+  },
+  {
+    "name": "tsc",
+    "status": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  {
+    "link": "trojan://p%40ss@example.com:443#test",
+    "parsed": {
+      "name": "test",
+      "protocol": "Trojan",
+      "yaml": "  - name: \"test\"\n    type: \"trojan\"\n    server: \"example.com\"\n    port: 443\n    password: \"p%40ss\"\n    udp: true",
+      "raw": {
+        "name": "test",
+        "type": "trojan",
+        "server": "example.com",
+        "port": 443,
+        "password": "p%40ss",
+        "udp": true
+      }
+    },
+    "exported": "trojan://p%40ss@example.com:443?security=tls&sni=#test",
+    "reparsed": {
+      "name": "test",
+      "protocol": "Trojan",
+      "yaml": "  - name: \"test\"\n    type: \"trojan\"\n    server: \"example.com\"\n    port: 443\n    password: \"p%40ss\"\n    udp: true",
+      "raw": {
+        "name": "test",
+        "type": "trojan",
+        "server": "example.com",
+        "port": 443,
+        "password": "p%40ss",
+        "udp": true
+      }
+    }
+  },
+  {
+    "link": "hysteria2://p%40ss@example.com:443?obfs=salamander&obfs-password=test#test",
+    "parsed": {
+      "name": "test",
+      "protocol": "Hysteria2",
+      "yaml": "  - name: \"test\"\n    type: \"hysteria2\"\n    server: \"example.com\"\n    port: 443\n    password: \"p%40ss\"\n    obfs: \"salamander\"\n    obfs-password: \"test\"",
+      "raw": {
+        "name": "test",
+        "type": "hysteria2",
+        "server": "example.com",
+        "port": 443,
+        "password": "p%40ss",
+        "obfs": "salamander",
+        "obfs-password": "test"
+      }
+    },
+    "exported": "hysteria2://p%40ss@example.com:443?sni=#test",
+    "reparsed": {
+      "name": "test",
+      "protocol": "Hysteria2",
+      "yaml": "  - name: \"test\"\n    type: \"hysteria2\"\n    server: \"example.com\"\n    port: 443\n    password: \"p%40ss\"",
+      "raw": {
+        "name": "test",
+        "type": "hysteria2",
+        "server": "example.com",
+        "port": 443,
+        "password": "p%40ss"
+      }
+    }
+  },
+  {
+    "link": "vless://id@example.com:443?security=tls&type=ws&path=%2Fcustom&host=cdn.example.com#test",
+    "parsed": {
+      "name": "test",
+      "protocol": "VLESS",
+      "yaml": "  - name: \"test\"\n    type: \"vless\"\n    server: \"example.com\"\n    port: 443\n    uuid: \"id\"\n    cipher: \"auto\"\n    udp: true\n    tls: true\n    client-fingerprint: \"chrome\"\n    network: \"ws\"\n    ws-opts:\n      path: \"/custom\"\n      headers:\n        Host: \"cdn.example.com\"",
+      "raw": {
+        "name": "test",
+        "type": "vless",
+        "server": "example.com",
+        "port": 443,
+        "uuid": "id",
+        "cipher": "auto",
+        "udp": true,
+        "tls": true,
+        "client-fingerprint": "chrome",
+        "network": "ws",
+        "ws-opts": {
+          "path": "/custom",
+          "headers": {
+            "Host": "cdn.example.com"
+          }
+        }
+      }
+    },
+    "exported": "vless://id@example.com:443?security=tls&type=ws&fp=chrome#test",
+    "reparsed": {
+      "name": "test",
+      "protocol": "VLESS",
+      "yaml": "  - name: \"test\"\n    type: \"vless\"\n    server: \"example.com\"\n    port: 443\n    uuid: \"id\"\n    cipher: \"auto\"\n    udp: true\n    tls: true\n    client-fingerprint: \"chrome\"\n    network: \"ws\"\n    ws-opts:\n      path: \"/\"",
+      "raw": {
+        "name": "test",
+        "type": "vless",
+        "server": "example.com",
+        "port": 443,
+        "uuid": "id",
+        "cipher": "auto",
+        "udp": true,
+        "tls": true,
+        "client-fingerprint": "chrome",
+        "network": "ws",
+        "ws-opts": {
+          "path": "/"
+        }
+      }
+    }
+  },
+  {
+    "link": "trojan://password@example.com:443#bad%22name",
+    "parsed": {
+      "name": "bad\"name",
+      "protocol": "Trojan",
+      "yaml": "  - name: \"bad\"name\"\n    type: \"trojan\"\n    server: \"example.com\"\n    port: 443\n    password: \"password\"\n    udp: true",
+      "raw": {
+        "name": "bad\"name",
+        "type": "trojan",
+        "server": "example.com",
+        "port": 443,
+        "password": "password",
+        "udp": true
+      }
+    },
+    "exported": "trojan://password@example.com:443?security=tls&sni=#bad%22name",
+    "reparsed": {
+      "name": "bad\"name",
+      "protocol": "Trojan",
+      "yaml": "  - name: \"bad\"name\"\n    type: \"trojan\"\n    server: \"example.com\"\n    port: 443\n    password: \"password\"\n    udp: true",
+      "raw": {
+        "name": "bad\"name",
+        "type": "trojan",
+        "server": "example.com",
+        "port": 443,
+        "password": "password",
+        "udp": true
+      }
+    }
+  }
+]

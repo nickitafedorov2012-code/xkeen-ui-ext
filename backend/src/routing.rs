@@ -23,6 +23,44 @@ pub const GROUPS_END: &str = "# --- AUTO-DEVICE-GROUPS-END ---";
 pub const RULES_BEGIN: &str = "# --- AUTO-DEVICE-RULES-BEGIN ---";
 pub const RULES_END: &str = "# --- AUTO-DEVICE-RULES-END ---";
 
+
+pub fn validate_marker_pair(yaml: &str, begin: &str, end: &str) -> Result<(), String> {
+    let mut opened = false;
+    let mut seen = false;
+    for (index, line) in yaml.lines().enumerate() {
+        let t = line.trim();
+        if t == begin {
+            if opened || seen {
+                return Err(format!("Повторный или вложенный маркер {}, строка {}", begin, index + 1));
+            }
+            opened = true;
+            seen = true;
+        } else if t == end {
+            if !opened {
+                return Err(format!("Маркер {} без соответствующего BEGIN, строка {}", end, index + 1));
+            }
+            opened = false;
+        }
+    }
+    if opened {
+        return Err(format!("Отсутствует завершающий маркер {}", end));
+    }
+    Ok(())
+}
+
+pub fn section_end_offset(yaml: &str, section: &str) -> Result<usize, String> {
+    let mut offset = 0;
+    let mut found = None;
+    for line in yaml.split_inclusive('\n') {
+        if line.trim_end() == section {
+            if found.is_some() { return Err(format!("Повторная секция {}", section)); }
+            found = Some(offset + section.len());
+        }
+        offset += line.len();
+    }
+    found.ok_or_else(|| format!("В конфиге нет секции {}", section))
+}
+
 pub const PROVIDER_DEFAULT_INTERVAL_SECS: u32 = 86400;
 pub const PROVIDER_HEALTH_CHECK_URL: &str = "https://www.gstatic.com/generate_204";
 pub const PROVIDER_HEALTH_CHECK_INTERVAL_SECS: u32 = 300;
@@ -592,6 +630,7 @@ pub fn find_proxy_target_group(yaml: &str) -> String {
 
 /// Применение правил Zapret Hybrid (YouTube DIRECT, Discord DIRECT, Изоляция PROXY).
 pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretConfig) -> Result<String, String> {
+    crate::routing::validate_marker_pair(yaml, ZAPRET_HYBRID_BEGIN, ZAPRET_HYBRID_END)?;
     let content = remove_zapret_hybrid_rules(yaml);
     if !zapret_cfg.enabled {
         return Ok(content);
@@ -674,6 +713,9 @@ pub fn apply_domain_rules(
     force: &[String],
     device_domains: &std::collections::BTreeMap<String, Vec<crate::config::DeviceDomainRule>>,
 ) -> Result<String, String> {
+    crate::routing::validate_marker_pair(yaml, DIRECT_BEGIN, DIRECT_END)?;
+    crate::routing::validate_marker_pair(yaml, FORCE_BEGIN, FORCE_END)?;
+    crate::routing::validate_marker_pair(yaml, DEV_DOMAINS_BEGIN, DEV_DOMAINS_END)?;
     let content = remove_domain_blocks(yaml);
     let direct = sanitize_domains(direct);
     let force = sanitize_domains(force);
@@ -1126,14 +1168,10 @@ pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> (String, usi
     }
 
     // 1. Умные гибридные правила Zapret (YouTube / Discord -> DIRECT, AI -> PROXY)
-    if let Ok(with_zapret) = apply_zapret_hybrid_rules(&current, &cfg.zapret) {
-        current = with_zapret;
-    }
+    current = apply_zapret_hybrid_rules(&current, &cfg.zapret)?;
 
     // 2. Доменные правила (DIRECT / FORCE / PER-DEVICE DOMAINS)
-    if let Ok(with_domains) = apply_domain_rules(&current, &cfg.direct_domains, &cfg.force_domains, &cfg.device_domain_rules) {
-        current = with_domains;
-    }
+    current = apply_domain_rules(&current, direct, force, device_domains)?;
 
     // 3. Выделенный маршрут Google Flow & AI (высший приоритет — на самом верху секции rules)
     let flow_target = cfg.flow_server.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or("PROXY");

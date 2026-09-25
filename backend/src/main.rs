@@ -238,7 +238,6 @@ async fn main() {
         config,
         config_path: Arc::new(config_path),
         http: match reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
             .cookie_store(true)
             .build()
         {

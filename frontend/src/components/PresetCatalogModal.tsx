@@ -17,7 +17,6 @@ export default function PresetCatalogModal({
   onApplyPreset,
   notify,
 }: PresetCatalogModalProps) {
-  if (!isOpen) return null
   const [activeCat, setActiveCat] = useState<string>('ai')
   const [selectedServices, setSelectedServices] = useState<Set<string>>(new Set())
   const [targetType, setTargetType] = useState<'force' | 'direct'>('force')
@@ -108,6 +107,8 @@ export default function PresetCatalogModal({
       setSaving(false)
     }
   }
+
+  if (!isOpen) return null
 
   return (
     <div className="modal-backdrop">

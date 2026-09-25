@@ -8,7 +8,6 @@ interface LoginModalProps {
 }
 
 export default function LoginModal({ isOpen = true, onSuccess, notify }: LoginModalProps) {
-  if (!isOpen) return null
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -36,6 +35,8 @@ export default function LoginModal({ isOpen = true, onSuccess, notify }: LoginMo
       setLoading(false)
     }
   }
+
+  if (!isOpen) return null
 
   return (
     <div className="modal-backdrop login-backdrop">

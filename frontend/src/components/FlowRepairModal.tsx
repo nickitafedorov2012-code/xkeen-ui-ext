@@ -15,7 +15,6 @@ export default function FlowRepairModal({
   notify,
   onRepaired,
 }: FlowRepairModalProps) {
-  if (!isOpen) return null
 
   const [repairing, setRepairing] = useState(false)
   const [activeServer, setActiveServer] = useState<string>('')
@@ -56,6 +55,8 @@ export default function FlowRepairModal({
       setTimeout(() => setCopiedLink(false), 2500)
     }
   }
+
+  if (!isOpen) return null
 
   return (
     <div className="modal-backdrop" onClick={onClose}>

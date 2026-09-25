@@ -28,7 +28,6 @@ interface Props {
 }
 
 export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: Props) {
-  if (!isOpen) return null
 
   const [data, setData] = useState<MihomoReleasesResponse | null>(null)
   const [loading, setLoading] = useState(true)
@@ -93,6 +92,8 @@ export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: 
   const toggleNotes = (tag: string) => {
     setExpandedNotes((prev) => ({ ...prev, [tag]: !prev[tag] }))
   }
+
+  if (!isOpen) return null
 
   return (
     <div className="modal-backdrop">

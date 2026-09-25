@@ -16,7 +16,6 @@ export default function OutboundGeneratorModal({
   onImportSuccess,
   notify,
 }: OutboundGeneratorModalProps) {
-  if (!isOpen) return null
   const [inputText, setInputText] = useState('')
   const [target, setTarget] = useState<'config' | 'provider'>('config')
   const [providerName, setProviderName] = useState('custom')
@@ -69,6 +68,8 @@ export default function OutboundGeneratorModal({
       setImporting(false)
     }
   }
+
+  if (!isOpen) return null
 
   return (
     <div className="modal-backdrop">

@@ -41,7 +41,6 @@ fn proxied_client(proxy_addr: &str) -> Option<reqwest::Client> {
     let proxy = reqwest::Proxy::all(proxy_addr).ok()?;
     reqwest::Client::builder()
         .proxy(proxy)
-        .danger_accept_invalid_certs(true)
         .build()
         .ok()
 }

@@ -75,12 +75,13 @@ export default function DeviceRoutingModal({
         ip: modal.ip,
         rules: domainRules,
       })
-    } catch {
-      /* игнорируем ошибку сохранения правил доменов, чтобы сохранить основной роутинг */
-    } finally {
+    } catch (e: any) {
+      alert('Ошибка сохранения доменных правил: ' + e.message)
       setSavingRules(false)
-      onSave()
+      return
     }
+    setSavingRules(false)
+    onSave()
   }
 
   return (

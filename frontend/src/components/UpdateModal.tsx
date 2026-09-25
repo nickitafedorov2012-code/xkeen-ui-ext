@@ -25,7 +25,6 @@ export default function UpdateModal({
   notes: initialNotes = [],
   notify,
 }: UpdateModalProps) {
-  if (!isOpen) return null
 
   const [updData, setUpdData] = useState<UpdateInfoResponse | null>(null)
   const [checking, setChecking] = useState(false)
@@ -79,6 +78,8 @@ export default function UpdateModal({
       notify(err?.message || 'Ошибка при установке обновления', true)
     }
   }
+
+  if (!isOpen) return null
 
   return (
     <div className="modal-backdrop">

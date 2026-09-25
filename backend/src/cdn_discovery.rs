@@ -135,7 +135,7 @@ fn proxied_client(proxy_url: &str) -> reqwest::Client {
     let new_client = reqwest::Client::builder()
         .proxy(reqwest::Proxy::all(proxy_url).unwrap_or_else(|_| reqwest::Proxy::custom(|_| None::<reqwest::Url>)))
         .timeout(Duration::from_millis(2500))
-        .danger_accept_invalid_certs(true)
+        
         .build()
         .unwrap_or_default();
     if let Ok(mut guard) = PROXIED_CLIENT.write() {

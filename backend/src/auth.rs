@@ -342,7 +342,9 @@ pub fn cli_reset_password(config_path: &Path) -> std::io::Result<()> {
     cfg.auth.salt.clear();
     cfg.auth.session_secret.clear();
     let serialized = serde_json::to_string_pretty(&cfg).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    std::fs::write(config_path, serialized)?;
+    let tmp_path = config_path.with_extension("tmp");
+    std::fs::write(&tmp_path, serialized)?;
+    std::fs::rename(&tmp_path, config_path)?;
     println!("[OK] Пароль успешно сброшен. Авторизация отключена.");
     restart_service_if_exists();
     Ok(())
@@ -362,7 +364,9 @@ pub fn cli_set_password(config_path: &Path, password: &str) -> std::io::Result<(
     cfg.auth.password_hash = hash;
     cfg.auth.session_secret = generate_secret();
     let serialized = serde_json::to_string_pretty(&cfg).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    std::fs::write(config_path, serialized)?;
+    let tmp_path = config_path.with_extension("tmp");
+    std::fs::write(&tmp_path, serialized)?;
+    std::fs::rename(&tmp_path, config_path)?;
     println!("[OK] Новый пароль установлен. Авторизация включена.");
     restart_service_if_exists();
     Ok(())

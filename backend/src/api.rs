@@ -1678,6 +1678,9 @@ fn resolve_config_file_path(id: &str, cfg: &config::AppConfig) -> Option<std::pa
         "crontab" => Some(std::path::PathBuf::from(crate::override_sync::SYSTEM_CRONTAB_FILE)),
         other => {
             if let Some(name) = other.strip_prefix("provider:") {
+                if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                    return None;
+                }
                 Some(providers_dir.join(format!("{}.yaml", name)))
             } else {
                 None
@@ -1861,10 +1864,14 @@ pub async fn import_backup(
     }
 
     if let Some(yaml) = files.get("config.yaml").and_then(|y| y.as_str()) {
-        let _ = tokio::fs::write(dir.join("config.yaml"), yaml).await;
+        if let Err(e) = tokio::fs::write(dir.join("config.yaml"), yaml).await {
+            return api_err(format!("Ошибка записи config.yaml: {}", e));
+        }
     }
     if let Some(json_val) = files.get("config.json").and_then(|j| j.as_str()) {
-        let _ = tokio::fs::write(dir.join("config.json"), json_val).await;
+        if let Err(e) = tokio::fs::write(dir.join("config.json"), json_val).await {
+            return api_err(format!("Ошибка записи config.json: {}", e));
+        }
     }
 
     log_i!("Импортирован бэкап '{}' в {}", safe_name, dir.display());
@@ -2926,7 +2933,7 @@ add_fw() {
   fi
 
   # Hook into POSTROUTING for all outbound WAN packets (LAN forwarded + router local direct)
-  iptables -t mangle -I POSTROUTING 1 ! -o br+ ! -o lo -j zapret
+  iptables -t mangle -I POSTROUTING 1 -j zapret || { del_fw; return 1; }
 
   # Hook into PREROUTING for client LAN bridge interfaces (br+)
   iptables -t mangle -I PREROUTING 1 -i br+ -j zapret
@@ -2936,7 +2943,7 @@ add_fw() {
     if ! curl -s -m 5 -o /dev/null http://www.gstatic.com/generate_204 2>/dev/null && \
        ! curl -s -m 5 -o /dev/null http://cp.cloudflare.com 2>/dev/null; then
       del_fw
-      killall nfqws 2>/dev/null
+      killall -q nfqws 2>/dev/null
       logger -t zapret "FAILSAFE: internet connectivity lost after enabling zapret, iptables rules rolled back"
     fi
   ) &
@@ -2990,12 +2997,12 @@ case "$1" in
     ;;
   stop)
     del_fw
-    killall nfqws 2>/dev/null
+    killall -q nfqws 2>/dev/null
     rm -f "$PIDFILE"
     ;;
   restart)
     del_fw
-    killall nfqws 2>/dev/null
+    killall -q nfqws 2>/dev/null
     sleep 1
     if [ -n "$BIN" ] && [ -x "$BIN" ]; then
       $BIN $NFQWS_ARGS
@@ -3382,7 +3389,11 @@ pub async fn zapret_action(
                 let output_str = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
                 let _cfg = state.config.read().await;
                 sync_zapret_files(&_cfg.zapret).await;
-                let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("start").output().await;
+                if let Ok(out) = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("start").output().await {
+            if !out.status.success() {
+                return api_err(format!("Ошибка запуска Zapret: {}", String::from_utf8_lossy(&out.stderr)));
+            }
+        }
                 let installed = std::path::Path::new("/opt/etc/init.d/S51zapret").exists();
                 return api_ok(json!({ "success": installed, "output": output_str.trim() }));
             }

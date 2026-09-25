@@ -1,4 +1,4 @@
-﻿const http = require('http');
+const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -14,24 +14,24 @@ if (!fs.existsSync(SCREENSHOT_DIR)) {
 
 // 1. Mock API Data
 const mockStatus = {
-  version: "v1.3.3",
+  version: "v1.3.21",
   config_path: "/opt/etc/xkeen-route/config.json",
   router: {
     model: "Keenetic Peak (KN-4110) WBR3000UAX",
-    version: "4.2.1",
+    version: "KeeneticOS 5.0.11",
     hostname: "Keenetic-Peak",
-    uptime: "18д 14ч 32м"
+    uptime: "21д 18ч 45м"
   },
   system: {
-    cpu_percent: 4,
-    memory_used_mb: 218,
+    cpu_percent: 6,
+    memory_used_mb: 234,
     memory_total_mb: 512,
-    app_memory_mb: 14.8,
-    app_cpu_percent: 0.7,
-    core_memory_mb: 42.1,
-    total_xkeen_memory_mb: 56.9
+    app_memory_mb: 12.4,
+    app_cpu_percent: 0.5,
+    core_memory_mb: 48.2,
+    total_xkeen_memory_mb: 60.6
   },
-  mihomo_version: "Mihomo Meta v1.19.0 (alpha-1845)",
+  mihomo_version: "Mihomo Meta v1.19.31",
   active_server: {
     id: "de_vless",
     name: "🇩🇪 Германия Frankfurt [VLESS-Reality]",
@@ -200,6 +200,28 @@ const mockLogs = `2026-09-24 05:14:22 [INFO] XKeen Route v1.3.3 готов к р
 2026-09-24 05:14:35 [INFO] [SmartDNS] DNS cache warmed up (240 записей, Fake-IP режим активен)
 2026-09-24 05:15:00 [INFO] [Failover] Проверка по расписанию: все узлы доступны, статус OK`;
 
+const mockZapret = {
+  installed: true,
+  running: true,
+  pid: 2419,
+  autostart: true,
+  iptables_active: true,
+  preset: "optimal",
+  cmdline: "nfqws --daemon --qnum=200 --dpi-desync-fwmark=0x40000000 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com --dpi-desync=fake,split2 --dpi-desync-cutoff=d4 --new --filter-udp=443 --dpi-desync=fake --new --filter-tcp=80,443 --hostlist-domains=discord.com,discord.gg --dpi-desync=fake,split2 --new --filter-udp=50000-65535 --dpi-desync=fake",
+  features: {
+    enabled: true,
+    hybrid_youtube: true,
+    hybrid_discord: true,
+    discord_voice_udp: true,
+    youtube_turbo: true,
+    general_bypass: true,
+    aggressive_dpi: false,
+    isolated_proxy: true,
+  },
+  config: "NFQWS_ARGS=\"--daemon --qnum=200 --filter-tcp=80,443 --hostlist-domains=youtube.com,googlevideo.com --dpi-desync=fake,split2 --dpi-desync-cutoff=d4\"\nDISCORD_VOICE_ENABLED=\"1\"\n",
+  hosts: "# zapret-hosts.txt — Список доменов для универсального обхода DPI\nrutracker.org\nntc.party\nkinozal.tv\nflibusta.is\nhdrezka.ag\nnotion.so\nintel.com\nmedium.com\n"
+};
+
 let pollCount = 0;
 
 const server = http.createServer((req, res) => {
@@ -278,7 +300,17 @@ const server = http.createServer((req, res) => {
     if (apiPath === 'dns/mode') return jsonOk({ enhanced_mode: "fake-ip", proxy_dns: "https://1.1.1.1/dns-query" });
     if (apiPath === 'adblock') return jsonOk({ enabled: true });
     if (apiPath === 'system/geo-info') return jsonOk({ geoip: { size: 4820000, updated_at: "2026-09-24 02:00" }, geosite: { size: 12400000, updated_at: "2026-09-24 02:00" } });
-    if (apiPath === 'zapret/status') return jsonOk({ installed: true, running: true, pid: 1420 });
+    if (apiPath === 'zapret/status') return jsonOk(mockZapret);
+    if (apiPath === 'zapret/action') {
+      return jsonOk({
+        success: true,
+        action: 'test_dpi',
+        youtube: { code: 200, time_secs: 0.084, ok: true },
+        discord: { code: 200, time_secs: 0.112, ok: true },
+        features: mockZapret.features,
+        message: '✅ YouTube и Discord успешно доступны напрямую!'
+      });
+    }
     if (apiPath.startsWith('logs')) return jsonOk({ text: mockLogs });
     if (apiPath === 'config-files/list') return jsonOk([
       { id: "mihomo_yaml", name: "config.yaml (Mihomo)", path: "/opt/etc/mihomo/config.yaml", syntax: "yaml" },
@@ -409,13 +441,15 @@ async function main() {
 
     const screens = [
       { tab: 'dashboard', filename: 'dashboard.png', waitMs: 1500 },
-      { tab: 'devices', filename: 'devices.png', waitMs: 1500 },
       { tab: 'servers', filename: 'servers.png', waitMs: 1500 },
+      { tab: 'devices', filename: 'devices.png', waitMs: 1500 },
       { tab: 'connections', filename: 'connections.png', waitMs: 1500 },
       { tab: 'rules', filename: 'rules.png', waitMs: 1500 },
       { tab: 'diagnostics', filename: 'diagnostics.png', waitMs: 1500 },
       { tab: 'google-ai', filename: 'google_ai.png', waitMs: 1500 },
+      { tab: 'zapret', filename: 'zapret.png', waitMs: 1500 },
       { tab: 'settings', filename: 'settings.png', waitMs: 1500 },
+      { tab: 'help', filename: 'help.png', waitMs: 1500 },
     ];
 
     for (const scr of screens) {
@@ -476,7 +510,17 @@ async function main() {
       if (scr.tab === 'google-ai') {
         await send('Runtime.evaluate', {
           expression: `
-            const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Проверить статус Flow'));
+            const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent && b.textContent.includes('Проверить статус Flow'));
+            if (btn) btn.click();
+          `
+        });
+        await sleep(600);
+      }
+
+      if (scr.tab === 'zapret') {
+        await send('Runtime.evaluate', {
+          expression: `
+            const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent && b.textContent.includes('Тест обхода DPI'));
             if (btn) btn.click();
           `
         });

@@ -354,7 +354,7 @@ function parseHysteria2(link: string): ParsedNode | null {
   const atIdx = mainPart.indexOf('@')
   if (atIdx === -1) return null
 
-  const auth = mainPart.slice(0, atIdx)
+  const auth = decodeURIComponent(mainPart.slice(0, atIdx))
   const rest = mainPart.slice(atIdx + 1)
   const qIdx = rest.indexOf('?')
   const hostPort = qIdx !== -1 ? rest.slice(0, qIdx) : rest
@@ -438,7 +438,7 @@ function objectToYamlNode(obj: Record<string, any>): string {
   const lines: string[] = []
   const keys = Object.keys(obj)
 
-  lines.push(`  - name: "${obj.name}"`)
+  lines.push(`  - name: ${JSON.stringify(String(obj.name))}`)
   for (const k of keys) {
     if (k === 'name') continue
     const val = obj[k]
@@ -452,17 +452,17 @@ function objectToYamlNode(obj: Record<string, any>): string {
           if (typeof subval === 'object') {
             lines.push(`      ${subk}:`)
             for (const h of Object.keys(subval)) {
-              lines.push(`        ${h}: "${subval[h]}"`)
+              lines.push(`        ${h}: ${JSON.stringify(String(subval[h]))}`)
             }
           } else {
-            lines.push(`      ${subk}: "${subval}"`)
+            lines.push(`      ${subk}: ${JSON.stringify(String(subval))}`)
           }
         }
       }
     } else if (typeof val === 'boolean' || typeof val === 'number') {
       lines.push(`    ${k}: ${val}`)
     } else {
-      lines.push(`    ${k}: "${val}"`)
+      lines.push(`    ${k}: ${JSON.stringify(String(val))}`)
     }
   }
 
@@ -533,13 +533,17 @@ export function exportServerToLink(server: {
   if (proto === 'trojan' || raw.type?.toLowerCase() === 'trojan') {
     const password = raw.password || 'password'
     const sni = raw.servername || raw.sni || ''
-    return `trojan://${password}@${host}:${port}?security=tls&sni=${encodeURIComponent(sni)}#${name}`
+    return `trojan://${encodeURIComponent(String(password))}@${host}:${port}?security=tls&sni=${encodeURIComponent(sni)}#${name}`
   }
 
   if (proto === 'hysteria2' || proto === 'hy2' || raw.type?.toLowerCase() === 'hysteria2') {
     const auth = raw.password || raw.auth || ''
     const sni = raw.servername || raw.sni || ''
-    return `hysteria2://${auth}@${host}:${port}?sni=${encodeURIComponent(sni)}#${name}`
+    const params = new URLSearchParams()
+    if (sni) params.set('sni', sni)
+    if (raw.obfs) params.set('obfs', String(raw.obfs))
+    if (raw['obfs-password']) params.set('obfs-password', String(raw['obfs-password']))
+    return `hysteria2://${encodeURIComponent(String(auth))}@${host}:${port}?${params.toString()}#${name}`
   }
 
   return `${proto}://${host}:${port}#${name}`

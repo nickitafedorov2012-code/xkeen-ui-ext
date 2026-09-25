@@ -38,7 +38,7 @@ pub async fn run_speedtest(
 
     let client = reqwest::Client::builder()
         .proxy(proxy)
-        .danger_accept_invalid_certs(true)
+        
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|e| format!("Ошибка инициализации HTTP клиента: {}", e))?;
