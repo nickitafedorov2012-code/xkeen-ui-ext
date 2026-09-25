@@ -643,7 +643,7 @@ pub fn mock_snapshot() -> TaskManagerSnapshot {
     }
 }
 
-pub async fn kill_process_by_pid(pid: u32, signal: Option<&str>) -> Result<String, String> {
+pub async fn kill_process_by_pid(pid: u32, _signal: Option<&str>) -> Result<String, String> {
     if pid <= 2 {
         return Err("Запрещено: системные процессы ядра/init (PID <= 2) защищены от завершения".into());
     }

@@ -3,7 +3,7 @@ use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{config, failover, log_e, log_i, mihomo, rci, routing, AppState, VERSION};
+use crate::{config, failover, log_e, log_i, log_w, mihomo, rci, routing, AppState, VERSION};
 
 /// GET /api/status — сводка: панель + роутер + активный сервер Mihomo.
 pub async fn status(State(state): State<AppState>) -> Response {
@@ -2660,7 +2660,7 @@ pub async fn set_dns_mode(
     let new_yaml = if RE_ENHANCED_MODE.is_match(&config_yaml) {
         RE_ENHANCED_MODE.replace(&config_yaml, format!("${{1}}{target_mode}")).into_owned()
     } else {
-        config_yaml
+        config_yaml.clone()
     };
 
     let _guard = state.routing_lock.lock().await;
