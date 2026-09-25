@@ -90,8 +90,8 @@ export interface ZapretStatus {
 }
 
 export interface DpiTestResult {
-  youtube: { code: number; time_secs: number; ok: boolean }
-  discord: { code: number; time_secs: number; ok: boolean }
+  youtube: { code: number; time_secs: number; ok: boolean; proxy_code?: number; proxy_time_secs?: number; proxy_ok?: boolean }
+  discord: { code: number; time_secs: number; ok: boolean; proxy_code?: number; proxy_time_secs?: number; proxy_ok?: boolean }
 }
 
 export interface PolicyInfo {

@@ -1021,9 +1021,53 @@ pub async fn ping_flow_servers(http: &reqwest::Client, cfg: &AppConfig, timeout_
     BTreeMap::new()
 }
 
+/// Автоматическое восстановление зависших селекторов групп (если текущий сервер удален из подписки или переименован)
+pub async fn auto_heal_proxy_selectors(http: &reqwest::Client, cfg: &AppConfig) {
+    let proxies = match get_proxies(http, cfg).await {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    for (name, val) in &proxies {
+        let p_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if p_type != "Selector" {
+            continue;
+        }
+
+        let now = val.get("now").and_then(|n| n.as_str()).unwrap_or("");
+        let all: Vec<&str> = val
+            .get("all")
+            .and_then(|a| a.as_array())
+            .map(|arr| arr.iter().filter_map(|x| x.as_str()).collect())
+            .unwrap_or_default();
+
+        let now_valid = !now.is_empty() && proxies.contains_key(now);
+        if !now_valid && !all.is_empty() {
+            let target = if all.contains(&"Fallback") {
+                "Fallback"
+            } else if all.contains(&"Fastest") {
+                "Fastest"
+            } else {
+                all.iter().find(|&&x| proxies.contains_key(x) && x != now).copied().unwrap_or(all[0])
+            };
+
+            let _ = m_put(
+                http,
+                cfg,
+                &format!("/proxies/{}", urlencoding_lite(name)),
+                json!({ "name": target }),
+                3,
+            )
+            .await;
+        }
+    }
+}
+
 /// Reload конфига Mihomo (после правки config.yaml). Путь — из настроек.
 pub async fn reload_config(http: &reqwest::Client, cfg: &AppConfig) -> Result<(), String> {
-    m_put(http, cfg, "/configs?force=true", json!({ "path": cfg.mihomo.config_path }), 15).await
+    let res = m_put(http, cfg, "/configs?force=true", json!({ "path": cfg.mihomo.config_path }), 15).await;
+    auto_heal_proxy_selectors(http, cfg).await;
+    res
 }
 
 /// Выбор сервера в конкретной группе (для AUTO-DEVICE групп после reload).

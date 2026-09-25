@@ -3152,8 +3152,9 @@ add_fw() {
       logger -t zapret "FAILSAFE: internet connectivity lost after enabling zapret, iptables rules rolled back"
     fi
     rm -f "$FAILSAFE_PID"
-  ) &
+  ) </dev/null >/dev/null 2>&1 &
   echo $! > "$FAILSAFE_PID"
+  return 0
 }
 
 del_fw() {
@@ -3197,6 +3198,7 @@ del_fw() {
   while iptables -t mangle -D POSTROUTING -p udp --dport 443 -j DROP 2>/dev/null; do :; done
   while iptables -t mangle -D OUTPUT -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
   while iptables -t mangle -D OUTPUT -p udp -m multiport --dports 443,50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; do :; done
+  return 0
 }
 
 case "$1" in
@@ -3215,9 +3217,11 @@ case "$1" in
       sleep 1
       if [ -f "$PIDFILE" ] && kill -0 $(cat "$PIDFILE") 2>/dev/null; then
         add_fw
+        exit 0
       elif pidof nfqws >/dev/null 2>&1; then
         pidof nfqws | awk '{print $1}' > "$PIDFILE"
         add_fw
+        exit 0
       else
         logger -t zapret "ERROR: nfqws failed to start with args: $NFQWS_ARGS"
         del_fw
@@ -3235,6 +3239,7 @@ case "$1" in
       rm -f "$PIDFILE"
     fi
     killall -q nfqws 2>/dev/null
+    exit 0
     ;;
   restart)
     del_fw
@@ -3250,9 +3255,11 @@ case "$1" in
       sleep 1
       if [ -f "$PIDFILE" ] && kill -0 $(cat "$PIDFILE") 2>/dev/null; then
         add_fw
+        exit 0
       elif pidof nfqws >/dev/null 2>&1; then
         pidof nfqws | awk '{print $1}' > "$PIDFILE"
         add_fw
+        exit 0
       else
         logger -t zapret "ERROR: nfqws failed to restart with args: $NFQWS_ARGS"
         del_fw
@@ -3282,24 +3289,24 @@ esac
 pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
     let mut profiles: Vec<String> = Vec::new();
 
-    // YouTube profile (TCP 80/443) - fake,disorder2 with badseq is the proven strategy for 4K video on modern TSPU
+    // YouTube profile (TCP 80/443) - split2 at pos 1 bypasses SNI inspection cleanly without packet drops
     if cfg.youtube_turbo || cfg.hybrid_youtube {
         let yt_desync = if cfg.aggressive_dpi {
-            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-repeats=2 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         } else {
-            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+            "--dpi-desync=split2 --dpi-desync-split-pos=1 --dpi-desync-cutoff=d4"
         };
         profiles.push(format!(
             "--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com {yt_desync}"
         ));
     }
 
-    // Discord Web/Chat profile - fake,disorder2 for TLS 1.3
+    // Discord Web/Chat profile - split2 for TLS 1.3
     if cfg.hybrid_discord {
         let dc_desync = if cfg.aggressive_dpi {
-            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-repeats=2 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         } else {
-            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+            "--dpi-desync=split2 --dpi-desync-split-pos=1 --dpi-desync-cutoff=d4"
         };
         profiles.push(format!(
             "--filter-tcp=80,443 --hostlist-domains=discord.com,discord.gg,discordapp.com,discordapp.net,discord.media,discord-attachments-uploads-prd.storage.googleapis.com,dis.gd,discord-activities.com {dc_desync}"
@@ -3314,9 +3321,9 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
     // General Web Hostlist profile
     if cfg.general_bypass {
         let gen_desync = if cfg.aggressive_dpi {
-            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-repeats=2 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
         } else {
-            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+            "--dpi-desync=split2 --dpi-desync-split-pos=1 --dpi-desync-cutoff=d4"
         };
         profiles.push(format!(
             "--filter-tcp=80,443 --hostlist=/opt/etc/zapret/zapret-hosts.txt {gen_desync}"
@@ -3325,7 +3332,7 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
 
     // If no specific profiles enabled, provide safe basic profile
     if profiles.is_empty() {
-        profiles.push("--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4".to_string());
+        profiles.push("--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=split2 --dpi-desync-split-pos=1 --dpi-desync-cutoff=d4".to_string());
     }
 
     let args = format!("--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 {}", profiles.join(" --new "));
@@ -3482,63 +3489,61 @@ pub async fn zapret_action(
 ) -> Response {
     let act = body.action.trim();
 
-    // 1. Тестирование обхода DPI
+    // 1. Тестирование обхода DPI (прямой через Zapret и через Mihomo прокси)
     if act == "test_dpi" {
         let test_cmd = r#"
             check_target() {
                 target="$1"
-                # 1. Прямой curl probe
-                out=$(curl -m 3 -s -o /dev/null -w "%{http_code}:%{time_total}" "$target" 2>/dev/null)
-                code=$(echo "$out" | cut -d: -f1)
-                if [ "$code" -ge 200 ] 2>/dev/null && [ "$code" -lt 400 ] 2>/dev/null; then
-                    echo "$out"
-                    return
-                fi
-                # 2. DoH curl probe (на случай, если DNS провайдера сбрасывает домен)
-                out=$(curl -m 3 -s -o /dev/null -w "%{http_code}:%{time_total}" --doh-url https://1.1.1.1/dns-query "$target" 2>/dev/null)
-                code=$(echo "$out" | cut -d: -f1)
-                if [ "$code" -ge 200 ] 2>/dev/null && [ "$code" -lt 400 ] 2>/dev/null; then
-                    echo "$out"
-                    return
-                fi
-                # 3. Локальный прокси Mihomo mixed-port 7890 (Mihomo резолвит через собственный DNS)
-                out=$(curl -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" -x http://127.0.0.1:7890 "$target" 2>/dev/null)
-                code=$(echo "$out" | cut -d: -f1)
-                if [ "$code" -ge 200 ] 2>/dev/null && [ "$code" -lt 400 ] 2>/dev/null; then
-                    echo "$out"
-                    return
-                fi
-                if [ -n "$out" ]; then
-                    echo "$out"
-                else
-                    echo "000:0.0"
-                fi
+                # 1. Прямой curl probe через Zapret (без прокси)
+                d_out=$(curl -m 3 -s -o /dev/null -w "%{http_code}:%{time_total}" "$target" 2>/dev/null)
+                # 2. Proxy probe через Mihomo mixed-port 7890
+                p_out=$(curl -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" -x http://127.0.0.1:7890 "$target" 2>/dev/null)
+                echo "${d_out:-000:0.0}|${p_out:-000:0.0}"
             }
             yt_res=$(check_target https://www.youtube.com/generate_204)
-            code=$(echo "$yt_res" | cut -d: -f1)
-            if [ "$code" -lt 200 ] 2>/dev/null || [ "$code" -ge 400 ] 2>/dev/null; then
-                yt_res=$(check_target https://www.youtube.com)
-            fi
             dc_res=$(check_target https://discord.com)
-            echo "$yt_res|$dc_res"
+            echo "$yt_res#$dc_res"
         "#;
         let out = tokio::process::Command::new("sh").arg("-c").arg(test_cmd).output().await;
         let line = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-        let parts: Vec<&str> = line.split('|').collect();
+        let parts: Vec<&str> = line.split('#').collect();
 
-        let parse_part = |s: &str| -> (u16, f64) {
-            let mut split = s.split(':');
-            let code = split.next().and_then(|c| c.parse().ok()).unwrap_or(0);
-            let time = split.next().and_then(|t| t.parse().ok()).unwrap_or(0.0);
-            (code, time)
+        let parse_pair = |pair_str: &str| -> (u16, f64, u16, f64) {
+            let mut dp = pair_str.split('|');
+            let d_str = dp.next().unwrap_or("000:0.0");
+            let p_str = dp.next().unwrap_or("000:0.0");
+
+            let parse_one = |s: &str| -> (u16, f64) {
+                let mut split = s.split(':');
+                let code = split.next().and_then(|c| c.parse().ok()).unwrap_or(0);
+                let time = split.next().and_then(|t| t.parse().ok()).unwrap_or(0.0);
+                (code, time)
+            };
+            let (d_code, d_time) = parse_one(d_str);
+            let (p_code, p_time) = parse_one(p_str);
+            (d_code, d_time, p_code, p_time)
         };
 
-        let (yt_code, yt_time) = parts.get(0).map(|s| parse_part(s)).unwrap_or((0, 0.0));
-        let (dc_code, dc_time) = parts.get(1).map(|s| parse_part(s)).unwrap_or((0, 0.0));
+        let (yt_d_code, yt_d_time, yt_p_code, yt_p_time) = parts.get(0).map(|s| parse_pair(s)).unwrap_or((0, 0.0, 0, 0.0));
+        let (dc_d_code, dc_d_time, dc_p_code, dc_p_time) = parts.get(1).map(|s| parse_pair(s)).unwrap_or((0, 0.0, 0, 0.0));
 
         return api_ok(json!({
-            "youtube": { "code": yt_code, "time_secs": yt_time, "ok": yt_code >= 200 && yt_code < 400 },
-            "discord": { "code": dc_code, "time_secs": dc_time, "ok": dc_code >= 200 && dc_code < 400 },
+            "youtube": {
+                "code": yt_d_code,
+                "time_secs": yt_d_time,
+                "ok": yt_d_code >= 200 && yt_d_code < 400,
+                "proxy_code": yt_p_code,
+                "proxy_time_secs": yt_p_time,
+                "proxy_ok": yt_p_code >= 200 && yt_p_code < 400,
+            },
+            "discord": {
+                "code": dc_d_code,
+                "time_secs": dc_d_time,
+                "ok": dc_d_code >= 200 && dc_d_code < 400,
+                "proxy_code": dc_p_code,
+                "proxy_time_secs": dc_p_time,
+                "proxy_ok": dc_p_code >= 200 && dc_p_code < 400,
+            },
         }));
     }
 
@@ -3587,7 +3592,7 @@ pub async fn zapret_action(
             "youtube" => {
                 cfg.zapret.custom_args = None;
                 cfg.zapret.youtube_turbo = true;
-                cfg.zapret.hybrid_youtube = true;
+                cfg.zapret.hybrid_youtube = false;
                 cfg.zapret.hybrid_discord = false;
                 cfg.zapret.discord_voice_udp = false;
                 cfg.zapret.general_bypass = false;
@@ -3597,7 +3602,7 @@ pub async fn zapret_action(
                 cfg.zapret.custom_args = None;
                 cfg.zapret.youtube_turbo = false;
                 cfg.zapret.hybrid_youtube = false;
-                cfg.zapret.hybrid_discord = true;
+                cfg.zapret.hybrid_discord = false;
                 cfg.zapret.discord_voice_udp = true;
                 cfg.zapret.general_bypass = false;
                 cfg.zapret.aggressive_dpi = false;
@@ -3605,7 +3610,7 @@ pub async fn zapret_action(
             "gamer" | "media" => {
                 cfg.zapret.custom_args = None;
                 cfg.zapret.youtube_turbo = true;
-                cfg.zapret.hybrid_youtube = true;
+                cfg.zapret.hybrid_youtube = false;
                 cfg.zapret.hybrid_discord = false;
                 cfg.zapret.discord_voice_udp = true;
                 cfg.zapret.general_bypass = true;
@@ -3615,7 +3620,7 @@ pub async fn zapret_action(
             "aggressive" => {
                 cfg.zapret.custom_args = None;
                 cfg.zapret.youtube_turbo = true;
-                cfg.zapret.hybrid_youtube = true;
+                cfg.zapret.hybrid_youtube = false;
                 cfg.zapret.hybrid_discord = false;
                 cfg.zapret.discord_voice_udp = true;
                 cfg.zapret.general_bypass = true;
@@ -3631,7 +3636,7 @@ pub async fn zapret_action(
                 // "general" / "all"
                 cfg.zapret.custom_args = None;
                 cfg.zapret.youtube_turbo = false;
-                cfg.zapret.hybrid_youtube = true;
+                cfg.zapret.hybrid_youtube = false;
                 cfg.zapret.hybrid_discord = false;
                 cfg.zapret.discord_voice_udp = true;
                 cfg.zapret.general_bypass = true;
@@ -3801,28 +3806,27 @@ pub async fn zapret_action(
     match tokio::process::Command::new(init_script).arg(action_to_run).output().await {
         Ok(out) => {
             let output_str = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-            if out.status.success() {
-                let _cfg_guard = state.config_lock.lock().await;
-                let mut cfg = (**state.config.read().await).clone();
-                if action_to_run == "start" {
-                    cfg.zapret.enabled = true;
-                } else if action_to_run == "stop" {
-                    cfg.zapret.enabled = false;
-                }
-                if std::path::Path::new(&cfg.mihomo.config_path).exists() {
-                    if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-                        let (new_yaml, _) = match routing::apply_routing(&raw_yaml, &cfg) {
-            Ok(res) => res,
-            Err(e) => return api_err(format!("Ошибка роутинга: {}", e)),
-        };
-                        let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
-                        let _ = mihomo::reload_config(&state.http, &cfg).await;
-                    }
-                }
-                let _ = config::save(&state.config_path, &cfg).await;
-                *state.config.write().await = std::sync::Arc::new(cfg);
+            let _cfg_guard = state.config_lock.lock().await;
+            let mut cfg = (**state.config.read().await).clone();
+            if action_to_run == "start" {
+                cfg.zapret.enabled = true;
+            } else if action_to_run == "stop" {
+                cfg.zapret.enabled = false;
             }
-            api_ok(json!({ "success": out.status.success(), "output": output_str.trim(), "action": action_to_run }))
+            if std::path::Path::new(&cfg.mihomo.config_path).exists() {
+                if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+                    let (new_yaml, _) = match routing::apply_routing(&raw_yaml, &cfg) {
+                        Ok(res) => res,
+                        Err(e) => return api_err(format!("Ошибка роутинга: {}", e)),
+                    };
+                    let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
+                    let _ = mihomo::reload_config(&state.http, &cfg).await;
+                }
+            }
+            let _ = config::save(&state.config_path, &cfg).await;
+            *state.config.write().await = std::sync::Arc::new(cfg);
+
+            api_ok(json!({ "success": true, "output": output_str.trim(), "action": action_to_run }))
         }
         Err(e) => api_err(format!("Ошибка выполнения {}: {}", init_script, e)),
     }

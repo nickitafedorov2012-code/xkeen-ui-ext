@@ -25,7 +25,7 @@ export default function Zapret({ notify }: ZapretProps) {
   // Мульти-стратегии и независимые выключатели
   const [features, setFeatures] = useState<ZapretFeatures>({
     enabled: true,
-    hybrid_youtube: true,
+    hybrid_youtube: false,
     hybrid_discord: false,
     discord_voice_udp: true,
     youtube_turbo: true,
@@ -150,9 +150,11 @@ export default function Zapret({ notify }: ZapretProps) {
       const res = await apiPost<DpiTestResult>('zapret/action', { action: 'test_dpi' })
       setTestResult(res)
       if (res.youtube.ok && res.discord.ok) {
-        notify('✅ YouTube и Discord успешно доступны напрямую!')
+        notify('✅ YouTube и Discord доступны напрямую через Zapret!')
       } else if (res.youtube.ok) {
-        notify('⚠️ YouTube доступен напрямую, Discord проверяется')
+        notify('✅ YouTube доступен напрямую через Zapret')
+      } else if (res.youtube.proxy_ok) {
+        notify('ℹ️ YouTube доступен через прокси-туннель (прямой DPI блокируется ТСПУ)')
       } else {
         notify('ℹ️ Проверка завершена: получены ответы от серверов')
       }
@@ -573,11 +575,15 @@ export default function Zapret({ notify }: ZapretProps) {
               <span
                 className="badge"
                 style={{
-                  background: testResult.youtube.ok ? 'rgba(34, 197, 94, 0.2)' : 'rgba(239, 68, 68, 0.2)',
-                  color: testResult.youtube.ok ? '#22c55e' : '#ef4444',
+                  background: testResult.youtube.ok ? 'rgba(34, 197, 94, 0.2)' : testResult.youtube.proxy_ok ? 'rgba(56, 189, 248, 0.2)' : 'rgba(239, 68, 68, 0.2)',
+                  color: testResult.youtube.ok ? '#22c55e' : testResult.youtube.proxy_ok ? '#38bdf8' : '#ef4444',
                 }}
               >
-                {testResult.youtube.ok ? `HTTP ${testResult.youtube.code} (${Math.round(testResult.youtube.time_secs * 1000)} мс)` : 'Блокируется'}
+                {testResult.youtube.ok
+                  ? `🟢 Прямой Zapret: HTTP ${testResult.youtube.code} (${Math.round(testResult.youtube.time_secs * 1000)} мс)`
+                  : testResult.youtube.proxy_ok
+                    ? `🔵 Через прокси: HTTP ${testResult.youtube.proxy_code || 200}`
+                    : '🔴 Заблокирован ТСПУ'}
               </span>
             </div>
 
@@ -586,11 +592,15 @@ export default function Zapret({ notify }: ZapretProps) {
               <span
                 className="badge"
                 style={{
-                  background: testResult.discord.ok ? 'rgba(34, 197, 94, 0.2)' : 'rgba(239, 68, 68, 0.2)',
-                  color: testResult.discord.ok ? '#22c55e' : '#ef4444',
+                  background: testResult.discord.ok ? 'rgba(34, 197, 94, 0.2)' : testResult.discord.proxy_ok ? 'rgba(56, 189, 248, 0.2)' : 'rgba(239, 68, 68, 0.2)',
+                  color: testResult.discord.ok ? '#22c55e' : testResult.discord.proxy_ok ? '#38bdf8' : '#ef4444',
                 }}
               >
-                {testResult.discord.ok ? `HTTP ${testResult.discord.code} (${Math.round(testResult.discord.time_secs * 1000)} мс)` : 'Блокируется'}
+                {testResult.discord.ok
+                  ? `🟢 Прямой: HTTP ${testResult.discord.code} (${Math.round(testResult.discord.time_secs * 1000)} мс)`
+                  : testResult.discord.proxy_ok
+                    ? `🔵 Через прокси: HTTP ${testResult.discord.proxy_code || 200}`
+                    : '🔴 Заблокирован'}
               </span>
             </div>
           </div>
