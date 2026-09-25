@@ -1213,7 +1213,7 @@ pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> Result<(Stri
         current = with_devices;
     }
 
-    (current, count)
+    Ok((current, count))
 }
 
 #[cfg(test)]

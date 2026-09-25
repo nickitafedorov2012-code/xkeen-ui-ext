@@ -1,10 +1,12 @@
-use std::time::{Instant, Duration};
-static LAST_SWITCH: tokio::sync::Mutex<Option<Instant>> = tokio::sync::Mutex::const_new(None);
 //! Фоновый failover-движок (порт check_and_failover из десктопа).
 //! 1) Если настроен приоритетный сервер и активен другой — проверить приоритетный;
 //!    восстановился (пинг < порог-50) → вернуться на него.
 //! 2) Пинг активного: в норме (<= порога) — ничего.
 //! 3) Иначе: параллельный пинг кандидатов → переключение на лучший.
+
+use std::time::{Instant, Duration};
+
+static LAST_SWITCH: tokio::sync::Mutex<Option<Instant>> = tokio::sync::Mutex::const_new(None);
 
 use crate::mihomo::{self, Server};
 use crate::AppState;
@@ -163,7 +165,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
     };
     let current = mihomo::ping_server(&state.http, &cfg, &active.id, ping_timeout).await;
     {
-        let mut last = LAST_SWITCH.lock().await;
+        let last = LAST_SWITCH.lock().await;
         if let Some(t) = *last {
             if t.elapsed() < Duration::from_secs(30) {
                 return Ok("Ожидание cooldown (30 сек) после предыдущего переключения".to_string());
