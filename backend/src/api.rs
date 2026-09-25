@@ -3085,10 +3085,11 @@ add_fw() {
   # 1. CRITICAL: Skip packets already marked by nfqws to prevent infinite packet looping
   iptables -t mangle -A zapret -m mark --mark 0x40000000/0x40000000 -j RETURN
 
-  # Exclude loopback and LAN bridge
+  # Exclude loopback and LAN bridge (OpenWrt br+ and Keenetic Bridge+)
   iptables -t mangle -A zapret -o lo -j RETURN
   iptables -t mangle -A zapret -i lo -j RETURN
   iptables -t mangle -A zapret -o br+ -j RETURN
+  iptables -t mangle -A zapret -o Bridge+ -j RETURN
 
   # 2. CRITICAL: Skip private/local subnets & router IP so Keenetic Web UI / LAN are NEVER touched
   iptables -t mangle -A zapret -d 0.0.0.0/8 -j RETURN
@@ -3117,8 +3118,12 @@ add_fw() {
   iptables -t mangle -I POSTROUTING 1 -j zapret || { del_fw; return 1; }
 
   # Redirect client LAN DNS queries to Mihomo DNS (port 1053) to eliminate ISP DNS poisoning (NXDOMAIN)
+  iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null
+  iptables -t nat -A PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null
   iptables -t nat -A PREROUTING -i br+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null
   iptables -t nat -A PREROUTING -i br+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null
+  iptables -t nat -A PREROUTING -i Bridge+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null
+  iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null
 
   # Stop previous failsafe if running
   if [ -f "$FAILSAFE_PID" ]; then
@@ -3149,13 +3154,19 @@ del_fw() {
   fi
 
   # Remove DNS redirects
+  while iptables -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
   while iptables -t nat -D PREROUTING -i br+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
   while iptables -t nat -D PREROUTING -i br+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
 
   # Remove hooks
   while iptables -t mangle -D POSTROUTING ! -o br+ ! -o lo -j zapret 2>/dev/null; do :; done
+  while iptables -t mangle -D POSTROUTING ! -o Bridge+ ! -o lo -j zapret 2>/dev/null; do :; done
   while iptables -t mangle -D POSTROUTING -j zapret 2>/dev/null; do :; done
   while iptables -t mangle -D PREROUTING -i br+ -j zapret 2>/dev/null; do :; done
+  while iptables -t mangle -D PREROUTING -i Bridge+ -j zapret 2>/dev/null; do :; done
   while iptables -t mangle -D PREROUTING -j zapret 2>/dev/null; do :; done
   while iptables -t mangle -D OUTPUT -j zapret 2>/dev/null; do :; done
 
