@@ -2508,7 +2508,8 @@ pub async fn clash_proxy(
     }
 
     for (k, v) in req.headers() {
-        if k != "host" && k != "authorization" {
+        let name = k.as_str().to_ascii_lowercase();
+        if name != "host" && name != "authorization" && name != "content-length" && name != "connection" {
             proxy_req = proxy_req.header(k, v);
         }
     }
@@ -2530,7 +2531,10 @@ pub async fn clash_proxy(
             let mut response = (status, bytes).into_response();
             for (k, v) in headers {
                 if let Some(key) = k {
-                    response.headers_mut().insert(key, v);
+                    let name = key.as_str().to_ascii_lowercase();
+                    if name != "transfer-encoding" && name != "content-length" && name != "connection" {
+                        response.headers_mut().insert(key, v);
+                    }
                 }
             }
             response
@@ -3112,8 +3116,9 @@ add_fw() {
   # Hook into POSTROUTING for all outbound WAN packets (LAN forwarded + router local direct)
   iptables -t mangle -I POSTROUTING 1 -j zapret || { del_fw; return 1; }
 
-  # Hook into PREROUTING for client LAN bridge interfaces (br+)
-  iptables -t mangle -I PREROUTING 1 -i br+ -j zapret
+  # Redirect client LAN DNS queries to Mihomo DNS (port 1053) to eliminate ISP DNS poisoning (NXDOMAIN)
+  iptables -t nat -A PREROUTING -i br+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null
+  iptables -t nat -A PREROUTING -i br+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null
 
   # Stop previous failsafe if running
   if [ -f "$FAILSAFE_PID" ]; then
@@ -3142,6 +3147,10 @@ del_fw() {
     kill -9 $(cat "$FAILSAFE_PID") 2>/dev/null
     rm -f "$FAILSAFE_PID"
   fi
+
+  # Remove DNS redirects
+  while iptables -t nat -D PREROUTING -i br+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i br+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
 
   # Remove hooks
   while iptables -t mangle -D POSTROUTING ! -o br+ ! -o lo -j zapret 2>/dev/null; do :; done
@@ -3393,7 +3402,7 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
 
     let iptables_active = tokio::process::Command::new("sh")
         .arg("-c")
-        .arg("iptables -t mangle -C POSTROUTING ! -o br+ ! -o lo -j zapret 2>/dev/null || iptables -t mangle -C PREROUTING -i br+ -j zapret 2>/dev/null || iptables -t mangle -C PREROUTING -i br+ -p tcp -m multiport --dports 80,443 -j NFQUEUE 2>/dev/null")
+        .arg("iptables -t mangle -C POSTROUTING -j zapret 2>/dev/null || iptables -t mangle -C POSTROUTING ! -o br+ ! -o lo -j zapret 2>/dev/null || iptables -t nat -C PREROUTING -i br+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || iptables -t mangle -C PREROUTING -i br+ -j zapret 2>/dev/null")
         .output()
         .await
         .map(|o| o.status.success())
@@ -3577,19 +3586,21 @@ pub async fn zapret_action(
                 cfg.zapret.custom_args = None;
                 cfg.zapret.youtube_turbo = true;
                 cfg.zapret.hybrid_youtube = true;
-                cfg.zapret.hybrid_discord = true;
+                cfg.zapret.hybrid_discord = false;
                 cfg.zapret.discord_voice_udp = true;
                 cfg.zapret.general_bypass = true;
                 cfg.zapret.aggressive_dpi = false;
+                cfg.zapret.isolated_proxy = true;
             }
             "aggressive" => {
                 cfg.zapret.custom_args = None;
                 cfg.zapret.youtube_turbo = true;
                 cfg.zapret.hybrid_youtube = true;
-                cfg.zapret.hybrid_discord = true;
+                cfg.zapret.hybrid_discord = false;
                 cfg.zapret.discord_voice_udp = true;
                 cfg.zapret.general_bypass = true;
                 cfg.zapret.aggressive_dpi = true;
+                cfg.zapret.isolated_proxy = true;
             }
             "custom" => {
                 if let Some(custom) = &body.custom_args {
@@ -3601,10 +3612,11 @@ pub async fn zapret_action(
                 cfg.zapret.custom_args = None;
                 cfg.zapret.youtube_turbo = false;
                 cfg.zapret.hybrid_youtube = true;
-                cfg.zapret.hybrid_discord = true;
+                cfg.zapret.hybrid_discord = false;
                 cfg.zapret.discord_voice_udp = true;
                 cfg.zapret.general_bypass = true;
                 cfg.zapret.aggressive_dpi = false;
+                cfg.zapret.isolated_proxy = true;
             }
         }
 
@@ -3739,13 +3751,17 @@ pub async fn zapret_action(
 
     // 6. Toggle (Включение / Выключение)
     let action_to_run = if act == "toggle" {
-        let is_running = tokio::process::Command::new("pidof")
-            .arg("nfqws")
-            .output()
-            .await
-            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-            .unwrap_or(false);
-        if is_running { "stop" } else { "start" }
+        if let Some(en) = body.enabled {
+            if en { "start" } else { "stop" }
+        } else {
+            let is_running = tokio::process::Command::new("pidof")
+                .arg("nfqws")
+                .output()
+                .await
+                .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+                .unwrap_or(false);
+            if is_running { "stop" } else { "start" }
+        }
     } else {
         act
     };

@@ -26,12 +26,12 @@ export default function Zapret({ notify }: ZapretProps) {
   const [features, setFeatures] = useState<ZapretFeatures>({
     enabled: true,
     hybrid_youtube: true,
-    hybrid_discord: true,
+    hybrid_discord: false,
     discord_voice_udp: true,
-    youtube_turbo: false,
+    youtube_turbo: true,
     general_bypass: true,
     aggressive_dpi: false,
-    isolated_proxy: false,
+    isolated_proxy: true,
   })
   const [togglingFeature, setTogglingFeature] = useState<string | null>(null)
 
@@ -56,14 +56,20 @@ export default function Zapret({ notify }: ZapretProps) {
   }, [])
 
   const handleToggle = async () => {
+    const nextVal = !isRunning
     setBusy(true)
+    setStatus((prev) => (prev ? { ...prev, running: nextVal } : prev))
+    setFeatures((prev) => ({ ...prev, enabled: nextVal }))
     try {
       const res = await apiPost<{ success: boolean; action: string; output?: string }>('zapret/action', {
-        action: 'toggle',
+        action: nextVal ? 'start' : 'stop',
+        enabled: nextVal,
       })
       notify(res.action === 'start' ? '🟢 Служба Zapret запущена' : '⚪ Служба Zapret остановлена')
       await loadStatus()
     } catch (e) {
+      setStatus((prev) => (prev ? { ...prev, running: !nextVal } : prev))
+      setFeatures((prev) => ({ ...prev, enabled: !nextVal }))
       notify(e instanceof Error ? e.message : 'Ошибка переключения Zapret', true)
     } finally {
       setBusy(false)
