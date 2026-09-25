@@ -4166,10 +4166,10 @@ pub async fn get_gaming_status(State(state): State<AppState>) -> Response {
     let domains_count = routing::get_gaming_domains(&cfg.gaming).len();
 
     // Пытаемся получить активный прокси для группы 🎮 Gaming из Mihomo
-    let active_server = match mihomo::get_proxies_raw(&state.http, &cfg).await {
-        Ok(val) => {
-            val.get("proxies")
-                .and_then(|p| p.get(routing::GAMING_GROUP_NAME).or_else(|| p.get("Gaming")))
+    let active_server = match mihomo::get_proxies(&state.http, &cfg).await {
+        Ok(map) => {
+            map.get(routing::GAMING_GROUP_NAME)
+                .or_else(|| map.get("Gaming"))
                 .and_then(|g| g.get("now"))
                 .and_then(|n| n.as_str())
                 .unwrap_or(cfg.gaming.target_server.as_str())
@@ -4292,9 +4292,8 @@ pub async fn ping_gaming_targets(State(_state): State<AppState>) -> Response {
         let n = name.to_string();
         set.spawn(async move {
             let start = tokio::time::Instant::now();
-            let resolved = tokio::net::lookup_host((h.as_str(), 443)).await;
+            let success = tokio::net::lookup_host(format!("{h}:443")).await.is_ok();
             let elapsed_ms = start.elapsed().as_millis() as u64;
-            let success = resolved.is_ok();
             (n, h, elapsed_ms, success)
         });
     }
