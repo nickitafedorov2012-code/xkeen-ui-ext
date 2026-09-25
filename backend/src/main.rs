@@ -442,7 +442,7 @@ async fn main() {
         .layer(middleware::from_fn_with_state(auth_state, auth::auth_middleware))
         .layer(middleware::from_fn(no_cache))
         .layer(middleware::from_fn(log_requests))
-        .with_state(state);
+        .with_state(state.clone());
 
     let host_ip: std::net::IpAddr = cli.host.parse().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)));
     let addr = std::net::SocketAddr::new(host_ip, port);
