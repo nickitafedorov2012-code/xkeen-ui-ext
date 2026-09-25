@@ -50,8 +50,7 @@ pub fn spawn(state: AppState) {
             };
 
             if file_changed {
-                last_mtime = mtime;
-                last_len = len;
+                /* will update after successful reload */
 
                 // Читаем содержимое и проверяем наличие сохраненных маркер-блоков
                 if let Ok(content) = tokio::fs::read_to_string(path).await {

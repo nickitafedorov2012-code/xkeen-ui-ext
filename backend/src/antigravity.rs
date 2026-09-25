@@ -221,7 +221,7 @@ impl AntigravityManager {
 
     /// Запрос по обычному UDP DNS
     async fn query_udp(&self, server: &str, domain: &str) -> Result<(Vec<Ipv4Addr>, u64), String> {
-        let sock = UdpSocket::bind("0.0.0.0:0").await.map_err(|e| e.to_string())?;
+        let sock = UdpSocket::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
         let target = if server.contains(':') {
             server.to_string()
         } else {
