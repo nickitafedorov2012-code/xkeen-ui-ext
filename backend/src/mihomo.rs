@@ -24,6 +24,7 @@ pub struct Server {
     pub ping_ms: i64,
     pub provider: Option<String>,
     pub provider_name: Option<String>,
+    pub is_pool: bool,
 }
 
 impl AsRef<str> for Server {
@@ -518,6 +519,7 @@ pub async fn get_servers(
 
     for (id, label, icon) in [("Fastest", "URL-TEST", "⚡"), ("Fallback", "FALLBACK", "🛡️")] {
         if let Some(p) = proxies.get(id) {
+            seen_names.insert(id.to_string());
             servers.push(Server {
                 id: id.into(),
                 name: format!("{icon} {id} (Авто)"),
@@ -527,14 +529,50 @@ pub async fn get_servers(
                 is_active: proxy_now == id,
                 is_priority: priority_chain.iter().any(|p| p == id),
                 ping_ms: last_delay(p),
-                provider: None,
-                provider_name: None,
+                provider: Some("__pool__".into()),
+                provider_name: Some("Группа / Пул".into()),
+                is_pool: true,
             });
         }
     }
 
     for (name, p) in &proxies {
         let typ = p.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
+        let is_group = ["selector", "urltest", "fallback", "load"].contains(&typ.as_str());
+
+        if is_group {
+            if seen_names.contains(name) || ip_from_group_name(name).is_some() {
+                continue;
+            }
+            seen_names.insert(name.clone());
+            let now_target = p.get("now").and_then(|n| n.as_str()).unwrap_or("—");
+            let icon = match name.as_str() {
+                "PROXY" => "🌐",
+                "Google AI" => "🤖",
+                "YouTube" => "📺",
+                "Discord" => "💬",
+                "Telegram" => "✈️",
+                "Steam" => "🎮",
+                "Twitch" => "🟣",
+                "Torrent" => "🧲",
+                _ => "🔀",
+            };
+            servers.push(Server {
+                id: name.clone(),
+                name: format!("{icon} {name}"),
+                protocol: format!("POOL ({})", typ.to_uppercase()),
+                host: format!("Выбран: {now_target}"),
+                port: 0,
+                is_active: *name == active || proxy_now == *name,
+                is_priority: priority_chain.iter().any(|p| p == name),
+                ping_ms: last_delay(p),
+                provider: Some("__pool__".into()),
+                provider_name: Some("Группа / Пул".into()),
+                is_pool: true,
+            });
+            continue;
+        }
+
         if SKIP_TYPES.contains(&typ.as_str()) {
             continue;
         }
@@ -553,6 +591,7 @@ pub async fn get_servers(
             ping_ms: last_delay(p),
             provider: None,
             provider_name: None,
+            is_pool: false,
         });
     }
 
@@ -582,6 +621,7 @@ pub async fn get_servers(
                 ping_ms: last_delay(p),
                 provider: provider_id,
                 provider_name,
+                is_pool: false,
             });
         }
     }

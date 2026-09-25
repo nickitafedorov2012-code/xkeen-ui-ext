@@ -94,6 +94,14 @@ impl Default for SystemConfig {
 }
 
 
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct FailoverPresetSlot {
+    pub id: String,
+    pub name: String,
+    pub chain: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct FailoverConfig {
@@ -107,6 +115,8 @@ pub struct FailoverConfig {
     pub interval_secs: u32,
     /// Per-device failover: мониторинг цепочек server+резервы (device_routing).
     pub device_failover_enabled: bool,
+    /// Именованные слоты настроенных пресетов для мгновенного переключения
+    pub presets: Vec<FailoverPresetSlot>,
 }
 
 impl Default for FailoverConfig {
@@ -119,6 +129,7 @@ impl Default for FailoverConfig {
             auto_restore_priority: true,
             interval_secs: 60,
             device_failover_enabled: false,
+            presets: Vec::new(),
         }
     }
 }

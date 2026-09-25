@@ -52,6 +52,7 @@ export interface ServerInfo {
   ping_ms: number
   provider?: string
   provider_name?: string
+  is_pool?: boolean
   raw?: Record<string, any>
 }
 
@@ -133,10 +134,25 @@ export interface FailoverEventInfo {
   switched: boolean
 }
 
+export interface FailoverPresetSlot {
+  id: string
+  name: string
+  chain: string[]
+}
+
 export interface AppSettings {
   rci: { host: string; port: number; login: string; password: string; use_https: boolean; token: string }
   mihomo: { host: string; port: number; secret: string; config_path: string; device_providers: string[] }
-  failover: { enabled: boolean; ping_threshold_ms: number; priority_server: string; priority_chain?: string[]; auto_restore_priority: boolean; interval_secs: number; device_failover_enabled: boolean }
+  failover: {
+    enabled: boolean
+    ping_threshold_ms: number
+    priority_server: string
+    priority_chain?: string[]
+    auto_restore_priority: boolean
+    interval_secs: number
+    device_failover_enabled: boolean
+    presets?: FailoverPresetSlot[]
+  }
   refresh_interval_sec: number
   system: { xkeen_init: string; backup_dir: string }
   logs: { level: string; remote_syslog: string; log_requests: boolean }

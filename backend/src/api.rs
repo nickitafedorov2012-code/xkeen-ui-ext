@@ -169,6 +169,7 @@ pub async fn get_servers(State(state): State<AppState>) -> Response {
                         "ping_ms": s.ping_ms,
                         "provider": s.provider,
                         "provider_name": s.provider_name,
+                        "is_pool": s.is_pool,
                     })
                 })
                 .collect();
@@ -1536,19 +1537,35 @@ pub async fn delete_provider(State(state): State<AppState>, Json(req): Json<Dele
         return api_err(format!("Ошибка сохранения config.yaml: {e}"));
     }
 
-    // Удаляем псевдоним
+    // Удаляем кэш-файлы провайдера с диска (если создавались)
+    let prov_cache_yaml = format!("/opt/etc/mihomo/providers/{id}.yaml");
+    let prov_cache_json = format!("/opt/etc/mihomo/providers/{id}.json");
+    let _ = tokio::fs::remove_file(&prov_cache_yaml).await;
+    let _ = tokio::fs::remove_file(&prov_cache_json).await;
+
+    // Удаляем псевдоним и фильтры из AppConfig
     {
         let _guard = state.config_lock.lock().await;
         let mut new_cfg = (**state.config.read().await).clone();
+        let mut changed = false;
         if new_cfg.provider_aliases.remove(id).is_some() {
+            changed = true;
+        }
+        if new_cfg.provider_filters.remove(id).is_some() {
+            changed = true;
+        }
+        if changed {
             let _ = config::save(&state.config_path, &new_cfg).await;
             *state.config.write().await = std::sync::Arc::new(new_cfg);
         }
     }
 
-    let _ = mihomo::reload_config(&state.http, &cfg).await;
+    let reload_res = mihomo::reload_config(&state.http, &cfg).await;
+    if let Err(e) = &reload_res {
+        crate::log_w!("Внимание: Mihomo reload вернул ошибку после удаления провайдера '{id}': {e}");
+    }
 
-    api_ok(json!({ "deleted": true, "message": format!("Подписка '{id}' удалена") }))
+    api_ok(json!({ "deleted": true, "message": format!("Подписка '{id}' успешно удалена") }))
 }
 
 /// GET /api/antigravity/status
@@ -2791,6 +2808,7 @@ pub async fn test_rule_match(
     let cfg = state.config.read().await;
     let domain = body.domain.trim().to_lowercase();
     let src_ip = body.source_ip.as_deref().unwrap_or("").trim();
+    let active_srv = cfg.failover.priority_chain.first().cloned().unwrap_or_else(|| "PROXY".into());
 
     // 1. Персональные доменные правила устройства
     if !src_ip.is_empty() {
@@ -2846,7 +2864,21 @@ pub async fn test_rule_match(
         }
     }
 
-    // 4. Прямой список (DIRECT)
+    // 4. Выделенный маршрут Google AI / Antigravity Flow
+    for d in crate::routing::FLOW_DOMAINS {
+        if domain == *d || domain.ends_with(&format!(".{}", d)) {
+            let flow_tgt = cfg.flow_server.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or("Google AI");
+            return api_ok(json!({
+                "matched_rule": format!("DOMAIN-SUFFIX,{},Google AI", d),
+                "rule_type": "GOOGLE_AI",
+                "target_group": "Google AI",
+                "resolved_server": flow_tgt,
+                "reason": "Выделенный маршрут Google AI / Antigravity Cloud Code"
+            }));
+        }
+    }
+
+    // 5. Прямой список (DIRECT)
     for d in &cfg.direct_domains {
         let d_lower = d.trim().to_lowercase();
         if domain == d_lower || domain.ends_with(&format!(".{}", d_lower)) {
@@ -2860,11 +2892,10 @@ pub async fn test_rule_match(
         }
     }
 
-    // 5. Принудительный список (PROXY / FORCE)
+    // 6. Принудительный список (PROXY / FORCE)
     for d in &cfg.force_domains {
         let d_lower = d.trim().to_lowercase();
         if domain == d_lower || domain.ends_with(&format!(".{}", d_lower)) {
-            let active_srv = cfg.failover.priority_chain.first().cloned().unwrap_or_else(|| "PROXY".into());
             return api_ok(json!({
                 "matched_rule": format!("DOMAIN-SUFFIX,{},PROXY", d),
                 "rule_type": "FORCE_DOMAIN",
@@ -2875,13 +2906,137 @@ pub async fn test_rule_match(
         }
     }
 
-    // 6. Базовое правило (MATCH)
-    let def_srv = cfg.failover.priority_chain.first().cloned().unwrap_or_else(|| "DIRECT".into());
+    // 7. Zapret Hybrid правила (если служба Zapret включена)
+    if cfg.zapret.enabled {
+        // Изолированные зарубежные сервисы -> PROXY
+        if cfg.zapret.isolated_proxy {
+            for d in crate::routing::ISOLATED_PROXIED_DOMAINS {
+                if domain == *d || domain.ends_with(&format!(".{}", d)) {
+                    return api_ok(json!({
+                        "matched_rule": format!("DOMAIN-SUFFIX,{},PROXY", d),
+                        "rule_type": "ZAPRET_ISOLATED",
+                        "target_group": "PROXY",
+                        "resolved_server": active_srv,
+                        "reason": "Изоляция IP-блокировок через VPN-прокси (Zapret Hybrid)"
+                    }));
+                }
+            }
+        }
+
+        // YouTube Direct -> DIRECT
+        if cfg.zapret.hybrid_youtube {
+            let is_yt = crate::routing::YOUTUBE_HYBRID_DOMAINS.iter().any(|d| domain == *d || domain.ends_with(&format!(".{}", d)))
+                || domain.contains("youtube")
+                || domain.contains("googlevideo")
+                || domain == "youtu.be";
+            if is_yt {
+                return api_ok(json!({
+                    "matched_rule": "DOMAIN-SUFFIX,youtube.com,DIRECT",
+                    "rule_type": "ZAPRET_HYBRID",
+                    "target_group": "DIRECT",
+                    "resolved_server": "DIRECT (Локальный обход Zapret nfqws)",
+                    "reason": "Zapret DPI bypass — YouTube Direct (напрямую с кэш-серверов GGC без расхода VPS)"
+                }));
+            }
+        }
+
+        // Discord Direct -> DIRECT
+        if cfg.zapret.hybrid_discord {
+            let is_dc = crate::routing::DISCORD_HYBRID_DOMAINS.iter().any(|d| domain == *d || domain.ends_with(&format!(".{}", d)))
+                || domain.contains("discord");
+            if is_dc {
+                return api_ok(json!({
+                    "matched_rule": "DOMAIN-SUFFIX,discord.com,DIRECT",
+                    "rule_type": "ZAPRET_HYBRID",
+                    "target_group": "DIRECT",
+                    "resolved_server": "DIRECT (Локальный обход Zapret nfqws)",
+                    "reason": "Zapret DPI bypass — Discord Direct (минимальный пинг напрямую без VPS)"
+                }));
+            }
+        }
+    }
+
+    // 8. Наборы правил Mihomo (Rule-Sets)
+    if domain.contains("youtube") || domain.contains("googlevideo") || domain == "youtu.be" {
+        return api_ok(json!({
+            "matched_rule": "RULE-SET,youtube@domain,YouTube",
+            "rule_type": "RULE_SET",
+            "target_group": "YouTube",
+            "resolved_server": active_srv,
+            "reason": "Специальная группа проксирования YouTube (Mihomo Selector)"
+        }));
+    }
+
+    if domain.contains("discord") {
+        return api_ok(json!({
+            "matched_rule": "RULE-SET,discord@classical,Discord",
+            "rule_type": "RULE_SET",
+            "target_group": "Discord",
+            "resolved_server": active_srv,
+            "reason": "Специальная группа проксирования Discord"
+        }));
+    }
+
+    if domain == "t.me" || domain.ends_with(".t.me") || domain.contains("telegram") {
+        return api_ok(json!({
+            "matched_rule": "RULE-SET,telegram@domain,Telegram",
+            "rule_type": "RULE_SET",
+            "target_group": "Telegram",
+            "resolved_server": active_srv,
+            "reason": "Специальная группа проксирования Telegram"
+        }));
+    }
+
+    if domain.contains("steam") {
+        return api_ok(json!({
+            "matched_rule": "RULE-SET,steam@domain,Steam",
+            "rule_type": "RULE_SET",
+            "target_group": "Steam",
+            "resolved_server": active_srv,
+            "reason": "Группа маршрутизации Steam"
+        }));
+    }
+
+    if domain.contains("twitch") {
+        return api_ok(json!({
+            "matched_rule": "RULE-SET,twitch@domain,Twitch",
+            "rule_type": "RULE_SET",
+            "target_group": "Twitch",
+            "resolved_server": active_srv,
+            "reason": "Группа маршрутизации Twitch"
+        }));
+    }
+
+    if domain.contains("tracker") || domain.contains("torrent") {
+        return api_ok(json!({
+            "matched_rule": "RULE-SET,public-tracker@domain,Torrent",
+            "rule_type": "RULE_SET",
+            "target_group": "Torrent",
+            "resolved_server": "DIRECT",
+            "reason": "P2P и торрент-трафик (Torrent группа)"
+        }));
+    }
+
+    // Российские домены и RU Geosite
+    if domain.ends_with(".ru") || domain.ends_with(".su") || domain.ends_with(".рф")
+        || domain == "ya.ru" || domain == "yandex.ru" || domain == "vk.com"
+        || domain == "gosuslugi.ru" || domain == "kinopoisk.ru"
+    {
+        return api_ok(json!({
+            "matched_rule": "RULE-SET,category-ru@domain,DIRECT",
+            "rule_type": "GEO_DIRECT",
+            "target_group": "DIRECT",
+            "resolved_server": "DIRECT (Напрямую)",
+            "reason": "Российский сегмент интернета (RU Geosite) — прямой доступ без прокси"
+        }));
+    }
+
+    // 9. Финальное базовое правило (MATCH)
     api_ok(json!({
         "matched_rule": "MATCH,PROXY",
         "rule_type": "MATCH",
         "target_group": "PROXY",
-        "resolved_server": def_srv,
+        "resolved_server": active_srv,
         "reason": "Сработало финальное правило маршрутизации по умолчанию (MATCH)"
     }))
 }

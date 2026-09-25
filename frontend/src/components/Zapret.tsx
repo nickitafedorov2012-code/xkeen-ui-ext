@@ -66,7 +66,15 @@ export default function Zapret({ notify }: ZapretProps) {
         enabled: nextVal,
       })
       notify(res.action === 'start' ? '🟢 Служба Zapret запущена' : '⚪ Служба Zapret остановлена')
-      await loadStatus()
+      // Даём nfqws время на инициализацию демона перед опросом PID
+      await new Promise((r) => setTimeout(r, 800))
+      let statusRes = await apiGet<ZapretStatus>('zapret/status')
+      if (nextVal && !statusRes.running) {
+        await new Promise((r) => setTimeout(r, 1200))
+        statusRes = await apiGet<ZapretStatus>('zapret/status')
+      }
+      setStatus(statusRes)
+      if (statusRes.features) setFeatures(statusRes.features)
     } catch (e) {
       setStatus((prev) => (prev ? { ...prev, running: !nextVal } : prev))
       setFeatures((prev) => ({ ...prev, enabled: !nextVal }))

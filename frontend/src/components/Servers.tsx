@@ -41,6 +41,7 @@ export default function Servers({ notify }: Props) {
 
   const [filter, setFilter] = useState('')
   const [flowOnly, setFlowOnly] = useState(false)
+  const [poolOnly, setPoolOnly] = useState(false)
   const [flowRepairOpen, setFlowRepairOpen] = useState(false)
   const [limit, setLimit] = useState(PAGE)
   const [loading, setLoading] = useState(true)
@@ -66,6 +67,8 @@ export default function Servers({ notify }: Props) {
 
   // Управление подписками
   const [providersOpen, setProvidersOpen] = useState(false)
+  const [confirmDeleteSub, setConfirmDeleteSub] = useState<{ id: string; name: string } | null>(null)
+  const [deletingSub, setDeletingSub] = useState(false)
   const [editingAliases, setEditingAliases] = useState<Record<string, string>>({})
   const [savedAliasFeedback, setSavedAliasFeedback] = useState<Record<string, boolean>>({})
   const [updatingProvider, setUpdatingProvider] = useState<string | null>(null)
@@ -196,10 +199,20 @@ export default function Servers({ notify }: Props) {
     return servers.filter((s) => getFlowStatus(s) === 'ok').length
   }, [servers])
 
+  const poolsCount = useMemo(() => {
+    return servers.filter((s) => s.is_pool).length
+  }, [servers])
+
   // Фильтрация серверов
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase()
     return servers.filter((s) => {
+      if (poolOnly && !s.is_pool) {
+        return false
+      }
+      if (!poolOnly && s.is_pool && !q && !selectedProviders.has('__pool__')) {
+        return false
+      }
       if (flowOnly && getFlowStatus(s) !== 'ok') {
         return false
       }
@@ -220,7 +233,7 @@ export default function Servers({ notify }: Props) {
         s.host.toLowerCase().includes(q)
       )
     })
-  }, [servers, filter, selectedProviders, flowOnly])
+  }, [servers, filter, selectedProviders, flowOnly, poolOnly])
 
   // Активный сервер для закрепления наверху
   const activeServer = useMemo(() => servers.find((s) => s.is_active), [servers])
@@ -429,16 +442,22 @@ export default function Servers({ notify }: Props) {
     }
   }
 
-  const handleDeleteSubscription = async (id: string, name: string) => {
-    if (!window.confirm(`Вы уверены, что хотите удалить подписку "${name}" (${id}) из config.yaml?`)) {
-      return
-    }
+  const handleDeleteSubscription = (id: string, name: string) => {
+    setConfirmDeleteSub({ id, name })
+  }
+
+  const executeDeleteSubscription = async (id: string, name: string) => {
+    setDeletingSub(true)
     try {
       await apiPost('providers/delete', { id })
-      notify(`Подписка "${name}" удалена`)
+      notify(`Подписка "${name}" успешно удалена`)
+      setProviders((prev) => prev.filter((p) => p.id !== id))
+      setConfirmDeleteSub(null)
       load()
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка удаления подписки', true)
+    } finally {
+      setDeletingSub(false)
     }
   }
 
@@ -587,12 +606,29 @@ export default function Servers({ notify }: Props) {
           className={`btn ${flowOnly ? 'primary' : ''}`}
           onClick={() => {
             setFlowOnly((prev) => !prev)
+            if (!flowOnly) setPoolOnly(false)
             setLimit(PAGE)
           }}
           title="Показать только серверы, совместимые с Google Flow и Gemini Labs"
         >
           ✨ Только Flow ({flowCount})
         </button>
+
+        {/* Фильтр Пулов и Групп */}
+        {poolsCount > 0 && (
+          <button
+            type="button"
+            className={`btn ${poolOnly ? 'primary' : ''}`}
+            onClick={() => {
+              setPoolOnly((prev) => !prev)
+              if (!poolOnly) setFlowOnly(false)
+              setLimit(PAGE)
+            }}
+            title="Показать только прокси-пулы и селекторные группы Mihomo (Fastest, Fallback, PROXY и др.)"
+          >
+            🔀 Пулы ({poolsCount})
+          </button>
+        )}
 
         {flowOnly && (
           <button
@@ -1264,7 +1300,7 @@ export default function Servers({ notify }: Props) {
               Вы можете переименовывать подписки, копировать их URL, добавлять новые или удалять неиспользуемые.
             </p>
 
-            <div className="modal-list" style={{ maxHeight: '52vh' }}>
+            <div className="modal-list" style={{ maxHeight: '56vh', display: 'flex', flexDirection: 'column', gap: 12 }}>
               {providers.length === 0 && <p className="muted">Нет активных подписок.</p>}
               {providers.map((p) => {
                 const draft = editingAliases[p.id] ?? (p.name === p.id ? '' : p.name)
@@ -1272,19 +1308,67 @@ export default function Servers({ notify }: Props) {
                 const isSaved = savedAliasFeedback[p.id]
                 const dotColor = providerColorMap.get(p.id) || '#a855f7'
                 const showUrl = urlVisibility[p.id]
+                const isConfirming = confirmDeleteSub?.id === p.id
 
                 return (
-                  <div key={p.id} className="provider-edit-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6, padding: '10px 0', borderBottom: '1px solid var(--border)' }}>
+                  <div
+                    key={p.id}
+                    className="provider-edit-card"
+                    style={{
+                      background: 'rgba(255, 255, 255, 0.025)',
+                      border: isConfirming ? '1px solid rgba(239, 68, 68, 0.5)' : '1px solid var(--border)',
+                      borderRadius: 10,
+                      padding: '12px 14px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 10,
+                      transition: 'border-color 0.2s, box-shadow 0.2s',
+                    }}
+                  >
+                    {/* Заголовок подписки и действия */}
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
-                      <div className="provider-meta" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <span className="sub-marker-dot" style={{ backgroundColor: dotColor }} />
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <span
+                          className="sub-marker-dot"
+                          style={{
+                            backgroundColor: dotColor,
+                            width: 10,
+                            height: 10,
+                            borderRadius: '50%',
+                            display: 'inline-block',
+                            boxShadow: `0 0 8px ${dotColor}66`,
+                          }}
+                        />
                         <b style={{ fontSize: 14 }}>{p.name}</b>
-                        <span className="provider-meta-id" style={{ fontFamily: 'Consolas, monospace', fontSize: 12, color: 'var(--muted)' }}>
-                          ({p.id})
+                        <span
+                          style={{
+                            fontFamily: 'Consolas, monospace',
+                            fontSize: 11,
+                            background: 'rgba(255,255,255,0.06)',
+                            padding: '1px 6px',
+                            borderRadius: 4,
+                            color: 'var(--muted)',
+                          }}
+                        >
+                          {p.id}
                         </span>
-                        <span style={{ fontSize: 11, color: 'var(--muted)' }}>
-                          · {p.count} серв.{p.updated_at ? ` · ${p.updated_at.slice(0, 10)}` : ''}
+                        <span
+                          style={{
+                            fontSize: 11,
+                            background: 'rgba(56, 189, 248, 0.1)',
+                            color: '#38bdf8',
+                            padding: '1px 7px',
+                            borderRadius: 12,
+                            fontWeight: 500,
+                          }}
+                        >
+                          {p.count} серв.
                         </span>
+                        {p.updated_at && (
+                          <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+                            · обновл. {p.updated_at.slice(0, 10)}
+                          </span>
+                        )}
                       </div>
 
                       {/* Кнопки обновления и удаления */}
@@ -1293,22 +1377,63 @@ export default function Servers({ notify }: Props) {
                           type="button"
                           className="btn sm ghost"
                           title="Загрузить свежие серверы из этой подписки"
-                          disabled={updatingProvider === p.id}
+                          disabled={updatingProvider === p.id || deletingSub}
                           onClick={() => updateProviderNow(p.id)}
                         >
-                          {updatingProvider === p.id ? '…' : '↻ Обновить'}
+                          {updatingProvider === p.id ? '⏳ Обновление…' : '↻ Обновить'}
                         </button>
                         <button
                           type="button"
                           className="btn sm ghost"
-                          style={{ color: '#ef4444' }}
+                          style={{ color: '#ef4444', borderColor: isConfirming ? 'rgba(239,68,68,0.4)' : undefined }}
                           title="Удалить подписку"
+                          disabled={deletingSub}
                           onClick={() => handleDeleteSubscription(p.id, p.name)}
                         >
-                          🗑
+                          🗑 Удалить
                         </button>
                       </div>
                     </div>
+
+                    {/* Баннер подтверждения удаления */}
+                    {isConfirming && (
+                      <div
+                        style={{
+                          padding: '10px 12px',
+                          background: 'rgba(239, 68, 68, 0.12)',
+                          border: '1px solid rgba(239, 68, 68, 0.35)',
+                          borderRadius: 8,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: 10,
+                          flexWrap: 'wrap',
+                        }}
+                      >
+                        <span style={{ fontSize: 12.5, color: '#fca5a5' }}>
+                          Удалить подписку <b>«{p.name}»</b> из config.yaml и всех групп маршрутизации?
+                        </span>
+                        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                          <button
+                            type="button"
+                            className="btn sm"
+                            style={{ background: '#dc2626', color: '#fff', border: 'none' }}
+                            disabled={deletingSub}
+                            onClick={() => executeDeleteSubscription(p.id, p.name)}
+                          >
+                            {deletingSub ? 'Удаление…' : 'Да, удалить'}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn sm ghost"
+                            disabled={deletingSub}
+                            onClick={() => setConfirmDeleteSub(null)}
+                          >
+                            Отмена
+                          </button>
+                        </div>
+                      </div>
+                    )}
 
                     {/* Поле переименования */}
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
@@ -1339,7 +1464,15 @@ export default function Servers({ notify }: Props) {
                     {p.hwid && (
                       <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#38bdf8' }}>
                         <span style={{ opacity: 0.7 }}>🔑 HWID:</span>
-                        <span style={{ fontFamily: 'Consolas, monospace', background: 'rgba(56, 189, 248, 0.12)', padding: '2px 6px', borderRadius: 4, border: '1px solid rgba(56, 189, 248, 0.25)' }}>
+                        <span
+                          style={{
+                            fontFamily: 'Consolas, monospace',
+                            background: 'rgba(56, 189, 248, 0.12)',
+                            padding: '2px 8px',
+                            borderRadius: 4,
+                            border: '1px solid rgba(56, 189, 248, 0.25)',
+                          }}
+                        >
                           {p.hwid}
                         </span>
                       </div>
@@ -1347,9 +1480,31 @@ export default function Servers({ notify }: Props) {
 
                     {/* Строка URL подписки */}
                     {p.url && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, background: 'rgba(0,0,0,0.2)', padding: '4px 8px', borderRadius: 6 }}>
-                        <span className="muted small" style={{ flexShrink: 0 }}>URL:</span>
-                        <span style={{ flex: 1, fontFamily: 'Consolas, monospace', fontSize: 11.5, color: showUrl ? 'var(--text)' : 'var(--muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          background: 'rgba(0,0,0,0.25)',
+                          padding: '6px 10px',
+                          borderRadius: 6,
+                          border: '1px solid rgba(255,255,255,0.05)',
+                        }}
+                      >
+                        <span className="muted small" style={{ flexShrink: 0, fontWeight: 500 }}>
+                          URL:
+                        </span>
+                        <span
+                          style={{
+                            flex: 1,
+                            fontFamily: 'Consolas, monospace',
+                            fontSize: 11.5,
+                            color: showUrl ? 'var(--text)' : 'var(--muted)',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
                           {showUrl ? p.url : '••••••••••••••••••••••••••••••••••••••••••••'}
                         </span>
                         <button
@@ -1357,7 +1512,7 @@ export default function Servers({ notify }: Props) {
                           className="btn sm ghost"
                           onClick={() => setUrlVisibility((prev) => ({ ...prev, [p.id]: !showUrl }))}
                           title={showUrl ? 'Скрыть URL' : 'Показать URL'}
-                          style={{ padding: '2px 6px', fontSize: 11 }}
+                          style={{ padding: '2px 8px', fontSize: 11 }}
                         >
                           {showUrl ? '🙈 Скрыть' : '👁 Показать'}
                         </button>
@@ -1366,7 +1521,7 @@ export default function Servers({ notify }: Props) {
                           className="btn sm ghost"
                           onClick={() => copySubUrl(p.id, p.url!)}
                           title="Скопировать URL в буфер обмена"
-                          style={{ padding: '2px 6px', fontSize: 11 }}
+                          style={{ padding: '2px 8px', fontSize: 11 }}
                         >
                           {copiedUrlId === p.id ? '✓ Скопировано' : '📋 Копировать'}
                         </button>

@@ -271,6 +271,67 @@ export default function Settings({ notify, status, refresh }: Props) {
   // --- Глобальная цепочка приоритетов ---
   const chain = settings?.failover.priority_chain ?? (settings?.failover.priority_server ? [settings.failover.priority_server] : [])
 
+  // --- Пресеты Failover слотов ---
+  const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null)
+  const [newPresetName, setNewPresetName] = useState('')
+  const [showNewPresetInput, setShowNewPresetInput] = useState(false)
+
+  const activePresets = settings?.failover?.presets && settings.failover.presets.length > 0
+    ? settings.failover.presets
+    : [
+        { id: 'preset_default', name: '⚡ Основной', chain: [] },
+        { id: 'preset_gaming', name: '🎮 Гейминг', chain: [] },
+        { id: 'preset_streaming', name: '🎬 Стриминг', chain: [] },
+      ]
+
+  const applyPresetSlot = (slot: { id: string; name: string; chain: string[] }) => {
+    setSelectedPresetId(slot.id)
+    patch((s) => {
+      s.failover.priority_chain = [...slot.chain]
+    })
+    notify(`Применен пресет: ${slot.name}`)
+  }
+
+  const saveCurrentToPreset = (slotId: string) => {
+    patch((s) => {
+      if (!s.failover.presets || s.failover.presets.length === 0) {
+        s.failover.presets = activePresets.map((p) => ({ ...p }))
+      }
+      const target = s.failover.presets.find((x) => x.id === slotId)
+      if (target) {
+        target.chain = [...chain]
+      }
+    })
+    const pName = activePresets.find((x) => x.id === slotId)?.name || slotId
+    notify(`Текущая цепочка (${chain.length} узлов) сохранена в пресет «${pName}»`)
+  }
+
+  const createNewPresetSlot = () => {
+    const name = newPresetName.trim()
+    if (!name) return
+    const newId = 'preset_' + Date.now()
+    patch((s) => {
+      const currentList = s.failover.presets && s.failover.presets.length > 0
+        ? [...s.failover.presets]
+        : activePresets.map((p) => ({ ...p }))
+      currentList.push({ id: newId, name, chain: [...chain] })
+      s.failover.presets = currentList
+    })
+    setSelectedPresetId(newId)
+    setNewPresetName('')
+    setShowNewPresetInput(false)
+    notify(`Создан слот пресета «${name}»`)
+  }
+
+  const deletePresetSlot = (slotId: string) => {
+    patch((s) => {
+      if (!s.failover.presets) return
+      s.failover.presets = s.failover.presets.filter((p) => p.id !== slotId)
+    })
+    if (selectedPresetId === slotId) setSelectedPresetId(null)
+    notify('Слот пресета удален')
+  }
+
   const chainMove = (idx: number, dir: -1 | 1) => {
     const next = [...chain]
     const j = idx + dir
@@ -523,10 +584,10 @@ export default function Settings({ notify, status, refresh }: Props) {
         {/* ЛЕВАЯ КОЛОНКА */}
         <div className="settings-col">
           {/* FAILOVER КАРТОЧКА */}
-          <section className="card">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+          <section className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <h2 style={{ margin: 0 }}>Failover</h2>
+                <h2 style={{ margin: 0, fontSize: 16 }}>⚡ Резервирование (Failover)</h2>
                 {autoSaveStatus === 'saving' && (
                   <span className="badge" style={{ borderColor: 'rgba(0, 211, 242, 0.4)', color: '#00D3F2', fontSize: 11 }}>
                     сохранение…
@@ -537,6 +598,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                 {settings.failover.enabled ? '🟢 включён' : '⚪ выключен'}
               </span>
             </div>
+
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <b>Включить автоматический failover</b>
               <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
@@ -553,47 +615,231 @@ export default function Settings({ notify, status, refresh }: Props) {
                 </span>
               </div>
             </div>
-            <label className="row"><span>Порог пинга, мс</span>
-              <NumberInput
-                min={50}
-                max={5000}
-                step={50}
-                fallback={300}
-                value={settings.failover.ping_threshold_ms}
-                onChange={(val) => patch((s) => (s.failover.ping_threshold_ms = val))}
-              />
-            </label>
+
+            {/* Слоты пресетов Failover */}
+            <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>
+                  📁 Слоты пресетов цепочек:
+                </span>
+                <span className="muted small">Быстрое переключение без ручной сборки</span>
+              </div>
+
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+                {activePresets.map((slot) => {
+                  const isSelected = selectedPresetId === slot.id
+                  return (
+                    <div
+                      key={slot.id}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        borderRadius: 20,
+                        background: isSelected ? 'rgba(56, 189, 248, 0.2)' : 'rgba(255, 255, 255, 0.05)',
+                        border: isSelected ? '1px solid #38bdf8' : '1px solid var(--border)',
+                        padding: '3px 8px 3px 10px',
+                        gap: 6,
+                      }}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => applyPresetSlot(slot)}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: isSelected ? '#38bdf8' : 'var(--text)',
+                          cursor: 'pointer',
+                          fontSize: 12,
+                          fontWeight: 500,
+                          padding: 0,
+                        }}
+                        title={`Применить эту цепочку (${slot.chain?.length || 0} узлов)`}
+                      >
+                        {slot.name} <span style={{ opacity: 0.6, fontSize: 11 }}>({slot.chain?.length || 0})</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => saveCurrentToPreset(slot.id)}
+                        style={{
+                          background: 'rgba(56, 189, 248, 0.25)',
+                          border: 'none',
+                          borderRadius: 4,
+                          color: '#38bdf8',
+                          cursor: 'pointer',
+                          fontSize: 10.5,
+                          padding: '1px 5px',
+                        }}
+                        title="Записать текущую настроенную цепочку в этот слот"
+                      >
+                        💾 Сохранить
+                      </button>
+                      {!['preset_default', 'preset_gaming', 'preset_streaming'].includes(slot.id) && (
+                        <button
+                          type="button"
+                          onClick={() => deletePresetSlot(slot.id)}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            color: '#ef4444',
+                            cursor: 'pointer',
+                            fontSize: 11,
+                            padding: '0 2px',
+                          }}
+                          title="Удалить слот"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  )
+                })}
+
+                {!showNewPresetInput ? (
+                  <button
+                    type="button"
+                    className="btn sm ghost"
+                    onClick={() => setShowNewPresetInput(true)}
+                    style={{ fontSize: 11, padding: '2px 8px', borderRadius: 20 }}
+                  >
+                    ➕ Создать слот
+                  </button>
+                ) : (
+                  <div style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
+                    <input
+                      className="input sm"
+                      placeholder="Имя слота…"
+                      value={newPresetName}
+                      onChange={(e) => setNewPresetName(e.target.value)}
+                      style={{ width: 110, fontSize: 11, padding: '2px 6px' }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') createNewPresetSlot()
+                      }}
+                    />
+                    <button type="button" className="btn sm primary" onClick={createNewPresetSlot} style={{ fontSize: 11, padding: '2px 6px' }}>
+                      ✓
+                    </button>
+                    <button type="button" className="btn sm ghost" onClick={() => setShowNewPresetInput(false)} style={{ fontSize: 11, padding: '2px 6px' }}>
+                      ✕
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
+              <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                <span style={{ fontSize: 12 }}>Порог пинга для смены узла, мс</span>
+                <NumberInput
+                  min={50}
+                  max={5000}
+                  step={50}
+                  fallback={300}
+                  value={settings.failover.ping_threshold_ms}
+                  onChange={(val) => patch((s) => (s.failover.ping_threshold_ms = val))}
+                />
+              </label>
+
+              <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                <span style={{ fontSize: 12 }}>Интервал проверки пинга, сек</span>
+                <NumberInput
+                  min={15}
+                  max={3600}
+                  step={5}
+                  fallback={60}
+                  value={settings.failover.interval_secs}
+                  onChange={(val) => patch((s) => (s.failover.interval_secs = val))}
+                />
+              </label>
+            </div>
+
             <div className="row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 6 }}>
-              <span>Цепочка приоритетов (первый — основной)</span>
-              <div className="modal-list" style={{ maxHeight: 260 }}>
-                {chain.length === 0 && <p className="muted small" style={{ margin: 0 }}>Цепочка не задана — failover выбирает лучший доступный сервер.</p>}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span style={{ fontWeight: 600, fontSize: 13 }}>Цепочка приоритетов серверов и пулов</span>
+                <span className="muted small">{chain.length} узлов в цепочке</span>
+              </div>
+
+              <div className="modal-list" style={{ maxHeight: 280, display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {chain.length === 0 && (
+                  <p className="muted small" style={{ margin: '8px 0' }}>
+                    Цепочка не задана — failover автоматически выбирает лучший доступный сервер.
+                  </p>
+                )}
                 {chain.map((id, i) => {
                   const sv = servers.find((x) => x.id === id)
                   return (
-                    <div key={id} className="check-row" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                      <span className="badge">{i === 0 ? 'ОСН' : `РЕЗ${i}`}</span>
-                      {sv?.provider && (
+                    <div
+                      key={id}
+                      className="check-row"
+                      style={{
+                        display: 'flex',
+                        gap: 8,
+                        alignItems: 'center',
+                        background: i === 0 ? 'rgba(56, 189, 248, 0.08)' : 'rgba(255, 255, 255, 0.02)',
+                        border: i === 0 ? '1px solid rgba(56, 189, 248, 0.3)' : '1px solid var(--border)',
+                        borderRadius: 8,
+                        padding: '6px 10px',
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: 10.5,
+                          fontWeight: 700,
+                          padding: '2px 6px',
+                          borderRadius: 4,
+                          background: i === 0 ? 'rgba(56, 189, 248, 0.25)' : 'rgba(255, 255, 255, 0.08)',
+                          color: i === 0 ? '#38bdf8' : 'var(--muted)',
+                        }}
+                      >
+                        {i === 0 ? '👑 ОСНОВНОЙ' : `⚡ РЕЗЕРВ ${i}`}
+                      </span>
+
+                      {sv?.is_pool ? (
+                        <span
+                          style={{
+                            fontSize: 10,
+                            background: 'rgba(168, 85, 247, 0.2)',
+                            color: '#c084fc',
+                            padding: '1px 6px',
+                            borderRadius: 4,
+                            fontWeight: 600,
+                          }}
+                        >
+                          🔀 ПУЛ
+                        </span>
+                      ) : sv?.provider ? (
                         <span className="tag-provider" style={{ fontSize: 10, padding: '1px 5px', cursor: 'default' }}>
                           📦 {sv.provider_name || sv.provider}
                         </span>
-                      )}
-                      <span className="server-name" style={{ flex: 1 }} title={id}>{sv ? sv.name : `${id} (сейчас недоступен)`}</span>
+                      ) : null}
+
+                      <span className="server-name" style={{ flex: 1, fontWeight: i === 0 ? 600 : 400 }} title={id}>
+                        {sv ? sv.name : `${id} (недоступен)`}
+                      </span>
+
                       {sv && (
                         <span className={'ping ' + pingClass(sv.ping_ms)}>
                           {sv.ping_ms > 0 ? `${sv.ping_ms} мс` : '—'}
                         </span>
                       )}
-                      <button className="btn sm ghost" disabled={i === 0} onClick={() => chainMove(i, -1)}>↑</button>
-                      <button className="btn sm ghost" disabled={i === chain.length - 1} onClick={() => chainMove(i, 1)}>↓</button>
+
+                      <button className="btn sm ghost" disabled={i === 0} onClick={() => chainMove(i, -1)} title="Повысить приоритет">
+                        ↑
+                      </button>
+                      <button className="btn sm ghost" disabled={i === chain.length - 1} onClick={() => chainMove(i, 1)} title="Понизить приоритет">
+                        ↓
+                      </button>
                       <button
                         className="btn sm ghost"
+                        style={{ color: '#ef4444' }}
                         onClick={() => patch((s) => (s.failover.priority_chain = chain.filter((x) => x !== id)))}
+                        title="Удалить из цепочки"
                       >
                         ✕
                       </button>
                     </div>
                   )
                 })}
+
                 <select
                   className="select"
                   value=""
@@ -603,25 +849,41 @@ export default function Settings({ notify, status, refresh }: Props) {
                       patch((s) => (s.failover.priority_chain = [...chain, e.target.value]))
                     }
                   }}
+                  style={{ marginTop: 4 }}
                 >
-                  <option value="">+ добавить сервер в цепочку…</option>
-                  {servers
-                    .filter((s) => !chain.includes(s.id))
-                    .map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.provider_name ? `[${s.provider_name}] ` : s.provider ? `[${s.provider}] ` : ''}{s.name} · {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
-                      </option>
-                    ))}
+                  <option value="">+ добавить сервер или пул в цепочку…</option>
+                  {servers.some((s) => s.is_pool && !chain.includes(s.id)) && (
+                    <optgroup label="🔀 Прокси-пулы и селекторы">
+                      {servers
+                        .filter((s) => s.is_pool && !chain.includes(s.id))
+                        .map((s) => (
+                          <option key={s.id} value={s.id}>
+                            🔀 {s.name} ({s.protocol || 'pool'})
+                          </option>
+                        ))}
+                    </optgroup>
+                  )}
+                  <optgroup label="🌐 Узлы и серверы">
+                    {servers
+                      .filter((s) => !s.is_pool && !chain.includes(s.id))
+                      .map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.provider_name ? `[${s.provider_name}] ` : s.provider ? `[${s.provider}] ` : ''}{s.name} · {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
+                        </option>
+                      ))}
+                  </optgroup>
                 </select>
               </div>
+
               {chain.length > 0 && (
-                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 6 }}>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4 }}>
                   <button className="btn sm ghost" onClick={() => patch((s) => (s.failover.priority_chain = []))}>
                     Очистить цепочку
                   </button>
                 </div>
               )}
             </div>
+
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <span>Возвращаться на приоритетный при восстановлении</span>
               <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
@@ -638,17 +900,8 @@ export default function Settings({ notify, status, refresh }: Props) {
                 </span>
               </div>
             </div>
-            <label className="row"><span>Интервал проверки, сек</span>
-              <NumberInput
-                min={15}
-                max={3600}
-                step={5}
-                fallback={60}
-                value={settings.failover.interval_secs}
-                onChange={(val) => patch((s) => (s.failover.interval_secs = val))}
-              />
-            </label>
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center', marginTop: 12, flexWrap: 'wrap' }}>
+
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center', marginTop: 4, flexWrap: 'wrap' }}>
               <button className="btn" onClick={testCheck}>🔍 Тестовая проверка сейчас</button>
               <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
                 {autoSaveStatus === 'saving' && (
@@ -671,38 +924,58 @@ export default function Settings({ notify, status, refresh }: Props) {
           </section>
 
           {/* ДОМЕНЫ */}
-          <section className="card">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-              <h2 style={{ margin: 0 }}>🌐 Домены</h2>
+          <section className="card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <h2 style={{ margin: 0, fontSize: 16 }}>🌐 Домены</h2>
+                <span className="badge" style={{ background: 'rgba(56, 189, 248, 0.1)', color: '#38bdf8' }}>
+                  {directDomains.split('\n').filter(Boolean).length} DIRECT · {forceDomains.split('\n').filter(Boolean).length} PROXY
+                </span>
+              </div>
               <button type="button" className="btn sm" onClick={() => setPresetCatalogOpen(true)} title="Добавить готовые списки (YouTube, Discord, AI...)">
                 ✨ Каталог пресетов
               </button>
             </div>
-            <p className="muted small">По одному домену в строке. Правила вставляются в начало rules: (DOMAIN-SUFFIX) и имеют приоритет. Сопутствующие CDN и медиа-сервера подтягиваются автоматически.</p>
-            <label className="row" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
-              <span>⏭ Напрямую (мимо прокси → DIRECT)</span>
-              <textarea
-                className="input"
-                rows={6}
-                placeholder={'example.com\nlocal-service.net\nw3.org'}
-                value={directDomains}
-                onChange={(e) => setDirectDomains(e.target.value)}
-                style={{ fontFamily: 'Consolas, monospace', fontSize: 12.5, resize: 'vertical' }}
-              />
-            </label>
-            <label className="row" style={{ flexDirection: 'column', alignItems: 'stretch', marginTop: 8 }}>
-              <span>🔒 Принудительно через прокси (→ PROXY)</span>
-              <textarea
-                className="input"
-                rows={6}
-                placeholder={'openai.com\nyoutube.com\ngithub.com'}
-                value={forceDomains}
-                onChange={(e) => setForceDomains(e.target.value)}
-                style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'Consolas, monospace', fontSize: 12.5, resize: 'vertical' }}
-              />
-            </label>
+            <p className="muted small" style={{ margin: 0 }}>
+              По одному домену в строке. Вставляются в начало <code>rules:</code> (DOMAIN-SUFFIX). Сопутствующие CDN и медиа-серверы определяются автоматически.
+            </p>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, marginTop: 4 }}>
+              {/* DIRECT */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <b style={{ fontSize: 12.5, color: '#34d399' }}>⏭ Напрямую (DIRECT)</b>
+                  <span className="muted small">{directDomains.split('\n').filter(Boolean).length} шт.</span>
+                </div>
+                <textarea
+                  className="input"
+                  rows={6}
+                  placeholder={'example.com\nlocal-service.net\nw3.org'}
+                  value={directDomains}
+                  onChange={(e) => setDirectDomains(e.target.value)}
+                  style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'Consolas, monospace', fontSize: 12, resize: 'vertical' }}
+                />
+              </div>
+
+              {/* PROXY */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <b style={{ fontSize: 12.5, color: '#38bdf8' }}>🔒 Через прокси (PROXY)</b>
+                  <span className="muted small">{forceDomains.split('\n').filter(Boolean).length} шт.</span>
+                </div>
+                <textarea
+                  className="input"
+                  rows={6}
+                  placeholder={'openai.com\nyoutube.com\ngithub.com'}
+                  value={forceDomains}
+                  onChange={(e) => setForceDomains(e.target.value)}
+                  style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'Consolas, monospace', fontSize: 12, resize: 'vertical' }}
+                />
+              </div>
+            </div>
+
             {autoCdns.length > 0 && (
-              <div style={{ marginTop: 8, padding: '8px 10px', background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.2)', borderRadius: 6, fontSize: 12 }}>
+              <div style={{ marginTop: 4, padding: '8px 10px', background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.2)', borderRadius: 6, fontSize: 12 }}>
                 <div style={{ color: '#38bdf8', fontWeight: 600, marginBottom: 4 }}>
                   ⚡ Автоматически подключенные CDN и медиа-сервера ({autoCdns.length}):
                 </div>
@@ -715,7 +988,8 @@ export default function Settings({ notify, status, refresh }: Props) {
                 </div>
               </div>
             )}
-            <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
               <button className="btn primary" onClick={saveDomains} disabled={savingDomains}>
                 {savingDomains ? 'Применение и поиск CDN…' : '🌐 Применить домены'}
               </button>
@@ -723,7 +997,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                 {scanningCdn ? '🔍 Поиск CDN…' : '🔍 Сканировать CDN сейчас'}
               </button>
             </div>
-            <p className="muted small" style={{ marginTop: 6, marginBottom: 0 }}>
+            <p className="muted small" style={{ marginTop: 2, marginBottom: 0 }}>
               💡 Фоновое сканирование выполняется автоматически 1 раз в неделю (в понедельник в 05:00) или вручную кнопкой выше, чтобы не нагружать процессор роутера.
             </p>
           </section>

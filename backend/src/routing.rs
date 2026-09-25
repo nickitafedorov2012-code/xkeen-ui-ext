@@ -303,7 +303,7 @@ pub fn add_provider_to_yaml(
     add_provider_to_yaml_full(yaml, id, url, health_check_url, health_check_interval, None, None)
 }
 
-/// Удалить подписку из блока proxy-providers в config.yaml
+/// Удалить подписку из блока proxy-providers и всех proxy-groups (секция use:) в config.yaml
 pub fn delete_provider_from_yaml(yaml: &str, id: &str) -> Result<String, String> {
     let id = id.trim();
     if id.is_empty() {
@@ -313,23 +313,26 @@ pub fn delete_provider_from_yaml(yaml: &str, id: &str) -> Result<String, String>
     let mut out = Vec::new();
     let mut in_providers = false;
     let mut skipping_target = false;
+    let mut in_use_block = false;
+    let mut use_indent = 0;
 
     for line in yaml.lines() {
         let trimmed = line.trim();
         let is_top = !line.starts_with(' ') && !trimmed.is_empty();
 
+        // Отслеживаем вход в proxy-providers
         if line.trim_end() == "proxy-providers:" {
             in_providers = true;
             skipping_target = false;
+            in_use_block = false;
             out.push(line.to_string());
             continue;
         }
         if in_providers && is_top {
             in_providers = false;
             skipping_target = false;
-            out.push(line.to_string());
-            continue;
         }
+
         if in_providers {
             if line.starts_with("  ") && !line.starts_with("   ") && trimmed.ends_with(':') && !trimmed.starts_with('-') {
                 let pname = trimmed.trim_end_matches(':');
@@ -344,9 +347,52 @@ pub fn delete_provider_from_yaml(yaml: &str, id: &str) -> Result<String, String>
                 continue;
             }
             out.push(line.to_string());
-        } else {
-            out.push(line.to_string());
+            continue;
         }
+
+        // Отслеживаем блок use: внутри proxy-groups
+        if trimmed == "use:" || trimmed.starts_with("use: ") {
+            let indent = line.len() - line.trim_start().len();
+            if trimmed == "use:" {
+                in_use_block = true;
+                use_indent = indent;
+                out.push(line.to_string());
+                continue;
+            } else {
+                // Однострочный inline use: [prov1, prov2, ...]
+                let raw_val = trimmed.trim_start_matches("use:").trim();
+                if raw_val.starts_with('[') && raw_val.ends_with(']') {
+                    let inner = &raw_val[1..raw_val.len() - 1];
+                    let remaining: Vec<&str> = inner
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|item| {
+                            let clean = item.trim_matches('\'').trim_matches('"').trim();
+                            !clean.eq_ignore_ascii_case(id)
+                        })
+                        .collect();
+                    let prefix = &line[..indent];
+                    out.push(format!("{prefix}use: [{}]", remaining.join(", ")));
+                    continue;
+                }
+            }
+        }
+
+        if in_use_block {
+            let indent = line.len() - line.trim_start().len();
+            if indent > use_indent && trimmed.starts_with('-') {
+                let item = trimmed.trim_start_matches('-').trim();
+                let clean = item.trim_matches('\'').trim_matches('"').trim();
+                if clean.eq_ignore_ascii_case(id) {
+                    // Пропускаем удаляемый провайдер из use:
+                    continue;
+                }
+            } else if !trimmed.is_empty() {
+                in_use_block = false;
+            }
+        }
+
+        out.push(line.to_string());
     }
 
     Ok(out.join("\n"))
@@ -1682,5 +1728,53 @@ proxy-groups:
         assert_eq!(result, yaml_with_missing_end);
         assert!(result.contains("MATCH,PROXY"));
     }
+
+    #[test]
+    fn test_delete_provider_from_yaml_full_cleanup() {
+        let yaml = r#"
+proxy-groups:
+  - name: PROXY
+    type: select
+    use:
+      - geodema
+      - subscription_1
+      - geodema2
+    proxies: [DIRECT, Fallback]
+  - name: Discord
+    type: select
+    use:
+      - subscription_1
+    proxies: [PROXY]
+  - name: Steam
+    type: select
+    use: [geodema, subscription_1, other]
+
+proxy-providers:
+  geodema:
+    type: http
+    url: "https://example.com/geo"
+  subscription_1:
+    type: http
+    url: "https://example.com/sub1"
+  geodema2:
+    type: http
+    url: "https://example.com/geo2"
+"#;
+
+        let cleaned = delete_provider_from_yaml(yaml, "subscription_1").unwrap();
+        // Проверяем удаление из proxy-providers
+        assert!(!cleaned.contains("subscription_1:"));
+        assert!(cleaned.contains("geodema:"));
+        assert!(cleaned.contains("geodema2:"));
+
+        // Проверяем удаление из use: списков proxy-groups
+        assert!(!cleaned.contains("- subscription_1"));
+        assert!(cleaned.contains("- geodema"));
+        assert!(cleaned.contains("- geodema2"));
+
+        // Проверяем inline use: [geodema, subscription_1, other] -> [geodema, other]
+        assert!(cleaned.contains("use: [geodema, other]"));
+    }
 }
+
 

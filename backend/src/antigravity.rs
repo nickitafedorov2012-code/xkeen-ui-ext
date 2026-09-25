@@ -221,7 +221,7 @@ impl AntigravityManager {
 
     /// Запрос по обычному UDP DNS
     async fn query_udp(&self, server: &str, domain: &str) -> Result<(Vec<Ipv4Addr>, u64), String> {
-        let sock = UdpSocket::bind("127.0.0.1:0").await.map_err(|e| e.to_string())?;
+        let sock = UdpSocket::bind("0.0.0.0:0").await.map_err(|e| e.to_string())?;
         let target = if server.contains(':') {
             server.to_string()
         } else {
@@ -320,54 +320,71 @@ impl AntigravityManager {
             ("comss.one", "udp", "83.220.169.155"),
             ("comss.one (alt)", "udp", "212.109.195.93"),
             ("geohide.ru", "udp", "45.155.204.190"),
-            ("dns-ai.ru", "doh", "https://dns.dns-ai.ru/dns-query"),
+            ("dns-ai.ru", "udp", "192.144.59.14"),
+            ("dns-ai.ru (alt)", "udp", "94.232.43.149"),
         ];
 
         let mut provider_statuses = Vec::new();
         let mut valid_substituted_ips: Vec<(Ipv4Addr, u64, String)> = Vec::new();
 
+        // Проверяем целевой домен и при необходимости aistudio.google.com
+        let probe_domains = if main_target == "aistudio.google.com" || main_target == "gemini.google.com" {
+            vec![main_target.clone()]
+        } else {
+            vec![main_target.clone(), "aistudio.google.com".into()]
+        };
+
         for (name, kind, endpoint) in resolver_candidates {
             let now_str = chrono::Local::now().format("%H:%M:%S").to_string();
-            let res = if kind == "doh" {
-                self.query_doh(endpoint, &main_target).await
-            } else {
-                self.query_udp(endpoint, &main_target).await
-            };
+            let mut prov_ips = Vec::new();
+            let mut prov_lat = None;
+            let mut prov_err = None;
 
-            match res {
-                Ok((ips, lat)) => {
-                    // Проверка: подменяет ли IP (не входит в оригинальные Google IP)
-                    let is_sub = !ips.is_empty()
-                        && !ips.iter().any(|ip| ref_ips.contains(ip) || is_google_ip(ip));
+            for target_domain in &probe_domains {
+                let res = if kind == "doh" {
+                    self.query_doh(endpoint, target_domain).await
+                } else {
+                    self.query_udp(endpoint, target_domain).await
+                };
 
-                    if is_sub {
-                        for ip in &ips {
-                            valid_substituted_ips.push((*ip, lat, name.to_string()));
+                match res {
+                    Ok((ips, lat)) => {
+                        prov_lat = Some(lat);
+                        let is_sub = !ips.is_empty()
+                            && !ips.iter().any(|ip| ref_ips.contains(ip) || is_google_ip(ip));
+
+                        if is_sub {
+                            for ip in &ips {
+                                valid_substituted_ips.push((*ip, lat, name.to_string()));
+                            }
+                        }
+                        for ip in ips {
+                            if !prov_ips.contains(&ip) {
+                                prov_ips.push(ip);
+                            }
+                        }
+                        if !prov_ips.is_empty() {
+                            break;
                         }
                     }
-
-                    provider_statuses.push(DnsProviderStatus {
-                        name: name.to_string(),
-                        provider_type: kind.to_string(),
-                        is_substituting: is_sub,
-                        last_latency_ms: Some(lat),
-                        resolved_ips: ips.into_iter().map(|ip| ip.to_string()).collect(),
-                        error: None,
-                        last_check: Some(now_str),
-                    });
-                }
-                Err(err) => {
-                    provider_statuses.push(DnsProviderStatus {
-                        name: name.to_string(),
-                        provider_type: kind.to_string(),
-                        is_substituting: false,
-                        last_latency_ms: None,
-                        resolved_ips: Vec::new(),
-                        error: Some(err),
-                        last_check: Some(now_str),
-                    });
+                    Err(err) => {
+                        prov_err = Some(err);
+                    }
                 }
             }
+
+            let has_ips = !prov_ips.is_empty();
+            let is_sub = has_ips && !prov_ips.iter().any(|ip| ref_ips.contains(ip) || is_google_ip(ip));
+
+            provider_statuses.push(DnsProviderStatus {
+                name: name.to_string(),
+                provider_type: kind.to_string(),
+                is_substituting: is_sub,
+                last_latency_ms: prov_lat,
+                resolved_ips: prov_ips.into_iter().map(|ip| ip.to_string()).collect(),
+                error: if has_ips { None } else { prov_err },
+                last_check: Some(now_str),
+            });
         }
 
         // 3. Выбираем лучший подменный IP (проверяем реальную доступность по порту 443)
@@ -375,6 +392,10 @@ impl AntigravityManager {
         let mut chosen_latency = None;
 
         for (ip, _, provider_name) in valid_substituted_ips {
+            // Пропускаем локальные loopback адреса (127.x.x.x), выбираем только реальные внешние прокси-узлы
+            if ip.is_loopback() || ip.is_unspecified() {
+                continue;
+            }
             match self.probe_latency(ip).await {
                 Ok(lat) => {
                     chosen_ip = Some((ip, provider_name));
