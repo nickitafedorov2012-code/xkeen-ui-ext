@@ -199,7 +199,7 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
     }
   }
 
-  const curFile = files.find((f) => f.id === selectedFile)
+  const curFile = Array.isArray(files) ? files.find((f) => f.id === selectedFile) : null
   const isDirty = content !== originalContent
   const linesCount = content ? content.split('\n').length : 1
   const lineNumbers = Array.from({ length: linesCount }, (_, i) => i + 1)

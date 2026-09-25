@@ -155,4 +155,72 @@ describe('Modals React Hook Order and State Lifecycle', () => {
       global.fetch = originalFetch
     })
   })
+
+  it('regression: Settings component renders without hook order errors during loading and loaded states', async () => {
+    const originalFetch = global.fetch
+    global.fetch = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('settings')) {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              success: true,
+              data: {
+                failover: {
+                  enabled: true,
+                  ping_threshold_ms: 300,
+                  priority_chain: [],
+                  auto_restore_priority: true,
+                  interval_secs: 60,
+                },
+                rci: { host: '127.0.0.1', port: 79, login: '', password: '', token: '' },
+                mihomo: { host: '127.0.0.1', port: 9090 },
+                auth: { enabled: false },
+                notifications: {},
+              },
+            }),
+        })
+      }
+      if (url.includes('servers')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ success: true, data: { servers: [] } }),
+        })
+      }
+      if (url.includes('domains')) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ success: true, data: { direct: [], force: [] } }),
+        })
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ success: true, data: {} }),
+      })
+    })
+
+    const Settings = (await import('./Settings')).default
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const root = createRoot(container)
+    const notify = vi.fn()
+
+    // 1. Initial render (settings is null -> renders loading placeholder)
+    await act(async () => {
+      root.render(<Settings notify={notify} />)
+    })
+    expect(container.innerHTML).toContain('Загрузка')
+
+    // 2. Wait for async fetch to populate settings -> transition to full view without React invariant 310 error
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10))
+    })
+    expect(container.innerHTML).toContain('Failover')
+
+    act(() => {
+      root.unmount()
+      container.remove()
+      global.fetch = originalFetch
+    })
+  })
 })

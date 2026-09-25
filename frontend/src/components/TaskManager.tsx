@@ -680,7 +680,7 @@ export default function TaskManager({ notify }: TaskManagerProps) {
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12, color: 'var(--muted)', flexWrap: 'wrap', gap: 8 }}>
         <span>
-          Отображено процессов: <b>{filteredProcesses.length}</b> из <b>{snapshot?.processes.length || 0}</b>
+          Отображено процессов: <b>{filteredProcesses.length}</b> из <b>{snapshot?.processes?.length || 0}</b>
         </span>
         <span>
           💡 Совет: Для сортировки нажмите на заголовок любого столбца (CPU%, MEM%, PID).

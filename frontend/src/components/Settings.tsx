@@ -60,6 +60,11 @@ export default function Settings({ notify, status, refresh }: Props) {
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // --- Пресеты Failover слотов ---
+  const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null)
+  const [newPresetName, setNewPresetName] = useState('')
+  const [showNewPresetInput, setShowNewPresetInput] = useState(false)
+
   // --- AdBlock ---
   const [adblockEnabled, setAdblockEnabled] = useState(false)
   const [adblockBusy, setAdblockBusy] = useState(false)
@@ -270,11 +275,6 @@ export default function Settings({ notify, status, refresh }: Props) {
 
   // --- Глобальная цепочка приоритетов ---
   const chain = settings?.failover.priority_chain ?? (settings?.failover.priority_server ? [settings.failover.priority_server] : [])
-
-  // --- Пресеты Failover слотов ---
-  const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null)
-  const [newPresetName, setNewPresetName] = useState('')
-  const [showNewPresetInput, setShowNewPresetInput] = useState(false)
 
   const activePresets = settings?.failover?.presets && settings.failover.presets.length > 0
     ? settings.failover.presets
@@ -1262,16 +1262,16 @@ export default function Settings({ notify, status, refresh }: Props) {
               <div className="stat-card">
                 <div className="stat-label">База GeoIP</div>
                 <div className="stat-value" style={{ fontSize: 16 }}>
-                  {geoInfo ? `${(geoInfo.geoip.size / (1024 * 1024)).toFixed(1)} МБ` : '—'}
+                  {geoInfo?.geoip?.size ? `${(geoInfo.geoip.size / (1024 * 1024)).toFixed(1)} МБ` : '—'}
                 </div>
-                <div className="muted small">{geoInfo?.geoip.updated_at || 'Mihomo Core'}</div>
+                <div className="muted small">{geoInfo?.geoip?.updated_at || 'Mihomo Core'}</div>
               </div>
               <div className="stat-card">
                 <div className="stat-label">База GeoSite</div>
                 <div className="stat-value" style={{ fontSize: 16 }}>
-                  {geoInfo ? `${(geoInfo.geosite.size / (1024 * 1024)).toFixed(1)} МБ` : '—'}
+                  {geoInfo?.geosite?.size ? `${(geoInfo.geosite.size / (1024 * 1024)).toFixed(1)} МБ` : '—'}
                 </div>
-                <div className="muted small">{geoInfo?.geosite.updated_at || 'Meta Rules Dat'}</div>
+                <div className="muted small">{geoInfo?.geosite?.updated_at || 'Meta Rules Dat'}</div>
               </div>
               <div className="stat-card">
                 <div className="stat-label">Источник баз</div>
