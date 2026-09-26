@@ -520,6 +520,8 @@ pub struct ZapretConfig {
     pub bypass_github: bool,
     /// Прямой обход популярных трекеров (RuTracker, Kinozal, Rutor, Flibusta, NNMClub)
     pub bypass_torrents: bool,
+    /// Прямой обход 18+ контента (Pornhub, Xvideos, XHamster, XNXX, RedTube, YouPorn)
+    pub bypass_adult: bool,
     /// Пользовательские сайты с автоматическим обнаружением CDN (/boost)
     pub custom_entries: Vec<ZapretCustomEntry>,
     /// Кастомные аргументы nfqws (сохраняются при установке пресетов)
@@ -539,6 +541,7 @@ impl Default for ZapretConfig {
             isolated_proxy: true,
             bypass_github: true,
             bypass_torrents: true,
+            bypass_adult: true,
             custom_entries: Vec::new(),
             custom_args: None,
         }

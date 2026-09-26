@@ -29,6 +29,7 @@ const mockZapretStatus: ZapretStatus = {
     isolated_proxy: true,
     bypass_github: true,
     bypass_torrents: true,
+    bypass_adult: true,
     custom_entries: [
       {
         domain: 'mysku.club',
@@ -61,7 +62,7 @@ describe('Zapret Component — Toggleable Service Blocks & Custom Site CDN Boost
     }
   })
 
-  it('renders all toggleable service blocks (YouTube, Discord, GitHub, Torrents, Hostlist)', async () => {
+  it('renders all toggleable service blocks (YouTube, Discord, GitHub, Torrents, 18+, Hostlist)', async () => {
     vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
       if (path === 'zapret/status') {
         return Promise.resolve(mockZapretStatus)
@@ -80,11 +81,13 @@ describe('Zapret Component — Toggleable Service Blocks & Custom Site CDN Boost
     expect(text).toContain('Discord Web & Chat')
     expect(text).toContain('GitHub (Релизы & Исходники)')
     expect(text).toContain('Торренты & Трекеры')
+    expect(text).toContain('18+ Контент')
     expect(text).toContain('Универсальный веб-обход (Hostlist)')
 
     // Check tags preview in service cards
     expect(text).toContain('github.com')
     expect(text).toContain('rutracker.org')
+    expect(text).toContain('pornhub.com')
     expect(text).toContain('googlevideo.com')
   })
 
@@ -127,6 +130,49 @@ describe('Zapret Component — Toggleable Service Blocks & Custom Site CDN Boost
     expect(postSpy).toHaveBeenCalledWith('zapret/action', {
       action: 'toggle_feature',
       feature: 'bypass_github',
+      enabled: false,
+    })
+  })
+
+  it('calls toggle_feature when toggling 18+ Content card', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve(mockZapretStatus)
+      }
+      return Promise.resolve({})
+    })
+
+    const postSpy = vi.spyOn(api, 'apiPost').mockImplementation((path: string, body: any) => {
+      if (path === 'zapret/action' && body.action === 'toggle_feature') {
+        return Promise.resolve({
+          success: true,
+          features: {
+            ...mockZapretStatus.features!,
+            bypass_adult: false,
+          },
+        })
+      }
+      return Promise.resolve({ success: true })
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    // Find button for 18+ card
+    const buttons = Array.from(container?.querySelectorAll('button') || [])
+    const adultBtn = buttons.find(
+      (b) => b.title === 'Выключить блок' && b.closest('div')?.textContent?.includes('18+ Контент')
+    )
+    expect(adultBtn).toBeDefined()
+
+    await act(async () => {
+      adultBtn?.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('zapret/action', {
+      action: 'toggle_feature',
+      feature: 'bypass_adult',
       enabled: false,
     })
   })

@@ -541,6 +541,31 @@ pub const TORRENT_DOMAINS: &[&str] = &[
     "lostfilm.tv",
 ];
 
+pub const ADULT_DOMAINS: &[&str] = &[
+    "pornhub.com",
+    "rt.pornhub.com",
+    "phncdn.com",
+    "phprcdn.com",
+    "xvideos.com",
+    "xvideos-cdn.com",
+    "xnxx.com",
+    "xnxx-cdn.com",
+    "xhamster.com",
+    "xhamster.desi",
+    "xhcdn.com",
+    "redtube.com",
+    "redtube.net",
+    "youporn.com",
+    "ypncdn.com",
+    "eporner.com",
+    "bravoteens.com",
+    "hqporner.com",
+    "spankbang.com",
+    "chaturbate.com",
+    "bongacams.com",
+    "stripchat.com",
+];
+
 pub const ISOLATED_PROXIED_DOMAINS: &[&str] = &[
     "openai.com",
     "chatgpt.com",
@@ -597,6 +622,61 @@ pub const FLOW_DOMAINS: &[&str] = &[
     "oaistatic.com",
     "oaiusercontent.com",
 ];
+
+/// Проверяет, обрабатывается ли домен локальным обходом Zapret (DIRECT через nfqws).
+/// Защищенные Google Flow & AI домены и изолированные PROXY сервисы всегда исключаются.
+pub fn is_zapret_direct_domain(domain: &str, zapret_cfg: &crate::config::ZapretConfig) -> bool {
+    if !zapret_cfg.enabled {
+        return false;
+    }
+    let d = domain.trim().to_lowercase();
+    // Flow/Google AI домены всегда защищены и должны идти через PROXY
+    if FLOW_DOMAINS.iter().any(|g| d == *g || d.ends_with(&format!(".{}", g))) {
+        return false;
+    }
+    // Изолированные сервисы всегда идут через PROXY при активной изоляции
+    if zapret_cfg.isolated_proxy && ISOLATED_PROXIED_DOMAINS.iter().any(|p| d == *p || d.ends_with(&format!(".{}", p))) {
+        return false;
+    }
+
+    let matches_list = |list: &[&str]| -> bool {
+        list.iter().any(|item| {
+            let item_lower = item.trim().to_lowercase();
+            d == item_lower || d.ends_with(&format!(".{}", item_lower))
+        })
+    };
+
+    if zapret_cfg.hybrid_youtube && matches_list(YOUTUBE_HYBRID_DOMAINS) {
+        return true;
+    }
+    if zapret_cfg.hybrid_discord && matches_list(DISCORD_HYBRID_DOMAINS) {
+        return true;
+    }
+    if zapret_cfg.bypass_github && matches_list(GITHUB_DOMAINS) {
+        return true;
+    }
+    if zapret_cfg.bypass_torrents && matches_list(TORRENT_DOMAINS) {
+        return true;
+    }
+    if zapret_cfg.bypass_adult && matches_list(ADULT_DOMAINS) {
+        return true;
+    }
+    for entry in &zapret_cfg.custom_entries {
+        if entry.enabled {
+            let c = crate::config::normalize_domain(&entry.domain);
+            if !c.is_empty() && (d == c || d.ends_with(&format!(".{}", c))) {
+                return true;
+            }
+            for cdn in &entry.cdns {
+                let c_cdn = crate::config::normalize_domain(cdn);
+                if !c_cdn.is_empty() && (d == c_cdn || d.ends_with(&format!(".{}", c_cdn))) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
 
 /// Удаление блока Google Flow & AI правил из YAML.
 pub fn remove_flow_rules(yaml: &str) -> String {
@@ -795,6 +875,7 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
         || zapret_cfg.hybrid_discord
         || zapret_cfg.bypass_github
         || zapret_cfg.bypass_torrents
+        || zapret_cfg.bypass_adult
         || has_active_custom
     {
         for d in FLOW_DOMAINS {
@@ -855,7 +936,17 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
         }
     }
 
-    // 6. Пользовательские сайты и их связанные CDN (/boost) -> DIRECT
+    // 6. 18+ Контент -> DIRECT
+    if zapret_cfg.bypass_adult {
+        for d in ADULT_DOMAINS {
+            let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
+            if !rules_to_add.contains(&rule) {
+                rules_to_add.push(rule);
+            }
+        }
+    }
+
+    // 7. Пользовательские сайты и их связанные CDN (/boost) -> DIRECT
     for entry in &zapret_cfg.custom_entries {
         if entry.enabled {
             let clean = crate::config::normalize_domain(&entry.domain);
@@ -887,15 +978,61 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
         .position(|l| l.trim_end() == "rules:")
         .ok_or("В config.yaml нет секции rules:")?;
 
+    // Порядок вставки блока ZAPRET_HYBRID:
+    // 1. Перед FORCE_BEGIN (если присутствует блок принудительного проксирования);
+    // 2. Иначе после DIRECT_END (если присутствует блок прямого белого списка);
+    // 3. Иначе после DEV_DOMAINS_END (если присутствуют индивидуальные правила устройств);
+    // 4. Иначе сразу после rules: (в начале секции правил).
+    // Это гарантирует четкую и неизменную иерархию правил Mihomo:
+    // FLOW_DOMAINS > DEV_DOMAINS > DIRECT_DOMAINS > ZAPRET_HYBRID > FORCE_DOMAINS
+    let force_idx = lines.iter().position(|l| l.trim() == FORCE_BEGIN);
+    let direct_end_idx = lines.iter().position(|l| l.trim() == DIRECT_END);
+    let dev_end_idx = lines.iter().position(|l| l.trim() == DEV_DOMAINS_END);
+
     let mut out = Vec::with_capacity(lines.len() + rules_to_add.len() + 4);
-    for (i, line) in lines.iter().enumerate() {
-        out.push(line.to_string());
-        if i == rules_idx {
-            out.push(ZAPRET_HYBRID_BEGIN.to_string());
-            for r in &rules_to_add {
-                out.push(r.clone());
+    if let Some(f_idx) = force_idx {
+        for (i, line) in lines.iter().enumerate() {
+            if i == f_idx {
+                out.push(ZAPRET_HYBRID_BEGIN.to_string());
+                for r in &rules_to_add {
+                    out.push(r.clone());
+                }
+                out.push(ZAPRET_HYBRID_END.to_string());
             }
-            out.push(ZAPRET_HYBRID_END.to_string());
+            out.push(line.to_string());
+        }
+    } else if let Some(d_end) = direct_end_idx {
+        for (i, line) in lines.iter().enumerate() {
+            out.push(line.to_string());
+            if i == d_end {
+                out.push(ZAPRET_HYBRID_BEGIN.to_string());
+                for r in &rules_to_add {
+                    out.push(r.clone());
+                }
+                out.push(ZAPRET_HYBRID_END.to_string());
+            }
+        }
+    } else if let Some(dev_end) = dev_end_idx {
+        for (i, line) in lines.iter().enumerate() {
+            out.push(line.to_string());
+            if i == dev_end {
+                out.push(ZAPRET_HYBRID_BEGIN.to_string());
+                for r in &rules_to_add {
+                    out.push(r.clone());
+                }
+                out.push(ZAPRET_HYBRID_END.to_string());
+            }
+        }
+    } else {
+        for (i, line) in lines.iter().enumerate() {
+            out.push(line.to_string());
+            if i == rules_idx {
+                out.push(ZAPRET_HYBRID_BEGIN.to_string());
+                for r in &rules_to_add {
+                    out.push(r.clone());
+                }
+                out.push(ZAPRET_HYBRID_END.to_string());
+            }
         }
     }
     Ok(out.join("\n"))
@@ -1628,14 +1765,20 @@ pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> Result<(Stri
         current = with_adblock;
     }
 
-    // 1. Умные гибридные правила Zapret (YouTube / Discord -> DIRECT, AI -> PROXY)
-    current = apply_zapret_hybrid_rules(&current, &cfg.zapret)?;
-
-    // 2. Доменные правила (DIRECT / FORCE / PER-DEVICE DOMAINS)
+    // 1. Доменные правила (DIRECT / FORCE / PER-DEVICE DOMAINS)
+    // Фильтруем force_domains: домены, которые активно обрабатываются Zapret DIRECT,
+    // не должны попадать в блок FORCE_BEGIN как PROXY
     let direct = &cfg.direct_domains;
-    let force = &cfg.force_domains;
+    let mut active_force: Vec<String> = cfg.force_domains.clone();
+    if cfg.zapret.enabled {
+        active_force.retain(|d| !is_zapret_direct_domain(d, &cfg.zapret));
+    }
     let device_domains = &cfg.device_domain_rules;
-    current = apply_domain_rules(&current, direct, force, device_domains)?;
+    current = apply_domain_rules(&current, direct, &active_force, device_domains)?;
+
+    // 2. Умные гибридные правила Zapret (YouTube / Discord / GitHub / Torrents / Adult -> DIRECT, AI -> PROXY)
+    // Вставляются ПЕРЕД FORCE_BEGIN (если есть), гарантируя DIRECT-приоритет локального nfqws
+    current = apply_zapret_hybrid_rules(&current, &cfg.zapret)?;
 
     // 3. Выделенный маршрут Google Flow & AI (высший приоритет — на самом верху секции rules)
     let flow_target = cfg.flow_server.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or("PROXY");
@@ -2028,6 +2171,7 @@ proxy-groups:
             isolated_proxy: true,
             bypass_github: true,
             bypass_torrents: true,
+            bypass_adult: true,
             custom_entries: vec![crate::config::ZapretCustomEntry {
                 domain: "mysku.club".to_string(),
                 enabled: true,
@@ -2043,6 +2187,8 @@ proxy-groups:
         assert!(with_zapret.contains("DOMAIN-SUFFIX,discord.com,DIRECT"));
         assert!(with_zapret.contains("DOMAIN-SUFFIX,raw.githubusercontent.com,DIRECT"));
         assert!(with_zapret.contains("DOMAIN-SUFFIX,rutracker.org,DIRECT"));
+        assert!(with_zapret.contains("DOMAIN-SUFFIX,pornhub.com,DIRECT"));
+        assert!(with_zapret.contains("DOMAIN-SUFFIX,xvideos.com,DIRECT"));
         assert!(with_zapret.contains("DOMAIN-SUFFIX,mysku.club,DIRECT"));
         assert!(with_zapret.contains("DOMAIN-SUFFIX,img.mysku-st.ru,DIRECT"));
         assert!(with_zapret.contains("DOMAIN-SUFFIX,openai.com,PROXY"));
@@ -2055,12 +2201,13 @@ proxy-groups:
         let dup = apply_zapret_hybrid_rules(&with_zapret, &zapret_cfg).unwrap();
         assert_eq!(dup.matches(ZAPRET_HYBRID_BEGIN).count(), 1);
 
-        // 3. Выключение YouTube (возврат в PROXY) — Discord, GitHub, Custom и isolated_proxy остаются
+        // 3. Выключение YouTube (возврат в PROXY) — Discord, GitHub, Torrents, Adult, Custom и isolated_proxy остаются
         zapret_cfg.hybrid_youtube = false;
         let no_yt = apply_zapret_hybrid_rules(&dup, &zapret_cfg).unwrap();
         assert!(!no_yt.contains("googlevideo.com,DIRECT"));
         assert!(no_yt.contains("discord.com,DIRECT"));
         assert!(no_yt.contains("raw.githubusercontent.com,DIRECT"));
+        assert!(no_yt.contains("pornhub.com,DIRECT"));
         assert!(no_yt.contains("mysku.club,DIRECT"));
         assert!(no_yt.contains("openai.com,PROXY"));
 
@@ -2070,6 +2217,7 @@ proxy-groups:
         assert!(!no_custom.contains("mysku.club,DIRECT"));
         assert!(!no_custom.contains("img.mysku-st.ru,DIRECT"));
         assert!(no_custom.contains("raw.githubusercontent.com,DIRECT"));
+        assert!(no_custom.contains("pornhub.com,DIRECT"));
 
         // 4. Полное отключение службы Zapret
         zapret_cfg.enabled = false;
@@ -2077,8 +2225,95 @@ proxy-groups:
         assert!(!disabled.contains(ZAPRET_HYBRID_BEGIN));
         assert!(!disabled.contains("discord.com,DIRECT"));
         assert!(!disabled.contains("raw.githubusercontent.com"));
+        assert!(!disabled.contains("pornhub.com"));
         assert!(!disabled.contains("openai.com"));
         assert!(disabled.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
+    }
+
+    #[test]
+    fn test_zapret_hybrid_precedence_over_force_domains() {
+        let yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\nrules:\n  - MATCH,PROXY\n";
+        let mut app_cfg = crate::config::AppConfig::default();
+        app_cfg.force_domains = vec![
+            "github.com".to_string(),
+            "data.shirogames.com".to_string(),
+            "pornhub.com".to_string(),
+        ];
+        app_cfg.zapret.enabled = true;
+        app_cfg.zapret.bypass_github = true;
+        app_cfg.zapret.bypass_adult = true;
+
+        let (applied, _) = apply_routing(yaml, &app_cfg).expect("apply_routing should succeed");
+
+        // 1. Zapret Hybrid rules must be present
+        assert!(applied.contains(ZAPRET_HYBRID_BEGIN));
+        assert!(applied.contains("DOMAIN-SUFFIX,github.com,DIRECT"));
+        assert!(applied.contains("DOMAIN-SUFFIX,pornhub.com,DIRECT"));
+
+        // 2. Zapret DIRECT rules must appear BEFORE FORCE block
+        let zapret_pos = applied.find(ZAPRET_HYBRID_BEGIN).expect("must contain ZAPRET_HYBRID_BEGIN");
+        let force_pos = applied.find(FORCE_BEGIN).expect("FORCE_BEGIN must be present for data.shirogames.com");
+        assert!(zapret_pos < force_pos, "Zapret hybrid rules must be placed BEFORE force_domains block!");
+
+        // Active Zapret domains must be excluded from FORCE block, while unrelated force domains remain
+        let force_block = &applied[force_pos..applied.find(FORCE_END).unwrap_or(applied.len())];
+        assert!(!force_block.contains("github.com,PROXY"), "github.com must not be in FORCE block when Zapret handles it");
+        assert!(!force_block.contains("pornhub.com,PROXY"), "pornhub.com must not be in FORCE block when Zapret handles it");
+        assert!(force_block.contains("data.shirogames.com,PROXY"), "Unrelated force domains must remain in FORCE block");
+    }
+
+    #[test]
+    fn test_zapret_hybrid_precedence_with_direct_and_no_force() {
+        let yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\nrules:\n  - MATCH,PROXY\n";
+        let mut app_cfg = crate::config::AppConfig::default();
+        app_cfg.direct_domains = vec!["mysite.direct".to_string()];
+        app_cfg.force_domains = vec!["github.com".to_string()];
+        app_cfg.zapret.enabled = true;
+        app_cfg.zapret.bypass_github = true;
+
+        let (applied, _) = apply_routing(yaml, &app_cfg).expect("apply_routing should succeed");
+
+        // github.com is handled by Zapret, so active_force is empty: FORCE_BEGIN should NOT exist
+        assert!(!applied.contains(FORCE_BEGIN));
+        // DIRECT_BEGIN must be present
+        assert!(applied.contains(DIRECT_BEGIN));
+        assert!(applied.contains(ZAPRET_HYBRID_BEGIN));
+
+        // DIRECT block must appear BEFORE ZAPRET block
+        let direct_end_pos = applied.find(DIRECT_END).expect("must contain DIRECT_END");
+        let zapret_pos = applied.find(ZAPRET_HYBRID_BEGIN).expect("must contain ZAPRET_HYBRID_BEGIN");
+        assert!(direct_end_pos < zapret_pos, "Direct domains block must be placed BEFORE Zapret hybrid rules!");
+    }
+
+    #[test]
+    fn test_is_zapret_direct_domain_exact_matching() {
+        let mut zapret_cfg = crate::config::ZapretConfig::default();
+        zapret_cfg.enabled = true;
+        zapret_cfg.hybrid_youtube = true;
+        zapret_cfg.hybrid_discord = true;
+        zapret_cfg.bypass_github = true;
+        zapret_cfg.bypass_torrents = true;
+        zapret_cfg.bypass_adult = true;
+
+        // Exact matches and subdomains
+        assert!(is_zapret_direct_domain("github.com", &zapret_cfg));
+        assert!(is_zapret_direct_domain("api.github.com", &zapret_cfg));
+        assert!(is_zapret_direct_domain("raw.githubusercontent.com", &zapret_cfg));
+        assert!(is_zapret_direct_domain("pornhub.com", &zapret_cfg));
+        assert!(is_zapret_direct_domain("rt.pornhub.com", &zapret_cfg));
+        assert!(is_zapret_direct_domain("rutracker.org", &zapret_cfg));
+        assert!(is_zapret_direct_domain("googlevideo.com", &zapret_cfg));
+        assert!(is_zapret_direct_domain("rr1---sn-4g5ednss.googlevideo.com", &zapret_cfg));
+        assert!(is_zapret_direct_domain("discord.gg", &zapret_cfg));
+
+        // Unrelated domains containing substring should NOT match
+        assert!(!is_zapret_direct_domain("notyoutube.com", &zapret_cfg));
+        assert!(!is_zapret_direct_domain("fake-discord.org", &zapret_cfg));
+        assert!(!is_zapret_direct_domain("fakegithub.com", &zapret_cfg));
+
+        // Protected Flow domains must never be treated as Zapret direct
+        assert!(!is_zapret_direct_domain("googleapis.com", &zapret_cfg));
+        assert!(!is_zapret_direct_domain("gemini.google.com", &zapret_cfg));
     }
 
     #[test]

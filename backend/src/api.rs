@@ -958,15 +958,21 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
             all_force.push(cdn.clone());
         }
     }
+    if tx.config().zapret.enabled {
+        all_force.retain(|d| !routing::is_zapret_direct_domain(d, &tx.config().zapret));
+    }
 
     let yaml = match tx.read_yaml().await {
         Ok(y) => y,
         Err(e) => return api_err(e),
     };
-    let new_yaml = match routing::apply_domain_rules(&yaml, &tx.config().direct_domains, &all_force, &tx.config().device_domain_rules) {
+    let mut new_yaml = match routing::apply_domain_rules(&yaml, &tx.config().direct_domains, &all_force, &tx.config().device_domain_rules) {
         Ok(y) => y,
         Err(e) => return api_err(e),
     };
+    if let Ok(with_zapret) = routing::apply_zapret_hybrid_rules(&new_yaml, &tx.config().zapret) {
+        new_yaml = with_zapret;
+    }
     if let Err(e) = tx.set_yaml(new_yaml) {
         return api_err(e);
     }
@@ -1118,16 +1124,22 @@ pub async fn force_add_domain(
                 all_force.push(cdn.clone());
             }
         }
+        if cfg.zapret.enabled {
+            all_force.retain(|d| !routing::is_zapret_direct_domain(d, &cfg.zapret));
+        }
 
         let yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
             Ok(y) => y,
             Err(e) => return api_err(format!("Не удалось прочитать config.yaml: {e}")),
         };
 
-        let new_yaml = match routing::apply_domain_rules(&yaml, &cfg.direct_domains, &all_force, &cfg.device_domain_rules) {
+        let mut new_yaml = match routing::apply_domain_rules(&yaml, &cfg.direct_domains, &all_force, &cfg.device_domain_rules) {
             Ok(y) => y,
             Err(e) => return api_err(e),
         };
+        if let Ok(with_zapret) = routing::apply_zapret_hybrid_rules(&new_yaml, &cfg.zapret) {
+            new_yaml = with_zapret;
+        }
 
         if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
             return api_err(format!("Ошибка сохранения config.yaml: {e}"));
@@ -2959,8 +2971,9 @@ pub async fn test_rule_match(
     State(state): State<AppState>,
     axum::extract::Json(body): axum::extract::Json<RuleTestReq>,
 ) -> Response {
-    let cfg = state.config.read().await;
-    let domain = body.domain.trim().to_lowercase();
+    let raw_domain = body.domain.trim();
+    let norm = crate::config::normalize_domain(raw_domain);
+    let domain = if !norm.is_empty() { norm.to_lowercase() } else { raw_domain.to_lowercase() };
     let src_ip = body.source_ip.as_deref().unwrap_or("").trim();
     let active_srv = cfg.failover.priority_chain.first().cloned().unwrap_or_else(|| "PROXY".into());
 
@@ -3046,21 +3059,7 @@ pub async fn test_rule_match(
         }
     }
 
-    // 6. Принудительный список (PROXY / FORCE)
-    for d in &cfg.force_domains {
-        let d_lower = d.trim().to_lowercase();
-        if domain == d_lower || domain.ends_with(&format!(".{}", d_lower)) {
-            return api_ok(json!({
-                "matched_rule": format!("DOMAIN-SUFFIX,{},PROXY", d),
-                "rule_type": "FORCE_DOMAIN",
-                "target_group": "PROXY",
-                "resolved_server": active_srv,
-                "reason": "Домен находится в списке принудительного проксирования XKeen"
-            }));
-        }
-    }
-
-    // 7. Zapret Hybrid правила (если служба Zapret включена)
+    // 6. Zapret Hybrid правила (если служба Zapret включена) — безусловный приоритет DIRECT-обхода nfqws над force_domains
     if cfg.zapret.enabled {
         // Изолированные зарубежные сервисы -> PROXY
         if cfg.zapret.isolated_proxy {
@@ -3079,13 +3078,10 @@ pub async fn test_rule_match(
 
         // YouTube Direct -> DIRECT
         if cfg.zapret.hybrid_youtube {
-            let is_yt = crate::routing::YOUTUBE_HYBRID_DOMAINS.iter().any(|d| domain == *d || domain.ends_with(&format!(".{}", d)))
-                || domain.contains("youtube")
-                || domain.contains("googlevideo")
-                || domain == "youtu.be";
-            if is_yt {
+            let matched = crate::routing::YOUTUBE_HYBRID_DOMAINS.iter().find(|d| domain == **d || domain.ends_with(&format!(".{}", d)));
+            if let Some(m) = matched {
                 return api_ok(json!({
-                    "matched_rule": "DOMAIN-SUFFIX,youtube.com,DIRECT",
+                    "matched_rule": format!("DOMAIN-SUFFIX,{},DIRECT", m),
                     "rule_type": "ZAPRET_HYBRID",
                     "target_group": "DIRECT",
                     "resolved_server": "DIRECT (Локальный обход Zapret nfqws)",
@@ -3096,17 +3092,105 @@ pub async fn test_rule_match(
 
         // Discord Direct -> DIRECT
         if cfg.zapret.hybrid_discord {
-            let is_dc = crate::routing::DISCORD_HYBRID_DOMAINS.iter().any(|d| domain == *d || domain.ends_with(&format!(".{}", d)))
-                || domain.contains("discord");
-            if is_dc {
+            let matched = crate::routing::DISCORD_HYBRID_DOMAINS.iter().find(|d| domain == **d || domain.ends_with(&format!(".{}", d)));
+            if let Some(m) = matched {
                 return api_ok(json!({
-                    "matched_rule": "DOMAIN-SUFFIX,discord.com,DIRECT",
+                    "matched_rule": format!("DOMAIN-SUFFIX,{},DIRECT", m),
                     "rule_type": "ZAPRET_HYBRID",
                     "target_group": "DIRECT",
                     "resolved_server": "DIRECT (Локальный обход Zapret nfqws)",
                     "reason": "Zapret DPI bypass — Discord Direct (минимальный пинг напрямую без VPS)"
                 }));
             }
+        }
+
+        // GitHub Direct -> DIRECT
+        if cfg.zapret.bypass_github {
+            let is_gh = crate::routing::GITHUB_DOMAINS.iter().any(|d| domain == *d || domain.ends_with(&format!(".{}", d)))
+                || domain == "github.com"
+                || domain.ends_with(".github.com");
+            if is_gh {
+                let matched = crate::routing::GITHUB_DOMAINS.iter().find(|d| domain == **d || domain.ends_with(&format!(".{}", d))).unwrap_or(&"github.com");
+                return api_ok(json!({
+                    "matched_rule": format!("DOMAIN-SUFFIX,{},DIRECT", matched),
+                    "rule_type": "ZAPRET_HYBRID",
+                    "target_group": "DIRECT",
+                    "resolved_server": "DIRECT (Локальный обход Zapret nfqws)",
+                    "reason": "Zapret DPI bypass — GitHub Direct (быстрый доступ к репозиториям и релизам без расхода VPS)"
+                }));
+            }
+        }
+
+        // Торренты & Трекеры -> DIRECT
+        if cfg.zapret.bypass_torrents {
+            let is_torrent = crate::routing::TORRENT_DOMAINS.iter().any(|d| domain == *d || domain.ends_with(&format!(".{}", d)));
+            if is_torrent {
+                let matched = crate::routing::TORRENT_DOMAINS.iter().find(|d| domain == **d || domain.ends_with(&format!(".{}", d))).unwrap_or(&"rutracker.org");
+                return api_ok(json!({
+                    "matched_rule": format!("DOMAIN-SUFFIX,{},DIRECT", matched),
+                    "rule_type": "ZAPRET_HYBRID",
+                    "target_group": "DIRECT",
+                    "resolved_server": "DIRECT (Локальный обход Zapret nfqws)",
+                    "reason": "Zapret DPI bypass — Торрент-трекеры Direct (скачивание метаданных и раздач без блокировки)"
+                }));
+            }
+        }
+
+        // 18+ Контент -> DIRECT
+        if cfg.zapret.bypass_adult {
+            let is_adult = crate::routing::ADULT_DOMAINS.iter().any(|d| domain == *d || domain.ends_with(&format!(".{}", d)));
+            if is_adult {
+                let matched = crate::routing::ADULT_DOMAINS.iter().find(|d| domain == **d || domain.ends_with(&format!(".{}", d))).unwrap_or(&"pornhub.com");
+                return api_ok(json!({
+                    "matched_rule": format!("DOMAIN-SUFFIX,{},DIRECT", matched),
+                    "rule_type": "ZAPRET_HYBRID",
+                    "target_group": "DIRECT",
+                    "resolved_server": "DIRECT (Локальный обход Zapret nfqws)",
+                    "reason": "Zapret DPI bypass — 18+ Контент Direct (локальный обход блокировок ТСПУ без нагрузки на VPS)"
+                }));
+            }
+        }
+
+        // Пользовательские сайты и их связанные CDN (/boost) -> DIRECT
+        for entry in &cfg.zapret.custom_entries {
+            if entry.enabled {
+                let clean_entry = crate::config::normalize_domain(&entry.domain);
+                let matched_custom = if !clean_entry.is_empty() && (domain == clean_entry || domain.ends_with(&format!(".{}", clean_entry))) {
+                    Some(clean_entry.clone())
+                } else {
+                    entry.cdns.iter().find_map(|cdn| {
+                        let clean_cdn = crate::config::normalize_domain(cdn);
+                        if !clean_cdn.is_empty() && (domain == clean_cdn || domain.ends_with(&format!(".{}", clean_cdn))) {
+                            Some(clean_cdn)
+                        } else {
+                            None
+                        }
+                    })
+                };
+                if let Some(m) = matched_custom {
+                    return api_ok(json!({
+                        "matched_rule": format!("DOMAIN-SUFFIX,{},DIRECT", m),
+                        "rule_type": "ZAPRET_HYBRID",
+                        "target_group": "DIRECT",
+                        "resolved_server": "DIRECT (Локальный обход Zapret nfqws)",
+                        "reason": format!("Zapret DPI bypass — Ускоренный сайт /boost ({})", entry.domain)
+                    }));
+                }
+            }
+        }
+    }
+
+    // 7. Принудительный список (PROXY / FORCE)
+    for d in &cfg.force_domains {
+        let d_lower = d.trim().to_lowercase();
+        if domain == d_lower || domain.ends_with(&format!(".{}", d_lower)) {
+            return api_ok(json!({
+                "matched_rule": format!("DOMAIN-SUFFIX,{},PROXY", d),
+                "rule_type": "FORCE_DOMAIN",
+                "target_group": "PROXY",
+                "resolved_server": active_srv,
+                "reason": "Домен находится в списке принудительного проксирования XKeen"
+            }));
         }
     }
 
@@ -3691,9 +3775,9 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
         profiles.push("--filter-udp=50000-65535 --filter-l7=discord,stun --dpi-desync=fake --dpi-desync-repeats=6".to_string());
     }
 
-    // General Web Hostlist profile (включает универсальный хостлист, GitHub, торренты и пользовательские сайты)
+    // General Web Hostlist profile (включает универсальный хостлист, GitHub, торренты, 18+ и пользовательские сайты)
     let has_active_custom = cfg.custom_entries.iter().any(|e| e.enabled);
-    if cfg.general_bypass || cfg.bypass_github || cfg.bypass_torrents || has_active_custom {
+    if cfg.general_bypass || cfg.bypass_github || cfg.bypass_torrents || cfg.bypass_adult || has_active_custom {
         let gen_desync = if cfg.aggressive_dpi {
             "--dpi-desync=fake,split2 --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=ts,md5sig --dpi-desync-cutoff=d4"
         } else {
@@ -3759,6 +3843,12 @@ pub fn sync_zapret_hosts_content(existing: &str, cfg: &crate::config::ZapretConf
         }
     }
 
+    if cfg.bypass_adult {
+        for d in crate::routing::ADULT_DOMAINS {
+            add_dynamic(d);
+        }
+    }
+
     for entry in &cfg.custom_entries {
         if entry.enabled {
             add_dynamic(&entry.domain);
@@ -3774,6 +3864,9 @@ pub fn sync_zapret_hosts_content(existing: &str, cfg: &crate::config::ZapretConf
         all_managed.insert(crate::config::normalize_domain(d));
     }
     for d in crate::routing::TORRENT_DOMAINS {
+        all_managed.insert(crate::config::normalize_domain(d));
+    }
+    for d in crate::routing::ADULT_DOMAINS {
         all_managed.insert(crate::config::normalize_domain(d));
     }
     for entry in &cfg.custom_entries {
@@ -4117,6 +4210,7 @@ pub async fn zapret_action(
                 cfg.zapret.aggressive_dpi = false;
                 cfg.zapret.bypass_github = false;
                 cfg.zapret.bypass_torrents = false;
+                cfg.zapret.bypass_adult = false;
             }
             "discord" => {
                 cfg.zapret.custom_args = None;
@@ -4128,6 +4222,7 @@ pub async fn zapret_action(
                 cfg.zapret.aggressive_dpi = false;
                 cfg.zapret.bypass_github = false;
                 cfg.zapret.bypass_torrents = false;
+                cfg.zapret.bypass_adult = false;
             }
             "gamer" | "media" => {
                 cfg.zapret.custom_args = None;
@@ -4140,6 +4235,7 @@ pub async fn zapret_action(
                 cfg.zapret.isolated_proxy = true;
                 cfg.zapret.bypass_github = true;
                 cfg.zapret.bypass_torrents = true;
+                cfg.zapret.bypass_adult = true;
             }
             "aggressive" => {
                 cfg.zapret.custom_args = None;
@@ -4152,6 +4248,7 @@ pub async fn zapret_action(
                 cfg.zapret.isolated_proxy = true;
                 cfg.zapret.bypass_github = true;
                 cfg.zapret.bypass_torrents = true;
+                cfg.zapret.bypass_adult = true;
             }
             "custom" => {
                 if let Some(custom) = &body.custom_args {
@@ -4170,6 +4267,7 @@ pub async fn zapret_action(
                 cfg.zapret.isolated_proxy = true;
                 cfg.zapret.bypass_github = true;
                 cfg.zapret.bypass_torrents = true;
+                cfg.zapret.bypass_adult = true;
             }
         }
 
@@ -4263,6 +4361,7 @@ pub async fn zapret_action(
                 "isolated_proxy" => cfg.zapret.isolated_proxy = val,
                 "bypass_github" => cfg.zapret.bypass_github = val,
                 "bypass_torrents" => cfg.zapret.bypass_torrents = val,
+                "bypass_adult" => cfg.zapret.bypass_adult = val,
                 "enabled" => cfg.zapret.enabled = val,
                 _ => return api_err(format!("Неизвестный параметр функции: {feat}")),
             }
@@ -5168,6 +5267,7 @@ mod tests {
         let mut cfg = crate::config::ZapretConfig {
             bypass_github: true,
             bypass_torrents: true,
+            bypass_adult: true,
             custom_entries: vec![crate::config::ZapretCustomEntry {
                 domain: "mysku.club".to_string(),
                 enabled: true,
@@ -5182,6 +5282,7 @@ mod tests {
         assert!(synced.contains(ZAPRET_HOSTS_MANAGED_BEGIN));
         assert!(synced.contains("github.com"));
         assert!(synced.contains("rutracker.org"));
+        assert!(synced.contains("pornhub.com"));
         assert!(synced.contains("mysku.club"));
         assert!(synced.contains("img.mysku-st.ru"));
 
@@ -5191,6 +5292,7 @@ mod tests {
         assert!(!synced_disabled.contains("mysku.club"));
         assert!(!synced_disabled.contains("img.mysku-st.ru"));
         assert!(synced_disabled.contains("github.com"));
+        assert!(synced_disabled.contains("pornhub.com"));
         assert!(synced_disabled.contains("manual-site.org"));
 
         // 3. Deleting custom entry removes it from zapret-hosts.txt
@@ -5199,12 +5301,14 @@ mod tests {
         assert!(!synced_deleted.contains("mysku.club"));
         assert!(!synced_deleted.contains("img.mysku-st.ru"));
 
-        // 4. Disabling bypass_github and bypass_torrents removes them
+        // 4. Disabling bypass_github, bypass_torrents, and bypass_adult removes them
         cfg.bypass_github = false;
         cfg.bypass_torrents = false;
+        cfg.bypass_adult = false;
         let synced_no_managed = sync_zapret_hosts_content(&synced_deleted, &cfg);
         assert!(!synced_no_managed.contains("github.com"));
         assert!(!synced_no_managed.contains("rutracker.org"));
+        assert!(!synced_no_managed.contains("pornhub.com"));
         assert!(!synced_no_managed.contains(ZAPRET_HOSTS_MANAGED_BEGIN));
         assert!(synced_no_managed.contains("manual-site.org"));
         assert!(synced_no_managed.contains("ntc.party"));

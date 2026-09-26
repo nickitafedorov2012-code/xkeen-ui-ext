@@ -83,6 +83,7 @@ export interface ZapretFeatures {
   isolated_proxy: boolean
   bypass_github?: boolean
   bypass_torrents?: boolean
+  bypass_adult?: boolean
   custom_entries?: ZapretCustomEntry[]
 }
 

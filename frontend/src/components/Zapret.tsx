@@ -45,6 +45,7 @@ export default function Zapret({ notify }: ZapretProps) {
     isolated_proxy: true,
     bypass_github: true,
     bypass_torrents: true,
+    bypass_adult: true,
     custom_entries: [],
   })
   const [togglingFeature, setTogglingFeature] = useState<string | null>(null)
@@ -938,7 +939,18 @@ export default function Zapret({ notify }: ZapretProps) {
             ['rutracker.org', 'kinozal.tv', 'rutor.info', 'flibusta.is', 'nnmclub.to']
           )}
 
-          {/* 5. Универсальный веб-обход (Hostlist) */}
+          {/* 5. 🔞 18+ Контент */}
+          {renderStrategyCard(
+            'bypass_adult',
+            '🔞 18+ Контент',
+            'ADULT DIRECT',
+            'Прямой локальный обход блокировок ТСПУ для популярных сайтов 18+ (Pornhub, Xvideos, XHamster, XNXX, RedTube, YouPorn) и их медиа-CDN без расхода трафика VPS.',
+            'DIRECT через Zapret',
+            'через стандартный маршрут',
+            ['pornhub.com', 'xvideos.com', 'xhamster.com', 'xnxx.com', 'redtube.com', 'youporn.com']
+          )}
+
+          {/* 6. Универсальный веб-обход (Hostlist) */}
           {renderStrategyCard(
             'general_bypass',
             '🌐 Универсальный веб-обход (Hostlist)',
