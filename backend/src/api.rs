@@ -4471,13 +4471,14 @@ async fn apply_and_verify_gaming(
         // Дополнительная верификация правил для режима совместимости
         if tx.config().gaming.mode == config::GamingMode::Compatibility {
             let has_explicit_enabled = tx.config().gaming.devices.iter().any(|d| d.enabled);
-            if let Some(active_dev) = tx.config().gaming.devices.iter().find(|d| {
+            let active_ip = tx.config().gaming.devices.iter().find(|d| {
                 if has_explicit_enabled { d.enabled } else { tx.config().gaming.devices.len() == 1 }
-            }) {
-                let expected_cidr = format!("SRC-IP-CIDR,{}/32", active_dev.ip);
+            }).map(|d| d.ip.clone());
+            if let Some(active_ip) = active_ip {
+                let expected_cidr = format!("SRC-IP-CIDR,{}/32", active_ip);
                 if !new_yaml.contains(&expected_cidr) {
                     tx.rollback().await;
-                    return Err(format!("Маршрутное правило для {} не сформировано. Прежние настройки возвращены.", active_dev.ip));
+                    return Err(format!("Маршрутное правило для {} не сформировано. Прежние настройки возвращены.", active_ip));
                 }
             }
         }

@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::OwnedMutexGuard;
 
-use crate::{config, log_e, log_i, log_w, mihomo, AppState};
+use crate::{config, log_e, log_w, mihomo, AppState};
 
 /// Легковесная валидация синтаксиса YAML (табуляции, кавычки, баланс скобок, UTF-8 safe).
 pub fn validate_yaml_syntax(content: &str) -> Result<(), String> {
