@@ -4002,7 +4002,7 @@ pub async fn zapret_action(
             "youtube" => {
                 cfg.zapret.custom_args = None;
                 cfg.zapret.youtube_turbo = true;
-                cfg.zapret.hybrid_youtube = false;
+                cfg.zapret.hybrid_youtube = true;
                 cfg.zapret.hybrid_discord = false;
                 cfg.zapret.discord_voice_udp = false;
                 cfg.zapret.general_bypass = false;
@@ -4012,7 +4012,7 @@ pub async fn zapret_action(
                 cfg.zapret.custom_args = None;
                 cfg.zapret.youtube_turbo = false;
                 cfg.zapret.hybrid_youtube = false;
-                cfg.zapret.hybrid_discord = false;
+                cfg.zapret.hybrid_discord = true;
                 cfg.zapret.discord_voice_udp = true;
                 cfg.zapret.general_bypass = false;
                 cfg.zapret.aggressive_dpi = false;
@@ -4020,8 +4020,8 @@ pub async fn zapret_action(
             "gamer" | "media" => {
                 cfg.zapret.custom_args = None;
                 cfg.zapret.youtube_turbo = true;
-                cfg.zapret.hybrid_youtube = false;
-                cfg.zapret.hybrid_discord = false;
+                cfg.zapret.hybrid_youtube = true;
+                cfg.zapret.hybrid_discord = true;
                 cfg.zapret.discord_voice_udp = true;
                 cfg.zapret.general_bypass = true;
                 cfg.zapret.aggressive_dpi = false;
@@ -4030,8 +4030,8 @@ pub async fn zapret_action(
             "aggressive" => {
                 cfg.zapret.custom_args = None;
                 cfg.zapret.youtube_turbo = true;
-                cfg.zapret.hybrid_youtube = false;
-                cfg.zapret.hybrid_discord = false;
+                cfg.zapret.hybrid_youtube = true;
+                cfg.zapret.hybrid_discord = true;
                 cfg.zapret.discord_voice_udp = true;
                 cfg.zapret.general_bypass = true;
                 cfg.zapret.aggressive_dpi = true;
@@ -4045,9 +4045,9 @@ pub async fn zapret_action(
             _ => {
                 // "general" / "all"
                 cfg.zapret.custom_args = None;
-                cfg.zapret.youtube_turbo = false;
-                cfg.zapret.hybrid_youtube = false;
-                cfg.zapret.hybrid_discord = false;
+                cfg.zapret.youtube_turbo = true;
+                cfg.zapret.hybrid_youtube = true;
+                cfg.zapret.hybrid_discord = true;
                 cfg.zapret.discord_voice_udp = true;
                 cfg.zapret.general_bypass = true;
                 cfg.zapret.aggressive_dpi = false;

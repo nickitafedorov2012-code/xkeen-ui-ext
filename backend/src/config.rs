@@ -445,8 +445,8 @@ impl Default for ZapretConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            hybrid_youtube: false,
-            hybrid_discord: false,
+            hybrid_youtube: true,
+            hybrid_discord: true,
             discord_voice_udp: true,
             youtube_turbo: true,
             general_bypass: true,
