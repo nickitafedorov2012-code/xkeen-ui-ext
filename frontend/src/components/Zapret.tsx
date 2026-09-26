@@ -778,8 +778,8 @@ export default function Zapret({ notify }: ZapretProps) {
             'youtube_turbo',
             '⚡ YouTube Turbo (Fake + Split2)',
             'GGC DIRECT',
-            'Комбинированная десинхронизация ClientHello (fake,split2, pos=1) с badseq и отсечкой cutoff=d4. Пробивает блокировки ТСПУ и устраняет буферизацию с кэшей Google GGC без расхода VPS.',
-            'fake,split2 (pos=1, badseq, cutoff=d4)',
+            'Десинхронизация ClientHello (fake,split2, pos=1) с repeats=6, fooling=ts и отсечкой cutoff=d4. Пробивает блокировки ТСПУ и устраняет буферизацию с кэшей Google GGC без расхода VPS.',
+            'fake,split2 (pos=1, repeats=6, ts, cutoff=d4)',
             'стандартный режим'
           )}
 
@@ -816,10 +816,10 @@ export default function Zapret({ notify }: ZapretProps) {
           {/* 5. Агрессивный режим ТСПУ */}
           {renderStrategyCard(
             'aggressive_dpi',
-            '🔥 Агрессивный режим ТСПУ (seqovl + midsld + badseq)',
+            '🔥 Агрессивный режим ТСПУ (seqovl + midsld + ts)',
             'ТСПУ BOOST',
-            'Перекрытие последовательностей (seqovl=1), сплит по середине SNI (midsld) и подделка badseq. Пробивает жесткие блокировки мобильных и кабельных операторов.',
-            'seqovl=1, midsld, badseq, md5sig',
+            'Перекрытие последовательностей (seqovl=1), сплит по середине SNI (pos=1,midsld), повторы repeats=6 и подделка ts,md5sig. Пробивает жесткие блокировки мобильных и кабельных операторов.',
+            'seqovl=1, pos=1,midsld, repeats=6, ts,md5sig',
             'базовые стратегии'
           )}
 

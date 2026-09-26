@@ -3421,7 +3421,7 @@ find_bin() {
 BIN=$(find_bin)
 
 # Fallback default with fwmark to prevent loops
-NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
 DISCORD_VOICE_ENABLED="1"
 BLOCK_QUIC="0"
 
@@ -3662,24 +3662,24 @@ esac
 pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
     let mut profiles: Vec<String> = Vec::new();
 
-    // YouTube profile (TCP 80/443) - fake,split2 at pos 1 with badseq fooling bypasses TSPU inspection cleanly without packet drops
+    // YouTube profile (TCP 80/443) - fake,split2 at pos 1 with repeats=6 and ts (TCP timestamp) fooling reliably bypasses TSPU inspection
     if cfg.youtube_turbo || cfg.hybrid_youtube {
         let yt_desync = if cfg.aggressive_dpi {
-            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq,md5sig --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=ts,md5sig --dpi-desync-cutoff=d4"
         } else {
-            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
         };
         profiles.push(format!(
             "--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com {yt_desync}"
         ));
     }
 
-    // Discord Web/Chat profile - fake,split2 for TLS 1.3
+    // Discord Web/Chat profile - fake,split2 with ts fooling for TLS 1.3
     if cfg.hybrid_discord {
         let dc_desync = if cfg.aggressive_dpi {
-            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq,md5sig --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=ts,md5sig --dpi-desync-cutoff=d4"
         } else {
-            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
         };
         profiles.push(format!(
             "--filter-tcp=80,443 --hostlist-domains=discord.com,discord.gg,discordapp.com,discordapp.net,discord.media,discord-attachments-uploads-prd.storage.googleapis.com,dis.gd,discord-activities.com {dc_desync}"
@@ -3688,15 +3688,15 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
 
     // Discord Voice UDP profile
     if cfg.discord_voice_udp {
-        profiles.push("--filter-udp=50000-65535 --dpi-desync=fake --dpi-desync-cutoff=d4".to_string());
+        profiles.push("--filter-udp=50000-65535 --filter-l7=discord,stun --dpi-desync=fake --dpi-desync-repeats=6".to_string());
     }
 
     // General Web Hostlist profile
     if cfg.general_bypass {
         let gen_desync = if cfg.aggressive_dpi {
-            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq,md5sig --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=ts,md5sig --dpi-desync-cutoff=d4"
         } else {
-            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4"
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
         };
         profiles.push(format!(
             "--filter-tcp=80,443 --hostlist=/opt/etc/zapret/zapret-hosts.txt {gen_desync}"
@@ -3705,7 +3705,7 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
 
     // If no specific profiles enabled, provide safe basic profile
     if profiles.is_empty() {
-        profiles.push("--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4".to_string());
+        profiles.push("--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4".to_string());
     }
 
     let args = format!("--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 {}", profiles.join(" --new "));
@@ -3849,7 +3849,7 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
     let check_str = cmdline.as_deref().or(config_content.as_deref()).unwrap_or("");
     let preset = if cfg.zapret.custom_args.is_some() {
         "custom"
-    } else if cfg.zapret.aggressive_dpi || check_str.contains("badseq,md5sig") {
+    } else if cfg.zapret.aggressive_dpi || check_str.contains("ts,md5sig") || check_str.contains("badseq,md5sig") {
         "aggressive"
     } else if cfg.zapret.youtube_turbo && cfg.zapret.discord_voice_udp && cfg.zapret.general_bypass {
         "gamer"
@@ -3902,9 +3902,9 @@ pub async fn zapret_action(
             check_target() {
                 target="$1"
                 # 1. Прямой curl probe через Zapret (без прокси)
-                d_out=$(curl -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" "$target" 2>/dev/null)
+                d_out=$(curl -4 -k -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" "$target" 2>/dev/null)
                 # 2. Proxy probe через Mihomo mixed-port 7890
-                p_out=$(curl -m 5 -s -o /dev/null -w "%{http_code}:%{time_total}" -x http://127.0.0.1:7890 "$target" 2>/dev/null)
+                p_out=$(curl -4 -k -m 5 -s -o /dev/null -w "%{http_code}:%{time_total}" -x http://127.0.0.1:7890 "$target" 2>/dev/null)
                 echo "${d_out:-000:0.0}|${p_out:-000:0.0}"
             }
             yt_res=$(check_target https://www.youtube.com/generate_204)
