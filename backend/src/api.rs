@@ -3502,9 +3502,9 @@ add_fw() {
   iptables -t mangle -A zapret -p tcp --dport 80 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null
   iptables -t mangle -A zapret -p tcp --dport 443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null
 
-  # 5. Reject UDP 443 (QUIC / HTTP3) only if explicitly enabled
+  # 5. Drop UDP 443 (QUIC / HTTP3) only if explicitly enabled (REJECT is invalid in mangle table)
   if [ "$BLOCK_QUIC" = "1" ]; then
-    iptables -t mangle -A zapret -p udp --dport 443 -m comment --comment "xkeen-route-zapret" -j REJECT --reject-with icmp-port-unreachable 2>/dev/null || \
+    iptables -t mangle -A zapret -p udp --dport 443 -m comment --comment "xkeen-route-zapret" -j DROP 2>/dev/null || \
     iptables -t mangle -A zapret -p udp --dport 443 -j DROP 2>/dev/null || true
   fi
 

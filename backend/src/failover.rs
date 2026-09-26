@@ -177,7 +177,16 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         state.failover_log.push(&msg, false).await;
         return Err(msg);
     };
-    let current = mihomo::ping_server(&state.http, &cfg, &active.id, ping_timeout).await;
+    let mut current = mihomo::ping_server(&state.http, &cfg, &active.id, ping_timeout).await;
+    // Защита от дребезга (flapping): при единичном сбое или повышенном пинге
+    // делаем повторную проверку через 750 мс для подтверждения, исключая ложные переключения
+    if current <= 0 || current > threshold {
+        tokio::time::sleep(Duration::from_millis(750)).await;
+        let retry_ping = mihomo::ping_server(&state.http, &cfg, &active.id, ping_timeout).await;
+        if retry_ping > 0 && retry_ping <= threshold {
+            current = retry_ping;
+        }
+    }
     if current > 0 && current <= threshold {
         let note = if !checked_higher_notes.is_empty() {
             format!("; приоритетные: {}", checked_higher_notes.join(", "))

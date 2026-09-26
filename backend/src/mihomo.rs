@@ -937,7 +937,7 @@ pub async fn ping_server_url(
     }
 
     // Для серверов из proxy-providers одиночный /proxies/{id}/delay отдаёт 404.
-    // Проверяем через селекторную группу (PROXY):
+    // Если сервер сейчас выбран в селекторной группе (PROXY), проверяем через неё (быстро, 1 узел):
     if let Ok(proxies) = get_proxies(http, cfg).await {
         if let Some(group) = find_primary_group(&proxies) {
             let is_now = proxies
@@ -962,21 +962,30 @@ pub async fn ping_server_url(
                     if resp.status().is_success() {
                         if let Ok(v) = resp.json::<Value>().await {
                             if let Some(d) = v.get("delay").and_then(|d| d.as_i64()) {
-                                if d > 0 {
-                                    return d;
-                                }
+                                return if d > 0 { d } else { -1 };
                             }
                         }
                     }
                 }
+                // Активный сервер не ответил на проверку через селектор — он недоступен
+                return -1;
             }
+        }
+    }
 
-            // Опрашиваем группу /group/{group}/delay
-            let group_pings = ping_group_url(http, cfg, &group, timeout_ms, test_url).await;
-            if let Some(&d) = group_pings.get(server_id) {
-                if d > 0 {
-                    return d;
-                }
+    // Для неактивных серверов из proxy-providers:
+    // НИ В КОЕМ СЛУЧАЕ не вызываем ping_group_url("PROXY"), так как это отправляет 142 одновременных
+    // TLS-рукопожатия ко всем серверам мира, забивая 100% CPU роутера и исчерпывая память!
+    // Вместо этого считываем закэшированную задержку/статус из /providers/proxies (память ядра Mihomo):
+    if let Ok(providers) = get_provider_proxies(http, cfg).await {
+        if let Some(p) = providers.get(server_id) {
+            let alive = p.get("alive").and_then(|a| a.as_bool()).unwrap_or(true);
+            if !alive {
+                return -1;
+            }
+            let d = last_delay(p);
+            if d > 0 {
+                return d;
             }
         }
     }
@@ -998,17 +1007,29 @@ pub async fn ping_all_url(
     test_url: Option<&str>,
 ) -> BTreeMap<String, i64> {
     let mut out = BTreeMap::new();
+    if ids.is_empty() {
+        return out;
+    }
+
+    // Если запрошен пинг небольшого списка серверов (failover, приоритеты, одиночные проверки),
+    // опрашиваем только их индивидуально через семафор, исключая шторм по всей группе.
+    // Запрос всей группы /group/{group}/delay допустим только если явно передан большой список (> 30).
+    let should_ping_group = ids.len() > 30;
     let mut remaining = Vec::new();
 
-    if let Ok(proxies) = get_proxies(http, cfg).await {
-        if let Some(group) = find_primary_group(&proxies) {
-            let group_pings = ping_group_url(http, cfg, &group, timeout_ms, test_url).await;
-            for id in ids {
-                if let Some(&ms) = group_pings.get(id) {
-                    out.insert(id.clone(), ms);
-                } else {
-                    remaining.push(id.clone());
+    if should_ping_group {
+        if let Ok(proxies) = get_proxies(http, cfg).await {
+            if let Some(group) = find_primary_group(&proxies) {
+                let group_pings = ping_group_url(http, cfg, &group, timeout_ms, test_url).await;
+                for id in ids {
+                    if let Some(&ms) = group_pings.get(id) {
+                        out.insert(id.clone(), ms);
+                    } else {
+                        remaining.push(id.clone());
+                    }
                 }
+            } else {
+                remaining.extend_from_slice(ids);
             }
         } else {
             remaining.extend_from_slice(ids);
@@ -1018,7 +1039,7 @@ pub async fn ping_all_url(
     }
 
     if !remaining.is_empty() {
-        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(6));
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
         let mut handles = Vec::new();
         let url_owned = test_url.map(|s| s.to_string());
         let shared_cfg = std::sync::Arc::new(cfg.clone());
