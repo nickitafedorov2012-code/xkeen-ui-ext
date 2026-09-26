@@ -1,0 +1,333 @@
+info: syncing channel updates for stable-x86_64-unknown-linux-gnu
+
+  stable-x86_64-unknown-linux-gnu unchanged - rustc 1.98.1 (48a229cea 2026-09-01)
+
+info: downloading component rust-src
+Unable to find image 'ghcr.io/cross-rs/armv7-unknown-linux-musleabihf:0.2.5' locally
+0.2.5: Pulling from cross-rs/armv7-unknown-linux-musleabihf
+b549f31133a9: Pulling fs layer
+19d48abface2: Pulling fs layer
+ea253c69b8a1: Pulling fs layer
+5feadb69aca5: Pulling fs layer
+a05e359a98f4: Pulling fs layer
+dd87c9c5bee9: Pulling fs layer
+c817aec00233: Pulling fs layer
+87b203417730: Pulling fs layer
+7b039d2870ba: Pulling fs layer
+ef81f183666a: Pulling fs layer
+941c2ce1086f: Pulling fs layer
+5ea6c56cce5c: Pulling fs layer
+565d6e9643a7: Pulling fs layer
+c71013ca9394: Pulling fs layer
+87b203417730: Waiting
+7b039d2870ba: Waiting
+ef81f183666a: Waiting
+5ea6c56cce5c: Waiting
+565d6e9643a7: Waiting
+941c2ce1086f: Waiting
+c71013ca9394: Waiting
+a05e359a98f4: Waiting
+dd87c9c5bee9: Waiting
+5feadb69aca5: Waiting
+c817aec00233: Waiting
+19d48abface2: Verifying Checksum
+19d48abface2: Download complete
+5feadb69aca5: Verifying Checksum
+5feadb69aca5: Download complete
+b549f31133a9: Download complete
+dd87c9c5bee9: Verifying Checksum
+dd87c9c5bee9: Download complete
+a05e359a98f4: Verifying Checksum
+a05e359a98f4: Download complete
+87b203417730: Verifying Checksum
+87b203417730: Download complete
+c817aec00233: Verifying Checksum
+c817aec00233: Download complete
+7b039d2870ba: Verifying Checksum
+ef81f183666a: Verifying Checksum
+ef81f183666a: Download complete
+5ea6c56cce5c: Verifying Checksum
+5ea6c56cce5c: Download complete
+565d6e9643a7: Verifying Checksum
+565d6e9643a7: Download complete
+c71013ca9394: Verifying Checksum
+c71013ca9394: Download complete
+ea253c69b8a1: Verifying Checksum
+ea253c69b8a1: Download complete
+b549f31133a9: Pull complete
+941c2ce1086f: Verifying Checksum
+941c2ce1086f: Download complete
+19d48abface2: Pull complete
+ea253c69b8a1: Pull complete
+5feadb69aca5: Pull complete
+a05e359a98f4: Pull complete
+dd87c9c5bee9: Pull complete
+c817aec00233: Pull complete
+87b203417730: Pull complete
+7b039d2870ba: Pull complete
+ef81f183666a: Pull complete
+941c2ce1086f: Pull complete
+5ea6c56cce5c: Pull complete
+565d6e9643a7: Pull complete
+c71013ca9394: Pull complete
+Digest: sha256:b4f481f30ceca34730a5723f717396d762d94f6eddd7e1cf7c7862d1377ff98c
+Status: Downloaded newer image for ghcr.io/cross-rs/armv7-unknown-linux-musleabihf:0.2.5
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.189
+   Compiling cfg-if v1.0.4
+   Compiling version_check v0.9.5
+   Compiling itoa v1.0.18
+   Compiling bytes v1.12.1
+   Compiling stable_deref_trait v1.2.1
+   Compiling typenum v1.20.1
+   Compiling syn v3.0.4
+   Compiling syn v2.0.119
+   Compiling pin-project-lite v0.2.17
+   Compiling futures-core v0.3.34
+   Compiling errno v0.3.14
+   Compiling smallvec v1.15.2
+   Compiling signal-hook-registry v1.4.8
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.2
+   Compiling http v1.5.0
+   Compiling generic-array v0.14.7
+   Compiling once_cell v1.21.4
+   Compiling log v0.4.34
+   Compiling litemap v0.8.3
+   Compiling percent-encoding v2.3.2
+   Compiling writeable v0.6.4
+   Compiling synstructure v0.13.2
+   Compiling serde_core v1.0.229
+   Compiling shlex v2.0.1
+   Compiling httparse v1.10.1
+   Compiling utf8_iter v1.0.4
+   Compiling futures-sink v0.3.34
+   Compiling find-msvc-tools v0.1.11
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling icu_normalizer_data v2.3.0
+   Compiling icu_properties_data v2.3.0
+   Compiling cc v1.4.4
+   Compiling zerofrom v0.1.8
+   Compiling http-body v1.1.0
+   Compiling yoke v0.8.3
+   Compiling tracing-core v0.1.36
+   Compiling getrandom v0.3.4
+   Compiling zerocopy v0.8.56
+   Compiling futures-task v0.3.34
+   Compiling slab v0.4.12
+   Compiling tracing v0.1.44
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+   Compiling tokio-macros v2.7.2
+   Compiling ring v0.17.14
+   Compiling zerotrie v0.2.5
+   Compiling futures-util v0.3.34
+   Compiling tokio v1.53.1
+   Compiling zerovec v0.11.8
+   Compiling tinystr v0.8.4
+   Compiling icu_locale_core v2.3.0
+   Compiling potential_utf v0.1.6
+   Compiling icu_collections v2.3.0
+   Compiling icu_provider v2.3.1
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling tower-service v0.3.3
+   Compiling digest v0.10.7
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling hybrid-array v0.4.14
+   Compiling form_urlencoded v1.2.2
+   Compiling serde v1.0.229
+   Compiling zeroize v1.9.0
+   Compiling try-lock v0.2.5
+   Compiling zmij v1.0.23
+   Compiling unicase v2.9.0
+   Compiling mime_guess v2.0.5
+   Compiling want v0.3.1
+   Compiling rustls-pki-types v1.15.1
+   Compiling idna_adapter v1.2.2
+   Compiling rand_core v0.9.5
+   Compiling serde_derive v1.0.229
+   Compiling sync_wrapper v1.0.2
+   Compiling futures-channel v0.3.34
+   Compiling ppv-lite86 v0.2.21
+   Compiling getrandom v0.2.17
+   Compiling tower-layer v0.3.3
+   Compiling serde_json v1.0.151
+   Compiling untrusted v0.9.0
+   Compiling atomic-waker v1.1.2
+   Compiling httpdate v1.0.3
+   Compiling thiserror v2.0.20
+   Compiling hyper v1.11.1
+   Compiling rand_chacha v0.9.0
+   Compiling idna v1.1.0
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling thiserror-impl v2.0.20
+   Compiling base64 v0.22.1
+   Compiling ipnet v2.12.1
+   Compiling num-conv v0.2.2
+   Compiling const-oid v0.10.2
+   Compiling rustls v0.23.43
+   Compiling memchr v2.8.3
+   Compiling time-core v0.1.9
+   Compiling time-macros v0.2.32
+   Compiling digest v0.11.3
+   Compiling hyper-util v0.1.20
+   Compiling rand v0.9.5
+   Compiling tower v0.5.3
+   Compiling sha1 v0.10.7
+   Compiling http-body-util v0.1.5
+   Compiling cookie v0.18.2
+   Compiling utf8parse v0.2.2
+   Compiling data-encoding v2.11.1
+   Compiling autocfg v1.5.1
+   Compiling same-file v1.0.6
+   Compiling subtle v2.6.1
+   Compiling ryu v1.0.23
+   Compiling deranged v0.5.8
+   Compiling powerfmt v0.2.0
+   Compiling cpufeatures v0.3.1
+   Compiling mime v0.3.17
+   Compiling time v0.3.55
+   Compiling sha2 v0.11.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling num-traits v0.2.19
+   Compiling tungstenite v0.29.0
+   Compiling walkdir v2.5.0
+   Compiling anstyle-parse v1.0.0
+   Compiling url v2.5.8
+   Compiling anstyle-query v1.1.5
+   Compiling psl-types v2.0.11
+   Compiling anstyle v1.0.14
+   Compiling litrs v1.0.0
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling colorchoice v1.0.5
+   Compiling anstream v1.0.0
+   Compiling document-features v0.2.12
+   Compiling publicsuffix v2.3.0
+   Compiling tokio-tungstenite v0.29.0
+   Compiling rust-embed-utils v8.12.0
+   Compiling axum-core v0.5.6
+   Compiling webpki-roots v1.0.9
+   Compiling serde_path_to_error v0.1.20
+   Compiling matchit v0.8.4
+   Compiling rustls-webpki v0.103.15
+   Compiling clap_lex v1.1.0
+   Compiling heck v0.5.0
+   Compiling bitflags v2.13.1
+   Compiling strsim v0.11.1
+   Compiling clap_builder v4.6.6
+   Compiling tower-http v0.6.11
+   Compiling axum v0.8.9
+   Compiling clap_derive v4.6.4
+   Compiling tokio-rustls v0.26.4
+   Compiling hyper-rustls v0.27.9
+   Compiling rust-embed-impl v8.12.0
+   Compiling cookie_store v0.22.1
+   Compiling tokio-util v0.7.19
+   Compiling iana-time-zone v0.1.65
+   Compiling chrono v0.4.45
+   Compiling reqwest v0.12.28
+   Compiling rust-embed v8.12.0
+   Compiling clap v4.6.6
+   Compiling md-5 v0.10.6
+   Compiling sha2 v0.10.9
+   Compiling hex v0.4.3
+   Compiling regex-lite v0.1.9
+   Compiling xkeen-route v1.5.12 (/project)
+error[E0423]: expected value, found macro `cfg`
+    --> src/api.rs:2978:22
+     |
+2978 |     let active_srv = cfg.failover.priority_chain.first().cloned().unwrap_or_else(|| "PROXY".into());
+     |                      ^^^ not a value
+
+error[E0423]: expected value, found macro `cfg`
+    --> src/api.rs:2982:30
+     |
+2982 |         if let Some(rules) = cfg.device_domain_rules.get(src_ip) {
+     |                              ^^^ not a value
+
+error[E0423]: expected value, found macro `cfg`
+    --> src/api.rs:2999:8
+     |
+2999 |     if cfg.adblock_enabled {
+     |        ^^^ not a value
+
+error[E0423]: expected value, found macro `cfg`
+    --> src/api.rs:3019:27
+     |
+3019 |         if let Some(dr) = cfg.device_routing.get(src_ip) {
+     |                           ^^^ not a value
+
+error[E0423]: expected value, found macro `cfg`
+    --> src/api.rs:3037:28
+     |
+3037 |             let flow_tgt = cfg.flow_server.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or("Google AI");
+     |                            ^^^ not a value
+
+error[E0423]: expected value, found macro `cfg`
+    --> src/api.rs:3049:15
+     |
+3049 |     for d in &cfg.direct_domains {
+     |               ^^^ not a value
+
+error[E0423]: expected value, found macro `cfg`
+    --> src/api.rs:3063:8
+     |
+3063 |     if cfg.zapret.enabled {
+     |        ^^^ not a value
+
+error[E0423]: expected value, found macro `cfg`
+    --> src/api.rs:3065:12
+     |
+3065 |         if cfg.zapret.isolated_proxy {
+     |            ^^^ not a value
+
+error[E0423]: expected value, found macro `cfg`
+    --> src/api.rs:3080:12
+     |
+3080 |         if cfg.zapret.hybrid_youtube {
+     |            ^^^ not a value
+
+error[E0423]: expected value, found macro `cfg`
+    --> src/api.rs:3094:12
+     |
+3094 |         if cfg.zapret.hybrid_discord {
+     |            ^^^ not a value
+
+error[E0423]: expected value, found macro `cfg`
+    --> src/api.rs:3108:12
+     |
+3108 |         if cfg.zapret.bypass_github {
+     |            ^^^ not a value
+
+error[E0423]: expected value, found macro `cfg`
+    --> src/api.rs:3125:12
+     |
+3125 |         if cfg.zapret.bypass_torrents {
+     |            ^^^ not a value
+
+error[E0423]: expected value, found macro `cfg`
+    --> src/api.rs:3140:12
+     |
+3140 |         if cfg.zapret.bypass_adult {
+     |            ^^^ not a value
+
+error[E0423]: expected value, found macro `cfg`
+    --> src/api.rs:3155:23
+     |
+3155 |         for entry in &cfg.zapret.custom_entries {
+     |                       ^^^ not a value
+
+error[E0423]: expected value, found macro `cfg`
+    --> src/api.rs:3184:15
+     |
+3184 |     for d in &cfg.force_domains {
+     |               ^^^ not a value
+
+For more information about this error, try `rustc --explain E0423`.
+error: could not compile `xkeen-route` (bin "xkeen-route") due to 15 previous errors
