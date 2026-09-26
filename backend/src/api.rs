@@ -4446,11 +4446,12 @@ async fn apply_and_verify_gaming(
             let policies = rci::get_policies(&state.http, cfg).await.unwrap_or_default();
             if let Ok(devices) = rci::get_devices(&state.http, cfg, &policies, "").await {
                 let has_explicit_enabled = cfg.gaming.devices.iter().any(|d| d.enabled);
+                let devices_len = cfg.gaming.devices.len();
                 for dev in &mut cfg.gaming.devices {
                     let is_active = if has_explicit_enabled {
                         dev.enabled
                     } else {
-                        cfg.gaming.devices.len() == 1
+                        devices_len == 1
                     };
                     if !is_active {
                         continue;

@@ -283,11 +283,12 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
                     let mut ip_changed = false;
                     let mut updated_devices = cfg.gaming.devices.clone();
                     let has_explicit_enabled = updated_devices.iter().any(|d| d.enabled);
+                    let devices_len = updated_devices.len();
                     for dev in &mut updated_devices {
                         let is_active = if has_explicit_enabled {
                             dev.enabled
                         } else {
-                            updated_devices.len() == 1
+                            devices_len == 1
                         };
                         if !is_active {
                             continue;
