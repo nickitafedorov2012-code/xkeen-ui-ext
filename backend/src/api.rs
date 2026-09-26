@@ -2971,6 +2971,7 @@ pub async fn test_rule_match(
     State(state): State<AppState>,
     axum::extract::Json(body): axum::extract::Json<RuleTestReq>,
 ) -> Response {
+    let cfg = state.config.read().await;
     let raw_domain = body.domain.trim();
     let norm = crate::config::normalize_domain(raw_domain);
     let domain = if !norm.is_empty() { norm.to_lowercase() } else { raw_domain.to_lowercase() };
