@@ -757,16 +757,22 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
     let mut rules_to_add: Vec<String> = Vec::new();
 
     // 0. Safeguard для Google AI / Antigravity (гарантированный PROXY перед любыми DIRECT правилами)
-    if zapret_cfg.isolated_proxy {
+    if zapret_cfg.isolated_proxy || zapret_cfg.hybrid_youtube || zapret_cfg.hybrid_discord {
         for d in FLOW_DOMAINS {
-            rules_to_add.push(format!("  - DOMAIN-SUFFIX,{d},{proxy_target}"));
+            let rule = format!("  - DOMAIN-SUFFIX,{d},{proxy_target}");
+            if !rules_to_add.contains(&rule) {
+                rules_to_add.push(rule);
+            }
         }
     }
 
     // 1. Изоляция IP-блокировок (ChatGPT, Claude, X/Twitter, Instagram -> PROXY)
     if zapret_cfg.isolated_proxy {
         for d in ISOLATED_PROXIED_DOMAINS {
-            rules_to_add.push(format!("  - DOMAIN-SUFFIX,{d},{proxy_target}"));
+            let rule = format!("  - DOMAIN-SUFFIX,{d},{proxy_target}");
+            if !rules_to_add.contains(&rule) {
+                rules_to_add.push(rule);
+            }
         }
     }
 

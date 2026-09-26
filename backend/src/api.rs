@@ -3477,50 +3477,56 @@ add_fw() {
   iptables -t mangle -F zapret 2>/dev/null
 
   # 1. CRITICAL: Skip packets already marked by nfqws to prevent infinite packet looping
-  iptables -t mangle -A zapret -m mark --mark 0x40000000/0x40000000 -m comment --comment "xkeen-route-zapret" -j RETURN
+  iptables -t mangle -A zapret -m mark --mark 0x40000000/0x40000000 -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
+  iptables -t mangle -A zapret -m mark --mark 0x40000000/0x40000000 -j RETURN 2>/dev/null || true
 
-  # Exclude loopback and LAN bridge (OpenWrt br+ and Keenetic Bridge+)
-  iptables -t mangle -A zapret -o lo -m comment --comment "xkeen-route-zapret" -j RETURN
-  iptables -t mangle -A zapret -i lo -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || true
-  iptables -t mangle -D zapret -i lo -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || true
-  iptables -t mangle -A zapret -o br+ -m comment --comment "xkeen-route-zapret" -j RETURN
-  iptables -t mangle -A zapret -o Bridge+ -m comment --comment "xkeen-route-zapret" -j RETURN
+  # 2. Exclude loopback and LAN bridge (OpenWrt br+ and Keenetic Bridge+)
+  iptables -t mangle -A zapret -o lo -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
+  iptables -t mangle -A zapret -o lo -j RETURN 2>/dev/null || true
+  # In POSTROUTING, incoming interface (-i) cannot be matched (kernel EINVAL: iniface set in postrouting):
+  # iptables -t mangle -A zapret -i lo -j RETURN
+  iptables -t mangle -A zapret -o br+ -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
+  iptables -t mangle -A zapret -o br+ -j RETURN 2>/dev/null || true
+  iptables -t mangle -A zapret -o Bridge+ -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
+  iptables -t mangle -A zapret -o Bridge+ -j RETURN 2>/dev/null || true
 
-  # 2. CRITICAL: Skip private/local subnets & router IP so Keenetic Web UI / LAN are NEVER touched
-  iptables -t mangle -A zapret -d 0.0.0.0/8 -m comment --comment "xkeen-route-zapret" -j RETURN
-  iptables -t mangle -A zapret -d 10.0.0.0/8 -m comment --comment "xkeen-route-zapret" -j RETURN
-  iptables -t mangle -A zapret -d 100.64.0.0/10 -m comment --comment "xkeen-route-zapret" -j RETURN
-  iptables -t mangle -A zapret -d 127.0.0.0/8 -m comment --comment "xkeen-route-zapret" -j RETURN
-  iptables -t mangle -A zapret -d 169.254.0.0/16 -m comment --comment "xkeen-route-zapret" -j RETURN
-  iptables -t mangle -A zapret -d 172.16.0.0/12 -m comment --comment "xkeen-route-zapret" -j RETURN
-  iptables -t mangle -A zapret -d 192.168.0.0/16 -m comment --comment "xkeen-route-zapret" -j RETURN
-  iptables -t mangle -A zapret -d 224.0.0.0/4 -m comment --comment "xkeen-route-zapret" -j RETURN
-  iptables -t mangle -A zapret -d 240.0.0.0/4 -m comment --comment "xkeen-route-zapret" -j RETURN
-  iptables -t mangle -A zapret -d 255.255.255.255/32 -m comment --comment "xkeen-route-zapret" -j RETURN
+  # 3. CRITICAL: Skip private/local subnets & router IP so Keenetic Web UI / LAN are NEVER touched
+  for net in 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 224.0.0.0/4 240.0.0.0/4 255.255.255.255/32; do
+    iptables -t mangle -A zapret -d "$net" -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
+    iptables -t mangle -A zapret -d "$net" -j RETURN 2>/dev/null || true
+  done
 
-  # 3. Queue WAN TCP (80, 443) -> NFQUEUE 200 with bypass
-  iptables -t mangle -A zapret -p tcp -m multiport --dports 80,443 -m comment --comment "xkeen-route-zapret" -j NFQUEUE --queue-num 200 --queue-bypass
+  # 4. Queue WAN TCP (80, 443) -> NFQUEUE 200 with bypass
+  iptables -t mangle -A zapret -p tcp -m multiport --dports 80,443 -m comment --comment "xkeen-route-zapret" -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
+  iptables -t mangle -A zapret -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
+  iptables -t mangle -A zapret -p tcp --dport 80 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null
+  iptables -t mangle -A zapret -p tcp --dport 443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null
 
-  # 4. Reject UDP 443 (QUIC / HTTP3) only if explicitly enabled
+  # 5. Reject UDP 443 (QUIC / HTTP3) only if explicitly enabled
   if [ "$BLOCK_QUIC" = "1" ]; then
-    iptables -t mangle -A zapret -p udp --dport 443 -m comment --comment "xkeen-route-zapret" -j REJECT --reject-with icmp-port-unreachable 2>/dev/null || iptables -t mangle -A zapret -p udp --dport 443 -m comment --comment "xkeen-route-zapret" -j DROP
+    iptables -t mangle -A zapret -p udp --dport 443 -m comment --comment "xkeen-route-zapret" -j REJECT --reject-with icmp-port-unreachable 2>/dev/null || \
+    iptables -t mangle -A zapret -p udp --dport 443 -j DROP 2>/dev/null || true
   fi
 
-  # 5. Discord Voice RTC UDP (50000:65535) if voice enabled
+  # 6. Discord Voice RTC UDP (50000:65535) if voice enabled
   if [ "$DISCORD_VOICE_ENABLED" = "1" ]; then
-    iptables -t mangle -A zapret -p udp -m multiport --dports 50000:65535 -m comment --comment "xkeen-route-zapret" -j NFQUEUE --queue-num 200 --queue-bypass
+    iptables -t mangle -A zapret -p udp -m multiport --dports 50000:65535 -m comment --comment "xkeen-route-zapret" -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
+    iptables -t mangle -A zapret -p udp --dport 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || true
   fi
 
-  # Hook into POSTROUTING for all outbound WAN packets (LAN forwarded + router local direct), with fallback to PREROUTING/FORWARD
+  # Hook into POSTROUTING for all outbound WAN packets (LAN forwarded + router local direct)
   iptables -t mangle -I POSTROUTING 1 -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null || \
-  iptables -t mangle -I PREROUTING 1 -i br+ -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null || \
-  iptables -t mangle -I FORWARD 1 -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null || { del_fw; return 1; }
+  iptables -t mangle -I POSTROUTING 1 -j zapret 2>/dev/null || { del_fw; return 1; }
 
   # Redirect client LAN DNS queries to Mihomo DNS (port 1053) only for LAN bridge interfaces (br+, Bridge+)
-  iptables -t nat -A PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null
-  iptables -t nat -A PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null
-  iptables -t nat -A PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null
-  iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null
+  iptables -t nat -A PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null || \
+  iptables -t nat -A PREROUTING -i br+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
+  iptables -t nat -A PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null || \
+  iptables -t nat -A PREROUTING -i br+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
+  iptables -t nat -A PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null || \
+  iptables -t nat -A PREROUTING -i Bridge+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
+  iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null || \
+  iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
 
   # Stop previous failsafe if running
   if [ -f "$FAILSAFE_PID" ]; then
@@ -3548,16 +3554,23 @@ del_fw() {
     rm -f "$FAILSAFE_PID"
   fi
 
-  # Remove DNS redirects with explicit comment
+  # Remove DNS redirects with or without comment
+  while iptables -t nat -D PREROUTING -i br+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i br+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
   while iptables -t nat -D PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
   while iptables -t nat -D PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
   while iptables -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
   while iptables -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
 
-  # Remove hooks from all possible chains
+  # Remove hooks from all possible chains (POSTROUTING, PREROUTING, FORWARD, OUTPUT)
   while iptables -t mangle -D POSTROUTING -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null; do :; done
   while iptables -t mangle -D POSTROUTING -j zapret 2>/dev/null; do :; done
-  while iptables -t mangle -D PREROUTING -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null; do :; done
+  while iptables -t mangle -D PREROUTING -i br+ -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null; do :; done
+  while iptables -t mangle -D PREROUTING -i br+ -j zapret 2>/dev/null; do :; done
+  while iptables -t mangle -D PREROUTING -i Bridge+ -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null; do :; done
+  while iptables -t mangle -D PREROUTING -i Bridge+ -j zapret 2>/dev/null; do :; done
   while iptables -t mangle -D PREROUTING -j zapret 2>/dev/null; do :; done
   while iptables -t mangle -D FORWARD -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null; do :; done
   while iptables -t mangle -D FORWARD -j zapret 2>/dev/null; do :; done
@@ -3821,7 +3834,7 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
 
     let iptables_active = tokio::process::Command::new("sh")
         .arg("-c")
-        .arg("iptables -t mangle -S POSTROUTING 2>/dev/null | grep -q zapret || iptables -t mangle -S PREROUTING 2>/dev/null | grep -q zapret || iptables -t mangle -S FORWARD 2>/dev/null | grep -q zapret || iptables -t nat -S PREROUTING 2>/dev/null | grep -q zapret")
+        .arg("iptables -t mangle -S POSTROUTING 2>/dev/null | grep -q zapret || iptables -t mangle -S PREROUTING 2>/dev/null | grep -q zapret || iptables -t mangle -S FORWARD 2>/dev/null | grep -q zapret || iptables -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE || iptables -t nat -S PREROUTING 2>/dev/null | grep -q zapret")
         .output()
         .await
         .map(|o| o.status.success())
@@ -4047,10 +4060,10 @@ pub async fn zapret_action(
         }
         let _ = crate::rci::set_clean_dns_servers(&state.http, &cfg).await;
 
-        // Обновляем правила в config.yaml ядра Mihomo
+        // Обновляем правила в config.yaml ядра Mihomo через apply_routing
         if std::path::Path::new(&cfg.mihomo.config_path).exists() {
-            if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-                if let Ok(new_yaml) = routing::apply_zapret_hybrid_rules(&yaml, &cfg.zapret) {
+            if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+                if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &cfg) {
                     let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
                     let _ = mihomo::reload_config(&state.http, &cfg).await;
                 }
@@ -4211,7 +4224,8 @@ pub async fn zapret_action(
 
     // Перед стартом гарантируем актуальные и безопасные правила
     if action_to_run == "start" || action_to_run == "restart" {
-        let _cfg = state.config.read().await;
+        let mut _cfg = (**state.config.read().await).clone();
+        _cfg.zapret.enabled = true;
         let _ = sync_zapret_files(&_cfg.zapret).await;
         let _ = crate::rci::set_clean_dns_servers(&state.http, &_cfg).await;
     }
@@ -4220,6 +4234,7 @@ pub async fn zapret_action(
         Ok(out) => {
             let output_str = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
             let _cfg_guard = state.config_lock.lock().await;
+            let _routing_guard = state.routing_lock.lock().await;
             let mut cfg = (**state.config.read().await).clone();
             if action_to_run == "start" {
                 cfg.zapret.enabled = true;
