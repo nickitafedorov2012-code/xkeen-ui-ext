@@ -6,6 +6,7 @@ mod logger;
 mod mihomo;
 mod rci;
 mod routing;
+pub mod transaction;
 mod updater;
 mod override_sync;
 mod cdn_discovery;

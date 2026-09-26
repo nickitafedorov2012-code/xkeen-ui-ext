@@ -600,7 +600,7 @@ pub fn merge_value(base: &mut serde_json::Value, over: &serde_json::Value) {
     }
 }
 
-fn parse_config_content(content: &str, path_display: &str) -> AppConfig {
+pub(crate) fn parse_config_content(content: &str, path_display: &str) -> AppConfig {
     let mut base = serde_json::to_value(AppConfig::default()).unwrap_or_default();
     match serde_json::from_str::<serde_json::Value>(content) {
         Ok(over) => merge_value(&mut base, &over),
