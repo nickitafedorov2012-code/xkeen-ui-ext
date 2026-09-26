@@ -66,6 +66,12 @@ export interface ProviderInfo {
   hwid?: string
 }
 
+export interface ZapretCustomEntry {
+  domain: string
+  enabled: boolean
+  cdns: string[]
+}
+
 export interface ZapretFeatures {
   enabled: boolean
   hybrid_youtube: boolean
@@ -75,6 +81,9 @@ export interface ZapretFeatures {
   general_bypass: boolean
   aggressive_dpi: boolean
   isolated_proxy: boolean
+  bypass_github?: boolean
+  bypass_torrents?: boolean
+  custom_entries?: ZapretCustomEntry[]
 }
 
 export interface ZapretStatus {

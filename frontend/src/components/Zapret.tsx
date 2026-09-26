@@ -6,6 +6,17 @@ interface ZapretProps {
   notify: (msg: string, error?: boolean) => void
 }
 
+export function normalizeDomainInput(input: string): string {
+  let s = input.trim().toLowerCase()
+  s = s.replace(/^[a-z]+:\/\//i, '')
+  s = s.split('/')[0].split('?')[0].split('#')[0]
+  s = s.split('@').pop() || s
+  s = s.split(':')[0]
+  s = s.replace(/^www\./i, '')
+  s = s.replace(/^\.+|\.+$/g, '')
+  return s.trim()
+}
+
 export default function Zapret({ notify }: ZapretProps) {
   const [status, setStatus] = useState<ZapretStatus | null>(null)
   const [loading, setLoading] = useState(true)
@@ -32,14 +43,27 @@ export default function Zapret({ notify }: ZapretProps) {
     general_bypass: true,
     aggressive_dpi: false,
     isolated_proxy: true,
+    bypass_github: true,
+    bypass_torrents: true,
+    custom_entries: [],
   })
   const [togglingFeature, setTogglingFeature] = useState<string | null>(null)
+
+  // Пользовательские сайты и CDN Boost (/boost)
+  const [customDomainInput, setCustomDomainInput] = useState('')
+  const [addingCustom, setAddingCustom] = useState(false)
+  const [boostingDomain, setBoostingDomain] = useState<string | null>(null)
 
   const loadStatus = async () => {
     try {
       const res = await apiGet<ZapretStatus>('zapret/status')
       setStatus(res)
-      if (res.features) setFeatures(res.features)
+      if (res.features) {
+        setFeatures({
+          ...res.features,
+          custom_entries: res.features.custom_entries || [],
+        })
+      }
       if (res.config) setConfigDraft(res.config)
       if (res.hosts) setHostsDraft(res.hosts)
     } catch (e) {
@@ -74,7 +98,12 @@ export default function Zapret({ notify }: ZapretProps) {
         statusRes = await apiGet<ZapretStatus>('zapret/status')
       }
       setStatus(statusRes)
-      if (statusRes.features) setFeatures(statusRes.features)
+      if (statusRes.features) {
+        setFeatures({
+          ...statusRes.features,
+          custom_entries: statusRes.features.custom_entries || [],
+        })
+      }
     } catch (e) {
       setStatus((prev) => (prev ? { ...prev, running: !nextVal } : prev))
       setFeatures((prev) => ({ ...prev, enabled: !nextVal }))
@@ -107,7 +136,10 @@ export default function Zapret({ notify }: ZapretProps) {
         preset: presetId,
       })
       if (res.features) {
-        setFeatures(res.features)
+        setFeatures({
+          ...res.features,
+          custom_entries: res.features.custom_entries || [],
+        })
       }
       notify(res.message || `Применен набор стратегий '${presetId}'`)
       await loadStatus()
@@ -184,17 +216,20 @@ export default function Zapret({ notify }: ZapretProps) {
         enabled: nextVal,
       })
       if (res.features) {
-        setFeatures(res.features)
+        setFeatures({
+          ...res.features,
+          custom_entries: res.features.custom_entries || [],
+        })
       }
       notify(
         nextVal
-          ? '🟢 Стратегия активирована и правила обновлены'
-          : '⚪ Стратегия выключена'
+          ? '🟢 Блок активирован и правила обновлены'
+          : '⚪ Блок выключен'
       )
       await loadStatus()
     } catch (e) {
       setFeatures((prev) => ({ ...prev, [key]: !nextVal }))
-      notify(e instanceof Error ? e.message : 'Ошибка переключения стратегии', true)
+      notify(e instanceof Error ? e.message : 'Ошибка переключения блока', true)
     } finally {
       setTogglingFeature(null)
     }
@@ -207,14 +242,129 @@ export default function Zapret({ notify }: ZapretProps) {
         action: 'reset_features',
       })
       if (res.features) {
-        setFeatures(res.features)
+        setFeatures({
+          ...res.features,
+          custom_entries: res.features.custom_entries || [],
+        })
       }
-      notify('Все стратегии сброшены к стандартным значениям')
+      notify('Все блоки сброшены к стандартным значениям')
       await loadStatus()
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка сброса настроек', true)
     } finally {
       setBusy(false)
+    }
+  }
+
+  const handleAddCustomDomain = async (domainToAdd?: string) => {
+    const raw = (domainToAdd || customDomainInput).trim()
+    if (!raw) {
+      notify('Укажите домен сайта (например, mysku.club или habr.com)', true)
+      return
+    }
+    const clean = normalizeDomainInput(raw)
+
+    if (!clean || clean.includes(' ') || !clean.includes('.')) {
+      notify('Некорректный домен сайта (например, mysku.club)', true)
+      return
+    }
+
+    setAddingCustom(true)
+    try {
+      const res = await apiPost<{ success: boolean; features?: ZapretFeatures; message?: string }>('zapret/action', {
+        action: 'add_custom_domain',
+        domain: clean,
+      })
+      if (res.features) {
+        setFeatures({
+          ...res.features,
+          custom_entries: res.features.custom_entries || [],
+        })
+      }
+      setCustomDomainInput('')
+      notify(res.message || `Сайт ${clean} добавлен и ускорен (/boost)`)
+      await loadStatus()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка добавления сайта', true)
+    } finally {
+      setAddingCustom(false)
+    }
+  }
+
+  const handleRemoveCustomDomain = async (domain: string) => {
+    const clean = normalizeDomainInput(domain)
+    try {
+      const res = await apiPost<{ success: boolean; features?: ZapretFeatures; message?: string }>('zapret/action', {
+        action: 'remove_custom_domain',
+        domain: clean,
+      })
+      if (res.features) {
+        setFeatures({
+          ...res.features,
+          custom_entries: res.features.custom_entries || [],
+        })
+      }
+      notify(res.message || `Сайт ${clean} удален из Zapret`)
+      await loadStatus()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка удаления сайта', true)
+    }
+  }
+
+  const handleToggleCustomDomain = async (domain: string, currentEnabled: boolean) => {
+    const clean = normalizeDomainInput(domain)
+    const nextVal = !currentEnabled
+    setFeatures((prev) => ({
+      ...prev,
+      custom_entries: (prev.custom_entries || []).map((e) =>
+        normalizeDomainInput(e.domain) === clean ? { ...e, enabled: nextVal } : e
+      ),
+    }))
+    try {
+      const res = await apiPost<{ success: boolean; features?: ZapretFeatures; message?: string }>('zapret/action', {
+        action: 'toggle_custom_domain',
+        domain: clean,
+        enabled: nextVal,
+      })
+      if (res.features) {
+        setFeatures({
+          ...res.features,
+          custom_entries: res.features.custom_entries || [],
+        })
+      }
+      notify(nextVal ? `🟢 ${clean} включен в обход DPI` : `⚪ ${clean} выключен`)
+      await loadStatus()
+    } catch (e) {
+      setFeatures((prev) => ({
+        ...prev,
+        custom_entries: (prev.custom_entries || []).map((e) =>
+          normalizeDomainInput(e.domain) === clean ? { ...e, enabled: currentEnabled } : e
+        ),
+      }))
+      notify(e instanceof Error ? e.message : 'Ошибка переключения сайта', true)
+    }
+  }
+
+  const handleBoostCustomDomain = async (domain: string) => {
+    const clean = normalizeDomainInput(domain)
+    setBoostingDomain(clean)
+    try {
+      const res = await apiPost<{ success: boolean; features?: ZapretFeatures; message?: string }>('zapret/action', {
+        action: 'boost_custom_domain',
+        domain: clean,
+      })
+      if (res.features) {
+        setFeatures({
+          ...res.features,
+          custom_entries: res.features.custom_entries || [],
+        })
+      }
+      notify(res.message || `⚡ Boost: домены CDN обновлены для ${clean}`)
+      await loadStatus()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка обновления CDN', true)
+    } finally {
+      setBoostingDomain(null)
     }
   }
 
@@ -236,7 +386,8 @@ export default function Zapret({ notify }: ZapretProps) {
     badgeText: string,
     desc: string,
     activeInfo: string,
-    inactiveInfo: string
+    inactiveInfo: string,
+    tags?: string[]
   ) => {
     const isChecked = !!features[key]
     const isBusy = togglingFeature === key || busy
@@ -258,7 +409,7 @@ export default function Zapret({ notify }: ZapretProps) {
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-          <div>
+          <div style={{ flex: 1 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               <b style={{ fontSize: 14, color: isChecked ? 'var(--text)' : 'var(--muted)' }}>{title}</b>
               <span
@@ -276,6 +427,26 @@ export default function Zapret({ notify }: ZapretProps) {
             <p className="muted small" style={{ margin: '6px 0 0', lineHeight: 1.45 }}>
               {desc}
             </p>
+            {tags && tags.length > 0 && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 8 }}>
+                {tags.map((t) => (
+                  <span
+                    key={t}
+                    style={{
+                      fontSize: 10,
+                      padding: '1px 6px',
+                      borderRadius: 4,
+                      background: isChecked ? 'rgba(56, 189, 248, 0.12)' : 'rgba(255, 255, 255, 0.04)',
+                      color: isChecked ? '#38bdf8' : 'var(--muted)',
+                      border: isChecked ? '1px solid rgba(56, 189, 248, 0.25)' : '1px solid var(--border)',
+                      fontFamily: 'Consolas, monospace',
+                    }}
+                  >
+                    {t}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
 
           <button
@@ -298,7 +469,7 @@ export default function Zapret({ notify }: ZapretProps) {
               marginTop: 2,
               boxShadow: isChecked ? '0 0 12px rgba(56, 189, 248, 0.4)' : 'none',
             }}
-            title={isChecked ? 'Выключить стратегию' : 'Включить стратегию'}
+            title={isChecked ? 'Выключить блок' : 'Включить блок'}
           >
             <div
               style={{
@@ -701,23 +872,405 @@ export default function Zapret({ notify }: ZapretProps) {
         )}
       </section>
 
-      {/* 2. МУЛЬТИ-СТРАТЕГИИ ОБХОДА DPI И БЫСТРЫЕ НАБОРЫ */}
+      {/* 2. СЛУЖБЫ И СЕРВИСЫ (ПРЯМОЙ ОБХОД DPI БЕЗ VPS) */}
       <section className="card" style={{ padding: '22px 24px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>
-                ⚡ Мульти-стратегии и режимы обхода DPI
+                🛡️ Службы и сервисы (прямой обход DPI без VPS)
               </h3>
               <span
                 className="badge"
                 style={{ background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.3)' }}
               >
-                Совместный выбор стратегий
+                Независимые блоки
               </span>
             </div>
             <div className="muted small" style={{ marginTop: 3 }}>
-              Включайте любые стратегии одновременно: nfqws запускает независимый профиль для каждого протокола без конфликтов
+              Каждый сервис можно выключить или включить отдельно. Трафик включенных сервисов десинхронизируется локально и не расходует лимиты VPS.
+            </div>
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 14 }}>
+          {/* 1. YouTube Direct */}
+          {renderStrategyCard(
+            'hybrid_youtube',
+            '🎥 YouTube Direct (без VPS)',
+            'YOUTUBE DIRECT',
+            'Направляет видеопотоки YouTube и кэш-серверы googlevideo напрямую через локальный nfqws в обход прокси. Экономит зарубежный трафик и ускоряет 4K/8K.',
+            'DIRECT через Zapret (без VPS)',
+            'через VLESS-прокси',
+            ['googlevideo.com', 'youtube.com', 'ytimg.com', 'ggpht.com']
+          )}
+
+          {/* 2. Discord Web & Chat */}
+          {renderStrategyCard(
+            'hybrid_discord',
+            '💬 Discord Web & Chat',
+            'DISCORD DIRECT',
+            'Прямое подключение к текстовым серверам, каналам и медиафайлам Discord напрямую через Zapret. Минимальный домашний пинг и быстрая загрузка картинок.',
+            'DIRECT через Zapret',
+            'через стандартный маршрут',
+            ['discord.com', 'discord.gg', 'discordapp.com', 'discord.media']
+          )}
+
+          {/* 3. GitHub (Релизы, исходники & аватары) */}
+          {renderStrategyCard(
+            'bypass_github',
+            '🐙 GitHub (Релизы & Исходники)',
+            'GITHUB DIRECT',
+            'Прямой обход блокировок и замедлений GitHub: моментальный git clone, высокая скорость загрузки релизов, raw-файлов и аватаров без нагрузки на VPS.',
+            'DIRECT через Zapret',
+            'через стандартный маршрут',
+            ['github.com', 'raw.githubusercontent.com', 'assets-cdn.github.com', 'objects.githubusercontent.com']
+          )}
+
+          {/* 4. Торренты & Трекеры */}
+          {renderStrategyCard(
+            'bypass_torrents',
+            '🧲 Торренты & Трекеры',
+            'TRACKERS DIRECT',
+            'Прямой доступ к анонсам трекеров и скачиванию .torrent файлов: RuTracker, Kinozal, Rutor, Flibusta, NNMClub, Torlook. Работает на максимальной скорости провайдера.',
+            'DIRECT через Zapret',
+            'через стандартный маршрут',
+            ['rutracker.org', 'kinozal.tv', 'rutor.info', 'flibusta.is', 'nnmclub.to']
+          )}
+
+          {/* 5. Универсальный веб-обход (Hostlist) */}
+          {renderStrategyCard(
+            'general_bypass',
+            '🌐 Универсальный веб-обход (Hostlist)',
+            'HOSTLIST',
+            'Обход блокировок по системному списку доменов (/opt/etc/zapret/zapret-hosts.txt). Обычные сайты и банки не затрагиваются.',
+            'zapret-hosts.txt (cutoff=d4)',
+            'без фильтрации общего веб',
+            ['/opt/etc/zapret/zapret-hosts.txt']
+          )}
+        </div>
+      </section>
+
+      {/* 3. ПОЛЬЗОВАТЕЛЬСКИЕ САЙТЫ & CDN BOOST (/boost) */}
+      <section
+        className="card"
+        style={{
+          padding: '22px 24px',
+          background: 'linear-gradient(135deg, rgba(168, 85, 247, 0.05) 0%, rgba(15, 23, 42, 0.5) 100%)',
+          border: '1px solid rgba(168, 85, 247, 0.3)',
+          borderRadius: 16,
+          boxShadow: '0 8px 24px rgba(168, 85, 247, 0.05)',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 14, marginBottom: 16 }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div
+                style={{
+                  width: 32,
+                  height: 32,
+                  borderRadius: 8,
+                  background: 'rgba(168, 85, 247, 0.2)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 16,
+                }}
+              >
+                ⚡
+              </div>
+              <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>
+                Свой сайт & CDN Boost (/boost)
+              </h3>
+              <span
+                className="badge"
+                style={{
+                  background: 'rgba(168, 85, 247, 0.15)',
+                  color: '#c084fc',
+                  border: '1px solid rgba(168, 85, 247, 0.4)',
+                  fontWeight: 600,
+                  fontSize: 11,
+                }}
+              >
+                ⚡ /boost активен
+              </span>
+            </div>
+            <div className="muted small" style={{ marginTop: 4, lineHeight: 1.45 }}>
+              Напишите адрес любого сайта. XKeen автоматически найдёт связанные CDN, картинки и медиа-сервера, подтянет их в карточку другим цветом и направит на максимальной скорости напрямую без расхода VPS.
+            </div>
+          </div>
+        </div>
+
+        {/* ПОЛЕ ВВОДА САЙТА */}
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            handleAddCustomDomain()
+          }}
+          style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', marginBottom: 14 }}
+        >
+          <input
+            type="text"
+            className="input"
+            value={customDomainInput}
+            onChange={(e) => setCustomDomainInput(e.target.value)}
+            placeholder="Например: mysku.club, habr.com, speedtest.net, twitch.tv..."
+            disabled={addingCustom || !isInstalled}
+            style={{ flex: 1, minWidth: 260 }}
+          />
+          <button
+            type="submit"
+            className="btn primary"
+            disabled={addingCustom || !isInstalled || !customDomainInput.trim()}
+            style={{
+              background: 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)',
+              border: 'none',
+              boxShadow: '0 2px 10px rgba(168, 85, 247, 0.35)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+            }}
+          >
+            {addingCustom ? '⏳ Сканирование CDN…' : '⚡ Добавить & Boost'}
+          </button>
+        </form>
+
+        {/* БЫСТРЫЕ ПОДСКАЗКИ САЙТОВ ДЛЯ ДОБАВЛЕНИЯ В 1 КЛИК */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 18 }}>
+          <span className="muted small" style={{ fontSize: 11 }}>Быстрый выбор:</span>
+          {['mysku.club', 'habr.com', 'speedtest.net', 'twitch.tv', '4pda.to', 'hdrezka.ag'].map((presetDomain) => {
+            const alreadyAdded = (features.custom_entries || []).some(
+              (e) => e.domain.toLowerCase() === presetDomain.toLowerCase()
+            )
+            return (
+              <button
+                key={presetDomain}
+                type="button"
+                className="btn sm ghost"
+                disabled={addingCustom || alreadyAdded || !isInstalled}
+                onClick={() => handleAddCustomDomain(presetDomain)}
+                style={{
+                  fontSize: 11,
+                  padding: '2px 8px',
+                  borderRadius: 6,
+                  opacity: alreadyAdded ? 0.4 : 1,
+                  background: alreadyAdded ? 'rgba(255, 255, 255, 0.03)' : 'rgba(168, 85, 247, 0.08)',
+                  borderColor: alreadyAdded ? 'var(--border)' : 'rgba(168, 85, 247, 0.25)',
+                  color: alreadyAdded ? 'var(--muted)' : '#c084fc',
+                }}
+                title={alreadyAdded ? 'Уже добавлен' : `Добавить ${presetDomain} и подтянуть его CDN`}
+              >
+                {alreadyAdded ? `✓ ${presetDomain}` : `+ ${presetDomain}`}
+              </button>
+            )
+          })}
+        </div>
+
+        {/* СПИСОК ДОБАВЛЕННЫХ САЙТОВ С РАЗНОЦВЕТНЫМИ CDN БЕЙДЖАМИ */}
+        {(!features.custom_entries || features.custom_entries.length === 0) ? (
+          <div
+            style={{
+              padding: '20px 16px',
+              textAlign: 'center',
+              borderRadius: 12,
+              background: 'rgba(0, 0, 0, 0.2)',
+              border: '1px dashed rgba(255, 255, 255, 0.1)',
+            }}
+          >
+            <div style={{ fontSize: 24, marginBottom: 6 }}>🌐</div>
+            <div className="muted small">
+              Пользовательские сайты пока не добавлены. Введите адрес сайта выше (например, <code>mysku.club</code>) и нажмите <b>«⚡ Добавить & Boost»</b>.
+            </div>
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {features.custom_entries.map((entry) => {
+              const isChecked = entry.enabled !== false
+              const isBoosting = boostingDomain === entry.domain
+
+              return (
+                <div
+                  key={entry.domain}
+                  style={{
+                    padding: '14px 16px',
+                    borderRadius: 12,
+                    background: isChecked ? 'rgba(168, 85, 247, 0.04)' : 'rgba(255, 255, 255, 0.01)',
+                    border: isChecked ? '1px solid rgba(168, 85, 247, 0.3)' : '1px solid var(--border)',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 10,
+                    transition: 'all 0.2s ease',
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                      {/* ОСНОВНОЙ ДОМЕН САЙТА — ЦВЕТ 1 (НЕБЕСНО-ГОЛУБОЙ) */}
+                      <span
+                        className="badge"
+                        style={{
+                          fontSize: 13,
+                          fontWeight: 700,
+                          padding: '5px 12px',
+                          borderRadius: 8,
+                          background: isChecked ? 'rgba(56, 189, 248, 0.15)' : 'rgba(255, 255, 255, 0.05)',
+                          color: isChecked ? '#38bdf8' : 'var(--muted)',
+                          border: isChecked ? '1px solid rgba(56, 189, 248, 0.4)' : '1px solid var(--border)',
+                          letterSpacing: 0.3,
+                        }}
+                      >
+                        🌐 {entry.domain}
+                      </span>
+
+                      <span
+                        className="badge"
+                        style={{
+                          fontSize: 10,
+                          background: isChecked ? 'rgba(34, 197, 94, 0.15)' : 'rgba(255, 255, 255, 0.05)',
+                          color: isChecked ? '#22c55e' : 'var(--muted)',
+                          border: `1px solid ${isChecked ? 'rgba(34, 197, 94, 0.3)' : 'var(--border)'}`,
+                        }}
+                      >
+                        {isChecked ? '🟢 DIRECT (Zapret)' : '⚪ Выключен'}
+                      </span>
+
+                      {entry.cdns && entry.cdns.length > 0 && (
+                        <span className="muted small" style={{ fontSize: 11 }}>
+                          +{entry.cdns.length} CDN подтянуто
+                        </span>
+                      )}
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      {/* КНОПКА RE-BOOST */}
+                      <button
+                        type="button"
+                        className="btn sm ghost"
+                        disabled={isBoosting || !isInstalled}
+                        onClick={() => handleBoostCustomDomain(entry.domain)}
+                        style={{
+                          fontSize: 11,
+                          padding: '3px 8px',
+                          color: '#c084fc',
+                          borderColor: 'rgba(168, 85, 247, 0.3)',
+                        }}
+                        title="Повторно проверить и до-подтянуть новые CDN адреса сайта"
+                      >
+                        {isBoosting ? '⏳ Boost…' : '⚡ Boost'}
+                      </button>
+
+                      {/* КНОПКА УДАЛЕНИЯ */}
+                      <button
+                        type="button"
+                        className="btn sm ghost"
+                        disabled={!isInstalled}
+                        onClick={() => handleRemoveCustomDomain(entry.domain)}
+                        style={{ fontSize: 11, padding: '3px 8px', color: '#ef4444' }}
+                        title="Удалить сайт из списка"
+                      >
+                        🗑️
+                      </button>
+
+                      {/* СВИТЧ ВКЛЮЧЕНИЯ/ВЫКЛЮЧЕНИЯ САЙТА ("Блоки, которые можно выключить") */}
+                      <button
+                        type="button"
+                        disabled={!isInstalled}
+                        onClick={() => handleToggleCustomDomain(entry.domain, isChecked)}
+                        style={{
+                          width: 44,
+                          height: 24,
+                          borderRadius: 14,
+                          border: 'none',
+                          cursor: !isInstalled ? 'not-allowed' : 'pointer',
+                          background: isChecked
+                            ? 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)'
+                            : 'rgba(255, 255, 255, 0.15)',
+                          position: 'relative',
+                          transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+                          padding: 2,
+                          flexShrink: 0,
+                          boxShadow: isChecked ? '0 0 10px rgba(168, 85, 247, 0.4)' : 'none',
+                        }}
+                        title={isChecked ? 'Выключить обход для этого сайта' : 'Включить обход для этого сайта'}
+                      >
+                        <div
+                          style={{
+                            width: 20,
+                            height: 20,
+                            borderRadius: '50%',
+                            background: '#fff',
+                            transform: isChecked ? 'translateX(20px)' : 'translateX(0)',
+                            transition: 'transform 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+                            boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            fontSize: 9,
+                            color: isChecked ? '#7c3aed' : '#888',
+                            fontWeight: 'bold',
+                          }}
+                        >
+                          {isChecked ? '✓' : '✕'}
+                        </div>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* ПОДТЯНУТЫЕ CDN ДОМЕНЫ — ЦВЕТ 2 (ФИОЛЕТОВО-РОЗОВЫЙ /BOOST) */}
+                  {entry.cdns && entry.cdns.length > 0 ? (
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', paddingTop: 6, borderTop: '1px solid rgba(255, 255, 255, 0.04)' }}>
+                      <span style={{ fontSize: 11, color: isChecked ? '#c084fc' : 'var(--muted)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
+                        ⚡ /boost CDN:
+                      </span>
+                      {entry.cdns.map((cdn) => (
+                        <span
+                          key={cdn}
+                          className="badge"
+                          style={{
+                            fontSize: 10,
+                            fontFamily: 'Consolas, monospace',
+                            padding: '3px 8px',
+                            borderRadius: 6,
+                            background: isChecked
+                              ? 'linear-gradient(135deg, rgba(168, 85, 247, 0.18) 0%, rgba(217, 70, 239, 0.18) 100%)'
+                              : 'rgba(255, 255, 255, 0.03)',
+                            color: isChecked ? '#e879f9' : 'var(--muted)',
+                            border: isChecked ? '1px solid rgba(168, 85, 247, 0.45)' : '1px solid var(--border)',
+                            boxShadow: isChecked ? '0 1px 4px rgba(168, 85, 247, 0.1)' : 'none',
+                          }}
+                        >
+                          ⚡ {cdn}
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 11, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 6, paddingTop: 4 }}>
+                      <span>Связанные CDN пока не обнаружены (трафик идёт на основной домен). Нажмите <b>«⚡ Boost»</b> для поиска.</span>
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </section>
+
+      {/* 4. РЕЖИМЫ ДЕСИНХРОНИЗАЦИИ (DPI TUNING) И БЫСТРЫЕ НАБОРЫ */}
+      <section className="card" style={{ padding: '22px 24px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>
+                ⚡ Режимы десинхронизации (DPI Tuning) & Быстрые наборы
+              </h3>
+              <span
+                className="badge"
+                style={{ background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.3)' }}
+              >
+                Тонкая настройка
+              </span>
+            </div>
+            <div className="muted small" style={{ marginTop: 3 }}>
+              Специальные параметры nfqws для пробития глубоких блокировок ТСПУ и изоляции защищенных ресурсов
             </div>
           </div>
 
@@ -728,7 +1281,7 @@ export default function Zapret({ notify }: ZapretProps) {
               className="btn sm ghost"
               disabled={busy || !isInstalled}
               onClick={() => handleApplyPreset('gamer')}
-              title="YouTube Turbo + Discord Web + Discord Voice RTC + Общий хостлист"
+              title="YouTube Turbo + Discord Web + Discord Voice RTC + GitHub + Торренты"
             >
               🎮 Геймер / Медиа
             </button>
@@ -755,7 +1308,7 @@ export default function Zapret({ notify }: ZapretProps) {
               className="btn sm ghost"
               disabled={busy || !isInstalled}
               onClick={handleResetFeatures}
-              title="Сбросить все стратегии к стандартным"
+              title="Сбросить все блоки к стандартным"
             >
               ↺ Сброс
             </button>
@@ -763,16 +1316,6 @@ export default function Zapret({ notify }: ZapretProps) {
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 14 }}>
-          {/* 0. YouTube Direct (без VPS) */}
-          {renderStrategyCard(
-            'hybrid_youtube',
-            '🎥 YouTube Direct (без VPS)',
-            'YOUTUBE DIRECT',
-            'Направляет домены YouTube и серверы googlevideo напрямую через локальный nfqws в обход прокси. Экономит трафик на зарубежном сервере.',
-            'DIRECT через Zapret (без VPS)',
-            'через VLESS-прокси'
-          )}
-
           {/* 1. YouTube Turbo */}
           {renderStrategyCard(
             'youtube_turbo',
@@ -783,17 +1326,7 @@ export default function Zapret({ notify }: ZapretProps) {
             'стандартный режим'
           )}
 
-          {/* 2. Discord Web & Chat */}
-          {renderStrategyCard(
-            'hybrid_discord',
-            '💬 Discord Web & Chat (Fake + Split2)',
-            'DIRECT',
-            'Прямое подключение к текстовым серверам, каналам и медиафайлам Discord напрямую через Zapret. Минимальный домашний пинг и быстрая загрузка картинок.',
-            'split2 (cutoff=d4) + DIRECT',
-            'через стандартный маршрут'
-          )}
-
-          {/* 3. Discord Voice RTC */}
+          {/* 2. Discord Voice RTC */}
           {renderStrategyCard(
             'discord_voice_udp',
             '🎙️ Discord Voice RTC (UDP 50000:65535)',
@@ -803,17 +1336,7 @@ export default function Zapret({ notify }: ZapretProps) {
             'только TCP/UDP 80/443'
           )}
 
-          {/* 4. Общий веб-обход (Hostlist) */}
-          {renderStrategyCard(
-            'general_bypass',
-            '🌐 Универсальный веб-обход (Hostlist)',
-            'HOSTLIST',
-            'Обход блокировок по списку доменов (/opt/etc/zapret/zapret-hosts.txt): RuTracker, NTC Party, Kinozal, Flibusta. Обычные сайты и банки не затрагиваются.',
-            'zapret-hosts.txt (cutoff=d4)',
-            'без фильтрации общего веб'
-          )}
-
-          {/* 5. Агрессивный режим ТСПУ */}
+          {/* 3. Агрессивный режим ТСПУ */}
           {renderStrategyCard(
             'aggressive_dpi',
             '🔥 Агрессивный режим ТСПУ (seqovl + midsld + ts)',
@@ -823,12 +1346,12 @@ export default function Zapret({ notify }: ZapretProps) {
             'базовые стратегии'
           )}
 
-          {/* 6. Изоляция IP-блокировок */}
+          {/* 4. Изоляция IP-блокировок */}
           {renderStrategyCard(
             'isolated_proxy',
             '🔒 Изоляция IP-блокировок (ChatGPT, Claude, X -> PROXY)',
             'STRICT PROXY',
-            'Разделение задач: Zapret обходит только цензуру по SNI (YouTube/Discord). Сервисы с жесткой блокировкой по IP (ChatGPT, Claude, Instagram, X/Twitter) гарантированно идут через VPS.',
+            'Разделение задач: Zapret обходит только цензуру по SNI (YouTube/Discord/GitHub). Сервисы с жесткой блокировкой по IP (ChatGPT, Claude, Instagram, X/Twitter) гарантированно идут через VPS.',
             'AI и соцсети строго через VPS PROXY',
             'по общим правилам маршрутизации'
           )}

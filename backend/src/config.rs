@@ -418,6 +418,85 @@ impl Default for GamingConfig {
     }
 }
 
+/// Пользовательская запись сайта для обхода DPI со связанными CDN серверами (/boost).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct ZapretCustomEntry {
+    pub domain: String,
+    pub enabled: bool,
+    pub cdns: Vec<String>,
+}
+
+impl Default for ZapretCustomEntry {
+    fn default() -> Self {
+        Self {
+            domain: String::new(),
+            enabled: true,
+            cdns: Vec::new(),
+        }
+    }
+}
+
+/// Нормализует введенный адрес сайта в чистый FQDN (домен без протокола, порта, пути, query, www и концевых точек).
+pub fn normalize_domain(input: &str) -> String {
+    let lower = input.trim().to_lowercase();
+    let no_proto = if let Some(idx) = lower.find("://") {
+        &lower[idx + 3..]
+    } else {
+        &lower
+    };
+    let host_part = no_proto
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split('?')
+        .next()
+        .unwrap_or("")
+        .split('#')
+        .next()
+        .unwrap_or("");
+    let no_user = host_part.split('@').last().unwrap_or(host_part);
+    let no_port = no_user.split(':').next().unwrap_or(no_user);
+    let clean = no_port
+        .trim_start_matches("www.")
+        .trim_matches(|c: char| c == '.' || c.is_whitespace());
+    clean.to_string()
+}
+
+/// Проверяет корректность публичного домена для обхода цензуры (исключает локальные сети, IP-адреса и спецсимволы).
+pub fn is_valid_domain(domain: &str) -> bool {
+    if domain.is_empty() || domain.len() > 253 {
+        return false;
+    }
+    if domain == "localhost"
+        || domain.ends_with(".local")
+        || domain.ends_with(".lan")
+        || domain.ends_with(".internal")
+        || domain.ends_with(".onion")
+    {
+        return false;
+    }
+    // Отклоняем IP-адреса (IPv4 / IPv6) — они не должны попадать в SNI hostlist
+    if domain.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    if !domain.contains('.') {
+        return false;
+    }
+    for label in domain.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return false;
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return false;
+        }
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return false;
+        }
+    }
+    true
+}
+
 /// Умные режимы и гибридная маршрутизация Zapret DPI.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -437,6 +516,12 @@ pub struct ZapretConfig {
     pub aggressive_dpi: bool,
     /// Принудительная изоляция заблокированных ресурсов (ChatGPT, Claude, X/Twitter, Instagram) через PROXY
     pub isolated_proxy: bool,
+    /// Прямой обход GitHub (github.com, raw, assets, codeload, api)
+    pub bypass_github: bool,
+    /// Прямой обход популярных трекеров (RuTracker, Kinozal, Rutor, Flibusta, NNMClub)
+    pub bypass_torrents: bool,
+    /// Пользовательские сайты с автоматическим обнаружением CDN (/boost)
+    pub custom_entries: Vec<ZapretCustomEntry>,
     /// Кастомные аргументы nfqws (сохраняются при установке пресетов)
     pub custom_args: Option<String>,
 }
@@ -452,6 +537,9 @@ impl Default for ZapretConfig {
             general_bypass: true,
             aggressive_dpi: false,
             isolated_proxy: true,
+            bypass_github: true,
+            bypass_torrents: true,
+            custom_entries: Vec::new(),
             custom_args: None,
         }
     }
@@ -718,5 +806,31 @@ mod tests {
         let loaded = load_async(&path).await;
         assert_eq!(loaded.refresh_interval_sec, 42);
         let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    #[test]
+    fn test_normalize_domain() {
+        assert_eq!(normalize_domain("https://habr.com/"), "habr.com");
+        assert_eq!(normalize_domain("HTTPS://MYSKU.CLUB:443"), "mysku.club");
+        assert_eq!(
+            normalize_domain("https://sub.domain.co.uk:8080/path?query=1#hash"),
+            "sub.domain.co.uk"
+        );
+        assert_eq!(normalize_domain("WWW.EXAMPLE.COM."), "example.com");
+        assert_eq!(normalize_domain("user:pass@example.com"), "example.com");
+        assert_eq!(normalize_domain("  twitch.tv  "), "twitch.tv");
+    }
+
+    #[test]
+    fn test_is_valid_domain() {
+        assert!(is_valid_domain("mysku.club"));
+        assert!(is_valid_domain("habr.com"));
+        assert!(is_valid_domain("sub.domain.co.uk"));
+        assert!(!is_valid_domain("localhost"));
+        assert!(!is_valid_domain("192.168.1.1"));
+        assert!(!is_valid_domain("127.0.0.1"));
+        assert!(!is_valid_domain("bad;domain"));
+        assert!(!is_valid_domain(""));
+        assert!(!is_valid_domain("domain_without_dot"));
     }
 }

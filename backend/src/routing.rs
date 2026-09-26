@@ -509,6 +509,38 @@ pub const DISCORD_HYBRID_DOMAINS: &[&str] = &[
     "discord-activities.com",
 ];
 
+pub const GITHUB_DOMAINS: &[&str] = &[
+    "github.com",
+    "githubassets.com",
+    "githubusercontent.com",
+    "raw.githubusercontent.com",
+    "assets-cdn.github.com",
+    "objects.githubusercontent.com",
+    "codeload.github.com",
+    "avatars.githubusercontent.com",
+    "api.github.com",
+    "gist.github.com",
+];
+
+pub const TORRENT_DOMAINS: &[&str] = &[
+    "rutracker.org",
+    "rutracker.cc",
+    "rutracker.net",
+    "static.rutracker.cc",
+    "kinozal.tv",
+    "kinozal-tv.org",
+    "rutor.info",
+    "rutor.is",
+    "d.rutor.info",
+    "flibusta.is",
+    "flibusta.site",
+    "flibusta.me",
+    "nnmclub.to",
+    "torlook.info",
+    "hdrezka.ag",
+    "lostfilm.tv",
+];
+
 pub const ISOLATED_PROXIED_DOMAINS: &[&str] = &[
     "openai.com",
     "chatgpt.com",
@@ -757,7 +789,14 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
     let mut rules_to_add: Vec<String> = Vec::new();
 
     // 0. Safeguard для Google AI / Antigravity (гарантированный PROXY перед любыми DIRECT правилами)
-    if zapret_cfg.isolated_proxy || zapret_cfg.hybrid_youtube || zapret_cfg.hybrid_discord {
+    let has_active_custom = zapret_cfg.custom_entries.iter().any(|e| e.enabled);
+    if zapret_cfg.isolated_proxy
+        || zapret_cfg.hybrid_youtube
+        || zapret_cfg.hybrid_discord
+        || zapret_cfg.bypass_github
+        || zapret_cfg.bypass_torrents
+        || has_active_custom
+    {
         for d in FLOW_DOMAINS {
             let rule = format!("  - DOMAIN-SUFFIX,{d},{proxy_target}");
             if !rules_to_add.contains(&rule) {
@@ -779,14 +818,62 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
     // 2. YouTube -> DIRECT (максимальная скорость с локальных кэшей GGC)
     if zapret_cfg.hybrid_youtube {
         for d in YOUTUBE_HYBRID_DOMAINS {
-            rules_to_add.push(format!("  - DOMAIN-SUFFIX,{d},DIRECT"));
+            let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
+            if !rules_to_add.contains(&rule) {
+                rules_to_add.push(rule);
+            }
         }
     }
 
     // 3. Discord -> DIRECT (минимальный пинг, прямые шлюзы)
     if zapret_cfg.hybrid_discord {
         for d in DISCORD_HYBRID_DOMAINS {
-            rules_to_add.push(format!("  - DOMAIN-SUFFIX,{d},DIRECT"));
+            let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
+            if !rules_to_add.contains(&rule) {
+                rules_to_add.push(rule);
+            }
+        }
+    }
+
+    // 4. GitHub -> DIRECT (высокая скорость git clone и релизов без расхода VPS)
+    if zapret_cfg.bypass_github {
+        for d in GITHUB_DOMAINS {
+            let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
+            if !rules_to_add.contains(&rule) {
+                rules_to_add.push(rule);
+            }
+        }
+    }
+
+    // 5. Торренты & Трекеры -> DIRECT
+    if zapret_cfg.bypass_torrents {
+        for d in TORRENT_DOMAINS {
+            let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
+            if !rules_to_add.contains(&rule) {
+                rules_to_add.push(rule);
+            }
+        }
+    }
+
+    // 6. Пользовательские сайты и их связанные CDN (/boost) -> DIRECT
+    for entry in &zapret_cfg.custom_entries {
+        if entry.enabled {
+            let clean = crate::config::normalize_domain(&entry.domain);
+            if !clean.is_empty() && !FLOW_DOMAINS.contains(&clean.as_str()) {
+                let rule = format!("  - DOMAIN-SUFFIX,{clean},DIRECT");
+                if !rules_to_add.contains(&rule) {
+                    rules_to_add.push(rule);
+                }
+            }
+            for cdn in &entry.cdns {
+                let clean_cdn = crate::config::normalize_domain(cdn);
+                if !clean_cdn.is_empty() && !FLOW_DOMAINS.contains(&clean_cdn.as_str()) {
+                    let rule = format!("  - DOMAIN-SUFFIX,{clean_cdn},DIRECT");
+                    if !rules_to_add.contains(&rule) {
+                        rules_to_add.push(rule);
+                    }
+                }
+            }
         }
     }
 
@@ -1939,6 +2026,14 @@ proxy-groups:
             general_bypass: false,
             aggressive_dpi: false,
             isolated_proxy: true,
+            bypass_github: true,
+            bypass_torrents: true,
+            custom_entries: vec![crate::config::ZapretCustomEntry {
+                domain: "mysku.club".to_string(),
+                enabled: true,
+                cdns: vec!["img.mysku-st.ru".to_string(), "art.mysku-st.net".to_string()],
+            }],
+            custom_args: None,
         };
 
         // 1. Включение всех гибридных правил
@@ -1946,6 +2041,10 @@ proxy-groups:
         assert!(with_zapret.contains(ZAPRET_HYBRID_BEGIN));
         assert!(with_zapret.contains("DOMAIN-SUFFIX,googlevideo.com,DIRECT"));
         assert!(with_zapret.contains("DOMAIN-SUFFIX,discord.com,DIRECT"));
+        assert!(with_zapret.contains("DOMAIN-SUFFIX,raw.githubusercontent.com,DIRECT"));
+        assert!(with_zapret.contains("DOMAIN-SUFFIX,rutracker.org,DIRECT"));
+        assert!(with_zapret.contains("DOMAIN-SUFFIX,mysku.club,DIRECT"));
+        assert!(with_zapret.contains("DOMAIN-SUFFIX,img.mysku-st.ru,DIRECT"));
         assert!(with_zapret.contains("DOMAIN-SUFFIX,openai.com,PROXY"));
         assert!(with_zapret.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
         // DOMAIN-KEYWORD правила НЕ должны присутствовать (слишком широкие)
@@ -1956,18 +2055,28 @@ proxy-groups:
         let dup = apply_zapret_hybrid_rules(&with_zapret, &zapret_cfg).unwrap();
         assert_eq!(dup.matches(ZAPRET_HYBRID_BEGIN).count(), 1);
 
-        // 3. Выключение YouTube (возврат в PROXY) — Discord и isolated_proxy остаются
+        // 3. Выключение YouTube (возврат в PROXY) — Discord, GitHub, Custom и isolated_proxy остаются
         zapret_cfg.hybrid_youtube = false;
         let no_yt = apply_zapret_hybrid_rules(&dup, &zapret_cfg).unwrap();
         assert!(!no_yt.contains("googlevideo.com,DIRECT"));
         assert!(no_yt.contains("discord.com,DIRECT"));
+        assert!(no_yt.contains("raw.githubusercontent.com,DIRECT"));
+        assert!(no_yt.contains("mysku.club,DIRECT"));
         assert!(no_yt.contains("openai.com,PROXY"));
+
+        // 3.1 Выключение custom entry
+        zapret_cfg.custom_entries[0].enabled = false;
+        let no_custom = apply_zapret_hybrid_rules(&no_yt, &zapret_cfg).unwrap();
+        assert!(!no_custom.contains("mysku.club,DIRECT"));
+        assert!(!no_custom.contains("img.mysku-st.ru,DIRECT"));
+        assert!(no_custom.contains("raw.githubusercontent.com,DIRECT"));
 
         // 4. Полное отключение службы Zapret
         zapret_cfg.enabled = false;
-        let disabled = apply_zapret_hybrid_rules(&no_yt, &zapret_cfg).unwrap();
+        let disabled = apply_zapret_hybrid_rules(&no_custom, &zapret_cfg).unwrap();
         assert!(!disabled.contains(ZAPRET_HYBRID_BEGIN));
         assert!(!disabled.contains("discord.com,DIRECT"));
+        assert!(!disabled.contains("raw.githubusercontent.com"));
         assert!(!disabled.contains("openai.com"));
         assert!(disabled.contains("DOMAIN-SUFFIX,example.com,DIRECT"));
     }

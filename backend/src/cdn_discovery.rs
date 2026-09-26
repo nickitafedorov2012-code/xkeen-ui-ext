@@ -44,6 +44,49 @@ pub const KNOWN_BUNDLES: &[(&str, &[&str])] = &[
     ("instagram.com", &["cdninstagram.com", "ig.me"]),
     ("ntc.party", &["ntc-party.discourse-cdn.com"]),
     (
+        "github.com",
+        &[
+            "githubassets.com",
+            "githubusercontent.com",
+            "raw.githubusercontent.com",
+            "assets-cdn.github.com",
+            "objects.githubusercontent.com",
+            "codeload.github.com",
+            "avatars.githubusercontent.com",
+            "api.github.com",
+            "gist.github.com",
+        ],
+    ),
+    (
+        "steampowered.com",
+        &[
+            "steamcommunity.com",
+            "steamstatic.com",
+            "steamcontent.com",
+            "steamcdn-a.akamaihd.net",
+        ],
+    ),
+    (
+        "steamcommunity.com",
+        &["steampowered.com", "steamstatic.com", "steamcontent.com"],
+    ),
+    (
+        "twitch.tv",
+        &["ttvnw.net", "jtvnw.net", "live-video.net"],
+    ),
+    (
+        "speedtest.net",
+        &["ooklaserver.net", "speedtestcustom.com"],
+    ),
+    (
+        "hdrezka.ag",
+        &["hdrezka.me", "rezka.ag", "stream.voidboost.cc"],
+    ),
+    (
+        "lostfilm.tv",
+        &["lostfilm.run", "lostfilm.online", "static.lostfilm.top"],
+    ),
+    (
         "flow.google.com",
         &[
             "labs.google",
@@ -261,5 +304,15 @@ mod tests {
         let domains = vec!["unknown-site.org".to_string()];
         let expanded = expand_bundles(&domains);
         assert!(expanded.is_empty());
+    }
+
+    #[test]
+    fn test_expand_github_bundle() {
+        let domains = vec!["github.com".to_string()];
+        let expanded = expand_bundles(&domains);
+        assert!(expanded.contains("githubassets.com"));
+        assert!(expanded.contains("raw.githubusercontent.com"));
+        assert!(expanded.contains("objects.githubusercontent.com"));
+        assert!(!expanded.contains("github.com"));
     }
 }

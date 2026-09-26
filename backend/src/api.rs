@@ -3691,8 +3691,9 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
         profiles.push("--filter-udp=50000-65535 --filter-l7=discord,stun --dpi-desync=fake --dpi-desync-repeats=6".to_string());
     }
 
-    // General Web Hostlist profile
-    if cfg.general_bypass {
+    // General Web Hostlist profile (включает универсальный хостлист, GitHub, торренты и пользовательские сайты)
+    let has_active_custom = cfg.custom_entries.iter().any(|e| e.enabled);
+    if cfg.general_bypass || cfg.bypass_github || cfg.bypass_torrents || has_active_custom {
         let gen_desync = if cfg.aggressive_dpi {
             "--dpi-desync=fake,split2 --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=ts,md5sig --dpi-desync-cutoff=d4"
         } else {
@@ -3711,6 +3712,107 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
     let args = format!("--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 {}", profiles.join(" --new "));
     let voice_enabled = cfg.discord_voice_udp;
     (args, voice_enabled)
+}
+
+pub const ZAPRET_HOSTS_MANAGED_BEGIN: &str = "# --- START XKEEN ROUTE DYNAMIC HOSTS ---";
+pub const ZAPRET_HOSTS_MANAGED_END: &str = "# --- END XKEEN ROUTE DYNAMIC HOSTS ---";
+
+pub fn sync_zapret_hosts_content(existing: &str, cfg: &crate::config::ZapretConfig) -> String {
+    // 1. Исключаем существующий блок авто-управления, сохраняя ручные строки пользователя
+    let mut manual_lines: Vec<String> = Vec::new();
+    let mut in_managed_block = false;
+
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed == ZAPRET_HOSTS_MANAGED_BEGIN {
+            in_managed_block = true;
+            continue;
+        }
+        if trimmed == ZAPRET_HOSTS_MANAGED_END {
+            in_managed_block = false;
+            continue;
+        }
+        if !in_managed_block {
+            manual_lines.push(line.to_string());
+        }
+    }
+
+    // 2. Список динамически управляемых доменов
+    let mut dynamic_domains: Vec<String> = Vec::new();
+
+    let mut add_dynamic = |d: &str| {
+        let clean = crate::config::normalize_domain(d);
+        if !clean.is_empty() && !dynamic_domains.iter().any(|existing| existing.eq_ignore_ascii_case(&clean)) {
+            dynamic_domains.push(clean);
+        }
+    };
+
+    if cfg.bypass_github {
+        for d in crate::routing::GITHUB_DOMAINS {
+            add_dynamic(d);
+        }
+    }
+
+    if cfg.bypass_torrents {
+        for d in crate::routing::TORRENT_DOMAINS {
+            add_dynamic(d);
+        }
+    }
+
+    for entry in &cfg.custom_entries {
+        if entry.enabled {
+            add_dynamic(&entry.domain);
+            for cdn in &entry.cdns {
+                add_dynamic(cdn);
+            }
+        }
+    }
+
+    // 3. Удаляем динамические домены из ручной части (предотвращает дубли и зависание отключенных доменов)
+    let mut all_managed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for d in crate::routing::GITHUB_DOMAINS {
+        all_managed.insert(crate::config::normalize_domain(d));
+    }
+    for d in crate::routing::TORRENT_DOMAINS {
+        all_managed.insert(crate::config::normalize_domain(d));
+    }
+    for entry in &cfg.custom_entries {
+        all_managed.insert(crate::config::normalize_domain(&entry.domain));
+        for cdn in &entry.cdns {
+            all_managed.insert(crate::config::normalize_domain(cdn));
+        }
+    }
+
+    manual_lines.retain(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return true;
+        }
+        let norm = crate::config::normalize_domain(trimmed);
+        !all_managed.contains(&norm)
+    });
+
+    // 4. Сборка итогового файла
+    let mut result = manual_lines.join("\n").trim().to_string();
+    if !result.is_empty() {
+        result.push('\n');
+    }
+
+    if !dynamic_domains.is_empty() {
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(ZAPRET_HOSTS_MANAGED_BEGIN);
+        result.push_str("\n# Автоматически управляемые службы и сайты /boost (Zapret)\n");
+        for d in dynamic_domains {
+            result.push_str(&d);
+            result.push('\n');
+        }
+        result.push_str(ZAPRET_HOSTS_MANAGED_END);
+        result.push('\n');
+    }
+
+    result
 }
 
 pub fn validate_custom_args(args: &str) -> Result<(), String> {
@@ -3762,10 +3864,15 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
         .await
         .map_err(|e| format!("Не удалось сделать S51zapret исполняемым: {e}"))?;
 
-    // 2. Default hostlist if missing
-    if !std::path::Path::new("/opt/etc/zapret/zapret-hosts.txt").exists() {
-        let _ = tokio::fs::write("/opt/etc/zapret/zapret-hosts.txt", DEFAULT_ZAPRET_HOSTS).await;
-    }
+    // 2. Default hostlist if missing, and sync active domains into it
+    let hosts_path = "/opt/etc/zapret/zapret-hosts.txt";
+    let base_hosts = if std::path::Path::new(hosts_path).exists() {
+        tokio::fs::read_to_string(hosts_path).await.unwrap_or_else(|_| DEFAULT_ZAPRET_HOSTS.to_string())
+    } else {
+        DEFAULT_ZAPRET_HOSTS.to_string()
+    };
+    let synced_hosts = sync_zapret_hosts_content(&base_hosts, cfg);
+    let _ = tokio::fs::write(hosts_path, synced_hosts).await;
 
     // 3. zapret.conf with multi-strategy args or custom_args
     let (args, voice_enabled) = if let Some(custom) = &cfg.custom_args {
@@ -3879,7 +3986,7 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
 
 #[derive(Deserialize)]
 pub struct ZapretActionReq {
-    pub action: String, // "start" | "stop" | "restart" | "toggle" | "install" | "set_preset" | "save_config" | "save_hosts" | "test_dpi" | "toggle_feature" | "set_features" | "reset_features"
+    pub action: String, // "start" | "stop" | "restart" | "toggle" | "install" | "set_preset" | "save_config" | "save_hosts" | "test_dpi" | "toggle_feature" | "set_features" | "reset_features" | "add_custom_domain" | "remove_custom_domain" | "toggle_custom_domain" | "boost_custom_domain"
     pub preset: Option<String>,
     pub custom_args: Option<String>,
     pub config_content: Option<String>,
@@ -3887,6 +3994,7 @@ pub struct ZapretActionReq {
     pub feature: Option<String>,
     pub enabled: Option<bool>,
     pub features: Option<crate::config::ZapretConfig>,
+    pub domain: Option<String>,
 }
 
 /// POST /api/zapret/action — запуск, остановка, переключение, пресеты и тест DPI
@@ -4007,6 +4115,8 @@ pub async fn zapret_action(
                 cfg.zapret.discord_voice_udp = false;
                 cfg.zapret.general_bypass = false;
                 cfg.zapret.aggressive_dpi = false;
+                cfg.zapret.bypass_github = false;
+                cfg.zapret.bypass_torrents = false;
             }
             "discord" => {
                 cfg.zapret.custom_args = None;
@@ -4016,6 +4126,8 @@ pub async fn zapret_action(
                 cfg.zapret.discord_voice_udp = true;
                 cfg.zapret.general_bypass = false;
                 cfg.zapret.aggressive_dpi = false;
+                cfg.zapret.bypass_github = false;
+                cfg.zapret.bypass_torrents = false;
             }
             "gamer" | "media" => {
                 cfg.zapret.custom_args = None;
@@ -4026,6 +4138,8 @@ pub async fn zapret_action(
                 cfg.zapret.general_bypass = true;
                 cfg.zapret.aggressive_dpi = false;
                 cfg.zapret.isolated_proxy = true;
+                cfg.zapret.bypass_github = true;
+                cfg.zapret.bypass_torrents = true;
             }
             "aggressive" => {
                 cfg.zapret.custom_args = None;
@@ -4036,6 +4150,8 @@ pub async fn zapret_action(
                 cfg.zapret.general_bypass = true;
                 cfg.zapret.aggressive_dpi = true;
                 cfg.zapret.isolated_proxy = true;
+                cfg.zapret.bypass_github = true;
+                cfg.zapret.bypass_torrents = true;
             }
             "custom" => {
                 if let Some(custom) = &body.custom_args {
@@ -4052,6 +4168,8 @@ pub async fn zapret_action(
                 cfg.zapret.general_bypass = true;
                 cfg.zapret.aggressive_dpi = false;
                 cfg.zapret.isolated_proxy = true;
+                cfg.zapret.bypass_github = true;
+                cfg.zapret.bypass_torrents = true;
             }
         }
 
@@ -4143,6 +4261,8 @@ pub async fn zapret_action(
                 "general_bypass" => cfg.zapret.general_bypass = val,
                 "aggressive_dpi" => cfg.zapret.aggressive_dpi = val,
                 "isolated_proxy" => cfg.zapret.isolated_proxy = val,
+                "bypass_github" => cfg.zapret.bypass_github = val,
+                "bypass_torrents" => cfg.zapret.bypass_torrents = val,
                 "enabled" => cfg.zapret.enabled = val,
                 _ => return api_err(format!("Неизвестный параметр функции: {feat}")),
             }
@@ -4193,6 +4313,225 @@ pub async fn zapret_action(
             "success": true,
             "features": cfg.zapret,
             "message": "Параметры и правила маршрутизации успешно обновлены"
+        }));
+    }
+
+    // 5.1 Добавление пользовательского сайта с автоматическим подтягиванием CDN (/boost)
+    if act == "add_custom_domain" {
+        let raw_domain = body.domain.as_deref().unwrap_or("").trim();
+        let clean = crate::config::normalize_domain(raw_domain);
+
+        if !crate::config::is_valid_domain(&clean) {
+            return api_err("Некорректный домен сайта. Укажите публичный домен (например, mysku.club или habr.com)");
+        }
+
+        // Обнаружение CDN (известные бандлы + DNS поддомены + HTML сканер) БЕЗ удержания блокировок
+        let proxy_url = state.config.read().await.mihomo_proxy_url();
+        let discovered = crate::cdn_discovery::discover_all_cdns(&[clean.clone()], &proxy_url).await;
+        let cdns_vec: Vec<String> = discovered
+            .into_iter()
+            .map(|c| crate::config::normalize_domain(&c))
+            .filter(|c| crate::config::is_valid_domain(c) && !c.eq_ignore_ascii_case(&clean))
+            .collect();
+        let cdns_count = cdns_vec.len();
+
+        let _cfg_guard = state.config_lock.lock().await;
+        let _routing_guard = state.routing_lock.lock().await;
+        let mut cfg = (**state.config.read().await).clone();
+
+        if let Some(existing) = cfg.zapret.custom_entries.iter_mut().find(|e| e.domain.eq_ignore_ascii_case(&clean)) {
+            existing.enabled = true;
+            for cdn in cdns_vec {
+                if !existing.cdns.iter().any(|c| c.eq_ignore_ascii_case(&cdn)) {
+                    existing.cdns.push(cdn);
+                }
+            }
+        } else {
+            cfg.zapret.custom_entries.push(crate::config::ZapretCustomEntry {
+                domain: clean.clone(),
+                enabled: true,
+                cdns: cdns_vec,
+            });
+        }
+
+        let _ = sync_zapret_files(&cfg.zapret).await;
+
+        if std::path::Path::new(&cfg.mihomo.config_path).exists() {
+            if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+                if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &cfg) {
+                    let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
+                    let _ = mihomo::reload_config(&state.http, &cfg).await;
+                }
+            }
+        }
+
+        let is_running = tokio::process::Command::new("pidof")
+            .arg("nfqws")
+            .output()
+            .await
+            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+            .unwrap_or(false);
+        if is_running && cfg.zapret.enabled {
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+        }
+
+        let _ = config::save(&state.config_path, &cfg).await;
+        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+
+        return api_ok(json!({
+            "success": true,
+            "features": cfg.zapret,
+            "message": format!("Сайт {} добавлен (/boost: обнаружено {} CDN)", clean, cdns_count)
+        }));
+    }
+
+    // 5.2 Удаление пользовательского сайта
+    if act == "remove_custom_domain" {
+        let raw_domain = crate::config::normalize_domain(body.domain.as_deref().unwrap_or(""));
+        if raw_domain.is_empty() {
+            return api_err("Не указан домен для удаления");
+        }
+        let _cfg_guard = state.config_lock.lock().await;
+        let _routing_guard = state.routing_lock.lock().await;
+        let mut cfg = (**state.config.read().await).clone();
+
+        cfg.zapret.custom_entries.retain(|e| !e.domain.eq_ignore_ascii_case(&raw_domain));
+
+        let _ = sync_zapret_files(&cfg.zapret).await;
+
+        if std::path::Path::new(&cfg.mihomo.config_path).exists() {
+            if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+                if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &cfg) {
+                    let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
+                    let _ = mihomo::reload_config(&state.http, &cfg).await;
+                }
+            }
+        }
+
+        let is_running = tokio::process::Command::new("pidof")
+            .arg("nfqws")
+            .output()
+            .await
+            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+            .unwrap_or(false);
+        if is_running && cfg.zapret.enabled {
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+        }
+
+        let _ = config::save(&state.config_path, &cfg).await;
+        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+
+        return api_ok(json!({
+            "success": true,
+            "features": cfg.zapret,
+            "message": format!("Сайт {} удален из Zapret", raw_domain)
+        }));
+    }
+
+    // 5.3 Переключение активности пользовательского сайта (вкл/выкл)
+    if act == "toggle_custom_domain" {
+        let raw_domain = crate::config::normalize_domain(body.domain.as_deref().unwrap_or(""));
+        if raw_domain.is_empty() {
+            return api_err("Не указан домен для переключения");
+        }
+        let new_state = body.enabled.unwrap_or(true);
+        let _cfg_guard = state.config_lock.lock().await;
+        let _routing_guard = state.routing_lock.lock().await;
+        let mut cfg = (**state.config.read().await).clone();
+
+        if let Some(entry) = cfg.zapret.custom_entries.iter_mut().find(|e| e.domain.eq_ignore_ascii_case(&raw_domain)) {
+            entry.enabled = new_state;
+        }
+
+        let _ = sync_zapret_files(&cfg.zapret).await;
+
+        if std::path::Path::new(&cfg.mihomo.config_path).exists() {
+            if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+                if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &cfg) {
+                    let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
+                    let _ = mihomo::reload_config(&state.http, &cfg).await;
+                }
+            }
+        }
+
+        let is_running = tokio::process::Command::new("pidof")
+            .arg("nfqws")
+            .output()
+            .await
+            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+            .unwrap_or(false);
+        if is_running && cfg.zapret.enabled {
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+        }
+
+        let _ = config::save(&state.config_path, &cfg).await;
+        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+
+        return api_ok(json!({
+            "success": true,
+            "features": cfg.zapret,
+            "message": format!("Сайт {} {}", raw_domain, if new_state { "включен" } else { "выключен" })
+        }));
+    }
+
+    // 5.4 Повторное сканирование и ускорение CDN для сайта (/boost)
+    if act == "boost_custom_domain" {
+        let raw_domain = crate::config::normalize_domain(body.domain.as_deref().unwrap_or(""));
+        if !crate::config::is_valid_domain(&raw_domain) {
+            return api_err("Некорректный домен сайта для повторного сканирования");
+        }
+
+        // Обнаружение CDN без удержания глобальных блокировок
+        let proxy_url = state.config.read().await.mihomo_proxy_url();
+        let discovered = crate::cdn_discovery::discover_all_cdns(&[raw_domain.clone()], &proxy_url).await;
+        let cdns_vec: Vec<String> = discovered
+            .into_iter()
+            .map(|c| crate::config::normalize_domain(&c))
+            .filter(|c| crate::config::is_valid_domain(c) && !c.eq_ignore_ascii_case(&raw_domain))
+            .collect();
+
+        let _cfg_guard = state.config_lock.lock().await;
+        let _routing_guard = state.routing_lock.lock().await;
+        let mut cfg = (**state.config.read().await).clone();
+
+        let mut count_added = 0;
+        if let Some(entry) = cfg.zapret.custom_entries.iter_mut().find(|e| e.domain.eq_ignore_ascii_case(&raw_domain)) {
+            for cdn in cdns_vec {
+                if !entry.cdns.iter().any(|c| c.eq_ignore_ascii_case(&cdn)) {
+                    entry.cdns.push(cdn);
+                    count_added += 1;
+                }
+            }
+        }
+
+        let _ = sync_zapret_files(&cfg.zapret).await;
+
+        if std::path::Path::new(&cfg.mihomo.config_path).exists() {
+            if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+                if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &cfg) {
+                    let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
+                    let _ = mihomo::reload_config(&state.http, &cfg).await;
+                }
+            }
+        }
+
+        let is_running = tokio::process::Command::new("pidof")
+            .arg("nfqws")
+            .output()
+            .await
+            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+            .unwrap_or(false);
+        if is_running && cfg.zapret.enabled {
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+        }
+
+        let _ = config::save(&state.config_path, &cfg).await;
+        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+
+        return api_ok(json!({
+            "success": true,
+            "features": cfg.zapret,
+            "message": format!("⚡ Boost: для {} найдено новых CDN: {}", raw_domain, count_added)
         }));
     }
 
@@ -4817,6 +5156,59 @@ pub async fn ping_gaming_targets(State(_state): State<AppState>) -> Response {
     });
 
     api_ok(json!({ "results": results }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sync_zapret_hosts_content_dynamic_isolation() {
+        let base = "# zapret-hosts.txt\nmanual-site.org\nntc.party\n";
+        let mut cfg = crate::config::ZapretConfig {
+            bypass_github: true,
+            bypass_torrents: true,
+            custom_entries: vec![crate::config::ZapretCustomEntry {
+                domain: "mysku.club".to_string(),
+                enabled: true,
+                cdns: vec!["img.mysku-st.ru".to_string()],
+            }],
+            ..Default::default()
+        };
+
+        // 1. Initial sync adds managed block
+        let synced = sync_zapret_hosts_content(base, &cfg);
+        assert!(synced.contains("manual-site.org"));
+        assert!(synced.contains(ZAPRET_HOSTS_MANAGED_BEGIN));
+        assert!(synced.contains("github.com"));
+        assert!(synced.contains("rutracker.org"));
+        assert!(synced.contains("mysku.club"));
+        assert!(synced.contains("img.mysku-st.ru"));
+
+        // 2. Disabling custom entry removes it from zapret-hosts.txt
+        cfg.custom_entries[0].enabled = false;
+        let synced_disabled = sync_zapret_hosts_content(&synced, &cfg);
+        assert!(!synced_disabled.contains("mysku.club"));
+        assert!(!synced_disabled.contains("img.mysku-st.ru"));
+        assert!(synced_disabled.contains("github.com"));
+        assert!(synced_disabled.contains("manual-site.org"));
+
+        // 3. Deleting custom entry removes it from zapret-hosts.txt
+        cfg.custom_entries.clear();
+        let synced_deleted = sync_zapret_hosts_content(&synced, &cfg);
+        assert!(!synced_deleted.contains("mysku.club"));
+        assert!(!synced_deleted.contains("img.mysku-st.ru"));
+
+        // 4. Disabling bypass_github and bypass_torrents removes them
+        cfg.bypass_github = false;
+        cfg.bypass_torrents = false;
+        let synced_no_managed = sync_zapret_hosts_content(&synced_deleted, &cfg);
+        assert!(!synced_no_managed.contains("github.com"));
+        assert!(!synced_no_managed.contains("rutracker.org"));
+        assert!(!synced_no_managed.contains(ZAPRET_HOSTS_MANAGED_BEGIN));
+        assert!(synced_no_managed.contains("manual-site.org"));
+        assert!(synced_no_managed.contains("ntc.party"));
+    }
 }
 
 
