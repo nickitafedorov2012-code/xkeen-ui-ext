@@ -2081,17 +2081,13 @@ pub async fn save_config_file(
             return api_err(format!("Ошибка синтаксиса JSON в файле config.json: {e}"));
         }
         let parsed_cfg = config::parse_config_content(&body.content, &path.display().to_string());
-        tx.stage_json(parsed_cfg);
-        if let Err(e) = tx.set_extra_file(&path, &body.content, false).await {
-            return api_err(e);
-        }
+        tx.stage_raw_json(&body.content, parsed_cfg);
     } else if body.file == "mihomo" {
         if let Err(e) = tx.set_yaml(&body.content) {
             return api_err(e);
         }
     } else {
         let is_yaml = body.file.starts_with("provider:")
-            || body.file == "override"
             || path.extension().map_or(false, |ext| ext == "yaml" || ext == "yml");
         if let Err(e) = tx.set_extra_file(&path, &body.content, is_yaml).await {
             return api_err(e);

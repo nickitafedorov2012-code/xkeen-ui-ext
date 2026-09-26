@@ -97,42 +97,58 @@ check('5. All 9 mutating API handlers use ConfigTx coordinator', () => {
   }
 });
 
-// 6. Functional simulation of YAML syntax validation
-check('6. YAML syntax validator correctly detects syntax errors', () => {
+// 6. Functional simulation of YAML syntax validation (including UTF-8 and escaped quotes)
+check('6. YAML syntax validator correctly detects syntax errors, handles UTF-8 and escaped quotes', () => {
+  const txContent = fs.readFileSync(txRsPath, 'utf8');
+  assert(txContent.includes('char_indices().peekable()'), 'validate_yaml_syntax must use char_indices().peekable() for UTF-8 safe parsing');
+  assert(txContent.includes('chars.peek()'), 'validate_yaml_syntax must peek to handle escaped quotes');
+
   function validateYamlSyntax(content) {
     const bracketStack = [];
-    let inSingleQuote = false;
-    let inDoubleQuote = false;
-    let escaped = false;
-
     const lines = content.split('\n');
+
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      if (line.includes('\t')) return { valid: false, error: 'табуляция' };
+      const displayLine = i + 1;
+      if (line.includes('\t')) return { valid: false, error: `Строка ${displayLine}: табуляция` };
       const trimmed = line.trim();
-      if (trimmed.startsWith('#')) continue;
+      if (!trimmed || trimmed.startsWith('#')) continue;
+
+      let inSingleQuote = false;
+      let inDoubleQuote = false;
+      let escaped = false;
 
       for (let c = 0; c < line.length; c++) {
         const ch = line[c];
         if (escaped) { escaped = false; continue; }
         if (ch === '\\' && inDoubleQuote) { escaped = true; continue; }
-        if (ch === "'" && !inDoubleQuote) { inSingleQuote = !inSingleQuote; continue; }
+        if (ch === "'" && !inDoubleQuote) {
+          if (inSingleQuote && c + 1 < line.length && line[c + 1] === "'") {
+            c++; // поглощаем экранированную одинарную кавычку ''
+            continue;
+          }
+          inSingleQuote = !inSingleQuote;
+          continue;
+        }
         if (ch === '"' && !inSingleQuote) { inDoubleQuote = !inDoubleQuote; continue; }
         if (inSingleQuote || inDoubleQuote) continue;
         if (ch === '#' && (c === 0 || line[c - 1] === ' ')) break;
 
-        if (ch === '[' || ch === '{') bracketStack.push({ ch, line: i + 1 });
+        if (ch === '[' || ch === '{') bracketStack.push({ ch, line: displayLine });
         else if (ch === ']') {
           const top = bracketStack.pop();
-          if (!top || top.ch !== '[') return { valid: false, error: 'скобка ]' };
+          if (!top || top.ch !== '[') return { valid: false, error: `Строка ${displayLine}: скобка ]` };
         } else if (ch === '}') {
           const top = bracketStack.pop();
-          if (!top || top.ch !== '{') return { valid: false, error: 'фигурная скобка }' };
+          if (!top || top.ch !== '{') return { valid: false, error: `Строка ${displayLine}: фигурная скобка }` };
         }
       }
+
+      if (inSingleQuote) return { valid: false, error: `Строка ${displayLine}: незакрытая одинарная кавычка` };
+      if (inDoubleQuote) return { valid: false, error: `Строка ${displayLine}: незакрытая двойная кавычка` };
     }
+
     if (bracketStack.length > 0) return { valid: false, error: 'незакрытая скобка' };
-    if (inSingleQuote || inDoubleQuote) return { valid: false, error: 'незакрытая кавычка' };
     return { valid: true };
   }
 
@@ -140,6 +156,8 @@ check('6. YAML syntax validator correctly detects syntax errors', () => {
   assert(!validateYamlSyntax('port: 7890\n\trules:').valid, 'Tabs must be rejected');
   assert(!validateYamlSyntax("name: 'unclosed").valid, 'Unclosed quote must be rejected');
   assert(!validateYamlSyntax('proxies: [name: {test]').valid, 'Mismatched brackets must be rejected');
+  assert(validateYamlSyntax("name: 'It''s a valid node name'\nport: 7890\n").valid, 'Escaped quote must be accepted');
+  assert(validateYamlSyntax('name: "Россия Direct" # комментарий [1] и \'тест\'\nport: 7890\n').valid, 'Unicode Russian comments must be accepted');
 });
 
 // 7. Functional simulation of ConfigTx two-phase rollback
@@ -148,11 +166,14 @@ check('7. ConfigTx two-phase rollback disk and state restoration simulation', ()
   fs.mkdirSync(tmpDir, { recursive: true });
   const yamlPath = path.join(tmpDir, 'config.yaml');
   const jsonPath = path.join(tmpDir, 'config.json');
+  const extraPath = path.join(tmpDir, 'custom_provider.yaml');
 
   const origYaml = 'port: 7890\nrules:\n  - MATCH,DIRECT\n';
   const origJson = '{"refresh_interval_sec":10}\n';
+  const origExtra = 'proxies:\n  - name: test\n';
   fs.writeFileSync(yamlPath, origYaml, 'utf8');
   fs.writeFileSync(jsonPath, origJson, 'utf8');
+  fs.writeFileSync(extraPath, origExtra, 'utf8');
 
   let inMemoryState = { refresh_interval_sec: 10 };
 
@@ -161,23 +182,28 @@ check('7. ConfigTx two-phase rollback disk and state restoration simulation', ()
     constructor() {
       this.initialYaml = fs.readFileSync(yamlPath, 'utf8');
       this.initialJson = fs.readFileSync(jsonPath, 'utf8');
+      this.initialExtra = fs.readFileSync(extraPath, 'utf8');
       this.initialState = { ...inMemoryState };
       this.stagedYaml = null;
       this.stagedJson = null;
+      this.stagedExtra = null;
       this.committed = false;
     }
     setYaml(y) { this.stagedYaml = y; }
     setJson(j) { this.stagedJson = j; }
+    setExtra(e) { this.stagedExtra = e; }
     commitAndReload(simulateDaemonFailure = false) {
       // Step 1: Write disk
       if (this.stagedYaml) fs.writeFileSync(yamlPath, this.stagedYaml, 'utf8');
       if (this.stagedJson) fs.writeFileSync(jsonPath, JSON.stringify(this.stagedJson), 'utf8');
+      if (this.stagedExtra) fs.writeFileSync(extraPath, this.stagedExtra, 'utf8');
 
       // Step 2: Reload daemon
       if (simulateDaemonFailure) {
         // Rollback Phase 1: restore disk files
         fs.writeFileSync(yamlPath, this.initialYaml, 'utf8');
         fs.writeFileSync(jsonPath, this.initialJson, 'utf8');
+        fs.writeFileSync(extraPath, this.initialExtra, 'utf8');
         // Rollback Phase 2: keep inMemoryState untouched
         throw new Error('Daemon reload rejected configuration');
       }
@@ -188,24 +214,28 @@ check('7. ConfigTx two-phase rollback disk and state restoration simulation', ()
     }
   }
 
-  // Test failed reload triggers rollback
+  // Test failed reload triggers rollback across all files
   const tx1 = new SimConfigTx();
   tx1.setYaml('corrupted: yaml\n');
   tx1.setJson({ refresh_interval_sec: 99 });
+  tx1.setExtra('corrupted: extra\n');
   assert.throws(() => tx1.commitAndReload(true), /Daemon reload rejected/);
 
-  // Verify rollback restored disk files
+  // Verify rollback restored all disk files
   assert.strictEqual(fs.readFileSync(yamlPath, 'utf8'), origYaml, 'Disk YAML must be restored on rollback');
   assert.strictEqual(fs.readFileSync(jsonPath, 'utf8'), origJson, 'Disk JSON must be restored on rollback');
+  assert.strictEqual(fs.readFileSync(extraPath, 'utf8'), origExtra, 'Extra file must be restored on rollback');
   assert.strictEqual(inMemoryState.refresh_interval_sec, 10, 'In-memory state must remain unchanged');
 
   // Test successful commit
   const tx2 = new SimConfigTx();
   tx2.setYaml('port: 9090\n');
   tx2.setJson({ refresh_interval_sec: 25 });
+  tx2.setExtra('proxies:\n  - name: updated\n');
   tx2.commitAndReload(false);
 
   assert.strictEqual(fs.readFileSync(yamlPath, 'utf8'), 'port: 9090\n', 'Disk YAML updated');
+  assert.strictEqual(fs.readFileSync(extraPath, 'utf8'), 'proxies:\n  - name: updated\n', 'Extra file updated');
   assert.strictEqual(inMemoryState.refresh_interval_sec, 25, 'In-memory state committed');
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
