@@ -1,7 +1,7 @@
 use std::path::Path;
 use tokio::time::{sleep, Duration};
 
-use crate::{log_i, log_w, mihomo, override_sync, routing, AppState};
+use crate::{config, log_i, log_w, mihomo, override_sync, rci, routing, AppState};
 
 pub static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -19,6 +19,7 @@ pub fn is_shutdown() -> bool {
 /// Watchdog отслеживает изменения и мгновенно восстанавливает правила маршрутизации.
 pub fn spawn(state: AppState) {
     spawn_schedules_monitor(state.clone());
+    spawn_dhcp_device_monitor(state.clone());
     tokio::spawn(async move {
         // Начальная пауза перед запуском монитора
         for _ in 0..10 {
@@ -242,6 +243,101 @@ pub fn spawn_schedules_monitor(state: AppState) {
                 } else if let Some(orig_node) = active_schedules.remove(&key) {
                     log_i!("[SCHEDULE] ⏰ Окончание действия расписания '{}' для {}: возврат к исходному узлу '{}'", s.id, s.ip, orig_node);
                     let _ = mihomo::switch_group(&state.http, &cfg, &group_name, &orig_node).await;
+                }
+            }
+        }
+    });
+}
+
+/// Фоновый монитор изменений DHCP IP-адресов устройств игрового режима по их постоянному MAC.
+pub fn spawn_dhcp_device_monitor(state: AppState) {
+    tokio::spawn(async move {
+        for _ in 0..12 {
+            if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+
+        loop {
+            for _ in 0..15 {
+                if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                sleep(Duration::from_secs(1)).await;
+            }
+
+            let (gaming_enabled, is_compat, has_devices) = {
+                let cfg = state.config.read().await;
+                (
+                    cfg.gaming.enabled,
+                    cfg.gaming.mode == config::GamingMode::Compatibility,
+                    !cfg.gaming.devices.is_empty(),
+                )
+            };
+
+            if gaming_enabled && is_compat && has_devices {
+                let cfg = state.config.read().await.clone();
+                let policies = rci::get_policies(&state.http, &cfg).await.unwrap_or_default();
+                if let Ok(current_devs) = rci::get_devices(&state.http, &cfg, &policies, "").await {
+                    let mut ip_changed = false;
+                    let mut updated_devices = cfg.gaming.devices.clone();
+                    let has_explicit_enabled = updated_devices.iter().any(|d| d.enabled);
+                    for dev in &mut updated_devices {
+                        let is_active = if has_explicit_enabled {
+                            dev.enabled
+                        } else {
+                            updated_devices.len() == 1
+                        };
+                        if !is_active {
+                            continue;
+                        }
+                        if let Some(rci_dev) = current_devs.iter().find(|d| d.mac.eq_ignore_ascii_case(&dev.mac)) {
+                            let ip_diff = !rci_dev.ip.is_empty() && rci_dev.ip != dev.ip;
+                            let filtered_v6: Vec<String> = rci_dev.ipv6.iter().filter(|v6| {
+                                let l = v6.trim().to_lowercase();
+                                !l.is_empty() && !l.starts_with("fe80:") && !l.starts_with("::1")
+                            }).cloned().collect();
+                            let v6_diff = !filtered_v6.is_empty() && filtered_v6 != dev.ipv6;
+
+                            if ip_diff || v6_diff {
+                                log_i!(
+                                    "[DHCP-WATCHDOG] 🔄 Изменение IP адреса по DHCP для устройства '{}' (MAC {}): IPv4: {} -> {}, IPv6: {:?} -> {:?}. Автообновление маршрута...",
+                                    dev.name, dev.mac, dev.ip, rci_dev.ip, dev.ipv6, filtered_v6
+                                );
+                                if !rci_dev.ip.is_empty() {
+                                    dev.ip = rci_dev.ip.clone();
+                                }
+                                dev.ipv6 = filtered_v6;
+                                dev.name = rci_dev.name.clone();
+                                ip_changed = true;
+                            }
+                        }
+                    }
+
+                    if ip_changed {
+                        let _cfg_guard = state.config_lock.lock().await;
+                        let _routing_guard = state.routing_lock.lock().await;
+                        let mut new_cfg = (**state.config.read().await).clone();
+                        new_cfg.gaming.devices = updated_devices;
+
+                        let path = Path::new(&new_cfg.mihomo.config_path);
+                        if path.exists() {
+                            if let Ok(raw_yaml) = tokio::fs::read_to_string(path).await {
+                                if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &new_cfg) {
+                                    if crate::api::atomic_write_file(path, &new_yaml).await.is_ok() {
+                                        if mihomo::reload_config(&state.http, &new_cfg).await.is_ok() {
+                                            log_i!("[DHCP-WATCHDOG] ✓ Маршрут игрового режима успешно переприменен для нового IP");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if config::save(&state.config_path, &new_cfg).await.is_ok() {
+                            *state.config.write().await = std::sync::Arc::new(new_cfg);
+                        }
+                    }
                 }
             }
         }

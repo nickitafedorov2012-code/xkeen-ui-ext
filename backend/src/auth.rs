@@ -19,16 +19,74 @@ pub const PBKDF2_ITERATIONS: u32 = 100_000;
 static SEED_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 static FAILED_LOGIN_ATTEMPTS: std::sync::Mutex<Option<HashMap<IpAddr, Vec<u64>>>> = std::sync::Mutex::new(None);
 
-fn rand_seed() -> u64 {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
+/// Заполнение буфера криптографически стойкими случайными байтами.
+/// Использует /dev/urandom на Unix/Linux/KeeneticOS с fallback на SHA-256 CSPRNG-микс.
+pub fn fill_crypto_random_bytes(dest: &mut [u8]) {
+    #[cfg(unix)]
+    {
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            use std::io::Read;
+            if f.read_exact(dest).is_ok() {
+                return;
+            }
+        }
+    }
+
+    let mut hasher = Sha256::new();
     let count = SEED_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let state = RandomState::new().build_hasher().finish();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_nanos() as u64;
-    now.wrapping_add(state).wrapping_add(count)
+        .as_nanos();
+    let pid = std::process::id();
+    let stack_addr = dest.as_ptr() as usize;
+
+    hasher.update(&count.to_ne_bytes());
+    hasher.update(&now.to_ne_bytes());
+    hasher.update(&pid.to_ne_bytes());
+    hasher.update(&stack_addr.to_ne_bytes());
+
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let state = RandomState::new().build_hasher().finish();
+    hasher.update(&state.to_ne_bytes());
+
+    let hash = hasher.finalize();
+    let mut offset = 0;
+    while offset < dest.len() {
+        let chunk = (dest.len() - offset).min(32);
+        dest[offset..offset + chunk].copy_from_slice(&hash[..chunk]);
+        offset += chunk;
+    }
+}
+
+/// Генерация hex-строки из криптографически стойких случайных байт.
+pub fn random_hex(len_bytes: usize) -> String {
+    let mut bytes = vec![0u8; len_bytes];
+    fill_crypto_random_bytes(&mut bytes);
+    hex::encode(bytes)
+}
+
+static REVOKED_TOKENS: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+
+/// Инвалидация токена сессии на стороне сервера при выходе (logout).
+pub fn revoke_token(token: &str) {
+    let mut guard = REVOKED_TOKENS.lock().unwrap_or_else(|e| e.into_inner());
+    let set = guard.get_or_insert_with(std::collections::HashSet::new);
+    if set.len() > 10_000 {
+        set.clear();
+    }
+    set.insert(token.to_string());
+}
+
+/// Проверка, был ли токен сессии отозван на сервере.
+pub fn is_token_revoked(token: &str) -> bool {
+    let guard = REVOKED_TOKENS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(set) = guard.as_ref() {
+        set.contains(token)
+    } else {
+        false
+    }
 }
 
 fn check_rate_limit(ip: IpAddr) -> bool {
@@ -81,27 +139,14 @@ pub struct AuthStatusResponse {
     pub authenticated: bool,
 }
 
-/// Генерация псевдослучайной соли (32 hex символа).
+/// Генерация криптографически стойкой соли (32 hex символа = 128 бит энтропии).
 pub fn generate_salt() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let pid = std::process::id();
-    let mut hasher = Sha256::new();
-    hasher.update(format!("xr-salt-{}-{}-{}", now, pid, rand_seed()).as_bytes());
-    hex::encode(hasher.finalize())[..32].to_string()
+    random_hex(16)
 }
 
-/// Генерация секретного ключа сессий.
+/// Генерация криптографически стойкого секретного ключа сессий (64 hex символа = 256 бит энтропии).
 pub fn generate_secret() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let mut hasher = Sha256::new();
-    hasher.update(format!("xr-secret-{}-{}", now, rand_seed()).as_bytes());
-    hex::encode(hasher.finalize())
+    random_hex(32)
 }
 
 /// HMAC-SHA256 без сторонних тяжелых библиотек.
@@ -179,22 +224,24 @@ pub fn verify_password(password: &str, salt: &str, expected_hash: &str) -> bool 
     constant_time_eq(&calculated, expected_hash)
 }
 
-/// Генерация токена сессии, подписанного секретом.
+/// Генерация токена сессии, подписанного HMAC-SHA256 секретом.
 pub fn create_session_token(secret: &str) -> String {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let payload = format!("{}:{}", ts, rand_seed());
-    let mut hasher = Sha256::new();
-    hasher.update(format!("{}:{}", secret, payload).as_bytes());
-    let sig = hex::encode(hasher.finalize());
+    let entropy = random_hex(16);
+    let payload = format!("{}:{}", ts, entropy);
+    let sig = hex::encode(hmac_sha256(secret.as_bytes(), payload.as_bytes()));
     format!("{}.{}", payload, sig)
 }
 
-/// Проверка валидности токена сессии (срок жизни — 24 часа).
+/// Проверка валидности токена сессии (срок жизни — 24 часа, проверка HMAC подписи и отзыва).
 pub fn verify_session_token(token: &str, secret: &str) -> bool {
     if secret.is_empty() || token.is_empty() {
+        return false;
+    }
+    if is_token_revoked(token) {
         return false;
     }
     let parts: Vec<&str> = token.split('.').collect();
@@ -202,9 +249,7 @@ pub fn verify_session_token(token: &str, secret: &str) -> bool {
         return false;
     }
     let (payload, sig) = (parts[0], parts[1]);
-    let mut hasher = Sha256::new();
-    hasher.update(format!("{}:{}", secret, payload).as_bytes());
-    let expected_sig = hex::encode(hasher.finalize());
+    let expected_sig = hex::encode(hmac_sha256(secret.as_bytes(), payload.as_bytes()));
     if !constant_time_eq(sig, &expected_sig) {
         return false;
     }
@@ -215,8 +260,8 @@ pub fn verify_session_token(token: &str, secret: &str) -> bool {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            // Токен валиден SESSION_TTL_SECS (24 часа)
-            if now >= ts && (now - ts) <= SESSION_TTL_SECS {
+            // Токен валиден SESSION_TTL_SECS (24 часа) с допуском 60с на дрейф часов при загрузке
+            if (now + 60 >= ts) && (now.saturating_sub(ts) <= SESSION_TTL_SECS) {
                 return true;
             }
         }
@@ -356,7 +401,10 @@ pub async fn login(
 }
 
 /// POST /api/auth/logout
-pub async fn logout() -> Response {
+pub async fn logout(req: Request) -> Response {
+    if let Some(token) = extract_token(&req) {
+        revoke_token(&token);
+    }
     let cookie_val = format!("{}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax", COOKIE_NAME);
     let mut response = api_ok(json!({ "authenticated": false }));
     if let Ok(hdr) = HeaderValue::from_str(&cookie_val) {
@@ -520,6 +568,26 @@ mod tests {
         assert!(verify_session_token(&token, &secret));
         assert!(!verify_session_token(&token, "wrong_secret"));
         assert!(!verify_session_token("invalid.token", &secret));
+    }
+
+    #[test]
+    fn session_token_tampering_and_revocation() {
+        let secret = generate_secret();
+        let token = create_session_token(&secret);
+        assert!(verify_session_token(&token, &secret));
+
+        // 1. Попытка подделки подписи
+        let parts: Vec<&str> = token.split('.').collect();
+        let tampered_sig = format!("{}.00112233445566778899aabbccddeeff", parts[0]);
+        assert!(!verify_session_token(&tampered_sig, &secret));
+
+        // 2. Попытка подделки payload
+        let tampered_payload = format!("9999999999:fake.{}", parts[1]);
+        assert!(!verify_session_token(&tampered_payload, &secret));
+
+        // 3. Отзыв токена
+        revoke_token(&token);
+        assert!(!verify_session_token(&token, &secret), "Отозванный токен не должен проходить проверку");
     }
 
     #[test]

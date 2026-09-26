@@ -317,33 +317,103 @@ impl Default for GamingPlatforms {
     }
 }
 
+/// Режим работы игрового маршрута. Compatibility направляет все новые
+/// соединения выбранного устройства через отдельную группу Mihomo.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GamingMode {
+    Compatibility,
+    SmartSplit,
+    KnownServices,
+}
+
+impl Default for GamingMode {
+    fn default() -> Self {
+        Self::Compatibility
+    }
+}
+
+/// Игровое LAN-устройство. MAC — постоянный идентификатор, IP/IPv6 — последний
+/// известный адрес; перед активацией они обновляются по данным Keenetic.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct GamingDevice {
+    pub mac: String,
+    pub ip: String,
+    pub ipv6: Vec<String>,
+    pub name: String,
+    pub enabled: bool,
+}
+
+/// Связь игрового режима с Zapret. Предыдущее состояние хранится только для
+/// управляемого запуска, чтобы выключение игрового режима не меняло вручную
+/// настроенный Zapret пользователя.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct GamingZapretPolicy {
+    pub managed: bool,
+    pub enabled: bool,
+    pub preset: String,
+    pub restore_previous_state: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_config: Option<ZapretConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_running: Option<bool>,
+}
+
+impl Default for GamingZapretPolicy {
+    fn default() -> Self {
+        Self {
+            managed: true,
+            enabled: true,
+            preset: "gaming_compat".into(),
+            restore_previous_state: true,
+            previous_config: None,
+            previous_running: None,
+        }
+    }
+}
+
 /// Настройки игрового режима (обход блокировок игр через VPS/Mihomo).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct GamingConfig {
     pub enabled: bool,
-    /// Выходной сервер: "Fastest", "PROXY", или имя конкретной ноды
+    pub mode: GamingMode,
+    /// Выходной сервер: "Fastest", "PROXY", или имя конкретной ноды.
     pub target_server: String,
-    /// Умный Split-Tunneling: проксировать только авторизацию, магазины и заблокированные API,
-    /// сохраняя игровой матч на минимальном прямом пинге (DIRECT).
-    pub smart_split: bool,
-    /// Исправление проблем Strict NAT и античитов через Fake-IP
-    pub fix_nat_fake_ip: bool,
-    /// Флаги включения игровых платформ
+    /// Устройства, для которых действует игровой режим.
+    pub devices: Vec<GamingDevice>,
+    /// Флаги включения игровых платформ.
     pub platforms: GamingPlatforms,
-    /// Дополнительные пользовательские домены
+    /// Дополнительные пользовательские домены.
     pub custom_domains: Vec<String>,
+    /// Применять совместимый DNS redir-host, если конфигурация DNS поддерживает его.
+    pub force_redir_host_for_devices: bool,
+    /// Не использовать Fake-IP для известных игровых доменов.
+    pub exclude_fake_ip_for_game_domains: bool,
+    /// Автоматическое управление Zapret из Gaming Mode.
+    pub zapret: GamingZapretPolicy,
+    /// Устаревший флаг, сохраняется для чтения старых конфигов. Логика задаётся mode.
+    pub smart_split: bool,
+    /// Устаревший флаг, сохраняется для совместимости со старым config.json.
+    pub fix_nat_fake_ip: bool,
 }
 
 impl Default for GamingConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            mode: GamingMode::Compatibility,
             target_server: "Fastest".into(),
-            smart_split: true,
-            fix_nat_fake_ip: true,
+            devices: Vec::new(),
             platforms: GamingPlatforms::default(),
             custom_domains: Vec::new(),
+            force_redir_host_for_devices: false,
+            exclude_fake_ip_for_game_domains: true,
+            zapret: GamingZapretPolicy::default(),
+            smart_split: true,
+            fix_nat_fake_ip: true,
         }
     }
 }

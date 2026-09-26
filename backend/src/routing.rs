@@ -919,13 +919,16 @@ pub fn apply_gaming_rules(
             with_group.push(format!("  - name: '{GAMING_GROUP_NAME}'"));
             with_group.push("    type: select".to_string());
             with_group.push("    proxies:".to_string());
-            if target_srv != "DIRECT" && target_srv != "Fastest" && target_srv != "Fallback" && target_srv != "PROXY" {
-                with_group.push(format!("      - {target_srv}"));
+            let mut group_proxies = Vec::new();
+            group_proxies.push(target_srv.to_string());
+            for p in &["Fastest", "PROXY", "Fallback", "DIRECT"] {
+                if !group_proxies.iter().any(|x| x == *p) {
+                    group_proxies.push(p.to_string());
+                }
             }
-            with_group.push("      - DIRECT".to_string());
-            with_group.push("      - Fastest".to_string());
-            with_group.push("      - Fallback".to_string());
-            with_group.push("      - PROXY".to_string());
+            for p in &group_proxies {
+                with_group.push(format!("      - {p}"));
+            }
             if !providers.is_empty() {
                 with_group.push("    use:".to_string());
                 for p in providers {
@@ -947,17 +950,70 @@ pub fn apply_gaming_rules(
         .position(|l| l.trim_end() == "rules:")
         .ok_or("В config.yaml нет секции rules:")?;
 
-    let domains = get_gaming_domains(cfg);
-    let mut out = Vec::with_capacity(lines2.len() + domains.len() + 8);
+    let mut gaming_rules = Vec::new();
+    match cfg.mode {
+        crate::config::GamingMode::Compatibility => {
+            // Режим совместимости: направляет весь интернет-трафик устройства через игровой туннель
+            let mut routed_any = false;
+            let has_explicit_enabled = cfg.devices.iter().any(|d| d.enabled);
+            for dev in &cfg.devices {
+                let is_active = if has_explicit_enabled {
+                    dev.enabled
+                } else {
+                    cfg.devices.len() == 1
+                };
+                if !is_active {
+                    continue;
+                }
+                let ip = dev.ip.trim();
+                if !ip.is_empty() {
+                    let cidr = if ip.contains('/') { ip.to_string() } else { format!("{ip}/32") };
+                    gaming_rules.push(format!("  - SRC-IP-CIDR,{cidr},{GAMING_GROUP_NAME}"));
+                    routed_any = true;
+                }
+                for v6 in &dev.ipv6 {
+                    let v6 = v6.trim();
+                    let v6_lower = v6.to_lowercase();
+                    if !v6.is_empty() && !v6_lower.starts_with("fe80:") && !v6_lower.starts_with("::1") {
+                        let cidr = if v6.contains('/') { v6.to_string() } else { format!("{v6}/128") };
+                        gaming_rules.push(format!("  - SRC-IP-CIDR,{cidr},{GAMING_GROUP_NAME}"));
+                        routed_any = true;
+                    }
+                }
+            }
+            for c in &cfg.custom_domains {
+                let t = c.trim().to_lowercase();
+                if !t.is_empty() {
+                    gaming_rules.push(format!("  - DOMAIN-SUFFIX,{t},{GAMING_GROUP_NAME}"));
+                }
+            }
+            // Если устройства ещё не настроены, добавляем домены как fallback
+            if !routed_any {
+                let domains = get_gaming_domains(cfg);
+                for d in &domains {
+                    gaming_rules.push(format!("  - DOMAIN-SUFFIX,{d},{GAMING_GROUP_NAME}"));
+                }
+            }
+        }
+        crate::config::GamingMode::KnownServices | crate::config::GamingMode::SmartSplit => {
+            // Режим «Только известные игровые сервисы» на базе category-games и правил платформ
+            let domains = get_gaming_domains(cfg);
+            for d in &domains {
+                gaming_rules.push(format!("  - DOMAIN-SUFFIX,{d},{GAMING_GROUP_NAME}"));
+            }
+            if cfg.platforms.category_games {
+                gaming_rules.push(format!("  - GEOSITE,category-games,{GAMING_GROUP_NAME}"));
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(lines2.len() + gaming_rules.len() + 4);
     for (i, line) in lines2.iter().enumerate() {
         out.push(line.to_string());
         if i == rules_idx {
             out.push(GAMING_BEGIN.to_string());
-            for d in &domains {
-                out.push(format!("  - DOMAIN-SUFFIX,{d},{GAMING_GROUP_NAME}"));
-            }
-            if cfg.platforms.category_games {
-                out.push(format!("  - GEOSITE,category-games,{GAMING_GROUP_NAME}"));
+            for r in &gaming_rules {
+                out.push(r.clone());
             }
             out.push(GAMING_END.to_string());
         }
@@ -1488,22 +1544,13 @@ pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> Result<(Stri
         current = with_flow;
     }
 
-    // 4. Игровой режим (селектор-группа 🎮 Gaming и правила обхода игровых платформ)
     let providers = if !cfg.mihomo.device_providers.is_empty() {
         cfg.mihomo.device_providers.clone()
     } else {
         parse_provider_names(&current)
     };
-    current = apply_gaming_rules(&current, &cfg.gaming, &providers)?;
 
-    // 5. Игнор-лист
-    if let Ok(with_ig) = apply_ignore_to_groups(&current, &cfg.ignore_servers) {
-        current = with_ig;
-    }
-    let mut filters = cfg.provider_filters.clone();
-    current = apply_ignore_to_providers(&current, &cfg.ignore_servers, &mut filters);
-
-    // 6. Per-device назначения
+    // 4. Per-device назначения
     let mut assignments = Vec::new();
     for (ip, dr) in &cfg.device_routing {
         if let Some(srv) = dr.servers.first() {
@@ -1519,6 +1566,16 @@ pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> Result<(Stri
     if let Ok(with_devices) = apply_assignments(&current, &assignments, &providers) {
         current = with_devices;
     }
+
+    // 5. Игнор-лист
+    if let Ok(with_ig) = apply_ignore_to_groups(&current, &cfg.ignore_servers) {
+        current = with_ig;
+    }
+    let mut filters = cfg.provider_filters.clone();
+    current = apply_ignore_to_providers(&current, &cfg.ignore_servers, &mut filters);
+
+    // 6. Игровой режим (приоритетный маршрут устройства и селектор-группа 🎮 Gaming)
+    current = apply_gaming_rules(&current, &cfg.gaming, &providers)?;
 
     Ok((current, count))
 }
@@ -2039,6 +2096,177 @@ rules:
         assert!(!disabled.contains(GAMING_BEGIN));
         assert!(!disabled.contains("🎮 Gaming"));
         assert!(disabled.contains("MATCH,PROXY"));
+    }
+
+    #[test]
+    fn test_apply_gaming_compatibility_mode_device() {
+        let yaml = r#"port: 7890
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - Fastest
+rules:
+  - GEOIP,RU,DIRECT
+  - MATCH,PROXY
+"#;
+        let mut cfg = crate::config::GamingConfig::default();
+        cfg.enabled = true;
+        cfg.mode = crate::config::GamingMode::Compatibility;
+        cfg.target_server = "GameVPS".into();
+        cfg.devices.push(crate::config::GamingDevice {
+            mac: "00:11:22:33:44:55".into(),
+            ip: "192.168.2.115".into(),
+            ipv6: vec!["2001:db8::10".into()],
+            name: "Gaming-Rig".into(),
+            enabled: true,
+        });
+
+        let providers = vec![];
+        let applied = apply_gaming_rules(yaml, &cfg, &providers).expect("Must apply compatibility mode");
+
+        assert!(applied.contains(GAMING_BEGIN));
+        assert!(applied.contains("SRC-IP-CIDR,192.168.2.115/32,🎮 Gaming"));
+        assert!(applied.contains("SRC-IP-CIDR,2001:db8::10/128,🎮 Gaming"));
+        // Не должно содержать category-games в режиме полной совместимости устройства
+        assert!(!applied.contains("GEOSITE,category-games"));
+    }
+
+    #[test]
+    fn test_apply_gaming_known_services_mode() {
+        let yaml = r#"port: 7890
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - Fastest
+rules:
+  - GEOIP,RU,DIRECT
+  - MATCH,PROXY
+"#;
+        let mut cfg = crate::config::GamingConfig::default();
+        cfg.enabled = true;
+        cfg.mode = crate::config::GamingMode::KnownServices;
+        cfg.target_server = "Fastest".into();
+        cfg.platforms.category_games = true;
+        cfg.platforms.steam = true;
+
+        let providers = vec![];
+        let applied = apply_gaming_rules(yaml, &cfg, &providers).expect("Must apply known services mode");
+
+        assert!(applied.contains(GAMING_BEGIN));
+        assert!(applied.contains("GEOSITE,category-games,🎮 Gaming"));
+        assert!(applied.contains("DOMAIN-SUFFIX,steamcommunity.com,🎮 Gaming"));
+        assert!(!applied.contains("SRC-IP-CIDR"));
+    }
+
+    #[test]
+    fn test_apply_gaming_filters_link_local_ipv6() {
+        let yaml = "port: 7890\nproxy-groups:\nrules:\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::GamingConfig::default();
+        cfg.enabled = true;
+        cfg.mode = crate::config::GamingMode::Compatibility;
+        cfg.target_server = "Fastest".into();
+        cfg.devices.push(crate::config::GamingDevice {
+            mac: "11:22:33:44:55:66".into(),
+            ip: "192.168.2.50".into(),
+            ipv6: vec![
+                "fe80::1ff:fe00:1".into(),
+                "::1".into(),
+                "2a02:1234:5678::1".into(),
+            ],
+            name: "Rig".into(),
+            enabled: true,
+        });
+
+        let applied = apply_gaming_rules(yaml, &cfg, &[]).expect("applied");
+        assert!(applied.contains("SRC-IP-CIDR,192.168.2.50/32,🎮 Gaming"));
+        assert!(applied.contains("SRC-IP-CIDR,2a02:1234:5678::1/128,🎮 Gaming"));
+        assert!(!applied.contains("fe80::1ff:fe00:1"), "fe80: must be excluded");
+        assert!(!applied.contains("::1/128"), "loopback must be excluded");
+    }
+
+    #[test]
+    fn test_apply_routing_gaming_priority_over_device_assignment() {
+        let yaml = "port: 7890\nproxy-groups:\nrules:\n  - MATCH,PROXY\n";
+        let mut app_cfg = crate::config::AppConfig::default();
+        app_cfg.device_routing.insert(
+            "192.168.2.115".into(),
+            crate::config::DeviceRoute {
+                servers: vec!["OldProxy".into()],
+                direct: false,
+                last_active: 0,
+            },
+        );
+        app_cfg.gaming.enabled = true;
+        app_cfg.gaming.mode = crate::config::GamingMode::Compatibility;
+        app_cfg.gaming.target_server = "GamingNode".into();
+        app_cfg.gaming.devices.push(crate::config::GamingDevice {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            ip: "192.168.2.115".into(),
+            ipv6: vec![],
+            name: "Gaming-Console".into(),
+            enabled: true,
+        });
+
+        let (applied, _) = apply_routing(yaml, &app_cfg).expect("applied");
+        let gaming_pos = applied.find(GAMING_BEGIN).expect("GAMING_BEGIN exists");
+        let device_pos = applied.find(RULES_BEGIN).expect("RULES_BEGIN exists");
+        assert!(
+            gaming_pos < device_pos,
+            "Gaming priority route must appear before general device assignment in rules"
+        );
+    }
+
+    #[test]
+    fn test_apply_gaming_target_server_order_in_proxies() {
+        let yaml = "port: 7890\nproxy-groups:\nrules:\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::GamingConfig::default();
+        cfg.enabled = true;
+        cfg.mode = crate::config::GamingMode::Compatibility;
+        cfg.target_server = "Fastest".into();
+        cfg.devices.push(crate::config::GamingDevice {
+            mac: "11:22:33:44:55:66".into(),
+            ip: "192.168.2.50".into(),
+            ipv6: vec![],
+            name: "PC".into(),
+            enabled: true,
+        });
+
+        let applied = apply_gaming_rules(yaml, &cfg, &[]).expect("applied");
+        // Fastest must be the first proxy listed under proxies: in the 🎮 Gaming group
+        let group_block = extract_block(&applied, GAMING_GROUP_BEGIN, GAMING_GROUP_END).expect("gaming group block");
+        let proxies_pos = group_block.find("proxies:").expect("proxies section");
+        let after_proxies = &group_block[proxies_pos..];
+        let first_proxy = after_proxies.lines().nth(1).expect("first proxy line").trim();
+        assert_eq!(first_proxy, "- Fastest", "Fastest must be the first proxy in the select group, not DIRECT");
+    }
+
+    #[test]
+    fn test_apply_gaming_excludes_disabled_devices_when_multiple() {
+        let yaml = "port: 7890\nproxy-groups:\nrules:\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::GamingConfig::default();
+        cfg.enabled = true;
+        cfg.mode = crate::config::GamingMode::Compatibility;
+        cfg.target_server = "Fastest".into();
+        cfg.devices.push(crate::config::GamingDevice {
+            mac: "11:11:11:11:11:11".into(),
+            ip: "192.168.2.10".into(),
+            ipv6: vec![],
+            name: "Active-Console".into(),
+            enabled: true,
+        });
+        cfg.devices.push(crate::config::GamingDevice {
+            mac: "22:22:22:22:22:22".into(),
+            ip: "192.168.2.20".into(),
+            ipv6: vec![],
+            name: "Inactive-PC".into(),
+            enabled: false,
+        });
+
+        let applied = apply_gaming_rules(yaml, &cfg, &[]).expect("applied");
+        assert!(applied.contains("SRC-IP-CIDR,192.168.2.10/32,🎮 Gaming"));
+        assert!(!applied.contains("SRC-IP-CIDR,192.168.2.20/32,🎮 Gaming"), "Disabled device must not be routed");
     }
 }
 

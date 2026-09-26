@@ -35,6 +35,7 @@ pub struct Device {
     pub rxbytes: u64,
     pub txbytes: u64,
     pub speed_limit_kbps: u64,
+    pub ipv6: Vec<String>,
 }
 
 fn md5_hex(s: &str) -> String {
@@ -663,6 +664,23 @@ pub async fn get_devices(
                 .unwrap_or(0);
         }
 
+        let mut ipv6_addrs = Vec::new();
+        if let Some(v6_val) = h.get("ipv6") {
+            if let Some(arr) = v6_val.as_array() {
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        ipv6_addrs.push(s.to_string());
+                    } else if let Some(s) = item.get("address").and_then(|a| a.as_str()) {
+                        ipv6_addrs.push(s.to_string());
+                    } else if let Some(s) = item.get("ip").and_then(|a| a.as_str()) {
+                        ipv6_addrs.push(s.to_string());
+                    }
+                }
+            } else if let Some(s) = v6_val.as_str() {
+                ipv6_addrs.push(s.to_string());
+            }
+        }
+
         devices.push(Device {
             is_current_device: !ip.is_empty() && ip == current_client_ip,
             interface: h
@@ -680,6 +698,7 @@ pub async fn get_devices(
             rxbytes: h.get("rxbytes").and_then(|v| v.as_u64()).unwrap_or(0),
             txbytes: h.get("txbytes").and_then(|v| v.as_u64()).unwrap_or(0),
             speed_limit_kbps: speed,
+            ipv6: ipv6_addrs,
         });
     }
 

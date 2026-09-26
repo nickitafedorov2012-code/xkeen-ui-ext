@@ -105,6 +105,7 @@ export interface DeviceInfo {
   mac: string
   name: string
   ip: string
+  ipv6?: string[]
   policy: string
   policy_name: string
   online: boolean
@@ -398,6 +399,16 @@ export interface TaskManagerSnapshot {
   processes: ProcessInfo[]
 }
 
+export type GamingMode = 'compatibility' | 'smart_split' | 'known_services'
+
+export interface GamingDevice {
+  mac: string
+  ip: string
+  ipv6: string[]
+  name: string
+  enabled: boolean
+}
+
 export interface GamingPlatforms {
   discord: boolean
   steam: boolean
@@ -415,7 +426,9 @@ export interface GamingPlatforms {
 
 export interface GamingConfig {
   enabled: boolean
+  mode: GamingMode
   target_server: string
+  devices: GamingDevice[]
   smart_split: boolean
   fix_nat_fake_ip: boolean
   platforms: GamingPlatforms
@@ -429,9 +442,41 @@ export interface GamingPingResult {
   available: boolean
 }
 
+export interface GamingTunnelStatus {
+  target: string
+  active_node: string
+  reachable: boolean
+  latency_ms: number | null
+}
+
+export interface GamingIpv6Status {
+  supported: boolean
+  active: boolean
+  addresses: string[]
+}
+
+export interface GamingRealConnection {
+  id: string
+  host: string
+  destination: string
+  network: string
+  chains: string[]
+  rule: string
+  download: number
+  upload: number
+}
+
 export interface GamingStatus {
   config: GamingConfig
   active_server: string
   domains_count: number
+  is_active: boolean
+  tunnel_status?: GamingTunnelStatus
+  tcp_interception?: boolean
+  udp_interception?: boolean
+  ipv6_status?: GamingIpv6Status
+  active_device?: GamingDevice | null
+  real_connections?: GamingRealConnection[]
+  verification_error?: string | null
 }
 

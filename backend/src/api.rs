@@ -608,6 +608,7 @@ pub async fn get_devices(
                 .map(|d| {
                     json!({
                         "mac": d.mac, "name": d.name, "ip": d.ip,
+                        "ipv6": d.ipv6,
                         "policy": d.policy, "policy_name": d.policy_name,
                         "online": d.online, "interface": d.interface,
                         "is_current_device": d.is_current_device,
@@ -1195,8 +1196,20 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
     if !matches!(action.as_str(), "start" | "stop" | "restart" | "status") {
         return api_err("Недопустимое действие (start/stop/restart/status)");
     }
+    let init_script = cfg.system.xkeen_init.trim();
+    if !init_script.starts_with("/opt/")
+        || init_script.contains("..")
+        || init_script.contains('\0')
+        || init_script.contains(';')
+        || init_script.contains('&')
+        || init_script.contains('|')
+        || init_script.contains('`')
+        || init_script.contains('$')
+    {
+        return api_err("Недопустимый путь к init-скрипту (разрешены только пути в /opt/)");
+    }
     let out = tokio::process::Command::new("sh")
-        .arg(&cfg.system.xkeen_init)
+        .arg(init_script)
         .arg(&action)
         .output()
         .await;
@@ -4152,8 +4165,8 @@ pub async fn zapret_action(
         let install_cmd = r#"
             mkdir -p /opt/zapret /opt/etc/init.d /opt/etc/zapret
             cd /opt
-            (curl -kLs -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" -o z.tar.gz || \
-             curl -kLs "https://ghproxy.net/https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" -o z.tar.gz) && \
+            (curl -sSL -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" -o z.tar.gz || \
+             curl -sSL "https://ghproxy.net/https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" -o z.tar.gz) && \
             tar -xzf z.tar.gz && \
             rm -f z.tar.gz && \
             rm -rf /opt/zapret && \
@@ -4346,28 +4359,397 @@ pub async fn save_schedules(
 
 // ==================== ИГРОВОЙ РЕЖИМ (GAMING MODE) ====================
 
-/// GET /api/gaming/status — статус, конфиг и активный игровой узел
+fn resolve_group_leaf(proxies: &std::collections::BTreeMap<String, serde_json::Value>, start: &str) -> String {
+    let mut cur = start.to_string();
+    let mut visited = std::collections::HashSet::new();
+    while let Some(sub) = proxies.get(&cur) {
+        if visited.len() >= 32 || visited.contains(&cur) {
+            break;
+        }
+        visited.insert(cur.clone());
+        let typ = sub.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
+        if typ != "fallback" && typ != "urltest" && typ != "selector" && typ != "select" {
+            break;
+        }
+        match sub.get("now").and_then(|n| n.as_str()) {
+            Some(next) if !next.is_empty() && next != &cur => cur = next.to_string(),
+            _ => break,
+        }
+    }
+    cur
+}
+
+async fn check_gaming_interception(cfg: &config::AppConfig) -> (bool, bool, bool) {
+    #[cfg(target_os = "linux")]
+    {
+        let yaml_opt = tokio::fs::read_to_string(&cfg.mihomo.config_path).await.ok();
+        let tun_mode = yaml_opt.as_ref().map_or(false, |y| {
+            (y.contains("tun:") && y.contains("enable: true")) || y.contains("auto-route: true")
+        });
+
+        // 1. Проверка перехвата TCP (PREROUTING nat -> xkeen или REDIRECT / TPROXY)
+        let tcp_check = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("iptables -t nat -C PREROUTING -j xkeen 2>/dev/null || iptables -t nat -L xkeen -n 2>/dev/null || iptables -t nat -L PREROUTING -n 2>/dev/null | grep -qE 'REDIRECT|TPROXY'")
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        // 2. Проверка перехвата UDP (PREROUTING mangle -> xkeen или TPROXY / NFQUEUE)
+        let udp_check = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("iptables -t mangle -C PREROUTING -j xkeen 2>/dev/null || iptables -t mangle -L xkeen -n 2>/dev/null || iptables -t mangle -L PREROUTING -n 2>/dev/null | grep -qE 'TPROXY|NFQUEUE'")
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        // 3. Честная проверка перехвата IPv6 (TPROXY/REDIRECT/xkeen в ip6tables mangle/nat)
+        let ip6_iptables_check = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("ip6tables -t mangle -C PREROUTING -j xkeen 2>/dev/null || ip6tables -t mangle -L xkeen -n 2>/dev/null || ip6tables -t nat -L xkeen -n 2>/dev/null || ip6tables -t mangle -L PREROUTING -n 2>/dev/null | grep -qE 'TPROXY|REDIRECT|xkeen'")
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        let yaml_ipv6_enabled = yaml_opt.as_ref().map_or(false, |y| y.contains("ipv6: true"));
+
+        let tcp_ok = tcp_check || tun_mode;
+        let udp_ok = udp_check || tun_mode;
+        let ipv6_ok = (ip6_iptables_check || (tun_mode && yaml_ipv6_enabled)) && yaml_ipv6_enabled;
+
+        (tcp_ok, udp_ok, ipv6_ok)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+            (
+                yaml.contains("redir-port:") || yaml.contains("tproxy-port:") || yaml.contains("port:"),
+                yaml.contains("tproxy-port:") || yaml.contains("tun:"),
+                yaml.contains("ipv6: true"),
+            )
+        } else {
+            (true, true, false)
+        }
+    }
+}
+
+async fn apply_and_verify_gaming(
+    state: &AppState,
+    cfg: &mut config::AppConfig,
+) -> Result<(), String> {
+    if cfg.gaming.enabled {
+        // 1. По нажатию кнопки получаем актуальный IP устройства по MAC через Keenetic RCI
+        if cfg.gaming.mode == config::GamingMode::Compatibility {
+            let policies = rci::get_policies(&state.http, cfg).await.unwrap_or_default();
+            if let Ok(devices) = rci::get_devices(&state.http, cfg, &policies, "").await {
+                let has_explicit_enabled = cfg.gaming.devices.iter().any(|d| d.enabled);
+                for dev in &mut cfg.gaming.devices {
+                    let is_active = if has_explicit_enabled {
+                        dev.enabled
+                    } else {
+                        cfg.gaming.devices.len() == 1
+                    };
+                    if !is_active {
+                        continue;
+                    }
+                    if let Some(rci_dev) = devices.iter().find(|d| d.mac.eq_ignore_ascii_case(&dev.mac)) {
+                        if !rci_dev.ip.is_empty() {
+                            dev.ip = rci_dev.ip.clone();
+                            dev.ipv6 = rci_dev.ipv6.iter().filter(|v6| {
+                                let l = v6.trim().to_lowercase();
+                                !l.is_empty() && !l.starts_with("fe80:") && !l.starts_with("::1")
+                            }).cloned().collect();
+                            dev.name = rci_dev.name.clone();
+                        }
+                    }
+                }
+            }
+
+            let has_explicit_enabled = cfg.gaming.devices.iter().any(|d| d.enabled);
+            let active = cfg.gaming.devices.iter().find(|d| {
+                if has_explicit_enabled { d.enabled } else { cfg.gaming.devices.len() == 1 }
+            });
+            match active {
+                Some(dev) if dev.ip.trim().is_empty() => {
+                    return Err(format!("Устройство '{}' (MAC {}) не имеет назначенного IP адреса в сети роутера", dev.name, dev.mac));
+                }
+                None => {
+                    return Err("Не выбрано устройство для режима совместимости. Выберите устройство в списке.".to_string());
+                }
+                _ => {}
+            }
+        }
+
+        // 2. Проверяем туннель
+        let target_srv = cfg.gaming.target_server.trim();
+        if !target_srv.is_empty() && target_srv != "DIRECT" && target_srv != "Fastest" && target_srv != "PROXY" {
+            if let Ok(proxies) = mihomo::get_proxies(&state.http, cfg).await {
+                if !proxies.contains_key(target_srv) {
+                    return Err(format!("Игровой туннель '{}' не найден в списке серверов ядра Mihomo", target_srv));
+                }
+            }
+        }
+
+        // 3. Проверяем перехват TCP/UDP
+        let (tcp_ok, udp_ok, _) = check_gaming_interception(cfg).await;
+        if !tcp_ok && !udp_ok {
+            return Err("Сбой перехвата трафика: ядро Mihomo не настроено на прозрачный прокси (проверьте redir-port/tproxy-port в config.yaml)".into());
+        }
+    }
+
+    // 4. Применяем конфигурацию к config.yaml с атомарным откатом при ошибке
+    let path = std::path::Path::new(&cfg.mihomo.config_path);
+    if path.exists() {
+        let raw_yaml = match tokio::fs::read_to_string(path).await {
+            Ok(y) => y,
+            Err(e) => return Err(format!("Ошибка чтения config.yaml: {e}")),
+        };
+
+        let (new_yaml, _) = match routing::apply_routing(&raw_yaml, cfg) {
+            Ok(res) => res,
+            Err(e) => return Err(format!("Ошибка генерации правил роутинга: {e}")),
+        };
+
+        if let Err(e) = atomic_write_file(path, &new_yaml).await {
+            return Err(format!("Ошибка записи config.yaml: {e}"));
+        }
+
+        // Перезагрузка Mihomo
+        if let Err(e) = mihomo::reload_config(&state.http, cfg).await {
+            // ОТКАТ к исходному yaml
+            let _ = atomic_write_file(path, &raw_yaml).await;
+            let _ = mihomo::reload_config(&state.http, cfg).await;
+            return Err(format!("Ошибка перезагрузки ядра Mihomo: {e}. Настройки возвращены к прежним."));
+        }
+
+        // Синхронизация селектор-группы 🎮 Gaming на выбранный узел
+        if cfg.gaming.enabled {
+            let target_srv = if cfg.gaming.target_server.trim().is_empty() {
+                "Fastest"
+            } else {
+                cfg.gaming.target_server.trim()
+            };
+            let _ = mihomo::switch_group(&state.http, cfg, routing::GAMING_GROUP_NAME, target_srv).await;
+        }
+
+        // Верификация результата в ядре Mihomo
+        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        if cfg.gaming.enabled {
+            match mihomo::get_proxies(&state.http, cfg).await {
+                Ok(proxies) => {
+                    let has_group = proxies.contains_key(routing::GAMING_GROUP_NAME) || proxies.contains_key("Gaming");
+                    if !has_group {
+                        // ОТКАТ
+                        let _ = atomic_write_file(path, &raw_yaml).await;
+                        let _ = mihomo::reload_config(&state.http, cfg).await;
+                        return Err("Селекторная группа 🎮 Gaming не была создана в ядре Mihomo. Прежние настройки возвращены.".into());
+                    }
+                }
+                Err(e) => {
+                    // ОТКАТ
+                    let _ = atomic_write_file(path, &raw_yaml).await;
+                    let _ = mihomo::reload_config(&state.http, cfg).await;
+                    return Err(format!("Сбой верификации ядра Mihomo: {e}. Прежние настройки возвращены."));
+                }
+            }
+
+            // Дополнительная верификация правил для режима совместимости
+            if cfg.gaming.mode == config::GamingMode::Compatibility {
+                let has_explicit_enabled = cfg.gaming.devices.iter().any(|d| d.enabled);
+                if let Some(active_dev) = cfg.gaming.devices.iter().find(|d| {
+                    if has_explicit_enabled { d.enabled } else { cfg.gaming.devices.len() == 1 }
+                }) {
+                    let expected_cidr = format!("SRC-IP-CIDR,{}/32", active_dev.ip);
+                    if !new_yaml.contains(&expected_cidr) {
+                        let _ = atomic_write_file(path, &raw_yaml).await;
+                        let _ = mihomo::reload_config(&state.http, cfg).await;
+                        return Err(format!("Маршрутное правило для {} не сформировано. Прежние настройки возвращены.", active_dev.ip));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// GET /api/gaming/status — статус, конфиг, активный узел, туннель, перехват и реальные соединения
 pub async fn get_gaming_status(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
     let domains_count = routing::get_gaming_domains(&cfg.gaming).len();
 
-    // Пытаемся получить активный прокси для группы 🎮 Gaming из Mihomo
-    let active_server = match mihomo::get_proxies(&state.http, &cfg).await {
-        Ok(map) => {
+    // 1. Активный узел группы 🎮 Gaming
+    let proxies_map = mihomo::get_proxies(&state.http, &cfg).await.ok();
+    let group_now = proxies_map
+        .as_ref()
+        .and_then(|map| {
             map.get(routing::GAMING_GROUP_NAME)
                 .or_else(|| map.get("Gaming"))
                 .and_then(|g| g.get("now"))
                 .and_then(|n| n.as_str())
-                .unwrap_or(cfg.gaming.target_server.as_str())
-                .to_string()
+        })
+        .unwrap_or(cfg.gaming.target_server.as_str());
+
+    let active_server = proxies_map
+        .as_ref()
+        .map(|map| resolve_group_leaf(map, group_now))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| group_now.to_string());
+
+    // 2. Статус туннеля (пинг / задержка)
+    let target_srv = cfg.gaming.target_server.trim();
+    let (tunnel_reachable, tunnel_latency) = if target_srv == "DIRECT" || active_server == "DIRECT" {
+        (true, Some(0i64))
+    } else if let Some(ref map) = proxies_map {
+        let leaf_to_ping = resolve_group_leaf(map, if target_srv.is_empty() { "Fastest" } else { target_srv });
+        let node = if !leaf_to_ping.is_empty() { leaf_to_ping } else { active_server.clone() };
+        if node == "DIRECT" {
+            (true, Some(0i64))
+        } else {
+            let delay = mihomo::ping_server_url(&state.http, &cfg, &node, 2500, None).await;
+            if delay > 0 {
+                (true, Some(delay))
+            } else if map.contains_key(node.as_str()) {
+                (true, None)
+            } else {
+                (false, None)
+            }
         }
-        Err(_) => cfg.gaming.target_server.clone(),
+    } else {
+        (false, None)
     };
+
+    // 3. Статус перехвата TCP / UDP / IPv6
+    let (tcp_ok, udp_ok, ipv6_ok) = check_gaming_interception(&cfg).await;
+
+    // 4. Активное игровое устройство и его реальный IP
+    let has_explicit_enabled = cfg.gaming.devices.iter().any(|d| d.enabled);
+    let active_device = cfg.gaming.devices.iter().find(|d| {
+        if has_explicit_enabled { d.enabled } else { cfg.gaming.devices.len() == 1 }
+    }).cloned();
+
+    // 5. Реальные соединения устройства через Mihomo (/connections)
+    let mut real_connections = Vec::new();
+    if let Some(ref dev) = active_device {
+        if !dev.ip.is_empty() {
+            if let Ok(val) = mihomo::m_get(&state.http, &cfg, "/connections").await {
+                if let Some(conns) = val.get("connections").and_then(|c| c.as_array()) {
+                    for c in conns {
+                        let src = c.get("metadata").and_then(|m| m.get("sourceIP")).and_then(|s| s.as_str()).unwrap_or("");
+                        let matches_device = src == dev.ip || dev.ipv6.iter().any(|v6| v6 == src);
+                        if matches_device {
+                            let host = c.get("metadata").and_then(|m| m.get("host")).and_then(|h| h.as_str()).unwrap_or("");
+                            let dest_ip = c.get("metadata").and_then(|m| m.get("destinationIP")).and_then(|d| d.as_str()).unwrap_or("");
+                            let dest_port = c.get("metadata")
+                                .and_then(|m| m.get("destinationPort"))
+                                .map(|p| {
+                                    if let Some(s) = p.as_str() {
+                                        s.to_string()
+                                    } else if let Some(n) = p.as_u64() {
+                                        n.to_string()
+                                    } else {
+                                        String::new()
+                                    }
+                                })
+                                .unwrap_or_default();
+                            let net = c.get("metadata").and_then(|m| m.get("network")).and_then(|n| n.as_str()).unwrap_or("TCP");
+                            let rule = c.get("rule").and_then(|r| r.as_str()).unwrap_or("");
+                            let chains = c.get("chains").and_then(|ch| ch.as_array())
+                                .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect::<Vec<_>>())
+                                .unwrap_or_default();
+                            let dl = c.get("download").and_then(|v| v.as_u64()).unwrap_or(0);
+                            let ul = c.get("upload").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                            real_connections.push(json!({
+                                "id": c.get("id").and_then(|i| i.as_str()).unwrap_or(""),
+                                "host": if !host.is_empty() { host } else { dest_ip },
+                                "destination": format!("{dest_ip}:{dest_port}"),
+                                "network": net.to_uppercase(),
+                                "chains": chains,
+                                "rule": rule,
+                                "download": dl,
+                                "upload": ul,
+                            }));
+
+                            if real_connections.len() >= 20 {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 6. Реальная верификация: не считать включенным только потому, что кнопка нажата
+    let mut is_active = false;
+    let mut verification_error: Option<String> = None;
+
+    if cfg.gaming.enabled {
+        let yaml_content = tokio::fs::read_to_string(&cfg.mihomo.config_path).await.unwrap_or_default();
+        let has_gaming_rules = yaml_content.contains(routing::GAMING_BEGIN) && yaml_content.contains(routing::GAMING_GROUP_BEGIN);
+
+        if !has_gaming_rules {
+            verification_error = Some("Маршрутные правила не найдены в config.yaml ядра Mihomo".to_string());
+        } else {
+            match cfg.gaming.mode {
+                config::GamingMode::Compatibility => {
+                    if let Some(ref dev) = active_device {
+                        if dev.ip.is_empty() {
+                            verification_error = Some(format!("Устройство '{}' не имеет активного IP адреса", dev.name));
+                        } else {
+                            let expected_cidr = format!("SRC-IP-CIDR,{}/32,{}", dev.ip, routing::GAMING_GROUP_NAME);
+                            if !yaml_content.contains(&expected_cidr) {
+                                verification_error = Some(format!("Приоритетный маршрут для {} отсутствует в config.yaml", dev.ip));
+                            } else if !tunnel_reachable && target_srv != "DIRECT" {
+                                verification_error = Some(format!("Игровой туннель '{}' недоступен", target_srv));
+                            } else {
+                                is_active = true;
+                            }
+                        }
+                    } else {
+                        verification_error = Some("Не выбрано устройство для режима совместимости".to_string());
+                    }
+                }
+                config::GamingMode::KnownServices | config::GamingMode::SmartSplit => {
+                    if !tunnel_reachable && target_srv != "DIRECT" {
+                        verification_error = Some(format!("Игровой туннель '{}' недоступен", target_srv));
+                    } else if domains_count == 0 && !cfg.gaming.platforms.category_games {
+                        verification_error = Some("В режиме известных сервисов не выбрана ни одна игровая платформа или категория правил".to_string());
+                    } else {
+                        is_active = true;
+                    }
+                }
+            }
+        }
+    }
 
     api_ok(json!({
         "config": cfg.gaming,
         "active_server": active_server,
         "domains_count": domains_count,
+        "is_active": is_active,
+        "tunnel_status": {
+            "target": cfg.gaming.target_server,
+            "active_node": active_server,
+            "reachable": tunnel_reachable,
+            "latency_ms": tunnel_latency,
+        },
+        "tcp_interception": tcp_ok,
+        "udp_interception": udp_ok,
+        "ipv6_status": {
+            "supported": ipv6_ok,
+            "active": ipv6_ok && active_device.as_ref().map_or(false, |d| d.ipv6.iter().any(|v| !v.to_lowercase().starts_with("fe80:") && !v.starts_with("::1"))),
+            "addresses": active_device.as_ref().map(|d| {
+                d.ipv6.iter().filter(|v| !v.to_lowercase().starts_with("fe80:") && !v.starts_with("::1")).cloned().collect::<Vec<_>>()
+            }).unwrap_or_default(),
+        },
+        "active_device": active_device,
+        "real_connections": real_connections,
+        "verification_error": verification_error,
     }))
 }
 
@@ -4386,34 +4768,18 @@ pub async fn save_gaming_config(
     let mut cfg = (**state.config.read().await).clone();
     cfg.gaming = body.gaming;
 
-    // 1. Применяем правила в config.yaml ядра Mihomo (под блокировкой routing_lock)
-    let path = std::path::Path::new(&cfg.mihomo.config_path);
-    if path.exists() {
-        let raw_yaml = match tokio::fs::read_to_string(path).await {
-            Ok(y) => y,
-            Err(e) => return api_err(format!("Ошибка чтения config.yaml: {e}")),
-        };
-        let (new_yaml, _) = match routing::apply_routing(&raw_yaml, &cfg) {
-            Ok(res) => res,
-            Err(e) => return api_err(format!("Ошибка генерации правил роутинга: {}", e)),
-        };
-        if let Err(e) = atomic_write_file(path, &new_yaml).await {
-            return api_err(format!("Ошибка записи config.yaml: {}", e));
-        }
-        if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
-            return api_err(format!("Ошибка перезагрузки Mihomo: {}", e));
-        }
+    if let Err(e) = apply_and_verify_gaming(&state, &mut cfg).await {
+        return api_err(e);
     }
 
-    // 2. Синхронизируем ipset geo_override ядра Keenetic для игровых доменов
-    if cfg.gaming.enabled {
+    // Синхронизируем ipset geo_override ядра Keenetic: очищаем от старых доменов при выключении/переключении
+    let mut all_domains = cfg.force_domains.clone();
+    if cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::KnownServices {
         let game_domains = routing::get_gaming_domains(&cfg.gaming);
-        let mut all_domains = cfg.force_domains.clone();
         all_domains.extend(game_domains);
-        let _ = crate::override_sync::sync_geo_override(&all_domains).await;
     }
+    let _ = crate::override_sync::sync_geo_override(&all_domains).await;
 
-    // 3. Сохраняем в config.json
     if let Err(e) = config::save(&state.config_path, &cfg).await {
         return api_err(format!("Ошибка сохранения config.json: {}", e));
     }
@@ -4426,9 +4792,15 @@ pub async fn save_gaming_config(
 #[derive(Deserialize)]
 pub struct ToggleGamingReq {
     pub enabled: bool,
+    #[serde(default)]
+    pub mode: Option<config::GamingMode>,
+    #[serde(default)]
+    pub device_mac: Option<String>,
+    #[serde(default)]
+    pub target_server: Option<String>,
 }
 
-/// POST /api/gaming/toggle — быстрое включение/отключение игрового режима
+/// POST /api/gaming/toggle — быстрое включение/отключение игрового режима с выбором устройства
 pub async fn toggle_gaming(
     State(state): State<AppState>,
     Json(body): Json<ToggleGamingReq>,
@@ -4438,30 +4810,49 @@ pub async fn toggle_gaming(
     let mut cfg = (**state.config.read().await).clone();
     cfg.gaming.enabled = body.enabled;
 
-    let path = std::path::Path::new(&cfg.mihomo.config_path);
-    if path.exists() {
-        let raw_yaml = match tokio::fs::read_to_string(path).await {
-            Ok(y) => y,
-            Err(e) => return api_err(format!("Ошибка чтения config.yaml: {e}")),
-        };
-        let (new_yaml, _) = match routing::apply_routing(&raw_yaml, &cfg) {
-            Ok(res) => res,
-            Err(e) => return api_err(format!("Ошибка роутинга: {}", e)),
-        };
-        if let Err(e) = atomic_write_file(path, &new_yaml).await {
-            return api_err(format!("Ошибка записи config.yaml: {e}"));
+    if let Some(mode) = body.mode {
+        cfg.gaming.mode = mode;
+    }
+    if let Some(target) = body.target_server {
+        if !target.trim().is_empty() {
+            cfg.gaming.target_server = target;
         }
-        if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
-            return api_err(format!("Ошибка перезагрузки Mihomo: {e}"));
+    }
+    if let Some(mac) = body.device_mac {
+        let mac_trimmed = mac.trim().to_lowercase();
+        if !mac_trimmed.is_empty() {
+            let mut found = false;
+            for d in &mut cfg.gaming.devices {
+                if d.mac.eq_ignore_ascii_case(&mac_trimmed) {
+                    d.enabled = true;
+                    found = true;
+                } else {
+                    d.enabled = false;
+                }
+            }
+            if !found {
+                cfg.gaming.devices.push(config::GamingDevice {
+                    mac: mac_trimmed,
+                    ip: String::new(),
+                    ipv6: Vec::new(),
+                    name: "Игровое устройство".into(),
+                    enabled: true,
+                });
+            }
         }
     }
 
-    if cfg.gaming.enabled {
-        let game_domains = routing::get_gaming_domains(&cfg.gaming);
-        let mut all_domains = cfg.force_domains.clone();
-        all_domains.extend(game_domains);
-        let _ = crate::override_sync::sync_geo_override(&all_domains).await;
+    if let Err(e) = apply_and_verify_gaming(&state, &mut cfg).await {
+        return api_err(e);
     }
+
+    // Синхронизируем ipset geo_override ядра Keenetic: очищаем от старых доменов при выключении/переключении
+    let mut all_domains = cfg.force_domains.clone();
+    if cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::KnownServices {
+        let game_domains = routing::get_gaming_domains(&cfg.gaming);
+        all_domains.extend(game_domains);
+    }
+    let _ = crate::override_sync::sync_geo_override(&all_domains).await;
 
     if let Err(e) = config::save(&state.config_path, &cfg).await {
         return api_err(format!("Ошибка сохранения config.json: {e}"));

@@ -260,14 +260,14 @@ runTest('8. Zapret failsafe PID management and lo/br+ exclusions in script', () 
   assert(apiRs.includes('kill -9 $(cat "$FAILSAFE_PID")'), 'Must kill previous failsafe PID');
 
   // Check lo and br+/Bridge+ exclusion rules in zapret chain
-  assert(apiRs.includes('iptables -t mangle -A zapret -o lo -j RETURN'), 'Must exclude outgoing lo in zapret chain');
-  assert(apiRs.includes('iptables -t mangle -A zapret -i lo -j RETURN'), 'Must exclude incoming lo in zapret chain');
-  assert(apiRs.includes('iptables -t mangle -A zapret -o br+ -j RETURN'), 'Must exclude bridge br+ in zapret chain');
-  assert(apiRs.includes('iptables -t mangle -A zapret -o Bridge+ -j RETURN'), 'Must exclude Keenetic Bridge+ in zapret chain');
+  assert(/iptables -t mangle -A zapret -o lo (?:-m comment --comment "[^"]+" )?-j RETURN/.test(apiRs), 'Must exclude outgoing lo in zapret chain');
+  assert(/iptables -t mangle -A zapret -i lo (?:-m comment --comment "[^"]+" )?-j RETURN/.test(apiRs), 'Must exclude incoming lo in zapret chain');
+  assert(/iptables -t mangle -A zapret -o br\+ (?:-m comment --comment "[^"]+" )?-j RETURN/.test(apiRs), 'Must exclude bridge br+ in zapret chain');
+  assert(/iptables -t mangle -A zapret -o Bridge\+ (?:-m comment --comment "[^"]+" )?-j RETURN/.test(apiRs), 'Must exclude Keenetic Bridge+ in zapret chain');
 
   // Check DNS redirection to Mihomo port 1053 to prevent ISP DNS poisoning (NXDOMAIN)
-  assert(apiRs.includes('iptables -t nat -A PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 1053'), 'Must redirect UDP 53 to 1053');
-  assert(apiRs.includes('iptables -t nat -A PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 1053'), 'Must redirect TCP 53 to 1053');
+  assert(/iptables -t nat -A PREROUTING (?:-i \S+ )?-p udp --dport 53 (?:-m comment --comment "[^"]+" )?-j REDIRECT --to-ports 1053/.test(apiRs), 'Must redirect UDP 53 to 1053');
+  assert(/iptables -t nat -A PREROUTING (?:-i \S+ )?-p tcp --dport 53 (?:-m comment --comment "[^"]+" )?-j REDIRECT --to-ports 1053/.test(apiRs), 'Must redirect TCP 53 to 1053');
 
   // Ensure PREROUTING mangle hook is removed so it doesn't break Mihomo/Telegram
   assert(!apiRs.includes('iptables -t mangle -I PREROUTING 1 -i br+ -j zapret'), 'Must not intercept LAN packets in PREROUTING mangle');
