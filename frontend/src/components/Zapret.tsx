@@ -481,7 +481,7 @@ export default function Zapret({ notify }: ZapretProps) {
             <div>
               <div className="muted small">Перехват Netfilter</div>
               <div style={{ fontSize: 13, fontWeight: 600, color: status?.iptables_active ? '#22c55e' : 'var(--muted)' }}>
-                {status?.iptables_active ? '🟢 Активен (mangle -i br+)' : '⚪ Отключен'}
+                {status?.iptables_active ? '🟢 Активен (Netfilter mangle)' : '⚪ Отключен'}
               </div>
             </div>
           </div>
@@ -504,6 +504,38 @@ export default function Zapret({ notify }: ZapretProps) {
             </div>
           </div>
         </div>
+
+        {/* ПРЕДУПРЕЖДЕНИЕ: СЛУЖБА ЗАПУЩЕНА, НО IPTABLES ОТКЛЮЧЕН */}
+        {isRunning && !status?.iptables_active && (
+          <div
+            style={{
+              marginTop: 14,
+              padding: '10px 14px',
+              borderRadius: 8,
+              background: 'rgba(234, 179, 8, 0.1)',
+              border: '1px solid rgba(234, 179, 8, 0.3)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 12,
+              flexWrap: 'wrap',
+            }}
+          >
+            <div style={{ fontSize: 12, color: '#eab308' }}>
+              ⚠️ Служба Zapret активна (PID: {status?.pid}), но перехват Netfilter отключен. Трафик не попадает в nfqws.
+            </div>
+            <button
+              type="button"
+              className="btn sm"
+              disabled={busy}
+              onClick={() => handleAction('restart')}
+              style={{ background: '#eab308', color: '#000', fontWeight: 600, border: 'none' }}
+              title="Перезапустить службу и восстановить правила iptables"
+            >
+              🔄 Включить перехват
+            </button>
+          </div>
+        )}
 
         {/* КНОПКИ ДЕЙСТВИЙ */}
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 16 }}>
@@ -744,10 +776,10 @@ export default function Zapret({ notify }: ZapretProps) {
           {/* 1. YouTube Turbo */}
           {renderStrategyCard(
             'youtube_turbo',
-            '⚡ YouTube Turbo (Split2)',
+            '⚡ YouTube Turbo (Fake + Split2)',
             'GGC DIRECT',
-            'Сплит первого байта ClientHello (split2, pos=1) с отсечкой cutoff=d4. Устраняет буферизацию видео с локальных кэшей Google GGC без блокировок.',
-            'split2 (pos=1, cutoff=d4)',
+            'Комбинированная десинхронизация ClientHello (fake,split2, pos=1) с badseq и отсечкой cutoff=d4. Пробивает блокировки ТСПУ и устраняет буферизацию с кэшей Google GGC без расхода VPS.',
+            'fake,split2 (pos=1, badseq, cutoff=d4)',
             'стандартный режим'
           )}
 
