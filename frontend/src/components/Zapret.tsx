@@ -328,6 +328,9 @@ export default function Zapret({ notify }: ZapretProps) {
     }
   }
 
+  const [upgradingEngine, setUpgradingEngine] = useState(false)
+  const [switchingEngine, setSwitchingEngine] = useState(false)
+
   const handleAction = async (act: string) => {
     setBusy(true)
     try {
@@ -342,6 +345,93 @@ export default function Zapret({ notify }: ZapretProps) {
       setBusy(false)
     }
   }
+
+  const handleUpgradeZapret2 = async () => {
+    setUpgradingEngine(true)
+    setBusy(true)
+    try {
+      const res = await apiPost<{
+        success: boolean
+        engine?: 'v1' | 'v2'
+        v2_installed?: boolean
+        can_rollback_v1?: boolean
+        features?: ZapretFeatures
+        message?: string
+      }>('zapret/action', {
+        action: 'upgrade_zapret2',
+        engine: 'v2',
+      })
+      setStatus((prev) =>
+        prev
+          ? {
+              ...prev,
+              engine: 'v2',
+              v2_installed: res.v2_installed ?? true,
+              can_rollback_v1: res.can_rollback_v1 ?? true,
+            }
+          : prev
+      )
+      if (res.features) {
+        setFeatures((prev) => ({
+          ...prev,
+          ...res.features,
+          engine: 'v2',
+          custom_entries: res.features?.custom_entries || prev.custom_entries || [],
+        }))
+      } else {
+        setFeatures((prev) => ({ ...prev, engine: 'v2' }))
+      }
+      notify(res.message || '🚀 Zapret 2.0 (nfqws2 + Lua) успешно установлен в /opt/zapret2')
+      await loadStatus()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка обновления до Zapret 2 (nfqws2)', true)
+    } finally {
+      setUpgradingEngine(false)
+      setBusy(false)
+    }
+  }
+
+  const handleSwitchEngine = async (targetEngine: 'v1' | 'v2') => {
+    setSwitchingEngine(true)
+    setBusy(true)
+    const prevEngine = status?.engine || features.engine || 'v2'
+    setStatus((prev) => (prev ? { ...prev, engine: targetEngine } : prev))
+    setFeatures((prev) => ({ ...prev, engine: targetEngine }))
+    try {
+      const res = await apiPost<{
+        success: boolean
+        engine?: 'v1' | 'v2'
+        features?: ZapretFeatures
+        message?: string
+      }>('zapret/action', {
+        action: targetEngine === 'v1' ? 'rollback_v1' : 'switch_engine',
+        engine: targetEngine,
+      })
+      if (res.features) {
+        setFeatures((prev) => ({
+          ...prev,
+          ...res.features,
+          engine: targetEngine,
+          custom_entries: res.features?.custom_entries || prev.custom_entries || [],
+        }))
+      }
+      notify(
+        res.message ||
+          (targetEngine === 'v1'
+            ? '⏪ Выполнен безопасный откат на Legacy 1.x (nfqws)'
+            : '🚀 Переключено на Modern 2.0 (nfqws2)')
+      )
+      await loadStatus()
+    } catch (e) {
+      setStatus((prev) => (prev ? { ...prev, engine: prevEngine } : prev))
+      setFeatures((prev) => ({ ...prev, engine: prevEngine }))
+      notify(e instanceof Error ? e.message : 'Ошибка переключения движка Zapret', true)
+    } finally {
+      setSwitchingEngine(false)
+      setBusy(false)
+    }
+  }
+
 
   const handleApplyPreset = async (presetId: string) => {
     const presetKey = `preset:${presetId}`
@@ -720,6 +810,16 @@ export default function Zapret({ notify }: ZapretProps) {
 
   const isRunning = !!status?.running && features.enabled !== false
   const isInstalled = !!status?.installed
+  const activeEngine: 'v1' | 'v2' =
+    status?.engine ||
+    features.engine ||
+    (status?.cmdline?.includes('--dpi-desync=') && !status?.cmdline?.includes('--lua-desync') ? 'v1' : 'v2')
+  const v2Installed =
+    status?.v2_installed ?? (status?.cmdline?.includes('nfqws2') || status?.cmdline?.includes('--lua-desync') || false)
+  const canRollbackV1 = status?.can_rollback_v1 ?? true
+  const hardwareHint =
+    status?.hardware?.hint_text || (loading ? 'Определение архитектуры и RAM роутера…' : 'Роутер Keenetic — рекомендуется Zapret 2.0')
+  const targetArchLabel = status?.hardware?.target_arch || (loading ? 'определение…' : 'авто')
 
   if (loading && !status) {
     return (
@@ -1132,6 +1232,145 @@ export default function Zapret({ notify }: ZapretProps) {
             </button>
           </div>
         )}
+
+        {/* ПЕРЕКЛЮЧАТЕЛЬ ДВИЖКОВ (LEGACY 1.X / MODERN 2.0) И АВТОПОДСКАЗКА АРХИТЕКТУРЫ */}
+        <div
+          data-testid="zapret-engine-panel"
+          style={{
+            marginTop: 16,
+            padding: '14px 16px',
+            borderRadius: 12,
+            background: 'linear-gradient(135deg, rgba(56, 189, 248, 0.08) 0%, rgba(168, 85, 247, 0.06) 100%)',
+            border: '1px solid rgba(56, 189, 248, 0.25)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 12,
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 20 }}>🧠</span>
+              <div>
+                <div
+                  data-testid="zapret-hardware-hint"
+                  style={{ fontSize: 13, fontWeight: 700, color: '#38bdf8' }}
+                >
+                  {hardwareHint}
+                </div>
+                <div className="muted small" style={{ marginTop: 2, fontSize: 11.5 }}>
+                  Автоопределение архитектуры ({targetArchLabel}) • каталог Zapret 2.0:{' '}
+                  <code>/opt/zapret2</code> (<code>nfqws2</code> + Lua-библиотеки) • доступно переключение и безопасный откат на v1
+                </div>
+              </div>
+            </div>
+
+            {/* Переключатель движков: Legacy 1.x / Modern 2.0 */}
+            <div
+              role="group"
+              aria-label="Переключатель движков Zapret"
+              style={{
+                display: 'inline-flex',
+                background: 'rgba(15, 23, 42, 0.65)',
+                padding: 3,
+                borderRadius: 10,
+                border: '1px solid var(--border)',
+                gap: 4,
+              }}
+            >
+              <button
+                type="button"
+                data-testid="engine-switch-v1"
+                disabled={busy || switchingEngine || upgradingEngine}
+                onClick={() => handleSwitchEngine('v1')}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: 7,
+                  border: 'none',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: busy ? 'wait' : 'pointer',
+                  background: activeEngine === 'v1' ? 'rgba(234, 179, 8, 0.22)' : 'transparent',
+                  color: activeEngine === 'v1' ? '#facc15' : 'var(--muted)',
+                  transition: 'all 0.2s ease',
+                }}
+                title="Переключить на классический движок Legacy 1.x (nfqws)"
+              >
+                Legacy 1.x (nfqws)
+              </button>
+              <button
+                type="button"
+                data-testid="engine-switch-v2"
+                disabled={busy || switchingEngine || upgradingEngine}
+                onClick={() => (v2Installed ? handleSwitchEngine('v2') : handleUpgradeZapret2())}
+                style={{
+                  padding: '6px 12px',
+                  borderRadius: 7,
+                  border: 'none',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: busy ? 'wait' : 'pointer',
+                  background:
+                    activeEngine === 'v2'
+                      ? 'linear-gradient(135deg, rgba(56, 189, 248, 0.25) 0%, rgba(168, 85, 247, 0.25) 100%)'
+                      : 'transparent',
+                  color: activeEngine === 'v2' ? '#38bdf8' : 'var(--muted)',
+                  transition: 'all 0.2s ease',
+                }}
+                title="Переключить на современный движок Modern 2.0 (nfqws2 + Lua)"
+              >
+                Modern 2.0 (nfqws2)
+              </button>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                data-testid="upgrade-zapret2-btn"
+                className="btn sm"
+                disabled={busy || upgradingEngine}
+                onClick={handleUpgradeZapret2}
+                style={{
+                  background: 'linear-gradient(135deg, #0284c7 0%, #7c3aed 100%)',
+                  color: '#fff',
+                  border: 'none',
+                  fontWeight: 600,
+                  boxShadow: '0 4px 14px rgba(56, 189, 248, 0.25)',
+                }}
+                title="В 1 клик скачать актуальный бинарник nfqws2 и Lua-библиотеки в /opt/zapret2 с сохранением резервной копии v1"
+              >
+                {upgradingEngine
+                  ? '⏳ Скачивание nfqws2 и Lua в /opt/zapret2…'
+                  : '🚀 Обновить до Zapret 2 (nfqws2)'}
+              </button>
+
+              {canRollbackV1 && activeEngine === 'v2' && (
+                <button
+                  type="button"
+                  data-testid="rollback-v1-btn"
+                  className="btn sm ghost"
+                  disabled={busy || switchingEngine}
+                  onClick={() => handleSwitchEngine('v1')}
+                  style={{
+                    border: '1px solid rgba(250, 204, 21, 0.35)',
+                    color: '#facc15',
+                  }}
+                  title="Безопасный откат на движок Zapret v1 (nfqws) с автоматической конвертацией аргументов"
+                >
+                  {switchingEngine ? '⏳ Откат на v1…' : '⏪ Откатить на v1 (Legacy 1.x)'}
+                </button>
+              )}
+            </div>
+
+            <div className="muted small" style={{ fontSize: 11 }}>
+              Активный движок:{' '}
+              <b style={{ color: activeEngine === 'v2' ? '#38bdf8' : '#facc15' }}>
+                {activeEngine === 'v2' ? 'Modern 2.0 (nfqws2 + Lua)' : 'Legacy 1.x (nfqws)'}
+              </b>
+            </div>
+          </div>
+        </div>
 
         {/* КНОПКИ ДЕЙСТВИЙ */}
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 16 }}>

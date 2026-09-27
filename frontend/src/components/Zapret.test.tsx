@@ -1209,5 +1209,235 @@ describe('Zapret Component — Features 1, 2, 4, 5 (Mini-Blockcheck, DPI Analyti
     expect(text).toContain('⚪ Демон остановлен')
     expect(text).toContain('Остановлена со службой')
   })
+
+  it('displays router architecture auto-hint, switches engines (Legacy 1.x / Modern 2.0), and performs 1-click upgrade to Zapret 2 (nfqws2) and safe rollback to v1', async () => {
+    const hwStatus: ZapretStatus = {
+      ...mockZapretStatus,
+      engine: 'v1',
+      v2_installed: false,
+      v1_installed: true,
+      can_rollback_v1: true,
+      hardware: {
+        model: 'Titan KN-1811',
+        arch_label: 'ARM64',
+        target_arch: 'linux-arm64',
+        ram_mb: 512,
+        recommended_engine: 'v2',
+        hint_text: 'Обнаружен Titan KN-1811 (ARM64, 512MB RAM) — рекомендуется Zapret 2.0',
+      },
+    }
+
+    let currentStatus = hwStatus
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve(currentStatus)
+      }
+      return Promise.resolve({})
+    })
+
+    const postSpy = vi.spyOn(api, 'apiPost').mockImplementation((_path: string, body: unknown) => {
+      const b = body as { action?: string; engine?: string }
+      if (b.action === 'upgrade_zapret2') {
+        currentStatus = {
+          ...currentStatus,
+          engine: 'v2',
+          v2_installed: true,
+          can_rollback_v1: true,
+        }
+        return Promise.resolve({
+          success: true,
+          engine: 'v2',
+          v2_installed: true,
+          can_rollback_v1: true,
+          message: 'Zapret 2.0 (nfqws2 + Lua) установлен в /opt/zapret2 для Titan KN-1811 (ARM64)',
+        })
+      }
+      if (b.action === 'rollback_v1') {
+        currentStatus = {
+          ...currentStatus,
+          engine: 'v1',
+        }
+        return Promise.resolve({
+          success: true,
+          engine: 'v1',
+          message: 'Выполнен безопасный откат на движок Legacy 1.x (nfqws)',
+        })
+      }
+      return Promise.resolve({ success: true })
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    const hintEl = container?.querySelector('[data-testid="zapret-hardware-hint"]')
+    expect(hintEl?.textContent).toBe('Обнаружен Titan KN-1811 (ARM64, 512MB RAM) — рекомендуется Zapret 2.0')
+    expect(container?.textContent).toContain('/opt/zapret2')
+
+    const upgradeBtn = container?.querySelector('[data-testid="upgrade-zapret2-btn"]') as HTMLButtonElement | null
+    expect(upgradeBtn).not.toBeNull()
+    expect(upgradeBtn?.textContent).toContain('Обновить до Zapret 2 (nfqws2)')
+
+    // Click 1-click upgrade to Zapret 2 (nfqws2)
+    await act(async () => {
+      upgradeBtn?.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('zapret/action', {
+      action: 'upgrade_zapret2',
+      engine: 'v2',
+    })
+    expect(notifyMock).toHaveBeenCalledWith(
+      'Zapret 2.0 (nfqws2 + Lua) установлен в /opt/zapret2 для Titan KN-1811 (ARM64)'
+    )
+    expect(container?.textContent).toContain('Modern 2.0 (nfqws2 + Lua)')
+
+    // Rollback button should now be visible for v2 -> v1 safe rollback
+    const rollbackBtn = container?.querySelector('[data-testid="rollback-v1-btn"]') as HTMLButtonElement | null
+    expect(rollbackBtn).not.toBeNull()
+
+    await act(async () => {
+      rollbackBtn?.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('zapret/action', {
+      action: 'rollback_v1',
+      engine: 'v1',
+    })
+    expect(notifyMock).toHaveBeenCalledWith('Выполнен безопасный откат на движок Legacy 1.x (nfqws)')
+  })
+
+  it('reverts optimistic engine state and notifies on error when engine switch fails', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve({
+          ...mockZapretStatus,
+          engine: 'v2',
+          v2_installed: true,
+          can_rollback_v1: true,
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    vi.spyOn(api, 'apiPost').mockRejectedValue(new Error('Сбой переключения движка'))
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    const v1SwitchBtn = container?.querySelector('[data-testid="engine-switch-v1"]') as HTMLButtonElement | null
+    expect(v1SwitchBtn).not.toBeNull()
+
+    await act(async () => {
+      v1SwitchBtn?.click()
+    })
+
+    expect(notifyMock).toHaveBeenCalledWith('Сбой переключения движка', true)
+    expect(container?.textContent).toContain('Modern 2.0 (nfqws2 + Lua)')
+  })
+
+  it('displays low-RAM MIPS router hardware auto-hint recommending Legacy 1.x', async () => {
+    const lowRamStatus: ZapretStatus = {
+      ...mockZapretStatus,
+      engine: 'v1',
+      v2_installed: false,
+      v1_installed: true,
+      can_rollback_v1: true,
+      hardware: {
+        model: 'Start KN-1111',
+        arch_label: 'MIPS32 (mips)',
+        target_arch: 'linux-mips32r2-msb',
+        ram_mb: 64,
+        recommended_engine: 'v1',
+        hint_text: 'Обнаружен Start KN-1111 (MIPS32 (mips), 64MB RAM) — рекомендуется Legacy 1.x (экономия RAM)',
+      },
+    }
+
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve(lowRamStatus)
+      }
+      return Promise.resolve({})
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    const hintEl = container?.querySelector('[data-testid="zapret-hardware-hint"]')
+    expect(hintEl?.textContent).toBe(
+      'Обнаружен Start KN-1111 (MIPS32 (mips), 64MB RAM) — рекомендуется Legacy 1.x (экономия RAM)'
+    )
+    expect(container?.textContent).toContain('linux-mips32r2-msb')
+    expect(container?.textContent).toContain('Legacy 1.x (nfqws)')
+  })
+
+  it('does not display hardcoded Titan KN-1811 when hardware status is not provided by API', async () => {
+    const statusWithoutHw: ZapretStatus = {
+      ...mockZapretStatus,
+      hardware: undefined,
+    }
+
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve(statusWithoutHw)
+      }
+      return Promise.resolve({})
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    const hintEl = container?.querySelector('[data-testid="zapret-hardware-hint"]')
+    expect(hintEl?.textContent).not.toContain('Titan KN-1811')
+    expect(hintEl?.textContent).toContain('Роутер Keenetic — рекомендуется Zapret 2.0')
+  })
+
+  it('handles upgrade_zapret2 API failure without switching engine state in UI', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve({
+          ...mockZapretStatus,
+          engine: 'v1',
+          v2_installed: false,
+          v1_installed: true,
+          can_rollback_v1: true,
+          hardware: {
+            model: 'Titan KN-1811',
+            arch_label: 'ARM64',
+            target_arch: 'linux-arm64',
+            ram_mb: 512,
+            recommended_engine: 'v2',
+            hint_text: 'Обнаружен Titan KN-1811 (ARM64, 512MB RAM) — рекомендуется Zapret 2.0',
+          },
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    vi.spyOn(api, 'apiPost').mockRejectedValue(
+      new Error('Не удалось установить Zapret 2.0: исполняемый файл nfqws2 или Lua-библиотеки не найдены в /opt/zapret2')
+    )
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    const upgradeBtn = container?.querySelector('[data-testid="upgrade-zapret2-btn"]') as HTMLButtonElement | null
+    expect(upgradeBtn).not.toBeNull()
+
+    await act(async () => {
+      upgradeBtn?.click()
+    })
+
+    expect(notifyMock).toHaveBeenCalledWith(
+      expect.stringContaining('Не удалось установить Zapret 2.0'),
+      true
+    )
+    expect(container?.textContent).toContain('Legacy 1.x (nfqws)')
+  })
 })
+
 

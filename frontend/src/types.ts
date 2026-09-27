@@ -72,6 +72,15 @@ export interface ZapretCustomEntry {
   cdns: string[]
 }
 
+export interface ZapretHardwareInfo {
+  model: string
+  arch_label: string
+  target_arch: string
+  ram_mb: number
+  recommended_engine: 'v1' | 'v2'
+  hint_text: string
+}
+
 export interface ZapretFeatures {
   enabled: boolean
   hybrid_youtube: boolean
@@ -92,6 +101,7 @@ export interface ZapretFeatures {
   community_hostlist_last_updated?: string
   community_hostlist_count?: number
   excluded_devices?: string[]
+  engine?: 'v1' | 'v2'
 }
 
 export interface ZapretAnalytics {
@@ -136,6 +146,11 @@ export interface ZapretStatus {
   hosts?: string
   features?: ZapretFeatures
   analytics?: ZapretAnalytics
+  engine?: 'v1' | 'v2'
+  v2_installed?: boolean
+  v1_installed?: boolean
+  can_rollback_v1?: boolean
+  hardware?: ZapretHardwareInfo
 }
 
 export interface DpiTestResult {

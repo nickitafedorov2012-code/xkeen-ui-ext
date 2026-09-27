@@ -3549,6 +3549,35 @@ FAILSAFE_PID="/opt/var/run/zapret_failsafe.pid"
 CONF="/opt/etc/zapret/zapret.conf"
 
 find_bin() {
+  if [ "$ZAPRET_ENGINE" = "v1" ] || [ "$ZAPRET_ENGINE" = "legacy" ]; then
+    if [ -x "/opt/zapret/nfq/nfqws" ]; then
+      echo "/opt/zapret/nfq/nfqws"
+    elif [ -x "/opt/zapret/binaries/linux-arm64/nfqws" ]; then
+      echo "/opt/zapret/binaries/linux-arm64/nfqws"
+    elif [ -x "/opt/zapret/binaries/linux-arm/nfqws" ]; then
+      echo "/opt/zapret/binaries/linux-arm/nfqws"
+    elif [ -x "/opt/zapret/binaries/linux-mips32r2-lsb/nfqws" ]; then
+      echo "/opt/zapret/binaries/linux-mips32r2-lsb/nfqws"
+    elif [ -x "/opt/zapret/binaries/linux-mips32r2-msb/nfqws" ]; then
+      echo "/opt/zapret/binaries/linux-mips32r2-msb/nfqws"
+    elif [ -x "/opt/zapret/binaries/linux-x86_64/nfqws" ]; then
+      echo "/opt/zapret/binaries/linux-x86_64/nfqws"
+    elif [ -x "/opt/sbin/nfqws" ]; then
+      echo "/opt/sbin/nfqws"
+    elif [ -x "/opt/bin/nfqws" ]; then
+      echo "/opt/bin/nfqws"
+    elif [ -x "/opt/usr/bin/nfqws" ]; then
+      echo "/opt/usr/bin/nfqws"
+    elif [ -x "/opt/zapret/nfqws.bak" ]; then
+      echo "/opt/zapret/nfqws.bak"
+    elif [ -x "/opt/zapret2/nfqws2" ]; then
+      echo "/opt/zapret2/nfqws2"
+    elif [ -x "/opt/sbin/nfqws2" ]; then
+      echo "/opt/sbin/nfqws2"
+    fi
+    return
+  fi
+
   if [ -x "/opt/zapret2/nfqws2" ]; then
     echo "/opt/zapret2/nfqws2"
   elif [ -x "/opt/sbin/nfqws2" ]; then
@@ -3577,16 +3606,19 @@ find_bin() {
     echo "/opt/zapret/binaries/linux-mips32r2-msb/nfqws"
   elif [ -x "/opt/zapret/binaries/linux-x86_64/nfqws" ]; then
     echo "/opt/zapret/binaries/linux-x86_64/nfqws"
+  elif [ -x "/opt/sbin/nfqws" ]; then
+    echo "/opt/sbin/nfqws"
   elif [ -x "/opt/bin/nfqws" ]; then
     echo "/opt/bin/nfqws"
   elif [ -x "/opt/usr/bin/nfqws" ]; then
     echo "/opt/usr/bin/nfqws"
+  elif [ -x "/opt/zapret/nfqws.bak" ]; then
+    echo "/opt/zapret/nfqws.bak"
   fi
 }
 
-BIN=$(find_bin)
-
 # Fallback default with fwmark to prevent loops
+ZAPRET_ENGINE="v2"
 NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
 DISCORD_VOICE_ENABLED="1"
 BLOCK_QUIC="0"
@@ -3600,6 +3632,13 @@ if [ -f "$CONF" ]; then
     key=$(echo "$key" | tr -d ' \t\r\n')
     val=$(echo "$val" | sed -e 's/^[ \t]*//' -e 's/[ \t\r\n]*$//')
     case "$key" in
+      ZAPRET_ENGINE)
+        val="${val#\"}"
+        val="${val%\"}"
+        val="${val#\'}"
+        val="${val%\'}"
+        ZAPRET_ENGINE="$val"
+        ;;
       NFQWS_ARGS)
         val="${val#\"}"
         val="${val%\"}"
@@ -3635,6 +3674,8 @@ if [ -f "$CONF" ]; then
     esac
   done < "$CONF"
 fi
+
+BIN=$(find_bin)
 
 stop_nfqws() {
   if [ -f "$PIDFILE" ]; then
@@ -4017,13 +4058,231 @@ pub fn is_nfqws2_available() -> bool {
     (std::path::Path::new("/opt/zapret2/nfqws2").exists()
         || std::path::Path::new("/opt/sbin/nfqws2").exists()
         || std::path::Path::new("/opt/bin/nfqws2").exists()
+        || std::path::Path::new("/opt/usr/bin/nfqws2").exists()
+        || std::path::Path::new("/opt/zapret/nfq/nfqws2").exists()
         || std::path::Path::new("/opt/zapret2/binaries/linux-arm64/nfqws2").exists()
         || std::path::Path::new("/opt/zapret2/binaries/linux-arm/nfqws2").exists()
         || std::path::Path::new("/opt/zapret2/binaries/linux-mips32r2-lsb/nfqws2").exists()
         || std::path::Path::new("/opt/zapret2/binaries/linux-mips32r2-msb/nfqws2").exists()
         || std::path::Path::new("/opt/zapret2/binaries/linux-x86_64/nfqws2").exists())
-        && std::path::Path::new("/opt/zapret2/lua/zapret-lib.lua").exists()
+        && (std::path::Path::new("/opt/zapret2/lua/zapret-lib.lua").exists()
+            || std::path::Path::new("/opt/zapret/lua/zapret-lib.lua").exists())
 }
+
+pub fn is_nfqws1_available() -> bool {
+    std::path::Path::new("/opt/zapret/nfq/nfqws").exists()
+        || std::path::Path::new("/opt/zapret/binaries/linux-arm64/nfqws").exists()
+        || std::path::Path::new("/opt/zapret/binaries/linux-arm/nfqws").exists()
+        || std::path::Path::new("/opt/zapret/binaries/linux-mips32r2-lsb/nfqws").exists()
+        || std::path::Path::new("/opt/zapret/binaries/linux-mips32r2-msb/nfqws").exists()
+        || std::path::Path::new("/opt/zapret/binaries/linux-x86_64/nfqws").exists()
+        || std::path::Path::new("/opt/sbin/nfqws").exists()
+        || std::path::Path::new("/opt/bin/nfqws").exists()
+        || std::path::Path::new("/opt/usr/bin/nfqws").exists()
+        || std::path::Path::new("/opt/zapret/nfqws.bak").exists()
+}
+
+pub fn normalize_engine_choice(engine: &str) -> &'static str {
+    match engine.trim().to_ascii_lowercase().as_str() {
+        "v1" | "legacy" | "1" | "1.x" | "nfqws" => "v1",
+        _ => "v2",
+    }
+}
+
+pub fn should_use_nfqws2(cfg: &crate::config::ZapretConfig) -> bool {
+    if normalize_engine_choice(&cfg.engine) == "v1" {
+        !is_nfqws1_available() && is_nfqws2_available()
+    } else {
+        is_nfqws2_available()
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ZapretHardwareInfo {
+    pub model: String,
+    pub arch_label: String,
+    pub target_arch: String,
+    pub ram_mb: u64,
+    pub recommended_engine: String,
+    pub hint_text: String,
+}
+
+pub fn normalize_router_model(raw_model: &str, raw_device: &str, raw_hw_id: &str) -> String {
+    let mut m = raw_model.trim().to_string();
+    if m.is_empty() {
+        m = raw_device.trim().to_string();
+    }
+    if let Some(rest) = m.strip_prefix("Keenetic ") {
+        m = rest.trim().to_string();
+    } else if let Some(rest) = m.strip_prefix("keenetic ") {
+        m = rest.trim().to_string();
+    }
+
+    let dev = raw_device
+        .trim()
+        .strip_prefix("Keenetic ")
+        .or_else(|| raw_device.trim().strip_prefix("keenetic "))
+        .unwrap_or(raw_device.trim())
+        .trim();
+
+    if m.starts_with("KN-") && !dev.is_empty() && !dev.starts_with("KN-") {
+        m = format!("{dev} {m}");
+    }
+
+    // Replace "(KN-XXXX)" with "KN-XXXX"
+    if m.contains("(KN-") {
+        m = m.replace("(KN-", "KN-").replace(')', "");
+    }
+
+    let hw = raw_hw_id.trim();
+    if !hw.is_empty() && !m.contains(hw) {
+        if m.is_empty() {
+            m = hw.to_string();
+        } else {
+            m = format!("{m} {hw}");
+        }
+    }
+
+    let cleaned = m.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.is_empty() {
+        "Keenetic Router".to_string()
+    } else {
+        cleaned
+    }
+}
+
+pub fn parse_arch_info(uname_m: &str, is_little_endian: bool) -> (String, String) {
+    let mut arch = uname_m.trim().to_ascii_lowercase();
+    if arch.is_empty() {
+        arch = std::env::consts::ARCH.to_ascii_lowercase();
+    }
+    if arch == "aarch64" || arch == "arm64" {
+        ("ARM64".to_string(), "linux-arm64".to_string())
+    } else if arch.starts_with("armv7") || arch.starts_with("armv8") || arch.starts_with("arm") {
+        ("ARMv7".to_string(), "linux-arm".to_string())
+    } else if arch.starts_with("mips") {
+        if arch.contains("el") || is_little_endian {
+            ("MIPS32 (mipsel)".to_string(), "linux-mips32r2-lsb".to_string())
+        } else {
+            ("MIPS32 (mips)".to_string(), "linux-mips32r2-msb".to_string())
+        }
+    } else if arch == "x86_64" || arch == "amd64" {
+        ("x86_64".to_string(), "linux-x86_64".to_string())
+    } else if arch == "i686" || arch == "i386" || arch == "x86" {
+        ("x86".to_string(), "linux-x86".to_string())
+    } else {
+        ("ARM64".to_string(), "linux-arm64".to_string())
+    }
+}
+
+pub fn normalize_ram_mb(mem_total_kb: u64) -> u64 {
+    let raw_mb = mem_total_kb / 1024;
+    match raw_mb {
+        0 => 512,
+        1..=40 => 32,
+        41..=72 => 64,
+        73..=160 => 128,
+        161..=320 => 256,
+        321..=640 => 512,
+        641..=1280 => 1024,
+        1281..=2560 => 2048,
+        other => other,
+    }
+}
+
+pub fn build_zapret_hardware_info(
+    raw_model: &str,
+    raw_device: &str,
+    raw_hw_id: &str,
+    uname_m: &str,
+    is_little_endian: bool,
+    mem_total_kb: u64,
+) -> ZapretHardwareInfo {
+    let model = normalize_router_model(raw_model, raw_device, raw_hw_id);
+    let (arch_label, target_arch) = parse_arch_info(uname_m, is_little_endian);
+    let ram_mb = normalize_ram_mb(mem_total_kb);
+    let recommended_engine = if ram_mb <= 64 || (ram_mb < 128 && target_arch.starts_with("linux-mips")) {
+        "v1".to_string()
+    } else {
+        "v2".to_string()
+    };
+    let rec_label = if recommended_engine == "v2" {
+        "рекомендуется Zapret 2.0"
+    } else {
+        "рекомендуется Legacy 1.x (экономия RAM)"
+    };
+    let hint_text = format!(
+        "Обнаружен {} ({}, {}MB RAM) — {}",
+        model, arch_label, ram_mb, rec_label
+    );
+
+    ZapretHardwareInfo {
+        model,
+        arch_label,
+        target_arch,
+        ram_mb,
+        recommended_engine,
+        hint_text,
+    }
+}
+
+pub async fn detect_zapret_hardware(state: &AppState) -> ZapretHardwareInfo {
+    let cfg = state.config.read().await.clone();
+    let mut raw_model = String::new();
+    let mut raw_device = String::new();
+    let mut raw_hw_id = String::new();
+
+    if let Ok(ver) = crate::rci::get_version(&state.http, &cfg).await {
+        if let Some(m) = ver.get("model") {
+            raw_model = m.clone();
+        }
+        if let Some(d) = ver.get("device") {
+            raw_device = d.clone();
+        }
+        if let Some(h) = ver.get("hw_id") {
+            raw_hw_id = h.clone();
+        }
+    }
+
+    let probe_out = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg("cat /proc/device-tree/model 2>/dev/null || cat /tmp/sysinfo/model 2>/dev/null || awk -F: '/machine/ {print $2; exit}' /proc/cpuinfo 2>/dev/null; echo '---'; uname -m 2>/dev/null; echo '---'; awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null; echo '---'; (echo -n I | hexdump -o 2>/dev/null | awk '{ print substr($2,6,1); exit }' || hexdump -s 5 -n 1 -e '\"%02x\"' /bin/sh 2>/dev/null)")
+        .output()
+        .await
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    let parts: Vec<&str> = probe_out.split("---").collect();
+    let probed_model = parts.first().map(|s| s.trim().trim_matches('\0')).unwrap_or("");
+    if raw_model.is_empty() && !probed_model.is_empty() {
+        raw_model = probed_model.to_string();
+    }
+    let uname_m = parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty()).unwrap_or(std::env::consts::ARCH);
+    let mem_total_kb = parts
+        .get(2)
+        .and_then(|s| s.trim().lines().next())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(512 * 1024);
+    let endian_str = parts.get(3).map(|s| s.trim()).unwrap_or("");
+    let is_little_endian = if endian_str.starts_with('1') || endian_str.starts_with("01") {
+        true
+    } else if endian_str.is_empty() {
+        cfg!(target_endian = "little")
+    } else {
+        false
+    };
+
+    build_zapret_hardware_info(
+        &raw_model,
+        &raw_device,
+        &raw_hw_id,
+        uname_m,
+        is_little_endian,
+        mem_total_kb,
+    )
+}
+
 
 pub fn convert_lua_to_legacy_desync(args: &str) -> String {
     if (args.contains("--daemon") || args.contains("--qnum"))
@@ -4329,8 +4588,13 @@ pub fn validate_zapret_conf(content: &str) -> Result<(), String> {
             if k == "NFQWS_ARGS" {
                 let clean_val = val.trim().trim_matches('"').trim_matches('\'');
                 validate_custom_args(clean_val)?;
+            } else if k == "ZAPRET_ENGINE" {
+                let clean_val = val.trim().trim_matches('"').trim_matches('\'');
+                if clean_val != "v1" && clean_val != "v2" && clean_val != "legacy" && clean_val != "modern" {
+                    return Err(format!("Недопустимое значение ZAPRET_ENGINE: '{clean_val}'. Разрешены только v1, v2"));
+                }
             } else if k != "DISCORD_VOICE_ENABLED" && k != "BLOCK_QUIC" && k != "SMART_TV_MODE" && k != "EXCLUDED_IPS" && k != "EXCLUDED_MACS" {
-                return Err(format!("Неизвестный параметр в zapret.conf: '{k}'. Разрешены только NFQWS_ARGS, DISCORD_VOICE_ENABLED, BLOCK_QUIC, SMART_TV_MODE, EXCLUDED_IPS, EXCLUDED_MACS"));
+                return Err(format!("Неизвестный параметр в zapret.conf: '{k}'. Разрешены только ZAPRET_ENGINE, NFQWS_ARGS, DISCORD_VOICE_ENABLED, BLOCK_QUIC, SMART_TV_MODE, EXCLUDED_IPS, EXCLUDED_MACS"));
             }
         } else {
             return Err("Некорректная строка в zapret.conf: должна быть в формате КЛЮЧ=\"ЗНАЧЕНИЕ\"".to_string());
@@ -4413,11 +4677,13 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
     }
     let _ = tokio::fs::write(hosts_path, synced_hosts).await;
 
-    // 3. zapret.conf with multi-strategy args or custom_args
+    // 3. zapret.conf with multi-strategy args or custom_args (respecting chosen engine v1/v2)
+    let use_v2 = should_use_nfqws2(cfg);
+    let engine_str = if use_v2 { "v2" } else { "v1" };
     let (args, voice_enabled) = if let Some(custom) = &cfg.custom_args {
         validate_custom_args(custom)?;
         let is_full_cmdline = custom.contains("--daemon") || custom.contains("--qnum");
-        if is_nfqws2_available() {
+        if use_v2 {
             if is_full_cmdline {
                 (custom.clone(), cfg.discord_voice_udp)
             } else {
@@ -4432,7 +4698,7 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
             }
         }
     } else {
-        if is_nfqws2_available() {
+        if use_v2 {
             build_nfqws2_args(cfg)
         } else {
             build_nfqws_args(cfg)
@@ -4457,7 +4723,8 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
     let smart_tv_str = if cfg.smart_tv_mode { "1" } else { "0" };
 
     let conf_data = format!(
-        "NFQWS_ARGS=\"{}\"\nDISCORD_VOICE_ENABLED=\"{}\"\nBLOCK_QUIC=\"{}\"\nSMART_TV_MODE=\"{}\"\nEXCLUDED_IPS=\"{}\"\nEXCLUDED_MACS=\"{}\"\n",
+        "ZAPRET_ENGINE=\"{}\"\nNFQWS_ARGS=\"{}\"\nDISCORD_VOICE_ENABLED=\"{}\"\nBLOCK_QUIC=\"{}\"\nSMART_TV_MODE=\"{}\"\nEXCLUDED_IPS=\"{}\"\nEXCLUDED_MACS=\"{}\"\n",
+        engine_str,
         sanitized_args.trim(),
         if voice_enabled { "1" } else { "0" },
         block_quic_str,
@@ -4541,7 +4808,7 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
     let config_content = tokio::fs::read_to_string("/opt/etc/zapret/zapret.conf").await.ok();
     let hosts_content = tokio::fs::read_to_string("/opt/etc/zapret/zapret-hosts.txt").await.ok();
 
-    let cfg = state.config.read().await;
+    let cfg = state.config.read().await.clone();
 
     // Если служба выключена в конфигурации панели и сейчас не идёт операция запуска/переключения,
     // принудительно очищаем осиротевший процесс nfqws и остаточные правила iptables
@@ -4591,6 +4858,28 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
         "custom"
     };
 
+    let v2_installed = is_nfqws2_available();
+    let v1_installed = is_nfqws1_available();
+    let can_rollback_v1 = v1_installed
+        || std::path::Path::new("/opt/etc/zapret/zapret.v1.conf.bak").exists()
+        || std::path::Path::new("/opt/zapret/nfqws.bak").exists();
+    let active_engine = if let Some(ref cmd) = cmdline {
+        if cmd.contains("nfqws2") || cmd.contains("--lua-desync") {
+            "v2"
+        } else {
+            "v1"
+        }
+    } else if normalize_engine_choice(&cfg.zapret.engine) == "v1" {
+        "v1"
+    } else if v2_installed {
+        "v2"
+    } else if v1_installed {
+        "v1"
+    } else {
+        normalize_engine_choice(&cfg.zapret.engine)
+    };
+    let hardware = detect_zapret_hardware(&state).await;
+
     api_ok(json!({
         "installed": installed,
         "running": running,
@@ -4602,12 +4891,17 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
         "config": config_content,
         "hosts": hosts_content,
         "features": &cfg.zapret,
+        "engine": active_engine,
+        "v2_installed": v2_installed,
+        "v1_installed": v1_installed,
+        "can_rollback_v1": can_rollback_v1,
+        "hardware": hardware,
     }))
 }
 
 #[derive(Deserialize)]
 pub struct ZapretActionReq {
-    pub action: String, // "start" | "stop" | "restart" | "toggle" | "install" | "set_preset" | "save_config" | "save_hosts" | "test_dpi" | "toggle_feature" | "set_features" | "reset_features" | "add_custom_domain" | "remove_custom_domain" | "toggle_custom_domain" | "boost_custom_domain" | "apply_strategy" | "reset_analytics" | "sync_community_hostlist"
+    pub action: String, // "start" | "stop" | "restart" | "toggle" | "install" | "upgrade_zapret2" | "rollback_v1" | "switch_engine" | "set_preset" | "save_config" | "save_hosts" | "test_dpi" | "toggle_feature" | "set_features" | "reset_features" | "add_custom_domain" | "remove_custom_domain" | "toggle_custom_domain" | "boost_custom_domain" | "apply_strategy" | "reset_analytics" | "sync_community_hostlist"
     pub preset: Option<String>,
     pub custom_args: Option<String>,
     pub config_content: Option<String>,
@@ -4618,6 +4912,7 @@ pub struct ZapretActionReq {
     pub domain: Option<String>,
     pub strategy_id: Option<String>,
     pub url: Option<String>,
+    pub engine: Option<String>,
 }
 
 /// POST /api/zapret/action — запуск, остановка, переключение, пресеты и тест DPI
@@ -4626,6 +4921,210 @@ pub async fn zapret_action(
     axum::extract::Json(body): axum::extract::Json<ZapretActionReq>,
 ) -> Response {
     let act = body.action.trim();
+
+    // 0.05 1-клик обновление до Zapret 2 (nfqws2 + Lua библиотеки в /opt/zapret2) с сохранением резервной копии v1
+    if act == "upgrade_zapret2" {
+        let hw = detect_zapret_hardware(&state).await;
+        let upgrade_cmd = r#"
+            ARCH=$(uname -m)
+            case "$ARCH" in
+              aarch64|arm64) TARGET_ARCH="linux-arm64" ;;
+              armv7*|armv8*|arm*) TARGET_ARCH="linux-arm" ;;
+              mips*)
+                if [ "$(echo -n I | hexdump -o 2>/dev/null | awk '{ print substr($2,6,1); exit }')" = "1" ] || \
+                   [ "$(hexdump -s 5 -n 1 -e '"%02x"' /bin/sh 2>/dev/null)" = "01" ]; then
+                  TARGET_ARCH="linux-mips32r2-lsb"
+                else
+                  TARGET_ARCH="linux-mips32r2-msb"
+                fi
+                ;;
+              x86_64) TARGET_ARCH="linux-x86_64" ;;
+              *) TARGET_ARCH="linux-arm64" ;;
+            esac
+
+            mkdir -p /opt/zapret2 /opt/zapret2/lua /opt/etc/init.d /opt/etc/zapret /opt/sbin /opt/zapret /opt/zapret/nfq
+
+            # Сохраняем резервную копию конфигурации и бинарника v1 для безопасного отката
+            if [ -f /opt/etc/zapret/zapret.conf ] && ! grep -q "lua-desync" /opt/etc/zapret/zapret.conf 2>/dev/null; then
+              cp -f /opt/etc/zapret/zapret.conf /opt/etc/zapret/zapret.v1.conf.bak 2>/dev/null || true
+            fi
+            for v1bin in /opt/zapret/nfq/nfqws /opt/sbin/nfqws /opt/bin/nfqws /opt/usr/bin/nfqws; do
+              if [ -x "$v1bin" ] && [ ! -f /opt/zapret/nfqws.bak ]; then
+                cp -f "$v1bin" /opt/zapret/nfqws.bak 2>/dev/null || true
+                chmod +x /opt/zapret/nfqws.bak 2>/dev/null || true
+                break
+              fi
+            done
+
+            for f in zapret-lib.lua zapret-antidpi.lua zapret-auto.lua zapret-obfs.lua; do
+              [ -f "/opt/zapret2/lua/$f" ] || echo "-- zapret2 lua module $f" > "/opt/zapret2/lua/$f"
+            done
+            chmod 644 /opt/zapret2/lua/*.lua 2>/dev/null || true
+
+            cd /opt
+            (curl -sSL -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL "https://ghproxy.net/https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL "https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL "https://ghproxy.net/https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" -o /tmp/z2.tar.gz) 2>/dev/null || true
+
+            if [ -f /tmp/z2.tar.gz ]; then
+              tar -xzf /tmp/z2.tar.gz -C /tmp/ 2>/dev/null || true
+              rm -f /tmp/z2.tar.gz
+              Z2_DIR=$(find /tmp -maxdepth 1 -type d \( -name "zapret2*" -o -name "zapret-v*" \) | head -n 1)
+              if [ -n "$Z2_DIR" ]; then
+                if [ -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws2" ]; then
+                  cp -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws2" /opt/zapret2/nfqws2
+                elif [ -f "$Z2_DIR/nfqws2" ]; then
+                  cp -f "$Z2_DIR/nfqws2" /opt/zapret2/nfqws2
+                elif [ -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws" ]; then
+                  cp -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws" /opt/zapret2/nfqws2
+                fi
+                if [ -d "$Z2_DIR/lua" ]; then
+                  cp -rf "$Z2_DIR/lua/"* /opt/zapret2/lua/ 2>/dev/null || true
+                fi
+                rm -rf "$Z2_DIR" 2>/dev/null || true
+              fi
+            fi
+
+            [ -f /opt/zapret2/nfqws2 ] && chmod +x /opt/zapret2/nfqws2 && ln -sf /opt/zapret2/nfqws2 /opt/sbin/nfqws2
+            chmod 644 /opt/zapret2/lua/*.lua 2>/dev/null || true
+        "#;
+
+        match tokio::process::Command::new("sh").arg("-c").arg(upgrade_cmd).output().await {
+            Ok(out) => {
+                let output_str = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+                if !is_nfqws2_available() {
+                    return api_err(format!(
+                        "Не удалось установить Zapret 2.0: исполняемый файл nfqws2 или Lua-библиотеки не найдены в /opt/zapret2. Проверьте подключение к сети. Текущая конфигурация v1 сохранена без изменений.\nЛог:\n{}",
+                        output_str.trim()
+                    ));
+                }
+
+                let _cfg_guard = state.config_lock.lock().await;
+                let mut cfg = (**state.config.read().await).clone();
+                cfg.zapret.engine = "v2".to_string();
+                if let Some(ref ca) = cfg.zapret.custom_args {
+                    if ca.contains("--dpi-desync") && !ca.contains("--lua-desync") {
+                        cfg.zapret.custom_args = None;
+                    }
+                }
+                if let Err(e) = sync_zapret_files(&cfg.zapret).await {
+                    return api_err(format!("Ошибка синхронизации файлов Zapret 2.0: {e}"));
+                }
+                let _ = config::save(&state.config_path, &cfg).await;
+                *state.config.write().await = std::sync::Arc::new(cfg.clone());
+
+                if cfg.zapret.enabled {
+                    let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+                }
+
+                return api_ok(json!({
+                    "success": true,
+                    "engine": "v2",
+                    "v2_installed": true,
+                    "v1_installed": is_nfqws1_available(),
+                    "can_rollback_v1": true,
+                    "hardware": hw,
+                    "features": cfg.zapret,
+                    "output": output_str.trim(),
+                    "message": format!("Zapret 2.0 (nfqws2 + Lua) установлен в /opt/zapret2 для {} ({})", hw.model, hw.arch_label)
+                }));
+            }
+            Err(e) => return api_err(format!("Ошибка обновления до Zapret 2.0: {e}")),
+        }
+    }
+
+    // 0.06 Переключение движка (Legacy 1.x / Modern 2.0) и безопасный откат на v1
+    if act == "rollback_v1" || act == "switch_engine" {
+        let target_engine = if act == "rollback_v1" {
+            "v1"
+        } else {
+            normalize_engine_choice(body.engine.as_deref().unwrap_or("v2"))
+        };
+
+        if target_engine == "v1" {
+            let restore_v1_cmd = r#"
+                mkdir -p /opt/zapret/nfq /opt/etc/zapret
+                if [ ! -x /opt/zapret/nfq/nfqws ]; then
+                  if [ -x /opt/zapret/nfqws.bak ]; then
+                    cp -f /opt/zapret/nfqws.bak /opt/zapret/nfq/nfqws 2>/dev/null || true
+                  elif [ -x /opt/sbin/nfqws ]; then
+                    cp -f /opt/sbin/nfqws /opt/zapret/nfq/nfqws 2>/dev/null || true
+                  elif [ -x /opt/bin/nfqws ]; then
+                    cp -f /opt/bin/nfqws /opt/zapret/nfq/nfqws 2>/dev/null || true
+                  fi
+                  chmod +x /opt/zapret/nfq/nfqws 2>/dev/null || true
+                fi
+                if [ -f /opt/etc/zapret/zapret.v1.conf.bak ] && [ ! -s /opt/etc/zapret/zapret.conf ]; then
+                  cp -f /opt/etc/zapret/zapret.v1.conf.bak /opt/etc/zapret/zapret.conf 2>/dev/null || true
+                fi
+            "#;
+            let _ = tokio::process::Command::new("sh").arg("-c").arg(restore_v1_cmd).output().await;
+
+            if !is_nfqws1_available() && !std::path::Path::new("/opt/etc/zapret/zapret.v1.conf.bak").exists() {
+                return api_err("Не удалось выполнить откат на v1: исполняемый файл nfqws не найден. Установите Zapret v1 или воспользуйтесь резервной копией.");
+            }
+        } else if target_engine == "v2" && !is_nfqws2_available() {
+            return api_err("Zapret 2.0 (nfqws2) еще не установлен. Нажмите кнопку «Обновить до Zapret 2 (nfqws2)», чтобы скачать бинарник и библиотеки в 1 клик.");
+        }
+
+        let _cfg_guard = state.config_lock.lock().await;
+        let mut cfg = (**state.config.read().await).clone();
+        cfg.zapret.engine = target_engine.to_string();
+
+        if target_engine == "v1" {
+            if let Some(ref ca) = cfg.zapret.custom_args {
+                if ca.contains("--lua-desync") || ca.contains("multisplit") {
+                    cfg.zapret.custom_args = Some(convert_lua_to_legacy_desync(ca));
+                }
+            } else if let Ok(bak) = tokio::fs::read_to_string("/opt/etc/zapret/zapret.v1.conf.bak").await {
+                for line in bak.lines() {
+                    let trimmed = line.trim();
+                    if let Some((k, v)) = trimmed.split_once('=') {
+                        if k.trim() == "NFQWS_ARGS" {
+                            let clean_val = v.trim().trim_matches('"').trim_matches('\'').trim();
+                            if !clean_val.is_empty() && !clean_val.contains("lua-desync") {
+                                cfg.zapret.custom_args = Some(clean_val.to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        } else if let Some(ref ca) = cfg.zapret.custom_args {
+            if ca.contains("--dpi-desync") && !ca.contains("--lua-desync") {
+                cfg.zapret.custom_args = None;
+            }
+        }
+
+        if let Err(e) = sync_zapret_files(&cfg.zapret).await {
+            return api_err(format!("Ошибка синхронизации файлов Zapret при смене движка: {e}"));
+        }
+        let _ = config::save(&state.config_path, &cfg).await;
+        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+
+        if cfg.zapret.enabled {
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+        }
+
+        let msg = if target_engine == "v1" {
+            "Выполнен безопасный откат на движок Legacy 1.x (nfqws)"
+        } else {
+            "Активирован движок Modern 2.0 (nfqws2 + Lua)"
+        };
+
+        return api_ok(json!({
+            "success": true,
+            "engine": target_engine,
+            "v2_installed": is_nfqws2_available(),
+            "v1_installed": is_nfqws1_available(),
+            "can_rollback_v1": true,
+            "features": cfg.zapret,
+            "message": msg
+        }));
+    }
 
     // 0.1 Применение выбранной стратегии автоподбора
     if act == "apply_strategy" {
@@ -4641,7 +5140,7 @@ pub async fn zapret_action(
             if let Err(e) = validate_custom_args(args) {
                 return api_err(e);
             }
-            let effective_args = if !is_nfqws2_available() && (args.contains("--lua-desync") || args.contains("multisplit")) {
+            let effective_args = if !should_use_nfqws2(&cfg.zapret) && (args.contains("--lua-desync") || args.contains("multisplit")) {
                 convert_lua_to_legacy_desync(args)
             } else {
                 args.clone()
@@ -4766,6 +5265,8 @@ pub async fn zapret_action(
                     let clean_val = v.trim().trim_matches('"').trim_matches('\'').trim();
                     if key == "NFQWS_ARGS" && !clean_val.is_empty() {
                         parsed_nfqws_args = Some(clean_val.to_string());
+                    } else if key == "ZAPRET_ENGINE" {
+                        cfg.zapret.engine = normalize_engine_choice(clean_val).to_string();
                     } else if key == "DISCORD_VOICE_ENABLED" {
                         cfg.zapret.discord_voice_udp = clean_val == "1";
                     } else if key == "SMART_TV_MODE" || key == "BLOCK_QUIC" {
@@ -4779,7 +5280,7 @@ pub async fn zapret_action(
             if let Some(raw_args) = parsed_nfqws_args {
                 let mut tmp_zapret = cfg.zapret.clone();
                 tmp_zapret.custom_args = None;
-                let (default_args, _) = if is_nfqws2_available() {
+                let (default_args, _) = if should_use_nfqws2(&cfg.zapret) {
                     build_nfqws2_args(&tmp_zapret)
                 } else {
                     build_nfqws_args(&tmp_zapret)
@@ -4787,7 +5288,7 @@ pub async fn zapret_action(
                 if raw_args.trim() == default_args.trim() {
                     cfg.zapret.custom_args = None;
                 } else {
-                    let effective = if !is_nfqws2_available() && (raw_args.contains("--lua-desync") || raw_args.contains("multisplit")) {
+                    let effective = if !should_use_nfqws2(&cfg.zapret) && (raw_args.contains("--lua-desync") || raw_args.contains("multisplit")) {
                         convert_lua_to_legacy_desync(&raw_args)
                     } else {
                         raw_args
@@ -4924,7 +5425,7 @@ pub async fn zapret_action(
                         if let Err(e) = validate_custom_args(&clean) {
                             return api_err(e);
                         }
-                        let effective = if !is_nfqws2_available() && (clean.contains("--lua-desync") || clean.contains("multisplit")) {
+                        let effective = if !should_use_nfqws2(&cfg.zapret) && (clean.contains("--lua-desync") || clean.contains("multisplit")) {
                             convert_lua_to_legacy_desync(&clean)
                         } else {
                             clean
@@ -5070,7 +5571,7 @@ pub async fn zapret_action(
                 if let Err(e) = validate_custom_args(ca) {
                     return api_err(e);
                 }
-                if !is_nfqws2_available() && (ca.contains("--lua-desync") || ca.contains("multisplit")) {
+                if !should_use_nfqws2(&new_features) && (ca.contains("--lua-desync") || ca.contains("multisplit")) {
                     new_features.custom_args = Some(convert_lua_to_legacy_desync(ca));
                 }
             }
@@ -5630,7 +6131,7 @@ pub fn get_strategy_args_by_id(id: &str) -> Option<&'static str> {
 }
 
 /// POST /api/zapret/blockcheck — встроенный автоподбор стратегий десинхронизации (Mini-Blockcheck)
-pub async fn run_mini_blockcheck(State(_state): State<AppState>) -> Response {
+pub async fn run_mini_blockcheck(State(state): State<AppState>) -> Response {
     let test_cmd = r#"
         yt_out=$(curl -4 -k -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" https://www.youtube.com/generate_204 2>/dev/null || echo "000:0.0")
         dc_out=$(curl -4 -k -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" https://discord.com 2>/dev/null || echo "000:0.0")
@@ -5658,7 +6159,8 @@ pub async fn run_mini_blockcheck(State(_state): State<AppState>) -> Response {
     let mut max_score: i32 = -1;
     let mut min_latency: u32 = u32::MAX;
 
-    let nfqws2_avail = is_nfqws2_available();
+    let cfg = state.config.read().await;
+    let nfqws2_avail = should_use_nfqws2(&cfg.zapret);
     for (idx, (id, name, desc, args)) in BLOCKCHECK_STRATEGIES.iter().enumerate() {
         let jitter = (idx as f64) * 0.007;
         let yt_time = if base_yt_time > 0.0 { base_yt_time + jitter } else { 0.080 + jitter };
@@ -6668,6 +7170,99 @@ mod tests {
         let (args, _) = build_nfqws_args_with_desync(&cfg, Some(custom));
         assert!(args.contains("--daemon --qnum=200"));
         assert!(args.contains(custom));
+    }
+
+    #[test]
+    fn test_build_zapret_hardware_info_and_auto_hint() {
+        let titan = build_zapret_hardware_info(
+            "Keenetic Titan (KN-1811)",
+            "Titan",
+            "KN-1811",
+            "aarch64",
+            true,
+            502_400,
+        );
+        assert_eq!(titan.model, "Titan KN-1811");
+        assert_eq!(titan.arch_label, "ARM64");
+        assert_eq!(titan.target_arch, "linux-arm64");
+        assert_eq!(titan.ram_mb, 512);
+        assert_eq!(titan.recommended_engine, "v2");
+        assert_eq!(
+            titan.hint_text,
+            "Обнаружен Titan KN-1811 (ARM64, 512MB RAM) — рекомендуется Zapret 2.0"
+        );
+
+        let giga_mips = build_zapret_hardware_info(
+            "KeeneticViva",
+            "Viva",
+            "KN-1910",
+            "mips",
+            true,
+            250_000,
+        );
+        assert_eq!(giga_mips.target_arch, "linux-mips32r2-lsb");
+        assert_eq!(giga_mips.ram_mb, 256);
+        assert_eq!(giga_mips.recommended_engine, "v2");
+
+        let low_ram_mips = build_zapret_hardware_info(
+            "Keenetic Start (KN-1111)",
+            "Start",
+            "KN-1111",
+            "mips",
+            false,
+            60_000,
+        );
+        assert_eq!(low_ram_mips.target_arch, "linux-mips32r2-msb");
+        assert_eq!(low_ram_mips.ram_mb, 64);
+        assert_eq!(low_ram_mips.recommended_engine, "v1");
+
+        let ultra_low_ram = build_zapret_hardware_info(
+            "Keenetic Lite (KN-1310)",
+            "Lite",
+            "KN-1310",
+            "mips",
+            true,
+            30_000,
+        );
+        assert_eq!(ultra_low_ram.ram_mb, 32);
+        assert_eq!(ultra_low_ram.recommended_engine, "v1");
+        assert!(ultra_low_ram.hint_text.contains("32MB RAM"));
+        assert!(ultra_low_ram.hint_text.contains("рекомендуется Legacy 1.x"));
+
+        let (x86_lbl, x86_target) = parse_arch_info("i686", true);
+        assert_eq!(x86_lbl, "x86");
+        assert_eq!(x86_target, "linux-x86");
+
+        let (empty_lbl, _) = parse_arch_info("", true);
+        assert!(!empty_lbl.is_empty());
+
+        let fallback = build_zapret_hardware_info("", "", "", "", true, 0);
+        assert_eq!(fallback.model, "Keenetic Router");
+        assert_eq!(fallback.arch_label, "ARM64");
+        assert_eq!(fallback.ram_mb, 512);
+    }
+
+    #[test]
+    fn test_s51zapret_engine_switching_and_conf_validation() {
+        assert_eq!(normalize_engine_choice("v1"), "v1");
+        assert_eq!(normalize_engine_choice("legacy"), "v1");
+        assert_eq!(normalize_engine_choice("1.x"), "v1");
+        assert_eq!(normalize_engine_choice("v2"), "v2");
+        assert_eq!(normalize_engine_choice("modern"), "v2");
+
+        // Ensure S51ZAPRET_SCRIPT parses ZAPRET_ENGINE before calling find_bin
+        let conf_parse_pos = S51ZAPRET_SCRIPT.find("ZAPRET_ENGINE)").expect("ZAPRET_ENGINE case in S51zapret");
+        let find_bin_call_pos = S51ZAPRET_SCRIPT.find("BIN=$(find_bin)").expect("BIN=$(find_bin) in S51zapret");
+        assert!(
+            conf_parse_pos < find_bin_call_pos,
+            "BIN=$(find_bin) must be evaluated after reading ZAPRET_ENGINE from zapret.conf"
+        );
+
+        let valid_conf = "ZAPRET_ENGINE=\"v2\"\nNFQWS_ARGS=\"--daemon --qnum=200\"\nDISCORD_VOICE_ENABLED=\"1\"\n";
+        assert!(validate_zapret_conf(valid_conf).is_ok());
+
+        let invalid_engine_conf = "ZAPRET_ENGINE=\"v3\"\n";
+        assert!(validate_zapret_conf(invalid_engine_conf).is_err());
     }
 }
 

@@ -473,5 +473,46 @@ runTest('13. Zapret legacy nfqws compatibility, lua-desync conversion and instan
   assert(watchdogRs.includes('state.config_lock.try_lock()'), 'spawn_zapret_monitor must guard with config_lock.try_lock() to prevent racing with active zapret_action');
 });
 
+// -------------------------------------------------------------
+// 14. Zapret 2 (nfqws2) 1-Click Upgrade, Engine Switcher & Safe v1 Rollback
+// -------------------------------------------------------------
+runTest('14. Zapret 2 (nfqws2) 1-click upgrade, router hardware auto-hint, and safe rollback to v1', () => {
+  const apiRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/api.rs'), 'utf8');
+  const configRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/config.rs'), 'utf8');
+  const zapretTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Zapret.tsx'), 'utf8');
+
+  // 1. Verify config.rs has engine field on ZapretConfig
+  assert(configRs.includes('pub engine: String'), 'config.rs ZapretConfig must include pub engine: String');
+
+  // 2. Verify backend hardware auto-detection and hint builder
+  assert(apiRs.includes('pub fn build_zapret_hardware_info'), 'api.rs must define build_zapret_hardware_info');
+  assert(apiRs.includes('pub async fn detect_zapret_hardware'), 'api.rs must define detect_zapret_hardware');
+  assert(apiRs.includes('рекомендуется Zapret 2.0'), 'api.rs must generate hardware recommendation hint for Zapret 2.0');
+
+  // 3. Verify 1-click upgrade_zapret2, switch_engine, and rollback_v1 actions
+  assert(apiRs.includes('act == "upgrade_zapret2"'), 'api.rs must handle upgrade_zapret2 action');
+  assert(apiRs.includes('act == "rollback_v1" || act == "switch_engine"'), 'api.rs must handle rollback_v1 and switch_engine actions');
+  assert(apiRs.includes('/opt/zapret/nfqws.bak'), 'api.rs must backup and restore v1 binary in /opt/zapret/nfqws.bak for safe rollback');
+
+  // 4. Verify S51zapret evaluates BIN=$(find_bin) after reading ZAPRET_ENGINE from zapret.conf
+  const parseIdx = apiRs.indexOf('ZAPRET_ENGINE)');
+  const binIdx = apiRs.indexOf('BIN=$(find_bin)');
+  assert(parseIdx !== -1 && binIdx !== -1 && parseIdx < binIdx, 'S51zapret must parse ZAPRET_ENGINE from zapret.conf before calling find_bin');
+
+  // 4.1 Verify save_config parses ZAPRET_ENGINE into cfg.zapret.engine and uses should_use_nfqws2
+  assert(apiRs.includes('key == "ZAPRET_ENGINE"'), 'save_config must parse ZAPRET_ENGINE from zapret.conf');
+  // 4.2 Verify upgrade_zapret2 guards against missing binary/failed download
+  assert(apiRs.includes('if !is_nfqws2_available()'), 'upgrade_zapret2 must verify is_nfqws2_available() before switching engine');
+
+  // 5. Verify UI components in Zapret.tsx
+  assert(zapretTsx.includes('Обновить до Zapret 2 (nfqws2)'), 'Zapret.tsx must render 1-click "Обновить до Zapret 2 (nfqws2)" button');
+  assert(zapretTsx.includes('Legacy 1.x'), 'Zapret.tsx must render Legacy 1.x engine switcher option');
+  assert(zapretTsx.includes('Modern 2.0'), 'Zapret.tsx must render Modern 2.0 engine switcher option');
+  assert(zapretTsx.includes('zapret-hardware-hint'), 'Zapret.tsx must render router hardware auto-hint element');
+  assert(!zapretTsx.includes("'Обнаружен Titan KN-1811 (ARM64, 512MB RAM) — рекомендуется Zapret 2.0'"), 'Zapret.tsx must NOT hardcode router hardware model fallback');
+  assert(apiRs.includes('Обнаружен Titan KN-1811 (ARM64, 512MB RAM) — рекомендуется Zapret 2.0'), 'api.rs must generate Titan KN-1811 hardware hint');
+  assert(zapretTsx.includes('rollback-v1-btn'), 'Zapret.tsx must include safe rollback to v1 button');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
 

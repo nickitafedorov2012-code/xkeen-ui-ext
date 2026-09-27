@@ -540,6 +540,8 @@ pub struct ZapretConfig {
     pub community_hostlist_count: usize,
     /// Исключенные устройства из перехвата Zapret (по IP или MAC): для них Zapret выключен
     pub excluded_devices: Vec<String>,
+    /// Выбранный движок DPI: "v2" (Modern Zapret 2.0 nfqws2 + Lua) или "v1" (Legacy Zapret 1.x nfqws)
+    pub engine: String,
 }
 
 impl Default for ZapretConfig {
@@ -565,6 +567,7 @@ impl Default for ZapretConfig {
             community_hostlist_last_updated: None,
             community_hostlist_count: 0,
             excluded_devices: Vec::new(),
+            engine: "v2".to_string(),
         }
     }
 }

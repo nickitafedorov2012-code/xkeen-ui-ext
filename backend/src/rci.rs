@@ -328,7 +328,7 @@ pub async fn get_version(http: &reqwest::Client, cfg: &AppConfig) -> Result<BTre
     let v = as_object(rci_get(http, cfg, &token, "/rci/show/version").await?);
     let mut out = BTreeMap::new();
     if let Some(o) = v.as_object() {
-        for key in ["model", "version", "hostname", "serial"] {
+        for key in ["model", "device", "hw_id", "version", "hostname", "serial"] {
             if let Some(s) = o.get(key).and_then(|x| x.as_str()) {
                 out.insert(key.to_string(), s.to_string());
             }

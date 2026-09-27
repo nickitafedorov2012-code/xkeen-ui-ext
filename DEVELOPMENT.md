@@ -946,3 +946,11 @@
   * **Восстановление запятых в `/proc/<pid>/cmdline` (`format_nfqws_proc_cmdline`):** Классический `nfqws` модифицирует `argv` на месте через `strtok(optarg, ",")`, заменяя запятые на `\0`; парсер командной строки теперь склеивает под-токены через запятую (`--dpi-desync=fake,split2`, `--dpi-desync-fooling=ts,md5sig`).
   * **Валидация, откат и сохранение `NFQWS_ARGS` в `save_config` и `apply_strategy`:** При ошибке перезапуска `S51zapret` с некорректными флагами автоматически восстанавливается предыдущая рабочая конфигурация и возвращается ошибка API; валидные кастомные `NFQWS_ARGS` из `save_config` синхронизируются в `cfg.zapret.custom_args`.
 
+## v1.5.19 (Zapret 2 Modern 2.0 / nfqws2 Engine Switcher, Hardware Auto-Hint & Safe v1 Rollback)
+- **Поддержка Zapret 2.0 (`nfqws2`), переключатель движков и автоопределение архитектуры (`api.rs`, `config.rs`, `rci.rs`, `Zapret.tsx`)**:
+  * **Автоопределение параметров роутера и RAM:** Функции `detect_zapret_hardware`, `parse_arch_info`, `normalize_ram_mb` и `build_zapret_hardware_info` определяют модель устройства (Keenetic RCI + fallback на `/proc/device-tree/model`), архитектуру (`ARM64`, `ARMv7`, `MIPS32 (mipsel/mips)`, `x86_64`) с определением порядка байт (Endianness), и ступень RAM.
+  * **Динамическая автоподсказка без хардкода:** В UI отображается рекомендация (например, `Обнаружен Titan KN-1811 (ARM64, 512MB RAM) — рекомендуется Zapret 2.0` для RAM $\ge$ 128 МБ или `Legacy 1.x (экономия RAM)` для low-RAM MIPS роутеров $\le$ 64 МБ).
+  * **1-клик апгрейд до Zapret 2 (`upgrade_zapret2`):** Скачивание и распаковка актуального бинарника `nfqws2` и Lua-библиотек (`zapret-lib.lua`, `zapret-antidpi.lua`) в `/opt/zapret2` под целевую архитектуру с проверкой доступности зеркал и строгой защитой от переключения движка при сбое загрузки.
+  * **Переключатель движков и безопасный откат на v1 (`rollback_v1`, `switch_engine`):** Сохранение бинарника в `/opt/zapret/nfqws.bak` и конфига в `zapret.v1.conf.bak`. При откате восстанавливаются бинарник и параметры десинхронизации с конвертацией Lua-флагов. В `S51zapret` чтение `ZAPRET_ENGINE` вынесено до `BIN=$(find_bin)`, что исключает захват бинарника v2 при выбранном движке v1.
+
+
