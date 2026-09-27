@@ -3541,7 +3541,7 @@ if command iptables -w 1 -L -n >/dev/null 2>&1; then
 fi
 
 iptables() {
-  $IPTABLES_CMD "$@"
+  command $IPTABLES_CMD "$@"
 }
 
 PIDFILE="/opt/var/run/zapret.pid"
@@ -3656,7 +3656,6 @@ stop_nfqws() {
   # Terminate any rogue or orphaned nfqws or nfqws2 processes holding queue 200
   killall -15 nfqws2 2>/dev/null
   killall -15 nfqws 2>/dev/null
-  usleep 300000 2>/dev/null || sleep 1
   killall -9 nfqws2 2>/dev/null
   killall -9 nfqws 2>/dev/null
 }
@@ -3753,6 +3752,23 @@ add_fw() {
   return 0
 }
 
+check_connectivity() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -s -m 5 -o /dev/null http://cp.cloudflare.com/generate_204 2>/dev/null || \
+    curl -s -m 5 -o /dev/null http://connectivitycheck.gstatic.com/generate_204 2>/dev/null || \
+    curl -s -m 5 -o /dev/null http://www.gstatic.com/generate_204 2>/dev/null || \
+    curl -s -m 5 -o /dev/null http://cp.cloudflare.com 2>/dev/null || \
+    curl -s -m 5 -o /dev/null http://detectportal.firefox.com/success.txt 2>/dev/null || \
+    curl -s -m 5 -o /dev/null http://ya.ru 2>/dev/null
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -O /dev/null -T 5 http://cp.cloudflare.com/generate_204 2>/dev/null || \
+    wget -q -O /dev/null -T 5 http://connectivitycheck.gstatic.com/generate_204 2>/dev/null || \
+    wget -q -O /dev/null -T 5 http://ya.ru 2>/dev/null
+  else
+    return 0
+  fi
+}
+
 start_failsafe() {
   # Stop previous failsafe if running
   if [ -f "$FAILSAFE_PID" ]; then
@@ -3761,22 +3777,8 @@ start_failsafe() {
   fi
 
   # FAILSAFE: через 45 сек проверяем интернет, при потере — откатываем всё
-  (sleep 45 && \
-    check_connectivity() {
-      if command -v curl >/dev/null 2>&1; then
-        curl -s -m 5 -o /dev/null http://cp.cloudflare.com/generate_204 2>/dev/null || \
-        curl -s -m 5 -o /dev/null http://connectivitycheck.gstatic.com/generate_204 2>/dev/null || \
-        curl -s -m 5 -o /dev/null http://www.gstatic.com/generate_204 2>/dev/null || \
-        curl -s -m 5 -o /dev/null http://cp.cloudflare.com 2>/dev/null || \
-        curl -s -m 5 -o /dev/null http://detectportal.firefox.com/success.txt 2>/dev/null
-      elif command -v wget >/dev/null 2>&1; then
-        wget -q -O /dev/null -T 5 http://cp.cloudflare.com/generate_204 2>/dev/null || \
-        wget -q -O /dev/null -T 5 http://connectivitycheck.gstatic.com/generate_204 2>/dev/null
-      else
-        return 0
-      fi
-    }
-    if ! check_connectivity; then
+  (sleep 45
+    if ! check_connectivity && ! ping -c 1 -W 2 77.88.8.8 >/dev/null 2>&1 && ! ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
       del_fw
       stop_nfqws
       logger -t zapret "FAILSAFE: internet connectivity lost after enabling zapret, iptables rules rolled back"
@@ -3832,6 +3834,7 @@ case "$1" in
         exit 0
       fi
     fi
+    stop_nfqws
     if [ -n "$BIN" ] && [ -x "$BIN" ]; then
       case "$BIN" in
         *nfqws2*)
@@ -3853,7 +3856,7 @@ case "$1" in
           ;;
         *)
           case "$NFQWS_ARGS" in
-            *lua-desync*|*payload=*|*out-range=*)
+            *lua-desync*|*payload=*|*out-range=*|*multisplit*)
               logger -t zapret "WARNING: NFQWS_ARGS contains nfqws2 Lua parameters, but running legacy nfqws. Using safe fallback args."
               NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
               [ -f "/opt/etc/zapret/zapret-hosts.txt" ] && NFQWS_ARGS="$NFQWS_ARGS --new --filter-tcp=80,443 --hostlist=/opt/etc/zapret/zapret-hosts.txt --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
@@ -3868,15 +3871,22 @@ case "$1" in
       esac
       set +f
       sleep 1
+      PID=""
       if [ -f "$PIDFILE" ]; then
         PID=$(cat "$PIDFILE" 2>/dev/null)
-        if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-          add_fw
-          start_failsafe
-          exit 0
-        fi
+      fi
+      if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
+        PID=$(pidof nfqws2 2>/dev/null | awk '{print $1}')
+        [ -z "$PID" ] && PID=$(pidof nfqws 2>/dev/null | awk '{print $1}')
+        [ -n "$PID" ] && echo "$PID" > "$PIDFILE" 2>/dev/null
+      fi
+      if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        add_fw
+        start_failsafe
+        exit 0
       fi
       logger -t zapret "ERROR: nfqws failed to start with args: $NFQWS_ARGS"
+      stop_nfqws
       del_fw
       exit 1
     else
@@ -3885,13 +3895,13 @@ case "$1" in
     fi
     ;;
   stop)
-    del_fw
     stop_nfqws
+    del_fw
     exit 0
     ;;
   restart)
-    del_fw
     stop_nfqws
+    del_fw
     sleep 1
     mkdir -p /opt/var/run /opt/etc/zapret
     if [ -n "$BIN" ] && [ -x "$BIN" ]; then
@@ -3915,7 +3925,7 @@ case "$1" in
           ;;
         *)
           case "$NFQWS_ARGS" in
-            *lua-desync*|*payload=*|*out-range=*)
+            *lua-desync*|*payload=*|*out-range=*|*multisplit*)
               logger -t zapret "WARNING: NFQWS_ARGS contains nfqws2 Lua parameters, but running legacy nfqws. Using safe fallback args."
               NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
               [ -f "/opt/etc/zapret/zapret-hosts.txt" ] && NFQWS_ARGS="$NFQWS_ARGS --new --filter-tcp=80,443 --hostlist=/opt/etc/zapret/zapret-hosts.txt --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
@@ -3930,15 +3940,22 @@ case "$1" in
       esac
       set +f
       sleep 1
+      PID=""
       if [ -f "$PIDFILE" ]; then
         PID=$(cat "$PIDFILE" 2>/dev/null)
-        if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-          add_fw
-          start_failsafe
-          exit 0
-        fi
+      fi
+      if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
+        PID=$(pidof nfqws2 2>/dev/null | awk '{print $1}')
+        [ -z "$PID" ] && PID=$(pidof nfqws 2>/dev/null | awk '{print $1}')
+        [ -n "$PID" ] && echo "$PID" > "$PIDFILE" 2>/dev/null
+      fi
+      if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        add_fw
+        start_failsafe
+        exit 0
       fi
       logger -t zapret "ERROR: nfqws failed to restart with args: $NFQWS_ARGS"
+      stop_nfqws
       del_fw
       exit 1
     else
@@ -3972,6 +3989,8 @@ case "$1" in
         exit 0
       fi
     fi
+    pidof nfqws2 >/dev/null 2>&1 && exit 0
+    pidof nfqws >/dev/null 2>&1 && exit 0
     exit 1
     ;;
   *)
@@ -4001,10 +4020,10 @@ pub fn convert_lua_to_legacy_desync(args: &str) -> String {
             "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-repeats=4 --dpi-desync-fooling=md5sig --dpi-desync-cutoff=d4".to_string()
         }
     } else if args.contains("seqovl") {
-        "--dpi-desync=fake,multisplit --dpi-desync-split-pos=1,midsld --dpi-desync-split-seqovl=5 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4".to_string()
+        "--dpi-desync=fake,split2 --dpi-desync-split-pos=1,midsld --dpi-desync-split-seqovl=5 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4".to_string()
     } else if args.contains("multisplit") {
         if args.contains("midsld") {
-            "--dpi-desync=fake,multisplit --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=ts,md5sig --dpi-desync-cutoff=d4".to_string()
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=ts,md5sig --dpi-desync-cutoff=d4".to_string()
         } else {
             "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4".to_string()
         }
@@ -4386,7 +4405,7 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
             }
         } else {
             if is_full_cmdline && !custom.contains("lua-desync") && !custom.contains("payload=") && !custom.contains("out-range=") {
-                (custom.clone(), cfg.discord_voice_udp)
+                (custom.replace("multisplit", "split2"), cfg.discord_voice_udp)
             } else {
                 let legacy_desync = convert_lua_to_legacy_desync(custom);
                 build_nfqws_args_with_desync(cfg, Some(&legacy_desync))
@@ -4491,14 +4510,19 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
 
     let cfg = state.config.read().await;
 
-    // Если служба выключена в конфигурации панели, она гарантированно не активна для трафика
+    // Если служба выключена в конфигурации панели и сейчас не идёт операция запуска/переключения,
+    // принудительно очищаем осиротевший процесс nfqws
     if !cfg.zapret.enabled {
         if running {
-            let _ = tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg("kill -9 $(pidof nfqws2 2>/dev/null) $(pidof nfqws 2>/dev/null) 2>/dev/null; rm -f /opt/var/run/zapret.pid /opt/var/run/zapret_failsafe.pid")
-                .output()
-                .await;
+            if let Ok(_guard) = state.config_lock.try_lock() {
+                if !state.config.read().await.zapret.enabled {
+                    let _ = tokio::process::Command::new("sh")
+                        .arg("-c")
+                        .arg("kill -9 $(pidof nfqws2 2>/dev/null) $(pidof nfqws 2>/dev/null) 2>/dev/null; rm -f /opt/var/run/zapret.pid /opt/var/run/zapret_failsafe.pid")
+                        .output()
+                        .await;
+                }
+            }
         }
         running = false;
         pid = None;
@@ -4574,7 +4598,7 @@ pub async fn zapret_action(
             if let Err(e) = validate_custom_args(args) {
                 return api_err(e);
             }
-            let effective_args = if !is_nfqws2_available() && args.contains("--lua-desync") {
+            let effective_args = if !is_nfqws2_available() && (args.contains("--lua-desync") || args.contains("multisplit")) {
                 convert_lua_to_legacy_desync(args)
             } else {
                 args.clone()
@@ -4586,7 +4610,9 @@ pub async fn zapret_action(
         }
         let _ = config::save(&state.config_path, &cfg).await;
         *state.config.write().await = std::sync::Arc::new(cfg.clone());
-        let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+        if cfg.zapret.enabled {
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+        }
         return api_ok(json!({
             "success": true,
             "message": "Стратегия десинхронизации успешно применена",
@@ -4766,7 +4792,7 @@ pub async fn zapret_action(
                         if let Err(e) = validate_custom_args(&clean) {
                             return api_err(e);
                         }
-                        let effective = if !is_nfqws2_available() && clean.contains("--lua-desync") {
+                        let effective = if !is_nfqws2_available() && (clean.contains("--lua-desync") || clean.contains("multisplit")) {
                             convert_lua_to_legacy_desync(&clean)
                         } else {
                             clean
@@ -4806,6 +4832,9 @@ pub async fn zapret_action(
             }
         }
 
+        let _ = config::save(&state.config_path, &cfg).await;
+        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+
         let is_running = tokio::process::Command::new("sh")
             .arg("-c")
             .arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null")
@@ -4819,9 +4848,6 @@ pub async fn zapret_action(
             let cmd_arg = if is_running { "restart" } else { "start" };
             let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg(cmd_arg).output().await;
         }
-
-        let _ = config::save(&state.config_path, &cfg).await;
-        *state.config.write().await = std::sync::Arc::new(cfg.clone());
 
         return api_ok(json!({ "preset": p, "features": cfg.zapret, "message": format!("Применен пресет '{p}'") }));
     }
@@ -4884,10 +4910,10 @@ pub async fn zapret_action(
                 let _cfg = state.config.read().await;
                 let _ = sync_zapret_files(&_cfg.zapret).await;
                 if let Ok(out) = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("start").output().await {
-            if !out.status.success() {
-                return api_err(format!("Ошибка запуска Zapret: {}", String::from_utf8_lossy(&out.stderr)));
-            }
-        }
+                    if !out.status.success() {
+                        return api_err(format!("Ошибка запуска Zapret: {}", String::from_utf8_lossy(&out.stderr)));
+                    }
+                }
                 let installed = std::path::Path::new("/opt/etc/init.d/S51zapret").exists();
                 return api_ok(json!({ "success": installed, "output": output_str.trim() }));
             }
@@ -4947,6 +4973,14 @@ pub async fn zapret_action(
             return api_err(format!("Ошибка синхронизации файлов Zapret: {e}"));
         }
 
+        // Сохраняем статус в памяти ДО запуска S51zapret, чтобы параллельный опрос
+        // GET /api/zapret/status не убил процесс nfqws во время старта
+        if let Err(e) = config::save(&state.config_path, &cfg).await {
+            log_e!("Ошибка сохранения config.json: {e}");
+            return api_err(format!("Настройки Zapret не сохранены в config.json: {e}"));
+        }
+        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+
         let is_domain_only = match body.feature.as_deref() {
             Some("bypass_github") | Some("bypass_torrents") | Some("bypass_adult") | Some("community_hostlist_enabled") => true,
             _ => false,
@@ -4987,12 +5021,6 @@ pub async fn zapret_action(
                 }
             }
         }
-
-        if let Err(e) = config::save(&state.config_path, &cfg).await {
-            log_e!("Ошибка сохранения config.json: {e}");
-            return api_err(format!("Настройки Zapret применены, но не сохранены в config.json: {e}"));
-        }
-        *state.config.write().await = std::sync::Arc::new(cfg.clone());
 
         return api_ok(json!({
             "success": true,
@@ -5258,10 +5286,14 @@ pub async fn zapret_action(
 
     // Перед стартом или остановкой гарантируем актуальные и безопасные правила
     if action_to_run == "start" || action_to_run == "restart" || action_to_run == "start-fw" || action_to_run == "reload-fw" {
-        let mut _cfg = (**state.config.read().await).clone();
-        _cfg.zapret.enabled = true;
-        let _ = sync_zapret_files(&_cfg.zapret).await;
-        let _ = crate::rci::set_clean_dns_servers(&state.http, &_cfg).await;
+        let _cfg_guard = state.config_lock.lock().await;
+        let mut cfg = (**state.config.read().await).clone();
+        if action_to_run == "start" || action_to_run == "restart" {
+            cfg.zapret.enabled = true;
+            *state.config.write().await = std::sync::Arc::new(cfg.clone());
+        }
+        let _ = sync_zapret_files(&cfg.zapret).await;
+        let _ = crate::rci::set_clean_dns_servers(&state.http, &cfg).await;
     } else if action_to_run == "stop" {
         // Заранее фиксируем выключение службы в конфигурации ДО остановки,
         // чтобы фоновый watchdog не успел перезапустить nfqws при обнаружении пропажи процесса
@@ -5486,6 +5518,7 @@ pub async fn run_mini_blockcheck(State(_state): State<AppState>) -> Response {
     let mut max_score: i32 = -1;
     let mut min_latency: u32 = u32::MAX;
 
+    let nfqws2_avail = is_nfqws2_available();
     for (idx, (id, name, desc, args)) in BLOCKCHECK_STRATEGIES.iter().enumerate() {
         let jitter = (idx as f64) * 0.007;
         let yt_time = if base_yt_time > 0.0 { base_yt_time + jitter } else { 0.080 + jitter };
@@ -5510,11 +5543,17 @@ pub async fn run_mini_blockcheck(State(_state): State<AppState>) -> Response {
             best_id = id;
         }
 
+        let effective_args = if nfqws2_avail {
+            (*args).to_string()
+        } else {
+            convert_lua_to_legacy_desync(args)
+        };
+
         results.push(json!({
             "id": id,
             "name": name,
             "description": desc,
-            "args": args,
+            "args": effective_args,
             "youtube_ok": yt_ok,
             "youtube_time_ms": yt_ms,
             "discord_ok": dc_ok,
@@ -5700,10 +5739,12 @@ pub async fn toggle_device_zapret(
     let _ = sync_zapret_files(&cfg.zapret).await;
 
     // Мгновенное обновление iptables правил через reload-fw без остановки nfqws
-    let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret")
-        .arg("reload-fw")
-        .output()
-        .await;
+    if cfg.zapret.enabled {
+        let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret")
+            .arg("reload-fw")
+            .output()
+            .await;
+    }
 
     api_ok(json!({
         "success": true,
@@ -6437,7 +6478,8 @@ mod tests {
     fn test_convert_lua_to_legacy_desync() {
         let lua_fake = "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid --lua-desync=multisplit:pos=1,midsld";
         let legacy = convert_lua_to_legacy_desync(lua_fake);
-        assert!(legacy.contains("--dpi-desync=fake,multisplit"));
+        assert!(legacy.contains("--dpi-desync=fake,split2"));
+        assert!(!legacy.contains("multisplit"));
         assert!(legacy.contains("--dpi-desync-split-pos=1,midsld"));
         assert!(!legacy.contains("lua-desync"));
 
@@ -6449,6 +6491,8 @@ mod tests {
         let split_lua = "--lua-desync=split2:pos=1";
         let legacy_split = convert_lua_to_legacy_desync(split_lua);
         assert!(legacy_split.contains("--dpi-desync=fake,split2"));
+
+        assert!(S51ZAPRET_SCRIPT.contains("command $IPTABLES_CMD \"$@\""));
     }
 
     #[test]

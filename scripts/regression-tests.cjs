@@ -461,6 +461,10 @@ runTest('13. Zapret legacy nfqws compatibility, lua-desync conversion and instan
 
   // 4. Verify watchdog disables enabled flag after 5 consecutive failures
   assert(watchdogRs.includes('cfg.zapret.enabled = false'), 'watchdog.rs must disable zapret after 5 failed restarts to prevent infinite loops');
+
+  // 5. Verify S51zapret iptables wrapper uses `command $IPTABLES_CMD` to prevent infinite shell recursion
+  assert(apiRs.includes('command $IPTABLES_CMD "$@"'), 'S51zapret iptables() function must use `command $IPTABLES_CMD "$@"` to prevent infinite recursion');
+  assert(!apiRs.includes('--dpi-desync=fake,multisplit'), 'legacy nfqws must not receive unsupported --dpi-desync=fake,multisplit');
 });
 
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
