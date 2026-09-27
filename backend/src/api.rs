@@ -84,7 +84,8 @@ pub async fn status(State(state): State<AppState>) -> Response {
             "label": zapret_label,
             "installed": zapret_installed,
             "running": cfg.zapret.enabled,
-            "update_available": cfg.zapret.update_available,
+            "update_available": cfg.zapret.update_available
+                && cfg.zapret.latest_version.as_deref().map_or(false, |lat| crate::updater::is_newer(lat, &zapret_ver)),
             "latest_version": cfg.zapret.latest_version,
         },
     }))
@@ -3579,71 +3580,94 @@ FAILSAFE_PID="/opt/var/run/zapret_failsafe.pid"
 CONF="/opt/etc/zapret/zapret.conf"
 
 find_bin() {
+  ARCH=$(uname -m 2>/dev/null)
+  case "$ARCH" in
+    aarch64|arm64)
+      ARCH_CANDIDATES="arm64 linux-arm64"
+      ;;
+    armv7*|armv8*|arm*)
+      ARCH_CANDIDATES="arm linux-arm"
+      ;;
+    mips*)
+      if [ "$(hexdump -s 5 -n 1 -e '"%02x"' /bin/sh 2>/dev/null)" = "02" ] || \
+         [ "$(od -t x1 -j 5 -N 1 /bin/sh 2>/dev/null | awk 'NR==1{print $2}')" = "02" ] || \
+         [ "$(echo -n I | hexdump -o 2>/dev/null | awk '{ print substr($2,6,1); exit }')" = "0" ]; then
+        ARCH_CANDIDATES="mips linux-mips32r2-msb mipsel linux-mips32r2-lsb"
+      else
+        ARCH_CANDIDATES="mipsel linux-mips32r2-lsb mips linux-mips32r2-msb"
+      fi
+      ;;
+    x86_64|amd64)
+      ARCH_CANDIDATES="x86_64 linux-x86_64"
+      ;;
+    i*86|x86)
+      ARCH_CANDIDATES="x86 linux-x86"
+      ;;
+    *)
+      ARCH_CANDIDATES="mipsel arm64 arm mips x86_64"
+      ;;
+  esac
+
+  is_runnable() {
+    [ -n "$1" ] && [ -x "$1" ] && "$1" --help >/dev/null 2>&1
+    local ret=$?
+    [ $ret -ne 126 ] && [ $ret -ne 127 ]
+  }
+
   if [ "$ZAPRET_ENGINE" = "v1" ] || [ "$ZAPRET_ENGINE" = "legacy" ]; then
-    if [ -x "/opt/zapret/nfq/nfqws" ]; then
+    if [ -x "/opt/zapret/nfq/nfqws" ] && is_runnable "/opt/zapret/nfq/nfqws"; then
       echo "/opt/zapret/nfq/nfqws"
-    elif [ -x "/opt/zapret/binaries/linux-arm64/nfqws" ]; then
-      echo "/opt/zapret/binaries/linux-arm64/nfqws"
-    elif [ -x "/opt/zapret/binaries/linux-arm/nfqws" ]; then
-      echo "/opt/zapret/binaries/linux-arm/nfqws"
-    elif [ -x "/opt/zapret/binaries/linux-mips32r2-lsb/nfqws" ]; then
-      echo "/opt/zapret/binaries/linux-mips32r2-lsb/nfqws"
-    elif [ -x "/opt/zapret/binaries/linux-mips32r2-msb/nfqws" ]; then
-      echo "/opt/zapret/binaries/linux-mips32r2-msb/nfqws"
-    elif [ -x "/opt/zapret/binaries/linux-x86_64/nfqws" ]; then
-      echo "/opt/zapret/binaries/linux-x86_64/nfqws"
-    elif [ -x "/opt/sbin/nfqws" ]; then
-      echo "/opt/sbin/nfqws"
-    elif [ -x "/opt/bin/nfqws" ]; then
-      echo "/opt/bin/nfqws"
-    elif [ -x "/opt/usr/bin/nfqws" ]; then
-      echo "/opt/usr/bin/nfqws"
-    elif [ -x "/opt/zapret/nfqws.bak" ]; then
-      echo "/opt/zapret/nfqws.bak"
-    elif [ -x "/opt/zapret2/nfqws2" ]; then
+      return
+    fi
+    for cand in $ARCH_CANDIDATES; do
+      if [ -x "/opt/zapret/binaries/$cand/nfqws" ] && is_runnable "/opt/zapret/binaries/$cand/nfqws"; then
+        echo "/opt/zapret/binaries/$cand/nfqws"
+        return
+      fi
+    done
+    for std_bin in /opt/sbin/nfqws /opt/bin/nfqws /opt/usr/bin/nfqws /opt/zapret/nfqws.bak; do
+      if [ -x "$std_bin" ] && is_runnable "$std_bin"; then
+        echo "$std_bin"
+        return
+      fi
+    done
+    if [ -x "/opt/zapret2/nfqws2" ] && is_runnable "/opt/zapret2/nfqws2"; then
       echo "/opt/zapret2/nfqws2"
-    elif [ -x "/opt/sbin/nfqws2" ]; then
+      return
+    elif [ -x "/opt/sbin/nfqws2" ] && is_runnable "/opt/sbin/nfqws2"; then
       echo "/opt/sbin/nfqws2"
+      return
     fi
     return
   fi
 
-  if [ -x "/opt/zapret2/nfqws2" ]; then
+  if [ -x "/opt/zapret2/nfqws2" ] && is_runnable "/opt/zapret2/nfqws2"; then
     echo "/opt/zapret2/nfqws2"
-  elif [ -x "/opt/sbin/nfqws2" ]; then
-    echo "/opt/sbin/nfqws2"
-  elif [ -x "/opt/zapret2/binaries/linux-arm64/nfqws2" ]; then
-    echo "/opt/zapret2/binaries/linux-arm64/nfqws2"
-  elif [ -x "/opt/zapret2/binaries/linux-arm/nfqws2" ]; then
-    echo "/opt/zapret2/binaries/linux-arm/nfqws2"
-  elif [ -x "/opt/zapret2/binaries/linux-mips32r2-lsb/nfqws2" ]; then
-    echo "/opt/zapret2/binaries/linux-mips32r2-lsb/nfqws2"
-  elif [ -x "/opt/zapret2/binaries/linux-mips32r2-msb/nfqws2" ]; then
-    echo "/opt/zapret2/binaries/linux-mips32r2-msb/nfqws2"
-  elif [ -x "/opt/zapret2/binaries/linux-x86_64/nfqws2" ]; then
-    echo "/opt/zapret2/binaries/linux-x86_64/nfqws2"
-  elif [ -x "/opt/bin/nfqws2" ]; then
-    echo "/opt/bin/nfqws2"
-  elif [ -x "/opt/zapret/nfq/nfqws" ]; then
+    return
+  fi
+  for std_z2 in /opt/sbin/nfqws2 /opt/bin/nfqws2 /opt/usr/bin/nfqws2; do
+    if [ -x "$std_z2" ] && is_runnable "$std_z2"; then
+      echo "$std_z2"
+      return
+    fi
+  done
+  for cand in $ARCH_CANDIDATES; do
+    if [ -x "/opt/zapret2/binaries/$cand/nfqws2" ] && is_runnable "/opt/zapret2/binaries/$cand/nfqws2"; then
+      cp -f "/opt/zapret2/binaries/$cand/nfqws2" /opt/zapret2/nfqws2 2>/dev/null || true
+      chmod +x /opt/zapret2/nfqws2 2>/dev/null || true
+      echo "/opt/zapret2/binaries/$cand/nfqws2"
+      return
+    fi
+  done
+  for cand in $ARCH_CANDIDATES; do
+    if [ -x "/opt/zapret/binaries/$cand/nfqws" ] && is_runnable "/opt/zapret/binaries/$cand/nfqws"; then
+      echo "/opt/zapret/binaries/$cand/nfqws"
+      return
+    fi
+  done
+  if [ -x "/opt/zapret/nfq/nfqws" ] && is_runnable "/opt/zapret/nfq/nfqws"; then
     echo "/opt/zapret/nfq/nfqws"
-  elif [ -x "/opt/zapret/binaries/linux-arm64/nfqws" ]; then
-    echo "/opt/zapret/binaries/linux-arm64/nfqws"
-  elif [ -x "/opt/zapret/binaries/linux-arm/nfqws" ]; then
-    echo "/opt/zapret/binaries/linux-arm/nfqws"
-  elif [ -x "/opt/zapret/binaries/linux-mips32r2-lsb/nfqws" ]; then
-    echo "/opt/zapret/binaries/linux-mips32r2-lsb/nfqws"
-  elif [ -x "/opt/zapret/binaries/linux-mips32r2-msb/nfqws" ]; then
-    echo "/opt/zapret/binaries/linux-mips32r2-msb/nfqws"
-  elif [ -x "/opt/zapret/binaries/linux-x86_64/nfqws" ]; then
-    echo "/opt/zapret/binaries/linux-x86_64/nfqws"
-  elif [ -x "/opt/sbin/nfqws" ]; then
-    echo "/opt/sbin/nfqws"
-  elif [ -x "/opt/bin/nfqws" ]; then
-    echo "/opt/bin/nfqws"
-  elif [ -x "/opt/usr/bin/nfqws" ]; then
-    echo "/opt/usr/bin/nfqws"
-  elif [ -x "/opt/zapret/nfqws.bak" ]; then
-    echo "/opt/zapret/nfqws.bak"
+    return
   fi
 }
 
@@ -3909,25 +3933,46 @@ case "$1" in
     if [ -n "$BIN" ] && [ -x "$BIN" ]; then
       case "$BIN" in
         *nfqws2*)
+          mkdir -p /opt/zapret2/lua
+          for alt_lua in /opt/zapret/lua /opt/zapret/files/lua /opt/share/zapret/lua; do
+            if [ ! -f /opt/zapret2/lua/zapret-lib.lua ] && [ -f "$alt_lua/zapret-lib.lua" ]; then
+              cp -rf "$alt_lua/"* /opt/zapret2/lua/ 2>/dev/null || true
+              break
+            fi
+          done
           if [ ! -f "/opt/zapret2/lua/zapret-lib.lua" ] || [ ! -f "/opt/zapret2/lua/zapret-antidpi.lua" ]; then
             logger -t zapret "ERROR: zapret2 Lua libraries missing in /opt/zapret2/lua/"
             echo "ERROR: zapret2 Lua libraries missing in /opt/zapret2/lua/" >&2
             exit 1
           fi
+          for chk in /opt/zapret2/lua/zapret-lib.lua /opt/zapret2/lua/zapret-antidpi.lua; do
+            if [ $(wc -c < "$chk" 2>/dev/null || echo 0) -lt 80 ] || grep -q "404: Not Found" "$chk" 2>/dev/null; then
+              logger -t zapret "ERROR: Lua library $chk is corrupted or incomplete in /opt/zapret2/lua/"
+              echo "ERROR: Lua library $chk is corrupted or incomplete in /opt/zapret2/lua/" >&2
+              exit 1
+            fi
+          done
           ;;
       esac
       set -f
       case "$BIN" in
         *nfqws2*)
           LUA_INIT_ARG=""
-          if [ -f "/opt/zapret2/lua/zapret-lib.lua" ]; then
-            LUA_INIT_ARG="--lua-init=@/opt/zapret2/lua/zapret-lib.lua"
-          fi
-          $BIN --pidfile="$PIDFILE" $LUA_INIT_ARG $NFQWS_ARGS
+          for lmod in zapret-lib.lua zapret-antidpi.lua zapret-auto.lua; do
+            if [ -f "/opt/zapret2/lua/$lmod" ]; then
+              LUA_INIT_ARG="$LUA_INIT_ARG --lua-init=@/opt/zapret2/lua/$lmod"
+            fi
+          done
+          case "$NFQWS_ARGS" in
+            *--daemon*) ;;
+            *) NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 $NFQWS_ARGS" ;;
+          esac
+          EFFECTIVE_ARGS=$(echo "$NFQWS_ARGS" | sed 's/--dpi-desync-fwmark=/--fwmark=/g')
+          $BIN --pidfile="$PIDFILE" $LUA_INIT_ARG $EFFECTIVE_ARGS
           ;;
         *)
           case "$NFQWS_ARGS" in
-            *lua-desync*|*payload=*|*out-range=*|*multisplit*)
+            *lua-desync*|*payload=*|*out-range=*|*multisplit*|*--fwmark=*)
               logger -t zapret "WARNING: NFQWS_ARGS contains nfqws2 Lua parameters, but running legacy nfqws. Using safe fallback args."
               NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
               [ -f "/opt/etc/zapret/zapret-hosts.txt" ] && NFQWS_ARGS="$NFQWS_ARGS --new --filter-tcp=80,443 --hostlist=/opt/etc/zapret/zapret-hosts.txt --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
@@ -3937,7 +3982,8 @@ case "$1" in
             *--daemon*) ;;
             *) NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 $NFQWS_ARGS" ;;
           esac
-          $BIN --pidfile="$PIDFILE" $NFQWS_ARGS
+          EFFECTIVE_ARGS=$(echo "$NFQWS_ARGS" | sed 's/--fwmark=/--dpi-desync-fwmark=/g')
+          $BIN --pidfile="$PIDFILE" $EFFECTIVE_ARGS
           ;;
       esac
       set +f
@@ -3957,11 +4003,13 @@ case "$1" in
         exit 0
       fi
       logger -t zapret "ERROR: nfqws failed to start with args: $NFQWS_ARGS"
+      echo "ERROR: nfqws failed to start with args: $NFQWS_ARGS" >&2
       stop_nfqws
       del_fw
       exit 1
     else
       logger -t zapret "ERROR: nfqws binary not found or not executable"
+      echo "ERROR: nfqws binary not found or not executable" >&2
       exit 1
     fi
     ;;
@@ -3974,65 +4022,7 @@ case "$1" in
     stop_nfqws
     del_fw
     sleep 1
-    mkdir -p /opt/var/run /opt/etc/zapret
-    if [ -n "$BIN" ] && [ -x "$BIN" ]; then
-      case "$BIN" in
-        *nfqws2*)
-          if [ ! -f "/opt/zapret2/lua/zapret-lib.lua" ] || [ ! -f "/opt/zapret2/lua/zapret-antidpi.lua" ]; then
-            logger -t zapret "ERROR: zapret2 Lua libraries missing in /opt/zapret2/lua/"
-            echo "ERROR: zapret2 Lua libraries missing in /opt/zapret2/lua/" >&2
-            exit 1
-          fi
-          ;;
-      esac
-      set -f
-      case "$BIN" in
-        *nfqws2*)
-          LUA_INIT_ARG=""
-          if [ -f "/opt/zapret2/lua/zapret-lib.lua" ]; then
-            LUA_INIT_ARG="--lua-init=@/opt/zapret2/lua/zapret-lib.lua"
-          fi
-          $BIN --pidfile="$PIDFILE" $LUA_INIT_ARG $NFQWS_ARGS
-          ;;
-        *)
-          case "$NFQWS_ARGS" in
-            *lua-desync*|*payload=*|*out-range=*|*multisplit*)
-              logger -t zapret "WARNING: NFQWS_ARGS contains nfqws2 Lua parameters, but running legacy nfqws. Using safe fallback args."
-              NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
-              [ -f "/opt/etc/zapret/zapret-hosts.txt" ] && NFQWS_ARGS="$NFQWS_ARGS --new --filter-tcp=80,443 --hostlist=/opt/etc/zapret/zapret-hosts.txt --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
-              ;;
-          esac
-          case "$NFQWS_ARGS" in
-            *--daemon*) ;;
-            *) NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 $NFQWS_ARGS" ;;
-          esac
-          $BIN --pidfile="$PIDFILE" $NFQWS_ARGS
-          ;;
-      esac
-      set +f
-      sleep 1
-      PID=""
-      if [ -f "$PIDFILE" ]; then
-        PID=$(cat "$PIDFILE" 2>/dev/null)
-      fi
-      if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
-        PID=$(pidof nfqws2 2>/dev/null | awk '{print $1}')
-        [ -z "$PID" ] && PID=$(pidof nfqws 2>/dev/null | awk '{print $1}')
-        [ -n "$PID" ] && echo "$PID" > "$PIDFILE" 2>/dev/null
-      fi
-      if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-        add_fw
-        start_failsafe
-        exit 0
-      fi
-      logger -t zapret "ERROR: nfqws failed to restart with args: $NFQWS_ARGS"
-      stop_nfqws
-      del_fw
-      exit 1
-    else
-      logger -t zapret "ERROR: nfqws binary not found"
-      exit 1
-    fi
+    exec "$0" start
     ;;
   reload|reload-hosts)
     PID=""
@@ -4090,13 +4080,19 @@ pub fn is_nfqws2_available() -> bool {
         || std::path::Path::new("/opt/bin/nfqws2").exists()
         || std::path::Path::new("/opt/usr/bin/nfqws2").exists()
         || std::path::Path::new("/opt/zapret/nfq/nfqws2").exists()
+        || std::path::Path::new("/opt/zapret2/binaries/arm64/nfqws2").exists()
+        || std::path::Path::new("/opt/zapret2/binaries/arm/nfqws2").exists()
+        || std::path::Path::new("/opt/zapret2/binaries/mipsel/nfqws2").exists()
+        || std::path::Path::new("/opt/zapret2/binaries/mips/nfqws2").exists()
+        || std::path::Path::new("/opt/zapret2/binaries/x86_64/nfqws2").exists()
         || std::path::Path::new("/opt/zapret2/binaries/linux-arm64/nfqws2").exists()
         || std::path::Path::new("/opt/zapret2/binaries/linux-arm/nfqws2").exists()
         || std::path::Path::new("/opt/zapret2/binaries/linux-mips32r2-lsb/nfqws2").exists()
         || std::path::Path::new("/opt/zapret2/binaries/linux-mips32r2-msb/nfqws2").exists()
         || std::path::Path::new("/opt/zapret2/binaries/linux-x86_64/nfqws2").exists())
         && (std::path::Path::new("/opt/zapret2/lua/zapret-lib.lua").exists()
-            || std::path::Path::new("/opt/zapret/lua/zapret-lib.lua").exists())
+            || std::path::Path::new("/opt/zapret/lua/zapret-lib.lua").exists()
+            || std::path::Path::new("/opt/zapret2/files/lua/zapret-lib.lua").exists())
 }
 
 pub fn is_nfqws1_available() -> bool {
@@ -4206,12 +4202,13 @@ pub async fn check_zapret_update_core(state: &AppState, force: bool) -> Result<s
             format!("Запрет 1 {cur_ver}")
         };
         let lat = latest_ver.unwrap_or_else(|| cur_ver.clone());
+        let effective_update = update_avail && crate::updater::is_newer(&lat, &cur_ver);
         return Ok(json!({
             "current_engine": engine,
             "current_version": cur_ver,
             "label": label,
             "latest_version": lat,
-            "update_available": update_avail,
+            "update_available": effective_update,
             "upgrade_available": engine == "v1",
             "last_check": last_checked,
         }));
@@ -4282,7 +4279,7 @@ pub async fn check_zapret_update_core(state: &AppState, force: bool) -> Result<s
 
     let has_newer_tag = crate::updater::is_newer(&final_latest, &cur_ver);
     let upgrade_available = engine == "v1"; // При v1 доступен переход на Запрет 2!
-    let update_available = has_newer_tag || upgrade_available;
+    let update_available = has_newer_tag;
 
     let now_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
     let display_latest = if upgrade_available && !has_newer_tag {
@@ -5136,7 +5133,8 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
         "engine": active_engine,
         "version": zapret_ver,
         "version_label": zapret_label,
-        "update_available": cfg.zapret.update_available,
+        "update_available": cfg.zapret.update_available
+            && cfg.zapret.latest_version.as_deref().map_or(false, |lat| crate::updater::is_newer(lat, &zapret_ver)),
         "latest_version": cfg.zapret.latest_version,
         "v2_installed": v2_installed,
         "v1_installed": v1_installed,
@@ -5174,23 +5172,24 @@ pub async fn zapret_action(
         let upgrade_cmd = r#"
             ARCH=$(uname -m)
             case "$ARCH" in
-              aarch64|arm64) TARGET_ARCH="linux-arm64" ;;
-              armv7*|armv8*|arm*) TARGET_ARCH="linux-arm" ;;
+              aarch64|arm64) TARGET_ARCH="linux-arm64"; Z2_ARCH="arm64" ;;
+              armv7*|armv8*|arm*) TARGET_ARCH="linux-arm"; Z2_ARCH="arm" ;;
               mips*)
-                if [ "$(echo -n I | hexdump -o 2>/dev/null | awk '{ print substr($2,6,1); exit }')" = "1" ] || \
-                   [ "$(hexdump -s 5 -n 1 -e '"%02x"' /bin/sh 2>/dev/null)" = "01" ]; then
-                  TARGET_ARCH="linux-mips32r2-lsb"
+                if [ "$(hexdump -s 5 -n 1 -e '"%02x"' /bin/sh 2>/dev/null)" = "02" ] || \
+                   [ "$(od -t x1 -j 5 -N 1 /bin/sh 2>/dev/null | awk 'NR==1{print $2}')" = "02" ] || \
+                   [ "$(echo -n I | hexdump -o 2>/dev/null | awk '{ print substr($2,6,1); exit }')" = "0" ]; then
+                  TARGET_ARCH="linux-mips32r2-msb"; Z2_ARCH="mips"
                 else
-                  TARGET_ARCH="linux-mips32r2-msb"
+                  TARGET_ARCH="linux-mips32r2-lsb"; Z2_ARCH="mipsel"
                 fi
                 ;;
-              x86_64) TARGET_ARCH="linux-x86_64" ;;
-              *) TARGET_ARCH="linux-arm64" ;;
+              x86_64) TARGET_ARCH="linux-x86_64"; Z2_ARCH="x86_64" ;;
+              *) TARGET_ARCH="linux-arm64"; Z2_ARCH="arm64" ;;
             esac
 
-            echo "[1/4] Архитектура целевой системы: $TARGET_ARCH ($ARCH)"
+            echo "[1/4] Архитектура целевой системы: $TARGET_ARCH ($ARCH, Z2_ARCH=$Z2_ARCH)"
 
-            mkdir -p /opt/zapret2 /opt/zapret2/lua /opt/etc/init.d /opt/etc/zapret /opt/sbin /opt/zapret /opt/zapret/nfq
+            mkdir -p /opt/zapret2 /opt/zapret2/lua /opt/zapret2/binaries /opt/etc/init.d /opt/etc/zapret /opt/sbin /opt/zapret /opt/zapret/nfq
 
             # Сохраняем резервную копию конфигурации и бинарника v1 для безопасного отката
             if [ -f /opt/etc/zapret/zapret.conf ] && ! grep -q "lua-desync" /opt/etc/zapret/zapret.conf 2>/dev/null; then
@@ -5205,11 +5204,6 @@ pub async fn zapret_action(
                 break
               fi
             done
-
-            for f in zapret-lib.lua zapret-antidpi.lua zapret-auto.lua zapret-obfs.lua; do
-              [ -f "/opt/zapret2/lua/$f" ] || echo "-- zapret2 lua module $f" > "/opt/zapret2/lua/$f"
-            done
-            chmod 644 /opt/zapret2/lua/*.lua 2>/dev/null || true
 
             cd /opt
             echo "[2/4] Загрузка дистрибутива Zapret 2 (zapret2-v1.0.5.2.tar.gz)..."
@@ -5233,23 +5227,49 @@ pub async fn zapret_action(
               Z2_DIR=$(find /tmp -maxdepth 1 -type d \( -name "zapret2*" -o -name "zapret-v*" \) | head -n 1)
               if [ -n "$Z2_DIR" ]; then
                 echo "Распакован каталог сборки: $Z2_DIR"
-                if [ -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws2" ]; then
+                if [ -d "$Z2_DIR/binaries" ]; then
+                  cp -rf "$Z2_DIR/binaries/"* /opt/zapret2/binaries/ 2>/dev/null || true
+                fi
+                if [ -n "$Z2_ARCH" ] && [ -f "$Z2_DIR/binaries/$Z2_ARCH/nfqws2" ]; then
+                  cp -f "$Z2_DIR/binaries/$Z2_ARCH/nfqws2" /opt/zapret2/nfqws2
+                  echo "Скопирован nfqws2 для $Z2_ARCH"
+                elif [ -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws2" ]; then
                   cp -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws2" /opt/zapret2/nfqws2
                   echo "Скопирован nfqws2 для $TARGET_ARCH"
                 elif [ -f "$Z2_DIR/nfqws2" ]; then
                   cp -f "$Z2_DIR/nfqws2" /opt/zapret2/nfqws2
                   echo "Скопирован nfqws2"
+                elif [ -n "$Z2_ARCH" ] && [ -f "$Z2_DIR/binaries/$Z2_ARCH/nfqws" ]; then
+                  cp -f "$Z2_DIR/binaries/$Z2_ARCH/nfqws" /opt/zapret2/nfqws2
+                  echo "Скопирован совместимый nfqws ($Z2_ARCH) в /opt/zapret2/nfqws2"
                 elif [ -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws" ]; then
                   cp -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws" /opt/zapret2/nfqws2
-                  echo "Скопирован совместимый nfqws в /opt/zapret2/nfqws2"
+                  echo "Скопирован совместимый nfqws ($TARGET_ARCH) в /opt/zapret2/nfqws2"
+                fi
+                if [ -d "$Z2_DIR/files/lua" ]; then
+                  cp -rf "$Z2_DIR/files/lua/"* /opt/zapret2/lua/ 2>/dev/null || true
+                  echo "Скопированы Lua библиотеки из files/lua в /opt/zapret2/lua"
                 fi
                 if [ -d "$Z2_DIR/lua" ]; then
                   cp -rf "$Z2_DIR/lua/"* /opt/zapret2/lua/ 2>/dev/null || true
-                  echo "Скопированы Lua библиотеки в /opt/zapret2/lua"
+                  echo "Скопированы Lua библиотеки из lua в /opt/zapret2/lua"
                 fi
                 rm -rf "$Z2_DIR" 2>/dev/null || true
               fi
             fi
+
+            # Если ключевые Lua скрипты отсутствуют или повреждены, загружаем их напрямую из официального репозитория
+            for lf in zapret-lib.lua zapret-antidpi.lua zapret-auto.lua; do
+              if [ ! -s "/opt/zapret2/lua/$lf" ] || [ $(wc -c < "/opt/zapret2/lua/$lf" 2>/dev/null || echo 0) -lt 80 ] || grep -q "404: Not Found" "/opt/zapret2/lua/$lf" 2>/dev/null; then
+                rm -f "/opt/zapret2/lua/$lf"
+                (curl -sSL -x http://127.0.0.1:7890 "https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf" || \
+                 curl -sSL "https://ghproxy.net/https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf" || \
+                 curl -sSL "https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf") 2>/dev/null || true
+                if [ $(wc -c < "/opt/zapret2/lua/$lf" 2>/dev/null || echo 0) -lt 80 ] || grep -q "404: Not Found" "/opt/zapret2/lua/$lf" 2>/dev/null; then
+                  rm -f "/opt/zapret2/lua/$lf"
+                fi
+              fi
+            done
 
             echo "[4/4] Настройка прав доступа, симлинков и инициализация /opt/zapret2..."
             [ -f /opt/zapret2/nfqws2 ] && chmod +x /opt/zapret2/nfqws2 && ln -sf /opt/zapret2/nfqws2 /opt/sbin/nfqws2
@@ -5268,9 +5288,15 @@ pub async fn zapret_action(
                     ));
                 }
 
+                let _ = tokio::fs::create_dir_all("/opt/zapret2").await;
+                let _ = tokio::fs::write("/opt/zapret2/version.txt", "v1.0.5.2\n").await;
+
                 let _cfg_guard = state.config_lock.lock().await;
                 let mut cfg = (**state.config.read().await).clone();
                 cfg.zapret.engine = "v2".to_string();
+                cfg.zapret.update_available = false;
+                cfg.zapret.latest_version = Some("v1.0.5.2".to_string());
+                cfg.zapret.last_update_check = Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
                 if let Some(ref ca) = cfg.zapret.custom_args {
                     if ca.contains("--dpi-desync") && !ca.contains("--lua-desync") {
                         cfg.zapret.custom_args = None;
@@ -5294,6 +5320,8 @@ pub async fn zapret_action(
                     "can_rollback_v1": true,
                     "hardware": hw,
                     "features": cfg.zapret,
+                    "update_available": false,
+                    "latest_version": "v1.0.5.2",
                     "output": output_str.trim(),
                     "message": format!("Zapret 2.0 (nfqws2 + Lua) установлен в /opt/zapret2 для {} ({})", hw.model, hw.arch_label)
                 }));
@@ -5339,6 +5367,9 @@ pub async fn zapret_action(
         let _cfg_guard = state.config_lock.lock().await;
         let mut cfg = (**state.config.read().await).clone();
         cfg.zapret.engine = target_engine.to_string();
+        if target_engine == "v1" {
+            cfg.zapret.update_available = false;
+        }
 
         if target_engine == "v1" {
             if let Some(ref ca) = cfg.zapret.custom_args {
@@ -5761,28 +5792,24 @@ pub async fn zapret_action(
         let install_cmd = r#"
             ARCH=$(uname -m)
             case "$ARCH" in
-              aarch64|arm64) TARGET_ARCH="linux-arm64" ;;
-              armv7*|armv8*|arm*) TARGET_ARCH="linux-arm" ;;
+              aarch64|arm64) TARGET_ARCH="linux-arm64"; Z2_ARCH="arm64" ;;
+              armv7*|armv8*|arm*) TARGET_ARCH="linux-arm"; Z2_ARCH="arm" ;;
               mips*)
-                if [ "$(echo -n I | hexdump -o 2>/dev/null | awk '{ print substr($2,6,1); exit }')" = "1" ] || \
-                   [ "$(hexdump -s 5 -n 1 -e '"%02x"' /bin/sh 2>/dev/null)" = "01" ]; then
-                  TARGET_ARCH="linux-mips32r2-lsb"
+                if [ "$(hexdump -s 5 -n 1 -e '"%02x"' /bin/sh 2>/dev/null)" = "02" ] || \
+                   [ "$(od -t x1 -j 5 -N 1 /bin/sh 2>/dev/null | awk 'NR==1{print $2}')" = "02" ] || \
+                   [ "$(echo -n I | hexdump -o 2>/dev/null | awk '{ print substr($2,6,1); exit }')" = "0" ]; then
+                  TARGET_ARCH="linux-mips32r2-msb"; Z2_ARCH="mips"
                 else
-                  TARGET_ARCH="linux-mips32r2-msb"
+                  TARGET_ARCH="linux-mips32r2-lsb"; Z2_ARCH="mipsel"
                 fi
                 ;;
-              x86_64) TARGET_ARCH="linux-x86_64" ;;
-              *) TARGET_ARCH="linux-arm64" ;;
+              x86_64) TARGET_ARCH="linux-x86_64"; Z2_ARCH="x86_64" ;;
+              *) TARGET_ARCH="linux-arm64"; Z2_ARCH="arm64" ;;
             esac
 
-            echo "[1/4] Архитектура целевой системы: $TARGET_ARCH ($ARCH)"
+            echo "[1/4] Архитектура целевой системы: $TARGET_ARCH ($ARCH, Z2_ARCH=$Z2_ARCH)"
 
-            mkdir -p /opt/zapret2 /opt/zapret2/lua /opt/etc/init.d /opt/etc/zapret /opt/sbin /opt/zapret
-
-            for f in zapret-lib.lua zapret-antidpi.lua zapret-auto.lua zapret-obfs.lua; do
-              [ -f "/opt/zapret2/lua/$f" ] || echo "-- zapret2 lua module $f" > "/opt/zapret2/lua/$f"
-            done
-            chmod 644 /opt/zapret2/lua/*.lua 2>/dev/null || true
+            mkdir -p /opt/zapret2 /opt/zapret2/lua /opt/zapret2/binaries /opt/etc/init.d /opt/etc/zapret /opt/sbin /opt/zapret
 
             cd /opt
             echo "[2/4] Загрузка дистрибутива Zapret 2 (zapret2-v1.0.5.2.tar.gz)..."
@@ -5801,20 +5828,54 @@ pub async fn zapret_action(
             if [ -f /tmp/z2.tar.gz ]; then
               tar -xzf /tmp/z2.tar.gz -C /tmp/ 2>/dev/null || true
               rm -f /tmp/z2.tar.gz
-              if [ -f /tmp/zapret2/binaries/$TARGET_ARCH/nfqws2 ]; then
-                cp -f /tmp/zapret2/binaries/$TARGET_ARCH/nfqws2 /opt/zapret2/nfqws2
-                cp -rf /tmp/zapret2/lua/* /opt/zapret2/lua/ 2>/dev/null || true
-              elif [ -f /tmp/zapret2/nfqws2 ]; then
-                cp -f /tmp/zapret2/nfqws2 /opt/zapret2/nfqws2
-                cp -rf /tmp/zapret2/lua/* /opt/zapret2/lua/ 2>/dev/null || true
+              Z2_DIR=$(find /tmp -maxdepth 1 -type d \( -name "zapret2*" -o -name "zapret-v*" \) | head -n 1)
+              if [ -n "$Z2_DIR" ]; then
+                echo "Распакован каталог сборки: $Z2_DIR"
+                if [ -d "$Z2_DIR/binaries" ]; then
+                  cp -rf "$Z2_DIR/binaries/"* /opt/zapret2/binaries/ 2>/dev/null || true
+                fi
+                if [ -n "$Z2_ARCH" ] && [ -f "$Z2_DIR/binaries/$Z2_ARCH/nfqws2" ]; then
+                  cp -f "$Z2_DIR/binaries/$Z2_ARCH/nfqws2" /opt/zapret2/nfqws2
+                  echo "Скопирован nfqws2 для $Z2_ARCH"
+                elif [ -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws2" ]; then
+                  cp -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws2" /opt/zapret2/nfqws2
+                  echo "Скопирован nfqws2 для $TARGET_ARCH"
+                elif [ -f "$Z2_DIR/nfqws2" ]; then
+                  cp -f "$Z2_DIR/nfqws2" /opt/zapret2/nfqws2
+                  echo "Скопирован nfqws2"
+                elif [ -n "$Z2_ARCH" ] && [ -f "$Z2_DIR/binaries/$Z2_ARCH/nfqws" ]; then
+                  cp -f "$Z2_DIR/binaries/$Z2_ARCH/nfqws" /opt/zapret2/nfqws2
+                elif [ -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws" ]; then
+                  cp -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws" /opt/zapret2/nfqws2
+                fi
+                if [ -d "$Z2_DIR/files/lua" ]; then
+                  cp -rf "$Z2_DIR/files/lua/"* /opt/zapret2/lua/ 2>/dev/null || true
+                  echo "Скопированы Lua библиотеки из files/lua в /opt/zapret2/lua"
+                fi
+                if [ -d "$Z2_DIR/lua" ]; then
+                  cp -rf "$Z2_DIR/lua/"* /opt/zapret2/lua/ 2>/dev/null || true
+                  echo "Скопированы Lua библиотеки из lua в /opt/zapret2/lua"
+                fi
+                if [ ! -f /opt/zapret2/nfqws2 ] && [ -d /tmp/zapret-v* ]; then
+                  rm -rf /opt/zapret
+                  mv /tmp/zapret-v* /opt/zapret
+                  cd /opt/zapret && ./install_bin.sh 2>/dev/null || true
+                fi
+                rm -rf "$Z2_DIR" /tmp/zapret-v* 2>/dev/null || true
               fi
-              if [ ! -f /opt/zapret2/nfqws2 ] && [ -d /tmp/zapret-v* ]; then
-                rm -rf /opt/zapret
-                mv /tmp/zapret-v* /opt/zapret
-                cd /opt/zapret && ./install_bin.sh 2>/dev/null || true
-              fi
-              rm -rf /tmp/zapret2 /tmp/zapret-v* 2>/dev/null || true
             fi
+
+            for lf in zapret-lib.lua zapret-antidpi.lua zapret-auto.lua; do
+              if [ ! -s "/opt/zapret2/lua/$lf" ] || [ $(wc -c < "/opt/zapret2/lua/$lf" 2>/dev/null || echo 0) -lt 80 ] || grep -q "404: Not Found" "/opt/zapret2/lua/$lf" 2>/dev/null; then
+                rm -f "/opt/zapret2/lua/$lf"
+                (curl -sSL -x http://127.0.0.1:7890 "https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf" || \
+                 curl -sSL "https://ghproxy.net/https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf" || \
+                 curl -sSL "https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf") 2>/dev/null || true
+                if [ $(wc -c < "/opt/zapret2/lua/$lf" 2>/dev/null || echo 0) -lt 80 ] || grep -q "404: Not Found" "/opt/zapret2/lua/$lf" 2>/dev/null; then
+                  rm -f "/opt/zapret2/lua/$lf"
+                fi
+              fi
+            done
 
             echo "[4/4] Настройка прав доступа, симлинков и инициализация /opt/zapret2..."
             [ -f /opt/zapret2/nfqws2 ] && chmod +x /opt/zapret2/nfqws2 && ln -sf /opt/zapret2/nfqws2 /opt/sbin/nfqws2
@@ -5825,6 +5886,8 @@ pub async fn zapret_action(
         match tokio::process::Command::new("sh").arg("-c").arg(install_cmd).output().await {
             Ok(out) => {
                 let output_str = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+                let _ = tokio::fs::create_dir_all("/opt/zapret2").await;
+                let _ = tokio::fs::write("/opt/zapret2/version.txt", "v1.0.5.2\n").await;
                 let _cfg = state.config.read().await;
                 let _ = sync_zapret_files(&_cfg.zapret).await;
                 if let Ok(out) = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("start").output().await {

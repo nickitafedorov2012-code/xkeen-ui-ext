@@ -379,6 +379,7 @@ export default function Zapret({ notify }: ZapretProps) {
               engine: 'v2',
               v2_installed: res.v2_installed ?? true,
               can_rollback_v1: res.can_rollback_v1 ?? true,
+              update_available: false,
             }
           : prev
       )
@@ -392,7 +393,28 @@ export default function Zapret({ notify }: ZapretProps) {
       } else {
         setFeatures((prev) => ({ ...prev, engine: 'v2' }))
       }
+      try {
+        localStorage.removeItem('xr_zapret_last_check')
+      } catch {
+        /* ignore */
+      }
+      try {
+        await apiGet('zapret/update/check?force=1')
+      } catch {
+        /* ignore */
+      }
       notify(res.message || '🚀 Zapret 2.0 (nfqws2 + Lua) успешно установлен в /opt/zapret2')
+      window.dispatchEvent(
+        new CustomEvent('xr:zapret-updated', {
+          detail: {
+            update_available: false,
+            engine: 'v2',
+            version: 'v1.0.5.2',
+            latest_version: 'v1.0.5.2',
+          },
+        })
+      )
+      window.dispatchEvent(new CustomEvent('xr:refresh-status'))
       await loadStatus()
     } catch (e) {
       if (e instanceof Error && (e.message.includes('Лог:') || e.message.includes('[1/4]'))) {
@@ -435,6 +457,15 @@ export default function Zapret({ notify }: ZapretProps) {
             ? '⏪ Выполнен безопасный откат на Legacy 1.x (nfqws)'
             : '🚀 Переключено на Modern 2.0 (nfqws2)')
       )
+      window.dispatchEvent(
+        new CustomEvent('xr:zapret-updated', {
+          detail: {
+            update_available: false,
+            engine: targetEngine,
+          },
+        })
+      )
+      window.dispatchEvent(new CustomEvent('xr:refresh-status'))
       await loadStatus()
     } catch (e) {
       setStatus((prev) => (prev ? { ...prev, engine: prevEngine } : prev))
@@ -1337,7 +1368,7 @@ export default function Zapret({ notify }: ZapretProps) {
             </div>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, width: '100%' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               <button
                 type="button"
@@ -1346,18 +1377,22 @@ export default function Zapret({ notify }: ZapretProps) {
                 disabled={busy || upgradingEngine}
                 onClick={handleUpgradeZapret2}
                 style={{
-                  background: 'linear-gradient(135deg, #0284c7 0%, #7c3aed 100%)',
+                  background: status?.update_available
+                    ? 'linear-gradient(135deg, #16a34a 0%, #22c55e 100%)'
+                    : 'linear-gradient(135deg, #0284c7 0%, #7c3aed 100%)',
                   color: '#fff',
                   border: 'none',
                   fontWeight: 600,
-                  boxShadow: '0 4px 14px rgba(56, 189, 248, 0.25)',
+                  boxShadow: status?.update_available
+                    ? '0 4px 14px rgba(34, 197, 94, 0.35)'
+                    : '0 4px 14px rgba(56, 189, 248, 0.25)',
                 }}
                 title="В 1 клик скачать актуальный бинарник nfqws2 и Lua-библиотеки в /opt/zapret2 с сохранением резервной копии v1"
               >
                 {upgradingEngine
                   ? '⏳ Скачивание nfqws2 и Lua в /opt/zapret2…'
                   : status?.update_available
-                  ? `🚀 Обновить Zapret 2 (до ${status.latest_version || 'новой версии'})`
+                  ? `🚀 Обновить Zapret 2 (${status.latest_version || 'v2'})`
                   : activeEngine === 'v2'
                   ? '🚀 Переустановить Zapret 2 (nfqws2)'
                   : '🚀 Обновить до Zapret 2 (nfqws2)'}
@@ -1381,7 +1416,7 @@ export default function Zapret({ notify }: ZapretProps) {
               )}
             </div>
 
-            <div className="muted small" style={{ fontSize: 11 }}>
+            <div className="muted small" style={{ fontSize: 11, flexShrink: 0, marginLeft: 'auto' }}>
               Активный движок:{' '}
               <b style={{ color: activeEngine === 'v2' ? '#38bdf8' : '#facc15' }}>
                 {activeEngine === 'v2' ? 'Modern 2.0 (nfqws2 + Lua)' : 'Legacy 1.x (nfqws)'}

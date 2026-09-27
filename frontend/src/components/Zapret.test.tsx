@@ -1562,6 +1562,72 @@ describe('Zapret Component — Features 1, 2, 4, 5 (Mini-Blockcheck, DPI Analyti
     expect(container?.textContent).toContain('LAN трафик фильтруется через nfqws')
     expect(container?.textContent).not.toContain('🟢 Работает: Zapret 2.0')
   })
+
+  it('clears localStorage xr_zapret_last_check and requests forced update check upon successful upgrade_zapret2', async () => {
+    localStorage.setItem('xr_zapret_last_check', '999999999')
+
+    let loadStatusCalled = false
+    const apiGetCalls: string[] = []
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      apiGetCalls.push(path)
+      if (path === 'zapret/status') {
+        loadStatusCalled = true
+        return Promise.resolve({
+          ...mockZapretStatus,
+          engine: 'v1',
+          v2_installed: false,
+          v1_installed: true,
+          update_available: true,
+          latest_version: 'v1.0.5.2',
+        })
+      }
+      return Promise.resolve({ update_available: false, latest_version: 'v1.0.5.2' })
+    })
+
+    vi.spyOn(api, 'apiPost').mockImplementation((path: string, body: any) => {
+      if (path === 'zapret/action' && body?.action === 'upgrade_zapret2') {
+        return Promise.resolve({
+          success: true,
+          engine: 'v2',
+          v2_installed: true,
+          can_rollback_v1: true,
+          update_available: false,
+          latest_version: 'v1.0.5.2',
+          message: 'Zapret 2.0 установлен',
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    const upgradeBtn = container?.querySelector('[data-testid="upgrade-zapret2-btn"]') as HTMLButtonElement | null
+    expect(upgradeBtn).not.toBeNull()
+
+    const dispatchSpy = vi.spyOn(window, 'dispatchEvent')
+
+    await act(async () => {
+      upgradeBtn?.click()
+    })
+
+    expect(localStorage.getItem('xr_zapret_last_check')).toBeNull()
+    expect(loadStatusCalled).toBe(true)
+    expect(apiGetCalls).toContain('zapret/update/check?force=1')
+    expect(notifyMock).toHaveBeenCalledWith(expect.stringContaining('Zapret 2.0 установлен'))
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'xr:zapret-updated',
+        detail: expect.objectContaining({ update_available: false, engine: 'v2' }),
+      })
+    )
+    expect(dispatchSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'xr:refresh-status',
+      })
+    )
+  })
 })
 
 

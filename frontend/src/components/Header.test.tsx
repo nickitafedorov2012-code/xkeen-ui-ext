@@ -128,7 +128,7 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
     expect(zapretPill).not.toBeNull()
     expect(zapretPill?.textContent).toContain('Запрет 1')
     expect(zapretPill?.textContent).toContain('v72.13')
-    expect(zapretPill?.classList.contains('header-pill-update-red')).toBe(false)
+    expect(zapretPill?.classList.contains('header-pill-update-green')).toBe(false)
 
     // Click Zapret pill
     await act(async () => {
@@ -168,7 +168,7 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
     expect(zapretPill?.textContent).toContain('v1.0.5.2')
   })
 
-  it('shows red pulsating animation and badge when Zapret update is available', async () => {
+  it('shows green pulsating animation and badge when Zapret update is available', async () => {
     vi.spyOn(api, 'apiGet').mockResolvedValue({})
 
     const statusUpdate: StatusInfo = {
@@ -196,12 +196,58 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
     })
 
     const zapretPill = container?.querySelector('[data-testid="header-zapret-pill"]') as HTMLButtonElement | null
-    expect(zapretPill?.classList.contains('header-pill-update-red')).toBe(true)
+    expect(zapretPill?.classList.contains('header-pill-update-green')).toBe(true)
 
     const badge = container?.querySelector('[data-testid="zapret-update-badge"]')
     expect(badge).not.toBeNull()
-    expect(badge?.classList.contains('update-pill-badge-red')).toBe(true)
+    expect(badge?.classList.contains('update-pill-badge-green')).toBe(true)
     expect(badge?.textContent).toContain('72.14')
+  })
+
+  it('shows green update badge for Mihomo core and blue update badge for Panel', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'update/check') {
+        return Promise.resolve({
+          current: 'v1.5.20',
+          latest: 'v1.5.21',
+          update_available: true,
+        })
+      }
+      if (path === 'mihomo/releases') {
+        return Promise.resolve({
+          current_version: 'v1.19.0',
+          latest_version: 'v1.19.1',
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    await act(async () => {
+      root!.render(
+        <Header
+          status={mockStatus}
+          notify={notifyMock}
+          refresh={refreshMock}
+          onSwitchTab={onSwitchTabMock}
+        />
+      )
+    })
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50))
+    })
+
+    const mihomoPill = container?.querySelector('[data-testid="header-mihomo-pill"]') as HTMLButtonElement | null
+    expect(mihomoPill).not.toBeNull()
+    expect(mihomoPill?.classList.contains('header-pill-update-green')).toBe(true)
+    const mihomoBadge = container?.querySelector('[data-testid="mihomo-update-badge"]')
+    expect(mihomoBadge?.classList.contains('update-pill-badge-green')).toBe(true)
+
+    const appPill = container?.querySelector('[data-testid="header-app-pill"]') as HTMLButtonElement | null
+    expect(appPill).not.toBeNull()
+    expect(appPill?.classList.contains('header-pill-update-blue')).toBe(true)
+    const appBadge = container?.querySelector('[data-testid="app-update-badge"]')
+    expect(appBadge?.classList.contains('update-pill-badge-blue')).toBe(true)
   })
 
   it('correctly calculates is5AmCheckDue boundary logic', () => {
@@ -268,10 +314,63 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
     })
 
     const zapretPill = container?.querySelector('[data-testid="header-zapret-pill"]') as HTMLButtonElement | null
-    expect(zapretPill?.classList.contains('header-pill-update-red')).toBe(true)
+    expect(zapretPill?.classList.contains('header-pill-update-green')).toBe(true)
     const badge = container?.querySelector('[data-testid="zapret-update-badge"]')
     expect(badge).not.toBeNull()
+    expect(badge?.classList.contains('update-pill-badge-green')).toBe(true)
     expect(badge?.textContent).toContain('1.0.5.3')
     expect(localStorage.getItem('xr_zapret_last_check')).not.toBe('1000')
+  })
+
+  it('resets green update badge immediately when xr:zapret-updated event is dispatched with update_available false', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/update/check') {
+        return Promise.resolve({
+          current_engine: 'v2',
+          current_version: '1.0.5.2',
+          label: 'Запрет 2 v1.0.5.2',
+          latest_version: 'v1.0.5.3',
+          update_available: true,
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    localStorage.setItem('xr_zapret_last_check', '1000')
+
+    await act(async () => {
+      root!.render(
+        <Header
+          status={mockStatus}
+          notify={notifyMock}
+          refresh={refreshMock}
+          onSwitchTab={onSwitchTabMock}
+        />
+      )
+    })
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50))
+    })
+
+    const zapretPill = container?.querySelector('[data-testid="header-zapret-pill"]') as HTMLButtonElement | null
+    expect(zapretPill?.classList.contains('header-pill-update-green')).toBe(true)
+
+    // Dispatch xr:zapret-updated indicating upgrade/update finished
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('xr:zapret-updated', {
+          detail: {
+            update_available: false,
+            engine: 'v2',
+            version: 'v1.0.5.2',
+            latest_version: 'v1.0.5.2',
+          },
+        })
+      )
+    })
+
+    expect(zapretPill?.classList.contains('header-pill-update-green')).toBe(false)
+    expect(container?.querySelector('[data-testid="zapret-update-badge"]')).toBeNull()
   })
 })

@@ -538,11 +538,11 @@ runTest('15. Header Navigation, Zapret 1/2 Chip, Red Pulse Animation & 5 AM Dail
   assert(headerTsx.includes('zapretEngine === \'v2\' ? \'Запрет 2\' : \'Запрет 1\''), 'Header.tsx must format Zapret label as Запрет 1 or Запрет 2');
   assert(headerTsx.includes('IconShield'), 'Header.tsx must include IconShield for Zapret');
 
-  // 3. Red pulsating glow animation for Zapret update
-  assert(stylesCss.includes('.header-pill-btn.header-pill-update-red'), 'styles.css must define .header-pill-btn.header-pill-update-red');
-  assert(stylesCss.includes('.update-pill-badge-red'), 'styles.css must define .update-pill-badge-red');
-  assert(stylesCss.includes('@keyframes pill-red-pulse'), 'styles.css must define @keyframes pill-red-pulse');
-  assert(headerTsx.includes('header-pill-update-red'), 'Header.tsx must apply header-pill-update-red when zapret update is available');
+  // 3. Green pulsating glow animation for Zapret and Core, Blue for Panel
+  assert(stylesCss.includes('.header-pill-btn.header-pill-update-green'), 'styles.css must define .header-pill-btn.header-pill-update-green');
+  assert(stylesCss.includes('.update-pill-badge-green'), 'styles.css must define .update-pill-badge-green');
+  assert(stylesCss.includes('@keyframes pill-green-pulse'), 'styles.css must define @keyframes pill-green-pulse');
+  assert(headerTsx.includes('header-pill-update-green'), 'Header.tsx must apply header-pill-update-green when zapret update is available');
   assert(headerTsx.includes('data-testid="zapret-update-badge"'), 'Header.tsx must render zapret-update-badge on update');
 
   // 4. 5:00 AM daily check logic
@@ -581,5 +581,102 @@ runTest('15. Header Navigation, Zapret 1/2 Chip, Red Pulse Animation & 5 AM Dail
   assert(appTestTsx.includes('removes Settings from bottom navigation'), 'App.test.tsx must test removal of settings from bottom tabs');
 });
 
+// -------------------------------------------------------------
+// 16. Zapret Update Badge Stuck Red & Service Start Startup Crash Fixes
+// -------------------------------------------------------------
+runTest('16. Zapret Update Badge Stuck Red & Service Start Startup Crash Fixes', () => {
+  const apiRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/api.rs'), 'utf8');
+  const zapretTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Zapret.tsx'), 'utf8');
+  const zapretTestTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Zapret.test.tsx'), 'utf8');
+  const headerTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Header.tsx'), 'utf8');
+  const appTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/App.tsx'), 'utf8');
+
+  // 1. check_zapret_update_core must NOT mark update_available=true solely due to v1 engine
+  assert(apiRs.includes('let update_available = has_newer_tag;'), 'check_zapret_update_core must set update_available based on has_newer_tag');
+  assert(!apiRs.includes('update_available = has_newer_tag || upgrade_available'), 'check_zapret_update_core must NOT conflate upgrade_available with update_available');
+  assert(apiRs.includes('let effective_update = update_avail && crate::updater::is_newer(&lat, &cur_ver);'), 'check_zapret_update_core cached branch must verify is_newer');
+
+  // 2. Both get_status and get_zapret_status must guard update_available with is_newer check against installed version
+  assert(apiRs.includes('"update_available": cfg.zapret.update_available\n                && cfg.zapret.latest_version.as_deref().map_or(false, |lat| crate::updater::is_newer(lat, &zapret_ver)),')
+    || apiRs.includes('crate::updater::is_newer(lat, &zapret_ver)'),
+    'get_status and get_zapret_status must verify is_newer against installed version');
+
+  // 3. upgrade_zapret2 must reset update_available=false, update latest_version, write version.txt and return update_available: false
+  assert(apiRs.includes('cfg.zapret.update_available = false;'), 'upgrade_zapret2 / rollback must set cfg.zapret.update_available = false');
+  assert(apiRs.includes('cfg.zapret.latest_version = Some("v1.0.5.2".to_string());'), 'upgrade_zapret2 must update latest_version to v1.0.5.2');
+  assert(apiRs.includes('"update_available": false'), 'upgrade_zapret2 response must return update_available: false');
+  assert(apiRs.includes('tokio::fs::write("/opt/zapret2/version.txt", "v1.0.5.2\\n")'), 'upgrade_zapret2 Rust handler must directly write version.txt');
+
+  // 4. S51zapret script: translates --dpi-desync-fwmark= to --fwmark= for nfqws2 to prevent startup crash
+  assert(apiRs.includes("sed 's/--dpi-desync-fwmark=/--fwmark=/g'"), 'S51zapret must translate --dpi-desync-fwmark= to --fwmark= for nfqws2');
+  assert(apiRs.includes("sed 's/--fwmark=/--dpi-desync-fwmark=/g'"), 'S51zapret must translate --fwmark= to --dpi-desync-fwmark= for legacy nfqws');
+
+  // 5. S51zapret script: loads both zapret-lib.lua and zapret-antidpi.lua before effective args
+  assert(apiRs.includes('for lmod in zapret-lib.lua zapret-antidpi.lua zapret-auto.lua; do'), 'S51zapret must iterate required lua modules');
+  assert(apiRs.includes('$BIN --pidfile="$PIDFILE" $LUA_INIT_ARG $EFFECTIVE_ARGS'), 'S51zapret must pass $LUA_INIT_ARG with nfqws2');
+
+  // 6. find_bin & is_nfqws2_available must support un-prefixed architecture binary folders and verify runnability
+  assert(apiRs.includes('/opt/zapret2/binaries/arm64/nfqws2'), 'find_bin must search /opt/zapret2/binaries/arm64/nfqws2');
+  assert(apiRs.includes('/opt/zapret2/binaries/arm/nfqws2'), 'find_bin must search /opt/zapret2/binaries/arm/nfqws2');
+  assert(apiRs.includes('/opt/zapret2/binaries/mipsel/nfqws2'), 'find_bin must search /opt/zapret2/binaries/mipsel/nfqws2');
+  assert(apiRs.includes('/opt/zapret2/binaries/mips/nfqws2'), 'find_bin must search /opt/zapret2/binaries/mips/nfqws2');
+  assert(apiRs.includes('/opt/zapret2/binaries/x86_64/nfqws2'), 'find_bin must search /opt/zapret2/binaries/x86_64/nfqws2');
+  assert(apiRs.includes('is_runnable()'), 'find_bin must include is_runnable function to avoid executing wrong architecture binaries');
+
+  // 7. upgrade_zapret2 & install archive extraction handles Z2_ARCH, files/lua, and valid master/lua download fallback
+  assert(apiRs.includes('Z2_ARCH="arm64"'), 'upgrade_zapret2 must map aarch64/arm64 to Z2_ARCH=arm64');
+  assert(apiRs.includes('Z2_ARCH="mipsel"'), 'upgrade_zapret2 must map little-endian mips to Z2_ARCH=mipsel');
+  assert(apiRs.includes('cp -rf "$Z2_DIR/files/lua/"* /opt/zapret2/lua/'), 'upgrade_zapret2 must copy from files/lua/');
+  assert(apiRs.includes('https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf'), 'upgrade_zapret2 must have direct GitHub lua download fallback using master/lua');
+
+  // 8. Event synchronization between components (Zapret.tsx, Header.tsx, App.tsx)
+  assert(zapretTsx.includes("new CustomEvent('xr:zapret-updated'"), 'Zapret.tsx must dispatch xr:zapret-updated event');
+  assert(zapretTsx.includes("new CustomEvent('xr:refresh-status')"), 'Zapret.tsx must dispatch xr:refresh-status event');
+  assert(headerTsx.includes("window.addEventListener('xr:zapret-updated'"), 'Header.tsx must listen to xr:zapret-updated');
+  assert(headerTsx.includes('effectiveZapretUpdate ='), 'Header.tsx must calculate effectiveZapretUpdate');
+  assert(appTsx.includes("window.addEventListener('xr:refresh-status'"), 'App.tsx must listen to xr:refresh-status');
+
+  // 9. Zapret.tsx handleUpgradeZapret2 clears localStorage cache, resets update_available, and forces check
+  assert(zapretTsx.includes("localStorage.removeItem('xr_zapret_last_check')"), 'Zapret.tsx must remove xr_zapret_last_check from localStorage on upgrade');
+  assert(zapretTsx.includes("apiGet('zapret/update/check?force=1')"), 'Zapret.tsx must trigger forced update check after upgrade');
+  assert(zapretTsx.includes('update_available: false'), 'Zapret.tsx must set update_available: false in status state');
+
+  // 10. Zapret.test.tsx anti-regression test exists
+  assert(zapretTestTsx.includes('clears localStorage xr_zapret_last_check and requests forced update check upon successful upgrade_zapret2'),
+    'Zapret.test.tsx must contain automated test for upgrade_zapret2 cache clearing and update_available reset');
+});
+
+// -------------------------------------------------------------
+// 17. Update Colors (Core & Zapret = Green, Panel = Blue) & Header Non-Overlapping Layout Protection
+// -------------------------------------------------------------
+runTest('17. Update Colors (Core & Zapret = Green, Panel = Blue) & Header Non-Overlapping Layout Protection', () => {
+  const stylesCss = fs.readFileSync(path.resolve(__dirname, '../frontend/src/styles.css'), 'utf8');
+  const headerTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Header.tsx'), 'utf8');
+  const headerTestTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Header.test.tsx'), 'utf8');
+  const zapretTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Zapret.tsx'), 'utf8');
+
+  // 1. Core update (Mihomo) uses GREEN
+  assert(headerTsx.includes("mihomoUpdateAvailable ? 'header-pill-update-green' : ''"), 'Header.tsx must use header-pill-update-green for Mihomo core');
+  assert(headerTsx.includes('update-pill-badge-green'), 'Header.tsx must use update-pill-badge-green for core and zapret');
+
+  // 2. Zapret update uses GREEN
+  assert(headerTsx.includes("effectiveZapretUpdate ? 'header-pill-update-green' : ''"), 'Header.tsx must use header-pill-update-green for Zapret');
+  assert(zapretTsx.includes('#16a34a') && zapretTsx.includes('#22c55e'), 'Zapret.tsx upgrade button must use green gradient when update_available is true');
+
+  // 3. Panel update (XKeen Route) uses BLUE
+  assert(headerTsx.includes("updateAvailable ? 'header-pill-update-blue' : ''"), 'Header.tsx must use header-pill-update-blue for Panel');
+  assert(headerTsx.includes('update-pill-badge-blue'), 'Header.tsx must use update-pill-badge-blue for Panel');
+
+  // 4. Header layout non-overlapping protection
+  assert(stylesCss.includes('min-width: max-content;'), 'styles.css must prevent .header-center from shrinking below its content');
+  assert(stylesCss.includes('@media (max-width: 1080px)'), 'styles.css must wrap header at 1080px to prevent element overlapping');
+  assert(stylesCss.includes('.header-pill-btn.header-pill-update-green .header-pill-subtitle'), 'styles.css must hide subtitle on update pills to prevent horizontal overflow');
+
+  // 5. Automated unit tests exist in Header.test.tsx
+  assert(headerTestTsx.includes('shows green update badge for Mihomo core and blue update badge for Panel'), 'Header.test.tsx must contain automated test for green core and blue panel updates');
+  assert(headerTestTsx.includes('shows green pulsating animation and badge when Zapret update is available'), 'Header.test.tsx must contain automated test for green zapret update');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
+
 

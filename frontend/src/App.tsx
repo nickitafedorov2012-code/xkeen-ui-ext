@@ -222,6 +222,14 @@ export default function App() {
     return () => clearInterval(interval)
   }, [refresh, status?.refresh_interval_sec])
 
+  useEffect(() => {
+    const handleRefreshStatus = () => {
+      refresh()
+    }
+    window.addEventListener('xr:refresh-status', handleRefreshStatus)
+    return () => window.removeEventListener('xr:refresh-status', handleRefreshStatus)
+  }, [refresh])
+
   // Глобальные горячие клавиши (Ctrl+K, Ctrl+P, Alt+R)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {

@@ -287,6 +287,31 @@ export default function Header({
       : (status?.zapret?.latest_version || '')
 
   useEffect(() => {
+    const handleZapretUpdated = (
+      e: Event
+    ) => {
+      const customEvent = e as CustomEvent<{
+        update_available?: boolean
+        engine?: 'v1' | 'v2'
+        version?: string
+        latest_version?: string
+      }>
+      if (customEvent.detail) {
+        if (customEvent.detail.update_available !== undefined) {
+          setZapretUpdateAvailable(Boolean(customEvent.detail.update_available))
+        }
+        if (customEvent.detail.engine) setZapretEngine(customEvent.detail.engine)
+        if (customEvent.detail.version) setZapretVersion(customEvent.detail.version)
+        if (customEvent.detail.latest_version) setZapretLatestVersion(customEvent.detail.latest_version)
+      } else {
+        setZapretUpdateAvailable(false)
+      }
+    }
+    window.addEventListener('xr:zapret-updated', handleZapretUpdated)
+    return () => window.removeEventListener('xr:zapret-updated', handleZapretUpdated)
+  }, [])
+
+  useEffect(() => {
     if (status?.zapret) {
       if (status.zapret.engine) {
         setZapretEngine(status.zapret.engine)
@@ -495,7 +520,8 @@ export default function Header({
       <div className="header-right">
         <button
           type="button"
-          className={`header-pill-btn ${mihomoUpdateAvailable ? 'header-pill-update-blue' : ''}`}
+          data-testid="header-mihomo-pill"
+          className={`header-pill-btn ${mihomoUpdateAvailable ? 'header-pill-update-green' : ''}`}
           onClick={() => {
             if (onOpenMihomoModal) {
               onOpenMihomoModal()
@@ -513,7 +539,11 @@ export default function Header({
           <span className="header-pill-title">Mihomo</span>
           <span className="header-pill-subtitle">{mihomoVersion}</span>
           {mihomoUpdateAvailable && (
-            <span className="update-pill-badge update-pill-badge-blue" title={`Доступна новая версия ${mihomoLatestVersion}`}>
+            <span
+              className="update-pill-badge update-pill-badge-green"
+              data-testid="mihomo-update-badge"
+              title={`Доступна новая версия ${mihomoLatestVersion}`}
+            >
               ↑ {mihomoLatestVersion.replace(/^v/, '')}
             </span>
           )}
@@ -521,6 +551,7 @@ export default function Header({
 
         <button
           type="button"
+          data-testid="header-app-pill"
           className={`header-pill-btn ${updateAvailable ? 'header-pill-update-blue' : ''}`}
           onClick={() => {
             if (onOpenUpdateModal) {
@@ -536,7 +567,11 @@ export default function Header({
           <IconBox />
           <span className="header-pill-title">{appVersion}</span>
           {updateAvailable && (
-            <span className="update-pill-badge update-pill-badge-blue" title={`Доступна новая версия ${latestVersion}`}>
+            <span
+              className="update-pill-badge update-pill-badge-blue"
+              data-testid="app-update-badge"
+              title={`Доступна новая версия ${latestVersion}`}
+            >
               ↑ {latestVersion.replace(/^v/, '')}
             </span>
           )}
@@ -545,7 +580,7 @@ export default function Header({
         <button
           type="button"
           data-testid="header-zapret-pill"
-          className={`header-pill-btn ${effectiveZapretUpdate ? 'header-pill-update-red' : ''}`}
+          className={`header-pill-btn ${effectiveZapretUpdate ? 'header-pill-update-green' : ''}`}
           onClick={() => onSwitchTab('zapret')}
           title={
             effectiveZapretUpdate
@@ -558,7 +593,7 @@ export default function Header({
           <span className="header-pill-subtitle">{zapretVersionDisplay}</span>
           {effectiveZapretUpdate && (
             <span
-              className="update-pill-badge update-pill-badge-red"
+              className="update-pill-badge update-pill-badge-green"
               data-testid="zapret-update-badge"
               title={`Доступна новая версия ${effectiveZapretLatest}`}
             >

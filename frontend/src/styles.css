@@ -246,9 +246,10 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  flex: 1;
-  min-width: 0;
+  flex: 0 1 auto;
+  min-width: max-content;
   z-index: 2;
+  padding: 0 6px;
 }
 
 .header-brand-link {
@@ -257,6 +258,7 @@ body {
   align-items: center;
   gap: 10px;
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  flex-shrink: 0;
 }
 
 .header-brand-link:hover {
@@ -276,7 +278,7 @@ body {
 }
 
 .header-brand-text {
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 700;
   letter-spacing: -0.5px;
   white-space: nowrap;
@@ -352,6 +354,30 @@ body {
   stroke: #38bdf8;
 }
 
+/* Зеленая индикация обновления (для ядра Mihomo и Запрета) */
+.header-pill-btn.header-pill-update-green {
+  border-color: rgba(34, 197, 94, 0.7);
+  background: rgba(34, 197, 94, 0.12);
+  box-shadow: 0 0 10px rgba(34, 197, 94, 0.3), inset 0 0 5px rgba(34, 197, 94, 0.08);
+  animation: pill-green-pulse 2.2s infinite ease-in-out;
+  cursor: pointer;
+}
+
+.header-pill-btn.header-pill-update-green:hover {
+  border-color: #22c55e;
+  background: rgba(34, 197, 94, 0.22);
+  box-shadow: 0 0 16px rgba(34, 197, 94, 0.5), inset 0 0 8px rgba(34, 197, 94, 0.15);
+}
+
+.header-pill-btn.header-pill-update-green .header-pill-title {
+  color: #22c55e;
+}
+
+.header-pill-btn.header-pill-update-green svg {
+  stroke: #22c55e;
+}
+
+/* Красная индикация (сохранена для ошибок / предупреждений) */
 .header-pill-btn.header-pill-update-red {
   border-color: rgba(239, 68, 68, 0.7);
   background: rgba(239, 68, 68, 0.12);
@@ -374,6 +400,14 @@ body {
   stroke: #ef4444;
 }
 
+/* Скрытие дублирующегося подзаголовка при наличии бейджа обновления для предотвращения наложения */
+.header-pill-btn.header-pill-update .header-pill-subtitle,
+.header-pill-btn.header-pill-update-blue .header-pill-subtitle,
+.header-pill-btn.header-pill-update-green .header-pill-subtitle,
+.header-pill-btn.header-pill-update-red .header-pill-subtitle {
+  display: none;
+}
+
 .update-pill-badge,
 .update-pill-badge-blue {
   display: inline-flex;
@@ -387,6 +421,21 @@ body {
   border-radius: 9999px;
   line-height: 1.2;
   box-shadow: 0 0 8px rgba(56, 189, 248, 0.55);
+  animation: badge-bounce 2.2s infinite ease-in-out;
+}
+
+.update-pill-badge-green {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: linear-gradient(135deg, #16a34a, #22c55e);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  line-height: 1.2;
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.55);
   animation: badge-bounce 2.2s infinite ease-in-out;
 }
 
@@ -413,6 +462,17 @@ body {
   50% {
     border-color: #38bdf8;
     box-shadow: 0 0 16px rgba(56, 189, 248, 0.55), inset 0 0 8px rgba(56, 189, 248, 0.18);
+  }
+}
+
+@keyframes pill-green-pulse {
+  0%, 100% {
+    border-color: rgba(34, 197, 94, 0.45);
+    box-shadow: 0 0 8px rgba(34, 197, 94, 0.2), inset 0 0 4px rgba(34, 197, 94, 0.05);
+  }
+  50% {
+    border-color: #22c55e;
+    box-shadow: 0 0 16px rgba(34, 197, 94, 0.55), inset 0 0 8px rgba(34, 197, 94, 0.18);
   }
 }
 
@@ -445,11 +505,11 @@ body {
   to { transform: rotate(360deg); }
 }
 
-@media (max-width: 860px) {
+@media (max-width: 1080px) {
   .header-bar {
     flex-wrap: wrap;
-    justify-content: center;
-    padding: 12px;
+    justify-content: space-between;
+    padding: 10px 12px;
   }
   .header-center {
     position: static;
@@ -457,6 +517,7 @@ body {
     order: -1;
     width: 100%;
     margin-bottom: 6px;
+    justify-content: center;
   }
   .header-left, .header-right {
     margin: 0;
