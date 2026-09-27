@@ -22,6 +22,7 @@ pub fn spawn(state: AppState) {
     spawn_dhcp_device_monitor(state.clone());
     spawn_zapret_monitor(state.clone());
     spawn_community_hostlist_updater(state.clone());
+    spawn_zapret_update_checker(state.clone());
     tokio::spawn(async move {
         // Начальная пауза перед запуском монитора
         for _ in 0..10 {
@@ -529,6 +530,37 @@ pub fn spawn_community_hostlist_updater(state: AppState) {
                         log_w!("[COMMUNITY-HOSTS] Ошибка автообновления: {}", e);
                     }
                 }
+            }
+        }
+    });
+pub fn spawn_zapret_update_checker(state: AppState) {
+    tokio::spawn(async move {
+        for _ in 0..15 {
+            if is_shutdown() {
+                return;
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+
+        loop {
+            let last_check = {
+                let cfg = state.config.read().await;
+                cfg.zapret.last_update_check.clone()
+            };
+
+            let now = chrono::Local::now();
+            if crate::api::is_zapret_5am_due(last_check.as_deref(), now) {
+                log_i!("[ZAPRET-UPDATER] Наступило 5:00 утра — плановая проверка обновлений Zapret...");
+                if let Err(e) = crate::api::check_zapret_update_core(&state, false).await {
+                    log_w!("[ZAPRET-UPDATER] Ошибка проверки обновлений Zapret: {}", e);
+                }
+            }
+
+            for _ in 0..3600 {
+                if is_shutdown() {
+                    return;
+                }
+                sleep(Duration::from_secs(1)).await;
             }
         }
     });

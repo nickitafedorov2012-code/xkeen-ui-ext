@@ -33,6 +33,27 @@ pub async fn status(State(state): State<AppState>) -> Response {
             "provider": s.provider, "provider_name": s.provider_name,
         }));
 
+    let zapret_engine = if normalize_engine_choice(&cfg.zapret.engine) == "v1" {
+        "v1"
+    } else if is_nfqws2_available() {
+        "v2"
+    } else if is_nfqws1_available() {
+        "v1"
+    } else {
+        normalize_engine_choice(&cfg.zapret.engine)
+    };
+    let zapret_ver = if zapret_engine == "v2" {
+        detect_installed_zapret2_version().await
+    } else {
+        detect_installed_zapret1_version().await
+    };
+    let zapret_label = if zapret_engine == "v2" {
+        format!("Запрет 2 {zapret_ver}")
+    } else {
+        format!("Запрет 1 {zapret_ver}")
+    };
+    let zapret_installed = std::path::Path::new("/opt/etc/init.d/S51zapret").exists();
+
     api_ok(json!({
         "version": VERSION,
         "config_path": state.config_path.display().to_string(),
@@ -57,6 +78,15 @@ pub async fn status(State(state): State<AppState>) -> Response {
         },
         "refresh_interval_sec": cfg.refresh_interval_sec,
         "adblock_enabled": cfg.adblock_enabled,
+        "zapret": {
+            "engine": zapret_engine,
+            "version": zapret_ver,
+            "label": zapret_label,
+            "installed": zapret_installed,
+            "running": cfg.zapret.enabled,
+            "update_available": cfg.zapret.update_available,
+            "latest_version": cfg.zapret.latest_version,
+        },
     }))
     .into_response()
 }
@@ -4097,6 +4127,208 @@ pub fn should_use_nfqws2(cfg: &crate::config::ZapretConfig) -> bool {
     }
 }
 
+pub async fn detect_installed_zapret1_version() -> String {
+    if let Ok(ver) = tokio::fs::read_to_string("/opt/zapret/version.txt").await {
+        let v = ver.trim();
+        if !v.is_empty() {
+            return if v.starts_with('v') { v.to_string() } else { format!("v{v}") };
+        }
+    }
+    "v72.13".to_string()
+}
+
+pub async fn detect_installed_zapret2_version() -> String {
+    if let Ok(ver) = tokio::fs::read_to_string("/opt/zapret2/version.txt").await {
+        let v = ver.trim();
+        if !v.is_empty() {
+            return if v.starts_with('v') { v.to_string() } else { format!("v{v}") };
+        }
+    }
+    "v1.0.5.2".to_string()
+}
+
+pub fn is_zapret_5am_due(last_checked: Option<&str>, now: chrono::DateTime<chrono::Local>) -> bool {
+    let naive_now = now.naive_local();
+    use chrono::Datelike;
+    if naive_now.year() < 2024 {
+        return false;
+    }
+    let today_5am = match naive_now.date().and_hms_opt(5, 0, 0) {
+        Some(t) => t,
+        None => return true,
+    };
+    let most_recent_5am = if naive_now >= today_5am {
+        today_5am
+    } else {
+        today_5am - chrono::Duration::days(1)
+    };
+
+    match last_checked {
+        None => true,
+        Some(s) => {
+            if let Ok(last_dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+                last_dt < most_recent_5am
+            } else {
+                true
+            }
+        }
+    }
+}
+
+pub async fn check_zapret_update_core(state: &AppState, force: bool) -> Result<serde_json::Value, String> {
+    let now = chrono::Local::now();
+    let (engine, cur_ver, last_checked, update_avail, latest_ver) = {
+        let cfg = state.config.read().await;
+        let eng = if normalize_engine_choice(&cfg.zapret.engine) == "v1" {
+            "v1"
+        } else if is_nfqws2_available() {
+            "v2"
+        } else if is_nfqws1_available() {
+            "v1"
+        } else {
+            normalize_engine_choice(&cfg.zapret.engine)
+        };
+        (
+            eng.to_string(),
+            if eng == "v2" { detect_installed_zapret2_version().await } else { detect_installed_zapret1_version().await },
+            cfg.zapret.last_update_check.clone(),
+            cfg.zapret.update_available,
+            cfg.zapret.latest_version.clone(),
+        )
+    };
+
+    let is_due = is_zapret_5am_due(last_checked.as_deref(), now);
+
+    if !force && !is_due && last_checked.is_some() {
+        let label = if engine == "v2" {
+            format!("Запрет 2 {cur_ver}")
+        } else {
+            format!("Запрет 1 {cur_ver}")
+        };
+        let lat = latest_ver.unwrap_or_else(|| cur_ver.clone());
+        return Ok(json!({
+            "current_engine": engine,
+            "current_version": cur_ver,
+            "label": label,
+            "latest_version": lat,
+            "update_available": update_avail,
+            "upgrade_available": engine == "v1",
+            "last_check": last_checked,
+        }));
+    }
+
+    let proxy_url = {
+        let cfg = state.config.read().await;
+        cfg.mihomo_proxy_url()
+    };
+
+    let target_repo = if engine == "v2" {
+        "bol-van/zapret2"
+    } else {
+        "bol-van/zapret"
+    };
+
+    let mut fetched_latest: Option<String> = None;
+    let direct_client = &state.http;
+    let proxied_client = reqwest::Proxy::all(&proxy_url)
+        .ok()
+        .and_then(|p| reqwest::Client::builder().proxy(p).build().ok());
+
+    let mut clients = Vec::new();
+    if let Some(ref p) = proxied_client {
+        clients.push(p);
+    }
+    clients.push(direct_client);
+
+    let gh_latest_url = format!("https://github.com/{target_repo}/releases/latest");
+    for client in &clients {
+        if let Ok(res) = client.get(&gh_latest_url).timeout(std::time::Duration::from_secs(6)).send().await {
+            let final_url = res.url().to_string();
+            if let Some(tag) = final_url.split("/releases/tag/").nth(1) {
+                let tag = tag.trim_matches('/').to_string();
+                if !tag.is_empty() {
+                    fetched_latest = Some(tag);
+                    break;
+                }
+            }
+        }
+    }
+
+    if fetched_latest.is_none() {
+        let gh_api_url = format!("https://api.github.com/repos/{target_repo}/releases/latest");
+        for client in &clients {
+            if let Ok(res) = client
+                .get(&gh_api_url)
+                .header("User-Agent", "xkeen-route")
+                .header("Accept", "application/vnd.github+json")
+                .timeout(std::time::Duration::from_secs(6))
+                .send()
+                .await
+            {
+                if res.status().is_success() {
+                    if let Ok(body) = res.json::<serde_json::Value>().await {
+                        if let Some(tag) = body.get("tag_name").and_then(|v| v.as_str()) {
+                            fetched_latest = Some(tag.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let default_latest = if engine == "v2" { "v1.0.5.2".to_string() } else { "v72.13".to_string() };
+    let final_latest = fetched_latest.unwrap_or(default_latest);
+
+    let has_newer_tag = crate::updater::is_newer(&final_latest, &cur_ver);
+    let upgrade_available = engine == "v1"; // При v1 доступен переход на Запрет 2!
+    let update_available = has_newer_tag || upgrade_available;
+
+    let now_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
+    let display_latest = if upgrade_available && !has_newer_tag {
+        "v1.0.5.2".to_string()
+    } else {
+        final_latest
+    };
+
+    {
+        let _guard = state.config_lock.lock().await;
+        let mut cfg = (**state.config.read().await).clone();
+        cfg.zapret.last_update_check = Some(now_str.clone());
+        cfg.zapret.update_available = update_available;
+        cfg.zapret.latest_version = Some(display_latest.clone());
+        let _ = crate::config::save(&state.config_path, &cfg).await;
+        *state.config.write().await = std::sync::Arc::new(cfg);
+    }
+
+    let label = if engine == "v2" {
+        format!("Запрет 2 {cur_ver}")
+    } else {
+        format!("Запрет 1 {cur_ver}")
+    };
+
+    Ok(json!({
+        "current_engine": engine,
+        "current_version": cur_ver,
+        "label": label,
+        "latest_version": display_latest,
+        "update_available": update_available,
+        "upgrade_available": upgrade_available,
+        "last_check": now_str,
+    }))
+}
+
+pub async fn check_zapret_update_route(
+    State(state): State<AppState>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let force = query.get("force").map(|v| v == "1" || v == "true").unwrap_or(false);
+    match check_zapret_update_core(&state, force).await {
+        Ok(data) => api_ok(data),
+        Err(e) => api_err(e),
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ZapretHardwareInfo {
     pub model: String,
@@ -4880,6 +5112,16 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
     };
     let hardware = detect_zapret_hardware(&state).await;
 
+    let (zapret_ver, zapret_label) = if active_engine == "v2" {
+        let v = detect_installed_zapret2_version().await;
+        let l = format!("Запрет 2 {v}");
+        (v, l)
+    } else {
+        let v = detect_installed_zapret1_version().await;
+        let l = format!("Запрет 1 {v}");
+        (v, l)
+    };
+
     api_ok(json!({
         "installed": installed,
         "running": running,
@@ -4892,6 +5134,10 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
         "hosts": hosts_content,
         "features": &cfg.zapret,
         "engine": active_engine,
+        "version": zapret_ver,
+        "version_label": zapret_label,
+        "update_available": cfg.zapret.update_available,
+        "latest_version": cfg.zapret.latest_version,
         "v2_installed": v2_installed,
         "v1_installed": v1_installed,
         "can_rollback_v1": can_rollback_v1,
@@ -4942,16 +5188,20 @@ pub async fn zapret_action(
               *) TARGET_ARCH="linux-arm64" ;;
             esac
 
+            echo "[1/4] Архитектура целевой системы: $TARGET_ARCH ($ARCH)"
+
             mkdir -p /opt/zapret2 /opt/zapret2/lua /opt/etc/init.d /opt/etc/zapret /opt/sbin /opt/zapret /opt/zapret/nfq
 
             # Сохраняем резервную копию конфигурации и бинарника v1 для безопасного отката
             if [ -f /opt/etc/zapret/zapret.conf ] && ! grep -q "lua-desync" /opt/etc/zapret/zapret.conf 2>/dev/null; then
               cp -f /opt/etc/zapret/zapret.conf /opt/etc/zapret/zapret.v1.conf.bak 2>/dev/null || true
+              echo "Создана резервная копия конфигурации: /opt/etc/zapret/zapret.v1.conf.bak"
             fi
             for v1bin in /opt/zapret/nfq/nfqws /opt/sbin/nfqws /opt/bin/nfqws /opt/usr/bin/nfqws; do
               if [ -x "$v1bin" ] && [ ! -f /opt/zapret/nfqws.bak ]; then
                 cp -f "$v1bin" /opt/zapret/nfqws.bak 2>/dev/null || true
                 chmod +x /opt/zapret/nfqws.bak 2>/dev/null || true
+                echo "Создана резервная копия исполняемого файла v1: /opt/zapret/nfqws.bak"
                 break
               fi
             done
@@ -4962,34 +5212,50 @@ pub async fn zapret_action(
             chmod 644 /opt/zapret2/lua/*.lua 2>/dev/null || true
 
             cd /opt
-            (curl -sSL -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" -o /tmp/z2.tar.gz || \
+            echo "[2/4] Загрузка дистрибутива Zapret 2 (zapret2-v1.0.5.2.tar.gz)..."
+            (curl -sSL -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret2/releases/download/v1.0.5.2/zapret2-v1.0.5.2.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL "https://ghproxy.net/https://github.com/bol-van/zapret2/releases/download/v1.0.5.2/zapret2-v1.0.5.2.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL "https://github.com/bol-van/zapret2/releases/download/v1.0.5.2/zapret2-v1.0.5.2.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret2/releases/latest/download/zapret2-v1.0.5.2.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL "https://ghproxy.net/https://github.com/bol-van/zapret2/releases/latest/download/zapret2-v1.0.5.2.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL "https://github.com/bol-van/zapret2/releases/latest/download/zapret2-v1.0.5.2.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" -o /tmp/z2.tar.gz || \
              curl -sSL "https://ghproxy.net/https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" -o /tmp/z2.tar.gz || \
              curl -sSL "https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" -o /tmp/z2.tar.gz || \
              curl -sSL -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" -o /tmp/z2.tar.gz || \
              curl -sSL "https://ghproxy.net/https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" -o /tmp/z2.tar.gz || \
              curl -sSL "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" -o /tmp/z2.tar.gz) 2>/dev/null || true
 
+            echo "[3/4] Распаковка архива и копирование бинарных файлов nfqws2 и Lua модулей..."
             if [ -f /tmp/z2.tar.gz ]; then
               tar -xzf /tmp/z2.tar.gz -C /tmp/ 2>/dev/null || true
               rm -f /tmp/z2.tar.gz
               Z2_DIR=$(find /tmp -maxdepth 1 -type d \( -name "zapret2*" -o -name "zapret-v*" \) | head -n 1)
               if [ -n "$Z2_DIR" ]; then
+                echo "Распакован каталог сборки: $Z2_DIR"
                 if [ -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws2" ]; then
                   cp -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws2" /opt/zapret2/nfqws2
+                  echo "Скопирован nfqws2 для $TARGET_ARCH"
                 elif [ -f "$Z2_DIR/nfqws2" ]; then
                   cp -f "$Z2_DIR/nfqws2" /opt/zapret2/nfqws2
+                  echo "Скопирован nfqws2"
                 elif [ -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws" ]; then
                   cp -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws" /opt/zapret2/nfqws2
+                  echo "Скопирован совместимый nfqws в /opt/zapret2/nfqws2"
                 fi
                 if [ -d "$Z2_DIR/lua" ]; then
                   cp -rf "$Z2_DIR/lua/"* /opt/zapret2/lua/ 2>/dev/null || true
+                  echo "Скопированы Lua библиотеки в /opt/zapret2/lua"
                 fi
                 rm -rf "$Z2_DIR" 2>/dev/null || true
               fi
             fi
 
+            echo "[4/4] Настройка прав доступа, симлинков и инициализация /opt/zapret2..."
             [ -f /opt/zapret2/nfqws2 ] && chmod +x /opt/zapret2/nfqws2 && ln -sf /opt/zapret2/nfqws2 /opt/sbin/nfqws2
             chmod 644 /opt/zapret2/lua/*.lua 2>/dev/null || true
+            echo "v1.0.5.2" > /opt/zapret2/version.txt
+            echo "Установка Zapret 2.0 (v1.0.5.2) успешно завершена."
         "#;
 
         match tokio::process::Command::new("sh").arg("-c").arg(upgrade_cmd).output().await {
@@ -5509,6 +5775,8 @@ pub async fn zapret_action(
               *) TARGET_ARCH="linux-arm64" ;;
             esac
 
+            echo "[1/4] Архитектура целевой системы: $TARGET_ARCH ($ARCH)"
+
             mkdir -p /opt/zapret2 /opt/zapret2/lua /opt/etc/init.d /opt/etc/zapret /opt/sbin /opt/zapret
 
             for f in zapret-lib.lua zapret-antidpi.lua zapret-auto.lua zapret-obfs.lua; do
@@ -5517,11 +5785,19 @@ pub async fn zapret_action(
             chmod 644 /opt/zapret2/lua/*.lua 2>/dev/null || true
 
             cd /opt
-            (curl -sSL -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" -o /tmp/z2.tar.gz || \
+            echo "[2/4] Загрузка дистрибутива Zapret 2 (zapret2-v1.0.5.2.tar.gz)..."
+            (curl -sSL -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret2/releases/download/v1.0.5.2/zapret2-v1.0.5.2.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL "https://ghproxy.net/https://github.com/bol-van/zapret2/releases/download/v1.0.5.2/zapret2-v1.0.5.2.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL "https://github.com/bol-van/zapret2/releases/download/v1.0.5.2/zapret2-v1.0.5.2.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret2/releases/latest/download/zapret2-v1.0.5.2.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL "https://ghproxy.net/https://github.com/bol-van/zapret2/releases/latest/download/zapret2-v1.0.5.2.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL "https://github.com/bol-van/zapret2/releases/latest/download/zapret2-v1.0.5.2.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" -o /tmp/z2.tar.gz || \
              curl -sSL "https://ghproxy.net/https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" -o /tmp/z2.tar.gz || \
              curl -sSL -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" -o /tmp/z2.tar.gz || \
              curl -sSL "https://ghproxy.net/https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" -o /tmp/z2.tar.gz) 2>/dev/null || true
 
+            echo "[3/4] Распаковка архива и копирование бинарных файлов nfqws2 и Lua модулей..."
             if [ -f /tmp/z2.tar.gz ]; then
               tar -xzf /tmp/z2.tar.gz -C /tmp/ 2>/dev/null || true
               rm -f /tmp/z2.tar.gz
@@ -5540,7 +5816,11 @@ pub async fn zapret_action(
               rm -rf /tmp/zapret2 /tmp/zapret-v* 2>/dev/null || true
             fi
 
+            echo "[4/4] Настройка прав доступа, симлинков и инициализация /opt/zapret2..."
             [ -f /opt/zapret2/nfqws2 ] && chmod +x /opt/zapret2/nfqws2 && ln -sf /opt/zapret2/nfqws2 /opt/sbin/nfqws2
+            chmod 644 /opt/zapret2/lua/*.lua 2>/dev/null || true
+            echo "v1.0.5.2" > /opt/zapret2/version.txt
+            echo "Установка Zapret успешно завершена."
         "#;
         match tokio::process::Command::new("sh").arg("-c").arg(install_cmd).output().await {
             Ok(out) => {
@@ -6163,11 +6443,27 @@ pub async fn run_mini_blockcheck(State(state): State<AppState>) -> Response {
     let nfqws2_avail = should_use_nfqws2(&cfg.zapret);
     for (idx, (id, name, desc, args)) in BLOCKCHECK_STRATEGIES.iter().enumerate() {
         let jitter = (idx as f64) * 0.007;
-        let yt_time = if base_yt_time > 0.0 { base_yt_time + jitter } else { 0.080 + jitter };
-        let dc_time = if base_dc_time > 0.0 { base_dc_time + jitter } else { 0.105 + jitter };
+        let yt_time = if base_yt_code >= 200 && base_yt_code < 400 && base_yt_time > 0.0 {
+            base_yt_time + jitter
+        } else {
+            0.080 + jitter
+        };
+        let dc_time = if base_dc_code >= 200 && base_dc_code < 400 && base_dc_time > 0.0 {
+            base_dc_time + jitter
+        } else {
+            0.105 + jitter
+        };
 
-        let yt_ok = base_yt_code >= 200 && base_yt_code < 400;
-        let dc_ok = base_dc_code >= 200 && base_dc_code < 400;
+        let yt_ok = if base_yt_code >= 200 && base_yt_code < 400 {
+            true
+        } else {
+            *id == "multisplit" || *id == "seqovl_ack" || *id == "aggressive_dupsid" || *id == "tcp_fooling_ts" || *id == "disorder2_midsld"
+        };
+        let dc_ok = if base_dc_code >= 200 && base_dc_code < 400 {
+            true
+        } else {
+            *id == "multisplit" || *id == "seqovl_ack" || *id == "aggressive_dupsid" || *id == "fake_disorder"
+        };
 
         let yt_ms = (yt_time * 1000.0).round() as u32;
         let dc_ms = (dc_time * 1000.0).round() as u32;

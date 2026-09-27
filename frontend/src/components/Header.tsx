@@ -2,11 +2,25 @@ import { useState, useEffect } from 'react'
 import { apiGet, apiPost } from '../api'
 import type { StatusInfo, SystemStats } from '../types'
 
+export function is5AmCheckDue(lastCheckMs: number, nowMs?: number): boolean {
+  const now = nowMs !== undefined ? new Date(nowMs) : new Date()
+  if (now.getFullYear() < 2024) return false
+  if (!lastCheckMs) return true
+  const today5am = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 5, 0, 0, 0).getTime()
+  if (now.getTime() >= today5am) {
+    return lastCheckMs < today5am
+  } else {
+    const yesterday5am = today5am - 24 * 60 * 60 * 1000
+    return lastCheckMs < yesterday5am
+  }
+}
+
 interface HeaderProps {
   status: StatusInfo | null
   notify: (msg: string, isError?: boolean) => void
   refresh: () => Promise<void>
-  onSwitchTab: (tab: 'dashboard' | 'servers' | 'devices' | 'settings' | 'google-ai') => void
+  onSwitchTab: (tab: string) => void
+  activeTab?: string
   theme?: 'dark' | 'light'
   onToggleTheme?: () => void
   onOpenEditor?: () => void
@@ -61,6 +75,14 @@ function IconBox() {
       <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
       <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
       <line x1="12" y1="22.08" x2="12" y2="12" />
+    </svg>
+  )
+}
+
+function IconShield() {
+  return (
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
     </svg>
   )
 }
@@ -155,6 +177,7 @@ export default function Header({
   notify,
   refresh,
   onSwitchTab,
+  activeTab,
   theme = 'dark',
   onToggleTheme,
   onOpenEditor,
@@ -247,6 +270,79 @@ export default function Header({
     }
   }, [])
 
+  // Запрет статус и обновление (проверка в 5:00 утра раз в сутки)
+  const [zapretUpdateAvailable, setZapretUpdateAvailable] = useState<boolean | null>(null)
+  const [zapretLatestVersion, setZapretLatestVersion] = useState<string | null>(null)
+  const [zapretVersion, setZapretVersion] = useState('')
+  const [zapretEngine, setZapretEngine] = useState<'v1' | 'v2'>('v1')
+
+  const effectiveZapretUpdate =
+    zapretUpdateAvailable !== null
+      ? zapretUpdateAvailable
+      : Boolean(status?.zapret?.update_available)
+
+  const effectiveZapretLatest =
+    zapretLatestVersion !== null
+      ? zapretLatestVersion
+      : (status?.zapret?.latest_version || '')
+
+  useEffect(() => {
+    if (status?.zapret) {
+      if (status.zapret.engine) {
+        setZapretEngine(status.zapret.engine)
+      }
+      if (status.zapret.version) {
+        setZapretVersion(status.zapret.version)
+      }
+      if (status.zapret.update_available !== undefined) {
+        setZapretUpdateAvailable(Boolean(status.zapret.update_available))
+      }
+      if (status.zapret.latest_version) {
+        setZapretLatestVersion(status.zapret.latest_version)
+      }
+    }
+  }, [status?.zapret])
+
+  useEffect(() => {
+    let active = true
+    const checkZapretDaily = async (force = false) => {
+      if (document.hidden) return
+      const lastCheckStr = localStorage.getItem('xr_zapret_last_check')
+      const lastCheckMs = lastCheckStr ? parseInt(lastCheckStr, 10) : 0
+      if (!force && !is5AmCheckDue(lastCheckMs)) {
+        return
+      }
+
+      try {
+        const res = await apiGet<{
+          current_engine?: 'v1' | 'v2'
+          current_version?: string
+          label?: string
+          latest_version?: string
+          update_available?: boolean
+        }>('zapret/update/check')
+        if (active && res) {
+          localStorage.setItem('xr_zapret_last_check', Date.now().toString())
+          if (res.update_available !== undefined) {
+            setZapretUpdateAvailable(Boolean(res.update_available))
+          }
+          if (res.latest_version) setZapretLatestVersion(res.latest_version)
+          if (res.current_version) setZapretVersion(res.current_version)
+          if (res.current_engine) setZapretEngine(res.current_engine)
+        }
+      } catch {
+        /* игнорируем ошибку сети */
+      }
+    }
+
+    checkZapretDaily()
+    const timer = setInterval(() => checkZapretDaily(false), 60_000)
+    return () => {
+      active = false
+      clearInterval(timer)
+    }
+  }, [])
+
   // Память и CPU (живые из 1-секундного таймера либо из статуса)
   const currentMetrics = liveMetrics || status?.system
   const memUsed = currentMetrics?.memory_used_mb ?? 0
@@ -259,6 +355,11 @@ export default function Header({
 
   const mihomoVersion = status?.mihomo_version || '—'
   const appVersion = status?.version ? status.version.replace(/^v/, '') : '—'
+  const zapretEngineLabel = zapretEngine === 'v2' ? 'Запрет 2' : 'Запрет 1'
+  const rawZapretVersion = zapretVersion || status?.zapret?.version || ''
+  const zapretVersionDisplay = rawZapretVersion
+    ? (rawZapretVersion.startsWith('v') ? rawZapretVersion : `v${rawZapretVersion}`)
+    : '—'
 
   const handleRestart = async () => {
     if (pending) return
@@ -439,6 +540,41 @@ export default function Header({
               ↑ {latestVersion.replace(/^v/, '')}
             </span>
           )}
+        </button>
+
+        <button
+          type="button"
+          data-testid="header-zapret-pill"
+          className={`header-pill-btn ${effectiveZapretUpdate ? 'header-pill-update-red' : ''}`}
+          onClick={() => onSwitchTab('zapret')}
+          title={
+            effectiveZapretUpdate
+              ? `Доступно обновление Запрет до ${effectiveZapretLatest || 'новой версии'}! Нажмите для перехода`
+              : `${zapretEngineLabel} ${zapretVersionDisplay}. Нажмите для управления Запретом`
+          }
+        >
+          <IconShield />
+          <span className="header-pill-title">{zapretEngineLabel}</span>
+          <span className="header-pill-subtitle">{zapretVersionDisplay}</span>
+          {effectiveZapretUpdate && (
+            <span
+              className="update-pill-badge update-pill-badge-red"
+              data-testid="zapret-update-badge"
+              title={`Доступна новая версия ${effectiveZapretLatest}`}
+            >
+              ↑ {(effectiveZapretLatest || '').replace(/^v/, '')}
+            </span>
+          )}
+        </button>
+
+        <button
+          type="button"
+          className={`header-action-btn ${activeTab === 'settings' ? 'active' : ''}`}
+          onClick={() => onSwitchTab('settings')}
+          title="Настройки"
+          data-testid="header-settings-btn"
+        >
+          <span style={{ fontSize: '15px' }}>⚙️</span>
         </button>
 
         {onOpenEditor && (

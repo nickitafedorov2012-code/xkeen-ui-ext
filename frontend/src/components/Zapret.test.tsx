@@ -1438,6 +1438,132 @@ describe('Zapret Component — Features 1, 2, 4, 5 (Mini-Blockcheck, DPI Analyti
     )
     expect(container?.textContent).toContain('Legacy 1.x (nfqws)')
   })
+
+  it('renders zapret1 (legacy) engine badge in Mini-Blockcheck when v1 engine is active', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve({
+          ...mockZapretStatus,
+          engine: 'v1',
+          features: {
+            ...mockZapretStatus.features,
+            engine: 'v1',
+          },
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    const badge = container?.querySelector('[data-testid="blockcheck-engine-badge"]')
+    expect(badge).not.toBeNull()
+    expect(badge?.textContent).toContain('zapret1 (legacy) engine')
+    expect(badge?.textContent).not.toContain('zapret2 engine')
+  })
+
+  it('renders zapret2 engine badge in Mini-Blockcheck when v2 engine is active', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve({
+          ...mockZapretStatus,
+          engine: 'v2',
+          features: {
+            ...mockZapretStatus.features,
+            engine: 'v2',
+          },
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    const badge = container?.querySelector('[data-testid="blockcheck-engine-badge"]')
+    expect(badge).not.toBeNull()
+    expect(badge?.textContent).toContain('zapret2 engine')
+  })
+
+  it('renders detailed step log [1/4]...[4/4] in UI when Zapret 2 upgrade succeeds with output', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve({
+          ...mockZapretStatus,
+          engine: 'v1',
+          v2_installed: false,
+          v1_installed: true,
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    const sampleStepLog = `[1/4] Архитектура целевой системы: linux-arm64
+[2/4] Загрузка дистрибутива Zapret 2 (zapret2-v1.0.5.2.tar.gz)...
+[3/4] Распаковка архива и копирование бинарных файлов nfqws2 и Lua модулей...
+[4/4] Настройка прав доступа, симлинков и инициализация /opt/zapret2...
+Установка Zapret 2.0 (v1.0.5.2) успешно завершена.`
+
+    vi.spyOn(api, 'apiPost').mockResolvedValue({
+      success: true,
+      engine: 'v2',
+      v2_installed: true,
+      can_rollback_v1: true,
+      output: sampleStepLog,
+      message: 'Установка завершена',
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    const upgradeBtn = container?.querySelector('[data-testid="upgrade-zapret2-btn"]') as HTMLButtonElement | null
+    expect(upgradeBtn).not.toBeNull()
+
+    // Initially no step log
+    expect(container?.querySelector('[data-testid="zapret-step-log"]')).toBeNull()
+
+    await act(async () => {
+      upgradeBtn?.click()
+    })
+
+    // Step log is now visible in UI
+    const logBox = container?.querySelector('[data-testid="zapret-step-log"]')
+    expect(logBox).not.toBeNull()
+    expect(logBox?.textContent).toContain('[1/4] Архитектура целевой системы: linux-arm64')
+    expect(logBox?.textContent).toContain('[4/4] Настройка прав доступа')
+  })
+
+  it('dynamically displays Zapret 1.x in main status card when v1 is active and running', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve({
+          ...mockZapretStatus,
+          running: true,
+          engine: 'v1',
+          features: {
+            ...mockZapretStatus.features,
+            enabled: true,
+            engine: 'v1',
+          },
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    expect(container?.textContent).toContain('🟢 Работает: Zapret 1.x')
+    expect(container?.textContent).toContain('LAN трафик фильтруется через nfqws')
+    expect(container?.textContent).not.toContain('🟢 Работает: Zapret 2.0')
+  })
 })
+
+
 
 

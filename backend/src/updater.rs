@@ -45,7 +45,7 @@ fn proxied_client(proxy_addr: &str) -> Option<reqwest::Client> {
         .ok()
 }
 
-fn version_tuple(v: &str) -> (Vec<u64>, bool) {
+pub fn version_tuple(v: &str) -> (Vec<u64>, bool) {
     let clean = v.trim_start_matches('v');
     let is_prerelease = clean.contains('-');
     let main_part = clean.split('-').next().unwrap_or(clean);
@@ -57,7 +57,7 @@ fn version_tuple(v: &str) -> (Vec<u64>, bool) {
     (parts, !is_prerelease)
 }
 
-fn is_newer(latest: &str, current: &str) -> bool {
+pub fn is_newer(latest: &str, current: &str) -> bool {
     version_tuple(latest) > version_tuple(current)
 }
 

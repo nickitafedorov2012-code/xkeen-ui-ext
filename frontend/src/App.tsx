@@ -41,7 +41,6 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'google-ai', label: '🤖 Google AI' },
   { id: 'zapret', label: '🛡️ Запрет (DPI)' },
   { id: 'gaming', label: '🎮 Игры' },
-  { id: 'settings', label: '⚙️ Настройки' },
 ]
 
 interface Toast {
@@ -78,7 +77,7 @@ export default function App() {
   const initial = (() => {
     const h = window.location.hash.replace('#', '')
     if (h === 'antigravity') return 'google-ai'
-    return (TABS.some((t) => t.id === h) ? h : 'dashboard') as TabId
+    return (TABS.some((t) => t.id === h) || h === 'settings' ? h : 'dashboard') as TabId
   })()
   const [tab, setTab] = useState<TabId>(initial)
   const [status, setStatus] = useState<StatusInfo | null>(null)
@@ -245,6 +244,11 @@ export default function App() {
           window.dispatchEvent(new CustomEvent('xr:ping-all'))
         }, 50)
       }
+      // Ctrl+, (или Cmd+,): быстрый переход в настройки
+      else if ((e.ctrlKey || e.metaKey) && e.key === ',') {
+        e.preventDefault()
+        switchTab('settings')
+      }
       // Alt+R или Shift+R: быстрое обновление панели (когда не в инпуте)
       else if (!isInput && ((e.altKey && e.key.toLowerCase() === 'r') || (e.shiftKey && e.key === 'R'))) {
         e.preventDefault()
@@ -260,7 +264,7 @@ export default function App() {
   useEffect(() => {
     const handleSwitchTab = (e: Event) => {
       const ce = e as CustomEvent<TabId>
-      if (ce.detail && TABS.some((t) => t.id === ce.detail)) {
+      if (ce.detail && (TABS.some((t) => t.id === ce.detail) || ce.detail === 'settings')) {
         switchTab(ce.detail)
       }
     }
@@ -275,7 +279,8 @@ export default function App() {
           status={status}
           notify={notify}
           refresh={refresh}
-          onSwitchTab={switchTab}
+          onSwitchTab={(t) => switchTab(t as TabId)}
+          activeTab={tab}
           theme={theme}
           onToggleTheme={() => setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'))}
           onOpenEditor={() => setGlobalEditorOpen(true)}

@@ -542,6 +542,15 @@ pub struct ZapretConfig {
     pub excluded_devices: Vec<String>,
     /// Выбранный движок DPI: "v2" (Modern Zapret 2.0 nfqws2 + Lua) или "v1" (Legacy Zapret 1.x nfqws)
     pub engine: String,
+    /// Отметка времени последней проверки обновлений Zapret (5:00 утра раз в сутки)
+    #[serde(default)]
+    pub last_update_check: Option<String>,
+    /// Доступно ли обновление для Zapret
+    #[serde(default)]
+    pub update_available: bool,
+    /// Последняя доступная версия Zapret
+    #[serde(default)]
+    pub latest_version: Option<String>,
 }
 
 impl Default for ZapretConfig {
@@ -568,6 +577,9 @@ impl Default for ZapretConfig {
             community_hostlist_count: 0,
             excluded_devices: Vec::new(),
             engine: "v2".to_string(),
+            last_update_check: None,
+            update_available: false,
+            latest_version: None,
         }
     }
 }

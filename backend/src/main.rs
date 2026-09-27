@@ -447,6 +447,7 @@ async fn main() {
         .route("/api/zapret/analytics", get(api::get_zapret_analytics))
         .route("/api/zapret/blockcheck", post(api::run_mini_blockcheck))
         .route("/api/zapret/community-hostlist/sync", post(api::sync_community_hostlist))
+        .route("/api/zapret/update/check", get(api::check_zapret_update_route))
         // Расписания устройств
         .route("/api/schedules", get(api::get_schedules).post(api::save_schedules))
         // Игровой режим (Gaming Mode)

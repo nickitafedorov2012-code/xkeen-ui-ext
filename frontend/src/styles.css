@@ -228,6 +228,13 @@ body {
   background: rgba(79, 140, 255, 0.12);
 }
 
+.header-action-btn.active {
+  border-color: var(--accent);
+  background: rgba(59, 130, 246, 0.2);
+  color: #60a5fa;
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.25);
+}
+
 .header-action-btn:disabled {
   opacity: 0.45;
   cursor: default;
@@ -345,6 +352,28 @@ body {
   stroke: #38bdf8;
 }
 
+.header-pill-btn.header-pill-update-red {
+  border-color: rgba(239, 68, 68, 0.7);
+  background: rgba(239, 68, 68, 0.12);
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.3), inset 0 0 5px rgba(239, 68, 68, 0.08);
+  animation: pill-red-pulse 2.2s infinite ease-in-out;
+  cursor: pointer;
+}
+
+.header-pill-btn.header-pill-update-red:hover {
+  border-color: #ef4444;
+  background: rgba(239, 68, 68, 0.22);
+  box-shadow: 0 0 16px rgba(239, 68, 68, 0.5), inset 0 0 8px rgba(239, 68, 68, 0.15);
+}
+
+.header-pill-btn.header-pill-update-red .header-pill-title {
+  color: #ef4444;
+}
+
+.header-pill-btn.header-pill-update-red svg {
+  stroke: #ef4444;
+}
+
 .update-pill-badge,
 .update-pill-badge-blue {
   display: inline-flex;
@@ -361,6 +390,21 @@ body {
   animation: badge-bounce 2.2s infinite ease-in-out;
 }
 
+.update-pill-badge-red {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: linear-gradient(135deg, #dc2626, #ef4444);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  line-height: 1.2;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.55);
+  animation: badge-bounce 2.2s infinite ease-in-out;
+}
+
 @keyframes pill-blue-pulse {
   0%, 100% {
     border-color: rgba(56, 189, 248, 0.45);
@@ -369,6 +413,17 @@ body {
   50% {
     border-color: #38bdf8;
     box-shadow: 0 0 16px rgba(56, 189, 248, 0.55), inset 0 0 8px rgba(56, 189, 248, 0.18);
+  }
+}
+
+@keyframes pill-red-pulse {
+  0%, 100% {
+    border-color: rgba(239, 68, 68, 0.45);
+    box-shadow: 0 0 8px rgba(239, 68, 68, 0.2), inset 0 0 4px rgba(239, 68, 68, 0.05);
+  }
+  50% {
+    border-color: #ef4444;
+    box-shadow: 0 0 16px rgba(239, 68, 68, 0.55), inset 0 0 8px rgba(239, 68, 68, 0.18);
   }
 }
 

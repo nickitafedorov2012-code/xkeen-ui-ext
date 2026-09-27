@@ -14,6 +14,15 @@ export interface StatusInfo {
   router: { model?: string; version?: string; hostname?: string; uptime?: string } | null
   system?: SystemStats | null
   mihomo_version?: string | null
+  zapret?: {
+    engine: 'v1' | 'v2'
+    version: string
+    label: string
+    installed: boolean
+    running: boolean
+    update_available: boolean
+    latest_version?: string
+  } | null
   active_server: {
     id: string
     name: string
@@ -147,6 +156,10 @@ export interface ZapretStatus {
   features?: ZapretFeatures
   analytics?: ZapretAnalytics
   engine?: 'v1' | 'v2'
+  version?: string
+  version_label?: string
+  update_available?: boolean
+  latest_version?: string
   v2_installed?: boolean
   v1_installed?: boolean
   can_rollback_v1?: boolean

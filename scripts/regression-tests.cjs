@@ -514,5 +514,72 @@ runTest('14. Zapret 2 (nfqws2) 1-click upgrade, router hardware auto-hint, and s
   assert(zapretTsx.includes('rollback-v1-btn'), 'Zapret.tsx must include safe rollback to v1 button');
 });
 
+// -------------------------------------------------------------
+// 15. Header Navigation, Zapret 1/2 Chip, Red Pulse Animation & 5 AM Daily Update
+// -------------------------------------------------------------
+runTest('15. Header Navigation, Zapret 1/2 Chip, Red Pulse Animation & 5 AM Daily Update', () => {
+  const headerTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Header.tsx'), 'utf8');
+  const appTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/App.tsx'), 'utf8');
+  const stylesCss = fs.readFileSync(path.resolve(__dirname, '../frontend/src/styles.css'), 'utf8');
+  const zapretTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Zapret.tsx'), 'utf8');
+  const apiRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/api.rs'), 'utf8');
+  const mainRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/main.rs'), 'utf8');
+  const watchdogRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/watchdog.rs'), 'utf8');
+
+  // 1. Settings tab moved to top header navigation
+  assert(headerTsx.includes('data-testid="header-settings-btn"'), 'Header.tsx must render settings button with data-testid="header-settings-btn"');
+  assert(headerTsx.includes("activeTab === 'settings' ? 'active' : ''"), 'Header.tsx must apply active class to settings button when activeTab is settings');
+  assert(stylesCss.includes('.header-action-btn.active'), 'styles.css must style .header-action-btn.active');
+  assert(!appTsx.includes("{ id: 'settings', label: '⚙️ Настройки' }"), 'App.tsx must remove settings from bottom tab bar TABS array');
+  assert(appTsx.includes('activeTab={tab}'), 'App.tsx must pass activeTab={tab} to Header');
+
+  // 2. Zapret chip in top header with Zapret 1 / 2 and version numbers
+  assert(headerTsx.includes('data-testid="header-zapret-pill"'), 'Header.tsx must render Zapret pill button');
+  assert(headerTsx.includes('zapretEngine === \'v2\' ? \'Запрет 2\' : \'Запрет 1\''), 'Header.tsx must format Zapret label as Запрет 1 or Запрет 2');
+  assert(headerTsx.includes('IconShield'), 'Header.tsx must include IconShield for Zapret');
+
+  // 3. Red pulsating glow animation for Zapret update
+  assert(stylesCss.includes('.header-pill-btn.header-pill-update-red'), 'styles.css must define .header-pill-btn.header-pill-update-red');
+  assert(stylesCss.includes('.update-pill-badge-red'), 'styles.css must define .update-pill-badge-red');
+  assert(stylesCss.includes('@keyframes pill-red-pulse'), 'styles.css must define @keyframes pill-red-pulse');
+  assert(headerTsx.includes('header-pill-update-red'), 'Header.tsx must apply header-pill-update-red when zapret update is available');
+  assert(headerTsx.includes('data-testid="zapret-update-badge"'), 'Header.tsx must render zapret-update-badge on update');
+
+  // 4. 5:00 AM daily check logic
+  assert(headerTsx.includes('export function is5AmCheckDue'), 'Header.tsx must export is5AmCheckDue function');
+  assert(headerTsx.includes('xr_zapret_last_check'), 'Header.tsx must track xr_zapret_last_check in localStorage');
+  assert(apiRs.includes('pub fn is_zapret_5am_due'), 'api.rs must define is_zapret_5am_due function');
+  assert(mainRs.includes('/api/zapret/update/check'), 'main.rs must register /api/zapret/update/check route');
+  assert(watchdogRs.includes('spawn_zapret_update_checker'), 'watchdog.rs must spawn 5 AM zapret update checker background task');
+
+  // 5. Mini-Blockcheck dynamic badge: no hardcoded zapret2 engine when v1 active
+  assert(zapretTsx.includes('data-testid="blockcheck-engine-badge"'), 'Zapret.tsx must render blockcheck-engine-badge with data-testid');
+  assert(zapretTsx.includes("activeEngine === 'v2' ? 'zapret2 engine' : 'zapret1 (legacy) engine'"), 'Zapret.tsx must dynamically render engine badge');
+  assert(!zapretTsx.includes('<span className="badge">⚡ zapret2 engine</span>'), 'Zapret.tsx must NOT hardcode zapret2 engine');
+
+  // 6. Zapret 2 installation: bol-van/zapret2 package with step logs, UI display and version file
+  assert(apiRs.includes('zapret2-v1.0.5.2.tar.gz'), 'api.rs must download zapret2-v1.0.5.2.tar.gz from bol-van/zapret2');
+  assert(apiRs.includes('[1/4]'), 'api.rs must emit step logs [1/4]');
+  assert(apiRs.includes('[4/4]'), 'api.rs must emit step logs [4/4]');
+  assert(apiRs.includes('/opt/zapret2/version.txt'), 'api.rs must write /opt/zapret2/version.txt');
+  assert(zapretTsx.includes('data-testid="zapret-step-log"'), 'Zapret.tsx must render step log in UI with data-testid="zapret-step-log"');
+  assert(zapretTsx.includes('stepLog'), 'Zapret.tsx must maintain stepLog state for installation output');
+
+  // 7. Mini-Blockcheck YouTube bypass handling for TSPU probes and latency guard
+  assert(apiRs.includes('*id == "multisplit" || *id == "seqovl_ack" || *id == "aggressive_dupsid"'), 'api.rs must mark proven bypass strategies as working for YouTube even with 000 direct probe');
+  assert(apiRs.includes('base_yt_code >= 200 && base_yt_code < 400 && base_yt_time > 0.0'), 'api.rs must protect yt_time from using failed direct probe timeout');
+
+  // 8. Dynamic main card engine label and pre-NTP clock protection
+  assert(zapretTsx.includes("activeEngine === 'v2' ? 'Zapret 2.0' : 'Zapret 1.x'"), 'Zapret.tsx must dynamically display active engine in status card');
+  assert(apiRs.includes('year() < 2024'), 'api.rs must guard against pre-NTP 1970 clock in is_zapret_5am_due');
+  assert(headerTsx.includes('getFullYear() < 2024'), 'Header.tsx must guard against pre-NTP 1970 clock in is5AmCheckDue');
+
+  // 9. App.test.tsx must exist and test Settings relocation and Zapret header chip
+  const appTestTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/App.test.tsx'), 'utf8');
+  assert(appTestTsx.includes('header-settings-btn'), 'App.test.tsx must test header-settings-btn');
+  assert(appTestTsx.includes('header-zapret-pill'), 'App.test.tsx must test header-zapret-pill');
+  assert(appTestTsx.includes('removes Settings from bottom navigation'), 'App.test.tsx must test removal of settings from bottom tabs');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
 

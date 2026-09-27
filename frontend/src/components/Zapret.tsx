@@ -330,16 +330,23 @@ export default function Zapret({ notify }: ZapretProps) {
 
   const [upgradingEngine, setUpgradingEngine] = useState(false)
   const [switchingEngine, setSwitchingEngine] = useState(false)
+  const [stepLog, setStepLog] = useState<string | null>(null)
 
   const handleAction = async (act: string) => {
     setBusy(true)
     try {
-      const res = await apiPost<{ success: boolean; message?: string }>('zapret/action', {
+      const res = await apiPost<{ success: boolean; message?: string; output?: string }>('zapret/action', {
         action: act,
       })
+      if (res.output) {
+        setStepLog(res.output)
+      }
       notify(res.message || `Действие ${act} выполнено`)
       await loadStatus()
     } catch (e) {
+      if (e instanceof Error && (e.message.includes('Лог:') || e.message.includes('[1/4]'))) {
+        setStepLog(e.message)
+      }
       notify(e instanceof Error ? e.message : `Ошибка действия ${act}`, true)
     } finally {
       setBusy(false)
@@ -357,10 +364,14 @@ export default function Zapret({ notify }: ZapretProps) {
         can_rollback_v1?: boolean
         features?: ZapretFeatures
         message?: string
+        output?: string
       }>('zapret/action', {
         action: 'upgrade_zapret2',
         engine: 'v2',
       })
+      if (res.output) {
+        setStepLog(res.output)
+      }
       setStatus((prev) =>
         prev
           ? {
@@ -384,6 +395,9 @@ export default function Zapret({ notify }: ZapretProps) {
       notify(res.message || '🚀 Zapret 2.0 (nfqws2 + Lua) успешно установлен в /opt/zapret2')
       await loadStatus()
     } catch (e) {
+      if (e instanceof Error && (e.message.includes('Лог:') || e.message.includes('[1/4]'))) {
+        setStepLog(e.message)
+      }
       notify(e instanceof Error ? e.message : 'Ошибка обновления до Zapret 2 (nfqws2)', true)
     } finally {
       setUpgradingEngine(false)
@@ -1083,11 +1097,11 @@ export default function Zapret({ notify }: ZapretProps) {
                     border: `1px solid ${isRunning ? 'rgba(34, 197, 94, 0.3)' : 'var(--border)'}`,
                   }}
                 >
-                  {isRunning ? `🟢 Работает: Zapret 2.0 (PID: ${status?.pid})` : isInstalled ? '⚪ Выключен' : '🔴 Не установлен'}
+                  {isRunning ? `🟢 Работает: ${activeEngine === 'v2' ? 'Zapret 2.0' : 'Zapret 1.x'} (PID: ${status?.pid})` : isInstalled ? '⚪ Выключен' : '🔴 Не установлен'}
                 </span>
               </div>
               <div className="muted small" style={{ marginTop: 4 }}>
-                Локальная десинхронизация TCP/UDP пакетов (Zapret 2.0 Lua Engine) для YouTube, Discord и сайтов без нагрузки на VPS
+                Локальная десинхронизация TCP/UDP пакетов ({activeEngine === 'v2' ? 'Zapret 2.0 Lua Engine' : 'Zapret 1.x Legacy'}) для YouTube, Discord и сайтов без нагрузки на VPS
               </div>
             </div>
           </div>
@@ -1100,7 +1114,7 @@ export default function Zapret({ notify }: ZapretProps) {
                   {isRunning ? 'СЛУЖБА АКТИВНА' : 'СЛУЖБА ВЫКЛЮЧЕНА'}
                 </div>
                 <div className="muted small" style={{ fontSize: 11 }}>
-                  {isRunning ? 'LAN трафик фильтруется через nfqws2' : 'Прямой трафик без изменений'}
+                  {isRunning ? `LAN трафик фильтруется через ${activeEngine === 'v2' ? 'nfqws2' : 'nfqws'}` : 'Прямой трафик без изменений'}
                 </div>
               </div>
 
@@ -1342,6 +1356,10 @@ export default function Zapret({ notify }: ZapretProps) {
               >
                 {upgradingEngine
                   ? '⏳ Скачивание nfqws2 и Lua в /opt/zapret2…'
+                  : status?.update_available
+                  ? `🚀 Обновить Zapret 2 (до ${status.latest_version || 'новой версии'})`
+                  : activeEngine === 'v2'
+                  ? '🚀 Переустановить Zapret 2 (nfqws2)'
                   : '🚀 Обновить до Zapret 2 (nfqws2)'}
               </button>
 
@@ -1370,6 +1388,38 @@ export default function Zapret({ notify }: ZapretProps) {
               </b>
             </div>
           </div>
+
+          {stepLog && (
+            <div
+              data-testid="zapret-step-log"
+              style={{
+                marginTop: 10,
+                padding: '10px 14px',
+                borderRadius: 8,
+                background: 'rgba(15, 23, 42, 0.95)',
+                border: '1px solid rgba(56, 189, 248, 0.35)',
+                fontSize: 12,
+                fontFamily: 'Consolas, monospace',
+                whiteSpace: 'pre-wrap',
+                maxHeight: 180,
+                overflowY: 'auto',
+                color: '#e2e8f0',
+                lineHeight: 1.45,
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, color: '#38bdf8', fontWeight: 600 }}>
+                <span>📋 Лог установки:</span>
+                <button
+                  type="button"
+                  onClick={() => setStepLog(null)}
+                  style={{ background: 'transparent', border: 'none', color: 'var(--muted)', cursor: 'pointer', fontSize: 11 }}
+                >
+                  ✕ Закрыть
+                </button>
+              </div>
+              {stepLog}
+            </div>
+          )}
         </div>
 
         {/* КНОПКИ ДЕЙСТВИЙ */}
@@ -1734,14 +1784,15 @@ export default function Zapret({ notify }: ZapretProps) {
                 </h3>
                 <span
                   className="badge"
+                  data-testid="blockcheck-engine-badge"
                   style={{
-                    background: 'rgba(56, 189, 248, 0.15)',
-                    color: '#38bdf8',
-                    border: '1px solid rgba(56, 189, 248, 0.4)',
+                    background: activeEngine === 'v2' ? 'rgba(56, 189, 248, 0.15)' : 'rgba(234, 179, 8, 0.15)',
+                    color: activeEngine === 'v2' ? '#38bdf8' : '#facc15',
+                    border: `1px solid ${activeEngine === 'v2' ? 'rgba(56, 189, 248, 0.4)' : 'rgba(234, 179, 8, 0.4)'}`,
                     fontSize: 11,
                   }}
                 >
-                  ⚡ zapret2 engine
+                  ⚡ {activeEngine === 'v2' ? 'zapret2 engine' : 'zapret1 (legacy) engine'}
                 </span>
               </div>
               <div className="muted small" style={{ marginTop: 3 }}>
