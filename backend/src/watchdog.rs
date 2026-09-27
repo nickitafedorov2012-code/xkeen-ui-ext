@@ -533,6 +533,8 @@ pub fn spawn_community_hostlist_updater(state: AppState) {
             }
         }
     });
+}
+
 pub fn spawn_zapret_update_checker(state: AppState) {
     tokio::spawn(async move {
         for _ in 0..15 {
