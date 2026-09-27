@@ -449,6 +449,11 @@ pub fn spawn_zapret_monitor(state: AppState) {
                     restart_failures += 1;
                 } else if restart_failures == 5 {
                     log_w!("[WATCHDOG] ❌ Не удалось запустить службу Zapret после 5 попыток. Приостановка автозапуска.");
+                    let _guard = state.config_lock.lock().await;
+                    let mut cfg = (**state.config.read().await).clone();
+                    cfg.zapret.enabled = false;
+                    let _ = config::save(&state.config_path, &cfg).await;
+                    *state.config.write().await = std::sync::Arc::new(cfg);
                     restart_failures += 1;
                 }
             }

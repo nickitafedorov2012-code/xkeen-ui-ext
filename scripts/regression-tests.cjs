@@ -439,4 +439,29 @@ runTest('12. Zapret 2.0 (nfqws2 + Lua Engine) migration, fast SIGHUP reload and 
   }
 });
 
+// -------------------------------------------------------------
+// 13. Zapret legacy nfqws compatibility & crash prevention
+// -------------------------------------------------------------
+runTest('13. Zapret legacy nfqws compatibility, lua-desync conversion and instant crash prevention', () => {
+  const apiRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/api.rs'), 'utf8');
+  const watchdogRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/watchdog.rs'), 'utf8');
+
+  // 1. Verify lua desync to legacy conversion helper
+  assert(apiRs.includes('pub fn convert_lua_to_legacy_desync'), 'api.rs must define convert_lua_to_legacy_desync');
+  assert(apiRs.includes('pub fn is_nfqws2_available'), 'api.rs must define is_nfqws2_available');
+  assert(apiRs.includes('build_nfqws_args_with_desync'), 'api.rs must define build_nfqws_args_with_desync');
+
+  // 2. Verify S51zapret script guards against passing Lua args to legacy nfqws
+  assert(apiRs.includes('*lua-desync*|*payload=*|*out-range=*'), 'S51zapret must guard against passing nfqws2 Lua parameters to legacy nfqws');
+  assert(apiRs.includes('logger -t zapret "WARNING: NFQWS_ARGS contains nfqws2 Lua parameters'), 'S51zapret must log warning and use safe legacy fallback');
+
+  // 3. Verify instant failure detection on start/restart in zapret_action
+  assert(apiRs.includes('Служба Zapret завершилась сразу после старта'), 'zapret_action must detect if nfqws dies immediately after start');
+  assert(apiRs.includes('cfg.zapret.enabled = false'), 'zapret_action must reset enabled to false on startup failure');
+
+  // 4. Verify watchdog disables enabled flag after 5 consecutive failures
+  assert(watchdogRs.includes('cfg.zapret.enabled = false'), 'watchdog.rs must disable zapret after 5 failed restarts to prevent infinite loops');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
+

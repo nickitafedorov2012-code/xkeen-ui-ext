@@ -3852,6 +3852,17 @@ case "$1" in
           $BIN --pidfile="$PIDFILE" $LUA_INIT_ARG $NFQWS_ARGS
           ;;
         *)
+          case "$NFQWS_ARGS" in
+            *lua-desync*|*payload=*|*out-range=*)
+              logger -t zapret "WARNING: NFQWS_ARGS contains nfqws2 Lua parameters, but running legacy nfqws. Using safe fallback args."
+              NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
+              [ -f "/opt/etc/zapret/zapret-hosts.txt" ] && NFQWS_ARGS="$NFQWS_ARGS --new --filter-tcp=80,443 --hostlist=/opt/etc/zapret/zapret-hosts.txt --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
+              ;;
+          esac
+          case "$NFQWS_ARGS" in
+            *--daemon*) ;;
+            *) NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 $NFQWS_ARGS" ;;
+          esac
           $BIN --pidfile="$PIDFILE" $NFQWS_ARGS
           ;;
       esac
@@ -3903,6 +3914,17 @@ case "$1" in
           $BIN --pidfile="$PIDFILE" $LUA_INIT_ARG $NFQWS_ARGS
           ;;
         *)
+          case "$NFQWS_ARGS" in
+            *lua-desync*|*payload=*|*out-range=*)
+              logger -t zapret "WARNING: NFQWS_ARGS contains nfqws2 Lua parameters, but running legacy nfqws. Using safe fallback args."
+              NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
+              [ -f "/opt/etc/zapret/zapret-hosts.txt" ] && NFQWS_ARGS="$NFQWS_ARGS --new --filter-tcp=80,443 --hostlist=/opt/etc/zapret/zapret-hosts.txt --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
+              ;;
+          esac
+          case "$NFQWS_ARGS" in
+            *--daemon*) ;;
+            *) NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 $NFQWS_ARGS" ;;
+          esac
           $BIN --pidfile="$PIDFILE" $NFQWS_ARGS
           ;;
       esac
@@ -3959,8 +3981,53 @@ case "$1" in
 esac
 "#;
 
-pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
+pub fn is_nfqws2_available() -> bool {
+    (std::path::Path::new("/opt/zapret2/nfqws2").exists()
+        || std::path::Path::new("/opt/sbin/nfqws2").exists()
+        || std::path::Path::new("/opt/bin/nfqws2").exists()
+        || std::path::Path::new("/opt/zapret2/binaries/linux-arm64/nfqws2").exists()
+        || std::path::Path::new("/opt/zapret2/binaries/linux-arm/nfqws2").exists()
+        || std::path::Path::new("/opt/zapret2/binaries/linux-mips32r2-lsb/nfqws2").exists()
+        || std::path::Path::new("/opt/zapret2/binaries/linux-mips32r2-msb/nfqws2").exists()
+        || std::path::Path::new("/opt/zapret2/binaries/linux-x86_64/nfqws2").exists())
+        && std::path::Path::new("/opt/zapret2/lua/zapret-lib.lua").exists()
+}
+
+pub fn convert_lua_to_legacy_desync(args: &str) -> String {
+    if args.contains("disorder2") {
+        if args.contains("midsld") {
+            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=5 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4".to_string()
+        } else {
+            "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1 --dpi-desync-repeats=4 --dpi-desync-fooling=md5sig --dpi-desync-cutoff=d4".to_string()
+        }
+    } else if args.contains("seqovl") {
+        "--dpi-desync=fake,multisplit --dpi-desync-split-pos=1,midsld --dpi-desync-split-seqovl=5 --dpi-desync-fooling=badseq --dpi-desync-cutoff=d4".to_string()
+    } else if args.contains("multisplit") {
+        if args.contains("midsld") {
+            "--dpi-desync=fake,multisplit --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=ts,md5sig --dpi-desync-cutoff=d4".to_string()
+        } else {
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4".to_string()
+        }
+    } else if args.contains("split2") || args.contains("split") {
+        if args.contains("ts_up") || args.contains("repeats=6") {
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4".to_string()
+        } else {
+            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-cutoff=d4".to_string()
+        }
+    } else {
+        "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4".to_string()
+    }
+}
+
+pub fn build_nfqws_args_with_desync(cfg: &crate::config::ZapretConfig, custom_desync: Option<&str>) -> (String, bool) {
     let mut profiles: Vec<String> = Vec::new();
+
+    let default_yt_desync = if cfg.aggressive_dpi {
+        "--dpi-desync=fake,split2 --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=ts,md5sig --dpi-desync-cutoff=d4"
+    } else {
+        "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
+    };
+    let yt_desync = custom_desync.unwrap_or(default_yt_desync);
 
     // YouTube profile (TCP 80/443) - fake,split2 at pos 1 with repeats=6 and ts (TCP timestamp) fooling reliably bypasses TSPU inspection
     if cfg.youtube_turbo || cfg.hybrid_youtube || cfg.smart_tv_mode {
@@ -3969,11 +4036,6 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
         } else {
             "googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com"
         };
-        let yt_desync = if cfg.aggressive_dpi {
-            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=ts,md5sig --dpi-desync-cutoff=d4"
-        } else {
-            "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
-        };
         profiles.push(format!(
             "--filter-tcp=80,443 --hostlist-domains={yt_domains} {yt_desync}"
         ));
@@ -3981,11 +4043,12 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
 
     // Discord Web/Chat profile - fake,split2 with ts fooling for TLS 1.3
     if cfg.hybrid_discord {
-        let dc_desync = if cfg.aggressive_dpi {
+        let dc_default = if cfg.aggressive_dpi {
             "--dpi-desync=fake,split2 --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=ts,md5sig --dpi-desync-cutoff=d4"
         } else {
             "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
         };
+        let dc_desync = custom_desync.unwrap_or(dc_default);
         profiles.push(format!(
             "--filter-tcp=80,443 --hostlist-domains=discord.com,discord.gg,discordapp.com,discordapp.net,discord.media,discord-attachments-uploads-prd.storage.googleapis.com,dis.gd,discord-activities.com {dc_desync}"
         ));
@@ -3999,11 +4062,12 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
     // General Web Hostlist profile (включает универсальный хостлист, GitHub, торренты, 18+ и пользовательские сайты)
     let has_active_custom = cfg.custom_entries.iter().any(|e| e.enabled);
     if cfg.general_bypass || cfg.bypass_github || cfg.bypass_torrents || cfg.bypass_adult || cfg.community_hostlist_enabled || has_active_custom {
-        let gen_desync = if cfg.aggressive_dpi {
+        let gen_default = if cfg.aggressive_dpi {
             "--dpi-desync=fake,split2 --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=ts,md5sig --dpi-desync-cutoff=d4"
         } else {
             "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
         };
+        let gen_desync = custom_desync.unwrap_or(gen_default);
         profiles.push(format!(
             "--filter-tcp=80,443 --hostlist=/opt/etc/zapret/zapret-hosts.txt {gen_desync}"
         ));
@@ -4011,7 +4075,8 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
 
     // If no specific profiles enabled, provide safe basic profile
     if profiles.is_empty() {
-        profiles.push("--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4".to_string());
+        let fallback_desync = custom_desync.unwrap_or("--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4");
+        profiles.push(format!("--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com {}", fallback_desync));
     }
 
     let args = format!("--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 {}", profiles.join(" --new "));
@@ -4019,9 +4084,22 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
     (args, voice_enabled)
 }
 
+pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
+    build_nfqws_args_with_desync(cfg, None)
+}
+
 /// Генератор аргументов zapret2 (nfqws2 с рантаймом Lua, --payload и --lua-desync)
-pub fn build_nfqws2_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
+pub fn build_nfqws2_args_with_desync(cfg: &crate::config::ZapretConfig, custom_desync: Option<&str>) -> (String, bool) {
     let mut profiles: Vec<String> = Vec::new();
+
+    let default_fake_desync = if cfg.aggressive_dpi {
+        "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid:tcp_ts_up:seqovl=5:tcp_ack=-66000 --lua-desync=multisplit:pos=1,midsld"
+    } else if cfg.youtube_turbo || cfg.smart_tv_mode {
+        "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid --lua-desync=multisplit:pos=1,midsld"
+    } else {
+        "--lua-desync=fake:blob=fake_default_tls --lua-desync=multisplit:pos=1"
+    };
+    let fake_desync = custom_desync.unwrap_or(default_fake_desync);
 
     // YouTube profile (TCP 80/443) - Fake ClientHello + multisplit desync с рандомизацией и ранняя отсечка -d10
     if cfg.youtube_turbo || cfg.hybrid_youtube || cfg.smart_tv_mode {
@@ -4030,13 +4108,6 @@ pub fn build_nfqws2_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
         } else {
             "googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com"
         };
-        let fake_desync = if cfg.aggressive_dpi {
-            "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid:tcp_ts_up:seqovl=5:tcp_ack=-66000 --lua-desync=multisplit:pos=1,midsld"
-        } else if cfg.youtube_turbo || cfg.smart_tv_mode {
-            "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid --lua-desync=multisplit:pos=1,midsld"
-        } else {
-            "--lua-desync=fake:blob=fake_default_tls --lua-desync=multisplit:pos=1"
-        };
         profiles.push(format!(
             "--filter-tcp=80,443 --filter-l7=tls,http --hostlist-domains={yt_domains} --out-range=-d10 --payload=tls_client_hello {fake_desync}"
         ));
@@ -4044,13 +4115,14 @@ pub fn build_nfqws2_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
 
     // Discord Web/Chat profile (TCP 80/443)
     if cfg.hybrid_discord {
-        let fake_desync = if cfg.aggressive_dpi {
+        let dc_default = if cfg.aggressive_dpi {
             "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid:tcp_ts_up:seqovl=5:tcp_ack=-66000 --lua-desync=multisplit:pos=1,midsld"
         } else {
             "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid --lua-desync=multisplit:pos=1,midsld"
         };
+        let dc_desync = custom_desync.unwrap_or(dc_default);
         profiles.push(format!(
-            "--filter-tcp=80,443 --filter-l7=tls,http --hostlist-domains=discord.com,discord.gg,discordapp.com,discordapp.net,discord.media,discord-attachments-uploads-prd.storage.googleapis.com,dis.gd,discord-activities.com --out-range=-d10 --payload=tls_client_hello {fake_desync}"
+            "--filter-tcp=80,443 --filter-l7=tls,http --hostlist-domains=discord.com,discord.gg,discordapp.com,discordapp.net,discord.media,discord-attachments-uploads-prd.storage.googleapis.com,dis.gd,discord-activities.com --out-range=-d10 --payload=tls_client_hello {dc_desync}"
         ));
     }
 
@@ -4062,11 +4134,12 @@ pub fn build_nfqws2_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
     // General Web Hostlist profile (общий файл zapret-hosts.txt)
     let has_active_custom = cfg.custom_entries.iter().any(|e| e.enabled);
     if cfg.general_bypass || cfg.bypass_github || cfg.bypass_torrents || cfg.bypass_adult || cfg.community_hostlist_enabled || has_active_custom {
-        let desync_args = if cfg.aggressive_dpi {
+        let gen_default = if cfg.aggressive_dpi {
             "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid:tcp_ts_up:seqovl=5:tcp_ack=-66000 --lua-desync=multisplit:pos=1,midsld"
         } else {
             "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid --lua-desync=multisplit:pos=1"
         };
+        let desync_args = custom_desync.unwrap_or(gen_default);
         profiles.push(format!(
             "--filter-tcp=80,443 --filter-l7=tls,http --hostlist=/opt/etc/zapret/zapret-hosts.txt --out-range=-d10 --payload=tls_client_hello {desync_args}"
         ));
@@ -4074,12 +4147,17 @@ pub fn build_nfqws2_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
 
     // Базовый безопасный профиль по умолчанию, если ничего не выбрано
     if profiles.is_empty() {
-        profiles.push("--filter-tcp=80,443 --filter-l7=tls,http --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid --lua-desync=multisplit:pos=1".to_string());
+        let fallback_desync = custom_desync.unwrap_or("--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid --lua-desync=multisplit:pos=1");
+        profiles.push(format!("--filter-tcp=80,443 --filter-l7=tls,http --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --out-range=-d10 --payload=tls_client_hello {}", fallback_desync));
     }
 
     let args = format!("--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 {}", profiles.join(" --new "));
     let voice_enabled = cfg.discord_voice_udp;
     (args, voice_enabled)
+}
+
+pub fn build_nfqws2_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
+    build_nfqws2_args_with_desync(cfg, None)
 }
 
 pub const ZAPRET_HOSTS_MANAGED_BEGIN: &str = "# --- START XKEEN ROUTE DYNAMIC HOSTS ---";
@@ -4299,15 +4377,26 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
     // 3. zapret.conf with multi-strategy args or custom_args
     let (args, voice_enabled) = if let Some(custom) = &cfg.custom_args {
         validate_custom_args(custom)?;
-        (custom.clone(), cfg.discord_voice_udp)
-    } else {
-        let legacy_only = std::path::Path::new("/opt/zapret/nfq/nfqws").exists()
-            && !std::path::Path::new("/opt/zapret2/nfqws2").exists()
-            && !std::path::Path::new("/opt/sbin/nfqws2").exists();
-        if legacy_only {
-            build_nfqws_args(cfg)
+        let is_full_cmdline = custom.contains("--daemon") || custom.contains("--qnum");
+        if is_nfqws2_available() {
+            if is_full_cmdline {
+                (custom.clone(), cfg.discord_voice_udp)
+            } else {
+                build_nfqws2_args_with_desync(cfg, Some(custom.as_str()))
+            }
         } else {
+            if is_full_cmdline && !custom.contains("lua-desync") && !custom.contains("payload=") && !custom.contains("out-range=") {
+                (custom.clone(), cfg.discord_voice_udp)
+            } else {
+                let legacy_desync = convert_lua_to_legacy_desync(custom);
+                build_nfqws_args_with_desync(cfg, Some(&legacy_desync))
+            }
+        }
+    } else {
+        if is_nfqws2_available() {
             build_nfqws2_args(cfg)
+        } else {
+            build_nfqws_args(cfg)
         }
     };
     let sanitized_args = args.replace('\r', " ").replace('\n', " ").replace('"', "");
@@ -4485,7 +4574,12 @@ pub async fn zapret_action(
             if let Err(e) = validate_custom_args(args) {
                 return api_err(e);
             }
-            cfg.zapret.custom_args = Some(args.clone());
+            let effective_args = if !is_nfqws2_available() && args.contains("--lua-desync") {
+                convert_lua_to_legacy_desync(args)
+            } else {
+                args.clone()
+            };
+            cfg.zapret.custom_args = Some(effective_args);
         }
         if let Err(e) = sync_zapret_files(&cfg.zapret).await {
             return api_err(format!("Ошибка синхронизации файлов Zapret: {e}"));
@@ -4667,7 +4761,18 @@ pub async fn zapret_action(
             }
             "custom" => {
                 if let Some(custom) = &body.custom_args {
-                    cfg.zapret.custom_args = Some(custom.clone());
+                    let clean = custom.trim().to_string();
+                    if !clean.is_empty() {
+                        if let Err(e) = validate_custom_args(&clean) {
+                            return api_err(e);
+                        }
+                        let effective = if !is_nfqws2_available() && clean.contains("--lua-desync") {
+                            convert_lua_to_legacy_desync(&clean)
+                        } else {
+                            clean
+                        };
+                        cfg.zapret.custom_args = Some(effective);
+                    }
                 }
             }
             _ => {
@@ -5170,10 +5275,41 @@ pub async fn zapret_action(
     match tokio::process::Command::new(init_script).arg(action_to_run).output().await {
         Ok(out) => {
             let output_str = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+            let success = out.status.success();
+
+            if (action_to_run == "start" || action_to_run == "restart") && !success {
+                let _cfg_guard = state.config_lock.lock().await;
+                let mut cfg = (**state.config.read().await).clone();
+                cfg.zapret.enabled = false;
+                let _ = config::save(&state.config_path, &cfg).await;
+                *state.config.write().await = std::sync::Arc::new(cfg.clone());
+                return api_err(format!("Ошибка запуска Zapret:\n{}", output_str.trim()));
+            }
+
+            if action_to_run == "start" || action_to_run == "restart" {
+                tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+                let pid_running = tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null")
+                    .output()
+                    .await
+                    .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+                    .unwrap_or(false);
+
+                if !pid_running {
+                    let _cfg_guard = state.config_lock.lock().await;
+                    let mut cfg = (**state.config.read().await).clone();
+                    cfg.zapret.enabled = false;
+                    let _ = config::save(&state.config_path, &cfg).await;
+                    *state.config.write().await = std::sync::Arc::new(cfg.clone());
+                    return api_err(format!("Служба Zapret завершилась сразу после старта:\n{}", output_str.trim()));
+                }
+            }
+
             let _cfg_guard = state.config_lock.lock().await;
             let _routing_guard = state.routing_lock.lock().await;
             let mut cfg = (**state.config.read().await).clone();
-            if action_to_run == "start" {
+            if action_to_run == "start" || action_to_run == "restart" {
                 cfg.zapret.enabled = true;
             } else if action_to_run == "stop" {
                 cfg.zapret.enabled = false;
@@ -6295,6 +6431,38 @@ mod tests {
         assert!(validate_custom_args("--arg !ls").is_err());
         assert!(validate_custom_args("--arg \"quote\"").is_err());
         assert!(validate_custom_args("--arg 'single'").is_err());
+    }
+
+    #[test]
+    fn test_convert_lua_to_legacy_desync() {
+        let lua_fake = "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid --lua-desync=multisplit:pos=1,midsld";
+        let legacy = convert_lua_to_legacy_desync(lua_fake);
+        assert!(legacy.contains("--dpi-desync=fake,multisplit"));
+        assert!(legacy.contains("--dpi-desync-split-pos=1,midsld"));
+        assert!(!legacy.contains("lua-desync"));
+
+        let disorder_lua = "--lua-desync=fake --lua-desync=disorder2:pos=1,midsld";
+        let legacy_disorder = convert_lua_to_legacy_desync(disorder_lua);
+        assert!(legacy_disorder.contains("--dpi-desync=fake,disorder2"));
+        assert!(legacy_disorder.contains("midsld"));
+
+        let split_lua = "--lua-desync=split2:pos=1";
+        let legacy_split = convert_lua_to_legacy_desync(split_lua);
+        assert!(legacy_split.contains("--dpi-desync=fake,split2"));
+    }
+
+    #[test]
+    fn test_build_nfqws_args_with_desync() {
+        let cfg = crate::config::ZapretConfig {
+            enabled: true,
+            youtube_turbo: true,
+            general_bypass: true,
+            ..Default::default()
+        };
+        let custom = "--dpi-desync=fake,split2 --dpi-desync-split-pos=2";
+        let (args, _) = build_nfqws_args_with_desync(&cfg, Some(custom));
+        assert!(args.contains("--daemon --qnum=200"));
+        assert!(args.contains(custom));
     }
 }
 
