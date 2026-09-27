@@ -526,6 +526,20 @@ pub struct ZapretConfig {
     pub custom_entries: Vec<ZapretCustomEntry>,
     /// Кастомные аргументы nfqws (сохраняются при установке пресетов)
     pub custom_args: Option<String>,
+    /// Специальный профиль «Smart TV / Кинотеатр» (блокировка UDP 443 + оптимизация GGC)
+    pub smart_tv_mode: bool,
+    /// Включено ли автообновление списков (Community Hostlists)
+    pub community_hostlist_enabled: bool,
+    /// URL внешнего списка (community antizapret / custom hostlist)
+    pub community_hostlist_url: String,
+    /// Автоматическое обновление списка
+    pub community_hostlist_auto_update: bool,
+    /// Дата и время последнего обновления списка
+    pub community_hostlist_last_updated: Option<String>,
+    /// Количество доменов в community hostlist
+    pub community_hostlist_count: usize,
+    /// Исключенные устройства из перехвата Zapret (по IP или MAC): для них Zapret выключен
+    pub excluded_devices: Vec<String>,
 }
 
 impl Default for ZapretConfig {
@@ -544,6 +558,13 @@ impl Default for ZapretConfig {
             bypass_adult: true,
             custom_entries: Vec::new(),
             custom_args: None,
+            smart_tv_mode: false,
+            community_hostlist_enabled: false,
+            community_hostlist_url: "https://raw.githubusercontent.com/zapret-info/z-block/master/hosts.txt".to_string(),
+            community_hostlist_auto_update: false,
+            community_hostlist_last_updated: None,
+            community_hostlist_count: 0,
+            excluded_devices: Vec::new(),
         }
     }
 }

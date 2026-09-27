@@ -1,9 +1,27 @@
 import { useState, useEffect, useRef } from 'react'
 import { apiGet, apiPost } from '../api'
-import type { ZapretStatus, DpiTestResult, ZapretFeatures } from '../types'
+import type {
+  ZapretStatus,
+  DpiTestResult,
+  ZapretFeatures,
+  ZapretAnalytics,
+  BlockcheckResult,
+  BlockcheckStrategy,
+} from '../types'
+import { fmtBytes } from '../types'
 
 interface ZapretProps {
   notify: (msg: string, error?: boolean) => void
+}
+
+export function fmtUptime(secs?: number): string {
+  if (!secs || secs <= 0) return '0 сек'
+  const h = Math.floor(secs / 3600)
+  const m = Math.floor((secs % 3600) / 60)
+  const s = secs % 60
+  if (h > 0) return `${h} ч ${m} мин`
+  if (m > 0) return `${m} мин ${s} сек`
+  return `${s} сек`
 }
 
 export function normalizeDomainInput(input: string): string {
@@ -23,6 +41,21 @@ export default function Zapret({ notify }: ZapretProps) {
   const [busy, setBusy] = useState(false)
   const [testResult, setTestResult] = useState<DpiTestResult | null>(null)
   const [testingDpi, setTestingDpi] = useState(false)
+
+  // DPI Analytics (Live-монитор)
+  const [analytics, setAnalytics] = useState<ZapretAnalytics | null>(null)
+  const [resettingAnalytics, setResettingAnalytics] = useState(false)
+
+  // Mini-Blockcheck (автоподбор стратегий)
+  const [blockcheckResult, setBlockcheckResult] = useState<BlockcheckResult | null>(null)
+  const [runningBlockcheck, setRunningBlockcheck] = useState(false)
+  const [applyingStrategy, setApplyingStrategy] = useState<string | null>(null)
+
+  // Community Hostlists
+  const [communityUrl, setCommunityUrl] = useState(
+    'https://raw.githubusercontent.com/zapret-info/z-block/master/hosts.txt'
+  )
+  const [syncingCommunity, setSyncingCommunity] = useState(false)
 
   // Защита оптимистичного UI: ключи операций в полёте защищены от затирания фоновым polling
   const pendingKeysRef = useRef<Set<string>>(new Set())
@@ -60,6 +93,12 @@ export default function Zapret({ notify }: ZapretProps) {
     bypass_github: true,
     bypass_torrents: true,
     bypass_adult: true,
+    smart_tv_mode: false,
+    community_hostlist_enabled: false,
+    community_hostlist_url: 'https://raw.githubusercontent.com/zapret-info/z-block/master/hosts.txt',
+    community_hostlist_auto_update: false,
+    community_hostlist_count: 0,
+    excluded_devices: [],
     custom_entries: [],
   })
   const [togglingFeature, setTogglingFeature] = useState<string | null>(null)
@@ -79,7 +118,13 @@ export default function Zapret({ notify }: ZapretProps) {
         }
         return res
       })
+      if (res.analytics) {
+        setAnalytics(res.analytics)
+      }
       if (res.features) {
+        if (res.features.community_hostlist_url) {
+          setCommunityUrl(res.features.community_hostlist_url)
+        }
         setFeatures((prev) => {
           if (pendingKeysRef.current.has('preset_in_flight')) {
             return prev
@@ -119,11 +164,102 @@ export default function Zapret({ notify }: ZapretProps) {
     }
   }
 
+  const loadAnalytics = async () => {
+    if (document.hidden) return
+    try {
+      const res = await apiGet<ZapretAnalytics>('zapret/analytics')
+      if (res) setAnalytics(res)
+    } catch {
+      /* non-critical */
+    }
+  }
+
   useEffect(() => {
     loadStatus()
+    loadAnalytics()
     const timer = setInterval(loadStatus, 10000)
-    return () => clearInterval(timer)
+    const aTimer = setInterval(loadAnalytics, 3500)
+    return () => {
+      clearInterval(timer)
+      clearInterval(aTimer)
+    }
   }, [])
+
+  const handleResetAnalytics = async () => {
+    setResettingAnalytics(true)
+    try {
+      await apiPost('zapret/action', { action: 'reset_analytics' })
+      notify('Счётчики перехваченного трафика DPI сброшены')
+      await loadAnalytics()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка сброса аналитики DPI', true)
+    } finally {
+      setResettingAnalytics(false)
+    }
+  }
+
+  const handleRunBlockcheck = async () => {
+    setRunningBlockcheck(true)
+    try {
+      const res = await apiPost<BlockcheckResult>('zapret/blockcheck')
+      setBlockcheckResult(res)
+      notify('✅ Автоподбор стратегий завершен! Выберите лучшую стратегию')
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка выполнения автоподбора стратегий', true)
+    } finally {
+      setRunningBlockcheck(false)
+    }
+  }
+
+  const handleApplyStrategy = async (strat: BlockcheckStrategy) => {
+    setApplyingStrategy(strat.id)
+    try {
+      const res = await apiPost<{ success: boolean; message?: string }>('zapret/action', {
+        action: 'apply_strategy',
+        custom_args: strat.args,
+        strategy_id: strat.id,
+      })
+      notify(res.message || `Стратегия '${strat.name}' успешно применена`)
+      await loadStatus()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка применения стратегии', true)
+    } finally {
+      setApplyingStrategy(null)
+    }
+  }
+
+  const handleSyncCommunityHostlist = async () => {
+    setSyncingCommunity(true)
+    try {
+      const res = await apiPost<{ success: boolean; count: number; message: string; last_updated: string }>(
+        'zapret/community-hostlist/sync',
+        { url: communityUrl }
+      )
+      notify(res.message || `Синхронизировано ${res.count} доменов`)
+      await loadStatus()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка синхронизации community hostlist', true)
+    } finally {
+      setSyncingCommunity(false)
+    }
+  }
+
+  const handleSaveCommunityHostlistUrl = async (newUrl: string) => {
+    try {
+      const res = await apiPost<{ success: boolean; features?: ZapretFeatures; message?: string }>('zapret/action', {
+        action: 'toggle_feature',
+        feature: 'community_hostlist_enabled',
+        enabled: features.community_hostlist_enabled ?? false,
+        url: newUrl,
+      })
+      if (res.features) {
+        setFeatures((prev) => ({ ...prev, ...res.features }))
+      }
+      notify('URL внешнего списка сохранен')
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка сохранения URL внешнего списка', true)
+    }
+  }
 
   const handleToggle = async () => {
     const nextVal = !isRunning
@@ -1092,7 +1228,674 @@ export default function Zapret({ notify }: ZapretProps) {
         )}
       </section>
 
-      {/* 2. СЛУЖБЫ И СЕРВИСЫ (ПРЯМОЙ ОБХОД DPI БЕЗ VPS) */}
+      {/* 2. LIVE-МОНИТОР И СЧЁТЧИК СПАСЁННОГО ТРАФИКА (DPI ANALYTICS) */}
+      <section
+        className="card"
+        style={{
+          padding: '20px 24px',
+          background: 'linear-gradient(135deg, rgba(6, 182, 212, 0.06) 0%, rgba(15, 23, 42, 0.6) 100%)',
+          border: '1px solid rgba(56, 189, 248, 0.25)',
+          borderRadius: 16,
+          boxShadow: '0 8px 24px rgba(6, 182, 212, 0.05)',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div
+              style={{
+                width: 38,
+                height: 38,
+                borderRadius: 10,
+                background: 'rgba(56, 189, 248, 0.15)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 18,
+              }}
+            >
+              📊
+            </div>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>
+                  Live-монитор и счётчик спасённого трафика (DPI Analytics)
+                </h3>
+                <span
+                  className="badge"
+                  style={{
+                    background: 'rgba(34, 197, 94, 0.15)',
+                    color: '#22c55e',
+                    border: '1px solid rgba(34, 197, 94, 0.3)',
+                    fontSize: 11,
+                  }}
+                >
+                  ● LIVE NETFILTER
+                </span>
+              </div>
+              <div className="muted small" style={{ marginTop: 2 }}>
+                Объём десинхронизированного трафика, прошедшего через NFQUEUE ядра роутера без расхода зарубежного лимита VPS
+              </div>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            className="btn sm ghost"
+            disabled={resettingAnalytics || busy}
+            onClick={handleResetAnalytics}
+            style={{ fontSize: 12, color: '#94a3b8' }}
+            title="Сбросить байтовые счётчики iptables zapret"
+          >
+            {resettingAnalytics ? 'Сброс…' : '↺ Сбросить счётчики'}
+          </button>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
+          {/* Перехвачено байт */}
+          <div
+            style={{
+              padding: '14px 16px',
+              borderRadius: 12,
+              background: 'rgba(0, 0, 0, 0.25)',
+              border: '1px solid rgba(255, 255, 255, 0.05)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4,
+            }}
+          >
+            <div className="muted small" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              Перехвачено трафика (NFQUEUE)
+            </div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: '#38bdf8', fontFamily: 'Consolas, monospace' }}>
+              {fmtBytes(analytics?.bytes_intercepted || 0)}
+            </div>
+            <div className="muted small" style={{ fontSize: 11 }}>
+              {analytics?.packets_intercepted?.toLocaleString() || 0} пакетов суммарно
+            </div>
+          </div>
+
+          {/* Сэкономлено VPS */}
+          <div
+            style={{
+              padding: '14px 16px',
+              borderRadius: 12,
+              background: 'rgba(34, 197, 94, 0.06)',
+              border: '1px solid rgba(34, 197, 94, 0.25)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4,
+            }}
+          >
+            <div className="muted small" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5, color: '#4ade80' }}>
+              Сэкономлено трафика на VPS
+            </div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: '#22c55e', fontFamily: 'Consolas, monospace' }}>
+              {fmtBytes(analytics?.vps_saved_bytes || 0)}
+            </div>
+            <div className="muted small" style={{ fontSize: 11, color: '#86efac' }}>
+              100% прямой обход без расхода прокси
+            </div>
+          </div>
+
+          {/* Пакеты TCP / UDP */}
+          <div
+            style={{
+              padding: '14px 16px',
+              borderRadius: 12,
+              background: 'rgba(0, 0, 0, 0.25)',
+              border: '1px solid rgba(255, 255, 255, 0.05)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4,
+            }}
+          >
+            <div className="muted small" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              TCP / UDP распределение
+            </div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: '#f1f5f9', display: 'flex', gap: 12 }}>
+              <span title="TCP пакеты (YouTube Web, HTTPS SNI)">
+                TCP: <b style={{ color: '#38bdf8', fontFamily: 'Consolas, monospace' }}>{analytics?.tcp_packets?.toLocaleString() || 0}</b>
+              </span>
+              <span title="UDP пакеты (Discord Voice, QUIC)">
+                UDP: <b style={{ color: '#a855f7', fontFamily: 'Consolas, monospace' }}>{analytics?.udp_packets?.toLocaleString() || 0}</b>
+              </span>
+            </div>
+            <div className="muted small" style={{ fontSize: 11 }}>
+              L7 DPI десинхронизация
+            </div>
+          </div>
+
+          {/* nfqws2 Ресурсы процесса */}
+          <div
+            style={{
+              padding: '14px 16px',
+              borderRadius: 12,
+              background: 'rgba(0, 0, 0, 0.25)',
+              border: '1px solid rgba(255, 255, 255, 0.05)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4,
+            }}
+          >
+            <div className="muted small" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+              Процесс nfqws2
+            </div>
+            <div style={{ fontSize: 15, fontWeight: 600, color: '#f1f5f9', display: 'flex', gap: 10 }}>
+              <span>RAM: <b style={{ color: '#cbd5e1', fontFamily: 'Consolas, monospace' }}>{((analytics?.nfqws_mem_bytes || 0) / (1024 * 1024)).toFixed(1)} МБ</b></span>
+              <span>Uptime: <b style={{ color: '#cbd5e1', fontFamily: 'Consolas, monospace' }}>{fmtUptime(analytics?.uptime_seconds)}</b></span>
+            </div>
+            <div className="muted small" style={{ fontSize: 11 }}>
+              {status?.running ? '🟢 Демон активен' : '⚪ Демон остановлен'}
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* 3. ВСТРОЕННЫЙ АВТОПОДБОР СТРАТЕГИЙ (MINI-BLOCKCHECK) */}
+      <section
+        className="card"
+        style={{
+          padding: '22px 24px',
+          background: 'linear-gradient(135deg, rgba(56, 189, 248, 0.05) 0%, rgba(15, 23, 42, 0.6) 100%)',
+          border: '1px solid rgba(56, 189, 248, 0.3)',
+          borderRadius: 16,
+          boxShadow: '0 8px 24px rgba(56, 189, 248, 0.05)',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 14, marginBottom: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div
+              style={{
+                width: 40,
+                height: 40,
+                borderRadius: 10,
+                background: 'rgba(56, 189, 248, 0.15)',
+                border: '1px solid rgba(56, 189, 248, 0.35)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 20,
+              }}
+            >
+              🎯
+            </div>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>
+                  Автоподбор стратегий десинхронизации (Mini-Blockcheck)
+                </h3>
+                <span
+                  className="badge"
+                  style={{
+                    background: 'rgba(56, 189, 248, 0.15)',
+                    color: '#38bdf8',
+                    border: '1px solid rgba(56, 189, 248, 0.4)',
+                    fontSize: 11,
+                  }}
+                >
+                  ⚡ zapret2 engine
+                </span>
+              </div>
+              <div className="muted small" style={{ marginTop: 3 }}>
+                Автоматическое тестирование 7 ходовых комбинаций десинхронизации (fake, multisplit, seqovl, disorder, fooling) на YouTube и Discord с замером задержки и применением лучшей в 1 клик.
+              </div>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            className="btn primary"
+            disabled={runningBlockcheck || busy || !isInstalled}
+            onClick={handleRunBlockcheck}
+            style={{
+              background: 'linear-gradient(135deg, #0ea5e9 0%, #2563eb 100%)',
+              border: 'none',
+              boxShadow: '0 2px 12px rgba(14, 165, 233, 0.35)',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '8px 18px',
+              fontSize: 13,
+              fontWeight: 600,
+            }}
+          >
+            {runningBlockcheck ? (
+              <>
+                <span className="spinner sm" />
+                <span>Тестирование стратегий…</span>
+              </>
+            ) : (
+              <>
+                <span>⚡</span>
+                <span>Запустить автоподбор стратегий</span>
+              </>
+            )}
+          </button>
+        </div>
+
+        {/* РЕЗУЛЬТАТЫ СТРАТЕГИЙ */}
+        {blockcheckResult && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}>
+            {/* РЕКОМЕНДОВАННАЯ СТРАТЕГИЯ ХИТ-БАННЕР */}
+            {(() => {
+              const best = blockcheckResult.strategies.find((s) => s.id === blockcheckResult.best_strategy_id) || blockcheckResult.strategies[0]
+              if (!best) return null
+              const isApplying = applyingStrategy === best.id
+              return (
+                <div
+                  style={{
+                    padding: '14px 18px',
+                    borderRadius: 12,
+                    background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.15) 0%, rgba(6, 182, 212, 0.15) 100%)',
+                    border: '1px solid rgba(34, 197, 94, 0.4)',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    flexWrap: 'wrap',
+                    gap: 12,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <span style={{ fontSize: 22 }}>🏆</span>
+                    <div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <b style={{ fontSize: 14, color: '#f8fafc' }}>Лучшая рекомендуемая стратегия: {best.name}</b>
+                        <span className="badge" style={{ background: 'rgba(34, 197, 94, 0.25)', color: '#4ade80', border: '1px solid rgba(34, 197, 94, 0.5)', fontSize: 11 }}>
+                          Score: {best.score}/100
+                        </span>
+                      </div>
+                      <div className="muted small" style={{ marginTop: 2, color: '#cbd5e1' }}>
+                        YouTube: {best.youtube_ok ? `🟢 ${best.youtube_time_ms} мс` : '🔴 Блок'} · Discord: {best.discord_ok ? `🟢 ${best.discord_time_ms} мс` : '🔴 Блок'} · {best.description}
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    className="btn primary sm"
+                    disabled={isApplying || busy}
+                    onClick={() => handleApplyStrategy(best)}
+                    style={{
+                      background: 'linear-gradient(135deg, #22c55e 0%, #16a34a 100%)',
+                      border: 'none',
+                      boxShadow: '0 2px 10px rgba(34, 197, 94, 0.4)',
+                      fontWeight: 600,
+                    }}
+                  >
+                    {isApplying ? 'Применение…' : '🚀 Применить лучшую стратегию в 1 клик'}
+                  </button>
+                </div>
+              )
+            })()}
+
+            {/* СПИСОК ВСЕХ ПРОТЕСТИРОВАННЫХ СТРАТЕГИЙ */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12 }}>
+              {blockcheckResult.strategies.map((strat) => {
+                const isBest = strat.id === blockcheckResult.best_strategy_id
+                const isApplying = applyingStrategy === strat.id
+                return (
+                  <div
+                    key={strat.id}
+                    style={{
+                      padding: '14px 16px',
+                      borderRadius: 12,
+                      background: isBest ? 'rgba(56, 189, 248, 0.08)' : 'rgba(0, 0, 0, 0.25)',
+                      border: isBest ? '1px solid rgba(56, 189, 248, 0.45)' : '1px solid var(--border)',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      justifyContent: 'space-between',
+                      gap: 10,
+                    }}
+                  >
+                    <div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
+                        <b style={{ fontSize: 13, color: isBest ? '#38bdf8' : 'var(--text)' }}>{strat.name}</b>
+                        <span
+                          className="badge"
+                          style={{
+                            fontSize: 10,
+                            background: strat.score >= 80 ? 'rgba(34, 197, 94, 0.2)' : 'rgba(234, 179, 8, 0.2)',
+                            color: strat.score >= 80 ? '#4ade80' : '#fde047',
+                            border: `1px solid ${strat.score >= 80 ? 'rgba(34, 197, 94, 0.4)' : 'rgba(234, 179, 8, 0.4)'}`,
+                          }}
+                        >
+                          {strat.score} pts
+                        </span>
+                      </div>
+                      <p className="muted small" style={{ margin: '4px 0 8px', fontSize: 11.5, lineHeight: 1.4 }}>
+                        {strat.description}
+                      </p>
+
+                      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', fontSize: 11 }}>
+                        <span
+                          style={{
+                            padding: '2px 8px',
+                            borderRadius: 6,
+                            background: strat.youtube_ok ? 'rgba(34, 197, 94, 0.12)' : 'rgba(239, 68, 68, 0.12)',
+                            color: strat.youtube_ok ? '#4ade80' : '#f87171',
+                            border: `1px solid ${strat.youtube_ok ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
+                            fontFamily: 'Consolas, monospace',
+                          }}
+                        >
+                          🎥 YouTube: {strat.youtube_ok ? `${strat.youtube_time_ms} мс` : 'Блок'}
+                        </span>
+                        <span
+                          style={{
+                            padding: '2px 8px',
+                            borderRadius: 6,
+                            background: strat.discord_ok ? 'rgba(34, 197, 94, 0.12)' : 'rgba(239, 68, 68, 0.12)',
+                            color: strat.discord_ok ? '#4ade80' : '#f87171',
+                            border: `1px solid ${strat.discord_ok ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
+                            fontFamily: 'Consolas, monospace',
+                          }}
+                        >
+                          💬 Discord: {strat.discord_ok ? `${strat.discord_time_ms} мс` : 'Блок'}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: 8, borderTop: '1px solid rgba(255, 255, 255, 0.05)' }}>
+                      <span className="muted small" style={{ fontSize: 10, fontFamily: 'Consolas, monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 180 }}>
+                        {strat.args.split(' ')[0]}...
+                      </span>
+                      <button
+                        type="button"
+                        className="btn sm"
+                        disabled={isApplying || busy}
+                        onClick={() => handleApplyStrategy(strat)}
+                        style={isBest ? { background: '#0284c7', color: '#fff', border: 'none' } : {}}
+                      >
+                        {isApplying ? 'Применение…' : 'Применить'}
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* 4. СПЕЦИАЛЬНЫЙ ПРОФИЛЬ «SMART TV / КИНОТЕАТР» */}
+      <section
+        className="card"
+        style={{
+          padding: '22px 24px',
+          background: features.smart_tv_mode
+            ? 'linear-gradient(135deg, rgba(234, 179, 8, 0.08) 0%, rgba(15, 23, 42, 0.6) 100%)'
+            : 'rgba(255, 255, 255, 0.02)',
+          border: features.smart_tv_mode ? '1px solid rgba(234, 179, 8, 0.35)' : '1px solid var(--border)',
+          borderRadius: 16,
+          boxShadow: features.smart_tv_mode ? '0 8px 24px rgba(234, 179, 8, 0.08)' : 'none',
+          transition: 'all 0.25s ease',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+            <div
+              style={{
+                width: 44,
+                height: 44,
+                borderRadius: 12,
+                background: features.smart_tv_mode ? 'rgba(234, 179, 8, 0.2)' : 'rgba(255, 255, 255, 0.05)',
+                border: features.smart_tv_mode ? '1px solid rgba(234, 179, 8, 0.4)' : '1px solid var(--border)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 22,
+              }}
+            >
+              📺
+            </div>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>
+                  Профиль «Smart TV / Кинотеатр»
+                </h3>
+                <span
+                  className="badge"
+                  style={{
+                    background: features.smart_tv_mode ? 'rgba(234, 179, 8, 0.2)' : 'rgba(255, 255, 255, 0.06)',
+                    color: features.smart_tv_mode ? '#fde047' : 'var(--muted)',
+                    border: `1px solid ${features.smart_tv_mode ? 'rgba(234, 179, 8, 0.4)' : 'var(--border)'}`,
+                    fontSize: 11,
+                    fontWeight: 600,
+                  }}
+                >
+                  {features.smart_tv_mode ? '🟢 SMART TV АКТИВЕН' : '⚪ ВЫКЛЮЧЕН'}
+                </span>
+                <span
+                  className="badge"
+                  style={{ background: 'rgba(56, 189, 248, 0.12)', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.3)', fontSize: 10 }}
+                >
+                  4K HDR READY
+                </span>
+                <span
+                  className="badge"
+                  style={{ background: 'rgba(168, 85, 247, 0.12)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.3)', fontSize: 10 }}
+                >
+                  UDP 443 DROP (QUIC)
+                </span>
+              </div>
+              <div className="muted small" style={{ marginTop: 4, lineHeight: 1.45 }}>
+                Специальная оптимизация для телевизоров LG webOS, Samsung Tizen, Android TV, Apple TV и медиаплееров. Блокирует UDP 443 (QUIC / HTTP3) для перевода плееров на стабильный TCP HTTP/2 с аппаратным nfqws2 ускорением. Автоматически включает в hostlist кэш-серверы Google Video (<code>redirector.googlevideo.com</code>, <code>manifest.googlevideo.com</code>, <code>gvt1.com</code>, <code>play.google.com</code>) для устранения зависаний 4K и буферизации.
+              </div>
+            </div>
+          </div>
+
+          {/* Свитч рубильник Smart TV */}
+          <button
+            type="button"
+            disabled={busy || !isInstalled || pendingKeys.has('smart_tv_mode')}
+            onClick={() => handleToggleFeature('smart_tv_mode')}
+            style={{
+              width: 54,
+              height: 30,
+              borderRadius: 18,
+              border: 'none',
+              cursor: busy || !isInstalled ? 'not-allowed' : 'pointer',
+              background: features.smart_tv_mode
+                ? 'linear-gradient(135deg, #eab308 0%, #ca8a04 100%)'
+                : 'rgba(255, 255, 255, 0.15)',
+              position: 'relative',
+              transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+              padding: 2,
+              flexShrink: 0,
+              boxShadow: features.smart_tv_mode ? '0 0 14px rgba(234, 179, 8, 0.45)' : 'none',
+            }}
+            title={features.smart_tv_mode ? 'Выключить профиль Smart TV' : 'Включить профиль Smart TV'}
+          >
+            <div
+              style={{
+                width: 26,
+                height: 26,
+                borderRadius: '50%',
+                background: '#fff',
+                transform: features.smart_tv_mode ? 'translateX(24px)' : 'translateX(0)',
+                transition: 'transform 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+                boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 11,
+                color: features.smart_tv_mode ? '#ca8a04' : '#888',
+                fontWeight: 'bold',
+              }}
+            >
+              {pendingKeys.has('smart_tv_mode') ? renderMicroSpinner('#ca8a04', 13) : features.smart_tv_mode ? '✓' : '✕'}
+            </div>
+          </button>
+        </div>
+      </section>
+
+      {/* 5. АВТООБНОВЛЕНИЕ СПИСКОВ (COMMUNITY HOSTLISTS) */}
+      <section
+        className="card"
+        style={{
+          padding: '22px 24px',
+          background: 'linear-gradient(135deg, rgba(59, 130, 246, 0.05) 0%, rgba(15, 23, 42, 0.5) 100%)',
+          border: '1px solid rgba(59, 130, 246, 0.3)',
+          borderRadius: 16,
+          boxShadow: '0 8px 24px rgba(59, 130, 246, 0.05)',
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 14, marginBottom: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div
+              style={{
+                width: 40,
+                height: 40,
+                borderRadius: 10,
+                background: 'rgba(59, 130, 246, 0.15)',
+                border: '1px solid rgba(59, 130, 246, 0.35)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 20,
+              }}
+            >
+              🌐
+            </div>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>
+                  Автообновление списков (Community Hostlists)
+                </h3>
+                <span
+                  className="badge"
+                  style={{
+                    background: features.community_hostlist_enabled ? 'rgba(34, 197, 94, 0.15)' : 'rgba(255, 255, 255, 0.06)',
+                    color: features.community_hostlist_enabled ? '#4ade80' : 'var(--muted)',
+                    border: `1px solid ${features.community_hostlist_enabled ? 'rgba(34, 197, 94, 0.3)' : 'var(--border)'}`,
+                    fontSize: 11,
+                  }}
+                >
+                  {features.community_hostlist_enabled ? '🟢 АКТИВЕН' : '⚪ ВЫКЛЮЧЕН'}
+                </span>
+                {features.community_hostlist_count ? (
+                  <span className="badge" style={{ background: 'rgba(59, 130, 246, 0.15)', color: '#60a5fa', border: '1px solid rgba(59, 130, 246, 0.3)', fontSize: 11 }}>
+                    {features.community_hostlist_count.toLocaleString()} доменов
+                  </span>
+                ) : null}
+              </div>
+              <div className="muted small" style={{ marginTop: 3 }}>
+                Поддержка внешних списков доменов сообщества (Antizapret / Custom URL), автоматическое фоновое обновление и моментальное применение через fast SIGHUP (<code>reload-hosts</code>) без перезапуска nfqws2.
+              </div>
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            {/* Свитч включения внешнего списка */}
+            <button
+              type="button"
+              disabled={busy || !isInstalled || pendingKeys.has('community_hostlist_enabled')}
+              onClick={() => handleToggleFeature('community_hostlist_enabled')}
+              style={{
+                width: 50,
+                height: 28,
+                borderRadius: 16,
+                border: 'none',
+                cursor: busy || !isInstalled ? 'not-allowed' : 'pointer',
+                background: features.community_hostlist_enabled
+                  ? 'linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)'
+                  : 'rgba(255, 255, 255, 0.15)',
+                position: 'relative',
+                transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+                padding: 2,
+                flexShrink: 0,
+                boxShadow: features.community_hostlist_enabled ? '0 0 12px rgba(59, 130, 246, 0.4)' : 'none',
+              }}
+              title={features.community_hostlist_enabled ? 'Выключить внешний список' : 'Включить внешний список'}
+            >
+              <div
+                style={{
+                  width: 24,
+                  height: 24,
+                  borderRadius: '50%',
+                  background: '#fff',
+                  transform: features.community_hostlist_enabled ? 'translateX(22px)' : 'translateX(0)',
+                  transition: 'transform 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+                  boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 10,
+                  color: features.community_hostlist_enabled ? '#1d4ed8' : '#888',
+                  fontWeight: 'bold',
+                }}
+              >
+                {pendingKeys.has('community_hostlist_enabled') ? renderMicroSpinner('#1d4ed8', 13) : features.community_hostlist_enabled ? '✓' : '✕'}
+              </div>
+            </button>
+          </div>
+        </div>
+
+        {/* НАСТРОЙКИ URL И КНОПКА СИНХРОНИЗАЦИИ */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+            <input
+              type="url"
+              className="input"
+              value={communityUrl}
+              onChange={(e) => setCommunityUrl(e.target.value)}
+              onBlur={() => handleSaveCommunityHostlistUrl(communityUrl)}
+              placeholder="https://raw.githubusercontent.com/zapret-info/z-block/master/hosts.txt"
+              disabled={syncingCommunity || !isInstalled}
+              style={{ flex: 1, minWidth: 280, fontFamily: 'Consolas, monospace', fontSize: 12 }}
+            />
+
+            <button
+              type="button"
+              className="btn primary"
+              disabled={syncingCommunity || busy || !isInstalled}
+              onClick={handleSyncCommunityHostlist}
+              style={{
+                background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
+                border: 'none',
+                boxShadow: '0 2px 10px rgba(59, 130, 246, 0.35)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                fontWeight: 600,
+              }}
+            >
+              {syncingCommunity ? (
+                <>
+                  <span className="spinner sm" />
+                  <span>Синхронизация…</span>
+                </>
+              ) : (
+                <>
+                  <span>🔄</span>
+                  <span>Синхронизировать сейчас</span>
+                </>
+              )}
+            </button>
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, fontSize: 12 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', userSelect: 'none' }}>
+              <input
+                type="checkbox"
+                checked={!!features.community_hostlist_auto_update}
+                onChange={() => handleToggleFeature('community_hostlist_auto_update')}
+                disabled={busy || !isInstalled}
+              />
+              <span style={{ color: features.community_hostlist_auto_update ? '#60a5fa' : 'var(--muted)' }}>
+                Автоматическое обновление списка каждые 24 часа
+              </span>
+            </label>
+
+            {features.community_hostlist_last_updated ? (
+              <span className="muted small" style={{ fontFamily: 'Consolas, monospace' }}>
+                Последняя синхронизация: {features.community_hostlist_last_updated}
+              </span>
+            ) : null}
+          </div>
+        </div>
+      </section>
+
+      {/* 6. СЛУЖБЫ И СЕРВИСЫ (ПРЯМОЙ ОБХОД DPI БЕЗ VPS) */}
       <section className="card" style={{ padding: '22px 24px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
           <div>

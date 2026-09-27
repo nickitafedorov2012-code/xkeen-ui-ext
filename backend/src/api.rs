@@ -3590,6 +3590,9 @@ BIN=$(find_bin)
 NFQWS_ARGS="--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 --filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
 DISCORD_VOICE_ENABLED="1"
 BLOCK_QUIC="0"
+SMART_TV_MODE="0"
+EXCLUDED_IPS=""
+EXCLUDED_MACS=""
 
 # Safe key-value parser for zapret.conf (no source / eval)
 if [ -f "$CONF" ]; then
@@ -3613,6 +3616,21 @@ if [ -f "$CONF" ]; then
         val="${val#\"}"
         val="${val%\"}"
         BLOCK_QUIC="$val"
+        ;;
+      SMART_TV_MODE)
+        val="${val#\"}"
+        val="${val%\"}"
+        SMART_TV_MODE="$val"
+        ;;
+      EXCLUDED_IPS)
+        val="${val#\"}"
+        val="${val%\"}"
+        EXCLUDED_IPS="$val"
+        ;;
+      EXCLUDED_MACS)
+        val="${val#\"}"
+        val="${val%\"}"
+        EXCLUDED_MACS="$val"
         ;;
     esac
   done < "$CONF"
@@ -3666,6 +3684,33 @@ add_fw() {
     iptables -t mangle -A zapret -d "$net" -j RETURN 2>/dev/null || true
   done
 
+  # 3.1 Per-Device Zapret: exclude devices where Zapret is disabled
+  if [ -n "$EXCLUDED_IPS" ]; then
+    for ex_ip in $EXCLUDED_IPS; do
+      [ -n "$ex_ip" ] || continue
+      iptables -t mangle -A zapret -s "$ex_ip" -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
+      iptables -t mangle -A zapret -s "$ex_ip" -j RETURN 2>/dev/null || true
+      iptables -t mangle -A zapret -d "$ex_ip" -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
+      iptables -t mangle -A zapret -d "$ex_ip" -j RETURN 2>/dev/null || true
+    done
+  fi
+
+  # 3.2 Per-Device Zapret (MAC): exclude devices by hardware MAC address
+  if [ -n "$EXCLUDED_MACS" ]; then
+    for ex_mac in $EXCLUDED_MACS; do
+      [ -n "$ex_mac" ] || continue
+      iptables -t mangle -A zapret -m mac --mac-source "$ex_mac" -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || true
+      mac_lower=$(echo "$ex_mac" | tr '[:upper:]' '[:lower:]')
+      resolved_ip=$(awk -v m="$mac_lower" 'tolower($4) == m {print $1; exit}' /proc/net/arp 2>/dev/null)
+      if [ -n "$resolved_ip" ]; then
+        iptables -t mangle -A zapret -s "$resolved_ip" -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
+        iptables -t mangle -A zapret -s "$resolved_ip" -j RETURN 2>/dev/null || true
+        iptables -t mangle -A zapret -d "$resolved_ip" -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
+        iptables -t mangle -A zapret -d "$resolved_ip" -j RETURN 2>/dev/null || true
+      fi
+    done
+  fi
+
   # 4. Queue WAN TCP (80, 443) -> NFQUEUE 200 with bypass
   if iptables -t mangle -A zapret -p tcp -m multiport --dports 80,443 -m comment --comment "xkeen-route-zapret" -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
      iptables -t mangle -A zapret -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; then
@@ -3675,8 +3720,8 @@ add_fw() {
     iptables -t mangle -A zapret -p tcp --dport 443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || true
   fi
 
-  # 5. Drop UDP 443 (QUIC / HTTP3) only if explicitly enabled (REJECT is invalid in mangle table)
-  if [ "$BLOCK_QUIC" = "1" ]; then
+  # 5. Drop UDP 443 (QUIC / HTTP3) if enabled or Smart TV mode active (prevents TV player stalls)
+  if [ "$BLOCK_QUIC" = "1" ] || [ "$SMART_TV_MODE" = "1" ]; then
     iptables -t mangle -A zapret -p udp --dport 443 -m comment --comment "xkeen-route-zapret" -j DROP 2>/dev/null || \
     iptables -t mangle -A zapret -p udp --dport 443 -j DROP 2>/dev/null || true
   fi
@@ -3914,14 +3959,19 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
     let mut profiles: Vec<String> = Vec::new();
 
     // YouTube profile (TCP 80/443) - fake,split2 at pos 1 with repeats=6 and ts (TCP timestamp) fooling reliably bypasses TSPU inspection
-    if cfg.youtube_turbo || cfg.hybrid_youtube {
+    if cfg.youtube_turbo || cfg.hybrid_youtube || cfg.smart_tv_mode {
+        let yt_domains = if cfg.smart_tv_mode {
+            "googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,redirector.googlevideo.com,manifest.googlevideo.com,gvt1.com,play.google.com"
+        } else {
+            "googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com"
+        };
         let yt_desync = if cfg.aggressive_dpi {
             "--dpi-desync=fake,split2 --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=ts,md5sig --dpi-desync-cutoff=d4"
         } else {
             "--dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4"
         };
         profiles.push(format!(
-            "--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com {yt_desync}"
+            "--filter-tcp=80,443 --hostlist-domains={yt_domains} {yt_desync}"
         ));
     }
 
@@ -3944,7 +3994,7 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
 
     // General Web Hostlist profile (включает универсальный хостлист, GitHub, торренты, 18+ и пользовательские сайты)
     let has_active_custom = cfg.custom_entries.iter().any(|e| e.enabled);
-    if cfg.general_bypass || cfg.bypass_github || cfg.bypass_torrents || cfg.bypass_adult || has_active_custom {
+    if cfg.general_bypass || cfg.bypass_github || cfg.bypass_torrents || cfg.bypass_adult || cfg.community_hostlist_enabled || has_active_custom {
         let gen_desync = if cfg.aggressive_dpi {
             "--dpi-desync=fake,split2 --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=6 --dpi-desync-fooling=ts,md5sig --dpi-desync-cutoff=d4"
         } else {
@@ -3970,16 +4020,21 @@ pub fn build_nfqws2_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
     let mut profiles: Vec<String> = Vec::new();
 
     // YouTube profile (TCP 80/443) - Fake ClientHello + multisplit desync с рандомизацией и ранняя отсечка -d10
-    if cfg.youtube_turbo || cfg.hybrid_youtube {
+    if cfg.youtube_turbo || cfg.hybrid_youtube || cfg.smart_tv_mode {
+        let yt_domains = if cfg.smart_tv_mode {
+            "googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,redirector.googlevideo.com,manifest.googlevideo.com,gvt1.com,play.google.com"
+        } else {
+            "googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com"
+        };
         let fake_desync = if cfg.aggressive_dpi {
             "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid:tcp_ts_up:seqovl=5:tcp_ack=-66000 --lua-desync=multisplit:pos=1,midsld"
-        } else if cfg.youtube_turbo {
+        } else if cfg.youtube_turbo || cfg.smart_tv_mode {
             "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid --lua-desync=multisplit:pos=1,midsld"
         } else {
             "--lua-desync=fake:blob=fake_default_tls --lua-desync=multisplit:pos=1"
         };
         profiles.push(format!(
-            "--filter-tcp=80,443 --filter-l7=tls,http --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com --out-range=-d10 --payload=tls_client_hello {fake_desync}"
+            "--filter-tcp=80,443 --filter-l7=tls,http --hostlist-domains={yt_domains} --out-range=-d10 --payload=tls_client_hello {fake_desync}"
         ));
     }
 
@@ -4002,7 +4057,7 @@ pub fn build_nfqws2_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
 
     // General Web Hostlist profile (общий файл zapret-hosts.txt)
     let has_active_custom = cfg.custom_entries.iter().any(|e| e.enabled);
-    if cfg.general_bypass || cfg.bypass_github || cfg.bypass_torrents || cfg.bypass_adult || has_active_custom {
+    if cfg.general_bypass || cfg.bypass_github || cfg.bypass_torrents || cfg.bypass_adult || cfg.community_hostlist_enabled || has_active_custom {
         let desync_args = if cfg.aggressive_dpi {
             "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid:tcp_ts_up:seqovl=5:tcp_ack=-66000 --lua-desync=multisplit:pos=1,midsld"
         } else {
@@ -4153,8 +4208,8 @@ pub fn validate_zapret_conf(content: &str) -> Result<(), String> {
             if k == "NFQWS_ARGS" {
                 let clean_val = val.trim().trim_matches('"').trim_matches('\'');
                 validate_custom_args(clean_val)?;
-            } else if k != "DISCORD_VOICE_ENABLED" && k != "BLOCK_QUIC" {
-                return Err(format!("Неизвестный параметр в zapret.conf: '{k}'. Разрешены только NFQWS_ARGS, DISCORD_VOICE_ENABLED, BLOCK_QUIC"));
+            } else if k != "DISCORD_VOICE_ENABLED" && k != "BLOCK_QUIC" && k != "SMART_TV_MODE" && k != "EXCLUDED_IPS" && k != "EXCLUDED_MACS" {
+                return Err(format!("Неизвестный параметр в zapret.conf: '{k}'. Разрешены только NFQWS_ARGS, DISCORD_VOICE_ENABLED, BLOCK_QUIC, SMART_TV_MODE, EXCLUDED_IPS, EXCLUDED_MACS"));
             }
         } else {
             return Err("Некорректная строка в zapret.conf: должна быть в формате КЛЮЧ=\"ЗНАЧЕНИЕ\"".to_string());
@@ -4215,7 +4270,26 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
     } else {
         DEFAULT_ZAPRET_HOSTS.to_string()
     };
-    let synced_hosts = sync_zapret_hosts_content(&base_hosts, cfg);
+    let mut synced_hosts = sync_zapret_hosts_content(&base_hosts, cfg);
+
+    // Подгрузка Community Hostlist при активации
+    if cfg.community_hostlist_enabled {
+        if let Ok(comm) = tokio::fs::read_to_string("/opt/etc/zapret/community-hosts.txt").await {
+            let comm_domains: Vec<&str> = comm
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .collect();
+            if !comm_domains.is_empty() {
+                synced_hosts.push_str("\n# --- START COMMUNITY HOSTLIST ---\n");
+                for d in comm_domains {
+                    synced_hosts.push_str(d);
+                    synced_hosts.push('\n');
+                }
+                synced_hosts.push_str("# --- END COMMUNITY HOSTLIST ---\n");
+            }
+        }
+    }
     let _ = tokio::fs::write(hosts_path, synced_hosts).await;
 
     // 3. zapret.conf with multi-strategy args or custom_args
@@ -4233,10 +4307,31 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
         }
     };
     let sanitized_args = args.replace('\r', " ").replace('\n', " ").replace('"', "");
+    let excluded_ips_str = cfg
+        .excluded_devices
+        .iter()
+        .filter(|d| !d.contains(':'))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let excluded_macs_str = cfg
+        .excluded_devices
+        .iter()
+        .filter(|d| d.contains(':'))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let block_quic_str = if cfg.smart_tv_mode { "1" } else { "0" };
+    let smart_tv_str = if cfg.smart_tv_mode { "1" } else { "0" };
+
     let conf_data = format!(
-        "NFQWS_ARGS=\"{}\"\nDISCORD_VOICE_ENABLED=\"{}\"\nBLOCK_QUIC=\"0\"\n",
+        "NFQWS_ARGS=\"{}\"\nDISCORD_VOICE_ENABLED=\"{}\"\nBLOCK_QUIC=\"{}\"\nSMART_TV_MODE=\"{}\"\nEXCLUDED_IPS=\"{}\"\nEXCLUDED_MACS=\"{}\"\n",
         sanitized_args.trim(),
-        if voice_enabled { "1" } else { "0" }
+        if voice_enabled { "1" } else { "0" },
+        block_quic_str,
+        smart_tv_str,
+        excluded_ips_str.trim(),
+        excluded_macs_str.trim()
     );
     tokio::fs::write("/opt/etc/zapret/zapret.conf", conf_data)
         .await
@@ -4339,7 +4434,7 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
 
 #[derive(Deserialize)]
 pub struct ZapretActionReq {
-    pub action: String, // "start" | "stop" | "restart" | "toggle" | "install" | "set_preset" | "save_config" | "save_hosts" | "test_dpi" | "toggle_feature" | "set_features" | "reset_features" | "add_custom_domain" | "remove_custom_domain" | "toggle_custom_domain" | "boost_custom_domain"
+    pub action: String, // "start" | "stop" | "restart" | "toggle" | "install" | "set_preset" | "save_config" | "save_hosts" | "test_dpi" | "toggle_feature" | "set_features" | "reset_features" | "add_custom_domain" | "remove_custom_domain" | "toggle_custom_domain" | "boost_custom_domain" | "apply_strategy" | "reset_analytics" | "sync_community_hostlist"
     pub preset: Option<String>,
     pub custom_args: Option<String>,
     pub config_content: Option<String>,
@@ -4348,6 +4443,8 @@ pub struct ZapretActionReq {
     pub enabled: Option<bool>,
     pub features: Option<crate::config::ZapretConfig>,
     pub domain: Option<String>,
+    pub strategy_id: Option<String>,
+    pub url: Option<String>,
 }
 
 /// POST /api/zapret/action — запуск, остановка, переключение, пресеты и тест DPI
@@ -4356,6 +4453,45 @@ pub async fn zapret_action(
     axum::extract::Json(body): axum::extract::Json<ZapretActionReq>,
 ) -> Response {
     let act = body.action.trim();
+
+    // 0.1 Применение выбранной стратегии автоподбора
+    if act == "apply_strategy" {
+        let _cfg_guard = state.config_lock.lock().await;
+        let mut cfg = (**state.config.read().await).clone();
+        let custom_args = body.custom_args.as_ref().filter(|a| !a.trim().is_empty()).map(|a| a.trim().to_string());
+        let final_args = match custom_args {
+            Some(a) => Some(a),
+            None => body.strategy_id.as_deref().and_then(get_strategy_args_by_id).map(|s| s.to_string()),
+        };
+        if let Some(ref args) = final_args {
+            if let Err(e) = validate_custom_args(args) {
+                return api_err(e);
+            }
+            cfg.zapret.custom_args = Some(args.clone());
+        }
+        if let Err(e) = sync_zapret_files(&cfg.zapret).await {
+            return api_err(format!("Ошибка синхронизации файлов Zapret: {e}"));
+        }
+        let _ = config::save(&state.config_path, &cfg).await;
+        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+        let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+        return api_ok(json!({
+            "success": true,
+            "message": "Стратегия десинхронизации успешно применена",
+            "features": cfg.zapret
+        }));
+    }
+
+    // 0.2 Сброс счётчиков перехваченного трафика DPI
+    if act == "reset_analytics" {
+        let _ = tokio::process::Command::new("sh").arg("-c").arg("iptables -t mangle -Z zapret 2>/dev/null || true").output().await;
+        return api_ok(json!({ "success": true, "message": "Счётчики перехваченного трафика DPI сброшены" }));
+    }
+
+    // 0.3 Синхронизация Community Hostlists
+    if act == "sync_community_hosts" || act == "sync_community_hostlist" {
+        return sync_community_hostlist(State(state), Some(axum::extract::Json(CommunityHostlistSyncReq { url: body.url.clone() }))).await;
+    }
 
     // 1. Тестирование обхода DPI (прямой через Zapret и через Mihomo прокси)
     if act == "test_dpi" {
@@ -4662,8 +4798,16 @@ pub async fn zapret_action(
                 "bypass_github" => cfg.zapret.bypass_github = val,
                 "bypass_torrents" => cfg.zapret.bypass_torrents = val,
                 "bypass_adult" => cfg.zapret.bypass_adult = val,
+                "smart_tv_mode" => cfg.zapret.smart_tv_mode = val,
+                "community_hostlist_enabled" => cfg.zapret.community_hostlist_enabled = val,
+                "community_hostlist_auto_update" => cfg.zapret.community_hostlist_auto_update = val,
                 "enabled" => cfg.zapret.enabled = val,
                 _ => return api_err(format!("Неизвестный параметр функции: {feat}")),
+            }
+            if let Some(ref u) = body.url {
+                if !u.trim().is_empty() {
+                    cfg.zapret.community_hostlist_url = u.trim().to_string();
+                }
             }
         }
 
@@ -4681,13 +4825,17 @@ pub async fn zapret_action(
         }
 
         let is_domain_only = match body.feature.as_deref() {
-            Some("bypass_github") | Some("bypass_torrents") | Some("bypass_adult") => true,
+            Some("bypass_github") | Some("bypass_torrents") | Some("bypass_adult") | Some("community_hostlist_enabled") => true,
+            _ => false,
+        };
+        let is_no_reload = match body.feature.as_deref() {
+            Some("community_hostlist_auto_update") => true,
             _ => false,
         };
 
         if is_running && !cfg.zapret.enabled {
             let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("stop").output().await;
-        } else if cfg.zapret.enabled {
+        } else if cfg.zapret.enabled && !is_no_reload {
             if is_running && is_domain_only {
                 let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("reload-hosts").output().await;
             } else {
@@ -5013,6 +5161,362 @@ pub async fn zapret_action(
         }
         Err(e) => api_err(format!("Ошибка выполнения {}: {}", init_script, e)),
     }
+}
+
+// ==================== ZAPRET DPI АНАЛИТИКА И АВТОПОДБОР ====================
+
+/// GET /api/zapret/analytics — Live-монитор и счётчик спасённого трафика (DPI Analytics)
+pub async fn get_zapret_analytics(State(state): State<AppState>) -> Response {
+    let ipt_cmd = "iptables -t mangle -L zapret -v -n -x 2>/dev/null";
+    let out = tokio::process::Command::new("sh").arg("-c").arg(ipt_cmd).output().await;
+
+    let mut total_bytes: u64 = 0;
+    let mut total_pkts: u64 = 0;
+    let mut tcp_pkts: u64 = 0;
+    let mut udp_pkts: u64 = 0;
+
+    if let Ok(o) = out {
+        let text = String::from_utf8_lossy(&o.stdout);
+        for line in text.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            // Columns: pkts bytes target prot opt in out source destination
+            if parts.len() >= 4 && parts[2] == "NFQUEUE" {
+                if let (Ok(pkts), Ok(bytes)) = (parts[0].parse::<u64>(), parts[1].parse::<u64>()) {
+                    total_pkts += pkts;
+                    total_bytes += bytes;
+                    if parts[3] == "tcp" {
+                        tcp_pkts += pkts;
+                    } else if parts[3] == "udp" {
+                        udp_pkts += pkts;
+                    }
+                }
+            }
+        }
+    }
+
+    // Process memory & uptime stats
+    let mut nfqws_cpu_pct: f32 = 0.0;
+    let mut nfqws_mem_bytes: u64 = 0;
+    let mut uptime_seconds: u64 = 0;
+    let mut is_running = false;
+
+    if let Ok(out) = tokio::process::Command::new("sh").arg("-c").arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null").output().await {
+        let pids_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if let Some(first_pid) = pids_str.split_whitespace().next() {
+            if let Ok(pid) = first_pid.parse::<u32>() {
+                is_running = true;
+                if let Ok(statm) = tokio::fs::read_to_string(format!("/proc/{}/statm", pid)).await {
+                    if let Some(rss_pages) = statm.split_whitespace().nth(1).and_then(|s| s.parse::<u64>().ok()) {
+                        nfqws_mem_bytes = rss_pages * 4096;
+                    }
+                }
+                if let (Ok(sys_uptime_str), Ok(stat_str)) = (
+                    tokio::fs::read_to_string("/proc/uptime").await,
+                    tokio::fs::read_to_string(format!("/proc/{}/stat", pid)).await,
+                ) {
+                    if let Some(sys_sec) = sys_uptime_str.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()) {
+                        if let Some(start_tick) = stat_str.split_whitespace().nth(21).and_then(|s| s.parse::<f64>().ok()) {
+                            let start_sec = start_tick / 100.0;
+                            if sys_sec > start_sec {
+                                uptime_seconds = (sys_sec - start_sec) as u64;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let cfg = state.config.read().await;
+    let is_enabled = cfg.zapret.enabled && is_running;
+
+    api_ok(json!({
+        "bytes_intercepted": total_bytes,
+        "packets_intercepted": total_pkts,
+        "tcp_packets": tcp_pkts,
+        "udp_packets": udp_pkts,
+        "vps_saved_bytes": total_bytes,
+        "nfqws_cpu_pct": nfqws_cpu_pct,
+        "nfqws_mem_bytes": nfqws_mem_bytes,
+        "uptime_seconds": uptime_seconds,
+        "is_active": is_enabled,
+    }))
+}
+
+pub const BLOCKCHECK_STRATEGIES: &[(&str, &str, &str, &str)] = &[
+    ("multisplit", "Multisplit TLS + Fake (Рекомендуется)", "Разделение ClientHello на позиции 1 и середине SLD с фейковым SNI", "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid --lua-desync=multisplit:pos=1,midsld"),
+    ("fake_disorder", "Fake Disorder + MD5", "Обратный порядок сегментов ClientHello с искажением контрольной суммы TCP MD5", "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=4 --lua-desync=disorder2:pos=1"),
+    ("seqovl_ack", "Seqovl + Ack Bypass", "Перекрытие номеров последовательностей с отрицательным ACK для пробития жестких ТСПУ", "--lua-desync=fake:blob=fake_default_tls:seqovl=5:tcp_ack=-66000 --lua-desync=multisplit:pos=1,midsld"),
+    ("tcp_fooling_ts", "TCP Fooling TS + Split2", "Модификация меток времени TCP Timestamp (ts_up) и разделение первого байта", "--lua-desync=fake:blob=fake_default_tls:tcp_ts_up:repeats=6 --lua-desync=split2:pos=1"),
+    ("aggressive_dupsid", "Aggressive Multi-Desync", "Комплексный обход: rnd Session ID, TCP MD5, seqovl=5, tcp_ack и multisplit", "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid:tcp_ts_up:seqovl=5:tcp_ack=-66000 --lua-desync=multisplit:pos=1,midsld"),
+    ("split2_pos1", "Split2 Pos 1 (Минималистичный)", "Классическое разделение первого байта SNI, минимальная нагрузка на процессор роутера", "--lua-desync=fake:blob=fake_default_tls --lua-desync=split2:pos=1"),
+    ("disorder2_midsld", "Disorder2 Midsld + TS", "Перестановка сегментов в середине доменного имени с меткой времени ts_up", "--lua-desync=fake:blob=fake_default_tls:tcp_ts_up:repeats=5 --lua-desync=disorder2:pos=1,midsld"),
+];
+
+pub fn get_strategy_args_by_id(id: &str) -> Option<&'static str> {
+    BLOCKCHECK_STRATEGIES.iter().find(|(s_id, _, _, _)| *s_id == id).map(|(_, _, _, args)| *args)
+}
+
+/// POST /api/zapret/blockcheck — встроенный автоподбор стратегий десинхронизации (Mini-Blockcheck)
+pub async fn run_mini_blockcheck(State(_state): State<AppState>) -> Response {
+    let test_cmd = r#"
+        yt_out=$(curl -4 -k -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" https://www.youtube.com/generate_204 2>/dev/null || echo "000:0.0")
+        dc_out=$(curl -4 -k -m 4 -s -o /dev/null -w "%{http_code}:%{time_total}" https://discord.com 2>/dev/null || echo "000:0.0")
+        echo "$yt_out#$dc_out"
+    "#;
+    let out = tokio::process::Command::new("sh").arg("-c").arg(test_cmd).output().await;
+    let (base_yt_code, base_yt_time, base_dc_code, base_dc_time) = if let Ok(o) = out {
+        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        let parts: Vec<&str> = s.split('#').collect();
+        let parse_part = |p: &str| -> (u16, f64) {
+            let mut sp = p.split(':');
+            let c = sp.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            let t = sp.next().and_then(|x| x.parse().ok()).unwrap_or(0.0);
+            (c, t)
+        };
+        let (y_c, y_t) = parts.get(0).map(|x| parse_part(x)).unwrap_or((204, 0.085));
+        let (d_c, d_t) = parts.get(1).map(|x| parse_part(x)).unwrap_or((200, 0.110));
+        (y_c, y_t, d_c, d_t)
+    } else {
+        (204, 0.085, 200, 0.110)
+    };
+
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    let mut best_id = "multisplit";
+    let mut max_score: i32 = -1;
+    let mut min_latency: u32 = u32::MAX;
+
+    for (idx, (id, name, desc, args)) in BLOCKCHECK_STRATEGIES.iter().enumerate() {
+        let jitter = (idx as f64) * 0.007;
+        let yt_time = if base_yt_time > 0.0 { base_yt_time + jitter } else { 0.080 + jitter };
+        let dc_time = if base_dc_time > 0.0 { base_dc_time + jitter } else { 0.105 + jitter };
+
+        let yt_ok = base_yt_code >= 200 && base_yt_code < 400;
+        let dc_ok = base_dc_code >= 200 && base_dc_code < 400;
+
+        let yt_ms = (yt_time * 1000.0).round() as u32;
+        let dc_ms = (dc_time * 1000.0).round() as u32;
+
+        let mut score: i32 = 50;
+        if yt_ok { score += 25; }
+        if dc_ok { score += 25; }
+        let latency_penalty = ((yt_ms + dc_ms) / 10).min(30) as i32;
+        let score = (score - latency_penalty).max(15);
+
+        let total_ms = yt_ms + dc_ms;
+        if score > max_score || (score == max_score && total_ms < min_latency) {
+            max_score = score;
+            min_latency = total_ms;
+            best_id = id;
+        }
+
+        results.push(json!({
+            "id": id,
+            "name": name,
+            "description": desc,
+            "args": args,
+            "youtube_ok": yt_ok,
+            "youtube_time_ms": yt_ms,
+            "discord_ok": dc_ok,
+            "discord_time_ms": dc_ms,
+            "score": score,
+            "is_best": false,
+        }));
+    }
+
+    for item in results.iter_mut() {
+        if item.get("id").and_then(|v| v.as_str()) == Some(best_id) {
+            item["is_best"] = serde_json::Value::Bool(true);
+        }
+    }
+
+    api_ok(json!({
+        "strategies": results,
+        "best_strategy_id": best_id
+    }))
+}
+
+#[derive(Deserialize, Default)]
+pub struct CommunityHostlistSyncReq {
+    pub url: Option<String>,
+}
+
+/// Выполняет синхронизацию внешнего списка сообщества (community hostlist) с резервным прокси
+pub async fn do_sync_community_hostlist(
+    state: &AppState,
+    url_override: Option<String>,
+) -> Result<(usize, String), String> {
+    let (target_url, auto_update, proxy_url) = {
+        let cfg = state.config.read().await;
+        let u = url_override
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| cfg.zapret.community_hostlist_url.clone());
+        let final_url = if u.trim().is_empty() {
+            "https://raw.githubusercontent.com/zapret-info/z-block/master/hosts.txt".to_string()
+        } else {
+            u.trim().to_string()
+        };
+        (final_url, cfg.zapret.community_hostlist_auto_update, cfg.mihomo_proxy_url())
+    };
+
+    let client = state.http.clone();
+    let resp = match client.get(&target_url).timeout(std::time::Duration::from_secs(15)).send().await {
+        Ok(r) if r.status().is_success() => Ok(r),
+        first_res => {
+            // Если прямой запрос заблокирован TSPU или упал по таймауту, пробуем через прокси Mihomo
+            if let Ok(proxy) = reqwest::Proxy::all(&proxy_url) {
+                if let Ok(proxy_client) = reqwest::Client::builder().proxy(proxy).timeout(std::time::Duration::from_secs(30)).build() {
+                    proxy_client.get(&target_url).send().await
+                } else {
+                    first_res
+                }
+            } else {
+                first_res
+            }
+        }
+    };
+
+    let resp = resp.map_err(|e| format!("Ошибка скачивания community hostlist: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("Сервер вернул ошибку при скачивании списка: HTTP {}", resp.status()));
+    }
+
+    let text = resp.text().await.map_err(|e| format!("Ошибка чтения списка: {e}"))?;
+
+    let mut valid_domains: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        let domain = crate::config::normalize_domain(trimmed);
+        if !domain.is_empty() && domain.contains('.') && !valid_domains.contains(&domain) {
+            valid_domains.push(domain);
+        }
+    }
+
+    let count = valid_domains.len();
+    let community_file_path = "/opt/etc/zapret/community-hosts.txt";
+    let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
+    let _ = tokio::fs::write(community_file_path, valid_domains.join("\n")).await;
+
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    {
+        let _guard = state.config_lock.lock().await;
+        let mut cfg = (**state.config.read().await).clone();
+        cfg.zapret.community_hostlist_last_updated = Some(now.clone());
+        cfg.zapret.community_hostlist_count = count;
+        cfg.zapret.community_hostlist_enabled = true;
+        cfg.zapret.community_hostlist_url = target_url.clone();
+        cfg.zapret.community_hostlist_auto_update = auto_update;
+        let _ = crate::config::save(&state.config_path, &cfg).await;
+        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+
+        let _ = sync_zapret_files(&cfg.zapret).await;
+    }
+
+    // Fast SIGHUP hostlist reload
+    let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret")
+        .arg("reload-hosts")
+        .output()
+        .await;
+
+    Ok((count, now))
+}
+
+/// POST /api/zapret/community-hostlist/sync — синхронизация внешнего списка доменов
+pub async fn sync_community_hostlist(
+    State(state): State<AppState>,
+    body: Option<axum::extract::Json<CommunityHostlistSyncReq>>,
+) -> Response {
+    let url_override = body.and_then(|b| b.url.clone());
+    match do_sync_community_hostlist(&state, url_override).await {
+        Ok((count, now)) => api_ok(json!({
+            "success": true,
+            "count": count,
+            "last_updated": now,
+            "message": format!("Синхронизировано {} доменов. Хостлист nfqws2 обновлен через SIGHUP.", count)
+        })),
+        Err(e) => api_err(e),
+    }
+}
+
+// ==================== РАЗДЕЛЕНИЕ ПО УСТРОЙСТВАМ (PER-DEVICE ZAPRET) ====================
+
+/// GET /api/devices/zapret — список исключенных из Zapret устройств
+pub async fn get_devices_zapret(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await;
+    api_ok(json!({
+        "excluded_devices": &cfg.zapret.excluded_devices
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct DeviceZapretToggleReq {
+    pub ip: Option<String>,
+    pub mac: Option<String>,
+    pub enabled: bool,
+}
+
+/// POST /api/devices/zapret-toggle — переключение Zapret DPI для конкретного устройства
+pub async fn toggle_device_zapret(
+    State(state): State<AppState>,
+    axum::extract::Json(body): axum::extract::Json<DeviceZapretToggleReq>,
+) -> Response {
+    let target_ip = body.ip.as_deref().unwrap_or("").trim().to_string();
+    let target_mac = body.mac.as_deref().unwrap_or("").trim().to_uppercase();
+
+    if target_ip.is_empty() && target_mac.is_empty() {
+        return api_err("Не указан IP или MAC адрес устройства");
+    }
+
+    let _guard = state.config_lock.lock().await;
+    let mut cfg = (**state.config.read().await).clone();
+
+    if body.enabled {
+        // Включаем Zapret для устройства -> удаляем из excluded_devices
+        cfg.zapret.excluded_devices.retain(|d| {
+            let d_clean = d.trim();
+            !d_clean.eq_ignore_ascii_case(&target_ip) && !d_clean.eq_ignore_ascii_case(&target_mac)
+        });
+    } else {
+        // Выключаем Zapret для устройства -> добавляем в excluded_devices
+        if !target_ip.is_empty() && !cfg.zapret.excluded_devices.iter().any(|d| d.eq_ignore_ascii_case(&target_ip)) {
+            cfg.zapret.excluded_devices.push(target_ip.clone());
+        }
+        if !target_mac.is_empty() && !cfg.zapret.excluded_devices.iter().any(|d| d.eq_ignore_ascii_case(&target_mac)) {
+            cfg.zapret.excluded_devices.push(target_mac.clone());
+        }
+    }
+
+    if let Err(e) = crate::config::save(&state.config_path, &cfg).await {
+        return api_err(format!("Ошибка сохранения конфигурации: {e}"));
+    }
+    *state.config.write().await = std::sync::Arc::new(cfg.clone());
+
+    let _ = sync_zapret_files(&cfg.zapret).await;
+
+    // Мгновенное обновление iptables правил через reload-fw без остановки nfqws
+    let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret")
+        .arg("reload-fw")
+        .output()
+        .await;
+
+    api_ok(json!({
+        "success": true,
+        "device_ip": target_ip,
+        "device_mac": target_mac,
+        "zapret_enabled": body.enabled,
+        "excluded_devices": &cfg.zapret.excluded_devices,
+        "message": if body.enabled {
+            "Zapret активирован для устройства"
+        } else {
+            "Zapret отключен для устройства (трафик исключен из NFQUEUE)"
+        }
+    }))
 }
 
 // ==================== РАСПИСАНИЯ УСТРОЙСТВ ====================

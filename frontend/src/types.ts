@@ -85,6 +85,43 @@ export interface ZapretFeatures {
   bypass_torrents?: boolean
   bypass_adult?: boolean
   custom_entries?: ZapretCustomEntry[]
+  smart_tv_mode?: boolean
+  community_hostlist_enabled?: boolean
+  community_hostlist_url?: string
+  community_hostlist_auto_update?: boolean
+  community_hostlist_last_updated?: string
+  community_hostlist_count?: number
+  excluded_devices?: string[]
+}
+
+export interface ZapretAnalytics {
+  bytes_intercepted: number
+  packets_intercepted: number
+  vps_saved_bytes: number
+  tcp_packets?: number
+  udp_packets?: number
+  nfqws_cpu_pct?: number
+  nfqws_mem_bytes?: number
+  uptime_seconds?: number
+  is_active?: boolean
+}
+
+export interface BlockcheckStrategy {
+  id: string
+  name: string
+  description: string
+  args: string
+  youtube_ok: boolean
+  youtube_time_ms: number
+  discord_ok: boolean
+  discord_time_ms: number
+  score: number
+  is_best: boolean
+}
+
+export interface BlockcheckResult {
+  strategies: BlockcheckStrategy[]
+  best_strategy_id: string
 }
 
 export interface ZapretStatus {
@@ -98,6 +135,7 @@ export interface ZapretStatus {
   config?: string
   hosts?: string
   features?: ZapretFeatures
+  analytics?: ZapretAnalytics
 }
 
 export interface DpiTestResult {
@@ -125,6 +163,7 @@ export interface DeviceInfo {
   txbytes: number
   speed_limit_kbps: number
   current_server: string
+  zapret_enabled?: boolean
 }
 
 export interface RoutingAssignmentInfo {

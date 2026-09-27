@@ -42,6 +42,7 @@ export default function Devices({ notify }: Props) {
   const [statusFilter, setStatusFilter] = useState<'all' | 'online' | 'offline'>('all')
   const [offlineExpanded, setOfflineExpanded] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [excludedZapretDevices, setExcludedZapretDevices] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
 
@@ -95,7 +96,7 @@ export default function Devices({ notify }: Props) {
 
   const load = useCallback(async () => {
     try {
-      const [d, p, s, r, dr] = await Promise.all([
+      const [d, p, s, r, dr, zDev] = await Promise.all([
         apiGet<{ devices: DeviceInfo[] }>('devices'),
         apiGet<{ policies: PolicyInfo[] }>('policies'),
         apiGet<{ servers: ServerInfo[] }>('servers'),
@@ -104,6 +105,9 @@ export default function Devices({ notify }: Props) {
           routing: {} as Record<string, DeviceRoutingEntry>,
           device_failover_enabled: false,
         })),
+        apiGet<{ excluded_devices?: string[] }>('devices/zapret').catch(() => ({
+          excluded_devices: [] as string[],
+        })),
       ])
       setDevices(d.devices)
       setPolicies(p.policies)
@@ -111,6 +115,7 @@ export default function Devices({ notify }: Props) {
       setRouting(r.assignments)
       setDrMap(dr.routing)
       setDevFailover(dr.device_failover_enabled)
+      setExcludedZapretDevices(new Set(zDev.excluded_devices || []))
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка загрузки устройств', true)
     } finally {
@@ -387,6 +392,47 @@ export default function Devices({ notify }: Props) {
     }
   }
 
+  const handleToggleZapret = async (ip: string, mac: string, enabled: boolean) => {
+    setExcludedZapretDevices((prev) => {
+      const next = new Set(prev)
+      if (enabled) {
+        if (ip) next.delete(ip)
+        if (mac) {
+          next.delete(mac.toUpperCase())
+          next.delete(mac.toLowerCase())
+        }
+      } else {
+        if (ip) next.add(ip)
+        if (mac) {
+          next.add(mac.toUpperCase())
+          next.add(mac.toLowerCase())
+        }
+      }
+      return next
+    })
+
+    try {
+      await apiPost('devices/zapret-toggle', { ip, mac, enabled })
+      notify(
+        enabled
+          ? `Zapret включен для ${ip || mac}`
+          : `Zapret выключен для ${ip || mac}`
+      )
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка изменения Zapret для устройства', true)
+      load()
+    }
+  }
+
+  const isDeviceZapretActive = (d: DeviceInfo) => {
+    const isExcluded =
+      (Boolean(d.ip) && excludedZapretDevices.has(d.ip)) ||
+      (Boolean(d.mac) &&
+        (excludedZapretDevices.has(d.mac.toUpperCase()) ||
+          excludedZapretDevices.has(d.mac.toLowerCase())))
+    return !isExcluded
+  }
+
   const sortIndicator = (col: SortColumn) => {
     if (sortCol !== col) return ' ⇅'
     return sortAsc ? ' ↑' : ' ↓'
@@ -514,6 +560,7 @@ export default function Devices({ notify }: Props) {
                 <th className="sortable" onClick={() => handleSort('server')}>
                   Server{sortIndicator('server')}
                 </th>
+                <th style={{ textAlign: 'center', width: 110 }}>Zapret (DPI)</th>
                 <th />
               </tr>
             </thead>
@@ -522,7 +569,7 @@ export default function Devices({ notify }: Props) {
               {(statusFilter === 'all' || statusFilter === 'online') && (
                 <>
                   <tr>
-                    <td colSpan={8} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
+                    <td colSpan={9} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
                       <span className="devices-group-header online">
                         Online ({sortedOnline.length})
                       </span>
@@ -530,7 +577,7 @@ export default function Devices({ notify }: Props) {
                   </tr>
                   {sortedOnline.length === 0 && (
                     <tr>
-                      <td colSpan={8} className="muted small" style={{ padding: '10px 14px' }}>
+                      <td colSpan={9} className="muted small" style={{ padding: '10px 14px' }}>
                         Нет устройств в сети
                       </td>
                     </tr>
@@ -554,6 +601,8 @@ export default function Devices({ notify }: Props) {
                       serverLabel={serverLabel}
                       openDrModal={openDrModal}
                       onOpenSchedule={(d) => setScheduleTarget({ ip: d.ip, name: d.name })}
+                      zapretActive={isDeviceZapretActive(d)}
+                      onToggleZapret={handleToggleZapret}
                     />
                   ))}
                 </>
@@ -563,7 +612,7 @@ export default function Devices({ notify }: Props) {
               {statusFilter === 'all' && (
                 <>
                   <tr>
-                    <td colSpan={8} style={{ padding: '16px 14px 4px', borderBottom: 'none' }}>
+                    <td colSpan={9} style={{ padding: '16px 14px 4px', borderBottom: 'none' }}>
                       <div className="offline-section-title">OFFLINE SECTION</div>
                       <div
                         className="offline-accordion-row"
@@ -603,6 +652,8 @@ export default function Devices({ notify }: Props) {
                         serverLabel={serverLabel}
                         openDrModal={openDrModal}
                         onOpenSchedule={(d) => setScheduleTarget({ ip: d.ip, name: d.name })}
+                        zapretActive={isDeviceZapretActive(d)}
+                        onToggleZapret={handleToggleZapret}
                       />
                     ))}
                 </>
@@ -611,7 +662,7 @@ export default function Devices({ notify }: Props) {
               {statusFilter === 'offline' && (
                 <>
                   <tr>
-                    <td colSpan={8} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
+                    <td colSpan={9} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
                       <span className="devices-group-header">
                         Offline ({sortedOffline.length})
                       </span>
@@ -619,7 +670,7 @@ export default function Devices({ notify }: Props) {
                   </tr>
                   {sortedOffline.length === 0 && (
                     <tr>
-                      <td colSpan={8} className="muted small" style={{ padding: '10px 14px' }}>
+                      <td colSpan={9} className="muted small" style={{ padding: '10px 14px' }}>
                         Нет офлайн-устройств
                       </td>
                     </tr>
@@ -643,6 +694,8 @@ export default function Devices({ notify }: Props) {
                       serverLabel={serverLabel}
                       openDrModal={openDrModal}
                       onOpenSchedule={(d) => setScheduleTarget({ ip: d.ip, name: d.name })}
+                      zapretActive={isDeviceZapretActive(d)}
+                      onToggleZapret={handleToggleZapret}
                     />
                   ))}
                 </>

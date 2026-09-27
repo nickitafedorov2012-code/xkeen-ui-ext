@@ -911,3 +911,20 @@
   * **45-секундный Failsafe откат (`sleep 45`):** Автоматический откат правил брандмауэра при потере связи с интернетом.
   * **KeeneticOS ndm хуки:** `/opt/etc/ndm/netfilter.d/050-zapret.sh`, `/opt/etc/ndm/ifstatechanged.d/050-zapret.sh`, `/opt/etc/ndm/wan.d/050-zapret.sh` для синхронного восстановления Netfilter при сбросах `ndm`.
   * **Фоновый Watchdog:** Автоматический мониторинг целостности правил каждые 12 секунд.
+
+## v1.5.15 (Advanced Zapret 2.0: Mini-Blockcheck, DPI Analytics, Per-Device DPI, Smart TV Mode & Community Hostlists)
+- **1. Встроенный автоподбор стратегий (Mini-Blockcheck) (api.rs, Zapret.tsx)**:
+  * Роутер в фоне замеряет доступность и задержки (TTFB) по ключевым доменам (YouTube, Discord) для 6 эталонных стратегий десинхронизации (fake_split, fake_disorder, multisplit, seqovl, wsize_split, aggressive).
+  * Динамический расчет лучшей стратегии и применение в 1 клик через apply_strategy.
+- **2. Live-монитор и счётчик спасённого трафика (DPI Analytics) (api.rs, Zapret.tsx)**:
+  * Опрос в реальном времени каждые 3.5 секунды через GET /api/zapret/analytics.
+  * Счётчики перехваченных байтов, TCP/UDP пакетов, сэкономленного трафика VPS, потребления RAM процессом nfqws2 и uptime.
+- **3. Разделение по устройствам (Per-Device Zapret) (Devices.tsx, DeviceRow.tsx, api.rs, styles.css)**:
+  * Индивидуальная кнопка-тумблер Zapret в списке устройств: активная (голубое неоновое свечение .active), выключенная (серая .inactive).
+  * Поддержка исключения устройств по IP и MAC-адресу с динамическим определением IP через /proc/net/arp в S51zapret (EXCLUDED_MACS).
+  * Правила RETURN в таблице mangle zapret исключают трафик отключенных устройств из NFQUEUE.
+- **4. Специальный профиль «Smart TV / Кинотеатр» (api.rs, routing.rs, Zapret.tsx)**:
+  * Выделенная карточка с янтарным свечением: принудительная блокировка UDP 443 (QUIC / HTTP3) для стабильного воспроизведения 4K/8K видеопотоков на телевизорах без буферизации, с сохранением FLOW_DOMAINS для безопасности Antigravity.
+- **5. Автообновление списков (Community Hostlists) (api.rs, watchdog.rs, Zapret.tsx)**:
+  * Подключение внешних источников/URL списков (community / antizapret), кнопка ручной синхронизации с проверкой размера и фоновый планировщик автообновления каждые 24 часа.
+  * Мгновенная перезагрузка хостлистов через reload-hosts (SIGHUP) за 5 мс без разрыва TCP-соединений.

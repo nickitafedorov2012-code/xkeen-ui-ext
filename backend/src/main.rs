@@ -369,6 +369,8 @@ async fn main() {
         .route("/api/devices/policy", post(api::set_device_policy))
         .route("/api/devices/speed", post(api::set_device_speed))
         .route("/api/devices/domain-rules", get(api::get_device_domain_rules).post(api::set_device_domain_rules))
+        .route("/api/devices/zapret", get(api::get_devices_zapret))
+        .route("/api/devices/zapret-toggle", post(api::toggle_device_zapret))
         .route("/api/policies", get(api::get_policies))
         .route("/api/routing", get(api::get_routing).post(api::apply_routing))
         .route("/api/device-routing", get(api::get_device_routing).post(api::set_device_routing))
@@ -442,6 +444,9 @@ async fn main() {
         // Zapret / DPI
         .route("/api/zapret/status", get(api::get_zapret_status))
         .route("/api/zapret/action", post(api::zapret_action))
+        .route("/api/zapret/analytics", get(api::get_zapret_analytics))
+        .route("/api/zapret/blockcheck", post(api::run_mini_blockcheck))
+        .route("/api/zapret/community-hostlist/sync", post(api::sync_community_hostlist))
         // Расписания устройств
         .route("/api/schedules", get(api::get_schedules).post(api::save_schedules))
         // Игровой режим (Gaming Mode)

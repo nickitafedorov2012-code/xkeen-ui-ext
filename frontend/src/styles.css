@@ -1847,6 +1847,83 @@ table.devices-table td {
   transform: scale(1.04);
 }
 
+/* --- Кнопка переключения Zapret DPI для устройства (Per-Device Zapret) --- */
+.device-zapret-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  user-select: none;
+  white-space: nowrap;
+}
+
+.device-zapret-btn.active {
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.22) 0%, rgba(56, 189, 248, 0.22) 100%);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.65);
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.45), inset 0 0 8px rgba(56, 189, 248, 0.15);
+  text-shadow: 0 0 8px rgba(56, 189, 248, 0.5);
+}
+
+.device-zapret-btn.active:hover {
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.35) 0%, rgba(56, 189, 248, 0.35) 100%);
+  box-shadow: 0 0 16px rgba(56, 189, 248, 0.7), inset 0 0 10px rgba(56, 189, 248, 0.25);
+  border-color: #38bdf8;
+}
+
+.device-zapret-btn.active .device-zapret-icon {
+  filter: drop-shadow(0 0 4px #38bdf8);
+  display: flex;
+  align-items: center;
+}
+
+.device-zapret-btn.inactive {
+  background: rgba(255, 255, 255, 0.04);
+  color: #64748b;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: none;
+}
+
+.device-zapret-btn.inactive:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #94a3b8;
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.device-zapret-btn.inactive .device-zapret-icon {
+  filter: none;
+  opacity: 0.6;
+  display: flex;
+  align-items: center;
+}
+
+.device-zapret-label {
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  letter-spacing: 0.2px;
+}
+
+[data-theme="light"] .device-zapret-btn.active {
+  background: rgba(14, 165, 233, 0.15);
+  color: #0284c7;
+  border-color: #0284c7;
+  box-shadow: 0 0 10px rgba(14, 165, 233, 0.35);
+  text-shadow: none;
+}
+
+[data-theme="light"] .device-zapret-btn.inactive {
+  background: #f1f5f9;
+  color: #94a3b8;
+  border-color: #cbd5e1;
+}
+
 /* Offline Section */
 .offline-section-title {
   padding: 14px 0 6px;

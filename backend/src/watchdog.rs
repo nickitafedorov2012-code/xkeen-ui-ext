@@ -21,6 +21,7 @@ pub fn spawn(state: AppState) {
     spawn_schedules_monitor(state.clone());
     spawn_dhcp_device_monitor(state.clone());
     spawn_zapret_monitor(state.clone());
+    spawn_community_hostlist_updater(state.clone());
     tokio::spawn(async move {
         // Начальная пауза перед запуском монитора
         for _ in 0..10 {
@@ -82,7 +83,15 @@ pub fn spawn(state: AppState) {
                     let needs_force = !force_domains.is_empty();
                     let needs_ignore = !ignore_servers.is_empty();
                     let needs_flow = flow_server.as_ref().map_or(false, |s| !s.trim().is_empty());
-                    let needs_zapret = zapret_cfg.enabled && (zapret_cfg.hybrid_youtube || zapret_cfg.hybrid_discord || zapret_cfg.isolated_proxy);
+                    let needs_zapret = zapret_cfg.enabled
+                        && (zapret_cfg.hybrid_youtube
+                            || zapret_cfg.hybrid_discord
+                            || zapret_cfg.isolated_proxy
+                            || zapret_cfg.smart_tv_mode
+                            || zapret_cfg.bypass_github
+                            || zapret_cfg.bypass_torrents
+                            || zapret_cfg.bypass_adult
+                            || zapret_cfg.custom_entries.iter().any(|e| e.enabled));
                     let needs_gaming = gaming_cfg.enabled;
 
                     let missing_device = needs_device && !content.contains("AUTO-DEVICE");
@@ -441,6 +450,66 @@ pub fn spawn_zapret_monitor(state: AppState) {
                 } else if restart_failures == 5 {
                     log_w!("[WATCHDOG] ❌ Не удалось запустить службу Zapret после 5 попыток. Приостановка автозапуска.");
                     restart_failures += 1;
+                }
+            }
+        }
+    });
+}
+
+/// Фоновое автообновление списков доменов Community Hostlists (каждые 24 часа).
+pub fn spawn_community_hostlist_updater(state: AppState) {
+    tokio::spawn(async move {
+        // Начальная пауза после старта роутера/панели
+        for _ in 0..30 {
+            if is_shutdown() {
+                return;
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+
+        loop {
+            // Проверка каждый час
+            for _ in 0..3600 {
+                if is_shutdown() {
+                    return;
+                }
+                sleep(Duration::from_secs(1)).await;
+            }
+
+            let (enabled, auto_update, last_updated) = {
+                let cfg = state.config.read().await;
+                (
+                    cfg.zapret.community_hostlist_enabled,
+                    cfg.zapret.community_hostlist_auto_update,
+                    cfg.zapret.community_hostlist_last_updated.clone(),
+                )
+            };
+
+            if !enabled || !auto_update {
+                continue;
+            }
+
+            let should_update = match last_updated {
+                None => true,
+                Some(ref s) => {
+                    if let Ok(last_dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+                        let now = chrono::Local::now().naive_local();
+                        (now - last_dt).num_hours() >= 24
+                    } else {
+                        true
+                    }
+                }
+            };
+
+            if should_update {
+                log_i!("[COMMUNITY-HOSTS] Запуск планового автообновления community hostlist (24ч)...");
+                match crate::api::do_sync_community_hostlist(&state, None).await {
+                    Ok((count, dt)) => {
+                        log_i!("[COMMUNITY-HOSTS] ✓ Автообновление успешно: {} доменов ({})", count, dt);
+                    }
+                    Err(e) => {
+                        log_w!("[COMMUNITY-HOSTS] Ошибка автообновления: {}", e);
+                    }
                 }
             }
         }

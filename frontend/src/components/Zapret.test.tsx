@@ -723,3 +723,284 @@ describe('Zapret Component — Toggleable Service Blocks & Custom Site CDN Boost
     expect(container?.textContent).not.toContain('+3 CDN подтянуто')
   })
 })
+
+describe('Zapret Component — Features 1, 2, 4, 5 (Mini-Blockcheck, DPI Analytics, Smart TV, Community Hostlists)', () => {
+  let container: HTMLDivElement | null = null
+  let root: ReturnType<typeof createRoot> | null = null
+  const notifyMock = vi.fn()
+
+  beforeEach(() => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    vi.restoreAllMocks()
+    notifyMock.mockClear()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    if (root && container) {
+      act(() => {
+        root!.unmount()
+      })
+      container.remove()
+    }
+  })
+
+  it('renders DPI Analytics live-widget with intercepted bytes, VPS saved bytes and handles reset', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve(mockZapretStatus)
+      }
+      if (path === 'zapret/analytics') {
+        return Promise.resolve({
+          bytes_intercepted: 52428800, // 50 MB
+          packets_intercepted: 45000,
+          tcp_packets: 40000,
+          udp_packets: 5000,
+          vps_saved_bytes: 52428800,
+          uptime_seconds: 3660, // 1h 1m
+          nfqws_mem_bytes: 4194304, // 4 MB
+          is_active: true,
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    const postSpy = vi.spyOn(api, 'apiPost').mockResolvedValue({ success: true })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    const text = container?.textContent || ''
+    expect(text).toContain('Live-монитор и счётчик спасённого трафика (DPI Analytics)')
+    expect(text).toContain('50.0 МБ')
+    expect(text).toMatch(/45[,\s\u00A0]?000 пакетов/)
+    expect(text).toContain('Сэкономлено трафика на VPS')
+    expect(text).toContain('1 ч 1 мин')
+    expect(text).toContain('4.0 МБ')
+
+    // Find reset button
+    const resetBtn = Array.from(container?.querySelectorAll('button') || []).find((b) =>
+      b.textContent?.includes('Сбросить счётчики')
+    )
+    expect(resetBtn).toBeDefined()
+
+    await act(async () => {
+      resetBtn?.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('zapret/action', {
+      action: 'reset_analytics',
+    })
+    expect(notifyMock).toHaveBeenCalledWith('Счётчики перехваченного трафика DPI сброшены')
+  })
+
+  it('runs Mini-Blockcheck and applies best strategy in 1 click', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve(mockZapretStatus)
+      }
+      return Promise.resolve({})
+    })
+
+    const mockBlockcheck = {
+      best_strategy_id: 'multisplit',
+      strategies: [
+        {
+          id: 'multisplit',
+          name: 'Multisplit TLS + Fake',
+          description: 'SLD split with fake SNI',
+          args: '--lua-desync=fake:blob=fake_default_tls --lua-desync=multisplit:pos=1,midsld',
+          youtube_ok: true,
+          youtube_time_ms: 82,
+          discord_ok: true,
+          discord_time_ms: 105,
+          score: 95,
+          is_best: true,
+        },
+        {
+          id: 'split2_pos1',
+          name: 'Split2 Pos 1',
+          description: 'Classic split',
+          args: '--lua-desync=split2:pos=1',
+          youtube_ok: true,
+          youtube_time_ms: 140,
+          discord_ok: false,
+          discord_time_ms: 0,
+          score: 65,
+          is_best: false,
+        },
+      ],
+    }
+
+    const postSpy = vi.spyOn(api, 'apiPost').mockImplementation((path: string, body: any) => {
+      if (path === 'zapret/blockcheck') {
+        return Promise.resolve(mockBlockcheck)
+      }
+      if (path === 'zapret/action' && body?.action === 'apply_strategy') {
+        return Promise.resolve({ success: true, message: 'Стратегия применена' })
+      }
+      return Promise.resolve({ success: true })
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    // Find and click start blockcheck button
+    const startBtn = Array.from(container?.querySelectorAll('button') || []).find((b) =>
+      b.textContent?.includes('Запустить автоподбор стратегий')
+    )
+    expect(startBtn).toBeDefined()
+
+    await act(async () => {
+      startBtn?.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('zapret/blockcheck')
+
+    const text = container?.textContent || ''
+    expect(text).toContain('Лучшая рекомендуемая стратегия: Multisplit TLS + Fake')
+    expect(text).toContain('Score: 95/100')
+    expect(text).toContain('82 мс')
+    expect(text).toContain('105 мс')
+
+    // Find and click apply 1-click button
+    const applyBestBtn = Array.from(container?.querySelectorAll('button') || []).find((b) =>
+      b.textContent?.includes('Применить лучшую стратегию в 1 клик')
+    )
+    expect(applyBestBtn).toBeDefined()
+
+    await act(async () => {
+      applyBestBtn?.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('zapret/action', {
+      action: 'apply_strategy',
+      strategy_id: 'multisplit',
+      custom_args: '--lua-desync=fake:blob=fake_default_tls --lua-desync=multisplit:pos=1,midsld',
+    })
+    expect(notifyMock).toHaveBeenCalledWith('Стратегия применена')
+  })
+
+  it('renders Smart TV / Кинотеатр profile card and toggles it', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve(mockZapretStatus)
+      }
+      return Promise.resolve({})
+    })
+
+    const postSpy = vi.spyOn(api, 'apiPost').mockImplementation((path: string, body: any) => {
+      if (path === 'zapret/action' && body?.action === 'toggle_feature') {
+        return Promise.resolve({
+          success: true,
+          features: {
+            ...mockZapretStatus.features!,
+            smart_tv_mode: true,
+          },
+        })
+      }
+      return Promise.resolve({ success: true })
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    const text = container?.textContent || ''
+    expect(text).toContain('Профиль «Smart TV / Кинотеатр»')
+    expect(text).toContain('4K HDR READY')
+    expect(text).toContain('UDP 443 DROP (QUIC)')
+    expect(text).toContain('redirector.googlevideo.com')
+
+    const smartTvBtn = Array.from(container?.querySelectorAll('button') || []).find(
+      (b) => b.title === 'Включить профиль Smart TV'
+    )
+    expect(smartTvBtn).toBeDefined()
+
+    await act(async () => {
+      smartTvBtn?.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('zapret/action', {
+      action: 'toggle_feature',
+      feature: 'smart_tv_mode',
+      enabled: true,
+      url: undefined,
+    })
+  })
+
+  it('renders Community Hostlists card, toggles auto-update and triggers manual sync', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve(mockZapretStatus)
+      }
+      return Promise.resolve({})
+    })
+
+    const postSpy = vi.spyOn(api, 'apiPost').mockImplementation((path: string, body: any) => {
+      if (path === 'zapret/community-hostlist/sync') {
+        return Promise.resolve({
+          success: true,
+          count: 14200,
+          message: 'Синхронизировано 14200 доменов',
+          last_updated: '2026-09-27 19:30:00',
+        })
+      }
+      if (path === 'zapret/action' && body?.action === 'toggle_feature') {
+        return Promise.resolve({
+          success: true,
+          features: {
+            ...mockZapretStatus.features!,
+            community_hostlist_auto_update: true,
+          },
+        })
+      }
+      return Promise.resolve({ success: true })
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    const text = container?.textContent || ''
+    expect(text).toContain('Автообновление списков (Community Hostlists)')
+    expect(text).toContain('Автоматическое обновление списка каждые 24 часа')
+
+    // Find and click sync button
+    const syncBtn = Array.from(container?.querySelectorAll('button') || []).find((b) =>
+      b.textContent?.includes('Синхронизировать сейчас')
+    )
+    expect(syncBtn).toBeDefined()
+
+    await act(async () => {
+      syncBtn?.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('zapret/community-hostlist/sync', {
+      url: 'https://raw.githubusercontent.com/zapret-info/z-block/master/hosts.txt',
+    })
+    expect(notifyMock).toHaveBeenCalledWith('Синхронизировано 14200 доменов')
+
+    // Find auto-update checkbox
+    const checkboxes = Array.from(container?.querySelectorAll('input[type="checkbox"]') || []) as HTMLInputElement[]
+    const autoUpdateCb = checkboxes.find(
+      (cb) => cb.closest('label')?.textContent?.includes('Автоматическое обновление списка каждые 24 часа')
+    )
+    expect(autoUpdateCb).toBeDefined()
+
+    await act(async () => {
+      autoUpdateCb?.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('zapret/action', {
+      action: 'toggle_feature',
+      feature: 'community_hostlist_auto_update',
+      enabled: true,
+      url: undefined,
+    })
+  })
+})

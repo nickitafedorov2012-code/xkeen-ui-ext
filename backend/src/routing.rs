@@ -498,6 +498,20 @@ pub const YOUTUBE_HYBRID_DOMAINS: &[&str] = &[
     "youtube-nocookie.com",
 ];
 
+pub const SMART_TV_GGC_DOMAINS: &[&str] = &[
+    "googlevideo.com",
+    "youtube.com",
+    "ytimg.com",
+    "youtu.be",
+    "yt.be",
+    "ggpht.com",
+    "youtube-nocookie.com",
+    "redirector.googlevideo.com",
+    "manifest.googlevideo.com",
+    "gvt1.com",
+    "play.google.com",
+];
+
 pub const DISCORD_HYBRID_DOMAINS: &[&str] = &[
     "discord.com",
     "discord.gg",
@@ -646,7 +660,10 @@ pub fn is_zapret_direct_domain(domain: &str, zapret_cfg: &crate::config::ZapretC
         })
     };
 
-    if zapret_cfg.hybrid_youtube && matches_list(YOUTUBE_HYBRID_DOMAINS) {
+    if (zapret_cfg.hybrid_youtube || zapret_cfg.smart_tv_mode) && matches_list(YOUTUBE_HYBRID_DOMAINS) {
+        return true;
+    }
+    if zapret_cfg.smart_tv_mode && matches_list(SMART_TV_GGC_DOMAINS) {
         return true;
     }
     if zapret_cfg.hybrid_discord && matches_list(DISCORD_HYBRID_DOMAINS) {
@@ -876,6 +893,7 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
         || zapret_cfg.bypass_github
         || zapret_cfg.bypass_torrents
         || zapret_cfg.bypass_adult
+        || zapret_cfg.smart_tv_mode
         || has_active_custom
     {
         for d in FLOW_DOMAINS {
@@ -899,6 +917,16 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
     // 2. YouTube -> DIRECT (максимальная скорость с локальных кэшей GGC)
     if zapret_cfg.hybrid_youtube {
         for d in YOUTUBE_HYBRID_DOMAINS {
+            let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
+            if !rules_to_add.contains(&rule) {
+                rules_to_add.push(rule);
+            }
+        }
+    }
+
+    // 2.1 Smart TV профиль -> DIRECT (оптимизация всех CDN/GGC кэшей)
+    if zapret_cfg.smart_tv_mode {
+        for d in SMART_TV_GGC_DOMAINS {
             let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
             if !rules_to_add.contains(&rule) {
                 rules_to_add.push(rule);
@@ -2178,6 +2206,7 @@ proxy-groups:
                 cdns: vec!["img.mysku-st.ru".to_string(), "art.mysku-st.net".to_string()],
             }],
             custom_args: None,
+            ..Default::default()
         };
 
         // 1. Включение всех гибридных правил
