@@ -139,11 +139,21 @@ export default function Zapret({ notify }: ZapretProps) {
               (merged as any)[k] = (prev as any)[k]
             } else if (k.startsWith('custom:')) {
               const domain = k.slice(7)
-              const prevEntry = prev.custom_entries?.find((e) => normalizeDomainInput(e.domain) === domain)
-              if (prevEntry && merged.custom_entries) {
-                merged.custom_entries = merged.custom_entries.map((e) =>
-                  normalizeDomainInput(e.domain) === domain ? { ...e, enabled: prevEntry.enabled } : e
-                )
+              if (domain === 'all') {
+                const prevEntries = prev.custom_entries || []
+                if (merged.custom_entries) {
+                  merged.custom_entries = merged.custom_entries.map((e) => {
+                    const match = prevEntries.find((pe) => normalizeDomainInput(pe.domain) === normalizeDomainInput(e.domain))
+                    return match ? { ...e, enabled: match.enabled } : e
+                  })
+                }
+              } else {
+                const prevEntry = prev.custom_entries?.find((e) => normalizeDomainInput(e.domain) === domain)
+                if (prevEntry && merged.custom_entries) {
+                  merged.custom_entries = merged.custom_entries.map((e) =>
+                    normalizeDomainInput(e.domain) === domain ? { ...e, enabled: prevEntry.enabled } : e
+                  )
+                }
               }
             } else if (k.startsWith('delete:')) {
               const domain = k.slice(7)
@@ -268,22 +278,43 @@ export default function Zapret({ notify }: ZapretProps) {
     setStatus((prev) => (prev ? { ...prev, running: nextVal } : prev))
     setFeatures((prev) => ({ ...prev, enabled: nextVal }))
     try {
-      const res = await apiPost<{ success: boolean; action: string; output?: string }>('zapret/action', {
+      const res = await apiPost<{ success: boolean; action: string; output?: string; features?: ZapretFeatures }>('zapret/action', {
         action: nextVal ? 'start' : 'stop',
         enabled: nextVal,
       })
+      if (res.features) {
+        setFeatures((prev) => ({
+          ...prev,
+          ...res.features,
+          custom_entries: res.features?.custom_entries || prev.custom_entries || [],
+        }))
+      }
       notify(res.action === 'start' ? '🟢 Служба Zapret запущена' : '⚪ Служба Zapret остановлена')
-      // Даём nfqws2 время на инициализацию демона перед опросом PID
-      await new Promise((r) => setTimeout(r, 800))
+      // Даём nfqws2 время на инициализацию или остановку перед опросом PID
+      await new Promise((r) => setTimeout(r, 600))
       let statusRes = await apiGet<ZapretStatus>('zapret/status')
       if (nextVal && !statusRes.running) {
         await new Promise((r) => setTimeout(r, 1200))
         statusRes = await apiGet<ZapretStatus>('zapret/status')
+      } else if (!nextVal && statusRes.running) {
+        await new Promise((r) => setTimeout(r, 800))
+        statusRes = await apiGet<ZapretStatus>('zapret/status')
+      }
+      if (!nextVal) {
+        statusRes = {
+          ...statusRes,
+          running: false,
+          features: {
+            ...(statusRes.features || {}),
+            enabled: false,
+          } as ZapretFeatures,
+        }
       }
       setStatus(statusRes)
       if (statusRes.features) {
         setFeatures({
           ...statusRes.features,
+          enabled: nextVal,
           custom_entries: statusRes.features.custom_entries || [],
         })
       }
@@ -613,6 +644,7 @@ export default function Zapret({ notify }: ZapretProps) {
         domain: clean,
         enabled: nextVal,
       })
+      removePendingKey(pendingKey)
       if (res.features) {
         setFeatures({
           ...res.features,
@@ -620,8 +652,8 @@ export default function Zapret({ notify }: ZapretProps) {
         })
       }
       notify(nextVal ? `🟢 ${clean} включен в обход DPI` : `⚪ ${clean} выключен`)
-      await loadStatus()
     } catch (e) {
+      removePendingKey(pendingKey)
       setFeatures((prev) => ({
         ...prev,
         custom_entries: (prev.custom_entries || []).map((e) =>
@@ -629,8 +661,37 @@ export default function Zapret({ notify }: ZapretProps) {
         ),
       }))
       notify(e instanceof Error ? e.message : 'Ошибка переключения сайта', true)
-    } finally {
+    }
+  }
+
+  const handleToggleAllCustomDomains = async () => {
+    if (!features.custom_entries || features.custom_entries.length === 0) return
+    const activeCount = features.custom_entries.filter((e) => e.enabled !== false).length
+    const nextVal = activeCount === 0
+    const pendingKey = 'custom:all'
+    addPendingKey(pendingKey)
+    setFeatures((prev) => ({
+      ...prev,
+      custom_entries: (prev.custom_entries || []).map((e) => ({ ...e, enabled: nextVal })),
+    }))
+    try {
+      const res = await apiPost<{ success: boolean; features?: ZapretFeatures; message?: string }>('zapret/action', {
+        action: 'toggle_custom_domain',
+        domain: 'all',
+        enabled: nextVal,
+      })
       removePendingKey(pendingKey)
+      if (res.features) {
+        setFeatures({
+          ...res.features,
+          custom_entries: res.features.custom_entries || [],
+        })
+      }
+      notify(nextVal ? '🟢 Все сайты /boost включены в обход DPI' : '⚪ Все сайты /boost выключены')
+    } catch (e) {
+      removePendingKey(pendingKey)
+      notify(e instanceof Error ? e.message : 'Ошибка переключения сайтов /boost', true)
+      await loadStatus()
     }
   }
 
@@ -657,7 +718,7 @@ export default function Zapret({ notify }: ZapretProps) {
     }
   }
 
-  const isRunning = !!status?.running
+  const isRunning = !!status?.running && features.enabled !== false
   const isInstalled = !!status?.installed
 
   if (loading && !status) {
@@ -814,11 +875,19 @@ export default function Zapret({ notify }: ZapretProps) {
             overflow: 'hidden',
           }}
         >
-          <span style={{ color: isChecked ? '#38bdf8' : 'var(--muted)', fontWeight: 500 }}>
-            {isChecked ? `🟢 ${activeInfo}` : `⚪ ${inactiveInfo}`}
+          <span style={{ color: isChecked && isRunning ? '#38bdf8' : 'var(--muted)', fontWeight: 500 }}>
+            {!isRunning && isChecked
+              ? `⚪ ${activeInfo} (Zapret остановлен)`
+              : isChecked
+              ? `🟢 ${activeInfo}`
+              : `⚪ ${inactiveInfo}`}
           </span>
           <span style={{ fontSize: 10, opacity: 0.8 }}>
-            {isChecked ? 'Активна в nfqws2' : 'Отключена'}
+            {!isRunning && isChecked
+              ? 'Остановлена со службой'
+              : isChecked
+              ? 'Активна в nfqws2'
+              : 'Отключена'}
           </span>
         </div>
       </div>
@@ -1385,7 +1454,7 @@ export default function Zapret({ notify }: ZapretProps) {
               <span>Uptime: <b style={{ color: '#cbd5e1', fontFamily: 'Consolas, monospace' }}>{fmtUptime(analytics?.uptime_seconds)}</b></span>
             </div>
             <div className="muted small" style={{ fontSize: 11 }}>
-              {status?.running ? '🟢 Демон активен' : '⚪ Демон остановлен'}
+              {isRunning ? '🟢 Демон активен' : '⚪ Демон остановлен'}
             </div>
           </div>
         </div>
@@ -1655,14 +1724,14 @@ export default function Zapret({ notify }: ZapretProps) {
                 <span
                   className="badge"
                   style={{
-                    background: features.smart_tv_mode ? 'rgba(234, 179, 8, 0.2)' : 'rgba(255, 255, 255, 0.06)',
-                    color: features.smart_tv_mode ? '#fde047' : 'var(--muted)',
-                    border: `1px solid ${features.smart_tv_mode ? 'rgba(234, 179, 8, 0.4)' : 'var(--border)'}`,
+                    background: features.smart_tv_mode ? (isRunning ? 'rgba(234, 179, 8, 0.2)' : 'rgba(255, 255, 255, 0.06)') : 'rgba(255, 255, 255, 0.06)',
+                    color: features.smart_tv_mode ? (isRunning ? '#fde047' : 'var(--muted)') : 'var(--muted)',
+                    border: `1px solid ${features.smart_tv_mode ? (isRunning ? 'rgba(234, 179, 8, 0.4)' : 'var(--border)') : 'var(--border)'}`,
                     fontSize: 11,
                     fontWeight: 600,
                   }}
                 >
-                  {features.smart_tv_mode ? '🟢 SMART TV АКТИВЕН' : '⚪ ВЫКЛЮЧЕН'}
+                  {features.smart_tv_mode ? (isRunning ? '🟢 SMART TV АКТИВЕН' : '⚪ SMART TV (Zapret остановлен)') : '⚪ ВЫКЛЮЧЕН'}
                 </span>
                 <span
                   className="badge"
@@ -1764,13 +1833,13 @@ export default function Zapret({ notify }: ZapretProps) {
                 <span
                   className="badge"
                   style={{
-                    background: features.community_hostlist_enabled ? 'rgba(34, 197, 94, 0.15)' : 'rgba(255, 255, 255, 0.06)',
-                    color: features.community_hostlist_enabled ? '#4ade80' : 'var(--muted)',
-                    border: `1px solid ${features.community_hostlist_enabled ? 'rgba(34, 197, 94, 0.3)' : 'var(--border)'}`,
+                    background: features.community_hostlist_enabled ? (isRunning ? 'rgba(34, 197, 94, 0.15)' : 'rgba(255, 255, 255, 0.06)') : 'rgba(255, 255, 255, 0.06)',
+                    color: features.community_hostlist_enabled ? (isRunning ? '#4ade80' : 'var(--muted)') : 'var(--muted)',
+                    border: `1px solid ${features.community_hostlist_enabled ? (isRunning ? 'rgba(34, 197, 94, 0.3)' : 'var(--border)') : 'var(--border)'}`,
                     fontSize: 11,
                   }}
                 >
-                  {features.community_hostlist_enabled ? '🟢 АКТИВЕН' : '⚪ ВЫКЛЮЧЕН'}
+                  {features.community_hostlist_enabled ? (isRunning ? '🟢 АКТИВЕН' : '⚪ ВЫКЛЮЧЕН (Zapret остановлен)') : '⚪ ВЫКЛЮЧЕН'}
                 </span>
                 {features.community_hostlist_count ? (
                   <span className="badge" style={{ background: 'rgba(59, 130, 246, 0.15)', color: '#60a5fa', border: '1px solid rgba(59, 130, 246, 0.3)', fontSize: 11 }}>
@@ -1998,7 +2067,7 @@ export default function Zapret({ notify }: ZapretProps) {
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 14, marginBottom: 16 }}>
           <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
               <div
                 style={{
                   width: 32,
@@ -2016,23 +2085,99 @@ export default function Zapret({ notify }: ZapretProps) {
               <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>
                 Свой сайт & CDN Boost (/boost)
               </h3>
-              <span
-                className="badge"
-                style={{
-                  background: 'rgba(168, 85, 247, 0.15)',
-                  color: '#c084fc',
-                  border: '1px solid rgba(168, 85, 247, 0.4)',
-                  fontWeight: 600,
-                  fontSize: 11,
-                }}
-              >
-                ⚡ /boost активен
-              </span>
+              {(() => {
+                const totalCount = features.custom_entries?.length || 0
+                const activeCount = (features.custom_entries || []).filter((e) => e.enabled !== false).length
+                const isBoostActive = isRunning && activeCount > 0
+                return (
+                  <span
+                    className="badge"
+                    style={{
+                      background: isBoostActive ? 'rgba(168, 85, 247, 0.15)' : 'rgba(255, 255, 255, 0.06)',
+                      color: isBoostActive ? '#c084fc' : 'var(--muted)',
+                      border: `1px solid ${isBoostActive ? 'rgba(168, 85, 247, 0.4)' : 'var(--border)'}`,
+                      fontWeight: 600,
+                      fontSize: 11,
+                    }}
+                  >
+                    {!isInstalled
+                      ? '🔴 Не установлен'
+                      : !isRunning
+                      ? '⚪ /boost выключен (Zapret остановлен)'
+                      : totalCount === 0
+                      ? '⚪ /boost (нет сайтов)'
+                      : activeCount === 0
+                      ? '⚪ /boost выключен'
+                      : `⚡ /boost активен (${activeCount})`}
+                  </span>
+                )
+              })()}
             </div>
             <div className="muted small" style={{ marginTop: 4, lineHeight: 1.45 }}>
               Напишите адрес любого сайта. XKeen автоматически найдёт связанные CDN, картинки и медиа-сервера, подтянет их в карточку другим цветом и направит на максимальной скорости напрямую без расхода VPS.
             </div>
           </div>
+
+          {/* Карточный мастер-свитч /boost */}
+          {(() => {
+            const totalCount = features.custom_entries?.length || 0
+            const activeCount = (features.custom_entries || []).filter((e) => e.enabled !== false).length
+            const isBoostChecked = activeCount > 0
+            const isBoostPending = pendingKeys.has('custom:all')
+            const isBoostDisabled = busy || !isInstalled || totalCount === 0
+
+            return (
+              <button
+                type="button"
+                disabled={isBoostDisabled || isBoostPending}
+                onClick={handleToggleAllCustomDomains}
+                className={isBoostPending ? 'zapret-glow-pulse-purple' : ''}
+                style={{
+                  width: 54,
+                  height: 30,
+                  borderRadius: 18,
+                  border: 'none',
+                  cursor: isBoostDisabled || isBoostPending ? 'not-allowed' : 'pointer',
+                  background: isBoostChecked
+                    ? 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)'
+                    : 'rgba(255, 255, 255, 0.15)',
+                  position: 'relative',
+                  transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+                  padding: 2,
+                  flexShrink: 0,
+                  boxShadow: isBoostChecked ? '0 0 14px rgba(168, 85, 247, 0.45)' : 'none',
+                  opacity: totalCount === 0 ? 0.4 : 1,
+                }}
+                title={
+                  totalCount === 0
+                    ? 'Добавьте хотя бы один сайт для включения /boost'
+                    : isBoostChecked
+                    ? 'Выключить все сайты /boost'
+                    : 'Включить все сайты /boost'
+                }
+              >
+                <div
+                  style={{
+                    width: 26,
+                    height: 26,
+                    borderRadius: '50%',
+                    background: '#fff',
+                    transform: isBoostChecked ? 'translateX(24px)' : 'translateX(0)',
+                    transition: 'transform 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+                    boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: 11,
+                    color: isBoostChecked ? '#7c3aed' : '#888',
+                    fontWeight: 'bold',
+                  }}
+                >
+                  {isBoostPending ? renderMicroSpinner('#7c3aed', 13) : isBoostChecked ? '✓' : '✕'}
+                </div>
+              </button>
+            )
+          })()}
         </div>
 
         {/* ПОЛЕ ВВОДА САЙТА */}
@@ -2159,12 +2304,28 @@ export default function Zapret({ notify }: ZapretProps) {
                         className="badge"
                         style={{
                           fontSize: 10,
-                          background: isChecked ? 'rgba(34, 197, 94, 0.15)' : 'rgba(255, 255, 255, 0.05)',
-                          color: isChecked ? '#22c55e' : 'var(--muted)',
-                          border: `1px solid ${isChecked ? 'rgba(34, 197, 94, 0.3)' : 'var(--border)'}`,
+                          background: !isRunning
+                            ? 'rgba(255, 255, 255, 0.05)'
+                            : isChecked
+                            ? 'rgba(34, 197, 94, 0.15)'
+                            : 'rgba(255, 255, 255, 0.05)',
+                          color: !isRunning
+                            ? 'var(--muted)'
+                            : isChecked
+                            ? '#22c55e'
+                            : 'var(--muted)',
+                          border: `1px solid ${
+                            !isRunning
+                              ? 'var(--border)'
+                              : isChecked
+                              ? 'rgba(34, 197, 94, 0.3)'
+                              : 'var(--border)'
+                          }`,
                         }}
                       >
-                        {isChecked ? '🟢 DIRECT (Zapret)' : '⚪ Выключен'}
+                        {!isRunning
+                          ? (isChecked ? '⚪ DIRECT (Zapret остановлен)' : '⚪ Выключен')
+                          : (isChecked ? '🟢 DIRECT (Zapret)' : '⚪ Выключен')}
                       </span>
 
                       {entry.cdns && entry.cdns.length > 0 && (

@@ -1003,4 +1003,211 @@ describe('Zapret Component — Features 1, 2, 4, 5 (Mini-Blockcheck, DPI Analyti
       url: undefined,
     })
   })
+
+  it('displays dynamic /boost badge when zapret is stopped or all sites are disabled', async () => {
+    // 1. When Zapret service is stopped
+    const stoppedStatus: ZapretStatus = {
+      ...mockZapretStatus,
+      running: false,
+    }
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve(stoppedStatus)
+      }
+      return Promise.resolve({})
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    let text = container?.textContent || ''
+    expect(text).toContain('⚪ /boost выключен (Zapret остановлен)')
+
+    // 2. When Zapret is running but all custom sites are disabled
+    const disabledSitesStatus: ZapretStatus = {
+      ...mockZapretStatus,
+      running: true,
+      features: {
+        ...mockZapretStatus.features!,
+        custom_entries: [
+          {
+            domain: 'mysku.club',
+            enabled: false,
+            cdns: ['mysku-st.ru'],
+          },
+        ],
+      },
+    }
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve(disabledSitesStatus)
+      }
+      return Promise.resolve({})
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    text = container?.textContent || ''
+    expect(text).toContain('⚪ /boost выключен')
+  })
+
+  it('toggles all custom sites via master switch in /boost card header', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve(mockZapretStatus)
+      }
+      return Promise.resolve({})
+    })
+
+    const postSpy = vi.spyOn(api, 'apiPost').mockImplementation((_path: string, _body: any) => {
+      return Promise.resolve({
+        success: true,
+        features: {
+          ...mockZapretStatus.features!,
+          custom_entries: mockZapretStatus.features!.custom_entries!.map((e) => ({ ...e, enabled: false })),
+        },
+      })
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    const masterSwitch = Array.from(container?.querySelectorAll('button') || []).find(
+      (b) => b.title === 'Выключить все сайты /boost'
+    )
+    expect(masterSwitch).toBeDefined()
+
+    await act(async () => {
+      masterSwitch?.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('zapret/action', {
+      action: 'toggle_custom_domain',
+      domain: 'all',
+      enabled: false,
+    })
+    expect(notifyMock).toHaveBeenCalledWith('⚪ Все сайты /boost выключены')
+  })
+
+  it('toggles main Zapret switch to stop service without reverting back to active', async () => {
+    let callCount = 0
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        callCount++
+        if (callCount === 1) {
+          return Promise.resolve({
+            ...mockZapretStatus,
+            running: true,
+            features: {
+              ...mockZapretStatus.features!,
+              enabled: true,
+            },
+          })
+        }
+        return Promise.resolve({
+          ...mockZapretStatus,
+          running: false,
+          features: {
+            ...mockZapretStatus.features!,
+            enabled: false,
+          },
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    const postSpy = vi.spyOn(api, 'apiPost').mockImplementation((_path: string, _body: any) => {
+      return Promise.resolve({
+        success: true,
+        action: 'stop',
+      })
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    const mainSwitch = Array.from(container?.querySelectorAll('button') || []).find(
+      (b) => b.title === 'Выключить Zapret'
+    )
+    expect(mainSwitch).toBeDefined()
+
+    await act(async () => {
+      mainSwitch?.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('zapret/action', {
+      action: 'stop',
+      enabled: false,
+    })
+    expect(notifyMock).toHaveBeenCalledWith('⚪ Служба Zapret остановлена')
+  })
+
+  it('treats zapret as inactive when features.enabled is false even if status.running is true', async () => {
+    // Simulates case where orphan pid was detected by pidof, but user turned off Zapret (features.enabled = false)
+    const ghostRunningStatus: ZapretStatus = {
+      ...mockZapretStatus,
+      running: true,
+      features: {
+        ...mockZapretStatus.features!,
+        enabled: false,
+      },
+    }
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve(ghostRunningStatus)
+      }
+      return Promise.resolve({})
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    const text = container?.textContent || ''
+    // Main switch should show service is stopped
+    expect(text).toContain('СЛУЖБА ВЫКЛЮЧЕНА')
+    expect(text).not.toContain('СЛУЖБА АКТИВНА')
+
+    // /boost badge should indicate Zapret is stopped
+    expect(text).toContain('⚪ /boost выключен (Zapret остановлен)')
+
+    // Custom domain badge should show Zapret остановлен
+    expect(text).toContain('⚪ DIRECT (Zapret остановлен)')
+  })
+
+  it('displays stopped status badges on custom entries and strategy cards when zapret is not running', async () => {
+    const stoppedStatus: ZapretStatus = {
+      ...mockZapretStatus,
+      running: false,
+      features: {
+        ...mockZapretStatus.features!,
+        enabled: false,
+        smart_tv_mode: true,
+        community_hostlist_enabled: true,
+      },
+    }
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve(stoppedStatus)
+      }
+      return Promise.resolve({})
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    const text = container?.textContent || ''
+    expect(text).toContain('⚪ DIRECT (Zapret остановлен)')
+    expect(text).toContain('⚪ SMART TV (Zapret остановлен)')
+    expect(text).toContain('⚪ ВЫКЛЮЧЕН (Zapret остановлен)')
+    expect(text).toContain('⚪ Демон остановлен')
+    expect(text).toContain('Остановлена со службой')
+  })
 })
+

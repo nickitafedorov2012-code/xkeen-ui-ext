@@ -3649,6 +3649,10 @@ stop_nfqws() {
     fi
     rm -f "$PIDFILE"
   fi
+  # Terminate via pidof (always present in busybox) in case killall is missing
+  for p in $(pidof nfqws2 2>/dev/null) $(pidof nfqws 2>/dev/null); do
+    kill -9 "$p" 2>/dev/null
+  done
   # Terminate any rogue or orphaned nfqws or nfqws2 processes holding queue 200
   killall -15 nfqws2 2>/dev/null
   killall -15 nfqws 2>/dev/null
@@ -4398,6 +4402,20 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
 
     let cfg = state.config.read().await;
 
+    // Если служба выключена в конфигурации панели, она гарантированно не активна для трафика
+    if !cfg.zapret.enabled {
+        if running {
+            let _ = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg("kill -9 $(pidof nfqws2 2>/dev/null) $(pidof nfqws 2>/dev/null) 2>/dev/null; rm -f /opt/var/run/zapret.pid /opt/var/run/zapret_failsafe.pid")
+                .output()
+                .await;
+        }
+        running = false;
+        pid = None;
+        cmdline = None;
+    }
+
     // Определение текущего пресета
     let check_str = cmdline.as_deref().or(config_content.as_deref()).unwrap_or("");
     let preset = if cfg.zapret.custom_args.is_some() {
@@ -4835,6 +4853,11 @@ pub async fn zapret_action(
 
         if is_running && !cfg.zapret.enabled {
             let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("stop").output().await;
+            let _ = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg("kill -9 $(pidof nfqws2 2>/dev/null) $(pidof nfqws 2>/dev/null) 2>/dev/null; rm -f /opt/var/run/zapret.pid /opt/var/run/zapret_failsafe.pid")
+                .output()
+                .await;
         } else if cfg.zapret.enabled && !is_no_reload {
             if is_running && is_domain_only {
                 let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("reload-hosts").output().await;
@@ -4998,7 +5021,11 @@ pub async fn zapret_action(
         let _routing_guard = state.routing_lock.lock().await;
         let mut cfg = (**state.config.read().await).clone();
 
-        if let Some(entry) = cfg.zapret.custom_entries.iter_mut().find(|e| e.domain.eq_ignore_ascii_case(&raw_domain)) {
+        if raw_domain == "all" {
+            for entry in &mut cfg.zapret.custom_entries {
+                entry.enabled = new_state;
+            }
+        } else if let Some(entry) = cfg.zapret.custom_entries.iter_mut().find(|e| e.domain.eq_ignore_ascii_case(&raw_domain)) {
             entry.enabled = new_state;
         }
 
@@ -5106,8 +5133,9 @@ pub async fn zapret_action(
         if let Some(en) = body.enabled {
             if en { "start" } else { "stop" }
         } else {
-            let is_running = tokio::process::Command::new("pidof")
-                .arg("nfqws")
+            let is_running = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null")
                 .output()
                 .await
                 .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
@@ -5123,14 +5151,20 @@ pub async fn zapret_action(
         return api_err("Недопустимое действие для службы Zapret");
     }
 
-    // Перед стартом гарантируем актуальные и безопасные правила
+    // Перед стартом или остановкой гарантируем актуальные и безопасные правила
     if action_to_run == "start" || action_to_run == "restart" || action_to_run == "start-fw" || action_to_run == "reload-fw" {
         let mut _cfg = (**state.config.read().await).clone();
-        if action_to_run == "start" || action_to_run == "restart" {
-            _cfg.zapret.enabled = true;
-        }
+        _cfg.zapret.enabled = true;
         let _ = sync_zapret_files(&_cfg.zapret).await;
         let _ = crate::rci::set_clean_dns_servers(&state.http, &_cfg).await;
+    } else if action_to_run == "stop" {
+        // Заранее фиксируем выключение службы в конфигурации ДО остановки,
+        // чтобы фоновый watchdog не успел перезапустить nfqws при обнаружении пропажи процесса
+        let _cfg_guard = state.config_lock.lock().await;
+        let mut cfg = (**state.config.read().await).clone();
+        cfg.zapret.enabled = false;
+        let _ = config::save(&state.config_path, &cfg).await;
+        *state.config.write().await = std::sync::Arc::new(cfg);
     }
 
     match tokio::process::Command::new(init_script).arg(action_to_run).output().await {
@@ -5143,6 +5177,12 @@ pub async fn zapret_action(
                 cfg.zapret.enabled = true;
             } else if action_to_run == "stop" {
                 cfg.zapret.enabled = false;
+                // Гарантированно прерываем nfqws2 и nfqws и подчищаем PID-файлы
+                let _ = tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg("kill -9 $(pidof nfqws2 2>/dev/null) $(pidof nfqws 2>/dev/null) 2>/dev/null; rm -f /opt/var/run/zapret.pid /opt/var/run/zapret_failsafe.pid")
+                    .output()
+                    .await;
             }
             if std::path::Path::new(&cfg.mihomo.config_path).exists() {
                 if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
@@ -5155,11 +5195,35 @@ pub async fn zapret_action(
                 }
             }
             let _ = config::save(&state.config_path, &cfg).await;
-            *state.config.write().await = std::sync::Arc::new(cfg);
+            *state.config.write().await = std::sync::Arc::new(cfg.clone());
 
-            api_ok(json!({ "success": true, "output": output_str.trim(), "action": action_to_run }))
+            api_ok(json!({ "success": true, "output": output_str.trim(), "action": action_to_run, "features": &cfg.zapret }))
         }
-        Err(e) => api_err(format!("Ошибка выполнения {}: {}", init_script, e)),
+        Err(e) => {
+            if action_to_run == "stop" {
+                let _cfg_guard = state.config_lock.lock().await;
+                let _routing_guard = state.routing_lock.lock().await;
+                let mut cfg = (**state.config.read().await).clone();
+                cfg.zapret.enabled = false;
+                let _ = tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg("kill -9 $(pidof nfqws2 2>/dev/null) $(pidof nfqws 2>/dev/null) 2>/dev/null; rm -f /opt/var/run/zapret.pid /opt/var/run/zapret_failsafe.pid")
+                    .output()
+                    .await;
+                if std::path::Path::new(&cfg.mihomo.config_path).exists() {
+                    if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+                        if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &cfg) {
+                            let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
+                            let _ = mihomo::reload_config(&state.http, &cfg).await;
+                        }
+                    }
+                }
+                let _ = config::save(&state.config_path, &cfg).await;
+                *state.config.write().await = std::sync::Arc::new(cfg.clone());
+                return api_ok(json!({ "success": true, "output": format!("Служба Zapret остановлена (fallback: {e})"), "action": "stop", "features": &cfg.zapret }));
+            }
+            api_err(format!("Ошибка выполнения {}: {}", init_script, e))
+        }
     }
 }
 
