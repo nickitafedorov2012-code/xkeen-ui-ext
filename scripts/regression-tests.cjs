@@ -465,6 +465,12 @@ runTest('13. Zapret legacy nfqws compatibility, lua-desync conversion and instan
   // 5. Verify S51zapret iptables wrapper uses `command $IPTABLES_CMD` to prevent infinite shell recursion
   assert(apiRs.includes('command $IPTABLES_CMD "$@"'), 'S51zapret iptables() function must use `command $IPTABLES_CMD "$@"` to prevent infinite recursion');
   assert(!apiRs.includes('--dpi-desync=fake,multisplit'), 'legacy nfqws must not receive unsupported --dpi-desync=fake,multisplit');
+
+  // 6. Verify reload-hosts auto-restarts nfqws if zapret-hosts.txt profile was newly added, cmdline comma restoration, and save_config rollback
+  assert(apiRs.includes('pub fn format_nfqws_proc_cmdline'), 'api.rs must reconstruct strtok-mutated commas in /proc/<pid>/cmdline');
+  assert(apiRs.includes('exec "$0" restart'), 'S51zapret reload-hosts must restart nfqws if zapret-hosts.txt profile was newly added to NFQWS_ARGS');
+  assert(apiRs.includes('Ошибка перезапуска Zapret с новой конфигурацией'), 'save_config must check S51zapret restart status and roll back on failure');
+  assert(watchdogRs.includes('state.config_lock.try_lock()'), 'spawn_zapret_monitor must guard with config_lock.try_lock() to prevent racing with active zapret_action');
 });
 
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);

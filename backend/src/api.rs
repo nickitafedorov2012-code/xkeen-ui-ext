@@ -3964,12 +3964,25 @@ case "$1" in
     fi
     ;;
   reload|reload-hosts)
+    PID=""
     if [ -f "$PIDFILE" ]; then
       PID=$(cat "$PIDFILE" 2>/dev/null)
-      if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-        kill -HUP "$PID" 2>/dev/null
-        exit 0
-      fi
+    fi
+    if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
+      PID=$(pidof nfqws2 2>/dev/null | awk '{print $1}')
+      [ -z "$PID" ] && PID=$(pidof nfqws 2>/dev/null | awk '{print $1}')
+      [ -n "$PID" ] && echo "$PID" > "$PIDFILE" 2>/dev/null
+    fi
+    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+      case "$NFQWS_ARGS" in
+        *zapret-hosts.txt*)
+          if [ -r "/proc/$PID/cmdline" ] && ! tr '\0' ' ' < "/proc/$PID/cmdline" 2>/dev/null | grep -q "zapret-hosts.txt"; then
+            exec "$0" restart
+          fi
+          ;;
+      esac
+      kill -HUP "$PID" 2>/dev/null
+      exit 0
     fi
     killall -HUP nfqws2 2>/dev/null || killall -HUP nfqws 2>/dev/null || true
     exit 0
@@ -4013,6 +4026,13 @@ pub fn is_nfqws2_available() -> bool {
 }
 
 pub fn convert_lua_to_legacy_desync(args: &str) -> String {
+    if (args.contains("--daemon") || args.contains("--qnum"))
+        && !args.contains("lua-desync")
+        && !args.contains("payload=")
+        && !args.contains("out-range=")
+    {
+        return args.replace("multisplit", "split2");
+    }
     if args.contains("disorder2") {
         if args.contains("midsld") {
             "--dpi-desync=fake,disorder2 --dpi-desync-split-pos=1,midsld --dpi-desync-repeats=5 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4".to_string()
@@ -4451,6 +4471,24 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
     Ok(())
 }
 
+pub fn format_nfqws_proc_cmdline(raw: &[u8]) -> String {
+    let mut c = String::new();
+    for (idx, part) in raw.split(|&b| b == 0).filter(|s| !s.is_empty()).enumerate() {
+        let token = String::from_utf8_lossy(part);
+        if idx == 0 {
+            c.push_str(&token);
+        } else if token.starts_with('-') {
+            c.push(' ');
+            c.push_str(&token);
+        } else {
+            // Legacy nfqws modifies argv in-place via strtok(optarg, ","), replacing ',' with '\0'
+            c.push(',');
+            c.push_str(&token);
+        }
+    }
+    c
+}
+
 /// GET /api/zapret/status — статус nfqws/nfqws2, iptables и S51zapret
 pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
     let init_script = std::path::Path::new("/opt/etc/init.d/S51zapret");
@@ -4470,12 +4508,7 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
 
                     let proc_cmd = format!("/proc/{p}/cmdline");
                     if let Ok(raw) = tokio::fs::read(&proc_cmd).await {
-                        let c = raw
-                            .split(|&b| b == 0)
-                            .filter(|s| !s.is_empty())
-                            .map(|s| String::from_utf8_lossy(s))
-                            .collect::<Vec<_>>()
-                            .join(" ");
+                        let c = format_nfqws_proc_cmdline(&raw);
                         if !c.is_empty() {
                             cmdline = Some(c);
                         }
@@ -4497,7 +4530,7 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
         false
     };
 
-    let iptables_active = tokio::process::Command::new("sh")
+    let mut iptables_active = tokio::process::Command::new("sh")
         .arg("-c")
         .arg("(iptables -t mangle -S POSTROUTING 2>/dev/null | grep -q zapret || iptables -t mangle -S PREROUTING 2>/dev/null | grep -q zapret) && iptables -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE")
         .output()
@@ -4511,20 +4544,29 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await;
 
     // Если служба выключена в конфигурации панели и сейчас не идёт операция запуска/переключения,
-    // принудительно очищаем осиротевший процесс nfqws
+    // принудительно очищаем осиротевший процесс nfqws и остаточные правила iptables
     if !cfg.zapret.enabled {
-        if running {
+        if running || iptables_active {
             if let Ok(_guard) = state.config_lock.try_lock() {
                 if !state.config.read().await.zapret.enabled {
-                    let _ = tokio::process::Command::new("sh")
-                        .arg("-c")
-                        .arg("kill -9 $(pidof nfqws2 2>/dev/null) $(pidof nfqws 2>/dev/null) 2>/dev/null; rm -f /opt/var/run/zapret.pid /opt/var/run/zapret_failsafe.pid")
-                        .output()
-                        .await;
+                    if running {
+                        let _ = tokio::process::Command::new("sh")
+                            .arg("-c")
+                            .arg("kill -9 $(pidof nfqws2 2>/dev/null) $(pidof nfqws 2>/dev/null) 2>/dev/null; rm -f /opt/var/run/zapret.pid /opt/var/run/zapret_failsafe.pid")
+                            .output()
+                            .await;
+                    }
+                    if iptables_active {
+                        let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret")
+                            .arg("stop-fw")
+                            .output()
+                            .await;
+                    }
                 }
             }
         }
         running = false;
+        iptables_active = false;
         pid = None;
         cmdline = None;
     }
@@ -4589,6 +4631,7 @@ pub async fn zapret_action(
     if act == "apply_strategy" {
         let _cfg_guard = state.config_lock.lock().await;
         let mut cfg = (**state.config.read().await).clone();
+        let prev_zapret = cfg.zapret.clone();
         let custom_args = body.custom_args.as_ref().filter(|a| !a.trim().is_empty()).map(|a| a.trim().to_string());
         let final_args = match custom_args {
             Some(a) => Some(a),
@@ -4611,7 +4654,19 @@ pub async fn zapret_action(
         let _ = config::save(&state.config_path, &cfg).await;
         *state.config.write().await = std::sync::Arc::new(cfg.clone());
         if cfg.zapret.enabled {
-            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+            match tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await {
+                Ok(out) if !out.status.success() => {
+                    let err_msg = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+                    cfg.zapret = prev_zapret;
+                    let _ = sync_zapret_files(&cfg.zapret).await;
+                    let _ = config::save(&state.config_path, &cfg).await;
+                    *state.config.write().await = std::sync::Arc::new(cfg);
+                    let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+                    return api_err(format!("Ошибка применения стратегии Zapret:\n{}", err_msg.trim()));
+                }
+                Err(e) => return api_err(format!("Ошибка перезапуска S51zapret: {e}")),
+                _ => {}
+            }
         }
         return api_ok(json!({
             "success": true,
@@ -4695,12 +4750,89 @@ pub async fn zapret_action(
             if let Err(e) = validate_zapret_conf(&content) {
                 return api_err(format!("Ошибка валидации zapret.conf: {e}"));
             }
+            let _cfg_guard = state.config_lock.lock().await;
+            let mut cfg = (**state.config.read().await).clone();
+            let prev_zapret = cfg.zapret.clone();
+            let prev_conf = tokio::fs::read_to_string("/opt/etc/zapret/zapret.conf").await.ok();
+
+            let mut parsed_nfqws_args: Option<String> = None;
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                if let Some((k, v)) = trimmed.split_once('=') {
+                    let key = k.trim();
+                    let clean_val = v.trim().trim_matches('"').trim_matches('\'').trim();
+                    if key == "NFQWS_ARGS" && !clean_val.is_empty() {
+                        parsed_nfqws_args = Some(clean_val.to_string());
+                    } else if key == "DISCORD_VOICE_ENABLED" {
+                        cfg.zapret.discord_voice_udp = clean_val == "1";
+                    } else if key == "SMART_TV_MODE" || key == "BLOCK_QUIC" {
+                        if clean_val == "1" {
+                            cfg.zapret.smart_tv_mode = true;
+                        }
+                    }
+                }
+            }
+
+            if let Some(raw_args) = parsed_nfqws_args {
+                let mut tmp_zapret = cfg.zapret.clone();
+                tmp_zapret.custom_args = None;
+                let (default_args, _) = if is_nfqws2_available() {
+                    build_nfqws2_args(&tmp_zapret)
+                } else {
+                    build_nfqws_args(&tmp_zapret)
+                };
+                if raw_args.trim() == default_args.trim() {
+                    cfg.zapret.custom_args = None;
+                } else {
+                    let effective = if !is_nfqws2_available() && (raw_args.contains("--lua-desync") || raw_args.contains("multisplit")) {
+                        convert_lua_to_legacy_desync(&raw_args)
+                    } else {
+                        raw_args
+                    };
+                    cfg.zapret.custom_args = Some(effective);
+                }
+            }
+
             let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
             if let Err(e) = tokio::fs::write("/opt/etc/zapret/zapret.conf", &content).await {
                 return api_err(format!("Ошибка записи zapret.conf: {e}"));
             }
-            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
-            return api_ok(json!({ "saved": true, "message": "Конфигурация Zapret сохранена и служба перезапущена" }));
+
+            if cfg.zapret.enabled {
+                match tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await {
+                    Ok(out) if !out.status.success() => {
+                        let err_msg = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+                        cfg.zapret = prev_zapret;
+                        if let Some(prev) = prev_conf {
+                            let _ = tokio::fs::write("/opt/etc/zapret/zapret.conf", prev).await;
+                        } else {
+                            let _ = sync_zapret_files(&cfg.zapret).await;
+                        }
+                        let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+                        return api_err(format!("Ошибка перезапуска Zapret с новой конфигурацией:\n{}", err_msg.trim()));
+                    }
+                    Err(e) => {
+                        if let Some(prev) = prev_conf {
+                            let _ = tokio::fs::write("/opt/etc/zapret/zapret.conf", prev).await;
+                        }
+                        return api_err(format!("Ошибка вызова S51zapret restart: {e}"));
+                    }
+                    _ => {}
+                }
+            }
+
+            let _ = config::save(&state.config_path, &cfg).await;
+            *state.config.write().await = std::sync::Arc::new(cfg.clone());
+
+            let msg = if cfg.zapret.enabled {
+                "Конфигурация Zapret сохранена и служба перезапущена"
+            } else {
+                "Конфигурация Zapret сохранена"
+            };
+            return api_ok(json!({ "saved": true, "features": cfg.zapret, "message": msg }));
         }
         return api_err("Отсутствует содержимое config_content");
     }
@@ -4846,7 +4978,12 @@ pub async fn zapret_action(
             let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("stop").output().await;
         } else if cfg.zapret.enabled {
             let cmd_arg = if is_running { "restart" } else { "start" };
-            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg(cmd_arg).output().await;
+            if let Ok(out) = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg(cmd_arg).output().await {
+                if !out.status.success() {
+                    let err_msg = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+                    return api_err(format!("Ошибка перезапуска Zapret при применении пресета '{p}':\n{}", err_msg.trim()));
+                }
+            }
         }
 
         return api_ok(json!({ "preset": p, "features": cfg.zapret, "message": format!("Применен пресет '{p}'") }));
@@ -4928,10 +5065,13 @@ pub async fn zapret_action(
         let mut cfg = (**state.config.read().await).clone();
         if act == "reset_features" {
             cfg.zapret = crate::config::ZapretConfig::default();
-        } else if let Some(new_features) = body.features {
+        } else if let Some(mut new_features) = body.features {
             if let Some(ref ca) = new_features.custom_args {
                 if let Err(e) = validate_custom_args(ca) {
                     return api_err(e);
+                }
+                if !is_nfqws2_available() && (ca.contains("--lua-desync") || ca.contains("multisplit")) {
+                    new_features.custom_args = Some(convert_lua_to_legacy_desync(ca));
                 }
             }
             cfg.zapret = new_features;
@@ -6492,7 +6632,28 @@ mod tests {
         let legacy_split = convert_lua_to_legacy_desync(split_lua);
         assert!(legacy_split.contains("--dpi-desync=fake,split2"));
 
+        let full_cmdline = format!(
+            "--daemon --qnum=200 --filter-tcp=80,443 --dpi-desync=fake,{} --new --filter-udp=50000-65535 --dpi-desync=fake",
+            "multisplit"
+        );
+        let legacy_full = convert_lua_to_legacy_desync(&full_cmdline);
+        assert!(legacy_full.contains("--daemon --qnum=200"));
+        assert!(legacy_full.contains("--dpi-desync=fake,split2"));
+        assert!(legacy_full.contains("--new --filter-udp=50000-65535"));
+        assert!(!legacy_full.contains("multisplit"));
+
         assert!(S51ZAPRET_SCRIPT.contains("command $IPTABLES_CMD \"$@\""));
+        assert!(S51ZAPRET_SCRIPT.contains("exec \"$0\" restart"));
+    }
+
+    #[test]
+    fn test_format_nfqws_proc_cmdline_restores_strtok_commas() {
+        let raw = b"/opt/zapret/nfq/nfqws\0--pidfile=/opt/var/run/zapret.pid\0--daemon\0--dpi-desync=fake\0split2\0--dpi-desync-split-pos=1\0midsld\0--dpi-desync-fooling=ts\0md5sig\0";
+        let formatted = format_nfqws_proc_cmdline(raw);
+        assert_eq!(
+            formatted,
+            "/opt/zapret/nfq/nfqws --pidfile=/opt/var/run/zapret.pid --daemon --dpi-desync=fake,split2 --dpi-desync-split-pos=1,midsld --dpi-desync-fooling=ts,md5sig"
+        );
     }
 
     #[test]

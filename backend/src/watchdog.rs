@@ -390,6 +390,16 @@ pub fn spawn_zapret_monitor(state: AppState) {
                 continue;
             }
 
+            // Если в данный момент выполняется операция запуска/рестарта/смены пресета из UI,
+            // пропускаем тик сторожа, чтобы не конфликтовать с S51zapret
+            let Ok(_cfg_guard) = state.config_lock.try_lock() else {
+                continue;
+            };
+            if !state.config.read().await.zapret.enabled {
+                restart_failures = 0;
+                continue;
+            }
+
             let init_script = "/opt/etc/init.d/S51zapret";
             if !Path::new(init_script).exists() {
                 continue;
@@ -449,11 +459,14 @@ pub fn spawn_zapret_monitor(state: AppState) {
                     restart_failures += 1;
                 } else if restart_failures == 5 {
                     log_w!("[WATCHDOG] ❌ Не удалось запустить службу Zapret после 5 попыток. Приостановка автозапуска.");
-                    let _guard = state.config_lock.lock().await;
                     let mut cfg = (**state.config.read().await).clone();
                     cfg.zapret.enabled = false;
                     let _ = config::save(&state.config_path, &cfg).await;
                     *state.config.write().await = std::sync::Arc::new(cfg);
+                    let _ = tokio::process::Command::new(init_script)
+                        .arg("stop-fw")
+                        .output()
+                        .await;
                     restart_failures += 1;
                 }
             }
