@@ -20,6 +20,7 @@ pub fn is_shutdown() -> bool {
 pub fn spawn(state: AppState) {
     spawn_schedules_monitor(state.clone());
     spawn_dhcp_device_monitor(state.clone());
+    spawn_zapret_monitor(state.clone());
     tokio::spawn(async move {
         // Начальная пауза перед запуском монитора
         for _ in 0..10 {
@@ -339,6 +340,107 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
                             *state.config.write().await = std::sync::Arc::new(new_cfg);
                         }
                     }
+                }
+            }
+        }
+    });
+}
+
+/// Фоновый сторожевой процесс (watchdog) для Zapret (DPI bypass).
+/// Отслеживает активность процесса nfqws и целостность правил перехвата в Netfilter/iptables.
+/// При периодических сбросах правил брандмауэра KeeneticOS (ndm, DHCP renewal, ping-check)
+/// мгновенно и бесшовно восстанавливает цепочки iptables.
+pub fn spawn_zapret_monitor(state: AppState) {
+    tokio::spawn(async move {
+        // Начальная пауза для завершения загрузки роутера и сети
+        for _ in 0..15 {
+            if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+
+        let mut restart_failures = 0;
+
+        loop {
+            // Проверка каждые 12 секунд
+            for _ in 0..12 {
+                if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                sleep(Duration::from_secs(1)).await;
+            }
+
+            let zapret_enabled = {
+                let cfg = state.config.read().await;
+                cfg.zapret.enabled
+            };
+
+            if !zapret_enabled {
+                restart_failures = 0;
+                continue;
+            }
+
+            let init_script = "/opt/etc/init.d/S51zapret";
+            if !Path::new(init_script).exists() {
+                continue;
+            }
+
+            // Проверяем, запущен ли бинарник nfqws / nfqws2
+            let is_running = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg("pidof nfqws2 >/dev/null 2>&1 || pidof nfqws >/dev/null 2>&1")
+                .output()
+                .await
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+
+            if is_running {
+                restart_failures = 0;
+                // nfqws работает — проверяем, на месте ли правила iptables netfilter.
+                // ВАЖНО: Требуется наличие КАК точки входа в POSTROUTING/PREROUTING,
+                // ТАК И цепочки zapret с правилами NFQUEUE!
+                // (Использование '||' было фатальной ошибкой: если Keenetic ndm сбрасывал POSTROUTING,
+                // цепочка zapret с NFQUEUE оставалась в памяти, из-за чего watchdog ошибочно считал
+                // перехват активным и никогда не восстанавливал вызов zapret из POSTROUTING).
+                let iptables_active = tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg("(iptables -t mangle -S POSTROUTING 2>/dev/null | grep -q zapret || iptables -t mangle -S PREROUTING 2>/dev/null | grep -q zapret) && iptables -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE")
+                    .output()
+                    .await
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+
+                if !iptables_active {
+                    log_w!("[WATCHDOG] ⚠️ Обнаружено отключение перехвата Netfilter при работающем nfqws (сброс iptables в KeeneticOS ndm)! Восстановление правил...");
+                    let res = tokio::process::Command::new(init_script)
+                        .arg("start-fw")
+                        .output()
+                        .await;
+                    match res {
+                        Ok(o) if o.status.success() => {
+                            log_i!("[WATCHDOG] ✓ Правила Netfilter (iptables) для Zapret успешно восстановлены");
+                        }
+                        Ok(o) => {
+                            log_w!("[WATCHDOG] Ошибка вызова S51zapret start-fw: {}", String::from_utf8_lossy(&o.stderr));
+                        }
+                        Err(e) => {
+                            log_w!("[WATCHDOG] Не удалось запустить S51zapret start-fw: {e}");
+                        }
+                    }
+                }
+            } else {
+                // Zapret включен в настройках, но nfqws не запущен
+                if restart_failures < 5 {
+                    log_w!("[WATCHDOG] ⚠️ Служба Zapret включена, но nfqws не активен! Автоматический запуск службы...");
+                    let _ = tokio::process::Command::new(init_script)
+                        .arg("start")
+                        .output()
+                        .await;
+                    restart_failures += 1;
+                } else if restart_failures == 5 {
+                    log_w!("[WATCHDOG] ❌ Не удалось запустить службу Zapret после 5 попыток. Приостановка автозапуска.");
+                    restart_failures += 1;
                 }
             }
         }

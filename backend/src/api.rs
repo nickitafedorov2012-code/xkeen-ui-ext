@@ -3085,7 +3085,7 @@ pub async fn test_rule_match(
                     "matched_rule": format!("DOMAIN-SUFFIX,{},DIRECT", m),
                     "rule_type": "ZAPRET_HYBRID",
                     "target_group": "DIRECT",
-                    "resolved_server": "DIRECT (Локальный обход Zapret nfqws)",
+                    "resolved_server": "DIRECT (Локальный обход Zapret)",
                     "reason": "Zapret DPI bypass — YouTube Direct (напрямую с кэш-серверов GGC без расхода VPS)"
                 }));
             }
@@ -3099,7 +3099,7 @@ pub async fn test_rule_match(
                     "matched_rule": format!("DOMAIN-SUFFIX,{},DIRECT", m),
                     "rule_type": "ZAPRET_HYBRID",
                     "target_group": "DIRECT",
-                    "resolved_server": "DIRECT (Локальный обход Zapret nfqws)",
+                    "resolved_server": "DIRECT (Локальный обход Zapret)",
                     "reason": "Zapret DPI bypass — Discord Direct (минимальный пинг напрямую без VPS)"
                 }));
             }
@@ -3116,7 +3116,7 @@ pub async fn test_rule_match(
                     "matched_rule": format!("DOMAIN-SUFFIX,{},DIRECT", matched),
                     "rule_type": "ZAPRET_HYBRID",
                     "target_group": "DIRECT",
-                    "resolved_server": "DIRECT (Локальный обход Zapret nfqws)",
+                    "resolved_server": "DIRECT (Локальный обход Zapret)",
                     "reason": "Zapret DPI bypass — GitHub Direct (быстрый доступ к репозиториям и релизам без расхода VPS)"
                 }));
             }
@@ -3131,7 +3131,7 @@ pub async fn test_rule_match(
                     "matched_rule": format!("DOMAIN-SUFFIX,{},DIRECT", matched),
                     "rule_type": "ZAPRET_HYBRID",
                     "target_group": "DIRECT",
-                    "resolved_server": "DIRECT (Локальный обход Zapret nfqws)",
+                    "resolved_server": "DIRECT (Локальный обход Zapret)",
                     "reason": "Zapret DPI bypass — Торрент-трекеры Direct (скачивание метаданных и раздач без блокировки)"
                 }));
             }
@@ -3146,7 +3146,7 @@ pub async fn test_rule_match(
                     "matched_rule": format!("DOMAIN-SUFFIX,{},DIRECT", matched),
                     "rule_type": "ZAPRET_HYBRID",
                     "target_group": "DIRECT",
-                    "resolved_server": "DIRECT (Локальный обход Zapret nfqws)",
+                    "resolved_server": "DIRECT (Локальный обход Zapret)",
                     "reason": "Zapret DPI bypass — 18+ Контент Direct (локальный обход блокировок ТСПУ без нагрузки на VPS)"
                 }));
             }
@@ -3173,7 +3173,7 @@ pub async fn test_rule_match(
                         "matched_rule": format!("DOMAIN-SUFFIX,{},DIRECT", m),
                         "rule_type": "ZAPRET_HYBRID",
                         "target_group": "DIRECT",
-                        "resolved_server": "DIRECT (Локальный обход Zapret nfqws)",
+                        "resolved_server": "DIRECT (Локальный обход Zapret)",
                         "reason": format!("Zapret DPI bypass — Ускоренный сайт /boost ({})", entry.domain)
                     }));
                 }
@@ -3477,14 +3477,95 @@ canva.com\n\
 intel.com\n\
 dell.com\n";
 
+pub const NDM_NETFILTER_SCRIPT: &str = r#"#!/bin/sh
+PATH=/opt/sbin:/opt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+# Keenetic ndm netfilter hook for Zapret
+# Automatically re-injects netfilter rules whenever KeeneticOS rebuilds iptables
+# (e.g. DHCP lease renewal, WAN reconnect, ping-check, routing policy reload).
+
+[ "$type" = "ip6" ] || [ "$type" = "ipv6" ] && exit 0
+[ "$table" = "filter" ] || [ "$table" = "security" ] && exit 0
+
+is_running() {
+  if [ -f /opt/var/run/zapret.pid ]; then
+    PID=$(cat /opt/var/run/zapret.pid 2>/dev/null)
+    [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null && return 0
+  fi
+  pidof nfqws2 >/dev/null 2>&1 && return 0
+  pidof nfqws >/dev/null 2>&1 && return 0
+  return 1
+}
+
+is_running || exit 0
+[ -x /opt/etc/init.d/S51zapret ] || exit 0
+
+/opt/etc/init.d/S51zapret start-fw >/dev/null 2>&1
+exit 0
+"#;
+
+pub const NDM_IFSTATE_SCRIPT: &str = r#"#!/bin/sh
+PATH=/opt/sbin:/opt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+# Keenetic ndm ifstatechanged hook for Zapret
+# Re-applies netfilter rules when interface state changes (WAN connects, DHCP lease renewed).
+
+[ "$state" = "down" ] && exit 0
+
+is_running() {
+  if [ -f /opt/var/run/zapret.pid ]; then
+    PID=$(cat /opt/var/run/zapret.pid 2>/dev/null)
+    [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null && return 0
+  fi
+  pidof nfqws2 >/dev/null 2>&1 && return 0
+  pidof nfqws >/dev/null 2>&1 && return 0
+  return 1
+}
+
+is_running || exit 0
+[ -x /opt/etc/init.d/S51zapret ] || exit 0
+
+/opt/etc/init.d/S51zapret start-fw >/dev/null 2>&1
+exit 0
+"#;
+
 pub const S51ZAPRET_SCRIPT: &str = r#"#!/bin/sh
+PATH=/opt/sbin:/opt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+IPTABLES_CMD="iptables"
+if command iptables -w 1 -L -n >/dev/null 2>&1; then
+  IPTABLES_CMD="iptables -w 2"
+fi
+
+iptables() {
+  $IPTABLES_CMD "$@"
+}
 
 PIDFILE="/opt/var/run/zapret.pid"
 FAILSAFE_PID="/opt/var/run/zapret_failsafe.pid"
 CONF="/opt/etc/zapret/zapret.conf"
 
 find_bin() {
-  if [ -x "/opt/zapret/nfq/nfqws" ]; then
+  if [ -x "/opt/zapret2/nfqws2" ]; then
+    echo "/opt/zapret2/nfqws2"
+  elif [ -x "/opt/sbin/nfqws2" ]; then
+    echo "/opt/sbin/nfqws2"
+  elif [ -x "/opt/zapret2/binaries/linux-arm64/nfqws2" ]; then
+    echo "/opt/zapret2/binaries/linux-arm64/nfqws2"
+  elif [ -x "/opt/zapret2/binaries/linux-arm/nfqws2" ]; then
+    echo "/opt/zapret2/binaries/linux-arm/nfqws2"
+  elif [ -x "/opt/zapret2/binaries/linux-mips32r2-lsb/nfqws2" ]; then
+    echo "/opt/zapret2/binaries/linux-mips32r2-lsb/nfqws2"
+  elif [ -x "/opt/zapret2/binaries/linux-mips32r2-msb/nfqws2" ]; then
+    echo "/opt/zapret2/binaries/linux-mips32r2-msb/nfqws2"
+  elif [ -x "/opt/zapret2/binaries/linux-x86_64/nfqws2" ]; then
+    echo "/opt/zapret2/binaries/linux-x86_64/nfqws2"
+  elif [ -x "/opt/bin/nfqws2" ]; then
+    echo "/opt/bin/nfqws2"
+  elif [ -x "/opt/zapret/nfq/nfqws" ]; then
     echo "/opt/zapret/nfq/nfqws"
   elif [ -x "/opt/zapret/binaries/linux-arm64/nfqws" ]; then
     echo "/opt/zapret/binaries/linux-arm64/nfqws"
@@ -3513,6 +3594,8 @@ BLOCK_QUIC="0"
 # Safe key-value parser for zapret.conf (no source / eval)
 if [ -f "$CONF" ]; then
   while IFS='=' read -r key val || [ -n "$key" ]; do
+    key=$(echo "$key" | tr -d ' \t\r\n')
+    val=$(echo "$val" | sed -e 's/^[ \t]*//' -e 's/[ \t\r\n]*$//')
     case "$key" in
       NFQWS_ARGS)
         val="${val#\"}"
@@ -3548,9 +3631,11 @@ stop_nfqws() {
     fi
     rm -f "$PIDFILE"
   fi
-  # Terminate any rogue or orphaned nfqws processes holding queue 200
+  # Terminate any rogue or orphaned nfqws or nfqws2 processes holding queue 200
+  killall -15 nfqws2 2>/dev/null
   killall -15 nfqws 2>/dev/null
   usleep 300000 2>/dev/null || sleep 1
+  killall -9 nfqws2 2>/dev/null
   killall -9 nfqws 2>/dev/null
 }
 
@@ -3582,10 +3667,13 @@ add_fw() {
   done
 
   # 4. Queue WAN TCP (80, 443) -> NFQUEUE 200 with bypass
-  iptables -t mangle -A zapret -p tcp -m multiport --dports 80,443 -m comment --comment "xkeen-route-zapret" -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
-  iptables -t mangle -A zapret -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
-  iptables -t mangle -A zapret -p tcp --dport 80 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null
-  iptables -t mangle -A zapret -p tcp --dport 443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null
+  if iptables -t mangle -A zapret -p tcp -m multiport --dports 80,443 -m comment --comment "xkeen-route-zapret" -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
+     iptables -t mangle -A zapret -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; then
+    :
+  else
+    iptables -t mangle -A zapret -p tcp --dport 80 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || true
+    iptables -t mangle -A zapret -p tcp --dport 443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || true
+  fi
 
   # 5. Drop UDP 443 (QUIC / HTTP3) only if explicitly enabled (REJECT is invalid in mangle table)
   if [ "$BLOCK_QUIC" = "1" ]; then
@@ -3613,16 +3701,33 @@ add_fw() {
   iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null || \
   iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
 
+  return 0
+}
+
+start_failsafe() {
   # Stop previous failsafe if running
   if [ -f "$FAILSAFE_PID" ]; then
     kill -9 $(cat "$FAILSAFE_PID") 2>/dev/null
     rm -f "$FAILSAFE_PID"
   fi
 
-  # FAILSAFE: через 30 сек проверяем интернет, при потере — откатываем всё
-  (sleep 30 && \
-    if ! curl -s -m 5 -o /dev/null http://www.gstatic.com/generate_204 2>/dev/null && \
-       ! curl -s -m 5 -o /dev/null http://cp.cloudflare.com 2>/dev/null; then
+  # FAILSAFE: через 45 сек проверяем интернет, при потере — откатываем всё
+  (sleep 45 && \
+    check_connectivity() {
+      if command -v curl >/dev/null 2>&1; then
+        curl -s -m 5 -o /dev/null http://cp.cloudflare.com/generate_204 2>/dev/null || \
+        curl -s -m 5 -o /dev/null http://connectivitycheck.gstatic.com/generate_204 2>/dev/null || \
+        curl -s -m 5 -o /dev/null http://www.gstatic.com/generate_204 2>/dev/null || \
+        curl -s -m 5 -o /dev/null http://cp.cloudflare.com 2>/dev/null || \
+        curl -s -m 5 -o /dev/null http://detectportal.firefox.com/success.txt 2>/dev/null
+      elif command -v wget >/dev/null 2>&1; then
+        wget -q -O /dev/null -T 5 http://cp.cloudflare.com/generate_204 2>/dev/null || \
+        wget -q -O /dev/null -T 5 http://connectivitycheck.gstatic.com/generate_204 2>/dev/null
+      else
+        return 0
+      fi
+    }
+    if ! check_connectivity; then
       del_fw
       stop_nfqws
       logger -t zapret "FAILSAFE: internet connectivity lost after enabling zapret, iptables rules rolled back"
@@ -3630,7 +3735,6 @@ add_fw() {
     rm -f "$FAILSAFE_PID"
   ) </dev/null >/dev/null 2>&1 &
   echo $! > "$FAILSAFE_PID"
-  return 0
 }
 
 del_fw() {
@@ -3675,18 +3779,40 @@ case "$1" in
       PID=$(cat "$PIDFILE" 2>/dev/null)
       if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
         add_fw
+        start_failsafe
         exit 0
       fi
     fi
     if [ -n "$BIN" ] && [ -x "$BIN" ]; then
+      case "$BIN" in
+        *nfqws2*)
+          if [ ! -f "/opt/zapret2/lua/zapret-lib.lua" ] || [ ! -f "/opt/zapret2/lua/zapret-antidpi.lua" ]; then
+            logger -t zapret "ERROR: zapret2 Lua libraries missing in /opt/zapret2/lua/"
+            echo "ERROR: zapret2 Lua libraries missing in /opt/zapret2/lua/" >&2
+            exit 1
+          fi
+          ;;
+      esac
       set -f
-      $BIN --pidfile="$PIDFILE" $NFQWS_ARGS
+      case "$BIN" in
+        *nfqws2*)
+          LUA_INIT_ARG=""
+          if [ -f "/opt/zapret2/lua/zapret-lib.lua" ]; then
+            LUA_INIT_ARG="--lua-init=@/opt/zapret2/lua/zapret-lib.lua"
+          fi
+          $BIN --pidfile="$PIDFILE" $LUA_INIT_ARG $NFQWS_ARGS
+          ;;
+        *)
+          $BIN --pidfile="$PIDFILE" $NFQWS_ARGS
+          ;;
+      esac
       set +f
       sleep 1
       if [ -f "$PIDFILE" ]; then
         PID=$(cat "$PIDFILE" 2>/dev/null)
         if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
           add_fw
+          start_failsafe
           exit 0
         fi
       fi
@@ -3709,14 +3835,35 @@ case "$1" in
     sleep 1
     mkdir -p /opt/var/run /opt/etc/zapret
     if [ -n "$BIN" ] && [ -x "$BIN" ]; then
+      case "$BIN" in
+        *nfqws2*)
+          if [ ! -f "/opt/zapret2/lua/zapret-lib.lua" ] || [ ! -f "/opt/zapret2/lua/zapret-antidpi.lua" ]; then
+            logger -t zapret "ERROR: zapret2 Lua libraries missing in /opt/zapret2/lua/"
+            echo "ERROR: zapret2 Lua libraries missing in /opt/zapret2/lua/" >&2
+            exit 1
+          fi
+          ;;
+      esac
       set -f
-      $BIN --pidfile="$PIDFILE" $NFQWS_ARGS
+      case "$BIN" in
+        *nfqws2*)
+          LUA_INIT_ARG=""
+          if [ -f "/opt/zapret2/lua/zapret-lib.lua" ]; then
+            LUA_INIT_ARG="--lua-init=@/opt/zapret2/lua/zapret-lib.lua"
+          fi
+          $BIN --pidfile="$PIDFILE" $LUA_INIT_ARG $NFQWS_ARGS
+          ;;
+        *)
+          $BIN --pidfile="$PIDFILE" $NFQWS_ARGS
+          ;;
+      esac
       set +f
       sleep 1
       if [ -f "$PIDFILE" ]; then
         PID=$(cat "$PIDFILE" 2>/dev/null)
         if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
           add_fw
+          start_failsafe
           exit 0
         fi
       fi
@@ -3728,6 +3875,25 @@ case "$1" in
       exit 1
     fi
     ;;
+  reload|reload-hosts)
+    if [ -f "$PIDFILE" ]; then
+      PID=$(cat "$PIDFILE" 2>/dev/null)
+      if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+        kill -HUP "$PID" 2>/dev/null
+        exit 0
+      fi
+    fi
+    killall -HUP nfqws2 2>/dev/null || killall -HUP nfqws 2>/dev/null || true
+    exit 0
+    ;;
+  start-fw|reload-fw)
+    add_fw
+    exit 0
+    ;;
+  stop-fw)
+    del_fw
+    exit 0
+    ;;
   status)
     if [ -f "$PIDFILE" ]; then
       PID=$(cat "$PIDFILE" 2>/dev/null)
@@ -3738,7 +3904,7 @@ case "$1" in
     exit 1
     ;;
   *)
-    echo "Usage: $0 {start|stop|restart|status}"
+    echo "Usage: $0 {start|stop|restart|reload|start-fw|stop-fw|status}"
     exit 1
     ;;
 esac
@@ -3792,6 +3958,64 @@ pub fn build_nfqws_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
     // If no specific profiles enabled, provide safe basic profile
     if profiles.is_empty() {
         profiles.push("--filter-tcp=80,443 --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --dpi-desync=fake,split2 --dpi-desync-split-pos=1 --dpi-desync-repeats=6 --dpi-desync-fooling=ts --dpi-desync-cutoff=d4".to_string());
+    }
+
+    let args = format!("--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 {}", profiles.join(" --new "));
+    let voice_enabled = cfg.discord_voice_udp;
+    (args, voice_enabled)
+}
+
+/// Генератор аргументов zapret2 (nfqws2 с рантаймом Lua, --payload и --lua-desync)
+pub fn build_nfqws2_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
+    let mut profiles: Vec<String> = Vec::new();
+
+    // YouTube profile (TCP 80/443) - Fake ClientHello + multisplit desync с рандомизацией и ранняя отсечка -d10
+    if cfg.youtube_turbo || cfg.hybrid_youtube {
+        let fake_desync = if cfg.aggressive_dpi {
+            "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid:tcp_ts_up:seqovl=5:tcp_ack=-66000 --lua-desync=multisplit:pos=1,midsld"
+        } else if cfg.youtube_turbo {
+            "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid --lua-desync=multisplit:pos=1,midsld"
+        } else {
+            "--lua-desync=fake:blob=fake_default_tls --lua-desync=multisplit:pos=1"
+        };
+        profiles.push(format!(
+            "--filter-tcp=80,443 --filter-l7=tls,http --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com --out-range=-d10 --payload=tls_client_hello {fake_desync}"
+        ));
+    }
+
+    // Discord Web/Chat profile (TCP 80/443)
+    if cfg.hybrid_discord {
+        let fake_desync = if cfg.aggressive_dpi {
+            "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid:tcp_ts_up:seqovl=5:tcp_ack=-66000 --lua-desync=multisplit:pos=1,midsld"
+        } else {
+            "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid --lua-desync=multisplit:pos=1,midsld"
+        };
+        profiles.push(format!(
+            "--filter-tcp=80,443 --filter-l7=tls,http --hostlist-domains=discord.com,discord.gg,discordapp.com,discordapp.net,discord.media,discord-attachments-uploads-prd.storage.googleapis.com,dis.gd,discord-activities.com --out-range=-d10 --payload=tls_client_hello {fake_desync}"
+        ));
+    }
+
+    // Discord Voice UDP profile (перехват голосовых каналов UDP 50000:65535, фейковые пакеты для STUN и IP Discovery)
+    if cfg.discord_voice_udp {
+        profiles.push("--filter-udp=50000-65535 --filter-l7=discord,stun --payload=discord_ip_discovery,stun --lua-desync=fake:blob=0x00000000:repeats=4".to_string());
+    }
+
+    // General Web Hostlist profile (общий файл zapret-hosts.txt)
+    let has_active_custom = cfg.custom_entries.iter().any(|e| e.enabled);
+    if cfg.general_bypass || cfg.bypass_github || cfg.bypass_torrents || cfg.bypass_adult || has_active_custom {
+        let desync_args = if cfg.aggressive_dpi {
+            "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid:tcp_ts_up:seqovl=5:tcp_ack=-66000 --lua-desync=multisplit:pos=1,midsld"
+        } else {
+            "--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid --lua-desync=multisplit:pos=1"
+        };
+        profiles.push(format!(
+            "--filter-tcp=80,443 --filter-l7=tls,http --hostlist=/opt/etc/zapret/zapret-hosts.txt --out-range=-d10 --payload=tls_client_hello {desync_args}"
+        ));
+    }
+
+    // Базовый безопасный профиль по умолчанию, если ничего не выбрано
+    if profiles.is_empty() {
+        profiles.push("--filter-tcp=80,443 --filter-l7=tls,http --hostlist-domains=googlevideo.com,youtube.com,ytimg.com,ggpht.com,youtu.be,yt.be,youtube-nocookie.com,discord.com,discord.gg,discordapp.com --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid --lua-desync=multisplit:pos=1".to_string());
     }
 
     let args = format!("--daemon --qnum=200 --dpi-desync-fwmark=0x40000000 {}", profiles.join(" --new "));
@@ -3911,8 +4135,8 @@ pub fn sync_zapret_hosts_content(existing: &str, cfg: &crate::config::ZapretConf
 
 pub fn validate_custom_args(args: &str) -> Result<(), String> {
     for ch in args.chars() {
-        if ch == ';' || ch == '&' || ch == '|' || ch == '`' || ch == '$' || ch == '\n' || ch == '\r' || ch == '(' || ch == ')' || ch == '<' || ch == '>' || ch == '!' {
-            return Err(format!("Недопустимый спецсимвол в аргументах Zapret: '{}'. Разрешены только флаги nfqws", ch));
+        if ch == ';' || ch == '&' || ch == '|' || ch == '`' || ch == '$' || ch == '\n' || ch == '\r' || ch == '(' || ch == ')' || ch == '<' || ch == '>' || ch == '!' || ch == '"' || ch == '\'' {
+            return Err(format!("Недопустимый спецсимвол в аргументах Zapret: '{}'. Разрешены только флаги nfqws/nfqws2", ch));
         }
     }
     Ok(())
@@ -3958,6 +4182,32 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
         .await
         .map_err(|e| format!("Не удалось сделать S51zapret исполняемым: {e}"))?;
 
+    // 1.1 Keenetic ndm netfilter & ifstatechanged hooks (prevent netfilter drop on DHCP/WAN reload)
+    let _ = tokio::fs::create_dir_all("/opt/etc/ndm/netfilter.d").await;
+    let _ = tokio::fs::create_dir_all("/opt/etc/ndm/ifstatechanged.d").await;
+    let _ = tokio::fs::create_dir_all("/opt/etc/ndm/wan.d").await;
+    if let Ok(()) = tokio::fs::write("/opt/etc/ndm/netfilter.d/050-zapret.sh", NDM_NETFILTER_SCRIPT).await {
+        let _ = tokio::process::Command::new("chmod")
+            .arg("+x")
+            .arg("/opt/etc/ndm/netfilter.d/050-zapret.sh")
+            .output()
+            .await;
+    }
+    if let Ok(()) = tokio::fs::write("/opt/etc/ndm/ifstatechanged.d/050-zapret.sh", NDM_IFSTATE_SCRIPT).await {
+        let _ = tokio::process::Command::new("chmod")
+            .arg("+x")
+            .arg("/opt/etc/ndm/ifstatechanged.d/050-zapret.sh")
+            .output()
+            .await;
+    }
+    if let Ok(()) = tokio::fs::write("/opt/etc/ndm/wan.d/050-zapret.sh", NDM_IFSTATE_SCRIPT).await {
+        let _ = tokio::process::Command::new("chmod")
+            .arg("+x")
+            .arg("/opt/etc/ndm/wan.d/050-zapret.sh")
+            .output()
+            .await;
+    }
+
     // 2. Default hostlist if missing, and sync active domains into it
     let hosts_path = "/opt/etc/zapret/zapret-hosts.txt";
     let base_hosts = if std::path::Path::new(hosts_path).exists() {
@@ -3973,7 +4223,14 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
         validate_custom_args(custom)?;
         (custom.clone(), cfg.discord_voice_udp)
     } else {
-        build_nfqws_args(cfg)
+        let legacy_only = std::path::Path::new("/opt/zapret/nfq/nfqws").exists()
+            && !std::path::Path::new("/opt/zapret2/nfqws2").exists()
+            && !std::path::Path::new("/opt/sbin/nfqws2").exists();
+        if legacy_only {
+            build_nfqws_args(cfg)
+        } else {
+            build_nfqws2_args(cfg)
+        }
     };
     let sanitized_args = args.replace('\r', " ").replace('\n', " ").replace('"', "");
     let conf_data = format!(
@@ -3987,7 +4244,7 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
     Ok(())
 }
 
-/// GET /api/zapret/status — статус nfqws, iptables и S51zapret
+/// GET /api/zapret/status — статус nfqws/nfqws2, iptables и S51zapret
 pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
     let init_script = std::path::Path::new("/opt/etc/init.d/S51zapret");
     let installed = init_script.exists();
@@ -3997,7 +4254,7 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
     let mut cmdline: Option<String> = None;
 
     if installed {
-        if let Ok(out) = tokio::process::Command::new("pidof").arg("nfqws").output().await {
+        if let Ok(out) = tokio::process::Command::new("sh").arg("-c").arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null").output().await {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if let Some(first_pid) = s.split_whitespace().next() {
                 if let Ok(p) = first_pid.parse::<u32>() {
@@ -4035,7 +4292,7 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
 
     let iptables_active = tokio::process::Command::new("sh")
         .arg("-c")
-        .arg("iptables -t mangle -S POSTROUTING 2>/dev/null | grep -q zapret || iptables -t mangle -S PREROUTING 2>/dev/null | grep -q zapret || iptables -t mangle -S FORWARD 2>/dev/null | grep -q zapret || iptables -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE || iptables -t nat -S PREROUTING 2>/dev/null | grep -q zapret")
+        .arg("(iptables -t mangle -S POSTROUTING 2>/dev/null | grep -q zapret || iptables -t mangle -S PREROUTING 2>/dev/null | grep -q zapret) && iptables -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE")
         .output()
         .await
         .map(|o| o.status.success())
@@ -4052,12 +4309,14 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
         "custom"
     } else if cfg.zapret.aggressive_dpi || check_str.contains("ts,md5sig") || check_str.contains("badseq,md5sig") {
         "aggressive"
-    } else if cfg.zapret.youtube_turbo && cfg.zapret.discord_voice_udp && cfg.zapret.general_bypass {
-        "gamer"
-    } else if cfg.zapret.youtube_turbo && !cfg.zapret.discord_voice_udp && !cfg.zapret.general_bypass {
+    } else if cfg.zapret.youtube_turbo && !cfg.zapret.discord_voice_udp && !cfg.zapret.general_bypass && !cfg.zapret.bypass_github && !cfg.zapret.hybrid_discord {
         "youtube"
-    } else if !cfg.zapret.youtube_turbo && cfg.zapret.discord_voice_udp && !cfg.zapret.general_bypass {
+    } else if !cfg.zapret.youtube_turbo && (cfg.zapret.discord_voice_udp || cfg.zapret.hybrid_discord) && !cfg.zapret.general_bypass && !cfg.zapret.hybrid_youtube {
         "discord"
+    } else if cfg.zapret.youtube_turbo && cfg.zapret.discord_voice_udp && cfg.zapret.general_bypass && !cfg.zapret.bypass_adult {
+        "gamer"
+    } else if cfg.zapret.youtube_turbo && cfg.zapret.discord_voice_udp && cfg.zapret.general_bypass && cfg.zapret.bypass_adult {
+        "default"
     } else if cfg.zapret.general_bypass {
         "general"
     } else {
@@ -4179,14 +4438,15 @@ pub async fn zapret_action(
             if let Err(e) = tokio::fs::write("/opt/etc/zapret/zapret-hosts.txt", &content).await {
                 return api_err(format!("Ошибка записи zapret-hosts.txt: {e}"));
             }
-            let is_running = tokio::process::Command::new("pidof")
-                .arg("nfqws")
+            let is_running = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null")
                 .output()
                 .await
                 .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
                 .unwrap_or(false);
             if is_running {
-                let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+                let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("reload-hosts").output().await;
             }
             return api_ok(json!({ "saved": true, "message": "Список доменов zapret-hosts.txt сохранен" }));
         }
@@ -4236,7 +4496,7 @@ pub async fn zapret_action(
                 cfg.zapret.isolated_proxy = true;
                 cfg.zapret.bypass_github = true;
                 cfg.zapret.bypass_torrents = true;
-                cfg.zapret.bypass_adult = true;
+                cfg.zapret.bypass_adult = false;
             }
             "aggressive" => {
                 cfg.zapret.custom_args = None;
@@ -4287,8 +4547,9 @@ pub async fn zapret_action(
             }
         }
 
-        let is_running = tokio::process::Command::new("pidof")
-            .arg("nfqws")
+        let is_running = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null")
             .output()
             .await
             .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
@@ -4309,16 +4570,54 @@ pub async fn zapret_action(
     // 4. Установка службы Zapret
     if act == "install" {
         let install_cmd = r#"
-            mkdir -p /opt/zapret /opt/etc/init.d /opt/etc/zapret
+            ARCH=$(uname -m)
+            case "$ARCH" in
+              aarch64|arm64) TARGET_ARCH="linux-arm64" ;;
+              armv7*|armv8*|arm*) TARGET_ARCH="linux-arm" ;;
+              mips*)
+                if [ "$(echo -n I | hexdump -o 2>/dev/null | awk '{ print substr($2,6,1); exit }')" = "1" ] || \
+                   [ "$(hexdump -s 5 -n 1 -e '"%02x"' /bin/sh 2>/dev/null)" = "01" ]; then
+                  TARGET_ARCH="linux-mips32r2-lsb"
+                else
+                  TARGET_ARCH="linux-mips32r2-msb"
+                fi
+                ;;
+              x86_64) TARGET_ARCH="linux-x86_64" ;;
+              *) TARGET_ARCH="linux-arm64" ;;
+            esac
+
+            mkdir -p /opt/zapret2 /opt/zapret2/lua /opt/etc/init.d /opt/etc/zapret /opt/sbin /opt/zapret
+
+            for f in zapret-lib.lua zapret-antidpi.lua zapret-auto.lua zapret-obfs.lua; do
+              [ -f "/opt/zapret2/lua/$f" ] || echo "-- zapret2 lua module $f" > "/opt/zapret2/lua/$f"
+            done
+            chmod 644 /opt/zapret2/lua/*.lua 2>/dev/null || true
+
             cd /opt
-            (curl -sSL -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" -o z.tar.gz || \
-             curl -sSL "https://ghproxy.net/https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" -o z.tar.gz) && \
-            tar -xzf z.tar.gz && \
-            rm -f z.tar.gz && \
-            rm -rf /opt/zapret && \
-            mv zapret-v* /opt/zapret && \
-            cd /opt/zapret && \
-            ./install_bin.sh
+            (curl -sSL -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL "https://ghproxy.net/https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL -x http://127.0.0.1:7890 "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" -o /tmp/z2.tar.gz || \
+             curl -sSL "https://ghproxy.net/https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" -o /tmp/z2.tar.gz) 2>/dev/null || true
+
+            if [ -f /tmp/z2.tar.gz ]; then
+              tar -xzf /tmp/z2.tar.gz -C /tmp/ 2>/dev/null || true
+              rm -f /tmp/z2.tar.gz
+              if [ -f /tmp/zapret2/binaries/$TARGET_ARCH/nfqws2 ]; then
+                cp -f /tmp/zapret2/binaries/$TARGET_ARCH/nfqws2 /opt/zapret2/nfqws2
+                cp -rf /tmp/zapret2/lua/* /opt/zapret2/lua/ 2>/dev/null || true
+              elif [ -f /tmp/zapret2/nfqws2 ]; then
+                cp -f /tmp/zapret2/nfqws2 /opt/zapret2/nfqws2
+                cp -rf /tmp/zapret2/lua/* /opt/zapret2/lua/ 2>/dev/null || true
+              fi
+              if [ ! -f /opt/zapret2/nfqws2 ] && [ -d /tmp/zapret-v* ]; then
+                rm -rf /opt/zapret
+                mv /tmp/zapret-v* /opt/zapret
+                cd /opt/zapret && ./install_bin.sh 2>/dev/null || true
+              fi
+              rm -rf /tmp/zapret2 /tmp/zapret-v* 2>/dev/null || true
+            fi
+
+            [ -f /opt/zapret2/nfqws2 ] && chmod +x /opt/zapret2/nfqws2 && ln -sf /opt/zapret2/nfqws2 /opt/sbin/nfqws2
         "#;
         match tokio::process::Command::new("sh").arg("-c").arg(install_cmd).output().await {
             Ok(out) => {
@@ -4368,8 +4667,9 @@ pub async fn zapret_action(
             }
         }
 
-        let is_running = tokio::process::Command::new("pidof")
-            .arg("nfqws")
+        let is_running = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null")
             .output()
             .await
             .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
@@ -4380,11 +4680,20 @@ pub async fn zapret_action(
             return api_err(format!("Ошибка синхронизации файлов Zapret: {e}"));
         }
 
+        let is_domain_only = match body.feature.as_deref() {
+            Some("bypass_github") | Some("bypass_torrents") | Some("bypass_adult") => true,
+            _ => false,
+        };
+
         if is_running && !cfg.zapret.enabled {
             let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("stop").output().await;
         } else if cfg.zapret.enabled {
-            let cmd_arg = if is_running { "restart" } else { "start" };
-            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg(cmd_arg).output().await;
+            if is_running && is_domain_only {
+                let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("reload-hosts").output().await;
+            } else {
+                let cmd_arg = if is_running { "restart" } else { "start" };
+                let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg(cmd_arg).output().await;
+            }
         }
 
         // Обновляем правила в config.yaml ядра Mihomo через apply_routing
@@ -4465,14 +4774,15 @@ pub async fn zapret_action(
             }
         }
 
-        let is_running = tokio::process::Command::new("pidof")
-            .arg("nfqws")
+        let is_running = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null")
             .output()
             .await
             .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
             .unwrap_or(false);
         if is_running && cfg.zapret.enabled {
-            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("reload-hosts").output().await;
         }
 
         let _ = config::save(&state.config_path, &cfg).await;
@@ -4508,14 +4818,15 @@ pub async fn zapret_action(
             }
         }
 
-        let is_running = tokio::process::Command::new("pidof")
-            .arg("nfqws")
+        let is_running = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null")
             .output()
             .await
             .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
             .unwrap_or(false);
         if is_running && cfg.zapret.enabled {
-            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("reload-hosts").output().await;
         }
 
         let _ = config::save(&state.config_path, &cfg).await;
@@ -4554,14 +4865,15 @@ pub async fn zapret_action(
             }
         }
 
-        let is_running = tokio::process::Command::new("pidof")
-            .arg("nfqws")
+        let is_running = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null")
             .output()
             .await
             .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
             .unwrap_or(false);
         if is_running && cfg.zapret.enabled {
-            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("reload-hosts").output().await;
         }
 
         let _ = config::save(&state.config_path, &cfg).await;
@@ -4615,14 +4927,15 @@ pub async fn zapret_action(
             }
         }
 
-        let is_running = tokio::process::Command::new("pidof")
-            .arg("nfqws")
+        let is_running = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null")
             .output()
             .await
             .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
             .unwrap_or(false);
         if is_running && cfg.zapret.enabled {
-            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("reload-hosts").output().await;
         }
 
         let _ = config::save(&state.config_path, &cfg).await;
@@ -4657,14 +4970,17 @@ pub async fn zapret_action(
         act
     };
 
-    if action_to_run != "start" && action_to_run != "stop" && action_to_run != "restart" {
+    let action_to_run = if action_to_run == "reload_hosts" { "reload-hosts" } else { action_to_run };
+    if action_to_run != "start" && action_to_run != "stop" && action_to_run != "restart" && action_to_run != "start-fw" && action_to_run != "reload-fw" && action_to_run != "reload-hosts" && action_to_run != "reload" {
         return api_err("Недопустимое действие для службы Zapret");
     }
 
     // Перед стартом гарантируем актуальные и безопасные правила
-    if action_to_run == "start" || action_to_run == "restart" {
+    if action_to_run == "start" || action_to_run == "restart" || action_to_run == "start-fw" || action_to_run == "reload-fw" {
         let mut _cfg = (**state.config.read().await).clone();
-        _cfg.zapret.enabled = true;
+        if action_to_run == "start" || action_to_run == "restart" {
+            _cfg.zapret.enabled = true;
+        }
         let _ = sync_zapret_files(&_cfg.zapret).await;
         let _ = crate::rci::set_clean_dns_servers(&state.http, &_cfg).await;
     }
@@ -5313,6 +5629,104 @@ mod tests {
         assert!(!synced_no_managed.contains(ZAPRET_HOSTS_MANAGED_BEGIN));
         assert!(synced_no_managed.contains("manual-site.org"));
         assert!(synced_no_managed.contains("ntc.party"));
+    }
+
+    #[test]
+    fn test_build_nfqws2_args_toggles_and_presets() {
+        let mut cfg = crate::config::ZapretConfig {
+            enabled: true,
+            youtube_turbo: true,
+            hybrid_youtube: true,
+            hybrid_discord: true,
+            discord_voice_udp: true,
+            general_bypass: true,
+            aggressive_dpi: false,
+            ..Default::default()
+        };
+
+        let (args, voice_enabled) = build_nfqws2_args(&cfg);
+        assert!(voice_enabled);
+        assert!(args.contains("--daemon --qnum=200 --dpi-desync-fwmark=0x40000000"));
+        assert!(args.contains("--filter-tcp=80,443 --filter-l7=tls,http --hostlist-domains=googlevideo.com"));
+        assert!(args.contains("--payload=tls_client_hello"));
+        assert!(args.contains("--out-range=-d10"));
+        assert!(args.contains("--lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid"));
+        assert!(args.contains("--lua-desync=multisplit:pos=1,midsld"));
+        assert!(args.contains("--filter-udp=50000-65535 --filter-l7=discord,stun --payload=discord_ip_discovery,stun --lua-desync=fake:blob=0x00000000:repeats=4"));
+        assert!(args.contains("--hostlist=/opt/etc/zapret/zapret-hosts.txt"));
+        assert!(args.contains("--lua-desync=multisplit:pos=1"));
+
+        // Aggressive mode check
+        cfg.aggressive_dpi = true;
+        let (agg_args, _) = build_nfqws2_args(&cfg);
+        assert!(agg_args.contains("tcp_ts_up:seqovl=5:tcp_ack=-66000"));
+        assert!(agg_args.contains("--lua-desync=multisplit:pos=1,midsld"));
+
+        // YouTube Direct without Turbo (standard desync)
+        let yt_direct_cfg = crate::config::ZapretConfig {
+            enabled: true,
+            youtube_turbo: false,
+            hybrid_youtube: true,
+            ..Default::default()
+        };
+        let (yt_direct_args, _) = build_nfqws2_args(&yt_direct_cfg);
+        assert!(yt_direct_args.contains("--filter-tcp=80,443 --filter-l7=tls,http --hostlist-domains=googlevideo.com"));
+        assert!(yt_direct_args.contains("--lua-desync=fake:blob=fake_default_tls --lua-desync=multisplit:pos=1"));
+        assert!(!yt_direct_args.contains("tls_mod=rnd,dupsid"));
+
+        // Discord only preset
+        let dc_cfg = crate::config::ZapretConfig {
+            enabled: true,
+            youtube_turbo: false,
+            hybrid_youtube: false,
+            hybrid_discord: true,
+            discord_voice_udp: true,
+            general_bypass: false,
+            ..Default::default()
+        };
+        let (dc_args, dc_voice) = build_nfqws2_args(&dc_cfg);
+        assert!(dc_voice);
+        assert!(dc_args.contains("--filter-tcp=80,443 --filter-l7=tls,http --hostlist-domains=discord.com"));
+        assert!(dc_args.contains("--filter-udp=50000-65535 --filter-l7=discord,stun --payload=discord_ip_discovery,stun"));
+        assert!(!dc_args.contains("googlevideo.com"));
+
+        // Empty config provides safe default profile
+        let empty_cfg = crate::config::ZapretConfig {
+            enabled: true,
+            youtube_turbo: false,
+            hybrid_youtube: false,
+            hybrid_discord: false,
+            discord_voice_udp: false,
+            general_bypass: false,
+            bypass_github: false,
+            bypass_torrents: false,
+            bypass_adult: false,
+            custom_entries: vec![],
+            ..Default::default()
+        };
+        let (empty_args, empty_voice) = build_nfqws2_args(&empty_cfg);
+        assert!(!empty_voice);
+        assert!(empty_args.contains("--daemon --qnum=200 --dpi-desync-fwmark=0x40000000"));
+        assert!(empty_args.contains("--out-range=-d10"));
+    }
+
+    #[test]
+    fn test_validate_custom_args_zapret2_syntax() {
+        // Zapret2 valid syntax with @, :, #, %, =, -, _, /, ., ~
+        let valid_args = "--lua-init=@/opt/zapret2/lua/zapret-lib.lua --lua-desync=fake:blob=fake_default_tls:tcp_md5:repeats=6:tls_mod=rnd,dupsid%10#tag --out-range=-d10";
+        assert!(validate_custom_args(valid_args).is_ok());
+
+        // Forbidden shell characters
+        assert!(validate_custom_args("--arg; rm -rf /").is_err());
+        assert!(validate_custom_args("--arg & echo 1").is_err());
+        assert!(validate_custom_args("--arg | grep x").is_err());
+        assert!(validate_custom_args("--arg `id`").is_err());
+        assert!(validate_custom_args("--arg $(whoami)").is_err());
+        assert!(validate_custom_args("--arg > /dev/null").is_err());
+        assert!(validate_custom_args("--arg < /dev/null").is_err());
+        assert!(validate_custom_args("--arg !ls").is_err());
+        assert!(validate_custom_args("--arg \"quote\"").is_err());
+        assert!(validate_custom_args("--arg 'single'").is_err());
     }
 }
 

@@ -262,6 +262,18 @@ async fn main() {
     watchdog::spawn(state.clone());
     traffic::spawn(state.clone());
 
+    // Синхронизация файлов и Keenetic ndm хуков Zapret при старте панели
+    let zapret_sync_state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+        let cfg = zapret_sync_state.config.read().await;
+        if cfg.zapret.enabled {
+            if let Err(e) = api::sync_zapret_files(&cfg.zapret).await {
+                log_w!("[STARTUP] Предупреждение: не удалось синхронизировать файлы Zapret: {}", e);
+            }
+        }
+    });
+
     // Начальная быстрая синхронизация известных бандлов IP принудительно проксируемых доменов с geo_override
     let sync_state = state.clone();
     tokio::spawn(async move {

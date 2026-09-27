@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { apiGet, apiPost } from '../api'
 import type { ZapretStatus, DpiTestResult, ZapretFeatures } from '../types'
 
@@ -23,6 +23,20 @@ export default function Zapret({ notify }: ZapretProps) {
   const [busy, setBusy] = useState(false)
   const [testResult, setTestResult] = useState<DpiTestResult | null>(null)
   const [testingDpi, setTestingDpi] = useState(false)
+
+  // Защита оптимистичного UI: ключи операций в полёте защищены от затирания фоновым polling
+  const pendingKeysRef = useRef<Set<string>>(new Set())
+  const [pendingKeys, setPendingKeys] = useState<Set<string>>(new Set())
+
+  const addPendingKey = (key: string) => {
+    pendingKeysRef.current.add(key)
+    setPendingKeys(new Set(pendingKeysRef.current))
+  }
+
+  const removePendingKey = (key: string) => {
+    pendingKeysRef.current.delete(key)
+    setPendingKeys(new Set(pendingKeysRef.current))
+  }
 
   // Конфигурация и хостлист
   const [showConfigEditor, setShowConfigEditor] = useState(false)
@@ -58,11 +72,42 @@ export default function Zapret({ notify }: ZapretProps) {
   const loadStatus = async () => {
     try {
       const res = await apiGet<ZapretStatus>('zapret/status')
-      setStatus(res)
+      setStatus((prev) => {
+        if (!prev) return res
+        if (pendingKeysRef.current.has('enabled')) {
+          return { ...res, running: prev.running }
+        }
+        return res
+      })
       if (res.features) {
-        setFeatures({
-          ...res.features,
-          custom_entries: res.features.custom_entries || [],
+        setFeatures((prev) => {
+          if (pendingKeysRef.current.has('preset_in_flight')) {
+            return prev
+          }
+          const merged: ZapretFeatures = {
+            ...res.features!,
+            custom_entries: res.features!.custom_entries || [],
+          }
+          // Защищаем ключи, которые прямо сейчас меняются пользователем
+          for (const k of pendingKeysRef.current) {
+            if (k in prev && k !== 'custom_entries') {
+              (merged as any)[k] = (prev as any)[k]
+            } else if (k.startsWith('custom:')) {
+              const domain = k.slice(7)
+              const prevEntry = prev.custom_entries?.find((e) => normalizeDomainInput(e.domain) === domain)
+              if (prevEntry && merged.custom_entries) {
+                merged.custom_entries = merged.custom_entries.map((e) =>
+                  normalizeDomainInput(e.domain) === domain ? { ...e, enabled: prevEntry.enabled } : e
+                )
+              }
+            } else if (k.startsWith('delete:')) {
+              const domain = k.slice(7)
+              if (merged.custom_entries) {
+                merged.custom_entries = merged.custom_entries.filter((e) => normalizeDomainInput(e.domain) !== domain)
+              }
+            }
+          }
+          return merged
         })
       }
       if (res.config) setConfigDraft(res.config)
@@ -82,6 +127,7 @@ export default function Zapret({ notify }: ZapretProps) {
 
   const handleToggle = async () => {
     const nextVal = !isRunning
+    addPendingKey('enabled')
     setBusy(true)
     setStatus((prev) => (prev ? { ...prev, running: nextVal } : prev))
     setFeatures((prev) => ({ ...prev, enabled: nextVal }))
@@ -91,7 +137,7 @@ export default function Zapret({ notify }: ZapretProps) {
         enabled: nextVal,
       })
       notify(res.action === 'start' ? '🟢 Служба Zapret запущена' : '⚪ Служба Zapret остановлена')
-      // Даём nfqws время на инициализацию демона перед опросом PID
+      // Даём nfqws2 время на инициализацию демона перед опросом PID
       await new Promise((r) => setTimeout(r, 800))
       let statusRes = await apiGet<ZapretStatus>('zapret/status')
       if (nextVal && !statusRes.running) {
@@ -110,6 +156,7 @@ export default function Zapret({ notify }: ZapretProps) {
       setFeatures((prev) => ({ ...prev, enabled: !nextVal }))
       notify(e instanceof Error ? e.message : 'Ошибка переключения Zapret', true)
     } finally {
+      removePendingKey('enabled')
       setBusy(false)
     }
   }
@@ -130,7 +177,88 @@ export default function Zapret({ notify }: ZapretProps) {
   }
 
   const handleApplyPreset = async (presetId: string) => {
+    const presetKey = `preset:${presetId}`
+    addPendingKey(presetKey)
+    addPendingKey('preset_in_flight')
     setBusy(true)
+
+    // Оптимистичное обновление стейта в соответствии с пресетом
+    setFeatures((prev) => {
+      let opt = { ...prev }
+      if (presetId === 'youtube') {
+        opt = {
+          ...opt,
+          youtube_turbo: true,
+          hybrid_youtube: true,
+          hybrid_discord: false,
+          discord_voice_udp: false,
+          general_bypass: false,
+          aggressive_dpi: false,
+          bypass_github: false,
+          bypass_torrents: false,
+          bypass_adult: false,
+        }
+      } else if (presetId === 'discord') {
+        opt = {
+          ...opt,
+          youtube_turbo: false,
+          hybrid_youtube: false,
+          hybrid_discord: true,
+          discord_voice_udp: true,
+          general_bypass: false,
+          aggressive_dpi: false,
+          bypass_github: false,
+          bypass_torrents: false,
+          bypass_adult: false,
+        }
+      } else if (presetId === 'gamer' || presetId === 'media') {
+        opt = {
+          ...opt,
+          youtube_turbo: true,
+          hybrid_youtube: true,
+          hybrid_discord: true,
+          discord_voice_udp: true,
+          general_bypass: true,
+          aggressive_dpi: false,
+          isolated_proxy: true,
+          bypass_github: true,
+          bypass_torrents: true,
+          bypass_adult: false,
+        }
+      } else if (presetId === 'aggressive') {
+        opt = {
+          ...opt,
+          youtube_turbo: true,
+          hybrid_youtube: true,
+          hybrid_discord: true,
+          discord_voice_udp: true,
+          general_bypass: true,
+          aggressive_dpi: true,
+          isolated_proxy: true,
+          bypass_github: true,
+          bypass_torrents: true,
+          bypass_adult: true,
+        }
+      } else if (presetId === 'default' || presetId === 'general') {
+        opt = {
+          ...opt,
+          youtube_turbo: true,
+          hybrid_youtube: true,
+          hybrid_discord: true,
+          discord_voice_udp: true,
+          general_bypass: true,
+          aggressive_dpi: false,
+          isolated_proxy: true,
+          bypass_github: true,
+          bypass_torrents: true,
+          bypass_adult: true,
+        }
+      }
+      return opt
+    })
+
+    setStatus((prev) => (prev ? { ...prev, preset: presetId } : prev))
+
     try {
       const res = await apiPost<{ success: boolean; features?: ZapretFeatures; message?: string }>('zapret/action', {
         action: 'set_preset',
@@ -143,10 +271,12 @@ export default function Zapret({ notify }: ZapretProps) {
         })
       }
       notify(res.message || `Применен набор стратегий '${presetId}'`)
-      await loadStatus()
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка применения набора стратегий', true)
+      await loadStatus()
     } finally {
+      removePendingKey(presetKey)
+      removePendingKey('preset_in_flight')
       setBusy(false)
     }
   }
@@ -208,6 +338,7 @@ export default function Zapret({ notify }: ZapretProps) {
 
   const handleToggleFeature = async (key: keyof ZapretFeatures) => {
     const nextVal = !features[key]
+    addPendingKey(key)
     setTogglingFeature(key)
     setFeatures((prev) => ({ ...prev, [key]: nextVal }))
     try {
@@ -217,9 +348,17 @@ export default function Zapret({ notify }: ZapretProps) {
         enabled: nextVal,
       })
       if (res.features) {
-        setFeatures({
-          ...res.features,
-          custom_entries: res.features.custom_entries || [],
+        setFeatures((prev) => {
+          const merged: ZapretFeatures = {
+            ...res.features!,
+            custom_entries: res.features!.custom_entries || [],
+          }
+          for (const k of pendingKeysRef.current) {
+            if (k !== key && k in prev && k !== 'custom_entries') {
+              (merged as any)[k] = (prev as any)[k]
+            }
+          }
+          return merged
         })
       }
       notify(
@@ -227,16 +366,17 @@ export default function Zapret({ notify }: ZapretProps) {
           ? '🟢 Блок активирован и правила обновлены'
           : '⚪ Блок выключен'
       )
-      await loadStatus()
     } catch (e) {
       setFeatures((prev) => ({ ...prev, [key]: !nextVal }))
       notify(e instanceof Error ? e.message : 'Ошибка переключения блока', true)
     } finally {
+      removePendingKey(key)
       setTogglingFeature(null)
     }
   }
 
   const handleResetFeatures = async () => {
+    addPendingKey('preset_in_flight')
     setBusy(true)
     try {
       const res = await apiPost<{ success: boolean; features?: ZapretFeatures; message?: string }>('zapret/action', {
@@ -249,10 +389,11 @@ export default function Zapret({ notify }: ZapretProps) {
         })
       }
       notify('Все блоки сброшены к стандартным значениям')
-      await loadStatus()
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка сброса настроек', true)
+      await loadStatus()
     } finally {
+      removePendingKey('preset_in_flight')
       setBusy(false)
     }
   }
@@ -284,7 +425,6 @@ export default function Zapret({ notify }: ZapretProps) {
       }
       setCustomDomainInput('')
       notify(res.message || `Сайт ${clean} добавлен и ускорен (/boost)`)
-      await loadStatus()
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка добавления сайта', true)
     } finally {
@@ -294,6 +434,12 @@ export default function Zapret({ notify }: ZapretProps) {
 
   const handleRemoveCustomDomain = async (domain: string) => {
     const clean = normalizeDomainInput(domain)
+    const pendingKey = `delete:${clean}`
+    addPendingKey(pendingKey)
+    setFeatures((prev) => ({
+      ...prev,
+      custom_entries: (prev.custom_entries || []).filter((e) => normalizeDomainInput(e.domain) !== clean),
+    }))
     try {
       const res = await apiPost<{ success: boolean; features?: ZapretFeatures; message?: string }>('zapret/action', {
         action: 'remove_custom_domain',
@@ -306,15 +452,19 @@ export default function Zapret({ notify }: ZapretProps) {
         })
       }
       notify(res.message || `Сайт ${clean} удален из Zapret`)
-      await loadStatus()
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка удаления сайта', true)
+      await loadStatus()
+    } finally {
+      removePendingKey(pendingKey)
     }
   }
 
   const handleToggleCustomDomain = async (domain: string, currentEnabled: boolean) => {
     const clean = normalizeDomainInput(domain)
     const nextVal = !currentEnabled
+    const pendingKey = `custom:${clean}`
+    addPendingKey(pendingKey)
     setFeatures((prev) => ({
       ...prev,
       custom_entries: (prev.custom_entries || []).map((e) =>
@@ -343,6 +493,8 @@ export default function Zapret({ notify }: ZapretProps) {
         ),
       }))
       notify(e instanceof Error ? e.message : 'Ошибка переключения сайта', true)
+    } finally {
+      removePendingKey(pendingKey)
     }
   }
 
@@ -381,6 +533,22 @@ export default function Zapret({ notify }: ZapretProps) {
     )
   }
 
+  const renderMicroSpinner = (color = '#2563eb', size = 13) => (
+    <svg
+      className="zapret-spin"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke={color}
+      strokeWidth="3"
+      strokeLinecap="round"
+      style={{ width: size, height: size, display: 'block' }}
+      data-testid="zapret-micro-spinner"
+    >
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.25" />
+      <path d="M12 3a9 9 0 0 1 9 9" stroke="currentColor" />
+    </svg>
+  )
+
   const renderStrategyCard = (
     key: keyof ZapretFeatures,
     title: string,
@@ -391,7 +559,8 @@ export default function Zapret({ notify }: ZapretProps) {
     tags?: string[]
   ) => {
     const isChecked = !!features[key]
-    const isBusy = togglingFeature === key || busy
+    const isPending = pendingKeys.has(key) || togglingFeature === key
+    const isCardDisabled = isPending || busy || !isInstalled
 
     return (
       <div
@@ -452,14 +621,15 @@ export default function Zapret({ notify }: ZapretProps) {
 
           <button
             type="button"
-            disabled={isBusy || !isInstalled}
+            disabled={isCardDisabled}
             onClick={() => handleToggleFeature(key)}
+            className={isPending ? 'zapret-glow-pulse-blue' : ''}
             style={{
               width: 50,
               height: 28,
               borderRadius: 16,
               border: 'none',
-              cursor: isBusy || !isInstalled ? 'not-allowed' : 'pointer',
+              cursor: isCardDisabled ? 'not-allowed' : 'pointer',
               background: isChecked
                 ? 'linear-gradient(135deg, #38bdf8 0%, #2563eb 100%)'
                 : 'rgba(255, 255, 255, 0.15)',
@@ -489,7 +659,7 @@ export default function Zapret({ notify }: ZapretProps) {
                 fontWeight: 'bold',
               }}
             >
-              {isBusy ? '…' : isChecked ? '✓' : '✕'}
+              {isPending ? renderMicroSpinner(isChecked ? '#2563eb' : '#888', 13) : isChecked ? '✓' : '✕'}
             </div>
           </button>
         </div>
@@ -512,7 +682,7 @@ export default function Zapret({ notify }: ZapretProps) {
             {isChecked ? `🟢 ${activeInfo}` : `⚪ ${inactiveInfo}`}
           </span>
           <span style={{ fontSize: 10, opacity: 0.8 }}>
-            {isChecked ? 'Активна в nfqws' : 'Отключена'}
+            {isChecked ? 'Активна в nfqws2' : 'Отключена'}
           </span>
         </div>
       </div>
@@ -521,6 +691,48 @@ export default function Zapret({ notify }: ZapretProps) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <style>{`
+        @keyframes zapretSpin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+        .zapret-spin {
+          animation: zapretSpin 0.75s linear infinite;
+        }
+        @keyframes zapretGlowPulse {
+          0%, 100% {
+            box-shadow: 0 0 8px rgba(56, 189, 248, 0.4), 0 0 0 2px rgba(56, 189, 248, 0.3);
+          }
+          50% {
+            box-shadow: 0 0 18px rgba(56, 189, 248, 0.8), 0 0 0 4px rgba(56, 189, 248, 0.5);
+          }
+        }
+        @keyframes zapretGlowPulseGreen {
+          0%, 100% {
+            box-shadow: 0 0 8px rgba(34, 197, 94, 0.4), 0 0 0 2px rgba(34, 197, 94, 0.3);
+          }
+          50% {
+            box-shadow: 0 0 18px rgba(34, 197, 94, 0.8), 0 0 0 4px rgba(34, 197, 94, 0.5);
+          }
+        }
+        @keyframes zapretGlowPulsePurple {
+          0%, 100% {
+            box-shadow: 0 0 8px rgba(168, 85, 247, 0.4), 0 0 0 2px rgba(168, 85, 247, 0.3);
+          }
+          50% {
+            box-shadow: 0 0 18px rgba(168, 85, 247, 0.8), 0 0 0 4px rgba(168, 85, 247, 0.5);
+          }
+        }
+        .zapret-glow-pulse-blue {
+          animation: zapretGlowPulse 1.2s ease-in-out infinite !important;
+        }
+        .zapret-glow-pulse-green {
+          animation: zapretGlowPulseGreen 1.2s ease-in-out infinite !important;
+        }
+        .zapret-glow-pulse-purple {
+          animation: zapretGlowPulsePurple 1.2s ease-in-out infinite !important;
+        }
+      `}</style>
       {/* 1. ГЛАВНАЯ КАРТОЧКА С ВЫКЛЮЧАТЕЛЕМ */}
       <section
         className="card"
@@ -566,11 +778,11 @@ export default function Zapret({ notify }: ZapretProps) {
                     border: `1px solid ${isRunning ? 'rgba(34, 197, 94, 0.3)' : 'var(--border)'}`,
                   }}
                 >
-                  {isRunning ? `🟢 Работает (PID: ${status?.pid})` : isInstalled ? '⚪ Выключен' : '🔴 Не установлен'}
+                  {isRunning ? `🟢 Работает: Zapret 2.0 (PID: ${status?.pid})` : isInstalled ? '⚪ Выключен' : '🔴 Не установлен'}
                 </span>
               </div>
               <div className="muted small" style={{ marginTop: 4 }}>
-                Локальная десинхронизация TCP/UDP пакетов (nfqws) для YouTube, Discord и сайтов без нагрузки на VPS
+                Локальная десинхронизация TCP/UDP пакетов (Zapret 2.0 Lua Engine) для YouTube, Discord и сайтов без нагрузки на VPS
               </div>
             </div>
           </div>
@@ -583,48 +795,55 @@ export default function Zapret({ notify }: ZapretProps) {
                   {isRunning ? 'СЛУЖБА АКТИВНА' : 'СЛУЖБА ВЫКЛЮЧЕНА'}
                 </div>
                 <div className="muted small" style={{ fontSize: 11 }}>
-                  {isRunning ? 'LAN трафик фильтруется через nfqws' : 'Прямой трафик без изменений'}
+                  {isRunning ? 'LAN трафик фильтруется через nfqws2' : 'Прямой трафик без изменений'}
                 </div>
               </div>
 
-              <button
-                type="button"
-                disabled={busy}
-                onClick={handleToggle}
-                style={{
-                  width: 64,
-                  height: 34,
-                  borderRadius: 20,
-                  border: 'none',
-                  cursor: busy ? 'wait' : 'pointer',
-                  background: isRunning
-                    ? 'linear-gradient(135deg, #22c55e 0%, #16a34a 100%)'
-                    : 'rgba(255, 255, 255, 0.15)',
-                  position: 'relative',
-                  transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
-                  padding: 3,
-                  boxShadow: isRunning ? '0 0 16px rgba(34, 197, 94, 0.4)' : 'none',
-                }}
-                title={isRunning ? 'Выключить Zapret' : 'Включить Zapret'}
-              >
-                <div
-                  style={{
-                    width: 28,
-                    height: 28,
-                    borderRadius: '50%',
-                    background: '#fff',
-                    transform: isRunning ? 'translateX(30px)' : 'translateX(0)',
-                    transition: 'transform 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
-                    boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    fontSize: 12,
-                  }}
-                >
-                  {busy ? '⏳' : isRunning ? '✓' : '✕'}
-                </div>
-              </button>
+              {(() => {
+                const isMainPending = pendingKeys.has('enabled')
+                return (
+                  <button
+                    type="button"
+                    disabled={busy || isMainPending}
+                    onClick={handleToggle}
+                    className={isMainPending ? 'zapret-glow-pulse-green' : ''}
+                    style={{
+                      width: 64,
+                      height: 34,
+                      borderRadius: 20,
+                      border: 'none',
+                      cursor: busy || isMainPending ? 'wait' : 'pointer',
+                      background: isRunning
+                        ? 'linear-gradient(135deg, #22c55e 0%, #16a34a 100%)'
+                        : 'rgba(255, 255, 255, 0.15)',
+                      position: 'relative',
+                      transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+                      padding: 3,
+                      boxShadow: isRunning ? '0 0 16px rgba(34, 197, 94, 0.4)' : 'none',
+                    }}
+                    title={isRunning ? 'Выключить Zapret' : 'Включить Zapret'}
+                  >
+                    <div
+                      style={{
+                        width: 28,
+                        height: 28,
+                        borderRadius: '50%',
+                        background: '#fff',
+                        transform: isRunning ? 'translateX(30px)' : 'translateX(0)',
+                        transition: 'transform 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+                        boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        fontSize: 12,
+                        color: isRunning ? '#16a34a' : '#888',
+                      }}
+                    >
+                      {isMainPending ? renderMicroSpinner('#16a34a', 15) : isRunning ? '✓' : '✕'}
+                    </div>
+                  </button>
+                )
+              })()}
             </div>
           )}
         </div>
@@ -700,9 +919,9 @@ export default function Zapret({ notify }: ZapretProps) {
               type="button"
               className="btn sm"
               disabled={busy}
-              onClick={() => handleAction('restart')}
+              onClick={() => handleAction('start-fw')}
               style={{ background: '#eab308', color: '#000', fontWeight: 600, border: 'none' }}
-              title="Перезапустить службу и восстановить правила iptables"
+              title="Восстановить перехват Netfilter (iptables) без перезапуска процесса nfqws"
             >
               🔄 Включить перехват
             </button>
@@ -1183,47 +1402,54 @@ export default function Zapret({ notify }: ZapretProps) {
                       </button>
 
                       {/* СВИТЧ ВКЛЮЧЕНИЯ/ВЫКЛЮЧЕНИЯ САЙТА ("Блоки, которые можно выключить") */}
-                      <button
-                        type="button"
-                        disabled={!isInstalled}
-                        onClick={() => handleToggleCustomDomain(entry.domain, isChecked)}
-                        style={{
-                          width: 44,
-                          height: 24,
-                          borderRadius: 14,
-                          border: 'none',
-                          cursor: !isInstalled ? 'not-allowed' : 'pointer',
-                          background: isChecked
-                            ? 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)'
-                            : 'rgba(255, 255, 255, 0.15)',
-                          position: 'relative',
-                          transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
-                          padding: 2,
-                          flexShrink: 0,
-                          boxShadow: isChecked ? '0 0 10px rgba(168, 85, 247, 0.4)' : 'none',
-                        }}
-                        title={isChecked ? 'Выключить обход для этого сайта' : 'Включить обход для этого сайта'}
-                      >
-                        <div
-                          style={{
-                            width: 20,
-                            height: 20,
-                            borderRadius: '50%',
-                            background: '#fff',
-                            transform: isChecked ? 'translateX(20px)' : 'translateX(0)',
-                            transition: 'transform 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
-                            boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            fontSize: 9,
-                            color: isChecked ? '#7c3aed' : '#888',
-                            fontWeight: 'bold',
-                          }}
-                        >
-                          {isChecked ? '✓' : '✕'}
-                        </div>
-                      </button>
+                      {(() => {
+                        const customPendingKey = `custom:${normalizeDomainInput(entry.domain)}`
+                        const isCustomBusy = pendingKeys.has(customPendingKey)
+                        return (
+                          <button
+                            type="button"
+                            disabled={!isInstalled || isCustomBusy}
+                            onClick={() => handleToggleCustomDomain(entry.domain, isChecked)}
+                            className={isCustomBusy ? 'zapret-glow-pulse-purple' : ''}
+                            style={{
+                              width: 44,
+                              height: 24,
+                              borderRadius: 14,
+                              border: 'none',
+                              cursor: !isInstalled || isCustomBusy ? 'not-allowed' : 'pointer',
+                              background: isChecked
+                                ? 'linear-gradient(135deg, #a855f7 0%, #7c3aed 100%)'
+                                : 'rgba(255, 255, 255, 0.15)',
+                              position: 'relative',
+                              transition: 'all 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+                              padding: 2,
+                              flexShrink: 0,
+                              boxShadow: isChecked ? '0 0 10px rgba(168, 85, 247, 0.4)' : 'none',
+                            }}
+                            title={isChecked ? 'Выключить обход для этого сайта' : 'Включить обход для этого сайта'}
+                          >
+                            <div
+                              style={{
+                                width: 20,
+                                height: 20,
+                                borderRadius: '50%',
+                                background: '#fff',
+                                transform: isChecked ? 'translateX(20px)' : 'translateX(0)',
+                                transition: 'transform 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+                                boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                fontSize: 9,
+                                color: isChecked ? '#7c3aed' : '#888',
+                                fontWeight: 'bold',
+                              }}
+                            >
+                              {isCustomBusy ? renderMicroSpinner(isChecked ? '#7c3aed' : '#888', 11) : isChecked ? '✓' : '✕'}
+                            </div>
+                          </button>
+                        )
+                      })()}
                     </div>
                   </div>
 
@@ -1287,44 +1513,93 @@ export default function Zapret({ notify }: ZapretProps) {
           </div>
 
           {/* БЫСТРЫЕ НАБОРЫ */}
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button
-              type="button"
-              className="btn sm ghost"
-              disabled={busy || !isInstalled}
-              onClick={() => handleApplyPreset('gamer')}
-              title="YouTube Turbo + Discord Web + Discord Voice RTC + GitHub + Торренты"
-            >
-              🎮 Геймер / Медиа
-            </button>
-            <button
-              type="button"
-              className="btn sm ghost"
-              disabled={busy || !isInstalled}
-              onClick={() => handleApplyPreset('aggressive')}
-              title="Все стратегии + Агрессивный режим для жестких ТСПУ"
-            >
-              🔥 Максимум (ТСПУ)
-            </button>
-            <button
-              type="button"
-              className="btn sm ghost"
-              disabled={busy || !isInstalled}
-              onClick={() => handleApplyPreset('youtube')}
-              title="Только YouTube Turbo"
-            >
-              📺 Только YouTube
-            </button>
-            <button
-              type="button"
-              className="btn sm ghost"
-              disabled={busy || !isInstalled}
-              onClick={handleResetFeatures}
-              title="Сбросить все блоки к стандартным"
-            >
-              ↺ Сброс
-            </button>
-          </div>
+          {(() => {
+            const activePreset = status?.preset || 'custom'
+            return (
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className={`btn sm ${activePreset === 'youtube' ? 'primary' : 'ghost'}`}
+                  disabled={busy || !isInstalled}
+                  onClick={() => handleApplyPreset('youtube')}
+                  title="Только YouTube Turbo (Google GGC Direct)"
+                  style={activePreset === 'youtube' ? { border: '1px solid #38bdf8', color: '#38bdf8', background: 'rgba(56, 189, 248, 0.15)' } : {}}
+                >
+                  {pendingKeys.has('preset:youtube') && <span style={{ marginRight: 6 }}>{renderMicroSpinner('#38bdf8', 11)}</span>}
+                  📺 Только YouTube
+                </button>
+
+                <button
+                  type="button"
+                  className={`btn sm ${activePreset === 'discord' ? 'primary' : 'ghost'}`}
+                  disabled={busy || !isInstalled}
+                  onClick={() => handleApplyPreset('discord')}
+                  title="Только Discord Web и Discord Voice UDP"
+                  style={activePreset === 'discord' ? { border: '1px solid #38bdf8', color: '#38bdf8', background: 'rgba(56, 189, 248, 0.15)' } : {}}
+                >
+                  {pendingKeys.has('preset:discord') && <span style={{ marginRight: 6 }}>{renderMicroSpinner('#38bdf8', 11)}</span>}
+                  💬 Только Discord
+                </button>
+
+                <button
+                  type="button"
+                  className={`btn sm ${activePreset === 'gamer' ? 'primary' : 'ghost'}`}
+                  disabled={busy || !isInstalled}
+                  onClick={() => handleApplyPreset('gamer')}
+                  title="YouTube Turbo + Discord Web + Discord Voice RTC + GitHub + Торренты"
+                  style={activePreset === 'gamer' ? { border: '1px solid #38bdf8', color: '#38bdf8', background: 'rgba(56, 189, 248, 0.15)' } : {}}
+                >
+                  {pendingKeys.has('preset:gamer') && <span style={{ marginRight: 6 }}>{renderMicroSpinner('#38bdf8', 11)}</span>}
+                  🎮 Медиа и Игры
+                </button>
+
+                <button
+                  type="button"
+                  className={`btn sm ${activePreset === 'aggressive' ? 'primary' : 'ghost'}`}
+                  disabled={busy || !isInstalled}
+                  onClick={() => handleApplyPreset('aggressive')}
+                  title="Все стратегии + Агрессивный режим для жестких ТСПУ"
+                  style={activePreset === 'aggressive' ? { border: '1px solid #38bdf8', color: '#38bdf8', background: 'rgba(56, 189, 248, 0.15)' } : {}}
+                >
+                  {pendingKeys.has('preset:aggressive') && <span style={{ marginRight: 6 }}>{renderMicroSpinner('#38bdf8', 11)}</span>}
+                  🔥 Агрессивный
+                </button>
+
+                <button
+                  type="button"
+                  className={`btn sm ${activePreset === 'custom' && (status?.preset === 'custom' || status?.config?.includes('NFQWS_ARGS')) ? 'primary' : 'ghost'}`}
+                  disabled={busy || !isInstalled}
+                  onClick={() => setShowConfigEditor(true)}
+                  title="Ручное редактирование zapret.conf и произвольные аргументы nfqws2"
+                  style={activePreset === 'custom' && (status?.preset === 'custom' || status?.config?.includes('NFQWS_ARGS')) ? { border: '1px solid #a855f7', color: '#c084fc', background: 'rgba(168, 85, 247, 0.15)' } : {}}
+                >
+                  ⚙️ Пользовательский (Custom)
+                </button>
+
+                <button
+                  type="button"
+                  className={`btn sm ${activePreset === 'default' || activePreset === 'general' ? 'primary' : 'ghost'}`}
+                  disabled={busy || !isInstalled}
+                  onClick={() => handleApplyPreset('default')}
+                  title="Сбалансированный режим: все сервисы и списки включены"
+                  style={activePreset === 'default' || activePreset === 'general' ? { border: '1px solid #22c55e', color: '#22c55e', background: 'rgba(34, 197, 94, 0.15)' } : {}}
+                >
+                  {pendingKeys.has('preset:default') && <span style={{ marginRight: 6 }}>{renderMicroSpinner('#22c55e', 11)}</span>}
+                  ✨ Все сервисы (По умолчанию)
+                </button>
+
+                <button
+                  type="button"
+                  className="btn sm ghost"
+                  disabled={busy || !isInstalled}
+                  onClick={handleResetFeatures}
+                  title="Сбросить все блоки к стандартным значениям"
+                >
+                  ↺ Сброс
+                </button>
+              </div>
+            )
+          })()}
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 14 }}>

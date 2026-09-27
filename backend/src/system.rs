@@ -81,8 +81,10 @@ pub fn detect_category(name: &str, cmdline: &str) -> &'static str {
     {
         "xkeen"
     } else if name_lower == "nfqws"
+        || name_lower == "nfqws2"
         || name_lower == "tpws"
         || cmd_lower.contains("nfqws")
+        || cmd_lower.contains("nfqws2")
         || cmd_lower.contains("tpws")
     {
         "zapret"
@@ -106,7 +108,7 @@ pub const PROTECTED_PROCESSES: &[&str] = &[
     "ndm", "ndns", "ndnproxy", "dnsmasq", "hostapd", "wpa_supplicant",
     "dropbear", "sshd", "udhcpc", "pppd", "netifd",
     "init", "systemd", "procd", "kthreadd", "xkeen-route",
-    "cron", "crond", "mihomo", "transmissiond", "nfqws",
+    "cron", "crond", "mihomo", "transmissiond", "nfqws", "nfqws2",
 ];
 
 pub fn is_protected(pid: u32, name: &str) -> bool {

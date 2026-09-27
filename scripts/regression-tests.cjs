@@ -357,4 +357,86 @@ runTest('10. Graceful shutdown flags and loop abort logic', () => {
   assert.strictEqual(loopIterations, 2, 'No further iterations should execute');
 });
 
+// -------------------------------------------------------------
+// 11. Zapret Netfilter persistence & Keenetic ndm hooks
+// -------------------------------------------------------------
+runTest('11. Zapret Netfilter persistence, Keenetic ndm hooks and watchdog self-healing', () => {
+  const apiRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/api.rs'), 'utf8');
+  const watchdogRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/watchdog.rs'), 'utf8');
+
+  // Verify NDM hook scripts definitions
+  assert(apiRs.includes('pub const NDM_NETFILTER_SCRIPT: &str'), 'api.rs must define NDM_NETFILTER_SCRIPT');
+  assert(apiRs.includes('pub const NDM_IFSTATE_SCRIPT: &str'), 'api.rs must define NDM_IFSTATE_SCRIPT');
+  assert(apiRs.includes('/opt/etc/ndm/netfilter.d/050-zapret.sh'), 'sync_zapret_files must install 050-zapret.sh into netfilter.d');
+  assert(apiRs.includes('/opt/etc/ndm/ifstatechanged.d/050-zapret.sh'), 'sync_zapret_files must install 050-zapret.sh into ifstatechanged.d');
+  assert(apiRs.includes('/opt/etc/ndm/wan.d/050-zapret.sh'), 'sync_zapret_files must install 050-zapret.sh into wan.d');
+
+  // Verify NDM scripts have pidof nfqws fallback
+  assert(apiRs.includes('pidof nfqws >/dev/null 2>&1'), 'NDM scripts must check pidof nfqws as fallback');
+
+  // Verify start-fw and reload-fw commands in S51zapret
+  assert(apiRs.includes('start-fw|reload-fw)'), 'S51zapret must support start-fw and reload-fw commands');
+
+  // Verify PATH is exported in S51zapret to avoid curl/iptables missing
+  assert(apiRs.includes('PATH=/opt/sbin:/opt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'), 'S51zapret must define complete PATH');
+
+  // Verify xtables wait lock wrapper in S51zapret
+  assert(apiRs.includes('IPTABLES_CMD="iptables"'), 'S51zapret must define IPTABLES_CMD wrapper');
+  assert(apiRs.includes('iptables -w 2'), 'S51zapret must support xtables wait-lock option');
+
+  // Verify watchdog self-healing & strict boolean check (&&, not ||)
+  assert(watchdogRs.includes('spawn_zapret_monitor'), 'watchdog.rs must define spawn_zapret_monitor');
+  assert(watchdogRs.includes('start-fw'), 'spawn_zapret_monitor must call start-fw on lost iptables rules');
+  assert(watchdogRs.includes(') && iptables -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE'), 'watchdog.rs must strictly require both hook and NFQUEUE chain with &&');
+  assert(apiRs.includes(') && iptables -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE'), 'api.rs must strictly require both hook and NFQUEUE chain with &&');
+});
+
+// -------------------------------------------------------------
+// 12. Zapret 2.0 (nfqws2 + Lua Engine) migration & UI state locking
+// -------------------------------------------------------------
+runTest('12. Zapret 2.0 (nfqws2 + Lua Engine) migration, fast SIGHUP reload and UI state locking', () => {
+  const apiRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/api.rs'), 'utf8');
+  const watchdogRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/watchdog.rs'), 'utf8');
+  const systemRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/system.rs'), 'utf8');
+  const zapretTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Zapret.tsx'), 'utf8');
+
+  // 1. Verify build_nfqws2_args generates zapret2 syntax
+  assert(apiRs.includes('pub fn build_nfqws2_args'), 'api.rs must define build_nfqws2_args');
+  assert(apiRs.includes('--payload=tls_client_hello'), 'nfqws2 args must use --payload=tls_client_hello');
+  assert(apiRs.includes('--out-range=-d10'), 'nfqws2 args must specify packet cutoff --out-range=-d10');
+  assert(apiRs.includes('--lua-desync='), 'nfqws2 args must specify Lua engine desynchronization --lua-desync=');
+
+  // 2. Verify S51zapret script checks and initializes Lua engine for nfqws2
+  assert(apiRs.includes('/opt/zapret2/lua/zapret-lib.lua'), 'S51zapret must verify /opt/zapret2/lua/zapret-lib.lua');
+  assert(apiRs.includes('/opt/zapret2/lua/zapret-antidpi.lua'), 'S51zapret must verify /opt/zapret2/lua/zapret-antidpi.lua');
+  assert(apiRs.includes('--lua-init=@/opt/zapret2/lua/zapret-lib.lua'), 'S51zapret must launch nfqws2 with --lua-init');
+
+  // 3. Verify fast hostlist reload via SIGHUP (kill -HUP)
+  assert(apiRs.includes('reload|reload-hosts)'), 'S51zapret must support reload and reload-hosts commands');
+  assert(apiRs.includes('kill -HUP'), 'S51zapret must send SIGHUP (kill -HUP) to reload domain lists without restart');
+
+  // 4. Verify nfqws2 process detection in NDM hooks, watchdog and system protected processes
+  assert(apiRs.includes('pidof nfqws2'), 'NDM scripts in api.rs must check pidof nfqws2 before nfqws');
+  assert(watchdogRs.includes('pidof nfqws2'), 'watchdog.rs must monitor pidof nfqws2');
+  assert(systemRs.includes('"nfqws2"'), 'system.rs must protect nfqws2 in PROTECTED_PROCESSES');
+  assert(systemRs.includes('name_lower == "nfqws2"'), 'system.rs detect_category must map nfqws2 to zapret');
+
+  // 5. Verify frontend state locking (pendingKeysRef) and loading micro-spinner
+  assert(zapretTsx.includes('pendingKeysRef'), 'Zapret.tsx must use pendingKeysRef to prevent polling state wipe');
+  assert(zapretTsx.includes('data-testid="zapret-micro-spinner"'), 'Zapret.tsx must render micro-spinner during transitions');
+  assert(zapretTsx.includes('zapret-glow-pulse-blue'), 'Zapret.tsx must apply smooth glowing pulse animation');
+
+  // 6. Verify 45-second failsafe rollback timer and safe whitespace trimming
+  assert(apiRs.includes('sleep 45'), 'S51zapret start_failsafe must use exactly 45s failsafe rollback timer (sleep 45)');
+  assert(apiRs.includes("key=$(echo \"$key\" | tr -d ' \\t\\r\\n')"), 'S51zapret parser must trim whitespace from keys');
+  assert(apiRs.includes('--queue-bypass'), 'S51zapret must use mandatory --queue-bypass for NFQUEUE');
+
+  // 7. Verify all 6 DPI presets are supported in backend and frontend
+  const presets = ['youtube', 'discord', 'gamer', 'aggressive', 'custom', 'default'];
+  for (const preset of presets) {
+    assert(apiRs.includes(`"${preset}"`), `api.rs must recognize preset "${preset}"`);
+    assert(zapretTsx.includes(`'${preset}'`), `Zapret.tsx must support preset "${preset}"`);
+  }
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
