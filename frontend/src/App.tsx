@@ -44,6 +44,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'connections', label: '🌐 Соединения' },
   { id: 'rules', label: '📋 Правила' },
   { id: 'diagnostics', label: '🩺 Диагностика' },
+  { id: 'help', label: '❓ Справка' },
 ]
 
 interface Toast {

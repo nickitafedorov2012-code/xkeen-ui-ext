@@ -31,34 +31,6 @@ interface HeaderProps {
   onLogout?: () => void
 }
 
-function StatusWaveform({ isRunning }: { isRunning: boolean }) {
-  const color = isRunning
-    ? 'rgba(34, 197, 94, 0.28)'
-    : 'rgba(239, 68, 68, 0.25)'
-
-  return (
-    <svg
-      aria-hidden="true"
-      className="status-badge-wave"
-      viewBox="0 0 200 36"
-      preserveAspectRatio="none"
-      fill="none"
-    >
-      {!isRunning ? (
-        <line x1="0" y1="18" x2="200" y2="18" stroke={color} strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
-      ) : (
-        <path
-          d="M 0,18 L 22,18 L 26,14.5 L 30,18 L 36,18 L 39,21 L 43,4 L 47,30 L 51,18 L 57,13.5 L 63,18 L 112,18 L 116,14.5 L 120,18 L 126,18 L 129,21 L 133,4 L 137,30 L 141,18 L 147,13.5 L 153,18 L 200,18"
-          stroke={color}
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          vectorEffect="non-scaling-stroke"
-        />
-      )}
-    </svg>
-  )
-}
 
 function IconCpu() {
   return (
@@ -417,7 +389,6 @@ export default function Header({
       {/* ЛЕВАЯ ЧАСТЬ: Статус сервиса + RAM/CPU + Температура + Потребление XKeen Route + Кнопки */}
       <div className="header-left">
         <div className={`status-badge-custom ${isRunning ? 'status-badge-running' : 'status-badge-stopped'}`}>
-          <StatusWaveform isRunning={isRunning} />
           <div className="status-badge-content">
             <div className="status-badge-row1">
               <span className={`status-dot ${isRunning ? 'status-dot-running' : 'status-dot-stopped'}`} />
@@ -443,11 +414,11 @@ export default function Header({
                   <span className="status-stat-sep">|</span>
                   <span
                     className="status-stat"
-                    title={`Температура процессора: ${cpuTemp}°C${cpuTemp > 90 ? ' (ВНИМАНИЕ: Критический нагрев выше 90°C!)' : ''}`}
+                    title={`Температура процессора: ${cpuTemp.toFixed(1)}°C${cpuTemp > 90 ? ' (ВНИМАНИЕ: Критический нагрев выше 90°C!)' : ''}`}
                   >
                     <span>🌡️</span>
                     <span style={cpuTemp > 90 ? { color: '#ef4444', fontWeight: 'bold' } : {}}>
-                      {cpuTemp}°C
+                      {cpuTemp.toFixed(1)}°C
                     </span>
                   </span>
                 </>
