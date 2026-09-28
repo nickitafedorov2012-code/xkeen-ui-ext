@@ -1628,6 +1628,75 @@ describe('Zapret Component — Features 1, 2, 4, 5 (Mini-Blockcheck, DPI Analyti
       })
     )
   })
+
+  it('locks aggressive_dpi card, shows lock badge and renders tags on v1 engine', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve({
+          ...mockZapretStatus,
+          engine: 'v1',
+          features: {
+            ...mockZapretStatus.features,
+            engine: 'v1',
+            aggressive_dpi: false,
+          },
+          cmdline: '/opt/zapret/nfq/nfqws --daemon',
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    const cardV1 = container?.querySelector('[data-testid="zapret-card-aggressive_dpi"]') as HTMLDivElement | null
+    expect(cardV1).not.toBeNull()
+    // Verify tags are rendered
+    expect(cardV1?.textContent).toContain('seqovl')
+    expect(cardV1?.textContent).toContain('midsld')
+    expect(cardV1?.textContent).toContain('md5sig')
+    // Verify engine restriction lock badge is rendered on v1
+    expect(cardV1?.textContent).toContain('🔒 Только для Запрет 2.0 (Modern)')
+    // Toggle button should be disabled
+    const toggleBtnV1 = cardV1?.querySelector('button') as HTMLButtonElement | null
+    expect(toggleBtnV1?.disabled).toBe(true)
+  })
+
+  it('enables aggressive_dpi card, removes lock badge and renders tags on v2 engine', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'zapret/status') {
+        return Promise.resolve({
+          ...mockZapretStatus,
+          engine: 'v2',
+          features: {
+            ...mockZapretStatus.features,
+            engine: 'v2',
+            aggressive_dpi: false,
+          },
+          v2_installed: true,
+          cmdline: '/opt/zapret2/nfqws2 --daemon',
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    await act(async () => {
+      root!.render(<Zapret notify={notifyMock} />)
+    })
+
+    const cardV2 = container?.querySelector('[data-testid="zapret-card-aggressive_dpi"]') as HTMLDivElement | null
+    expect(cardV2).not.toBeNull()
+    // Verify tags are rendered
+    expect(cardV2?.textContent).toContain('seqovl')
+    expect(cardV2?.textContent).toContain('midsld')
+    expect(cardV2?.textContent).toContain('md5sig')
+    // Lock badge should NOT be present on v2
+    expect(cardV2?.textContent).not.toContain('🔒 Только для Запрет 2.0 (Modern)')
+    // Toggle button should NOT be disabled on v2
+    const toggleBtnV2 = cardV2?.querySelector('button') as HTMLButtonElement | null
+    expect(toggleBtnV2?.disabled).toBe(false)
+  })
 })
 
 

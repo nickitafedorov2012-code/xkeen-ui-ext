@@ -799,6 +799,17 @@ runTest('21. Zapret v1/v2 Engine Greyout, Router PREROUTING Hook, Fast DPI Test 
   assert(gamingTsx.includes('хостов в детекторе'), 'Gaming.tsx must unify smart gaming with recent activity detector');
 });
 
+// -------------------------------------------------------------
+// 22. Zapret renderStrategyCard aggressive_dpi arguments alignment and engine restriction
+// -------------------------------------------------------------
+runTest('22. Zapret renderStrategyCard aggressive_dpi arguments alignment and engine restriction', () => {
+  const zapretTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Zapret.tsx'), 'utf8');
+
+  // Verify aggressive_dpi passes tags AND supportedEngines as 8th parameter
+  const match = zapretTsx.match(/'aggressive_dpi'[\s\S]*?\['seqovl',\s*'midsld',\s*'ts',\s*'md5sig'\][\s\S]*?\['v2'\]/);
+  assert(match, 'Zapret.tsx must pass tags and supportedEngines (v2) to renderStrategyCard for aggressive_dpi');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
 
 

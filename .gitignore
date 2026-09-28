@@ -11,3 +11,5 @@ frontend/dist/
 *.log
 xkeen-route.config.json
 config.json
+xkeen-route-*
+

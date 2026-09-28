@@ -3011,6 +3011,7 @@ export default function Zapret({ notify }: ZapretProps) {
             'Перекрытие последовательностей (seqovl=1), сплит по середине SNI (pos=1,midsld), повторы repeats=6 и подделка ts,md5sig. Пробивает жесткие блокировки мобильных и кабельных операторов.',
             'seqovl=1, pos=1,midsld, repeats=6, ts,md5sig',
             'базовые стратегии',
+            ['seqovl', 'midsld', 'ts', 'md5sig'],
             ['v2']
           )}
 
