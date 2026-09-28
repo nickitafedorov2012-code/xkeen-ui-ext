@@ -452,21 +452,26 @@ impl ConfigTx {
         }
 
         // 4. Атомарная запись дополнительных файлов
-        for extra in &self.extra_files {
-            if let Err(e) = crate::api::atomic_write_file(&extra.path, &extra.staged_content).await {
+        let extra_items: Vec<(PathBuf, String)> = self
+            .extra_files
+            .iter()
+            .map(|e| (e.path.clone(), e.staged_content.clone()))
+            .collect();
+        for (extra_path, extra_content) in extra_items {
+            if let Err(e) = crate::api::atomic_write_file(&extra_path, &extra_content).await {
                 let r_res = self.rollback_disk_files().await;
                 if let Err(ref r_errs) = r_res {
-                    log_e!("Сбой при откате после ошибки записи {}: {:?}", extra.path.display(), r_errs);
+                    log_e!("Сбой при откате после ошибки записи {}: {:?}", extra_path.display(), r_errs);
                     return Err(format!(
                         "Ошибка записи {}: {e}. При двухфазном откате произошли критические ошибки (recovery_required): {}",
-                        extra.path.display(),
+                        extra_path.display(),
                         r_errs.join("; ")
                     ));
                 }
-                return Err(format!("Ошибка записи {}: {e}", extra.path.display()));
+                return Err(format!("Ошибка записи {}: {e}", extra_path.display()));
             }
-            if !self.applied_files.contains(&extra.path) {
-                self.applied_files.push(extra.path.clone());
+            if !self.applied_files.contains(&extra_path) {
+                self.applied_files.push(extra_path);
             }
             self.files_applied = true;
         }

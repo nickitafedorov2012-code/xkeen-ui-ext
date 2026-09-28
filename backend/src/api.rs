@@ -7088,7 +7088,7 @@ pub async fn zapret_action(
     }
 
     if act == "verify_failsafe" {
-        let rep = crate::zapret::verify_zapret_failsafe().await;
+        let rep = crate::zapret::verify_zapret_failsafe(&state.http, None).await;
         return api_ok(json!({
             "success": rep.overall_success,
             "report": rep
@@ -7734,8 +7734,7 @@ pub fn calc_schedules_revision(schedules: &[config::DeviceSchedule]) -> String {
         s.days.hash(&mut hasher);
         s.action.hash(&mut hasher);
         s.target_server.hash(&mut hasher);
-        s.device_ip.hash(&mut hasher);
-        s.device_mac.hash(&mut hasher);
+        s.ip.hash(&mut hasher);
         s.enabled.hash(&mut hasher);
     }
     format!("{:016x}", hasher.finish())

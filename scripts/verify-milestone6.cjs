@@ -277,4 +277,54 @@ runTest('19. RT-01 & RT-02: Strict IP/CIDR validation, format_src_ip_cidr & tran
   assert(applyDomainRulesFn.includes('direct_set'), 'apply_domain_rules must deduplicate direct and force domain conflicts');
 });
 
+// -------------------------------------------------------------
+// 20. BUILD-02: Rust Compiler Integrity (Brace Balance, Borrow Safety & Struct Fields)
+// -------------------------------------------------------------
+runTest('20. BUILD-02: All Rust source files have balanced braces, valid borrow semantics & struct fields', () => {
+  const srcDir = path.resolve(__dirname, '../backend/src');
+  fs.readdirSync(srcDir).filter(f => f.endsWith('.rs')).forEach(f => {
+    const content = fs.readFileSync(path.join(srcDir, f), 'utf8');
+    let balance = 0;
+    let inString = false;
+    let inLineComment = false;
+    let inBlockComment = false;
+    let inRawString = false;
+    for (let i = 0; i < content.length; i++) {
+      const ch = content[i];
+      const next = content[i + 1];
+      if (inLineComment) { if (ch === '\n') inLineComment = false; }
+      else if (inBlockComment) { if (ch === '*' && next === '/') { inBlockComment = false; i++; } }
+      else if (inString) { if (ch === '\\') i++; else if (ch === '"') inString = false; }
+      else if (inRawString) { if (ch === '"' && next === '#') { inRawString = false; i++; } }
+      else {
+        if (ch === '/' && next === '/') { inLineComment = true; i++; }
+        else if (ch === '/' && next === '*') { inBlockComment = true; i++; }
+        else if (ch === 'r' && next === '#' && content[i + 2] === '"') { inRawString = true; i += 2; }
+        else if (ch === '"') inString = true;
+        else if (ch === '\'') {
+          if (content[i + 1] === '\\') {
+            const closeIdx = content.indexOf('\'', i + 2);
+            if (closeIdx !== -1 && closeIdx - i <= 6) i = closeIdx;
+          } else if (content[i + 2] === '\'') { i += 2; }
+        }
+        else if (ch === '{') balance++;
+        else if (ch === '}') balance--;
+      }
+    }
+    assert.strictEqual(balance, 0, `Brace imbalance detected in ${f}: ${balance}`);
+  });
+
+  // Verify verify_zapret_failsafe call signature in api.rs
+  assert(apiRs.includes('crate::zapret::verify_zapret_failsafe(&state.http, None).await'), 'verify_zapret_failsafe in api.rs must pass (&state.http, None)');
+
+  // Verify calc_schedules_revision uses s.ip instead of non-existent device_ip/device_mac
+  const calcSchedFn = apiRs.slice(apiRs.indexOf('pub fn calc_schedules_revision'), apiRs.indexOf('pub async fn get_schedules'));
+  assert(calcSchedFn.includes('s.ip.hash'), 'calc_schedules_revision must hash s.ip');
+  assert(!calcSchedFn.includes('s.device_ip') && !calcSchedFn.includes('s.device_mac'), 'calc_schedules_revision must not reference non-existent device_ip/device_mac');
+
+  // Verify transaction.rs collects extra_items before mutably borrowing self in rollback_disk_files
+  const txRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/transaction.rs'), 'utf8');
+  assert(txRs.includes('let extra_items: Vec<(PathBuf, String)> = self'), 'transaction.rs must clone extra_files items before loop to avoid simultaneous borrow');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Milestone 6 Checks Passed Successfully ===\n`);
