@@ -62,12 +62,26 @@ pub fn get_snapshot_json() -> serde_json::Value {
 
     let history = get_history_json();
     json!({
-        "direct": { "down": d_down, "up": d_up },
-        "proxy": { "down": p_down, "up": p_up },
-        "total": { "down": w_down, "up": w_up },
+        "direct": {
+            "down": d_down,
+            "up": d_up,
+            "estimated": true,
+            "source": "WAN (/proc/net/dev) - Mihomo (/traffic)"
+        },
+        "proxy": {
+            "down": p_down,
+            "up": p_up,
+            "source": "Mihomo (/traffic)"
+        },
+        "total": {
+            "down": w_down,
+            "up": w_up,
+            "source": "WAN interfaces (/proc/net/dev)"
+        },
         "down": p_down,
         "up": p_up,
         "history": history,
+        "estimated": true,
     })
 }
 
@@ -262,11 +276,12 @@ async fn run_wan_polling() {
         DIRECT_UP.store(d_up, Ordering::Relaxed);
 
         record_history_point(json!({
-            "direct": { "down": d_down, "up": d_up },
-            "proxy": { "down": p_down, "up": p_up },
-            "total": { "down": wan_rx_speed, "up": wan_tx_speed },
+            "direct": { "down": d_down, "up": d_up, "estimated": true, "source": "WAN - Mihomo" },
+            "proxy": { "down": p_down, "up": p_up, "source": "Mihomo" },
+            "total": { "down": wan_rx_speed, "up": wan_tx_speed, "source": "WAN" },
             "down": p_down,
             "up": p_up,
+            "estimated": true,
         }));
     }
 }

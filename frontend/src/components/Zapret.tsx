@@ -80,6 +80,9 @@ export default function Zapret({ notify }: ZapretProps) {
   const [showHostsEditor, setShowHostsEditor] = useState(false)
   const [hostsDraft, setHostsDraft] = useState('')
   const [savingHosts, setSavingHosts] = useState(false)
+  // Refs are read by the polling callback created on mount.
+  const configDirtyRef = useRef(false)
+  const hostsDirtyRef = useRef(false)
 
   // Мульти-стратегии и независимые выключатели
   const [features, setFeatures] = useState<ZapretFeatures>({
@@ -169,8 +172,8 @@ export default function Zapret({ notify }: ZapretProps) {
           return merged
         })
       }
-      if (res.config) setConfigDraft(res.config)
-      if (res.hosts) setHostsDraft(res.hosts)
+      if (!configDirtyRef.current && typeof res.config === 'string') setConfigDraft(res.config)
+      if (!hostsDirtyRef.current && typeof res.hosts === 'string') setHostsDraft(res.hosts)
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка загрузки статуса Zapret', true)
     } finally {
@@ -213,6 +216,7 @@ export default function Zapret({ notify }: ZapretProps) {
   }
 
   const handleRunBlockcheck = async () => {
+    setBlockcheckResult(null)
     setRunningBlockcheck(true)
     try {
       const res = await apiPost<BlockcheckResult>('zapret/blockcheck')
@@ -595,6 +599,7 @@ export default function Zapret({ notify }: ZapretProps) {
         action: 'save_config',
         config_content: configDraft,
       })
+      configDirtyRef.current = false
       notify('Конфигурация zapret.conf сохранена и перезапущена')
       await loadStatus()
       setShowConfigEditor(false)
@@ -612,6 +617,7 @@ export default function Zapret({ notify }: ZapretProps) {
         action: 'save_hosts',
         hosts_content: hostsDraft,
       })
+      hostsDirtyRef.current = false
       notify('Список доменов zapret-hosts.txt сохранен')
       await loadStatus()
       setShowHostsEditor(false)
@@ -623,6 +629,7 @@ export default function Zapret({ notify }: ZapretProps) {
   }
 
   const handleTestDpi = async () => {
+    setTestResult(null)
     setTestingDpi(true)
     try {
       const res = await apiPost<DpiTestResult>('zapret/action', { action: 'test_dpi' })
@@ -1623,7 +1630,8 @@ export default function Zapret({ notify }: ZapretProps) {
               className="input"
               rows={8}
               value={hostsDraft}
-              onChange={(e) => setHostsDraft(e.target.value)}
+              disabled={savingHosts}
+              onChange={(e) => { hostsDirtyRef.current = true; setHostsDraft(e.target.value) }}
               placeholder="rutracker.org&#10;ntc.party&#10;kinozal.tv"
               style={{ fontFamily: 'Consolas, monospace', fontSize: 12, resize: 'vertical' }}
             />
@@ -1651,7 +1659,8 @@ export default function Zapret({ notify }: ZapretProps) {
               className="input"
               rows={6}
               value={configDraft}
-              onChange={(e) => setConfigDraft(e.target.value)}
+              disabled={savingConfig}
+              onChange={(e) => { configDirtyRef.current = true; setConfigDraft(e.target.value) }}
               style={{ fontFamily: 'Consolas, monospace', fontSize: 12, resize: 'vertical' }}
             />
           </div>
@@ -1868,7 +1877,7 @@ export default function Zapret({ notify }: ZapretProps) {
                 </span>
               </div>
               <div className="muted small" style={{ marginTop: 3 }}>
-                Автоматическое тестирование 7 ходовых комбинаций десинхронизации (fake, multisplit, seqovl, disorder, fooling) на YouTube и Discord с замером задержки и применением лучшей в 1 клик.
+                Автоподбор временно недоступен: прежний алгоритм не измерял работу отдельных стратегий. Для достоверного результата требуется проверка клиентского трафика через Zapret; наличие процесса не подтверждает обход DPI.
               </div>
             </div>
           </div>

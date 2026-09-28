@@ -40,6 +40,7 @@ export default function DeviceScheduleModal({
   availableServers,
 }: DeviceScheduleModalProps) {
   const [allSchedules, setAllSchedules] = useState<DeviceSchedule[]>([])
+  const [revision, setRevision] = useState<string | undefined>(undefined)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
 
@@ -50,19 +51,21 @@ export default function DeviceScheduleModal({
   const [action, setAction] = useState<'block' | 'direct' | 'proxy'>('block')
   const [targetServer, setTargetServer] = useState('')
 
+  const load = async () => {
+    setLoading(true)
+    try {
+      const res = await apiGet<{ schedules: DeviceSchedule[]; revision?: string }>('schedules')
+      setAllSchedules(res.schedules || [])
+      setRevision(res.revision)
+    } catch (e: any) {
+      notify('Ошибка загрузки расписаний: ' + e.message, true)
+    } finally {
+      setLoading(false)
+    }
+  }
+
   useEffect(() => {
     if (!isOpen) return
-    const load = async () => {
-      setLoading(true)
-      try {
-        const res = await apiGet<{ schedules: DeviceSchedule[] }>('schedules')
-        setAllSchedules(res.schedules || [])
-      } catch (e: any) {
-        notify('Ошибка загрузки расписаний: ' + e.message, true)
-      } finally {
-        setLoading(false)
-      }
-    }
     load()
   }, [isOpen, notify])
 
@@ -97,11 +100,16 @@ export default function DeviceScheduleModal({
     const updated = [...allSchedules, newSched]
     setSaving(true)
     try {
-      await apiPost('schedules', { schedules: updated })
+      const res = await apiPost<{ saved: boolean; revision?: string }>('schedules', {
+        schedules: updated,
+        expected_revision: revision,
+      })
       setAllSchedules(updated)
+      if (res?.revision) setRevision(res.revision)
       notify('Расписание добавлено')
     } catch (e: any) {
       notify('Ошибка сохранения: ' + e.message, true)
+      await load()
     } finally {
       setSaving(false)
     }
@@ -111,11 +119,16 @@ export default function DeviceScheduleModal({
     const updated = allSchedules.filter((s) => s.id !== id)
     setSaving(true)
     try {
-      await apiPost('schedules', { schedules: updated })
+      const res = await apiPost<{ saved: boolean; revision?: string }>('schedules', {
+        schedules: updated,
+        expected_revision: revision,
+      })
       setAllSchedules(updated)
+      if (res?.revision) setRevision(res.revision)
       notify('Расписание удалено')
     } catch (e: any) {
       notify('Ошибка: ' + e.message, true)
+      await load()
     } finally {
       setSaving(false)
     }
@@ -124,10 +137,15 @@ export default function DeviceScheduleModal({
   const handleToggleSchedule = async (id: string) => {
     const updated = allSchedules.map((s) => (s.id === id ? { ...s, enabled: !s.enabled } : s))
     try {
-      await apiPost('schedules', { schedules: updated })
+      const res = await apiPost<{ saved: boolean; revision?: string }>('schedules', {
+        schedules: updated,
+        expected_revision: revision,
+      })
       setAllSchedules(updated)
+      if (res?.revision) setRevision(res.revision)
     } catch (e: any) {
       notify('Ошибка: ' + e.message, true)
+      await load()
     }
   }
 

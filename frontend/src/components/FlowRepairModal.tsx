@@ -18,6 +18,8 @@ export default function FlowRepairModal({
 
   const [repairing, setRepairing] = useState(false)
   const [activeServer, setActiveServer] = useState<string>('')
+  const [isVerified, setIsVerified] = useState<boolean>(false)
+  const [repairError, setRepairError] = useState<string | null>(null)
   const [copiedLink, setCopiedLink] = useState(false)
 
   const cleanUrl = 'https://flow.google.com/?authuser=0&hl=en'
@@ -25,16 +27,21 @@ export default function FlowRepairModal({
 
   const handleRepair = async () => {
     setRepairing(true)
+    setRepairError(null)
     try {
-      const res = await apiPost<{ flow_server?: string; message?: string }>('flow/repair', {})
+      const res = await apiPost<{ success?: boolean; flow_server?: string; verified?: boolean; message?: string }>('flow/repair', {})
       if (res && res.flow_server) {
         setActiveServer(res.flow_server)
+        setIsVerified(Boolean(res.verified))
         notify(`✓ Маршрут Flow переключен на ${res.flow_server}, сокеты сброшены`)
         if (onRepaired) onRepaired(res.flow_server)
       } else {
-        notify('✓ Сокеты ядра Mihomo сброшены')
+        setIsVerified(false)
+        notify(res?.message || '✓ Сокеты ядра Mihomo сброшены')
       }
     } catch (e: any) {
+      setRepairError(e.message || 'Ошибка выполнения сброса на роутере')
+      setIsVerified(false)
       notify(e.message || 'Ошибка выполнения сброса на роутере', true)
     } finally {
       setRepairing(false)
@@ -82,35 +89,88 @@ export default function FlowRepairModal({
 
         <div className="modal-body" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           {/* Статус маршрута на роутере */}
-          <div
-            style={{
-              background: 'rgba(34, 197, 94, 0.08)',
-              border: '1px solid rgba(34, 197, 94, 0.25)',
-              borderRadius: 8,
-              padding: '10px 14px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-            }}
-          >
-            <div>
-              <div style={{ fontWeight: 600, color: '#22c55e', fontSize: 13 }}>
-                ✓ Роутер готов (маршрут США активен)
-              </div>
-              <div className="muted small" style={{ marginTop: 2 }}>
-                Узел: <b>{activeServer || '🇺🇸 США'}</b> • Сокеты ядра сброшены
+          {repairing ? (
+            <div
+              style={{
+                background: 'rgba(59, 130, 246, 0.08)',
+                border: '1px solid rgba(59, 130, 246, 0.25)',
+                borderRadius: 8,
+                padding: '10px 14px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+              }}
+            >
+              <div>
+                <div style={{ fontWeight: 600, color: '#3b82f6', fontSize: 13 }}>
+                  ⏳ Настройка маршрута и сброс сокетов…
+                </div>
+                <div className="muted small" style={{ marginTop: 2 }}>
+                  Применение правил маршрутизации в ядре Mihomo
+                </div>
               </div>
             </div>
-            <button
-              type="button"
-              className="btn btn-sm ghost"
-              onClick={handleRepair}
-              disabled={repairing}
-              title="Повторить сброс сокетов на роутере"
+          ) : repairError ? (
+            <div
+              style={{
+                background: 'rgba(239, 68, 68, 0.08)',
+                border: '1px solid rgba(239, 68, 68, 0.25)',
+                borderRadius: 8,
+                padding: '10px 14px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+              }}
             >
-              {repairing ? '⏳ Сброс…' : '🔄 Повторить'}
-            </button>
-          </div>
+              <div>
+                <div style={{ fontWeight: 600, color: '#ef4444', fontSize: 13 }}>
+                  ⚠️ Не удалось подтвердить маршрут Flow
+                </div>
+                <div className="muted small" style={{ marginTop: 2 }}>
+                  {repairError}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn btn-sm ghost"
+                onClick={handleRepair}
+                disabled={repairing}
+                title="Повторить сброс сокетов на роутере"
+              >
+                🔄 Повторить
+              </button>
+            </div>
+          ) : (
+            <div
+              style={{
+                background: 'rgba(34, 197, 94, 0.08)',
+                border: '1px solid rgba(34, 197, 94, 0.25)',
+                borderRadius: 8,
+                padding: '10px 14px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+              }}
+            >
+              <div>
+                <div style={{ fontWeight: 600, color: '#22c55e', fontSize: 13 }}>
+                  {isVerified ? '✓ Маршрут подтвержден и активен' : '✓ Сокеты сброшены'}
+                </div>
+                <div className="muted small" style={{ marginTop: 2 }}>
+                  Узел: <b>{activeServer || 'Маршрут по умолчанию'}</b> {isVerified ? '• Проверен в рантайме ядра' : ''}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn btn-sm ghost"
+                onClick={handleRepair}
+                disabled={repairing}
+                title="Повторить сброс сокетов на роутере"
+              >
+                🔄 Повторить
+              </button>
+            </div>
+          )}
 
           {/* Карточка установки плагина */}
           <div

@@ -291,9 +291,10 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
       } catch (err: any) {
         // Fallback на раздельные API, если force-add не ответил
         if (modal.scope === 'device' && modal.clientIp) {
-          const res = await apiGet<{ rules: Record<string, Array<{ domain: string; target: string }>> }>('devices/domain-rules')
-          const curRules = res.rules?.[modal.clientIp] || []
-          if (!curRules.some((r) => r.domain === domain)) {
+          const res = await apiGet<{ rules?: Record<string, Array<{ domain: string; target: string }>> } | Record<string, Array<{ domain: string; target: string }>>>('devices/domain-rules')
+          const rulesMap = (res as any)?.rules ?? (res as any) ?? {}
+          const curRules: Array<{ domain: string; target: string }> = rulesMap[modal.clientIp] || []
+          if (!curRules.some((r: { domain: string; target: string }) => r.domain === domain)) {
             const nextRules = [...curRules, { domain, target: 'PROXY' }]
             await apiPost('devices/domain-rules', {
               ip: modal.clientIp,

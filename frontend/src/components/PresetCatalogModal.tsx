@@ -81,17 +81,18 @@ export default function PresetCatalogModal({
 
     setSaving(true)
     try {
-      // 1. Получаем текущие доменные списки
-      const cur = await apiGet<{ direct: string[]; force: string[] }>('domains')
+      // 1. Получаем текущие доменные списки и ревизию (UI-03: optimistic concurrency)
+      const cur = await apiGet<{ direct: string[]; force: string[]; revision?: string }>('domains')
       const targetList = targetType === 'force' ? (cur.force || []) : (cur.direct || [])
 
       // 2. Объединяем без дубликатов
       const merged = Array.from(new Set([...targetList, ...uniqueDomains]))
 
-      // 3. Сохраняем обновленный список
+      // 3. Сохраняем обновленный список с проверкой ожидаемой ревизии
       await apiPost('domains', {
         direct: targetType === 'direct' ? merged : (cur.direct || []),
         force: targetType === 'force' ? merged : (cur.force || []),
+        expected_revision: cur.revision,
       })
 
       notify(

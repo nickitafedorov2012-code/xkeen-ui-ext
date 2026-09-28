@@ -710,9 +710,68 @@ pub async fn kill_process_by_pid(pid: u32, _signal: Option<&str>) -> Result<Stri
         }
     }
 
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (pid, _signal);
+            Ok(format!("(Симуляция) Сигнал успешно отправлен процессу PID {}", pid))
+        }
+    }
+}
+
+/// Проверяет, запущен ли процесс с указанным PID и соответствует ли имя/бинарник ожидаемому (Z-08)
+pub fn is_process_running_match(pid: u32, expected_name: &str) -> bool {
+    if pid <= 1 {
+        return false;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let exp = expected_name.to_lowercase();
+        // 1. Проверяем /proc/<pid>/comm
+        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", pid)) {
+            let c = comm.trim().to_lowercase();
+            if c == exp || c.starts_with(&exp) {
+                return true;
+            }
+        }
+        // 2. Проверяем /proc/<pid>/exe (симлинк на бинарник)
+        if let Ok(exe_link) = std::fs::read_link(format!("/proc/{}/exe", pid)) {
+            let exe_str = exe_link.to_string_lossy().to_lowercase();
+            if exe_str.ends_with(&exp) || exe_str.contains(&format!("/{exp}")) {
+                return true;
+            }
+        }
+        // 3. Проверяем /proc/<pid>/cmdline
+        if let Ok(cmdline_raw) = std::fs::read(format!("/proc/{}/cmdline", pid)) {
+            let cmdline = String::from_utf8_lossy(&cmdline_raw).replace('\0', " ").to_lowercase();
+            if cmdline.contains(&exp) {
+                return true;
+            }
+        }
+        false
+    }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (pid, signal);
-        Ok(format!("(Симуляция) Сигнал успешно отправлен процессу PID {}", pid))
+        let _ = (pid, expected_name);
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_protected_system_daemons() {
+        assert!(is_protected(1, "init"));
+        assert!(is_protected(2, "kthreadd"));
+        assert!(is_protected(100, "ndm"));
+        assert!(is_protected(101, "dnsmasq"));
+        assert!(!is_protected(999, "my_custom_script"));
+    }
+
+    #[test]
+    fn test_is_process_running_match_pid_bounds() {
+        assert!(!is_process_running_match(0, "nfqws"));
+        assert!(!is_process_running_match(1, "nfqws"));
     }
 }

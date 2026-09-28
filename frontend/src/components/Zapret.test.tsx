@@ -63,6 +63,28 @@ describe('Zapret Component — Toggleable Service Blocks & Custom Site CDN Boost
     }
   })
 
+  it.each(['config', 'hosts'] as const)('preserves edited %s during status polling', async (field) => {
+    vi.useFakeTimers()
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) =>
+      Promise.resolve(path === 'zapret/status' ? mockZapretStatus : {})
+    )
+    await act(async () => { root!.render(<Zapret notify={notifyMock} />) })
+    const label = field === 'config' ? 'zapret.conf' : 'Список доменов (Hostlist)'
+    const button = Array.from(container!.querySelectorAll('button')).find(b => b.textContent?.includes(label))
+    expect(button).toBeDefined()
+    await act(async () => { button!.click() })
+    const textarea = container!.querySelector('textarea')!
+    expect(textarea).not.toBeNull()
+    const draft = field === 'config' ? 'NFQWS_ARGS="--daemon --qnum=201"' : 'manual.example.org'
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, draft)
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(textarea.value).toBe(draft)
+    await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+    expect(textarea.value).toBe(draft)
+  })
+
   it('renders all toggleable service blocks (YouTube, Discord, GitHub, Torrents, 18+, Hostlist)', async () => {
     vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
       if (path === 'zapret/status') {
@@ -747,6 +769,24 @@ describe('Zapret Component — Features 1, 2, 4, 5 (Mini-Blockcheck, DPI Analyti
     }
   })
 
+  it.each(['dpi', 'blockcheck'])('reports unavailable %s diagnostics without fabricated success', async (kind) => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) =>
+      Promise.resolve(path === 'zapret/status' ? mockZapretStatus : {})
+    )
+    const message = 'DPI-диагностика временно недоступна'
+    vi.spyOn(api, 'apiPost').mockRejectedValue(new Error(message))
+    await act(async () => { root!.render(<Zapret notify={notifyMock} />) })
+    const label = kind === 'dpi' ? 'Тест YouTube & Discord' : 'Запустить автоподбор стратегий'
+    const button = Array.from(container!.querySelectorAll('button')).find(b => b.textContent?.includes(label))!
+    expect(button).toBeDefined()
+    await act(async () => { button.click() })
+    expect(notifyMock).toHaveBeenCalledWith(message, true)
+    expect(notifyMock).toHaveBeenCalledTimes(1)
+    expect(button.disabled).toBe(false)
+    expect(container!.textContent).not.toContain('Лучшая рекомендуемая стратегия:')
+    expect(container!.textContent).not.toContain('Score:')
+  })
+
   it('renders DPI Analytics live-widget with intercepted bytes, VPS saved bytes and handles reset', async () => {
     vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
       if (path === 'zapret/status') {
@@ -883,6 +923,12 @@ describe('Zapret Component — Features 1, 2, 4, 5 (Mini-Blockcheck, DPI Analyti
       custom_args: '--lua-desync=fake:blob=fake_default_tls --lua-desync=multisplit:pos=1,midsld',
     })
     expect(notifyMock).toHaveBeenCalledWith('Стратегия применена')
+
+    postSpy.mockRejectedValueOnce(new Error('DPI-диагностика временно недоступна'))
+    await act(async () => { startBtn?.click() })
+    expect(container!.textContent).not.toContain('Лучшая рекомендуемая стратегия:')
+    expect(container!.textContent).not.toContain('Score: 95/100')
+    expect(notifyMock).toHaveBeenLastCalledWith('DPI-диагностика временно недоступна', true)
   })
 
   it('renders Smart TV / Кинотеатр profile card and toggles it', async () => {

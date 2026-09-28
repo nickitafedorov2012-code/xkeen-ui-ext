@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
+use std::collections::HashMap;
+use serde_json::json;
 use crate::{config::AppConfig, log_i, log_w};
 
 #[derive(Deserialize)]
@@ -14,27 +16,48 @@ pub struct SpeedtestResponse {
     pub speed_mbps: f64,
     pub bytes_downloaded: u64,
     pub duration_secs: f64,
+    #[serde(default)]
+    pub verified: bool,
 }
 
-async fn restore_server_if_active(
+/// Сохранение полного снимка выбора групп selector перед замером
+pub async fn take_groups_snapshot(
     http: &reqwest::Client,
     cfg: &AppConfig,
-    original: Option<&str>,
-    tested_server: &str,
-) {
-    if let Some(orig) = original {
-        if !orig.is_empty() && orig != tested_server {
-            if let Ok(current_proxies) = crate::mihomo::get_proxies(http, cfg).await {
-                let current_leaf = crate::mihomo::resolve_active_leaf(&current_proxies);
-                if current_leaf == tested_server {
-                    let _ = crate::mihomo::switch_server(http, cfg, orig).await;
-                } else {
-                    log_i!("Восстановление сервера после speedtest отменено: активный сервер был переключен во время замера ('{}')", current_leaf);
-                }
-            } else {
-                let _ = crate::mihomo::switch_server(http, cfg, orig).await;
+) -> Result<(HashMap<String, String>, String), String> {
+    let proxies = crate::mihomo::get_proxies(http, cfg).await
+        .map_err(|e| format!("Ошибка получения списка прокси ядра Mihomo: {}", e))?;
+    let active_leaf = crate::mihomo::resolve_active_leaf(&proxies);
+    let mut snapshot = HashMap::new();
+    for (name, val) in &proxies {
+        let typ = val.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
+        if typ == "selector" || typ == "select" {
+            if let Some(now) = val.get("now").and_then(|n| n.as_str()) {
+                snapshot.insert(name.clone(), now.to_string());
             }
         }
+    }
+    Ok((snapshot, active_leaf))
+}
+
+/// Восстановление точного снимка выбора групп Selector, сохраненного перед замером
+pub async fn restore_groups_snapshot(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    snapshot: &HashMap<String, String>,
+) {
+    if snapshot.is_empty() {
+        return;
+    }
+    log_i!("Восстановление снимка групп выбора после Speedtest ({} групп)", snapshot.len());
+    for (group_name, orig_target) in snapshot {
+        let _ = crate::mihomo::m_put(
+            http,
+            cfg,
+            &format!("/proxies/{}", crate::mihomo::urlencoding_lite(group_name)),
+            json!({ "name": orig_target }),
+            3,
+        ).await;
     }
 }
 
@@ -44,31 +67,71 @@ pub async fn run_speedtest(
     _cfg: &AppConfig,
     server_id: &str,
 ) -> Result<SpeedtestResponse, String> {
-    log_i!("Запуск теста скорости для сервера '{}'", server_id);
-
-    // 1. Замер задержки выбранного узла через API ядра Mihomo
-    let mut first_byte_ms = 0u32;
-    if !server_id.is_empty() {
-        let measured_ping = crate::mihomo::ping_server_url(_http, _cfg, server_id, 4000, Some("https://cp.cloudflare.com")).await;
-        if measured_ping > 0 {
-            first_byte_ms = measured_ping as u32;
-        }
+    let target_server = server_id.trim();
+    if target_server.is_empty() {
+        return Err("Идентификатор сервера для Speedtest не может быть пустым".to_string());
     }
 
-    // 2. Временное переключение активного сервера на целевой server_id для замера
-    let proxies_opt = crate::mihomo::get_proxies(_http, _cfg).await.ok();
-    let original_server = proxies_opt.as_ref().map(|p| crate::mihomo::resolve_active_leaf(p));
-    let need_restore = if let Some(orig) = &original_server {
-        if !orig.is_empty() && orig != server_id && !server_id.is_empty() {
-            crate::mihomo::switch_server(_http, _cfg, server_id).await.is_ok()
-        } else {
-            false
+    log_i!("Запуск теста скорости для сервера '{}'", target_server);
+
+    // 1. Создание снимка текущего выбора всех групп Selector ядра Mihomo
+    let (group_snapshot, original_server) = take_groups_snapshot(_http, _cfg).await?;
+
+    // 2. Переключение активного маршрута на запрошенный сервер (DIAG-01)
+    let need_restore = if original_server != target_server {
+        match crate::mihomo::switch_server(_http, _cfg, target_server).await {
+            Ok(_) => true,
+            Err(e) => return Err(format!("Не удалось переключить маршрут на запрошенный сервер '{}': {}", target_server, e)),
         }
     } else {
         false
     };
 
-    // Тестовые зеркала для скачивания чанка (5-10 МБ)
+    // 3. Подтверждение тестового маршрута в runtime (DIAG-01)
+    // Маршрут должен быть строго подтвержден в runtime:
+    // либо активный leaf равен target_server, либо основной селектор (PROXY/GLOBAL/etc)
+    // переключен на target_server (если target_server сам является группой или селектором)
+    let current_proxies = match crate::mihomo::get_proxies(_http, _cfg).await {
+        Ok(p) => p,
+        Err(e) => {
+            if need_restore {
+                restore_groups_snapshot(_http, _cfg, &group_snapshot).await;
+            }
+            return Err(format!("Ошибка проверки прокси ядра Mihomo: {}", e));
+        }
+    };
+    let current_leaf = crate::mihomo::resolve_active_leaf(&current_proxies);
+    let is_confirmed = if current_leaf == target_server {
+        true
+    } else {
+        // Проверяем только основные группы (PROXY, GLOBAL, Proxy, auto), исключая изолированные группы устройств
+        ["PROXY", "GLOBAL", "Proxy", "auto"].iter().any(|&grp_name| {
+            current_proxies.get(grp_name)
+                .and_then(|g| g.get("now"))
+                .and_then(|n| n.as_str())
+                == Some(target_server)
+        })
+    };
+
+    if !is_confirmed {
+        if need_restore {
+            restore_groups_snapshot(_http, _cfg, &group_snapshot).await;
+        }
+        return Err(format!(
+            "Подтверждение тестового маршрута не удалось: сервер '{}' не стал активным в ядре Mihomo (текущий: '{}')",
+            target_server,
+            if current_leaf.is_empty() { "не определён" } else { &current_leaf }
+        ));
+    }
+
+    // 4. Замер задержки выбранного узла через API ядра Mihomo
+    let mut first_byte_ms = 0u32;
+    let measured_ping = crate::mihomo::ping_server_url(_http, _cfg, target_server, 4000, Some("https://cp.cloudflare.com")).await;
+    if measured_ping > 0 {
+        first_byte_ms = measured_ping as u32;
+    }
+
+    // 5. Тестовые зеркала для скачивания чанка (5-10 МБ)
     let test_urls = [
         "https://speed.cloudflare.com/__down?bytes=5242880",
         "http://cachefly.cachefly.net/5mb.test",
@@ -81,7 +144,7 @@ pub async fn run_speedtest(
         Ok(p) => p,
         Err(e) => {
             if need_restore {
-                restore_server_if_active(_http, _cfg, original_server.as_deref(), server_id).await;
+                restore_groups_snapshot(_http, _cfg, &group_snapshot).await;
             }
             return Err(format!("Ошибка создания прокси: {}", e));
         }
@@ -95,14 +158,15 @@ pub async fn run_speedtest(
         Ok(c) => c,
         Err(e) => {
             if need_restore {
-                restore_server_if_active(_http, _cfg, original_server.as_deref(), server_id).await;
+                restore_groups_snapshot(_http, _cfg, &group_snapshot).await;
             }
             return Err(format!("Ошибка инициализации HTTP клиента: {}", e));
         }
     };
 
-    let start = Instant::now();
+    // 6. Измерение ТОЛЬКО интервала передачи данных (DIAG-01)
     let mut total_bytes = 0u64;
+    let mut transfer_duration_secs = 0.0f64;
     let mut success = false;
 
     for url in &test_urls {
@@ -116,14 +180,19 @@ pub async fn run_speedtest(
                     first_byte_ms = req_start.elapsed().as_millis() as u32;
                 }
 
+                let transfer_start = Instant::now();
+                let mut chunk_bytes = 0u64;
                 while let Ok(Some(chunk)) = resp.chunk().await {
-                    total_bytes += chunk.len() as u64;
+                    chunk_bytes += chunk.len() as u64;
                     // Если скачали больше 5 МБ или прошло больше 8 секунд — завершаем замер
-                    if total_bytes >= 5 * 1024 * 1024 || start.elapsed().as_secs() >= 8 {
+                    if chunk_bytes >= 5 * 1024 * 1024 || transfer_start.elapsed().as_secs() >= 8 {
                         break;
                     }
                 }
-                if total_bytes > 100_000 {
+                let elapsed = transfer_start.elapsed().as_secs_f64().max(0.001);
+                if chunk_bytes > 100_000 {
+                    total_bytes = chunk_bytes;
+                    transfer_duration_secs = elapsed;
                     success = true;
                     break;
                 }
@@ -134,33 +203,34 @@ pub async fn run_speedtest(
         }
     }
 
-    // Восстанавливаем исходный сервер после замера только если активным всё ещё является тестируемый узел
+    // 7. Восстанавливаем исходную структуру групп выбора сразу после замера
     if need_restore {
-        restore_server_if_active(_http, _cfg, original_server.as_deref(), server_id).await;
+        restore_groups_snapshot(_http, _cfg, &group_snapshot).await;
     }
 
     if !success || total_bytes == 0 {
         return Err("Не удалось выполнить тест скорости: тестовые узлы недоступны".to_string());
     }
 
-    let duration_secs = start.elapsed().as_secs_f64().max(0.001);
-    let speed_mbps = calculate_speed(total_bytes, duration_secs);
+    // Время замера включает строго интервал передачи данных, без накладных расходов на переключение и откат
+    let speed_mbps = calculate_speed(total_bytes, transfer_duration_secs);
 
     log_i!(
         "Тест скорости для '{}' завершён: {} Мбит/с ({} байт за {:.2} с, отклик {} мс)",
-        server_id,
+        target_server,
         speed_mbps,
         total_bytes,
-        duration_secs,
+        transfer_duration_secs,
         first_byte_ms
     );
 
     Ok(SpeedtestResponse {
-        server_id: server_id.to_string(),
+        server_id: target_server.to_string(),
         latency_ms: first_byte_ms,
         speed_mbps,
         bytes_downloaded: total_bytes,
-        duration_secs: (duration_secs * 100.0).round() / 100.0,
+        duration_secs: (transfer_duration_secs * 100.0).round() / 100.0,
+        verified: true,
     })
 }
 

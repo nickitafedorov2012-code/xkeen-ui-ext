@@ -362,6 +362,7 @@ export interface AntigravityStatus {
   events: AntigravityEvent[]
   targets: string[]
   own_proxy: string
+  health_check_interval?: number
 }
 
 export interface GoogleGeoStatus {

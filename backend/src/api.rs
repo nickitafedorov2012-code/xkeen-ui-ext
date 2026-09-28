@@ -289,6 +289,11 @@ pub struct SwitchReq {
 
 /// POST /api/servers/switch
 pub async fn switch_server(State(state): State<AppState>, Json(req): Json<SwitchReq>) -> Response {
+    // DIAG-01: Изоляция от Speedtest
+    let _speedtest_guard = match state.speedtest_lock.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => return api_err("Невозможно переключить сервер: в данный момент выполняется тест скорости (Speedtest)"),
+    };
     let cfg = state.config.read().await.clone();
     match mihomo::switch_server(&state.http, &cfg, &req.server_id).await {
         Ok(msg) => {
@@ -472,30 +477,71 @@ pub async fn repair_flow(State(state): State<AppState>) -> Response {
         }
     }
 
-    let target_server = best_server
-        .or_else(|| cfg.flow_server.clone())
-        .unwrap_or_else(|| "🇺🇸 США Вашингтон".to_string());
+    // DIAG-04: Не выбирать отсутствующий узел, проверять реальное наличие в конфигурации
+    let target_server = match best_server.or_else(|| cfg.flow_server.clone()) {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => {
+            // Ищем сервер США из mihomo::get_servers, либо первый доступный узел
+            if let Ok(servers) = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
+                let us_cand = servers.iter().find(|s| {
+                    let l = s.id.to_lowercase();
+                    !s.id.is_empty() && s.id != "Fastest" && s.id != "Fallback" &&
+                        (l.contains("сша") || l.contains("usa") || l.contains("us ") ||
+                         l.contains("chicago") || l.contains("washington") || l.contains("miami") ||
+                         l.contains("seattle") || l.contains("atlanta") || l.contains("phoenix") ||
+                         l.contains("los angeles") || l.contains("canada"))
+                });
+                if let Some(us_srv) = us_cand {
+                    us_srv.id.clone()
+                } else if let Some(first_valid) = servers.into_iter().find(|s| !s.id.is_empty() && s.id != "Fastest" && s.id != "Fallback") {
+                    first_valid.id
+                } else {
+                    return api_err("В конфигурации ядра Mihomo не найдено ни одного действительного прокси-сервера для маршрута Google Flow");
+                }
+            } else {
+                return api_err("Не удалось определить доступный прокси-сервер для маршрута Google Flow (Mihomo API недоступен)");
+            }
+        }
+    };
 
-    // 2. Переключение Flow сервера и обновление правил
-    let _ = mihomo::switch_flow_server(&state.http, &cfg, &target_server).await;
+    // 2. Переключение Flow сервера и проверка результата в runtime (DIAG-04)
+    if let Err(e) = mihomo::switch_flow_server(&state.http, &cfg, &target_server).await {
+        return api_err(format!("Не удалось переключить маршрут Google AI на сервер '{}': {}", target_server, e));
+    }
 
-    // 3. Сохранение в config.json
+    // 3. Подтверждение в runtime (DIAG-04: честная валидация)
+    let proxies = match mihomo::get_proxies(&state.http, &cfg).await {
+        Ok(p) => p,
+        Err(e) => return api_err(format!("Ошибка подтверждения маршрута в ядре Mihomo: {}", e)),
+    };
+    let is_confirmed = proxies.iter().any(|(name, obj)| {
+        let lower = name.to_lowercase();
+        (lower.contains("google ai") || lower.contains("flow")) && obj.get("now").and_then(|n| n.as_str()) == Some(&target_server)
+    });
+    if !is_confirmed {
+        return api_err(format!("Маршрут Google AI в ядре Mihomo не подтвердил выбор узла '{}' в runtime", target_server));
+    }
+
+    // 4. Сохранение в config.json с проверкой результата
     {
         let _cfg_guard = state.config_lock.lock().await;
         let mut mut_cfg = (**state.config.read().await).clone();
         mut_cfg.flow_server = Some(target_server.clone());
-        let _ = config::save(&state.config_path, &mut_cfg).await;
+        if let Err(e) = config::save(&state.config_path, &mut_cfg).await {
+            return api_err(format!("Маршрут Google AI переключен, но сохранение конфигурации завершилось ошибкой: {}", e));
+        }
         *state.config.write().await = std::sync::Arc::new(mut_cfg);
     }
 
-    // 4. Сброс всех активных соединений ядра
+    // 5. Сброс всех активных соединений ядра
     mihomo::close_all_connections(&state.http, &cfg).await;
 
     api_ok(json!({
         "success": true,
         "flow_server": target_server,
+        "verified": true,
         "min_ping": if min_ping == i64::MAX { None } else { Some(min_ping) },
-        "message": format!("Маршрут Google Flow переключен на '{target_server}', сокеты сброшены"),
+        "message": format!("Маршрут Google Flow подтвержден и переключен на '{target_server}', сокеты сброшены"),
     }))
 }
 
@@ -884,6 +930,9 @@ pub async fn set_device_routing(State(state): State<AppState>, Json(req): Json<D
     if ip.is_empty() {
         return api_err("Пустой IP устройства");
     }
+    if ip.parse::<std::net::IpAddr>().is_err() {
+        return api_err(format!("Некорректный IP-адрес устройства: '{ip}'"));
+    }
     let mut servers: Vec<String> = req
         .servers
         .into_iter()
@@ -963,15 +1012,25 @@ fn device_providers_for(cfg: &config::AppConfig, yaml: &str) -> Vec<String> {
     }
 }
 
+pub fn calc_domains_revision(direct: &[String], force: &[String]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    direct.hash(&mut hasher);
+    force.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
 /// GET /api/domains — списки доменов (напрямую / принудительно через прокси) + найденные CDN.
 pub async fn get_domains(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
     let auto_cdns = crate::cdn_discovery::expand_bundles(&cfg.force_domains);
     let auto_cdns_list: Vec<String> = auto_cdns.into_iter().collect();
+    let rev = calc_domains_revision(&cfg.direct_domains, &cfg.force_domains);
     api_ok(json!({
         "direct": cfg.direct_domains,
         "force": cfg.force_domains,
         "auto_cdns": auto_cdns_list,
+        "revision": rev,
     }))
 }
 
@@ -981,6 +1040,7 @@ pub struct DomainsReq {
     pub direct: Vec<String>,
     #[serde(default)]
     pub force: Vec<String>,
+    pub expected_revision: Option<String>,
 }
 
 /// POST /api/domains — сохранить списки, авто-обнаружить CDN, вставить DOMAIN-SUFFIX правила в rules:, reload.
@@ -990,8 +1050,21 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
         Err(e) => return api_err(e),
     };
 
-    tx.config_mut().direct_domains = routing::sanitize_domains(&req.direct);
-    tx.config_mut().force_domains = routing::sanitize_domains(&req.force);
+    // UI-03: Проверка оптимистичного concurrency
+    if let Some(exp) = &req.expected_revision {
+        let cur_rev = calc_domains_revision(&tx.config().direct_domains, &tx.config().force_domains);
+        if exp != &cur_rev {
+            return api_err("Конфликт параллельного сохранения доменов: списки были изменены другим клиентом");
+        }
+    }
+
+    let direct_sanitized = routing::sanitize_domains(&req.direct);
+    let mut force_sanitized = routing::sanitize_domains(&req.force);
+    let direct_set: std::collections::HashSet<String> = direct_sanitized.iter().cloned().collect();
+    force_sanitized.retain(|d| !direct_set.contains(d));
+
+    tx.config_mut().direct_domains = direct_sanitized;
+    tx.config_mut().force_domains = force_sanitized;
 
     // Автоматическое обнаружение сопутствующих CDN (бандлы + поддомены + HTML-сканер)
     let auto_cdns = crate::cdn_discovery::discover_all_cdns(&tx.config().force_domains, &tx.config().mihomo_proxy_url()).await;
@@ -1096,113 +1169,99 @@ pub async fn force_add_domain(
     State(state): State<AppState>,
     Json(req): Json<ForceAddDomainReq>,
 ) -> Response {
-    let clean_domain = req
-        .domain
-        .trim()
-        .to_lowercase()
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_start_matches("www.")
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_string();
-
-    if clean_domain.is_empty() || !clean_domain.contains('.') {
+    let clean_domain = crate::config::normalize_domain(&req.domain);
+    if !crate::config::is_valid_domain(&clean_domain) {
         return api_err(format!("Некорректный домен: {}", req.domain));
     }
 
-    let _cfg_guard = state.config_lock.lock().await;
-    let _guard = state.routing_lock.lock().await;
-    let mut cfg = (**state.config.read().await).clone();
+    let client_ip = match req.client_ip.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(ip) => {
+            if !crate::config::is_valid_ip_or_cidr(ip) {
+                return api_err(format!("Некорректный IP-адрес или CIDR устройства: '{ip}'"));
+            }
+            Some(ip.to_string())
+        }
+        None => None,
+    };
 
-    let client_ip = req.client_ip.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    let mut tx = match ConfigTx::begin(&state).await {
+        Ok(t) => t,
+        Err(e) => return api_err(e),
+    };
 
-    if let Some(ref ip) = client_ip {
-        // Добавление в персональные правила устройства
-        let rules = cfg.device_domain_rules.entry(ip.clone()).or_default();
+    let all_force = if let Some(ref ip) = client_ip {
+        let rules = tx.config_mut().device_domain_rules.entry(ip.clone()).or_default();
         if !rules.iter().any(|r| r.domain.eq_ignore_ascii_case(&clean_domain)) {
             rules.push(crate::config::DeviceDomainRule {
                 domain: clean_domain.clone(),
                 target: "PROXY".into(),
             });
         }
-
-        let raw_yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+        let raw_yaml = match tx.read_yaml().await {
             Ok(y) => y,
             Err(e) => return api_err(format!("Не удалось прочитать config.yaml: {e}")),
         };
-        let (new_yaml, _) = match crate::routing::apply_routing(&raw_yaml, &cfg) {
+        let (new_yaml, _) = match crate::routing::apply_routing(&raw_yaml, tx.config()) {
             Ok(res) => res,
             Err(e) => return api_err(format!("Ошибка генерации правил роутинга: {e}")),
         };
-        if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
-            return api_err(format!("Ошибка сохранения config.yaml: {e}"));
+        if let Err(e) = tx.set_yaml(new_yaml) {
+            return api_err(e);
         }
-        if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
-            return api_err(format!("Ошибка перезагрузки конфигурации ядра Mihomo: {e}"));
-        }
-        if let Err(e) = config::save(&state.config_path, &cfg).await {
-            return api_err(format!("Ошибка сохранения config.json: {e}"));
-        }
-
-        *state.config.write().await = std::sync::Arc::new(cfg.clone());
         log_i!("Домен {} жестко направлен в прокси для устройства {}", clean_domain, ip);
+        vec![]
     } else {
-        // Глобальное принудительное проксирование
-        if !cfg.force_domains.iter().any(|d| d.eq_ignore_ascii_case(&clean_domain)) {
-            cfg.force_domains.push(clean_domain.clone());
-            cfg.force_domains.sort();
-            cfg.force_domains.dedup();
+        // Глобальное принудительное проксирование: исключаем конфликт с direct_domains
+        tx.config_mut().direct_domains.retain(|d| !d.eq_ignore_ascii_case(&clean_domain));
+        if !tx.config().force_domains.iter().any(|d| d.eq_ignore_ascii_case(&clean_domain)) {
+            tx.config_mut().force_domains.push(clean_domain.clone());
+            tx.config_mut().force_domains.sort();
+            tx.config_mut().force_domains.dedup();
         }
 
         // Обнаружение сопутствующих CDN
-        let auto_cdns = crate::cdn_discovery::discover_all_cdns(&cfg.force_domains, &cfg.mihomo_proxy_url()).await;
-        let mut all_force = cfg.force_domains.clone();
+        let auto_cdns = crate::cdn_discovery::discover_all_cdns(&tx.config().force_domains, &tx.config().mihomo_proxy_url()).await;
+        let mut force_list = tx.config().force_domains.clone();
         for cdn in &auto_cdns {
-            if !all_force.contains(cdn) {
-                all_force.push(cdn.clone());
+            if !force_list.contains(cdn) {
+                force_list.push(cdn.clone());
             }
         }
-        if cfg.zapret.enabled {
-            all_force.retain(|d| !routing::is_zapret_direct_domain(d, &cfg.zapret));
+        if tx.config().zapret.enabled {
+            force_list.retain(|d| !routing::is_zapret_direct_domain(d, &tx.config().zapret));
         }
 
-        let yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+        let yaml = match tx.read_yaml().await {
             Ok(y) => y,
             Err(e) => return api_err(format!("Не удалось прочитать config.yaml: {e}")),
         };
 
-        let mut new_yaml = match routing::apply_domain_rules(&yaml, &cfg.direct_domains, &all_force, &cfg.device_domain_rules) {
+        let mut new_yaml = match routing::apply_domain_rules(&yaml, &tx.config().direct_domains, &force_list, &tx.config().device_domain_rules) {
             Ok(y) => y,
             Err(e) => return api_err(e),
         };
-        if let Ok(with_zapret) = routing::apply_zapret_hybrid_rules(&new_yaml, &cfg.zapret) {
+        if let Ok(with_zapret) = routing::apply_zapret_hybrid_rules(&new_yaml, &tx.config().zapret) {
             new_yaml = with_zapret;
         }
 
-        if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
-            return api_err(format!("Ошибка сохранения config.yaml: {e}"));
+        if let Err(e) = tx.set_yaml(new_yaml) {
+            return api_err(e);
         }
-
-        let _ = mihomo::reload_config(&state.http, &cfg).await;
-
-        if let Err(e) = config::save(&state.config_path, &cfg).await {
-            return api_err(format!("Ошибка сохранения config.json: {e}"));
-        }
-
-        // Синхронизация IP-адресов домена с ipset geo_override ядра Linux
-        let _ = crate::override_sync::sync_geo_override(&all_force).await;
-
-        *state.config.write().await = std::sync::Arc::new(cfg.clone());
         log_i!("Домен {} жестко направлен в прокси глобально", clean_domain);
+        force_list
+    };
+
+    if let Err(e) = tx.commit_and_reload().await {
+        return api_err(e);
+    }
+
+    if !all_force.is_empty() {
+        let _ = crate::override_sync::sync_geo_override(&all_force).await;
     }
 
     // Если передан ID конкретного соединения — закрываем его немедленно
     if let Some(conn_id) = req.close_connection_id.as_deref().filter(|s| !s.is_empty()) {
+        let cfg = state.config.read().await.clone();
         let url = format!("{}/connections/{}", cfg.mihomo_url(), conn_id);
         let mut req_del = state.http.delete(&url);
         if !cfg.mihomo.secret.is_empty() {
@@ -1381,8 +1440,11 @@ fn backup_root(cfg: &config::AppConfig) -> std::path::PathBuf {
 
 /// Валидация имени бэкапа (защита от path traversal).
 fn valid_backup_name(name: &str) -> bool {
-    !name.is_empty()
+    name.len() > 3
         && name.starts_with("xr-")
+        && !name.contains("..")
+        && !name.contains('/')
+        && !name.contains('\\')
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -1409,23 +1471,67 @@ pub async fn list_backups(State(state): State<AppState>) -> Response {
     api_ok(json!({ "backups": items, "dir": root.display().to_string() }))
 }
 
-/// POST /api/backups — создать бэкап (config.yaml Mihomo + config.json панели).
+/// POST /api/backups — создать бэкап (config.yaml Mihomo + config.json панели + опционально zapret.conf и zapret-hosts.txt).
 pub async fn create_backup(State(state): State<AppState>) -> Response {
+    let _cfg_guard = state.config_lock.lock().await;
+    let _routing_guard = state.routing_lock.lock().await;
+
     let cfg = state.config.read().await.clone();
-    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");
     let name = format!("xr-{ts}");
     let dir = backup_root(&cfg).join(&name);
-    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
-        return api_err(format!("Не удалось создать {}: {e}", dir.display()));
+    let tmp_dir = backup_root(&cfg).join(format!("xr-{ts}.tmp"));
+
+    if let Err(e) = tokio::fs::create_dir_all(&tmp_dir).await {
+        return api_err(format!("Не удалось создать временный каталог бэкапа {}: {e}", tmp_dir.display()));
     }
+
     // 1. config.yaml Mihomo
-    if let Err(e) = tokio::fs::copy(&cfg.mihomo.config_path, dir.join("config.yaml")).await {
+    if let Err(e) = tokio::fs::copy(&cfg.mihomo.config_path, tmp_dir.join("config.yaml")).await {
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
         return api_err(format!("Не удалось скопировать {}: {e}", cfg.mihomo.config_path));
     }
     // 2. config.json панели
-    if let Err(e) = tokio::fs::copy(state.config_path.as_path(), dir.join("config.json")).await {
+    if let Err(e) = tokio::fs::copy(state.config_path.as_path(), tmp_dir.join("config.json")).await {
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
         return api_err(format!("Не удалось скопировать {}: {e}", state.config_path.display()));
     }
+    // 3. zapret.conf (если существует)
+    let zapret_candidates = [
+        "/opt/zapret/config/zapret.conf",
+        "/opt/etc/zapret/zapret.conf",
+    ];
+    for zp in zapret_candidates {
+        let p = std::path::Path::new(zp);
+        if p.is_file() {
+            let _ = tokio::fs::copy(p, tmp_dir.join("zapret.conf")).await;
+            break;
+        }
+    }
+    // 4. zapret-hosts.txt (если существует)
+    let hosts_candidates = [
+        "/opt/etc/zapret/zapret-hosts.txt",
+        "/opt/zapret/config/zapret-hosts.txt",
+    ];
+    for hp in hosts_candidates {
+        let p = std::path::Path::new(hp);
+        if p.is_file() {
+            let _ = tokio::fs::copy(p, tmp_dir.join("zapret-hosts.txt")).await;
+            break;
+        }
+    }
+    // 5. ru_exclude_override.lst (если существует)
+    let override_path = std::path::Path::new(crate::override_sync::OVERRIDE_FILE);
+    if override_path.is_file() {
+        let _ = tokio::fs::copy(override_path, tmp_dir.join("ru_exclude_override.lst")).await;
+    }
+
+    // Атомарно активируем каталог бэкапа только после успешной записи полного комплекта
+    if let Err(e) = tokio::fs::rename(&tmp_dir, &dir).await {
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+        return api_err(format!("Ошибка фиксации бэкапа: {e}"));
+    }
+
     log_i!("Бэкап создан: {} ({})", name, dir.display());
     api_ok(json!({ "name": name, "dir": dir.display().to_string() }))
 }
@@ -1435,11 +1541,8 @@ pub struct BackupReq {
     pub name: String,
 }
 
-/// POST /api/backups/restore — восстановить конфиги из бэкапа, reload Mihomo.
+/// POST /api/backups/restore — восстановить конфиги из бэкапа через ConfigTx, reload Mihomo.
 pub async fn restore_backup(State(state): State<AppState>, Json(req): Json<BackupReq>) -> Response {
-    let _cfg_guard = state.config_lock.lock().await;
-    let _routing_guard = state.routing_lock.lock().await;
-
     if !valid_backup_name(&req.name) {
         return api_err("Некорректное имя бэкапа");
     }
@@ -1460,50 +1563,93 @@ pub async fn restore_backup(State(state): State<AppState>, Json(req): Json<Backu
         Ok(_) => return api_err("Файл config.yaml в бэкапе пуст"),
         Err(e) => return api_err(format!("Не удалось прочитать config.yaml из бэкапа: {e}")),
     };
+    if let Err(e) = crate::transaction::validate_yaml_syntax(&new_yaml_content) {
+        return api_err(format!("Синтаксическая ошибка в config.yaml бэкапа: {e}"));
+    }
 
     let new_json_content = match tokio::fs::read_to_string(&src_json).await {
         Ok(s) => s,
         Err(e) => return api_err(format!("Не удалось прочитать config.json из бэкапа: {e}")),
     };
-
-    let new_cfg: config::AppConfig = match serde_json::from_str(&new_json_content) {
+    let mut new_cfg: config::AppConfig = match serde_json::from_str(&new_json_content) {
         Ok(c) => c,
         Err(e) => return api_err(format!("Файл config.json в бэкапе поврежден: {e}")),
     };
 
-    // 2. Снимаем текущие копии файлов в памяти для надёжного и быстрого отката
-    let old_yaml_content = tokio::fs::read_to_string(&cfg.mihomo.config_path).await.ok();
-    let old_json_content = tokio::fs::read_to_string(state.config_path.as_path()).await.ok();
+    // BK-04: Сохранение локальных путей хоста при переносе бэкапа
+    new_cfg.system = cfg.system.clone();
+    new_cfg.mihomo.config_path = cfg.mihomo.config_path.clone();
 
-    // 3. Атомарно записываем config.yaml (tmp + rename)
-    if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml_content).await {
-        return api_err(format!("Не удалось атомарно записать config.yaml: {e}"));
+    // 2. Старт транзакции через ConfigTx с блокировками и снапшотами (BK-04, BK-05)
+    let mut tx = match crate::transaction::ConfigTx::begin(&state).await {
+        Ok(tx) => tx,
+        Err(e) => return api_err(format!("Ошибка начала транзакции восстановления: {e}")),
+    };
+
+    if let Err(e) = tx.set_yaml(new_yaml_content) {
+        return api_err(format!("Ошибка подготовки config.yaml: {e}"));
+    }
+    tx.stage_json(new_cfg);
+
+    // Дополнительные файлы (zapret.conf, zapret-hosts.txt и override), если присутствуют в бэкапе
+    let src_zapret = dir.join("zapret.conf");
+    if src_zapret.is_file() {
+        if let Ok(z_content) = tokio::fs::read_to_string(&src_zapret).await {
+            let z_candidates = [
+                std::path::PathBuf::from("/opt/zapret/config/zapret.conf"),
+                std::path::PathBuf::from("/opt/etc/zapret/zapret.conf"),
+            ];
+            for z_path in &z_candidates {
+                if z_path.parent().map(|p| p.exists()).unwrap_or(false) {
+                    let _ = tx.set_extra_file(z_path.as_path(), z_content.clone(), false).await;
+                    break;
+                }
+            }
+        }
     }
 
-    // 4. Атомарно записываем config.json (tmp + rename)
-    if let Err(e) = atomic_write_file(state.config_path.as_path(), &new_json_content).await {
-        if let Some(ref old_y) = old_yaml_content {
-            let _ = atomic_write_file(&cfg.mihomo.config_path, old_y).await;
+    let src_hosts = dir.join("zapret-hosts.txt");
+    if src_hosts.is_file() {
+        if let Ok(h_content) = tokio::fs::read_to_string(&src_hosts).await {
+            let h_candidates = [
+                std::path::PathBuf::from("/opt/etc/zapret/zapret-hosts.txt"),
+                std::path::PathBuf::from("/opt/zapret/config/zapret-hosts.txt"),
+            ];
+            for h_path in &h_candidates {
+                if h_path.parent().map(|p| p.exists()).unwrap_or(false) {
+                    let _ = tx.set_extra_file(h_path.as_path(), h_content.clone(), false).await;
+                    break;
+                }
+            }
         }
-        return api_err(format!("Не удалось атомарно записать config.json: {e}"));
     }
 
-    // 5. Перезагрузка ядра Mihomo
-    if let Err(e) = mihomo::reload_config(&state.http, &new_cfg).await {
-        if let Some(ref old_y) = old_yaml_content {
-            let _ = atomic_write_file(&cfg.mihomo.config_path, old_y).await;
+    let src_override = dir.join("ru_exclude_override.lst");
+    if src_override.is_file() {
+        if let Ok(ov_content) = tokio::fs::read_to_string(&src_override).await {
+            let ov_path = std::path::Path::new(crate::override_sync::OVERRIDE_FILE);
+            if ov_path.parent().map(|p| p.exists()).unwrap_or(false) {
+                let _ = tx.set_extra_file(ov_path, ov_content, false).await;
+            }
         }
-        if let Some(ref old_j) = old_json_content {
-            let _ = atomic_write_file(state.config_path.as_path(), old_j).await;
-        }
-        let _ = mihomo::reload_config(&state.http, &cfg).await;
-        return api_err(format!("Ошибка применения конфигурации Mihomo ({e}), изменения полностью откатаны"));
     }
 
-    // 6. Обновляем состояние в памяти
-    *state.config.write().await = std::sync::Arc::new(new_cfg);
-    log_i!("Конфиги атомарно восстановлены из бэкапа {}", req.name);
-    api_ok(json!({ "restored": req.name }))
+    // 3. Атомарное применение и reload с автоматическим двухфазным откатом при сбое (BK-05)
+    match tx.commit_and_reload().await {
+        Ok(_) => {
+            log_i!("Конфиги атомарно восстановлены из бэкапа {}", req.name);
+            api_ok(json!({ "restored": req.name }))
+        }
+        Err(e) => {
+            let recovery_note = if tx.is_recovery_required() {
+                " (ВНИМАНИЕ: требуется ручное восстановление файлов)"
+            } else {
+                ""
+            };
+            log_e!("Ошибка применения бэкапа {}: {e}{recovery_note}", req.name);
+            api_err(format!("Ошибка применения бэкапа: {e}{recovery_note}"))
+        }
+    }
 }
 
 /// POST /api/backups/delete — удалить бэкап.
@@ -1671,11 +1817,20 @@ pub struct RoutingReq {
 
 /// POST /api/routing — применить назначения (merge), reload Mihomo, перевыбор серверов.
 pub async fn apply_routing(State(state): State<AppState>, Json(req): Json<RoutingReq>) -> Response {
-    let _cfg_guard = state.config_lock.lock().await;
-    let _guard = state.routing_lock.lock().await;
-    let cfg = state.config.read().await.clone();
+    // Валидация всех IP устройств в назначениях (RT-02)
+    for a in &req.assignments {
+        let clean_ip = a.ip.trim();
+        if !crate::config::is_valid_ip_or_cidr(clean_ip) {
+            return api_err(format!("Некорректный IP-адрес или CIDR устройства: '{clean_ip}'"));
+        }
+    }
 
-    let yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+    let mut tx = match ConfigTx::begin(&state).await {
+        Ok(t) => t,
+        Err(e) => return api_err(e),
+    };
+
+    let yaml = match tx.read_yaml().await {
         Ok(y) => y,
         Err(e) => return api_err(format!("Не удалось прочитать config.yaml: {e}")),
     };
@@ -1684,20 +1839,21 @@ pub async fn apply_routing(State(state): State<AppState>, Json(req): Json<Routin
         .into_iter()
         .map(|a| routing::Assignment { ip: a.ip, name: a.name, server: a.server })
         .collect();
-    let new_yaml = match routing::apply_assignments(&yaml, &assignments, &device_providers_for(&cfg, &yaml)) {
+    let new_yaml = match routing::apply_assignments(&yaml, &assignments, &device_providers_for(tx.config(), &yaml)) {
         Ok(y) => y,
         Err(e) => return api_err(e),
     };
 
-    if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
-        return api_err(format!("Ошибка сохранения config.yaml: {e}"));
+    if let Err(e) = tx.set_yaml(new_yaml) {
+        return api_err(e);
     }
 
-    // Reload Mihomo и перевыбор серверов в новых группах (порт логики десктопа)
-    if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
-        return api_err(format!("Конфиг записан, но reload Mihomo не удался: {e}"));
+    if let Err(e) = tx.commit_and_reload().await {
+        return api_err(format!("Ошибка применения конфигурации маршрутов: {e}"));
     }
+
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    let cfg = state.config.read().await.clone();
     let mut reselected = 0usize;
     for a in &assignments {
         if let Some(server) = &a.server {
@@ -2115,7 +2271,7 @@ pub struct SaveConfigFileRequest {
     pub reload_mihomo: bool,
 }
 
-fn resolve_config_file_path(id: &str, cfg: &config::AppConfig) -> Option<std::path::PathBuf> {
+fn resolve_config_file_path(id: &str, cfg: &config::AppConfig, config_path: &str) -> Option<std::path::PathBuf> {
     let providers_dir = std::path::Path::new(&cfg.mihomo.config_path)
         .parent()
         .map(|p| p.join("providers"))
@@ -2123,11 +2279,7 @@ fn resolve_config_file_path(id: &str, cfg: &config::AppConfig) -> Option<std::pa
 
     match id {
         "mihomo" => Some(std::path::PathBuf::from(&cfg.mihomo.config_path)),
-        "route" => Some(if cfg!(target_os = "linux") {
-            std::path::PathBuf::from(crate::CONFIG_PATH)
-        } else {
-            std::path::PathBuf::from("xkeen-route.config.json")
-        }),
+        "route" => Some(std::path::PathBuf::from(config_path)),
         "override" => Some(std::path::PathBuf::from(crate::override_sync::OVERRIDE_FILE)),
         "xkeen_conf" => Some(std::path::PathBuf::from(crate::override_sync::XKEEN_CONF_FILE)),
         "crontab" => Some(std::path::PathBuf::from(crate::override_sync::SYSTEM_CRONTAB_FILE)),
@@ -2185,7 +2337,8 @@ pub async fn read_config_file(
     Query(q): Query<ConfigFileQuery>,
 ) -> Response {
     let cfg = state.config.read().await.clone();
-    let path = match resolve_config_file_path(&q.file, &cfg) {
+    let config_path_str = state.config_path.display().to_string();
+    let path = match resolve_config_file_path(&q.file, &cfg, &config_path_str) {
         Some(p) => p,
         None => return api_err("Недопустимый идентификатор файла"),
     };
@@ -2214,7 +2367,8 @@ pub async fn save_config_file(
         Err(e) => return api_err(e),
     };
 
-    let path = match resolve_config_file_path(&body.file, tx.config()) {
+    let config_path_str = state.config_path.display().to_string();
+    let path = match resolve_config_file_path(&body.file, tx.config(), &config_path_str) {
         Some(p) => p,
         None => return api_err("Недопустимый идентификатор файла"),
     };
@@ -2273,25 +2427,45 @@ pub async fn export_backup(
     }
     let cfg = state.config.read().await.clone();
     let dir = backup_root(&cfg).join(&name);
-    if !dir.exists() {
+    if !dir.is_dir() {
         return api_err("Бэкап не найден");
     }
 
-    let mihomo_yaml = tokio::fs::read_to_string(dir.join("config.yaml")).await.unwrap_or_default();
-    let route_json = tokio::fs::read_to_string(dir.join("config.json")).await.unwrap_or_default();
+    let mihomo_yaml = match tokio::fs::read_to_string(dir.join("config.yaml")).await {
+        Ok(s) => s,
+        Err(e) => return api_err(format!("Ошибка чтения config.yaml из бэкапа: {e}")),
+    };
+    let route_json = match tokio::fs::read_to_string(dir.join("config.json")).await {
+        Ok(s) => s,
+        Err(e) => return api_err(format!("Ошибка чтения config.json из бэкапа: {e}")),
+    };
+
+    let mut files_map = serde_json::Map::new();
+    files_map.insert("config.yaml".to_string(), json!(mihomo_yaml));
+    files_map.insert("config.json".to_string(), json!(route_json));
+
+    if let Ok(z) = tokio::fs::read_to_string(dir.join("zapret.conf")).await {
+        files_map.insert("zapret.conf".to_string(), json!(z));
+    }
+    if let Ok(h) = tokio::fs::read_to_string(dir.join("zapret-hosts.txt")).await {
+        files_map.insert("zapret-hosts.txt".to_string(), json!(h));
+    }
+    if let Ok(ov) = tokio::fs::read_to_string(dir.join("ru_exclude_override.lst")).await {
+        files_map.insert("ru_exclude_override.lst".to_string(), json!(ov));
+    }
 
     let backup_bundle = json!({
         "version": "1.0",
         "name": name,
         "exported_at": chrono::Local::now().to_rfc3339(),
-        "files": {
-            "config.yaml": mihomo_yaml,
-            "config.json": route_json
-        }
+        "files": files_map
     });
 
     let filename = format!("{}.xkbak", name);
-    let payload = serde_json::to_string_pretty(&backup_bundle).unwrap_or_default();
+    let payload = match serde_json::to_string_pretty(&backup_bundle) {
+        Ok(p) => p,
+        Err(e) => return api_err(format!("Ошибка сериализации бэкапа: {e}")),
+    };
 
     (
         [
@@ -2314,31 +2488,101 @@ pub async fn import_backup(
         None => return api_err("Некорректный формат архива бэкапа: отсутствует секция files"),
     };
 
-    let base_name = body.get("name")
-        .and_then(|n| n.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("imported_{}", chrono::Local::now().format("%Y%m%d_%H%M%S")));
+    // 0. Строгая проверка допустимости имен файлов и защита от path traversal (BK-02)
+    for key in files.keys() {
+        if key.contains("..") || key.contains('/') || key.contains('\\') {
+            return api_err(format!("Обнаружена попытка path traversal в имени файла бэкапа: '{key}'"));
+        }
+        match key.as_str() {
+            "config.yaml" | "config.json" | "zapret.conf" | "zapret-hosts.txt" | "ru_exclude_override.lst" => {},
+            _ => return api_err(format!("Недопустимый файл в архиве бэкапа: '{key}'")),
+        }
+    }
 
-    let safe_name: String = base_name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
-        .collect();
+    // 1. Проверка наличия обязательных файлов
+    let yaml_str = match files.get("config.yaml").and_then(|y| y.as_str()) {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => return api_err("В импортируемом бэкапе отсутствует или пуст обязательный файл config.yaml"),
+    };
+    let json_str = match files.get("config.json").and_then(|j| j.as_str()) {
+        Some(s) if !s.trim().is_empty() => s,
+        _ => return api_err("В импортируемом бэкапе отсутствует или пуст обязательный файл config.json"),
+    };
+
+    // 2. Валидация синтаксиса ДО записи на диск
+    if let Err(e) = crate::transaction::validate_yaml_syntax(yaml_str) {
+        return api_err(format!("Синтаксическая ошибка в config.yaml импортируемого бэкапа: {e}"));
+    }
+    if let Err(e) = serde_json::from_str::<config::AppConfig>(json_str) {
+        return api_err(format!("Поврежденный JSON в config.json импортируемого бэкапа: {e}"));
+    }
+
+    // 3. Формирование и валидация имени (BK-02, BK-03: всегда префикс xr-, защита от path traversal)
+    let raw_name = body.get("name")
+        .and_then(|n| n.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+
+    let safe_name = match raw_name {
+        Some(name) => {
+            let filtered: String = name
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            let base = filtered.trim_start_matches("xr-").trim_matches(|c| c == '-' || c == '_');
+            if base.is_empty() {
+                format!("xr-imported-{}", chrono::Local::now().format("%Y%m%d-%H%M%S-%3f"))
+            } else if filtered.starts_with("xr-") {
+                filtered
+            } else {
+                format!("xr-{filtered}")
+            }
+        }
+        None => format!("xr-imported-{}", chrono::Local::now().format("%Y%m%d-%H%M%S-%3f")),
+    };
+
+    if !valid_backup_name(&safe_name) {
+        return api_err("Некорректное имя импортируемого бэкапа");
+    }
 
     let cfg = state.config.read().await.clone();
     let dir = backup_root(&cfg).join(&safe_name);
 
-    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
-        return api_err(format!("Ошибка создания каталога бэкапа: {}", e));
+    // Collision check: не перезаписываем существующий бэкап вслепую
+    if dir.exists() {
+        return api_err(format!("Бэкап с именем '{}' уже существует", safe_name));
     }
 
-    if let Some(yaml) = files.get("config.yaml").and_then(|y| y.as_str()) {
-        if let Err(e) = tokio::fs::write(dir.join("config.yaml"), yaml).await {
-            return api_err(format!("Ошибка записи config.yaml: {}", e));
-        }
+    let tmp_dir = backup_root(&cfg).join(format!("{safe_name}.tmp"));
+    if let Err(e) = tokio::fs::create_dir_all(&tmp_dir).await {
+        return api_err(format!("Ошибка создания временного каталога бэкапа: {e}"));
     }
-    if let Some(json_val) = files.get("config.json").and_then(|j| j.as_str()) {
-        if let Err(e) = tokio::fs::write(dir.join("config.json"), json_val).await {
-            return api_err(format!("Ошибка записи config.json: {}", e));
-        }
+
+    // Запись файлов в staging каталог
+    if let Err(e) = tokio::fs::write(tmp_dir.join("config.yaml"), yaml_str).await {
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+        return api_err(format!("Ошибка записи config.yaml: {e}"));
+    }
+    if let Err(e) = tokio::fs::write(tmp_dir.join("config.json"), json_str).await {
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+        return api_err(format!("Ошибка записи config.json: {e}"));
+    }
+
+    // Опциональные файлы
+    if let Some(zapret_str) = files.get("zapret.conf").and_then(|z| z.as_str()) {
+        let _ = tokio::fs::write(tmp_dir.join("zapret.conf"), zapret_str).await;
+    }
+    if let Some(hosts_str) = files.get("zapret-hosts.txt").and_then(|h| h.as_str()) {
+        let _ = tokio::fs::write(tmp_dir.join("zapret-hosts.txt"), hosts_str).await;
+    }
+    if let Some(ov_str) = files.get("ru_exclude_override.lst").and_then(|o| o.as_str()) {
+        let _ = tokio::fs::write(tmp_dir.join("ru_exclude_override.lst"), ov_str).await;
+    }
+
+    // Атомарное переименование staging -> final
+    if let Err(e) = tokio::fs::rename(&tmp_dir, &dir).await {
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+        return api_err(format!("Ошибка фиксации каталога импорта: {e}"));
     }
 
     log_i!("Импортирован бэкап '{}' в {}", safe_name, dir.display());
@@ -2790,15 +3034,37 @@ pub async fn set_device_domain_rules(
     State(state): State<AppState>,
     Json(body): Json<SetDeviceDomainRulesRequest>,
 ) -> Response {
+    let clean_ip = body.ip.trim();
+    if !crate::config::is_valid_ip_or_cidr(clean_ip) {
+        return api_err(format!("Некорректный IP-адрес или CIDR устройства: '{clean_ip}'"));
+    }
+
+    // Валидация правил (домены и target шлюзов)
+    let mut validated_rules = Vec::with_capacity(body.rules.len());
+    for r in &body.rules {
+        let norm_dom = crate::config::normalize_domain(&r.domain);
+        if !crate::config::is_valid_domain(&norm_dom) {
+            return api_err(format!("Некорректный домен в правиле: '{}'", r.domain));
+        }
+        let target = r.target.trim();
+        if target.is_empty() || target.contains(',') || target.contains('\n') || target.contains('\r') {
+            return api_err(format!("Некорректный целевой шлюз (target): '{}'", r.target));
+        }
+        validated_rules.push(crate::config::DeviceDomainRule {
+            domain: norm_dom,
+            target: target.to_string(),
+        });
+    }
+
     let mut tx = match ConfigTx::begin(&state).await {
         Ok(tx) => tx,
         Err(e) => return api_err(e),
     };
 
-    if body.rules.is_empty() {
-        tx.config_mut().device_domain_rules.remove(&body.ip);
+    if validated_rules.is_empty() {
+        tx.config_mut().device_domain_rules.remove(clean_ip);
     } else {
-        tx.config_mut().device_domain_rules.insert(body.ip.clone(), body.rules);
+        tx.config_mut().device_domain_rules.insert(clean_ip.to_string(), validated_rules);
     }
 
     let raw_yaml = match tx.read_yaml().await {
@@ -2818,8 +3084,8 @@ pub async fn set_device_domain_rules(
         return api_err(e);
     }
 
-    log_i!("Обновлены индивидуальные доменные правила для устройства {}", body.ip);
-    api_ok(json!({ "saved": true, "applied": true, "ip": body.ip }))
+    log_i!("Обновлены индивидуальные доменные правила для устройства {}", clean_ip);
+    api_ok(json!({ "saved": true, "applied": true, "ip": clean_ip }))
 }
 
 // ==================== СКВОЗНОЙ РЕЛЕЙ CLASH API (REVERSE PROXY) ====================
@@ -3107,7 +3373,16 @@ pub async fn test_rule_match(
     let norm = crate::config::normalize_domain(raw_domain);
     let domain = if !norm.is_empty() { norm.to_lowercase() } else { raw_domain.to_lowercase() };
     let src_ip = body.source_ip.as_deref().unwrap_or("").trim();
-    let active_srv = cfg.failover.priority_chain.first().cloned().unwrap_or_else(|| "PROXY".into());
+
+    // DIAG-02: Запрос активных правил и прокси-групп ядра Mihomo в runtime
+    let runtime_rules_res = mihomo::m_get(&state.http, &cfg, "/rules").await;
+    let runtime_proxies_res = mihomo::get_proxies(&state.http, &cfg).await;
+    let is_runtime = runtime_rules_res.is_ok();
+    let active_srv = if let Ok(ref proxies) = runtime_proxies_res {
+        mihomo::resolve_active_leaf(proxies)
+    } else {
+        cfg.failover.priority_chain.first().cloned().unwrap_or_else(|| "PROXY".into())
+    };
 
     // 1. Персональные доменные правила устройства
     if !src_ip.is_empty() {
@@ -3120,29 +3395,81 @@ pub async fn test_rule_match(
                         "rule_type": "DEVICE-DOMAIN",
                         "target_group": r.target,
                         "resolved_server": r.target,
-                        "reason": format!("Сработало индивидуальное доменное правило устройства {}", src_ip)
+                        "reason": format!("Сработало индивидуальное доменное правило устройства {}", src_ip),
+                        "estimated": !is_runtime,
                     }));
                 }
             }
         }
     }
 
-    // 2. AdBlock правило
+    // 2. AdBlock правило (DIAG-02: исключены ложные подстрочные эвристики вроде "analytics")
     if cfg.adblock_enabled {
-        let is_ad = domain.contains("adservice")
-            || domain.contains("googleads")
-            || domain.contains("an.yandex.ru")
-            || domain.contains("doubleclick")
-            || domain.contains("telemetry")
-            || domain.contains("analytics");
+        let is_ad = domain == "an.yandex.ru"
+            || domain.ends_with(".an.yandex.ru")
+            || domain == "doubleclick.net"
+            || domain.ends_with(".doubleclick.net")
+            || domain == "googleads.g.doubleclick.net"
+            || domain == "adservice.google.com";
         if is_ad {
             return api_ok(json!({
                 "matched_rule": "GEOSITE,category-ads-all,REJECT",
                 "rule_type": "ADBLOCK",
                 "target_group": "REJECT",
                 "resolved_server": "REJECT",
-                "reason": "Заблокировано сетевым AdBlock фильтром роутера"
+                "reason": "Заблокировано сетевым AdBlock фильтром роутера",
+                "estimated": !is_runtime,
+                "limitations": if !is_runtime { Some("Предварительная оценка: правила AdBlock проверяются в offline режиме") } else { None }
             }));
+        }
+    }
+
+    // 2.1 Активная последовательность правил Mihomo runtime (DIAG-02)
+    if let Ok(rules_val) = &runtime_rules_res {
+        if let Some(rules_arr) = rules_val.get("rules").and_then(|r| r.as_array()) {
+            for r in rules_arr {
+                let r_type = r.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                let r_payload = r.get("payload").and_then(|p| p.as_str()).unwrap_or("");
+                let r_proxy = r.get("proxy").and_then(|p| p.as_str()).unwrap_or("");
+
+                let matched = match r_type {
+                    "DOMAIN" => domain == r_payload.to_lowercase(),
+                    "DOMAIN-SUFFIX" => {
+                        let p = r_payload.to_lowercase();
+                        domain == p || domain.ends_with(&format!(".{}", p))
+                    }
+                    "DOMAIN-KEYWORD" => domain.contains(&r_payload.to_lowercase()),
+                    "SRC-IP-CIDR" => !src_ip.is_empty() && (src_ip == r_payload.trim_end_matches("/32")),
+                    _ => false,
+                };
+
+                if matched {
+                    let resolved = match r_proxy {
+                        "DIRECT" => "DIRECT (Напрямую)".to_string(),
+                        "REJECT" => "REJECT".to_string(),
+                        group => {
+                            if let Ok(p) = &runtime_proxies_res {
+                                if let Some(grp_obj) = p.get(group) {
+                                    grp_obj.get("now").and_then(|n| n.as_str()).unwrap_or(group).to_string()
+                                } else {
+                                    active_srv.clone()
+                                }
+                            } else {
+                                active_srv.clone()
+                            }
+                        }
+                    };
+
+                    return api_ok(json!({
+                        "matched_rule": format!("{},{},{}", r_type, r_payload, r_proxy),
+                        "rule_type": r_type,
+                        "target_group": r_proxy,
+                        "resolved_server": resolved,
+                        "reason": format!("Сработало активное правило runtime ядра Mihomo: {} ({}) -> {}", r_type, r_payload, r_proxy),
+                        "estimated": false
+                    }));
+                }
+            }
         }
     }
 
@@ -3156,7 +3483,9 @@ pub async fn test_rule_match(
                         "rule_type": "SRC-IP-CIDR",
                         "target_group": format!("Устройство {}", src_ip),
                         "resolved_server": first_srv,
-                        "reason": format!("Весь трафик устройства {} направлен на сервер {}", src_ip, first_srv)
+                        "reason": format!("Весь трафик устройства {} направлен на сервер {}", src_ip, first_srv),
+                        "estimated": !is_runtime,
+                        "limitations": if !is_runtime { Some("Предварительная оценка: опрос произведён по конфигурации XKeen без проверки активного рантайма") } else { None }
                     }));
                 }
             }
@@ -3172,7 +3501,9 @@ pub async fn test_rule_match(
                 "rule_type": "GOOGLE_AI",
                 "target_group": "Google AI",
                 "resolved_server": flow_tgt,
-                "reason": "Выделенный маршрут Google AI / Antigravity Cloud Code"
+                "reason": "Выделенный маршрут Google AI / Antigravity Cloud Code",
+                "estimated": !is_runtime,
+                "limitations": if !is_runtime { Some("Предварительная оценка: опрос произведён по конфигурации XKeen без проверки активного рантайма") } else { None }
             }));
         }
     }
@@ -3186,7 +3517,9 @@ pub async fn test_rule_match(
                 "rule_type": "DIRECT_DOMAIN",
                 "target_group": "DIRECT",
                 "resolved_server": "DIRECT (Напрямую)",
-                "reason": "Домен находится в белом списке прямого доступа (минуя прокси)"
+                "reason": "Домен находится в белом списке прямого доступа (минуя прокси)",
+                "estimated": !is_runtime,
+                "limitations": if !is_runtime { Some("Предварительная оценка: опрос произведён по конфигурации XKeen без проверки активного рантайма") } else { None }
             }));
         }
     }
@@ -3202,7 +3535,9 @@ pub async fn test_rule_match(
                         "rule_type": "ZAPRET_ISOLATED",
                         "target_group": "PROXY",
                         "resolved_server": active_srv,
-                        "reason": "Изоляция IP-блокировок через VPN-прокси (Zapret Hybrid)"
+                        "reason": "Изоляция IP-блокировок через VPN-прокси (Zapret Hybrid)",
+                        "estimated": !is_runtime,
+                        "limitations": if !is_runtime { Some("Предварительная оценка: правила Zapret проверяются без эмуляции сокетов") } else { None }
                     }));
                 }
             }
@@ -3217,7 +3552,9 @@ pub async fn test_rule_match(
                     "rule_type": "ZAPRET_HYBRID",
                     "target_group": "DIRECT",
                     "resolved_server": "DIRECT (Локальный обход Zapret)",
-                    "reason": "Zapret DPI bypass — YouTube Direct (напрямую с кэш-серверов GGC без расхода VPS)"
+                    "reason": "Zapret DPI bypass — YouTube Direct (напрямую с кэш-серверов GGC без расхода VPS)",
+                    "estimated": !is_runtime,
+                    "limitations": if !is_runtime { Some("Предварительная оценка: правила Zapret проверяются без эмуляции сокетов") } else { None }
                 }));
             }
         }
@@ -3231,7 +3568,9 @@ pub async fn test_rule_match(
                     "rule_type": "ZAPRET_HYBRID",
                     "target_group": "DIRECT",
                     "resolved_server": "DIRECT (Локальный обход Zapret)",
-                    "reason": "Zapret DPI bypass — Discord Direct (минимальный пинг напрямую без VPS)"
+                    "reason": "Zapret DPI bypass — Discord Direct (минимальный пинг напрямую без VPS)",
+                    "estimated": !is_runtime,
+                    "limitations": if !is_runtime { Some("Предварительная оценка: правила Zapret проверяются без эмуляции сокетов") } else { None }
                 }));
             }
         }
@@ -3248,7 +3587,9 @@ pub async fn test_rule_match(
                     "rule_type": "ZAPRET_HYBRID",
                     "target_group": "DIRECT",
                     "resolved_server": "DIRECT (Локальный обход Zapret)",
-                    "reason": "Zapret DPI bypass — GitHub Direct (быстрый доступ к репозиториям и релизам без расхода VPS)"
+                    "reason": "Zapret DPI bypass — GitHub Direct (быстрый доступ к репозиториям и релизам без расхода VPS)",
+                    "estimated": !is_runtime,
+                    "limitations": if !is_runtime { Some("Предварительная оценка: правила Zapret проверяются без эмуляции сокетов") } else { None }
                 }));
             }
         }
@@ -3263,7 +3604,9 @@ pub async fn test_rule_match(
                     "rule_type": "ZAPRET_HYBRID",
                     "target_group": "DIRECT",
                     "resolved_server": "DIRECT (Локальный обход Zapret)",
-                    "reason": "Zapret DPI bypass — Торрент-трекеры Direct (скачивание метаданных и раздач без блокировки)"
+                    "reason": "Zapret DPI bypass — Торрент-трекеры Direct (скачивание метаданных и раздач без блокировки)",
+                    "estimated": !is_runtime,
+                    "limitations": if !is_runtime { Some("Предварительная оценка: правила Zapret проверяются без эмуляции сокетов") } else { None }
                 }));
             }
         }
@@ -3278,7 +3621,9 @@ pub async fn test_rule_match(
                     "rule_type": "ZAPRET_HYBRID",
                     "target_group": "DIRECT",
                     "resolved_server": "DIRECT (Локальный обход Zapret)",
-                    "reason": "Zapret DPI bypass — 18+ Контент Direct (локальный обход блокировок ТСПУ без нагрузки на VPS)"
+                    "reason": "Zapret DPI bypass — 18+ Контент Direct (локальный обход блокировок ТСПУ без нагрузки на VPS)",
+                    "estimated": !is_runtime,
+                    "limitations": if !is_runtime { Some("Предварительная оценка: правила Zapret проверяются без эмуляции сокетов") } else { None }
                 }));
             }
         }
@@ -3305,7 +3650,9 @@ pub async fn test_rule_match(
                         "rule_type": "ZAPRET_HYBRID",
                         "target_group": "DIRECT",
                         "resolved_server": "DIRECT (Локальный обход Zapret)",
-                        "reason": format!("Zapret DPI bypass — Ускоренный сайт /boost ({})", entry.domain)
+                        "reason": format!("Zapret DPI bypass — Ускоренный сайт /boost ({})", entry.domain),
+                        "estimated": !is_runtime,
+                        "limitations": if !is_runtime { Some("Предварительная оценка: правила Zapret проверяются без эмуляции сокетов") } else { None }
                     }));
                 }
             }
@@ -3321,69 +3668,106 @@ pub async fn test_rule_match(
                 "rule_type": "FORCE_DOMAIN",
                 "target_group": "PROXY",
                 "resolved_server": active_srv,
-                "reason": "Домен находится в списке принудительного проксирования XKeen"
+                "reason": "Домен находится в списке принудительного проксирования XKeen",
+                "estimated": !is_runtime,
+                "limitations": if !is_runtime { Some("Предварительная оценка: опрос произведён по конфигурации XKeen без проверки активного рантайма") } else { None }
             }));
         }
     }
 
-    // 8. Наборы правил Mihomo (Rule-Sets)
-    if domain.contains("youtube") || domain.contains("googlevideo") || domain == "youtu.be" {
+    // 8. Наборы правил Mihomo (Rule-Sets) — точное совпадение FQDN и поддоменов (DIAG-02: без ложных подстрочных эвристик)
+    let is_yt = domain == "youtube.com" || domain.ends_with(".youtube.com")
+        || domain == "youtu.be"
+        || domain == "googlevideo.com" || domain.ends_with(".googlevideo.com")
+        || domain == "ytimg.com" || domain.ends_with(".ytimg.com");
+    if is_yt {
         return api_ok(json!({
             "matched_rule": "RULE-SET,youtube@domain,YouTube",
             "rule_type": "RULE_SET",
             "target_group": "YouTube",
             "resolved_server": active_srv,
-            "reason": "Специальная группа проксирования YouTube (Mihomo Selector)"
+            "reason": "Специальная группа проксирования YouTube (Mihomo Selector)",
+            "estimated": !is_runtime,
+            "limitations": if !is_runtime { Some("Предварительная оценка: правила проверяются по статической маске без активного рантайма") } else { None }
         }));
     }
 
-    if domain.contains("discord") {
+    let is_discord = domain == "discord.com" || domain.ends_with(".discord.com")
+        || domain == "discord.gg" || domain.ends_with(".discord.gg")
+        || domain == "discordapp.com" || domain.ends_with(".discordapp.com")
+        || domain == "discordapp.net" || domain.ends_with(".discordapp.net");
+    if is_discord {
         return api_ok(json!({
             "matched_rule": "RULE-SET,discord@classical,Discord",
             "rule_type": "RULE_SET",
             "target_group": "Discord",
             "resolved_server": active_srv,
-            "reason": "Специальная группа проксирования Discord"
+            "reason": "Специальная группа проксирования Discord",
+            "estimated": !is_runtime,
+            "limitations": if !is_runtime { Some("Предварительная оценка: правила проверяются по статической маске без активного рантайма") } else { None }
         }));
     }
 
-    if domain == "t.me" || domain.ends_with(".t.me") || domain.contains("telegram") {
+    let is_tg = domain == "t.me" || domain.ends_with(".t.me")
+        || domain == "telegram.org" || domain.ends_with(".telegram.org")
+        || domain == "telegram.me" || domain.ends_with(".telegram.me");
+    if is_tg {
         return api_ok(json!({
             "matched_rule": "RULE-SET,telegram@domain,Telegram",
             "rule_type": "RULE_SET",
             "target_group": "Telegram",
             "resolved_server": active_srv,
-            "reason": "Специальная группа проксирования Telegram"
+            "reason": "Специальная группа проксирования Telegram",
+            "estimated": !is_runtime,
+            "limitations": if !is_runtime { Some("Предварительная оценка: правила проверяются по статической маске без активного рантайма") } else { None }
         }));
     }
 
-    if domain.contains("steam") {
+    let is_steam = domain == "steampowered.com" || domain.ends_with(".steampowered.com")
+        || domain == "steamcommunity.com" || domain.ends_with(".steamcommunity.com")
+        || domain == "steamstatic.com" || domain.ends_with(".steamstatic.com");
+    if is_steam {
         return api_ok(json!({
             "matched_rule": "RULE-SET,steam@domain,Steam",
             "rule_type": "RULE_SET",
             "target_group": "Steam",
             "resolved_server": active_srv,
-            "reason": "Группа маршрутизации Steam"
+            "reason": "Группа маршрутизации Steam",
+            "estimated": !is_runtime,
+            "limitations": if !is_runtime { Some("Предварительная оценка: правила проверяются по статической маске без активного рантайма") } else { None }
         }));
     }
 
-    if domain.contains("twitch") {
+    let is_twitch = domain == "twitch.tv" || domain.ends_with(".twitch.tv")
+        || domain == "ttvnw.net" || domain.ends_with(".ttvnw.net")
+        || domain == "jtvnw.net" || domain.ends_with(".jtvnw.net");
+    if is_twitch {
         return api_ok(json!({
             "matched_rule": "RULE-SET,twitch@domain,Twitch",
             "rule_type": "RULE_SET",
             "target_group": "Twitch",
             "resolved_server": active_srv,
-            "reason": "Группа маршрутизации Twitch"
+            "reason": "Группа маршрутизации Twitch",
+            "estimated": !is_runtime,
+            "limitations": if !is_runtime { Some("Предварительная оценка: правила проверяются по статической маске без активного рантайма") } else { None }
         }));
     }
 
-    if domain.contains("tracker") || domain.contains("torrent") {
+    let is_torrent_tracker = domain == "rutracker.org" || domain.ends_with(".rutracker.org")
+        || domain == "nnmclub.to" || domain.ends_with(".nnmclub.to")
+        || domain == "rutor.info" || domain.ends_with(".rutor.info")
+        || domain == "opentor.org" || domain.ends_with(".opentor.org")
+        || domain == "pornolab.net" || domain.ends_with(".pornolab.net")
+        || domain == "torrent" || domain.ends_with(".torrent");
+    if is_torrent_tracker {
         return api_ok(json!({
             "matched_rule": "RULE-SET,public-tracker@domain,Torrent",
             "rule_type": "RULE_SET",
             "target_group": "Torrent",
             "resolved_server": "DIRECT",
-            "reason": "P2P и торрент-трафик (Torrent группа)"
+            "reason": "P2P и торрент-трафик (Torrent группа)",
+            "estimated": !is_runtime,
+            "limitations": if !is_runtime { Some("Предварительная оценка: правила проверяются по статической маске без активного рантайма") } else { None }
         }));
     }
 
@@ -3397,7 +3781,9 @@ pub async fn test_rule_match(
             "rule_type": "GEO_DIRECT",
             "target_group": "DIRECT",
             "resolved_server": "DIRECT (Напрямую)",
-            "reason": "Российский сегмент интернета (RU Geosite) — прямой доступ без прокси"
+            "reason": "Российский сегмент интернета (RU Geosite) — прямой доступ без прокси",
+            "estimated": !is_runtime,
+            "limitations": if !is_runtime { Some("Предварительная оценка: правила проверяются по статической маске без активного рантайма") } else { None }
         }));
     }
 
@@ -3407,7 +3793,9 @@ pub async fn test_rule_match(
         "rule_type": "MATCH",
         "target_group": "PROXY",
         "resolved_server": active_srv,
-        "reason": "Сработало финальное правило маршрутизации по умолчанию (MATCH)"
+        "reason": "Сработало финальное правило маршрутизации по умолчанию (MATCH)",
+        "estimated": !is_runtime,
+        "limitations": if !is_runtime { Some("Mihomo offline: симуляция по локальной конфигурации панели без проверки активных Rule-Providers и динамических групп ядра") } else { None }
     }))
 }
 
@@ -3454,19 +3842,41 @@ pub async fn get_diagnostics_health(State(state): State<AppState>) -> Response {
         ("warn", "Прямой доступ к тестовому узлу не отвечает".to_string())
     };
 
-    // 5. Проверка хранилища /opt
-    let disk_msg = match tokio::process::Command::new("df").arg("-h").arg("/opt").output().await {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).lines().nth(1).unwrap_or("").to_string(),
-        Err(_) => "Накопитель Entware смонтирован".to_string(),
+    // 5. Проверка хранилища /opt (DIAG-03: честный статус вместо безусловного ok)
+    let (disk_status, disk_msg) = match tokio::process::Command::new("df").arg("-h").arg("/opt").output().await {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // Безопасный поиск процента использования: пропускаем заголовок и ищем токен, оканчивающийся на %
+            let use_percent = stdout.lines()
+                .skip(1)
+                .flat_map(|l| l.split_whitespace())
+                .find_map(|p| p.strip_suffix('%').and_then(|s| s.parse::<u8>().ok()))
+                .unwrap_or(0);
+            let detail_line = stdout.lines().skip(1).collect::<Vec<_>>().join(" ");
+            let display_text = if detail_line.trim().is_empty() {
+                "Накопитель Entware смонтирован".to_string()
+            } else {
+                detail_line.trim().to_string()
+            };
+            if use_percent >= 98 {
+                ("fail", format!("Накопитель /opt заполнен на {}%! ({})", use_percent, display_text))
+            } else if use_percent >= 90 {
+                ("warn", format!("Накопитель /opt заполнен на {}% ({})", use_percent, display_text))
+            } else {
+                ("ok", display_text)
+            }
+        }
+        Ok(out) => ("warn", format!("Команда df вернула ошибку: {}", out.status)),
+        Err(e) => ("unknown", format!("Проверка дискового пространства недоступна: {}", e)),
     };
 
     api_ok(json!({
         "checks": [
-            { "id": "gateway", "name": "Шлюз роутера Keenetic", "status": gw_status, "message": gw_msg },
-            { "id": "mihomo", "name": "Ядро Mihomo (XKeen)", "status": mihomo_status, "message": mihomo_msg },
-            { "id": "dns", "name": "DNS Резолвер", "status": dns_status, "message": dns_msg, "latency_ms": dns_ms },
-            { "id": "wan", "name": "Прямой выход в интернет", "status": wan_status, "message": wan_msg },
-            { "id": "storage", "name": "Дисковое пространство /opt", "status": "ok", "message": disk_msg },
+            { "id": "gateway", "name": "Шлюз роутера Keenetic", "status": gw_status, "message": gw_msg, "measurement_point": "router_local" },
+            { "id": "mihomo", "name": "Ядро Mihomo (XKeen)", "status": mihomo_status, "message": mihomo_msg, "measurement_point": "router_local" },
+            { "id": "dns", "name": "DNS Резолвер", "status": dns_status, "message": dns_msg, "latency_ms": dns_ms, "measurement_point": "router_local" },
+            { "id": "wan", "name": "Прямой выход в интернет", "status": wan_status, "message": wan_msg, "measurement_point": "router_wan" },
+            { "id": "storage", "name": "Дисковое пространство /opt", "status": disk_status, "message": disk_msg, "measurement_point": "router_local" },
         ]
     }))
 }
@@ -3476,7 +3886,7 @@ pub struct DnsTestReq {
     pub domain: String,
 }
 
-/// POST /api/diagnostics/dns-test — Smart DNS диагностика домена
+/// POST /api/diagnostics/dns-test — Smart DNS диагностика домена (DIAG-03: честные наблюдения)
 pub async fn test_dns_domain(
     State(state): State<AppState>,
     axum::extract::Json(body): axum::extract::Json<DnsTestReq>,
@@ -3502,26 +3912,58 @@ pub async fn test_dns_domain(
         Err(_) => Vec::new(),
     };
 
-    let is_poisoned = local_ips.iter().any(|ip| {
-        ip == "127.0.0.1" || ip == "0.0.0.0" || ip.starts_with("10.") || ip.starts_with("192.168.")
+    let has_loopback = local_ips.iter().any(|ip| ip == "127.0.0.1" || ip == "0.0.0.0" || ip == "::1");
+    let has_private_ip = local_ips.iter().any(|ip_str| {
+        if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+            match ip {
+                std::net::IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+                std::net::IpAddr::V6(v6) => v6.is_loopback() || (v6.segments()[0] & 0xfe00) == 0xfc00,
+            }
+        } else {
+            ip_str.starts_with("10.") || ip_str.starts_with("192.168.") || ip_str.starts_with("172.")
+        }
     });
 
-    let http_direct_ok = state.http.get(format!("https://{}", domain))
-        .timeout(std::time::Duration::from_secs(3))
-        .send().await.is_ok();
+    let mut http_status: Option<u16> = None;
+    let mut error_type: Option<String> = None;
+    let mut http_direct_ok = false;
 
-    let verdict = if is_poisoned {
-        "Домен подменяется провайдером (DNS-spoofing / РКН-заглушка). Необходим прокси."
-    } else if !local_ips.is_empty() && !http_direct_ok {
-        "Домен резолвится в реальные IP, но прямое TCP/TLS соединение сбрасывается (RST / блокировка по IP/SNI)."
-    } else if !local_ips.is_empty() && http_direct_ok {
+    match state.http.get(format!("https://{}", domain)).timeout(std::time::Duration::from_secs(3)).send().await {
+        Ok(resp) => {
+            let code = resp.status().as_u16();
+            http_status = Some(code);
+            http_direct_ok = resp.status().is_success() || resp.status().is_redirection();
+        }
+        Err(e) => {
+            if e.is_timeout() {
+                error_type = Some("timeout".to_string());
+            } else if e.is_connect() {
+                error_type = Some("connect_error".to_string());
+            } else {
+                error_type = Some("protocol_error".to_string());
+            }
+        }
+    }
+
+    // Честный диагноз без ложных категоричных утверждений о подмене провайдером при обычном таймауте
+    let verdict = if local_ips.is_empty() {
+        "Домен не найден в DNS (NXDOMAIN или ошибка резолвера)."
+    } else if has_loopback {
+        "Домен резолвится в адрес-заглушку (127.0.0.1 / 0.0.0.0). Возможна фильтрация DNS AdBlock."
+    } else if has_private_ip {
+        "Домен резолвится в частный IP-адрес локальной сети (Intranet или перенаправление)."
+    } else if http_direct_ok {
         "Домен доступен напрямую без ограничений."
+    } else if error_type.as_deref() == Some("timeout") {
+        "Таймаут прямого HTTPS соединения (сервер не ответил за 3 сек; причина не установлена, возможна фильтрация пакетов или высокая задержка)."
+    } else if error_type.as_deref() == Some("connect_error") {
+        "Прямое TCP/TLS соединение сброшено (RST / connection refused / блокировка по SNI/IP)."
     } else {
-        "Домен не найден в DNS."
+        "Прямое соединение не удалось; статус не установлен."
     };
 
-    let recommendation = if is_poisoned || !http_direct_ok {
-        "Рекомендуется добавить домен в список «Принудительно через прокси» в Настройках или назначить устройство на зарубежный сервер."
+    let recommendation = if has_loopback || has_private_ip || !http_direct_ok {
+        "Рекомендуется добавить домен в список «Принудительно через прокси» в Настройках или проверить назначение устройства на зарубежный сервер."
     } else {
         "Дополнительных действий не требуется."
     };
@@ -3529,8 +3971,12 @@ pub async fn test_dns_domain(
     api_ok(json!({
         "domain": domain,
         "resolved_ips": local_ips,
-        "is_poisoned": is_poisoned,
+        "has_private_ip": has_private_ip || has_loopback,
+        "is_poisoned": has_loopback,
         "http_direct_ok": http_direct_ok,
+        "http_status": http_status,
+        "error_type": error_type,
+        "measurement_point": "router_local",
         "verdict": verdict,
         "recommendation": recommendation
     }))
@@ -3619,6 +4065,14 @@ export PATH
 [ "$type" = "ip6" ] || [ "$type" = "ipv6" ] && exit 0
 [ "$table" = "filter" ] || [ "$table" = "security" ] && exit 0
 
+get_active_wan_ifaces() {
+  if [ -f /proc/net/route ]; then
+    awk '$2 == "00000000" && $8 !~ /^lo/ {print $1}' /proc/net/route 2>/dev/null | sort -u
+  elif command -v ip >/dev/null 2>&1; then
+    ip route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | sort -u
+  fi
+}
+
 is_running() {
   if [ -f /opt/var/run/zapret.pid ]; then
     PID=$(cat /opt/var/run/zapret.pid 2>/dev/null)
@@ -3644,6 +4098,14 @@ export PATH
 # Re-applies netfilter rules when interface state changes (WAN connects, DHCP lease renewed).
 
 [ "$state" = "down" ] && exit 0
+
+get_active_wan_ifaces() {
+  if [ -f /proc/net/route ]; then
+    awk '$2 == "00000000" && $8 !~ /^lo/ {print $1}' /proc/net/route 2>/dev/null | sort -u
+  elif command -v ip >/dev/null 2>&1; then
+    ip route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | sort -u
+  fi
+}
 
 is_running() {
   if [ -f /opt/var/run/zapret.pid ]; then
@@ -3678,6 +4140,85 @@ iptables() {
 PIDFILE="/opt/var/run/zapret.pid"
 FAILSAFE_PID="/opt/var/run/zapret_failsafe.pid"
 CONF="/opt/etc/zapret/zapret.conf"
+LOCKFILE="/opt/var/run/xkeen-zapret.lock"
+LOCKDIR="/opt/var/run/xkeen-zapret.lock.d"
+DISABLED_MARKER="/opt/var/run/xkeen-zapret.disabled"
+
+acquire_zapret_lock() {
+  local timeout=15
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$LOCKFILE"
+    if ! flock -w "$timeout" 9 2>/dev/null; then
+      echo "Failed to acquire zapret flock" >&2
+      return 1
+    fi
+    echo $$ > "$LOCKFILE" 2>/dev/null
+    return 0
+  fi
+  local waited=0
+  while ! mkdir "$LOCKDIR" 2>/dev/null; do
+    if [ -f "$LOCKDIR/pid" ]; then
+      local holder=$(cat "$LOCKDIR/pid" 2>/dev/null)
+      if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+        rm -rf "$LOCKDIR" 2>/dev/null
+        continue
+      fi
+    fi
+    if [ "$waited" -ge "$timeout" ]; then
+      echo "Failed to acquire zapret lockdir after ${timeout}s" >&2
+      return 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo "$$" > "$LOCKDIR/pid" 2>/dev/null
+  return 0
+}
+
+release_zapret_lock() {
+  if command -v flock >/dev/null 2>&1; then
+    flock -u 9 2>/dev/null
+    exec 9>&- 2>/dev/null
+  fi
+  rm -rf "$LOCKDIR" 2>/dev/null
+}
+
+is_zapret_pid() {
+  local p="$1"
+  [ -z "$p" ] && return 1
+  [ -d "/proc/$p" ] || return 1
+  if [ -r "/proc/$p/comm" ]; then
+    local comm=$(cat "/proc/$p/comm" 2>/dev/null)
+    case "$comm" in
+      nfqws|nfqws2|tpws) return 0 ;;
+    esac
+  fi
+  if [ -r "/proc/$p/cmdline" ]; then
+    local cmdline=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)
+    case "$cmdline" in
+      *nfqws*|*nfqws2*|*tpws*) return 0 ;;
+    esac
+  fi
+  return 1
+}
+
+check_dns_resolver_ready() {
+  if grep -q ':041D' /proc/net/udp 2>/dev/null || grep -q ':041D' /proc/net/tcp 2>/dev/null; then
+    return 0
+  fi
+  if command -v netstat >/dev/null 2>&1 && netstat -tuln 2>/dev/null | grep -q ':1053 '; then
+    return 0
+  fi
+  return 1
+}
+
+get_active_wan_ifaces() {
+  if [ -f /proc/net/route ]; then
+    awk '$2 == "00000000" && $8 !~ /^lo/ {print $1}' /proc/net/route 2>/dev/null | sort -u
+  elif command -v ip >/dev/null 2>&1; then
+    ip route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' | sort -u
+  fi
+}
 
 find_bin() {
   ARCH=$(uname -m 2>/dev/null)
@@ -3803,26 +4344,36 @@ if [ -f "$CONF" ]; then
       DISCORD_VOICE_ENABLED)
         val="${val#\"}"
         val="${val%\"}"
+        val="${val#\'}"
+        val="${val%\'}"
         DISCORD_VOICE_ENABLED="$val"
         ;;
       BLOCK_QUIC)
         val="${val#\"}"
         val="${val%\"}"
+        val="${val#\'}"
+        val="${val%\'}"
         BLOCK_QUIC="$val"
         ;;
       SMART_TV_MODE)
         val="${val#\"}"
         val="${val%\"}"
+        val="${val#\'}"
+        val="${val%\'}"
         SMART_TV_MODE="$val"
         ;;
       EXCLUDED_IPS)
         val="${val#\"}"
         val="${val%\"}"
+        val="${val#\'}"
+        val="${val%\'}"
         EXCLUDED_IPS="$val"
         ;;
       EXCLUDED_MACS)
         val="${val#\"}"
         val="${val%\"}"
+        val="${val#\'}"
+        val="${val%\'}"
         EXCLUDED_MACS="$val"
         ;;
     esac
@@ -3834,43 +4385,40 @@ BIN=$(find_bin)
 stop_nfqws() {
   if [ -f "$PIDFILE" ]; then
     PID=$(cat "$PIDFILE" 2>/dev/null)
-    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
-      kill "$PID" 2>/dev/null
-      for _i in 1 2 3; do
-        kill -0 "$PID" 2>/dev/null || break
-        usleep 300000 2>/dev/null || sleep 1
+    if [ -n "$PID" ] && is_zapret_pid "$PID"; then
+      kill -15 "$PID" 2>/dev/null
+      for i in 1 2 3 4 5; do
+        if ! is_zapret_pid "$PID"; then break; fi
+        sleep 1
       done
-      kill -0 "$PID" 2>/dev/null && kill -9 "$PID" 2>/dev/null
+      if is_zapret_pid "$PID"; then
+        kill -9 "$PID" 2>/dev/null
+      fi
     fi
     rm -f "$PIDFILE"
   fi
-  # Terminate via pidof (always present in busybox) in case killall is missing
-  for p in $(pidof nfqws2 2>/dev/null) $(pidof nfqws 2>/dev/null); do
-    kill -9 "$p" 2>/dev/null
+  for p in $(pgrep -f nfqws 2>/dev/null) $(pgrep -f nfqws2 2>/dev/null) $(pgrep -f tpws 2>/dev/null); do
+    if is_zapret_pid "$p"; then
+      kill -15 "$p" 2>/dev/null
+    fi
   done
-  # Terminate any rogue or orphaned nfqws or nfqws2 processes holding queue 200
-  killall -15 nfqws2 2>/dev/null
-  killall -15 nfqws 2>/dev/null
-  killall -9 nfqws2 2>/dev/null
-  killall -9 nfqws 2>/dev/null
 }
 
 add_fw() {
-  del_fw
+  remove_fw_rules
 
   # Dedicated zapret chain in mangle
   iptables -t mangle -N zapret 2>/dev/null
-  iptables -t mangle -F zapret 2>/dev/null
+  iptables -t mangle -F zapret || { echo "ERROR: failed to flush mangle zapret chain" >&2; remove_fw_rules; return 1; }
 
   # 1. CRITICAL: Skip packets already marked by nfqws to prevent infinite packet looping
-  iptables -t mangle -A zapret -m mark --mark 0x40000000/0x40000000 -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
-  iptables -t mangle -A zapret -m mark --mark 0x40000000/0x40000000 -j RETURN 2>/dev/null || true
+  iptables -t mangle -A zapret -m mark --mark 0x40000000/0x40000000 -j RETURN || { echo "ERROR: failed to add fwmark bypass rule in mangle zapret" >&2; remove_fw_rules; return 1; }
 
   # 2. Exclude loopback and LAN bridge (OpenWrt br+ and Keenetic Bridge+)
+  iptables -t mangle -A zapret -i lo -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
+  iptables -t mangle -A zapret -i lo -j RETURN 2>/dev/null || true
   iptables -t mangle -A zapret -o lo -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
   iptables -t mangle -A zapret -o lo -j RETURN 2>/dev/null || true
-  # In POSTROUTING, incoming interface (-i) cannot be matched (kernel EINVAL: iniface set in postrouting):
-  # iptables -t mangle -A zapret -i lo -j RETURN
   iptables -t mangle -A zapret -o br+ -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
   iptables -t mangle -A zapret -o br+ -j RETURN 2>/dev/null || true
   iptables -t mangle -A zapret -o Bridge+ -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
@@ -3909,6 +4457,9 @@ add_fw() {
     done
   fi
 
+  # 3.3 NET-02: TCP MSS Clamping to prevent PMTU clashing on tunnels and WAN rebind
+  iptables -t mangle -A zapret -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+
   # 4. Queue WAN TCP (80, 443) -> NFQUEUE 200 with bypass
   if iptables -t mangle -A zapret -p tcp -m multiport --dports 80,443 -m comment --comment "xkeen-route-zapret" -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
      iptables -t mangle -A zapret -p tcp -m multiport --dports 80,443 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null; then
@@ -3931,18 +4482,28 @@ add_fw() {
   fi
 
   # Hook into PREROUTING for client LAN bridge packets (br+, Bridge+)
-  iptables -t mangle -I PREROUTING 1 -i br+ -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null || true
-  iptables -t mangle -I PREROUTING 1 -i Bridge+ -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null || true
+  iptables -t mangle -I PREROUTING 1 -i br+ -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null || \
+  iptables -t mangle -I PREROUTING 1 -i Bridge+ -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null || {
+    echo "ERROR: failed to hook zapret chain into PREROUTING for br+/Bridge+" >&2
+    remove_fw_rules
+    return 1
+  }
 
-  # Redirect client LAN DNS queries to Mihomo DNS (port 1053) only for LAN bridge interfaces (br+, Bridge+)
-  iptables -t nat -A PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null || \
-  iptables -t nat -A PREROUTING -i br+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
-  iptables -t nat -A PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null || \
-  iptables -t nat -A PREROUTING -i br+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
-  iptables -t nat -A PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null || \
-  iptables -t nat -A PREROUTING -i Bridge+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
-  iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null || \
-  iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
+  # Z-02 & NET-01: Guard DNS redirect before PREROUTING to port 1053 to prevent LAN blackout & loops
+  if check_dns_resolver_ready; then
+    iptables -t nat -A PREROUTING -i br+ -d 127.0.0.1 -j RETURN 2>/dev/null || true
+    iptables -t nat -A PREROUTING -i Bridge+ -d 127.0.0.1 -j RETURN 2>/dev/null || true
+    iptables -t nat -A PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null || \
+    iptables -t nat -A PREROUTING -i br+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
+    iptables -t nat -A PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null || \
+    iptables -t nat -A PREROUTING -i br+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
+    iptables -t nat -A PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null || \
+    iptables -t nat -A PREROUTING -i Bridge+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
+    iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null || \
+    iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
+  else
+    echo "DNS resolver port 1053 not listening; client DNS redirect skipped to prevent LAN blackout" >&2
+  fi
 
   return 0
 }
@@ -3965,25 +4526,25 @@ check_connectivity() {
 }
 
 start_failsafe() {
-  # Stop previous failsafe if running
   if [ -f "$FAILSAFE_PID" ]; then
     kill -9 $(cat "$FAILSAFE_PID") 2>/dev/null
     rm -f "$FAILSAFE_PID"
   fi
 
-  # FAILSAFE: через 45 сек проверяем интернет, при потере — откатываем всё
-  (sleep 45
+  # NET-03 & Z-05: Failsafe timer (45s base with hardware-aware checks)
+  (
+    sleep 45
     if ! check_connectivity && ! ping -c 1 -W 2 77.88.8.8 >/dev/null 2>&1 && ! ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
-      del_fw
-      stop_nfqws
       logger -t zapret "FAILSAFE: internet connectivity lost after enabling zapret, iptables rules rolled back"
+      remove_fw_rules
+      stop_nfqws
     fi
     rm -f "$FAILSAFE_PID"
   ) </dev/null >/dev/null 2>&1 &
   echo $! > "$FAILSAFE_PID"
 }
 
-del_fw() {
+remove_fw_rules() {
   if [ -f "$FAILSAFE_PID" ]; then
     kill -9 $(cat "$FAILSAFE_PID") 2>/dev/null
     rm -f "$FAILSAFE_PID"
@@ -3994,10 +4555,17 @@ del_fw() {
   while iptables -t nat -D PREROUTING -i br+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
   while iptables -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
   while iptables -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i br+ -p udp --dport 53 ! -d 127.0.0.1 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i br+ -p tcp --dport 53 ! -d 127.0.0.1 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 ! -d 127.0.0.1 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 ! -d 127.0.0.1 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
   while iptables -t nat -D PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
   while iptables -t nat -D PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
   while iptables -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
   while iptables -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+
+  # Remove TCPMSS clamping rule (NET-02 / NET-04)
+  while iptables -t mangle -D zapret -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
 
   # Remove hooks from all possible chains (POSTROUTING, PREROUTING, FORWARD, OUTPUT)
   while iptables -t mangle -D POSTROUTING -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null; do :; done
@@ -4018,14 +4586,20 @@ del_fw() {
   return 0
 }
 
+del_fw() {
+  remove_fw_rules
+}
+
 case "$1" in
   start)
+    acquire_zapret_lock || exit 1
     mkdir -p /opt/var/run /opt/etc/zapret
     if [ -f "$PIDFILE" ]; then
       PID=$(cat "$PIDFILE" 2>/dev/null)
-      if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+      if [ -n "$PID" ] && is_zapret_pid "$PID"; then
         add_fw
         start_failsafe
+        release_zapret_lock
         exit 0
       fi
     fi
@@ -4050,12 +4624,14 @@ case "$1" in
         if [ ! -f "/opt/zapret2/lua/zapret-lib.lua" ] || [ ! -f "/opt/zapret2/lua/zapret-antidpi.lua" ]; then
           logger -t zapret "ERROR: zapret2 Lua libraries missing in /opt/zapret2/lua/"
           echo "ERROR: zapret2 Lua libraries missing in /opt/zapret2/lua/" >&2
+          release_zapret_lock
           exit 1
         fi
         for chk in /opt/zapret2/lua/zapret-lib.lua /opt/zapret2/lua/zapret-antidpi.lua; do
           if [ $(wc -c < "$chk" 2>/dev/null || echo 0) -lt 80 ] || grep -q "404: Not Found" "$chk" 2>/dev/null; then
             logger -t zapret "ERROR: Lua library $chk is corrupted or incomplete in /opt/zapret2/lua/"
             echo "ERROR: Lua library $chk is corrupted or incomplete in /opt/zapret2/lua/" >&2
+            release_zapret_lock
             exit 1
           fi
         done
@@ -4099,79 +4675,110 @@ case "$1" in
       if [ -f "$PIDFILE" ]; then
         PID=$(cat "$PIDFILE" 2>/dev/null)
       fi
-      if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
-        PID=$(pidof nfqws2 2>/dev/null | awk '{print $1}')
-        [ -z "$PID" ] && PID=$(pidof nfqws 2>/dev/null | awk '{print $1}')
-        [ -n "$PID" ] && echo "$PID" > "$PIDFILE" 2>/dev/null
+      if [ -z "$PID" ] || ! is_zapret_pid "$PID"; then
+        for p in $(pgrep -f nfqws2 2>/dev/null) $(pgrep -f nfqws 2>/dev/null); do
+          if is_zapret_pid "$p"; then
+            PID="$p"
+            echo "$PID" > "$PIDFILE" 2>/dev/null
+            break
+          fi
+        done
       fi
-      if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+      if [ -n "$PID" ] && is_zapret_pid "$PID"; then
         add_fw
         start_failsafe
+        release_zapret_lock
         exit 0
       fi
       logger -t zapret "ERROR: nfqws failed to start with args: $NFQWS_ARGS"
       echo "ERROR: nfqws failed to start with args: $NFQWS_ARGS" >&2
       stop_nfqws
-      del_fw
+      remove_fw_rules
+      release_zapret_lock
       exit 1
     else
       logger -t zapret "ERROR: nfqws binary not found or not executable"
       echo "ERROR: nfqws binary not found or not executable" >&2
+      release_zapret_lock
       exit 1
     fi
     ;;
   stop)
+    acquire_zapret_lock || exit 1
     stop_nfqws
-    del_fw
+    remove_fw_rules
+    release_zapret_lock
     exit 0
     ;;
   restart)
+    acquire_zapret_lock || exit 1
     stop_nfqws
-    del_fw
+    remove_fw_rules
     sleep 1
+    release_zapret_lock
     exec "$0" start
     ;;
   reload|reload-hosts)
+    acquire_zapret_lock || exit 1
     PID=""
     if [ -f "$PIDFILE" ]; then
       PID=$(cat "$PIDFILE" 2>/dev/null)
     fi
-    if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
-      PID=$(pidof nfqws2 2>/dev/null | awk '{print $1}')
-      [ -z "$PID" ] && PID=$(pidof nfqws 2>/dev/null | awk '{print $1}')
-      [ -n "$PID" ] && echo "$PID" > "$PIDFILE" 2>/dev/null
+    if [ -z "$PID" ] || ! is_zapret_pid "$PID"; then
+      for p in $(pgrep -f nfqws2 2>/dev/null) $(pgrep -f nfqws 2>/dev/null); do
+        if is_zapret_pid "$p"; then
+          PID="$p"
+          echo "$PID" > "$PIDFILE" 2>/dev/null
+          break
+        fi
+      done
     fi
-    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+    if [ -n "$PID" ] && is_zapret_pid "$PID"; then
       case "$NFQWS_ARGS" in
         *zapret-hosts.txt*)
           if [ -r "/proc/$PID/cmdline" ] && ! tr '\0' ' ' < "/proc/$PID/cmdline" 2>/dev/null | grep -q "zapret-hosts.txt"; then
+            release_zapret_lock
             exec "$0" restart
           fi
           ;;
       esac
       kill -HUP "$PID" 2>/dev/null
+      release_zapret_lock
       exit 0
     fi
-    killall -HUP nfqws2 2>/dev/null || killall -HUP nfqws 2>/dev/null || true
+    for p in $(pgrep -f nfqws2 2>/dev/null) $(pgrep -f nfqws 2>/dev/null); do
+      if is_zapret_pid "$p"; then
+        kill -HUP "$p" 2>/dev/null
+      fi
+    done
+    release_zapret_lock
     exit 0
     ;;
   start-fw|reload-fw)
+    acquire_zapret_lock || exit 1
     add_fw
-    exit 0
+    ret=$?
+    release_zapret_lock
+    exit $ret
     ;;
   stop-fw)
-    del_fw
+    acquire_zapret_lock || exit 1
+    remove_fw_rules
+    release_zapret_lock
     exit 0
     ;;
   status)
     if [ -f "$PIDFILE" ]; then
       PID=$(cat "$PIDFILE" 2>/dev/null)
-      if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+      if [ -n "$PID" ] && is_zapret_pid "$PID"; then
         exit 0
       fi
     fi
-    pidof nfqws2 >/dev/null 2>&1 && exit 0
-    pidof nfqws >/dev/null 2>&1 && exit 0
+    for p in $(pgrep -f nfqws2 2>/dev/null) $(pgrep -f nfqws 2>/dev/null); do
+      if is_zapret_pid "$p"; then
+        exit 0
+      fi
+    done
     exit 1
     ;;
   *)
@@ -4968,7 +5575,7 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
         .map_err(|e| format!("Не удалось создать /opt/etc/init.d: {e}"))?;
 
     // 1. S51zapret script
-    tokio::fs::write("/opt/etc/init.d/S51zapret", S51ZAPRET_SCRIPT)
+    atomic_write_file("/opt/etc/init.d/S51zapret", S51ZAPRET_SCRIPT)
         .await
         .map_err(|e| format!("Не удалось записать /opt/etc/init.d/S51zapret: {e}"))?;
     tokio::process::Command::new("chmod")
@@ -4982,21 +5589,21 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
     let _ = tokio::fs::create_dir_all("/opt/etc/ndm/netfilter.d").await;
     let _ = tokio::fs::create_dir_all("/opt/etc/ndm/ifstatechanged.d").await;
     let _ = tokio::fs::create_dir_all("/opt/etc/ndm/wan.d").await;
-    if let Ok(()) = tokio::fs::write("/opt/etc/ndm/netfilter.d/050-zapret.sh", NDM_NETFILTER_SCRIPT).await {
+    if let Ok(()) = atomic_write_file("/opt/etc/ndm/netfilter.d/050-zapret.sh", NDM_NETFILTER_SCRIPT).await {
         let _ = tokio::process::Command::new("chmod")
             .arg("+x")
             .arg("/opt/etc/ndm/netfilter.d/050-zapret.sh")
             .output()
             .await;
     }
-    if let Ok(()) = tokio::fs::write("/opt/etc/ndm/ifstatechanged.d/050-zapret.sh", NDM_IFSTATE_SCRIPT).await {
+    if let Ok(()) = atomic_write_file("/opt/etc/ndm/ifstatechanged.d/050-zapret.sh", NDM_IFSTATE_SCRIPT).await {
         let _ = tokio::process::Command::new("chmod")
             .arg("+x")
             .arg("/opt/etc/ndm/ifstatechanged.d/050-zapret.sh")
             .output()
             .await;
     }
-    if let Ok(()) = tokio::fs::write("/opt/etc/ndm/wan.d/050-zapret.sh", NDM_IFSTATE_SCRIPT).await {
+    if let Ok(()) = atomic_write_file("/opt/etc/ndm/wan.d/050-zapret.sh", NDM_IFSTATE_SCRIPT).await {
         let _ = tokio::process::Command::new("chmod")
             .arg("+x")
             .arg("/opt/etc/ndm/wan.d/050-zapret.sh")
@@ -5031,7 +5638,7 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
             }
         }
     }
-    let _ = tokio::fs::write(hosts_path, synced_hosts).await;
+    let _ = atomic_write_file(hosts_path, &synced_hosts).await;
 
     // 3. zapret.conf with multi-strategy args or custom_args (respecting chosen engine v1/v2)
     let use_v2 = should_use_nfqws2(cfg);
@@ -5088,7 +5695,7 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
         excluded_ips_str.trim(),
         excluded_macs_str.trim()
     );
-    tokio::fs::write("/opt/etc/zapret/zapret.conf", conf_data)
+    atomic_write_file("/opt/etc/zapret/zapret.conf", &conf_data)
         .await
         .map_err(|e| format!("Не удалось записать /opt/etc/zapret/zapret.conf: {e}"))?;
     Ok(())
@@ -5126,8 +5733,10 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if let Some(first_pid) = s.split_whitespace().next() {
                 if let Ok(p) = first_pid.parse::<u32>() {
-                    running = true;
-                    pid = Some(p);
+                    if crate::zapret::is_zapret_pid_valid(p) {
+                        running = true;
+                        pid = Some(p);
+                    }
 
                     let proc_cmd = format!("/proc/{p}/cmdline");
                     if let Ok(raw) = tokio::fs::read(&proc_cmd).await {
@@ -5265,12 +5874,27 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
         None
     };
 
+    let current_op = crate::zapret::get_current_operation_state();
+    let operation_in_progress = current_op != crate::zapret::ZapretOperationState::Idle;
+    let dns_resolver_ready = crate::zapret::check_dns_resolver_ready(1053).await;
+    let dns_redirect_active = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg("iptables -t nat -S PREROUTING 2>/dev/null | grep -q '1053'")
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
     api_ok(json!({
         "installed": installed,
         "running": running,
         "pid": pid,
         "autostart": autostart,
         "iptables_active": iptables_active,
+        "dns_resolver_ready": dns_resolver_ready,
+        "dns_redirect_active": dns_redirect_active,
+        "operation_state": current_op,
+        "operation_in_progress": operation_in_progress,
         "preset": preset,
         "active_strategy_id": active_strategy_id,
         "cmdline": cmdline,
@@ -5352,43 +5976,49 @@ pub async fn zapret_action(
               fi
             done
 
-            cd /opt
-            echo "[2/4] Загрузка дистрибутива Zapret 2..."
-            rm -f /tmp/z2.tar.gz
+            STAGE_DIR=$(mktemp -d /tmp/z2_stage.XXXXXX)
+            echo "[2/4] Загрузка дистрибутива Zapret 2 в $STAGE_DIR..."
             for url in \
               "https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" \
               "https://ghproxy.net/https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" \
               "https://github.com/bol-van/zapret2/archive/refs/heads/master.tar.gz" \
               "https://ghproxy.net/https://github.com/bol-van/zapret2/archive/refs/heads/master.tar.gz" \
               "https://github.com/bol-van/zapret2/releases/download/v1.0.5.2/zapret2-v1.0.5.2.tar.gz"; do
-              if curl -fsSL --connect-timeout 10 -m 60 -x http://127.0.0.1:7890 "$url" -o /tmp/z2.tar.gz 2>/dev/null || \
-                 curl -fsSL --connect-timeout 10 -m 60 "$url" -o /tmp/z2.tar.gz 2>/dev/null; then
-                if [ -s /tmp/z2.tar.gz ] && [ $(wc -c < /tmp/z2.tar.gz 2>/dev/null || echo 0) -gt 10000 ]; then
+              if curl -fsSL --connect-timeout 10 -m 60 -x http://127.0.0.1:7890 "$url" -o "$STAGE_DIR/z2.tar.gz" 2>/dev/null || \
+                 curl -fsSL --connect-timeout 10 -m 60 "$url" -o "$STAGE_DIR/z2.tar.gz" 2>/dev/null; then
+                if [ -s "$STAGE_DIR/z2.tar.gz" ] && [ $(wc -c < "$STAGE_DIR/z2.tar.gz" 2>/dev/null || echo 0) -gt 10000 ]; then
                   echo "Архив успешно загружен с: $url"
                   break
                 fi
               fi
-              rm -f /tmp/z2.tar.gz
+              rm -f "$STAGE_DIR/z2.tar.gz"
             done
 
             echo "[3/4] Распаковка архива и копирование бинарных файлов nfqws2 и Lua модулей..."
-            if [ -f /tmp/z2.tar.gz ]; then
-              tar -xzf /tmp/z2.tar.gz -C /tmp/ 2>/dev/null || true
-              rm -f /tmp/z2.tar.gz
-              Z2_DIR=$(find /tmp -maxdepth 1 -type d \( -name "zapret2*" -o -name "zapret-v*" \) | head -n 1)
+            if [ -f "$STAGE_DIR/z2.tar.gz" ]; then
+              tar -xzf "$STAGE_DIR/z2.tar.gz" -C "$STAGE_DIR" 2>/dev/null || true
+              rm -f "$STAGE_DIR/z2.tar.gz"
+              Z2_DIR=$(find "$STAGE_DIR" -maxdepth 1 -type d \( -name "zapret2*" -o -name "zapret-v*" \) | head -n 1)
               if [ -n "$Z2_DIR" ]; then
                 echo "Распакован каталог сборки: $Z2_DIR"
                 if [ -d "$Z2_DIR/binaries" ]; then
                   cp -rf "$Z2_DIR/binaries/"* /opt/zapret2/binaries/ 2>/dev/null || true
                 fi
+                NEW_BIN=""
                 if [ -n "$Z2_ARCH" ] && [ -f "$Z2_DIR/binaries/$Z2_ARCH/nfqws2" ]; then
-                  cp -f "$Z2_DIR/binaries/$Z2_ARCH/nfqws2" /opt/zapret2/nfqws2
-                  echo "Скопирован nfqws2 для $Z2_ARCH"
+                  NEW_BIN="$Z2_DIR/binaries/$Z2_ARCH/nfqws2"
                 elif [ -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws2" ]; then
-                  cp -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws2" /opt/zapret2/nfqws2
-                  echo "Скопирован nfqws2 для $TARGET_ARCH"
+                  NEW_BIN="$Z2_DIR/binaries/$TARGET_ARCH/nfqws2"
                 elif [ -f "$Z2_DIR/nfqws2" ]; then
-                  cp -f "$Z2_DIR/nfqws2" /opt/zapret2/nfqws2
+                  NEW_BIN="$Z2_DIR/nfqws2"
+                fi
+                if [ -n "$NEW_BIN" ] && [ -f "$NEW_BIN" ]; then
+                  if ! head -c 4 "$NEW_BIN" 2>/dev/null | grep -q "7fELF" && [ "$(od -t x1 -N 4 "$NEW_BIN" 2>/dev/null | head -n 1 | awk '{$1=""; print $0}' | tr -d ' ')" != "7f454c46" ]; then
+                    echo "ERROR: Invalid ELF header in $NEW_BIN (expected 7f 45 4c 46)" >&2
+                    rm -rf "$STAGE_DIR"
+                    exit 1
+                  fi
+                  mv -f "$NEW_BIN" /opt/zapret2/nfqws2
                   echo "Скопирован nfqws2"
                 fi
                 if [ -d "$Z2_DIR/files/lua" ]; then
@@ -5399,9 +6029,9 @@ pub async fn zapret_action(
                   cp -rf "$Z2_DIR/lua/"* /opt/zapret2/lua/ 2>/dev/null || true
                   echo "Скопированы Lua библиотеки из lua в /opt/zapret2/lua"
                 fi
-                rm -rf "$Z2_DIR" 2>/dev/null || true
               fi
             fi
+            rm -rf "$STAGE_DIR" 2>/dev/null || true
 
             # Если ключевые Lua скрипты отсутствуют или повреждены, загружаем их напрямую из официального репозитория
             for lf in zapret-lib.lua zapret-antidpi.lua zapret-auto.lua; do
@@ -5792,7 +6422,7 @@ pub async fn zapret_action(
             }
 
             let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
-            if let Err(e) = tokio::fs::write("/opt/etc/zapret/zapret.conf", &content).await {
+            if let Err(e) = atomic_write_file("/opt/etc/zapret/zapret.conf", &content).await {
                 return api_err(format!("Ошибка записи zapret.conf: {e}"));
             }
 
@@ -5827,7 +6457,13 @@ pub async fn zapret_action(
             } else {
                 "Конфигурация Zapret сохранена"
             };
-            return api_ok(json!({ "saved": true, "features": cfg.zapret, "message": msg }));
+            return api_ok(json!({
+                "saved": true,
+                "hot_reloaded": false,
+                "restart_required": !cfg.zapret.enabled,
+                "features": cfg.zapret,
+                "message": msg
+            }));
         }
         return api_err("Отсутствует содержимое config_content");
     }
@@ -5836,7 +6472,7 @@ pub async fn zapret_action(
     if act == "save_hosts" {
         if let Some(content) = body.hosts_content {
             let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
-            if let Err(e) = tokio::fs::write("/opt/etc/zapret/zapret-hosts.txt", &content).await {
+            if let Err(e) = atomic_write_file("/opt/etc/zapret/zapret-hosts.txt", &content).await {
                 return api_err(format!("Ошибка записи zapret-hosts.txt: {e}"));
             }
             let is_running = tokio::process::Command::new("sh")
@@ -5849,7 +6485,12 @@ pub async fn zapret_action(
             if is_running {
                 let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("reload-hosts").output().await;
             }
-            return api_ok(json!({ "saved": true, "message": "Список доменов zapret-hosts.txt сохранен" }));
+            return api_ok(json!({
+                "saved": true,
+                "hot_reloaded": is_running,
+                "restart_required": !is_running,
+                "message": "Список доменов zapret-hosts.txt сохранен"
+            }));
         }
         return api_err("Отсутствует содержимое hosts_content");
     }
@@ -6208,8 +6849,12 @@ pub async fn zapret_action(
             }
         }
 
+        let hot_reloaded = is_running && is_domain_only;
+        let restart_required = !is_running || (!is_domain_only && !is_no_reload);
         return api_ok(json!({
             "success": true,
+            "hot_reloaded": hot_reloaded,
+            "restart_required": restart_required,
             "features": cfg.zapret,
             "message": "Параметры и правила маршрутизации успешно обновлены"
         }));
@@ -6442,6 +7087,14 @@ pub async fn zapret_action(
         }));
     }
 
+    if act == "verify_failsafe" {
+        let rep = crate::zapret::verify_zapret_failsafe().await;
+        return api_ok(json!({
+            "success": rep.overall_success,
+            "report": rep
+        }));
+    }
+
     let init_script = "/opt/etc/init.d/S51zapret";
     if !std::path::Path::new(init_script).exists() {
         return api_err("Служба Zapret (S51zapret) не установлена в /opt/etc/init.d/");
@@ -6502,6 +7155,8 @@ pub async fn zapret_action(
                 let _ = config::save(&state.config_path, &cfg).await;
                 *state.config.write().await = std::sync::Arc::new(cfg.clone());
                 return api_err(format!("Ошибка запуска Zapret:\n{}", output_str.trim()));
+            } else if !success {
+                return api_err(format!("Ошибка выполнения {}: {}", action_to_run, output_str.trim()));
             }
 
             if action_to_run == "start" || action_to_run == "restart" {
@@ -6511,7 +7166,12 @@ pub async fn zapret_action(
                     .arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null")
                     .output()
                     .await
-                    .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+                    .map(|o| {
+                        let out_s = String::from_utf8_lossy(&o.stdout);
+                        out_s.split_whitespace().any(|pid_s| {
+                            pid_s.parse::<u32>().map_or(false, |p| crate::zapret::is_zapret_pid_valid(p))
+                        })
+                    })
                     .unwrap_or(false);
 
                 if !pid_running {
@@ -6531,12 +7191,6 @@ pub async fn zapret_action(
                 cfg.zapret.enabled = true;
             } else if action_to_run == "stop" {
                 cfg.zapret.enabled = false;
-                // Гарантированно прерываем nfqws2 и nfqws и подчищаем PID-файлы
-                let _ = tokio::process::Command::new("sh")
-                    .arg("-c")
-                    .arg("kill -9 $(pidof nfqws2 2>/dev/null) $(pidof nfqws 2>/dev/null) 2>/dev/null; rm -f /opt/var/run/zapret.pid /opt/var/run/zapret_failsafe.pid")
-                    .output()
-                    .await;
             }
             if std::path::Path::new(&cfg.mihomo.config_path).exists() {
                 if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
@@ -6551,7 +7205,15 @@ pub async fn zapret_action(
             let _ = config::save(&state.config_path, &cfg).await;
             *state.config.write().await = std::sync::Arc::new(cfg.clone());
 
-            api_ok(json!({ "success": true, "output": output_str.trim(), "action": action_to_run, "features": &cfg.zapret }))
+            let hot_reloaded = action_to_run == "reload" || action_to_run == "reload-hosts";
+            api_ok(json!({
+                "success": true,
+                "hot_reloaded": hot_reloaded,
+                "restart_required": false,
+                "output": output_str.trim(),
+                "action": action_to_run,
+                "features": &cfg.zapret
+            }))
         }
         Err(e) => {
             if action_to_run == "stop" {
@@ -7062,17 +7724,34 @@ pub async fn toggle_device_zapret(
     }))
 }
 
-// ==================== РАСПИСАНИЯ УСТРОЙСТВ ====================
+pub fn calc_schedules_revision(schedules: &[config::DeviceSchedule]) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for s in schedules {
+        s.id.hash(&mut hasher);
+        s.time_start.hash(&mut hasher);
+        s.time_end.hash(&mut hasher);
+        s.days.hash(&mut hasher);
+        s.action.hash(&mut hasher);
+        s.target_server.hash(&mut hasher);
+        s.device_ip.hash(&mut hasher);
+        s.device_mac.hash(&mut hasher);
+        s.enabled.hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
 
 /// GET /api/schedules — список расписаний
 pub async fn get_schedules(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await;
-    api_ok(json!({ "schedules": cfg.schedules }))
+    let rev = calc_schedules_revision(&cfg.schedules);
+    api_ok(json!({ "schedules": cfg.schedules, "revision": rev }))
 }
 
 #[derive(Deserialize)]
 pub struct SaveSchedulesReq {
     pub schedules: Vec<config::DeviceSchedule>,
+    pub expected_revision: Option<String>,
 }
 
 /// POST /api/schedules — сохранение расписаний
@@ -7083,7 +7762,17 @@ pub async fn save_schedules(
     let _guard = state.config_lock.lock().await;
     let _rguard = state.routing_lock.lock().await;
     let mut cfg = state.config.read().await.as_ref().clone();
+
+    // UI-03: Optimistic concurrency check
+    if let Some(exp) = &body.expected_revision {
+        let cur_rev = calc_schedules_revision(&cfg.schedules);
+        if exp != &cur_rev {
+            return api_err("Конфликт параллельного сохранения расписаний: данные были изменены другим клиентом");
+        }
+    }
+
     cfg.schedules = body.schedules;
+    let new_rev = calc_schedules_revision(&cfg.schedules);
 
     if let Err(e) = config::save(&state.config_path, &cfg).await {
         return api_err(format!("Ошибка сохранения расписаний: {}", e));
@@ -7097,7 +7786,7 @@ pub async fn save_schedules(
         }
     }
     *state.config.write().await = std::sync::Arc::new(cfg);
-    api_ok(json!({ "saved": true }))
+    api_ok(json!({ "saved": true, "revision": new_rev }))
 }
 
 // ==================== ИГРОВОЙ РЕЖИМ (GAMING MODE) ====================

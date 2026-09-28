@@ -4,6 +4,8 @@ import { apiGet } from '../api'
 interface SpeedPair {
   down: number
   up: number
+  estimated?: boolean
+  source?: string
 }
 
 interface TrafficHistoryPoint {
@@ -45,6 +47,7 @@ export default function TrafficGraph() {
   const [currentProxy, setCurrentProxy] = useState<SpeedPair>({ down: 0, up: 0 })
   const [peakDirect, setPeakDirect] = useState(0)
   const [peakProxy, setPeakProxy] = useState(0)
+  const [isDirectEstimated, setIsDirectEstimated] = useState(false)
 
   // Режим отображения: 'down' (входящий) | 'up' (исходящий) | 'both' (сумма)
   const [metricMode, setMetricMode] = useState<'down' | 'up' | 'both'>('down')
@@ -65,8 +68,9 @@ export default function TrafficGraph() {
         const dDown = data.direct?.down ?? 0
         const dUp = data.direct?.up ?? 0
 
-        setCurrentDirect({ down: dDown, up: dUp })
+        setCurrentDirect({ down: dDown, up: dUp, estimated: data.direct?.estimated, source: data.direct?.source })
         setCurrentProxy({ down: pDown, up: pUp })
+        setIsDirectEstimated(Boolean(data.direct?.estimated))
 
         setPeakDirect((prev) => Math.max(prev, dDown + dUp))
         setPeakProxy((prev) => Math.max(prev, pDown + pUp))
@@ -198,7 +202,7 @@ export default function TrafficGraph() {
             <h3 style={{ margin: 0, fontSize: 15 }}>Трафик в реальном времени</h3>
             <div className="traffic-legend-chips">
               <span className="legend-chip direct">
-                <span className="legend-dot green" /> Прямой трафик (Direct)
+                <span className="legend-dot green" /> Прямой трафик (Direct) {isDirectEstimated && <span style={{ opacity: 0.75, fontSize: '0.85em' }}>(оценка)</span>}
               </span>
               <span className="legend-chip proxy">
                 <span className="legend-dot blue" /> Проксированный (Proxy)
@@ -238,8 +242,8 @@ export default function TrafficGraph() {
 
           <div className="traffic-stats">
             {/* Зеленый бейдж: Прямой трафик */}
-            <div className="traffic-badge direct" title={`Прямой трафик роутера (мимо прокси)\nПик: ${formatSpeed(peakDirect)}`}>
-              <span className="badge-label">🟢 Прямой:</span>
+            <div className="traffic-badge direct" title={`Прямой трафик роутера (мимо прокси${isDirectEstimated ? ', оценочный расчёт' : ''})\nПик: ${formatSpeed(peakDirect)}`}>
+              <span className="badge-label">🟢 Прямой{isDirectEstimated ? ' (оценка)' : ''}:</span>
               <span className="badge-arrow">↓</span>
               <span className="badge-val">{formatSpeed(currentDirect.down)}</span>
               <span className="badge-arrow">↑</span>

@@ -40,9 +40,10 @@ export default function DeviceRoutingModal({
 
   // Загрузка персональных правил для доменов устройства
   useEffect(() => {
-    apiGet<{ rules: Record<string, DeviceDomainRule[]> }>('devices/domain-rules')
-      .then((res) => {
-        setDomainRules(res.rules[modal.ip] || [])
+    apiGet<{ rules?: Record<string, DeviceDomainRule[]> } | Record<string, DeviceDomainRule[]>>('devices/domain-rules')
+      .then((res: any) => {
+        const rulesMap = res?.rules ?? res ?? {}
+        setDomainRules(rulesMap[modal.ip] || [])
       })
       .catch(() => {})
   }, [modal.ip])

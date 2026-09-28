@@ -78,6 +78,14 @@ pub struct SystemConfig {
     pub xkeen_init: String,
     /// Каталог бэкапов (как в XKeen-UI: /opt/backups).
     pub backup_dir: String,
+    /// Путь к исполняемому файлу xkeen-route.
+    pub xkeen_route_bin: String,
+    /// Init-скрипт службы xkeen-route.
+    pub xkeen_route_init: String,
+    /// Путь к исполняемому файлу mihomo.
+    pub mihomo_bin: String,
+    /// Init-скрипт службы zapret.
+    pub zapret_init: String,
 }
 
 impl Default for SystemConfig {
@@ -89,6 +97,10 @@ impl Default for SystemConfig {
             } else {
                 "backups".into()
             },
+            xkeen_route_bin: "/opt/sbin/xkeen-route".into(),
+            xkeen_route_init: "/opt/etc/init.d/S99xkeen-route".into(),
+            mihomo_bin: "/opt/sbin/mihomo".into(),
+            zapret_init: "/opt/etc/init.d/S51zapret".into(),
         }
     }
 }
@@ -515,6 +527,27 @@ pub fn is_valid_domain(domain: &str) -> bool {
     true
 }
 
+/// Проверяет, является ли строка корректным IPv4/IPv6 адресом или CIDR нотацией (например, 192.168.1.1, 10.0.0.0/24, 2001:db8::1/128).
+pub fn is_valid_ip_or_cidr(s: &str) -> bool {
+    let clean = s.trim();
+    if clean.is_empty() {
+        return false;
+    }
+    if clean.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    if let Some((addr_str, prefix_str)) = clean.split_once('/') {
+        if let Ok(addr) = addr_str.trim().parse::<std::net::IpAddr>() {
+            if let Ok(prefix) = prefix_str.trim().parse::<u8>() {
+                if (addr.is_ipv4() && prefix <= 32) || (addr.is_ipv6() && prefix <= 128) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Умные режимы и гибридная маршрутизация Zapret DPI.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -749,36 +782,105 @@ pub fn merge_value(base: &mut serde_json::Value, over: &serde_json::Value) {
     }
 }
 
-pub(crate) fn parse_config_content(content: &str, path_display: &str) -> AppConfig {
+/// Строгий парсинг конфига. Возвращает Err, если JSON некорректен или структура невалидна.
+pub fn parse_config_strict(content: &str) -> Result<AppConfig, String> {
+    let over: serde_json::Value = serde_json::from_str(content)
+        .map_err(|e| format!("Некорректный JSON конфигурации: {e}"))?;
     let mut base = serde_json::to_value(AppConfig::default()).unwrap_or_default();
-    match serde_json::from_str::<serde_json::Value>(content) {
-        Ok(over) => merge_value(&mut base, &over),
-        Err(e) => eprintln!("[WARN] {} не JSON: {} — использую дефолты", path_display, e),
+    merge_value(&mut base, &over);
+    let mut cfg: AppConfig = serde_json::from_value(base)
+        .map_err(|e| format!("Некорректная структура конфигурации: {e}"))?;
+    cfg.failover.migrate_priority();
+    Ok(cfg)
+}
+
+pub(crate) fn parse_config_content(content: &str, path_display: &str) -> AppConfig {
+    match parse_config_strict(content) {
+        Ok(c) => c,
+        Err(err) => {
+            eprintln!("[ERROR] {}: {err}", path_display);
+            // Пытаемся восстановить секцию auth, чтобы ни при каких условиях не отключить авторизацию
+            let mut fallback = AppConfig::default();
+            let mut preserved_auth = false;
+
+            if let Ok(over) = serde_json::from_str::<serde_json::Value>(content) {
+                if let Some(auth_val) = over.get("auth") {
+                    if let Ok(auth) = serde_json::from_value::<AuthConfig>(auth_val.clone()) {
+                        fallback.auth = auth;
+                        preserved_auth = true;
+                    }
+                }
+            }
+
+            // Если JSON был поврежден на уровне синтаксиса, но содержал следы включенной auth
+            if !preserved_auth && (content.contains("\"password_hash\"") || content.contains("\"auth\"")) {
+                eprintln!("[SECURITY] Обнаружены следы авторизации в поврежденном конфиге! Сохраняем защитный режим auth.");
+                fallback.auth.enabled = true;
+            }
+
+            fallback
+        }
     }
-    serde_json::from_value::<AppConfig>(base)
-        .map(|mut c| {
-            c.failover.migrate_priority();
-            c
-        })
-        .unwrap_or_else(|e| {
-            eprintln!("[WARN] Ошибка конфига {}: {} — использую дефолты", path_display, e);
-            AppConfig::default()
-        })
 }
 
 /// Синхронная загрузка конфига с deep-merge поверх дефолтов (для инициализации CLI/main).
 pub fn load(path: &Path) -> AppConfig {
+    if !path.exists() {
+        return AppConfig::default();
+    }
     match std::fs::read_to_string(path) {
-        Ok(content) => parse_config_content(&content, &path.display().to_string()),
-        Err(_) => AppConfig::default(),
+        Ok(content) => {
+            match parse_config_strict(&content) {
+                Ok(c) => c,
+                Err(err) => {
+                    eprintln!("[ERROR] Поврежденный файл конфигурации {}: {err}", path.display());
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let backup_path = path.with_extension(format!("corrupted.{ts}.bak"));
+                    let _ = std::fs::copy(path, &backup_path);
+                    eprintln!("[INFO] Создан бэкап поврежденного конфига: {}", backup_path.display());
+                    parse_config_content(&content, &path.display().to_string())
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[ERROR] Не удалось прочитать существующий конфиг {}: {e}", path.display());
+            let mut cfg = AppConfig::default();
+            cfg.auth.enabled = true;
+            cfg
+        }
     }
 }
 
 /// Асинхронная загрузка конфига (не блокирует воркеры Tokio в обработчиках API).
 pub async fn load_async(path: &Path) -> AppConfig {
+    if !path.exists() {
+        return AppConfig::default();
+    }
     match tokio::fs::read_to_string(path).await {
-        Ok(content) => parse_config_content(&content, &path.display().to_string()),
-        Err(_) => AppConfig::default(),
+        Ok(content) => {
+            match parse_config_strict(&content) {
+                Ok(c) => c,
+                Err(err) => {
+                    eprintln!("[ERROR] Поврежденный файл конфигурации {}: {err}", path.display());
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let backup_path = path.with_extension(format!("corrupted.{ts}.bak"));
+                    let _ = tokio::fs::copy(path, &backup_path).await;
+                    parse_config_content(&content, &path.display().to_string())
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[ERROR] Не удалось прочитать существующий конфиг {}: {e}", path.display());
+            let mut cfg = AppConfig::default();
+            cfg.auth.enabled = true;
+            cfg
+        }
     }
 }
 
@@ -893,5 +995,46 @@ mod tests {
         assert!(!is_valid_domain("bad;domain"));
         assert!(!is_valid_domain(""));
         assert!(!is_valid_domain("domain_without_dot"));
+    }
+
+    #[test]
+    fn test_corrupted_config_preserves_auth() {
+        let path = std::env::temp_dir().join("xr-test-corrupted-auth.json");
+        std::fs::write(&path, r#"{"auth": {"enabled": true, "password_hash": "$pbkdf2$hash", "salt": "saltsalt"}, "mihomo": { corrupted"#).unwrap();
+        let cfg = load(&path);
+        assert!(cfg.auth.enabled, "Auth must remain enabled even if config JSON is corrupted");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_invalid_structure_preserves_auth_object() {
+        let path = std::env::temp_dir().join("xr-test-invalid-struct.json");
+        std::fs::write(&path, r#"{"auth": {"enabled": true, "password_hash": "myhash", "salt": "mysalt", "session_secret": "sec"}, "rci": {"port": "not-a-number"}}"#).unwrap();
+        let cfg = load(&path);
+        assert!(cfg.auth.enabled);
+        assert_eq!(cfg.auth.password_hash, "myhash");
+        assert_eq!(cfg.auth.salt, "mysalt");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_strict_config_parsing_fails_on_corrupt_json() {
+        assert!(parse_config_strict("not json at all").is_err());
+        assert!(parse_config_strict(r#"{"failover": {"enabled": true}}"#).is_ok());
+    }
+
+    #[test]
+    fn test_is_valid_ip_or_cidr() {
+        assert!(is_valid_ip_or_cidr("192.168.1.1"));
+        assert!(is_valid_ip_or_cidr("10.0.0.1/24"));
+        assert!(is_valid_ip_or_cidr("192.168.1.50/32"));
+        assert!(is_valid_ip_or_cidr("::1"));
+        assert!(is_valid_ip_or_cidr("2001:db8::1/128"));
+        assert!(is_valid_ip_or_cidr("2001:db8::/64"));
+        assert!(!is_valid_ip_or_cidr(""));
+        assert!(!is_valid_ip_or_cidr("not-an-ip"));
+        assert!(!is_valid_ip_or_cidr("192.168.1.50/33"));
+        assert!(!is_valid_ip_or_cidr("2001:db8::1/129"));
+        assert!(!is_valid_ip_or_cidr("192.168.1.50/32/32"));
     }
 }

@@ -57,6 +57,25 @@ describe('api client', () => {
     expect(authEventTriggered).toBe(true)
   })
 
+  it.each([401, 403, 500, 503])('rejects HTTP %s even with a success envelope', async (status) => {
+    global.fetch = vi.fn().mockResolvedValue({
+      status,
+      ok: false,
+      statusText: 'Failure',
+      json: async () => ({ success: true, data: { saved: true } }),
+    })
+    await expect(apiPost('zapret/action', { action: 'start' })).rejects.toThrow(`HTTP ${status}`)
+  })
+
+  it.each(['false', 1, {}, null])('rejects invalid success value %j', async (success) => {
+    global.fetch = vi.fn().mockResolvedValue({
+      status: 200,
+      ok: true,
+      json: async () => ({ success, data: {} }),
+    })
+    await expect(apiGet('status')).rejects.toThrow('Ошибка API')
+  })
+
   it('apiPost sends POST request with json body', async () => {
     global.fetch = vi.fn().mockResolvedValue({
       status: 200,
@@ -101,5 +120,71 @@ describe('api client', () => {
 
   it('getWsUrl converts http/https host to ws/wss', () => {
     expect(getWsUrl('logs/ws')).toContain('/api/logs/ws')
+  })
+
+  it('anti-regression (API-01): apiPost auth/change-password targets /api/auth/change-password', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({ success: true, data: { saved: true, enabled: true } }),
+    } as any)
+
+    const res = await apiPost<{ saved: boolean; enabled: boolean }>('auth/change-password', {
+      enabled: true,
+      current_password: 'old',
+      new_password: 'new',
+    })
+    expect(res).toEqual({ saved: true, enabled: true })
+    expect(global.fetch).toHaveBeenCalledWith('/api/auth/change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: true, current_password: 'old', new_password: 'new' }),
+    })
+  })
+
+  it('anti-regression (API-02): devices/domain-rules receives { rules: ... } DTO without data loss', async () => {
+    const mockRules = {
+      rules: {
+        '192.168.1.105': [{ domain: 'example.com', target: 'DIRECT' }],
+      },
+    }
+    global.fetch = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({ success: true, data: mockRules }),
+    } as any)
+
+    const res = await apiGet<{ rules: Record<string, Array<{ domain: string; target: string }>> }>('devices/domain-rules')
+    expect(res.rules).toBeDefined()
+    expect(res.rules['192.168.1.105']).toHaveLength(1)
+    expect(res.rules['192.168.1.105'][0].domain).toBe('example.com')
+  })
+
+  it('anti-regression (UI-08): validateEndpointData rejects critical responses with invalid structure', async () => {
+    // 1. config-files/read missing content
+    global.fetch = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({ success: true, data: { file: 'mihomo' } }),
+    } as any)
+    await expect(apiGet('config-files/read?file=mihomo')).rejects.toThrow('отсутствует обязательное поле content')
+
+    // 2. servers missing servers array
+    global.fetch = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({ success: true, data: { foo: 'bar' } }),
+    } as any)
+    await expect(apiGet('servers')).rejects.toThrow('отсутствует список серверов')
+
+    // 3. diagnostics/health missing checks array
+    global.fetch = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({ success: true, data: { ok: true } }),
+    } as any)
+    await expect(apiGet('diagnostics/health')).rejects.toThrow('отсутствует массив проверок checks')
+
+    // 4. rules missing rules array
+    global.fetch = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({ success: true, data: { ok: true } }),
+    } as any)
+    await expect(apiGet('rules')).rejects.toThrow('отсутствует массив правил rules')
   })
 })

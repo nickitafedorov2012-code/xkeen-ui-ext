@@ -86,7 +86,7 @@ export default function ZapretCoreModal({ isOpen, onClose, notify, onUpdated }: 
         new CustomEvent('xr:zapret-updated', {
           detail: {
             engine: 'v2',
-            version: 'v1.0.5.2',
+            version: status?.version || updInfo?.latest_version || '',
             update_available: false,
           },
         })
@@ -105,7 +105,7 @@ export default function ZapretCoreModal({ isOpen, onClose, notify, onUpdated }: 
 
   const activeEngine = status?.engine || updInfo?.current_engine || 'v1'
   const isV2Installed = Boolean(status?.v2_installed || updInfo?.v2_installed || activeEngine === 'v2')
-  const curVersion = status?.version || updInfo?.current_version || (activeEngine === 'v2' ? 'v1.0.5.2' : 'v72.13')
+  const curVersion = status?.version || updInfo?.current_version || ''
   const latVersion = updInfo?.latest_version || status?.latest_version || ''
   const hasUpdate = Boolean(updInfo?.update_available)
 
@@ -116,11 +116,11 @@ export default function ZapretCoreModal({ isOpen, onClose, notify, onUpdated }: 
     },
     {
       title: '🎥 YouTube Web + googlevideo CDN',
-      desc: '100% стабильный обход замедления и блокировок YouTube в 4K/60fps без прокси и нагрузки на VPS-канал.',
+      desc: 'Десинхронизация TCP/TLS соединений для YouTube Web и googlevideo CDN без необходимости маршрутизации через внешний прокси.',
     },
     {
       title: '💬 Discord Web + Голосовые каналы (UDP Voice)',
-      desc: 'Полноценный пробой блокировок текстовых сообщений и голосовых протоколов Discord без потери пакетов.',
+      desc: 'Пакетная модификация и десинхронизация для веб-клиента и голосовых UDP-потоков Discord.',
     },
     {
       title: '🛡️ Стойкость к ТСПУ v2 нового поколения',

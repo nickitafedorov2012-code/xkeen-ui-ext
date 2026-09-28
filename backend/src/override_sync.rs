@@ -122,17 +122,25 @@ pub fn update_override_file_content(
     }
 }
 
+static IPSET_SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Синхронизирует IP-адреса force_domains с ru_exclude_override.lst и живыми ipset ядра.
 pub async fn sync_geo_override(domains: &[String]) -> Result<usize, String> {
     if !Path::new(OVERRIDE_DIR).exists() {
         return Ok(0);
     }
 
+    let _lock = IPSET_SYNC_LOCK.lock().await;
+
     let (v4, v6) = resolve_domains(domains).await;
     let total_ips = v4.len() + v6.len();
 
     // 1. Потоково обновляем файл ru_exclude_override.lst без буферизации всего содержимого в RAM
-    let tmp_file = format!("{OVERRIDE_FILE}.{}.tmp", std::process::id());
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_file = format!("{OVERRIDE_FILE}.{}.{nonce}.tmp", std::process::id());
     write_override_file_streaming(OVERRIDE_FILE, &tmp_file, &v4, &v6).await?;
     if let Err(e) = tokio::fs::rename(&tmp_file, OVERRIDE_FILE).await {
         let _ = tokio::fs::remove_file(&tmp_file).await;
@@ -143,10 +151,8 @@ pub async fn sync_geo_override(domains: &[String]) -> Result<usize, String> {
     sync_ipset_family("geo_override", "inet").await?;
 
     // 3. Атомарно обновляем ipset ядра geo_override6 (IPv6)
-    if !v6.is_empty() {
-        if let Err(e) = sync_ipset_family("geo_override6", "inet6").await {
-            crate::log_w!("[OVERRIDE] Ошибка синхронизации IPv6 ipset: {e}");
-        }
+    if let Err(e) = sync_ipset_family("geo_override6", "inet6").await {
+        crate::log_w!("[OVERRIDE] Ошибка синхронизации IPv6 ipset: {e}");
     }
 
     crate::log_i!("[OVERRIDE] Синхронизировано {total_ips} IP для {} доменов", domains.len());
@@ -168,27 +174,35 @@ async fn write_override_file_streaming(
 
     let mut had_block = false;
 
-    if let Ok(src_file) = tokio::fs::File::open(src_path).await {
-        let reader = tokio::io::BufReader::new(src_file);
-        let mut lines = reader.lines();
-        let mut in_block = false;
+    match tokio::fs::File::open(src_path).await {
+        Ok(src_file) => {
+            let reader = tokio::io::BufReader::new(src_file);
+            let mut lines = reader.lines();
+            let mut in_block = false;
 
-        while let Ok(Some(line)) = lines.next_line().await {
-            let t = line.trim();
-            if t == MARKER_BEGIN {
-                in_block = true;
-                had_block = true;
-                write_ips_block(&mut writer, v4_ips, v6_ips).await.map_err(|e| format!("Ошибка записи {dst_path}: {e}"))?;
-                continue;
+            while let Some(line) = lines.next_line().await.map_err(|e| format!("Ошибка чтения {src_path}: {e}"))? {
+                let t = line.trim();
+                if t == MARKER_BEGIN {
+                    in_block = true;
+                    had_block = true;
+                    write_ips_block(&mut writer, v4_ips, v6_ips).await.map_err(|e| format!("Ошибка записи {dst_path}: {e}"))?;
+                    continue;
+                }
+                if t == MARKER_END {
+                    in_block = false;
+                    continue;
+                }
+                if in_block {
+                    continue;
+                }
+                writer.write_all(format!("{line}\n").as_bytes()).await.map_err(|e| format!("Ошибка записи {dst_path}: {e}"))?;
             }
-            if t == MARKER_END {
-                in_block = false;
-                continue;
-            }
-            if in_block {
-                continue;
-            }
-            writer.write_all(format!("{line}\n").as_bytes()).await.map_err(|e| format!("Ошибка записи {dst_path}: {e}"))?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Файл ещё не существует — допустимо создать с нуля
+        }
+        Err(e) => {
+            return Err(format!("Ошибка открытия {src_path}: {e}. Операция отменена во избежание потери правил"));
         }
     }
 
@@ -238,34 +252,44 @@ async fn run_ipset(args: &[&str]) -> Result<(), String> {
 }
 
 async fn sync_ipset_family(set_name: &str, family: &str) -> Result<(), String> {
-    let tmp = format!("{set_name}_tmp");
+    let tmp = format!("{set_name}_{}_tmp", std::process::id());
 
     // Уничтожаем возможный старый временный ipset от прерванного swap (ошибка ожидаема, если не существовал)
     let _ = run_ipset(&["destroy", &tmp]).await;
 
-    if let Err(e) = run_ipset(&["create", &tmp, "hash:net", "family", family, "-exist"]).await {
-        crate::log_w!("[OVERRIDE] ipset create {tmp} failed: {e}");
-    }
+    run_ipset(&["create", &tmp, "hash:net", "family", family, "-exist"]).await
+        .map_err(|e| format!("Ошибка создания staging ipset {tmp}: {e}"))?;
 
-    let _ = run_ipset(&["flush", &tmp]).await;
+    run_ipset(&["flush", &tmp]).await
+        .map_err(|e| format!("Ошибка очистки staging ipset {tmp}: {e}"))?;
 
-    if let Ok(file) = tokio::fs::File::open(OVERRIDE_FILE).await {
-        use tokio::io::AsyncBufReadExt;
-        let reader = tokio::io::BufReader::new(file);
-        let mut lines = reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let t = line.trim();
-            if t.is_empty() || t.starts_with('#') {
-                continue;
+    match tokio::fs::File::open(OVERRIDE_FILE).await {
+        Ok(file) => {
+            use tokio::io::AsyncBufReadExt;
+            let reader = tokio::io::BufReader::new(file);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let t = line.trim();
+                if t.is_empty() || t.starts_with('#') {
+                    continue;
+                }
+                let is_v6 = t.contains(':');
+                if (family == "inet" && !is_v6) || (family == "inet6" && is_v6) {
+                    let _ = run_ipset(&["add", &tmp, t, "-exist"]).await;
+                }
             }
-            let is_v6 = t.contains(':');
-            if (family == "inet" && !is_v6) || (family == "inet6" && is_v6) {
-                let _ = run_ipset(&["add", &tmp, t, "-exist"]).await;
-            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Файл отсутствует — пустой набор допустим
+        }
+        Err(e) => {
+            let _ = run_ipset(&["destroy", &tmp]).await;
+            return Err(format!("Не удалось прочитать {OVERRIDE_FILE}: {e}"));
         }
     }
 
-    let _ = run_ipset(&["create", set_name, "hash:net", "family", family, "-exist"]).await;
+    run_ipset(&["create", set_name, "hash:net", "family", family, "-exist"]).await
+        .map_err(|e| format!("Ошибка создания рабочего ipset {set_name}: {e}"))?;
 
     let swap_res = run_ipset(&["swap", set_name, &tmp]).await;
     let _ = run_ipset(&["destroy", &tmp]).await;

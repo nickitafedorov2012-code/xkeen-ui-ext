@@ -30,6 +30,7 @@ struct GhRelease {
 
 static LAST_CHECK: tokio::sync::Mutex<Option<(std::time::Instant, GhRelease)>> =
     tokio::sync::Mutex::const_new(None);
+static UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[derive(Deserialize)]
 struct JsDelivrResolved {
@@ -263,8 +264,33 @@ pub async fn check(State(state): State<AppState>) -> Response {
     }))
 }
 
+/// Определяет целевую архитектуру для скачивания бинарников с точным учетом endianness для MIPS (mipsel vs mips).
+pub fn current_arch() -> &'static str {
+    if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else if cfg!(target_arch = "arm") {
+        "arm"
+    } else if cfg!(target_arch = "mips") {
+        if cfg!(target_endian = "little") {
+            "mipsel"
+        } else {
+            "mips"
+        }
+    } else if cfg!(target_arch = "x86_64") {
+        "x86_64"
+    } else if cfg!(target_arch = "x86") {
+        "x86"
+    } else {
+        std::env::consts::ARCH
+    }
+}
+
 pub fn validate_elf_header(header: &[u8], target_arch: &str) -> Result<(), String> {
     if header.len() < 20 || header[0..4] != [0x7F, b'E', b'L', b'F'] {
+        let prefix = String::from_utf8_lossy(&header[..header.len().min(16)]).to_lowercase();
+        if prefix.contains("<!doc") || prefix.contains("<html") || prefix.contains("{\"") || prefix.contains("error") {
+            return Err("Скачанный артефакт является HTML-страницей или текстом ошибки вместо исполняемого ELF-бинарника".to_string());
+        }
         return Err("Файл не является ELF-бинарём".to_string());
     }
 
@@ -294,8 +320,13 @@ pub fn validate_elf_header(header: &[u8], target_arch: &str) -> Result<(), Strin
     Ok(())
 }
 
-/// POST /api/update/install — скачать бинарь релиза, заменить, перезапустить сервис.
+/// POST /api/update/install — скачать бинарь релиза, проверить, атомарно заменить с бэкапом и перезапустить сервис.
 pub async fn install(State(state): State<AppState>) -> Response {
+    let _update_guard = match UPDATE_LOCK.try_lock() {
+        Ok(g) => g,
+        Err(_) => return api_err("Операция обновления уже выполняется другим процессом"),
+    };
+
     let proxy_url = {
         let cfg = state.config.read().await;
         cfg.mihomo_proxy_url()
@@ -309,34 +340,52 @@ pub async fn install(State(state): State<AppState>) -> Response {
         return api_err(format!("Уже установлена актуальная версия {VERSION}"));
     }
 
-    let arch = std::env::consts::ARCH;
-    let asset = match arch {
-        "aarch64" => "xkeen-route-arm64-v8a",
-        "mipsel" => "xkeen-route-mipsel",
-        "mips" => "xkeen-route-mips",
-        "arm" => "xkeen-route-armv7",
+    let arch = current_arch();
+    let asset_candidates: Vec<&'static str> = match arch {
+        "aarch64" => vec!["xkeen-route-arm64-v8a"],
+        "mipsel" => vec!["xkeen-route-mipsel"],
+        "mips" => vec!["xkeen-route-mips"],
+        "arm" => vec!["xkeen-route-armv7-v7a", "xkeen-route-armv7"],
         _ => return api_err(format!("Архитектура {arch} не поддерживается автообновлением")),
     };
-    let url = format!("{GITHUB_RELEASE}/{ver}/{asset}");
-    crate::log_i!("[UPDATE] Загрузка {url}");
-
-    let tmp_dir = Path::new("/opt/tmp");
-    let _ = tokio::fs::create_dir_all(tmp_dir).await;
-    let tmp = tmp_dir.join("xkeen-route.update");
 
     let proxied = proxied_client(&proxy_url);
     let http = proxied.as_ref().unwrap_or(&state.http);
-    let mut res = match http
-        .get(&url)
-        .header("User-Agent", "xkeen-route")
-        .timeout(Duration::from_secs(300))
-        .send()
-        .await
-    {
-        Ok(r) if r.status().is_success() => r,
-        Ok(r) => return api_err(format!("Загрузка: HTTP {}", r.status())),
-        Err(e) => return api_err(format!("Загрузка: {e}")),
+
+    let mut download_res = None;
+    let mut chosen_asset = "";
+    for asset in asset_candidates {
+        let url = format!("{GITHUB_RELEASE}/{ver}/{asset}");
+        crate::log_i!("[UPDATE] Попытка загрузки {url}");
+        match http
+            .get(&url)
+            .header("User-Agent", "xkeen-route")
+            .timeout(Duration::from_secs(300))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => {
+                download_res = Some(r);
+                chosen_asset = asset;
+                break;
+            }
+            Ok(r) => {
+                crate::log_w!("[UPDATE] Ресурс {asset} вернул статус {}", r.status());
+            }
+            Err(e) => {
+                crate::log_w!("[UPDATE] Ошибка запроса {asset}: {e}");
+            }
+        }
+    }
+
+    let mut res = match download_res {
+        Some(r) => r,
+        None => return api_err(format!("Не удалось загрузить бинарник обновления для архитектуры {arch}")),
     };
+
+    let tmp_dir = Path::new("/opt/tmp");
+    let _ = tokio::fs::create_dir_all(tmp_dir).await;
+    let tmp = tmp_dir.join(format!("xkeen-route.{}.staging", std::process::id()));
 
     use tokio::io::AsyncWriteExt;
     let mut file = match tokio::fs::File::create(&tmp).await {
@@ -360,13 +409,13 @@ pub async fn install(State(state): State<AppState>) -> Response {
                 total_bytes += chunk.len();
                 if let Err(e) = file.write_all(&chunk).await {
                     let _ = tokio::fs::remove_file(&tmp).await;
-                    return api_err(format!("Запись: {e}"));
+                    return api_err(format!("Ошибка записи: {e}"));
                 }
             }
             Ok(None) => break,
             Err(e) => {
                 let _ = tokio::fs::remove_file(&tmp).await;
-                return api_err(format!("Загрузка: {e}"));
+                return api_err(format!("Загрузка прервана: {e}"));
             }
         }
     }
@@ -377,48 +426,126 @@ pub async fn install(State(state): State<AppState>) -> Response {
     }
     drop(file);
 
-    // Проверка целостности: размер и ELF-магия
+    // Проверка целостности: размер (не менее 1 МБ) и ELF-заголовок
     if total_bytes < 1024 * 1024 {
         let _ = tokio::fs::remove_file(&tmp).await;
         return api_err(format!("Файл слишком мал ({total_bytes} байт) — повреждённый артефакт"));
     }
     if let Err(e) = validate_elf_header(&header, arch) {
         let _ = tokio::fs::remove_file(&tmp).await;
-        return api_err(format!("{e} — отменено"));
+        return api_err(format!("{e} — установка отменена"));
     }
 
-    // Замена бинаря.
-    if let Err(e) = tokio::fs::rename(&tmp, BIN_PATH).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return api_err(format!("Установка: {e}"));
-    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = tokio::fs::set_permissions(BIN_PATH, std::fs::Permissions::from_mode(0o755)).await;
+        let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).await;
     }
-    crate::log_i!("[UPDATE] Установлена {ver}, перезапуск сервиса");
-    // Перезапуск после ответа клиенту: spawn — панель перезапустится сама.
-    if Path::new(INIT_SCRIPT).exists() {
+
+    // Предварительная проверка синтаксиса/запускаемости бинарника до подмены рабочей версии
+    #[cfg(unix)]
+    {
+        let test_run = tokio::process::Command::new(&tmp)
+            .arg("--version")
+            .output()
+            .await;
+        match test_run {
+            Ok(out) if out.status.success() => {
+                crate::log_i!("[UPDATE] Тестовый запуск staging-бинарника успешен: {}", String::from_utf8_lossy(&out.stdout).trim());
+            }
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr);
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return api_err(format!("Новый бинарник не запустился (--version завершился с ошибкой: {})", err.trim()));
+            }
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return api_err(format!("Новый бинарник не совместим с роутером (ошибка exec: {e})"));
+            }
+        }
+    }
+
+    let cfg = state.config.read().await.clone();
+    let bin_path_str = if cfg.system.xkeen_route_bin.is_empty() { BIN_PATH } else { &cfg.system.xkeen_route_bin };
+    let init_script_str = if cfg.system.xkeen_route_init.is_empty() { INIT_SCRIPT } else { &cfg.system.xkeen_route_init };
+
+    // Резервное копирование текущего бинарника
+    let target_bin = Path::new(bin_path_str);
+    let bak_bin_buf = target_bin.with_extension("bak");
+    let bak_bin = bak_bin_buf.as_path();
+    if target_bin.exists() {
+        let _ = tokio::fs::remove_file(bak_bin).await;
+        if let Err(e) = tokio::fs::copy(target_bin, bak_bin).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return api_err(format!("Не удалось создать резервную копию xkeen-route.bak: {e}"));
+        }
+    }
+
+    // Атомарная замена рабочего бинарника (через staging-файл в том же каталоге во избежание cross-device rename)
+    let staged_dest_buf = target_bin.with_extension("staged");
+    let staged_dest = staged_dest_buf.as_path();
+    let _ = tokio::fs::remove_file(staged_dest).await;
+    if let Err(e) = tokio::fs::copy(&tmp, staged_dest).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return api_err(format!("Ошибка перемещения бинарника в каталог {}: {e}", target_bin.display()));
+    }
+    let _ = tokio::fs::remove_file(&tmp).await;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(staged_dest, std::fs::Permissions::from_mode(0o755)).await;
+    }
+
+    if let Err(e) = tokio::fs::rename(staged_dest, target_bin).await {
+        // Не удаляем target_bin при ошибке rename — пробуем copy
+        if let Err(copy_err) = tokio::fs::copy(staged_dest, target_bin).await {
+            let _ = tokio::fs::remove_file(staged_dest).await;
+            return api_err(format!("Ошибка установки бинарника: {copy_err} (rename: {e})"));
+        }
+        let _ = tokio::fs::remove_file(staged_dest).await;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(target_bin, std::fs::Permissions::from_mode(0o755)).await;
+    }
+
+    crate::log_i!("[UPDATE] Установлена {ver} ({chosen_asset}), запуск перезапуска сервиса");
+
+    if Path::new(init_script_str).exists() {
         #[cfg(unix)]
         {
-            let restart_cmd = format!("(sleep 1 && {} restart) >/dev/null 2>&1 &", INIT_SCRIPT);
-            let _ = std::process::Command::new("sh")
+            let restart_cmd = format!("(sleep 1 && {} restart) >/dev/null 2>&1 &", init_script_str);
+            let spawn_res = tokio::process::Command::new("sh")
                 .arg("-c")
                 .arg(&restart_cmd)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .spawn();
+
+            if let Err(e) = spawn_res {
+                // Если не удалось даже запустить команду перезапуска, пробуем восстановить из .bak
+                if bak_bin.exists() {
+                    let _ = tokio::fs::copy(bak_bin, target_bin).await;
+                }
+                return api_err(format!("Не удалось запустить перезапуск службы: {e}"));
+            }
         }
         #[cfg(not(unix))]
         {
-            let _ = tokio::process::Command::new(INIT_SCRIPT)
+            let _ = tokio::process::Command::new(init_script_str)
                 .arg("restart")
+                .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn();
         }
-        api_ok(json!({ "installed": ver, "restarting": true }))
+        api_ok(json!({ "installed": ver, "restarting": true, "success": true }))
     } else {
-        api_err(format!("{ver} установлена, но {INIT_SCRIPT} не найден — перезапустите вручную"))
+        api_err(format!("{ver} установлена, но {init_script_str} не найден — перезапустите вручную"))
     }
 }
 
@@ -462,7 +589,7 @@ pub async fn detect_mihomo_arch() -> &'static str {
                 return "arm64";
             }
             if s.contains("mips") {
-                if s.contains("el") || s.contains("le") {
+                if s.contains("el") || s.contains("le") || cfg!(target_endian = "little") {
                     return "mipsle-softfloat";
                 }
                 return "mips-hardfloat";
@@ -476,13 +603,20 @@ pub async fn detect_mihomo_arch() -> &'static str {
         }
     }
 
-    match std::env::consts::ARCH {
-        "aarch64" => "arm64",
-        "mipsel" => "mipsle-softfloat",
-        "mips" => "mips-hardfloat",
-        "arm" => "armv7",
-        "x86_64" => "amd64",
-        _ => "arm64",
+    if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else if cfg!(target_arch = "mips") {
+        if cfg!(target_endian = "little") {
+            "mipsle-softfloat"
+        } else {
+            "mips-hardfloat"
+        }
+    } else if cfg!(target_arch = "arm") {
+        "armv7"
+    } else if cfg!(target_arch = "x86_64") {
+        "amd64"
+    } else {
+        "arm64"
     }
 }
 
@@ -639,6 +773,11 @@ pub async fn mihomo_install(
     State(state): State<AppState>,
     axum::extract::Json(req): axum::extract::Json<MihomoInstallReq>,
 ) -> Response {
+    let _update_guard = match UPDATE_LOCK.try_lock() {
+        Ok(g) => g,
+        Err(_) => return api_err("Операция обновления уже выполняется"),
+    };
+
     let tag = req.tag.trim();
     if tag.is_empty() {
         return api_err("Не указана версия ядра Mihomo для установки");
@@ -800,6 +939,39 @@ pub async fn mihomo_install(
         let _ = tokio::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755)).await;
     }
 
+    // Проверка ELF-заголовка распакованного бинарника ДО запуска (строгий fail-closed)
+    let mut f = match tokio::fs::File::open(&bin_path).await {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&bin_path).await;
+            return api_err(format!("Ошибка открытия файла ядра для валидации: {e}"));
+        }
+    };
+    use tokio::io::AsyncReadExt;
+    let mut elf_hdr = [0u8; 20];
+    if let Err(e) = f.read_exact(&mut elf_hdr).await {
+        let _ = tokio::fs::remove_file(&bin_path).await;
+        return api_err(format!("Не удалось прочитать ELF-заголовок ядра: {e}"));
+    }
+    drop(f);
+
+    let target_arch = detect_mihomo_arch().await;
+    let arch_check = if target_arch.starts_with("mipsle") {
+        "mipsel"
+    } else if target_arch.starts_with("mips") {
+        "mips"
+    } else if target_arch.starts_with("arm64") {
+        "aarch64"
+    } else if target_arch.starts_with("amd64") {
+        "x86_64"
+    } else {
+        "arm"
+    };
+    if let Err(e) = validate_elf_header(&elf_hdr, arch_check) {
+        let _ = tokio::fs::remove_file(&bin_path).await;
+        return api_err(format!("Ошибка проверки архитектуры ядра: {e}"));
+    }
+
     // Проверка исполнения бинарника
     let test_run = tokio::process::Command::new(&bin_path)
         .arg("-v")
@@ -826,14 +998,20 @@ pub async fn mihomo_install(
         }
     }
 
-    // Бэкап и атомарная замена /opt/sbin/mihomo (через .new в той же директории во избежание ETXTBSY)
-    let target_bin = Path::new("/opt/sbin/mihomo");
-    let staged_bin = Path::new("/opt/sbin/mihomo.new");
-    let bak_bin = Path::new("/opt/sbin/mihomo.bak");
+    // Бэкап и атомарная замена mihomo (через .new в той же директории во избежание ETXTBSY)
+    let target_bin_str = if cfg.system.mihomo_bin.is_empty() { "/opt/sbin/mihomo" } else { &cfg.system.mihomo_bin };
+    let target_bin = Path::new(target_bin_str);
+    let staged_bin_buf = target_bin.with_extension("new");
+    let bak_bin_buf = target_bin.with_extension("bak");
+    let staged_bin = staged_bin_buf.as_path();
+    let bak_bin = bak_bin_buf.as_path();
 
     if target_bin.exists() {
         let _ = tokio::fs::remove_file(bak_bin).await;
-        let _ = tokio::fs::copy(target_bin, bak_bin).await;
+        if let Err(e) = tokio::fs::copy(target_bin, bak_bin).await {
+            let _ = tokio::fs::remove_file(&bin_path).await;
+            return api_err(format!("Не удалось создать резервную копию {}: {e}", target_bin.display()));
+        }
     }
 
     let _ = tokio::fs::remove_file(staged_bin).await;
@@ -852,7 +1030,7 @@ pub async fn mihomo_install(
     }
 
     if let Err(e) = tokio::fs::rename(staged_bin, target_bin).await {
-        let _ = tokio::fs::remove_file(target_bin).await;
+        // Не удаляем target_bin при ошибке rename — безопасно копируем поверх
         if let Err(copy_err) = tokio::fs::copy(staged_bin, target_bin).await {
             let _ = tokio::fs::remove_file(staged_bin).await;
             return api_err(format!("Ошибка установки бинарника в /opt/sbin/mihomo: {copy_err} (rename: {e})"));
@@ -870,6 +1048,9 @@ pub async fn mihomo_install(
     let _ = tokio::process::Command::new("sh")
         .arg(&cfg.system.xkeen_init)
         .arg("restart")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .await;
 
@@ -886,16 +1067,29 @@ pub async fn mihomo_install(
     };
 
     if !check_ok {
-        crate::log_w!("[Mihomo Update] Ядро не ответило после обновления. Выполняется откат...");
+        crate::log_w!("[Mihomo Update] Ядро не ответило после обновления. Выполняется автоматический откат...");
+        let mut rollback_ok = false;
         if bak_bin.exists() {
-            let _ = tokio::fs::copy(bak_bin, target_bin).await;
-            let _ = tokio::process::Command::new("sh")
-                .arg(&cfg.system.xkeen_init)
-                .arg("restart")
-                .status()
-                .await;
+            if tokio::fs::copy(bak_bin, target_bin).await.is_ok() {
+                let _ = tokio::process::Command::new("sh")
+                    .arg(&cfg.system.xkeen_init)
+                    .arg("restart")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .await;
+                tokio::time::sleep(Duration::from_millis(2000)).await;
+                if crate::mihomo::get_version(&state.http, &cfg).await.is_some() {
+                    rollback_ok = true;
+                }
+            }
         }
-        return api_err("Ядро Mihomo не запустилось после обновления. Выполнен автоматический откат на предыдущую версию.");
+        if rollback_ok {
+            return api_err("Ядро Mihomo не запустилось после обновления. Выполнен автоматический откат на предыдущую версию.");
+        } else {
+            return api_err(format!("Ядро Mihomo не запустилось после обновления, и автоматический откат не удался. Требуется ручное восстановление {}.", bak_bin.display()));
+        }
     }
 
     api_ok(json!({

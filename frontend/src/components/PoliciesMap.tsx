@@ -38,15 +38,15 @@ interface PoliciesMapProps {
 export default function PoliciesMap({ notify }: PoliciesMapProps) {
   const [data, setData] = useState<PoliciesMapResponse | null>(null)
   const [loading, setLoading] = useState(true)
-  const [selectedDevice, setSelectedDevice] = useState<DeviceNode | null>(null)
+  const [selectedDeviceIp, setSelectedDeviceIp] = useState<string | null>(null)
 
   const loadData = async () => {
     setLoading(true)
     try {
       const res = await apiGet<PoliciesMapResponse>('policies/map')
       setData(res)
-      if (res.devices.length > 0 && !selectedDevice) {
-        setSelectedDevice(res.devices[0])
+      if (res.devices.length > 0 && !selectedDeviceIp) {
+        setSelectedDeviceIp(res.devices[0].ip)
       }
     } catch (e: any) {
       notify('Ошибка загрузки карты политик: ' + e.message, true)
@@ -58,6 +58,9 @@ export default function PoliciesMap({ notify }: PoliciesMapProps) {
   useEffect(() => {
     loadData()
   }, [])
+
+  // UI-04: Всегда брать актуальный объект устройства из свежих данных data.devices по IP
+  const selectedDevice = data?.devices.find((d) => d.ip === selectedDeviceIp) || data?.devices[0] || null
 
   if (loading || !data) {
     return <div className="card loading-placeholder">⏳ Построение карты политик роутера…</div>
@@ -93,7 +96,7 @@ export default function PoliciesMap({ notify }: PoliciesMapProps) {
                 <div
                   key={d.ip}
                   className={`map-node device-node ${isSelected ? 'selected' : ''}`}
-                  onClick={() => setSelectedDevice(d)}
+                  onClick={() => setSelectedDeviceIp(d.ip)}
                 >
                   <div className="node-title">
                     <span className="node-icon">{d.active ? '🟢' : '⚪'}</span>

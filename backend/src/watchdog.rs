@@ -44,6 +44,7 @@ pub fn spawn(state: AppState) {
 
         let mut last_mtime: Option<std::time::SystemTime> = None;
         let mut last_len: usize = 0;
+        let mut reload_pending = false;
 
         loop {
             for _ in 0..4 {
@@ -55,6 +56,16 @@ pub fn spawn(state: AppState) {
 
             if is_service_stopped() {
                 continue;
+            }
+
+            // RT-04: Если предыдущий reload завершился сбоем, повторяем попытку
+            if reload_pending {
+                log_i!("[WATCHDOG] 🔄 Повторная попытка отложенного reload Mihomo (RT-04)...");
+                let cfg = state.config.read().await.clone();
+                if mihomo::reload_config(&state.http, &cfg).await.is_ok() {
+                    log_i!("[WATCHDOG] ✓ Отложенный reload Mihomo успешно подтвержден");
+                    reload_pending = false;
+                }
             }
 
             let (config_path_str, force_domains, device_routing, ignore_servers, device_domains, adblock_enabled, flow_server, zapret_cfg, gaming_cfg) = {
@@ -144,12 +155,14 @@ pub fn spawn(state: AppState) {
                             continue;
                         }
 
-                        // Перезагрузка ядра Mihomo
+                        // Перезагрузка ядра Mihomo (RT-04)
                         if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
                             log_w!("[WATCHDOG] Ошибка перезагрузки Mihomo: {}", e);
-                            last_mtime = None; // Сброс для повторной попытки на следующем тике
+                            reload_pending = true;
+                            last_mtime = None; // Сброс для обязательного повтора
                         } else {
                             log_i!("[WATCHDOG] ✓ Правила маршрутизации успешно восстановлены и применены в ядре");
+                            reload_pending = false;
                         }
 
                         // Синхронизация ipset geo_override (быстрые статические бандлы без сетевой нагрузки)
@@ -166,10 +179,12 @@ pub fn spawn(state: AppState) {
                             let _ = override_sync::sync_geo_override(&all_domains).await;
                         }
 
-                        // Обновляем зафиксированные метаданные
-                        if let Ok(new_meta) = tokio::fs::metadata(path).await {
-                            last_mtime = new_meta.modified().ok();
-                            last_len = new_meta.len() as usize;
+                        // RT-04: Обновляем зафиксированные метаданные только если reload успешен
+                        if !reload_pending {
+                            if let Ok(new_meta) = tokio::fs::metadata(path).await {
+                                last_mtime = new_meta.modified().ok();
+                                last_len = new_meta.len() as usize;
+                            }
                         }
                     }
                 }
@@ -197,7 +212,14 @@ pub fn spawn_schedules_monitor(state: AppState) {
             }
             sleep(Duration::from_secs(1)).await;
         }
-        let mut active_schedules: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        #[derive(Clone)]
+        struct ActiveScheduleEntry {
+            schedule_id: String,
+            device_ip: String,
+            group_name: String,
+            original_node: String,
+        }
+        let mut active_schedules: std::collections::HashMap<String, ActiveScheduleEntry> = std::collections::HashMap::new();
 
         loop {
             for _ in 0..30 {
@@ -207,19 +229,30 @@ pub fn spawn_schedules_monitor(state: AppState) {
                 sleep(Duration::from_secs(1)).await;
             }
             let cfg = state.config.read().await.clone();
-            if cfg.schedules.is_empty() {
-                // Если все расписания удалены, восстанавливаем исходные ноды для тех, что были активны
-                if !active_schedules.is_empty() {
-                    let rules = mihomo::m_get(&state.http, &cfg, "/rules").await.unwrap_or(serde_json::Value::Null);
-                    let groups_by_ip = mihomo::ip_groups_from_rules(&rules);
-                    for (key, orig_node) in active_schedules.drain() {
-                        let group_name = match groups_by_ip.get(&key) {
-                            Some(g) => g.clone(),
-                            None => routing::group_name_for(&key, ""),
-                        };
-                        let _ = mihomo::switch_group(&state.http, &cfg, &group_name, &orig_node).await;
+
+            // RT-06: Reconcile удалённых расписаний с корректным group_name по IP устройства
+            let current_ids: std::collections::HashSet<String> = cfg
+                .schedules
+                .iter()
+                .map(|s| if s.id.is_empty() { s.ip.clone() } else { s.id.clone() })
+                .collect();
+
+            let mut removed_keys = Vec::new();
+            for (key, _) in &active_schedules {
+                if !current_ids.contains(key) {
+                    removed_keys.push(key.clone());
+                }
+            }
+            for key in removed_keys {
+                if let Some(entry) = active_schedules.get(&key) {
+                    log_i!("[SCHEDULE] ⏰ Расписание '{}' удалено/снято для {}: возврат к исходному узлу '{}'", entry.schedule_id, entry.device_ip, entry.original_node);
+                    if mihomo::switch_group(&state.http, &cfg, &entry.group_name, &entry.original_node).await.is_ok() {
+                        active_schedules.remove(&key);
                     }
                 }
+            }
+
+            if cfg.schedules.is_empty() {
                 continue;
             }
 
@@ -259,15 +292,27 @@ pub fn spawn_schedules_monitor(state: AppState) {
                             _ => continue,
                         };
 
-                        if current_node != target_node {
+                        let switch_ok = if current_node != target_node {
                             log_i!("[SCHEDULE] ⏰ Активация расписания '{}' ({}) для {}: {} -> {}", s.id, s.action, s.ip, current_node, target_node);
-                            let _ = mihomo::switch_group(&state.http, &cfg, &group_name, target_node).await;
+                            mihomo::switch_group(&state.http, &cfg, &group_name, target_node).await.is_ok()
+                        } else {
+                            true
+                        };
+
+                        if switch_ok {
+                            active_schedules.insert(key, ActiveScheduleEntry {
+                                schedule_id: s.id.clone(),
+                                device_ip: s.ip.clone(),
+                                group_name,
+                                original_node: current_node,
+                            });
                         }
-                        active_schedules.insert(key, current_node);
                     }
-                } else if let Some(orig_node) = active_schedules.remove(&key) {
-                    log_i!("[SCHEDULE] ⏰ Окончание действия расписания '{}' для {}: возврат к исходному узлу '{}'", s.id, s.ip, orig_node);
-                    let _ = mihomo::switch_group(&state.http, &cfg, &group_name, &orig_node).await;
+                } else if let Some(entry) = active_schedules.get(&key) {
+                    log_i!("[SCHEDULE] ⏰ Окончание действия расписания '{}' для {}: возврат к исходному узлу '{}'", entry.schedule_id, entry.device_ip, entry.original_node);
+                    if mihomo::switch_group(&state.http, &cfg, &entry.group_name, &entry.original_node).await.is_ok() {
+                        active_schedules.remove(&key);
+                    }
                 }
             }
         }
@@ -305,11 +350,14 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
                 let cfg = state.config.read().await.clone();
                 let policies = rci::get_policies(&state.http, &cfg).await.unwrap_or_default();
                 if let Ok(current_devs) = rci::get_devices(&state.http, &cfg, &policies, "").await {
+                    let _cfg_guard = state.config_lock.lock().await;
+                    let _routing_guard = state.routing_lock.lock().await;
+                    let mut new_cfg = (**state.config.read().await).clone();
+
                     let mut ip_changed = false;
-                    let mut updated_devices = cfg.gaming.devices.clone();
-                    let has_explicit_enabled = updated_devices.iter().any(|d| d.enabled);
-                    let devices_len = updated_devices.len();
-                    for dev in &mut updated_devices {
+                    let has_explicit_enabled = new_cfg.gaming.devices.iter().any(|d| d.enabled);
+                    let devices_len = new_cfg.gaming.devices.len();
+                    for dev in &mut new_cfg.gaming.devices {
                         let is_active = if has_explicit_enabled {
                             dev.enabled
                         } else {
@@ -342,11 +390,6 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
                     }
 
                     if ip_changed {
-                        let _cfg_guard = state.config_lock.lock().await;
-                        let _routing_guard = state.routing_lock.lock().await;
-                        let mut new_cfg = (**state.config.read().await).clone();
-                        new_cfg.gaming.devices = updated_devices;
-
                         let path = Path::new(&new_cfg.mihomo.config_path);
                         if path.exists() {
                             if let Ok(raw_yaml) = tokio::fs::read_to_string(path).await {
@@ -411,7 +454,13 @@ pub fn spawn_zapret_monitor(state: AppState) {
             }
 
             // Если в данный момент выполняется операция запуска/рестарта/смены пресета из UI,
-            // пропускаем тик сторожа, чтобы не конфликтовать с S51zapret
+            // пропускаем тик сторожа, чтобы не конфликтовать с S51zapret (Z-01)
+            if crate::zapret::get_current_operation_state() != crate::zapret::ZapretOperationState::Idle {
+                continue;
+            }
+            let Ok(_zapret_guard) = state.zapret_lock.try_lock() else {
+                continue;
+            };
             let Ok(_cfg_guard) = state.config_lock.try_lock() else {
                 continue;
             };
@@ -466,6 +515,27 @@ pub fn spawn_zapret_monitor(state: AppState) {
                         Err(e) => {
                             log_w!("[WATCHDOG] Не удалось запустить S51zapret start-fw: {e}");
                         }
+                    }
+                }
+
+                // NET-01: Контроль здоровья DNS-редиректа на порт 1053 во избежание блэкаута LAN
+                let dns_redirect_active = tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg("iptables -t nat -S PREROUTING 2>/dev/null | grep -q 'to-ports 1053'")
+                    .output()
+                    .await
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+
+                if dns_redirect_active {
+                    let resolver_ready = crate::zapret::check_dns_resolver_ready(1053).await;
+                    if !resolver_ready {
+                        log_w!("[WATCHDOG] ⚠️ DNS-редирект на 1053 активен в iptables, но резолвер не отвечает! Временное снятие редиректа для предотвращения DNS-блэкаута LAN...");
+                        let _ = tokio::process::Command::new("sh")
+                            .arg("-c")
+                            .arg("while iptables -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done; while iptables -t nat -D PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done")
+                            .output()
+                            .await;
                     }
                 }
             } else {

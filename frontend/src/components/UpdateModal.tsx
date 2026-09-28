@@ -31,9 +31,11 @@ export default function UpdateModal({
   const [installing, setInstalling] = useState(false)
   const [stage, setStage] = useState('')
   const [countdown, setCountdown] = useState<number | null>(null)
+  const [installError, setInstallError] = useState<string | null>(null)
 
   const checkUpdates = useCallback(async () => {
     setChecking(true)
+    setInstallError(null)
     try {
       const res = await apiGet<UpdateInfoResponse>('update/check')
       setUpdData(res)
@@ -55,10 +57,11 @@ export default function UpdateModal({
 
   const handleInstall = async () => {
     setInstalling(true)
-    setStage('Загрузка обновления из GitHub Releases…')
+    setInstallError(null)
+    setStage('Загрузка артефакта, проверка ELF-заголовка и создание бэкапа…')
 
     try {
-      await apiPost<{ installed: string; restarting: boolean }>('update/install')
+      await apiPost<{ installed: string; restarting: boolean; success?: boolean }>('update/install')
       setStage(`Версия ${latVer} успешно установлена! Перезапуск службы…`)
       notify(`Обновление ${latVer} установлено. Служба перезапускается.`)
 
@@ -75,7 +78,9 @@ export default function UpdateModal({
     } catch (err: any) {
       setInstalling(false)
       setStage('')
-      notify(err?.message || 'Ошибка при установке обновления', true)
+      const errMsg = err?.message || 'Ошибка при установке обновления'
+      setInstallError(errMsg)
+      notify(errMsg, true)
     }
   }
 
@@ -214,6 +219,39 @@ export default function UpdateModal({
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {/* Ошибка установки с кнопкой повтора */}
+        {installError && !installing && (
+          <div
+            style={{
+              background: 'rgba(239, 68, 68, 0.12)',
+              border: '1px solid rgba(239, 68, 68, 0.35)',
+              borderRadius: 10,
+              padding: '12px 16px',
+              marginBottom: 16,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 12,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 20 }}>⚠️</span>
+              <div>
+                <div style={{ fontWeight: 600, color: '#f87171', fontSize: 13.5 }}>Ошибка установки обновления</div>
+                <div className="muted small" style={{ color: '#fca5a5' }}>{installError}</div>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="btn sm"
+              onClick={handleInstall}
+              style={{ borderColor: '#f87171', color: '#f87171', flexShrink: 0 }}
+            >
+              🔄 Повторить
+            </button>
           </div>
         )}
 

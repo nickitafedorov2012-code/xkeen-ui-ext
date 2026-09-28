@@ -14,7 +14,7 @@ fn groups_name_re() -> &'static Regex {
 }
 
 fn rules_cidr_re() -> &'static Regex {
-    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*- SRC-IP-CIDR,(.+?)/32,").unwrap());
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*- SRC-IP-CIDR,(.+?)/(?:32|128),").unwrap());
     &RE
 }
 
@@ -112,7 +112,7 @@ pub fn group_name_for(ip: &str, name: &str) -> String {
 /// на чужом железе имена провайдеров свои (или их нет вовсе).
 pub fn group_yaml(group_name: &str, providers: &[String]) -> String {
     let base = format!(
-        "  - name: '{group_name}'\n    type: select\n    proxies:\n      - Fastest\n      - Fallback\n      - DIRECT"
+        "  - name: '{group_name}'\n    type: select\n    proxies:\n      - Fastest\n      - Fallback\n      - DIRECT\n      - REJECT"
     );
     let mut use_block = String::new();
     for p in providers {
@@ -398,20 +398,12 @@ pub fn delete_provider_from_yaml(yaml: &str, id: &str) -> Result<String, String>
     Ok(out.join("\n"))
 }
 
-/// Домены: очистка и нормализация (нижний регистр, без пробелов/протоколов/путей).
+/// Домены: очистка и нормализация (нижний регистр, без портов/протоколов/путей/userinfo).
 pub fn sanitize_domains(list: &[String]) -> Vec<String> {
     let mut out: Vec<String> = list
         .iter()
-        .map(|d| {
-            d.trim()
-                .to_lowercase()
-                .trim_start_matches("https://")
-                .trim_start_matches("http://")
-                .trim_start_matches("www.")
-                .to_string()
-        })
-        .map(|d| d.split('/').next().unwrap_or("").trim().to_string())
-        .filter(|d| !d.is_empty() && d.contains('.'))
+        .map(|d| crate::config::normalize_domain(d))
+        .filter(|d| !d.is_empty() && d.contains('.') && !d.contains('/') && !d.contains(' '))
         .collect();
     out.sort();
     out.dedup();
@@ -1395,7 +1387,11 @@ pub fn apply_domain_rules(
     crate::routing::validate_marker_pair(yaml, DEV_DOMAINS_BEGIN, DEV_DOMAINS_END)?;
     let content = remove_domain_blocks(yaml);
     let direct = sanitize_domains(direct);
-    let force = sanitize_domains(force);
+    let direct_set: std::collections::HashSet<String> = direct.iter().cloned().collect();
+    let force: Vec<String> = sanitize_domains(force)
+        .into_iter()
+        .filter(|d| !direct_set.contains(d))
+        .collect();
     let has_dev_domains = !device_domains.is_empty() && device_domains.values().any(|v| !v.is_empty());
 
     if direct.is_empty() && force.is_empty() && !has_dev_domains {
@@ -1415,13 +1411,13 @@ pub fn apply_domain_rules(
             if has_dev_domains {
                 out.push(DEV_DOMAINS_BEGIN.to_string());
                 for (ip, rules) in device_domains {
+                    let cidr = format_src_ip_cidr(ip);
                     for r in rules {
                         let dom = r.domain.trim().to_lowercase();
                         let target = r.target.trim();
                         if !dom.is_empty() && !target.is_empty() {
                             out.push(format!(
-                                "  - AND,((SRC-IP-CIDR,{}/32),(DOMAIN-SUFFIX,{})),{},no-resolve",
-                                ip, dom, target
+                                "  - AND,((SRC-IP-CIDR,{cidr}),(DOMAIN-SUFFIX,{dom})),{target},no-resolve"
                             ));
                         }
                     }
@@ -1453,9 +1449,31 @@ pub fn apply_domain_rules(
     Ok(out.join("\n"))
 }
 
-/// Строка правила для устройства.
+/// Нормализует IP или CIDR строку для правила SRC-IP-CIDR (IPv4 -> /32, IPv6 -> /128, без дублирования /32/32).
+pub fn format_src_ip_cidr(ip: &str) -> String {
+    let clean = ip.trim();
+    if let Some((addr_str, prefix_str)) = clean.split_once('/') {
+        if let Ok(addr) = addr_str.trim().parse::<std::net::IpAddr>() {
+            if let Ok(prefix) = prefix_str.trim().parse::<u8>() {
+                if (addr.is_ipv4() && prefix <= 32) || (addr.is_ipv6() && prefix <= 128) {
+                    return format!("{addr}/{prefix}");
+                }
+            }
+        }
+    }
+    if let Ok(addr) = clean.parse::<std::net::IpAddr>() {
+        let prefix = if addr.is_ipv6() { 128 } else { 32 };
+        return format!("{addr}/{prefix}");
+    }
+    let prefix = if clean.contains(':') { "128" } else { "32" };
+    format!("{clean}/{prefix}")
+}
+
+/// Строка правила для устройства (IPv4 -> /32, IPv6 -> /128).
 pub fn rule_line(ip: &str, group_name: &str) -> String {
-    format!("  - SRC-IP-CIDR,{ip}/32,{group_name}")
+    // IPv4 -> /32, IPv6 -> /128
+    let cidr = format_src_ip_cidr(ip);
+    format!("  - SRC-IP-CIDR,{cidr},{group_name}")
 }
 
 fn extract_block<'a>(yaml: &'a str, begin: &str, end: &str) -> Option<&'a str> {
@@ -2741,6 +2759,28 @@ rules:
         let applied = apply_gaming_rules(yaml, &cfg, &[]).expect("applied");
         assert!(applied.contains("SRC-IP-CIDR,192.168.2.10/32,🎮 Gaming"));
         assert!(!applied.contains("SRC-IP-CIDR,192.168.2.20/32,🎮 Gaming"), "Disabled device must not be routed");
+    }
+
+    #[test]
+    fn test_format_src_ip_cidr_no_duplicate_suffix() {
+        assert_eq!(format_src_ip_cidr("192.168.1.1"), "192.168.1.1/32");
+        assert_eq!(format_src_ip_cidr("192.168.1.1/32"), "192.168.1.1/32");
+        assert_eq!(format_src_ip_cidr("10.0.0.0/24"), "10.0.0.0/24");
+        assert_eq!(format_src_ip_cidr("2001:db8::1"), "2001:db8::1/128");
+        assert_eq!(format_src_ip_cidr("2001:db8::1/128"), "2001:db8::1/128");
+        assert_eq!(rule_line("192.168.1.1/32", "DEV_GROUP"), "  - SRC-IP-CIDR,192.168.1.1/32,DEV_GROUP");
+    }
+
+    #[test]
+    fn test_apply_domain_rules_deduplicates_direct_and_force() {
+        let yaml = "rules:\n  - MATCH,PROXY\n";
+        let direct = vec!["conflict.com".to_string(), "only-direct.com".to_string()];
+        let force = vec!["conflict.com".to_string(), "only-force.com".to_string()];
+        let empty_dev = std::collections::BTreeMap::new();
+        let res = apply_domain_rules(yaml, &direct, &force, &empty_dev).expect("success");
+        assert!(res.contains("DOMAIN-SUFFIX,conflict.com,DIRECT"));
+        assert!(!res.contains("DOMAIN-SUFFIX,conflict.com,PROXY"), "Conflicting domain must not be added to PROXY when present in DIRECT");
+        assert!(res.contains("DOMAIN-SUFFIX,only-force.com,PROXY"));
     }
 }
 

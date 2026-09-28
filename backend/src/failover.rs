@@ -96,6 +96,15 @@ async fn record_switch() {
 
 /// Одна итерация проверки. Возвращает текст решения (для ручного прогона).
 pub async fn run_check(state: &AppState) -> Result<String, String> {
+    // DIAG-01: Изоляция от Speedtest — если выполняется замер скорости, пропускаем переключение failover
+    let _speedtest_guard = match state.speedtest_lock.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            crate::log_i!("Failover пропущен: в данный момент выполняется Speedtest");
+            return Ok("Проверка failover пропущена: выполняется Speedtest".to_string());
+        }
+    };
+
     {
         let last = LAST_SWITCH.lock().await;
         if let Some(t) = *last {
@@ -307,6 +316,15 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
 /// пинг текущего; отвалился или пинг > порога → переключение на следующий
 /// живой из цепочки; автовозврат на основной, когда восстановился.
 pub async fn run_device_check(state: &AppState) -> Result<String, String> {
+    // DIAG-01: Изоляция от Speedtest
+    let _speedtest_guard = match state.speedtest_lock.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            crate::log_i!("Per-device failover пропущен: выполняется Speedtest");
+            return Ok("Per-device failover пропущен: выполняется Speedtest".to_string());
+        }
+    };
+
     let cfg = state.config.read().await.clone();
     if cfg.device_routing.is_empty() {
         return Ok("Нет устройств с резервными цепочками".to_string());

@@ -727,12 +727,15 @@ pub async fn switch_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &
         if typ != "selector" {
             continue;
         }
-        // исключаем авто-группы, специализированные AI/Flow группы и группы устройств
+        // исключаем авто-группы, специализированные AI/Flow группы, игровые группы (RT-01) и группы устройств
         let lower_g = name.to_lowercase();
         if name == "Fastest"
             || name == "Fallback"
             || lower_g.contains("google ai")
             || lower_g.contains("flow")
+            || lower_g.contains("gaming")
+            || lower_g.contains("гейминг")
+            || name.contains("🎮")
             || ip_from_group_name(name).is_some()
         {
             continue;

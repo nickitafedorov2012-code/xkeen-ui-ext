@@ -7,6 +7,7 @@ mod mihomo;
 mod rci;
 mod routing;
 pub mod transaction;
+pub mod zapret;
 mod updater;
 mod override_sync;
 mod cdn_discovery;
@@ -97,6 +98,8 @@ pub struct AppState {
     pub config_lock: Arc<tokio::sync::Mutex<()>>,
     /// Сериализация speedtest для исключения гонок при переключении узлов.
     pub speedtest_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Сериализация операций Zapret (start, stop, restart, fw, lockfile).
+    pub zapret_lock: Arc<tokio::sync::Mutex<()>>,
     /// Менеджер обхода блокировок Google Antigravity.
     pub antigravity: Arc<antigravity::AntigravityManager>,
 }
@@ -255,6 +258,7 @@ async fn main() {
         routing_lock: Arc::new(tokio::sync::Mutex::new(())),
         config_lock: Arc::new(tokio::sync::Mutex::new(())),
         speedtest_lock: Arc::new(tokio::sync::Mutex::new(())),
+        zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
         antigravity: ag_mgr,
     };
 
@@ -343,6 +347,7 @@ async fn main() {
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/logout", post(auth::logout))
         .route("/api/auth/password", post(auth::change_password))
+        .route("/api/auth/change-password", post(auth::change_password))
         // Статус и метрики
         .route("/api/status", get(api::status))
         .route("/api/system/metrics", get(api::get_system_metrics))

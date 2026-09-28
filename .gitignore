@@ -12,4 +12,5 @@ frontend/dist/
 xkeen-route.config.json
 config.json
 xkeen-route-*
+audit_full_prompt*.txt
 

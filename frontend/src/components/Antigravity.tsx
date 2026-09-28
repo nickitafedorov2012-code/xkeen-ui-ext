@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, useRef } from 'react'
 import { apiGet, apiPost } from '../api'
 import { getFlowStatus, formatFlowServerName, type AntigravityStatus, type ServerInfo } from '../types'
 import { copyToClipboard as doCopy } from '../utils/clipboard'
@@ -47,16 +47,22 @@ export default function Antigravity({ notify }: Props) {
   const [proxyEnabled, setProxyEnabled] = useState(true)
   const [interval, setIntervalVal] = useState(120)
   const [ownProxy, setOwnProxy] = useState('')
+  const [isSettingsDirty, setIsSettingsDirty] = useState(false)
+  const isSettingsDirtyRef = useRef(false)
 
   const load = useCallback(async () => {
     try {
       const data = await apiGet<AntigravityStatus>('antigravity/status')
       setStatus(data)
-      setEnabled(data.enabled)
-      setMode(data.mode || 'auto')
-      setProxyPort(data.proxy_port || 53129)
-      setProxyEnabled(data.proxy_running)
-      setOwnProxy(data.own_proxy || '')
+      // UI-02: Dirty-защита от перезатирания полей ввода фоновым 5-секундным опросом
+      if (!isSettingsDirtyRef.current) {
+        setEnabled(data.enabled)
+        setMode(data.mode || 'auto')
+        setProxyPort(data.proxy_port || 53129)
+        setProxyEnabled(data.proxy_running)
+        setIntervalVal(data.health_check_interval || 120)
+        setOwnProxy(data.own_proxy || '')
+      }
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка загрузки статуса Antigravity', true)
     } finally {
@@ -207,6 +213,8 @@ export default function Antigravity({ notify }: Props) {
         health_check_interval: interval,
         own_proxy: ownProxy,
       })
+      isSettingsDirtyRef.current = false
+      setIsSettingsDirty(false)
       notify('Настройки Antigravity успешно сохранены')
       load()
     } catch (e) {
@@ -214,6 +222,13 @@ export default function Antigravity({ notify }: Props) {
     } finally {
       setSaving(false)
     }
+  }
+
+  const handleResetSettings = () => {
+    isSettingsDirtyRef.current = false
+    setIsSettingsDirty(false)
+    load()
+    notify('Локальные изменения сброшены к текущим настройкам')
   }
 
   const copyToClipboard = async (text: string, id: string) => {
@@ -640,7 +655,15 @@ export default function Antigravity({ notify }: Props) {
           <div className="ag-form">
             <div className="form-group">
               <label>Режим маршрутизации</label>
-              <select className="select" value={mode} onChange={(e) => setMode(e.target.value)}>
+              <select
+                className="select"
+                value={mode}
+                onChange={(e) => {
+                  setMode(e.target.value)
+                  isSettingsDirtyRef.current = true
+                  setIsSettingsDirty(true)
+                }}
+              >
                 <option value="auto">Автоматический (Direct через подменный IP с авто-ротацией)</option>
                 <option value="direct">Только прямой маршрут (Direct)</option>
                 <option value="proxy">Собственный релей / прокси</option>
@@ -654,7 +677,11 @@ export default function Antigravity({ notify }: Props) {
                   type="number"
                   className="input mono"
                   value={proxyPort}
-                  onChange={(e) => setProxyPort(Number(e.target.value) || 53129)}
+                  onChange={(e) => {
+                    setProxyPort(Number(e.target.value) || 53129)
+                    isSettingsDirtyRef.current = true
+                    setIsSettingsDirty(true)
+                  }}
                 />
               </div>
 
@@ -664,7 +691,11 @@ export default function Antigravity({ notify }: Props) {
                   type="number"
                   className="input mono"
                   value={interval}
-                  onChange={(e) => setIntervalVal(Number(e.target.value) || 120)}
+                  onChange={(e) => {
+                    setIntervalVal(Number(e.target.value) || 120)
+                    isSettingsDirtyRef.current = true
+                    setIsSettingsDirty(true)
+                  }}
                 />
               </div>
             </div>
@@ -676,14 +707,32 @@ export default function Antigravity({ notify }: Props) {
                 className="input mono"
                 placeholder="например: 127.0.0.1:7890 или socks5://..."
                 value={ownProxy}
-                onChange={(e) => setOwnProxy(e.target.value)}
+                onChange={(e) => {
+                  setOwnProxy(e.target.value)
+                  isSettingsDirtyRef.current = true
+                  setIsSettingsDirty(true)
+                }}
               />
             </div>
 
-            <div className="ag-form-actions">
+            <div className="ag-form-actions" style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
               <button className="btn primary" onClick={saveSettings} disabled={saving}>
                 {saving ? '⏳ Сохранение…' : '💾 Сохранить параметры'}
               </button>
+              {isSettingsDirty && (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={handleResetSettings}
+                >
+                  ↩️ Сбросить
+                </button>
+              )}
+              {isSettingsDirty && (
+                <span className="badge warning" style={{ fontSize: 11 }}>
+                  ✏️ Есть несохранённые изменения
+                </span>
+              )}
             </div>
           </div>
         </section>

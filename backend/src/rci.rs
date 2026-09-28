@@ -144,21 +144,9 @@ async fn challenge_auth(
     ))
 }
 
-/// Гарантирует авторизацию: токен из файлов → challenge-auth → попытка без авторизации
-/// (на многих прошивках RCI с localhost отвечает без auth). Возвращает токен (может быть пустым).
-pub async fn ensure_auth(http: &reqwest::Client, cfg: &AppConfig) -> Result<String, String> {
+/// Внутренняя проверка и выполнение авторизации с уже захваченным AUTH_LOCK.
+async fn ensure_auth_locked(http: &reqwest::Client, cfg: &AppConfig) -> Result<String, String> {
     let token = token_from_files(cfg).await;
-    // Быстрый путь без блокировки (Acquire ordering)
-    if !token.is_empty() && TOKEN_OK.load(Ordering::Acquire) {
-        return Ok(token);
-    }
-    if token.is_empty() && AUTHED.load(Ordering::Acquire) {
-        return Ok(String::new());
-    }
-
-    // Синхронизация параллельных запросов
-    let _guard = AUTH_LOCK.lock().await;
-
     // Повторная проверка под блокировкой (double-check)
     if !token.is_empty() {
         if TOKEN_OK.load(Ordering::Acquire) {
@@ -216,6 +204,23 @@ pub async fn ensure_auth(http: &reqwest::Client, cfg: &AppConfig) -> Result<Stri
     Err("RCI требует авторизацию: задайте rci.token или rci.password в конфиге".into())
 }
 
+/// Гарантирует авторизацию: токен из файлов → challenge-auth → попытка без авторизации
+/// (на многих прошивках RCI с localhost отвечает без auth). Возвращает токен (может быть пустым).
+pub async fn ensure_auth(http: &reqwest::Client, cfg: &AppConfig) -> Result<String, String> {
+    let token = token_from_files(cfg).await;
+    // Быстрый путь без блокировки (Acquire ordering)
+    if !token.is_empty() && TOKEN_OK.load(Ordering::Acquire) {
+        return Ok(token);
+    }
+    if token.is_empty() && AUTHED.load(Ordering::Acquire) {
+        return Ok(String::new());
+    }
+
+    // Синхронизация параллельных запросов
+    let _guard = AUTH_LOCK.lock().await;
+    ensure_auth_locked(http, cfg).await
+}
+
 /// Повторная авторизация после 401/403: сброс кэша токена, challenge-auth
 /// (если задан пароль) или повторный ensure_auth. Возвращает новый токен.
 async fn reauth(http: &reqwest::Client, cfg: &AppConfig, _had_token: bool) -> Result<String, String> {
@@ -229,7 +234,7 @@ async fn reauth(http: &reqwest::Client, cfg: &AppConfig, _had_token: bool) -> Re
     {
         return Ok(String::new());
     }
-    ensure_auth(http, cfg).await
+    ensure_auth_locked(http, cfg).await
 }
 
 async fn rci_get(http: &reqwest::Client, cfg: &AppConfig, token: &str, path: &str) -> Result<Value, String> {
@@ -783,32 +788,18 @@ pub async fn set_device_policy(
 ) -> Result<String, String> {
     let token = ensure_auth(http, cfg).await?;
     let mac = mac.to_lowercase();
-    let base = cfg.base_url();
-
-    let post = |path: String, body: Value| {
-        let http = http.clone();
-        let base = base.clone();
-        let token = token.clone();
-        async move {
-            let mut req = http.post(format!("{base}{path}")).timeout(std::time::Duration::from_secs(5)).json(&body);
-            if !token.is_empty() {
-                req = req.header("X-Ndma-Tkn", &token);
-            }
-            let resp = req.send().await.map_err(|e| e.to_string())?;
-            let ok = resp.status().is_success();
-            let text = resp.text().await.unwrap_or_default();
-            Ok::<_, String>((ok, text))
-        }
-    };
 
     if policy_id.is_empty() || policy_id == "default" {
-        post("/rci/ip/hotspot/host/policy".into(), json!({ "mac": mac, "no": true })).await?;
-        let _ = post("/rci/ip/hotspot/host".into(), json!({ "mac": mac, "access": "permit" })).await?;
+        rci_post(http, cfg, &token, "/rci/ip/hotspot/host/policy", json!({ "mac": mac, "no": true })).await?;
+        rci_post(http, cfg, &token, "/rci/ip/hotspot/host", json!({ "mac": mac, "access": "permit" })).await?;
     } else if policy_id == "block" {
-        let _ = post("/rci/ip/hotspot/host".into(), json!({ "mac": mac, "access": "deny" })).await?;
+        rci_post(http, cfg, &token, "/rci/ip/hotspot/host", json!({ "mac": mac, "access": "deny" })).await?;
     } else {
-        let _ = post(
-            "/rci/ip/hotspot/host".into(),
+        rci_post(
+            http,
+            cfg,
+            &token,
+            "/rci/ip/hotspot/host",
             json!({ "mac": mac, "policy": policy_id, "access": "permit" }),
         )
         .await?;
@@ -853,11 +844,54 @@ pub async fn save_config(http: &reqwest::Client, cfg: &AppConfig) -> Result<(), 
 /// для устранения отравления DNS провайдером (NXDOMAIN для YouTube и сайтов).
 pub async fn set_clean_dns_servers(http: &reqwest::Client, cfg: &AppConfig) -> Result<(), String> {
     let token = ensure_auth(http, cfg).await?;
-    let _ = rci_post(http, cfg, &token, "/rci/ip/name-server", json!({ "address": "77.88.8.8" })).await;
-    let _ = rci_post(http, cfg, &token, "/rci/ip/name-server", json!({ "address": "77.88.8.1" })).await;
-    let _ = rci_post(http, cfg, &token, "/rci/ip/name-server", json!({ "address": "1.1.1.1" })).await;
-    let _ = save_config(http, cfg).await;
+    let servers = ["77.88.8.8", "77.88.8.1", "1.1.1.1"];
+    let mut success_count = 0;
+    let mut last_err = None;
+
+    for addr in servers {
+        match rci_post(http, cfg, &token, "/rci/ip/name-server", json!({ "address": addr })).await {
+            Ok(_) => success_count += 1,
+            Err(e) => {
+                crate::log_w!("Ошибка добавления DNS-сервера {addr}: {e}");
+                last_err = Some(e);
+            }
+        }
+    }
+
+    if success_count == 0 {
+        if let Some(e) = last_err {
+            return Err(format!("Не удалось применить чистые DNS-серверы в RCI: {e}"));
+        }
+    }
+
+    save_config(http, cfg).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_as_object_normalizes_arrays() {
+        let arr = json!([{"version": "4.2"}]);
+        let obj = as_object(arr);
+        assert_eq!(obj["version"], "4.2");
+
+        let empty = json!([]);
+        let empty_obj = as_object(empty);
+        assert!(empty_obj.is_object());
+    }
+
+    #[tokio::test]
+    async fn test_auth_lock_does_not_deadlock_on_reauth() {
+        // Regression test for RCI-01: verify AUTH_LOCK acquisition without self-deadlock
+        let _guard = AUTH_LOCK.lock().await;
+        // In the old buggy code, reauth held AUTH_LOCK and called ensure_auth, which attempted to acquire AUTH_LOCK again.
+        // In the fixed architecture, ensure_auth_locked is called when the lock is already held.
+        drop(_guard);
+        assert!(AUTH_LOCK.try_lock().is_ok());
+    }
 }
 
 

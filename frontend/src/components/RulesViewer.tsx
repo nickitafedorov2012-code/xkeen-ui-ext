@@ -13,6 +13,8 @@ interface RuleTestResult {
   target_group: string
   resolved_server: string
   reason: string
+  estimated?: boolean
+  limitations?: string
 }
 
 interface RulesViewerProps {
@@ -215,6 +217,27 @@ export default function RulesViewer({ notify }: RulesViewerProps) {
               gap: 12,
             }}
           >
+            {testResult.estimated && (
+              <div
+                style={{
+                  padding: '8px 12px',
+                  borderRadius: 6,
+                  fontSize: 12,
+                  background: 'rgba(234, 179, 8, 0.1)',
+                  border: '1px solid rgba(234, 179, 8, 0.3)',
+                  color: '#facc15',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                }}
+              >
+                <span>⚠️</span>
+                <div>
+                  <strong>Оценочный расчёт:</strong> {testResult.limitations || 'Расчёт произведён по статическому дереву правил (рантайм ядра Mihomo недоступен).'}
+                </div>
+              </div>
+            )}
+
             {/* Visual Pipeline Flow */}
             <div
               style={{

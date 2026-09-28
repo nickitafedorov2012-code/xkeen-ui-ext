@@ -241,4 +241,141 @@ check('7. ConfigTx two-phase rollback disk and state restoration simulation', ()
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-console.log(`\n=== All ${passed}/${total} Milestone 2 Checks Passed Successfully ===\n`);
+// ==================== STAGE 2 ENHANCEMENTS AUDIT ====================
+
+// 8. TX-01: Aggregated rollback result and recovery_required status
+check('8. TX-01: Aggregated rollback result and recovery_required status', () => {
+  const txContent = fs.readFileSync(txRsPath, 'utf8');
+  assert(txContent.includes('recovery_required'), 'ConfigTx must track recovery_required flag');
+  assert(txContent.includes('TxStatus::RecoveryRequired'), 'ConfigTx must have TxStatus::RecoveryRequired state');
+  assert(txContent.includes('Result<(), Vec<String>>'), 'rollback and rollback_disk_files must return aggregated Result<(), Vec<String>>');
+  assert(!txContent.includes('let _ = crate::api::atomic_write_file'), 'File restoration errors must not be swallowed with let _ =');
+});
+
+// 9. TX-02: Granular resource tracking via applied_files
+check('9. TX-02: Granular resource tracking via applied_files', () => {
+  const txContent = fs.readFileSync(txRsPath, 'utf8');
+  assert(txContent.includes('applied_files: Vec<PathBuf>'), 'ConfigTx must track applied_files');
+  assert(txContent.includes('self.applied_files.push('), 'applied_files must be appended on each successful write');
+  assert(txContent.includes('applied_files.iter().rev()'), 'Rollback must iterate applied_files in reverse (LIFO)');
+});
+
+// 10. TX-03: Hold lock guards throughout runtime recovery & atomic Drop
+check('10. TX-03: Hold lock guards throughout runtime recovery & atomic Drop', () => {
+  const txContent = fs.readFileSync(txRsPath, 'utf8');
+  assert(txContent.includes('sync_atomic_write_or_remove'), 'Must implement sync_atomic_write_or_remove helper');
+  assert(txContent.includes('_routing_guard: Option<OwnedMutexGuard<()>>'), 'Guards must be movable into background recovery');
+  assert(txContent.includes('self._routing_guard.take()'), 'Drop must take routing_guard into recovery task');
+  assert(txContent.includes('self._cfg_guard.take()'), 'Drop must take cfg_guard into recovery task');
+  assert(txContent.includes('drop(routing_guard)'), 'Locks must be explicitly held until reload finishes');
+});
+
+// 11. Optimistic Concurrency: Pre-commit collision check
+check('11. Optimistic Concurrency: Hash and collision check before commit', () => {
+  const txContent = fs.readFileSync(txRsPath, 'utf8');
+  assert(txContent.includes('compute_content_hash'), 'Must compute content hash for collision detection');
+  assert(txContent.includes('check_external_collisions'), 'Must implement check_external_collisions');
+  assert(txContent.includes('self.check_external_collisions().await?;'), 'apply_disk_files must verify collisions before writes');
+});
+
+// 12. Functional simulation of Stage 2 TX-01, TX-02, TX-03, and Collision Check
+check('12. Functional simulation of Stage 2 partial write rollback and collision detection', () => {
+  const tmpDir = path.join(__dirname, '../.tmp_stage2_test');
+  fs.mkdirSync(tmpDir, { recursive: true });
+  const yamlPath = path.join(tmpDir, 'config.yaml');
+  const jsonPath = path.join(tmpDir, 'config.json');
+  const extraPath = path.join(tmpDir, 'extra.yaml');
+
+  fs.writeFileSync(yamlPath, 'port: 7890\n', 'utf8');
+  fs.writeFileSync(jsonPath, '{"mode":"rule"}\n', 'utf8');
+
+  // Simulation class matching Stage 2 ConfigTx semantics
+  class Stage2Tx {
+    constructor() {
+      this.origYaml = fs.readFileSync(yamlPath, 'utf8');
+      this.origYamlHash = this.hash(this.origYaml);
+      this.appliedFiles = [];
+      this.recoveryRequired = false;
+      this.stagedYaml = null;
+    }
+    hash(content) {
+      return require('crypto').createHash('sha256').update(content).digest('hex');
+    }
+    checkCollision() {
+      const current = fs.readFileSync(yamlPath, 'utf8');
+      if (this.hash(current) !== this.origYamlHash) {
+        throw new Error('Collision detected: external modification');
+      }
+    }
+    applyDiskFiles(failOnExtra = false) {
+      this.checkCollision();
+      // Write yaml
+      if (this.stagedYaml) {
+        fs.writeFileSync(yamlPath, this.stagedYaml, 'utf8');
+        this.appliedFiles.push(yamlPath);
+      }
+      // Write extra (simulated failure)
+      if (failOnExtra) {
+        this.rollbackDisk();
+        throw new Error('Disk write failed on extra file');
+      }
+    }
+    rollbackDisk() {
+      const errors = [];
+      while (this.appliedFiles.length > 0) {
+        const file = this.appliedFiles.pop();
+        try {
+          if (file === yamlPath) fs.writeFileSync(yamlPath, this.origYaml, 'utf8');
+        } catch (e) {
+          errors.push(e.message);
+        }
+      }
+      if (errors.length > 0) {
+        this.recoveryRequired = true;
+        throw new Error(`Rollback failed: ${errors.join(', ')}`);
+      }
+    }
+  }
+
+  // A. Verify Collision Check rejects stale write
+  const txColl = new Stage2Tx();
+  txColl.stagedYaml = 'port: 9090\n';
+  // External edit occurs
+  fs.writeFileSync(yamlPath, 'port: 8888\n# external\n', 'utf8');
+  assert.throws(() => txColl.applyDiskFiles(), /Collision detected/);
+  assert.strictEqual(fs.readFileSync(yamlPath, 'utf8'), 'port: 8888\n# external\n', 'External edit preserved');
+
+  // B. Verify Partial Apply Failure rolls back already written file
+  fs.writeFileSync(yamlPath, 'port: 7890\n', 'utf8');
+  const txPartial = new Stage2Tx();
+  txPartial.stagedYaml = 'port: 9999\n';
+  assert.throws(() => txPartial.applyDiskFiles(true), /Disk write failed/);
+  assert.strictEqual(fs.readFileSync(yamlPath, 'utf8'), 'port: 7890\n', 'Partial write successfully rolled back');
+  assert.strictEqual(txPartial.appliedFiles.length, 0, 'applied_files emptied after rollback');
+
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+// 13. State guard: commit() rejected on rolled back or recovery_required transaction
+check('13. ConfigTx state guard: commit() rejects execution if already rolled back', () => {
+  const txContent = fs.readFileSync(txRsPath, 'utf8');
+  assert(
+    txContent.includes('self.status == TxStatus::RolledBack || self.status == TxStatus::RecoveryRequired'),
+    'commit() and apply_disk_files() must check TxStatus::RolledBack and TxStatus::RecoveryRequired'
+  );
+  assert(
+    txContent.includes('Невозможно зафиксировать транзакцию: транзакция уже откатана'),
+    'commit() must reject committing a rolled-back transaction'
+  );
+});
+
+// 14. Mihomo reload guard: only reload runtime if YAML/providers were actually modified
+check('14. Mihomo reload guard: skips runtime reload on panel-only (config.json) transactions', () => {
+  const txContent = fs.readFileSync(txRsPath, 'utf8');
+  assert(
+    txContent.includes('let runtime_touched = self.staged_yaml.is_some() || !self.extra_files.is_empty();'),
+    'rollback and Drop must check runtime_touched before reloading Mihomo runtime'
+  );
+});
+
+console.log(`\n=== All ${passed}/${total} Milestone 2 & Stage 2 Checks Passed Successfully ===\n`);

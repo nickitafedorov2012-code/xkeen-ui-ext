@@ -49,11 +49,14 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
   const [saving, setSaving] = useState<boolean>(false)
   const [reloadMihomo, setReloadMihomo] = useState<boolean>(true)
   const [syntaxError, setSyntaxError] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [searchTerm, setSearchTerm] = useState<string>('')
   const [showSearch, setShowSearch] = useState<boolean>(false)
 
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const lineNumbersRef = useRef<HTMLDivElement>(null)
+  const currentRequestIdRef = useRef<number>(0)
+  const loadedFileIdRef = useRef<string | null>(null)
 
   // Загрузка списка файлов
   useEffect(() => {
@@ -68,22 +71,38 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
     fetchList()
   }, [notify])
 
-  // Загрузка содержимого выбранного файла
+  // Загрузка содержимого выбранного файла (UI-01: привязка к requestId и fileId)
   useEffect(() => {
+    const requestId = ++currentRequestIdRef.current
+    const targetFile = selectedFile
+
     const loadFile = async () => {
       setLoading(true)
       setSyntaxError(null)
+      setLoadError(null)
       try {
         const res = await apiGet<{ file: string; path: string; content: string }>(
-          `config-files/read?file=${encodeURIComponent(selectedFile)}`
+          `config-files/read?file=${encodeURIComponent(targetFile)}`
         )
+        // UI-01: Отбрасываем запоздалый ответ, если пользователь уже переключил файл
+        if (requestId !== currentRequestIdRef.current) {
+          return
+        }
         setContent(res.content)
         setOriginalContent(res.content)
         setFilePath(res.path)
+        loadedFileIdRef.current = targetFile
+        setLoadError(null)
       } catch (err: any) {
-        notify('Ошибка чтения файла: ' + err.message, true)
+        if (requestId === currentRequestIdRef.current) {
+          setLoadError(err.message || 'Ошибка чтения файла')
+          loadedFileIdRef.current = null
+          notify('Ошибка чтения файла: ' + err.message, true)
+        }
       } finally {
-        setLoading(false)
+        if (requestId === currentRequestIdRef.current) {
+          setLoading(false)
+        }
       }
     }
     loadFile()
@@ -176,6 +195,11 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
 
   // Сохранение файла
   const handleSave = async () => {
+    // UI-01: Запретить сохранение файла, если последняя загрузка завершилась ошибкой или файл не совпадает
+    if (loading || !!loadError || loadedFileIdRef.current !== selectedFile) {
+      notify('Невозможно сохранить файл: загрузка файла не завершилась успешно', true)
+      return
+    }
     setSaving(true)
     try {
       const res = await apiPost<{ saved: boolean; warning?: string }>('config-files/save', {
@@ -313,6 +337,13 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
         <div className="editor-body">
           {loading ? (
             <div className="editor-loading">⏳ Загрузка содержимого файла…</div>
+          ) : loadError ? (
+            <div className="editor-load-error-banner" style={{ padding: '28px 20px', textAlign: 'center', color: '#ef4444' }}>
+              <div style={{ fontSize: 26, marginBottom: 8 }}>⚠️</div>
+              <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 6 }}>Ошибка загрузки файла</div>
+              <div style={{ color: 'var(--muted)', fontSize: 13, marginBottom: 12 }}>{loadError}</div>
+              <div style={{ fontSize: 12, color: '#f59e0b' }}>Сохранение заблокировано для предотвращения перезаписи файла поврежденными данными.</div>
+            </div>
           ) : (
             <div className="editor-container">
               <div className="editor-line-numbers" ref={lineNumbersRef}>
@@ -351,7 +382,7 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
             </button>
             <button
               className="btn btn-primary"
-              disabled={saving || !isDirty}
+              disabled={saving || !isDirty || loading || !!loadError || loadedFileIdRef.current !== selectedFile}
               onClick={handleSave}
             >
               {saving ? '⏳ Сохранение…' : '💾 Сохранить файл (Ctrl+S)'}
