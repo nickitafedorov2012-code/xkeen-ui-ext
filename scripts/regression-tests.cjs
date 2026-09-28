@@ -742,27 +742,61 @@ runTest('20. DeviceRow Zapret Switch, CPU Temp Rounding, Blue Active Server & He
   const dashboardTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Dashboard.tsx'), 'utf8');
   const skillMd = fs.readFileSync(path.resolve('C:/Users/internet/.gemini/config/skills/xkeen-troubleshooting/SKILL.md'), 'utf8');
 
-  // 1. DeviceRow must use clean toggle switch for Zapret
-  assert(deviceRowTsx.includes('className="switch device-zapret-switch"'), 'DeviceRow.tsx must use .switch device-zapret-switch');
-  assert(deviceRowTsx.includes('className="device-zapret-toggle"'), 'DeviceRow.tsx must render checkbox with device-zapret-toggle');
-  assert(!deviceRowTsx.includes('className={`device-zapret-btn'), 'DeviceRow.tsx must not use old device-zapret-btn button');
+  // 1. DeviceRow must use restored beautiful button for Zapret and new toggle switch for gaming mode
+  assert(deviceRowTsx.includes('className={`device-zapret-btn'), 'DeviceRow.tsx must restore beautiful .device-zapret-btn button');
+  assert(deviceRowTsx.includes('className="switch device-gaming-switch"'), 'DeviceRow.tsx must provide per-device .device-gaming-switch');
+  assert(deviceRowTsx.includes('className="device-gaming-toggle"'), 'DeviceRow.tsx must render checkbox with device-gaming-toggle');
 
-  // 2. Header must format CPU temperature & XKeen RAM as whole integers
-  assert(headerTsx.includes('{Math.round(cpuTemp)}°C'), 'Header.tsx must round CPU temp to whole integer');
+  // 2. Header must format all metrics (CPU temp, XKeen RAM, etc.) as whole integers
+  assert(headerTsx.includes('const cpuTemp = currentMetrics?.cpu_temp_c != null ? Math.round(currentMetrics.cpu_temp_c) : undefined'), 'Header.tsx must round CPU temp to whole integer at declaration');
+  assert(headerTsx.includes('const totalXkeenMem = Math.round(currentMetrics?.total_xkeen_memory_mb ?? (appMemMb + coreMemMb))'), 'Header.tsx must round XKeen RAM to whole integer at declaration');
+  assert(headerTsx.includes('const appMemMb = Math.round(currentMetrics?.app_memory_mb ?? 0)'), 'Header.tsx must round app memory to whole integer at declaration');
   assert(!headerTsx.includes('{cpuTemp.toFixed(1)}°C'), 'Header.tsx must not format CPU temp with decimals');
-  assert(headerTsx.includes('Math.round(totalXkeenMem > 0 ? totalXkeenMem : appMemMb)'), 'Header.tsx must round XKeen RAM to whole integer');
 
-  // 3. Header must not contain the removed gaming pill button
-  assert(!headerTsx.includes('header-gaming-pill'), 'Header.tsx must have gaming pill button removed');
+  // 3. Header must contain the restored gaming pill button
+  assert(headerTsx.includes('data-testid="header-gaming-pill"'), 'Header.tsx must contain restored header-gaming-pill button');
+  assert(headerTsx.includes('header-actions-right'), 'Header.tsx must wrap right action buttons in header-actions-right container');
 
-  // 4. Dashboard Active Server card & Failover primary must use blue accents (#38bdf8) instead of green (#22c55e)
+  // 4. Dashboard Active Server card, Failover primary & Servers list badge must use blue accents (#38bdf8) instead of green (#22c55e)
   assert(dashboardTsx.includes('color: \'#38bdf8\'') && dashboardTsx.includes('🔵 В сети'), 'Dashboard.tsx Active Server badge must be blue (#38bdf8)');
   assert(dashboardTsx.includes('stroke="#38bdf8"'), 'Dashboard.tsx PingSparkline must use stroke #38bdf8');
   assert(!dashboardTsx.includes('stroke="#22c55e"'), 'Dashboard.tsx PingSparkline must not use green stroke');
   assert(dashboardTsx.includes('color: \'#38bdf8\' }}>ОСН (основной)</span>'), 'Dashboard.tsx Failover primary server badge must be blue (#38bdf8)');
 
+  const stylesCss = fs.readFileSync(path.resolve(__dirname, '../frontend/src/styles.css'), 'utf8');
+  assert(stylesCss.includes('.current-active-badge {') && stylesCss.includes('color: #38bdf8;'), '.current-active-badge must use blue text #38bdf8');
+  assert(!stylesCss.includes('.current-active-badge {\n  display: inline-flex;\n  align-items: center;\n  gap: 4px;\n  background: rgba(34, 197, 94, 0.16);'), '.current-active-badge must not use green #22c55e styling');
+
   // 5. Skill file must contain release notes protocol rule
   assert(skillMd.includes('Обязательный регламент релизов и версионирования (Release Notes & What\'s New)'), 'SKILL.md must document release notes and versioning rule');
+});
+
+runTest('21. Zapret v1/v2 Engine Greyout, Router PREROUTING Hook, Fast DPI Test & Unified Gaming Card', () => {
+  const zapretTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Zapret.tsx'), 'utf8');
+  const gamingTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Gaming.tsx'), 'utf8');
+  const apiRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/api.rs'), 'utf8');
+
+  // 1. Zapret.tsx must support engine compatibility greyout with badge
+  assert(zapretTsx.includes('supportedEngines?: (\'v1\' | \'v2\')[]'), 'Zapret.tsx renderStrategyCard must take supportedEngines parameter');
+  assert(zapretTsx.includes('opacity: isEngineSupported ? 1 : 0.45'), 'Zapret.tsx must reduce opacity to 0.45 when engine not supported');
+  assert(zapretTsx.includes('filter: isEngineSupported ? \'none\' : \'grayscale(0.8)\''), 'Zapret.tsx must apply grayscale filter to unsupported cards');
+  assert(zapretTsx.includes('🔒 Только для Запрет'), 'Zapret.tsx must render lock badge for engine restricted cards');
+  assert(zapretTsx.includes('activeEngine === \'v1\''), 'Zapret.tsx must disable aggressive preset when activeEngine === v1');
+
+  // 2. backend/src/api.rs must hook PREROUTING 1 -i br+ / Bridge+ in ensure_zapret_init_script
+  assert(apiRs.includes('iptables -t mangle -I PREROUTING 1 -i br+ -m comment --comment "xkeen-route-zapret" -j zapret'), 'api.rs must hook PREROUTING br+ instead of POSTROUTING');
+  assert(apiRs.includes('iptables -t mangle -I PREROUTING 1 -i Bridge+ -m comment --comment "xkeen-route-zapret" -j zapret'), 'api.rs must hook PREROUTING Bridge+ instead of POSTROUTING');
+  assert(!apiRs.includes('iptables -t mangle -I POSTROUTING 1 -m comment --comment "xkeen-route-zapret" -j zapret'), 'api.rs must not hook POSTROUTING in ensure_zapret_init_script');
+
+  // 3. backend/src/api.rs test_dpi fast parallel checking
+  assert(apiRs.includes('p_yt=$(curl -4 -k -m 2.5 -s -o /dev/null'), 'api.rs test_dpi must use fast parallel 2.5s curl probes');
+  assert(apiRs.includes('service_running') && apiRs.includes('iptables_active'), 'api.rs test_dpi must include service_running and iptables_active status');
+
+  // 4. Gaming.tsx must fetch serversRes.servers and unify Smart Gaming with Recent Activity
+  assert(gamingTsx.includes('serversRes?.servers || serversRes?.proxies || serversRes?.all || []'), 'Gaming.tsx must check serversRes.servers to populate proxy nodes dropdown');
+  assert(gamingTsx.includes('height: 38'), 'Gaming.tsx ping button must have uniform 38px height');
+  assert(gamingTsx.includes('📊 Диагностика задержки'), 'Gaming.tsx ping button must have uniform label');
+  assert(gamingTsx.includes('хостов в детекторе'), 'Gaming.tsx must unify smart gaming with recent activity detector');
 });
 
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);

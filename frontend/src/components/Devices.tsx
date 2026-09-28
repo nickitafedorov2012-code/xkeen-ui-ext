@@ -94,9 +94,11 @@ export default function Devices({ notify }: Props) {
     autoRestore: boolean
   } | null>(null)
 
+  const [gamingDeviceMacs, setGamingDeviceMacs] = useState<Set<string>>(new Set())
+
   const load = useCallback(async () => {
     try {
-      const [d, p, s, r, dr, zDev] = await Promise.all([
+      const [d, p, s, r, dr, zDev, gamingRes] = await Promise.all([
         apiGet<{ devices: DeviceInfo[] }>('devices'),
         apiGet<{ policies: PolicyInfo[] }>('policies'),
         apiGet<{ servers: ServerInfo[] }>('servers'),
@@ -108,6 +110,7 @@ export default function Devices({ notify }: Props) {
         apiGet<{ excluded_devices?: string[] }>('devices/zapret').catch(() => ({
           excluded_devices: [] as string[],
         })),
+        apiGet<{ enabled: boolean; config?: { devices?: Array<{ mac: string; enabled: boolean }> } }>('gaming/status').catch(() => null),
       ])
       setDevices(d.devices)
       setPolicies(p.policies)
@@ -116,6 +119,15 @@ export default function Devices({ notify }: Props) {
       setDrMap(dr.routing)
       setDevFailover(dr.device_failover_enabled)
       setExcludedZapretDevices(new Set(zDev.excluded_devices || []))
+      if (gamingRes) {
+        const macs = new Set<string>()
+        if (gamingRes.enabled && gamingRes.config?.devices) {
+          for (const gd of gamingRes.config.devices) {
+            if (gd.enabled) macs.add(gd.mac.toLowerCase())
+          }
+        }
+        setGamingDeviceMacs(macs)
+      }
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка загрузки устройств', true)
     } finally {
@@ -424,6 +436,33 @@ export default function Devices({ notify }: Props) {
     }
   }
 
+  const handleToggleGaming = async (mac: string, ip: string, enabled: boolean) => {
+    const macLower = mac.toLowerCase()
+    setGamingDeviceMacs((prev) => {
+      const next = new Set(prev)
+      if (enabled) {
+        next.add(macLower)
+      } else {
+        next.delete(macLower)
+      }
+      return next
+    })
+    setBusy(true)
+    try {
+      await apiPost('gaming/toggle', {
+        enabled,
+        device_mac: mac,
+      })
+      notify(enabled ? `🎮 Игровой режим включен для ${ip || mac}` : `⚪ Игровой режим выключен для ${ip || mac}`)
+      window.dispatchEvent(new CustomEvent('xr:refresh-status'))
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка переключения игрового режима', true)
+      await load()
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const isDeviceZapretActive = (d: DeviceInfo) => {
     const isExcluded =
       (Boolean(d.ip) && excludedZapretDevices.has(d.ip)) ||
@@ -561,6 +600,7 @@ export default function Devices({ notify }: Props) {
                   Server{sortIndicator('server')}
                 </th>
                 <th style={{ textAlign: 'center', width: 110 }}>Zapret (DPI)</th>
+                <th style={{ textAlign: 'center', width: 90 }}>Игры 🎮</th>
                 <th />
               </tr>
             </thead>
@@ -569,7 +609,7 @@ export default function Devices({ notify }: Props) {
               {(statusFilter === 'all' || statusFilter === 'online') && (
                 <>
                   <tr>
-                    <td colSpan={9} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
+                    <td colSpan={10} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
                       <span className="devices-group-header online">
                         Online ({sortedOnline.length})
                       </span>
@@ -577,7 +617,7 @@ export default function Devices({ notify }: Props) {
                   </tr>
                   {sortedOnline.length === 0 && (
                     <tr>
-                      <td colSpan={9} className="muted small" style={{ padding: '10px 14px' }}>
+                      <td colSpan={10} className="muted small" style={{ padding: '10px 14px' }}>
                         Нет устройств в сети
                       </td>
                     </tr>
@@ -603,6 +643,8 @@ export default function Devices({ notify }: Props) {
                       onOpenSchedule={(d) => setScheduleTarget({ ip: d.ip, name: d.name })}
                       zapretActive={isDeviceZapretActive(d)}
                       onToggleZapret={handleToggleZapret}
+                      gamingActive={gamingDeviceMacs.has(d.mac.toLowerCase())}
+                      onToggleGaming={handleToggleGaming}
                     />
                   ))}
                 </>
@@ -612,7 +654,7 @@ export default function Devices({ notify }: Props) {
               {statusFilter === 'all' && (
                 <>
                   <tr>
-                    <td colSpan={9} style={{ padding: '16px 14px 4px', borderBottom: 'none' }}>
+                    <td colSpan={10} style={{ padding: '16px 14px 4px', borderBottom: 'none' }}>
                       <div className="offline-section-title">OFFLINE SECTION</div>
                       <div
                         className="offline-accordion-row"
@@ -654,6 +696,8 @@ export default function Devices({ notify }: Props) {
                         onOpenSchedule={(d) => setScheduleTarget({ ip: d.ip, name: d.name })}
                         zapretActive={isDeviceZapretActive(d)}
                         onToggleZapret={handleToggleZapret}
+                        gamingActive={gamingDeviceMacs.has(d.mac.toLowerCase())}
+                        onToggleGaming={handleToggleGaming}
                       />
                     ))}
                 </>
@@ -662,7 +706,7 @@ export default function Devices({ notify }: Props) {
               {statusFilter === 'offline' && (
                 <>
                   <tr>
-                    <td colSpan={9} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
+                    <td colSpan={10} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
                       <span className="devices-group-header">
                         Offline ({sortedOffline.length})
                       </span>
@@ -670,7 +714,7 @@ export default function Devices({ notify }: Props) {
                   </tr>
                   {sortedOffline.length === 0 && (
                     <tr>
-                      <td colSpan={9} className="muted small" style={{ padding: '10px 14px' }}>
+                      <td colSpan={10} className="muted small" style={{ padding: '10px 14px' }}>
                         Нет офлайн-устройств
                       </td>
                     </tr>
@@ -696,6 +740,8 @@ export default function Devices({ notify }: Props) {
                       onOpenSchedule={(d) => setScheduleTarget({ ip: d.ip, name: d.name })}
                       zapretActive={isDeviceZapretActive(d)}
                       onToggleZapret={handleToggleZapret}
+                      gamingActive={gamingDeviceMacs.has(d.mac.toLowerCase())}
+                      onToggleGaming={handleToggleGaming}
                     />
                   ))}
                 </>

@@ -154,7 +154,7 @@ export default function Gaming({ notify }: GamingProps) {
     try {
       const [statusRes, serversRes, devicesRes] = await Promise.all([
         apiGet<GamingStatus>('gaming/status').catch(() => null),
-        apiGet<{ proxies?: ServerInfo[]; all?: ServerInfo[] }>('servers').catch(() => null),
+        apiGet<{ servers?: ServerInfo[]; proxies?: ServerInfo[]; all?: ServerInfo[] }>('servers').catch(() => null),
         apiGet<{ devices?: DeviceInfo[] }>('devices').catch(() => null),
       ])
 
@@ -168,7 +168,7 @@ export default function Gaming({ notify }: GamingProps) {
       }
 
       if (serversRes) {
-        const list = serversRes.proxies || serversRes.all || []
+        const list = serversRes?.servers || serversRes?.proxies || serversRes?.all || []
         setServers(list.filter((s) => s.id && s.id !== 'REJECT' && s.id !== 'DIRECT'))
       }
 
@@ -562,13 +562,24 @@ export default function Gaming({ notify }: GamingProps) {
             </div>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'flex-end' }}>
+          <div>
+            <label className="label-sm" style={{ display: 'block', marginBottom: 6, color: '#94a3b8' }}>
+              📊 Диагностика задержки
+            </label>
             <button
               type="button"
-              className="btn btn-secondary sm"
+              className="btn btn-secondary"
               onClick={handlePingTest}
               disabled={pinging}
-              style={{ width: '100%' }}
+              style={{
+                width: '100%',
+                height: 38,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                boxSizing: 'border-box',
+                whiteSpace: 'nowrap',
+              }}
               title="Замерить задержку подключения до Steam, Discord, Xbox, PSN, Supercell"
             >
               {pinging ? '⏳ Замер задержки...' : '⚡ Замерить пинг до серверов игр'}
@@ -659,7 +670,7 @@ export default function Gaming({ notify }: GamingProps) {
         </div>
       </div>
 
-      {/* Умный игровой режим (Smart Gaming Mode) */}
+      {/* Умный игровой режим (Smart Auto-Gaming) и детектор игр */}
       <div className="card" style={{ padding: '16px 18px', border: cfg.smart_mode ? '1px solid rgba(56, 189, 248, 0.4)' : '1px solid var(--border)' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -670,6 +681,11 @@ export default function Gaming({ notify }: GamingProps) {
                 <span className="badge" style={{ background: cfg.smart_mode ? 'rgba(34, 197, 94, 0.2)' : 'rgba(255, 255, 255, 0.08)', color: cfg.smart_mode ? '#4ade80' : 'var(--muted)' }}>
                   {cfg.smart_mode ? '🟢 Активен' : '⚪ Выключен'}
                 </span>
+                {status?.recent_gaming_conns && status.recent_gaming_conns.length > 0 && (
+                  <span className="badge" style={{ background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', fontSize: 11 }}>
+                    {status.recent_gaming_conns.length} хостов в детекторе
+                  </span>
+                )}
               </div>
               <p className="muted small" style={{ margin: '3px 0 0', fontSize: 12, lineHeight: 1.4 }}>
                 Автоматически включает игровой туннель при обнаружении сетевой активности игр на выбранном устройстве и отключает после таймаута бездействия для экономии VPS.
@@ -710,6 +726,99 @@ export default function Gaming({ notify }: GamingProps) {
             </span>
           </div>
         )}
+
+        {/* Недавняя игровая активность и игнор-лист детектора внутри единой карточки */}
+        <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid rgba(255, 255, 255, 0.06)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 16 }}>🕹️</span>
+              <b style={{ fontSize: 13.5 }}>Недавняя игровая активность (детектор игр)</b>
+            </div>
+            <button
+              type="button"
+              className="btn sm"
+              onClick={loadData}
+              style={{ fontSize: 12 }}
+            >
+              🔄 Обновить
+            </button>
+          </div>
+
+          {status?.recent_gaming_conns && status.recent_gaming_conns.length > 0 ? (
+            <div style={{ overflowX: 'auto', maxHeight: 220, overflowY: 'auto' }}>
+              <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr style={{ textAlign: 'left', borderBottom: '1px solid rgba(255, 255, 255, 0.08)', color: '#94a3b8' }}>
+                    <th style={{ padding: '6px 8px' }}>Хост / Назначение</th>
+                    <th style={{ padding: '6px 8px' }}>Протокол</th>
+                    <th style={{ padding: '6px 8px' }}>Время</th>
+                    <th style={{ padding: '6px 8px' }}>Статус</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right' }}>Действие</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {status.recent_gaming_conns.map((conn, idx) => {
+                    const target = conn.destination || conn.host
+                    return (
+                      <tr key={idx} style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.04)', height: 32 }}>
+                        <td style={{ padding: '6px 8px', fontFamily: 'Consolas, monospace', fontSize: 11.5 }}>
+                          <span title={conn.destination}>{conn.host || conn.destination}</span>
+                        </td>
+                        <td style={{ padding: '6px 8px' }}>
+                          <span
+                            className="badge"
+                            style={{
+                              background: conn.network === 'UDP' ? 'rgba(168, 85, 247, 0.2)' : 'rgba(56, 189, 248, 0.2)',
+                              color: conn.network === 'UDP' ? '#c084fc' : '#38bdf8',
+                              fontSize: 10,
+                              padding: '1px 5px',
+                            }}
+                          >
+                            {conn.network}
+                          </span>
+                        </td>
+                        <td style={{ padding: '6px 8px', color: '#94a3b8', fontSize: 11 }}>
+                          {conn.last_seen || 'Недавно'}
+                        </td>
+                        <td style={{ padding: '6px 8px' }}>
+                          {conn.ignored ? (
+                            <span className="badge" style={{ background: 'rgba(239, 68, 68, 0.15)', color: '#f87171', fontSize: 10 }}>
+                              В игноре
+                            </span>
+                          ) : (
+                            <span className="badge" style={{ background: 'rgba(34, 197, 94, 0.15)', color: '#4ade80', fontSize: 10 }}>
+                              Отслеживается
+                            </span>
+                          )}
+                        </td>
+                        <td style={{ padding: '6px 8px', textAlign: 'right' }}>
+                          <button
+                            type="button"
+                            className="btn sm"
+                            onClick={() => handleToggleIgnoreConn(target, !!conn.ignored)}
+                            style={{
+                              fontSize: 11,
+                              padding: '2px 8px',
+                              background: conn.ignored ? 'rgba(56, 189, 248, 0.15)' : 'rgba(239, 68, 68, 0.12)',
+                              color: conn.ignored ? '#38bdf8' : '#f87171',
+                              border: conn.ignored ? '1px solid rgba(56, 189, 248, 0.3)' : '1px solid rgba(239, 68, 68, 0.3)',
+                            }}
+                          >
+                            {conn.ignored ? 'Следить' : 'Не реагировать'}
+                          </button>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="muted small" style={{ padding: '12px 0', textAlign: 'center' }}>
+              Пока нет зафиксированных игровых соединений. При сетевой активности игр они появятся здесь.
+            </div>
+          )}
+        </div>
       </div>
 
       {/* 2. Результаты пинга, если замерены */}
@@ -833,104 +942,6 @@ export default function Gaming({ notify }: GamingProps) {
             {cfg.enabled
               ? 'Соединения от выбранного устройства пока не зафиксированы в ядре Mihomo. Запустите игру или откройте страницу на устройстве.'
               : 'Включите игровой режим или режим совместимости, чтобы отслеживать соединения.'}
-          </div>
-        )}
-      </div>
-
-      {/* Недавняя игровая активность и игнор-лист */}
-      <div className="card" style={{ padding: '14px 16px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 16 }}>🕹️</span>
-            <b style={{ fontSize: 13.5 }}>Недавняя игровая активность (детектор игр)</b>
-            {status?.recent_gaming_conns && (
-              <span className="badge" style={{ background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', fontSize: 11 }}>
-                {status.recent_gaming_conns.length} хостов
-              </span>
-            )}
-          </div>
-          <button
-            type="button"
-            className="btn sm"
-            onClick={loadData}
-            style={{ fontSize: 12 }}
-          >
-            🔄 Обновить
-          </button>
-        </div>
-
-        {status?.recent_gaming_conns && status.recent_gaming_conns.length > 0 ? (
-          <div style={{ overflowX: 'auto', maxHeight: 220, overflowY: 'auto' }}>
-            <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
-              <thead>
-                <tr style={{ textAlign: 'left', borderBottom: '1px solid rgba(255, 255, 255, 0.08)', color: '#94a3b8' }}>
-                  <th style={{ padding: '6px 8px' }}>Хост / Назначение</th>
-                  <th style={{ padding: '6px 8px' }}>Протокол</th>
-                  <th style={{ padding: '6px 8px' }}>Время</th>
-                  <th style={{ padding: '6px 8px' }}>Статус</th>
-                  <th style={{ padding: '6px 8px', textAlign: 'right' }}>Действие</th>
-                </tr>
-              </thead>
-              <tbody>
-                {status.recent_gaming_conns.map((conn, idx) => {
-                  const target = conn.destination || conn.host
-                  return (
-                    <tr key={idx} style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.04)', height: 32 }}>
-                      <td style={{ padding: '6px 8px', fontFamily: 'Consolas, monospace', fontSize: 11.5 }}>
-                        <span title={conn.destination}>{conn.host || conn.destination}</span>
-                      </td>
-                      <td style={{ padding: '6px 8px' }}>
-                        <span
-                          className="badge"
-                          style={{
-                            background: conn.network === 'UDP' ? 'rgba(168, 85, 247, 0.2)' : 'rgba(56, 189, 248, 0.2)',
-                            color: conn.network === 'UDP' ? '#c084fc' : '#38bdf8',
-                            fontSize: 10,
-                            padding: '1px 5px',
-                          }}
-                        >
-                          {conn.network}
-                        </span>
-                      </td>
-                      <td style={{ padding: '6px 8px', color: '#94a3b8', fontSize: 11 }}>
-                        {conn.last_seen || 'Недавно'}
-                      </td>
-                      <td style={{ padding: '6px 8px' }}>
-                        {conn.ignored ? (
-                          <span className="badge" style={{ background: 'rgba(239, 68, 68, 0.15)', color: '#f87171', fontSize: 10 }}>
-                            В игноре
-                          </span>
-                        ) : (
-                          <span className="badge" style={{ background: 'rgba(34, 197, 94, 0.15)', color: '#4ade80', fontSize: 10 }}>
-                            Отслеживается
-                          </span>
-                        )}
-                      </td>
-                      <td style={{ padding: '6px 8px', textAlign: 'right' }}>
-                        <button
-                          type="button"
-                          className="btn sm"
-                          onClick={() => handleToggleIgnoreConn(target, !!conn.ignored)}
-                          style={{
-                            fontSize: 11,
-                            padding: '2px 8px',
-                            background: conn.ignored ? 'rgba(56, 189, 248, 0.15)' : 'rgba(239, 68, 68, 0.12)',
-                            color: conn.ignored ? '#38bdf8' : '#f87171',
-                            border: conn.ignored ? '1px solid rgba(56, 189, 248, 0.3)' : '1px solid rgba(239, 68, 68, 0.3)',
-                          }}
-                        >
-                          {conn.ignored ? 'Следить' : 'Не реагировать'}
-                        </button>
-                      </td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="muted small" style={{ padding: '12px 0', textAlign: 'center' }}>
-            Пока нет зафиксированных игровых соединений. При сетевой активности игр они появятся здесь.
           </div>
         )}
       </div>

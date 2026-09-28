@@ -337,13 +337,13 @@ export default function Header({
 
   // Память и CPU (живые из 1-секундного таймера либо из статуса)
   const currentMetrics = liveMetrics || status?.system
-  const memUsed = currentMetrics?.memory_used_mb ?? 0
-  const memTotal = currentMetrics?.memory_total_mb ?? 0
-  const cpuPercent = currentMetrics?.cpu_percent ?? 0
-  const appMemMb = currentMetrics?.app_memory_mb ?? 0
-  const appCpu = currentMetrics?.app_cpu_percent ?? 0
-  const coreMemMb = currentMetrics?.core_memory_mb ?? 0
-  const totalXkeenMem = currentMetrics?.total_xkeen_memory_mb ?? (appMemMb + coreMemMb)
+  const memUsed = Math.round(currentMetrics?.memory_used_mb ?? 0)
+  const memTotal = Math.round(currentMetrics?.memory_total_mb ?? 0)
+  const cpuPercent = Math.round(currentMetrics?.cpu_percent ?? 0)
+  const appMemMb = Math.round(currentMetrics?.app_memory_mb ?? 0)
+  const appCpu = Math.round(currentMetrics?.app_cpu_percent ?? 0)
+  const coreMemMb = Math.round(currentMetrics?.core_memory_mb ?? 0)
+  const totalXkeenMem = Math.round(currentMetrics?.total_xkeen_memory_mb ?? (appMemMb + coreMemMb))
 
   const mihomoVersion = status?.mihomo_version || '—'
   const appVersion = status?.version ? status.version.replace(/^v/, '') : '—'
@@ -382,7 +382,7 @@ export default function Header({
     }
   }
 
-  const cpuTemp = currentMetrics?.cpu_temp_c
+  const cpuTemp = currentMetrics?.cpu_temp_c != null ? Math.round(currentMetrics.cpu_temp_c) : undefined
 
   return (
     <header className="header-bar">
@@ -414,11 +414,11 @@ export default function Header({
                   <span className="status-stat-sep">|</span>
                   <span
                     className="status-stat"
-                    title={`Температура процессора: ${Math.round(cpuTemp)}°C${cpuTemp > 90 ? ' (ВНИМАНИЕ: Критический нагрев выше 90°C!)' : ''}`}
+                    title={`Температура процессора: ${cpuTemp}°C${cpuTemp > 90 ? ' (ВНИМАНИЕ: Критический нагрев выше 90°C!)' : ''}`}
                   >
                     <span>🌡️</span>
                     <span style={cpuTemp > 90 ? { color: '#ef4444', fontWeight: 'bold' } : {}}>
-                      {Math.round(cpuTemp)}°C
+                      {cpuTemp}°C
                     </span>
                   </span>
                 </>
@@ -428,10 +428,10 @@ export default function Header({
                   <span className="status-stat-sep">|</span>
                   <span
                     className="status-stat"
-                    title={`Потребление XKeen: всего ${Math.round(totalXkeenMem > 0 ? totalXkeenMem : appMemMb)} МБ RAM (Панель XR: ${Math.round(appMemMb)} МБ, Ядро Mihomo: ${coreMemMb > 0 ? Math.round(coreMemMb) + ' МБ' : '—'}), CPU: ${Math.round(appCpu)}%`}
+                    title={`Потребление XKeen: всего ${totalXkeenMem > 0 ? totalXkeenMem : appMemMb} МБ RAM (Панель XR: ${appMemMb} МБ, Ядро Mihomo: ${coreMemMb > 0 ? coreMemMb + ' МБ' : '—'}), CPU: ${appCpu}%`}
                   >
                     <span className="status-xr-label">XKeen:</span>
-                    <span>{Math.round(totalXkeenMem > 0 ? totalXkeenMem : appMemMb)} МБ</span>
+                    <span>{totalXkeenMem > 0 ? totalXkeenMem : appMemMb} МБ</span>
                   </span>
                 </>
               )}
@@ -570,60 +570,88 @@ export default function Header({
           )}
         </button>
 
-        {/* Кнопка справки и API документации */}
+        {/* Чип Игрового режима */}
         <button
           type="button"
-          className={`header-action-btn ${activeTab === 'help' ? 'active' : ''}`}
-          onClick={() => onSwitchTab('help')}
-          title="Справка, руководство пользователя и API документация"
-          data-testid="header-help-btn"
+          data-testid="header-gaming-pill"
+          className={`header-pill-btn ${status?.gaming?.enabled ? 'header-pill-gaming-active' : ''}`}
+          onClick={async (e) => {
+            if (e.altKey || e.shiftKey) {
+              onSwitchTab('gaming')
+            } else {
+              const next = !Boolean(status?.gaming?.enabled)
+              try {
+                await apiPost('gaming/toggle', { enabled: next })
+                notify(next ? 'Игровой режим включён' : 'Игровой режим выключен')
+                await refresh()
+              } catch (err: any) {
+                notify(err?.message || 'Ошибка переключения игрового режима', true)
+                onSwitchTab('gaming')
+              }
+            }
+          }}
+          title={status?.gaming?.enabled ? 'Игровой режим включён (нажмите для выключения, Alt+клик для перехода в меню)' : 'Игровой режим выключен (нажмите для включения, Alt+клик для перехода в меню)'}
         >
-          <span style={{ fontSize: '15px' }}>❓</span>
+          <span style={{ fontSize: '14px', lineHeight: 1 }}>🎮</span>
+          <span className="header-pill-title">Игры</span>
+          <span className="header-pill-subtitle">{status?.gaming?.enabled ? 'ВКЛ' : 'ВЫКЛ'}</span>
         </button>
 
-        <button
-          type="button"
-          className={`header-action-btn ${activeTab === 'settings' ? 'active' : ''}`}
-          onClick={() => onSwitchTab('settings')}
-          title="Настройки"
-          data-testid="header-settings-btn"
-        >
-          <span style={{ fontSize: '15px' }}>⚙️</span>
-        </button>
-
-        {onOpenEditor && (
+        <div className="header-actions header-actions-right">
+          {/* Кнопка справки и API документации */}
           <button
             type="button"
-            className="header-action-btn"
-            onClick={onOpenEditor}
-            title="Редактор конфигов"
+            className={`header-action-btn ${activeTab === 'help' ? 'active' : ''}`}
+            onClick={() => onSwitchTab('help')}
+            title="Справка, руководство пользователя и API документация"
+            data-testid="header-help-btn"
           >
-            <span style={{ fontSize: '15px' }}>📝</span>
+            <span style={{ fontSize: '15px', lineHeight: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>❓</span>
           </button>
-        )}
 
-        {onToggleTheme && (
           <button
             type="button"
-            className="header-action-btn"
-            onClick={onToggleTheme}
-            title={theme === 'dark' ? 'Переключить на светлую тему' : 'Переключить на тёмную тему'}
+            className={`header-action-btn ${activeTab === 'settings' ? 'active' : ''}`}
+            onClick={() => onSwitchTab('settings')}
+            title="Настройки"
+            data-testid="header-settings-btn"
           >
-            <span style={{ fontSize: '15px' }}>{theme === 'dark' ? '🌙' : '☀️'}</span>
+            <span style={{ fontSize: '15px', lineHeight: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>⚙️</span>
           </button>
-        )}
 
+          {onOpenEditor && (
+            <button
+              type="button"
+              className="header-action-btn"
+              onClick={onOpenEditor}
+              title="Редактор конфигов"
+            >
+              <span style={{ fontSize: '15px', lineHeight: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>📝</span>
+            </button>
+          )}
 
-        {authStatus?.enabled && authStatus?.authenticated && onLogout && (
-          <button
-            type="button"
-            className="header-action-btn"
-            onClick={onLogout}
-            title="Выйти из панели"
-          >
-            <span style={{ fontSize: '15px' }}>🚪</span>
-          </button>
-        )}
+          {onToggleTheme && (
+            <button
+              type="button"
+              className="header-action-btn"
+              onClick={onToggleTheme}
+              title={theme === 'dark' ? 'Переключить на светлую тему' : 'Переключить на тёмную тему'}
+            >
+              <span style={{ fontSize: '15px', lineHeight: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>{theme === 'dark' ? '🌙' : '☀️'}</span>
+            </button>
+          )}
+
+          {authStatus?.enabled && authStatus?.authenticated && onLogout && (
+            <button
+              type="button"
+              className="header-action-btn"
+              onClick={onLogout}
+              title="Выйти из панели"
+            >
+              <span style={{ fontSize: '15px', lineHeight: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>🚪</span>
+            </button>
+          )}
+        </div>
       </div>
     </header>
   )

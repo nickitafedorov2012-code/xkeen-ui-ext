@@ -903,43 +903,63 @@ export default function Zapret({ notify }: ZapretProps) {
     desc: string,
     activeInfo: string,
     inactiveInfo: string,
-    tags?: string[]
+    tags?: string[],
+    supportedEngines?: ('v1' | 'v2')[]
   ) => {
     const isChecked = !!features[key]
     const isPending = pendingKeys.has(key) || togglingFeature === key
-    const isCardDisabled = isPending || busy || !isInstalled
+    const isEngineSupported = !supportedEngines || supportedEngines.includes(activeEngine)
+    const isCardDisabled = isPending || busy || !isInstalled || !isEngineSupported
 
     return (
       <div
         key={key}
+        data-testid={`zapret-card-${key}`}
         style={{
           padding: '16px 18px',
           borderRadius: 14,
-          background: isChecked ? 'rgba(56, 189, 248, 0.06)' : 'rgba(255, 255, 255, 0.02)',
-          border: isChecked ? '1px solid rgba(56, 189, 248, 0.35)' : '1px solid var(--border)',
+          background: isChecked && isEngineSupported ? 'rgba(56, 189, 248, 0.06)' : 'rgba(255, 255, 255, 0.02)',
+          border: isChecked && isEngineSupported ? '1px solid rgba(56, 189, 248, 0.35)' : '1px solid var(--border)',
           display: 'flex',
           flexDirection: 'column',
           justifyContent: 'space-between',
           gap: 12,
           transition: 'all 0.2s ease',
-          boxShadow: isChecked ? '0 4px 16px rgba(56, 189, 248, 0.06)' : 'none',
+          boxShadow: isChecked && isEngineSupported ? '0 4px 16px rgba(56, 189, 248, 0.06)' : 'none',
+          opacity: isEngineSupported ? 1 : 0.45,
+          filter: isEngineSupported ? 'none' : 'grayscale(0.8)',
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
           <div style={{ flex: 1 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-              <b style={{ fontSize: 14, color: isChecked ? 'var(--text)' : 'var(--muted)' }}>{title}</b>
+              <b style={{ fontSize: 14, color: isChecked && isEngineSupported ? 'var(--text)' : 'var(--muted)' }}>{title}</b>
               <span
                 className="badge"
                 style={{
                   fontSize: 10,
-                  background: isChecked ? 'rgba(56, 189, 248, 0.2)' : 'rgba(255, 255, 255, 0.05)',
-                  color: isChecked ? '#38bdf8' : 'var(--muted)',
-                  border: isChecked ? '1px solid rgba(56, 189, 248, 0.4)' : '1px solid var(--border)',
+                  background: isChecked && isEngineSupported ? 'rgba(56, 189, 248, 0.2)' : 'rgba(255, 255, 255, 0.05)',
+                  color: isChecked && isEngineSupported ? '#38bdf8' : 'var(--muted)',
+                  border: isChecked && isEngineSupported ? '1px solid rgba(56, 189, 248, 0.4)' : '1px solid var(--border)',
                 }}
               >
                 {badgeText}
               </span>
+              {!isEngineSupported && (
+                <span
+                  className="badge"
+                  style={{
+                    fontSize: 10,
+                    background: 'rgba(239, 68, 68, 0.15)',
+                    color: '#f87171',
+                    border: '1px solid rgba(239, 68, 68, 0.35)',
+                    fontWeight: 600,
+                  }}
+                  title={`Данная функция поддерживается только движком Запрет ${supportedEngines?.map((e) => (e === 'v2' ? '2.0 (Modern)' : '1.x (Legacy)')).join(', ')}`}
+                >
+                  🔒 Только для Запрет {supportedEngines?.map((e) => (e === 'v2' ? '2.0 (Modern)' : '1.x (Legacy)')).join(', ')}
+                </span>
+              )}
             </div>
             <p className="muted small" style={{ margin: '6px 0 0', lineHeight: 1.45 }}>
               {desc}
@@ -953,9 +973,9 @@ export default function Zapret({ notify }: ZapretProps) {
                       fontSize: 10,
                       padding: '1px 6px',
                       borderRadius: 4,
-                      background: isChecked ? 'rgba(56, 189, 248, 0.12)' : 'rgba(255, 255, 255, 0.04)',
-                      color: isChecked ? '#38bdf8' : 'var(--muted)',
-                      border: isChecked ? '1px solid rgba(56, 189, 248, 0.25)' : '1px solid var(--border)',
+                      background: isChecked && isEngineSupported ? 'rgba(56, 189, 248, 0.12)' : 'rgba(255, 255, 255, 0.04)',
+                      color: isChecked && isEngineSupported ? '#38bdf8' : 'var(--muted)',
+                      border: isChecked && isEngineSupported ? '1px solid rgba(56, 189, 248, 0.25)' : '1px solid var(--border)',
                       fontFamily: 'Consolas, monospace',
                     }}
                   >
@@ -977,7 +997,7 @@ export default function Zapret({ notify }: ZapretProps) {
               borderRadius: 16,
               border: 'none',
               cursor: isCardDisabled ? 'not-allowed' : 'pointer',
-              background: isChecked
+              background: isChecked && isEngineSupported
                 ? 'linear-gradient(135deg, #38bdf8 0%, #2563eb 100%)'
                 : 'rgba(255, 255, 255, 0.15)',
               position: 'relative',
@@ -985,9 +1005,15 @@ export default function Zapret({ notify }: ZapretProps) {
               padding: 2,
               flexShrink: 0,
               marginTop: 2,
-              boxShadow: isChecked ? '0 0 12px rgba(56, 189, 248, 0.4)' : 'none',
+              boxShadow: isChecked && isEngineSupported ? '0 0 12px rgba(56, 189, 248, 0.4)' : 'none',
             }}
-            title={isChecked ? 'Выключить блок' : 'Включить блок'}
+            title={
+              !isEngineSupported
+                ? `Недоступно для текущего движка (требуется Запрет ${supportedEngines?.join(', ').toUpperCase()})`
+                : isChecked
+                ? 'Выключить блок'
+                : 'Включить блок'
+            }
           >
             <div
               style={{
@@ -995,18 +1021,18 @@ export default function Zapret({ notify }: ZapretProps) {
                 height: 24,
                 borderRadius: '50%',
                 background: '#fff',
-                transform: isChecked ? 'translateX(22px)' : 'translateX(0)',
+                transform: isChecked && isEngineSupported ? 'translateX(22px)' : 'translateX(0)',
                 transition: 'transform 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
                 boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 fontSize: 10,
-                color: isChecked ? '#2563eb' : '#888',
+                color: isChecked && isEngineSupported ? '#2563eb' : '#888',
                 fontWeight: 'bold',
               }}
             >
-              {isPending ? renderMicroSpinner(isChecked ? '#2563eb' : '#888', 13) : isChecked ? '✓' : '✕'}
+              {isPending ? renderMicroSpinner(isChecked ? '#2563eb' : '#888', 13) : isChecked && isEngineSupported ? '✓' : '✕'}
             </div>
           </button>
         </div>
@@ -1025,18 +1051,22 @@ export default function Zapret({ notify }: ZapretProps) {
             overflow: 'hidden',
           }}
         >
-          <span style={{ color: isChecked && isRunning ? '#38bdf8' : 'var(--muted)', fontWeight: 500 }}>
-            {!isRunning && isChecked
+          <span style={{ color: isChecked && isRunning && isEngineSupported ? '#38bdf8' : 'var(--muted)', fontWeight: 500 }}>
+            {!isEngineSupported
+              ? `🔒 Не поддерживается в Запрет ${activeEngine.toUpperCase()}`
+              : !isRunning && isChecked
               ? `⚪ ${activeInfo} (Zapret остановлен)`
               : isChecked
               ? `🟢 ${activeInfo}`
               : `⚪ ${inactiveInfo}`}
           </span>
           <span style={{ fontSize: 10, opacity: 0.8 }}>
-            {!isRunning && isChecked
+            {!isEngineSupported
+              ? 'Только ' + supportedEngines?.join(', ').toUpperCase()
+              : !isRunning && isChecked
               ? 'Остановлена со службой'
               : isChecked
-              ? 'Активна в nfqws2'
+              ? 'Активна в ' + (activeEngine === 'v2' ? 'nfqws2' : 'nfqws')
               : 'Отключена'}
           </span>
         </div>
@@ -2895,13 +2925,24 @@ export default function Zapret({ notify }: ZapretProps) {
                 <button
                   type="button"
                   className={`btn sm ${activePreset === 'aggressive' ? 'primary' : 'ghost'}`}
-                  disabled={busy || !isInstalled}
+                  disabled={busy || !isInstalled || activeEngine === 'v1'}
                   onClick={() => handleApplyPreset('aggressive')}
-                  title="Все стратегии + Агрессивный режим для жестких ТСПУ"
-                  style={activePreset === 'aggressive' ? { border: '1px solid #38bdf8', color: '#38bdf8', background: 'rgba(56, 189, 248, 0.15)' } : {}}
+                  title={
+                    activeEngine === 'v1'
+                      ? 'Пресет «🔥 Агрессивный» доступен только для Запрет 2.0 (Modern nfqws2)'
+                      : 'Все стратегии + Агрессивный режим для жестких ТСПУ'
+                  }
+                  style={{
+                    ...(activePreset === 'aggressive'
+                      ? { border: '1px solid #38bdf8', color: '#38bdf8', background: 'rgba(56, 189, 248, 0.15)' }
+                      : {}),
+                    ...(activeEngine === 'v1'
+                      ? { opacity: 0.45, filter: 'grayscale(0.8)', cursor: 'not-allowed' }
+                      : {}),
+                  }}
                 >
                   {pendingKeys.has('preset:aggressive') && <span style={{ marginRight: 6 }}>{renderMicroSpinner('#38bdf8', 11)}</span>}
-                  🔥 Агрессивный
+                  🔥 Агрессивный {activeEngine === 'v1' ? '(v2)' : ''}
                 </button>
 
                 <button
@@ -2969,7 +3010,8 @@ export default function Zapret({ notify }: ZapretProps) {
             'ТСПУ BOOST',
             'Перекрытие последовательностей (seqovl=1), сплит по середине SNI (pos=1,midsld), повторы repeats=6 и подделка ts,md5sig. Пробивает жесткие блокировки мобильных и кабельных операторов.',
             'seqovl=1, pos=1,midsld, repeats=6, ts,md5sig',
-            'базовые стратегии'
+            'базовые стратегии',
+            ['v2']
           )}
 
           {/* 4. Изоляция IP-блокировок */}

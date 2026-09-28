@@ -406,14 +406,24 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
       await new Promise((r) => setTimeout(r, 50))
     })
 
-    // 1. Whole integer rounded CPU temp & XKeen RAM consumption
+    // 1. Whole integer rounded CPU temp & XKeen RAM consumption in UI text
     const text = container?.textContent || ''
     expect(text).toContain('43°C')
     expect(text).not.toContain('42.9°C')
     expect(text).toContain('110 МБ')
     expect(text).not.toContain('109.7 МБ')
 
-    // 2. Gaming pill button must not be present
-    expect(container?.querySelector('[data-testid="header-gaming-pill"]')).toBeNull()
+    // 2. Whole integer rounded numbers in tooltips (title attributes)
+    const html = container?.innerHTML || ''
+    expect(html).toContain('Температура процессора: 43°C')
+    expect(html).not.toContain('42.9')
+    expect(html).not.toContain('109.7')
+    expect(html).not.toContain('99.9')
+    expect(html).not.toContain('9.8')
+
+    // 3. Gaming pill button MUST be present
+    const gamingPill = container?.querySelector('[data-testid="header-gaming-pill"]')
+    expect(gamingPill).not.toBeNull()
+    expect(gamingPill?.textContent).toContain('Игры')
   })
 })

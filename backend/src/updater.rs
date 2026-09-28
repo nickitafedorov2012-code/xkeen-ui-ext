@@ -90,7 +90,7 @@ pub fn extract_notes_from_markdown(text: &str, tag: &str) -> String {
     let mut in_section = false;
     for line in text.lines() {
         let t = line.trim();
-        if t.starts_with("### ") {
+        if t.starts_with("### ") || t.starts_with("## ") {
             if in_section {
                 break;
             }
@@ -103,11 +103,11 @@ pub fn extract_notes_from_markdown(text: &str, tag: &str) -> String {
             lines.push(t[2..].trim().to_string());
         }
     }
-    // Если точный тег не найден, берём самую верхнюю секцию ### v...
+    // Если точный тег не найден, берём самую верхнюю секцию ### v... или ## v...
     if lines.is_empty() {
         for line in text.lines() {
             let t = line.trim();
-            if t.starts_with("### ") {
+            if t.starts_with("### ") || t.starts_with("## ") {
                 if in_section {
                     break;
                 }
@@ -1006,5 +1006,27 @@ mod tests {
         // Corrupted / non-ELF header
         let text_hdr = b"<!DOCTYPE html><html>";
         assert!(validate_elf_header(text_hdr, "aarch64").is_err());
+    }
+
+    #[test]
+    fn test_extract_notes_from_markdown_h2_and_h3() {
+        let md = r#"
+# Changelog
+
+## v1.5.25 (Restore Zapret button, Gaming Switch & DPI Audit)
+- Restored Zapret button with active glowing state
+- Added per-device gaming toggle
+- Fast parallel DPI test
+
+## v1.5.24 (Previous release)
+- Old feature
+"#;
+        let notes_exact = extract_notes_from_markdown(md, "v1.5.25");
+        assert!(notes_exact.contains("Restored Zapret button with active glowing state"));
+        assert!(notes_exact.contains("Added per-device gaming toggle"));
+        assert!(!notes_exact.contains("Old feature"));
+
+        let notes_fallback = extract_notes_from_markdown(md, "v9.9.9");
+        assert!(notes_fallback.contains("Restored Zapret button with active glowing state"));
     }
 }

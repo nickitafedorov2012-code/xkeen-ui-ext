@@ -14,7 +14,7 @@ if (!fs.existsSync(SCREENSHOT_DIR)) {
 
 // 1. Mock API Data
 const mockStatus = {
-  version: "v1.5.24",
+  version: "v1.5.25",
   config_path: "/opt/etc/xkeen-route/config.json",
   router: {
     model: "Keenetic Peak (KN-4110) WBR3000UAX",
@@ -193,13 +193,13 @@ const mockSettings = {
   notifications: { telegram_enabled: true, telegram_bot_token: "61829381:AAF_ExampleToken_xyz", telegram_chat_id: "89124125", webhook_url: "" }
 };
 
-const mockLogs = `2026-09-24 05:14:22 [INFO] XKeen Route v1.3.3 готов к работе на порту 1001
-2026-09-24 05:14:23 [INFO] [RCI] Соединение с роутером Keenetic KN-4110 (KeeneticOS 4.2.1) установлено
-2026-09-24 05:14:23 [INFO] [Mihomo] Конфиг /opt/etc/mihomo/config.yaml прочитан (успешно, 10 серверов)
-2026-09-24 05:14:25 [INFO] [Failover] Активный сервер: 🇩🇪 Германия Frankfurt [VLESS-Reality] (пинг 34 мс < 250 мс)
-2026-09-24 05:14:30 [INFO] [Per-Device] 5 устройств привязаны к персональным серверам маршрутизации
-2026-09-24 05:14:35 [INFO] [SmartDNS] DNS cache warmed up (240 записей, Fake-IP режим активен)
-2026-09-24 05:15:00 [INFO] [Failover] Проверка по расписанию: все узлы доступны, статус OK`;
+const mockLogs = `2026-09-28 07:58:04 [INFO] XKeen Route v1.5.25 готов к работе на порту 1001
+2026-09-28 07:58:05 [INFO] [RCI] Соединение с роутером Keenetic KN-4110 (KeeneticOS 5.0.11) установлено
+2026-09-28 07:58:05 [INFO] [Mihomo] Конфиг /opt/etc/mihomo/config.yaml прочитан (успешно, 10 серверов)
+2026-09-28 07:58:07 [INFO] [Failover] Активный сервер: 🇩🇪 Германия Frankfurt [VLESS-Reality] (пинг 34 мс < 250 мс)
+2026-09-28 07:58:12 [INFO] [Per-Device] 5 устройств привязаны к персональным серверам маршрутизации
+2026-09-28 07:58:15 [INFO] [SmartDNS] DNS cache warmed up (240 записей, Fake-IP режим активен)
+2026-09-28 07:58:40 [INFO] [Failover] Проверка по расписанию: все узлы доступны, статус OK`;
 
 const mockZapret = {
   installed: true,
@@ -239,7 +239,7 @@ const server = http.createServer((req, res) => {
     if (apiPath === 'status') return jsonOk(mockStatus);
     if (apiPath === 'system/metrics') return jsonOk(mockStatus.system);
     if (apiPath === 'auth/status') return jsonOk({ enabled: false, authenticated: true });
-    if (apiPath === 'update/check') return jsonOk({ current: "v1.3.3", latest: "v1.3.3", update_available: false, notes: [] });
+    if (apiPath === 'update/check') return jsonOk({ current: "v1.5.25", latest: "v1.5.25", update_available: false, notes: [] });
     if (apiPath === 'failover/events') return jsonOk({
       events: [
         { time: "05:14:22", message: "🇩🇪 Германия Frankfurt (34 мс) — в норме", switched: false },
