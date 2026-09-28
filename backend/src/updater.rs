@@ -400,11 +400,22 @@ pub async fn install(State(state): State<AppState>) -> Response {
     crate::log_i!("[UPDATE] Установлена {ver}, перезапуск сервиса");
     // Перезапуск после ответа клиенту: spawn — панель перезапустится сама.
     if Path::new(INIT_SCRIPT).exists() {
-        _ = tokio::process::Command::new(INIT_SCRIPT)
-            .arg("restart")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
+        #[cfg(unix)]
+        {
+            let restart_cmd = format!("(sleep 1 && {} restart) >/dev/null 2>&1 &", INIT_SCRIPT);
+            let _ = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&restart_cmd)
+                .spawn();
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::process::Command::new(INIT_SCRIPT)
+                .arg("restart")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+        }
         api_ok(json!({ "installed": ver, "restarting": true }))
     } else {
         api_err(format!("{ver} установлена, но {INIT_SCRIPT} не найден — перезапустите вручную"))

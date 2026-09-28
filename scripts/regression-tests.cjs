@@ -719,6 +719,20 @@ runTest('18. Boost Update: Strategy Visual Feedback, Smart Gaming & 60s Traffic 
   assert(dashboardTsx.includes('devicesCount'), 'Dashboard.tsx must display connected devices count');
 });
 
+// -------------------------------------------------------------
+// 19. Updater Detached Safe Self-Restart & Response Handshake Protection
+// -------------------------------------------------------------
+runTest('19. Updater Detached Safe Self-Restart & Response Handshake Protection', () => {
+  const updaterRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/updater.rs'), 'utf8');
+
+  // 1. updater.rs must delay restart by 1 second in detached background shell on unix
+  // to ensure HTTP 200 { "installed": ver, "restarting": true } response finishes before killall
+  assert(updaterRs.includes('(sleep 1 && {} restart) >/dev/null 2>&1 &') || updaterRs.includes('sleep 1 &&'), 
+    'updater.rs must detach restart command with 1s sleep delay to prevent premature process termination');
+  assert(updaterRs.includes('BIN_PATH: &str = "/opt/sbin/xkeen-route"'), 'updater.rs must define BIN_PATH as /opt/sbin/xkeen-route');
+  assert(updaterRs.includes('INIT_SCRIPT: &str = "/opt/etc/init.d/S99xkeen-route"'), 'updater.rs must define INIT_SCRIPT as /opt/etc/init.d/S99xkeen-route');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
 
 
