@@ -7589,6 +7589,7 @@ pub async fn toggle_gaming(
                     ipv6: Vec::new(),
                     name: "Игровое устройство".into(),
                     enabled: true,
+                    server: None,
                 });
             }
         }
