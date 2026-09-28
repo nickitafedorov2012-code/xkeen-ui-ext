@@ -438,4 +438,47 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
     expect(container?.querySelector('button[title="Редактор конфигов"]')).not.toBeNull()
     expect(container?.querySelector('button[title*="тему"]')).not.toBeNull()
   })
+
+  it('contains all header sections strictly inside .header-bar container block without gaming switch', async () => {
+    vi.spyOn(api, 'apiGet').mockResolvedValue({})
+
+    await act(async () => {
+      root!.render(
+        <Header
+          status={mockStatus}
+          notify={notifyMock}
+          refresh={refreshMock}
+          onSwitchTab={onSwitchTabMock}
+        />
+      )
+    })
+
+    const headerBar = container?.querySelector('header.header-bar')
+    expect(headerBar).not.toBeNull()
+
+    const headerLeft = headerBar?.querySelector('.header-left')
+    const headerCenter = headerBar?.querySelector('.header-center')
+    const headerRight = headerBar?.querySelector('.header-right')
+
+    expect(headerLeft).not.toBeNull()
+    expect(headerCenter).not.toBeNull()
+    expect(headerRight).not.toBeNull()
+
+    // Status badge and service actions are inside header-left
+    expect(headerLeft?.querySelector('.status-badge-custom')).not.toBeNull()
+    expect(headerLeft?.querySelector('.header-actions')).not.toBeNull()
+
+    // Brand logo link is inside header-center
+    expect(headerCenter?.querySelector('.header-brand-link')).not.toBeNull()
+
+    // Mihomo, App version, Zapret chips are inside header-right
+    expect(headerRight?.querySelector('[data-testid="header-mihomo-pill"]')).not.toBeNull()
+    expect(headerRight?.querySelector('[data-testid="header-app-pill"]')).not.toBeNull()
+    expect(headerRight?.querySelector('[data-testid="header-zapret-pill"]')).not.toBeNull()
+
+    // Gaming pill and toggle are completely absent from header-bar
+    expect(headerBar?.querySelector('[data-testid="header-gaming-pill"]')).toBeNull()
+    expect(headerBar?.textContent).not.toContain('Игры ВЫКЛ')
+    expect(headerBar?.textContent).not.toContain('Игры ВКЛ')
+  })
 })

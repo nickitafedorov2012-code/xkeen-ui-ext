@@ -810,7 +810,38 @@ runTest('22. Zapret renderStrategyCard aggressive_dpi arguments alignment and en
   assert(match, 'Zapret.tsx must pass tags and supportedEngines (v2) to renderStrategyCard for aggressive_dpi');
 });
 
+// -------------------------------------------------------------
+// 23. Header layout containment: gaming pill removed, header-bar flex-wrap & non-overflowing bounds protection
+// -------------------------------------------------------------
+runTest('23. Header layout containment: gaming pill removed, header-bar flex-wrap & non-overflowing bounds protection', () => {
+  const headerTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Header.tsx'), 'utf8');
+  const stylesCss = fs.readFileSync(path.resolve(__dirname, '../frontend/src/styles.css'), 'utf8');
+
+  // 1. Gaming pill switch must NOT be present in Header.tsx
+  assert(!headerTsx.includes('data-testid="header-gaming-pill"'), 'Header.tsx must not contain header-gaming-pill');
+  assert(!headerTsx.includes('gaming/toggle'), 'Header.tsx must not contain gaming/toggle endpoint call');
+
+  // 2. styles.css must not have leftover header-pill-gaming-active
+  assert(!stylesCss.includes('header-pill-gaming-active'), 'styles.css must not contain obsolete header-pill-gaming-active');
+
+  // 3. header-bar must have flex-wrap: wrap, box-sizing: border-box, max-width: 100% to fit in one block
+  assert(stylesCss.includes('.header-bar {'), 'styles.css must style .header-bar');
+  const headerBarMatch = stylesCss.match(/\.header-bar\s*\{([^}]+)\}/);
+  assert(headerBarMatch, 'styles.css must define .header-bar block');
+  const headerBarRules = headerBarMatch[1];
+  assert(headerBarRules.includes('flex-wrap: wrap'), '.header-bar must have flex-wrap: wrap to prevent element overflow');
+  assert(headerBarRules.includes('box-sizing: border-box'), '.header-bar must have box-sizing: border-box');
+  assert(headerBarRules.includes('max-width: 100%'), '.header-bar must have max-width: 100%');
+
+  // 4. header-right must have flex-wrap: wrap to allow pills to wrap within container bounds
+  const headerRightMatch = stylesCss.match(/\.header-right\s*\{([^}]+)\}/);
+  assert(headerRightMatch, 'styles.css must define .header-right block');
+  const headerRightRules = headerRightMatch[1];
+  assert(headerRightRules.includes('flex-wrap: wrap'), '.header-right must have flex-wrap: wrap to prevent overflowing block boundary');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
+
 
 
 
