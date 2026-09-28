@@ -710,11 +710,10 @@ pub async fn kill_process_by_pid(pid: u32, _signal: Option<&str>) -> Result<Stri
         }
     }
 
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = (pid, _signal);
-            Ok(format!("(Симуляция) Сигнал успешно отправлен процессу PID {}", pid))
-        }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pid, _signal);
+        Ok(format!("(Симуляция) Сигнал успешно отправлен процессу PID {}", pid))
     }
 }
 
