@@ -14,7 +14,7 @@ if (!fs.existsSync(SCREENSHOT_DIR)) {
 
 // 1. Mock API Data
 const mockStatus = {
-  version: "v1.3.21",
+  version: "v1.5.23",
   config_path: "/opt/etc/xkeen-route/config.json",
   router: {
     model: "Keenetic Peak (KN-4110) WBR3000UAX",
@@ -24,6 +24,7 @@ const mockStatus = {
   },
   system: {
     cpu_percent: 6,
+    cpu_temp_c: 43.0,
     memory_used_mb: 234,
     memory_total_mb: 512,
     app_memory_mb: 12.4,
@@ -446,6 +447,7 @@ async function main() {
       { tab: 'connections', filename: 'connections.png', waitMs: 1500 },
       { tab: 'rules', filename: 'rules.png', waitMs: 1500 },
       { tab: 'diagnostics', filename: 'diagnostics.png', waitMs: 1500 },
+      { tab: 'gaming', filename: 'gaming.png', waitMs: 1500 },
       { tab: 'google-ai', filename: 'google_ai.png', waitMs: 1500 },
       { tab: 'zapret', filename: 'zapret.png', waitMs: 1500 },
       { tab: 'settings', filename: 'settings.png', waitMs: 1500 },
