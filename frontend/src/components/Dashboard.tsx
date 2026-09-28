@@ -404,7 +404,7 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                   <span>Позиция в цепочке</span>
                   <b>
                     {f!.priority_chain!.indexOf(status.active_server.id) === 0 ? (
-                      <span style={{ color: '#22c55e' }}>ОСН (основной)</span>
+                      <span style={{ color: '#38bdf8' }}>ОСН (основной)</span>
                     ) : (
                       <span style={{ color: '#eab308' }}>
                         РЕЗ{f!.priority_chain!.indexOf(status.active_server.id)} (резервный)

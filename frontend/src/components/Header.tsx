@@ -428,10 +428,10 @@ export default function Header({
                   <span className="status-stat-sep">|</span>
                   <span
                     className="status-stat"
-                    title={`Потребление XKeen: всего ${totalXkeenMem > 0 ? totalXkeenMem : appMemMb} МБ RAM (Панель XR: ${appMemMb} МБ, Ядро Mihomo: ${coreMemMb > 0 ? coreMemMb + ' МБ' : '—'}), CPU: ${appCpu}%`}
+                    title={`Потребление XKeen: всего ${Math.round(totalXkeenMem > 0 ? totalXkeenMem : appMemMb)} МБ RAM (Панель XR: ${Math.round(appMemMb)} МБ, Ядро Mihomo: ${coreMemMb > 0 ? Math.round(coreMemMb) + ' МБ' : '—'}), CPU: ${Math.round(appCpu)}%`}
                   >
                     <span className="status-xr-label">XKeen:</span>
-                    <span>{totalXkeenMem > 0 ? totalXkeenMem : appMemMb} МБ</span>
+                    <span>{Math.round(totalXkeenMem > 0 ? totalXkeenMem : appMemMb)} МБ</span>
                   </span>
                 </>
               )}

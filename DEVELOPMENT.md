@@ -966,6 +966,14 @@
   * **Динамический бейдж Mini-Blockcheck:** Устранен хардкод zapret2 engine при активном движке v1.
   * **Точный расчет задержек YouTube:** Исключен ложный учет 4-секундного таймаута заблокированного curl probe как сетевой задержки.
 
+## v1.5.24 (Whole Number Metrics Rounding, Failover Primary Blue Accent & Visual Refinements)
+- **Целые числа для всех системных метрик (`frontend/src/components/Header.tsx`, `Header.test.tsx`)**:
+  * Округление оперативной памяти XKeen и нагрузки процессора до целых чисел (`Math.round(...)`), исключая появление дробных хвостов вроде `60.6 МБ` или `105.4 МБ`.
+- **Единый небесно-синий цвет для активного сервера (`frontend/src/components/Dashboard.tsx`)**:
+  * Статус основного сервера в карточке Failover-контроля (`ОСН (основной)`) переведён с зелёного на фирменный синий (`#38bdf8`), обеспечивая визуальное единство с карточкой активного сервера.
+- **Очистка стилей и анти-регрессионные тесты (`frontend/src/styles.css`, `scripts/regression-tests.cjs`)**:
+  * Удаление устаревших неиспользуемых CSS-стилей кнопки Zapret, расширение теста 20 на валидацию округления памяти XKeen и синего акцента цепочки серверов.
+
 ## v1.5.23 (Device Zapret Toggle Switch, Whole CPU Temp, Blue Active Server Card & Header Cleanup)
 - **Удобный тумблер Запрета в таблице устройств (`frontend/src/components/DeviceRow.tsx`, `Devices.test.tsx`)**:
   * Замена кнопки на стандартный компактный переключатель-тумблер (`.switch` с `.slider`) в колонке «Zapret (DPI)».

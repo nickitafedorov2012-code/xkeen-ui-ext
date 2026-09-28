@@ -406,10 +406,12 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
       await new Promise((r) => setTimeout(r, 50))
     })
 
-    // 1. Whole integer rounded CPU temp
+    // 1. Whole integer rounded CPU temp & XKeen RAM consumption
     const text = container?.textContent || ''
     expect(text).toContain('43°C')
     expect(text).not.toContain('42.9°C')
+    expect(text).toContain('110 МБ')
+    expect(text).not.toContain('109.7 МБ')
 
     // 2. Gaming pill button must not be present
     expect(container?.querySelector('[data-testid="header-gaming-pill"]')).toBeNull()

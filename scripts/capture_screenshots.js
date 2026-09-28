@@ -14,7 +14,7 @@ if (!fs.existsSync(SCREENSHOT_DIR)) {
 
 // 1. Mock API Data
 const mockStatus = {
-  version: "v1.5.23",
+  version: "v1.5.24",
   config_path: "/opt/etc/xkeen-route/config.json",
   router: {
     model: "Keenetic Peak (KN-4110) WBR3000UAX",
