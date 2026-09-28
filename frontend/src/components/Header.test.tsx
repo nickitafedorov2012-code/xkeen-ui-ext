@@ -391,6 +391,9 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
       return Promise.resolve({})
     })
 
+    const onOpenEditorMock = vi.fn()
+    const onToggleThemeMock = vi.fn()
+
     await act(async () => {
       root!.render(
         <Header
@@ -398,6 +401,8 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
           notify={notifyMock}
           refresh={refreshMock}
           onSwitchTab={onSwitchTabMock}
+          onOpenEditor={onOpenEditorMock}
+          onToggleTheme={onToggleThemeMock}
         />
       )
     })
@@ -421,9 +426,16 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
     expect(html).not.toContain('99.9')
     expect(html).not.toContain('9.8')
 
-    // 3. Gaming pill button MUST be present
+    // 3. Gaming pill button MUST be absent per user request
     const gamingPill = container?.querySelector('[data-testid="header-gaming-pill"]')
-    expect(gamingPill).not.toBeNull()
-    expect(gamingPill?.textContent).toContain('Игры')
+    expect(gamingPill).toBeNull()
+
+    // 4. Right action buttons [?] [⚙] [📝] [🌙] remain accessible
+    const helpBtn = container?.querySelector('[data-testid="header-help-btn"]')
+    const settingsBtn = container?.querySelector('[data-testid="header-settings-btn"]')
+    expect(helpBtn).not.toBeNull()
+    expect(settingsBtn).not.toBeNull()
+    expect(container?.querySelector('button[title="Редактор конфигов"]')).not.toBeNull()
+    expect(container?.querySelector('button[title*="тему"]')).not.toBeNull()
   })
 })

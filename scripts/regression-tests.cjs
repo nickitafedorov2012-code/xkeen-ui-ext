@@ -753,8 +753,8 @@ runTest('20. DeviceRow Zapret Switch, CPU Temp Rounding, Blue Active Server & He
   assert(headerTsx.includes('const appMemMb = Math.round(currentMetrics?.app_memory_mb ?? 0)'), 'Header.tsx must round app memory to whole integer at declaration');
   assert(!headerTsx.includes('{cpuTemp.toFixed(1)}°C'), 'Header.tsx must not format CPU temp with decimals');
 
-  // 3. Header must contain the restored gaming pill button
-  assert(headerTsx.includes('data-testid="header-gaming-pill"'), 'Header.tsx must contain restored header-gaming-pill button');
+  // 3. Header must NOT contain header-gaming-pill button (removed per user request to keep header clean)
+  assert(!headerTsx.includes('data-testid="header-gaming-pill"'), 'Header.tsx must NOT contain header-gaming-pill button (removed per user request to keep header clean)');
   assert(headerTsx.includes('header-actions-right'), 'Header.tsx must wrap right action buttons in header-actions-right container');
 
   // 4. Dashboard Active Server card, Failover primary & Servers list badge must use blue accents (#38bdf8) instead of green (#22c55e)

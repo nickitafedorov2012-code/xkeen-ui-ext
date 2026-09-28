@@ -570,33 +570,6 @@ export default function Header({
           )}
         </button>
 
-        {/* Чип Игрового режима */}
-        <button
-          type="button"
-          data-testid="header-gaming-pill"
-          className={`header-pill-btn ${status?.gaming?.enabled ? 'header-pill-gaming-active' : ''}`}
-          onClick={async (e) => {
-            if (e.altKey || e.shiftKey) {
-              onSwitchTab('gaming')
-            } else {
-              const next = !Boolean(status?.gaming?.enabled)
-              try {
-                await apiPost('gaming/toggle', { enabled: next })
-                notify(next ? 'Игровой режим включён' : 'Игровой режим выключен')
-                await refresh()
-              } catch (err: any) {
-                notify(err?.message || 'Ошибка переключения игрового режима', true)
-                onSwitchTab('gaming')
-              }
-            }
-          }}
-          title={status?.gaming?.enabled ? 'Игровой режим включён (нажмите для выключения, Alt+клик для перехода в меню)' : 'Игровой режим выключен (нажмите для включения, Alt+клик для перехода в меню)'}
-        >
-          <span style={{ fontSize: '14px', lineHeight: 1 }}>🎮</span>
-          <span className="header-pill-title">Игры</span>
-          <span className="header-pill-subtitle">{status?.gaming?.enabled ? 'ВКЛ' : 'ВЫКЛ'}</span>
-        </button>
-
         <div className="header-actions header-actions-right">
           {/* Кнопка справки и API документации */}
           <button
