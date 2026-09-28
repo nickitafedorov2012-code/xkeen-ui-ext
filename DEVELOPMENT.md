@@ -966,6 +966,19 @@
   * **Динамический бейдж Mini-Blockcheck:** Устранен хардкод zapret2 engine при активном движке v1.
   * **Точный расчет задержек YouTube:** Исключен ложный учет 4-секундного таймаута заблокированного curl probe как сетевой задержки.
 
+## v1.5.23 (Device Zapret Toggle Switch, Whole CPU Temp, Blue Active Server Card & Header Cleanup)
+- **Удобный тумблер Запрета в таблице устройств (`frontend/src/components/DeviceRow.tsx`, `Devices.test.tsx`)**:
+  * Замена кнопки на стандартный компактный переключатель-тумблер (`.switch` с `.slider`) в колонке «Zapret (DPI)».
+  * Быстрое и наглядное включение/отключение обхода DPI индивидуально для каждого клиента сети.
+- **Округление температуры CPU до целых градусов (`frontend/src/components/Header.tsx`, `Header.test.tsx`)**:
+  * Значение температуры процессора в шапке панели теперь всегда округляется до целого числа (`Math.round(cpuTemp)}°C`).
+- **Синий акцент для карточки Активного сервера (`frontend/src/components/Dashboard.tsx`)**:
+  * Индикатор «🔵 В сети», график отклика PingSparkline и бейджи роли переведены в стильный небесно-синий цвет (`#38bdf8`) вместо зеленого для идеального визуального контраста.
+- **Очистка шапки (`frontend/src/components/Header.tsx`)**:
+  * Удалена отдельная кнопка-таблетка `🎮 Игра` из заголовка панели для разгрузки верхней панели.
+- **Регламент релизов и фиксация изменений (`SKILL.md`, `GEMINI.md`)**:
+  * Зафиксировано обязательное правило документирования и передачи списка изменений («Что нового») на GitHub и в диалог обновления веб-панели при каждом коммите новой версии.
+
 ## v1.5.22 (Smart Gaming Mode, Dual Zapret Switcher, 60s Traffic History, Interactive API Docs, System Telemetry & UI Overhaul)
 - **Умный игровой режим (Smart Gaming Mode) и селекторы серверов устройств (`backend/src/config.rs`, `backend/src/routing.rs`, `backend/src/watchdog.rs`, `frontend/src/components/Gaming.tsx`, `DeviceRoutingModal.tsx`)**:
   * **Smart Gaming Mode:** Фоновый сторожевой демон в реальном времени мониторит активные UDP/TCP игровые порты (Steam, CS2, Dota 2, Valorant, Apex, Battle.net, PlayStation, Xbox). При обнаружении игровой активности режим активируется автоматически и удерживается в течение настраиваемого времени простоя (`smart_idle_timeout_mins`).

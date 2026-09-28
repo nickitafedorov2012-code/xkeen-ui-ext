@@ -224,8 +224,8 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
         <section className="card active-server-card" style={{ height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
             <h2 style={{ margin: 0 }}>🛰 Активный сервер</h2>
-            <span className="badge badge-online" style={{ color: '#22c55e' }}>
-              🟢 В сети
+            <span className="badge" style={{ color: '#38bdf8', borderColor: 'rgba(56, 189, 248, 0.3)', background: 'rgba(56, 189, 248, 0.1)' }}>
+              🔵 В сети
             </span>
           </div>
 
@@ -280,9 +280,9 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                     <span>Роль в Failover</span>
                     <b>
                       {f?.priority_server && f.priority_server === status.active_server.name ? (
-                        <span style={{ color: '#22c55e' }}>★ Основной (приоритетный)</span>
+                        <span style={{ color: '#38bdf8' }}>★ Основной (приоритетный)</span>
                       ) : f?.priority_chain && f.priority_chain.indexOf(status.active_server.id) === 0 ? (
-                        <span style={{ color: '#22c55e' }}>★ Основной (в цепочке)</span>
+                        <span style={{ color: '#38bdf8' }}>★ Основной (в цепочке)</span>
                       ) : f?.priority_chain && f.priority_chain.indexOf(status.active_server.id) > 0 ? (
                         <span style={{ color: '#eab308' }}>⚡ Резервный (РЕЗ{f.priority_chain.indexOf(status.active_server.id)})</span>
                       ) : (
@@ -301,7 +301,7 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                   <li>
                     <span>Перехват / NAT</span>
                     <b>
-                      <span style={{ color: '#22c55e' }}>TProxy / Redir</span>
+                      <span style={{ color: '#38bdf8' }}>TProxy / Redir</span>
                       <span className="muted small" style={{ marginLeft: 6, fontWeight: 'normal' }}>(Full-Cone NAT)</span>
                     </b>
                   </li>
@@ -511,18 +511,18 @@ function PingSparkline({ data }: { data: { ms: number; ok: boolean }[] }) {
     <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: 'block' }}>
       <defs>
         <linearGradient id="dashSparkGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#22c55e" stopOpacity="0.25" />
-          <stop offset="100%" stopColor="#22c55e" stopOpacity="0.0" />
+          <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.25" />
+          <stop offset="100%" stopColor="#38bdf8" stopOpacity="0.0" />
         </linearGradient>
       </defs>
       <polygon points={areaPts} fill="url(#dashSparkGrad)" />
-      <polyline points={pts} fill="none" stroke="#22c55e" strokeWidth="1.8" />
+      <polyline points={pts} fill="none" stroke="#38bdf8" strokeWidth="1.8" />
       {data.map((d, i) =>
         d.ok ? null : (
           <circle key={i} cx={i * step} cy={y(d)} r="2.6" fill="var(--red, #e5484d)" />
         ),
       )}
-      <circle cx={(data.length - 1) * step} cy={y(last)} r="3" fill="#22c55e" />
+      <circle cx={(data.length - 1) * step} cy={y(last)} r="3" fill="#38bdf8" />
     </svg>
   )
 }

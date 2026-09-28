@@ -733,7 +733,38 @@ runTest('19. Updater Detached Safe Self-Restart & Response Handshake Protection'
   assert(updaterRs.includes('INIT_SCRIPT: &str = "/opt/etc/init.d/S99xkeen-route"'), 'updater.rs must define INIT_SCRIPT as /opt/etc/init.d/S99xkeen-route');
 });
 
+// -------------------------------------------------------------
+// 20. DeviceRow Zapret Switch, CPU Temp Rounding, Blue Active Server & Header Cleanup
+// -------------------------------------------------------------
+runTest('20. DeviceRow Zapret Switch, CPU Temp Rounding, Blue Active Server & Header Cleanup', () => {
+  const deviceRowTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/DeviceRow.tsx'), 'utf8');
+  const headerTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Header.tsx'), 'utf8');
+  const dashboardTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Dashboard.tsx'), 'utf8');
+  const skillMd = fs.readFileSync(path.resolve('C:/Users/internet/.gemini/config/skills/xkeen-troubleshooting/SKILL.md'), 'utf8');
+
+  // 1. DeviceRow must use clean toggle switch for Zapret
+  assert(deviceRowTsx.includes('className="switch device-zapret-switch"'), 'DeviceRow.tsx must use .switch device-zapret-switch');
+  assert(deviceRowTsx.includes('className="device-zapret-toggle"'), 'DeviceRow.tsx must render checkbox with device-zapret-toggle');
+  assert(!deviceRowTsx.includes('className={`device-zapret-btn'), 'DeviceRow.tsx must not use old device-zapret-btn button');
+
+  // 2. Header must format CPU temperature as whole integer
+  assert(headerTsx.includes('{Math.round(cpuTemp)}°C'), 'Header.tsx must round CPU temp to whole integer');
+  assert(!headerTsx.includes('{cpuTemp.toFixed(1)}°C'), 'Header.tsx must not format CPU temp with decimals');
+
+  // 3. Header must not contain the removed gaming pill button
+  assert(!headerTsx.includes('header-gaming-pill'), 'Header.tsx must have gaming pill button removed');
+
+  // 4. Dashboard Active Server card must use blue accents (#38bdf8) instead of green (#22c55e)
+  assert(dashboardTsx.includes('color: \'#38bdf8\'') && dashboardTsx.includes('🔵 В сети'), 'Dashboard.tsx Active Server badge must be blue (#38bdf8)');
+  assert(dashboardTsx.includes('stroke="#38bdf8"'), 'Dashboard.tsx PingSparkline must use stroke #38bdf8');
+  assert(!dashboardTsx.includes('stroke="#22c55e"'), 'Dashboard.tsx PingSparkline must not use green stroke');
+
+  // 5. Skill file must contain release notes protocol rule
+  assert(skillMd.includes('Обязательный регламент релизов и версионирования (Release Notes & What\'s New)'), 'SKILL.md must document release notes and versioning rule');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
+
 
 
 

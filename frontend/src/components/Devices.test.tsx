@@ -98,25 +98,23 @@ describe('Devices Component — Per-Device Zapret DPI (Feature 3)', () => {
     expect(text).toContain('Smart TV Samsung')
     expect(text).toContain('Work Laptop')
 
-    // Find all zapret buttons
-    const zapretButtons = Array.from(
-      container?.querySelectorAll('button.device-zapret-btn') || []
-    ) as HTMLButtonElement[]
-    expect(zapretButtons.length).toBe(2)
+    // Find all zapret switches
+    const zapretSwitches = Array.from(
+      container?.querySelectorAll('input.device-zapret-toggle') || []
+    ) as HTMLInputElement[]
+    expect(zapretSwitches.length).toBe(2)
 
-    // First button (Smart TV - enabled): active class, "Zapret ON"
-    const tvBtn = zapretButtons[0]
-    expect(tvBtn.className).toContain('active')
-    expect(tvBtn.textContent).toContain('Zapret ON')
+    // First switch (Smart TV - enabled): checked
+    const tvSwitch = zapretSwitches[0]
+    expect(tvSwitch.checked).toBe(true)
 
-    // Second button (Work Laptop - excluded): inactive class, "Zapret OFF"
-    const laptopBtn = zapretButtons[1]
-    expect(laptopBtn.className).toContain('inactive')
-    expect(laptopBtn.textContent).toContain('Zapret OFF')
+    // Second switch (Work Laptop - excluded): unchecked
+    const laptopSwitch = zapretSwitches[1]
+    expect(laptopSwitch.checked).toBe(false)
 
-    // Click on Smart TV button to disable Zapret for it
+    // Click on Smart TV switch to disable Zapret for it
     await act(async () => {
-      tvBtn.click()
+      tvSwitch.click()
     })
 
     expect(postSpy).toHaveBeenCalledWith('devices/zapret-toggle', {
@@ -125,13 +123,12 @@ describe('Devices Component — Per-Device Zapret DPI (Feature 3)', () => {
       enabled: false,
     })
 
-    // Now TV button should have switched to inactive
-    expect(tvBtn.className).toContain('inactive')
-    expect(tvBtn.textContent).toContain('Zapret OFF')
+    // Now TV switch should have switched to unchecked
+    expect(tvSwitch.checked).toBe(false)
 
-    // Click on Laptop button to enable Zapret for it
+    // Click on Laptop switch to enable Zapret for it
     await act(async () => {
-      laptopBtn.click()
+      laptopSwitch.click()
     })
 
     expect(postSpy).toHaveBeenCalledWith('devices/zapret-toggle', {
@@ -140,9 +137,8 @@ describe('Devices Component — Per-Device Zapret DPI (Feature 3)', () => {
       enabled: true,
     })
 
-    // Now Laptop button should have switched to active
-    expect(laptopBtn.className).toContain('active')
-    expect(laptopBtn.textContent).toContain('Zapret ON')
+    // Now Laptop switch should have switched to checked
+    expect(laptopSwitch.checked).toBe(true)
   })
 
   it('correctly handles offline devices with empty IP when toggling Zapret off and on', async () => {
@@ -200,14 +196,13 @@ describe('Devices Component — Per-Device Zapret DPI (Feature 3)', () => {
       })
     }
 
-    const zapretBtn = container?.querySelector('button.device-zapret-btn') as HTMLButtonElement
-    expect(zapretBtn).toBeDefined()
-    expect(zapretBtn.className).toContain('active')
-    expect(zapretBtn.textContent).toContain('Zapret ON')
+    const zapretToggle = container?.querySelector('input.device-zapret-toggle') as HTMLInputElement
+    expect(zapretToggle).toBeDefined()
+    expect(zapretToggle.checked).toBe(true)
 
     // Click to disable Zapret for this device without IP (only MAC)
     await act(async () => {
-      zapretBtn.click()
+      zapretToggle.click()
     })
 
     expect(postSpy).toHaveBeenCalledWith('devices/zapret-toggle', {
@@ -216,8 +211,7 @@ describe('Devices Component — Per-Device Zapret DPI (Feature 3)', () => {
       enabled: false,
     })
 
-    // Button MUST optimistically switch to inactive even without IP
-    expect(zapretBtn.className).toContain('inactive')
-    expect(zapretBtn.textContent).toContain('Zapret OFF')
+    // Switch MUST optimistically switch to unchecked even without IP
+    expect(zapretToggle.checked).toBe(false)
   })
 })

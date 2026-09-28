@@ -235,33 +235,26 @@ const DeviceRow = memo(function DeviceRow({
         )}
       </td>
       <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>
-        <button
-          type="button"
-          className={`device-zapret-btn ${zapretActive ? 'active' : 'inactive'}`}
-          disabled={busy}
-          onClick={() => onToggleZapret?.(d.ip, d.mac, !zapretActive)}
-          title={
-            zapretActive
-              ? `Zapret DPI включен для ${d.name} (${d.ip}). Трафик обходит блокировки напрямую. Нажмите для отключения.`
-              : `Zapret DPI выключен для ${d.name} (${d.ip}). Трафик исключен из NFQUEUE zapret. Нажмите для включения.`
-          }
-        >
-          <span className="device-zapret-icon">
-            <svg
-              width="13"
-              height="13"
-              viewBox="0 0 24 24"
-              fill={zapretActive ? 'currentColor' : 'none'}
-              stroke="currentColor"
-              strokeWidth="2.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
-            </svg>
-          </span>
-          <span className="device-zapret-label">{zapretActive ? 'Zapret ON' : 'Zapret OFF'}</span>
-        </button>
+        <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
+          <label
+            className="switch device-zapret-switch"
+            data-testid={`device-zapret-switch-${d.mac}`}
+            title={
+              zapretActive
+                ? `Zapret DPI включен для ${d.name} (${d.ip}). Трафик обходит блокировки напрямую. Нажмите для отключения.`
+                : `Zapret DPI выключен для ${d.name} (${d.ip}). Трафик исключен из NFQUEUE zapret. Нажмите для включения.`
+            }
+          >
+            <input
+              type="checkbox"
+              className="device-zapret-toggle"
+              checked={zapretActive}
+              disabled={busy}
+              onChange={(e) => onToggleZapret?.(d.ip, d.mac, e.target.checked)}
+            />
+            <span className="slider" />
+          </label>
+        </div>
       </td>
       <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>
         <button

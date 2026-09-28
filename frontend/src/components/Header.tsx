@@ -414,11 +414,11 @@ export default function Header({
                   <span className="status-stat-sep">|</span>
                   <span
                     className="status-stat"
-                    title={`Температура процессора: ${cpuTemp.toFixed(1)}°C${cpuTemp > 90 ? ' (ВНИМАНИЕ: Критический нагрев выше 90°C!)' : ''}`}
+                    title={`Температура процессора: ${Math.round(cpuTemp)}°C${cpuTemp > 90 ? ' (ВНИМАНИЕ: Критический нагрев выше 90°C!)' : ''}`}
                   >
                     <span>🌡️</span>
                     <span style={cpuTemp > 90 ? { color: '#ef4444', fontWeight: 'bold' } : {}}>
-                      {cpuTemp.toFixed(1)}°C
+                      {Math.round(cpuTemp)}°C
                     </span>
                   </span>
                 </>
@@ -568,33 +568,6 @@ export default function Header({
               ↑ {(effectiveZapretLatest || '').replace(/^v/, '')}
             </span>
           )}
-        </button>
-
-        {/* Чип Игрового режима */}
-        <button
-          type="button"
-          data-testid="header-gaming-pill"
-          className={`header-pill-btn ${status?.gaming?.enabled ? 'header-pill-gaming-active' : ''}`}
-          onClick={async (e) => {
-            if (e.altKey || e.shiftKey) {
-              onSwitchTab('gaming')
-            } else {
-              const next = !Boolean(status?.gaming?.enabled)
-              try {
-                await apiPost('gaming/toggle', { enabled: next })
-                notify(next ? 'Игровой режим включён' : 'Игровой режим выключен')
-                await refresh()
-              } catch (err: any) {
-                notify(err?.message || 'Ошибка переключения игрового режима', true)
-                onSwitchTab('gaming')
-              }
-            }
-          }}
-          title={status?.gaming?.enabled ? 'Игровой режим включён (нажмите для выключения, Alt+клик для перехода в меню)' : 'Игровой режим выключен (нажмите для включения, Alt+клик для перехода в меню)'}
-        >
-          <span style={{ fontSize: '14px', lineHeight: 1 }}>🎮</span>
-          <span className="header-pill-title">Игры</span>
-          <span className="header-pill-subtitle">{status?.gaming?.enabled ? 'ВКЛ' : 'ВЫКЛ'}</span>
         </button>
 
         {/* Кнопка справки и API документации */}

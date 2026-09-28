@@ -373,4 +373,45 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
     expect(zapretPill?.classList.contains('header-pill-update-green')).toBe(false)
     expect(container?.querySelector('[data-testid="zapret-update-badge"]')).toBeNull()
   })
+
+  it('renders CPU temperature as whole integer and omits gaming pill button', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'system/metrics') {
+        return Promise.resolve({
+          cpu_percent: 5,
+          memory_used_mb: 280,
+          memory_total_mb: 512,
+          cpu_temp_c: 42.9,
+          app_memory_mb: 9.8,
+          app_cpu_percent: 0.6,
+          core_memory_mb: 99.9,
+          total_xkeen_memory_mb: 109.7,
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    await act(async () => {
+      root!.render(
+        <Header
+          status={mockStatus}
+          notify={notifyMock}
+          refresh={refreshMock}
+          onSwitchTab={onSwitchTabMock}
+        />
+      )
+    })
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50))
+    })
+
+    // 1. Whole integer rounded CPU temp
+    const text = container?.textContent || ''
+    expect(text).toContain('43°C')
+    expect(text).not.toContain('42.9°C')
+
+    // 2. Gaming pill button must not be present
+    expect(container?.querySelector('[data-testid="header-gaming-pill"]')).toBeNull()
+  })
 })
