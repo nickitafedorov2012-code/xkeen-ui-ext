@@ -668,8 +668,8 @@ runTest('17. Update Colors (Core & Zapret = Green, Panel = Blue) & Header Non-Ov
   assert(headerTsx.includes('update-pill-badge-blue'), 'Header.tsx must use update-pill-badge-blue for Panel');
 
   // 4. Header layout non-overlapping protection
-  assert(stylesCss.includes('min-width: max-content;'), 'styles.css must prevent .header-center from shrinking below its content');
-  assert(stylesCss.includes('@media (max-width: 1080px)'), 'styles.css must wrap header at 1080px to prevent element overlapping');
+  assert(stylesCss.includes('min-width: 380px') || stylesCss.includes('minmax(380px, 1fr)'), 'styles.css must allocate proper space for version pills');
+  assert(stylesCss.includes('@media (max-width: 1139.98px)'), 'styles.css must wrap header below 1140px into two rows');
   assert(stylesCss.includes('.header-pill-btn.header-pill-update-green .header-pill-subtitle'), 'styles.css must hide subtitle on update pills to prevent horizontal overflow');
 
   // 5. Automated unit tests exist in Header.test.tsx
@@ -811,9 +811,9 @@ runTest('22. Zapret renderStrategyCard aggressive_dpi arguments alignment and en
 });
 
 // -------------------------------------------------------------
-// 23. Header layout containment: gaming pill removed, header-bar flex-wrap & non-overflowing bounds protection
+// 23. Header layout containment: gaming pill removed, header-bar grid & non-overflowing bounds protection
 // -------------------------------------------------------------
-runTest('23. Header layout containment: gaming pill removed, header-bar flex-wrap & non-overflowing bounds protection', () => {
+runTest('23. Header layout containment: gaming pill removed, header-bar grid & non-overflowing bounds protection', () => {
   const headerTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Header.tsx'), 'utf8');
   const stylesCss = fs.readFileSync(path.resolve(__dirname, '../frontend/src/styles.css'), 'utf8');
 
@@ -824,20 +824,44 @@ runTest('23. Header layout containment: gaming pill removed, header-bar flex-wra
   // 2. styles.css must not have leftover header-pill-gaming-active
   assert(!stylesCss.includes('header-pill-gaming-active'), 'styles.css must not contain obsolete header-pill-gaming-active');
 
-  // 3. header-bar must have flex-wrap: wrap, box-sizing: border-box, max-width: 100% to fit in one block
-  assert(stylesCss.includes('.header-bar {'), 'styles.css must style .header-bar');
-  const headerBarMatch = stylesCss.match(/\.header-bar\s*\{([^}]+)\}/);
-  assert(headerBarMatch, 'styles.css must define .header-bar block');
-  const headerBarRules = headerBarMatch[1];
-  assert(headerBarRules.includes('flex-wrap: wrap'), '.header-bar must have flex-wrap: wrap to prevent element overflow');
-  assert(headerBarRules.includes('box-sizing: border-box'), '.header-bar must have box-sizing: border-box');
-  assert(headerBarRules.includes('max-width: 100%'), '.header-bar must have max-width: 100%');
+  // 3. header-bar must have display: grid, box-sizing: border-box, max-width: 100%
+  assert(stylesCss.includes('.header-bar'), 'styles.css must style .header-bar');
+  assert(stylesCss.includes('display: grid;'), 'styles.css .header-bar must use display: grid');
+  assert(stylesCss.includes('box-sizing: border-box;'), 'styles.css .header-bar must have box-sizing: border-box');
+  assert(stylesCss.includes('max-width: 100%;'), 'styles.css .header-bar must have max-width: 100%');
 
-  // 4. header-right must have flex-wrap: wrap to allow pills to wrap within container bounds
-  const headerRightMatch = stylesCss.match(/\.header-right\s*\{([^}]+)\}/);
-  assert(headerRightMatch, 'styles.css must define .header-right block');
-  const headerRightRules = headerRightMatch[1];
-  assert(headerRightRules.includes('flex-wrap: wrap'), '.header-right must have flex-wrap: wrap to prevent overflowing block boundary');
+  // 4. Responsive switch at < 1140px to two rows
+  assert(stylesCss.includes('@media (max-width: 1139.98px)'), 'styles.css must define two-row switch below 1140px');
+});
+
+// -------------------------------------------------------------
+// 24. Header 5-group single-line grid toolbar & exact metrics specification
+// -------------------------------------------------------------
+runTest('24. Header 5-group single-line grid toolbar & exact metrics specification', () => {
+  const headerTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Header.tsx'), 'utf8');
+  const stylesCss = fs.readFileSync(path.resolve(__dirname, '../frontend/src/styles.css'), 'utf8');
+
+  // 1. 5 groups in Header.tsx in correct semantic sequence
+  assert(headerTsx.includes('className="header-brand-group"'), 'Header.tsx must contain group 1: header-brand-group');
+  assert(headerTsx.includes('className="header-status-group"'), 'Header.tsx must contain group 2: header-status-group');
+  assert(headerTsx.includes('className="header-versions-group"'), 'Header.tsx must contain group 3: header-versions-group');
+  assert(headerTsx.includes('className="header-service-actions"'), 'Header.tsx must contain group 4: header-service-actions');
+  assert(headerTsx.includes('className="header-utility-actions'), 'Header.tsx must contain group 5: header-utility-actions');
+
+  // 2. Exact grid template columns: 150px 270px minmax(380px, 1fr) 82px 159px
+  assert(stylesCss.includes('grid-template-columns: 150px 270px minmax(380px, 1fr) 82px 159px;'),
+    'styles.css must define exact 5-column grid: 150px 270px minmax(380px, 1fr) 82px 159px');
+
+  // 3. Exact heights: toolbar min-height 72px, status card 44px, badges 36px, buttons 38px
+  assert(stylesCss.includes('min-height: 72px;'), 'styles.css .header-bar must have min-height: 72px');
+  assert(stylesCss.includes('height: 44px;'), 'styles.css status badge must have height: 44px');
+  assert(stylesCss.includes('height: 36px;'), 'styles.css version badges must have height: 36px');
+  assert(stylesCss.includes('height: 38px;'), 'styles.css action buttons must have height: 38px');
+
+  // 4. Red highlight only for stop button; blue highlight for active settings button
+  assert(headerTsx.includes('header-action-btn-stop'), 'Header.tsx must apply header-action-btn-stop to stop button');
+  assert(stylesCss.includes('.header-action-btn.header-action-btn-stop'), 'styles.css must highlight only stop button in red');
+  assert(stylesCss.includes('.header-utility-actions .header-action-btn.active'), 'styles.css must highlight only active settings in blue');
 });
 
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);

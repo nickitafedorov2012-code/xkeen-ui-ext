@@ -73,46 +73,98 @@ body {
 
 .app { max-width: 1180px; margin: 0 auto; padding: 16px 20px 40px; }
 
-/* Верхняя панель в стиле XKeen UI */
-.header-bar {
-  display: flex;
+/* Верхняя панель в стиле XKeen UI: 5 групп в одну горизонтальную строку */
+.header-bar,
+.toolbar.header-bar {
+  display: grid;
+  grid-template-columns: 150px 270px minmax(380px, 1fr) 82px 159px;
+  grid-template-areas: "logo status versions service utility";
   align-items: center;
-  justify-content: space-between;
-  gap: 8px 12px;
+  gap: 12px;
+  min-height: 72px;
+  height: 72px;
+  padding: 0 16px;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 8px 12px;
   margin-bottom: 16px;
   position: relative;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
   box-sizing: border-box;
   max-width: 100%;
   width: 100%;
-  flex-wrap: wrap;
 }
 
-.header-left {
+/* 1. Группа логотипа: 150 px */
+.header-brand-group {
+  grid-area: logo;
+  width: 150px;
   display: flex;
   align-items: center;
-  gap: 6px;
   flex-shrink: 0;
-  z-index: 2;
+}
+
+.header-brand-link {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  flex-shrink: 0;
+}
+
+.header-brand-link:hover {
+  opacity: 0.95;
+  transform: translateY(-1px);
+}
+
+.header-brand-icon {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  transition: all 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+  filter: drop-shadow(0 0 6px rgba(0, 211, 242, 0.35));
+}
+
+.header-brand-link:hover .header-brand-icon {
+  filter: drop-shadow(0 0 12px rgba(0, 211, 242, 0.75));
+  transform: rotate(20deg) scale(1.08);
+}
+
+.header-brand-text {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  white-space: nowrap;
+  background: linear-gradient(90deg, #00D3F2 0%, #2B7FFF 50%, #155DFC 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* 2. Группа статуса: 270 px, 2 строки внутри карточки высотой 44 px */
+.header-status-group {
+  grid-area: status;
+  width: 270px;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
 }
 
 .status-badge-custom {
-  display: inline-flex;
-  align-items: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
   background: #111520;
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 4px 10px;
-  height: 38px;
+  padding: 3px 10px;
+  height: 44px;
+  width: 270px;
+  box-sizing: border-box;
   position: relative;
   overflow: hidden;
   user-select: none;
   transition: all 0.25s ease;
-  min-width: 165px;
 }
 
 .status-badge-running {
@@ -125,16 +177,6 @@ body {
   box-shadow: 0 0 10px rgba(239, 68, 68, 0.15), inset 0 0 6px rgba(239, 68, 68, 0.05);
 }
 
-.status-badge-wave {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-  z-index: 1;
-  opacity: 0.35;
-}
-
 .status-badge-content {
   display: flex;
   flex-direction: column;
@@ -142,6 +184,7 @@ body {
   position: relative;
   z-index: 2;
   gap: 2px;
+  width: 100%;
 }
 
 .status-badge-row1 {
@@ -179,24 +222,29 @@ body {
 .status-badge-row2 {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 11px;
+  gap: 4px;
+  font-size: 10.5px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .status-stat {
   display: inline-flex;
   align-items: center;
-  gap: 3.5px;
+  gap: 3px;
+  white-space: nowrap;
 }
 
 .status-stat-sep {
-  opacity: 0.35;
-  font-size: 11px;
+  opacity: 0.45;
+  font-size: 10.5px;
   margin: 0 1px;
+  color: var(--muted);
+  user-select: none;
 }
 
 .status-xr-label {
@@ -205,18 +253,32 @@ body {
   letter-spacing: 0.2px;
 }
 
-.header-actions {
+/* 3. Группа версий: всё оставшееся место (не меньше 380 px), бейджи высотой 36 px с промежутком 6 px */
+.header-versions-group {
+  grid-area: versions;
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 1 1 auto;
+  min-width: 380px;
 }
 
-.header-actions-right {
-  display: inline-flex;
+/* 4. Группа запуск/остановка: 82 px (кнопки высотой 38 px, промежуток 6 px) */
+.header-service-actions {
+  grid-area: service;
+  width: 82px;
+  display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
 }
 
+.header-service-actions .header-action-btn {
+  width: 38px;
+  height: 38px;
+}
+
+/* Общие стили служебных кнопок тулбара */
 .header-action-btn {
   width: 38px;
   height: 38px;
@@ -240,79 +302,77 @@ body {
   background: rgba(79, 140, 255, 0.12);
 }
 
-.header-action-btn.active {
-  border-color: var(--accent);
-  background: rgba(59, 130, 246, 0.2);
-  color: #60a5fa;
-  box-shadow: 0 0 10px rgba(59, 130, 246, 0.25);
-}
-
 .header-action-btn:disabled {
   opacity: 0.45;
   cursor: default;
 }
 
-.header-center {
-  position: static;
-  transform: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex: 0 1 auto;
-  min-width: max-content;
-  z-index: 2;
-  padding: 0 6px;
+/* Красным выделить только остановку */
+.header-action-btn.header-action-btn-stop {
+  border-color: rgba(239, 68, 68, 0.5);
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
 }
 
-.header-brand-link {
-  text-decoration: none;
+.header-action-btn.header-action-btn-stop:hover:not(:disabled) {
+  border-color: #ef4444;
+  background: rgba(239, 68, 68, 0.22);
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.35);
+}
+
+/* 5. Четыре служебные кнопки: 159 px (высота 38 px, промежуток 5 px) */
+.header-utility-actions {
+  grid-area: utility;
+  width: 159px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.header-utility-actions .header-action-btn {
+  width: 36px;
+  height: 38px;
+  flex: 1 1 36px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text-muted, #94a3b8);
+}
+
+.header-utility-actions .header-action-btn:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+/* Синим выделить активную настройку, а не все иконки сразу */
+.header-utility-actions .header-action-btn.active,
+.header-action-btn.active {
+  border-color: var(--accent, #3b82f6);
+  background: rgba(59, 130, 246, 0.2);
+  color: #60a5fa;
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.25);
+}
+
+.header-action-icon {
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  flex-shrink: 0;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  filter: grayscale(0.5) opacity(0.85);
+  transition: filter 0.15s ease, opacity 0.15s ease;
 }
 
-.header-brand-link:hover {
-  opacity: 0.95;
-  transform: translateY(-1px);
-}
-
-.header-brand-icon {
-  flex-shrink: 0;
-  transition: all 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
-  filter: drop-shadow(0 0 6px rgba(0, 211, 242, 0.35));
-}
-
-.header-brand-link:hover .header-brand-icon {
-  filter: drop-shadow(0 0 12px rgba(0, 211, 242, 0.75));
-  transform: rotate(20deg) scale(1.08);
-}
-
-.header-brand-text {
-  font-size: 20px;
-  font-weight: 700;
-  letter-spacing: -0.5px;
-  white-space: nowrap;
-  background: linear-gradient(90deg, #00D3F2 0%, #2B7FFF 50%, #155DFC 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-}
-
-.header-right {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: auto;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  z-index: 2;
-  max-width: 100%;
+.header-action-btn:hover .header-action-icon,
+.header-action-btn.active .header-action-icon {
+  filter: none;
+  opacity: 1;
 }
 
 .header-pill-btn {
-  height: 38px;
-  padding: 0 10px;
+  height: 36px;
+  padding: 0 8px;
   border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--panel-2);
@@ -322,8 +382,9 @@ body {
   gap: 5px;
   cursor: pointer;
   transition: all 0.15s ease;
-  font-size: 13px;
+  font-size: 12.5px;
   white-space: nowrap;
+  box-sizing: border-box;
 }
 
 .header-pill-btn:hover {
@@ -334,12 +395,12 @@ body {
 
 .header-pill-title {
   font-weight: 600;
-  color: #f1f5f9;
+  color: var(--text-bright, #f1f5f9);
 }
 
 .header-pill-subtitle {
-  font-size: 11.5px;
-  color: var(--muted);
+  font-size: 11px;
+  color: var(--muted, #94a3b8);
   margin-left: 2px;
 }
 
@@ -520,39 +581,65 @@ body {
   to { transform: rotate(360deg); }
 }
 
-@media (max-width: 1080px) {
-  .header-bar {
-    flex-wrap: wrap;
-    justify-content: space-between;
-    padding: 10px 12px;
-    gap: 8px 10px;
+/* Адаптивность: при ширине окна меньше 1140 px переключаем панель на две строки:
+   В первой строке — логотип слева и четыре служебные кнопки справа;
+   Во второй строке — статус, версии и кнопки перезапуска/остановки. */
+@media (max-width: 1139.98px) {
+  .header-bar,
+  .toolbar.header-bar {
+    grid-template-columns: auto 1fr auto;
+    grid-template-rows: auto auto;
+    grid-template-areas:
+      "logo . utility"
+      "status versions service";
+    gap: 10px 12px;
+    height: auto;
+    min-height: unset;
+    padding: 12px 16px;
   }
-  .header-center {
-    position: static;
-    transform: none;
-    order: -1;
-    width: 100%;
-    margin-bottom: 6px;
+  .header-brand-group {
+    grid-area: logo;
+    justify-self: start;
+    width: auto;
+  }
+  .header-utility-actions {
+    grid-area: utility;
+    justify-self: end;
+    width: 159px;
+  }
+  .header-status-group {
+    grid-area: status;
+    justify-self: start;
+    width: 270px;
+  }
+  .header-versions-group {
+    grid-area: versions;
+    min-width: 0;
     justify-content: center;
   }
-  .header-left {
-    margin: 0;
-    flex: 0 1 auto;
-  }
-  .header-right {
-    margin: 0;
-    flex: 1 1 auto;
-    justify-content: flex-end;
+  .header-service-actions {
+    grid-area: service;
+    justify-self: end;
+    width: 82px;
   }
 }
 
-@media (max-width: 920px) {
-  .header-left, .header-right {
-    width: 100%;
-    justify-content: center;
+/* Мобильный экран / планшет < 820px */
+@media (max-width: 819.98px) {
+  .header-bar,
+  .toolbar.header-bar {
+    grid-template-columns: 1fr auto;
+    grid-template-rows: auto auto auto;
+    grid-template-areas:
+      "logo utility"
+      "status service"
+      "versions versions";
+    gap: 10px 8px;
+    padding: 10px 12px;
   }
-  .header-right {
-    margin-top: 4px;
+  .header-versions-group {
+    min-width: unset;
+    flex-wrap: wrap;
     justify-content: center;
   }
 }
@@ -2695,6 +2782,29 @@ table.devices-table td {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.05);
 }
 
+[data-theme="light"] .status-badge-custom {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+}
+
+[data-theme="light"] .header-action-btn.header-action-btn-stop {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #dc2626;
+}
+
+[data-theme="light"] .header-utility-actions .header-action-btn {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+  color: #475569;
+}
+
+[data-theme="light"] .header-utility-actions .header-action-btn:hover:not(:disabled) {
+  border-color: #94a3b8;
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
 [data-theme="light"] .card h2,
 [data-theme="light"] .header-brand-text,
 [data-theme="light"] .header-pill-title,
@@ -4359,24 +4469,32 @@ table.devices-table td {
   .app {
     padding: 10px 10px 30px;
   }
-  .header-bar {
+  .header-bar,
+  .toolbar.header-bar {
+    display: flex;
     flex-direction: column;
     align-items: stretch;
+    height: auto;
+    min-height: unset;
     gap: 10px;
-    padding: 10px;
+    padding: 10px 12px;
   }
-  .header-left, .header-center, .header-right {
-    justify-content: space-between;
+  .header-brand-group,
+  .header-status-group,
+  .header-service-actions,
+  .header-utility-actions {
     width: 100%;
-  }
-  .header-right {
     justify-content: center;
-    flex-wrap: wrap;
-    gap: 6px;
   }
   .status-badge-custom {
+    width: 100%;
+    max-width: 100%;
+  }
+  .header-versions-group {
     min-width: unset;
-    flex: 1;
+    width: 100%;
+    justify-content: center;
+    flex-wrap: wrap;
   }
   .grid2 {
     grid-template-columns: 1fr;

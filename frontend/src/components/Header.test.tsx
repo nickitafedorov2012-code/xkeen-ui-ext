@@ -439,7 +439,7 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
     expect(container?.querySelector('button[title*="тему"]')).not.toBeNull()
   })
 
-  it('contains all header sections strictly inside .header-bar container block without gaming switch', async () => {
+  it('contains all 5 header sections strictly inside .header-bar in logical horizontal order without gaming switch', async () => {
     vi.spyOn(api, 'apiGet').mockResolvedValue({})
 
     await act(async () => {
@@ -456,29 +456,91 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
     const headerBar = container?.querySelector('header.header-bar')
     expect(headerBar).not.toBeNull()
 
-    const headerLeft = headerBar?.querySelector('.header-left')
-    const headerCenter = headerBar?.querySelector('.header-center')
-    const headerRight = headerBar?.querySelector('.header-right')
+    // 1. Group: Brand logo (150px on the far left)
+    const brandGroup = headerBar?.querySelector('.header-brand-group')
+    expect(brandGroup).not.toBeNull()
+    expect(brandGroup?.querySelector('.header-brand-link')).not.toBeNull()
+    expect(brandGroup?.textContent).toContain('XKeen Route')
 
-    expect(headerLeft).not.toBeNull()
-    expect(headerCenter).not.toBeNull()
-    expect(headerRight).not.toBeNull()
+    // 2. Group: Status card (270px, 2 rows)
+    const statusGroup = headerBar?.querySelector('.header-status-group')
+    expect(statusGroup).not.toBeNull()
+    const statusCard = statusGroup?.querySelector('.status-badge-custom')
+    expect(statusCard).not.toBeNull()
+    expect(statusCard?.querySelector('.status-badge-row1')).not.toBeNull()
+    expect(statusCard?.querySelector('.status-badge-row2')).not.toBeNull()
+    expect(statusCard?.textContent).toContain('Сервис запущен')
 
-    // Status badge and service actions are inside header-left
-    expect(headerLeft?.querySelector('.status-badge-custom')).not.toBeNull()
-    expect(headerLeft?.querySelector('.header-actions')).not.toBeNull()
+    // 3. Group: Versions block (Mihomo, XKeen, Zapret compact badges)
+    const versionsGroup = headerBar?.querySelector('.header-versions-group')
+    expect(versionsGroup).not.toBeNull()
+    expect(versionsGroup?.querySelector('[data-testid="header-mihomo-pill"]')).not.toBeNull()
+    expect(versionsGroup?.querySelector('[data-testid="header-app-pill"]')).not.toBeNull()
+    expect(versionsGroup?.querySelector('[data-testid="header-zapret-pill"]')).not.toBeNull()
 
-    // Brand logo link is inside header-center
-    expect(headerCenter?.querySelector('.header-brand-link')).not.toBeNull()
+    // 4. Group: Service actions (restart & stop)
+    const serviceActions = headerBar?.querySelector('.header-service-actions')
+    expect(serviceActions).not.toBeNull()
+    const stopBtn = serviceActions?.querySelector('.header-action-btn-stop')
+    expect(stopBtn).not.toBeNull()
 
-    // Mihomo, App version, Zapret chips are inside header-right
-    expect(headerRight?.querySelector('[data-testid="header-mihomo-pill"]')).not.toBeNull()
-    expect(headerRight?.querySelector('[data-testid="header-app-pill"]')).not.toBeNull()
-    expect(headerRight?.querySelector('[data-testid="header-zapret-pill"]')).not.toBeNull()
+    // 5. Group: Utility actions (4 utility buttons)
+    const utilityActions = headerBar?.querySelector('.header-utility-actions')
+    expect(utilityActions).not.toBeNull()
+    expect(utilityActions?.querySelector('[data-testid="header-help-btn"]')).not.toBeNull()
+    expect(utilityActions?.querySelector('[data-testid="header-settings-btn"]')).not.toBeNull()
 
     // Gaming pill and toggle are completely absent from header-bar
     expect(headerBar?.querySelector('[data-testid="header-gaming-pill"]')).toBeNull()
     expect(headerBar?.textContent).not.toContain('Игры ВЫКЛ')
     expect(headerBar?.textContent).not.toContain('Игры ВКЛ')
+  })
+
+  it('highlights only stop button in red when service is running, and highlights only active settings in blue', async () => {
+    vi.spyOn(api, 'apiGet').mockResolvedValue({})
+
+    // Running service
+    await act(async () => {
+      root!.render(
+        <Header
+          status={mockStatus}
+          notify={notifyMock}
+          refresh={refreshMock}
+          onSwitchTab={onSwitchTabMock}
+          activeTab="settings"
+        />
+      )
+    })
+
+    const stopBtn = container?.querySelector('.header-service-actions .header-action-btn-stop')
+    expect(stopBtn).not.toBeNull()
+
+    const activeSettings = container?.querySelector('.header-utility-actions [data-testid="header-settings-btn"].active')
+    expect(activeSettings).not.toBeNull()
+
+    const helpBtn = container?.querySelector('[data-testid="header-help-btn"]')
+    expect(helpBtn?.classList.contains('active')).toBe(false)
+
+    // Stopped service
+    const stoppedStatus: StatusInfo = {
+      ...mockStatus,
+      service_stopped: true,
+      service_running: false,
+    }
+
+    await act(async () => {
+      root!.render(
+        <Header
+          status={stoppedStatus}
+          notify={notifyMock}
+          refresh={refreshMock}
+          onSwitchTab={onSwitchTabMock}
+          activeTab="dashboard"
+        />
+      )
+    })
+
+    expect(container?.querySelector('.header-service-actions .header-action-btn-stop')).toBeNull()
+    expect(container?.querySelector('.header-service-actions .header-action-btn-start')).not.toBeNull()
   })
 })

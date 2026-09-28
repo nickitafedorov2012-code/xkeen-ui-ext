@@ -85,15 +85,6 @@ function IconPlay() {
   )
 }
 
-function IconDisk() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <ellipse cx="12" cy="5" rx="9" ry="3" />
-      <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
-      <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
-    </svg>
-  )
-}
 
 function BrandLogoIcon() {
   return (
@@ -385,84 +376,9 @@ export default function Header({
   const cpuTemp = currentMetrics?.cpu_temp_c != null ? Math.round(currentMetrics.cpu_temp_c) : undefined
 
   return (
-    <header className="header-bar">
-      {/* ЛЕВАЯ ЧАСТЬ: Статус сервиса + RAM/CPU + Температура + Потребление XKeen Route + Кнопки */}
-      <div className="header-left">
-        <div className={`status-badge-custom ${isRunning ? 'status-badge-running' : 'status-badge-stopped'}`}>
-          <div className="status-badge-content">
-            <div className="status-badge-row1">
-              <span className={`status-dot ${isRunning ? 'status-dot-running' : 'status-dot-stopped'}`} />
-              <span className="status-label">{isRunning ? 'Сервис запущен' : 'Сервис остановлен'}</span>
-            </div>
-            <div className="status-badge-row2">
-              <span
-                className="status-stat"
-                title={memTotal > 0
-                  ? `Оперативная память роутера: ${memUsed} из ${memTotal} МБ (${Math.round((memUsed / memTotal) * 100)}%)\nПотребление XKeen: всего ${totalXkeenMem > 0 ? totalXkeenMem : appMemMb} МБ (XR: ${appMemMb} МБ, Mihomo: ${coreMemMb > 0 ? coreMemMb + ' МБ' : '—'})`
-                  : 'Оперативная память роутера'}
-              >
-                <IconDisk />
-                <span>{memTotal > 0 ? `${memUsed}/${memTotal} МБ` : '—'}</span>
-              </span>
-              <span className="status-stat-sep">|</span>
-              <span className="status-stat" title={`Нагрузка на процессор роутера: ${cpuPercent}%`}>
-                <IconCpu />
-                <span>{cpuPercent}%</span>
-              </span>
-              {(cpuTemp !== undefined && cpuTemp !== null) && (
-                <>
-                  <span className="status-stat-sep">|</span>
-                  <span
-                    className="status-stat"
-                    title={`Температура процессора: ${cpuTemp}°C${cpuTemp > 90 ? ' (ВНИМАНИЕ: Критический нагрев выше 90°C!)' : ''}`}
-                  >
-                    <span>🌡️</span>
-                    <span style={cpuTemp > 90 ? { color: '#ef4444', fontWeight: 'bold' } : {}}>
-                      {cpuTemp}°C
-                    </span>
-                  </span>
-                </>
-              )}
-              {(totalXkeenMem > 0 || appMemMb > 0) && (
-                <>
-                  <span className="status-stat-sep">|</span>
-                  <span
-                    className="status-stat"
-                    title={`Потребление XKeen: всего ${totalXkeenMem > 0 ? totalXkeenMem : appMemMb} МБ RAM (Панель XR: ${appMemMb} МБ, Ядро Mihomo: ${coreMemMb > 0 ? coreMemMb + ' МБ' : '—'}), CPU: ${appCpu}%`}
-                  >
-                    <span className="status-xr-label">XKeen:</span>
-                    <span>{totalXkeenMem > 0 ? totalXkeenMem : appMemMb} МБ</span>
-                  </span>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-
-        <div className="header-actions">
-          <button
-            type="button"
-            className="header-action-btn"
-            onClick={handleRestart}
-            disabled={pending}
-            title="Перезапустить все службы (XKeen, Mihomo, Zapret, Панель)"
-          >
-            <IconRefresh className={pending ? 'spin-icon' : ''} />
-          </button>
-          <button
-            type="button"
-            className="header-action-btn"
-            onClick={handleToggle}
-            disabled={pending}
-            title={isRunning ? 'Остановить сервис (все службы остановятся, прямой выход для всех устройств)' : 'Запустить сервис'}
-          >
-            {isRunning ? <IconStop /> : <IconPlay />}
-          </button>
-        </div>
-      </div>
-
-      {/* ЦЕНТР: Логотип XKeen UI / Route с градиентом */}
-      <div className="header-center">
+    <header className="header-bar header-toolbar">
+      {/* 1. ЛОГОТИП (150px) */}
+      <div className="header-brand-group">
         <a
           href="#dashboard"
           className="header-brand-link"
@@ -476,8 +392,59 @@ export default function Header({
         </a>
       </div>
 
-      {/* ПРАВАЯ ЧАСТЬ: Чип Mihomo + Чип Версии + Кнопка Настроек */}
-      <div className="header-right">
+      {/* 2. СТАТУС (270px: 2 строки внутри карточки высотой 44px) */}
+      <div className="header-status-group">
+        <div className={`status-badge-custom ${isRunning ? 'status-badge-running' : 'status-badge-stopped'}`}>
+          <div className="status-badge-content">
+            <div className="status-badge-row1">
+              <span className={`status-dot ${isRunning ? 'status-dot-running' : 'status-dot-stopped'}`} />
+              <span className="status-label">{isRunning ? 'Сервис запущен' : 'Сервис остановлен'}</span>
+            </div>
+            <div className="status-badge-row2">
+              <span
+                className="status-stat"
+                title={memTotal > 0
+                  ? `Оперативная память роутера: ${memUsed} из ${memTotal} МБ (${Math.round((memUsed / memTotal) * 100)}%)\nПотребление XKeen: всего ${totalXkeenMem > 0 ? totalXkeenMem : appMemMb} МБ (XR: ${appMemMb} МБ, Mihomo: ${coreMemMb > 0 ? coreMemMb + ' МБ' : '—'})`
+                  : 'Оперативная память роутера'}
+              >
+                <span>{memTotal > 0 ? `${memUsed}/${memTotal} МБ` : '—'}</span>
+              </span>
+              <span className="status-stat-sep">·</span>
+              <span className="status-stat" title={`Нагрузка на процессор роутера: ${cpuPercent}%`}>
+                <span>{cpuPercent}%</span>
+              </span>
+              {(cpuTemp !== undefined && cpuTemp !== null) && (
+                <>
+                  <span className="status-stat-sep">·</span>
+                  <span
+                    className="status-stat"
+                    title={`Температура процессора: ${cpuTemp}°C${cpuTemp > 90 ? ' (ВНИМАНИЕ: Критический нагрев выше 90°C!)' : ''}`}
+                  >
+                    <span style={cpuTemp > 90 ? { color: '#ef4444', fontWeight: 'bold' } : {}}>
+                      {cpuTemp}°C
+                    </span>
+                  </span>
+                </>
+              )}
+              {(totalXkeenMem > 0 || appMemMb > 0) && (
+                <>
+                  <span className="status-stat-sep">·</span>
+                  <span
+                    className="status-stat"
+                    title={`Потребление XKeen: всего ${totalXkeenMem > 0 ? totalXkeenMem : appMemMb} МБ RAM (Панель XR: ${appMemMb} МБ, Ядро Mihomo: ${coreMemMb > 0 ? coreMemMb + ' МБ' : '—'}), CPU: ${appCpu}%`}
+                  >
+                    <span className="status-xr-label">XR: </span>
+                    <span>{totalXkeenMem > 0 ? totalXkeenMem : appMemMb} МБ</span>
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 3. БЛОК ВЕРСИЙ (>= 380px: 3 компактных бейджа высотой 36px) */}
+      <div className="header-versions-group">
         <button
           type="button"
           data-testid="header-mihomo-pill"
@@ -525,7 +492,8 @@ export default function Header({
           }
         >
           <IconBox />
-          <span className="header-pill-title">{appVersion}</span>
+          <span className="header-pill-title">XKeen</span>
+          <span className="header-pill-subtitle">{appVersion}</span>
           {updateAvailable && (
             <span
               className="update-pill-badge update-pill-badge-blue"
@@ -537,7 +505,6 @@ export default function Header({
           )}
         </button>
 
-        {/* Чип Запрет */}
         <button
           type="button"
           data-testid="header-zapret-pill"
@@ -569,62 +536,84 @@ export default function Header({
             </span>
           )}
         </button>
+      </div>
 
-        <div className="header-actions header-actions-right">
-          {/* Кнопка справки и API документации */}
+      {/* 4. ЗАПУСК / ОСТАНОВКА (82px: высота 38px, красный только для остановки) */}
+      <div className="header-service-actions">
+        <button
+          type="button"
+          className="header-action-btn"
+          onClick={handleRestart}
+          disabled={pending}
+          title="Перезапустить все службы (XKeen, Mihomo, Zapret, Панель)"
+        >
+          <IconRefresh className={pending ? 'spin-icon' : ''} />
+        </button>
+        <button
+          type="button"
+          className={`header-action-btn ${isRunning ? 'header-action-btn-stop' : 'header-action-btn-start'}`}
+          onClick={handleToggle}
+          disabled={pending}
+          title={isRunning ? 'Остановить сервис (все службы остановятся, прямой выход для всех устройств)' : 'Запустить сервис'}
+        >
+          {isRunning ? <IconStop /> : <IconPlay />}
+        </button>
+      </div>
+
+      {/* 5. ЧЕТЫРЕ СЛУЖЕБНЫЕ КНОПКИ (159px: высота 38px, промежуток 5px, синий только активный) */}
+      <div className="header-utility-actions header-actions-right">
+        <button
+          type="button"
+          className={`header-action-btn ${activeTab === 'help' ? 'active' : ''}`}
+          onClick={() => onSwitchTab('help')}
+          title="Справка, руководство пользователя и API документация"
+          data-testid="header-help-btn"
+        >
+          <span className="header-action-icon">❓</span>
+        </button>
+
+        <button
+          type="button"
+          className={`header-action-btn ${activeTab === 'settings' ? 'active' : ''}`}
+          onClick={() => onSwitchTab('settings')}
+          title="Настройки"
+          data-testid="header-settings-btn"
+        >
+          <span className="header-action-icon">⚙️</span>
+        </button>
+
+        {onOpenEditor && (
           <button
             type="button"
-            className={`header-action-btn ${activeTab === 'help' ? 'active' : ''}`}
-            onClick={() => onSwitchTab('help')}
-            title="Справка, руководство пользователя и API документация"
-            data-testid="header-help-btn"
+            className="header-action-btn"
+            onClick={onOpenEditor}
+            title="Редактор конфигов"
           >
-            <span style={{ fontSize: '15px', lineHeight: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>❓</span>
+            <span className="header-action-icon">📝</span>
           </button>
+        )}
 
+        {onToggleTheme && (
           <button
             type="button"
-            className={`header-action-btn ${activeTab === 'settings' ? 'active' : ''}`}
-            onClick={() => onSwitchTab('settings')}
-            title="Настройки"
-            data-testid="header-settings-btn"
+            className="header-action-btn"
+            onClick={onToggleTheme}
+            title={theme === 'dark' ? 'Переключить на светлую тему' : 'Переключить на тёмную тему'}
           >
-            <span style={{ fontSize: '15px', lineHeight: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>⚙️</span>
+            <span className="header-action-icon">{theme === 'dark' ? '🌙' : '☀️'}</span>
           </button>
+        )}
 
-          {onOpenEditor && (
-            <button
-              type="button"
-              className="header-action-btn"
-              onClick={onOpenEditor}
-              title="Редактор конфигов"
-            >
-              <span style={{ fontSize: '15px', lineHeight: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>📝</span>
-            </button>
-          )}
-
-          {onToggleTheme && (
-            <button
-              type="button"
-              className="header-action-btn"
-              onClick={onToggleTheme}
-              title={theme === 'dark' ? 'Переключить на светлую тему' : 'Переключить на тёмную тему'}
-            >
-              <span style={{ fontSize: '15px', lineHeight: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>{theme === 'dark' ? '🌙' : '☀️'}</span>
-            </button>
-          )}
-
-          {authStatus?.enabled && authStatus?.authenticated && onLogout && (
-            <button
-              type="button"
-              className="header-action-btn"
-              onClick={onLogout}
-              title="Выйти из панели"
-            >
-              <span style={{ fontSize: '15px', lineHeight: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>🚪</span>
-            </button>
-          )}
-        </div>
+        {authStatus?.enabled && authStatus?.authenticated && onLogout && (
+          <button
+            type="button"
+            className="header-action-btn"
+            onClick={onLogout}
+            title="Выйти из панели"
+          >
+            <span className="header-action-icon">🚪</span>
+          </button>
+        )}
       </div>
     </header>
   )
