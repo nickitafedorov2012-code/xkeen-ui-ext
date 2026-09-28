@@ -82,8 +82,12 @@ export default function UpdateModal({
   if (!isOpen) return null
 
   return (
-    <div className="modal-backdrop">
-      <div className="modal-card update-modal-card" style={{ maxWidth: 640, width: '94vw', maxHeight: '88vh', display: 'flex', flexDirection: 'column' }}>
+    <div className="modal-backdrop" onClick={() => !installing && onClose()}>
+      <div
+        className="modal-card update-modal-card"
+        onClick={(e) => e.stopPropagation()}
+        style={{ maxWidth: 660, width: '94vw', maxHeight: '88vh', display: 'flex', flexDirection: 'column', padding: '22px 24px' }}
+      >
         {/* Заголовок */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -214,8 +218,32 @@ export default function UpdateModal({
         )}
 
         {/* Блок списка изменений или статуса актуальности */}
-        <div style={{ flex: 1, overflowY: 'auto', marginBottom: 14 }}>
-          {hasUpdate && notesList.length > 0 ? (
+        <div style={{ flex: 1, overflowY: 'auto', marginBottom: 14, display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {!hasUpdate && (
+            <div
+              style={{
+                background: 'rgba(34, 197, 94, 0.08)',
+                border: '1px solid rgba(34, 197, 94, 0.28)',
+                borderRadius: 10,
+                padding: '12px 16px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+              }}
+            >
+              <span style={{ fontSize: 22 }}>✨</span>
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 13.5, color: 'var(--text-bright)' }}>
+                  У вас установлена последняя стабильная версия панели ({curVer})
+                </div>
+                <div className="muted small">
+                  Все модули, компоненты и оптимизации работают в актуальном состоянии.
+                </div>
+              </div>
+            </div>
+          )}
+
+          {notesList.length > 0 && (
             <div
               style={{
                 background: 'rgba(0, 0, 0, 0.25)',
@@ -225,7 +253,7 @@ export default function UpdateModal({
               }}
             >
               <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8, color: '#38bdf8' }}>
-                Что нового в {latVer}:
+                Что нового в {hasUpdate ? latVer : curVer}:
               </div>
               <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, lineHeight: 1.6 }}>
                 {notesList.map((n, i) => (
@@ -234,24 +262,6 @@ export default function UpdateModal({
                   </li>
                 ))}
               </ul>
-            </div>
-          ) : (
-            <div
-              style={{
-                background: 'rgba(0, 0, 0, 0.2)',
-                border: '1px solid var(--border)',
-                borderRadius: 10,
-                padding: '24px 20px',
-                textAlign: 'center',
-              }}
-            >
-              <div style={{ fontSize: 32, marginBottom: 8 }}>✨</div>
-              <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--text-bright)', marginBottom: 4 }}>
-                У вас установлена последняя стабильная версия панели ({curVer})
-              </div>
-              <div className="muted small">
-                Все модули, компоненты и оптимизации работают в актуальном состоянии.
-              </div>
             </div>
           )}
         </div>

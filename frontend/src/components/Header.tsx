@@ -26,6 +26,7 @@ interface HeaderProps {
   onOpenEditor?: () => void
   onOpenUpdateModal?: () => void
   onOpenMihomoModal?: () => void
+  onOpenZapretModal?: () => void
   authStatus?: { enabled: boolean; authenticated: boolean }
   onLogout?: () => void
 }
@@ -122,15 +123,6 @@ function IconDisk() {
   )
 }
 
-function IconGauge() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
-      <circle cx="12" cy="12" r="3.5" />
-    </svg>
-  )
-}
-
 function BrandLogoIcon() {
   return (
     <svg
@@ -183,6 +175,7 @@ export default function Header({
   onOpenEditor,
   onOpenUpdateModal,
   onOpenMihomoModal,
+  onOpenZapretModal,
   authStatus,
   onLogout,
 }: HeaderProps) {
@@ -191,7 +184,9 @@ export default function Header({
   const [updateAvailable, setUpdateAvailable] = useState(false)
   const [latestVersion, setLatestVersion] = useState('')
 
-  const isRunning = status ? Boolean(status.failover?.enabled) : true
+  const isRunning = status?.service_stopped
+    ? false
+    : (status?.service_running !== undefined ? status.service_running : (status ? Boolean(status.failover?.enabled) : true))
 
   // Периодическое обновление метрик (раз в 3 сек для минимизации нагрузки на CPU роутера)
   useEffect(() => {
@@ -390,11 +385,11 @@ export default function Header({
     if (pending) return
     setPending(true)
     try {
-      const res = await apiPost<{ message: string }>('failover/check')
-      notify(res?.message || 'Проверка выполнена')
+      const res = await apiPost<{ message?: string }>('xkeen/service', { action: 'restart_all' })
+      notify(res?.message || 'Полный перезапуск всех компонентов (XKeen, Mihomo, Zapret, Панель)…')
       await refresh()
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка проверки', true)
+      notify(e instanceof Error ? e.message : 'Ошибка перезапуска сервисов', true)
     } finally {
       setPending(false)
     }
@@ -403,21 +398,23 @@ export default function Header({
   const handleToggle = async () => {
     if (pending) return
     setPending(true)
-    const nextState = !isRunning
+    const nextAction = isRunning ? 'stop' : 'start'
     try {
-      await apiPost<{ enabled: boolean }>('failover/toggle', { enabled: nextState })
-      notify(nextState ? 'Failover запущен' : 'Failover остановлен')
+      await apiPost<{ message?: string; service_running?: boolean; service_stopped?: boolean }>('xkeen/service', { action: nextAction })
+      notify(nextAction === 'stop' ? 'Все службы (XKeen, Mihomo, Zapret) остановлены. Трафик идёт напрямую.' : 'Службы успешно запущены.')
       await refresh()
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка переключения', true)
+      notify(e instanceof Error ? e.message : 'Ошибка переключения сервиса', true)
     } finally {
       setPending(false)
     }
   }
 
+  const cpuTemp = currentMetrics?.cpu_temp_c
+
   return (
     <header className="header-bar">
-      {/* ЛЕВАЯ ЧАСТЬ: Статус сервиса + RAM/CPU + Потребление XKeen Route + Кнопки */}
+      {/* ЛЕВАЯ ЧАСТЬ: Статус сервиса + RAM/CPU + Температура + Потребление XKeen Route + Кнопки */}
       <div className="header-left">
         <div className={`status-badge-custom ${isRunning ? 'status-badge-running' : 'status-badge-stopped'}`}>
           <StatusWaveform isRunning={isRunning} />
@@ -435,34 +432,26 @@ export default function Header({
               >
                 <IconDisk />
                 <span>{memTotal > 0 ? `${memUsed}/${memTotal} МБ` : '—'}</span>
-                {memTotal > 0 && (
-                  <span className="mini-progress-bar">
-                    <span
-                      className={`mini-progress-fill ${
-                        (memUsed / memTotal) > 0.85
-                          ? 'fill-red'
-                          : (memUsed / memTotal) > 0.65
-                          ? 'fill-yellow'
-                          : 'fill-green'
-                      }`}
-                      style={{ width: `${Math.min(100, Math.round((memUsed / memTotal) * 100))}%` }}
-                    />
-                  </span>
-                )}
               </span>
               <span className="status-stat-sep">|</span>
               <span className="status-stat" title={`Нагрузка на процессор роутера: ${cpuPercent}%`}>
-                <IconGauge />
+                <IconCpu />
                 <span>{cpuPercent}%</span>
-                <span className="mini-progress-bar">
-                  <span
-                    className={`mini-progress-fill ${
-                      cpuPercent > 80 ? 'fill-red' : cpuPercent > 45 ? 'fill-yellow' : 'fill-blue'
-                    }`}
-                    style={{ width: `${Math.min(100, cpuPercent)}%` }}
-                  />
-                </span>
               </span>
+              {(cpuTemp !== undefined && cpuTemp !== null) && (
+                <>
+                  <span className="status-stat-sep">|</span>
+                  <span
+                    className="status-stat"
+                    title={`Температура процессора: ${cpuTemp}°C${cpuTemp > 90 ? ' (ВНИМАНИЕ: Критический нагрев выше 90°C!)' : ''}`}
+                  >
+                    <span>🌡️</span>
+                    <span style={cpuTemp > 90 ? { color: '#ef4444', fontWeight: 'bold' } : {}}>
+                      {cpuTemp}°C
+                    </span>
+                  </span>
+                </>
+              )}
               {(totalXkeenMem > 0 || appMemMb > 0) && (
                 <>
                   <span className="status-stat-sep">|</span>
@@ -485,7 +474,7 @@ export default function Header({
             className="header-action-btn"
             onClick={handleRestart}
             disabled={pending}
-            title="Перезапустить failover / обновить"
+            title="Перезапустить все службы (XKeen, Mihomo, Zapret, Панель)"
           >
             <IconRefresh className={pending ? 'spin-icon' : ''} />
           </button>
@@ -494,7 +483,7 @@ export default function Header({
             className="header-action-btn"
             onClick={handleToggle}
             disabled={pending}
-            title={isRunning ? 'Остановить сервис' : 'Запустить сервис'}
+            title={isRunning ? 'Остановить сервис (все службы остановятся, прямой выход для всех устройств)' : 'Запустить сервис'}
           >
             {isRunning ? <IconStop /> : <IconPlay />}
           </button>
@@ -577,11 +566,19 @@ export default function Header({
           )}
         </button>
 
+        {/* Чип Запрет */}
         <button
           type="button"
           data-testid="header-zapret-pill"
           className={`header-pill-btn ${effectiveZapretUpdate ? 'header-pill-update-green' : ''}`}
-          onClick={() => onSwitchTab('zapret')}
+          onClick={() => {
+            if (onOpenZapretModal) {
+              onOpenZapretModal()
+            } else {
+              window.dispatchEvent(new CustomEvent('xr:open-zapret-modal'))
+            }
+            onSwitchTab('zapret')
+          }}
           title={
             effectiveZapretUpdate
               ? `Доступно обновление Запрет до ${effectiveZapretLatest || 'новой версии'}! Нажмите для перехода`
@@ -600,6 +597,44 @@ export default function Header({
               ↑ {(effectiveZapretLatest || '').replace(/^v/, '')}
             </span>
           )}
+        </button>
+
+        {/* Чип Игрового режима */}
+        <button
+          type="button"
+          data-testid="header-gaming-pill"
+          className={`header-pill-btn ${status?.gaming?.enabled ? 'header-pill-gaming-active' : ''}`}
+          onClick={async (e) => {
+            if (e.altKey || e.shiftKey) {
+              onSwitchTab('gaming')
+            } else {
+              const next = !Boolean(status?.gaming?.enabled)
+              try {
+                await apiPost('gaming/toggle', { enabled: next })
+                notify(next ? 'Игровой режим включён' : 'Игровой режим выключен')
+                await refresh()
+              } catch (err: any) {
+                notify(err?.message || 'Ошибка переключения игрового режима', true)
+                onSwitchTab('gaming')
+              }
+            }
+          }}
+          title={status?.gaming?.enabled ? 'Игровой режим включён (нажмите для выключения, Alt+клик для перехода в меню)' : 'Игровой режим выключен (нажмите для включения, Alt+клик для перехода в меню)'}
+        >
+          <span style={{ fontSize: '14px', lineHeight: 1 }}>🎮</span>
+          <span className="header-pill-title">Игры</span>
+          <span className="header-pill-subtitle">{status?.gaming?.enabled ? 'ВКЛ' : 'ВЫКЛ'}</span>
+        </button>
+
+        {/* Кнопка справки и API документации */}
+        <button
+          type="button"
+          className={`header-action-btn ${activeTab === 'help' ? 'active' : ''}`}
+          onClick={() => onSwitchTab('help')}
+          title="Справка, руководство пользователя и API документация"
+          data-testid="header-help-btn"
+        >
+          <span style={{ fontSize: '15px' }}>❓</span>
         </button>
 
         <button

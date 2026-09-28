@@ -343,6 +343,8 @@ pub struct GamingDevice {
     pub ipv6: Vec<String>,
     pub name: String,
     pub enabled: bool,
+    #[serde(default)]
+    pub server: Option<String>,
 }
 
 /// Связь игрового режима с Zapret. Предыдущее состояние хранится только для
@@ -374,6 +376,10 @@ impl Default for GamingZapretPolicy {
     }
 }
 
+fn default_smart_idle_mins() -> u32 {
+    60
+}
+
 /// Настройки игрового режима (обход блокировок игр через VPS/Mihomo).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -398,6 +404,15 @@ pub struct GamingConfig {
     pub smart_split: bool,
     /// Устаревший флаг, сохраняется для совместимости со старым config.json.
     pub fix_nat_fake_ip: bool,
+    /// Умный игровой режим: авто-включение при обнаружении соединений к игровым серверам
+    #[serde(default)]
+    pub smart_mode: bool,
+    /// Таймаут бездействия в минутах до авто-отключения (по умолчанию 60 минут)
+    #[serde(default = "default_smart_idle_mins")]
+    pub smart_idle_timeout_mins: u32,
+    /// Список игнорируемых игровых соединений ("Не реагировать")
+    #[serde(default)]
+    pub ignored_game_conns: Vec<String>,
 }
 
 impl Default for GamingConfig {
@@ -414,6 +429,9 @@ impl Default for GamingConfig {
             zapret: GamingZapretPolicy::default(),
             smart_split: true,
             fix_nat_fake_ip: true,
+            smart_mode: false,
+            smart_idle_timeout_mins: 60,
+            ignored_game_conns: Vec::new(),
         }
     }
 }
@@ -551,6 +569,9 @@ pub struct ZapretConfig {
     /// Последняя доступная версия Zapret
     #[serde(default)]
     pub latest_version: Option<String>,
+    /// Накопленный спасённый трафик на VPS за период (байты)
+    #[serde(default)]
+    pub period_saved_bytes: u64,
 }
 
 impl Default for ZapretConfig {
@@ -580,6 +601,7 @@ impl Default for ZapretConfig {
             last_update_check: None,
             update_available: false,
             latest_version: None,
+            period_saved_bytes: 0,
         }
     }
 }

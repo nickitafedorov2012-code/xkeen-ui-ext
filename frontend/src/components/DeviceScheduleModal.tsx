@@ -133,7 +133,11 @@ export default function DeviceScheduleModal({
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal-card schedule-modal" onClick={(e) => e.stopPropagation()}>
+      <div
+        className="modal-card schedule-modal"
+        onClick={(e) => e.stopPropagation()}
+        style={{ padding: '22px 24px', maxWidth: 640, width: '94vw', maxHeight: '88vh' }}
+      >
         <div className="modal-header">
           <div>
             <h3>⏰ Расписание для: {deviceName || deviceIp}</h3>
@@ -141,7 +145,7 @@ export default function DeviceScheduleModal({
               Автоматическая блокировка или переключение режима устройства по часам и дням недели (например, блокировка PlayStation после 23:00).
             </p>
           </div>
-          <button className="btn-close" onClick={onClose}>✕</button>
+          <button type="button" className="btn-close" onClick={onClose} title="Закрыть">✕</button>
         </div>
 
         {/* Список текущих расписаний */}

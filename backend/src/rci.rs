@@ -354,6 +354,8 @@ pub struct SystemStats {
     pub memory_used_mb: u32,
     pub memory_total_mb: u32,
     #[serde(default)]
+    pub cpu_temp_c: Option<f32>,
+    #[serde(default)]
     pub app_memory_mb: f64,
     #[serde(default)]
     pub app_cpu_percent: f64,
@@ -361,6 +363,64 @@ pub struct SystemStats {
     pub core_memory_mb: f64,
     #[serde(default)]
     pub total_xkeen_memory_mb: f64,
+}
+
+/// Парсинг строки датчика температуры (миллиградусы 62000 -> 62.0 или градусы 62 -> 62.0).
+pub fn parse_thermal_temp_str(raw: &str) -> Option<f32> {
+    let cleaned = raw.trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+    // Если строка содержит число (например "62000" или "62.5" или "temp: 62 C")
+    let num_token = cleaned
+        .split(|c: char| !c.is_ascii_digit() && c != '.' && c != '-')
+        .find(|s| !s.is_empty())?;
+    let val: f32 = num_token.parse().ok()?;
+    let temp_c = if val > 200.0 { val / 1000.0 } else { val };
+    if (10.0..=150.0).contains(&temp_c) {
+        Some((temp_c * 10.0).round() / 10.0)
+    } else {
+        None
+    }
+}
+
+/// Чтение температуры процессора роутера из sysfs / procfs или ответа RCI.
+pub fn read_cpu_temp_c(rci_obj: Option<&serde_json::Map<String, Value>>) -> Option<f32> {
+    if let Some(o) = rci_obj {
+        for key in ["cputemp", "temp", "temperature", "cpu_temp"] {
+            if let Some(v) = o.get(key) {
+                if let Some(n) = v.as_f64() {
+                    if let Some(t) = parse_thermal_temp_str(&n.to_string()) {
+                        return Some(t);
+                    }
+                } else if let Some(s) = v.as_str() {
+                    if let Some(t) = parse_thermal_temp_str(s) {
+                        return Some(t);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let paths = [
+            "/sys/class/thermal/thermal_zone0/temp",
+            "/sys/class/thermal/thermal_zone1/temp",
+            "/sys/devices/virtual/thermal/thermal_zone0/temp",
+            "/sys/class/hwmon/hwmon0/temp1_input",
+            "/proc/dmu/temperature",
+        ];
+        for p in paths {
+            if let Ok(raw) = std::fs::read_to_string(p) {
+                if let Some(t) = parse_thermal_temp_str(&raw) {
+                    return Some(t);
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Получение показателей потребления физической памяти (RSS в МБ) процесса по его имени.
@@ -481,6 +541,7 @@ pub async fn get_system(http: &reqwest::Client, cfg: &AppConfig) -> Result<Syste
                 memory_total_mb = (tot_kb / 1024) as u32;
             }
         }
+        let cpu_temp_c = read_cpu_temp_c(Some(o));
         let (app_memory_mb, app_cpu_percent) = get_proc_stats();
         let core_memory_mb = get_process_rss(&cfg.mihomo.process_name);
         let total_xkeen_memory_mb = ((app_memory_mb + core_memory_mb) * 10.0).round() / 10.0;
@@ -488,6 +549,7 @@ pub async fn get_system(http: &reqwest::Client, cfg: &AppConfig) -> Result<Syste
             cpu_percent,
             memory_used_mb,
             memory_total_mb,
+            cpu_temp_c,
             app_memory_mb,
             app_cpu_percent,
             core_memory_mb,

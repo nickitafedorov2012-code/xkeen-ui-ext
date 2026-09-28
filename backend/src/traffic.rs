@@ -60,12 +60,14 @@ pub fn get_snapshot_json() -> serde_json::Value {
     let w_down = WAN_DOWN.load(Ordering::Relaxed);
     let w_up = WAN_UP.load(Ordering::Relaxed);
 
+    let history = get_history_json();
     json!({
         "direct": { "down": d_down, "up": d_up },
         "proxy": { "down": p_down, "up": p_up },
         "total": { "down": w_down, "up": w_up },
         "down": p_down,
         "up": p_up,
+        "history": history,
     })
 }
 
@@ -73,6 +75,31 @@ pub static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 
 pub fn shutdown() {
     SHUTDOWN.store(true, Ordering::Release);
+}
+
+pub fn is_shutdown() -> bool {
+    SHUTDOWN.load(Ordering::Acquire)
+}
+
+static TRAFFIC_HISTORY: std::sync::Mutex<Option<std::collections::VecDeque<serde_json::Value>>> = std::sync::Mutex::new(None);
+
+pub fn record_history_point(snapshot_json: serde_json::Value) {
+    if let Ok(mut lock) = TRAFFIC_HISTORY.lock() {
+        let deq = lock.get_or_insert_with(|| std::collections::VecDeque::with_capacity(60));
+        if deq.len() >= 60 {
+            deq.pop_front();
+        }
+        deq.push_back(snapshot_json);
+    }
+}
+
+pub fn get_history_json() -> serde_json::Value {
+    if let Ok(lock) = TRAFFIC_HISTORY.lock() {
+        if let Some(ref deq) = *lock {
+            return serde_json::to_value(deq.iter().cloned().collect::<Vec<_>>()).unwrap_or_else(|_| json!([]));
+        }
+    }
+    json!([])
 }
 
 /// Поток чтения /traffic из Mihomo (Server-Sent Chunks)
@@ -233,6 +260,14 @@ async fn run_wan_polling() {
 
         DIRECT_DOWN.store(d_down, Ordering::Relaxed);
         DIRECT_UP.store(d_up, Ordering::Relaxed);
+
+        record_history_point(json!({
+            "direct": { "down": d_down, "up": d_up },
+            "proxy": { "down": p_down, "up": p_up },
+            "total": { "down": wan_rx_speed, "up": wan_tx_speed },
+            "down": p_down,
+            "up": p_up,
+        }));
     }
 }
 

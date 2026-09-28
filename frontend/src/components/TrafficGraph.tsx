@@ -6,12 +6,20 @@ interface SpeedPair {
   up: number
 }
 
+interface TrafficHistoryPoint {
+  direct?: SpeedPair
+  proxy?: SpeedPair
+  down?: number
+  up?: number
+}
+
 interface TrafficPayload {
   direct?: SpeedPair
   proxy?: SpeedPair
   total?: SpeedPair
   down?: number
   up?: number
+  history?: TrafficHistoryPoint[]
 }
 
 interface TrafficHistoryItem {
@@ -30,7 +38,7 @@ function formatSpeed(bytesPerSec: number): string {
 
 export default function TrafficGraph() {
   const [history, setHistory] = useState<TrafficHistoryItem[]>(() =>
-    Array(30).fill({ directDown: 0, directUp: 0, proxyDown: 0, proxyUp: 0 })
+    Array(60).fill({ directDown: 0, directUp: 0, proxyDown: 0, proxyUp: 0 })
   )
 
   const [currentDirect, setCurrentDirect] = useState<SpeedPair>({ down: 0, up: 0 })
@@ -42,6 +50,7 @@ export default function TrafficGraph() {
   const [metricMode, setMetricMode] = useState<'down' | 'up' | 'both'>('down')
 
   const activeRef = useRef(true)
+  const initialHistoryLoaded = useRef(false)
 
   useEffect(() => {
     activeRef.current = true
@@ -62,15 +71,39 @@ export default function TrafficGraph() {
         setPeakDirect((prev) => Math.max(prev, dDown + dUp))
         setPeakProxy((prev) => Math.max(prev, pDown + pUp))
 
-        setHistory((prev) => [
-          ...prev.slice(1),
-          {
-            directDown: dDown,
-            directUp: dUp,
-            proxyDown: pDown,
-            proxyUp: pUp,
-          },
-        ])
+        if (!initialHistoryLoaded.current && Array.isArray(data.history) && data.history.length > 0) {
+          const mapped: TrafficHistoryItem[] = data.history.map((h) => ({
+            directDown: h.direct?.down ?? 0,
+            directUp: h.direct?.up ?? 0,
+            proxyDown: h.proxy?.down ?? h.down ?? 0,
+            proxyUp: h.proxy?.up ?? h.up ?? 0,
+          }))
+
+          let maxD = dDown + dUp
+          let maxP = pDown + pUp
+          for (const item of mapped) {
+            maxD = Math.max(maxD, item.directDown + item.directUp)
+            maxP = Math.max(maxP, item.proxyDown + item.proxyUp)
+          }
+          setPeakDirect((prev) => Math.max(prev, maxD))
+          setPeakProxy((prev) => Math.max(prev, maxP))
+
+          const padded = Array(Math.max(0, 60 - mapped.length))
+            .fill({ directDown: 0, directUp: 0, proxyDown: 0, proxyUp: 0 })
+            .concat(mapped)
+          setHistory(padded.slice(-60))
+          initialHistoryLoaded.current = true
+        } else {
+          setHistory((prev) => [
+            ...prev.slice(1),
+            {
+              directDown: dDown,
+              directUp: dUp,
+              proxyDown: pDown,
+              proxyUp: pUp,
+            },
+          ])
+        }
       } catch {
         /* игнорируем одиночные ошибки опроса */
       }
@@ -165,10 +198,10 @@ export default function TrafficGraph() {
             <h3 style={{ margin: 0, fontSize: 15 }}>Трафик в реальном времени</h3>
             <div className="traffic-legend-chips">
               <span className="legend-chip direct">
-                <span className="legend-dot blue" /> Прямой трафик (Direct)
+                <span className="legend-dot green" /> Прямой трафик (Direct)
               </span>
               <span className="legend-chip proxy">
-                <span className="legend-dot green" /> Проксированный (Proxy)
+                <span className="legend-dot blue" /> Проксированный (Proxy)
               </span>
             </div>
           </div>
@@ -204,18 +237,18 @@ export default function TrafficGraph() {
           </div>
 
           <div className="traffic-stats">
-            {/* Синий бейдж: Прямой трафик */}
+            {/* Зеленый бейдж: Прямой трафик */}
             <div className="traffic-badge direct" title={`Прямой трафик роутера (мимо прокси)\nПик: ${formatSpeed(peakDirect)}`}>
-              <span className="badge-label">🔵 Прямой:</span>
+              <span className="badge-label">🟢 Прямой:</span>
               <span className="badge-arrow">↓</span>
               <span className="badge-val">{formatSpeed(currentDirect.down)}</span>
               <span className="badge-arrow">↑</span>
               <span className="badge-val">{formatSpeed(currentDirect.up)}</span>
             </div>
 
-            {/* Зеленый бейдж: Проксированный трафик */}
+            {/* Синий бейдж: Проксированный трафик */}
             <div className="traffic-badge proxy" title={`Проксированный трафик через Mihomo/VPS\nПик: ${formatSpeed(peakProxy)}`}>
-              <span className="badge-label">🟢 Прокси:</span>
+              <span className="badge-label">🔵 Прокси:</span>
               <span className="badge-arrow">↓</span>
               <span className="badge-val">{formatSpeed(currentProxy.down)}</span>
               <span className="badge-arrow">↑</span>
@@ -234,15 +267,15 @@ export default function TrafficGraph() {
       <div className="traffic-svg-wrapper">
         <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className="traffic-svg">
           <defs>
-            {/* Синий градиент (Прямой трафик) */}
+            {/* Зеленый градиент (Прямой трафик) */}
             <linearGradient id="directGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.32" />
-              <stop offset="100%" stopColor="#3b82f6" stopOpacity="0.0" />
+              <stop offset="0%" stopColor="#22c55e" stopOpacity="0.32" />
+              <stop offset="100%" stopColor="#22c55e" stopOpacity="0.0" />
             </linearGradient>
-            {/* Зеленый градиент (Проксированный трафик) */}
+            {/* Синий градиент (Проксированный трафик) */}
             <linearGradient id="proxyGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#10b981" stopOpacity="0.32" />
-              <stop offset="100%" stopColor="#10b981" stopOpacity="0.0" />
+              <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.32" />
+              <stop offset="100%" stopColor="#38bdf8" stopOpacity="0.0" />
             </linearGradient>
           </defs>
 
@@ -255,21 +288,21 @@ export default function TrafficGraph() {
           <path d={areaD(directPoints)} fill="url(#directGrad)" />
           <path d={areaD(proxyPoints)} fill="url(#proxyGrad)" />
 
-          {/* Синяя линия (Прямой трафик) */}
+          {/* Зеленая линия (Прямой трафик) */}
           <path
             d={lineD(directPoints)}
             fill="none"
-            stroke="#3b82f6"
+            stroke="#22c55e"
             strokeWidth="2.5"
             strokeLinecap="round"
             strokeLinejoin="round"
           />
 
-          {/* Зеленая линия (Проксированный трафик) */}
+          {/* Синяя линия (Проксированный трафик) */}
           <path
             d={lineD(proxyPoints)}
             fill="none"
-            stroke="#10b981"
+            stroke="#38bdf8"
             strokeWidth="2.5"
             strokeLinecap="round"
             strokeLinejoin="round"

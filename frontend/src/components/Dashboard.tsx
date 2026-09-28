@@ -121,6 +121,16 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
     }
   }
 
+  const [devicesCount, setDevicesCount] = useState<number | null>(null)
+
+  useEffect(() => {
+    apiGet<{ devices: any[] }>('devices')
+      .then((d) => {
+        if (d?.devices) setDevicesCount(d.devices.length)
+      })
+      .catch(() => {})
+  }, [])
+
   const loadEvents = useCallback(async () => {
     try {
       const data = await apiGet<{ events: FailoverEventInfo[] }>('failover/events')
@@ -165,7 +175,6 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
 
   const f = status?.failover
   const groupedEvents = groupEvents(events)
-  const mihomoVer = status?.mihomo_version || '—'
 
   const okPings = pingHistory.filter((p) => p.ok).map((p) => p.ms)
   const minPing = okPings.length > 0 ? okPings.reduce((a, b) => Math.min(a, b)) : 0
@@ -183,15 +192,6 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
             <span>{status?.router?.version ? (status.router.version.startsWith('KeeneticOS') ? status.router.version : `KeeneticOS ${status.router.version}`) : 'KeeneticOS'}</span>
             <span className="dash-info-sep">·</span>
             <span className="muted">RCI {status?.rci ? `${status.rci.host}:${status.rci.port}` : '127.0.0.1:79'}</span>
-          </span>
-        </div>
-
-        <div className="dash-info-group">
-          <span className="dash-info-badge" title="Mihomo core proxy engine">
-            <span>⚙️ Ядро:</span>
-            <b>Mihomo {mihomoVer}</b>
-            <span className="dash-info-sep">·</span>
-            <span className="muted">API {status?.mihomo ? `${status.mihomo.host}:${status.mihomo.port}` : '127.0.0.1:9090'}</span>
           </span>
         </div>
 
@@ -221,7 +221,7 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
       {/* Оперативные виджеты */}
       <div className="grid2">
         {/* КАРТОЧКА 1: Активный сервер */}
-        <section className="card active-server-card">
+        <section className="card active-server-card" style={{ height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
             <h2 style={{ margin: 0 }}>🛰 Активный сервер</h2>
             <span className="badge badge-online" style={{ color: '#22c55e' }}>
@@ -230,83 +230,100 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
           </div>
 
           {status?.active_server ? (
-            <div className="active-server-hero">
-              {/* Верхняя идентичность: флаг, имя, протокол, подписка */}
-              <div className="active-server-top">
-                <div className="active-server-identity">
-                  <div className="active-server-title">
-                    <span className="active-server-name">{status.active_server.name}</span>
-                    <div className="active-server-badges">
-                      {status.active_server.protocol && (
-                        <span className="badge" style={{ fontSize: 10, padding: '1px 6px' }}>
-                          {status.active_server.protocol}
-                        </span>
-                      )}
-                      {status.active_server.provider && (
-                        <span className="tag-provider" style={{ cursor: 'default', fontSize: 11, padding: '1px 7px' }}>
-                          📁 {status.active_server.provider_name || status.active_server.provider}
-                        </span>
-                      )}
+            <div className="active-server-hero" style={{ display: 'flex', flexDirection: 'column', height: '100%', justifyContent: 'space-between' }}>
+              <div>
+                {/* Верхняя идентичность: флаг, имя, протокол, подписка */}
+                <div className="active-server-top">
+                  <div className="active-server-identity">
+                    <div className="active-server-title">
+                      <span className="active-server-name">{status.active_server.name}</span>
+                      <div className="active-server-badges">
+                        {status.active_server.protocol && (
+                          <span className="badge" style={{ fontSize: 10, padding: '1px 6px' }}>
+                            {status.active_server.protocol}
+                          </span>
+                        )}
+                        {status.active_server.provider && (
+                          <span className="tag-provider" style={{ cursor: 'default', fontSize: 11, padding: '1px 7px' }}>
+                            📁 {status.active_server.provider_name || status.active_server.provider}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ textAlign: 'right' }}>
+                    <div className={'ping ' + pingClass(status.active_server.ping_ms)} style={{ fontSize: 15, fontWeight: 700 }}>
+                      {status.active_server.ping_ms > 0 ? `${status.active_server.ping_ms} мс` : '—'}
+                    </div>
+                    <div className="muted small" style={{ fontSize: 11 }}>
+                      {status.active_server.ping_ms > 0 && status.active_server.ping_ms <= 100
+                        ? 'отличный отклик'
+                        : status.active_server.ping_ms > 100 && status.active_server.ping_ms <= 250
+                        ? 'хороший отклик'
+                        : status.active_server.ping_ms > 250
+                        ? 'высокая задержка'
+                        : 'проверка…'}
                     </div>
                   </div>
                 </div>
 
-                <div style={{ textAlign: 'right' }}>
-                  <div className={'ping ' + pingClass(status.active_server.ping_ms)} style={{ fontSize: 15, fontWeight: 700 }}>
-                    {status.active_server.ping_ms > 0 ? `${status.active_server.ping_ms} мс` : '—'}
+                {/* Таблица параметров в едином стиле с соседней карточкой */}
+                <ul className="kv" style={{ margin: '4px 0 8px' }}>
+                  <li>
+                    <span>Хост и порт</span>
+                    <b className="mono" style={{ fontSize: 12 }}>
+                      {status.active_server.host ? `${status.active_server.host}${status.active_server.port ? `:${status.active_server.port}` : ''}` : '—'}
+                    </b>
+                  </li>
+                  <li>
+                    <span>Роль в Failover</span>
+                    <b>
+                      {f?.priority_server && f.priority_server === status.active_server.name ? (
+                        <span style={{ color: '#22c55e' }}>★ Основной (приоритетный)</span>
+                      ) : f?.priority_chain && f.priority_chain.indexOf(status.active_server.id) === 0 ? (
+                        <span style={{ color: '#22c55e' }}>★ Основной (в цепочке)</span>
+                      ) : f?.priority_chain && f.priority_chain.indexOf(status.active_server.id) > 0 ? (
+                        <span style={{ color: '#eab308' }}>⚡ Резервный (РЕЗ{f.priority_chain.indexOf(status.active_server.id)})</span>
+                      ) : (
+                        <span style={{ color: 'var(--muted)' }}>Обычный сервер</span>
+                      )}
+                    </b>
+                  </li>
+                  <li>
+                    <span>Режим трафика</span>
+                    <b>Rule (авто-маршрутизация)</b>
+                  </li>
+                  <li>
+                    <span>Mixed Port</span>
+                    <b className="mono" style={{ fontSize: 12 }}>7890 (HTTP/SOCKS5)</b>
+                  </li>
+                  <li>
+                    <span>Перехват / NAT</span>
+                    <b>
+                      <span style={{ color: '#22c55e' }}>TProxy / Redir</span>
+                      <span className="muted small" style={{ marginLeft: 6, fontWeight: 'normal' }}>(Full-Cone NAT)</span>
+                    </b>
+                  </li>
+                  <li>
+                    <span>Подключено устройств</span>
+                    <b>{devicesCount !== null ? `${devicesCount} в сети` : '—'}</b>
+                  </li>
+                </ul>
+
+                {/* График стабильности задержки */}
+                {pingHistory.length >= 2 && (
+                  <div className="active-server-sparkline-box">
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+                      <span className="muted small" style={{ fontSize: 11 }}>Стабильность пинга ({pingHistory.length} точек):</span>
+                      <span className="muted small" style={{ fontSize: 11, fontFamily: 'monospace' }}>
+                        мин: {minPing} мс / макс: {maxPing} мс
+                      </span>
+                    </div>
+                    <PingSparkline data={pingHistory} />
                   </div>
-                  <div className="muted small" style={{ fontSize: 11 }}>
-                    {status.active_server.ping_ms > 0 && status.active_server.ping_ms <= 100
-                      ? 'отличный отклик'
-                      : status.active_server.ping_ms > 100 && status.active_server.ping_ms <= 250
-                      ? 'хороший отклик'
-                      : status.active_server.ping_ms > 250
-                      ? 'высокая задержка'
-                      : 'проверка…'}
-                  </div>
-                </div>
+                )}
               </div>
-
-              {/* Таблица параметров в едином стиле с соседней карточкой */}
-              <ul className="kv" style={{ margin: '4px 0 8px' }}>
-                <li>
-                  <span>Хост и порт</span>
-                  <b className="mono" style={{ fontSize: 12 }}>
-                    {status.active_server.host ? `${status.active_server.host}${status.active_server.port ? `:${status.active_server.port}` : ''}` : '—'}
-                  </b>
-                </li>
-                <li>
-                  <span>Роль в Failover</span>
-                  <b>
-                    {f?.priority_server && f.priority_server === status.active_server.name ? (
-                      <span style={{ color: '#22c55e' }}>★ Основной (приоритетный)</span>
-                    ) : f?.priority_chain && f.priority_chain.indexOf(status.active_server.id) === 0 ? (
-                      <span style={{ color: '#22c55e' }}>★ Основной (в цепочке)</span>
-                    ) : f?.priority_chain && f.priority_chain.indexOf(status.active_server.id) > 0 ? (
-                      <span style={{ color: '#eab308' }}>⚡ Резервный (РЕЗ{f.priority_chain.indexOf(status.active_server.id)})</span>
-                    ) : (
-                      <span style={{ color: 'var(--muted)' }}>Обычный сервер</span>
-                    )}
-                  </b>
-                </li>
-                <li>
-                  <span>Режим трафика</span>
-                  <b>Rule (авто-маршрутизация)</b>
-                </li>
-              </ul>
-
-              {/* График стабильности задержки */}
-              {pingHistory.length >= 2 && (
-                <div className="active-server-sparkline-box">
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
-                    <span className="muted small" style={{ fontSize: 11 }}>Стабильность пинга ({pingHistory.length} точек):</span>
-                    <span className="muted small" style={{ fontSize: 11, fontFamily: 'monospace' }}>
-                      мин: {minPing} мс / макс: {maxPing} мс
-                    </span>
-                  </div>
-                  <PingSparkline data={pingHistory} />
-                </div>
-              )}
 
               {/* Кнопки перехода и действий */}
               <div style={{ display: 'grid', gridTemplateColumns: onSwitchTab ? '1fr 1fr' : '1fr', gap: 10, marginTop: 8 }}>
@@ -339,13 +356,14 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
         </section>
 
         {/* КАРТОЧКА 2: Failover статус и управление */}
-        <section className="card">
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-            <h2 style={{ margin: 0 }}>⚡ Failover контроль</h2>
-            <span className={`badge ${f?.enabled ? 'badge-online' : ''}`} style={{ color: f?.enabled ? '#22c55e' : 'var(--muted)' }}>
-              {f?.enabled ? '🟢 включён' : '⚪ выключен'}
-            </span>
-          </div>
+        <section className="card" style={{ height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+              <h2 style={{ margin: 0 }}>⚡ Failover контроль</h2>
+              <span className={`badge ${f?.enabled ? 'badge-online' : ''}`} style={{ color: f?.enabled ? '#22c55e' : 'var(--muted)' }}>
+                {f?.enabled ? '🟢 включён' : '⚪ выключен'}
+              </span>
+            </div>
           <ul className="kv">
             <li>
               <span>Автоматический мониторинг</span>
@@ -400,6 +418,7 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
             )}
             <li><span>Интервал проверки</span><b>{f ? `${f.interval_secs} с` : '—'}</b></li>
           </ul>
+          </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
             <button className="btn primary" onClick={runCheck} disabled={checking} style={{ flex: 1 }}>
               {checking ? 'Проверка…' : '🔍 Проверить сейчас'}

@@ -13,8 +13,10 @@ import RulesViewer from './components/RulesViewer'
 import Diagnostics from './components/Diagnostics'
 import UpdateModal from './components/UpdateModal'
 import MihomoCoreModal from './components/MihomoCoreModal'
+import ZapretCoreModal from './components/ZapretCoreModal'
 import Zapret from './components/Zapret'
 import Gaming from './components/Gaming'
+import Help from './components/Help'
 import { apiGet, apiPost } from './api'
 import type { AuthStatus, StatusInfo } from './types'
 
@@ -22,25 +24,26 @@ type TabId =
   | 'dashboard'
   | 'servers'
   | 'devices'
+  | 'zapret'
+  | 'gaming'
+  | 'google-ai'
   | 'connections'
   | 'rules'
   | 'diagnostics'
-  | 'google-ai'
-  | 'zapret'
-  | 'gaming'
   | 'settings'
+  | 'help'
   | 'antigravity'
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'dashboard', label: '📊 Дашборд' },
   { id: 'servers', label: '🛰 Серверы' },
   { id: 'devices', label: '📱 Устройства' },
+  { id: 'zapret', label: '🛡️ Запрет (DPI)' },
+  { id: 'gaming', label: '🎮 Игры' },
+  { id: 'google-ai', label: '🤖 Google AI' },
   { id: 'connections', label: '🌐 Соединения' },
   { id: 'rules', label: '📋 Правила' },
   { id: 'diagnostics', label: '🩺 Диагностика' },
-  { id: 'google-ai', label: '🤖 Google AI' },
-  { id: 'zapret', label: '🛡️ Запрет (DPI)' },
-  { id: 'gaming', label: '🎮 Игры' },
 ]
 
 interface Toast {
@@ -77,7 +80,7 @@ export default function App() {
   const initial = (() => {
     const h = window.location.hash.replace('#', '')
     if (h === 'antigravity') return 'google-ai'
-    return (TABS.some((t) => t.id === h) || h === 'settings' ? h : 'dashboard') as TabId
+    return (TABS.some((t) => t.id === h) || h === 'settings' || h === 'help' ? h : 'dashboard') as TabId
   })()
   const [tab, setTab] = useState<TabId>(initial)
   const [status, setStatus] = useState<StatusInfo | null>(null)
@@ -101,15 +104,20 @@ export default function App() {
 
   // Управление ядром Mihomo (релизы и обновление)
   const [mihomoModalOpen, setMihomoModalOpen] = useState(false)
+  // Управление ядром Zapret (DPI)
+  const [zapretModalOpen, setZapretModalOpen] = useState(false)
 
   useEffect(() => {
     const handleOpenMihomo = () => setMihomoModalOpen(true)
     const handleOpenUpdate = () => setUpdateModalOpen(true)
+    const handleOpenZapret = () => setZapretModalOpen(true)
     window.addEventListener('xr:open-mihomo-modal', handleOpenMihomo)
     window.addEventListener('xr:open-update-modal', handleOpenUpdate)
+    window.addEventListener('xr:open-zapret-modal', handleOpenZapret)
     return () => {
       window.removeEventListener('xr:open-mihomo-modal', handleOpenMihomo)
       window.removeEventListener('xr:open-update-modal', handleOpenUpdate)
+      window.removeEventListener('xr:open-zapret-modal', handleOpenZapret)
     }
   }, [])
 
@@ -167,7 +175,7 @@ export default function App() {
     const handleLocationChange = () => {
       const h = window.location.hash.replace('#', '')
       const targetTab = (h === 'antigravity' ? 'google-ai' : h) as TabId
-      if (TABS.some((t) => t.id === targetTab)) {
+      if (TABS.some((t) => t.id === targetTab) || targetTab === 'settings' || targetTab === 'help') {
         setTab(targetTab)
       }
     }
@@ -272,7 +280,7 @@ export default function App() {
   useEffect(() => {
     const handleSwitchTab = (e: Event) => {
       const ce = e as CustomEvent<TabId>
-      if (ce.detail && (TABS.some((t) => t.id === ce.detail) || ce.detail === 'settings')) {
+      if (ce.detail && (TABS.some((t) => t.id === ce.detail) || ce.detail === 'settings' || ce.detail === 'help')) {
         switchTab(ce.detail)
       }
     }
@@ -294,6 +302,7 @@ export default function App() {
           onOpenEditor={() => setGlobalEditorOpen(true)}
           onOpenUpdateModal={() => setUpdateModalOpen(true)}
           onOpenMihomoModal={() => setMihomoModalOpen(true)}
+          onOpenZapretModal={() => setZapretModalOpen(true)}
           authStatus={authStatus}
           onLogout={handleLogout}
         />
@@ -330,13 +339,14 @@ export default function App() {
           {tab === 'dashboard' && <Dashboard status={status} notify={notify} refresh={refresh} onSwitchTab={switchTab} />}
           {tab === 'servers' && <Servers notify={notify} />}
           {tab === 'devices' && <Devices notify={notify} />}
+          {tab === 'zapret' && <Zapret notify={notify} />}
+          {tab === 'gaming' && <Gaming notify={notify} />}
+          {(tab === 'google-ai' || tab === 'antigravity') && <Antigravity notify={notify} />}
           {tab === 'connections' && <ConnectionsViewer notify={notify} />}
           {tab === 'rules' && <RulesViewer notify={notify} />}
           {tab === 'diagnostics' && <Diagnostics notify={notify} />}
-          {(tab === 'google-ai' || tab === 'antigravity') && <Antigravity notify={notify} />}
-          {tab === 'zapret' && <Zapret notify={notify} />}
-          {tab === 'gaming' && <Gaming notify={notify} />}
           {tab === 'settings' && <Settings notify={notify} status={status} refresh={refresh} />}
+          {tab === 'help' && <Help status={status} />}
         </ErrorBoundary>
       </main>
 
@@ -380,6 +390,14 @@ export default function App() {
       <MihomoCoreModal
         isOpen={mihomoModalOpen}
         onClose={() => setMihomoModalOpen(false)}
+        notify={notify}
+        onUpdated={refresh}
+      />
+
+      {/* Модальное окно управления и выбора ядра Запрет (DPI) */}
+      <ZapretCoreModal
+        isOpen={zapretModalOpen}
+        onClose={() => setZapretModalOpen(false)}
         notify={notify}
         onUpdated={refresh}
       />

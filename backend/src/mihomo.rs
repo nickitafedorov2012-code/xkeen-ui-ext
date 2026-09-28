@@ -67,7 +67,13 @@ pub async fn m_put(http: &reqwest::Client, cfg: &AppConfig, path: &str, body: Va
     }
     let resp = req.send().await.map_err(|e| format!("Mihomo {path}: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!("Mihomo {path}: статус {}", resp.status()));
+        let err_body = resp.text().await.unwrap_or_default();
+        let err_msg = if !err_body.trim().is_empty() {
+            format!("Mihomo {path}: статус {} ({})", resp.status(), err_body.trim())
+        } else {
+            format!("Mihomo {path}: статус {}", resp.status())
+        };
+        return Err(err_msg);
     }
     Ok(())
 }
@@ -82,7 +88,13 @@ pub async fn m_delete(http: &reqwest::Client, cfg: &AppConfig, path: &str, timeo
     }
     let resp = req.send().await.map_err(|e| format!("Mihomo {path}: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!("Mihomo {path}: статус {}", resp.status()));
+        let err_body = resp.text().await.unwrap_or_default();
+        let err_msg = if !err_body.trim().is_empty() {
+            format!("Mihomo {path}: статус {} ({})", resp.status(), err_body.trim())
+        } else {
+            format!("Mihomo {path}: статус {}", resp.status())
+        };
+        return Err(err_msg);
     }
     Ok(())
 }

@@ -677,6 +677,49 @@ runTest('17. Update Colors (Core & Zapret = Green, Panel = Blue) & Header Non-Ov
   assert(headerTestTsx.includes('shows green pulsating animation and badge when Zapret update is available'), 'Header.test.tsx must contain automated test for green zapret update');
 });
 
+// -------------------------------------------------------------
+// 18. Boost Update: Strategy Visual Feedback, Smart Gaming & 60s Traffic History
+// -------------------------------------------------------------
+runTest('18. Boost Update: Strategy Visual Feedback, Smart Gaming & 60s Traffic History', () => {
+  const zapretTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Zapret.tsx'), 'utf8');
+  const trafficGraphTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/TrafficGraph.tsx'), 'utf8');
+  const gamingTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Gaming.tsx'), 'utf8');
+  const dashboardTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Dashboard.tsx'), 'utf8');
+  const apiRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/api.rs'), 'utf8');
+  const trafficRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/traffic.rs'), 'utf8');
+  const configRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/config.rs'), 'utf8');
+
+  // 1. Strategy application visual feedback in Zapret.tsx
+  assert(zapretTsx.includes('activeStrategyId === strat.id') || zapretTsx.includes('isSelected'), 'Zapret.tsx must track and style activeStrategyId');
+  assert(zapretTsx.includes('✓ Выбрано'), 'Zapret.tsx must render "✓ Выбрано" label for selected strategy');
+  assert(zapretTsx.includes('activeEngine !== \'v2\' && ('), 'Zapret.tsx must hide hardware recommendation hint when Zapret 2 is active');
+
+  // 2. Traffic Analytics single VPS counter and period_bytes
+  assert(zapretTsx.includes('Трафик за весь период'), 'Zapret.tsx must display "Трафик за весь период" counter');
+  assert(zapretTsx.includes('analytics?.period_bytes'), 'Zapret.tsx must use analytics.period_bytes');
+  assert(configRs.includes('pub period_saved_bytes: u64'), 'config.rs must store period_saved_bytes');
+  assert(apiRs.includes('"period_bytes": period_bytes'), 'api.rs must return period_bytes in analytics response');
+
+  // 3. TrafficGraph 60s ring buffer and swapped direct/proxy colors (Proxy = Blue #38bdf8, Direct = Green #22c55e)
+  assert(trafficGraphTsx.includes('Array(60).fill'), 'TrafficGraph.tsx must maintain 60s history buffer');
+  assert(trafficGraphTsx.includes('data.history'), 'TrafficGraph.tsx must initialize history buffer from data.history');
+  assert(trafficRs.includes('pub fn record_history_point'), 'traffic.rs must record history points in ring buffer');
+  assert(trafficRs.includes('pub fn get_history_json'), 'traffic.rs must provide get_history_json');
+  assert(trafficGraphTsx.includes('stroke="#22c55e"') && trafficGraphTsx.includes('stroke="#38bdf8"'), 'TrafficGraph.tsx must use green for direct and blue for proxy');
+
+  // 4. Smart Gaming Mode & Recent Gaming Connections
+  assert(gamingTsx.includes('smart_mode') && gamingTsx.includes('smart_idle_timeout_mins'), 'Gaming.tsx must render smart gaming mode controls');
+  assert(gamingTsx.includes('handleToggleIgnoreConn'), 'Gaming.tsx must implement handleToggleIgnoreConn handler');
+  assert(gamingTsx.includes('Не реагировать'), 'Gaming.tsx must render "Не реагировать" ignore button');
+  assert(apiRs.includes('pub async fn ignore_gaming_conn'), 'api.rs must implement ignore_gaming_conn endpoint');
+
+  // 5. Dashboard Active Server card details
+  assert(dashboardTsx.includes('Mixed Port') && dashboardTsx.includes('7890'), 'Dashboard.tsx must display Mixed Port 7890');
+  assert(dashboardTsx.includes('Full-Cone NAT'), 'Dashboard.tsx must display Full-Cone NAT');
+  assert(dashboardTsx.includes('devicesCount'), 'Dashboard.tsx must display connected devices count');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
+
 
 

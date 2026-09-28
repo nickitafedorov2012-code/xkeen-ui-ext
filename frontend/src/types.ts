@@ -6,11 +6,14 @@ export interface SystemStats {
   app_cpu_percent?: number
   core_memory_mb?: number
   total_xkeen_memory_mb?: number
+  cpu_temp_c?: number | null
 }
 
 export interface StatusInfo {
   version: string
   config_path: string
+  service_running?: boolean
+  service_stopped?: boolean
   router: { model?: string; version?: string; hostname?: string; uptime?: string } | null
   system?: SystemStats | null
   mihomo_version?: string | null
@@ -19,9 +22,17 @@ export interface StatusInfo {
     version: string
     label: string
     installed: boolean
+    v1_installed?: boolean
+    v2_installed?: boolean
     running: boolean
     update_available: boolean
     latest_version?: string
+  } | null
+  gaming?: {
+    enabled: boolean
+    mode: GamingMode
+    smart_mode: boolean
+    smart_idle_timeout_mins: number
   } | null
   active_server: {
     id: string
@@ -111,12 +122,14 @@ export interface ZapretFeatures {
   community_hostlist_count?: number
   excluded_devices?: string[]
   engine?: 'v1' | 'v2'
+  period_saved_bytes?: number
 }
 
 export interface ZapretAnalytics {
   bytes_intercepted: number
   packets_intercepted: number
   vps_saved_bytes: number
+  period_bytes?: number
   tcp_packets?: number
   udp_packets?: number
   nfqws_cpu_pct?: number
@@ -132,8 +145,14 @@ export interface BlockcheckStrategy {
   args: string
   youtube_ok: boolean
   youtube_time_ms: number
+  youtube_cdn_ok?: boolean
   discord_ok: boolean
   discord_time_ms: number
+  discord_cdn_ok?: boolean
+  tls_handshake_ms?: number
+  cpu_impact?: string
+  tspu_resistance?: string
+  udp_voice_ready?: boolean
   score: number
   is_best: boolean
 }
@@ -141,6 +160,7 @@ export interface BlockcheckStrategy {
 export interface BlockcheckResult {
   strategies: BlockcheckStrategy[]
   best_strategy_id: string
+  active_strategy_id?: string | null
 }
 
 export interface ZapretStatus {
@@ -150,6 +170,7 @@ export interface ZapretStatus {
   autostart?: boolean
   iptables_active?: boolean
   preset?: string
+  active_strategy_id?: string | null
   cmdline?: string
   config?: string
   hosts?: string
@@ -510,6 +531,17 @@ export interface GamingConfig {
   fix_nat_fake_ip: boolean
   platforms: GamingPlatforms
   custom_domains: string[]
+  smart_mode?: boolean
+  smart_idle_timeout_mins?: number
+  ignored_game_conns?: string[]
+}
+
+export interface RecentGamingConn {
+  host: string
+  destination: string
+  network: string
+  last_seen: string
+  ignored: boolean
 }
 
 export interface GamingPingResult {
@@ -554,6 +586,8 @@ export interface GamingStatus {
   ipv6_status?: GamingIpv6Status
   active_device?: GamingDevice | null
   real_connections?: GamingRealConnection[]
+  recent_gaming_conns?: RecentGamingConn[]
   verification_error?: string | null
 }
+
 

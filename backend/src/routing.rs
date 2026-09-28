@@ -112,7 +112,7 @@ pub fn group_name_for(ip: &str, name: &str) -> String {
 /// на чужом железе имена провайдеров свои (или их нет вовсе).
 pub fn group_yaml(group_name: &str, providers: &[String]) -> String {
     let base = format!(
-        "  - name: '{group_name}'\n    type: select\n    proxies:\n      - Fastest\n      - Fallback"
+        "  - name: '{group_name}'\n    type: select\n    proxies:\n      - Fastest\n      - Fallback\n      - DIRECT"
     );
     let mut use_block = String::new();
     for p in providers {
@@ -1150,6 +1150,31 @@ pub fn remove_gaming_rules(yaml: &str) -> String {
     content
 }
 
+/// Имена proxy-groups верхнего уровня из config.yaml.
+pub fn parse_existing_group_names(yaml: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_section = false;
+    for line in yaml.lines() {
+        if line.trim_end() == "proxy-groups:" && !line.starts_with(' ') {
+            in_section = true;
+            continue;
+        }
+        if in_section {
+            if !line.starts_with(' ') && !line.trim().is_empty() && !line.trim().starts_with('#') {
+                break;
+            }
+            let t = line.trim();
+            if let Some(rest) = t.strip_prefix("- name:") {
+                let name = rest.trim().trim_matches('\'').trim_matches('"').to_string();
+                if !name.is_empty() {
+                    out.push(name);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Применение выделенного маршрута игрового режима (селектор-группа 🎮 Gaming и правила rules:).
 pub fn apply_gaming_rules(
     yaml: &str,
@@ -1169,6 +1194,10 @@ pub fn apply_gaming_rules(
         cfg.target_server.trim()
     };
 
+    let existing_groups = parse_existing_group_names(&content);
+    let static_proxies = parse_static_proxy_names(&content);
+    let has_providers_section = content.contains("proxy-providers:");
+
     // 1. Вставка селектор-группы в proxy-groups:
     let lines: Vec<&str> = content.lines().collect();
     let pg_idx = lines
@@ -1185,14 +1214,36 @@ pub fn apply_gaming_rules(
             with_group.push("    type: select".to_string());
             with_group.push("    proxies:".to_string());
             let mut group_proxies = Vec::new();
-            group_proxies.push(target_srv.to_string());
-            for p in &["Fastest", "PROXY", "Fallback", "DIRECT"] {
-                if !group_proxies.iter().any(|x| x == *p) {
+            let target_is_static_or_group = target_srv == "DIRECT"
+                || target_srv == "REJECT"
+                || existing_groups.iter().any(|g| g == target_srv)
+                || static_proxies.iter().any(|p| p == target_srv)
+                || (!has_providers_section && existing_groups.len() <= 1 && static_proxies.is_empty());
+            if target_is_static_or_group {
+                group_proxies.push(target_srv.to_string());
+            }
+            for p in &["Fastest", "PROXY", "Fallback"] {
+                let exists = existing_groups.iter().any(|g| g == *p)
+                    || content.contains(&format!("- {p}"))
+                    || existing_groups.is_empty();
+                if exists && !group_proxies.iter().any(|x| x == *p) {
                     group_proxies.push(p.to_string());
                 }
             }
+            for sp in &static_proxies {
+                if !group_proxies.iter().any(|x| x == sp) {
+                    group_proxies.push(sp.clone());
+                }
+            }
+            if !group_proxies.iter().any(|x| x == "DIRECT") {
+                group_proxies.push("DIRECT".to_string());
+            }
             for p in &group_proxies {
-                with_group.push(format!("      - {p}"));
+                if p.contains(':') || p.contains('[') || p.contains(']') || p.contains('#') || p.contains('\'') || p.contains('"') {
+                    with_group.push(format!("      - '{}'", p.replace('\'', "''")));
+                } else {
+                    with_group.push(format!("      - {p}"));
+                }
             }
             if !providers.is_empty() {
                 with_group.push("    use:".to_string());
@@ -1758,10 +1809,22 @@ pub fn apply_ignore_to_providers(yaml: &str, ignore: &[String], saved: &mut std:
                         continue;
                     }
                     let orig = saved.entry(p.clone()).or_insert_with(|| extract_filter_value(trimmed));
-                    let mut parts: Vec<String> = orig.split('|').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    let mut parts: Vec<String> = orig
+                        .split('|')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| {
+                            if s.contains('(') || s.contains(')') || s.contains('[') || s.contains(']') || s.contains('?') || s.contains('+') || s.contains('*') {
+                                regex_escape(&s)
+                            } else {
+                                s
+                            }
+                        })
+                        .collect();
                     for i in &ig {
-                        if !parts.iter().any(|p2| p2.eq_ignore_ascii_case(i)) {
-                            parts.push(i.clone());
+                        let esc_i = regex_escape(i.trim());
+                        if !parts.iter().any(|p2| p2.eq_ignore_ascii_case(&esc_i)) {
+                            parts.push(esc_i);
                         }
                     }
                     out.push(format!("    exclude-filter: \"{}\"", parts.join("|")));
@@ -1830,6 +1893,31 @@ pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> Result<(Stri
                 name: String::new(),
                 server: Some(srv.clone()),
             });
+        }
+    }
+    // Включаем устройства с активными расписаниями (чтобы группа существовала для переключения)
+    for s in &cfg.schedules {
+        if s.enabled && !assignments.iter().any(|a| a.ip == s.ip) {
+            let default_target = s.target_server.as_deref().unwrap_or("DIRECT");
+            assignments.push(Assignment {
+                ip: s.ip.clone(),
+                name: String::new(),
+                server: Some(default_target.to_string()),
+            });
+        }
+    }
+    // Включаем игровые устройства с выделенным сервером
+    for d in &cfg.gaming.devices {
+        if d.enabled {
+            if let Some(ref srv) = d.server {
+                if !srv.trim().is_empty() && !assignments.iter().any(|a| a.ip == d.ip) {
+                    assignments.push(Assignment {
+                        ip: d.ip.clone(),
+                        name: d.name.clone(),
+                        server: Some(srv.clone()),
+                    });
+                }
+            }
         }
     }
 

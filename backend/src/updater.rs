@@ -36,11 +36,15 @@ struct JsDelivrResolved {
     version: String,
 }
 
+/// Встроенный DEVELOPMENT.md как надёжный фоллбэк списка изменений текущей версии.
+const EMBEDDED_DEV_MD: &str = include_str!("../../DEVELOPMENT.md");
+
 /// Клиент с проксированием через Mihomo mixed-port (обход блокировок ТСПУ для локальных процессов).
 fn proxied_client(proxy_addr: &str) -> Option<reqwest::Client> {
     let proxy = reqwest::Proxy::all(proxy_addr).ok()?;
     reqwest::Client::builder()
         .proxy(proxy)
+        .connect_timeout(Duration::from_secs(8))
         .build()
         .ok()
 }
@@ -77,6 +81,47 @@ fn notes_lines(body: &str, max: usize) -> Vec<String> {
         .filter(|l| !l.is_empty())
         .take(max)
         .collect()
+}
+
+pub fn extract_notes_from_markdown(text: &str, tag: &str) -> String {
+    let clean_tag = tag.trim_start_matches('v');
+    let v_tag = format!("v{clean_tag}");
+    let mut lines = Vec::new();
+    let mut in_section = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with("### ") {
+            if in_section {
+                break;
+            }
+            if t.contains(&v_tag) || t.contains(tag) {
+                in_section = true;
+            }
+            continue;
+        }
+        if in_section && (t.starts_with("- ") || t.starts_with("* ")) {
+            lines.push(t[2..].trim().to_string());
+        }
+    }
+    // Если точный тег не найден, берём самую верхнюю секцию ### v...
+    if lines.is_empty() {
+        for line in text.lines() {
+            let t = line.trim();
+            if t.starts_with("### ") {
+                if in_section {
+                    break;
+                }
+                if t.contains("v1.") || t.contains("v2.") {
+                    in_section = true;
+                }
+                continue;
+            }
+            if in_section && (t.starts_with("- ") || t.starts_with("* ")) {
+                lines.push(t[2..].trim().to_string());
+            }
+        }
+    }
+    lines.join("\n")
 }
 
 async fn fetch_latest(direct: &reqwest::Client, proxy_url: &str) -> Result<GhRelease, String> {
@@ -132,7 +177,10 @@ async fn fetch_latest(direct: &reqwest::Client, proxy_url: &str) -> Result<GhRel
         {
             if res.status().is_success() {
                 if let Ok(list) = res.json::<Vec<GhRelease>>().await {
-                    if let Some(rel) = list.into_iter().next() {
+                    if let Some(mut rel) = list.into_iter().next() {
+                        if rel.body.trim().is_empty() {
+                            rel.body = fetch_notes(http, &rel.tag_name).await;
+                        }
                         return Ok(rel);
                     }
                 }
@@ -155,50 +203,63 @@ async fn get_latest_cached(http: &reqwest::Client, proxy_url: &str) -> Result<Gh
     Ok(fresh)
 }
 
-/// Список изменений: секция `### {tag}` из DEVELOPMENT.md через jsDelivr CDN.
+/// Список изменений: секция `### {tag}` из DEVELOPMENT.md через jsDelivr CDN с фоллбэком на встроенный DEVELOPMENT.md.
 async fn fetch_notes(http: &reqwest::Client, tag: &str) -> String {
     let url = format!("{JSDELIVR_CDN}@{tag}/DEVELOPMENT.md");
-    let Ok(res) = http.get(&url).timeout(Duration::from_secs(15)).send().await else {
-        return String::new();
-    };
-    let Ok(text) = res.text().await else {
-        return String::new();
-    };
-    let mut lines = Vec::new();
-    let mut in_section = false;
-    for line in text.lines() {
-        let t = line.trim();
-        if t.starts_with("### ") {
-            if in_section {
-                break;
+    if let Ok(res) = http.get(&url).timeout(Duration::from_secs(8)).send().await {
+        if res.status().is_success() {
+            if let Ok(text) = res.text().await {
+                let extracted = extract_notes_from_markdown(&text, tag);
+                if !extracted.is_empty() {
+                    return extracted;
+                }
             }
-            in_section = t.contains(tag);
-            continue;
-        }
-        if in_section && (t.starts_with("- ") || t.starts_with("* ")) {
-            lines.push(t[2..].trim().to_string());
         }
     }
-    lines.join("\n")
+    extract_notes_from_markdown(EMBEDDED_DEV_MD, tag)
 }
 
-/// GET /api/update/check — текущая/последняя версия + список изменений.
+/// GET /api/update/check — текущая/последняя версия + список изменений (всегда включает changelog).
 pub async fn check(State(state): State<AppState>) -> Response {
     let proxy_url = {
         let cfg = state.config.read().await;
         cfg.mihomo_proxy_url()
     };
+    let current_tag = format!("v{}", VERSION.trim_start_matches('v'));
     let rel = match get_latest_cached(&state.http, &proxy_url).await {
         Ok(r) => r,
-        Err(e) => return api_err(e),
+        Err(_) => {
+            // Даже если GitHub недоступен, возвращаем информацию о текущей версии и её список изменений
+            let fallback_notes = extract_notes_from_markdown(EMBEDDED_DEV_MD, &current_tag);
+            return api_ok(json!({
+                "current": VERSION,
+                "latest": current_tag,
+                "update_available": false,
+                "notes": notes_lines(&fallback_notes, 12),
+            }));
+        }
     };
     let latest = rel.tag_name.clone();
     let update_available = is_newer(&latest, VERSION);
+    let body_to_use = if !update_available {
+        let local_notes = extract_notes_from_markdown(EMBEDDED_DEV_MD, &current_tag);
+        if !local_notes.is_empty() {
+            local_notes
+        } else if !rel.body.trim().is_empty() {
+            rel.body.clone()
+        } else {
+            extract_notes_from_markdown(EMBEDDED_DEV_MD, &latest)
+        }
+    } else if !rel.body.trim().is_empty() {
+        rel.body.clone()
+    } else {
+        extract_notes_from_markdown(EMBEDDED_DEV_MD, &latest)
+    };
     api_ok(json!({
         "current": VERSION,
-        "latest": latest,
+        "latest": if update_available { latest } else { current_tag },
         "update_available": update_available,
-        "notes": notes_lines(&rel.body, 12),
+        "notes": notes_lines(&body_to_use, 12),
     }))
 }
 
@@ -603,49 +664,99 @@ pub async fn mihomo_install(
     let _ = tokio::fs::remove_file(&bin_path).await;
 
     let proxied = proxied_client(&proxy_url);
-    let http = proxied.as_ref().unwrap_or(&state.http);
-
-    let mut dl_resp = http.get(&download_url)
-        .header("User-Agent", "xkeen-route")
-        .timeout(Duration::from_secs(180))
-        .send()
-        .await;
-
-    if dl_resp.is_err() || dl_resp.as_ref().map(|r| !r.status().is_success()).unwrap_or(false) {
-        let mirror_url = format!("https://ghproxy.net/{download_url}");
-        if let Ok(m_res) = http.get(&mirror_url).header("User-Agent", "xkeen-route").timeout(Duration::from_secs(180)).send().await {
-            if m_res.status().is_success() {
-                dl_resp = Ok(m_res);
-            }
-        }
+    let mut clients: Vec<(&str, &reqwest::Client)> = Vec::new();
+    if let Some(ref p) = proxied {
+        clients.push(("proxy", p));
     }
+    clients.push(("direct", &state.http));
 
-    let mut res = match dl_resp {
-        Ok(r) if r.status().is_success() => r,
-        Ok(r) => return api_err(format!("Ошибка загрузки ядра: HTTP {}", r.status())),
-        Err(e) => return api_err(format!("Ошибка сети при загрузке: {e}")),
-    };
+    let urls = vec![
+        download_url.clone(),
+        format!("https://ghproxy.net/{download_url}"),
+        format!("https://gh-proxy.com/{download_url}"),
+    ];
 
     use tokio::io::AsyncWriteExt;
-    let mut file = match tokio::fs::File::create(&gz_path).await {
-        Ok(f) => f,
-        Err(e) => return api_err(format!("Ошибка создания временного файла: {e}")),
-    };
+    let mut downloaded_ok = false;
+    let mut last_err = String::from("Не удалось подключиться к серверам загрузки");
 
-    let mut total_bytes = 0usize;
-    while let Ok(Some(chunk)) = res.chunk().await {
-        total_bytes += chunk.len();
-        if let Err(e) = file.write_all(&chunk).await {
+    'dl_loop: for url in &urls {
+        for (mode_name, http) in &clients {
             let _ = tokio::fs::remove_file(&gz_path).await;
-            return api_err(format!("Ошибка записи архива: {e}"));
+            crate::log_i!("[Mihomo Update] Попытка загрузки ({mode_name}): {url}");
+
+            let send_fut = http
+                .get(url)
+                .header("User-Agent", "xkeen-route")
+                .timeout(Duration::from_secs(90))
+                .send();
+
+            let mut res = match tokio::time::timeout(Duration::from_secs(12), send_fut).await {
+                Ok(Ok(r)) if r.status().is_success() => r,
+                Ok(Ok(r)) => {
+                    last_err = format!("HTTP {} ({mode_name})", r.status());
+                    continue;
+                }
+                Ok(Err(e)) => {
+                    last_err = format!("Ошибка сети ({mode_name}): {e}");
+                    continue;
+                }
+                Err(_) => {
+                    last_err = format!("Таймаут соединения ({mode_name})");
+                    continue;
+                }
+            };
+
+            let mut file = match tokio::fs::File::create(&gz_path).await {
+                Ok(f) => f,
+                Err(e) => return api_err(format!("Ошибка создания временного файла: {e}")),
+            };
+
+            let mut total_bytes = 0usize;
+            let mut stream_err = None;
+            loop {
+                match tokio::time::timeout(Duration::from_secs(15), res.chunk()).await {
+                    Ok(Ok(Some(chunk))) => {
+                        total_bytes += chunk.len();
+                        if let Err(e) = file.write_all(&chunk).await {
+                            let _ = tokio::fs::remove_file(&gz_path).await;
+                            return api_err(format!("Ошибка записи архива: {e}"));
+                        }
+                    }
+                    Ok(Ok(None)) => break,
+                    Ok(Err(e)) => {
+                        stream_err = Some(format!("Обрыв потока ({mode_name}): {e}"));
+                        break;
+                    }
+                    Err(_) => {
+                        stream_err = Some(format!("Таймаут чтения потока ({mode_name})"));
+                        break;
+                    }
+                }
+            }
+            let _ = file.flush().await;
+            drop(file);
+
+            if let Some(err_msg) = stream_err {
+                crate::log_w!("[Mihomo Update] {err_msg}");
+                last_err = err_msg;
+                continue;
+            }
+
+            if total_bytes < 1024 * 1024 {
+                last_err = format!("Загруженный архив слишком мал ({total_bytes} байт)");
+                continue;
+            }
+
+            crate::log_i!("[Mihomo Update] Загружено {} байт через {mode_name}", total_bytes);
+            downloaded_ok = true;
+            break 'dl_loop;
         }
     }
-    let _ = file.flush().await;
-    drop(file);
 
-    if total_bytes < 1024 * 1024 {
+    if !downloaded_ok {
         let _ = tokio::fs::remove_file(&gz_path).await;
-        return api_err(format!("Загруженный архив слишком мал ({total_bytes} байт)"));
+        return api_err(format!("Не удалось загрузить ядро Mihomo: {last_err}"));
     }
 
     // Распаковка .gz
@@ -704,20 +815,38 @@ pub async fn mihomo_install(
         }
     }
 
-    // Бэкап и замена /opt/sbin/mihomo
+    // Бэкап и атомарная замена /opt/sbin/mihomo (через .new в той же директории во избежание ETXTBSY)
     let target_bin = Path::new("/opt/sbin/mihomo");
+    let staged_bin = Path::new("/opt/sbin/mihomo.new");
     let bak_bin = Path::new("/opt/sbin/mihomo.bak");
 
     if target_bin.exists() {
+        let _ = tokio::fs::remove_file(bak_bin).await;
         let _ = tokio::fs::copy(target_bin, bak_bin).await;
     }
 
-    if let Err(e) = tokio::fs::rename(&bin_path, target_bin).await {
-        if let Err(copy_err) = tokio::fs::copy(&bin_path, target_bin).await {
+    let _ = tokio::fs::remove_file(staged_bin).await;
+    if tokio::fs::rename(&bin_path, staged_bin).await.is_err() {
+        if let Err(copy_err) = tokio::fs::copy(&bin_path, staged_bin).await {
             let _ = tokio::fs::remove_file(&bin_path).await;
-            return api_err(format!("Ошибка установки бинарника в /opt/sbin/mihomo: {copy_err} (rename: {e})"));
+            return api_err(format!("Ошибка копирования бинарника в /opt/sbin/mihomo.new: {copy_err}"));
         }
         let _ = tokio::fs::remove_file(&bin_path).await;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(staged_bin, std::fs::Permissions::from_mode(0o755)).await;
+    }
+
+    if let Err(e) = tokio::fs::rename(staged_bin, target_bin).await {
+        let _ = tokio::fs::remove_file(target_bin).await;
+        if let Err(copy_err) = tokio::fs::copy(staged_bin, target_bin).await {
+            let _ = tokio::fs::remove_file(staged_bin).await;
+            return api_err(format!("Ошибка установки бинарника в /opt/sbin/mihomo: {copy_err} (rename: {e})"));
+        }
+        let _ = tokio::fs::remove_file(staged_bin).await;
     }
 
     #[cfg(unix)]

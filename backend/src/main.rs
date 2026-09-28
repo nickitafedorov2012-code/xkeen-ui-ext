@@ -455,6 +455,7 @@ async fn main() {
         .route("/api/gaming/save", post(api::save_gaming_config))
         .route("/api/gaming/toggle", post(api::toggle_gaming))
         .route("/api/gaming/ping", post(api::ping_gaming_targets))
+        .route("/api/gaming/ignore-conn", post(api::ignore_gaming_conn))
         // 404 JSON для несуществующих маршрутов API (вместо отдачи HTML через SPA fallback)
         .route("/api/{*path}", any(api::api_not_found))
         .fallback(frontend::serve)

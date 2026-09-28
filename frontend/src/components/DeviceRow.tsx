@@ -213,21 +213,19 @@ const DeviceRow = memo(function DeviceRow({
       <td>
         <select
           className="device-select"
-          value={assigned ? '__keep__' : 'default'}
+          value={assigned || 'default'}
           disabled={busy}
-          onChange={(e) =>
-            applyServer(d.ip, d.name, e.target.value === '__keep__' ? assigned || '' : e.target.value)
-          }
+          onChange={(e) => applyServer(d.ip, d.name, e.target.value)}
         >
           <option value="default">Default (PROXY)</option>
-          {assigned && <option value="__keep__">{serverLabel(assigned)}</option>}
-          {servers
-            .filter((s) => s.id !== assigned)
-            .map((s) => (
-              <option key={s.id} value={s.id}>
-                {serverLabel(s.id)}
-              </option>
-            ))}
+          {assigned && !servers.some((s) => s.id === assigned) && (
+            <option value={assigned}>{serverLabel(assigned)}</option>
+          )}
+          {servers.map((s) => (
+            <option key={s.id} value={s.id}>
+              {serverLabel(s.id)}
+            </option>
+          ))}
         </select>
         {(drEntry?.servers?.length ?? 0) > 1 && (
           <div className="device-reserve-hint">

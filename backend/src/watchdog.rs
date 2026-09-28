@@ -4,6 +4,7 @@ use tokio::time::{sleep, Duration};
 use crate::{config, log_i, log_w, mihomo, override_sync, rci, routing, AppState};
 
 pub static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static SERVICE_MANUALLY_STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn shutdown() {
     SHUTDOWN.store(true, std::sync::atomic::Ordering::Release);
@@ -11,6 +12,14 @@ pub fn shutdown() {
 
 pub fn is_shutdown() -> bool {
     SHUTDOWN.load(std::sync::atomic::Ordering::Acquire)
+}
+
+pub fn set_service_stopped(stopped: bool) {
+    SERVICE_MANUALLY_STOPPED.store(stopped, std::sync::atomic::Ordering::Release);
+}
+
+pub fn is_service_stopped() -> bool {
+    SERVICE_MANUALLY_STOPPED.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Фоновый сторожевой процесс (watchdog) для защиты конфигурации config.yaml.
@@ -23,6 +32,7 @@ pub fn spawn(state: AppState) {
     spawn_zapret_monitor(state.clone());
     spawn_community_hostlist_updater(state.clone());
     spawn_zapret_update_checker(state.clone());
+    spawn_smart_gaming_monitor(state.clone());
     tokio::spawn(async move {
         // Начальная пауза перед запуском монитора
         for _ in 0..10 {
@@ -41,6 +51,10 @@ pub fn spawn(state: AppState) {
                     return;
                 }
                 sleep(Duration::from_secs(1)).await;
+            }
+
+            if is_service_stopped() {
+                continue;
             }
 
             let (config_path_str, force_domains, device_routing, ignore_servers, device_domains, adblock_enabled, flow_server, zapret_cfg, gaming_cfg) = {
@@ -381,6 +395,11 @@ pub fn spawn_zapret_monitor(state: AppState) {
                 sleep(Duration::from_secs(1)).await;
             }
 
+            if is_service_stopped() {
+                restart_failures = 0;
+                continue;
+            }
+
             let zapret_enabled = {
                 let cfg = state.config.read().await;
                 cfg.zapret.enabled
@@ -568,6 +587,262 @@ pub fn spawn_zapret_update_checker(state: AppState) {
     });
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct RecentGamingConn {
+    pub target: String,
+    pub destination: String,
+    pub network: String,
+    pub device_ip: String,
+    pub last_seen: String,
+    pub ignored: bool,
+}
+
+static RECENT_GAMING_CONNS: std::sync::Mutex<Vec<RecentGamingConn>> = std::sync::Mutex::new(Vec::new());
+
+pub fn get_recent_gaming_conns(ignored_list: &[String]) -> Vec<RecentGamingConn> {
+    let mut list = RECENT_GAMING_CONNS.lock().map(|g| g.clone()).unwrap_or_default();
+    for item in &mut list {
+        item.ignored = is_conn_target_ignored(&item.target, &item.destination, ignored_list);
+    }
+    list
+}
+
+pub fn is_conn_target_ignored(target: &str, destination: &str, ignored_list: &[String]) -> bool {
+    let t_low = target.trim().to_lowercase();
+    let d_low = destination.trim().to_lowercase();
+    let dest_ip = d_low.split(':').next().unwrap_or("");
+    ignored_list.iter().any(|ig| {
+        let ig_low = ig.trim().to_lowercase();
+        if ig_low.is_empty() {
+            return false;
+        }
+        t_low == ig_low
+            || d_low == ig_low
+            || dest_ip == ig_low
+            || t_low.ends_with(&format!(".{ig_low}"))
+    })
+}
+
+pub fn is_gaming_connection_match(
+    host: &str,
+    dest_ip: &str,
+    dest_port: &str,
+    network: &str,
+    rule: &str,
+    gaming_domains: &[String],
+) -> bool {
+    let rule_low = rule.to_lowercase();
+    if rule_low.contains("category-games") || rule_low.contains("gaming") {
+        return true;
+    }
+    let host_low = host.trim().to_lowercase();
+    if !host_low.is_empty() {
+        for gd in gaming_domains {
+            let gd_low = gd.trim().to_lowercase();
+            if !gd_low.is_empty() && (host_low == gd_low || host_low.ends_with(&format!(".{gd_low}"))) {
+                return true;
+            }
+        }
+    }
+    // Для UDP соединений с игрового устройства: высокие игровые порты (не DNS/QUIC/NTP/SSDP/mDNS)
+    if network.eq_ignore_ascii_case("udp") && !dest_ip.is_empty() {
+        if let Ok(port_num) = dest_port.parse::<u16>() {
+            if !matches!(port_num, 53 | 80 | 123 | 443 | 853 | 1900 | 5353) && port_num >= 1024 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub fn record_recent_gaming_conn(conn: RecentGamingConn) {
+    if let Ok(mut guard) = RECENT_GAMING_CONNS.lock() {
+        if let Some(existing) = guard.iter_mut().find(|c| c.target.eq_ignore_ascii_case(&conn.target)) {
+            existing.destination = conn.destination;
+            existing.network = conn.network;
+            existing.device_ip = conn.device_ip;
+            existing.last_seen = conn.last_seen;
+            existing.ignored = conn.ignored;
+        } else {
+            guard.insert(0, conn);
+            if guard.len() > 25 {
+                guard.truncate(25);
+            }
+        }
+    }
+}
+
+pub fn spawn_smart_gaming_monitor(state: AppState) {
+    tokio::spawn(async move {
+        for _ in 0..12 {
+            if is_shutdown() {
+                return;
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+
+        let mut last_active_instant: Option<std::time::Instant> = None;
+
+        loop {
+            for _ in 0..8 {
+                if is_shutdown() {
+                    return;
+                }
+                sleep(Duration::from_secs(1)).await;
+            }
+
+            if is_service_stopped() {
+                continue;
+            }
+
+            let cfg = state.config.read().await.clone();
+            if !cfg.gaming.smart_mode && !cfg.gaming.enabled {
+                continue;
+            }
+
+            // Собираем список всех известных игровых доменов (даже если сейчас gaming.enabled == false)
+            let mut probe_gaming = cfg.gaming.clone();
+            probe_gaming.enabled = true;
+            let gaming_domains = routing::get_gaming_domains(&probe_gaming);
+
+            let has_explicit_enabled = cfg.gaming.devices.iter().any(|d| d.enabled);
+            let active_dev_ip = cfg
+                .gaming
+                .devices
+                .iter()
+                .find(|d| if has_explicit_enabled { d.enabled } else { cfg.gaming.devices.len() == 1 })
+                .map(|d| d.ip.trim().to_string())
+                .unwrap_or_default();
+
+            let Ok(val) = mihomo::m_get(&state.http, &cfg, "/connections").await else {
+                continue;
+            };
+
+            let mut found_non_ignored = false;
+            let mut trigger_target = String::new();
+            let now_str = chrono::Local::now().format("%H:%M:%S").to_string();
+
+            if let Some(conns) = val.get("connections").and_then(|c| c.as_array()) {
+                for c in conns {
+                    let Some(meta) = c.get("metadata") else { continue };
+                    let src_ip = meta.get("sourceIP").and_then(|s| s.as_str()).unwrap_or("");
+                    if !active_dev_ip.is_empty() && src_ip != active_dev_ip {
+                        continue;
+                    }
+                    let host = meta.get("host").and_then(|h| h.as_str()).unwrap_or("");
+                    let dest_ip = meta.get("destinationIP").and_then(|d| d.as_str()).unwrap_or("");
+                    let dest_port = meta
+                        .get("destinationPort")
+                        .map(|p| {
+                            if let Some(s) = p.as_str() {
+                                s.to_string()
+                            } else if let Some(n) = p.as_u64() {
+                                n.to_string()
+                            } else {
+                                String::new()
+                            }
+                        })
+                        .unwrap_or_default();
+                    let net = meta.get("network").and_then(|n| n.as_str()).unwrap_or("tcp");
+                    let rule = c.get("rule").and_then(|r| r.as_str()).unwrap_or("");
+
+                    if is_gaming_connection_match(host, dest_ip, &dest_port, net, rule, &gaming_domains) {
+                        let destination = format!("{dest_ip}:{dest_port}");
+                        let target = if !host.trim().is_empty() {
+                            host.trim().to_lowercase()
+                        } else {
+                            destination.clone()
+                        };
+                        let ignored = is_conn_target_ignored(&target, &destination, &cfg.gaming.ignored_game_conns);
+                        record_recent_gaming_conn(RecentGamingConn {
+                            target: target.clone(),
+                            destination,
+                            network: net.to_uppercase(),
+                            device_ip: src_ip.to_string(),
+                            last_seen: now_str.clone(),
+                            ignored,
+                        });
+                        if !ignored {
+                            found_non_ignored = true;
+                            if trigger_target.is_empty() {
+                                trigger_target = target;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !cfg.gaming.smart_mode {
+                continue;
+            }
+
+            if found_non_ignored {
+                last_active_instant = Some(std::time::Instant::now());
+                if !cfg.gaming.enabled || cfg.gaming.mode != config::GamingMode::Compatibility {
+                    // Включаем режим совместимости только если выбрано игровое устройство с IP
+                    if !active_dev_ip.is_empty() {
+                        log_i!(
+                            "[SMART-GAMING] 🎮 Обнаружено игровое подключение ({}) на {} — автоматическое включение Режима совместимости!",
+                            trigger_target,
+                            active_dev_ip
+                        );
+                        let _cfg_guard = state.config_lock.lock().await;
+                        let _routing_guard = state.routing_lock.lock().await;
+                        let mut new_cfg = (**state.config.read().await).clone();
+                        new_cfg.gaming.enabled = true;
+                        new_cfg.gaming.mode = config::GamingMode::Compatibility;
+                        let path = Path::new(&new_cfg.mihomo.config_path);
+                        if path.exists() {
+                            if let Ok(raw_yaml) = tokio::fs::read_to_string(path).await {
+                                if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &new_cfg) {
+                                    let _ = crate::api::atomic_write_file(path, &new_yaml).await;
+                                    let _ = mihomo::reload_config(&state.http, &new_cfg).await;
+                                    let target_srv = if new_cfg.gaming.target_server.trim().is_empty() {
+                                        "Fastest"
+                                    } else {
+                                        new_cfg.gaming.target_server.trim()
+                                    };
+                                    let _ = mihomo::switch_group(&state.http, &new_cfg, routing::GAMING_GROUP_NAME, target_srv).await;
+                                }
+                            }
+                        }
+                        if config::save(&state.config_path, &new_cfg).await.is_ok() {
+                            *state.config.write().await = std::sync::Arc::new(new_cfg);
+                        }
+                    }
+                }
+            } else if cfg.gaming.enabled {
+                let idle_mins = cfg.gaming.smart_idle_timeout_mins.max(1) as u64;
+                let idle_dur = Duration::from_secs(idle_mins * 60);
+                let ref_instant = *last_active_instant.get_or_insert_with(std::time::Instant::now);
+                if ref_instant.elapsed() >= idle_dur {
+                    log_i!(
+                        "[SMART-GAMING] 💤 Нет активных игровых подключений более {} мин — автоматическое отключение Режима совместимости.",
+                        idle_mins
+                    );
+                    last_active_instant = None;
+                    let _cfg_guard = state.config_lock.lock().await;
+                    let _routing_guard = state.routing_lock.lock().await;
+                    let mut new_cfg = (**state.config.read().await).clone();
+                    new_cfg.gaming.enabled = false;
+                    let path = Path::new(&new_cfg.mihomo.config_path);
+                    if path.exists() {
+                        if let Ok(raw_yaml) = tokio::fs::read_to_string(path).await {
+                            if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &new_cfg) {
+                                let _ = crate::api::atomic_write_file(path, &new_yaml).await;
+                                let _ = mihomo::reload_config(&state.http, &new_cfg).await;
+                            }
+                        }
+                    }
+                    if config::save(&state.config_path, &new_cfg).await.is_ok() {
+                        *state.config.write().await = std::sync::Arc::new(new_cfg);
+                    }
+                }
+            }
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -577,6 +852,19 @@ mod tests {
         assert!(!is_shutdown());
         shutdown();
         assert!(is_shutdown());
+    }
+
+    #[test]
+    fn test_smart_gaming_connection_match_and_ignore() {
+        let domains = vec!["steamcommunity.com".to_string(), "discord.gg".to_string()];
+        assert!(is_gaming_connection_match("api.steamcommunity.com", "1.2.3.4", "443", "tcp", "MATCH", &domains));
+        assert!(is_gaming_connection_match("", "155.133.248.34", "27015", "udp", "MATCH", &domains));
+        assert!(!is_gaming_connection_match("google.com", "8.8.8.8", "443", "udp", "MATCH", &domains));
+
+        let ignored = vec!["api.steamcommunity.com".to_string(), "155.133.248.34:27015".to_string()];
+        assert!(is_conn_target_ignored("api.steamcommunity.com", "1.2.3.4:443", &ignored));
+        assert!(is_conn_target_ignored("155.133.248.34:27015", "155.133.248.34:27015", &ignored));
+        assert!(!is_conn_target_ignored("discord.gg", "162.159.130.234:443", &ignored));
     }
 }
 

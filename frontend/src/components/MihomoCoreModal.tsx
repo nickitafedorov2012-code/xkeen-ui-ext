@@ -96,8 +96,12 @@ export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: 
   if (!isOpen) return null
 
   return (
-    <div className="modal-backdrop">
-      <div className="modal-card" style={{ maxWidth: 660, width: '94vw', maxHeight: '88vh', display: 'flex', flexDirection: 'column' }}>
+    <div className="modal-backdrop" onClick={() => !installingTag && onClose()}>
+      <div
+        className="modal-card mihomo-modal-card"
+        onClick={(e) => e.stopPropagation()}
+        style={{ maxWidth: 680, width: '94vw', maxHeight: '88vh', display: 'flex', flexDirection: 'column', padding: '22px 24px' }}
+      >
         {/* Заголовок */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>

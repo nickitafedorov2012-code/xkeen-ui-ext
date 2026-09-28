@@ -50,6 +50,7 @@ export default function Zapret({ notify }: ZapretProps) {
   const [blockcheckResult, setBlockcheckResult] = useState<BlockcheckResult | null>(null)
   const [runningBlockcheck, setRunningBlockcheck] = useState(false)
   const [applyingStrategy, setApplyingStrategy] = useState<string | null>(null)
+  const [activeStrategyId, setActiveStrategyId] = useState<string | null>(null)
 
   // Community Hostlists
   const [communityUrl, setCommunityUrl] = useState(
@@ -118,6 +119,9 @@ export default function Zapret({ notify }: ZapretProps) {
         }
         return res
       })
+      if (res.active_strategy_id) {
+        setActiveStrategyId(res.active_strategy_id)
+      }
       if (res.analytics) {
         setAnalytics(res.analytics)
       }
@@ -229,6 +233,7 @@ export default function Zapret({ notify }: ZapretProps) {
         custom_args: strat.args,
         strategy_id: strat.id,
       })
+      setActiveStrategyId(strat.id)
       notify(res.message || `Стратегия '${strat.name}' успешно применена`)
       await loadStatus()
     } catch (e) {
@@ -858,7 +863,7 @@ export default function Zapret({ notify }: ZapretProps) {
   const activeEngine: 'v1' | 'v2' =
     status?.engine ||
     features.engine ||
-    (status?.cmdline?.includes('--dpi-desync=') && !status?.cmdline?.includes('--lua-desync') ? 'v1' : 'v2')
+    (status?.cmdline?.includes('nfqws2') || status?.cmdline?.includes('--lua-desync') ? 'v2' : 'v1')
   const v2Installed =
     status?.v2_installed ?? (status?.cmdline?.includes('nfqws2') || status?.cmdline?.includes('--lua-desync') || false)
   const canRollbackV1 = status?.can_rollback_v1 ?? true
@@ -1296,12 +1301,14 @@ export default function Zapret({ notify }: ZapretProps) {
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
               <span style={{ fontSize: 20 }}>🧠</span>
               <div>
-                <div
-                  data-testid="zapret-hardware-hint"
-                  style={{ fontSize: 13, fontWeight: 700, color: '#38bdf8' }}
-                >
-                  {hardwareHint}
-                </div>
+                {activeEngine !== 'v2' && (
+                  <div
+                    data-testid="zapret-hardware-hint"
+                    style={{ fontSize: 13, fontWeight: 700, color: '#38bdf8' }}
+                  >
+                    {hardwareHint}
+                  </div>
+                )}
                 <div className="muted small" style={{ marginTop: 2, fontSize: 11.5 }}>
                   Автоопределение архитектуры ({targetArchLabel}) • каталог Zapret 2.0:{' '}
                   <code>/opt/zapret2</code> (<code>nfqws2</code> + Lua-библиотеки) • доступно переключение и безопасный откат на v1
@@ -1684,7 +1691,7 @@ export default function Zapret({ notify }: ZapretProps) {
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
-          {/* Перехвачено байт */}
+          {/* Трафик за весь период */}
           <div
             style={{
               padding: '14px 16px',
@@ -1697,17 +1704,17 @@ export default function Zapret({ notify }: ZapretProps) {
             }}
           >
             <div className="muted small" style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.5 }}>
-              Перехвачено трафика (NFQUEUE)
+              Трафик за весь период
             </div>
             <div style={{ fontSize: 20, fontWeight: 700, color: '#38bdf8', fontFamily: 'Consolas, monospace' }}>
-              {fmtBytes(analytics?.bytes_intercepted || 0)}
+              {fmtBytes(analytics?.period_bytes || analytics?.bytes_intercepted || 0)}
             </div>
             <div className="muted small" style={{ fontSize: 11 }}>
-              {analytics?.packets_intercepted?.toLocaleString() || 0} пакетов суммарно
+              Накопительный трафик с момента запуска
             </div>
           </div>
 
-          {/* Сэкономлено VPS */}
+          {/* Сэкономлено VPS (единый счетчик перехвачено + сэкономлено) */}
           <div
             style={{
               padding: '14px 16px',
@@ -1723,10 +1730,10 @@ export default function Zapret({ notify }: ZapretProps) {
               Сэкономлено трафика на VPS
             </div>
             <div style={{ fontSize: 20, fontWeight: 700, color: '#22c55e', fontFamily: 'Consolas, monospace' }}>
-              {fmtBytes(analytics?.vps_saved_bytes || 0)}
+              {fmtBytes(analytics?.vps_saved_bytes || analytics?.bytes_intercepted || 0)}
             </div>
             <div className="muted small" style={{ fontSize: 11, color: '#86efac' }}>
-              100% прямой обход без расхода прокси
+              {analytics?.packets_intercepted?.toLocaleString() || 0} пакетов · 100% прямой обход без расхода прокси
             </div>
           </div>
 
@@ -1875,6 +1882,7 @@ export default function Zapret({ notify }: ZapretProps) {
               const best = blockcheckResult.strategies.find((s) => s.id === blockcheckResult.best_strategy_id) || blockcheckResult.strategies[0]
               if (!best) return null
               const isApplying = applyingStrategy === best.id
+              const isSelected = activeStrategyId === best.id
               return (
                 <div
                   style={{
@@ -1897,6 +1905,11 @@ export default function Zapret({ notify }: ZapretProps) {
                         <span className="badge" style={{ background: 'rgba(34, 197, 94, 0.25)', color: '#4ade80', border: '1px solid rgba(34, 197, 94, 0.5)', fontSize: 11 }}>
                           Score: {best.score}/100
                         </span>
+                        {isSelected && (
+                          <span className="badge" style={{ background: 'rgba(34, 197, 94, 0.2)', color: '#22c55e', border: '1px solid #22c55e', fontSize: 11 }}>
+                            ✓ Активна
+                          </span>
+                        )}
                       </div>
                       <div className="muted small" style={{ marginTop: 2, color: '#cbd5e1' }}>
                         YouTube: {best.youtube_ok ? `🟢 ${best.youtube_time_ms} мс` : '🔴 Блок'} · Discord: {best.discord_ok ? `🟢 ${best.discord_time_ms} мс` : '🔴 Блок'} · {best.description}
@@ -1907,16 +1920,24 @@ export default function Zapret({ notify }: ZapretProps) {
                   <button
                     type="button"
                     className="btn primary sm"
-                    disabled={isApplying || busy}
+                    disabled={isApplying || busy || isSelected}
                     onClick={() => handleApplyStrategy(best)}
                     style={{
-                      background: 'linear-gradient(135deg, #22c55e 0%, #16a34a 100%)',
-                      border: 'none',
-                      boxShadow: '0 2px 10px rgba(34, 197, 94, 0.4)',
+                      background: isSelected
+                        ? 'rgba(255, 255, 255, 0.08)'
+                        : 'linear-gradient(135deg, #22c55e 0%, #16a34a 100%)',
+                      color: isSelected ? 'var(--text-muted, #94a3b8)' : '#fff',
+                      border: isSelected ? '1px solid rgba(255, 255, 255, 0.15)' : 'none',
+                      boxShadow: isSelected ? 'none' : '0 2px 10px rgba(34, 197, 94, 0.4)',
                       fontWeight: 600,
+                      cursor: isSelected ? 'default' : 'pointer',
                     }}
                   >
-                    {isApplying ? 'Применение…' : '🚀 Применить лучшую стратегию в 1 клик'}
+                    {isApplying
+                      ? 'Применение…'
+                      : isSelected
+                      ? '✓ Выбрано'
+                      : '🚀 Применить лучшую стратегию в 1 клик'}
                   </button>
                 </div>
               )
@@ -1927,14 +1948,23 @@ export default function Zapret({ notify }: ZapretProps) {
               {blockcheckResult.strategies.map((strat) => {
                 const isBest = strat.id === blockcheckResult.best_strategy_id
                 const isApplying = applyingStrategy === strat.id
+                const isSelected = activeStrategyId === strat.id
                 return (
                   <div
                     key={strat.id}
                     style={{
                       padding: '14px 16px',
                       borderRadius: 12,
-                      background: isBest ? 'rgba(56, 189, 248, 0.08)' : 'rgba(0, 0, 0, 0.25)',
-                      border: isBest ? '1px solid rgba(56, 189, 248, 0.45)' : '1px solid var(--border)',
+                      background: isSelected
+                        ? 'rgba(34, 197, 94, 0.08)'
+                        : isBest
+                        ? 'rgba(56, 189, 248, 0.08)'
+                        : 'rgba(0, 0, 0, 0.25)',
+                      border: isSelected
+                        ? '1px solid rgba(34, 197, 94, 0.5)'
+                        : isBest
+                        ? '1px solid rgba(56, 189, 248, 0.45)'
+                        : '1px solid var(--border)',
                       display: 'flex',
                       flexDirection: 'column',
                       justifyContent: 'space-between',
@@ -1943,7 +1973,16 @@ export default function Zapret({ notify }: ZapretProps) {
                   >
                     <div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 }}>
-                        <b style={{ fontSize: 13, color: isBest ? '#38bdf8' : 'var(--text)' }}>{strat.name}</b>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <b style={{ fontSize: 13, color: isSelected ? '#4ade80' : isBest ? '#38bdf8' : 'var(--text)' }}>
+                            {strat.name}
+                          </b>
+                          {isSelected && (
+                            <span className="badge" style={{ fontSize: 10, background: 'rgba(34, 197, 94, 0.2)', color: '#4ade80' }}>
+                              ✓ Выбрано
+                            </span>
+                          )}
+                        </div>
                         <span
                           className="badge"
                           style={{
@@ -1995,11 +2034,22 @@ export default function Zapret({ notify }: ZapretProps) {
                       <button
                         type="button"
                         className="btn sm"
-                        disabled={isApplying || busy}
+                        disabled={isApplying || busy || isSelected}
                         onClick={() => handleApplyStrategy(strat)}
-                        style={isBest ? { background: '#0284c7', color: '#fff', border: 'none' } : {}}
+                        style={
+                          isSelected
+                            ? {
+                                background: 'rgba(255, 255, 255, 0.08)',
+                                color: 'var(--text-muted, #94a3b8)',
+                                border: '1px solid rgba(255, 255, 255, 0.12)',
+                                cursor: 'default',
+                              }
+                            : isBest
+                            ? { background: '#0284c7', color: '#fff', border: 'none' }
+                            : {}
+                        }
                       >
-                        {isApplying ? 'Применение…' : 'Применить'}
+                        {isApplying ? 'Применение…' : isSelected ? '✓ Выбрано' : 'Применить'}
                       </button>
                     </div>
                   </div>

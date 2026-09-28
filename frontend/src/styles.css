@@ -4480,14 +4480,14 @@ table.devices-table td {
   font-weight: 600;
 }
 .traffic-badge.direct {
-  background: rgba(59, 130, 246, 0.12);
-  color: #60a5fa;
-  border: 1px solid rgba(59, 130, 246, 0.3);
+  background: rgba(34, 197, 94, 0.12);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.3);
 }
 .traffic-badge.proxy {
-  background: rgba(16, 185, 129, 0.12);
-  color: #34d399;
-  border: 1px solid rgba(16, 185, 129, 0.3);
+  background: rgba(56, 189, 248, 0.12);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.3);
 }
 .traffic-badge.total {
   background: rgba(139, 92, 246, 0.12);
@@ -5533,7 +5533,210 @@ table.devices-table td {
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25) !important;
 }
 
+/* ==========================================================================
+   ИСПРАВЛЕНИЕ ОТСТУПОВ МОДАЛЬНЫХ ОКОН (MihomoCoreModal, UpdateModal, ScheduleModal, ZapretModal)
+   ========================================================================== */
+.modal-card.padded-modal,
+.modal-card.update-modal-card,
+.modal-card.mihomo-modal-card,
+.modal-card.zapret-modal-card,
+.modal-card.schedule-modal {
+  padding: 22px 24px !important;
+  box-sizing: border-box;
+}
 
+.schedule-modal {
+  max-width: 640px !important;
+  width: 94vw !important;
+  max-height: 88vh !important;
+  overflow-y: auto !important;
+  gap: 16px;
+}
 
+.schedule-modal .modal-header {
+  padding: 0 0 14px 0;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  align-items: flex-start;
+  gap: 12px;
+}
 
+.schedule-modal .modal-header h3 {
+  margin: 0 0 4px 0;
+  font-size: 18px;
+  font-weight: 700;
+}
 
+.schedule-modal .modal-header p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.schedule-modal .btn-close {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+
+.schedule-modal .btn-close:hover {
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.schedules-current-list h4,
+.schedule-add-form h4 {
+  margin: 0 0 10px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+
+.schedule-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.schedule-item-card {
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.schedule-item-card.disabled {
+  opacity: 0.6;
+}
+
+.schedule-item-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.schedule-time {
+  font-weight: 700;
+  font-size: 13.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.schedule-action-badge {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(56, 189, 248, 0.14);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  margin-right: auto;
+}
+
+.schedule-action-badge.block {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+.schedule-action-badge.direct {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border-color: rgba(34, 197, 94, 0.35);
+}
+
+.schedule-days-row {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.schedule-add-form {
+  background: rgba(15, 23, 42, 0.45);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.schedule-add-form .form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 560px) {
+  .schedule-add-form .form-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.schedule-add-form .form-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.schedule-add-form label {
+  font-size: 12.5px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.schedule-add-form .form-days {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.days-pills {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.day-pill {
+  height: 32px;
+  min-width: 40px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.day-pill.active {
+  background: linear-gradient(135deg, #2563eb, #1d4ed8);
+  border-color: #38bdf8;
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.35);
+}
+
+/* Растягивание карточек верхнего ряда Дашборда по одной высоте */
+.grid2.stretch-cards {
+  align-items: stretch;
+}
+
+.grid2.stretch-cards > .card {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
