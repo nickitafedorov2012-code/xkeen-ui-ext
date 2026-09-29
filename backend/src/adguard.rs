@@ -1248,6 +1248,179 @@ esac
     )
 }
 
+/// Определение архитектуры AdGuard Home по строке архитектуры (из uname или cfg)
+pub fn detect_adguard_arch_from_str(arch_str: &str) -> &'static str {
+    let m = arch_str.trim().to_lowercase();
+    if m.contains("aarch64") || m.contains("arm64") || m.contains("armv8") {
+        "arm64"
+    } else if m.contains("armv7") || m.contains("armhf") {
+        "armv7"
+    } else if m.contains("armv6") {
+        "armv6"
+    } else if m.contains("armv5") {
+        "armv5"
+    } else if m.contains("mipsle") || m.contains("mipsel") {
+        "mipsle_softfloat"
+    } else if m.contains("mips") {
+        "mips_softfloat"
+    } else if m.contains("x86_64") || m.contains("amd64") {
+        "amd64"
+    } else if m.contains("i386") || m.contains("i686") || m.contains("386") {
+        "386"
+    } else if m.contains("arm") {
+        "armv7"
+    } else {
+        "arm64"
+    }
+}
+
+/// Определение архитектуры для официальных архивов AdGuard Home
+pub fn detect_adguard_arch() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(out) = std::process::Command::new("uname").arg("-m").output() {
+            let m = String::from_utf8_lossy(&out.stdout);
+            return detect_adguard_arch_from_str(&m);
+        }
+    }
+
+    if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else if cfg!(target_arch = "arm") {
+        "armv7"
+    } else if cfg!(target_arch = "mips") {
+        if cfg!(target_endian = "little") {
+            "mipsle_softfloat"
+        } else {
+            "mips_softfloat"
+        }
+    } else if cfg!(target_arch = "x86_64") {
+        "amd64"
+    } else {
+        "armv7"
+    }
+}
+
+/// Генерация готовой стандартной конфигурации AdGuardHome.yaml
+/// Задает schema_version: 29 для полного пропуска мастера первичной настройки (setup wizard)
+pub fn generate_default_adguard_yaml(dns_port: u16, http_port: u16) -> String {
+    format!(
+r#"bind_host: 0.0.0.0
+bind_port: {http_port}
+auth_attempts: 5
+block_auth_min: 15
+http_proxy: ""
+language: ru
+rlimit_nofile: 0
+dns:
+  bind_hosts:
+    - 127.0.0.1
+    - 0.0.0.0
+  port: {dns_port}
+  statistics_interval: 1
+  querylog_enabled: true
+  querylog_file_enabled: true
+  querylog_interval: 24h
+  querylog_size_memory: 1000
+  anonymize_client_ip: false
+  protection_enabled: true
+  blocking_mode: default
+  blocking_ipv4: ""
+  blocking_ipv6: ""
+  blocked_response_ttl: 10
+  parental_block_host: ""
+  safebrowsing_block_host: ""
+  ratelimit: 0
+  ratelimit_whitelist: []
+  refuse_any: true
+  upstream_dns:
+    - https://dns.google/dns-query
+    - tls://1.1.1.1
+    - 1.1.1.1
+    - 8.8.8.8
+  upstream_dns_file: ""
+  bootstrap_dns:
+    - 1.1.1.1
+    - 8.8.8.8
+  all_servers: false
+  fastest_addr: true
+  fastest_timeout: 1s
+  use_http3_upstreams: false
+  use_dns64: false
+  dns64_prefixes: []
+  edns_client_subnet:
+    custom_ip: ""
+    enabled: false
+    use_custom: false
+  max_goroutines: 300
+  handle_ddr: true
+  ipset: []
+  ipset_file: ""
+  filtering_enabled: true
+  filters_update_interval: 24
+  parental_enabled: false
+  safesearch_enabled: false
+  safebrowsing_enabled: false
+  safebrowsing_cache_size: 1048576
+  safesearch_cache_size: 1048576
+  parental_cache_size: 1048576
+  cache_size: 4194304
+  cache_time: 30
+  rewrites: []
+  blocked_services: []
+  upstream_timeout: 10s
+  private_networks: []
+  use_private_ptr_resolvers: true
+  local_ptr_upstreams: []
+tls:
+  enabled: false
+filters:
+  - enabled: true
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
+    name: AdGuard Base Filter
+    id: 1
+whitelist_filters: []
+user_rules: []
+dhcp:
+  enabled: false
+clients:
+  runtime_sources:
+    whois: true
+    arp: true
+    rdns: true
+    dhcp: true
+    hosts: true
+  persistent: []
+log_compress: false
+log_localtime: false
+log_max_backups: 0
+log_max_size: 100
+log_max_age: 3
+log_file: /opt/var/log/adguardhome.log
+verbose: false
+os:
+  group: ""
+  user: ""
+  rlimit_nofile: 0
+schema_version: 29
+"#
+    )
+}
+
+/// Гарантированное создание стандартного файла конфигурации, если он еще не существует
+pub fn ensure_default_adguard_config(dns_port: u16, http_port: u16) -> PathBuf {
+    let conf_path = PathBuf::from("/opt/etc/AdGuardHome/AdGuardHome.yaml");
+    if let Some(parent) = conf_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if !conf_path.is_file() {
+        let content = generate_default_adguard_yaml(dns_port, http_port);
+        let _ = std::fs::write(&conf_path, content);
+        crate::log_i!("Создана стандартная конфигурация AdGuard Home: {:?}", conf_path);
+    }
+    conf_path
+}
+
 /// Проверка наличия или автоматическое создание init-скрипта службы
 pub fn ensure_adguard_init_script() -> Result<PathBuf, String> {
     if let Some(script) = find_adguard_init_script() {
@@ -1255,11 +1428,14 @@ pub fn ensure_adguard_init_script() -> Result<PathBuf, String> {
     }
 
     let bin = find_adguard_binary().ok_or_else(|| {
-        "Бинарный файл AdGuardHome не найден в системе (проверены /opt/bin, /opt/sbin, /opt/etc/AdGuardHome и PATH)".to_string()
+        "Бинарный файл AdGuardHome не найден в системе (проверены /opt/AdGuardHome, /opt/bin, /opt/sbin и PATH)".to_string()
     })?;
 
-    let conf = find_adguard_config()
-        .unwrap_or_else(|| PathBuf::from("/opt/etc/AdGuardHome/AdGuardHome.yaml"));
+    let conf = find_adguard_config().unwrap_or_else(|| {
+        let is_53_free = std::net::UdpSocket::bind("0.0.0.0:53").is_ok();
+        let port = if is_53_free { 53 } else { 5353 };
+        ensure_default_adguard_config(port, 3000)
+    });
     let work_dir = conf
         .parent()
         .map(|p| p.to_string_lossy().to_string())
@@ -1289,58 +1465,136 @@ pub fn ensure_adguard_init_script() -> Result<PathBuf, String> {
     Ok(target_script)
 }
 
-/// Автоматическая установка официального пакета adguardhome через opkg
+/// Автоматическая загрузка официального бинарника AdGuard Home с CDN и установка
 pub async fn install_adguard_package() -> Result<String, String> {
     #[cfg(target_os = "linux")]
     {
-        let opkg_candidates = ["/opt/bin/opkg", "/opt/sbin/opkg", "opkg"];
-        let opkg_bin = opkg_candidates
-            .iter()
-            .find(|p| Path::new(p).exists())
-            .copied()
-            .unwrap_or("opkg");
+        let arch = detect_adguard_arch();
+        crate::log_i!("Запуск загрузки и установки AdGuard Home для архитектуры '{}'...", arch);
 
         let log_file = "/tmp/agh_install.log";
-        let install_cmd = format!("exec {opkg_bin} update && {opkg_bin} install adguardhome </dev/null >{log_file} 2>&1");
+        let script_cmd = format!(
+r#"
+ARCH="{arch}"
+URL1="https://static.adguard.com/adguardhome/release/AdGuardHome_linux_${{ARCH}}.tar.gz"
+URL2="https://github.com/AdguardTeam/AdGuardHome/releases/latest/download/AdGuardHome_linux_${{ARCH}}.tar.gz"
+URL3="https://ghproxy.net/https://github.com/AdguardTeam/AdGuardHome/releases/latest/download/AdGuardHome_linux_${{ARCH}}.tar.gz"
+
+TMP_DIR="/opt/tmp"
+mkdir -p "$TMP_DIR" /opt/var/log /opt/var/run /opt/etc/AdGuardHome /opt/bin 2>/dev/null
+TAR_FILE="$TMP_DIR/AdGuardHome.tar.gz"
+rm -f "$TAR_FILE"
+
+download_file() {{
+    dl_url="$1"
+    echo "Загрузка с $dl_url ..."
+    if command -v curl >/dev/null 2>&1; then
+        if curl -f -k -s -S -L --connect-timeout 15 --max-time 180 "$dl_url" -o "$TAR_FILE"; then
+            return 0
+        fi
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        if wget --no-check-certificate -q -T 30 -O "$TAR_FILE" "$dl_url"; then
+            return 0
+        fi
+    fi
+    return 1
+}}
+
+SUCCESS=0
+for u in "$URL1" "$URL2" "$URL3"; do
+    if download_file "$u"; then
+        if [ -s "$TAR_FILE" ]; then
+            FILE_SIZE=$(wc -c < "$TAR_FILE" 2>/dev/null || echo 0)
+            if [ "$FILE_SIZE" -gt 1000000 ]; then
+                SUCCESS=1
+                echo "Архив успешно скачан ($FILE_SIZE байт)"
+                break
+            fi
+        fi
+    fi
+    rm -f "$TAR_FILE"
+done
+
+# Резервная попытка через opkg (если пакет вдруг доступен в кастомном репозитории)
+if [ "$SUCCESS" -ne 1 ]; then
+    echo "Прямая загрузка с CDN не удалась, проверка opkg..."
+    if command -v opkg >/dev/null 2>&1; then
+        opkg update >/dev/null 2>&1 && opkg install adguardhome && SUCCESS=2
+    fi
+fi
+
+if [ "$SUCCESS" -eq 0 ]; then
+    echo "Ошибка: не удалось скачать архив AdGuardHome_linux_${{ARCH}}.tar.gz с CDN static.adguard.com и GitHub." >&2
+    exit 1
+fi
+
+if [ "$SUCCESS" -eq 1 ]; then
+    echo "Распаковка $TAR_FILE в /opt..."
+    tar -xzf "$TAR_FILE" -C /opt
+    rm -f "$TAR_FILE"
+fi
+
+if [ -f /opt/AdGuardHome/AdGuardHome ]; then
+    chmod 755 /opt/AdGuardHome/AdGuardHome
+    ln -sf /opt/AdGuardHome/AdGuardHome /opt/bin/AdGuardHome
+elif [ -f /opt/bin/AdGuardHome ]; then
+    chmod 755 /opt/bin/AdGuardHome
+elif [ -f /opt/sbin/AdGuardHome ]; then
+    chmod 755 /opt/sbin/AdGuardHome
+else
+    echo "Ошибка: бинарный файл AdGuardHome не найден после распаковки архива." >&2
+    exit 1
+fi
+
+echo "AdGuard Home успешно установлен."
+"#
+        );
 
         let timeout_res = tokio::time::timeout(
-            Duration::from_secs(90),
+            Duration::from_secs(210),
             tokio::process::Command::new("sh")
                 .arg("-c")
-                .arg(&install_cmd)
+                .arg(format!("exec sh -c '{script_cmd}' </dev/null >{log_file} 2>&1"))
                 .status(),
         )
         .await;
 
         let status = match timeout_res {
             Ok(Ok(st)) => st,
-            Ok(Err(e)) => return Err(format!("Ошибка запуска процесса установки opkg: {e}")),
-            Err(_) => return Err("Превышен таймаут установки AdGuard Home (90 сек)".to_string()),
+            Ok(Err(e)) => return Err(format!("Ошибка запуска процесса установки: {e}")),
+            Err(_) => return Err("Превышен таймаут загрузки и установки AdGuard Home (210 сек)".to_string()),
         };
 
         let log = tokio::fs::read_to_string(log_file).await.unwrap_or_default().trim().to_string();
 
         if !status.success() {
             return Err(format!(
-                "Установка пакета adguardhome завершилась с ошибкой (код {:?}): {}",
+                "Ошибка скачивания или установки AdGuard Home (код {:?}): {}",
                 status.code(),
                 if log.is_empty() { "нет данных в логе" } else { &log }
             ));
         }
 
-        if find_adguard_binary().is_none() && find_adguard_init_script().is_none() {
-            return Err(format!(
-                "Пакет adguardhome был установлен через opkg, но исполняемый файл не обнаружен. Лог: {log}"
-            ));
-        }
+        let bin = find_adguard_binary().ok_or_else(|| {
+            format!("Установка завершена, но бинарный файл не обнаружен в /opt/AdGuardHome/AdGuardHome. Лог: {log}")
+        })?;
 
-        let _ = ensure_adguard_init_script();
+        // Создаем готовый конфиг AdGuardHome.yaml (если его еще нет), чтобы не требовалось проходить визард
+        let is_53_free = std::net::UdpSocket::bind("0.0.0.0:53").is_ok();
+        let dns_port = if is_53_free { 53 } else { 5353 };
+        let conf_path = ensure_default_adguard_config(dns_port, 3000);
 
-        Ok(if log.is_empty() {
-            "Пакет AdGuard Home успешно установлен в Entware".to_string()
-        } else {
-            format!("Пакет AdGuard Home успешно установлен: {log}")
-        })
+        // Создаем init-скрипт службы
+        let script = ensure_adguard_init_script().map_err(|e| {
+            format!("Бинарник установлен ({:?}), но не удалось создать init-скрипт: {e}", bin)
+        })?;
+
+        crate::log_i!("AdGuard Home успешно установлен: bin={:?}, conf={:?}, script={:?}", bin, conf_path, script);
+
+        Ok(format!(
+            "AdGuard Home ({arch}) успешно загружен с официального CDN, распакован и настроен (DNS порт: {dns_port}, Web UI порт: 3000)."
+        ))
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -1362,14 +1616,14 @@ pub async fn service_action(action: &str) -> Result<String, String> {
             Ok(p) => p,
             Err(e) => {
                 if act == "start" {
-                    crate::log_i!("Служба AdGuard Home не найдена, инициируем установку через opkg...");
+                    crate::log_i!("Служба AdGuard Home не найдена, выполняем автоматическую установку с CDN...");
                     match install_adguard_package().await {
                         Ok(_) => ensure_adguard_init_script().map_err(|e2| {
                             format!("AdGuard Home был установлен, но init-скрипт не найден: {e2}")
                         })?,
                         Err(install_err) => {
                             return Err(format!(
-                                "AdGuard Home не установлен в системе. Попытка авто-установки не удалась: {install_err}"
+                                "AdGuard Home не установлен. Попытка автоматической загрузки завершилась с ошибкой: {install_err}"
                             ));
                         }
                     }
@@ -1427,7 +1681,26 @@ pub async fn service_action(action: &str) -> Result<String, String> {
 
         // Для start и restart: верифицируем фактический запуск процесса
         tokio::time::sleep(Duration::from_millis(800)).await;
-        let is_running = crate::system::is_process_running("AdGuardHome");
+        let mut is_running = crate::system::is_process_running("AdGuardHome");
+
+        // Если процесс не запустился из-за конфликта порта 53 (dnsmasq на роутере), автоматически переключаем на 5353
+        if !is_running && (act == "start" || act == "restart") {
+            if let Ok(agh_log) = tokio::fs::read_to_string("/opt/var/log/adguardhome.log").await {
+                if agh_log.contains("address already in use") || agh_log.contains("bind: address already in use") {
+                    crate::log_w!("Обнаружен конфликт порта DNS 53. Автоматическое переключение DNS-порта AdGuard Home на 5353...");
+                    if let Some(conf_path) = find_adguard_config() {
+                        if let Ok(conf_str) = tokio::fs::read_to_string(&conf_path).await {
+                            let patched = conf_str.replace("port: 53\n", "port: 5353\n");
+                            let _ = tokio::fs::write(&conf_path, patched).await;
+                            let cmd_retry = format!("exec '{script}' '{act}' </dev/null >'{log_file}' 2>&1");
+                            let _ = tokio::process::Command::new("sh").arg("-c").arg(&cmd_retry).status().await;
+                            tokio::time::sleep(Duration::from_millis(1000)).await;
+                            is_running = crate::system::is_process_running("AdGuardHome");
+                        }
+                    }
+                }
+            }
+        }
 
         if is_running {
             let msg = if !log_content.is_empty() {
@@ -1446,7 +1719,7 @@ pub async fn service_action(action: &str) -> Result<String, String> {
                 if !tail.is_empty() {
                     let reversed_tail = tail.into_iter().rev().collect::<Vec<_>>().join(" | ");
                     if reversed_tail.contains("address already in use") || reversed_tail.contains("bind:") {
-                        err_msg.push_str(" Внимание: Порт DNS (53) или веб-панели (3000) уже занят другой службой (например, dnsmasq роутера).");
+                        err_msg.push_str(" Внимание: Порт DNS (53) или веб-панели (3000) занят другой службой роутера (например, dnsmasq).");
                     }
                     err_msg.push_str(&format!(" Лог: {reversed_tail}"));
                 }
@@ -1590,6 +1863,36 @@ mod tests {
         let _ = find_adguard_init_script();
         let _ = find_adguard_binary();
         let _ = find_adguard_config();
+    }
+
+    #[test]
+    fn test_detect_adguard_arch() {
+        assert_eq!(detect_adguard_arch_from_str("aarch64"), "arm64");
+        assert_eq!(detect_adguard_arch_from_str("armv8l"), "arm64");
+        assert_eq!(detect_adguard_arch_from_str("armv7l"), "armv7");
+        assert_eq!(detect_adguard_arch_from_str("mipsle"), "mipsle_softfloat");
+        assert_eq!(detect_adguard_arch_from_str("mipsel"), "mipsle_softfloat");
+        assert_eq!(detect_adguard_arch_from_str("mips"), "mips_softfloat");
+        assert_eq!(detect_adguard_arch_from_str("x86_64"), "amd64");
+        assert_eq!(detect_adguard_arch_from_str("i386"), "386");
+        assert_eq!(detect_adguard_arch_from_str("unknown_arch"), "arm64");
+        // Также проверяем вызов detect_adguard_arch() без паники
+        let arch = detect_adguard_arch();
+        assert!(!arch.is_empty());
+    }
+
+    #[test]
+    fn test_generate_default_adguard_yaml() {
+        let yaml_53 = generate_default_adguard_yaml(53, 3000);
+        assert!(yaml_53.contains("schema_version: 29"));
+        assert!(yaml_53.contains("port: 53"));
+        assert!(yaml_53.contains("bind_port: 3000"));
+        assert!(yaml_53.contains("language: ru"));
+        assert!(yaml_53.contains("upstream_dns:"));
+
+        let yaml_5353 = generate_default_adguard_yaml(5353, 3000);
+        assert!(yaml_5353.contains("port: 5353"));
+        assert!(yaml_5353.contains("schema_version: 29"));
     }
 }
 

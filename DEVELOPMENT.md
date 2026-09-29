@@ -1084,6 +1084,23 @@
   * **Ежесуточная проверка в 5:00 утра:** Фоновый планировщик с защитой от рассинхронизации часов до поднятия NTP роутера (year >= 2024).
 - **Исправление установки Zapret 2.0 и Mini-Blockcheck (api.rs, Zapret.tsx)**:
 
+## v1.7.3 (AdGuard Home Multi-Mirror CDN Downloader, Wizard Bypass & Port 53 Self-Healing)
+- **Отказ от несуществующего пакета opkg и переход на прямое скачивание с официального CDN AdGuard (`backend/src/adguard.rs`)**:
+  * **Проблема**: В официальных репозиториях Entware пакет `adguardhome` отсутствует (`Cannot find package adguardhome`), из-за чего попытки установки через opkg завершались ошибкой.
+  * **Решение**: Реализован умный загрузчик с каскадом зеркал (основное зеркало: `https://static.adguard.com/adguardhome/release/AdGuardHome_linux_${ARCH}.tar.gz` — быстрый, не подвержен rate-limit GitHub и не блокируется в РФ; резервные зеркала: GitHub Releases и зеркало `ghproxy.net`).
+  * **Автоматическое определение архитектуры CPU**: поддержка всех моделей Keenetic — MT7621 (`mipsle_softfloat`), EN7512/7516 (`mips_softfloat`), ARMv7 (`armv7`), Cortex-A53 ARMv8 (`arm64`), а также x86_64.
+  * **Автономная распаковка и линковка**: скачивание tar.gz, проверка целостности архива, распаковка бинарника в `/opt/AdGuardHome/AdGuardHome`, назначение прав `chmod 755` и создание симлинка `/opt/bin/AdGuardHome`.
+- **Автоматический обход мастера первоначальной настройки (Setup Wizard Bypass)**:
+  * AdGuard Home при первом запуске без конфига требует интерактивной настройки через браузер на порту 3000, блокируя REST API (эндпоинты отдают 404).
+  * XKeen теперь перед первым стартом автоматически генерирует преднастроенный `AdGuardHome.yaml` с `schema_version: 29`, русским языком интерфейса, включенным журналом запросов и проверенными быстрыми апстримами, полностью минуя необходимость ручного прохождения мастера установки.
+- **Интеллектуальное самовосстановление при конфликте DNS-порта 53 (Port 53 Self-Healing)**:
+  * В Keenetic встроенный сервис роутера (`dnsmasq`/`ndm`) по умолчанию занимает порт 53.
+  * Если `0.0.0.0:53` занят или в логе обнаружена ошибка `bind: address already in use`, XKeen автоматически переключает DNS-порт AdGuard Home на свободный порт `5353`, патчит `AdGuardHome.yaml` и перезапускает службу без участия пользователя.
+- **Обновление интерфейса (`frontend/src/components/AdGuard.tsx`)**:
+  * Информационные подсказки о загрузке с официального CDN и автоматическом определении процессора.
+- **Анти-регрессионный тест (Test 32 в `scripts/regression-tests.cjs` и unit-тесты Rust)**:
+  * Добавлен тест `test_detect_adguard_arch` для всех процессоров и `test_generate_default_adguard_yaml` для генерации конфига.
+
 ## v1.7.2 (AdGuard Home Autonomous Service Launcher, Pipe Leak Protection & 1-Click Entware Installer)
 - **Устранение критического бага зависания кнопки «Запуск» AdGuard Home (`backend/src/adguard.rs`)**:
   * **Защита от утечки пайпов (Pipe Leak / EOF Hang)**: исправлено зависание `tokio::process::Command` при запуске фонового демона AdGuard Home. Вызовы команд службы теперь выполняются с явным перенаправлением дескрипторов `exec '{script}' '{act}' </dev/null >'{log_file}' 2>&1` и ограничены 15-секундным таймаутом через `tokio::time::timeout`.

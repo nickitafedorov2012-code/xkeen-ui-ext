@@ -1086,7 +1086,41 @@ runTest('31. AdGuard Home Service Start, Pipe Leak Protection & Autonomous Disco
   assert(adguardTsx.includes('/adguard/install'), 'AdGuard.tsx must call /adguard/install');
 });
 
+// -------------------------------------------------------------
+// 32. AdGuard Home Multi-Mirror CDN Downloader, Wizard Bypass & Port 53 Self-Healing (v1.7.3)
+// -------------------------------------------------------------
+runTest('32. AdGuard Home Multi-Mirror CDN Downloader, Wizard Bypass & Port 53 Self-Healing (v1.7.3)', () => {
+  const adguardRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/adguard.rs'), 'utf8');
+  const adguardTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/AdGuard.tsx'), 'utf8');
+
+  // 1. Architecture detection for MIPS, ARM, AArch64, x86_64
+  assert(adguardRs.includes('pub fn detect_adguard_arch_from_str'), 'adguard.rs must implement detect_adguard_arch_from_str');
+  assert(adguardRs.includes('pub fn detect_adguard_arch'), 'adguard.rs must implement detect_adguard_arch');
+  assert(adguardRs.includes('mipsle_softfloat'), 'adguard.rs must map mipsle routers (MT7621) to mipsle_softfloat');
+  assert(adguardRs.includes('arm64'), 'adguard.rs must map aarch64 to arm64');
+  assert(adguardRs.includes('armv7'), 'adguard.rs must map armv7 to armv7');
+
+  // 2. Multi-mirror CDN download resilience (AdGuard CDN, GitHub, ghproxy)
+  assert(adguardRs.includes('static.adguard.com/adguardhome/release/AdGuardHome_linux_'), 'adguard.rs must use AdGuard official CDN as primary mirror');
+  assert(adguardRs.includes('ghproxy.net'), 'adguard.rs must support ghproxy fallback');
+  assert(adguardRs.includes('tar -xzf'), 'adguard.rs must extract AdGuardHome tarball');
+
+  // 3. Autonomous configuration generator & First-run wizard bypass
+  assert(adguardRs.includes('pub fn generate_default_adguard_yaml'), 'adguard.rs must implement generate_default_adguard_yaml');
+  assert(adguardRs.includes('pub fn ensure_default_adguard_config'), 'adguard.rs must implement ensure_default_adguard_config');
+  assert(adguardRs.includes('schema_version: 29'), 'generate_default_adguard_yaml must specify schema_version to bypass setup wizard');
+  assert(adguardRs.includes('language: ru'), 'generate_default_adguard_yaml must preconfigure Russian language');
+
+  // 4. Port 53 collision detection and automatic self-healing to port 5353
+  assert(adguardRs.includes('port: 5353'), 'adguard.rs must provide fallback to port 5353 if port 53 is occupied by dnsmasq');
+  assert(adguardRs.includes('replace("port: 53\\n", "port: 5353\\n")'), 'adguard.rs must patch config automatically upon address already in use');
+
+  // 5. Frontend notification and guidance updates
+  assert(adguardTsx.includes('официального CDN'), 'AdGuard.tsx notification must inform user about official CDN download');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
+
 
 
 

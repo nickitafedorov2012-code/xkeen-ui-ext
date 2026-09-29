@@ -178,11 +178,11 @@ export default function AdGuard({ notify }: AdGuardProps) {
     }
   }
 
-  // Ручная установка пакета через Entware opkg
+  // Автоматическая загрузка с официального CDN AdGuard и установка
   const handleInstallAdGuard = async () => {
     setActionPending(true)
     try {
-      notify('Установка пакета AdGuard Home через Entware opkg (ожидайте)...')
+      notify('Скачивание AdGuard Home с официального CDN и установка на роутер (ожидайте 15-45 сек)...')
       const res = await apiPost<{ output: string }>('/adguard/install')
       notify(`Установка завершена: ${res.output || 'успешно'}`)
       await handleServiceAction('start')
@@ -491,8 +491,8 @@ export default function AdGuard({ notify }: AdGuardProps) {
           >
             <span style={{ fontSize: 18 }}>ℹ️</span>
             <div style={{ flex: 1 }}>
-              <strong>AdGuard Home не установлен на роутере:</strong> Служба или бинарный файл не обнаружены в Entware.
-              Вы можете нажать кнопку <b>«📦 Установить AGH»</b> или <b>«🚀 Установить и запустить»</b> для автоматической установки официального пакета через opkg.
+              <strong>AdGuard Home не установлен на роутере:</strong> Служба или бинарный файл не обнаружены.
+              Нажмите <b>«📦 Установить AGH»</b> или <b>«🚀 Установить и запустить»</b> — система автоматически определит архитектуру процессора роутера, скачает бинарный файл с официального CDN AdGuard, создаст службу и применит готовую конфигурацию без ручной настройки.
             </div>
           </div>
         )}
