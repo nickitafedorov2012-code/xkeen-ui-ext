@@ -1337,15 +1337,19 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
             echo "Все службы (XKeen, Mihomo, Zapret) остановлены. Трафик устройств переведен на прямой выход (DIRECT)."
             "#
         );
-        let out = tokio::process::Command::new("sh").arg("-c").arg(&stop_cmd).output().await;
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio::process::Command::new("sh").arg("-c").arg(&stop_cmd).output(),
+        ).await;
         log_i!("Сервисы остановлены пользователем (прямой выход в интернет активирован)");
         let (code, stdout, stderr) = match out {
-            Ok(o) => (
+            Ok(Ok(o)) => (
                 o.status.code(),
                 String::from_utf8_lossy(&o.stdout).to_string(),
                 String::from_utf8_lossy(&o.stderr).to_string(),
             ),
-            Err(e) => (Some(0), String::new(), e.to_string()),
+            Ok(Err(e)) => (Some(0), String::new(), e.to_string()),
+            Err(_) => (Some(0), String::new(), "Превышен таймаут остановки служб (15 сек)".to_string()),
         };
         return api_ok(json!({
             "code": code,
@@ -1353,7 +1357,7 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
             "stderr": stderr,
             "service_running": false,
             "service_stopped": true,
-            "message": "Все службы остановлены, трафик идёт напрямую"
+            "message": "Все службы остановлены. Трафик переведён на прямой выход (DIRECT)."
         }));
     }
 
@@ -1362,13 +1366,25 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
     }
 
     let script_arg = if action == "restart_all" { "restart" } else { action.as_str() };
-    let out = tokio::process::Command::new("sh")
-        .arg(init_script)
-        .arg(script_arg)
-        .output()
-        .await;
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        tokio::process::Command::new("sh")
+            .env("fd_out", "true")
+            .arg(init_script)
+            .arg(script_arg)
+            .output(),
+    )
+    .await;
+
     match out {
-        Ok(o) => {
+        Err(_) => {
+            log_w!("Таймаут (15 сек) выполнения '{} {}'", init_script, script_arg);
+            return api_err(format!("Превышен таймаут выполнения '{} {}'", init_script, script_arg));
+        }
+        Ok(Err(e)) => {
+            return api_err(format!("Ошибка запуска скрипта '{}': {}", init_script, e));
+        }
+        Ok(Ok(o)) => {
             log_i!(
                 "Сервис XKeen: {} (код {})",
                 action,
@@ -1387,14 +1403,18 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
                 }
                 if cfg.zapret.enabled && std::path::Path::new("/opt/etc/init.d/S51zapret").exists() {
                     let _ = sync_zapret_files(&cfg.zapret).await;
-                    let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret")
-                        .arg("restart")
-                        .output()
-                        .await;
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(8),
+                        tokio::process::Command::new("sh")
+                            .arg("-c")
+                            .arg("exec /opt/etc/init.d/S51zapret restart </dev/null >/dev/null 2>&1")
+                            .status(),
+                    )
+                    .await;
                 }
                 if action == "restart_all" {
                     tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
                         let _ = tokio::process::Command::new("sh")
                             .arg("-c")
                             .arg("/opt/etc/init.d/S99xkeen-route restart >/dev/null 2>&1 &")
@@ -1415,20 +1435,21 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
                 };
                 return api_err(format!("Команда '{}' завершилась с ошибкой: {}", action, err_msg));
             }
+            let msg = match action.as_str() {
+                "restart_all" => "Все компоненты (XKeen, Mihomo, Zapret, Панель) успешно перезапущены!",
+                "restart" => "Службы XKeen и Mihomo успешно перезапущены!",
+                "start" => "Службы успешно запущены!",
+                "stop" => "Все службы остановлены. Трафик переведён на прямой выход (DIRECT).",
+                _ => "Команда успешно выполнена.",
+            };
             api_ok(json!({
                 "code": o.status.code(),
                 "stdout": String::from_utf8_lossy(&o.stdout),
                 "stderr": String::from_utf8_lossy(&o.stderr),
-                "service_running": true,
-                "service_stopped": false,
+                "service_running": action != "stop",
+                "service_stopped": action == "stop",
+                "message": msg,
             }))
-        }
-        Err(e) => {
-            log_e!("Сервис XKeen: {} не удался: {e}", action);
-            api_err(format!(
-                "Не удалось выполнить {} {}: {e} (путь настраивается в system.xkeen_init)",
-                cfg.system.xkeen_init, action
-            ))
         }
     }
 }

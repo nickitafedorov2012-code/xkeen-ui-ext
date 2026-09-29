@@ -944,6 +944,29 @@ runTest('27. Exclude-filter YAML single-quote rendering & regex preservation', (
   assert(!routingRs.includes("if s.contains('(') || s.contains(')')"), 'routing.rs must not re-escape existing orig regex elements');
 });
 
+// -------------------------------------------------------------
+// 28. XKeen Service Pipe Leak Protection & Live Header Feedback (v1.6.4)
+// -------------------------------------------------------------
+runTest('28. XKeen Service Pipe Leak Protection & Live Header Feedback (v1.6.4)', () => {
+  const apiRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/api.rs'), 'utf8');
+  const headerTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Header.tsx'), 'utf8');
+
+  // 1. xkeen_service must set fd_out=true to prevent Mihomo daemon from inheriting stdout/stderr pipes
+  assert(apiRs.includes('.env("fd_out", "true")'), 'api.rs must set env fd_out=true when invoking init_script');
+
+  // 2. xkeen_service must wrap script execution in a bounded timeout (max 15s)
+  assert(apiRs.includes('Duration::from_secs(15)'), 'api.rs must wrap service execution in 15s timeout');
+
+  // 3. xkeen_service must return an explicit message field
+  assert(apiRs.includes('"message": msg'), 'api.rs must return an explicit message field on success');
+
+  // 4. Header.tsx must maintain serviceFeedback and render it in status-label
+  assert(headerTsx.includes('serviceFeedback'), 'Header.tsx must track serviceFeedback');
+  assert(headerTsx.includes('data-testid="header-status-label"'), 'Header.tsx must render header-status-label');
+  assert(headerTsx.includes('data-testid="header-restart-btn"'), 'Header.tsx must have header-restart-btn');
+  assert(headerTsx.includes('data-testid="header-toggle-btn"'), 'Header.tsx must have header-toggle-btn');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
 
 

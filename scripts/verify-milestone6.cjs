@@ -209,8 +209,8 @@ runTest('15. ARCH-01..03: SystemConfig unified paths and version bumped to 1.5.2
   assert(configRs.includes('pub mihomo_bin: String'), 'SystemConfig must have mihomo_bin');
   assert(configRs.includes('pub zapret_init: String'), 'SystemConfig must have zapret_init');
 
-  assert(cargoToml.includes('version = "1.5.29"') || cargoToml.includes('version = "1.6.0"') || cargoToml.includes('version = "1.6.1"') || cargoToml.includes('version = "1.6.2"') || cargoToml.includes('version = "1.6.3"'), 'backend/Cargo.toml must be bumped');
-  assert(packageJson.version === '1.5.29' || packageJson.version === '1.6.0' || packageJson.version === '1.6.1' || packageJson.version === '1.6.2' || packageJson.version === '1.6.3', 'frontend/package.json must be bumped');
+  assert(cargoToml.includes('version = "1.5.29"') || cargoToml.includes('version = "1.6.0"') || cargoToml.includes('version = "1.6.1"') || cargoToml.includes('version = "1.6.2"') || cargoToml.includes('version = "1.6.3"') || cargoToml.includes('version = "1.6.4"'), 'backend/Cargo.toml must be bumped');
+  assert(packageJson.version === '1.5.29' || packageJson.version === '1.6.0' || packageJson.version === '1.6.1' || packageJson.version === '1.6.2' || packageJson.version === '1.6.3' || packageJson.version === '1.6.4', 'frontend/package.json must be bumped');
 });
 
 // -------------------------------------------------------------

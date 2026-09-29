@@ -344,15 +344,25 @@ export default function Header({
     ? (rawZapretVersion.startsWith('v') ? rawZapretVersion : `v${rawZapretVersion}`)
     : '—'
 
+  const [serviceFeedback, setServiceFeedback] = useState<{ text: string; type: 'info' | 'success' | 'error' } | null>(null)
+
   const handleRestart = async () => {
     if (pending) return
     setPending(true)
+    setServiceFeedback({ text: '⏳ Перезапуск всех служб…', type: 'info' })
     try {
       const res = await apiPost<{ message?: string }>('xkeen/service', { action: 'restart_all' })
-      notify(res?.message || 'Полный перезапуск всех компонентов (XKeen, Mihomo, Zapret, Панель)…')
+      const msg = res?.message || 'Все компоненты (XKeen, Mihomo, Zapret, Панель) успешно перезапущены!'
+      notify(msg)
+      setServiceFeedback({ text: '✓ Все службы перезапущены', type: 'success' })
+      setTimeout(() => setServiceFeedback(null), 4000)
+      await new Promise((r) => setTimeout(r, 1200))
       await refresh()
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка перезапуска сервисов', true)
+      const err = e instanceof Error ? e.message : 'Ошибка перезапуска сервисов'
+      notify(err, true)
+      setServiceFeedback({ text: `❌ ${err}`, type: 'error' })
+      setTimeout(() => setServiceFeedback(null), 5000)
     } finally {
       setPending(false)
     }
@@ -362,12 +372,30 @@ export default function Header({
     if (pending) return
     setPending(true)
     const nextAction = isRunning ? 'stop' : 'start'
+    setServiceFeedback({
+      text: nextAction === 'stop' ? '⏳ Остановка служб…' : '⏳ Запуск служб…',
+      type: 'info',
+    })
     try {
-      await apiPost<{ message?: string; service_running?: boolean; service_stopped?: boolean }>('xkeen/service', { action: nextAction })
-      notify(nextAction === 'stop' ? 'Все службы (XKeen, Mihomo, Zapret) остановлены. Трафик идёт напрямую.' : 'Службы успешно запущены.')
+      const res = await apiPost<{ message?: string; service_running?: boolean; service_stopped?: boolean }>(
+        'xkeen/service',
+        { action: nextAction }
+      )
+      const msg = res?.message || (nextAction === 'stop'
+        ? 'Все службы (XKeen, Mihomo, Zapret) остановлены. Трафик идёт напрямую.'
+        : 'Все службы успешно запущены!')
+      notify(msg)
+      setServiceFeedback({
+        text: nextAction === 'stop' ? '✓ Службы остановлены (DIRECT)' : '✓ Все службы запущены',
+        type: 'success',
+      })
+      setTimeout(() => setServiceFeedback(null), 4000)
       await refresh()
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка переключения сервиса', true)
+      const err = e instanceof Error ? e.message : 'Ошибка переключения сервиса'
+      notify(err, true)
+      setServiceFeedback({ text: `❌ ${err}`, type: 'error' })
+      setTimeout(() => setServiceFeedback(null), 5000)
     } finally {
       setPending(false)
     }
@@ -398,7 +426,16 @@ export default function Header({
           <div className="status-badge-content">
             <div className="status-badge-row1">
               <span className={`status-dot ${isRunning ? 'status-dot-running' : 'status-dot-stopped'}`} />
-              <span className="status-label">{isRunning ? 'Сервис запущен' : 'Сервис остановлен'}</span>
+              <span
+                className="status-label"
+                style={serviceFeedback ? {
+                  color: serviceFeedback.type === 'error' ? '#ef4444' : serviceFeedback.type === 'success' ? '#22c55e' : '#38bdf8',
+                  fontWeight: 600,
+                } : undefined}
+                data-testid="header-status-label"
+              >
+                {serviceFeedback ? serviceFeedback.text : (isRunning ? 'Сервис запущен' : 'Сервис остановлен')}
+              </span>
             </div>
             <div className="status-badge-row2">
               <span
@@ -543,18 +580,20 @@ export default function Header({
         <button
           type="button"
           className="header-action-btn"
+          data-testid="header-restart-btn"
           onClick={handleRestart}
           disabled={pending}
-          title="Перезапустить все службы (XKeen, Mihomo, Zapret, Панель)"
+          title={pending ? 'Выполняется перезапуск служб…' : 'Перезапустить все службы (XKeen, Mihomo, Zapret, Панель)'}
         >
           <IconRefresh className={pending ? 'spin-icon' : ''} />
         </button>
         <button
           type="button"
+          data-testid="header-toggle-btn"
           className={`header-action-btn ${isRunning ? 'header-action-btn-stop' : 'header-action-btn-start'}`}
           onClick={handleToggle}
           disabled={pending}
-          title={isRunning ? 'Остановить сервис (все службы остановятся, прямой выход для всех устройств)' : 'Запустить сервис'}
+          title={pending ? 'Выполняется переключение служб…' : (isRunning ? 'Остановить сервис (все службы остановятся, прямой выход для всех устройств)' : 'Запустить сервис')}
         >
           {isRunning ? <IconStop /> : <IconPlay />}
         </button>

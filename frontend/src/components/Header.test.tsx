@@ -543,4 +543,71 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
     expect(container?.querySelector('.header-service-actions .header-action-btn-stop')).toBeNull()
     expect(container?.querySelector('.header-service-actions .header-action-btn-start')).not.toBeNull()
   })
+
+  it('triggers restart_all action with live feedback and notification', async () => {
+    vi.spyOn(api, 'apiGet').mockResolvedValue({})
+    const postSpy = vi.spyOn(api, 'apiPost').mockResolvedValue({
+      message: 'Все компоненты (XKeen, Mihomo, Zapret, Панель) успешно перезапущены!',
+      service_running: true,
+    })
+
+    await act(async () => {
+      root!.render(
+        <Header
+          status={mockStatus}
+          notify={notifyMock}
+          refresh={refreshMock}
+          onSwitchTab={onSwitchTabMock}
+          activeTab="dashboard"
+        />
+      )
+    })
+
+    const restartBtn = container?.querySelector('[data-testid="header-restart-btn"]') as HTMLButtonElement | null
+    expect(restartBtn).not.toBeNull()
+
+    await act(async () => {
+      restartBtn?.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('xkeen/service', { action: 'restart_all' })
+    expect(notifyMock).toHaveBeenCalledWith('Все компоненты (XKeen, Mihomo, Zapret, Панель) успешно перезапущены!')
+
+    const statusLabel = container?.querySelector('[data-testid="header-status-label"]')
+    expect(statusLabel?.textContent).toContain('перезапущены')
+  })
+
+  it('triggers stop action with live feedback and notification', async () => {
+    vi.spyOn(api, 'apiGet').mockResolvedValue({})
+    const postSpy = vi.spyOn(api, 'apiPost').mockResolvedValue({
+      message: 'Все службы остановлены. Трафик переведён на прямой выход (DIRECT).',
+      service_running: false,
+      service_stopped: true,
+    })
+
+    await act(async () => {
+      root!.render(
+        <Header
+          status={mockStatus}
+          notify={notifyMock}
+          refresh={refreshMock}
+          onSwitchTab={onSwitchTabMock}
+          activeTab="dashboard"
+        />
+      )
+    })
+
+    const toggleBtn = container?.querySelector('[data-testid="header-toggle-btn"]') as HTMLButtonElement | null
+    expect(toggleBtn).not.toBeNull()
+
+    await act(async () => {
+      toggleBtn?.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('xkeen/service', { action: 'stop' })
+    expect(notifyMock).toHaveBeenCalledWith('Все службы остановлены. Трафик переведён на прямой выход (DIRECT).')
+
+    const statusLabel = container?.querySelector('[data-testid="header-status-label"]')
+    expect(statusLabel?.textContent).toContain('остановлены')
+  })
 })
