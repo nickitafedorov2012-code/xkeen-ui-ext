@@ -35,7 +35,7 @@ export default function ZapretCoreModal({ isOpen, onClose, notify, onUpdated }: 
       if (st) setStatus(st)
       if (upd) setUpdInfo(upd)
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка загрузки данных Запрет', true)
+      notify(e instanceof Error ? e.message : 'Ошибка загрузки данных Zapret', true)
     }
   }, [notify])
 
@@ -48,13 +48,13 @@ export default function ZapretCoreModal({ isOpen, onClose, notify, onUpdated }: 
   const handleSwitchEngine = async (targetEngine: 'v1' | 'v2') => {
     if (busy) return
     setBusy(true)
-    setStage(targetEngine === 'v2' ? 'Переключение на Запрет 2 (Modern 2.0)…' : 'Переключение на Запрет 1 (Legacy 1.x)…')
+    setStage(targetEngine === 'v2' ? 'Переключение на Zapret 2 (Modern 2.0)…' : 'Переключение на Zapret 1 (Legacy 1.x)…')
     try {
       const res = await apiPost<{ success: boolean; message?: string }>('zapret/action', {
         action: 'switch_engine',
         engine: targetEngine,
       })
-      notify(res?.message || `Движок Запрет успешно переключён на ${targetEngine === 'v2' ? 'Запрет 2.0' : 'Запрет 1.x'}`)
+      notify(res?.message || `Движок Zapret успешно переключён на ${targetEngine === 'v2' ? 'Zapret 2.0' : 'Zapret 1.x'}`)
       window.dispatchEvent(
         new CustomEvent('xr:zapret-updated', {
           detail: {
@@ -66,7 +66,7 @@ export default function ZapretCoreModal({ isOpen, onClose, notify, onUpdated }: 
       if (onUpdated) onUpdated()
       await loadData()
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка смены движка Запрет', true)
+      notify(e instanceof Error ? e.message : 'Ошибка смены движка Zapret', true)
     } finally {
       setBusy(false)
       setStage('')
@@ -161,11 +161,11 @@ export default function ZapretCoreModal({ isOpen, onClose, notify, onUpdated }: 
               }}
             >
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
               </svg>
             </div>
             <div>
-              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Управление ядром Запрет (DPI)</h3>
+              <h3 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Управление ядром Zapret (DPI)</h3>
               <div className="muted small">Выбор ядра 1 или 2, обновление версий и журнал нововведений</div>
             </div>
           </div>
@@ -203,7 +203,7 @@ export default function ZapretCoreModal({ isOpen, onClose, notify, onUpdated }: 
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               <span className="upd-dot" style={{ background: '#22c55e', boxShadow: '0 0 8px #22c55e' }} />
               <span style={{ fontWeight: 700, fontSize: 16, color: '#f8fafc' }}>
-                {activeEngine === 'v2' ? 'Запрет 2 (nfqws2)' : 'Запрет 1 (nfqws)'} {curVersion}
+                {activeEngine === 'v2' ? 'Zapret 2 (nfqws2)' : 'Zapret 1 (nfqws)'} {curVersion}
               </span>
               <span
                 className="badge"
@@ -292,7 +292,7 @@ export default function ZapretCoreModal({ isOpen, onClose, notify, onUpdated }: 
         {/* Список нововведений */}
         <div style={{ flex: 1, overflowY: 'auto', marginBottom: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
           <div style={{ fontWeight: 600, fontSize: 13, color: '#38bdf8', marginBottom: 2 }}>
-            Основные изменения и возможности Запрет 2.0:
+            Основные изменения и возможности Zapret 2.0:
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 }}>
             {changelogItems.map((item, idx) => (
@@ -335,7 +335,7 @@ export default function ZapretCoreModal({ isOpen, onClose, notify, onUpdated }: 
                 borderColor: '#22c55e',
               }}
             >
-              🚀 Обновить Запрет до {latVersion}
+              🚀 Обновить Zapret до {latVersion}
             </button>
           )}
         </div>

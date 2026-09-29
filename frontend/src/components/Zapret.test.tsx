@@ -1703,7 +1703,7 @@ describe('Zapret Component — Features 1, 2, 4, 5 (Mini-Blockcheck, DPI Analyti
     expect(cardV1?.textContent).toContain('midsld')
     expect(cardV1?.textContent).toContain('md5sig')
     // Verify engine restriction lock badge is rendered on v1
-    expect(cardV1?.textContent).toContain('🔒 Только для Запрет 2.0 (Modern)')
+    expect(cardV1?.textContent).toContain('🔒 Только для Zapret 2.0 (Modern)')
     // Toggle button should be disabled
     const toggleBtnV1 = cardV1?.querySelector('button') as HTMLButtonElement | null
     expect(toggleBtnV1?.disabled).toBe(true)
@@ -1738,7 +1738,7 @@ describe('Zapret Component — Features 1, 2, 4, 5 (Mini-Blockcheck, DPI Analyti
     expect(cardV2?.textContent).toContain('midsld')
     expect(cardV2?.textContent).toContain('md5sig')
     // Lock badge should NOT be present on v2
-    expect(cardV2?.textContent).not.toContain('🔒 Только для Запрет 2.0 (Modern)')
+    expect(cardV2?.textContent).not.toContain('🔒 Только для Zapret 2.0 (Modern)')
     // Toggle button should NOT be disabled on v2
     const toggleBtnV2 = cardV2?.querySelector('button') as HTMLButtonElement | null
     expect(toggleBtnV2?.disabled).toBe(false)

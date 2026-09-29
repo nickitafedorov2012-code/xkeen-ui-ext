@@ -1084,6 +1084,19 @@
   * **Ежесуточная проверка в 5:00 утра:** Фоновый планировщик с защитой от рассинхронизации часов до поднятия NTP роутера (year >= 2024).
 - **Исправление установки Zapret 2.0 и Mini-Blockcheck (api.rs, Zapret.tsx)**:
 
+## v1.7.4 (AdGuard Home Synchronized Protection Toggle, Duplicated Tab Button & Zapret Lightning Branding)
+- **Полная двусторонняя синхронизация кнопки AdGuard Home (`Dashboard.tsx`, `AdGuard.tsx`, `api.rs`)**:
+  * **Проблема**: Кнопка блокировки рекламы на главной панели переключала только устаревший флаг маршрутизации Mihomo (`adblock/toggle`), никак не влияя на реальную защиту и фильтрацию AdGuard Home на соответствующей вкладке.
+  * **Решение**: Реализована полная двусторонняя синхронизация: вызов кнопки на главной теперь обращается напрямую к REST API AdGuard Home (`/control/protection`), переключает защиту AdGuard Home и одновременно синхронизирует состояние в конфигурации XKeen/Mihomo.
+  * Добавлена реактивная шина событий DOM (`xr:adguard-protection-changed`): при переключении защиты в любом месте (на главной панели или во вкладке AdGuard) состояние немедленно обновляется во всех компонентах интерфейса без перезагрузки страницы.
+- **Дублированная кнопка быстрого управления во вкладке AdGuard**:
+  * Во вкладку AdGuard Home (`dash-info-strip`) добавлена плашка-кнопка быстрого включения/выключения защиты (`data-testid="adguard-duplicated-btn"`), позволяющая управлять защитой в один клик прямо из вкладки DNS-фильтрации.
+- **Новый визуальный брендинг Zapret (⚡ Lightning)**:
+  * Для исключения визуального дублирования и путаницы со щитом AdGuard Home (`🛡️`), иконка и эмодзи Zapret повсеместно заменены на молнию (`⚡` / `<IconZap />`).
+  * Все русскоязычные надписи «Запрет» в интерфейсе, бейджах, заголовках и модальных окнах приведены к единому английскому написанию «Zapret» (`Zapret 1`, `Zapret 2`, `⚡ Zapret (DPI)`).
+- **Анти-регрессионный тест 33**:
+  * Добавлен автоматический тест `33. AdGuard Home Synchronized Protection Toggle, Duplicated Tab Button & Zapret Lightning Branding (v1.7.4)` в набор регрессионного тестирования `scripts/regression-tests.cjs`.
+
 ## v1.7.3 (AdGuard Home Multi-Mirror CDN Downloader, Wizard Bypass & Port 53 Self-Healing)
 - **Отказ от несуществующего пакета opkg и переход на прямое скачивание с официального CDN AdGuard (`backend/src/adguard.rs`)**:
   * **Проблема**: В официальных репозиториях Entware пакет `adguardhome` отсутствует (`Cannot find package adguardhome`), из-за чего попытки установки через opkg завершались ошибкой.

@@ -69,7 +69,7 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
           zapret: {
             engine: 'v2',
             version: '1.0.5.2',
-            label: 'Запрет 2 v1.0.5.2',
+            label: 'Zapret 2 v1.0.5.2',
             installed: true,
             running: true,
             update_available: false,

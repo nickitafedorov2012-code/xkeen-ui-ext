@@ -48,9 +48,9 @@ pub async fn status(State(state): State<AppState>) -> Response {
         detect_installed_zapret1_version().await
     };
     let zapret_label = if zapret_engine == "v2" {
-        format!("Запрет 2 {zapret_ver}")
+        format!("Zapret 2 {zapret_ver}")
     } else {
-        format!("Запрет 1 {zapret_ver}")
+        format!("Zapret 1 {zapret_ver}")
     };
     let zapret_installed = std::path::Path::new("/opt/etc/init.d/S51zapret").exists();
     let service_stopped = crate::watchdog::is_service_stopped();
@@ -3286,6 +3286,9 @@ pub async fn toggle_adblock(
     };
     tx.config_mut().adblock_enabled = target_enabled;
 
+    // Синхронизируем состояние защиты с AdGuard Home (если служба доступна)
+    let _ = crate::adguard::set_protection(&state.http, &tx.config().adguard, target_enabled).await;
+
     let raw_yaml = match tx.read_yaml().await {
         Ok(c) => c,
         Err(e) => return api_err(e),
@@ -5038,7 +5041,7 @@ pub async fn check_zapret_update_core(state: &AppState, force: bool) -> Result<s
     };
 
     let default_notes = if engine == "v2" {
-        "• Движок Zapret 2 (nfqws2 + Lua): поддержка адаптивных Lua-стратегий десинхронизации (multisplit, multidisorder, fake TLS ClientHello с рандомизацией Session ID и tcp_ts_up).\n• Полная совместимость с YouTube, Discord и голосовыми UDP-каналами (STUN / IP Discovery).\n• Мгновенное переключение между движками Запрет 1 и Запрет 2 без переустановки."
+        "• Движок Zapret 2 (nfqws2 + Lua): поддержка адаптивных Lua-стратегий десинхронизации (multisplit, multidisorder, fake TLS ClientHello с рандомизацией Session ID и tcp_ts_up).\n• Полная совместимость с YouTube, Discord и голосовыми UDP-каналами (STUN / IP Discovery).\n• Мгновенное переключение между движками Zapret 1 и Zapret 2 без переустановки."
     } else {
         "• Классический движок Zapret 1 (nfqws v72.13): проверенная десинхронизация fake,split2 / disorder2 с минимальным потреблением RAM.\n• Доступно переключение на движок Zapret 2 (nfqws2 + Lua) в 1 клик."
     };
@@ -5047,9 +5050,9 @@ pub async fn check_zapret_update_core(state: &AppState, force: bool) -> Result<s
 
     if !force && !is_due && last_checked.is_some() {
         let label = if engine == "v2" {
-            format!("Запрет 2 {cur_ver}")
+            format!("Zapret 2 {cur_ver}")
         } else {
-            format!("Запрет 1 {cur_ver}")
+            format!("Zapret 1 {cur_ver}")
         };
         let lat = latest_ver.unwrap_or_else(|| cur_ver.clone());
         let effective_update = update_avail && crate::updater::is_newer(&lat, &cur_ver);
@@ -5158,9 +5161,9 @@ pub async fn check_zapret_update_core(state: &AppState, force: bool) -> Result<s
     }
 
     let label = if engine == "v2" {
-        format!("Запрет 2 {cur_ver}")
+        format!("Zapret 2 {cur_ver}")
     } else {
-        format!("Запрет 1 {cur_ver}")
+        format!("Zapret 1 {cur_ver}")
     };
 
     Ok(json!({
@@ -5975,11 +5978,11 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
 
     let (zapret_ver, zapret_label) = if active_engine == "v2" {
         let v = detect_installed_zapret2_version().await;
-        let l = format!("Запрет 2 {v}");
+        let l = format!("Zapret 2 {v}");
         (v, l)
     } else {
         let v = detect_installed_zapret1_version().await;
-        let l = format!("Запрет 1 {v}");
+        let l = format!("Zapret 1 {v}");
         (v, l)
     };
 
@@ -6291,7 +6294,7 @@ pub async fn zapret_action(
             let _ = tokio::process::Command::new("sh").arg("-c").arg(restore_v1_cmd).output().await;
 
             if !is_nfqws1_available() && !std::path::Path::new("/opt/etc/zapret/zapret.v1.conf.bak").exists() {
-                return api_err("Не удалось активировать Запрет 1: исполняемый файл nfqws не найден.");
+                return api_err("Не удалось активировать Zapret 1: исполняемый файл nfqws не найден.");
             }
         } else if target_engine == "v2" && !is_nfqws2_available() {
             // Автоматическая установка Zapret 2 при переключении тумблера, если он ещё не установлен
@@ -6345,9 +6348,9 @@ pub async fn zapret_action(
         }
 
         let msg = if target_engine == "v1" {
-            "Переключено на движок Запрет 1 (nfqws)"
+            "Переключено на движок Zapret 1 (nfqws)"
         } else {
-            "Переключено на движок Запрет 2 (nfqws2 + Lua)"
+            "Переключено на движок Zapret 2 (nfqws2 + Lua)"
         };
 
         return api_ok(json!({
@@ -8560,7 +8563,13 @@ pub async fn adguard_set_protection(
 ) -> Response {
     let cfg = state.config.read().await.clone();
     match crate::adguard::set_protection(&state.http, &cfg.adguard, body.enabled).await {
-        Ok(now_enabled) => api_ok(json!({ "enabled": now_enabled })),
+        Ok(now_enabled) => {
+            if let Ok(mut tx) = ConfigTx::begin(&state).await {
+                tx.config_mut().adblock_enabled = now_enabled;
+                let _ = tx.commit().await;
+            }
+            api_ok(json!({ "enabled": now_enabled }))
+        }
         Err(e) => api_err(e),
     }
 }

@@ -1231,7 +1231,7 @@ export default function Settings({ notify, status, refresh }: Props) {
           <section className="card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <span style={{ fontSize: 20 }}>🛡️</span>
+                <span style={{ fontSize: 20 }}>⚡</span>
                 <h2 style={{ margin: 0 }}>Zapret — Обход замедлений DPI</h2>
               </div>
               <span className="badge" style={{ color: zapretStatus?.running ? '#22c55e' : zapretStatus?.installed ? '#f59e0b' : 'var(--muted)' }}>
@@ -1239,7 +1239,7 @@ export default function Settings({ notify, status, refresh }: Props) {
               </span>
             </div>
             <p className="muted small">
-              Все параметры обхода DPI (мульти-стратегии для YouTube, Discord, списки доменов и онлайн-тест) сосредоточены во вкладке <b>«🛡️ Запрет (DPI)»</b>.
+              Все параметры обхода DPI (мульти-стратегии для YouTube, Discord, списки доменов и онлайн-тест) сосредоточены во вкладке <b>«⚡ Zapret (DPI)»</b>.
             </p>
             <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
               <button
@@ -1247,7 +1247,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                 className="btn primary sm"
                 onClick={() => window.dispatchEvent(new CustomEvent('xr:switch-tab', { detail: 'zapret' }))}
               >
-                🛡️ Перейти в настройки Zapret →
+                ⚡ Перейти в настройки Zapret →
               </button>
             </div>
           </section>

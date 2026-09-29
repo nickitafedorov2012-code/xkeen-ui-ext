@@ -17,7 +17,7 @@ const mockStatus: StatusInfo = {
   zapret: {
     engine: 'v1',
     version: '72.13',
-    label: 'Запрет 1 v72.13',
+    label: 'Zapret 1 v72.13',
     installed: true,
     running: true,
     update_available: false,
@@ -126,7 +126,7 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
 
     const zapretPill = container?.querySelector('[data-testid="header-zapret-pill"]') as HTMLButtonElement | null
     expect(zapretPill).not.toBeNull()
-    expect(zapretPill?.textContent).toContain('Запрет 1')
+    expect(zapretPill?.textContent).toContain('Zapret 1')
     expect(zapretPill?.textContent).toContain('v72.13')
     expect(zapretPill?.classList.contains('header-pill-update-green')).toBe(false)
 
@@ -145,7 +145,7 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
       zapret: {
         engine: 'v2',
         version: '1.0.5.2',
-        label: 'Запрет 2 v1.0.5.2',
+        label: 'Zapret 2 v1.0.5.2',
         installed: true,
         running: true,
         update_available: false,
@@ -164,7 +164,7 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
     })
 
     const zapretPill = container?.querySelector('[data-testid="header-zapret-pill"]') as HTMLButtonElement | null
-    expect(zapretPill?.textContent).toContain('Запрет 2')
+    expect(zapretPill?.textContent).toContain('Zapret 2')
     expect(zapretPill?.textContent).toContain('v1.0.5.2')
   })
 
@@ -176,7 +176,7 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
       zapret: {
         engine: 'v1',
         version: '72.13',
-        label: 'Запрет 1 v72.13',
+        label: 'Zapret 1 v72.13',
         installed: true,
         running: true,
         update_available: true,
@@ -286,7 +286,7 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
         return Promise.resolve({
           current_engine: 'v2',
           current_version: '1.0.5.2',
-          label: 'Запрет 2 v1.0.5.2',
+          label: 'Zapret 2 v1.0.5.2',
           latest_version: 'v1.0.5.3',
           update_available: true,
         })
@@ -328,7 +328,7 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
         return Promise.resolve({
           current_engine: 'v2',
           current_version: '1.0.5.2',
-          label: 'Запрет 2 v1.0.5.2',
+          label: 'Zapret 2 v1.0.5.2',
           latest_version: 'v1.0.5.3',
           update_available: true,
         })

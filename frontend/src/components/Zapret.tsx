@@ -962,9 +962,9 @@ export default function Zapret({ notify }: ZapretProps) {
                     border: '1px solid rgba(239, 68, 68, 0.35)',
                     fontWeight: 600,
                   }}
-                  title={`Данная функция поддерживается только движком Запрет ${supportedEngines?.map((e) => (e === 'v2' ? '2.0 (Modern)' : '1.x (Legacy)')).join(', ')}`}
+                  title={`Данная функция поддерживается только движком Zapret ${supportedEngines?.map((e) => (e === 'v2' ? '2.0 (Modern)' : '1.x (Legacy)')).join(', ')}`}
                 >
-                  🔒 Только для Запрет {supportedEngines?.map((e) => (e === 'v2' ? '2.0 (Modern)' : '1.x (Legacy)')).join(', ')}
+                  🔒 Только для Zapret {supportedEngines?.map((e) => (e === 'v2' ? '2.0 (Modern)' : '1.x (Legacy)')).join(', ')}
                 </span>
               )}
             </div>
@@ -1016,7 +1016,7 @@ export default function Zapret({ notify }: ZapretProps) {
             }}
             title={
               !isEngineSupported
-                ? `Недоступно для текущего движка (требуется Запрет ${supportedEngines?.join(', ').toUpperCase()})`
+                ? `Недоступно для текущего движка (требуется Zapret ${supportedEngines?.join(', ').toUpperCase()})`
                 : isChecked
                 ? 'Выключить блок'
                 : 'Включить блок'
@@ -1060,7 +1060,7 @@ export default function Zapret({ notify }: ZapretProps) {
         >
           <span style={{ color: isChecked && isRunning && isEngineSupported ? '#38bdf8' : 'var(--muted)', fontWeight: 500 }}>
             {!isEngineSupported
-              ? `🔒 Не поддерживается в Запрет ${activeEngine.toUpperCase()}`
+              ? `🔒 Не поддерживается в Zapret ${activeEngine.toUpperCase()}`
               : !isRunning && isChecked
               ? `⚪ ${activeInfo} (Zapret остановлен)`
               : isChecked
@@ -2938,7 +2938,7 @@ export default function Zapret({ notify }: ZapretProps) {
                   onClick={() => handleApplyPreset('aggressive')}
                   title={
                     activeEngine === 'v1'
-                      ? 'Пресет «🔥 Агрессивный» доступен только для Запрет 2.0 (Modern nfqws2)'
+                      ? 'Пресет «🔥 Агрессивный» доступен только для Zapret 2.0 (Modern nfqws2)'
                       : 'Все стратегии + Агрессивный режим для жестких ТСПУ'
                   }
                   style={{

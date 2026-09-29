@@ -143,6 +143,18 @@ export default function AdGuard({ notify }: AdGuardProps) {
     if (activeSubTab === 'rewrites' && status?.running) loadRewrites()
   }, [activeSubTab, loadFiltering, loadRewrites, status?.running])
 
+  // Слушаем синхронизацию защиты AdGuard с главной страницы (Дашборда)
+  useEffect(() => {
+    const handleSync = (e: Event) => {
+      const detail = (e as CustomEvent<{ enabled: boolean }>).detail
+      if (detail && typeof detail.enabled === 'boolean') {
+        setStatus((prev) => (prev ? { ...prev, protection_enabled: detail.enabled } : null))
+      }
+    }
+    window.addEventListener('xr:adguard-protection-changed', handleSync)
+    return () => window.removeEventListener('xr:adguard-protection-changed', handleSync)
+  }, [])
+
   // Переключение защиты (Protection Toggle)
   const handleToggleProtection = async () => {
     if (!status || actionPending) return
@@ -150,7 +162,9 @@ export default function AdGuard({ notify }: AdGuardProps) {
     setActionPending(true)
     try {
       await apiPost<{ enabled: boolean }>('/adguard/protection', { enabled: nextState })
+      await apiPost('adblock/toggle', { enabled: nextState }).catch(() => null)
       setStatus({ ...status, protection_enabled: nextState })
+      window.dispatchEvent(new CustomEvent('xr:adguard-protection-changed', { detail: { enabled: nextState } }))
       notify(nextState ? 'Защита AdGuard Home включена' : 'Защита AdGuard Home временно отключена')
       await loadData()
     } catch (e: any) {
@@ -332,6 +346,49 @@ export default function AdGuard({ notify }: AdGuardProps) {
 
   return (
     <div className="agh-container" data-testid="adguard-view">
+      {/* 0. СТАТУСНАЯ ПОЛОСКА И ДУБЛИРОВАННАЯ КНОПКА С ГЛАВНОЙ СТРАНИЦЫ */}
+      <div className="dash-info-strip" style={{ marginBottom: 14 }}>
+        <div className="dash-info-group">
+          <span className="dash-info-badge" title="Статус службы AdGuard Home на роутере">
+            <span>🛡️ Служба AGH:</span>
+            <b>{status?.running ? 'Активна 🟢' : isInstalled ? 'Остановлена 🔴' : 'Не установлена ⚪'}</b>
+            {status?.version && (
+              <>
+                <span className="dash-info-sep">·</span>
+                <span className="muted">v{status.version}</span>
+              </>
+            )}
+            <span className="dash-info-sep">·</span>
+            <span className="muted">DNS порт: {status?.dns_port || 53}</span>
+          </span>
+        </div>
+
+        <div className="dash-info-group">
+          <button
+            type="button"
+            className="dash-info-badge"
+            onClick={handleToggleProtection}
+            disabled={actionPending || !status?.running}
+            data-testid="adguard-duplicated-btn"
+            title="Быстрое включение/отключение защиты AdGuard Home (дублированная кнопка с главной страницы)"
+            style={{
+              cursor: status?.running ? 'pointer' : 'not-allowed',
+              background: status?.protection_enabled ? 'rgba(16, 185, 129, 0.15)' : 'rgba(255, 255, 255, 0.05)',
+              border: status?.protection_enabled ? '1px solid #10b981' : '1px solid var(--border)',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+            }}
+          >
+            <span>🛡️ AdGuard:</span>
+            <b style={{ color: status?.protection_enabled ? '#10b981' : 'var(--text-secondary)' }}>
+              {status?.running ? (status?.protection_enabled ? 'ВКЛ 🟢' : 'ВЫКЛ ⚪') : 'ВЫКЛ ⚪'}
+            </b>
+            {actionPending && <span style={{ fontSize: 11 }}>⏳</span>}
+          </button>
+        </div>
+      </div>
+
       {/* 1. ГЛАВНЫЙ СТАТУСНЫЙ HERO-БАННЕР */}
       <section className="card agh-hero-card">
         <div className="agh-hero-header">

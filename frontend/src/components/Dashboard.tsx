@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
-import { pingClass, type FailoverEventInfo, type StatusInfo } from '../types'
+import { pingClass, type FailoverEventInfo, type StatusInfo, type AghStatus } from '../types'
 import TrafficGraph from './TrafficGraph'
 
 interface Props {
@@ -103,6 +103,41 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
   }, [status?.active_server?.ping_ms, status?.active_server?.name])
 
   const [adblockEnabled, setAdblockEnabled] = useState<boolean>(() => !!status?.adblock_enabled)
+  const [adguardStatus, setAdguardStatus] = useState<AghStatus | null>(null)
+  const [adguardToggling, setAdguardToggling] = useState(false)
+
+  const loadAdguardStatus = useCallback(async () => {
+    try {
+      const res = await apiGet<AghStatus>('/adguard/status')
+      if (res) {
+        setAdguardStatus(res)
+        if (res.running) {
+          setAdblockEnabled(res.protection_enabled)
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  useEffect(() => {
+    loadAdguardStatus()
+    const timer = setInterval(loadAdguardStatus, 8000)
+    return () => clearInterval(timer)
+  }, [loadAdguardStatus])
+
+  // Слушаем синхронизацию с вкладки AdGuard
+  useEffect(() => {
+    const handleSync = (e: Event) => {
+      const detail = (e as CustomEvent<{ enabled: boolean }>).detail
+      if (detail && typeof detail.enabled === 'boolean') {
+        setAdblockEnabled(detail.enabled)
+        setAdguardStatus((prev) => (prev ? { ...prev, protection_enabled: detail.enabled } : null))
+      }
+    }
+    window.addEventListener('xr:adguard-protection-changed', handleSync)
+    return () => window.removeEventListener('xr:adguard-protection-changed', handleSync)
+  }, [])
 
   useEffect(() => {
     if (status?.adblock_enabled !== undefined) {
@@ -110,14 +145,31 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
     }
   }, [status?.adblock_enabled])
 
+  const isAghActive = adguardStatus?.running ? adguardStatus.protection_enabled : adblockEnabled
+
   const handleToggleAdblock = async () => {
+    if (adguardToggling) return
+    const nextState = !isAghActive
+    setAdguardToggling(true)
     try {
-      const res = await apiPost<{ enabled: boolean }>('adblock/toggle', { enabled: !adblockEnabled })
-      setAdblockEnabled(res.enabled)
-      notify(res.enabled ? 'Блокировка рекламы (AdBlock) включена' : 'Блокировка рекламы отключена')
+      // 1. Переключаем защиту в AdGuard Home через REST API
+      const aghRes = await apiPost<{ enabled: boolean }>('/adguard/protection', { enabled: nextState }).catch(() => null)
+      // 2. Синхронизируем флаг adblock в Mihomo
+      await apiPost<{ enabled: boolean }>('adblock/toggle', { enabled: nextState }).catch(() => null)
+
+      const effectiveState = aghRes?.enabled !== undefined ? aghRes.enabled : nextState
+      setAdblockEnabled(effectiveState)
+      setAdguardStatus((prev) => (prev ? { ...prev, protection_enabled: effectiveState } : null))
+
+      // Синхронизируем вкладку AdGuard через глобальное событие
+      window.dispatchEvent(new CustomEvent('xr:adguard-protection-changed', { detail: { enabled: effectiveState } }))
+
+      notify(effectiveState ? 'Защита AdGuard Home включена' : 'Защита AdGuard Home отключена')
       refresh?.()
     } catch (e: any) {
-      notify('Ошибка переключения AdBlock: ' + e.message, true)
+      notify('Ошибка переключения AdGuard: ' + (e.message || e), true)
+    } finally {
+      setAdguardToggling(false)
     }
   }
 
@@ -200,17 +252,20 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
             type="button"
             className="dash-info-badge"
             onClick={handleToggleAdblock}
-            title="Быстрое включение/отключение сетевого фильтра рекламы"
+            disabled={adguardToggling}
+            data-testid="dashboard-adguard-btn"
+            title="Быстрое включение/отключение защиты AdGuard Home (синхронизировано с вкладкой AdGuard)"
             style={{
               cursor: 'pointer',
-              background: adblockEnabled ? 'rgba(16, 185, 129, 0.15)' : 'rgba(255, 255, 255, 0.05)',
-              border: adblockEnabled ? '1px solid #10b981' : '1px solid var(--border)',
+              background: isAghActive ? 'rgba(16, 185, 129, 0.15)' : 'rgba(255, 255, 255, 0.05)',
+              border: isAghActive ? '1px solid #10b981' : '1px solid var(--border)',
             }}
           >
-            <span>🛡️ AdBlock:</span>
-            <b style={{ color: adblockEnabled ? '#10b981' : 'var(--text-secondary)' }}>
-              {adblockEnabled ? 'ВКЛ 🟢' : 'ВЫКЛ ⚪'}
+            <span>🛡️ AdGuard:</span>
+            <b style={{ color: isAghActive ? '#10b981' : 'var(--text-secondary)' }}>
+              {isAghActive ? 'ВКЛ 🟢' : 'ВЫКЛ ⚪'}
             </b>
+            {adguardToggling && <span style={{ fontSize: 11 }}>⏳</span>}
           </button>
         </div>
       </div>

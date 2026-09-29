@@ -52,10 +52,10 @@ function IconBox() {
   )
 }
 
-function IconShield() {
+function IconZap() {
   return (
     <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
     </svg>
   )
 }
@@ -338,7 +338,7 @@ export default function Header({
 
   const mihomoVersion = status?.mihomo_version || '—'
   const appVersion = status?.version ? status.version.replace(/^v/, '') : '—'
-  const zapretEngineLabel = zapretEngine === 'v2' ? 'Запрет 2' : 'Запрет 1'
+  const zapretEngineLabel = zapretEngine === 'v2' ? 'Zapret 2' : 'Zapret 1'
   const rawZapretVersion = zapretVersion || status?.zapret?.version || ''
   const zapretVersionDisplay = rawZapretVersion
     ? (rawZapretVersion.startsWith('v') ? rawZapretVersion : `v${rawZapretVersion}`)
@@ -556,11 +556,11 @@ export default function Header({
           }}
           title={
             effectiveZapretUpdate
-              ? `Доступно обновление Запрет до ${effectiveZapretLatest || 'новой версии'}! Нажмите для перехода`
-              : `${zapretEngineLabel} ${zapretVersionDisplay}. Нажмите для управления Запретом`
+              ? `Доступно обновление Zapret до ${effectiveZapretLatest || 'новой версии'}! Нажмите для перехода`
+              : `${zapretEngineLabel} ${zapretVersionDisplay}. Нажмите для управления Zapret`
           }
         >
-          <IconShield />
+          <IconZap />
           <span className="header-pill-title">{zapretEngineLabel}</span>
           <span className="header-pill-subtitle">{zapretVersionDisplay}</span>
           {effectiveZapretUpdate && (

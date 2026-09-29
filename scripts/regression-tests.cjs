@@ -535,8 +535,8 @@ runTest('15. Header Navigation, Zapret 1/2 Chip, Red Pulse Animation & 5 AM Dail
 
   // 2. Zapret chip in top header with Zapret 1 / 2 and version numbers
   assert(headerTsx.includes('data-testid="header-zapret-pill"'), 'Header.tsx must render Zapret pill button');
-  assert(headerTsx.includes('zapretEngine === \'v2\' ? \'Запрет 2\' : \'Запрет 1\''), 'Header.tsx must format Zapret label as Запрет 1 or Запрет 2');
-  assert(headerTsx.includes('IconShield'), 'Header.tsx must include IconShield for Zapret');
+  assert(headerTsx.includes("zapretEngine === 'v2' ? 'Zapret 2' : 'Zapret 1'"), 'Header.tsx must format Zapret label as Zapret 1 or Zapret 2');
+  assert(headerTsx.includes('IconZap'), 'Header.tsx must include IconZap for Zapret');
 
   // 3. Green pulsating glow animation for Zapret and Core, Blue for Panel
   assert(stylesCss.includes('.header-pill-btn.header-pill-update-green'), 'styles.css must define .header-pill-btn.header-pill-update-green');
@@ -780,7 +780,7 @@ runTest('21. Zapret v1/v2 Engine Greyout, Router PREROUTING Hook, Fast DPI Test 
   assert(zapretTsx.includes('supportedEngines?: (\'v1\' | \'v2\')[]'), 'Zapret.tsx renderStrategyCard must take supportedEngines parameter');
   assert(zapretTsx.includes('opacity: isEngineSupported ? 1 : 0.45'), 'Zapret.tsx must reduce opacity to 0.45 when engine not supported');
   assert(zapretTsx.includes('filter: isEngineSupported ? \'none\' : \'grayscale(0.8)\''), 'Zapret.tsx must apply grayscale filter to unsupported cards');
-  assert(zapretTsx.includes('🔒 Только для Запрет'), 'Zapret.tsx must render lock badge for engine restricted cards');
+  assert(zapretTsx.includes('🔒 Только для Zapret'), 'Zapret.tsx must render lock badge for engine restricted cards');
   assert(zapretTsx.includes('activeEngine === \'v1\''), 'Zapret.tsx must disable aggressive preset when activeEngine === v1');
 
   // 2. backend/src/api.rs must hook PREROUTING 1 -i br+ / Bridge+ in ensure_zapret_init_script
@@ -1117,6 +1117,36 @@ runTest('32. AdGuard Home Multi-Mirror CDN Downloader, Wizard Bypass & Port 53 S
 
   // 5. Frontend notification and guidance updates
   assert(adguardTsx.includes('официального CDN'), 'AdGuard.tsx notification must inform user about official CDN download');
+});
+
+// -------------------------------------------------------------
+// 33. AdGuard Home Synchronized Protection Toggle, Duplicated Tab Button & Zapret Lightning Branding (v1.7.4)
+// -------------------------------------------------------------
+runTest('33. AdGuard Home Synchronized Protection Toggle, Duplicated Tab Button & Zapret Lightning Branding (v1.7.4)', () => {
+  const apiRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/api.rs'), 'utf8');
+  const dashboardTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Dashboard.tsx'), 'utf8');
+  const adguardTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/AdGuard.tsx'), 'utf8');
+  const headerTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Header.tsx'), 'utf8');
+  const appTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/App.tsx'), 'utf8');
+
+  // 1. Backend bidirectional synchronization between toggle_adblock and AdGuard Home protection
+  assert(apiRs.includes('set_protection(&state.http, &tx.config().adguard, target_enabled).await'), 'api.rs toggle_adblock must synchronize with AdGuard Home protection endpoint');
+  assert(apiRs.includes('tx.config_mut().adblock_enabled = now_enabled'), 'api.rs adguard_set_protection must synchronize adblock_enabled flag in config');
+  assert(apiRs.includes('Zapret 2 {cur_ver}') && apiRs.includes('Zapret 1 {cur_ver}'), 'api.rs must return Zapret 1/2 in English');
+
+  // 2. Dashboard AdGuard button and event synchronization
+  assert(dashboardTsx.includes('🛡️ AdGuard:'), 'Dashboard.tsx must label button as AdGuard');
+  assert(dashboardTsx.includes('xr:adguard-protection-changed'), 'Dashboard.tsx must listen to and dispatch xr:adguard-protection-changed');
+  assert(dashboardTsx.includes('/adguard/protection'), 'Dashboard.tsx toggle must call /adguard/protection');
+
+  // 3. AdGuard tab duplicated button and two-way sync
+  assert(adguardTsx.includes('data-testid="adguard-duplicated-btn"'), 'AdGuard.tsx must render duplicated button with data-testid="adguard-duplicated-btn"');
+  assert(adguardTsx.includes('xr:adguard-protection-changed'), 'AdGuard.tsx must listen to and dispatch xr:adguard-protection-changed');
+  assert(adguardTsx.includes('adblock/toggle'), 'AdGuard.tsx handleToggleProtection must synchronize adblock/toggle');
+
+  // 4. Zapret lightning emoji and branding
+  assert(headerTsx.includes('<IconZap />'), 'Header.tsx Zapret pill must use IconZap');
+  assert(appTsx.includes("{ id: 'zapret', label: '⚡ Zapret' }"), 'App.tsx must use ⚡ Zapret label in tabs');
 });
 
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);

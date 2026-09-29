@@ -39,7 +39,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'dashboard', label: '📊 Дашборд' },
   { id: 'servers', label: '🛰 Серверы' },
   { id: 'devices', label: '📱 Устройства' },
-  { id: 'zapret', label: '🛡️ Запрет (DPI)' },
+  { id: 'zapret', label: '⚡ Zapret' },
   { id: 'gaming', label: '🎮 Игры' },
   { id: 'google-ai', label: '🤖 Google AI' },
   { id: 'connections', label: '🌐 Соединения' },
@@ -399,7 +399,7 @@ export default function App() {
         onUpdated={refresh}
       />
 
-      {/* Модальное окно управления и выбора ядра Запрет (DPI) */}
+      {/* Модальное окно управления и выбора ядра Zapret (DPI) */}
       <ZapretCoreModal
         isOpen={zapretModalOpen}
         onClose={() => setZapretModalOpen(false)}
