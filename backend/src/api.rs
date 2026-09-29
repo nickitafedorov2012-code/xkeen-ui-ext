@@ -8684,6 +8684,14 @@ pub async fn adguard_service(Json(body): Json<ServiceReq>) -> Response {
     }
 }
 
+/// POST /api/adguard/install
+pub async fn adguard_install() -> Response {
+    match crate::adguard::install_adguard_package().await {
+        Ok(out) => api_ok(json!({ "output": out })),
+        Err(e) => api_err(e),
+    }
+}
+
 /// GET /api/adguard/config
 pub async fn adguard_get_config(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();

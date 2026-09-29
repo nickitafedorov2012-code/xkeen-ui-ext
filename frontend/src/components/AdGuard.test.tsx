@@ -235,4 +235,68 @@ describe('AdGuard Component — Dashboard, Query Log, Filtering & Rewrites', () 
     expect(container?.textContent).toContain('Открыт и отвечает')
     expect(container?.textContent).toContain('Порт 3000 (Веб-интерфейс)')
   })
+
+  it('triggers start service action when service action button is clicked in stopped state', async () => {
+    // Мокаем остановленный сервис
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path.includes('/adguard/status')) return Promise.resolve({ ...mockStatus, running: false })
+      if (path.includes('/adguard/health')) return Promise.resolve({ ...mockHealth, process_alive: false })
+      if (path.includes('/adguard/overview')) return Promise.resolve({ ...mockOverview, running: false })
+      if (path.includes('/adguard/config')) return Promise.resolve(mockConfig)
+      if (path.includes('/adguard/diagnostics')) return Promise.resolve(mockDiagnostics)
+      return Promise.resolve({})
+    })
+
+    await act(async () => {
+      root!.render(<AdGuard notify={notifyMock} />)
+    })
+
+    const startBtn = container?.querySelector('[data-testid="adguard-service-action-btn"]') as HTMLButtonElement
+    expect(startBtn).not.toBeNull()
+    expect(startBtn.textContent).toContain('Запуск')
+
+    await act(async () => {
+      startBtn.click()
+    })
+
+    expect(api.apiPost).toHaveBeenCalledWith('/adguard/service', { action: 'start' })
+  })
+
+  it('renders install button and banner when AdGuard Home is not installed, and triggers install', async () => {
+    // Мокаем неустановленный сервис (нет путей, нет версии, running: false)
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path.includes('/adguard/status')) return Promise.resolve({ running: false })
+      if (path.includes('/adguard/health')) return Promise.resolve({ process_alive: false })
+      if (path.includes('/adguard/overview')) return Promise.resolve({ running: false })
+      if (path.includes('/adguard/config')) return Promise.resolve(mockConfig)
+      if (path.includes('/adguard/diagnostics')) return Promise.resolve({
+        port_53_status: 'inactive',
+        port_3000_status: 'inactive',
+        dnsmasq_redirect_active: false,
+        iptables_redirect_active: false,
+        detected_service_path: null,
+        detected_config_path: null,
+        loop_risk: false,
+        recommendations: [],
+      })
+      return Promise.resolve({})
+    })
+
+    await act(async () => {
+      root!.render(<AdGuard notify={notifyMock} />)
+    })
+
+    expect(container?.textContent).toContain('Не установлен')
+    expect(container?.textContent).toContain('AdGuard Home не установлен на роутере')
+
+    const installBtn = container?.querySelector('[data-testid="adguard-install-btn"]') as HTMLButtonElement
+    expect(installBtn).not.toBeNull()
+    expect(installBtn.textContent).toContain('Установить AGH')
+
+    await act(async () => {
+      installBtn.click()
+    })
+
+    expect(api.apiPost).toHaveBeenCalledWith('/adguard/install')
+  })
 })

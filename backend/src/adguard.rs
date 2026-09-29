@@ -2,7 +2,8 @@ use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
-use std::path::Path;
+#[allow(unused_imports)]
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use crate::config::AdGuardConfig;
 
@@ -1004,18 +1005,9 @@ pub async fn get_diagnostics(
     };
 
     // 2. Обнаружение файлов конфигурации и службы
-    let service_paths = [
-        "/opt/etc/init.d/S99adguardhome",
-        "/opt/etc/init.d/S99AdGuardHome",
-    ];
-    let detected_service_path = service_paths.iter().find(|p| Path::new(p).exists()).map(|s| s.to_string());
-
-    let config_paths = [
-        "/opt/etc/AdGuardHome.yaml",
-        "/opt/etc/AdGuardHome/AdGuardHome.yaml",
-        "AdGuardHome.yaml",
-    ];
-    let detected_config_path = config_paths.iter().find(|p| Path::new(p).exists()).map(|s| s.to_string());
+    let detected_service_path = find_adguard_init_script().map(|p| p.to_string_lossy().to_string());
+    let detected_config_path = find_adguard_config().map(|p| p.to_string_lossy().to_string());
+    let detected_binary_path = find_adguard_binary().map(|p| p.to_string_lossy().to_string());
 
     // 3. Проверка iptables NAT редиректов (Linux)
     #[allow(unused_mut)]
@@ -1055,17 +1047,19 @@ pub async fn get_diagnostics(
 
     // Рекомендации
     if !status.running {
-        recommendations.push("Служба AdGuard Home остановлена или веб-интерфейс недоступен на порту 3000.".to_string());
+        if detected_service_path.is_none() && detected_binary_path.is_none() {
+            recommendations.push("AdGuard Home не установлен в системе Entware. Нажмите «Установить и запустить AdGuard Home» или выполните 'opkg install adguardhome'.".to_string());
+        } else if detected_service_path.is_none() && detected_binary_path.is_some() {
+            recommendations.push("Бинарный файл AdGuard Home обнаружен. Init-скрипт будет автоматически создан при первом запуске службы.".to_string());
+        } else {
+            recommendations.push("Служба AdGuard Home остановлена или веб-интерфейс недоступен на порту 3000.".to_string());
+        }
     } else if !port_53_active {
         recommendations.push("AdGuard Home запущен, но UDP-порт DNS 53 не отвечает на запросы.".to_string());
     }
 
     if status.running && !status.protection_enabled {
         recommendations.push("Защита AdGuard Home временно выключена — блокировка рекламы и трекеров не выполняется.".to_string());
-    }
-
-    if detected_service_path.is_none() && cfg.integration_mode == "managed" {
-        recommendations.push("Init-скрипт службы (/opt/etc/init.d/S99adguardhome) не найден. Для работы требуется пакет adguardhome из Entware.".to_string());
     }
 
     AghDiagnostics {
@@ -1080,6 +1074,281 @@ pub async fn get_diagnostics(
     }
 }
 
+/// Поиск существующего init-скрипта AdGuard Home в Entware
+pub fn find_adguard_init_script() -> Option<PathBuf> {
+    let standard = [
+        "/opt/etc/init.d/S99adguardhome",
+        "/opt/etc/init.d/S99AdGuardHome",
+        "/opt/etc/init.d/S99adguard",
+        "/opt/etc/init.d/S99AdguardHome",
+        "/opt/etc/init.d/adguardhome",
+    ];
+    for p in &standard {
+        let path = PathBuf::from(p);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    if let Ok(entries) = std::fs::read_dir("/opt/etc/init.d") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let name = path.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+                if name.contains("adguard") {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Поиск исполняемого файла AdGuardHome в стандартных путях Keenetic/Entware и PATH
+pub fn find_adguard_binary() -> Option<PathBuf> {
+    let standard = [
+        "/opt/bin/AdGuardHome",
+        "/opt/bin/adguardhome",
+        "/opt/sbin/AdGuardHome",
+        "/opt/sbin/adguardhome",
+        "/opt/etc/AdGuardHome/AdGuardHome",
+        "/opt/AdGuardHome/AdGuardHome",
+        "/opt/root/AdGuardHome/AdGuardHome",
+        "/opt/home/AdGuardHome/AdGuardHome",
+        "/opt/var/AdGuardHome/AdGuardHome",
+    ];
+    for p in &standard {
+        let path = PathBuf::from(p);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        for cmd in &["AdGuardHome", "adguardhome"] {
+            if let Ok(out) = std::process::Command::new("which").arg(cmd).output() {
+                if out.status.success() {
+                    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !s.is_empty() && Path::new(&s).is_file() {
+                        return Some(PathBuf::from(s));
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Поиск конфигурационного файла AdGuardHome.yaml
+pub fn find_adguard_config() -> Option<PathBuf> {
+    let standard = [
+        "/opt/etc/AdGuardHome.yaml",
+        "/opt/etc/AdGuardHome/AdGuardHome.yaml",
+        "/opt/AdGuardHome/AdGuardHome.yaml",
+        "/opt/root/AdGuardHome/AdGuardHome.yaml",
+        "AdGuardHome.yaml",
+    ];
+    for p in &standard {
+        let path = PathBuf::from(p);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Генерация автономного скрипта инициализации /opt/etc/init.d/S99adguardhome
+pub fn generate_adguard_init_script_content(bin_path: &str, conf_path: &str, work_dir: &str) -> String {
+    format!(
+r#"#!/bin/sh
+
+NAME="AdGuardHome"
+BIN="{bin_path}"
+WORK_DIR="{work_dir}"
+CONF="{conf_path}"
+PID_FILE="/opt/var/run/AdGuardHome.pid"
+LOG_FILE="/opt/var/log/adguardhome.log"
+
+mkdir -p /opt/var/run /opt/var/log "$WORK_DIR" 2>/dev/null
+
+is_running() {{
+    if [ -f "$PID_FILE" ]; then
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    pid=$(pidof AdGuardHome 2>/dev/null || pgrep -f "$BIN" 2>/dev/null)
+    if [ -n "$pid" ]; then
+        echo "$pid" | awk '{{print $1}}' > "$PID_FILE"
+        return 0
+    fi
+    return 1
+}}
+
+start() {{
+    if is_running; then
+        echo "$NAME is already running"
+        return 0
+    fi
+    echo "Starting $NAME..."
+    if [ ! -f "$CONF" ]; then
+        mkdir -p "$(dirname "$CONF")" 2>/dev/null
+    fi
+    "$BIN" -c "$CONF" -w "$WORK_DIR" --no-check-update >> "$LOG_FILE" 2>&1 &
+    pid=$!
+    echo "$pid" > "$PID_FILE"
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "$NAME started (pid $pid)"
+        return 0
+    else
+        echo "Failed to start $NAME, check $LOG_FILE" >&2
+        return 1
+    fi
+}}
+
+stop() {{
+    echo "Stopping $NAME..."
+    if is_running; then
+        pid=$(cat "$PID_FILE" 2>/dev/null)
+        [ -n "$pid" ] && kill "$pid" 2>/dev/null
+        sleep 1
+        killall -15 AdGuardHome 2>/dev/null || true
+        sleep 1
+        killall -9 AdGuardHome 2>/dev/null || true
+        rm -f "$PID_FILE"
+    else
+        killall -9 AdGuardHome 2>/dev/null || true
+    fi
+    echo "$NAME stopped"
+    return 0
+}}
+
+status() {{
+    if is_running; then
+        echo "$NAME is running (pid $(cat "$PID_FILE"))"
+        return 0
+    else
+        echo "$NAME is stopped"
+        return 1
+    fi
+}}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; sleep 1; start ;;
+    status) status ;;
+    *) echo "Usage: $0 {{start|stop|restart|status}}" >&2; exit 1 ;;
+esac
+"#
+    )
+}
+
+/// Проверка наличия или автоматическое создание init-скрипта службы
+pub fn ensure_adguard_init_script() -> Result<PathBuf, String> {
+    if let Some(script) = find_adguard_init_script() {
+        return Ok(script);
+    }
+
+    let bin = find_adguard_binary().ok_or_else(|| {
+        "Бинарный файл AdGuardHome не найден в системе (проверены /opt/bin, /opt/sbin, /opt/etc/AdGuardHome и PATH)".to_string()
+    })?;
+
+    let conf = find_adguard_config()
+        .unwrap_or_else(|| PathBuf::from("/opt/etc/AdGuardHome/AdGuardHome.yaml"));
+    let work_dir = conf
+        .parent()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "/opt/etc/AdGuardHome".to_string());
+
+    let target_script = PathBuf::from("/opt/etc/init.d/S99adguardhome");
+    if let Some(parent) = target_script.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let content = generate_adguard_init_script_content(
+        &bin.to_string_lossy(),
+        &conf.to_string_lossy(),
+        &work_dir,
+    );
+
+    std::fs::write(&target_script, content)
+        .map_err(|e| format!("Не удалось создать init-скрипт {:?}: {e}", target_script))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&target_script, std::fs::Permissions::from_mode(0o755));
+    }
+
+    crate::log_i!("Автоматически создан init-скрипт службы AdGuard Home: {:?}", target_script);
+    Ok(target_script)
+}
+
+/// Автоматическая установка официального пакета adguardhome через opkg
+pub async fn install_adguard_package() -> Result<String, String> {
+    #[cfg(target_os = "linux")]
+    {
+        let opkg_candidates = ["/opt/bin/opkg", "/opt/sbin/opkg", "opkg"];
+        let opkg_bin = opkg_candidates
+            .iter()
+            .find(|p| Path::new(p).exists())
+            .copied()
+            .unwrap_or("opkg");
+
+        let log_file = "/tmp/agh_install.log";
+        let install_cmd = format!("exec {opkg_bin} update && {opkg_bin} install adguardhome </dev/null >{log_file} 2>&1");
+
+        let timeout_res = tokio::time::timeout(
+            Duration::from_secs(90),
+            tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(&install_cmd)
+                .status(),
+        )
+        .await;
+
+        let status = match timeout_res {
+            Ok(Ok(st)) => st,
+            Ok(Err(e)) => return Err(format!("Ошибка запуска процесса установки opkg: {e}")),
+            Err(_) => return Err("Превышен таймаут установки AdGuard Home (90 сек)".to_string()),
+        };
+
+        let log = tokio::fs::read_to_string(log_file).await.unwrap_or_default().trim().to_string();
+
+        if !status.success() {
+            return Err(format!(
+                "Установка пакета adguardhome завершилась с ошибкой (код {:?}): {}",
+                status.code(),
+                if log.is_empty() { "нет данных в логе" } else { &log }
+            ));
+        }
+
+        if find_adguard_binary().is_none() && find_adguard_init_script().is_none() {
+            return Err(format!(
+                "Пакет adguardhome был установлен через opkg, но исполняемый файл не обнаружен. Лог: {log}"
+            ));
+        }
+
+        let _ = ensure_adguard_init_script();
+
+        Ok(if log.is_empty() {
+            "Пакет AdGuard Home успешно установлен в Entware".to_string()
+        } else {
+            format!("Пакет AdGuard Home успешно установлен: {log}")
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok("[dev/win] Пакет AdGuard Home успешно установлен (эмуляция)".to_string())
+    }
+}
+
 /// Управление системной службой AdGuard Home (/opt/etc/init.d/S99adguardhome)
 pub async fn service_action(action: &str) -> Result<String, String> {
     let act = action.trim().to_lowercase();
@@ -1089,26 +1358,101 @@ pub async fn service_action(action: &str) -> Result<String, String> {
 
     #[cfg(target_os = "linux")]
     {
-        let script = if Path::new("/opt/etc/init.d/S99adguardhome").exists() {
-            "/opt/etc/init.d/S99adguardhome"
-        } else if Path::new("/opt/etc/init.d/S99AdGuardHome").exists() {
-            "/opt/etc/init.d/S99AdGuardHome"
-        } else {
-            return Err("Служба AdGuard Home не найдена в /opt/etc/init.d/".to_string());
+        let script_path = match ensure_adguard_init_script() {
+            Ok(p) => p,
+            Err(e) => {
+                if act == "start" {
+                    crate::log_i!("Служба AdGuard Home не найдена, инициируем установку через opkg...");
+                    match install_adguard_package().await {
+                        Ok(_) => ensure_adguard_init_script().map_err(|e2| {
+                            format!("AdGuard Home был установлен, но init-скрипт не найден: {e2}")
+                        })?,
+                        Err(install_err) => {
+                            return Err(format!(
+                                "AdGuard Home не установлен в системе. Попытка авто-установки не удалась: {install_err}"
+                            ));
+                        }
+                    }
+                } else {
+                    return Err(e);
+                }
+            }
         };
 
-        let out = tokio::process::Command::new(script)
-            .arg(&act)
-            .output()
-            .await
-            .map_err(|e| format!("Ошибка выполнения {script} {act}: {e}"))?;
+        let script = script_path.to_string_lossy().to_string();
+        let log_file = "/tmp/agh_service.log";
 
-        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        if !out.status.success() && act != "status" {
-            return Err(format!("Ошибка команды {act}: {stderr} {stdout}"));
+        // КРИТИЧЕСКИ ВАЖНО:
+        // Перенаправление stdin/stdout/stderr (exec ... </dev/null >/tmp/agh_service.log 2>&1)
+        // и жесткий таймаут 15 секунд исключают зависание tokio на пайпах фонового демона!
+        let cmd_str = format!("exec '{script}' '{act}' </dev/null >'{log_file}' 2>&1");
+        let timeout_res = tokio::time::timeout(
+            Duration::from_secs(15),
+            tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd_str)
+                .status(),
+        )
+        .await;
+
+        let status = match timeout_res {
+            Ok(Ok(st)) => st,
+            Ok(Err(e)) => return Err(format!("Ошибка запуска команды для {script}: {e}")),
+            Err(_) => return Err(format!("Таймаут (15 сек) выполнения службы {script} {act}")),
+        };
+
+        let log_content = tokio::fs::read_to_string(log_file)
+            .await
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+
+        if act == "stop" {
+            let _ = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg("killall -9 AdGuardHome 2>/dev/null || true")
+                .status()
+                .await;
+            return Ok("Служба AdGuard Home остановлена".to_string());
         }
-        Ok(if stdout.is_empty() { stderr } else { stdout })
+
+        if act == "status" {
+            let is_running = crate::system::is_process_running("AdGuardHome");
+            return Ok(if is_running {
+                "Служба AdGuard Home активна (работает)".to_string()
+            } else {
+                "Служба AdGuard Home остановлена".to_string()
+            });
+        }
+
+        // Для start и restart: верифицируем фактический запуск процесса
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let is_running = crate::system::is_process_running("AdGuardHome");
+
+        if is_running {
+            let msg = if !log_content.is_empty() {
+                format!("Служба AdGuard Home успешно выполнила команду '{act}': {log_content}")
+            } else {
+                format!("Служба AdGuard Home успешно выполнила команду '{act}'")
+            };
+            Ok(msg)
+        } else {
+            let mut err_msg = format!("Команда '{act}' завершилась (код {:?}), но процесс AdGuardHome не обнаружен.", status.code());
+            if !log_content.is_empty() {
+                err_msg.push_str(&format!(" Вывод службы: {log_content}."));
+            }
+            if let Ok(agh_log) = tokio::fs::read_to_string("/opt/var/log/adguardhome.log").await {
+                let tail = agh_log.lines().rev().take(5).collect::<Vec<_>>();
+                if !tail.is_empty() {
+                    let reversed_tail = tail.into_iter().rev().collect::<Vec<_>>().join(" | ");
+                    if reversed_tail.contains("address already in use") || reversed_tail.contains("bind:") {
+                        err_msg.push_str(" Внимание: Порт DNS (53) или веб-панели (3000) уже занят другой службой (например, dnsmasq роутера).");
+                    }
+                    err_msg.push_str(&format!(" Лог: {reversed_tail}"));
+                }
+            }
+            Err(err_msg)
+        }
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -1203,4 +1547,49 @@ mod tests {
         let cap_ext = get_capabilities(&cfg);
         assert!(!cap_ext.managed_service);
     }
+
+    #[test]
+    fn test_adguard_init_script_generator() {
+        let content = generate_adguard_init_script_content(
+            "/opt/bin/AdGuardHome",
+            "/opt/etc/AdGuardHome/AdGuardHome.yaml",
+            "/opt/etc/AdGuardHome",
+        );
+        assert!(content.contains("#!/bin/sh"));
+        assert!(content.contains("NAME=\"AdGuardHome\""));
+        assert!(content.contains("BIN=\"/opt/bin/AdGuardHome\""));
+        assert!(content.contains("CONF=\"/opt/etc/AdGuardHome/AdGuardHome.yaml\""));
+        assert!(content.contains("WORK_DIR=\"/opt/etc/AdGuardHome\""));
+        assert!(content.contains("PID_FILE=\"/opt/var/run/AdGuardHome.pid\""));
+        assert!(content.contains("LOG_FILE=\"/opt/var/log/adguardhome.log\""));
+        assert!(content.contains("is_running()"));
+        assert!(content.contains("start()"));
+        assert!(content.contains("stop()"));
+        assert!(content.contains("restart()"));
+        assert!(content.contains("status()"));
+    }
+
+    #[tokio::test]
+    async fn test_adguard_service_action_and_install_dev_mode() {
+        // Проверка допустимых действий
+        assert!(service_action("start").await.is_ok());
+        assert!(service_action("stop").await.is_ok());
+        assert!(service_action("restart").await.is_ok());
+        assert!(service_action("status").await.is_ok());
+
+        // Проверка недопустимого действия
+        assert!(service_action("invalid_action").await.is_err());
+
+        // Проверка установки пакета
+        assert!(install_adguard_package().await.is_ok());
+    }
+
+    #[test]
+    fn test_adguard_service_discovery_helpers() {
+        // На этапе тестов без Entware функции должны возвращать None или найденные пути без паники
+        let _ = find_adguard_init_script();
+        let _ = find_adguard_binary();
+        let _ = find_adguard_config();
+    }
 }
+

@@ -164,12 +164,30 @@ export default function AdGuard({ notify }: AdGuardProps) {
   const handleServiceAction = async (action: 'start' | 'stop' | 'restart') => {
     setActionPending(true)
     try {
+      if (action === 'start' && !isInstalled) {
+        notify('Запуск AdGuard Home: установка и подготовка службы...')
+      }
       const res = await apiPost<{ output: string }>('/adguard/service', { action })
       notify(`Служба AdGuard Home: ${action} (${res.output || 'успешно'})`)
       await new Promise((r) => setTimeout(r, 2000))
       await loadData()
     } catch (e: any) {
       notify(`Ошибка управления службой AdGuard Home: ${e.message || e}`, true)
+    } finally {
+      setActionPending(false)
+    }
+  }
+
+  // Ручная установка пакета через Entware opkg
+  const handleInstallAdGuard = async () => {
+    setActionPending(true)
+    try {
+      notify('Установка пакета AdGuard Home через Entware opkg (ожидайте)...')
+      const res = await apiPost<{ output: string }>('/adguard/install')
+      notify(`Установка завершена: ${res.output || 'успешно'}`)
+      await handleServiceAction('start')
+    } catch (e: any) {
+      notify(`Ошибка установки AdGuard Home: ${e.message || e}`, true)
     } finally {
       setActionPending(false)
     }
@@ -279,6 +297,15 @@ export default function AdGuard({ notify }: AdGuardProps) {
     }
   }
 
+  // Проверка факта установки AdGuard Home в системе
+  const isInstalled = useMemo(() => {
+    return Boolean(
+      diagnostics?.detected_service_path ||
+      diagnostics?.detected_config_path ||
+      status?.version
+    )
+  }, [diagnostics?.detected_service_path, diagnostics?.detected_config_path, status?.version])
+
   // Ссылка на родную веб-панель AGH
   const nativePanelUrl = useMemo(() => {
     const host = config?.host || '127.0.0.1'
@@ -330,9 +357,9 @@ export default function AdGuard({ notify }: AdGuardProps) {
                 {loading && <span className="muted" style={{ fontSize: 12 }}>⏳ Обновление…</span>}
                 <span
                   className={`agh-status-badge ${status?.running ? 'running' : 'stopped'}`}
-                  title={status?.running ? 'Служба активна' : 'Служба остановлена'}
+                  title={status?.running ? 'Служба активна' : isInstalled ? 'Служба остановлена' : 'Не установлен'}
                 >
-                  <span>{status?.running ? '🟢 В сети' : '🔴 Не запущен'}</span>
+                  <span>{status?.running ? '🟢 В сети' : isInstalled ? '🔴 Не запущен' : '⚪ Не установлен'}</span>
                 </span>
                 {health?.loop_risk && (
                   <span
@@ -396,15 +423,47 @@ export default function AdGuard({ notify }: AdGuardProps) {
               <span style={{ fontSize: 11, opacity: 0.8 }}>↗</span>
             </a>
 
+            {/* Кнопка установки при отсутствии пакета */}
+            {!isInstalled && !status?.running && (
+              <button
+                type="button"
+                onClick={handleInstallAdGuard}
+                disabled={actionPending}
+                data-testid="adguard-install-btn"
+                className="btn btn-sm btn-primary"
+                style={{
+                  background: 'linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)',
+                  borderColor: '#2563eb',
+                  color: '#ffffff',
+                }}
+                title="Установить официальный пакет adguardhome через Entware opkg"
+              >
+                {actionPending ? '⏳ Установка…' : '📦 Установить AGH'}
+              </button>
+            )}
+
             {/* Быстрый перезапуск / запуск службы */}
             <button
               type="button"
               onClick={() => handleServiceAction(status?.running ? 'restart' : 'start')}
               disabled={actionPending}
+              data-testid="adguard-service-action-btn"
               className="btn btn-sm btn-secondary"
-              title={status?.running ? 'Перезапустить службу AdGuard Home' : 'Запустить службу AdGuard Home'}
+              title={
+                status?.running
+                  ? 'Перезапустить службу AdGuard Home'
+                  : isInstalled
+                  ? 'Запустить службу AdGuard Home'
+                  : 'Установить и запустить службу AdGuard Home'
+              }
             >
-              {actionPending ? '⏳' : status?.running ? '🔄 Перезапуск' : '▶ Запуск'}
+              {actionPending
+                ? '⏳'
+                : status?.running
+                ? '🔄 Перезапуск'
+                : isInstalled
+                ? '▶ Запуск'
+                : '🚀 Установить и запустить'}
             </button>
           </div>
         </div>
@@ -415,6 +474,25 @@ export default function AdGuard({ notify }: AdGuardProps) {
             <span style={{ fontSize: 18 }}>⚠️</span>
             <div>
               <strong>Внимание! Обнаружен риск петли DNS:</strong> {health.loop_warning}
+            </div>
+          </div>
+        )}
+
+        {/* Информационный баннер при отсутствии установки */}
+        {!isInstalled && !status?.running && (
+          <div
+            className="agh-warning-banner"
+            style={{
+              borderColor: 'rgba(59, 130, 246, 0.4)',
+              background: 'rgba(59, 130, 246, 0.08)',
+              color: '#93c5fd',
+              marginTop: 14,
+            }}
+          >
+            <span style={{ fontSize: 18 }}>ℹ️</span>
+            <div style={{ flex: 1 }}>
+              <strong>AdGuard Home не установлен на роутере:</strong> Служба или бинарный файл не обнаружены в Entware.
+              Вы можете нажать кнопку <b>«📦 Установить AGH»</b> или <b>«🚀 Установить и запустить»</b> для автоматической установки официального пакета через opkg.
             </div>
           </div>
         )}

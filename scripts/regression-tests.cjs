@@ -1052,6 +1052,40 @@ runTest('30. AdGuard Home Frontend Tab, Navigation & Failsafe Diagnostics (v1.7.
   assert(typesTs.includes('export interface AghDiagnostics'), 'types.ts must export AghDiagnostics');
 });
 
+// -------------------------------------------------------------
+// 31. AdGuard Home Service Start, Pipe Leak Protection & Autonomous Discovery (v1.7.2)
+// -------------------------------------------------------------
+runTest('31. AdGuard Home Service Start, Pipe Leak Protection & Autonomous Discovery (v1.7.2)', () => {
+  const adguardRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/adguard.rs'), 'utf8');
+  const mainRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/main.rs'), 'utf8');
+  const apiRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/api.rs'), 'utf8');
+  const adguardTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/AdGuard.tsx'), 'utf8');
+
+  // 1. adguard.rs discovery & autonomous init script generation
+  assert(adguardRs.includes('pub fn find_adguard_init_script'), 'adguard.rs must provide find_adguard_init_script');
+  assert(adguardRs.includes('pub fn find_adguard_binary'), 'adguard.rs must provide find_adguard_binary');
+  assert(adguardRs.includes('pub fn find_adguard_config'), 'adguard.rs must provide find_adguard_config');
+  assert(adguardRs.includes('pub fn generate_adguard_init_script_content'), 'adguard.rs must provide generate_adguard_init_script_content');
+  assert(adguardRs.includes('pub fn ensure_adguard_init_script'), 'adguard.rs must provide ensure_adguard_init_script');
+  assert(adguardRs.includes('pub async fn install_adguard_package'), 'adguard.rs must provide install_adguard_package');
+
+  // 2. adguard.rs service_action pipe leak protection and bounded timeout
+  assert(adguardRs.includes("</dev/null >'{log_file}' 2>&1"), 'service_action must detach stdio to prevent daemon pipe leaks');
+  assert(adguardRs.includes('Duration::from_secs(15)'), 'service_action must enforce a bounded 15s timeout');
+  assert(adguardRs.includes('is_process_running("AdGuardHome")'), 'service_action must verify process presence via is_process_running');
+  assert(adguardRs.includes('address already in use'), 'service_action must detect port 53/3000 conflicts in logs');
+
+  // 3. Backend routing: /api/adguard/install endpoint
+  assert(mainRs.includes('/api/adguard/install'), 'main.rs must register /api/adguard/install route');
+  assert(apiRs.includes('pub async fn adguard_install'), 'api.rs must implement adguard_install handler');
+
+  // 4. Frontend UI: installation feedback and service action button
+  assert(adguardTsx.includes('isInstalled'), 'AdGuard.tsx must track isInstalled state');
+  assert(adguardTsx.includes('data-testid="adguard-service-action-btn"'), 'AdGuard.tsx must have adguard-service-action-btn');
+  assert(adguardTsx.includes('data-testid="adguard-install-btn"'), 'AdGuard.tsx must provide adguard-install-btn when not installed');
+  assert(adguardTsx.includes('/adguard/install'), 'AdGuard.tsx must call /adguard/install');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
 
 
