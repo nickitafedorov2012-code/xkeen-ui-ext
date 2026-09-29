@@ -98,9 +98,9 @@ runTest('4. NET-02: Dynamic active WAN interface detection in NDM hooks and S51z
 });
 
 runTest('5. NET-02: TCP MSS clamping prevents PMTU clashing and packet stalls on tunnels', () => {
-  assert(apiRs.includes('iptables -t mangle -A zapret -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu'),
-    'add_fw must configure TCPMSS clamp-mss-to-pmtu');
-  assert(apiRs.includes('while iptables -t mangle -D zapret -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu'),
+  assert(apiRs.includes('iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN') && apiRs.includes('TCPMSS --clamp-mss-to-pmtu'),
+    'add_fw must configure TCPMSS clamp-mss-to-pmtu in POSTROUTING');
+  assert(apiRs.includes('while iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN') || apiRs.includes('while iptables -t mangle -D zapret -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu'),
     'remove_fw_rules must cleanly remove TCPMSS clamp-mss-to-pmtu');
 });
 

@@ -4457,8 +4457,11 @@ add_fw() {
     done
   fi
 
-  # 3.3 NET-02: TCP MSS Clamping to prevent PMTU clashing on tunnels and WAN rebind
-  iptables -t mangle -A zapret -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+  # 3.3 NET-02: TCP MSS Clamping in POSTROUTING & FORWARD (xt_TCPMSS is forbidden in PREROUTING by kernel)
+  iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -m comment --comment "xkeen-route-zapret" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+  iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+  iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment "xkeen-route-zapret" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || \
+  iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 
   # 4. Queue WAN TCP (80, 443) -> NFQUEUE 200 with bypass
   if iptables -t mangle -A zapret -p tcp -m multiport --dports 80,443 -m comment --comment "xkeen-route-zapret" -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || \
@@ -4566,6 +4569,10 @@ remove_fw_rules() {
 
   # Remove TCPMSS clamping rule (NET-02 / NET-04)
   while iptables -t mangle -D zapret -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
+  while iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -m comment --comment "xkeen-route-zapret" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
+  while iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
+  while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -m comment --comment "xkeen-route-zapret" -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
+  while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
 
   # Remove hooks from all possible chains (POSTROUTING, PREROUTING, FORWARD, OUTPUT)
   while iptables -t mangle -D POSTROUTING -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null; do :; done

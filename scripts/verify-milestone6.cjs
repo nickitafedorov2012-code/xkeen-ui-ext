@@ -209,8 +209,8 @@ runTest('15. ARCH-01..03: SystemConfig unified paths and version bumped to 1.5.2
   assert(configRs.includes('pub mihomo_bin: String'), 'SystemConfig must have mihomo_bin');
   assert(configRs.includes('pub zapret_init: String'), 'SystemConfig must have zapret_init');
 
-  assert(cargoToml.includes('version = "1.5.29"') || cargoToml.includes('version = "1.6.0"'), 'backend/Cargo.toml must be bumped to 1.5.29 or 1.6.0');
-  assert(packageJson.version === '1.5.29' || packageJson.version === '1.6.0', 'frontend/package.json must be bumped to 1.5.29 or 1.6.0');
+  assert(cargoToml.includes('version = "1.5.29"') || cargoToml.includes('version = "1.6.0"') || cargoToml.includes('version = "1.6.1"'), 'backend/Cargo.toml must be bumped');
+  assert(packageJson.version === '1.5.29' || packageJson.version === '1.6.0' || packageJson.version === '1.6.1', 'frontend/package.json must be bumped');
 });
 
 // -------------------------------------------------------------

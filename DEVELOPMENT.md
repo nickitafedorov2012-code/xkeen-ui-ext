@@ -1085,7 +1085,12 @@
 - **Исправление установки Zapret 2.0 и Mini-Blockcheck (api.rs, Zapret.tsx)**:
   * **Загрузка официальных версий Zapret 2:** Переход на скачивание zapret2-v1.0.5.2.tar.gz с fallback-зеркалами и подробным 4-шаговым логом в UI (zapret-step-log).
   * **Динамический бейдж Mini-Blockcheck:** Устранен хардкод zapret2 engine при активном движке v1.
-  * **Точный расчет задержек YouTube:** Исключен ложный учет 4-секундного таймаута заблокированного curl probe как сетевой задержки.
+## v1.6.1 (Zapret Netfilter TCPMSS Fix & Resilient PREROUTING Hook)
+- **Исправление сбоя включения перехвата Netfilter (Zapret / S51zapret)**:
+  * **Устранение отказа ядра Linux (`xt_TCPMSS: path-MTU clamping only supported in FORWARD, OUTPUT and POSTROUTING hooks`)**: правило TCP MSS clamping вынесено из цепочки `zapret` (подключаемой в `PREROUTING`) в цепочки `POSTROUTING` и `FORWARD`. Ядро Linux запрещает вызов `TCPMSS --clamp-mss-to-pmtu` из `PREROUTING`, что вызывало ошибку `iptables: Invalid argument` и сбой `ERROR: failed to hook zapret chain into PREROUTING for br+/Bridge+`.
+  * **Корректный демонтаж правил**: в процедуре `remove_fw_rules` обеспечено полное удаление правил TCPMSS из `POSTROUTING`, `FORWARD` и `zapret`.
+  * **Анти-регрессионный тест 25**: добавлен автоматический тест, гарантирующий недопущение правил `TCPMSS` в цепочках `PREROUTING`.
+
 ## v1.6.0 (Major Release: Complete Architectural Audit, Safe Updates, Transactional Backups & Unified Routing)
 - **Финальный релиз по результатам комплексного аудита архитектуры и безопасности (Этапы 1–6)**:
   * **Безопасные обновления ядра и панели (`updater.rs`, `UpdateModal.tsx`)**: взаимная блокировка `UPDATE_LOCK`, валидация архитектуры ELF и детекция страниц ошибок (404/Cloudflare), staging в `/opt/tmp`, атомарная замена с сохранением `.bak` и авто-откатом при сбое запуска или проверки `--version`.

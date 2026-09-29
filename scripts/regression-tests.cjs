@@ -864,6 +864,38 @@ runTest('24. Header 5-group single-line grid toolbar & exact metrics specificati
   assert(stylesCss.includes('.header-utility-actions .header-action-btn.active'), 'styles.css must highlight only active settings in blue');
 });
 
+// -------------------------------------------------------------
+// 25. Zapret Netfilter: TCPMSS must NOT be placed in PREROUTING-hooked zapret chain and PREROUTING hook must have resilient fallback
+// -------------------------------------------------------------
+runTest('25. Zapret Netfilter: TCPMSS must NOT be placed in PREROUTING-hooked zapret chain and PREROUTING hook must have resilient fallback', () => {
+  const apiRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/api.rs'), 'utf8');
+
+  // 1. Linux kernel forbids TCPMSS in PREROUTING hook (xt_TCPMSS: path-MTU clamping only supported in FORWARD, OUTPUT and POSTROUTING hooks).
+  // Placing TCPMSS inside a chain called from PREROUTING causes kernel to reject the PREROUTING hook with -EINVAL.
+  assert(!apiRs.includes('iptables -t mangle -A zapret -p tcp --tcp-flags SYN,RST SYN -j TCPMSS'),
+    'api.rs must NEVER place TCPMSS rule inside zapret chain (which is hooked into PREROUTING)');
+
+  // 2. TCPMSS must be placed in valid netfilter hooks (POSTROUTING and/or FORWARD)
+  assert(apiRs.includes('iptables -t mangle -A POSTROUTING -p tcp --tcp-flags SYN,RST SYN') && apiRs.includes('TCPMSS --clamp-mss-to-pmtu'),
+    'api.rs must place TCPMSS clamping in POSTROUTING hook');
+  assert(apiRs.includes('iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN') && apiRs.includes('TCPMSS --clamp-mss-to-pmtu'),
+    'api.rs must place TCPMSS clamping in FORWARD hook');
+
+  // 3. PREROUTING hook must hook br+ and Bridge+
+  assert(apiRs.includes('iptables -t mangle -I PREROUTING 1 -i br+ -m comment --comment "xkeen-route-zapret" -j zapret'),
+    'api.rs must hook PREROUTING for br+ bridge interface');
+  assert(apiRs.includes('iptables -t mangle -I PREROUTING 1 -i Bridge+ -m comment --comment "xkeen-route-zapret" -j zapret'),
+    'api.rs must hook PREROUTING for Bridge+ bridge interface');
+
+  // 4. remove_fw_rules must cleanly tear down TCPMSS from POSTROUTING, FORWARD and legacy zapret
+  assert(apiRs.includes('while iptables -t mangle -D POSTROUTING -p tcp --tcp-flags SYN,RST SYN'),
+    'remove_fw_rules must clean up POSTROUTING TCPMSS');
+  assert(apiRs.includes('while iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN'),
+    'remove_fw_rules must clean up FORWARD TCPMSS');
+  assert(apiRs.includes('while iptables -t mangle -D zapret -p tcp --tcp-flags SYN,RST SYN -j TCPMSS'),
+    'remove_fw_rules must clean up legacy zapret TCPMSS');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
 
 
