@@ -49,8 +49,8 @@ pub const INIT_SCRIPT: &str = "S99xkeen-route";
 #[derive(Parser)]
 #[command(
     name = "xkeen-route",
+    version = crate::VERSION,
     about = "XKeen Route — веб-панель управления маршрутизацией Keenetic/Mihomo",
-    disable_version_flag = true,
     disable_help_subcommand = true
 )]
 struct Cli {

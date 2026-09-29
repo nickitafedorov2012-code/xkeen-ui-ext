@@ -894,6 +894,16 @@ runTest('25. Zapret Netfilter: TCPMSS must NOT be placed in PREROUTING-hooked za
     'remove_fw_rules must clean up FORWARD TCPMSS');
   assert(apiRs.includes('while iptables -t mangle -D zapret -p tcp --tcp-flags SYN,RST SYN -j TCPMSS'),
     'remove_fw_rules must clean up legacy zapret TCPMSS');
+
+  // 5. main.rs must support --version flag (version = crate::VERSION without disable_version_flag)
+  const mainRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/main.rs'), 'utf8');
+  assert(!mainRs.includes('disable_version_flag = true'), 'main.rs must NOT disable version flag');
+  assert(mainRs.includes('version = crate::VERSION'), 'main.rs must bind version = crate::VERSION');
+
+  // 6. updater.rs must provide fallback staging verification
+  const updaterRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/updater.rs'), 'utf8');
+  assert(updaterRs.includes('.arg("version")') && updaterRs.includes('.arg("--help")'),
+    'updater.rs must provide staging validation fallbacks');
 });
 
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);

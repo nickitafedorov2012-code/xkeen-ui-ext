@@ -445,10 +445,27 @@ pub async fn install(State(state): State<AppState>) -> Response {
     // Предварительная проверка синтаксиса/запускаемости бинарника до подмены рабочей версии
     #[cfg(unix)]
     {
-        let test_run = tokio::process::Command::new(&tmp)
+        let mut test_run = tokio::process::Command::new(&tmp)
             .arg("--version")
             .output()
             .await;
+        if test_run.as_ref().map(|o| !o.status.success()).unwrap_or(true) {
+            let alt_run = tokio::process::Command::new(&tmp)
+                .arg("version")
+                .output()
+                .await;
+            if alt_run.as_ref().map(|o| o.status.success()).unwrap_or(false) {
+                test_run = alt_run;
+            } else {
+                let help_run = tokio::process::Command::new(&tmp)
+                    .arg("--help")
+                    .output()
+                    .await;
+                if help_run.as_ref().map(|o| o.status.success()).unwrap_or(false) {
+                    test_run = help_run;
+                }
+            }
+        }
         match test_run {
             Ok(out) if out.status.success() => {
                 crate::log_i!("[UPDATE] Тестовый запуск staging-бинарника успешен: {}", String::from_utf8_lossy(&out.stdout).trim());

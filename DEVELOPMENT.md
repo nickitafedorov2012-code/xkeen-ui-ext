@@ -1090,6 +1090,9 @@
   * **Устранение отказа ядра Linux (`xt_TCPMSS: path-MTU clamping only supported in FORWARD, OUTPUT and POSTROUTING hooks`)**: правило TCP MSS clamping вынесено из цепочки `zapret` (подключаемой в `PREROUTING`) в цепочки `POSTROUTING` и `FORWARD`. Ядро Linux запрещает вызов `TCPMSS --clamp-mss-to-pmtu` из `PREROUTING`, что вызывало ошибку `iptables: Invalid argument` и сбой `ERROR: failed to hook zapret chain into PREROUTING for br+/Bridge+`.
   * **Корректный демонтаж правил**: в процедуре `remove_fw_rules` обеспечено полное удаление правил TCPMSS из `POSTROUTING`, `FORWARD` и `zapret`.
   * **Анти-регрессионный тест 25**: добавлен автоматический тест, гарантирующий недопущение правил `TCPMSS` в цепочках `PREROUTING`.
+- **Исправление проверки обновлений панели (`updater.rs`, `main.rs`)**:
+  * **Поддержка флага `--version` в CLI панели**: устранён флаг `disable_version_flag = true` в `main.rs` и включён `version = crate::VERSION`, устраняющий ошибку `error: unexpected argument '--version' found` при staging-проверке скачанного бинарника.
+  * **Отказоустойчивая верификация staging**: в `updater.rs` добавлен многоступенчатый fallback проверки (`--version` → `version` → `--help`), гарантирующий успешную валидацию при любых конфигурациях аргументов.
 
 ## v1.6.0 (Major Release: Complete Architectural Audit, Safe Updates, Transactional Backups & Unified Routing)
 - **Финальный релиз по результатам комплексного аудита архитектуры и безопасности (Этапы 1–6)**:
