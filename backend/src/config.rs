@@ -1007,7 +1007,11 @@ mod tests {
 
     #[test]
     fn partial_config_fills_defaults() {
-        let path = std::env::temp_dir().join("xr-test-config.json");
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("xr-test-config-{}-{}.json", std::process::id(), nonce));
         std::fs::write(&path, r#"{"failover": {"enabled": true}}"#).unwrap();
         let cfg = load(&path);
         assert!(cfg.failover.enabled);
@@ -1019,7 +1023,11 @@ mod tests {
 
     #[test]
     fn save_and_load_roundtrip() {
-        let path = std::env::temp_dir().join("xr-test-config2.json");
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("xr-test-config2-{}-{}.json", std::process::id(), nonce));
         let mut cfg = AppConfig::default();
         cfg.failover.ping_threshold_ms = 250;
         cfg.mihomo.secret = "s3cret".into();
@@ -1033,7 +1041,11 @@ mod tests {
 
     #[test]
     fn load_broken_json_returns_default() {
-        let path = std::env::temp_dir().join("xr-test-broken.json");
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("xr-test-broken-{}-{}.json", std::process::id(), nonce));
         std::fs::write(&path, "{ invalid json structure ...").unwrap();
         let cfg = load(&path);
         assert_eq!(cfg.refresh_interval_sec, 10);
@@ -1043,7 +1055,11 @@ mod tests {
 
     #[tokio::test]
     async fn load_async_roundtrip() {
-        let path = std::env::temp_dir().join("xr-test-async-cfg.json");
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("xr-test-async-cfg-{}-{}.json", std::process::id(), nonce));
         let mut cfg = AppConfig::default();
         cfg.refresh_interval_sec = 42;
         save(&path, &cfg).await.unwrap();

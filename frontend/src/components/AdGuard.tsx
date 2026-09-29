@@ -287,173 +287,194 @@ export default function AdGuard({ notify }: AdGuardProps) {
     return `http://${targetHost}:${port}`
   }, [config?.host, config?.http_port])
 
+  // Вспомогательный расчет максимальных значений для шкал топов
+  const maxQueries = useMemo(() => {
+    if (!overview?.top_queried_domains?.length) return 1
+    return Math.max(...overview.top_queried_domains.map((d) => d.count), 1)
+  }, [overview?.top_queried_domains])
+
+  const maxBlocked = useMemo(() => {
+    if (!overview?.top_blocked_domains?.length) return 1
+    return Math.max(...overview.top_blocked_domains.map((d) => d.count), 1)
+  }, [overview?.top_blocked_domains])
+
+  const maxClients = useMemo(() => {
+    if (!overview?.top_clients?.length) return 1
+    return Math.max(...overview.top_clients.map((c) => c.count), 1)
+  }, [overview?.top_clients])
+
   return (
-    <div className="space-y-6" data-testid="adguard-view">
-      {/* 1. ГЛАВНЫЙ СТАТУСНЫЙ БАННЕР */}
-      <div className="card p-6 bg-gradient-to-r from-gray-900/80 via-gray-850/80 to-gray-900/80 border border-emerald-500/20 shadow-xl rounded-2xl backdrop-blur-md">
-        <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
-          <div className="flex items-center gap-4">
-            <div className="w-14 h-14 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-3xl shadow-inner">
+    <div className="agh-container" data-testid="adguard-view">
+      {/* 1. ГЛАВНЫЙ СТАТУСНЫЙ HERO-БАННЕР */}
+      <section className="card agh-hero-card">
+        <div className="agh-hero-header">
+          <div className="agh-hero-title-group">
+            <div className="agh-hero-icon" title="Сетевой щит AdGuard Home">
               🛡️
             </div>
             <div>
-              <div className="flex items-center gap-3">
-                <h1 className="text-2xl font-bold text-white tracking-wide">AdGuard Home</h1>
-                {loading && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <h2 className="agh-hero-title">AdGuard Home</h2>
+                {status?.version && (
                   <span
-                    className="w-3.5 h-3.5 border-2 border-emerald-400 border-t-transparent rounded-full animate-spin inline-block"
-                    title="Обновление данных..."
-                  />
-                )}
-                {status?.running ? (
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                    Активен {status.version ? `v${status.version}` : ''}
-                  </span>
-                ) : (
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium bg-rose-500/20 text-rose-300 border border-rose-500/30">
-                    <span className="w-2 h-2 rounded-full bg-rose-400" />
-                    Не запущен
+                    className="badge"
+                    style={{
+                      background: 'rgba(16, 185, 129, 0.15)',
+                      color: '#34d399',
+                      borderColor: 'rgba(16, 185, 129, 0.35)',
+                    }}
+                  >
+                    v{status.version}
                   </span>
                 )}
+                {loading && <span className="muted" style={{ fontSize: 12 }}>⏳ Обновление…</span>}
+                <span
+                  className={`agh-status-badge ${status?.running ? 'running' : 'stopped'}`}
+                  title={status?.running ? 'Служба активна' : 'Служба остановлена'}
+                >
+                  <span>{status?.running ? '🟢 В сети' : '🔴 Не запущен'}</span>
+                </span>
                 {health?.loop_risk && (
-                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-medium bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                    ⚠️ Loop Risk
+                  <span
+                    className="badge"
+                    style={{
+                      background: 'rgba(245, 158, 11, 0.18)',
+                      color: '#fbbf24',
+                      borderColor: 'rgba(245, 158, 11, 0.4)',
+                    }}
+                  >
+                    ⚠️ Риск петли DNS
                   </span>
                 )}
               </div>
-              <p className="text-sm text-gray-400 mt-1">
-                Сетевой DNS-сервер: защита от рекламы, трекеров, фишинга и переопределение доменов в роутере
-              </p>
+              <div className="agh-hero-subtitle">
+                Сетевой DNS-сервер: фильтрация рекламы, трекеров, фишинга и локальное переопределение доменов в Keenetic
+              </div>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3 w-full md:w-auto justify-end">
+          <div className="agh-hero-controls">
             {/* Тумблер защиты */}
             <button
               type="button"
               onClick={handleToggleProtection}
-              disabled={actionPending || !status?.running}
+              disabled={actionPending}
               data-testid="adguard-protection-toggle"
-              className={`flex items-center gap-2.5 px-4 py-2.5 rounded-xl font-medium text-sm transition-all duration-200 border shadow-md ${
-                status?.protection_enabled
-                  ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-200 hover:bg-emerald-500/30'
-                  : 'bg-rose-500/20 border-rose-500/40 text-rose-200 hover:bg-rose-500/30'
-              } disabled:opacity-50 disabled:cursor-not-allowed`}
+              className={`btn btn-sm ${status?.protection_enabled ? 'btn-primary' : 'btn-secondary'}`}
+              style={{
+                background: status?.protection_enabled
+                  ? 'linear-gradient(135deg, #10b981 0%, #059669 100%)'
+                  : 'rgba(239, 68, 68, 0.15)',
+                borderColor: status?.protection_enabled ? '#10b981' : 'rgba(239, 68, 68, 0.35)',
+                color: status?.protection_enabled ? '#ffffff' : '#f87171',
+                gap: 7,
+              }}
+              title="Включить или временно отключить блокировку DNS"
             >
-              <span className={`w-3 h-3 rounded-full ${status?.protection_enabled ? 'bg-emerald-400' : 'bg-rose-400'}`} />
-              {status?.protection_enabled ? 'Защита включена' : 'Защита отключена'}
-              {actionPending && <span className="animate-spin text-xs">⏳</span>}
+              <span
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  background: status?.protection_enabled ? '#34d399' : '#ef4444',
+                  boxShadow: status?.protection_enabled ? '0 0 6px #34d399' : 'none',
+                }}
+              />
+              <b>{status?.protection_enabled ? 'Защита включена' : 'Защита отключена'}</b>
+              {actionPending && <span style={{ fontSize: 12 }}>⏳</span>}
             </button>
 
-            {/* Ссылка в веб-панель */}
+            {/* Ссылка в веб-панель AGH */}
             <a
               href={nativePanelUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl text-sm font-medium bg-gray-800/80 hover:bg-gray-700/80 border border-gray-700 text-gray-200 transition-colors shadow-sm"
+              className="btn btn-sm btn-secondary"
               title="Открыть нативную веб-панель AdGuard Home в новой вкладке"
             >
-              Веб-панель AGH ↗
+              <span>Веб-панель AGH</span>
+              <span style={{ fontSize: 11, opacity: 0.8 }}>↗</span>
             </a>
 
-            {/* Быстрый перезапуск службы */}
+            {/* Быстрый перезапуск / запуск службы */}
             <button
               type="button"
-              onClick={() => handleServiceAction('restart')}
+              onClick={() => handleServiceAction(status?.running ? 'restart' : 'start')}
               disabled={actionPending}
-              className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl text-sm font-medium bg-gray-800/80 hover:bg-gray-700/80 border border-gray-700 text-gray-200 transition-colors"
-              title="Перезапустить службу AdGuard Home"
+              className="btn btn-sm btn-secondary"
+              title={status?.running ? 'Перезапустить службу AdGuard Home' : 'Запустить службу AdGuard Home'}
             >
-              🔄
+              {actionPending ? '⏳' : status?.running ? '🔄 Перезапуск' : '▶ Запуск'}
             </button>
           </div>
         </div>
 
         {/* Предупреждение о циклической пересылке (Loop Warning) */}
         {health?.loop_warning && (
-          <div className="mt-4 p-3.5 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-200 text-xs flex items-center gap-3">
-            <span className="text-base">⚠️</span>
-            <div className="flex-1">
-              <strong>Внимание!</strong> {health.loop_warning}
+          <div className="agh-warning-banner">
+            <span style={{ fontSize: 18 }}>⚠️</span>
+            <div>
+              <strong>Внимание! Обнаружен риск петли DNS:</strong> {health.loop_warning}
             </div>
           </div>
         )}
-      </div>
+      </section>
 
       {/* 2. НАВИГАЦИОННЫЕ ВКЛАДКИ РАЗДЕЛА */}
-      <div className="flex flex-wrap gap-2 border-b border-gray-800 pb-2">
+      <div className="agh-tabs">
         <button
           type="button"
           data-testid="subtab-overview"
           onClick={() => setActiveSubTab('overview')}
-          className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${
-            activeSubTab === 'overview'
-              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-              : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
-          }`}
+          className={`agh-tab ${activeSubTab === 'overview' ? 'active' : ''}`}
         >
-          📊 Обзор и статистика
+          <span>📊</span>
+          <span>Обзор и статистика</span>
         </button>
         <button
           type="button"
           data-testid="subtab-querylog"
           onClick={() => setActiveSubTab('querylog')}
-          className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${
-            activeSubTab === 'querylog'
-              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-              : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
-          }`}
+          className={`agh-tab ${activeSubTab === 'querylog' ? 'active' : ''}`}
         >
-          📜 Журнал запросов (Query Log)
+          <span>📜</span>
+          <span>Журнал запросов</span>
         </button>
         <button
           type="button"
           data-testid="subtab-filtering"
           onClick={() => setActiveSubTab('filtering')}
-          className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${
-            activeSubTab === 'filtering'
-              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-              : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
-          }`}
+          className={`agh-tab ${activeSubTab === 'filtering' ? 'active' : ''}`}
         >
-          🛡️ Фильтры и правила
+          <span>🛡️</span>
+          <span>Фильтры и правила</span>
         </button>
         <button
           type="button"
           data-testid="subtab-rewrites"
           onClick={() => setActiveSubTab('rewrites')}
-          className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${
-            activeSubTab === 'rewrites'
-              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-              : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
-          }`}
+          className={`agh-tab ${activeSubTab === 'rewrites' ? 'active' : ''}`}
         >
-          🔀 DNS Переопределения
+          <span>🔀</span>
+          <span>DNS Переопределения</span>
         </button>
         <button
           type="button"
           data-testid="subtab-diagnostics"
           onClick={() => setActiveSubTab('diagnostics')}
-          className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${
-            activeSubTab === 'diagnostics'
-              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-              : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
-          }`}
+          className={`agh-tab ${activeSubTab === 'diagnostics' ? 'active' : ''}`}
         >
-          🩺 Диагностика и сеть
+          <span>🩺</span>
+          <span>Диагностика и сеть</span>
         </button>
         <button
           type="button"
           data-testid="subtab-settings"
           onClick={() => setActiveSubTab('settings')}
-          className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${
-            activeSubTab === 'settings'
-              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-              : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/50'
-          }`}
+          className={`agh-tab ${activeSubTab === 'settings' ? 'active' : ''}`}
         >
-          ⚙️ Настройки
+          <span>⚙️</span>
+          <span>Настройки</span>
         </button>
       </div>
 
@@ -461,128 +482,250 @@ export default function AdGuard({ notify }: AdGuardProps) {
 
       {/* TAB 1: ОБЗОР И СТАТИСТИКА */}
       {activeSubTab === 'overview' && (
-        <div className="space-y-6">
-          {/* Метрики */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            <div className="card p-5 bg-gray-900/60 border border-gray-800 rounded-2xl backdrop-blur-sm">
-              <div className="flex items-center justify-between text-gray-400 mb-2 text-xs font-medium uppercase tracking-wider">
-                <span>DNS Запросов (24ч)</span>
-                <span className="text-blue-400">🌐</span>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {/* 4-Колоночная сетка ключевых метрик */}
+          <div className="agh-metrics-grid">
+            <div className="agh-metric-card">
+              <div className="agh-metric-top">
+                <span className="agh-metric-label">DNS Запросов (24ч)</span>
+                <div className="agh-metric-icon-box blue">🌐</div>
               </div>
-              <div className="text-2xl font-bold text-white tracking-tight">
-                {overview?.num_dns_queries?.toLocaleString() || 0}
+              <div className="agh-metric-val">
+                {overview?.num_dns_queries !== undefined ? overview.num_dns_queries.toLocaleString() : '0'}
               </div>
-              <p className="text-xs text-gray-500 mt-1">Все входящие DNS-резолвы сети</p>
+              <div className="agh-metric-sub">Все входящие DNS-резолвы сети</div>
             </div>
 
-            <div className="card p-5 bg-gray-900/60 border border-gray-800 rounded-2xl backdrop-blur-sm">
-              <div className="flex items-center justify-between text-gray-400 mb-2 text-xs font-medium uppercase tracking-wider">
-                <span>Заблокировано</span>
-                <span className="text-emerald-400">🛑</span>
+            <div className="agh-metric-card">
+              <div className="agh-metric-top">
+                <span className="agh-metric-label">Заблокировано</span>
+                <div className="agh-metric-icon-box green">🛑</div>
               </div>
-              <div className="text-2xl font-bold text-emerald-400 tracking-tight flex items-baseline gap-2">
-                <span>{overview?.num_blocked_filtering?.toLocaleString() || 0}</span>
-                <span className="text-sm font-normal text-emerald-500/80">({overview?.block_percentage || 0}%)</span>
+              <div className="agh-metric-val">
+                <span style={{ color: '#34d399' }}>
+                  {overview?.num_blocked_filtering !== undefined ? overview.num_blocked_filtering.toLocaleString() : '0'}
+                </span>
+                <span style={{ fontSize: 14, fontWeight: 500, color: 'var(--muted)' }}>
+                  ({overview?.block_percentage !== undefined ? overview.block_percentage : 0}%)
+                </span>
               </div>
-              <p className="text-xs text-gray-500 mt-1">Реклама, трекеры и угрозы</p>
+              <div className="agh-metric-sub">Реклама, трекеры и угрозы</div>
             </div>
 
-            <div className="card p-5 bg-gray-900/60 border border-gray-800 rounded-2xl backdrop-blur-sm">
-              <div className="flex items-center justify-between text-gray-400 mb-2 text-xs font-medium uppercase tracking-wider">
-                <span>Активных правил</span>
-                <span className="text-indigo-400">📑</span>
+            <div className="agh-metric-card">
+              <div className="agh-metric-top">
+                <span className="agh-metric-label">Активных правил</span>
+                <div className="agh-metric-icon-box purple">📑</div>
               </div>
-              <div className="text-2xl font-bold text-white tracking-tight">
-                {overview?.active_rules_count?.toLocaleString() || 0}
+              <div className="agh-metric-val">
+                {overview?.active_rules_count !== undefined ? overview.active_rules_count.toLocaleString() : '0'}
               </div>
-              <p className="text-xs text-gray-500 mt-1">Правил в подписках и вручную</p>
+              <div className="agh-metric-sub">Правил в подписках и вручную</div>
             </div>
 
-            <div className="card p-5 bg-gray-900/60 border border-gray-800 rounded-2xl backdrop-blur-sm">
-              <div className="flex items-center justify-between text-gray-400 mb-2 text-xs font-medium uppercase tracking-wider">
-                <span>Время обработки</span>
-                <span className="text-amber-400">⚡</span>
+            <div className="agh-metric-card">
+              <div className="agh-metric-top">
+                <span className="agh-metric-label">Время обработки</span>
+                <div className="agh-metric-icon-box amber">⚡</div>
               </div>
-              <div className="text-2xl font-bold text-white tracking-tight">
+              <div className="agh-metric-val">
                 {overview?.avg_processing_time_ms ? `${overview.avg_processing_time_ms.toFixed(1)} мс` : '—'}
               </div>
-              <p className="text-xs text-gray-500 mt-1">Средняя задержка ответа клиенту</p>
+              <div className="agh-metric-sub">Средняя задержка ответа клиенту</div>
             </div>
           </div>
 
-          {/* Списки топов: Домены и клиенты */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Топ запросов */}
-            <div className="card p-5 bg-gray-900/60 border border-gray-800 rounded-2xl">
-              <h3 className="text-sm font-semibold text-gray-200 mb-4 flex items-center justify-between">
-                <span>📈 Топ запросов</span>
-                <span className="text-xs text-gray-500">24ч</span>
-              </h3>
+          {/* 3-Колоночная сетка топов (Запросы / Блокировки / Клиенты) */}
+          <div className="agh-stats-grid">
+            {/* Карточка 1: Топ запросов */}
+            <div className="agh-stat-card">
+              <div className="agh-stat-card-header">
+                <h3 className="agh-stat-card-title">
+                  <span>📈</span>
+                  <span>Топ запросов</span>
+                </h3>
+                <span className="badge">24ч</span>
+              </div>
               {overview?.top_queried_domains && overview.top_queried_domains.length > 0 ? (
-                <div className="space-y-2">
-                  {overview.top_queried_domains.map((d, i) => (
-                    <div key={i} className="flex items-center justify-between text-xs py-1.5 border-b border-gray-800/50 last:border-0">
-                      <span className="font-mono text-gray-300 truncate max-w-[180px]" title={d.domain}>
-                        {d.domain}
-                      </span>
-                      <span className="font-medium text-gray-400 bg-gray-800/80 px-2 py-0.5 rounded-md">
-                        {d.count.toLocaleString()}
-                      </span>
-                    </div>
-                  ))}
-                </div>
+                <ul className="agh-stat-list">
+                  {overview.top_queried_domains.map((d, i) => {
+                    const pct = Math.min(100, Math.round((d.count / maxQueries) * 100))
+                    return (
+                      <li key={i} className="agh-stat-item">
+                        <div className="agh-stat-row">
+                          <span className="agh-stat-rank">#{i + 1}</span>
+                          <span className="agh-stat-domain" title={d.domain}>
+                            {d.domain}
+                          </span>
+                          <span className="agh-stat-count">{d.count.toLocaleString()}</span>
+                        </div>
+                        <div className="agh-stat-bar-track">
+                          <div className="agh-stat-bar-fill blue" style={{ width: `${pct}%` }} />
+                        </div>
+                      </li>
+                    )
+                  })}
+                </ul>
               ) : (
-                <p className="text-xs text-gray-500 py-4 text-center">Нет данных о запросах</p>
+                <div className="agh-empty-state">
+                  <div className="agh-empty-icon">📊</div>
+                  <div className="agh-empty-text">Нет данных о запросах</div>
+                </div>
               )}
             </div>
 
-            {/* Топ заблокированных */}
-            <div className="card p-5 bg-gray-900/60 border border-gray-800 rounded-2xl">
-              <h3 className="text-sm font-semibold text-gray-200 mb-4 flex items-center justify-between">
-                <span>🚫 Топ заблокированных</span>
-                <span className="text-xs text-gray-500">24ч</span>
-              </h3>
+            {/* Карточка 2: Топ заблокированных */}
+            <div className="agh-stat-card">
+              <div className="agh-stat-card-header">
+                <h3 className="agh-stat-card-title">
+                  <span>🚫</span>
+                  <span>Топ заблокированных</span>
+                </h3>
+                <span className="badge" style={{ color: '#f87171', borderColor: 'rgba(239, 68, 68, 0.3)' }}>
+                  24ч
+                </span>
+              </div>
               {overview?.top_blocked_domains && overview.top_blocked_domains.length > 0 ? (
-                <div className="space-y-2">
-                  {overview.top_blocked_domains.map((d, i) => (
-                    <div key={i} className="flex items-center justify-between text-xs py-1.5 border-b border-gray-800/50 last:border-0">
-                      <span className="font-mono text-rose-300 truncate max-w-[180px]" title={d.domain}>
-                        {d.domain}
-                      </span>
-                      <span className="font-medium text-rose-400 bg-rose-500/10 px-2 py-0.5 rounded-md border border-rose-500/20">
-                        {d.count.toLocaleString()}
-                      </span>
-                    </div>
-                  ))}
-                </div>
+                <ul className="agh-stat-list">
+                  {overview.top_blocked_domains.map((d, i) => {
+                    const pct = Math.min(100, Math.round((d.count / maxBlocked) * 100))
+                    return (
+                      <li key={i} className="agh-stat-item">
+                        <div className="agh-stat-row">
+                          <span className="agh-stat-rank" style={{ color: '#f87171' }}>
+                            #{i + 1}
+                          </span>
+                          <span className="agh-stat-domain" title={d.domain} style={{ color: '#fca5a5' }}>
+                            {d.domain}
+                          </span>
+                          <span
+                            className="agh-stat-count"
+                            style={{
+                              background: 'rgba(239, 68, 68, 0.12)',
+                              color: '#f87171',
+                              borderColor: 'rgba(239, 68, 68, 0.25)',
+                            }}
+                          >
+                            {d.count.toLocaleString()}
+                          </span>
+                        </div>
+                        <div className="agh-stat-bar-track">
+                          <div className="agh-stat-bar-fill red" style={{ width: `${pct}%` }} />
+                        </div>
+                      </li>
+                    )
+                  })}
+                </ul>
               ) : (
-                <p className="text-xs text-gray-500 py-4 text-center">Блокировок не зафиксировано</p>
+                <div className="agh-empty-state">
+                  <div className="agh-empty-icon">🛡️</div>
+                  <div className="agh-empty-text">Блокировок не зафиксировано</div>
+                </div>
               )}
             </div>
 
-            {/* Топ клиентов */}
-            <div className="card p-5 bg-gray-900/60 border border-gray-800 rounded-2xl">
-              <h3 className="text-sm font-semibold text-gray-200 mb-4 flex items-center justify-between">
-                <span>📱 Топ клиентов</span>
-                <span className="text-xs text-gray-500">24ч</span>
-              </h3>
+            {/* Карточка 3: Топ клиентов */}
+            <div className="agh-stat-card">
+              <div className="agh-stat-card-header">
+                <h3 className="agh-stat-card-title">
+                  <span>📱</span>
+                  <span>Топ клиентов</span>
+                </h3>
+                <span className="badge">24ч</span>
+              </div>
               {overview?.top_clients && overview.top_clients.length > 0 ? (
-                <div className="space-y-2">
-                  {overview.top_clients.map((c, i) => (
-                    <div key={i} className="flex items-center justify-between text-xs py-1.5 border-b border-gray-800/50 last:border-0">
-                      <div className="truncate max-w-[180px]">
-                        <span className="font-mono text-gray-300 block">{c.ip}</span>
-                        {c.name && <span className="text-[10px] text-gray-500 truncate block">{c.name}</span>}
-                      </div>
-                      <span className="font-medium text-gray-400 bg-gray-800/80 px-2 py-0.5 rounded-md">
-                        {c.count.toLocaleString()}
-                      </span>
-                    </div>
-                  ))}
-                </div>
+                <ul className="agh-stat-list">
+                  {overview.top_clients.map((c, i) => {
+                    const pct = Math.min(100, Math.round((c.count / maxClients) * 100))
+                    return (
+                      <li key={i} className="agh-stat-item">
+                        <div className="agh-stat-row">
+                          <span className="agh-stat-rank">#{i + 1}</span>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <span className="agh-stat-domain" title={c.ip}>
+                              {c.ip}
+                            </span>
+                            {c.name && (
+                              <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 1 }} className="truncate">
+                                {c.name}
+                              </div>
+                            )}
+                          </div>
+                          <span className="agh-stat-count">{c.count.toLocaleString()}</span>
+                        </div>
+                        <div className="agh-stat-bar-track">
+                          <div className="agh-stat-bar-fill emerald" style={{ width: `${pct}%` }} />
+                        </div>
+                      </li>
+                    )
+                  })}
+                </ul>
               ) : (
-                <p className="text-xs text-gray-500 py-4 text-center">Нет данных о клиентах</p>
+                <div className="agh-empty-state">
+                  <div className="agh-empty-icon">👥</div>
+                  <div className="agh-empty-text">Нет данных о клиентах</div>
+                </div>
               )}
+            </div>
+          </div>
+
+          {/* Дополнительная карточка: Апстримы и порты */}
+          <div className="grid2">
+            <div className="card">
+              <h2>🌐 Вышестоящие DNS-серверы (Upstreams)</h2>
+              <p className="muted" style={{ fontSize: 12.5, margin: '0 0 10px' }}>
+                Серверы разрешения внешних имен, настроенные в конфигурации AdGuard Home
+              </p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {(config?.upstream_dns && config.upstream_dns.length > 0
+                  ? config.upstream_dns
+                  : ['tls://1.1.1.1', 'tls://8.8.8.8']
+                ).map((u, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '7px 10px',
+                      borderRadius: 8,
+                      background: 'var(--panel-2)',
+                      border: '1px solid var(--border)',
+                      fontSize: 12.5,
+                      fontFamily: 'monospace',
+                    }}
+                  >
+                    <span>{u}</span>
+                    <span className="badge badge-flow-ok">Активен</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="card">
+              <h2>⚡ Сетевые порты и статус</h2>
+              <ul className="kv">
+                <li>
+                  <span>Порт DNS (UDP/TCP):</span>
+                  <span className="mono">{status?.dns_port || 53}</span>
+                </li>
+                <li>
+                  <span>Порт Веб-панели (HTTP):</span>
+                  <span className="mono">{status?.http_port || 3000}</span>
+                </li>
+                <li>
+                  <span>IP-адреса слушателя:</span>
+                  <span className="mono">
+                    {status?.dns_addresses?.length ? status.dns_addresses.join(', ') : '0.0.0.0'}
+                  </span>
+                </li>
+                <li>
+                  <span>Режим работы:</span>
+                  <span className="badge" style={{ color: '#38bdf8' }}>
+                    {config?.integration_mode === 'external' ? 'Внешний сервер' : 'Локальный (Entware)'}
+                  </span>
+                </li>
+              </ul>
             </div>
           </div>
         </div>
@@ -590,21 +733,23 @@ export default function AdGuard({ notify }: AdGuardProps) {
 
       {/* TAB 2: ЖУРНАЛ ЗАПРОСОВ (QUERY LOG) */}
       {activeSubTab === 'querylog' && (
-        <div className="card p-6 bg-gray-900/60 border border-gray-800 rounded-2xl space-y-4">
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
-            <div className="flex-1 flex items-center gap-3">
+        <div className="card">
+          <div className="agh-toolbar">
+            <div className="agh-search-group">
               <input
                 type="text"
                 value={logSearch}
                 onChange={(e) => setLogSearch(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && loadQueryLog()}
-                placeholder="Поиск по домену или IP клиента..."
-                className="w-full sm:max-w-md px-3.5 py-2 bg-gray-800/80 border border-gray-700 rounded-xl text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-emerald-500/50"
+                placeholder="Поиск по домену или IP клиента (Enter)..."
+                className="input"
+                style={{ flex: 1, minWidth: 220 }}
               />
               <select
                 value={logStatusFilter}
                 onChange={(e) => setLogStatusFilter(e.target.value)}
-                className="px-3 py-2 bg-gray-800/80 border border-gray-700 rounded-xl text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+                className="select"
+                style={{ minWidth: 160 }}
               >
                 <option value="">Все статусы</option>
                 <option value="filtered">Заблокировано (Blocked)</option>
@@ -613,87 +758,105 @@ export default function AdGuard({ notify }: AdGuardProps) {
               </select>
             </div>
 
-            <button
-              type="button"
-              onClick={loadQueryLog}
-              disabled={logLoading}
-              className="px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-200 rounded-xl text-sm font-medium flex items-center gap-2 transition-colors"
-            >
-              <span>{logLoading ? 'Загрузка…' : 'Обновить'}</span>
-              <span className={logLoading ? 'animate-spin' : ''}>🔄</span>
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span className="badge">Записей: {queryLog.length}</span>
+              <button
+                type="button"
+                onClick={loadQueryLog}
+                disabled={logLoading}
+                className="btn btn-sm btn-secondary"
+                title="Обновить журнал запросов"
+              >
+                <span>{logLoading ? 'Загрузка…' : '🔄 Обновить'}</span>
+              </button>
+            </div>
           </div>
 
-          <div className="overflow-x-auto rounded-xl border border-gray-800">
-            <table className="w-full text-left text-xs text-gray-300">
-              <thead className="bg-gray-800/60 text-gray-400 uppercase text-[10px] tracking-wider border-b border-gray-800">
+          <div className="agh-table-container">
+            <table className="agh-table">
+              <thead>
                 <tr>
-                  <th className="px-4 py-3">Время</th>
-                  <th className="px-4 py-3">Клиент</th>
-                  <th className="px-4 py-3">Домен</th>
-                  <th className="px-4 py-3">Тип</th>
-                  <th className="px-4 py-3">Статус</th>
-                  <th className="px-4 py-3">Время</th>
-                  <th className="px-4 py-3 text-right">Действие</th>
+                  <th>Время</th>
+                  <th>Клиент</th>
+                  <th>Домен</th>
+                  <th>Тип</th>
+                  <th>Статус</th>
+                  <th>Ответ</th>
+                  <th style={{ textAlign: 'right' }}>Действие</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-800/60">
+              <tbody>
                 {queryLog.length > 0 ? (
                   queryLog.map((item, idx) => {
-                    const isBlocked = item.status === 'Filtered' || item.status === 'Blocked' || item.reason === 'FilteredBlockedService'
+                    const isBlocked =
+                      item.status === 'Filtered' ||
+                      item.status === 'Blocked' ||
+                      item.reason === 'FilteredBlockedService'
                     const isRewrite = item.status === 'Rewrite' || item.reason === 'Rewrite'
                     const timePart = item.timestamp ? new Date(item.timestamp).toLocaleTimeString() : '—'
 
                     return (
-                      <tr key={idx} className="hover:bg-gray-800/30 transition-colors">
-                        <td className="px-4 py-2.5 font-mono text-gray-500 whitespace-nowrap">{timePart}</td>
-                        <td className="px-4 py-2.5 whitespace-nowrap">
-                          <span className="font-mono text-gray-300 block">{item.client_ip}</span>
-                          {item.client_name && <span className="text-[10px] text-gray-500 block truncate max-w-[120px]">{item.client_name}</span>}
+                      <tr key={idx}>
+                        <td className="mono" style={{ color: 'var(--muted)', whiteSpace: 'nowrap' }}>
+                          {timePart}
                         </td>
-                        <td className="px-4 py-2.5 font-mono text-gray-200">
-                          <div className="flex items-center gap-2">
-                            <span className="truncate max-w-[260px]" title={item.question_name}>
+                        <td style={{ whiteSpace: 'nowrap' }}>
+                          <span className="mono" style={{ display: 'block', fontWeight: 600 }}>
+                            {item.client_ip}
+                          </span>
+                          {item.client_name && (
+                            <span style={{ fontSize: 11, color: 'var(--muted)', display: 'block' }}>
+                              {item.client_name}
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                            <span className="mono" style={{ fontWeight: 600 }} title={item.question_name}>
                               {item.question_name}
                             </span>
                             {item.rule && (
-                              <span className="text-[10px] text-gray-500 bg-gray-800 px-1.5 py-0.5 rounded truncate max-w-[120px]" title={item.rule}>
+                              <span
+                                className="badge"
+                                style={{
+                                  fontSize: 10,
+                                  background: 'rgba(239, 68, 68, 0.1)',
+                                  color: '#f87171',
+                                }}
+                                title={item.rule}
+                              >
                                 {item.rule}
                               </span>
                             )}
                           </div>
                         </td>
-                        <td className="px-4 py-2.5 font-mono text-gray-400">{item.question_type}</td>
-                        <td className="px-4 py-2.5 whitespace-nowrap">
+                        <td>
+                          <span className="badge mono">{item.question_type}</span>
+                        </td>
+                        <td>
                           {isBlocked ? (
-                            <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-rose-500/10 text-rose-300 border border-rose-500/20">
-                              Блокировка
-                            </span>
+                            <span className="agh-pill blocked">Блокировка</span>
                           ) : isRewrite ? (
-                            <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-500/10 text-blue-300 border border-blue-500/20">
-                              Rewrite
-                            </span>
+                            <span className="agh-pill rewrite">Rewrite</span>
                           ) : (
-                            <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-emerald-300 border border-emerald-500/20">
-                              ОК
-                            </span>
+                            <span className="agh-pill ok">ОК</span>
                           )}
                         </td>
-                        <td className="px-4 py-2.5 font-mono text-gray-400 whitespace-nowrap">
+                        <td className="mono" style={{ color: 'var(--muted)', fontSize: 12 }}>
                           {item.elapsed_ms ? `${item.elapsed_ms.toFixed(1)} мс` : '<1 мс'}
                         </td>
-                        <td className="px-4 py-2.5 text-right whitespace-nowrap">
+                        <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
                           {!isBlocked ? (
                             <button
                               type="button"
                               onClick={() => handleQuickBlockDomain(item.question_name)}
-                              className="px-2 py-1 text-[11px] rounded bg-rose-500/20 text-rose-300 hover:bg-rose-500/30 transition-colors"
+                              className="btn btn-xs btn-danger"
                               title="Добавить домен в правила блокировки"
                             >
                               Заблокировать
                             </button>
                           ) : (
-                            <span className="text-gray-600 text-xs">—</span>
+                            <span className="muted" style={{ fontSize: 12 }}>—</span>
                           )}
                         </td>
                       </tr>
@@ -701,8 +864,13 @@ export default function AdGuard({ notify }: AdGuardProps) {
                   })
                 ) : (
                   <tr>
-                    <td colSpan={7} className="px-4 py-8 text-center text-gray-500 text-xs">
-                      {logLoading ? 'Загрузка записей журнала…' : 'Записей журнала запросов не найдено'}
+                    <td colSpan={7}>
+                      <div className="agh-empty-state">
+                        <div className="agh-empty-icon">📜</div>
+                        <div className="agh-empty-text">
+                          {logLoading ? 'Загрузка записей журнала…' : 'Записей журнала запросов не найдено'}
+                        </div>
+                      </div>
                     </td>
                   </tr>
                 )}
@@ -714,70 +882,124 @@ export default function AdGuard({ notify }: AdGuardProps) {
 
       {/* TAB 3: ФИЛЬТРЫ И ПРАВИЛА */}
       {activeSubTab === 'filtering' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="grid2">
           {/* Списки подписок */}
-          <div className="card p-6 bg-gray-900/60 border border-gray-800 rounded-2xl space-y-4">
-            <h3 className="text-base font-semibold text-gray-200">Подписки фильтрации (Blocklists)</h3>
-            <p className="text-xs text-gray-400">
-              Подключенные официальные и сторонние базы блокировки рекламы и угроз
-            </p>
+          <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div>
+                <h2>Подписки фильтрации (Blocklists)</h2>
+                <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+                  Официальные и сторонние базы блокировки рекламы и угроз
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-sm btn-secondary"
+                onClick={loadFiltering}
+                title="Обновить список подписок"
+              >
+                🔄
+              </button>
+            </div>
 
-            <div className="space-y-3 mt-3">
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 6 }}>
               {filters.length > 0 ? (
                 filters.map((flt) => (
-                  <div
-                    key={flt.id}
-                    className="p-3.5 bg-gray-850/70 border border-gray-800 rounded-xl flex items-center justify-between gap-4"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium text-gray-200 truncate">{flt.name}</span>
-                        <span className="text-[10px] bg-gray-800 text-gray-400 px-2 py-0.5 rounded-full font-mono">
-                          {flt.rules_count?.toLocaleString()} правил
-                        </span>
+                  <div key={flt.id} className="agh-filter-item">
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                        <span style={{ fontWeight: 600, fontSize: 13, color: 'var(--text-bright)' }}>{flt.name}</span>
+                        <span className="badge mono">{flt.rules_count?.toLocaleString()} правил</span>
                       </div>
-                      <p className="text-[11px] text-gray-500 truncate mt-0.5">{flt.url}</p>
+                      <div
+                        className="mono muted"
+                        style={{
+                          fontSize: 11,
+                          marginTop: 3,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {flt.url}
+                      </div>
                     </div>
 
-                    <input
-                      type="checkbox"
-                      checked={flt.enabled}
-                      onChange={() => handleToggleFilter(flt.url, flt.enabled)}
-                      className="w-4 h-4 rounded border-gray-700 text-emerald-500 focus:ring-emerald-500/20 bg-gray-800 cursor-pointer"
-                    />
+                    <label className="switch" title={flt.enabled ? 'Отключить подписку' : 'Включить подписку'}>
+                      <input
+                        type="checkbox"
+                        checked={flt.enabled}
+                        onChange={() => handleToggleFilter(flt.url, flt.enabled)}
+                      />
+                      <span className="slider" />
+                    </label>
                   </div>
                 ))
               ) : (
-                <p className="text-xs text-gray-500 py-4 text-center">Списки фильтров не настроены</p>
+                <div className="agh-empty-state">
+                  <div className="agh-empty-icon">🛡️</div>
+                  <div className="agh-empty-text">Списки фильтров не настроены</div>
+                </div>
               )}
             </div>
           </div>
 
           {/* Пользовательские правила */}
-          <div className="card p-6 bg-gray-900/60 border border-gray-800 rounded-2xl space-y-4 flex flex-col">
-            <div className="flex items-center justify-between">
+          <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <div>
-                <h3 className="text-base font-semibold text-gray-200">Пользовательские правила</h3>
-                <p className="text-xs text-gray-400 mt-0.5">
-                  Собственные правила блокировки (||example.com^) и исключений (@@||safe.com^)
+                <h2>Пользовательские правила</h2>
+                <p className="muted" style={{ fontSize: 12, margin: 0 }}>
+                  Собственные правила блокировки (||domain^) и исключений (@@||domain^)
                 </p>
               </div>
               <button
                 type="button"
                 onClick={handleSaveRules}
                 disabled={rulesSaving}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-medium transition-colors shadow-sm disabled:opacity-50"
+                className="btn btn-sm btn-primary"
               >
-                {rulesSaving ? 'Сохранение…' : 'Сохранить правила'}
+                {rulesSaving ? 'Сохранение…' : '💾 Сохранить правила'}
+              </button>
+            </div>
+
+            {/* Быстрые вставки синтаксиса */}
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="badge"
+                style={{ cursor: 'pointer', background: 'var(--panel-2)' }}
+                onClick={() => setUserRulesText((prev) => (prev ? `${prev}\n||example.com^` : '||example.com^'))}
+                title="Добавить шаблон блокировки домена"
+              >
+                + Блок: ||domain^
+              </button>
+              <button
+                type="button"
+                className="badge"
+                style={{ cursor: 'pointer', background: 'var(--panel-2)' }}
+                onClick={() => setUserRulesText((prev) => (prev ? `${prev}\n@@||example.com^` : '@@||example.com^'))}
+                title="Добавить шаблон белого списка"
+              >
+                + Белый список: @@||domain^
+              </button>
+              <button
+                type="button"
+                className="badge"
+                style={{ cursor: 'pointer', background: 'var(--panel-2)' }}
+                onClick={() => setUserRulesText((prev) => (prev ? `${prev}\n! Комментарий` : '! Комментарий'))}
+                title="Добавить комментарий"
+              >
+                + Комментарий: ! Текст
               </button>
             </div>
 
             <textarea
               value={userRulesText}
               onChange={(e) => setUserRulesText(e.target.value)}
-              placeholder="||ad.example.com^&#10;! Комментарий&#10;@@||whitelist.example.com^"
+              placeholder="||ad.example.com^&#10;! Мой комментарий&#10;@@||whitelist.example.com^"
               rows={14}
-              className="w-full flex-1 p-3.5 bg-gray-950/80 border border-gray-800 rounded-xl font-mono text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-emerald-500/50 resize-y"
+              className="agh-rules-editor"
             />
           </div>
         </div>
@@ -785,63 +1007,70 @@ export default function AdGuard({ notify }: AdGuardProps) {
 
       {/* TAB 4: DNS ПЕРЕОПРЕДЕЛЕНИЯ (REWRITES) */}
       {activeSubTab === 'rewrites' && (
-        <div className="space-y-6">
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {/* Форма добавления */}
-          <div className="card p-6 bg-gray-900/60 border border-gray-800 rounded-2xl">
-            <h3 className="text-base font-semibold text-gray-200 mb-1">Добавить DNS Rewrite</h3>
-            <p className="text-xs text-gray-400 mb-4">
+          <div className="card">
+            <h2>Добавить DNS Rewrite</h2>
+            <p className="muted" style={{ fontSize: 12.5, margin: '0 0 14px' }}>
               Переопределение доменного имени на произвольный IP-адрес или CNAME для локальной сети и сервисов
             </p>
 
-            <form onSubmit={handleAddRewrite} className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+            <form onSubmit={handleAddRewrite} style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
               <input
                 type="text"
                 value={newRewriteDomain}
                 onChange={(e) => setNewRewriteDomain(e.target.value)}
                 placeholder="Домен (например, router.lan или *.local)"
-                className="flex-1 px-3.5 py-2.5 bg-gray-800/80 border border-gray-700 rounded-xl text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-emerald-500/50"
+                className="input"
+                style={{ flex: 1, minWidth: 200 }}
               />
               <input
                 type="text"
                 value={newRewriteAnswer}
                 onChange={(e) => setNewRewriteAnswer(e.target.value)}
                 placeholder="IP-адрес или целевой CNAME (192.168.1.1)"
-                className="flex-1 px-3.5 py-2.5 bg-gray-800/80 border border-gray-700 rounded-xl text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-emerald-500/50"
+                className="input"
+                style={{ flex: 1, minWidth: 200 }}
               />
               <button
                 type="submit"
                 disabled={rewriteAdding}
-                className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-sm font-medium transition-colors shadow-sm disabled:opacity-50 whitespace-nowrap"
+                className="btn btn-primary"
+                style={{ whiteSpace: 'nowrap' }}
               >
-                {rewriteAdding ? 'Добавление…' : '+ Добавить'}
+                {rewriteAdding ? 'Добавление…' : '+ Добавить переопределение'}
               </button>
             </form>
           </div>
 
           {/* Таблица существующих rewrites */}
-          <div className="card p-6 bg-gray-900/60 border border-gray-800 rounded-2xl">
-            <h3 className="text-base font-semibold text-gray-200 mb-4">Текущие переопределения ({rewrites.length})</h3>
+          <div className="card">
+            <h2>Текущие переопределения ({rewrites.length})</h2>
 
-            <div className="overflow-x-auto rounded-xl border border-gray-800">
-              <table className="w-full text-left text-xs text-gray-300">
-                <thead className="bg-gray-800/60 text-gray-400 uppercase text-[10px] tracking-wider border-b border-gray-800">
+            <div className="agh-table-container" style={{ marginTop: 12 }}>
+              <table className="agh-table">
+                <thead>
                   <tr>
-                    <th className="px-4 py-3">Домен</th>
-                    <th className="px-4 py-3">Ответ (IP / CNAME)</th>
-                    <th className="px-4 py-3 text-right">Действие</th>
+                    <th>Домен</th>
+                    <th>Ответ (IP / CNAME)</th>
+                    <th style={{ textAlign: 'right' }}>Действие</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-800/60">
+                <tbody>
                   {rewrites.length > 0 ? (
                     rewrites.map((r, i) => (
-                      <tr key={i} className="hover:bg-gray-800/30 transition-colors">
-                        <td className="px-4 py-3 font-mono text-gray-200">{r.domain}</td>
-                        <td className="px-4 py-3 font-mono text-emerald-300">{r.answer}</td>
-                        <td className="px-4 py-3 text-right">
+                      <tr key={i}>
+                        <td className="mono" style={{ fontWeight: 600 }}>
+                          {r.domain}
+                        </td>
+                        <td className="mono" style={{ color: '#34d399' }}>
+                          {r.answer}
+                        </td>
+                        <td style={{ textAlign: 'right' }}>
                           <button
                             type="button"
                             onClick={() => handleDeleteRewrite(r)}
-                            className="px-2.5 py-1 text-xs text-rose-300 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/20 rounded-lg transition-colors"
+                            className="btn btn-xs btn-danger"
                           >
                             Удалить
                           </button>
@@ -850,8 +1079,11 @@ export default function AdGuard({ notify }: AdGuardProps) {
                     ))
                   ) : (
                     <tr>
-                      <td colSpan={3} className="px-4 py-8 text-center text-gray-500">
-                        Нет настроенных DNS переопределений
+                      <td colSpan={3}>
+                        <div className="agh-empty-state">
+                          <div className="agh-empty-icon">🔀</div>
+                          <div className="agh-empty-text">Нет настроенных DNS переопределений</div>
+                        </div>
                       </td>
                     </tr>
                   )}
@@ -864,64 +1096,71 @@ export default function AdGuard({ notify }: AdGuardProps) {
 
       {/* TAB 5: ДИАГНОСТИКА И СЕТЬ */}
       {activeSubTab === 'diagnostics' && (
-        <div className="space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="card p-5 bg-gray-900/60 border border-gray-800 rounded-2xl">
-              <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Состояние портов</h4>
-              <div className="space-y-2.5 text-xs">
-                <div className="flex items-center justify-between py-1 border-b border-gray-800/50">
-                  <span className="text-gray-300">Порт 53 (DNS UDP Listener):</span>
-                  <span className={`font-mono px-2 py-0.5 rounded ${diagnostics?.port_53_status === 'active' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div className="grid2">
+            <div className="card">
+              <h2>Состояние портов и слушателей</h2>
+              <ul className="kv">
+                <li>
+                  <span>Порт 53 (DNS UDP Listener):</span>
+                  <span
+                    className={
+                      diagnostics?.port_53_status === 'active' ? 'badge badge-flow-ok' : 'badge badge-flow-blocked'
+                    }
+                  >
                     {diagnostics?.port_53_status === 'active' ? 'Открыт и отвечает' : 'Не отвечает'}
                   </span>
-                </div>
-                <div className="flex items-center justify-between py-1 border-b border-gray-800/50">
-                  <span className="text-gray-300">Порт 3000 (Веб-интерфейс):</span>
-                  <span className={`font-mono px-2 py-0.5 rounded ${diagnostics?.port_3000_status === 'active' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
+                </li>
+                <li>
+                  <span>Порт 3000 (Веб-интерфейс):</span>
+                  <span
+                    className={
+                      diagnostics?.port_3000_status === 'active' ? 'badge badge-flow-ok' : 'badge badge-flow-blocked'
+                    }
+                  >
                     {diagnostics?.port_3000_status === 'active' ? 'Активен' : 'Не отвечает'}
                   </span>
-                </div>
-                <div className="flex items-center justify-between py-1 border-b border-gray-800/50">
-                  <span className="text-gray-300">Перехват iptables NAT (Port 53):</span>
-                  <span className={`font-mono px-2 py-0.5 rounded ${diagnostics?.iptables_redirect_active ? 'bg-emerald-500/20 text-emerald-300' : 'bg-gray-800 text-gray-400'}`}>
+                </li>
+                <li>
+                  <span>Перехват iptables NAT (Port 53):</span>
+                  <span className={diagnostics?.iptables_redirect_active ? 'badge badge-flow-ok' : 'badge'}>
                     {diagnostics?.iptables_redirect_active ? 'Активен' : 'Отключен'}
                   </span>
-                </div>
-              </div>
+                </li>
+              </ul>
             </div>
 
-            <div className="card p-5 bg-gray-900/60 border border-gray-800 rounded-2xl">
-              <h4 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Системные файлы</h4>
-              <div className="space-y-2.5 text-xs">
-                <div className="flex items-center justify-between py-1 border-b border-gray-800/50">
-                  <span className="text-gray-300">Служба Entware:</span>
-                  <span className="font-mono text-gray-400 text-right truncate max-w-[200px]" title={diagnostics?.detected_service_path || 'Не найдена'}>
+            <div className="card">
+              <h2>Системные файлы и watchdog</h2>
+              <ul className="kv">
+                <li>
+                  <span>Служба Entware:</span>
+                  <span className="mono" style={{ fontSize: 11 }}>
                     {diagnostics?.detected_service_path || 'Не найдена'}
                   </span>
-                </div>
-                <div className="flex items-center justify-between py-1 border-b border-gray-800/50">
-                  <span className="text-gray-300">Файл конфигурации:</span>
-                  <span className="font-mono text-gray-400 text-right truncate max-w-[200px]" title={diagnostics?.detected_config_path || 'Не найден'}>
+                </li>
+                <li>
+                  <span>Файл конфигурации:</span>
+                  <span className="mono" style={{ fontSize: 11 }}>
                     {diagnostics?.detected_config_path || 'Не найден'}
                   </span>
-                </div>
-                <div className="flex items-center justify-between py-1 border-b border-gray-800/50">
-                  <span className="text-gray-300">Защитный откат DNS (Watchdog):</span>
-                  <span className="font-mono text-emerald-300">Активен</span>
-                </div>
-              </div>
+                </li>
+                <li>
+                  <span>Защитный откат DNS (Watchdog):</span>
+                  <span className="badge badge-flow-ok">Активен</span>
+                </li>
+              </ul>
             </div>
           </div>
 
           {/* Рекомендации */}
           {diagnostics?.recommendations && diagnostics.recommendations.length > 0 && (
-            <div className="card p-5 bg-gray-900/60 border border-gray-800 rounded-2xl">
-              <h4 className="text-sm font-semibold text-gray-200 mb-3">Рекомендации системы</h4>
-              <ul className="space-y-2 text-xs text-gray-300">
+            <div className="card">
+              <h2>Рекомендации системы</h2>
+              <ul style={{ margin: '8px 0 0', paddingLeft: 18, color: 'var(--text)' }}>
                 {diagnostics.recommendations.map((rec, i) => (
-                  <li key={i} className="flex items-start gap-2.5">
-                    <span className="text-emerald-400 mt-0.5">•</span>
-                    <span>{rec}</span>
+                  <li key={i} style={{ marginBottom: 4, fontSize: 13 }}>
+                    {rec}
                   </li>
                 ))}
               </ul>
@@ -932,21 +1171,24 @@ export default function AdGuard({ notify }: AdGuardProps) {
 
       {/* TAB 6: НАСТРОЙКИ ИНТЕГРАЦИИ */}
       {activeSubTab === 'settings' && (
-        <form onSubmit={handleSaveSettings} className="card p-6 bg-gray-900/60 border border-gray-800 rounded-2xl space-y-6">
+        <form onSubmit={handleSaveSettings} className="card" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <div>
-            <h3 className="text-base font-semibold text-gray-200">Параметры подключения к AdGuard Home</h3>
-            <p className="text-xs text-gray-400 mt-0.5">
+            <h2>Параметры подключения к AdGuard Home</h2>
+            <p className="muted" style={{ fontSize: 12.5, margin: '2px 0 0' }}>
               Настройка хоста, порта и авторизации панели управления
             </p>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid2" style={{ gap: 14 }}>
             <div>
-              <label className="block text-xs font-medium text-gray-400 mb-1.5">Режим интеграции</label>
+              <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', marginBottom: 6, fontWeight: 500 }}>
+                Режим интеграции
+              </label>
               <select
                 value={settingsForm.integration_mode}
                 onChange={(e) => setSettingsForm({ ...settingsForm, integration_mode: e.target.value as any })}
-                className="w-full px-3.5 py-2.5 bg-gray-800/80 border border-gray-700 rounded-xl text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+                className="select"
+                style={{ width: '100%' }}
               >
                 <option value="managed">Managed (на роутере Keenetic / Entware)</option>
                 <option value="external">External (внешний сервер AdGuard Home)</option>
@@ -954,64 +1196,76 @@ export default function AdGuard({ notify }: AdGuardProps) {
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-gray-400 mb-1.5">Хост API</label>
+              <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', marginBottom: 6, fontWeight: 500 }}>
+                Хост API
+              </label>
               <input
                 type="text"
                 value={settingsForm.host}
                 onChange={(e) => setSettingsForm({ ...settingsForm, host: e.target.value })}
-                className="w-full px-3.5 py-2.5 bg-gray-800/80 border border-gray-700 rounded-xl text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+                className="input"
+                style={{ width: '100%' }}
               />
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-gray-400 mb-1.5">HTTP Порт API (по умолчанию 3000)</label>
+              <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', marginBottom: 6, fontWeight: 500 }}>
+                HTTP Порт API (по умолчанию 3000)
+              </label>
               <input
                 type="number"
                 value={settingsForm.http_port}
                 onChange={(e) => setSettingsForm({ ...settingsForm, http_port: parseInt(e.target.value, 10) || 3000 })}
-                className="w-full px-3.5 py-2.5 bg-gray-800/80 border border-gray-700 rounded-xl text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+                className="input"
+                style={{ width: '100%' }}
               />
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-gray-400 mb-1.5">DNS Порт (по умолчанию 53)</label>
+              <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', marginBottom: 6, fontWeight: 500 }}>
+                DNS Порт (по умолчанию 53)
+              </label>
               <input
                 type="number"
                 value={settingsForm.dns_port}
                 onChange={(e) => setSettingsForm({ ...settingsForm, dns_port: parseInt(e.target.value, 10) || 53 })}
-                className="w-full px-3.5 py-2.5 bg-gray-800/80 border border-gray-700 rounded-xl text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+                className="input"
+                style={{ width: '100%' }}
               />
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-gray-400 mb-1.5">Логин веб-панели AGH (опционально)</label>
+              <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', marginBottom: 6, fontWeight: 500 }}>
+                Логин веб-панели AGH (опционально)
+              </label>
               <input
                 type="text"
                 value={settingsForm.username || ''}
                 onChange={(e) => setSettingsForm({ ...settingsForm, username: e.target.value })}
                 placeholder="admin"
-                className="w-full px-3.5 py-2.5 bg-gray-800/80 border border-gray-700 rounded-xl text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+                className="input"
+                style={{ width: '100%' }}
               />
             </div>
 
             <div>
-              <label className="block text-xs font-medium text-gray-400 mb-1.5">Пароль веб-панели AGH (опционально)</label>
+              <label style={{ display: 'block', fontSize: 12, color: 'var(--muted)', marginBottom: 6, fontWeight: 500 }}>
+                Пароль веб-панели AGH (опционально)
+              </label>
               <input
                 type="password"
                 value={settingsForm.password || ''}
                 onChange={(e) => setSettingsForm({ ...settingsForm, password: e.target.value })}
                 placeholder="••••••••"
-                className="w-full px-3.5 py-2.5 bg-gray-800/80 border border-gray-700 rounded-xl text-sm text-gray-200 focus:outline-none focus:border-emerald-500/50"
+                className="input"
+                style={{ width: '100%' }}
               />
             </div>
           </div>
 
-          <div className="pt-2 flex justify-end">
-            <button
-              type="submit"
-              className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-sm font-medium transition-colors shadow-md"
-            >
-              Сохранить параметры
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
+            <button type="submit" className="btn btn-primary">
+              💾 Сохранить параметры
             </button>
           </div>
         </form>
