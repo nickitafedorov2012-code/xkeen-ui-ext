@@ -967,6 +967,91 @@ runTest('28. XKeen Service Pipe Leak Protection & Live Header Feedback (v1.6.4)'
   assert(headerTsx.includes('data-testid="header-toggle-btn"'), 'Header.tsx must have header-toggle-btn');
 });
 
+// -------------------------------------------------------------
+// 29. AdGuard Home Backend Integration, Router Endpoints & YAML Backup Protection (v1.7.0)
+// -------------------------------------------------------------
+runTest('29. AdGuard Home Backend Integration, Router Endpoints & YAML Backup Protection (v1.7.0)', () => {
+  const adguardRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/adguard.rs'), 'utf8');
+  const mainRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/main.rs'), 'utf8');
+  const configRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/config.rs'), 'utf8');
+  const apiRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/api.rs'), 'utf8');
+
+  // 1. adguard.rs functions and data structures
+  assert(adguardRs.includes('pub fn base64_encode'), 'adguard.rs must provide base64_encode');
+  assert(adguardRs.includes('pub fn build_auth_header'), 'adguard.rs must provide build_auth_header');
+  assert(adguardRs.includes('pub async fn get_status'), 'adguard.rs must implement get_status');
+  assert(adguardRs.includes('pub async fn get_health'), 'adguard.rs must implement get_health');
+  assert(adguardRs.includes('pub async fn get_overview'), 'adguard.rs must implement get_overview');
+  assert(adguardRs.includes('pub async fn get_query_log'), 'adguard.rs must implement get_query_log');
+  assert(adguardRs.includes('pub async fn set_protection'), 'adguard.rs must implement set_protection');
+  assert(adguardRs.includes('pub async fn get_filtering'), 'adguard.rs must implement get_filtering');
+  assert(adguardRs.includes('pub async fn set_user_rules'), 'adguard.rs must implement set_user_rules');
+  assert(adguardRs.includes('pub fn validate_user_rules'), 'adguard.rs must validate user rules syntax');
+  assert(adguardRs.includes('pub async fn get_rewrites'), 'adguard.rs must implement get_rewrites');
+  assert(adguardRs.includes('pub async fn add_rewrite'), 'adguard.rs must implement add_rewrite');
+  assert(adguardRs.includes('pub async fn delete_rewrite'), 'adguard.rs must implement delete_rewrite');
+  assert(adguardRs.includes('pub async fn get_diagnostics'), 'adguard.rs must implement get_diagnostics');
+  assert(adguardRs.includes('pub async fn service_action'), 'adguard.rs must implement service_action');
+
+  // 2. main.rs routing table registration
+  assert(mainRs.includes('/api/adguard/status'), 'main.rs must register /api/adguard/status');
+  assert(mainRs.includes('/api/adguard/health'), 'main.rs must register /api/adguard/health');
+  assert(mainRs.includes('/api/adguard/overview'), 'main.rs must register /api/adguard/overview');
+  assert(mainRs.includes('/api/adguard/query-log'), 'main.rs must register /api/adguard/query-log');
+  assert(mainRs.includes('/api/adguard/protection'), 'main.rs must register /api/adguard/protection');
+  assert(mainRs.includes('/api/adguard/filtering'), 'main.rs must register /api/adguard/filtering');
+  assert(mainRs.includes('/api/adguard/filtering/rules'), 'main.rs must register /api/adguard/filtering/rules');
+  assert(mainRs.includes('/api/adguard/rewrites'), 'main.rs must register /api/adguard/rewrites');
+  assert(mainRs.includes('/api/adguard/diagnostics'), 'main.rs must register /api/adguard/diagnostics');
+  assert(mainRs.includes('/api/adguard/service'), 'main.rs must register /api/adguard/service');
+
+  // 3. config.rs AdGuardConfig schema
+  assert(configRs.includes('pub struct AdGuardConfig'), 'config.rs must define AdGuardConfig');
+  assert(configRs.includes('pub failsafe_rollback: bool'), 'AdGuardConfig must include failsafe_rollback');
+  assert(configRs.includes('pub upstream_dns: Vec<String>'), 'AdGuardConfig must include upstream_dns');
+
+  // 4. api.rs AdGuardHome.yaml backup integration
+  assert(apiRs.includes('AdGuardHome.yaml'), 'api.rs must register AdGuardHome.yaml in backups');
+});
+
+// -------------------------------------------------------------
+// 30. AdGuard Home Frontend Tab, Navigation & Failsafe Diagnostics (v1.7.0)
+// -------------------------------------------------------------
+runTest('30. AdGuard Home Frontend Tab, Navigation & Failsafe Diagnostics (v1.7.0)', () => {
+  const appTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/App.tsx'), 'utf8');
+  const headerTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Header.tsx'), 'utf8');
+  const adguardTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/AdGuard.tsx'), 'utf8');
+  const typesTs = fs.readFileSync(path.resolve(__dirname, '../frontend/src/types.ts'), 'utf8');
+
+  // 1. App.tsx tab registration and #help redirection
+  assert(appTsx.includes("id: 'adguard'"), 'App.tsx must register adguard tab');
+  assert(appTsx.includes("h === 'help'") && appTsx.includes("'adguard'"), 'App.tsx must redirect legacy #help to #adguard');
+  assert(appTsx.includes('<AdGuard notify={notify} />'), 'App.tsx must render AdGuard view');
+
+  // 2. Header.tsx AdGuard navigation button with shield icon
+  assert(headerTsx.includes("data-testid=\"header-help-btn\""), 'Header.tsx must have header-help-btn');
+  assert(headerTsx.includes('title="AdGuard Home — сетевой фильтр DNS и защита от рекламы"'), 'Header.tsx must have AdGuard tooltip');
+
+  // 3. AdGuard.tsx UI components and subtabs
+  assert(adguardTsx.includes('data-testid="adguard-view"'), 'AdGuard.tsx must have adguard-view container');
+  assert(adguardTsx.includes('data-testid="adguard-protection-toggle"'), 'AdGuard.tsx must have adguard-protection-toggle');
+  assert(adguardTsx.includes('subtab-overview'), 'AdGuard.tsx must have overview subtab');
+  assert(adguardTsx.includes('subtab-querylog'), 'AdGuard.tsx must have querylog subtab');
+  assert(adguardTsx.includes('subtab-filtering'), 'AdGuard.tsx must have filtering subtab');
+  assert(adguardTsx.includes('subtab-rewrites'), 'AdGuard.tsx must have rewrites subtab');
+  assert(adguardTsx.includes('subtab-diagnostics'), 'AdGuard.tsx must have diagnostics subtab');
+  assert(adguardTsx.includes('subtab-settings'), 'AdGuard.tsx must have settings subtab');
+
+  // 4. types.ts data structures
+  assert(typesTs.includes('export interface AdGuardConfig'), 'types.ts must export AdGuardConfig');
+  assert(typesTs.includes('export interface AghStatus'), 'types.ts must export AghStatus');
+  assert(typesTs.includes('export interface AghHealth'), 'types.ts must export AghHealth');
+  assert(typesTs.includes('export interface AghOverview'), 'types.ts must export AghOverview');
+  assert(typesTs.includes('export interface AghQueryLogItem'), 'types.ts must export AghQueryLogItem');
+  assert(typesTs.includes('export interface AghRewriteEntry'), 'types.ts must export AghRewriteEntry');
+  assert(typesTs.includes('export interface AghDiagnostics'), 'types.ts must export AghDiagnostics');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
 
 

@@ -220,55 +220,102 @@ pub fn is_zapret_pid_valid(pid: u32) -> bool {
     }
 }
 
-/// Валидация готовности DNS-сервиса перед перенаправлением на порт 1053 (Z-02)
+/// Надежная команда полного снятия правил перенаправления DNS на порт 1053 во избежание DNS-блэкаута
+pub const DNS_REDIRECT_REMOVE_CMD: &str = r#"
+for ipt in iptables ip6tables; do
+  $ipt -t nat -S PREROUTING 2>/dev/null | grep 'to-ports 1053' | while read -r rule; do
+    del_cmd=$(echo "$rule" | sed 's/^-A/-D/')
+    $ipt -t nat $del_cmd 2>/dev/null || true
+  done
+  for iface in "br+" "Bridge+"; do
+    for proto in udp tcp; do
+      while $ipt -t nat -D PREROUTING -i "$iface" -p "$proto" --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+      while $ipt -t nat -D PREROUTING -i "$iface" -p "$proto" --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+    done
+  done
+  while $ipt -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while $ipt -t nat -D PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+done
+"#;
+
+/// Валидация байтов ответа DNS: проверка длины, совпадения Transaction ID и флага QR (Response)
+pub fn validate_dns_response(query_id: (u8, u8), buf: &[u8]) -> bool {
+    // DNS Header: ID(2), Flags(2), QDCOUNT(2), ANCOUNT(2), NSCOUNT(2), ARCOUNT(2) = 12 bytes
+    if buf.len() < 12 {
+        return false;
+    }
+    // Проверка совпадения Transaction ID
+    if buf[0] != query_id.0 || buf[1] != query_id.1 {
+        return false;
+    }
+    // QR bit (старший бит первого байта флагов: 0 = Query, 1 = Response)
+    let is_response = (buf[2] & 0x80) != 0;
+    is_response
+}
+
+/// Валидация готовности DNS-сервиса перед перенаправлением на порт 1053 (Z-02 & AGH-00)
 pub async fn check_dns_resolver_ready(target_port: u16) -> bool {
     #[cfg(target_os = "linux")]
     {
-        // 1. Проверяем наличие порта в таблицах сокетов ядра (/proc/net/udp, /proc/net/tcp)
-        let hex_port = format!(":{:04X}", target_port);
-        let in_proc_udp = std::fs::read_to_string("/proc/net/udp")
-            .map(|s| s.lines().any(|l| l.split_whitespace().nth(1).map_or(false, |addr| addr.ends_with(&hex_port))))
-            .unwrap_or(false);
-        let in_proc_tcp = std::fs::read_to_string("/proc/net/tcp")
-            .map(|s| s.lines().any(|l| {
-                let parts: Vec<&str> = l.split_whitespace().collect();
-                // State 0A is LISTEN in /proc/net/tcp
-                parts.get(1).map_or(false, |addr| addr.ends_with(&hex_port)) && parts.get(3).map_or(false, |st| *st == "0A")
-            }))
-            .unwrap_or(false);
-        if in_proc_udp || in_proc_tcp {
-            return true;
-        }
-
-        // 2. Fallback: попытка TCP соединения (TCP handshake валидирует слушателя)
         let addr = format!("127.0.0.1:{}", target_port);
-        if let Ok(Ok(_)) = tokio::time::timeout(
-            std::time::Duration::from_millis(300),
-            tokio::net::TcpStream::connect(&addr),
-        )
-        .await
-        {
-            return true;
-        }
+        let query_id = (0x7A, 0x51);
 
-        // 3. Fallback: попытка UDP DNS-запроса с ожиданием ответа (fail-closed если ответа нет)
+        // Стандартный DNS-запрос для проверки резолвера ("localhost" A IN, RD=1)
+        let dns_query = [
+            query_id.0, query_id.1, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x09, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't', 0x00,
+            0x00, 0x01, 0x00, 0x01,
+        ];
+
+        // 1. Проверяем реальным UDP DNS-запросом к резолверу
         if let Ok(sock) = tokio::net::UdpSocket::bind("127.0.0.1:0").await {
-            let dummy_dns_query = [
-                0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x09, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't', 0x00,
-                0x00, 0x01, 0x00, 0x01,
-            ];
             if let Ok(Ok(_)) = tokio::time::timeout(
-                std::time::Duration::from_millis(200),
-                sock.send_to(&dummy_dns_query, &addr),
+                std::time::Duration::from_millis(300),
+                sock.send_to(&dns_query, &addr),
             ).await {
                 let mut buf = [0u8; 512];
                 if let Ok(Ok((bytes_read, _))) = tokio::time::timeout(
-                    std::time::Duration::from_millis(300),
+                    std::time::Duration::from_millis(400),
                     sock.recv_from(&mut buf),
                 ).await {
-                    if bytes_read >= 12 {
+                    if validate_dns_response(query_id, &buf[..bytes_read]) {
                         return true;
+                    }
+                }
+            }
+        }
+
+        // 2. Fallback: проверка по TCP (с префиксом 2-байтовой длины пакета)
+        if let Ok(Ok(mut stream)) = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            tokio::net::TcpStream::connect(&addr),
+        ).await {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let len_prefix = (dns_query.len() as u16).to_be_bytes();
+            let mut tcp_packet = Vec::with_capacity(2 + dns_query.len());
+            tcp_packet.extend_from_slice(&len_prefix);
+            tcp_packet.extend_from_slice(&dns_query);
+
+            if let Ok(Ok(_)) = tokio::time::timeout(
+                std::time::Duration::from_millis(300),
+                stream.write_all(&tcp_packet),
+            ).await {
+                let mut resp_len_buf = [0u8; 2];
+                if let Ok(Ok(_)) = tokio::time::timeout(
+                    std::time::Duration::from_millis(400),
+                    stream.read_exact(&mut resp_len_buf),
+                ).await {
+                    let resp_len = u16::from_be_bytes(resp_len_buf) as usize;
+                    if resp_len >= 12 && resp_len <= 4096 {
+                        let mut resp_buf = vec![0u8; resp_len];
+                        if let Ok(Ok(_)) = tokio::time::timeout(
+                            std::time::Duration::from_millis(400),
+                            stream.read_exact(&mut resp_buf),
+                        ).await {
+                            if validate_dns_response(query_id, &resp_buf) {
+                                return true;
+                            }
+                        }
                     }
                 }
             }
@@ -731,4 +778,44 @@ mod tests {
         // Timeout must never be smaller than base
         assert!(adapted >= base);
     }
+
+    #[test]
+    fn test_validate_dns_response_regression() {
+        let qid = (0x7A, 0x51);
+
+        // 1. Слишком короткий пакет (< 12 байт)
+        assert!(!validate_dns_response(qid, &[0x7A, 0x51, 0x81, 0x80]));
+        assert!(!validate_dns_response(qid, &[]));
+
+        // 2. Несовпадение Transaction ID
+        let wrong_id_packet = [
+            0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert!(!validate_dns_response(qid, &wrong_id_packet));
+
+        // 3. Пакет с верным ID, но это запрос (QR=0), а не ответ
+        let query_packet = [
+            0x7A, 0x51, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        assert!(!validate_dns_response(qid, &query_packet));
+
+        // 4. Корректный ответ (QR=1, флаги 0x8180: Standard query response, No error)
+        let valid_response = [
+            0x7A, 0x51, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+            0x09, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't', 0x00,
+            0x00, 0x01, 0x00, 0x01,
+        ];
+        assert!(validate_dns_response(qid, &valid_response));
+    }
+
+    #[test]
+    fn test_dns_redirect_remove_cmd_regression() {
+        // Гарантируем, что команда удаления редиректа содержит адресное удаление для br+ и Bridge+
+        assert!(DNS_REDIRECT_REMOVE_CMD.contains("to-ports 1053"));
+        assert!(DNS_REDIRECT_REMOVE_CMD.contains("br+"));
+        assert!(DNS_REDIRECT_REMOVE_CMD.contains("Bridge+"));
+        assert!(DNS_REDIRECT_REMOVE_CMD.contains("xkeen-route-zapret"));
+        assert!(DNS_REDIRECT_REMOVE_CMD.contains("ip6tables"));
+    }
 }
+

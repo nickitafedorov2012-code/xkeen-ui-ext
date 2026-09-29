@@ -16,7 +16,7 @@ import MihomoCoreModal from './components/MihomoCoreModal'
 import ZapretCoreModal from './components/ZapretCoreModal'
 import Zapret from './components/Zapret'
 import Gaming from './components/Gaming'
-import Help from './components/Help'
+import AdGuard from './components/AdGuard'
 import { apiGet, apiPost } from './api'
 import type { AuthStatus, StatusInfo } from './types'
 
@@ -31,6 +31,7 @@ type TabId =
   | 'rules'
   | 'diagnostics'
   | 'settings'
+  | 'adguard'
   | 'help'
   | 'antigravity'
 
@@ -44,7 +45,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'connections', label: '🌐 Соединения' },
   { id: 'rules', label: '📋 Правила' },
   { id: 'diagnostics', label: '🩺 Диагностика' },
-  { id: 'help', label: '❓ Справка' },
+  { id: 'adguard', label: '🛡️ AdGuard' },
 ]
 
 interface Toast {
@@ -81,7 +82,8 @@ export default function App() {
   const initial = (() => {
     const h = window.location.hash.replace('#', '')
     if (h === 'antigravity') return 'google-ai'
-    return (TABS.some((t) => t.id === h) || h === 'settings' || h === 'help' ? h : 'dashboard') as TabId
+    if (h === 'help') return 'adguard'
+    return (TABS.some((t) => t.id === h) || h === 'settings' || h === 'adguard' ? h : 'dashboard') as TabId
   })()
   const [tab, setTab] = useState<TabId>(initial)
   const [status, setStatus] = useState<StatusInfo | null>(null)
@@ -175,8 +177,8 @@ export default function App() {
   useEffect(() => {
     const handleLocationChange = () => {
       const h = window.location.hash.replace('#', '')
-      const targetTab = (h === 'antigravity' ? 'google-ai' : h) as TabId
-      if (TABS.some((t) => t.id === targetTab) || targetTab === 'settings' || targetTab === 'help') {
+      const targetTab = (h === 'antigravity' ? 'google-ai' : (h === 'help' ? 'adguard' : h)) as TabId
+      if (TABS.some((t) => t.id === targetTab) || targetTab === 'settings' || targetTab === 'adguard') {
         setTab(targetTab)
       }
     }
@@ -281,8 +283,9 @@ export default function App() {
   useEffect(() => {
     const handleSwitchTab = (e: Event) => {
       const ce = e as CustomEvent<TabId>
-      if (ce.detail && (TABS.some((t) => t.id === ce.detail) || ce.detail === 'settings' || ce.detail === 'help')) {
-        switchTab(ce.detail)
+      const target = (ce.detail === 'help' ? 'adguard' : ce.detail) as TabId
+      if (target && (TABS.some((t) => t.id === target) || target === 'settings' || target === 'adguard')) {
+        switchTab(target)
       }
     }
     window.addEventListener('xr:switch-tab', handleSwitchTab)
@@ -347,7 +350,8 @@ export default function App() {
           {tab === 'rules' && <RulesViewer notify={notify} />}
           {tab === 'diagnostics' && <Diagnostics notify={notify} />}
           {tab === 'settings' && <Settings notify={notify} status={status} refresh={refresh} />}
-          {tab === 'help' && <Help status={status} />}
+          {tab === 'adguard' && <AdGuard notify={notify} />}
+          {tab === 'help' && <AdGuard notify={notify} />}
         </ErrorBoundary>
       </main>
 

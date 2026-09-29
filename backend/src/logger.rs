@@ -228,7 +228,17 @@ mod tests {
         for i in 0..300 {
             log("INFO", &format!("Проверка кириллицы {i} — тестовая строка журнала"));
         }
-        let out = tail(1).expect("tail");
+        // Даём фоновому потоку время записать строки на диск под параллельной нагрузкой
+        let mut out = String::new();
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            if let Ok(s) = tail(50) {
+                if !s.is_empty() {
+                    out = s;
+                    break;
+                }
+            }
+        }
         assert!(out.contains("Проверка кириллицы"), "OUT={out}");
         let _ = std::fs::remove_dir_all(&dir);
     }

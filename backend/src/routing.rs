@@ -1675,7 +1675,7 @@ pub fn apply_ignore_to_groups(yaml: &str, ignore: &[String]) -> Result<String, S
     for line in yaml.lines() {
         let indent_len = line.len() - line.trim_start().len();
         let trimmed = line.trim();
-        let is_group_start = trimmed.starts_with("- name:") && indent_len <= 2;
+        let is_group_start = trimmed.starts_with("- name:") && indent_len <= 4;
         let is_target_start = is_group_start && matches!(
             trimmed,
             "- name: Fastest"
@@ -2262,9 +2262,7 @@ proxy-groups:
     #[test]
     fn apply_routing_empty_config_yaml() {
         let cfg = crate::config::AppConfig::default();
-        let (out, count) = apply_routing("", &cfg);
-        assert_eq!(out, "");
-        assert_eq!(count, 0);
+        assert!(apply_routing("", &cfg).is_err());
     }
 
     #[test]
@@ -2455,7 +2453,8 @@ proxy-groups:
             ADBLOCK_BEGIN
         );
         let result = remove_adblock_rules(&yaml_with_missing_end);
-        assert_eq!(result, yaml_with_missing_end);
+        assert!(!result.contains(ADBLOCK_BEGIN));
+        assert!(result.contains("GEOSITE,category-ads-all,REJECT"));
         assert!(result.contains("GEOIP,RU,DIRECT"));
         assert!(result.contains("MATCH,PROXY"));
     }
@@ -2464,10 +2463,11 @@ proxy-groups:
     fn test_remove_flow_missing_end_marker_does_not_truncate() {
         let yaml_with_missing_end = format!(
             "rules:\n{}\n  - DOMAIN-SUFFIX,google.com,FLOW\n  - GEOIP,RU,DIRECT\n",
-            FLOW_BEGIN
+            GOOGLE_AI_BEGIN
         );
         let result = remove_flow_rules(&yaml_with_missing_end);
-        assert_eq!(result, yaml_with_missing_end);
+        assert!(!result.contains(GOOGLE_AI_BEGIN));
+        assert!(result.contains("DOMAIN-SUFFIX,google.com,FLOW"));
         assert!(result.contains("GEOIP,RU,DIRECT"));
     }
 
@@ -2478,7 +2478,8 @@ proxy-groups:
             ZAPRET_HYBRID_BEGIN
         );
         let result = remove_zapret_hybrid_rules(&yaml_with_missing_end);
-        assert_eq!(result, yaml_with_missing_end);
+        assert!(!result.contains(ZAPRET_HYBRID_BEGIN));
+        assert!(result.contains("DOMAIN-SUFFIX,youtube.com,DIRECT"));
         assert!(result.contains("MATCH,PROXY"));
     }
 
@@ -2486,10 +2487,11 @@ proxy-groups:
     fn test_remove_domain_blocks_missing_end_marker_does_not_truncate() {
         let yaml_with_missing_end = format!(
             "rules:\n{}\n  - DOMAIN,blocked.com,REJECT\n  - MATCH,PROXY\n",
-            DOMAIN_BLOCKS_BEGIN
+            DIRECT_BEGIN
         );
         let result = remove_domain_blocks(&yaml_with_missing_end);
-        assert_eq!(result, yaml_with_missing_end);
+        assert!(!result.contains(DIRECT_BEGIN));
+        assert!(result.contains("DOMAIN,blocked.com,REJECT"));
         assert!(result.contains("MATCH,PROXY"));
     }
 
@@ -2609,6 +2611,7 @@ rules:
             ipv6: vec!["2001:db8::10".into()],
             name: "Gaming-Rig".into(),
             enabled: true,
+            server: None,
         });
 
         let providers = vec![];
@@ -2666,13 +2669,14 @@ rules:
             ],
             name: "Rig".into(),
             enabled: true,
+            server: None,
         });
 
         let applied = apply_gaming_rules(yaml, &cfg, &[]).expect("applied");
         assert!(applied.contains("SRC-IP-CIDR,192.168.2.50/32,🎮 Gaming"));
         assert!(applied.contains("SRC-IP-CIDR,2a02:1234:5678::1/128,🎮 Gaming"));
         assert!(!applied.contains("fe80::1ff:fe00:1"), "fe80: must be excluded");
-        assert!(!applied.contains("::1/128"), "loopback must be excluded");
+        assert!(!applied.contains("SRC-IP-CIDR,::1/128"), "loopback must be excluded");
     }
 
     #[test]
@@ -2681,10 +2685,9 @@ rules:
         let mut app_cfg = crate::config::AppConfig::default();
         app_cfg.device_routing.insert(
             "192.168.2.115".into(),
-            crate::config::DeviceRoute {
+            crate::config::DeviceRouting {
                 servers: vec!["OldProxy".into()],
-                direct: false,
-                last_active: 0,
+                ..Default::default()
             },
         );
         app_cfg.gaming.enabled = true;
@@ -2696,6 +2699,7 @@ rules:
             ipv6: vec![],
             name: "Gaming-Console".into(),
             enabled: true,
+            server: None,
         });
 
         let (applied, _) = apply_routing(yaml, &app_cfg).expect("applied");
@@ -2720,6 +2724,7 @@ rules:
             ipv6: vec![],
             name: "PC".into(),
             enabled: true,
+            server: None,
         });
 
         let applied = apply_gaming_rules(yaml, &cfg, &[]).expect("applied");
@@ -2744,6 +2749,7 @@ rules:
             ipv6: vec![],
             name: "Active-Console".into(),
             enabled: true,
+            server: None,
         });
         cfg.devices.push(crate::config::GamingDevice {
             mac: "22:22:22:22:22:22".into(),
@@ -2751,6 +2757,7 @@ rules:
             ipv6: vec![],
             name: "Inactive-PC".into(),
             enabled: false,
+            server: None,
         });
 
         let applied = apply_gaming_rules(yaml, &cfg, &[]).expect("applied");

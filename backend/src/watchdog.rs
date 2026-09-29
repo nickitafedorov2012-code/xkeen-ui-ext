@@ -533,7 +533,7 @@ pub fn spawn_zapret_monitor(state: AppState) {
                         log_w!("[WATCHDOG] ⚠️ DNS-редирект на 1053 активен в iptables, но резолвер не отвечает! Временное снятие редиректа для предотвращения DNS-блэкаута LAN...");
                         let _ = tokio::process::Command::new("sh")
                             .arg("-c")
-                            .arg("while iptables -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done; while iptables -t nat -D PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done")
+                            .arg(crate::zapret::DNS_REDIRECT_REMOVE_CMD)
                             .output()
                             .await;
                     }

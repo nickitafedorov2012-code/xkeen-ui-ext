@@ -18,6 +18,7 @@ mod speedtest;
 mod notifications;
 pub mod traffic;
 mod system;
+pub mod adguard;
 
 use axum::extract::Request;
 use axum::middleware::{self, Next};
@@ -592,6 +593,23 @@ async fn main() {
         .route("/api/gaming/toggle", post(api::toggle_gaming))
         .route("/api/gaming/ping", post(api::ping_gaming_targets))
         .route("/api/gaming/ignore-conn", post(api::ignore_gaming_conn))
+        // AdGuard Home
+        .route("/api/adguard/status", get(api::adguard_status))
+        .route("/api/adguard/capabilities", get(api::adguard_capabilities))
+        .route("/api/adguard/health", get(api::adguard_health))
+        .route("/api/adguard/overview", get(api::adguard_overview))
+        .route("/api/adguard/query-log", get(api::adguard_query_log))
+        .route("/api/adguard/protection", post(api::adguard_set_protection))
+        .route("/api/adguard/filtering", get(api::adguard_get_filtering))
+        .route("/api/adguard/filtering/rules", post(api::adguard_set_rules))
+        .route("/api/adguard/filtering/toggle-filter", post(api::adguard_toggle_filter))
+        .route("/api/adguard/rewrites", get(api::adguard_get_rewrites))
+        .route("/api/adguard/rewrites/add", post(api::adguard_add_rewrite))
+        .route("/api/adguard/rewrites/delete", post(api::adguard_delete_rewrite))
+        .route("/api/adguard/clients", get(api::adguard_get_clients))
+        .route("/api/adguard/diagnostics", get(api::adguard_diagnostics))
+        .route("/api/adguard/service", post(api::adguard_service))
+        .route("/api/adguard/config", get(api::adguard_get_config).post(api::adguard_set_config))
         // 404 JSON для несуществующих маршрутов API (вместо отдачи HTML через SPA fallback)
         .route("/api/{*path}", any(api::api_not_found))
         .fallback(frontend::serve)

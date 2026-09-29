@@ -591,4 +591,143 @@ export interface GamingStatus {
   verification_error?: string | null
 }
 
+// ==================== AdGuard Home Types ====================
+
+export interface AdGuardConfig {
+  enabled: boolean
+  host: string
+  http_port: number
+  dns_port: number
+  username?: string
+  password?: string
+  integration_mode: 'managed' | 'external'
+  upstream_dns: string[]
+  failsafe_rollback: boolean
+  config_path: string
+}
+
+export interface AghStatus {
+  running: boolean
+  version: string
+  protection_enabled: boolean
+  dns_addresses: string[]
+  dns_port: number
+  http_port: number
+  language: string
+  start_time?: number
+}
+
+export interface AghCapabilities {
+  protection_control: boolean
+  query_log: boolean
+  filtering: boolean
+  custom_rules: boolean
+  rewrites: boolean
+  clients: boolean
+  stats: boolean
+  managed_service: boolean
+}
+
+export interface AghHealth {
+  process_alive: boolean
+  api_ok: boolean
+  api_latency_ms: number
+  dns_listener_ok: boolean
+  loop_risk: boolean
+  loop_warning?: string
+  version?: string
+  protection_enabled: boolean
+}
+
+export interface AghDomainStat {
+  domain: string
+  count: number
+}
+
+export interface AghClientStat {
+  ip: string
+  name?: string
+  count: number
+}
+
+export interface AghOverview {
+  running: boolean
+  protection_enabled: boolean
+  num_dns_queries: number
+  num_blocked_filtering: number
+  num_replaced_safebrowsing: number
+  num_replaced_parental: number
+  num_replaced_safesearch: number
+  avg_processing_time_ms: number
+  block_percentage: number
+  active_rules_count: number
+  top_queried_domains: AghDomainStat[]
+  top_blocked_domains: AghDomainStat[]
+  top_clients: AghClientStat[]
+}
+
+export interface AghQueryLogItem {
+  timestamp: string
+  client_ip: string
+  client_name?: string
+  question_name: string
+  question_type: string
+  status: string
+  elapsed_ms: number
+  reason: string
+  rule?: string
+  filter_id?: number
+  answer: string[]
+}
+
+export interface AghQueryLogResponse {
+  data: AghQueryLogItem[]
+  oldest?: string
+}
+
+export interface AghFilterSubscription {
+  id: number
+  name: string
+  url: string
+  rules_count: number
+  enabled: boolean
+  last_updated?: string
+}
+
+export interface AghFilteringStatus {
+  enabled: boolean
+  interval: number
+  filters: AghFilterSubscription[]
+  whitelist_filters: AghFilterSubscription[]
+  user_rules: string[]
+}
+
+export interface AghRewriteEntry {
+  domain: string
+  answer: string
+}
+
+export interface AghClient {
+  name: string
+  ids: string[]
+  use_global_settings: boolean
+  filtering_enabled: boolean
+  parental_enabled: boolean
+  safebrowsing_enabled: boolean
+  blocked_services: string[]
+  upstreams: string[]
+}
+
+export interface AghDiagnostics {
+  port_53_status: string
+  port_3000_status: string
+  dnsmasq_redirect_active: boolean
+  iptables_redirect_active: boolean
+  detected_service_path?: string
+  detected_config_path?: string
+  loop_risk: boolean
+  recommendations: string[]
+}
+
+
 

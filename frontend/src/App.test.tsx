@@ -41,6 +41,9 @@ vi.mock('./components/Settings', () => ({
 vi.mock('./components/Help', () => ({
   default: () => <div data-testid="help-view">Help View</div>,
 }))
+vi.mock('./components/AdGuard', () => ({
+  default: () => <div data-testid="adguard-view">AdGuard View</div>,
+}))
 
 describe('App Component — Top Header Navigation & Settings Tab Relocation', () => {
   let container: HTMLDivElement | null = null
@@ -198,20 +201,29 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
     expect(container?.querySelector('[data-testid="settings-view"]')).not.toBeNull()
   })
 
-  it('renders Help tab button and switches to Help view when clicked', async () => {
+  it('renders AdGuard tab button and switches to AdGuard view when clicked', async () => {
     await act(async () => {
       root!.render(<App />)
     })
 
-    const helpTabBtn = Array.from(container?.querySelectorAll('nav.tabs button') || []).find((b) =>
-      b.textContent?.includes('Справка')
+    const adguardTabBtn = Array.from(container?.querySelectorAll('nav.tabs button') || []).find((b) =>
+      b.textContent?.includes('AdGuard')
     ) as HTMLButtonElement | undefined
-    expect(helpTabBtn).toBeDefined()
+    expect(adguardTabBtn).toBeDefined()
 
     await act(async () => {
-      helpTabBtn?.click()
+      adguardTabBtn?.click()
     })
 
-    expect(container?.querySelector('[data-testid="help-view"]')).not.toBeNull()
+    expect(container?.querySelector('[data-testid="adguard-view"]')).not.toBeNull()
+  })
+
+  it('redirects #help hash to adguard view', async () => {
+    window.location.hash = '#help'
+    await act(async () => {
+      root!.render(<App />)
+    })
+    expect(container?.querySelector('[data-testid="adguard-view"]')).not.toBeNull()
+    window.location.hash = ''
   })
 })

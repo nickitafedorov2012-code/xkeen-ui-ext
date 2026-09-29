@@ -887,10 +887,10 @@ mod tests {
         let mut tx = ConfigTx::begin(&state).await.unwrap();
         tx.set_yaml("port: 9999\n").unwrap();
 
-        // Создаем директорию с именем extra_path, чтобы atomic_write_file гарантированно упал при попытке rename файла в директорию
+        // Регистрируем extra_path, а затем создаем директорию с этим именем, чтобы sync_atomic_write_or_remove упал при записи в директорию
         let bad_extra_dir = root.join("bad_extra_as_dir");
-        tokio::fs::create_dir_all(&bad_extra_dir).await.unwrap();
         tx.set_extra_file(&bad_extra_dir, "content: 1\n", true).await.unwrap();
+        tokio::fs::create_dir_all(&bad_extra_dir).await.unwrap();
 
         let apply_res = tx.apply_disk_files().await;
         assert!(apply_res.is_err());

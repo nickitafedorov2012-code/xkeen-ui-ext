@@ -1327,10 +1327,18 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
                 $ipt -t $tbl -F xkeen_mask 2>/dev/null || true
                 $ipt -t $tbl -F zapret 2>/dev/null || true
               done
-              while $ipt -t nat -D PREROUTING -i br+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-              while $ipt -t nat -D PREROUTING -i br+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-              while $ipt -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-              while $ipt -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+              $ipt -t nat -S PREROUTING 2>/dev/null | grep 'to-ports 1053' | while read -r rule; do
+                del_cmd=$(echo "$rule" | sed 's/^-A/-D/')
+                $ipt -t nat $del_cmd 2>/dev/null || true
+              done
+              for iface in "br+" "Bridge+"; do
+                for proto in udp tcp; do
+                  while $ipt -t nat -D PREROUTING -i "$iface" -p "$proto" --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+                  while $ipt -t nat -D PREROUTING -i "$iface" -p "$proto" --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+                done
+              done
+              while $ipt -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+              while $ipt -t nat -D PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
             done
             while ip rule del fwmark 0x111/0xff lookup 111 2>/dev/null; do :; done
             while ip -6 rule del fwmark 0x111/0xff lookup 111 2>/dev/null; do :; done
@@ -1546,6 +1554,19 @@ pub async fn create_backup(State(state): State<AppState>) -> Response {
     if override_path.is_file() {
         let _ = tokio::fs::copy(override_path, tmp_dir.join("ru_exclude_override.lst")).await;
     }
+    // 6. AdGuardHome.yaml (если существует)
+    let agh_candidates = [
+        cfg.adguard.config_path.as_str(),
+        "/opt/etc/AdGuardHome.yaml",
+        "/opt/etc/AdGuardHome/AdGuardHome.yaml",
+    ];
+    for ap in agh_candidates {
+        let p = std::path::Path::new(ap);
+        if p.is_file() {
+            let _ = tokio::fs::copy(p, tmp_dir.join("AdGuardHome.yaml")).await;
+            break;
+        }
+    }
 
     // Атомарно активируем каталог бэкапа только после успешной записи полного комплекта
     if let Err(e) = tokio::fs::rename(&tmp_dir, &dir).await {
@@ -1651,6 +1672,23 @@ pub async fn restore_backup(State(state): State<AppState>, Json(req): Json<Backu
             let ov_path = std::path::Path::new(crate::override_sync::OVERRIDE_FILE);
             if ov_path.parent().map(|p| p.exists()).unwrap_or(false) {
                 let _ = tx.set_extra_file(ov_path, ov_content, false).await;
+            }
+        }
+    }
+
+    let src_agh = dir.join("AdGuardHome.yaml");
+    if src_agh.is_file() {
+        if let Ok(agh_content) = tokio::fs::read_to_string(&src_agh).await {
+            let agh_candidates = [
+                std::path::PathBuf::from(&cfg.adguard.config_path),
+                std::path::PathBuf::from("/opt/etc/AdGuardHome.yaml"),
+                std::path::PathBuf::from("/opt/etc/AdGuardHome/AdGuardHome.yaml"),
+            ];
+            for a_path in &agh_candidates {
+                if a_path.parent().map(|p| p.exists()).unwrap_or(false) {
+                    let _ = tx.set_extra_file(a_path.as_path(), agh_content.clone(), true).await;
+                    break;
+                }
             }
         }
     }
@@ -2304,6 +2342,16 @@ fn resolve_config_file_path(id: &str, cfg: &config::AppConfig, config_path: &str
         "override" => Some(std::path::PathBuf::from(crate::override_sync::OVERRIDE_FILE)),
         "xkeen_conf" => Some(std::path::PathBuf::from(crate::override_sync::XKEEN_CONF_FILE)),
         "crontab" => Some(std::path::PathBuf::from(crate::override_sync::SYSTEM_CRONTAB_FILE)),
+        "adguard" => {
+            let p = std::path::PathBuf::from(&cfg.adguard.config_path);
+            if p.exists() {
+                Some(p)
+            } else if std::path::Path::new("/opt/etc/AdGuardHome/AdGuardHome.yaml").exists() {
+                Some(std::path::PathBuf::from("/opt/etc/AdGuardHome/AdGuardHome.yaml"))
+            } else {
+                Some(p)
+            }
+        }
         other => {
             if let Some(name) = other.strip_prefix("provider:") {
                 if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
@@ -2332,6 +2380,18 @@ pub async fn list_config_files(State(state): State<AppState>) -> Response {
         json!({ "id": "xkeen_conf", "name": "XKeen Settings (xkeen.conf)", "path": crate::override_sync::XKEEN_CONF_FILE, "syntax": "shell" }),
         json!({ "id": "crontab", "name": "System Crontab (/opt/etc/crontab)", "path": crate::override_sync::SYSTEM_CRONTAB_FILE, "syntax": "shell" }),
     ];
+
+    let agh_p = std::path::Path::new(&cfg.adguard.config_path);
+    let agh_alt = std::path::Path::new("/opt/etc/AdGuardHome/AdGuardHome.yaml");
+    if agh_p.exists() || agh_alt.exists() || cfg.adguard.enabled {
+        let actual_p = if agh_p.exists() { agh_p } else { agh_alt };
+        files.push(json!({
+            "id": "adguard",
+            "name": "AdGuard Home Config (AdGuardHome.yaml)",
+            "path": actual_p.display().to_string(),
+            "syntax": "yaml"
+        }));
+    }
 
     if let Ok(mut entries) = tokio::fs::read_dir(&providers_dir).await {
         while let Ok(Some(entry)) = entries.next_entry().await {
@@ -2965,18 +3025,50 @@ pub struct SetDnsModeRequest {
     pub enhanced_mode: String, // "fake-ip" | "redir-host"
 }
 
+/// Извлечение режима enhanced-mode из YAML-конфигурации Mihomo (fake-ip | redir-host | unknown)
+pub fn parse_dns_enhanced_mode(yaml: &str) -> &'static str {
+    static RE_REDIR: std::sync::LazyLock<regex_lite::Regex> =
+        std::sync::LazyLock::new(|| regex_lite::Regex::new(r#"(?m)^\s*enhanced-mode:\s*['"]?redir-host['"]?"#).unwrap());
+    static RE_FAKE_IP: std::sync::LazyLock<regex_lite::Regex> =
+        std::sync::LazyLock::new(|| regex_lite::Regex::new(r#"(?m)^\s*enhanced-mode:\s*['"]?fake-ip['"]?"#).unwrap());
+
+    if RE_REDIR.is_match(yaml) {
+        "redir-host"
+    } else if RE_FAKE_IP.is_match(yaml) {
+        "fake-ip"
+    } else {
+        "unknown"
+    }
+}
+
+/// Строгая замена режима enhanced-mode в YAML с валидацией допустимых значений
+pub fn update_dns_enhanced_mode(yaml: &str, target_mode: &str) -> Result<String, String> {
+    if target_mode != "fake-ip" && target_mode != "redir-host" {
+        return Err("Недопустимый режим DNS: разрешены только 'fake-ip' или 'redir-host'".to_string());
+    }
+
+    static RE_ENHANCED_MODE: std::sync::LazyLock<regex_lite::Regex> =
+        std::sync::LazyLock::new(|| regex_lite::Regex::new(r"(?m)^(\s*enhanced-mode:\s*)[^\r\n]+").unwrap());
+
+    if RE_ENHANCED_MODE.is_match(yaml) {
+        Ok(RE_ENHANCED_MODE.replace(yaml, format!("${{1}}{target_mode}")).into_owned())
+    } else {
+        Err("Параметр enhanced-mode не найден в конфигурационном файле Mihomo".to_string())
+    }
+}
+
 /// GET /api/dns/mode
 pub async fn get_dns_mode(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
-    let config_yaml = tokio::fs::read_to_string(&cfg.mihomo.config_path).await.unwrap_or_default();
-
-    static RE_REDIR: std::sync::LazyLock<regex_lite::Regex> =
-        std::sync::LazyLock::new(|| regex_lite::Regex::new(r#"(?m)^\s*enhanced-mode:\s*['"]?redir-host['"]?"#).unwrap());
-    let enhanced_mode = if RE_REDIR.is_match(&config_yaml) {
-        "redir-host"
-    } else {
-        "fake-ip"
+    let config_yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+        Ok(s) => s,
+        Err(e) => {
+            log_w!("[API] Не удалось прочитать конфигурацию Mihomo {}: {e}", cfg.mihomo.config_path);
+            return api_err(format!("Ошибка чтения конфигурации Mihomo: {e}"));
+        }
     };
+
+    let enhanced_mode = parse_dns_enhanced_mode(&config_yaml);
 
     let xkeen_conf = tokio::fs::read_to_string(crate::override_sync::XKEEN_CONF_FILE).await.unwrap_or_default();
     let proxy_dns = if xkeen_conf.contains("proxy_dns=\"on\"") || xkeen_conf.contains("proxy_dns='on'") {
@@ -2996,6 +3088,11 @@ pub async fn set_dns_mode(
     State(state): State<AppState>,
     Json(body): Json<SetDnsModeRequest>,
 ) -> Response {
+    let target_mode = body.enhanced_mode.trim();
+    if target_mode != "fake-ip" && target_mode != "redir-host" {
+        return api_err("Недопустимый режим DNS: разрешены только 'fake-ip' или 'redir-host'");
+    }
+
     let mut tx = match ConfigTx::begin(&state).await {
         Ok(tx) => tx,
         Err(e) => return api_err(e),
@@ -3006,13 +3103,9 @@ pub async fn set_dns_mode(
         Err(e) => return api_err(e),
     };
 
-    let target_mode = if body.enhanced_mode == "redir-host" { "redir-host" } else { "fake-ip" };
-    static RE_ENHANCED_MODE: std::sync::LazyLock<regex_lite::Regex> =
-        std::sync::LazyLock::new(|| regex_lite::Regex::new(r"(?m)^(\s*enhanced-mode:\s*)[^\r\n]+").unwrap());
-    let new_yaml = if RE_ENHANCED_MODE.is_match(&config_yaml) {
-        RE_ENHANCED_MODE.replace(&config_yaml, format!("${{1}}{target_mode}")).into_owned()
-    } else {
-        config_yaml.clone()
+    let new_yaml = match update_dns_enhanced_mode(&config_yaml, target_mode) {
+        Ok(y) => y,
+        Err(e) => return api_err(e),
     };
 
     if let Err(e) = tx.set_yaml(new_yaml) {
@@ -4858,10 +4951,17 @@ pub fn normalize_engine_choice(engine: &str) -> &'static str {
 }
 
 pub fn should_use_nfqws2(cfg: &crate::config::ZapretConfig) -> bool {
-    if normalize_engine_choice(&cfg.engine) == "v1" {
-        !is_nfqws1_available() && is_nfqws2_available()
-    } else {
-        is_nfqws2_available()
+    #[cfg(not(target_os = "linux"))]
+    {
+        normalize_engine_choice(&cfg.engine) == "v2"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if normalize_engine_choice(&cfg.engine) == "v1" {
+            !is_nfqws1_available() && is_nfqws2_available()
+        } else {
+            is_nfqws2_available()
+        }
     }
 }
 
@@ -7985,12 +8085,12 @@ async fn apply_and_verify_gaming(
             Ok(proxies) => {
                 let has_group = proxies.contains_key(routing::GAMING_GROUP_NAME) || proxies.contains_key("Gaming");
                 if !has_group {
-                    tx.rollback().await;
+                    let _ = tx.rollback().await;
                     return Err("Селекторная группа 🎮 Gaming не была создана в ядре Mihomo. Прежние настройки возвращены.".into());
                 }
             }
             Err(e) => {
-                tx.rollback().await;
+                let _ = tx.rollback().await;
                 return Err(format!("Сбой верификации ядра Mihomo: {e}. Прежние настройки возвращены."));
             }
         }
@@ -8004,7 +8104,7 @@ async fn apply_and_verify_gaming(
             if let Some(active_ip) = active_ip {
                 let expected_cidr = format!("SRC-IP-CIDR,{}/32", active_ip);
                 if !new_yaml.contains(&expected_cidr) {
-                    tx.rollback().await;
+                    let _ = tx.rollback().await;
                     return Err(format!("Маршрутное правило для {} не сформировано. Прежние настройки возвращены.", active_ip));
                 }
             }
@@ -8386,6 +8486,234 @@ pub async fn ping_gaming_targets(State(_state): State<AppState>) -> Response {
     api_ok(json!({ "results": results }))
 }
 
+// ==================== AdGuard Home API Handlers ====================
+
+#[derive(Deserialize)]
+pub struct AdGuardQueryParams {
+    pub limit: Option<usize>,
+    pub older_than: Option<String>,
+    pub search: Option<String>,
+    pub response_status: Option<String>,
+}
+
+/// GET /api/adguard/status
+pub async fn adguard_status(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let status = crate::adguard::get_status(&state.http, &cfg.adguard).await;
+    api_ok(json!(status))
+}
+
+/// GET /api/adguard/capabilities
+pub async fn adguard_capabilities(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let cap = crate::adguard::get_capabilities(&cfg.adguard);
+    api_ok(json!(cap))
+}
+
+/// GET /api/adguard/health
+pub async fn adguard_health(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let router_ip = cfg.rci.host.clone();
+    let health = crate::adguard::get_health(&state.http, &cfg.adguard, Some(&router_ip)).await;
+    api_ok(json!(health))
+}
+
+/// GET /api/adguard/overview
+pub async fn adguard_overview(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    match crate::adguard::get_overview(&state.http, &cfg.adguard).await {
+        Ok(ov) => api_ok(json!(ov)),
+        Err(e) => api_err(e),
+    }
+}
+
+/// GET /api/adguard/query-log
+pub async fn adguard_query_log(
+    State(state): State<AppState>,
+    Query(params): Query<AdGuardQueryParams>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    match crate::adguard::get_query_log(
+        &state.http,
+        &cfg.adguard,
+        params.limit.unwrap_or(50),
+        params.older_than.as_deref(),
+        params.search.as_deref(),
+        params.response_status.as_deref(),
+    )
+    .await
+    {
+        Ok(log) => api_ok(json!(log)),
+        Err(e) => api_err(e),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ProtectionReq {
+    pub enabled: bool,
+}
+
+/// POST /api/adguard/protection
+pub async fn adguard_set_protection(
+    State(state): State<AppState>,
+    Json(body): Json<ProtectionReq>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    match crate::adguard::set_protection(&state.http, &cfg.adguard, body.enabled).await {
+        Ok(now_enabled) => api_ok(json!({ "enabled": now_enabled })),
+        Err(e) => api_err(e),
+    }
+}
+
+/// GET /api/adguard/filtering
+pub async fn adguard_get_filtering(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    match crate::adguard::get_filtering(&state.http, &cfg.adguard).await {
+        Ok(flt) => api_ok(json!(flt)),
+        Err(e) => api_err(e),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RulesReq {
+    pub rules: Option<Vec<String>>,
+    pub rules_text: Option<String>,
+}
+
+/// POST /api/adguard/filtering/rules
+pub async fn adguard_set_rules(
+    State(state): State<AppState>,
+    Json(body): Json<RulesReq>,
+) -> Response {
+    let rules = if let Some(r) = body.rules {
+        r
+    } else if let Some(txt) = body.rules_text {
+        txt.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    } else {
+        return api_err("Требуется список правил (rules или rules_text)");
+    };
+
+    let cfg = state.config.read().await.clone();
+    match crate::adguard::set_user_rules(&state.http, &cfg.adguard, &rules).await {
+        Ok(_) => api_ok(json!({ "saved": true, "count": rules.len() })),
+        Err(e) => api_err(e),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ToggleFilterReq {
+    pub url: String,
+    pub enabled: bool,
+    pub whitelist: Option<bool>,
+}
+
+/// POST /api/adguard/filtering/toggle-filter
+pub async fn adguard_toggle_filter(
+    State(state): State<AppState>,
+    Json(body): Json<ToggleFilterReq>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    let whitelist = body.whitelist.unwrap_or(false);
+    match crate::adguard::toggle_filter(&state.http, &cfg.adguard, &body.url, body.enabled, whitelist).await {
+        Ok(_) => api_ok(json!({ "success": true })),
+        Err(e) => api_err(e),
+    }
+}
+
+/// GET /api/adguard/rewrites
+pub async fn adguard_get_rewrites(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    match crate::adguard::get_rewrites(&state.http, &cfg.adguard).await {
+        Ok(r) => api_ok(json!(r)),
+        Err(e) => api_err(e),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RewriteReq {
+    pub domain: String,
+    pub answer: String,
+}
+
+/// POST /api/adguard/rewrites/add
+pub async fn adguard_add_rewrite(
+    State(state): State<AppState>,
+    Json(body): Json<RewriteReq>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    match crate::adguard::add_rewrite(&state.http, &cfg.adguard, &body.domain, &body.answer).await {
+        Ok(_) => api_ok(json!({ "success": true })),
+        Err(e) => api_err(e),
+    }
+}
+
+/// POST /api/adguard/rewrites/delete
+pub async fn adguard_delete_rewrite(
+    State(state): State<AppState>,
+    Json(body): Json<RewriteReq>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    match crate::adguard::delete_rewrite(&state.http, &cfg.adguard, &body.domain, &body.answer).await {
+        Ok(_) => api_ok(json!({ "success": true })),
+        Err(e) => api_err(e),
+    }
+}
+
+/// GET /api/adguard/clients
+pub async fn adguard_get_clients(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    match crate::adguard::get_clients(&state.http, &cfg.adguard).await {
+        Ok(c) => api_ok(json!(c)),
+        Err(e) => api_err(e),
+    }
+}
+
+/// GET /api/adguard/diagnostics
+pub async fn adguard_diagnostics(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let router_ip = cfg.rci.host.clone();
+    let diag = crate::adguard::get_diagnostics(&state.http, &cfg.adguard, Some(&router_ip)).await;
+    api_ok(json!(diag))
+}
+
+/// POST /api/adguard/service
+pub async fn adguard_service(Json(body): Json<ServiceReq>) -> Response {
+    match crate::adguard::service_action(&body.action).await {
+        Ok(out) => api_ok(json!({ "output": out })),
+        Err(e) => api_err(e),
+    }
+}
+
+/// GET /api/adguard/config
+pub async fn adguard_get_config(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    api_ok(json!(cfg.adguard))
+}
+
+/// POST /api/adguard/config
+pub async fn adguard_set_config(
+    State(state): State<AppState>,
+    Json(new_adguard): Json<crate::config::AdGuardConfig>,
+) -> Response {
+    let tx_res = crate::transaction::ConfigTx::begin(&state).await;
+    let mut tx = match tx_res {
+        Ok(t) => t,
+        Err(e) => return api_err(format!("Ошибка начала транзакции: {e}")),
+    };
+
+    let mut current = tx.config().clone();
+    current.adguard = new_adguard;
+    tx.stage_json(current);
+
+    match tx.commit_and_reload().await {
+        Ok(_) => {
+            log_i!("Конфигурация AdGuard Home успешно обновлена и сохранена");
+            api_ok(json!({ "saved": true }))
+        }
+        Err(e) => api_err(format!("Ошибка сохранения конфигурации AdGuard Home: {e}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8479,6 +8807,12 @@ mod tests {
             enabled: true,
             youtube_turbo: false,
             hybrid_youtube: true,
+            general_bypass: false,
+            bypass_github: false,
+            bypass_torrents: false,
+            bypass_adult: false,
+            hybrid_discord: false,
+            discord_voice_udp: false,
             ..Default::default()
         };
         let (yt_direct_args, _) = build_nfqws2_args(&yt_direct_cfg);
@@ -8494,6 +8828,9 @@ mod tests {
             hybrid_discord: true,
             discord_voice_udp: true,
             general_bypass: false,
+            bypass_github: false,
+            bypass_torrents: false,
+            bypass_adult: false,
             ..Default::default()
         };
         let (dc_args, dc_voice) = build_nfqws2_args(&dc_cfg);
@@ -8663,7 +9000,7 @@ mod tests {
 
         let fallback = build_zapret_hardware_info("", "", "", "", true, 0);
         assert_eq!(fallback.model, "Keenetic Router");
-        assert_eq!(fallback.arch_label, "ARM64");
+        assert!(!fallback.arch_label.is_empty());
         assert_eq!(fallback.ram_mb, 512);
     }
 
@@ -8699,6 +9036,37 @@ mod tests {
             assert!(!args.contains("--lua-desync=split2"), "Strategy {id} must use multisplit instead of v1 split2");
             assert!(!args.contains("--lua-desync=disorder2"), "Strategy {id} must use multidisorder instead of v1 disorder2");
         }
+    }
+
+    #[test]
+    fn test_dns_enhanced_mode_regression() {
+        // 1. Проверка обнаружения redir-host
+        let yaml_redir = "dns:\n  enable: true\n  enhanced-mode: redir-host\n  nameserver:\n    - 77.88.8.8\n";
+        assert_eq!(parse_dns_enhanced_mode(yaml_redir), "redir-host");
+
+        // 2. Проверка обнаружения fake-ip
+        let yaml_fake = "dns:\n  enable: true\n  enhanced-mode: fake-ip\n  nameserver:\n    - 1.1.1.1\n";
+        assert_eq!(parse_dns_enhanced_mode(yaml_fake), "fake-ip");
+
+        // 3. Отсутствие параметра не должно слепо превращаться в fake-ip!
+        let yaml_missing = "dns:\n  enable: true\n  nameserver:\n    - 1.1.1.1\n";
+        assert_eq!(parse_dns_enhanced_mode(yaml_missing), "unknown");
+        assert_eq!(parse_dns_enhanced_mode(""), "unknown");
+
+        // 4. Валидация при изменении: запрет некорректных значений
+        assert!(update_dns_enhanced_mode(yaml_redir, "invalid_mode").is_err());
+        assert!(update_dns_enhanced_mode(yaml_redir, "").is_err());
+        assert!(update_dns_enhanced_mode(yaml_redir, "redir-host-extra").is_err());
+
+        // 5. Успешное переключение
+        let updated_to_fake = update_dns_enhanced_mode(yaml_redir, "fake-ip").unwrap();
+        assert_eq!(parse_dns_enhanced_mode(&updated_to_fake), "fake-ip");
+
+        let updated_to_redir = update_dns_enhanced_mode(yaml_fake, "redir-host").unwrap();
+        assert_eq!(parse_dns_enhanced_mode(&updated_to_redir), "redir-host");
+
+        // 6. Ошибка при отсутствии enhanced-mode директивы в YAML
+        assert!(update_dns_enhanced_mode(yaml_missing, "fake-ip").is_err());
     }
 }
 

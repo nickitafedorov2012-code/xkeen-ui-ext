@@ -290,6 +290,8 @@ pub struct AppConfig {
     pub zapret: ZapretConfig,
     /// Отдельный модуль игрового режима (обход игровых блокировок).
     pub gaming: GamingConfig,
+    /// Полноценная интеграция AdGuard Home.
+    pub adguard: AdGuardConfig,
 }
 
 /// Платформы и сервисы для игрового режима.
@@ -463,6 +465,80 @@ impl Default for ZapretCustomEntry {
             domain: String::new(),
             enabled: true,
             cdns: Vec::new(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_agh_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_agh_http_port() -> u16 {
+    3000
+}
+
+fn default_agh_dns_port() -> u16 {
+    53
+}
+
+fn default_agh_mode() -> String {
+    "managed".to_string()
+}
+
+fn default_agh_upstream() -> Vec<String> {
+    vec![
+        "tls://1.1.1.1".to_string(),
+        "tls://8.8.8.8".to_string(),
+        "https://dns.google/dns-query".to_string(),
+    ]
+}
+
+fn default_agh_config_path() -> String {
+    "/opt/etc/AdGuardHome.yaml".to_string()
+}
+
+/// Настройки интеграции полнофункционального AdGuard Home.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct AdGuardConfig {
+    pub enabled: bool,
+    #[serde(default = "default_agh_host")]
+    pub host: String,
+    #[serde(default = "default_agh_http_port")]
+    pub http_port: u16,
+    #[serde(default = "default_agh_dns_port")]
+    pub dns_port: u16,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    #[serde(default = "default_agh_mode")]
+    pub integration_mode: String, // "managed" | "external"
+    #[serde(default = "default_agh_upstream")]
+    pub upstream_dns: Vec<String>,
+    /// Защитный механизм отката транзакции при потере DNS
+    #[serde(default = "default_true")]
+    pub failsafe_rollback: bool,
+    /// Путь к файлу конфигурации AdGuardHome.yaml (для managed-режима и бэкапов)
+    #[serde(default = "default_agh_config_path")]
+    pub config_path: String,
+}
+
+impl Default for AdGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: default_agh_host(),
+            http_port: default_agh_http_port(),
+            dns_port: default_agh_dns_port(),
+            username: None,
+            password: None,
+            integration_mode: default_agh_mode(),
+            upstream_dns: default_agh_upstream(),
+            failsafe_rollback: true,
+            config_path: default_agh_config_path(),
         }
     }
 }
@@ -725,11 +801,16 @@ impl Default for AppConfig {
             schedules: Vec::new(),
             zapret: ZapretConfig::default(),
             gaming: GamingConfig::default(),
+            adguard: AdGuardConfig::default(),
         }
     }
 }
 
 impl AppConfig {
+    pub fn adguard_url(&self) -> String {
+        format!("http://{}:{}", self.adguard.host, self.adguard.http_port)
+    }
+
     pub fn base_url(&self) -> String {
         let scheme = if self.rci.use_https { "https" } else { "http" };
         format!("{}://{}:{}", scheme, self.rci.host, self.rci.port)

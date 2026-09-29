@@ -456,6 +456,53 @@ pub async fn change_password(
     api_ok(json!({ "saved": true, "enabled": body.enabled }))
 }
 
+/// Проверка безопасности Origin/Referer для защиты от межсайтовых атак (CSRF)
+pub fn is_trusted_origin(origin_or_referer: &str, host_header: Option<&str>) -> bool {
+    let stripped = origin_or_referer
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+
+    let origin_host_part = stripped.split('/').next().unwrap_or("").trim();
+    let origin_host_only = origin_host_part.split(':').next().unwrap_or("").trim();
+
+    // 1. Совпадение с переданным Host header
+    if let Some(host) = host_header {
+        let host_trimmed = host.trim();
+        let host_only = host_trimmed.split(':').next().unwrap_or("").trim();
+        if origin_host_part.eq_ignore_ascii_case(host_trimmed) || origin_host_only.eq_ignore_ascii_case(host_only) {
+            return true;
+        }
+    }
+
+    // 2. Локальные адреса loopback, LAN и официальные домены KeenDNS
+    if origin_host_only.eq_ignore_ascii_case("localhost")
+        || origin_host_only == "127.0.0.1"
+        || origin_host_only == "::1"
+        || origin_host_only.starts_with("192.168.")
+        || origin_host_only.starts_with("10.")
+        || origin_host_only.ends_with(".keenetic.pro")
+        || origin_host_only.ends_with(".keenetic.link")
+        || origin_host_only.ends_with(".keenetic.name")
+        || origin_host_only.eq_ignore_ascii_case("my.keenetic.net")
+    {
+        return true;
+    }
+
+    // 3. Подсеть 172.16.0.0/12 (172.16.* - 172.31.*)
+    if origin_host_only.starts_with("172.") {
+        let parts: Vec<&str> = origin_host_only.split('.').collect();
+        if parts.len() >= 2 {
+            if let Ok(second) = parts[1].parse::<u8>() {
+                if (16..=31).contains(&second) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
 /// Middleware защиты API и reverse-proxy Clash
 pub async fn auth_middleware(
     State(state): State<AppState>,
@@ -474,6 +521,33 @@ pub async fn auth_middleware(
     // Разрешаем статику фронтенда и явно открытые эндпоинты
     if !is_protected || is_exempt {
         return next.run(req).await;
+    }
+
+    // CSRF Guard для всех мутирующих запросов (POST, PUT, DELETE, PATCH)
+    let method = req.method();
+    if method == axum::http::Method::POST
+        || method == axum::http::Method::PUT
+        || method == axum::http::Method::DELETE
+        || method == axum::http::Method::PATCH
+    {
+        let host_header = req.headers().get("host").and_then(|h| h.to_str().ok());
+        let origin_header = req.headers().get("origin")
+            .or_else(|| req.headers().get("referer"))
+            .and_then(|h| h.to_str().ok());
+
+        if let Some(origin) = origin_header {
+            if !is_trusted_origin(origin, host_header) {
+                log_w!("[AUTH] ⚠️ Отклонен запрос с недопустимым Origin: {} к {}", origin, path);
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({
+                        "success": false,
+                        "error": "forbidden",
+                        "message": "Отклонено политикой CSRF: недопустимый Origin"
+                    })),
+                ).into_response();
+            }
+        }
     }
 
     let cfg = state.config.read().await.clone();
@@ -606,7 +680,8 @@ mod tests {
         let hash1 = hash_password(pass, &salt1);
         let hash2 = hash_password(pass, &salt2);
         assert_ne!(hash1, hash2, "Разная соль должна давать разный хэш");
-        assert!(!verify_password(pass, &salt2, &hash1));
+        let tampered_hash = hash1.replace(&salt1, &salt2);
+        assert!(!verify_password(pass, &salt2, &tampered_hash));
     }
 
     #[test]
@@ -629,5 +704,29 @@ mod tests {
 
         clear_rate_limit(ip1);
         assert!(check_rate_limit(ip1), "ip1 должен быть разблокирован после clear_rate_limit");
+    }
+
+    #[test]
+    fn test_csrf_origin_validation_regression() {
+        // 1. Доверенные локальные источники
+        assert!(is_trusted_origin("http://127.0.0.1:1001", None));
+        assert!(is_trusted_origin("http://localhost:1001", None));
+        assert!(is_trusted_origin("http://192.168.1.1:1001", None));
+        assert!(is_trusted_origin("https://10.0.0.1", None));
+        assert!(is_trusted_origin("http://172.16.0.1", None));
+        assert!(is_trusted_origin("http://172.31.255.254", None));
+        assert!(is_trusted_origin("https://myrouter.keenetic.pro:1001", None));
+        assert!(is_trusted_origin("https://my.keenetic.net", None));
+
+        // 2. Источник совпадает с заголовком Host
+        assert!(is_trusted_origin("http://mycustombox:1001/dashboard", Some("mycustombox:1001")));
+        assert!(is_trusted_origin("https://router.lan", Some("router.lan")));
+
+        // 3. Злонамеренные внешние источники (CSRF-атаки) ОБЯЗАНЫ блокироваться!
+        assert!(!is_trusted_origin("http://evil-attacker.com", None));
+        assert!(!is_trusted_origin("http://evil-attacker.com", Some("192.168.1.1:1001")));
+        assert!(!is_trusted_origin("http://172.32.0.1", None), "172.32.* вне приватного диапазона");
+        assert!(!is_trusted_origin("http://8.8.8.8", None));
+        assert!(!is_trusted_origin("http://phishing-keenetic.com", None));
     }
 }
