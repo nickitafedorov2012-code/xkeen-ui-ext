@@ -930,6 +930,20 @@ runTest('26. Autonomous Entware Init & Self-Healing Watchdog (v1.6.2)', () => {
   assert(mainRs.includes("*/5 * * * * /opt/etc/init.d/S99xkeen-route start"), 'main.rs watchdog must call S99xkeen-route start');
 });
 
+// -------------------------------------------------------------
+// 27. Exclude-filter YAML single-quote rendering & regex preservation
+// -------------------------------------------------------------
+runTest('27. Exclude-filter YAML single-quote rendering & regex preservation', () => {
+  const routingRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/routing.rs'), 'utf8');
+
+  // 1. apply_ignore_to_providers must output single-quoted exclude-filter to prevent unknown escape character in YAML
+  assert(routingRs.includes("out.push(format!(\"    exclude-filter: '{}'\""), 'routing.rs must use single quotes for exclude-filter');
+  assert(!routingRs.includes("out.push(format!(\"    exclude-filter: \\\"{}\\\"\""), 'routing.rs must NOT use double quotes for exclude-filter');
+
+  // 2. Must not re-escape existing orig regex parts
+  assert(!routingRs.includes("if s.contains('(') || s.contains(')')"), 'routing.rs must not re-escape existing orig regex elements');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
 
 

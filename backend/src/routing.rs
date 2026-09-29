@@ -1820,7 +1820,7 @@ pub fn apply_ignore_to_providers(yaml: &str, ignore: &[String], saved: &mut std:
                 if let Some(p) = &cur_provider {
                     if ig.is_empty() {
                         if let Some(orig) = saved.get(p) {
-                            out.push(format!("    exclude-filter: \"{}\"", orig));
+                            out.push(format!("    exclude-filter: '{}'", orig.replace('\'', "''")));
                         } else {
                             out.push(line.to_string());
                         }
@@ -1831,21 +1831,18 @@ pub fn apply_ignore_to_providers(yaml: &str, ignore: &[String], saved: &mut std:
                         .split('|')
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty())
-                        .map(|s| {
-                            if s.contains('(') || s.contains(')') || s.contains('[') || s.contains(']') || s.contains('?') || s.contains('+') || s.contains('*') {
-                                regex_escape(&s)
-                            } else {
-                                s
-                            }
-                        })
                         .collect();
                     for i in &ig {
-                        let esc_i = regex_escape(i.trim());
+                        let trimmed_i = i.trim();
+                        if trimmed_i.is_empty() || trimmed_i.chars().all(|c| c == '?' || c.is_whitespace() || c == '[' || c == ']') {
+                            continue;
+                        }
+                        let esc_i = regex_escape(trimmed_i);
                         if !parts.iter().any(|p2| p2.eq_ignore_ascii_case(&esc_i)) {
                             parts.push(esc_i);
                         }
                     }
-                    out.push(format!("    exclude-filter: \"{}\"", parts.join("|")));
+                    out.push(format!("    exclude-filter: '{}'", parts.join("|").replace('\'', "''")));
                     continue;
                 }
             }
@@ -2171,11 +2168,11 @@ proxy-groups:
     type: select
 ";
         let mut saved = std::collections::BTreeMap::new();
-        let out = apply_ignore_to_providers(pyaml, &["Германия".to_string()], &mut saved);
-        assert!(out.contains("exclude-filter: \"(?i)DIRECT|Russia|RU|Германия\""), "OUT={out}");
+        let out = apply_ignore_to_providers(pyaml, &["Германия".to_string(), "????????? [? ?????????? ]".to_string()], &mut saved);
+        assert!(out.contains("exclude-filter: '(?i)DIRECT|Russia|RU|Германия'"), "OUT={out}");
         assert_eq!(saved.len(), 1);
         let restored = apply_ignore_to_providers(&out, &[], &mut saved);
-        assert!(restored.contains("exclude-filter: \"(?i)DIRECT|Russia|RU\""), "OUT={restored}");
+        assert!(restored.contains("exclude-filter: '(?i)DIRECT|Russia|RU'"), "OUT={restored}");
     }
 
     #[test]
