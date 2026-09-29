@@ -104,36 +104,167 @@ pub struct AppState {
     pub antigravity: Arc<antigravity::AntigravityManager>,
 }
 
+fn init_script_content(port: u16) -> String {
+    format!(
+        r#"#!/bin/sh
+# XKeen Route: автономный init-скрипт Entware.
+# S99 запускается после S05xkeen. Дополнительные проверки устраняют гонку,
+# когда /opt или Mihomo ещё не готовы после полной перезагрузки роутера.
+
+PATH=/opt/sbin:/opt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+NAME=xkeen-route
+BIN=/opt/sbin/xkeen-route
+PID_FILE=/opt/var/run/xkeen-route.pid
+LOG_FILE=/opt/etc/xkeen-route/xkeen-route.log
+XKEEN_INIT=/opt/etc/init.d/S05xkeen
+PORT={port}
+
+is_running() {{
+    if [ -s "$PID_FILE" ]; then
+        pid="$(cat "$PID_FILE" 2>/dev/null)"
+        case "$pid" in ''|*[!0-9]*) pid="" ;; esac
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            if [ -r "/proc/$pid/cmdline" ] && tr '\000' ' ' < "/proc/$pid/cmdline" | grep -q "$NAME"; then
+                return 0
+            fi
+        fi
+    fi
+    for p in $(pidof "$NAME" 2>/dev/null); do
+        if kill -0 "$p" 2>/dev/null; then
+            echo "$p" > "$PID_FILE"
+            return 0
+        fi
+    done
+    return 1
+}}
+
+wait_for_opt() {{
+    attempt=0
+    while [ "$attempt" -lt 30 ]; do
+        [ -x "$BIN" ] && return 0
+        attempt=$((attempt + 1))
+        sleep 2
+    done
+    echo "$NAME: $BIN is unavailable after waiting for /opt" >&2
+    return 1
+}}
+
+mihomo_running() {{
+    pidof mihomo clash clash-meta >/dev/null 2>&1
+}}
+
+ensure_xkeen() {{
+    attempt=0
+    while [ "$attempt" -lt 12 ]; do
+        mihomo_running && return 0
+        if [ -x "$XKEEN_INIT" ]; then
+            sh "$XKEEN_INIT" start >/dev/null 2>&1 || true
+        fi
+        attempt=$((attempt + 1))
+        sleep 5
+    done
+    echo "$NAME: Mihomo did not start in 60 seconds; panel will remain available for diagnostics" >&2
+    return 1
+}}
+
+start() {{
+    wait_for_opt || return 1
+    mkdir -p "$(dirname "$PID_FILE")" "$(dirname "$LOG_FILE")"
+
+    # Панель стартует первой: при сбое Mihomo она остаётся доступна для диагностики.
+    if ! is_running; then
+        rm -f "$PID_FILE"
+        "$BIN" -p "$PORT" >> "$LOG_FILE" 2>&1 &
+        pid=$!
+        sleep 1
+        if kill -0 "$pid" 2>/dev/null; then
+            echo "$pid" > "$PID_FILE"
+        else
+            echo "$NAME: failed to start; see $LOG_FILE" >&2
+            return 1
+        fi
+    fi
+
+    # Не задерживаем загрузку Entware: Mihomo восстанавливается ретраями в фоне.
+    # Повторный start из cron выполняет ту же проверку.
+    ensure_xkeen >> "$LOG_FILE" 2>&1 &
+    return 0
+}}
+
+stop() {{
+    if is_running; then
+        pid="$(cat "$PID_FILE")"
+        kill -TERM "$pid" 2>/dev/null || true
+        attempt=0
+        while kill -0 "$pid" 2>/dev/null && [ "$attempt" -lt 10 ]; do
+            attempt=$((attempt + 1))
+            sleep 1
+        done
+        kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE"
+}}
+
+status() {{
+    if is_running; then
+        echo "$NAME alive (pid $(cat "$PID_FILE"))"
+        return 0
+    fi
+    echo "$NAME stopped"
+    return 1
+}}
+
+case "$1" in
+    start) start ;;
+    stop) stop ;;
+    restart) stop; start ;;
+    status) status ;;
+    *) echo "Usage: $0 {{start|stop|restart|status}}" >&2; exit 1 ;;
+esac
+"#
+    )
+}
+
 fn create_init(port: u16) -> std::io::Result<()> {
     if let Some(dir) = PathBuf::from(INIT_SCRIPT).parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let content = format!(
-        r#"#!/bin/sh
-
-ENABLED=yes
-PROCS=xkeen-route
-ARGS="-p {port}"
-PREARGS=""
-DESC=$PROCS
-PATH=/opt/sbin:/opt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-. /opt/etc/init.d/rc.func
-"#
-    );
-    std::fs::write(INIT_SCRIPT, content)?;
+    std::fs::write(INIT_SCRIPT, init_script_content(port))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(INIT_SCRIPT, std::fs::Permissions::from_mode(0o755))?;
-        // Добавление сторожевого таймера (watchdog) в crontab для автоперезапуска
+        // Резервная проверка: start идемпотентен и одновременно восстанавливает Mihomo.
         let _ = std::process::Command::new("sh")
             .arg("-c")
-            .arg("(crontab -l 2>/dev/null | grep -v 'xkeen-route'; echo '*/5 * * * * pidof xkeen-route >/dev/null || /opt/etc/init.d/S99xkeen-route start >/dev/null 2>&1') | crontab -")
+            .arg("(crontab -l 2>/dev/null | grep -v 'xkeen-route'; echo '*/5 * * * * /opt/etc/init.d/S99xkeen-route start >/dev/null 2>&1') | crontab -")
             .status();
     }
     println!("[OK] Init-скрипт создан: {}", INIT_SCRIPT);
     Ok(())
+}
+
+#[cfg(test)]
+mod init_script_tests {
+    use super::init_script_content;
+
+    #[test]
+    fn init_script_waits_for_entware_and_recovers_mihomo() {
+        let script = init_script_content(1001);
+        assert!(script.contains("wait_for_opt()"));
+        assert!(script.contains("ensure_xkeen()"));
+        assert!(script.contains("sh \"$XKEEN_INIT\" start"));
+        assert!(script.contains("Mihomo did not start in 60 seconds"));
+    }
+
+    #[test]
+    fn init_script_uses_pid_file_and_requested_port() {
+        let script = init_script_content(1234);
+        assert!(script.contains("PID_FILE=/opt/var/run/xkeen-route.pid"));
+        assert!(script.contains("PORT=1234"));
+        assert!(script.contains("$BIN\" -p \"$PORT\""));
+        assert!(script.contains("for p in $(pidof \"$NAME\" 2>/dev/null); do"));
+    }
 }
 
 /// Запрет кэширования ответов панели (иначе браузер показывает устаревшие данные).

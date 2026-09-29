@@ -906,6 +906,30 @@ runTest('25. Zapret Netfilter: TCPMSS must NOT be placed in PREROUTING-hooked za
     'updater.rs must provide staging validation fallbacks');
 });
 
+// -------------------------------------------------------------
+// 26. Autonomous Entware Init & Self-Healing Watchdog (v1.6.2)
+// -------------------------------------------------------------
+runTest('26. Autonomous Entware Init & Self-Healing Watchdog (v1.6.2)', () => {
+  const mainRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/main.rs'), 'utf8');
+  const updaterRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/updater.rs'), 'utf8');
+  const setupSh = fs.readFileSync(path.resolve(__dirname, '../setup.sh'), 'utf8');
+
+  // 1. main.rs init script template must have wait_for_opt, ensure_xkeen, and PID management
+  assert(mainRs.includes('wait_for_opt()'), 'main.rs init template must define wait_for_opt');
+  assert(mainRs.includes('ensure_xkeen()'), 'main.rs init template must define ensure_xkeen');
+  assert(mainRs.includes('PID_FILE=/opt/var/run/xkeen-route.pid'), 'main.rs init template must use PID_FILE');
+  assert(mainRs.includes('for p in $(pidof "$NAME" 2>/dev/null); do'), 'main.rs init template must include pidof self-healing fallback');
+  assert(mainRs.includes('sh "$XKEEN_INIT" start'), 'main.rs init template must invoke S05xkeen start');
+  assert(!mainRs.includes('. /opt/etc/init.d/rc.func'), 'main.rs init template must be autonomous without rc.func dependency');
+
+  // 2. updater.rs must regenerate init script via create-init upon update
+  assert(updaterRs.includes('.arg("create-init")'), 'updater.rs must execute create-init on target_bin');
+
+  // 3. setup.sh and main.rs crontab watchdog must execute S99xkeen-route start directly
+  assert(setupSh.includes("*/5 * * * * /opt/etc/init.d/S99xkeen-route start"), 'setup.sh watchdog must call S99xkeen-route start');
+  assert(mainRs.includes("*/5 * * * * /opt/etc/init.d/S99xkeen-route start"), 'main.rs watchdog must call S99xkeen-route start');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
 
 

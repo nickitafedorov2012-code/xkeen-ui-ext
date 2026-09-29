@@ -1084,7 +1084,15 @@
   * **Ежесуточная проверка в 5:00 утра:** Фоновый планировщик с защитой от рассинхронизации часов до поднятия NTP роутера (year >= 2024).
 - **Исправление установки Zapret 2.0 и Mini-Blockcheck (api.rs, Zapret.tsx)**:
   * **Загрузка официальных версий Zapret 2:** Переход на скачивание zapret2-v1.0.5.2.tar.gz с fallback-зеркалами и подробным 4-шаговым логом в UI (zapret-step-log).
-  * **Динамический бейдж Mini-Blockcheck:** Устранен хардкод zapret2 engine при активном движке v1.
+## v1.6.2 (Autonomous Entware Init & Self-Healing Watchdog)
+- **Автономный init-скрипт S99xkeen-route и устранение гонок при старте (`backend/src/main.rs`, `setup.sh`)**:
+  * **Ожидание готовности `/opt` (`wait_for_opt`)**: до 60 секунд ожидания монтирования раздела Entware и доступности исполняемого файла `/opt/sbin/xkeen-route` после перезагрузки роутера.
+  * **Независимый запуск веб-панели и фоновое восстановление Mihomo (`ensure_xkeen`)**: веб-панель стартует первой и остаётся доступной для диагностики даже при сбое или задержке Mihomo; процесс Mihomo запускается и проверяется в фоновом цикле с ретраями (`S05xkeen start`).
+  * **Надёжный контроль процессов по PID-файлу (`/opt/var/run/xkeen-route.pid`)**: корректная обработка `is_running`, `start`, `stop` (с тайм-аутом SIGTERM и последующим SIGKILL), `status` без зависимости от `rc.func`.
+  * **Идемпотентный cron-watchdog**: сторожевой таймер в crontab запускает `/opt/etc/init.d/S99xkeen-route start` каждые 5 минут, автоматически поднимая и панель, и Mihomo в случае сбоев.
+  * **Автоматическое обновление init-скрипта при установке апдейтов (`backend/src/updater.rs`)**: запуск `xkeen-route create-init` во время обновления панели гарантирует развертывание актуального init-скрипта без необходимости ручного запуска `setup.sh`.
+  * **Анти-регрессионный тест 26**: модульные тесты шаблона init-скрипта в `main.rs` и интеграционный тест в `scripts/regression-tests.cjs`.
+
 ## v1.6.1 (Zapret Netfilter TCPMSS Fix & Resilient PREROUTING Hook)
 - **Исправление сбоя включения перехвата Netfilter (Zapret / S51zapret)**:
   * **Устранение отказа ядра Linux (`xt_TCPMSS: path-MTU clamping only supported in FORWARD, OUTPUT and POSTROUTING hooks`)**: правило TCP MSS clamping вынесено из цепочки `zapret` (подключаемой в `PREROUTING`) в цепочки `POSTROUTING` и `FORWARD`. Ядро Linux запрещает вызов `TCPMSS --clamp-mss-to-pmtu` из `PREROUTING`, что вызывало ошибку `iptables: Invalid argument` и сбой `ERROR: failed to hook zapret chain into PREROUTING for br+/Bridge+`.

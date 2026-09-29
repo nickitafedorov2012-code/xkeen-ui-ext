@@ -529,6 +529,28 @@ pub async fn install(State(state): State<AppState>) -> Response {
         let _ = tokio::fs::set_permissions(target_bin, std::fs::Permissions::from_mode(0o755)).await;
     }
 
+    // Новый бинарник может содержать исправленный шаблон S99xkeen-route. Регенерируем
+    // init-скрипт до перезапуска, чтобы UI-обновление исправляло автозапуск без запуска setup.sh.
+    match tokio::process::Command::new(target_bin)
+        .arg("create-init")
+        .output()
+        .await
+    {
+        Ok(out) if out.status.success() => {
+            crate::log_i!("[UPDATE] Init-скрипт XKeen Route обновлён");
+        }
+        Ok(out) => {
+            crate::log_w!(
+                "[UPDATE] Не удалось обновить init-скрипт (код {}): {}",
+                out.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Err(e) => {
+            crate::log_w!("[UPDATE] Не удалось запустить create-init: {e}");
+        }
+    }
+
     crate::log_i!("[UPDATE] Установлена {ver} ({chosen_asset}), запуск перезапуска сервиса");
 
     if Path::new(init_script_str).exists() {
