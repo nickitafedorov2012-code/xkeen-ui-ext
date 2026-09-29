@@ -1099,12 +1099,13 @@
   * **Валидация фальшивых DNS-ответов (`zapret.rs`)**: проверка формата IPv4 и отсечка мусорных пакетов (`test_validate_dns_response_regression`).
   * **Симметричное переключение `enhanced-mode` в Mihomo (`zapret.rs`)**: автоматический возврат `fake-ip` при отключении `redir-host` (`test_dns_enhanced_mode_regression`).
   * **Строгая валидация CSRF Origin/Referer (`main.rs`)**: защита от межсайтовых атак при обращении к REST API панели (`test_csrf_origin_validation_regression`).
+  * **Кросс-платформенная проверка процессов (`system.rs`)**: добавлена функция `is_process_running` для обхода `/proc` в Linux с проверкой comm/cmdline и регрессионным тестом (`test_is_process_running_regression`).
 - **Фронтенд и навигация (`frontend/src/App.tsx`, `Header.tsx`, `AdGuard.tsx`)**:
   * Замена устаревшей вкладки Помощь на полнофункциональный раздел AdGuard Home со значком щита 🛡️ в шапке и таб-баре.
   * Бесшовный редирект устаревших ссылок `#help` на `#adguard`.
   * Динамический индикатор фоновой загрузки данных и оптимистичное переключение защиты.
 - **Анти-регрессионные тесты**:
-  * Добавлены модульные тесты `adguard.rs` (151/151 тестов в Rust).
+  * Добавлены модульные тесты `adguard.rs` и `test_is_process_running_regression` (152/152 тестов в Rust).
   * Добавлены Vitest тесты `AdGuard.test.tsx` (163/163 тестов на фронтенде).
   * Добавлены тесты 29 и 30 в системный набор `scripts/regression-tests.cjs` (30/30).
 

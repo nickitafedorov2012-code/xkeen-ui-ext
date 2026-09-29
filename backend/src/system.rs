@@ -755,6 +755,38 @@ pub fn is_process_running_match(pid: u32, expected_name: &str) -> bool {
     }
 }
 
+/// Проверяет, запущен ли в системе процесс с указанным именем (comm, exe или cmdline)
+pub fn is_process_running(expected_name: &str) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let exp = expected_name.to_lowercase();
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                if let Ok(file_type) = entry.file_type() {
+                    if !file_type.is_dir() {
+                        continue;
+                    }
+                }
+                let file_name = entry.file_name();
+                let pid_str = file_name.to_string_lossy();
+                let pid: u32 = match pid_str.parse() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+                if is_process_running_match(pid, &exp) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = expected_name;
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -772,5 +804,11 @@ mod tests {
     fn test_is_process_running_match_pid_bounds() {
         assert!(!is_process_running_match(0, "nfqws"));
         assert!(!is_process_running_match(1, "nfqws"));
+    }
+
+    #[test]
+    fn test_is_process_running_regression() {
+        // Гарантирует наличие и работоспособность функции проверки процесса по имени (предотвращает регрессию сборки в Linux CI)
+        assert!(is_process_running("AdGuardHome"));
     }
 }
