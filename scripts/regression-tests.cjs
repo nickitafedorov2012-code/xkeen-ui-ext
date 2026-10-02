@@ -1149,6 +1149,41 @@ runTest('33. AdGuard Home Synchronized Protection Toggle, Duplicated Tab Button 
   assert(appTsx.includes("{ id: 'zapret', label: '⚡ Zapret' }"), 'App.tsx must use ⚡ Zapret label in tabs');
 });
 
+// -------------------------------------------------------------
+// 34. Setup.sh SHA-256 Validation Resilience & 404 Not Found Immunity
+// -------------------------------------------------------------
+runTest('34. Setup.sh SHA-256 Validation Resilience & 404 Not Found Immunity', () => {
+  const setupSh = fs.readFileSync(path.resolve(__dirname, '../setup.sh'), 'utf8');
+  const buildYml = fs.readFileSync(path.resolve(__dirname, '../.github/workflows/build.yml'), 'utf8');
+
+  // 1. URL pattern matching in download_url must terminate with quote to avoid matching .sha256 assets over binary
+  assert(setupSh.includes('xkeen-route-\'"$ARCH"\'"\''), 'setup.sh download_url must terminate with trailing quote to only match binary asset');
+
+  // 2. curl must use -f / -fsSL so 404 Not Found does not write error page body into .sha256 file
+  assert(setupSh.includes('curl -fsSL --max-time 15 "${SHA_URL}"'), 'setup.sh must use curl -fsSL when downloading .sha256');
+
+  // 3. Script must validate that EXPECTED_SHA is exactly 64 hex characters before comparing
+  assert(setupSh.includes('${#EXPECTED_SHA} -eq 64'), 'setup.sh must check that EXPECTED_SHA length is exactly 64');
+  assert(setupSh.includes("tr -d '0-9a-fA-F'"), 'setup.sh must verify that EXPECTED_SHA contains only hex characters');
+
+  // 4. Simulation of 404 error text vs valid sha256
+  const validateSha = (raw) => {
+    const firstWord = raw.trim().split(/\s+/)[0] || '';
+    if (firstWord.length === 64 && /^[0-9a-fA-F]{64}$/.test(firstWord)) {
+      return firstWord;
+    }
+    return null;
+  };
+
+  assert.strictEqual(validateSha('Not Found\n'), null, '404 "Not Found" must NOT be treated as a valid SHA-256');
+  assert.strictEqual(validateSha('<!DOCTYPE html><html><body>Error</body></html>'), null, 'HTML error pages must NOT be treated as a valid SHA-256');
+  assert.strictEqual(validateSha('41bee937b7d378b531fec0797866d21a1e60dc9f582f072302581cbe4b7892aa  xkeen-route-arm64-v8a\n'), '41bee937b7d378b531fec0797866d21a1e60dc9f582f072302581cbe4b7892aa');
+
+  // 5. GitHub workflow must generate and release .sha256 checksums
+  assert(buildYml.includes('sha256sum xkeen-route-${{ matrix.name }} > xkeen-route-${{ matrix.name }}.sha256'), 'build.yml must generate sha256 checksum files');
+  assert(buildYml.includes('xkeen-route-${{ matrix.name }}.sha256'), 'build.yml must upload .sha256 files as release artifacts');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
 
 

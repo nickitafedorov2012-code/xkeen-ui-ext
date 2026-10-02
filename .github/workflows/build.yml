@@ -102,6 +102,7 @@ jobs:
             exit 1
           fi
           cp target/${{ matrix.target }}/release/xkeen-route ../xkeen-route-${{ matrix.name }}
+          (cd .. && sha256sum xkeen-route-${{ matrix.name }} > xkeen-route-${{ matrix.name }}.sha256)
 
       - name: Dump build log to ci-log branch (on failure)
         if: failure()
@@ -117,7 +118,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: xkeen-route-${{ matrix.name }}
-          path: xkeen-route-${{ matrix.name }}
+          path: |
+            xkeen-route-${{ matrix.name }}
+            xkeen-route-${{ matrix.name }}.sha256
 
   release:
     runs-on: ubuntu-latest
