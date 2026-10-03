@@ -1227,6 +1227,12 @@ stop() {{
     return 0
 }}
 
+restart() {{
+    stop
+    sleep 1
+    start
+}}
+
 status() {{
     if is_running; then
         echo "$NAME is running (pid $(cat "$PID_FILE"))"
@@ -1240,7 +1246,7 @@ status() {{
 case "$1" in
     start) start ;;
     stop) stop ;;
-    restart) stop; sleep 1; start ;;
+    restart) restart ;;
     status) status ;;
     *) echo "Usage: $0 {{start|stop|restart|status}}" >&2; exit 1 ;;
 esac

@@ -7941,6 +7941,63 @@ fn resolve_group_leaf(proxies: &std::collections::BTreeMap<String, serde_json::V
     cur
 }
 
+/// Проверка существования целевого узла в объединении статических серверов/групп и proxy-providers.
+pub fn target_exists(
+    proxies: &std::collections::BTreeMap<String, serde_json::Value>,
+    providers: &std::collections::BTreeMap<String, serde_json::Value>,
+    name: &str,
+) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    proxies.contains_key(name) || providers.contains_key(name)
+}
+
+/// Определение доступности и задержки туннеля для игрового режима.
+/// Возвращает (reachable, latency_ms).
+pub fn tunnel_reachability(
+    proxies: &std::collections::BTreeMap<String, serde_json::Value>,
+    providers: &std::collections::BTreeMap<String, serde_json::Value>,
+    node: &str,
+    delay: i64,
+) -> (bool, Option<i64>) {
+    if node.is_empty() {
+        return (false, None);
+    }
+    if node == "DIRECT" {
+        return (true, Some(0));
+    }
+
+    let in_proxies = proxies.contains_key(node);
+    let provider_entry = providers.get(node);
+    let in_providers = provider_entry.is_some();
+
+    // Недоступным считать только если узла нет ни в /proxies, ни в провайдерах
+    if !in_proxies && !in_providers {
+        return (false, None);
+    }
+
+    // Либо провайдер явно сообщил alive == false
+    if let Some(p) = provider_entry {
+        if p.get("alive").and_then(|a| a.as_bool()) == Some(false) {
+            return (false, None);
+        }
+    }
+    if let Some(p) = proxies.get(node) {
+        if p.get("alive").and_then(|a| a.as_bool()) == Some(false) {
+            return (false, None);
+        }
+    }
+
+    // Если ping_server_url вернул > 0, считать доступным с этой задержкой
+    if delay > 0 {
+        (true, Some(delay))
+    } else {
+        // Неизвестная задержка не означает недоступность (узел есть в провайдерах/прокси и alive != false)
+        (true, None)
+    }
+}
+
 async fn check_gaming_interception(cfg: &config::AppConfig) -> (bool, bool, bool) {
     #[cfg(target_os = "linux")]
     {
@@ -8048,10 +8105,14 @@ async fn apply_and_verify_gaming(
         // 2. Проверяем туннель
         let target_srv = tx.config().gaming.target_server.trim().to_string();
         if !target_srv.is_empty() && target_srv != "DIRECT" && target_srv != "Fastest" && target_srv != "PROXY" {
-            if let Ok(proxies) = mihomo::get_proxies(&tx.state.http, tx.config()).await {
-                if !proxies.contains_key(&target_srv) {
-                    return Err(format!("Игровой туннель '{}' не найден в списке серверов ядра Mihomo", target_srv));
-                }
+            let (proxies_res, providers_res) = tokio::join!(
+                mihomo::get_proxies(&tx.state.http, tx.config()),
+                mihomo::get_provider_proxies(&tx.state.http, tx.config())
+            );
+            let proxies = proxies_res.unwrap_or_default();
+            let providers = providers_res.unwrap_or_default();
+            if (!proxies.is_empty() || !providers.is_empty()) && !target_exists(&proxies, &providers, &target_srv) {
+                return Err(format!("Игровой туннель '{}' не найден в списке серверов ядра Mihomo", target_srv));
             }
         }
 
@@ -8123,7 +8184,13 @@ pub async fn get_gaming_status(State(state): State<AppState>) -> Response {
     let domains_count = routing::get_gaming_domains(&cfg.gaming).len();
 
     // 1. Активный узел группы 🎮 Gaming
-    let proxies_map = mihomo::get_proxies(&state.http, &cfg).await.ok();
+    let (proxies_res, providers_res) = tokio::join!(
+        mihomo::get_proxies(&state.http, &cfg),
+        mihomo::get_provider_proxies(&state.http, &cfg)
+    );
+    let proxies_map = proxies_res.ok();
+    let providers_map = providers_res.ok();
+
     let group_now = proxies_map
         .as_ref()
         .and_then(|map| {
@@ -8144,23 +8211,29 @@ pub async fn get_gaming_status(State(state): State<AppState>) -> Response {
     let target_srv = cfg.gaming.target_server.trim();
     let (tunnel_reachable, tunnel_latency) = if target_srv == "DIRECT" || active_server == "DIRECT" {
         (true, Some(0i64))
-    } else if let Some(ref map) = proxies_map {
-        let leaf_to_ping = resolve_group_leaf(map, if target_srv.is_empty() { "Fastest" } else { target_srv });
+    } else {
+        let empty_map = std::collections::BTreeMap::new();
+        let proxies = proxies_map.as_ref().unwrap_or(&empty_map);
+        let providers = providers_map.as_ref().unwrap_or(&empty_map);
+
+        let leaf_to_ping = resolve_group_leaf(proxies, if target_srv.is_empty() { "Fastest" } else { target_srv });
         let node = if !leaf_to_ping.is_empty() { leaf_to_ping } else { active_server.clone() };
+
         if node == "DIRECT" {
             (true, Some(0i64))
         } else {
-            let delay = mihomo::ping_server_url(&state.http, &cfg, &node, 2500, None).await;
-            if delay > 0 {
-                (true, Some(delay))
-            } else if map.contains_key(node.as_str()) {
-                (true, None)
-            } else {
-                (false, None)
+            let mut delay = mihomo::ping_server_url(&state.http, &cfg, &node, 2500, None).await;
+            if delay <= 0 && node != routing::GAMING_GROUP_NAME && node != "Gaming" {
+                // Дополнительно меряем задержку выбранного узла через /proxies/{GAMING_GROUP_NAME}/delay
+                // Группа 🎮 Gaming имеет тип selector в /proxies, и её delay-эндпоинт тестирует текущий now-узел
+                let group_delay = mihomo::ping_server_url(&state.http, &cfg, routing::GAMING_GROUP_NAME, 2500, None).await;
+                if group_delay > 0 {
+                    delay = group_delay;
+                }
             }
+
+            tunnel_reachability(proxies, providers, &node, delay)
         }
-    } else {
-        (false, None)
     };
 
     // 3. Статус перехвата TCP / UDP / IPv6
@@ -9084,6 +9157,76 @@ mod tests {
 
         // 6. Ошибка при отсутствии enhanced-mode директивы в YAML
         assert!(update_dns_enhanced_mode(yaml_missing, "fake-ip").is_err());
+    }
+
+    #[test]
+    fn test_gaming_tunnel_reachability_and_target_exists() {
+        use std::collections::BTreeMap;
+        use serde_json::json;
+
+        let mut proxies = BTreeMap::new();
+        proxies.insert("Static-Node".to_string(), json!({ "name": "Static-Node", "type": "Vless" }));
+
+        let mut providers = BTreeMap::new();
+        providers.insert("Provider-Alive-Node".to_string(), json!({ "name": "Provider-Alive-Node", "alive": true }));
+        providers.insert("Provider-NoAliveField-Node".to_string(), json!({ "name": "Provider-NoAliveField-Node" }));
+        providers.insert("Provider-Dead-Node".to_string(), json!({ "name": "Provider-Dead-Node", "alive": false }));
+
+        // 1. Узел есть только в providers, пинг -1, alive не false: reachable=true
+        let (reachable_alive, latency_alive) = tunnel_reachability(&proxies, &providers, "Provider-Alive-Node", -1);
+        assert!(reachable_alive, "Узел есть только в providers, пинг -1, alive не false: reachable=true");
+        assert_eq!(latency_alive, None);
+
+        let (reachable_no_field, latency_no_field) = tunnel_reachability(&proxies, &providers, "Provider-NoAliveField-Node", -1);
+        assert!(reachable_no_field, "Узел есть только в providers без поля alive, пинг -1: reachable=true");
+        assert_eq!(latency_no_field, None);
+
+        // 2. Узел есть только в providers, alive=false: reachable=false
+        let (reachable_dead, latency_dead) = tunnel_reachability(&proxies, &providers, "Provider-Dead-Node", -1);
+        assert!(!reachable_dead, "Узел есть только в providers, alive=false: reachable=false");
+        assert_eq!(latency_dead, None);
+
+        // Даже если ping вернул > 0, если alive=false узел недоступен
+        let (reachable_dead_ping, latency_dead_ping) = tunnel_reachability(&proxies, &providers, "Provider-Dead-Node", 50);
+        assert!(!reachable_dead_ping, "Узел с alive=false должен быть недоступен даже при ненулевом пинге");
+        assert_eq!(latency_dead_ping, None);
+
+        // 3. Узла нет нигде: false
+        let (reachable_missing, latency_missing) = tunnel_reachability(&proxies, &providers, "NonExistentNode", -1);
+        assert!(!reachable_missing, "Узла нет нигде: false");
+        assert_eq!(latency_missing, None);
+
+        let (reachable_missing_ping, _) = tunnel_reachability(&proxies, &providers, "NonExistentNode", 100);
+        assert!(!reachable_missing_ping, "Узла нет нигде: false даже с положительным пингом");
+
+        // 4. target_exists истинно для узла только из провайдера
+        assert!(
+            target_exists(&proxies, &providers, "Provider-Alive-Node"),
+            "target_exists истинно для узла только из провайдера"
+        );
+        assert!(
+            target_exists(&proxies, &providers, "Static-Node"),
+            "target_exists истинно для узла из proxies"
+        );
+        assert!(
+            !target_exists(&proxies, &providers, "NonExistentNode"),
+            "target_exists ложно для отсутствующего узла"
+        );
+        assert!(
+            !target_exists(&proxies, &providers, ""),
+            "target_exists ложно для пустой строки"
+        );
+
+        // Дополнительные проверки:
+        // Пинг > 0 для доступного узла возвращает latency
+        let (reachable_ping, latency_ping) = tunnel_reachability(&proxies, &providers, "Provider-Alive-Node", 45);
+        assert!(reachable_ping);
+        assert_eq!(latency_ping, Some(45));
+
+        // DIRECT всегда доступен
+        let (reachable_direct, latency_direct) = tunnel_reachability(&proxies, &providers, "DIRECT", -1);
+        assert!(reachable_direct);
+        assert_eq!(latency_direct, Some(0));
     }
 }
 

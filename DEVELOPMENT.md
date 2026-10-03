@@ -1084,6 +1084,22 @@
   * **Ежесуточная проверка в 5:00 утра:** Фоновый планировщик с защитой от рассинхронизации часов до поднятия NTP роутера (year >= 2024).
 - **Исправление установки Zapret 2.0 и Mini-Blockcheck (api.rs, Zapret.tsx)**:
 
+## v1.7.5 (Gaming Mode Proxy-Providers Support, Live Group Delay Verification & Reachability Fix)
+- **Поддержка серверов из Proxy-Providers в Игровом режиме (`backend/src/api.rs`)**:
+  * **Проблема**: В игровом режиме узлы, полученные через подписки `proxy-providers`, ошибочно считались недоступными или несуществующими. Эндпоинты ядра Mihomo `GET /proxies` и `GET /proxies/{name}/delay` возвращают только статические прокси и селекторные группы, отдавая 404 для провайдерных узлов. В результате при выборе сервера из подписки режим совместимости и известные сервисы выдавали ошибку «Игровой туннель недоступен», блокируя активацию игрового режима.
+  * **Решение**:
+    - В функцию `apply_and_verify_gaming` добавлена проверка существования выбранного целевого узла через объединение статических узлов `get_proxies` и серверов из подписок `get_provider_proxies`.
+    - В `get_gaming_status` обновлена логика вычисления статуса туннеля: если прямой пинг `ping_server_url` вернул `> 0`, узел считается доступным с этой задержкой. Если сервер находится в провайдерах и явно не помечен как `alive == false`, он признается доступным (`reachable: true, latency: None`), так как отсутствие закэшированного пинга не означает сбой туннеля.
+    - Реализовано дополнительное измерение живой задержки провайдерного узла через селекторную группу `🎮 Gaming` (`/proxies/{GAMING_GROUP_NAME}/delay`). Поскольку группа `🎮 Gaming` объявлена в `/proxies` как селектор, обращение к её эндпоинту delay тестирует её текущий активный узел (включая провайдерные серверы), возвращая реальный пинг.
+    - Логика вынесена в чистые тестируемые функции `target_exists(proxies, providers, name) -> bool` и `tunnel_reachability(proxies, providers, node, delay) -> (bool, Option<i64>)`.
+- **Анти-регрессионные тесты**:
+  * Rust unit-тесты в `backend/src/api.rs` (`test_gaming_tunnel_reachability_and_target_exists`):
+    - Узел только в providers, пинг -1, alive не false: `reachable = true, latency = None`.
+    - Узел только в providers, alive = false: `reachable = false`.
+    - Узла нет нигде: `reachable = false`.
+    - `target_exists` возвращает true для узла только из провайдера.
+  * Тест 35 в наборе сквозного регрессионного тестирования `scripts/regression-tests.cjs`.
+
 ## v1.7.4 (AdGuard Home Synchronized Protection Toggle, Duplicated Tab Button & Zapret Lightning Branding)
 - **Полная двусторонняя синхронизация кнопки AdGuard Home (`Dashboard.tsx`, `AdGuard.tsx`, `api.rs`)**:
   * **Проблема**: Кнопка блокировки рекламы на главной панели переключала только устаревший флаг маршрутизации Mihomo (`adblock/toggle`), никак не влияя на реальную защиту и фильтрацию AdGuard Home на соответствующей вкладке.

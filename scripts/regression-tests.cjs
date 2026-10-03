@@ -1184,6 +1184,72 @@ runTest('34. Setup.sh SHA-256 Validation Resilience & 404 Not Found Immunity', (
   assert(buildYml.includes('xkeen-route-${{ matrix.name }}.sha256'), 'build.yml must upload .sha256 files as release artifacts');
 });
 
+// -------------------------------------------------------------
+// 35. Gaming Mode Proxy-Providers Support & Reachability (v1.7.5)
+// -------------------------------------------------------------
+runTest('35. Gaming Mode Proxy-Providers Support & Reachability (v1.7.5)', () => {
+  const apiRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/api.rs'), 'utf8');
+
+  // 1. Backend functions exist
+  assert(apiRs.includes('pub fn target_exists('), 'api.rs must define pub fn target_exists');
+  assert(apiRs.includes('pub fn tunnel_reachability('), 'api.rs must define pub fn tunnel_reachability');
+
+  // 2. apply_and_verify_gaming checks target_exists across get_proxies and get_provider_proxies
+  assert(apiRs.includes('get_provider_proxies(&tx.state.http, tx.config())'), 'apply_and_verify_gaming must query get_provider_proxies');
+  assert(apiRs.includes('!target_exists(&proxies, &providers, &target_srv)'), 'apply_and_verify_gaming must verify target_srv with target_exists');
+
+  // 3. get_gaming_status tests latency via GAMING_GROUP_NAME and resolves tunnel reachability
+  assert(apiRs.includes('routing::GAMING_GROUP_NAME, 2500, None)'), 'get_gaming_status must ping GAMING_GROUP_NAME as selector fallback');
+  assert(apiRs.includes('tunnel_reachability(proxies, providers, &node, delay)'), 'get_gaming_status must invoke tunnel_reachability');
+
+  // 4. Rust unit tests present
+  assert(apiRs.includes('fn test_gaming_tunnel_reachability_and_target_exists()'), 'api.rs must contain test_gaming_tunnel_reachability_and_target_exists');
+
+  // 5. JavaScript simulation of pure logic
+  function simTargetExists(proxies, providers, name) {
+    if (!name) return false;
+    return Boolean(proxies[name] || providers[name]);
+  }
+
+  function simTunnelReachability(proxies, providers, node, delay) {
+    if (!node) return [false, null];
+    if (node === 'DIRECT') return [true, 0];
+    const inProxies = Boolean(proxies[node]);
+    const pEntry = providers[node];
+    const inProviders = Boolean(pEntry);
+    if (!inProxies && !inProviders) return [false, null];
+    if (pEntry && pEntry.alive === false) return [false, null];
+    if (proxies[node] && proxies[node].alive === false) return [false, null];
+    if (delay > 0) return [true, delay];
+    return [true, null];
+  }
+
+  const mockProxies = { 'Static-1': { name: 'Static-1' } };
+  const mockProviders = {
+    'Prov-Alive': { name: 'Prov-Alive', alive: true },
+    'Prov-Dead': { name: 'Prov-Dead', alive: false },
+    'Prov-NoField': { name: 'Prov-NoField' },
+  };
+
+  // Node only in providers, ping -1, alive != false -> reachable: true
+  assert.deepStrictEqual(simTunnelReachability(mockProxies, mockProviders, 'Prov-Alive', -1), [true, null]);
+  assert.deepStrictEqual(simTunnelReachability(mockProxies, mockProviders, 'Prov-NoField', -1), [true, null]);
+
+  // Node only in providers, alive: false -> reachable: false
+  assert.deepStrictEqual(simTunnelReachability(mockProxies, mockProviders, 'Prov-Dead', -1), [false, null]);
+  assert.deepStrictEqual(simTunnelReachability(mockProxies, mockProviders, 'Prov-Dead', 50), [false, null]);
+
+  // Node missing everywhere -> false
+  assert.deepStrictEqual(simTunnelReachability(mockProxies, mockProviders, 'Missing', -1), [false, null]);
+  assert.deepStrictEqual(simTunnelReachability(mockProxies, mockProviders, 'Missing', 100), [false, null]);
+
+  // target_exists true for provider node
+  assert.strictEqual(simTargetExists(mockProxies, mockProviders, 'Prov-Alive'), true);
+  assert.strictEqual(simTargetExists(mockProxies, mockProviders, 'Static-1'), true);
+  assert.strictEqual(simTargetExists(mockProxies, mockProviders, 'Missing'), false);
+  assert.strictEqual(simTargetExists(mockProxies, mockProviders, ''), false);
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
 
 
