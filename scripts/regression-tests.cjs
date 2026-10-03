@@ -1250,6 +1250,62 @@ runTest('35. Gaming Mode Proxy-Providers Support & Reachability (v1.7.5)', () =>
   assert.strictEqual(simTargetExists(mockProxies, mockProviders, ''), false);
 });
 
+// 36. Selector Auto-Heal Subscription / Proxy-Providers Immunity (v1.7.6)
+runTest('36. Selector Auto-Heal Subscription / Proxy-Providers Immunity (v1.7.6)', () => {
+  function simEvaluateSelectorAutoHeal(now, all, proxiesHasKey) {
+    if (!all || all.length === 0) return null;
+    const nowValid = Boolean(now) && (all.includes(now) || proxiesHasKey(now));
+    if (nowValid) return null;
+    if (all.includes('Fallback')) return 'Fallback';
+    if (all.includes('Fastest')) return 'Fastest';
+    return all.find(x => (all.includes(x) || proxiesHasKey(x)) && x !== now) || all[0];
+  }
+
+  const rootProxies = {
+    'Fallback': { type: 'Fallback' },
+    'Fastest': { type: 'URLTest' },
+    'PROXY': { type: 'Selector' },
+  };
+  const proxiesHasKey = (k) => Object.prototype.hasOwnProperty.call(rootProxies, k);
+
+  const groupAll = ['Fallback', 'Fastest', 'ObsV-ne_dir', '🇩🇪 Германия'];
+
+  // Case 1: Subscription node present in `all`, absent in root `proxies` -> MUST NOT HEAL (return null)
+  assert.strictEqual(
+    simEvaluateSelectorAutoHeal('ObsV-ne_dir', groupAll, proxiesHasKey),
+    null,
+    'Subscription node in group all must never trigger auto-heal to Fallback'
+  );
+
+  // Case 2: Static proxy present in root `proxies` -> MUST NOT HEAL (return null)
+  assert.strictEqual(
+    simEvaluateSelectorAutoHeal('Fastest', groupAll, proxiesHasKey),
+    null,
+    'Fastest in all and root proxies must not trigger auto-heal'
+  );
+
+  // Case 3: Truly missing node deleted from subscription -> HEALS to Fallback
+  assert.strictEqual(
+    simEvaluateSelectorAutoHeal('DeletedNode', groupAll, proxiesHasKey),
+    'Fallback',
+    'Truly deleted node must heal to Fallback'
+  );
+
+  // Case 4: Truly missing node when Fallback not in all -> HEALS to Fastest
+  assert.strictEqual(
+    simEvaluateSelectorAutoHeal('DeletedNode', ['Fastest', 'ObsV-ne_dir'], proxiesHasKey),
+    'Fastest',
+    'Deleted node when Fallback absent must heal to Fastest'
+  );
+
+  // Case 5: Empty now string -> HEALS to Fallback
+  assert.strictEqual(
+    simEvaluateSelectorAutoHeal('', groupAll, proxiesHasKey),
+    'Fallback',
+    'Empty now selector must heal to Fallback'
+  );
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
 
 

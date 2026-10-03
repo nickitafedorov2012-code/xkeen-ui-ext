@@ -1104,6 +1104,37 @@ pub async fn ping_flow_servers(http: &reqwest::Client, cfg: &AppConfig, timeout_
     BTreeMap::new()
 }
 
+/// Проверяет и вычисляет исправление для селектора, если его текущий узел отсутствует или невалиден.
+/// Возвращает Some(target) если селектор нужно переключить, или None если он валиден.
+pub fn evaluate_selector_auto_heal<'a>(
+    now: &'a str,
+    all: &'a [&'a str],
+    proxies_has_key: impl Fn(&str) -> bool,
+) -> Option<&'a str> {
+    if all.is_empty() {
+        return None;
+    }
+    // Сервер считается валидным, если он не пуст И (содержится в all-списке группы ИЛИ присутствует среди корневых прокси).
+    // ВАЖНО: В Mihomo GET /proxies возвращает только статические прокси и группы.
+    // Серверы из подписок (proxy-providers) НЕ являются ключами /proxies, но всегда присутствуют в массиве all группы!
+    let now_valid = !now.is_empty() && (all.contains(&now) || proxies_has_key(now));
+    if now_valid {
+        return None;
+    }
+
+    let target = if all.contains(&"Fallback") {
+        "Fallback"
+    } else if all.contains(&"Fastest") {
+        "Fastest"
+    } else {
+        all.iter()
+            .find(|&&x| (all.contains(&x) || proxies_has_key(x)) && x != now)
+            .copied()
+            .unwrap_or(all[0])
+    };
+    Some(target)
+}
+
 /// Автоматическое восстановление зависших селекторов групп (если текущий сервер удален из подписки или переименован)
 pub async fn auto_heal_proxy_selectors(http: &reqwest::Client, cfg: &AppConfig) {
     let proxies = match get_proxies(http, cfg).await {
@@ -1124,16 +1155,13 @@ pub async fn auto_heal_proxy_selectors(http: &reqwest::Client, cfg: &AppConfig) 
             .map(|arr| arr.iter().filter_map(|x| x.as_str()).collect())
             .unwrap_or_default();
 
-        let now_valid = !now.is_empty() && proxies.contains_key(now);
-        if !now_valid && !all.is_empty() {
-            let target = if all.contains(&"Fallback") {
-                "Fallback"
-            } else if all.contains(&"Fastest") {
-                "Fastest"
-            } else {
-                all.iter().find(|&&x| proxies.contains_key(x) && x != now).copied().unwrap_or(all[0])
-            };
-
+        if let Some(target) = evaluate_selector_auto_heal(now, &all, |k| proxies.contains_key(k)) {
+            crate::log_w!(
+                "[AUTO-HEAL] Селектор '{}' ссылается на отсутствующий узел '{}'. Автоматическое переключение на '{}'",
+                name,
+                now,
+                target
+            );
             let _ = m_put(
                 http,
                 cfg,
@@ -1597,6 +1625,28 @@ mod tests {
         assert_eq!(display_name(&ru_with_flag), "Россия");
         // нормальное имя с флагом не ломается
         assert_eq!(display_name("🇩🇪 Германия"), "Германия");
+    }
+
+    #[test]
+    fn test_evaluate_selector_auto_heal_subscription_provider_protection() {
+        // Узел из подписки (proxy-provider) ObsV-ne_dir: он есть в all группы, но его нет в корневом словаре proxies
+        let now = "ObsV-ne_dir";
+        let all = ["Fallback", "Fastest", "ObsV-ne_dir", "🇩🇪 Германия"];
+        let proxies_has_key = |k: &str| k == "Fallback" || k == "Fastest" || k == "PROXY";
+
+        // Проверяем, что для subscription-узла НЕ происходит ложного срабатывания auto-heal
+        let heal = evaluate_selector_auto_heal(now, &all, proxies_has_key);
+        assert_eq!(heal, None, "Узел из подписки, присутствующий в all, не должен сбрасываться в Fallback!");
+
+        // Проверяем, что реально отсутствующий/удаленный узел переключается на Fallback
+        let missing_now = "Deleted-Node-123";
+        let heal_missing = evaluate_selector_auto_heal(missing_now, &all, proxies_has_key);
+        assert_eq!(heal_missing, Some("Fallback"));
+
+        // Если Fallback отсутствует в all, переключается на Fastest
+        let all_no_fallback = ["Fastest", "ObsV-ne_dir"];
+        let heal_no_fallback = evaluate_selector_auto_heal(missing_now, &all_no_fallback, proxies_has_key);
+        assert_eq!(heal_no_fallback, Some("Fastest"));
     }
 }
 
