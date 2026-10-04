@@ -1023,14 +1023,14 @@ runTest('30. AdGuard Home Frontend Tab, Navigation & Failsafe Diagnostics (v1.7.
   const adguardTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/AdGuard.tsx'), 'utf8');
   const typesTs = fs.readFileSync(path.resolve(__dirname, '../frontend/src/types.ts'), 'utf8');
 
-  // 1. App.tsx tab registration and #help redirection
+  // 1. App.tsx tab registration
   assert(appTsx.includes("id: 'adguard'"), 'App.tsx must register adguard tab');
-  assert(appTsx.includes("h === 'help'") && appTsx.includes("'adguard'"), 'App.tsx must redirect legacy #help to #adguard');
   assert(appTsx.includes('<AdGuard notify={notify} />'), 'App.tsx must render AdGuard view');
 
-  // 2. Header.tsx AdGuard navigation button with shield icon
+  // 2. Header.tsx Help navigation button (? icon, distinct from AdGuard tab to avoid duplication)
   assert(headerTsx.includes("data-testid=\"header-help-btn\""), 'Header.tsx must have header-help-btn');
-  assert(headerTsx.includes('title="AdGuard Home — сетевой фильтр DNS и защита от рекламы"'), 'Header.tsx must have AdGuard tooltip');
+  assert(headerTsx.includes('title="Справка, руководство пользователя и API документация"'), 'Header.tsx must have Help tooltip');
+  assert(headerTsx.includes('❓'), 'Header.tsx must have Help icon');
 
   // 3. AdGuard.tsx UI components and subtabs
   assert(adguardTsx.includes('data-testid="adguard-view"'), 'AdGuard.tsx must have adguard-view container');
@@ -1306,7 +1306,55 @@ runTest('36. Selector Auto-Heal Subscription / Proxy-Providers Immunity (v1.7.6)
   );
 });
 
+// -------------------------------------------------------------
+// 37. Xbox DNS Dedicated Tab, Antigravity Resolver Integration & AdGuard Tab Deduplication (v1.7.7)
+// -------------------------------------------------------------
+runTest('37. Xbox DNS Dedicated Tab, Antigravity Resolver Integration & AdGuard Tab Deduplication (v1.7.7)', () => {
+  const appTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/App.tsx'), 'utf8');
+  const headerTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/Header.tsx'), 'utf8');
+  const xboxDnsTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/components/XboxDns.tsx'), 'utf8');
+  const antigravityRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/antigravity.rs'), 'utf8');
+  const apiRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/api.rs'), 'utf8');
+  const mainRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/main.rs'), 'utf8');
+
+  // 1. App.tsx tab registration and rendering
+  assert(appTsx.includes("'xbox-dns'"), 'App.tsx must include xbox-dns in TabId');
+  assert(appTsx.includes("id: 'xbox-dns'"), 'App.tsx must register xbox-dns tab in TABS');
+  assert(appTsx.includes("label: '🎮 Xbox DNS'"), 'App.tsx must label xbox-dns tab as 🎮 Xbox DNS');
+  assert(appTsx.includes('<XboxDns notify={notify} />'), 'App.tsx must render XboxDns component');
+
+  // 2. AdGuard Tab Deduplication & Restored Help
+  assert(appTsx.includes("id: 'adguard'"), 'App.tsx must have dedicated adguard tab in TABS');
+  assert(appTsx.includes('<Help status={status} />'), 'App.tsx must render Help component for help tab');
+  assert(headerTsx.includes('data-testid="header-help-btn"'), 'Header.tsx must retain header-help-btn');
+  assert(headerTsx.includes('❓'), 'Header.tsx header-help-btn must use Help icon without duplicating AdGuard');
+
+  // 3. XboxDns.tsx UI features
+  assert(xboxDnsTsx.includes('data-testid="xbox-dns-view"'), 'XboxDns.tsx must contain xbox-dns-view container');
+  assert(xboxDnsTsx.includes('data-testid="xbox-dns-check-btn"'), 'XboxDns.tsx must have check DNS button');
+  assert(xboxDnsTsx.includes('data-testid="xbox-dns-download-cmd"'), 'XboxDns.tsx must have download button for fix_xbox_dns.cmd');
+  assert(xboxDnsTsx.includes('111.88.96.54'), 'XboxDns.tsx must list primary IP 111.88.96.54');
+  assert(xboxDnsTsx.includes('111.88.96.50'), 'XboxDns.tsx must list alt IP 111.88.96.50');
+  assert(xboxDnsTsx.includes('188.68.214.130'), 'XboxDns.tsx must display Selectel SNI proxy IP 188.68.214.130');
+
+  // 4. Backend Antigravity resolver integration
+  assert(antigravityRs.includes('("xbox-dns.ru", "udp", "111.88.96.54")'), 'antigravity.rs must include xbox-dns.ru in resolver_candidates');
+  assert(antigravityRs.includes('("xbox-dns.ru (alt)", "udp", "111.88.96.50")'), 'antigravity.rs must include xbox-dns.ru (alt) in resolver_candidates');
+
+  // 5. Backend Xbox DNS API endpoints
+  assert(apiRs.includes('pub async fn get_xbox_dns_status'), 'api.rs must provide get_xbox_dns_status');
+  assert(apiRs.includes('pub async fn check_xbox_dns'), 'api.rs must provide check_xbox_dns');
+  assert(apiRs.includes('pub async fn get_xbox_dns_fix_cmd'), 'api.rs must provide get_xbox_dns_fix_cmd');
+  assert(apiRs.includes('fix_xbox_dns.cmd'), 'api.rs must serve fix_xbox_dns.cmd with Content-Disposition');
+
+  // 6. Router endpoint registration in main.rs
+  assert(mainRs.includes('/api/xbox-dns/status'), 'main.rs must route /api/xbox-dns/status');
+  assert(mainRs.includes('/api/xbox-dns/check'), 'main.rs must route /api/xbox-dns/check');
+  assert(mainRs.includes('/api/xbox-dns/fix.cmd'), 'main.rs must route /api/xbox-dns/fix.cmd');
+});
+
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);
+
 
 
 

@@ -729,5 +729,40 @@ export interface AghDiagnostics {
   recommendations: string[]
 }
 
+// ==================== Xbox DNS & SmartDNS Types ====================
+export interface XboxDnsServerInfo {
+  id: string
+  name: string
+  provider: string
+  ips: string[]
+  ipv6: string[]
+  status: string
+  latency_ms?: number
+  is_recommended: boolean
+  supported_features: string[]
+}
+
+export interface XboxDnsStatusResponse {
+  active: boolean
+  servers: XboxDnsServerInfo[]
+  reverse_proxy_ips: string[]
+  targets: string[]
+  antigravity_fallback_ready: boolean
+}
+
+export interface XboxDnsCheckResult {
+  server: string
+  ip: string
+  reachable: boolean
+  latency_ms?: number
+  resolved_ips: string[]
+  error?: string
+}
+
+export interface XboxDnsCheckResponse {
+  timestamp: string
+  results: XboxDnsCheckResult[]
+}
+
 
 

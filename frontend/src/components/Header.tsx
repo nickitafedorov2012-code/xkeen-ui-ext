@@ -603,12 +603,12 @@ export default function Header({
       <div className="header-utility-actions header-actions-right">
         <button
           type="button"
-          className={`header-action-btn ${activeTab === 'adguard' || activeTab === 'help' ? 'active' : ''}`}
-          onClick={() => onSwitchTab('adguard')}
-          title="AdGuard Home — сетевой фильтр DNS и защита от рекламы"
+          className={`header-action-btn ${activeTab === 'help' ? 'active' : ''}`}
+          onClick={() => onSwitchTab('help')}
+          title="Справка, руководство пользователя и API документация"
           data-testid="header-help-btn"
         >
-          <span className="header-action-icon">🛡️</span>
+          <span className="header-action-icon">❓</span>
         </button>
 
         <button

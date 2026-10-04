@@ -322,6 +322,8 @@ impl AntigravityManager {
             ("geohide.ru", "udp", "45.155.204.190"),
             ("dns-ai.ru", "udp", "192.144.59.14"),
             ("dns-ai.ru (alt)", "udp", "94.232.43.149"),
+            ("xbox-dns.ru", "udp", "111.88.96.54"),
+            ("xbox-dns.ru (alt)", "udp", "111.88.96.50"),
         ];
 
         let mut provider_statuses = Vec::new();
@@ -711,5 +713,24 @@ mod tests {
         assert!(!is_google_ip(&Ipv4Addr::new(45, 155, 204, 190)));
         assert!(!is_google_ip(&Ipv4Addr::new(192, 168, 1, 1)));
         assert!(!is_google_ip(&Ipv4Addr::new(1, 1, 1, 1)));
+
+        // Xbox-DNS resolvers & Selectel SNI reverse-proxies
+        assert!(!is_google_ip(&Ipv4Addr::new(111, 88, 96, 54)));
+        assert!(!is_google_ip(&Ipv4Addr::new(111, 88, 96, 50)));
+        assert!(!is_google_ip(&Ipv4Addr::new(188, 68, 214, 130)));
+        assert!(!is_google_ip(&Ipv4Addr::new(188, 68, 214, 143)));
+    }
+
+    #[test]
+    fn test_xbox_dns_ip_validity() {
+        let primary_dns = Ipv4Addr::new(111, 88, 96, 54);
+        let alt_dns = Ipv4Addr::new(111, 88, 96, 50);
+        let proxy_node = Ipv4Addr::new(188, 68, 214, 130);
+
+        assert!(!primary_dns.is_loopback());
+        assert!(!primary_dns.is_unspecified());
+        assert!(!alt_dns.is_loopback());
+        assert!(!proxy_node.is_loopback());
+        assert!(!is_google_ip(&proxy_node));
     }
 }

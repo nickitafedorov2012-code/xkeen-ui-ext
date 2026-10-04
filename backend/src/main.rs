@@ -556,6 +556,10 @@ async fn main() {
         .route("/api/antigravity/check", post(api::check_antigravity))
         .route("/api/antigravity/fix.cmd", get(api::get_antigravity_fix_cmd))
         .route("/patch", get(api::get_antigravity_patch_script))
+        // Xbox DNS & SmartDNS
+        .route("/api/xbox-dns/status", get(api::get_xbox_dns_status))
+        .route("/api/xbox-dns/check", post(api::check_xbox_dns))
+        .route("/api/xbox-dns/fix.cmd", get(api::get_xbox_dns_fix_cmd))
         // Reverse-Proxy Clash API
         .route("/clash/{*path}", any(api::clash_proxy))
         // AdBlock (Блокировка рекламы)

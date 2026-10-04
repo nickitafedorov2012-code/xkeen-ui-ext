@@ -1084,6 +1084,31 @@
   * **Ежесуточная проверка в 5:00 утра:** Фоновый планировщик с защитой от рассинхронизации часов до поднятия NTP роутера (year >= 2024).
 - **Исправление установки Zapret 2.0 и Mini-Blockcheck (api.rs, Zapret.tsx)**:
 
+## v1.7.7 (Xbox DNS Dedicated Tab, Antigravity Resolver Integration & AdGuard Tab Deduplication)
+- **Выделенная вкладка Xbox DNS & SmartDNS (`frontend/src/components/XboxDns.tsx`)**:
+  * **Решение проблемы ошибки 0x80a40401**: Полная интеграция серверов `xbox-dns.ru` для обхода региональной блокировки авторизации учетных записей Microsoft/Xbox Live, доступа к каталогу Xbox Game Pass, xCloud и мультиплееру.
+  * **Пулы DNS-серверов Selectel**:
+    - Основной пул: IPv4 `111.88.96.54`, `111.88.96.55`, IPv6 `2a00:ab00:1233:26::50`.
+    - Резервный пул: IPv4 `111.88.96.50`, `111.88.96.51`, IPv6 `2a00:ab00:1233:26::51`.
+  * **Живая диагностика и замер задержки**:
+    - Эндпоинт `POST /api/xbox-dns/check` выполняет реальный UDP probe к каждому DNS-серверу с замером latency в миллисекундах и проверкой разрешения доменов на обратные SNI-прокси Selectel (`188.68.214.130`, `188.68.214.143`).
+  * **Готовый батник в 1 клик для Windows (`fix_xbox_dns.cmd`)**:
+    - Эндпоинт `GET /api/xbox-dns/fix.cmd` генерирует готовый скрипт для Windows-клиентов.
+    - Выполнен в строгой латинской кодировке ASCII (без кириллицы) с `chcp 437`, полностью защищен от повреждения кодировки (`????`) в Windows CMD/PowerShell.
+    - Поддерживает применение DNS в 1 клик на все активные сетевые адаптеры, сброс на DHCP и проверку связи.
+  * **Инструкции по настройке оборудования**:
+    - Интерактивный селектор руководств с пошаговыми инструкциями для Xbox Series X/S / One, PlayStation 5/4, Windows 10/11 и роутеров Keenetic (настройка `ip host` на реверс-прокси).
+- **Интеграция с подсистемой обхода Google Antigravity (`backend/src/antigravity.rs`)**:
+  * Серверы `xbox-dns.ru` (`111.88.96.54`) и `xbox-dns.ru (alt)` (`111.88.96.50`) добавлены в `resolver_candidates` модуля авто-восстановления Antigravity.
+  * При возникновении проблем с гео-локацией Google AI (`aistudio.google.com`, `gemini.google.com`, `generativelanguage.googleapis.com`, `daily-cloudcode-pa.googleapis.com`) Antigravity задействует обратные SNI-прокси серверов Xbox-DNS в качестве проверенного резервного источника для подмены IP.
+- **Устранение дублирования вкладки AdGuard (`frontend/src/components/Header.tsx`, `App.tsx`)**:
+  * В шапке панели кнопка `header-help-btn` возвращена к своему оригинальному назначению — Справка (`❓`), открывающая руководство пользователя и документацию API (`#help`).
+  * Вкладка AdGuard Home (`🛡️ AdGuard`) теперь располагается исключительно среди основных вкладок навигации `TABS`, устраняя визуальное дублирование и конфликт переходов.
+- **Анти-регрессионные тесты**:
+  * Тест 37 в `scripts/regression-tests.cjs`: проверка маршрутов `#xbox-dns`, `#help`, изоляции кнопки AdGuard, регистрации резолверов в `antigravity.rs` и эндпоинтов в `api.rs`.
+  * Frontend unit-тесты в `XboxDns.test.tsx` (5 тестов) и `App.test.tsx`.
+  * Rust unit-тесты `test_xbox_dns_ip_validity` и `test_xbox_dns_status_response_serialization`.
+
 ## v1.7.6 (Subscription Nodes Auto-Heal Fix & Fallback Reset Prevention)
 - **Устранение ложного сброса селекторов на Fallback (`backend/src/mihomo.rs`)**:
   * **Проблема**: При перезагрузке конфигурации ядра (`mihomo::reload_config`), вызываемой DHCP-ватчдогом при обновлении аренды IP устройств LAN или сохранении настроек, срабатывала функция `auto_heal_proxy_selectors`. В ядре Mihomo (Clash.Meta) эндпоинт `GET /proxies` возвращает только статические узлы и группы, но не содержит серверы из подписок `proxy-providers` в корневом словаре. Проверка `proxies.contains_key(now)` ошибочно считала любой активный узел из подписки (например, `ObsV-ne_dir`) «несуществующим/удаленным» и принудительно сбрасывала все селекторные группы (`PROXY`, `YouTube`, `Discord`, `Steam` и др.) на `Fallback`.

@@ -35,6 +35,9 @@ vi.mock('./components/Zapret', () => ({
 vi.mock('./components/Gaming', () => ({
   default: () => <div data-testid="gaming-view">Gaming View</div>,
 }))
+vi.mock('./components/XboxDns', () => ({
+  default: () => <div data-testid="xbox-dns-view">Xbox DNS View</div>,
+}))
 vi.mock('./components/Settings', () => ({
   default: () => <div data-testid="settings-view">Settings View</div>,
 }))
@@ -218,12 +221,22 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
     expect(container?.querySelector('[data-testid="adguard-view"]')).not.toBeNull()
   })
 
-  it('redirects #help hash to adguard view', async () => {
+  it('renders #help hash as help view without duplicating adguard', async () => {
     window.location.hash = '#help'
     await act(async () => {
       root!.render(<App />)
     })
-    expect(container?.querySelector('[data-testid="adguard-view"]')).not.toBeNull()
+    expect(container?.querySelector('[data-testid="help-view"]')).not.toBeNull()
+    expect(container?.querySelector('[data-testid="adguard-view"]')).toBeNull()
+    window.location.hash = ''
+  })
+
+  it('renders #xbox-dns hash as xbox-dns view and renders Xbox DNS tab', async () => {
+    window.location.hash = '#xbox-dns'
+    await act(async () => {
+      root!.render(<App />)
+    })
+    expect(container?.querySelector('[data-testid="xbox-dns-view"]')).not.toBeNull()
     window.location.hash = ''
   })
 })

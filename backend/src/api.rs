@@ -1,6 +1,6 @@
 use axum::extract::{ConnectInfo, Query, State};
 use axum::response::{IntoResponse, Json, Response};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{config, failover, log_e, log_i, log_w, mihomo, rci, routing, transaction::ConfigTx, AppState, VERSION};
@@ -2311,6 +2311,272 @@ pub async fn get_antigravity_fix_cmd() -> impl IntoResponse {
             ("Cache-Control", "no-cache, no-store, must-revalidate"),
         ],
         cmd,
+    )
+        .into_response()
+}
+
+// ==================== XBOX DNS & SMARTDNS ====================
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct XboxDnsServerInfo {
+    pub id: String,
+    pub name: String,
+    pub provider: String,
+    pub ips: Vec<String>,
+    pub ipv6: Vec<String>,
+    pub status: String,
+    pub latency_ms: Option<u64>,
+    pub is_recommended: bool,
+    pub supported_features: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct XboxDnsStatusResponse {
+    pub active: bool,
+    pub servers: Vec<XboxDnsServerInfo>,
+    pub reverse_proxy_ips: Vec<String>,
+    pub targets: Vec<String>,
+    pub antigravity_fallback_ready: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct XboxDnsCheckResult {
+    pub server: String,
+    pub ip: String,
+    pub reachable: bool,
+    pub latency_ms: Option<u64>,
+    pub resolved_ips: Vec<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct XboxDnsCheckResponse {
+    pub timestamp: String,
+    pub results: Vec<XboxDnsCheckResult>,
+}
+
+/// GET /api/xbox-dns/status
+pub async fn get_xbox_dns_status(State(state): State<AppState>) -> Response {
+    let ag_st = state.antigravity.get_status().await;
+    let servers = vec![
+        XboxDnsServerInfo {
+            id: "xbox-dns-primary".into(),
+            name: "xbox-dns.ru (Primary)".into(),
+            provider: "Selectel (Saint Petersburg, RU)".into(),
+            ips: vec!["111.88.96.54".into(), "111.88.96.55".into()],
+            ipv6: vec!["2a00:ab00:1233:26::50".into(), "2a00:ab00:1233:26::51".into()],
+            status: "online".into(),
+            latency_ms: None,
+            is_recommended: true,
+            supported_features: vec![
+                "Xbox Live (0x80a40401 fix)".into(),
+                "Xbox Game Pass".into(),
+                "xCloud Gaming".into(),
+                "Google AI Studio".into(),
+                "Google Gemini".into(),
+                "PlayStation Network".into(),
+            ],
+        },
+        XboxDnsServerInfo {
+            id: "xbox-dns-alt".into(),
+            name: "xbox-dns.ru (Alt Pool)".into(),
+            provider: "Selectel (Saint Petersburg, RU)".into(),
+            ips: vec!["111.88.96.50".into(), "111.88.96.51".into()],
+            ipv6: vec!["2a00:ab00:1233:26::50".into(), "2a00:ab00:1233:26::51".into()],
+            status: "online".into(),
+            latency_ms: None,
+            is_recommended: false,
+            supported_features: vec![
+                "Xbox Live (0x80a40401 fix)".into(),
+                "Xbox Game Pass".into(),
+                "Google AI Studio".into(),
+                "Google Gemini".into(),
+            ],
+        },
+        XboxDnsServerInfo {
+            id: "comss-one".into(),
+            name: "Comss.one SmartDNS".into(),
+            provider: "Comss Network".into(),
+            ips: vec!["83.220.169.155".into(), "212.109.195.93".into()],
+            ipv6: vec![],
+            status: "online".into(),
+            latency_ms: None,
+            is_recommended: false,
+            supported_features: vec![
+                "Xbox Live".into(),
+                "PlayStation Network".into(),
+                "Discord".into(),
+                "Google AI Studio".into(),
+            ],
+        },
+    ];
+
+    let resp = XboxDnsStatusResponse {
+        active: ag_st.enabled,
+        servers,
+        reverse_proxy_ips: vec!["188.68.214.130".into(), "188.68.214.143".into()],
+        targets: vec![
+            "auth.xboxlive.com".into(),
+            "xsts.auth.xboxlive.com".into(),
+            "aistudio.google.com".into(),
+            "gemini.google.com".into(),
+            "generativelanguage.googleapis.com".into(),
+            "cloudcode-pa.googleapis.com".into(),
+        ],
+        antigravity_fallback_ready: true,
+    };
+
+    Json(resp).into_response()
+}
+
+/// POST /api/xbox-dns/check
+pub async fn check_xbox_dns(State(_state): State<AppState>) -> Response {
+    let candidates = vec![
+        ("xbox-dns.ru (Primary)", "111.88.96.54"),
+        ("xbox-dns.ru (Alt)", "111.88.96.50"),
+        ("comss.one", "83.220.169.155"),
+    ];
+
+    let mut results = Vec::new();
+
+    for (name, ip) in candidates {
+        let sock_res = tokio::net::UdpSocket::bind("0.0.0.0:0").await;
+        match sock_res {
+            Ok(sock) => {
+                let target = format!("{ip}:53");
+                let query = crate::antigravity::build_dns_query("aistudio.google.com", 0x7b11);
+                let start = std::time::Instant::now();
+                if let Err(e) = sock.send_to(&query, &target).await {
+                    results.push(XboxDnsCheckResult {
+                        server: name.into(),
+                        ip: ip.into(),
+                        reachable: false,
+                        latency_ms: None,
+                        resolved_ips: Vec::new(),
+                        error: Some(e.to_string()),
+                    });
+                    continue;
+                }
+
+                let mut buf = [0u8; 1024];
+                match tokio::time::timeout(std::time::Duration::from_millis(2500), sock.recv_from(&mut buf)).await {
+                    Ok(Ok((len, _))) => {
+                        let elapsed = start.elapsed().as_millis() as u64;
+                        let ips = crate::antigravity::parse_dns_a_records(&buf[..len]);
+                        results.push(XboxDnsCheckResult {
+                            server: name.into(),
+                            ip: ip.into(),
+                            reachable: true,
+                            latency_ms: Some(elapsed),
+                            resolved_ips: ips.into_iter().map(|a| a.to_string()).collect(),
+                            error: None,
+                        });
+                    }
+                    Ok(Err(e)) => {
+                        results.push(XboxDnsCheckResult {
+                            server: name.into(),
+                            ip: ip.into(),
+                            reachable: false,
+                            latency_ms: None,
+                            resolved_ips: Vec::new(),
+                            error: Some(e.to_string()),
+                        });
+                    }
+                    Err(_) => {
+                        results.push(XboxDnsCheckResult {
+                            server: name.into(),
+                            ip: ip.into(),
+                            reachable: false,
+                            latency_ms: None,
+                            resolved_ips: Vec::new(),
+                            error: Some("DNS query timeout".into()),
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                results.push(XboxDnsCheckResult {
+                    server: name.into(),
+                    ip: ip.into(),
+                    reachable: false,
+                    latency_ms: None,
+                    resolved_ips: Vec::new(),
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    let now_str = chrono::Local::now().format("%H:%M:%S").to_string();
+    Json(XboxDnsCheckResponse {
+        timestamp: now_str,
+        results,
+    })
+    .into_response()
+}
+
+/// GET /api/xbox-dns/fix.cmd — One-click setup/reset batch script for Windows clients (Strict English ASCII)
+pub async fn get_xbox_dns_fix_cmd() -> impl IntoResponse {
+    let script_content = "@echo off\r\n\
+        setlocal EnableDelayedExpansion\r\n\
+        title Xbox DNS Setup & Diagnostic Tool - xkeen route\r\n\
+        chcp 437 >nul\r\n\
+        echo ========================================================\r\n\
+        echo    Xbox-DNS & SmartDNS Client Manager (xkeen route)    \r\n\
+        echo ========================================================\r\n\
+        echo.\r\n\
+        echo Select an action:\r\n\
+        echo   [1] Apply Xbox-DNS (Primary: 111.88.96.54, Alt: 111.88.96.55)\r\n\
+        echo   [2] Reset DNS to Automatic (DHCP)\r\n\
+        echo   [3] Test DNS Connectivity and Latency\r\n\
+        echo   [4] Exit\r\n\
+        echo.\r\n\
+        set /p choice=\"Enter choice [1-4]: \"\r\n\
+        if \"%choice%\"==\"1\" goto SET_DNS\r\n\
+        if \"%choice%\"==\"2\" goto RESET_DNS\r\n\
+        if \"%choice%\"==\"3\" goto TEST_DNS\r\n\
+        if \"%choice%\"==\"4\" goto EXIT_SCRIPT\r\n\
+        goto EXIT_SCRIPT\r\n\
+        \r\n\
+        :SET_DNS\r\n\
+        echo.\r\n\
+        echo [INFO] Applying Xbox-DNS servers to active network interfaces...\r\n\
+        powershell -NoProfile -Command \"Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ServerAddresses ('111.88.96.54','111.88.96.55'); Write-Host ('[OK] Applied Xbox-DNS to ' + $_.Name) -ForegroundColor Green }\"\r\n\
+        ipconfig /flushdns >nul\r\n\
+        echo [OK] DNS cache flushed successfully.\r\n\
+        echo [OK] Done! Xbox Live, Game Pass, and AI Studio bypass are now active.\r\n\
+        goto END_SCRIPT\r\n\
+        \r\n\
+        :RESET_DNS\r\n\
+        echo.\r\n\
+        echo [INFO] Resetting DNS servers to automatic (DHCP)...\r\n\
+        powershell -NoProfile -Command \"Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object { Set-DnsClientServerAddress -InterfaceIndex $_.ifIndex -ResetServerAddresses; Write-Host ('[OK] Reset DNS on ' + $_.Name) -ForegroundColor Green }\"\r\n\
+        ipconfig /flushdns >nul\r\n\
+        echo [OK] DNS reset to default router DHCP.\r\n\
+        goto END_SCRIPT\r\n\
+        \r\n\
+        :TEST_DNS\r\n\
+        echo.\r\n\
+        echo [INFO] Testing DNS resolution via Xbox-DNS (111.88.96.54)...\r\n\
+        powershell -NoProfile -Command \"$res = Resolve-DnsName -Name auth.xboxlive.com -Server 111.88.96.54 -QuickTimeout -ErrorAction SilentlyContinue; if ($res) { Write-Host '[OK] auth.xboxlive.com resolved successfully!' -ForegroundColor Green } else { Write-Host '[WARN] DNS query timed out' -ForegroundColor Yellow }\"\r\n\
+        powershell -NoProfile -Command \"$res = Resolve-DnsName -Name aistudio.google.com -Server 111.88.96.54 -QuickTimeout -ErrorAction SilentlyContinue; if ($res) { Write-Host '[OK] aistudio.google.com proxied via Selectel!' -ForegroundColor Green } else { Write-Host '[WARN] DNS query timed out' -ForegroundColor Yellow }\"\r\n\
+        goto END_SCRIPT\r\n\
+        \r\n\
+        :END_SCRIPT\r\n\
+        echo.\r\n\
+        pause\r\n\
+        :EXIT_SCRIPT\r\n";
+
+    (
+        [
+            ("Content-Type", "application/x-bat; charset=utf-8"),
+            (
+                "Content-Disposition",
+                "attachment; filename=\"fix_xbox_dns.cmd\"",
+            ),
+            ("Cache-Control", "no-cache, no-store, must-revalidate"),
+        ],
+        script_content,
     )
         .into_response()
 }
@@ -9227,6 +9493,35 @@ mod tests {
         let (reachable_direct, latency_direct) = tunnel_reachability(&proxies, &providers, "DIRECT", -1);
         assert!(reachable_direct);
         assert_eq!(latency_direct, Some(0));
+    }
+
+    #[test]
+    fn test_xbox_dns_status_response_serialization() {
+        let resp = XboxDnsStatusResponse {
+            active: true,
+            servers: vec![
+                XboxDnsServerInfo {
+                    id: "xbox-dns-primary".into(),
+                    name: "xbox-dns.ru (Primary)".into(),
+                    provider: "Selectel".into(),
+                    ips: vec!["111.88.96.54".into(), "111.88.96.55".into()],
+                    ipv6: vec!["2a00:ab00:1233:26::50".into()],
+                    status: "online".into(),
+                    latency_ms: Some(15),
+                    is_recommended: true,
+                    supported_features: vec!["Xbox Live".into(), "AI Studio".into()],
+                },
+            ],
+            reverse_proxy_ips: vec!["188.68.214.130".into(), "188.68.214.143".into()],
+            targets: vec!["auth.xboxlive.com".into(), "aistudio.google.com".into()],
+            antigravity_fallback_ready: true,
+        };
+
+        let json_str = serde_json::to_string(&resp).expect("Serialization must succeed");
+        assert!(json_str.contains("111.88.96.54"));
+        assert!(json_str.contains("188.68.214.130"));
+        assert!(json_str.contains("auth.xboxlive.com"));
+        assert!(json_str.contains("antigravity_fallback_ready"));
     }
 }
 
