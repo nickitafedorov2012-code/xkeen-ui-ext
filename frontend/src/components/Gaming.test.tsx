@@ -430,13 +430,13 @@ describe('Gaming Component', () => {
     })
   })
 
-  it('always enforces compatibility mode when main button is clicked', async () => {
-    const knownStatus: GamingStatus = {
+  it('activates currently selected preset when main button is clicked', async () => {
+    const bypassStatus: GamingStatus = {
       ...mockStatus,
       config: {
         ...mockStatus.config,
         enabled: false,
-        mode: 'known_services',
+        mode: 'bypass_ru',
         devices: [],
       },
       active_device: null,
@@ -444,14 +444,14 @@ describe('Gaming Component', () => {
     }
 
     vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
-      if (path === 'gaming/status') return Promise.resolve(knownStatus)
+      if (path === 'gaming/status') return Promise.resolve(bypassStatus)
       if (path === 'servers') return Promise.resolve({ proxies: [] })
       if (path === 'devices') {
         return Promise.resolve({
           devices: [
             {
               mac: '11:22:33:44:55:66',
-              name: 'My-Console',
+              name: 'Gaming-Rig',
               ip: '192.168.2.205',
               policy: 'default',
               policy_name: '',
@@ -475,9 +475,8 @@ describe('Gaming Component', () => {
       root!.render(<Gaming notify={vi.fn()} />)
     })
 
-    // The primary button should still be "Включить совместимость"
     const mainBtn = Array.from(container!.querySelectorAll('button')).find((b) =>
-      b.textContent?.includes('Включить совместимость')
+      b.textContent?.includes('Включить игровой режим')
     )
     expect(mainBtn).toBeDefined()
 
@@ -487,9 +486,115 @@ describe('Gaming Component', () => {
 
     expect(postSpy).toHaveBeenCalledWith('gaming/toggle', {
       enabled: true,
-      mode: 'compatibility',
+      mode: 'bypass_ru',
       device_mac: '11:22:33:44:55:66',
       target_server: 'Fastest',
+    })
+  })
+
+  it('supports multiple devices selection and saving per-device custom servers', async () => {
+    const multiDeviceStatus: GamingStatus = {
+      ...mockStatus,
+      config: {
+        ...mockStatus.config,
+        enabled: true,
+        mode: 'bypass_ru',
+        devices: [
+          {
+            mac: '00:11:22:33:44:55',
+            name: 'PC-1',
+            ip: '192.168.2.10',
+            enabled: true,
+            server: 'Germany-Node',
+          },
+          {
+            mac: 'aa:bb:cc:dd:ee:ff',
+            name: 'PS5-Console',
+            ip: '192.168.2.20',
+            enabled: true,
+            server: undefined, // uses default
+          },
+        ],
+      },
+      is_active: true,
+    }
+
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'gaming/status') return Promise.resolve(multiDeviceStatus)
+      if (path === 'servers') {
+        return Promise.resolve({
+          proxies: [
+            { id: 'Finland-Fastest', name: 'Finland VLESS', ping_ms: 38 },
+            { id: 'Germany-Node', name: 'Germany Shadowsocks', ping_ms: 55 },
+          ],
+        })
+      }
+      if (path === 'devices') {
+        return Promise.resolve({
+          devices: [
+            {
+              mac: '00:11:22:33:44:55',
+              name: 'PC-1',
+              ip: '192.168.2.10',
+              policy: 'default',
+              policy_name: '',
+              online: true,
+              interface: 'br0',
+              is_current_device: true,
+              rxbytes: 0,
+              txbytes: 0,
+              speed_limit_kbps: 0,
+              current_server: '',
+            },
+            {
+              mac: 'aa:bb:cc:dd:ee:ff',
+              name: 'PS5-Console',
+              ip: '192.168.2.20',
+              policy: 'default',
+              policy_name: '',
+              online: true,
+              interface: 'br0',
+              is_current_device: false,
+              rxbytes: 0,
+              txbytes: 0,
+              speed_limit_kbps: 0,
+              current_server: '',
+            },
+          ],
+        })
+      }
+      return Promise.reject(new Error('not mocked'))
+    })
+
+    const saveSpy = vi.spyOn(api, 'apiPost').mockResolvedValue({ success: true })
+
+    await act(async () => {
+      root!.render(<Gaming notify={vi.fn()} />)
+    })
+
+    // Verify both devices rendered
+    expect(container?.innerHTML).toContain('PC-1')
+    expect(container?.innerHTML).toContain('PS5-Console')
+    expect(container?.innerHTML).toContain('2 активно')
+
+    // Find save button and click
+    const saveBtn = Array.from(container!.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('Сохранить и применить')
+    )
+    expect(saveBtn).toBeDefined()
+
+    await act(async () => {
+      saveBtn?.click()
+    })
+
+    expect(saveSpy).toHaveBeenCalledWith('gaming/save', {
+      gaming: expect.objectContaining({
+        mode: 'bypass_ru',
+        devices: expect.arrayContaining([
+          expect.objectContaining({ mac: '00:11:22:33:44:55', server: 'Germany-Node' }),
+          expect.objectContaining({ mac: 'aa:bb:cc:dd:ee:ff' }),
+        ]),
+      }),
     })
   })
 })

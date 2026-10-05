@@ -341,7 +341,7 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
                 let cfg = state.config.read().await;
                 (
                     cfg.gaming.enabled,
-                    cfg.gaming.mode == config::GamingMode::Compatibility,
+                    cfg.gaming.mode == config::GamingMode::Compatibility || cfg.gaming.mode == config::GamingMode::BypassRu,
                     !cfg.gaming.devices.is_empty(),
                 )
             };
@@ -848,8 +848,8 @@ pub fn spawn_smart_gaming_monitor(state: AppState) {
 
             if found_non_ignored {
                 last_active_instant = Some(std::time::Instant::now());
-                if !cfg.gaming.enabled || cfg.gaming.mode != config::GamingMode::Compatibility {
-                    // Включаем режим совместимости только если выбрано игровое устройство с IP
+                if !cfg.gaming.enabled || (cfg.gaming.mode != config::GamingMode::Compatibility && cfg.gaming.mode != config::GamingMode::BypassRu) {
+                    // Включаем игровой режим только если выбрано игровое устройство с IP
                     if !active_dev_ip.is_empty() {
                         log_i!(
                             "[SMART-GAMING] 🎮 Обнаружено игровое подключение ({}) на {} — автоматическое включение Режима совместимости!",

@@ -498,14 +498,15 @@ export interface TaskManagerSnapshot {
   processes: ProcessInfo[]
 }
 
-export type GamingMode = 'compatibility' | 'smart_split' | 'known_services'
+export type GamingMode = 'compatibility' | 'bypass_ru' | 'smart_split' | 'known_services'
 
 export interface GamingDevice {
   mac: string
   ip: string
-  ipv6: string[]
+  ipv6?: string[]
   name: string
   enabled: boolean
+  server?: string
 }
 
 export interface GamingPlatforms {
@@ -574,6 +575,8 @@ export interface GamingRealConnection {
   rule: string
   download: number
   upload: number
+  device_name?: string
+  device_ip?: string
 }
 
 export interface GamingStatus {
@@ -586,6 +589,7 @@ export interface GamingStatus {
   udp_interception?: boolean
   ipv6_status?: GamingIpv6Status
   active_device?: GamingDevice | null
+  active_devices?: GamingDevice[]
   real_connections?: GamingRealConnection[]
   recent_gaming_conns?: RecentGamingConn[]
   verification_error?: string | null

@@ -337,6 +337,7 @@ impl Default for GamingPlatforms {
 #[serde(rename_all = "snake_case")]
 pub enum GamingMode {
     Compatibility,
+    BypassRu,
     SmartSplit,
     KnownServices,
 }

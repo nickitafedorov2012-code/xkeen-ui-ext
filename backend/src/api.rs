@@ -8326,7 +8326,7 @@ async fn apply_and_verify_gaming(
 ) -> Result<(), String> {
     if tx.config().gaming.enabled {
         // 1. По нажатию кнопки получаем актуальный IP устройства по MAC через Keenetic RCI
-        if tx.config().gaming.mode == config::GamingMode::Compatibility {
+        if tx.config().gaming.mode == config::GamingMode::Compatibility || tx.config().gaming.mode == config::GamingMode::BypassRu {
             let policies = rci::get_policies(&tx.state.http, tx.config()).await.unwrap_or_default();
             if let Ok(devices) = rci::get_devices(&tx.state.http, tx.config(), &policies, "").await {
                 let has_explicit_enabled = tx.config().gaming.devices.iter().any(|d| d.enabled);
@@ -8354,17 +8354,16 @@ async fn apply_and_verify_gaming(
             }
 
             let has_explicit_enabled = tx.config().gaming.devices.iter().any(|d| d.enabled);
-            let active = tx.config().gaming.devices.iter().find(|d| {
+            let active_devices: Vec<_> = tx.config().gaming.devices.iter().filter(|d| {
                 if has_explicit_enabled { d.enabled } else { tx.config().gaming.devices.len() == 1 }
-            });
-            match active {
-                Some(dev) if dev.ip.trim().is_empty() => {
+            }).collect();
+            if active_devices.is_empty() {
+                return Err("Не выбрано устройство для игрового режима. Выберите устройство в списке.".to_string());
+            }
+            for dev in active_devices {
+                if dev.ip.trim().is_empty() {
                     return Err(format!("Устройство '{}' (MAC {}) не имеет назначенного IP адреса в сети роутера", dev.name, dev.mac));
                 }
-                None => {
-                    return Err("Не выбрано устройство для режима совместимости. Выберите устройство в списке.".to_string());
-                }
-                _ => {}
             }
         }
 
@@ -8426,16 +8425,16 @@ async fn apply_and_verify_gaming(
         }
 
         // Дополнительная верификация правил для режима совместимости
-        if tx.config().gaming.mode == config::GamingMode::Compatibility {
+        if tx.config().gaming.mode == config::GamingMode::Compatibility || tx.config().gaming.mode == config::GamingMode::BypassRu {
             let has_explicit_enabled = tx.config().gaming.devices.iter().any(|d| d.enabled);
-            let active_ip = tx.config().gaming.devices.iter().find(|d| {
+            let active_ips: Vec<String> = tx.config().gaming.devices.iter().filter(|d| {
                 if has_explicit_enabled { d.enabled } else { tx.config().gaming.devices.len() == 1 }
-            }).map(|d| d.ip.clone());
-            if let Some(active_ip) = active_ip {
-                let expected_cidr = format!("SRC-IP-CIDR,{}/32", active_ip);
+            }).map(|d| d.ip.clone()).collect();
+            for ip in active_ips {
+                let expected_cidr = format!("SRC-IP-CIDR,{}/32", ip);
                 if !new_yaml.contains(&expected_cidr) {
                     let _ = tx.rollback().await;
-                    return Err(format!("Маршрутное правило для {} не сформировано. Прежние настройки возвращены.", active_ip));
+                    return Err(format!("Маршрутное правило для {} не сформировано. Прежние настройки возвращены.", ip));
                 }
             }
         }
@@ -8505,58 +8504,58 @@ pub async fn get_gaming_status(State(state): State<AppState>) -> Response {
     // 3. Статус перехвата TCP / UDP / IPv6
     let (tcp_ok, udp_ok, ipv6_ok) = check_gaming_interception(&cfg).await;
 
-    // 4. Активное игровое устройство и его реальный IP
+    // 4. Активные игровые устройства и их реальные IP
     let has_explicit_enabled = cfg.gaming.devices.iter().any(|d| d.enabled);
-    let active_device = cfg.gaming.devices.iter().find(|d| {
+    let active_devices: Vec<config::GamingDevice> = cfg.gaming.devices.iter().filter(|d| {
         if has_explicit_enabled { d.enabled } else { cfg.gaming.devices.len() == 1 }
-    }).cloned();
+    }).cloned().collect();
+    let active_device = active_devices.first().cloned();
 
-    // 5. Реальные соединения устройства через Mihomo (/connections)
+    // 5. Реальные соединения устройств через Mihomo (/connections)
     let mut real_connections = Vec::new();
-    if let Some(ref dev) = active_device {
-        if !dev.ip.is_empty() {
-            if let Ok(val) = mihomo::m_get(&state.http, &cfg, "/connections").await {
-                if let Some(conns) = val.get("connections").and_then(|c| c.as_array()) {
-                    for c in conns {
-                        let src = c.get("metadata").and_then(|m| m.get("sourceIP")).and_then(|s| s.as_str()).unwrap_or("");
-                        let matches_device = src == dev.ip || dev.ipv6.iter().any(|v6| v6 == src);
-                        if matches_device {
-                            let host = c.get("metadata").and_then(|m| m.get("host")).and_then(|h| h.as_str()).unwrap_or("");
-                            let dest_ip = c.get("metadata").and_then(|m| m.get("destinationIP")).and_then(|d| d.as_str()).unwrap_or("");
-                            let dest_port = c.get("metadata")
-                                .and_then(|m| m.get("destinationPort"))
-                                .map(|p| {
-                                    if let Some(s) = p.as_str() {
-                                        s.to_string()
-                                    } else if let Some(n) = p.as_u64() {
-                                        n.to_string()
-                                    } else {
-                                        String::new()
-                                    }
-                                })
-                                .unwrap_or_default();
-                            let net = c.get("metadata").and_then(|m| m.get("network")).and_then(|n| n.as_str()).unwrap_or("TCP");
-                            let rule = c.get("rule").and_then(|r| r.as_str()).unwrap_or("");
-                            let chains = c.get("chains").and_then(|ch| ch.as_array())
-                                .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect::<Vec<_>>())
-                                .unwrap_or_default();
-                            let dl = c.get("download").and_then(|v| v.as_u64()).unwrap_or(0);
-                            let ul = c.get("upload").and_then(|v| v.as_u64()).unwrap_or(0);
+    if !active_devices.is_empty() {
+        if let Ok(val) = mihomo::m_get(&state.http, &cfg, "/connections").await {
+            if let Some(conns) = val.get("connections").and_then(|c| c.as_array()) {
+                for c in conns {
+                    let src = c.get("metadata").and_then(|m| m.get("sourceIP")).and_then(|s| s.as_str()).unwrap_or("");
+                    if let Some(matched_dev) = active_devices.iter().find(|d| src == d.ip || d.ipv6.iter().any(|v6| v6 == src)) {
+                        let host = c.get("metadata").and_then(|m| m.get("host")).and_then(|h| h.as_str()).unwrap_or("");
+                        let dest_ip = c.get("metadata").and_then(|m| m.get("destinationIP")).and_then(|d| d.as_str()).unwrap_or("");
+                        let dest_port = c.get("metadata")
+                            .and_then(|m| m.get("destinationPort"))
+                            .map(|p| {
+                                if let Some(s) = p.as_str() {
+                                    s.to_string()
+                                } else if let Some(n) = p.as_u64() {
+                                    n.to_string()
+                                } else {
+                                    String::new()
+                                }
+                            })
+                            .unwrap_or_default();
+                        let net = c.get("metadata").and_then(|m| m.get("network")).and_then(|n| n.as_str()).unwrap_or("TCP");
+                        let rule = c.get("rule").and_then(|r| r.as_str()).unwrap_or("");
+                        let chains = c.get("chains").and_then(|ch| ch.as_array())
+                            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect::<Vec<_>>())
+                            .unwrap_or_default();
+                        let dl = c.get("download").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let ul = c.get("upload").and_then(|v| v.as_u64()).unwrap_or(0);
 
-                            real_connections.push(json!({
-                                "id": c.get("id").and_then(|i| i.as_str()).unwrap_or(""),
-                                "host": if !host.is_empty() { host } else { dest_ip },
-                                "destination": format!("{dest_ip}:{dest_port}"),
-                                "network": net.to_uppercase(),
-                                "chains": chains,
-                                "rule": rule,
-                                "download": dl,
-                                "upload": ul,
-                            }));
+                        real_connections.push(json!({
+                            "id": c.get("id").and_then(|i| i.as_str()).unwrap_or(""),
+                            "host": if !host.is_empty() { host } else { dest_ip },
+                            "destination": format!("{dest_ip}:{dest_port}"),
+                            "network": net.to_uppercase(),
+                            "chains": chains,
+                            "rule": rule,
+                            "download": dl,
+                            "upload": ul,
+                            "device_name": matched_dev.name,
+                            "device_ip": matched_dev.ip,
+                        }));
 
-                            if real_connections.len() >= 20 {
-                                break;
-                            }
+                        if real_connections.len() >= 30 {
+                            break;
                         }
                     }
                 }
@@ -8576,22 +8575,33 @@ pub async fn get_gaming_status(State(state): State<AppState>) -> Response {
             verification_error = Some("Маршрутные правила не найдены в config.yaml ядра Mihomo".to_string());
         } else {
             match cfg.gaming.mode {
-                config::GamingMode::Compatibility => {
-                    if let Some(ref dev) = active_device {
-                        if dev.ip.is_empty() {
-                            verification_error = Some(format!("Устройство '{}' не имеет активного IP адреса", dev.name));
-                        } else {
-                            let expected_cidr = format!("SRC-IP-CIDR,{}/32,{}", dev.ip, routing::GAMING_GROUP_NAME);
-                            if !yaml_content.contains(&expected_cidr) {
-                                verification_error = Some(format!("Приоритетный маршрут для {} отсутствует в config.yaml", dev.ip));
-                            } else if !tunnel_reachable && target_srv != "DIRECT" {
+                config::GamingMode::Compatibility | config::GamingMode::BypassRu => {
+                    if active_devices.is_empty() {
+                        verification_error = Some("Не выбрано устройство для игрового режима".to_string());
+                    } else {
+                        let mut all_ok = true;
+                        for dev in &active_devices {
+                            if dev.ip.is_empty() {
+                                verification_error = Some(format!("Устройство '{}' не имеет активного IP адреса", dev.name));
+                                all_ok = false;
+                                break;
+                            } else {
+                                let target = dev.server.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or(routing::GAMING_GROUP_NAME);
+                                let expected_cidr = format!("SRC-IP-CIDR,{}/32,{}", dev.ip, target);
+                                if !yaml_content.contains(&expected_cidr) {
+                                    verification_error = Some(format!("Приоритетный маршрут для {} отсутствует в config.yaml", dev.ip));
+                                    all_ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if all_ok {
+                            if !tunnel_reachable && target_srv != "DIRECT" {
                                 verification_error = Some(format!("Игровой туннель '{}' недоступен", target_srv));
                             } else {
                                 is_active = true;
                             }
                         }
-                    } else {
-                        verification_error = Some("Не выбрано устройство для режима совместимости".to_string());
                     }
                 }
                 config::GamingMode::KnownServices | config::GamingMode::SmartSplit => {
@@ -8624,12 +8634,13 @@ pub async fn get_gaming_status(State(state): State<AppState>) -> Response {
         "udp_interception": udp_ok,
         "ipv6_status": {
             "supported": ipv6_ok,
-            "active": ipv6_ok && active_device.as_ref().map_or(false, |d| d.ipv6.iter().any(|v| !v.to_lowercase().starts_with("fe80:") && !v.starts_with("::1"))),
-            "addresses": active_device.as_ref().map(|d| {
-                d.ipv6.iter().filter(|v| !v.to_lowercase().starts_with("fe80:") && !v.starts_with("::1")).cloned().collect::<Vec<_>>()
-            }).unwrap_or_default(),
+            "active": ipv6_ok && active_devices.iter().any(|d| d.ipv6.iter().any(|v| !v.to_lowercase().starts_with("fe80:") && !v.starts_with("::1"))),
+            "addresses": active_devices.iter().flat_map(|d| {
+                d.ipv6.iter().filter(|v| !v.to_lowercase().starts_with("fe80:") && !v.starts_with("::1")).cloned()
+            }).collect::<Vec<_>>(),
         },
         "active_device": active_device,
+        "active_devices": active_devices,
         "real_connections": real_connections,
         "recent_gaming_conns": recent_gaming_conns,
         "verification_error": verification_error,
@@ -8728,8 +8739,6 @@ pub async fn toggle_gaming(
         Ok(tx) => tx,
         Err(e) => return api_err(e),
     };
-    tx.config_mut().gaming.enabled = body.enabled;
-
     if let Some(mode) = body.mode {
         tx.config_mut().gaming.mode = mode;
     }
@@ -8746,8 +8755,6 @@ pub async fn toggle_gaming(
                 if d.mac.eq_ignore_ascii_case(&mac_trimmed) {
                     d.enabled = body.enabled;
                     found = true;
-                } else if body.enabled {
-                    d.enabled = false;
                 }
             }
             if !found && body.enabled {
@@ -8760,7 +8767,11 @@ pub async fn toggle_gaming(
                     server: None,
                 });
             }
+            let has_active = tx.config().gaming.devices.iter().any(|d| d.enabled);
+            tx.config_mut().gaming.enabled = has_active;
         }
+    } else {
+        tx.config_mut().gaming.enabled = body.enabled;
     }
 
     if let Err(e) = apply_and_verify_gaming(&mut tx).await {
