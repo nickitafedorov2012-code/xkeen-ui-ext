@@ -534,7 +534,7 @@ pub async fn repair_flow(State(state): State<AppState>) -> Response {
     }
 
     // 5. Сброс всех активных соединений ядра
-    mihomo::close_all_connections(&state.http, &cfg).await;
+    let _ = mihomo::close_all_connections(&state.http, &cfg).await;
 
     api_ok(json!({
         "success": true,
