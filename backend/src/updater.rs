@@ -743,8 +743,8 @@ pub async fn mihomo_releases(State(state): State<AppState>) -> Response {
     let arch = detect_mihomo_arch().await;
 
     // Определяем текущую установленную версию Mihomo
-    let current_ver = crate::mihomo::get_version(&state.http, &cfg).await.unwrap_or_default();
-    let full_ver = current_ver.clone();
+    let mut current_ver = crate::mihomo::get_version(&state.http, &cfg).await.unwrap_or_default();
+    let mut full_ver = current_ver.clone();
 
     #[cfg(unix)]
     {

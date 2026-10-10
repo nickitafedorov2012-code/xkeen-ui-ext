@@ -200,9 +200,9 @@ fn get_wan_interfaces() -> Vec<String> {
 }
 
 /// Чтение счетчиков байт WAN-интерфейсов из /proc/net/dev
-fn read_wan_bytes(_wan_ifaces: &[String]) -> (u64, u64) {
-    let rx = 0u64;
-    let tx = 0u64;
+fn read_wan_bytes(wan_ifaces: &[String]) -> (u64, u64) {
+    let mut rx = 0u64;
+    let mut tx = 0u64;
     #[cfg(target_os = "linux")]
     if let Ok(content) = std::fs::read_to_string("/proc/net/dev") {
         for line in content.lines().skip(2) {
