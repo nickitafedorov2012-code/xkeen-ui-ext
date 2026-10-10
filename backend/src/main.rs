@@ -410,6 +410,20 @@ async fn main() {
         }
     });
 
+    // Синхронизация режима игровой совместимости (iptables full tunnel) при старте панели
+    let gaming_sync_state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(7)).await;
+        let cfg = gaming_sync_state.config.read().await;
+        if cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility {
+            if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+                let redir_port = routing::parse_redir_port(&yaml).unwrap_or(5000);
+                let tproxy_port = routing::parse_tproxy_port(&yaml).unwrap_or(5001);
+                let _ = api::sync_gaming_full_tunnel(&cfg.gaming, redir_port, tproxy_port).await;
+            }
+        }
+    });
+
     // Начальная быстрая синхронизация известных бандлов IP принудительно проксируемых доменов с geo_override
     let sync_state = state.clone();
     tokio::spawn(async move {

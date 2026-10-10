@@ -1946,6 +1946,22 @@ pub fn parse_redir_port(yaml: &str) -> Option<u16> {
     None
 }
 
+/// Извлечение порта TPROXY перехвата (tproxy-port) из config.yaml Mihomo
+pub fn parse_tproxy_port(yaml: &str) -> Option<u16> {
+    for line in yaml.lines() {
+        let t = line.trim();
+        if t.starts_with("tproxy-port:") {
+            if let Some(val_str) = t.strip_prefix("tproxy-port:") {
+                let s = val_str.trim().trim_matches('\'').trim_matches('"');
+                if let Ok(p) = s.parse::<u16>() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Применение всей сохраненной в AppConfig маршрутизации к сырому YAML Mihomo.
 pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> Result<(String, usize), String> {
     let mut current = yaml.to_string();
@@ -2942,6 +2958,18 @@ rules:
 
         let yaml3 = "tproxy-port: 5000\n";
         assert_eq!(parse_redir_port(yaml3), None);
+    }
+
+    #[test]
+    fn test_parse_tproxy_port() {
+        let yaml1 = "tproxy-port: 5001\nport: 7890\n";
+        assert_eq!(parse_tproxy_port(yaml1), Some(5001));
+
+        let yaml2 = "tproxy-port: '5005'\n";
+        assert_eq!(parse_tproxy_port(yaml2), Some(5005));
+
+        let yaml3 = "redir-port: 5000\n";
+        assert_eq!(parse_tproxy_port(yaml3), None);
     }
 }
 

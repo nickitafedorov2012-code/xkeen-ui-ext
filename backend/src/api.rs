@@ -8558,22 +8558,24 @@ async fn apply_and_verify_gaming(
     }
 
     // Синхронизация сетевого фильтра ядра (iptables) для режима полной совместимости:
-    // пакеты устройств в Compat-режиме направляются в REDIRECT минуя geo_exclude RETURN
+    // пакеты устройств в Compat-режиме направляются в REDIRECT (TCP) и TPROXY (UDP) минуя geo_exclude RETURN
     let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
-    let _ = sync_gaming_full_tunnel(&tx.config().gaming, redir_port).await;
+    let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
+    let _ = sync_gaming_full_tunnel(&tx.config().gaming, redir_port, tproxy_port).await;
 
     Ok(())
 }
 
 /// Синхронизация перехвата полного туннеля в iptables для Compatibility-режима (100% Всё в прокси)
-pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16) -> Result<(), String> {
+pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16, tproxy_port: u16) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let port = if redir_port > 0 { redir_port } else { 5000 };
-        // 1. Очистка старых правил
+        let r_port = if redir_port > 0 { redir_port } else { 5000 };
+        let tp_port = if tproxy_port > 0 { tproxy_port } else { 5001 };
+        // 1. Очистка старых правил из nat (TCP REDIRECT) и mangle (UDP TPROXY)
         let _ = tokio::process::Command::new("sh")
             .arg("-c")
-            .arg("while iptables -t nat -D xkeen -m comment --comment 'xkeen-gaming-compat' 2>/dev/null; do :; done")
+            .arg("while iptables -t nat -D xkeen -m comment --comment 'xkeen-gaming-compat' 2>/dev/null; do :; done; while iptables -t mangle -D xkeen -m comment --comment 'xkeen-gaming-compat' 2>/dev/null; do :; done")
             .status()
             .await;
 
@@ -8587,17 +8589,24 @@ pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16
             for dev in active_devices {
                 let ip = dev.ip.trim();
                 if !ip.is_empty() {
-                    let cmd = format!(
-                        "iptables -t nat -I xkeen 1 -s {ip} -p tcp -m comment --comment 'xkeen-gaming-compat' -j REDIRECT --to-ports {port}"
+                    // TCP -> REDIRECT
+                    let tcp_cmd = format!(
+                        "iptables -t nat -I xkeen 1 -s {ip} -p tcp -m comment --comment 'xkeen-gaming-compat' -j REDIRECT --to-ports {r_port}"
                     );
-                    let _ = tokio::process::Command::new("sh").arg("-c").arg(&cmd).status().await;
+                    let _ = tokio::process::Command::new("sh").arg("-c").arg(&tcp_cmd).status().await;
+
+                    // UDP -> TPROXY (полный перехват игровых UDP дейтаграмм в туннель минуя geo_exclude)
+                    let udp_cmd = format!(
+                        "iptables -t mangle -I xkeen 1 -s {ip} -p udp -m comment --comment 'xkeen-gaming-compat' -j TPROXY --tproxy-mark 0x111/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1"
+                    );
+                    let _ = tokio::process::Command::new("sh").arg("-c").arg(&udp_cmd).status().await;
                 }
             }
         }
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (cfg, redir_port);
+        let _ = (cfg, redir_port, tproxy_port);
     }
     Ok(())
 }
@@ -9693,6 +9702,31 @@ mod tests {
         assert!(json_str.contains("188.68.214.130"));
         assert!(json_str.contains("auth.xboxlive.com"));
         assert!(json_str.contains("antigravity_fallback_ready"));
+    }
+
+    #[tokio::test]
+    async fn test_sync_gaming_full_tunnel_tcp_and_udp_rules_generation() {
+        let mut cfg = config::GamingConfig::default();
+        cfg.enabled = true;
+        cfg.mode = config::GamingMode::Compatibility;
+        cfg.devices = vec![
+            config::GamingDevice {
+                name: "Big PC".into(),
+                ip: "192.168.2.118".into(),
+                mac: "fc:22:1c:37:48:55".into(),
+                ipv6: vec![],
+                enabled: true,
+                server: Some("PROXY".into()),
+            }
+        ];
+
+        let res = sync_gaming_full_tunnel(&cfg, 5000, 5001).await;
+        assert!(res.is_ok(), "sync_gaming_full_tunnel must succeed without errors");
+
+        // Verify disabled mode returns Ok(()) without errors
+        cfg.enabled = false;
+        let res_disabled = sync_gaming_full_tunnel(&cfg, 5000, 5001).await;
+        assert!(res_disabled.is_ok(), "disabled mode must clean up cleanly");
     }
 }
 

@@ -872,6 +872,9 @@ pub fn spawn_smart_gaming_monitor(state: AppState) {
                                         new_cfg.gaming.target_server.trim()
                                     };
                                     let _ = mihomo::switch_group(&state.http, &new_cfg, routing::GAMING_GROUP_NAME, target_srv).await;
+                                    let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
+                                    let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
+                                    let _ = crate::api::sync_gaming_full_tunnel(&new_cfg.gaming, redir_port, tproxy_port).await;
                                 }
                             }
                         }
@@ -900,6 +903,9 @@ pub fn spawn_smart_gaming_monitor(state: AppState) {
                             if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &new_cfg) {
                                 let _ = crate::api::atomic_write_file(path, &new_yaml).await;
                                 let _ = mihomo::reload_config(&state.http, &new_cfg).await;
+                                let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
+                                let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
+                                let _ = crate::api::sync_gaming_full_tunnel(&new_cfg.gaming, redir_port, tproxy_port).await;
                             }
                         }
                     }

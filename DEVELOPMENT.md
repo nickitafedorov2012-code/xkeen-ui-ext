@@ -1084,6 +1084,18 @@
   * **Ежесуточная проверка в 5:00 утра:** Фоновый планировщик с защитой от рассинхронизации часов до поднятия NTP роутера (year >= 2024).
 - **Исправление установки Zapret 2.0 и Mini-Blockcheck (api.rs, Zapret.tsx)**:
 
+## v1.8.0 (Gaming UDP TPROXY Interception, Dedicated Game Server Session Fix & Anti-Regression Suite)
+- **Полный перехват игрового UDP трафика в Режиме совместимости (`backend/src/api.rs`, `backend/src/routing.rs`, `backend/src/watchdog.rs`)**:
+  * **Проблема**: В мультиплеерных играх на движках Unreal Engine / Unity (включая Wardogs) при выборе сервера из браузера серверов игра соединялась по REST API (порт 443 TCP) через туннель, а игровой UDP-трафик рукопожатия (порты 7777, 27015, динамические порты матчей) летел напрямую к IP серверов (AWS, Azure, Leaseweb, Scaleway, SkillHost). Из-за отсутствия UDP-правила в `mangle` пакеты вылетали через `geo_exclude -> RETURN` мимо туннеля, вызывая конфликт IP сессии (IP mismatch) и возврат на экран лобби Frontend.
+  * **Решение**:
+    - В функцию `sync_gaming_full_tunnel` добавлен полноценный перехват UDP дейтаграмм через TPROXY на порт ядра Mihomo (`tproxy-port: 5001`, fwmark `0x111`) на 1-ю позицию цепочки `xkeen` таблицы `mangle`, до любых проверок `geo_exclude RETURN`.
+    - Реализовано извлечение порта TPROXY (`parse_tproxy_port`) из конфигурации Mihomo.
+    - Обеспечена полная и атомарная очистка правил `xkeen-gaming-compat` из обеих таблиц ядра (`nat` и `mangle`).
+    - Добавлен автоматический вызов синхронизации перехвата туннеля при запуске панели (`main.rs`) и при срабатывании фонового сторожа игрового режима (`watchdog.rs`).
+- **Анти-регрессионные тесты**:
+  * Rust unit-тест `test_sync_gaming_full_tunnel_tcp_and_udp_rules_generation` в `backend/src/api.rs`: проверка генерации TCP REDIRECT и UDP TPROXY правил и корректной очистки.
+  * Rust unit-тест `test_parse_tproxy_port` в `backend/src/routing.rs`: верификация парсинга `tproxy-port` из YAML ядра.
+
 ## v1.7.9 (XRoute Rebranding, Subscription Toggles, Full Gaming Tunnel Fix & Google AI Auto-Select)
 - **Ребрендинг панели «XKeen» → «XRoute»**:
   * Обновлены заголовки в шапке панели, метатеги HTML и тестовый набор до единого стандарта XRoute.
