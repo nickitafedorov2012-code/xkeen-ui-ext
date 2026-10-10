@@ -1930,6 +1930,22 @@ fn extract_filter_value(trimmed: &str) -> String {
     v.strip_suffix('\'').unwrap_or(v).to_string()
 }
 
+/// Извлечение порта прозрачного перехвата (redir-port) из config.yaml Mihomo
+pub fn parse_redir_port(yaml: &str) -> Option<u16> {
+    for line in yaml.lines() {
+        let t = line.trim();
+        if t.starts_with("redir-port:") {
+            if let Some(val_str) = t.strip_prefix("redir-port:") {
+                let s = val_str.trim().trim_matches('\'').trim_matches('"');
+                if let Ok(p) = s.parse::<u16>() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Применение всей сохраненной в AppConfig маршрутизации к сырому YAML Mihomo.
 pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> Result<(String, usize), String> {
     let mut current = yaml.to_string();
@@ -2914,6 +2930,18 @@ rules:
         assert!(applied.contains("AND,((SRC-IP-CIDR,192.168.2.10/32),(GEOSITE,ru)),DIRECT"), "RU Geosite must be direct in BypassRu");
         assert!(applied.contains("AND,((SRC-IP-CIDR,192.168.2.10/32),(GEOSITE,category-gov-ru)),DIRECT"), "Gov-RU must be direct in BypassRu");
         assert!(applied.contains("SRC-IP-CIDR,192.168.2.10/32,Finland-Node"), "Remaining traffic must route to Finland-Node");
+    }
+
+    #[test]
+    fn test_parse_redir_port() {
+        let yaml1 = "redir-port: 5000\nport: 7890\n";
+        assert_eq!(parse_redir_port(yaml1), Some(5000));
+
+        let yaml2 = "redir-port: '5200'\n";
+        assert_eq!(parse_redir_port(yaml2), Some(5200));
+
+        let yaml3 = "tproxy-port: 5000\n";
+        assert_eq!(parse_redir_port(yaml3), None);
     }
 }
 

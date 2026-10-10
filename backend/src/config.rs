@@ -282,6 +282,10 @@ pub struct AppConfig {
     pub antigravity: AntigravityConfig,
     /// Выделенный сервер для Google Flow & AI сервисов (не затрагивает основной PROXY / Failover).
     pub flow_server: Option<String>,
+    /// Отключенные подписки (провайдеры): их серверы не используются и скрываются из списков.
+    pub disabled_providers: Vec<String>,
+    /// Автоматический подбор сервера для Google AI / Flow.
+    pub flow_auto_select: bool,
     /// Блокировка рекламы на роутере через Mihomo (GEOSITE,category-ads-all,REJECT).
     pub adblock_enabled: bool,
     /// Расписания работы устройств (блокировка/прокси/direct по часам).
@@ -798,6 +802,8 @@ impl Default for AppConfig {
             provider_aliases: std::collections::BTreeMap::new(),
             antigravity: AntigravityConfig::default(),
             flow_server: None,
+            disabled_providers: Vec::new(),
+            flow_auto_select: false,
             adblock_enabled: false,
             schedules: Vec::new(),
             zapret: ZapretConfig::default(),

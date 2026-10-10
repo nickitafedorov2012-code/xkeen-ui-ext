@@ -507,16 +507,18 @@ export default function Gaming({ notify }: GamingProps) {
                 <span
                   className="badge"
                   style={{
-                    background: isActuallyActive
+                    background: loading
+                      ? 'rgba(148, 163, 184, 0.2)'
+                      : isActuallyActive
                       ? 'rgba(34, 197, 94, 0.2)'
                       : cfg.enabled
                       ? 'rgba(234, 179, 8, 0.2)'
                       : 'rgba(148, 163, 184, 0.15)',
-                    color: isActuallyActive ? '#4ade80' : cfg.enabled ? '#facc15' : '#94a3b8',
+                    color: loading ? '#94a3b8' : isActuallyActive ? '#4ade80' : cfg.enabled ? '#facc15' : '#94a3b8',
                     fontWeight: 600,
                   }}
                 >
-                  {isActuallyActive ? '🟢 АКТИВЕН' : cfg.enabled ? '⚠️ МАРШРУТ НЕ ПОДТВЕРЖДЕН' : '⚪ ОТКЛЮЧЕН'}
+                  {loading ? '⏳ ПРОВЕРКА...' : isActuallyActive ? '🟢 АКТИВЕН' : cfg.enabled ? '⚠️ МАРШРУТ НЕ ПОДТВЕРЖДЕН' : '⚪ ОТКЛЮЧЕН'}
                 </span>
                 <span
                   className="badge"
@@ -566,10 +568,12 @@ export default function Gaming({ notify }: GamingProps) {
               type="button"
               className={`btn sm ${cfg.enabled ? 'btn-danger' : 'btn-primary'}`}
               onClick={() => handleToggle(!cfg.enabled)}
-              disabled={toggling}
+              disabled={loading || toggling}
               style={{ minWidth: 160, fontWeight: 600 }}
             >
-              {toggling
+              {loading
+                ? '⏳ Проверка...'
+                : toggling
                 ? '⏳ Применение...'
                 : cfg.enabled
                 ? '⏹ Выключить'

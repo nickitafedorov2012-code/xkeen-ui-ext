@@ -39,6 +39,8 @@ export default function Antigravity({ notify }: Props) {
   })
   const [switchingFlowServer, setSwitchingFlowServer] = useState(false)
   const [repairModalOpen, setRepairModalOpen] = useState(false)
+  const [autoSelectFlow, setAutoSelectFlow] = useState(false)
+  const [togglingAutoSelect, setTogglingAutoSelect] = useState(false)
 
   // Форма настроек
   const [enabled, setEnabled] = useState(true)
@@ -79,8 +81,11 @@ export default function Antigravity({ notify }: Props) {
 
       let flowSrv = ''
       try {
-        const fStatus = await apiGet<{ flow_server?: string }>('flow/status')
+        const fStatus = await apiGet<{ flow_server?: string; flow_auto_select?: boolean }>('flow/status')
         if (fStatus.flow_server) flowSrv = fStatus.flow_server
+        if (typeof fStatus.flow_auto_select === 'boolean') {
+          setAutoSelectFlow(fStatus.flow_auto_select)
+        }
       } catch {}
 
       if (!flowSrv) {
@@ -163,6 +168,25 @@ export default function Antigravity({ notify }: Props) {
       notify(e instanceof Error ? e.message : 'Ошибка переключения узла Flow', true)
     } finally {
       setSwitchingFlowServer(false)
+    }
+  }
+
+  const toggleAutoSelect = async () => {
+    setTogglingAutoSelect(true)
+    try {
+      const target = !autoSelectFlow
+      const res = await apiPost<{ enabled: boolean; best_server?: string; message: string }>('flow/auto-select', { enabled: target })
+      setAutoSelectFlow(res.enabled)
+      if (res.best_server) {
+        setSelectedFlowServer(res.best_server)
+        localStorage.setItem('xr_flow_server', res.best_server)
+      }
+      notify(res.message || (res.enabled ? 'Автоподбор сервера включен' : 'Автоподбор выключен'))
+      setTimeout(checkFlowAccess, 1000)
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка автоподбора сервера', true)
+    } finally {
+      setTogglingAutoSelect(false)
     }
   }
 
@@ -419,7 +443,51 @@ export default function Antigravity({ notify }: Props) {
                   </optgroup>
                 )}
               </select>
+              <button
+                type="button"
+                className={`btn sm ${autoSelectFlow ? 'primary' : 'ghost'}`}
+                style={{
+                  fontWeight: 600,
+                  whiteSpace: 'nowrap',
+                  background: autoSelectFlow ? 'rgba(34, 197, 94, 0.2)' : 'rgba(255, 255, 255, 0.05)',
+                  borderColor: autoSelectFlow ? 'rgba(34, 197, 94, 0.6)' : 'var(--border)',
+                  color: autoSelectFlow ? '#4ade80' : 'var(--muted)',
+                }}
+                title={autoSelectFlow ? 'Автоподбор активен: роутер пингует и выбирает чистый сервер США' : 'Включить автоматический подбор чистого и быстрого сервера США для Google AI'}
+                disabled={togglingAutoSelect}
+                onClick={toggleAutoSelect}
+              >
+                {togglingAutoSelect ? '⏳…' : autoSelectFlow ? '🤖 Авто: ВКЛ' : '🤖 Авто: ВЫКЛ'}
+              </button>
             </div>
+            {autoSelectFlow && (
+              <div style={{ fontSize: 11, color: '#4ade80', marginTop: 4 }}>
+                ✓ Роутер автоматически пингует доступные узлы и переключает на чистый валидный сервер Google AI
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Проверка конфликта с прямым режимом (DIRECT / Игровой режим) */}
+        <div style={{
+          padding: '10px 14px',
+          background: 'rgba(56, 189, 248, 0.08)',
+          border: '1px solid rgba(56, 189, 248, 0.25)',
+          borderRadius: 8,
+          marginBottom: 16,
+          fontSize: 12.5,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: 8,
+        }}>
+          <div>
+            <span style={{ fontWeight: 600, color: '#38bdf8' }}>⚡ Приоритет маршрутизации Google AI:</span>{' '}
+            <span>
+              Правила Google Flow & AI находятся в самом верху цепочки правил Mihomo (наивысший приоритет).
+              Они автоматически изолированы от прямого режима (DIRECT) и Zapret, гарантируя туннелирование трафика через выделенный AI-узел.
+            </span>
           </div>
         </div>
 

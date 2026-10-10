@@ -1054,8 +1054,15 @@ pub async fn get_diagnostics(
         } else {
             recommendations.push("Служба AdGuard Home остановлена или веб-интерфейс недоступен на порту 3000.".to_string());
         }
-    } else if !port_53_active {
+    } else if !port_53_active && cfg.dns_port == 53 {
         recommendations.push("AdGuard Home запущен, но UDP-порт DNS 53 не отвечает на запросы.".to_string());
+    }
+
+    if status.running && cfg.dns_port != 53 && !iptables_redirect_active {
+        recommendations.push(format!(
+            "Причина 0 заблокированной рекламы: AdGuard Home слушает порт {} (порт 53 занят Keenetic ndnproxy). Запросы устройств идут на 53 порт и не попадают в фильтр AdGuard. Настройте upstream в Keenetic ndnproxy на 127.0.0.1:{} или включите перенаправление DNS в iptables.",
+            cfg.dns_port, cfg.dns_port
+        ));
     }
 
     if status.running && !status.protection_enabled {

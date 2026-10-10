@@ -268,26 +268,21 @@ const DeviceRow = memo(function DeviceRow({
         </button>
       </td>
       <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>
-        <div style={{ display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
-          <label
-            className="switch device-gaming-switch"
-            data-testid={`device-gaming-switch-${d.mac}`}
-            title={
-              gamingActive
-                ? `Игровой режим включен для ${d.name} (${d.ip}). Нажмите для отключения.`
-                : `Игровой режим выключен для ${d.name} (${d.ip}). Нажмите для включения.`
-            }
-          >
-            <input
-              type="checkbox"
-              className="device-gaming-toggle"
-              checked={Boolean(gamingActive)}
-              disabled={busy}
-              onChange={(e) => onToggleGaming?.(d.mac, d.ip, e.target.checked)}
-            />
-            <span className="slider" />
-          </label>
-        </div>
+        <button
+          type="button"
+          className={`device-gaming-btn ${gamingActive ? 'active' : 'inactive'}`}
+          data-testid={`device-gaming-btn-${d.mac}`}
+          disabled={busy}
+          onClick={() => onToggleGaming?.(d.mac, d.ip, !gamingActive)}
+          title={
+            gamingActive
+              ? `Игровой режим включен для ${d.name} (${d.ip}). Нажмите для отключения.`
+              : `Игровой режим выключен для ${d.name} (${d.ip}). Нажмите для включения.`
+          }
+        >
+          <span className="device-gaming-icon">🎮</span>
+          <span className="device-gaming-label">{gamingActive ? 'Gaming ON' : 'Gaming OFF'}</span>
+        </button>
       </td>
       <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>
         <button

@@ -110,7 +110,7 @@ export default function Devices({ notify }: Props) {
         apiGet<{ excluded_devices?: string[] }>('devices/zapret').catch(() => ({
           excluded_devices: [] as string[],
         })),
-        apiGet<{ enabled: boolean; config?: { devices?: Array<{ mac: string; enabled: boolean }> } }>('gaming/status').catch(() => null),
+        apiGet<{ is_active?: boolean; enabled?: boolean; config?: { enabled?: boolean; devices?: Array<{ mac: string; enabled: boolean }> } }>('gaming/status').catch(() => null),
       ])
       setDevices(d.devices)
       setPolicies(p.policies)
@@ -121,7 +121,8 @@ export default function Devices({ notify }: Props) {
       setExcludedZapretDevices(new Set(zDev.excluded_devices || []))
       if (gamingRes) {
         const macs = new Set<string>()
-        if (gamingRes.enabled && gamingRes.config?.devices) {
+        const isGamingActive = Boolean(gamingRes.is_active ?? gamingRes.config?.enabled ?? gamingRes.enabled)
+        if (isGamingActive && gamingRes.config?.devices) {
           for (const gd of gamingRes.config.devices) {
             if (gd.enabled) macs.add(gd.mac.toLowerCase())
           }

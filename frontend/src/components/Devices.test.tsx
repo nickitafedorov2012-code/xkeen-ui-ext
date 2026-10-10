@@ -144,15 +144,15 @@ describe('Devices Component — Per-Device Zapret DPI (Feature 3)', () => {
     expect(laptopBtn.className).toContain('active')
     expect(laptopBtn.textContent).toContain('Zapret ON')
 
-    // 2. Verify new Per-Device Gaming Mode toggle switches
-    const gamingSwitches = Array.from(
-      container?.querySelectorAll('input.device-gaming-toggle') || []
-    ) as HTMLInputElement[]
-    expect(gamingSwitches.length).toBe(2)
+    // 2. Verify new Per-Device Gaming Mode styled buttons (like Zapret)
+    const gamingButtons = Array.from(
+      container?.querySelectorAll('button.device-gaming-btn') || []
+    ) as HTMLButtonElement[]
+    expect(gamingButtons.length).toBe(2)
 
     // Toggle gaming on TV
     await act(async () => {
-      gamingSwitches[0].click()
+      gamingButtons[0].click()
     })
 
     expect(postSpy).toHaveBeenCalledWith('gaming/toggle', {

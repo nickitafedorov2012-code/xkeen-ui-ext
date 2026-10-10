@@ -46,9 +46,8 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'gaming', label: '🎮 Игры' },
   { id: 'xbox-dns', label: '🎮 Xbox DNS' },
   { id: 'google-ai', label: '🤖 Google AI' },
-  { id: 'connections', label: '🌐 Соединения' },
+  { id: 'connections', label: '🌐 Соединения & Диагностика' },
   { id: 'rules', label: '📋 Правила' },
-  { id: 'diagnostics', label: '🩺 Диагностика' },
   { id: 'adguard', label: '🛡️ AdGuard' },
 ]
 
@@ -86,6 +85,7 @@ export default function App() {
   const initial = (() => {
     const h = window.location.hash.replace('#', '')
     if (h === 'antigravity') return 'google-ai'
+    if (h === 'diagnostics') return 'connections'
     return (TABS.some((t) => t.id === h) || h === 'settings' || h === 'help' ? h : 'dashboard') as TabId
   })()
   const [tab, setTab] = useState<TabId>(initial)

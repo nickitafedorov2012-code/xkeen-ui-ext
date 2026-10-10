@@ -545,6 +545,84 @@ pub async fn repair_flow(State(state): State<AppState>) -> Response {
     }))
 }
 
+#[derive(Deserialize)]
+pub struct FlowAutoSelectReq {
+    pub enabled: Option<bool>,
+}
+
+/// POST /api/flow/auto-select — включение/выключение автоподбора сервера Google AI и автовыбор лучшего узла
+pub async fn auto_select_flow_server(
+    State(state): State<AppState>,
+    Json(req): Json<FlowAutoSelectReq>,
+) -> Response {
+    let _cfg_guard = state.config_lock.lock().await;
+    let mut mut_cfg = (**state.config.read().await).clone();
+
+    let target_enabled = req.enabled.unwrap_or(!mut_cfg.flow_auto_select);
+    mut_cfg.flow_auto_select = target_enabled;
+
+    let mut message = if target_enabled {
+        "Автоматический подбор сервера Google AI включен".to_string()
+    } else {
+        "Автоматический подбор сервера Google AI выключен".to_string()
+    };
+    let mut best_server_id: Option<String> = None;
+    let mut chosen_ping: Option<i64> = None;
+
+    if target_enabled {
+        let pings = mihomo::ping_flow_servers(&state.http, &mut_cfg, 3500).await;
+        let mut min_ping = i64::MAX;
+
+        for (name, &ping) in &pings {
+            if ping > 0 && ping < min_ping {
+                let lower = name.to_lowercase();
+                let is_us_ca = lower.contains("сша") || lower.contains("usa") || lower.contains("us ") ||
+                    lower.contains("chicago") || lower.contains("чикаго") || lower.contains("канад") ||
+                    lower.contains("canada") || lower.contains("вашингтон") || lower.contains("washington") ||
+                    lower.contains("майами") || lower.contains("miami") || lower.contains("сиэтл") ||
+                    lower.contains("seattle") || lower.contains("атланта") || lower.contains("atlanta") ||
+                    lower.contains("феникс") || lower.contains("phoenix") || lower.contains("лос-анджелес") ||
+                    lower.contains("los angeles");
+                if is_us_ca {
+                    min_ping = ping;
+                    best_server_id = Some(name.clone());
+                }
+            }
+        }
+
+        if best_server_id.is_none() {
+            for (name, &ping) in &pings {
+                if ping > 0 && ping < min_ping {
+                    min_ping = ping;
+                    best_server_id = Some(name.clone());
+                }
+            }
+        }
+
+        if let Some(ref target) = best_server_id {
+            chosen_ping = Some(min_ping);
+            if let Ok(_msg) = mihomo::switch_flow_server(&state.http, &mut_cfg, target).await {
+                mut_cfg.flow_server = Some(target.clone());
+                let _ = mihomo::close_all_connections(&state.http, &mut_cfg).await;
+                message = format!("Автоматически выбран лучший сервер для Google AI: '{target}' ({min_ping} мс)");
+            }
+        }
+    }
+
+    if let Err(e) = config::save(&state.config_path, &mut_cfg).await {
+        return api_err(format!("Ошибка сохранения: {e}"));
+    }
+    *state.config.write().await = std::sync::Arc::new(mut_cfg);
+
+    api_ok(json!({
+        "saved": true,
+        "enabled": target_enabled,
+        "best_server": best_server_id,
+        "ping_ms": chosen_ping,
+        "message": message,
+    }))
+}
+
 
 
 /// GET /api/flow/extension.zip — отдача готового запакованного расширения для Chrome/Edge
@@ -1968,6 +2046,50 @@ pub async fn rename_provider(State(state): State<AppState>, Json(req): Json<Rena
         format!("Подписка '{pid}' переименована в '{alias}'")
     };
     api_ok(json!({ "saved": true, "message": label, "provider_id": pid, "alias": alias }))
+}
+
+#[derive(Deserialize)]
+pub struct ToggleProviderReq {
+    #[serde(alias = "id")]
+    pub provider_id: String,
+    pub enabled: Option<bool>,
+}
+
+/// POST /api/providers/toggle — быстрое включение/отключение подписки
+pub async fn toggle_provider(State(state): State<AppState>, Json(req): Json<ToggleProviderReq>) -> Response {
+    let pid = req.provider_id.trim().to_string();
+    if pid.is_empty() {
+        return api_err("ID подписки не может быть пустым");
+    }
+    let _cfg_guard = state.config_lock.lock().await;
+    let mut new_cfg = (**state.config.read().await).clone();
+
+    let is_currently_disabled = new_cfg.disabled_providers.iter().any(|p| p.eq_ignore_ascii_case(&pid));
+    let target_enabled = req.enabled.unwrap_or(is_currently_disabled);
+
+    if target_enabled {
+        new_cfg.disabled_providers.retain(|p| !p.eq_ignore_ascii_case(&pid));
+    } else if !is_currently_disabled {
+        new_cfg.disabled_providers.push(pid.clone());
+    }
+
+    if let Err(e) = config::save(&state.config_path, &new_cfg).await {
+        return api_err(format!("Ошибка сохранения config.json: {e}"));
+    }
+    *state.config.write().await = std::sync::Arc::new(new_cfg.clone());
+
+    let label = if target_enabled {
+        format!("Подписка '{pid}' включена")
+    } else {
+        format!("Подписка '{pid}' отключена")
+    };
+    api_ok(json!({
+        "saved": true,
+        "message": label,
+        "provider_id": pid,
+        "enabled": target_enabled,
+        "disabled_providers": new_cfg.disabled_providers,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -8440,6 +8562,48 @@ async fn apply_and_verify_gaming(
         }
     }
 
+    // Синхронизация сетевого фильтра ядра (iptables) для режима полной совместимости:
+    // пакеты устройств в Compat-режиме направляются в REDIRECT минуя geo_exclude RETURN
+    let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
+    let _ = sync_gaming_full_tunnel(&tx.config().gaming, redir_port).await;
+
+    Ok(())
+}
+
+/// Синхронизация перехвата полного туннеля в iptables для Compatibility-режима (100% Всё в прокси)
+pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let port = if redir_port > 0 { redir_port } else { 5000 };
+        // 1. Очистка старых правил
+        let _ = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("while iptables -t nat -D xkeen -m comment --comment 'xkeen-gaming-compat' 2>/dev/null; do :; done")
+            .status()
+            .await;
+
+        // 2. Если режим активен и режим совместимости:
+        if cfg.enabled && cfg.mode == config::GamingMode::Compatibility {
+            let has_explicit_enabled = cfg.devices.iter().any(|d| d.enabled);
+            let active_devices: Vec<_> = cfg.devices.iter().filter(|d| {
+                if has_explicit_enabled { d.enabled } else { cfg.devices.len() == 1 }
+            }).collect();
+
+            for dev in active_devices {
+                let ip = dev.ip.trim();
+                if !ip.is_empty() {
+                    let cmd = format!(
+                        "iptables -t nat -I xkeen 1 -s {ip} -p tcp -m comment --comment 'xkeen-gaming-compat' -j REDIRECT --to-ports {port}"
+                    );
+                    let _ = tokio::process::Command::new("sh").arg("-c").arg(&cmd).status().await;
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (cfg, redir_port);
+    }
     Ok(())
 }
 
@@ -8620,6 +8784,7 @@ pub async fn get_gaming_status(State(state): State<AppState>) -> Response {
     let recent_gaming_conns = crate::watchdog::get_recent_gaming_conns(&cfg.gaming.ignored_game_conns);
 
     api_ok(json!({
+        "enabled": cfg.gaming.enabled,
         "config": cfg.gaming,
         "active_server": active_server,
         "domains_count": domains_count,

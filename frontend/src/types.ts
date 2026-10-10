@@ -84,6 +84,7 @@ export interface ProviderInfo {
   updated_at?: string
   url?: string
   hwid?: string
+  enabled?: boolean
 }
 
 export interface ZapretCustomEntry {

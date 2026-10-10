@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import { apiGet, apiPost, apiDelete } from '../api'
+import Diagnostics from './Diagnostics'
 
 export interface ConnectionMetadata {
   network: string
@@ -94,6 +95,7 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [search, setSearch] = useState('')
   const [sortBy, setSortBy] = useState<'download' | 'upload' | 'time'>('download')
+  const [mainView, setMainView] = useState<'connections' | 'diagnostics'>('connections')
   const [filterTab, setFilterTab] = useState<'all' | 'active' | 'proxy' | 'direct' | 'closed'>('all')
 
   // Имена устройств локальной сети (IP -> имя)
@@ -411,15 +413,39 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
 
   return (
     <div className="connections-view">
-      <div className="section-header">
+      <div className="section-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
         <div>
-          <h2>🌐 Все соединения</h2>
-          <p className="muted">
-            Мониторинг всех сетевых сессий ядра Mihomo в реальном времени: активные сокеты, история завершённых подключений,
-            передача трафика и мгновенная отправка в прокси.
+          <h2>🌐 {mainView === 'connections' ? 'Соединения и диагностика' : 'Диагностика сети'}</h2>
+          <p className="muted" style={{ margin: 0 }}>
+            {mainView === 'connections'
+              ? 'Мониторинг сетевых сессий ядра Mihomo в реальном времени и диагностика доступности узлов.'
+              : 'Проверка здоровья компонентов маршрутизации, DNS и сетевых интерфейсов роутера.'}
           </p>
         </div>
+        <div style={{ display: 'inline-flex', padding: 3, background: 'rgba(255, 255, 255, 0.05)', borderRadius: 8, border: '1px solid var(--border)' }}>
+          <button
+            type="button"
+            className={`btn sm ${mainView === 'connections' ? 'primary' : 'ghost'}`}
+            style={{ fontWeight: 600, border: 'none', borderRadius: 6 }}
+            onClick={() => setMainView('connections')}
+          >
+            🌐 Активные соединения
+          </button>
+          <button
+            type="button"
+            className={`btn sm ${mainView === 'diagnostics' ? 'primary' : 'ghost'}`}
+            style={{ fontWeight: 600, border: 'none', borderRadius: 6 }}
+            onClick={() => setMainView('diagnostics')}
+          >
+            🩺 Диагностика сети
+          </button>
+        </div>
       </div>
+
+      {mainView === 'diagnostics' ? (
+        <Diagnostics notify={notify} />
+      ) : (
+        <>
 
       {/* Метрики (плитки в 1/4 ширины) */}
       <div className="stats-grid four-col">
@@ -806,6 +832,8 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
             </form>
           </div>
         </div>
+      )}
+      </>
       )}
     </div>
   )

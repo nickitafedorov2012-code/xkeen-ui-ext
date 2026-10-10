@@ -494,6 +494,7 @@ async fn main() {
         .route("/api/servers/google-check", get(api::check_google_geo))
         .route("/api/flow/status", get(api::get_flow_status))
         .route("/api/flow/switch", post(api::switch_flow_server))
+        .route("/api/flow/auto-select", post(api::auto_select_flow_server))
         .route("/api/flow/ping", post(api::ping_flow_servers))
         .route("/api/flow/repair", post(api::repair_flow))
         .route("/api/flow/extension.zip", get(api::get_flow_extension))
@@ -533,6 +534,7 @@ async fn main() {
         .route("/api/notifications/test", post(api::test_notification))
         // Провайдеры
         .route("/api/providers", get(api::get_providers))
+        .route("/api/providers/toggle", post(api::toggle_provider))
         .route("/api/providers/rename", post(api::rename_provider))
         .route("/api/providers/update", post(api::update_provider))
         .route("/api/providers/add", post(api::add_provider))

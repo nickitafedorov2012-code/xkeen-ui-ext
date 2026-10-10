@@ -71,6 +71,7 @@ export default function Servers({ notify }: Props) {
   const [deletingSub, setDeletingSub] = useState(false)
   const [editingAliases, setEditingAliases] = useState<Record<string, string>>({})
   const [savedAliasFeedback, setSavedAliasFeedback] = useState<Record<string, boolean>>({})
+  const [togglingProvider, setTogglingProvider] = useState<string | null>(null)
   const [updatingProvider, setUpdatingProvider] = useState<string | null>(null)
   const [updatingAllProviders, setUpdatingAllProviders] = useState(false)
   const [urlVisibility, setUrlVisibility] = useState<Record<string, boolean>>({})
@@ -374,6 +375,21 @@ export default function Servers({ notify }: Props) {
     }
   }
 
+  const toggleProviderEnable = async (id: string, currentEnabled: boolean) => {
+    setTogglingProvider(id)
+    try {
+      const target = !currentEnabled
+      const res = await apiPost<{ message: string; enabled: boolean }>('providers/toggle', { id, enabled: target })
+      notify(res.message || (target ? 'Подписка включена' : 'Подписка отключена'))
+      setProviders((prev) => prev.map((p) => (p.id === id ? { ...p, enabled: target } : p)))
+      load()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка переключения подписки', true)
+    } finally {
+      setTogglingProvider(null)
+    }
+  }
+
   const updateProviderNow = async (id: string) => {
     setUpdatingProvider(id)
     try {
@@ -578,8 +594,8 @@ export default function Servers({ notify }: Props) {
                         style={{ pointerEvents: 'none' }}
                       />
                       <span className="sub-marker-dot" style={{ backgroundColor: dotColor }} />
-                      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {p.name}
+                      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: p.enabled === false ? 0.6 : 1 }}>
+                        {p.name} {p.enabled === false && <span style={{ fontSize: 10, color: 'var(--muted)' }}>(откл.)</span>}
                       </span>
                       <span className="sub-count-badge">({p.count})</span>
                     </div>
@@ -1371,8 +1387,24 @@ export default function Servers({ notify }: Props) {
                         )}
                       </div>
 
-                      {/* Кнопки обновления и удаления */}
+                      {/* Кнопки переключения, обновления и удаления */}
                       <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                        <button
+                          type="button"
+                          className={`btn sm ${p.enabled !== false ? 'primary' : 'ghost'}`}
+                          style={{
+                            fontWeight: 600,
+                            minWidth: 90,
+                            background: p.enabled !== false ? 'rgba(34, 197, 94, 0.2)' : 'rgba(255, 255, 255, 0.05)',
+                            borderColor: p.enabled !== false ? 'rgba(34, 197, 94, 0.6)' : 'var(--border)',
+                            color: p.enabled !== false ? '#4ade80' : 'var(--muted)',
+                          }}
+                          title={p.enabled !== false ? 'Отключить подписку (серверы будут скрыты)' : 'Включить подписку'}
+                          disabled={togglingProvider === p.id || deletingSub}
+                          onClick={() => toggleProviderEnable(p.id, p.enabled !== false)}
+                        >
+                          {togglingProvider === p.id ? '⏳…' : p.enabled !== false ? '● Активна' : '○ Отключена'}
+                        </button>
                         <button
                           type="button"
                           className="btn sm ghost"

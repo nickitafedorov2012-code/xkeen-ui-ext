@@ -460,7 +460,7 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
     const brandGroup = headerBar?.querySelector('.header-brand-group')
     expect(brandGroup).not.toBeNull()
     expect(brandGroup?.querySelector('.header-brand-link')).not.toBeNull()
-    expect(brandGroup?.textContent).toContain('XKeen Route')
+    expect(brandGroup?.textContent).toContain('XRoute')
 
     // 2. Group: Status card (270px, 2 rows)
     const statusGroup = headerBar?.querySelector('.header-status-group')

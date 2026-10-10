@@ -134,6 +134,9 @@ pub async fn get_provider_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Re
             if prov.get("vehicleType").and_then(|t| t.as_str()) == Some("Compatible") {
                 continue;
             }
+            if cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(pname)) {
+                continue;
+            }
             if let Some(list) = prov.get("proxies").and_then(|p| p.as_array()) {
                 for p in list {
                     if let Some(name) = p.get("name").and_then(|n| n.as_str()) {
@@ -159,6 +162,7 @@ pub struct ProviderInfo {
     pub updated_at: Option<String>,
     pub url: Option<String>,
     pub hwid: Option<String>,
+    pub enabled: bool,
 }
 
 /// Список всех подписок (proxy-providers) с метаданными и пользовательскими псевдонимами.
@@ -182,6 +186,7 @@ pub async fn get_providers_info(http: &reqwest::Client, cfg: &AppConfig) -> Resu
             let vtype = prov.get("vehicleType").and_then(|t| t.as_str()).unwrap_or("HTTP").to_string();
             let updated = prov.get("updatedAt").and_then(|u| u.as_str()).map(|s| s.to_string());
             let display_name = cfg.provider_aliases.get(pname).cloned().unwrap_or_else(|| pname.clone());
+            let is_enabled = !cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(pname));
             out.push(ProviderInfo {
                 id: pname.clone(),
                 name: display_name,
@@ -190,6 +195,7 @@ pub async fn get_providers_info(http: &reqwest::Client, cfg: &AppConfig) -> Resu
                 updated_at: updated,
                 url: urls.get(pname).cloned(),
                 hwid: hwids.get(pname).cloned(),
+                enabled: is_enabled,
             });
         }
     }
@@ -720,6 +726,21 @@ pub async fn switch_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &
         "fallback" => "Fallback".to_string(),
         _ => server_id.to_string(),
     };
+    if !cfg.disabled_providers.is_empty() {
+        if let Ok(v) = m_get(http, cfg, "/providers/proxies").await {
+            if let Some(map) = v.get("providers").and_then(|p| p.as_object()) {
+                for (pname, prov) in map {
+                    if cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(pname)) {
+                        if let Some(list) = prov.get("proxies").and_then(|p| p.as_array()) {
+                            if list.iter().any(|p| p.get("name").and_then(|n| n.as_str()) == Some(&target)) {
+                                return Err(format!("Сервер '{target}' принадлежит отключенной подписке '{pname}'"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     let proxies = get_proxies(http, cfg).await?;
     let mut groups: Vec<String> = Vec::new();
     for (name, p) in &proxies {
@@ -814,6 +835,7 @@ pub async fn get_flow_status(http: &reqwest::Client, cfg: &AppConfig) -> Result<
     Ok(json!({
         "flow_server": active_server,
         "group_name": group_found,
+        "flow_auto_select": cfg.flow_auto_select,
     }))
 }
 
@@ -1647,6 +1669,17 @@ mod tests {
         let all_no_fallback = ["Fastest", "ObsV-ne_dir"];
         let heal_no_fallback = evaluate_selector_auto_heal(missing_now, &all_no_fallback, proxies_has_key);
         assert_eq!(heal_no_fallback, Some("Fastest"));
+    }
+
+    #[test]
+    fn test_disabled_providers_filtering_logic() {
+        let mut cfg = AppConfig::default();
+        cfg.disabled_providers = vec!["sub1".to_string(), "old_provider".to_string()];
+
+        // Проверяем проверку принадлежности к отключенной подписке
+        assert!(cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case("sub1")));
+        assert!(cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case("OLD_PROVIDER")));
+        assert!(!cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case("active_sub")));
     }
 }
 

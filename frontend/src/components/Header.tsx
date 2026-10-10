@@ -416,7 +416,7 @@ export default function Header({
           }}
         >
           <BrandLogoIcon />
-          <span className="header-brand-text">XKeen Route</span>
+          <span className="header-brand-text">XRoute</span>
         </a>
       </div>
 
@@ -524,12 +524,12 @@ export default function Header({
           }}
           title={
             updateAvailable
-              ? `Доступно обновление XKeen Route до ${latestVersion}! Нажмите для установки`
-              : `Версия XKeen Route: ${appVersion}. Нажмите для управления версией`
+              ? `Доступно обновление XRoute до ${latestVersion}! Нажмите для установки`
+              : `Версия XRoute: ${appVersion}. Нажмите для управления версией`
           }
         >
           <IconBox />
-          <span className="header-pill-title">XKeen</span>
+          <span className="header-pill-title">XRoute</span>
           <span className="header-pill-subtitle">{appVersion}</span>
           {updateAvailable && (
             <span

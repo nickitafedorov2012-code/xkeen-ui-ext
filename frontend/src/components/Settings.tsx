@@ -20,6 +20,7 @@ export default function Settings({ notify, status, refresh }: Props) {
   const [directDomains, setDirectDomains] = useState('')
   const [forceDomains, setForceDomains] = useState('')
   const [autoCdns, setAutoCdns] = useState<string[]>([])
+  const [cdnsCollapsed, setCdnsCollapsed] = useState(true)
   const [savingDomains, setSavingDomains] = useState(false)
   const [scanningCdn, setScanningCdn] = useState(false)
 
@@ -976,16 +977,25 @@ export default function Settings({ notify, status, refresh }: Props) {
 
             {autoCdns.length > 0 && (
               <div style={{ marginTop: 4, padding: '8px 10px', background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.2)', borderRadius: 6, fontSize: 12 }}>
-                <div style={{ color: '#38bdf8', fontWeight: 600, marginBottom: 4 }}>
-                  ⚡ Автоматически подключенные CDN и медиа-сервера ({autoCdns.length}):
+                <div
+                  style={{ color: '#38bdf8', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', userSelect: 'none' }}
+                  onClick={() => setCdnsCollapsed((prev) => !prev)}
+                  title={cdnsCollapsed ? 'Развернуть список найденных CDN' : 'Свернуть список CDN'}
+                >
+                  <span>⚡ Автоматически подключенные CDN и медиа-сервера ({autoCdns.length})</span>
+                  <span style={{ fontSize: 12, opacity: 0.85, background: 'rgba(56, 189, 248, 0.15)', padding: '2px 8px', borderRadius: 4 }}>
+                    {cdnsCollapsed ? '▼ Развернуть' : '▲ Свернуть'}
+                  </span>
                 </div>
-                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                  {autoCdns.map((cdn) => (
-                    <span key={cdn} style={{ fontSize: 11, background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace' }}>
-                      {cdn}
-                    </span>
-                  ))}
-                </div>
+                {!cdnsCollapsed && (
+                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 8 }}>
+                    {autoCdns.map((cdn) => (
+                      <span key={cdn} style={{ fontSize: 11, background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace' }}>
+                        {cdn}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 

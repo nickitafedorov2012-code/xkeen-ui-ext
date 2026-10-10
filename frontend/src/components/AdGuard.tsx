@@ -351,7 +351,7 @@ export default function AdGuard({ notify }: AdGuardProps) {
         <div className="dash-info-group">
           <span className="dash-info-badge" title="Статус службы AdGuard Home на роутере">
             <span>🛡️ Служба AGH:</span>
-            <b>{status?.running ? 'Активна 🟢' : isInstalled ? 'Остановлена 🔴' : 'Не установлена ⚪'}</b>
+            <b>{loading && !status ? 'Проверка... ⏳' : status?.running ? 'Активна 🟢' : isInstalled ? 'Остановлена 🔴' : 'Не установлена ⚪'}</b>
             {status?.version && (
               <>
                 <span className="dash-info-sep">·</span>
@@ -368,7 +368,7 @@ export default function AdGuard({ notify }: AdGuardProps) {
             type="button"
             className="dash-info-badge"
             onClick={handleToggleProtection}
-            disabled={actionPending || !status?.running}
+            disabled={actionPending || loading || !status?.running}
             data-testid="adguard-duplicated-btn"
             title="Быстрое включение/отключение защиты AdGuard Home (дублированная кнопка с главной страницы)"
             style={{
@@ -382,7 +382,7 @@ export default function AdGuard({ notify }: AdGuardProps) {
           >
             <span>🛡️ AdGuard:</span>
             <b style={{ color: status?.protection_enabled ? '#10b981' : 'var(--text-secondary)' }}>
-              {status?.running ? (status?.protection_enabled ? 'ВКЛ 🟢' : 'ВЫКЛ ⚪') : 'ВЫКЛ ⚪'}
+              {loading && !status ? 'Проверка... ⏳' : status?.running ? (status?.protection_enabled ? 'ВКЛ 🟢' : 'ВЫКЛ ⚪') : 'ВЫКЛ ⚪'}
             </b>
             {actionPending && <span style={{ fontSize: 11 }}>⏳</span>}
           </button>
@@ -416,7 +416,7 @@ export default function AdGuard({ notify }: AdGuardProps) {
                   className={`agh-status-badge ${status?.running ? 'running' : 'stopped'}`}
                   title={status?.running ? 'Служба активна' : isInstalled ? 'Служба остановлена' : 'Не установлен'}
                 >
-                  <span>{status?.running ? '🟢 В сети' : isInstalled ? '🔴 Не запущен' : '⚪ Не установлен'}</span>
+                  <span>{loading && !status ? '⏳ Проверка…' : status?.running ? '🟢 В сети' : isInstalled ? '🔴 Не запущен' : '⚪ Не установлен'}</span>
                 </span>
                 {health?.loop_risk && (
                   <span
@@ -442,7 +442,7 @@ export default function AdGuard({ notify }: AdGuardProps) {
             <button
               type="button"
               onClick={handleToggleProtection}
-              disabled={actionPending}
+              disabled={actionPending || (loading && !status)}
               data-testid="adguard-protection-toggle"
               className={`btn btn-sm ${status?.protection_enabled ? 'btn-primary' : 'btn-secondary'}`}
               style={{
@@ -460,11 +460,11 @@ export default function AdGuard({ notify }: AdGuardProps) {
                   width: 8,
                   height: 8,
                   borderRadius: '50%',
-                  background: status?.protection_enabled ? '#34d399' : '#ef4444',
+                  background: loading && !status ? '#94a3b8' : status?.protection_enabled ? '#34d399' : '#ef4444',
                   boxShadow: status?.protection_enabled ? '0 0 6px #34d399' : 'none',
                 }}
               />
-              <b>{status?.protection_enabled ? 'Защита включена' : 'Защита отключена'}</b>
+              <b>{loading && !status ? 'Проверка…' : status?.protection_enabled ? 'Защита включена' : 'Защита отключена'}</b>
               {actionPending && <span style={{ fontSize: 12 }}>⏳</span>}
             </button>
 
