@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,9 @@ pub const ZAPRET_DISABLED_MARKER: &str = "xkeen-zapret.disabled";
 /// Операционное состояние перехода службы Zapret (Z-01)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ZapretOperationState {
+    #[default]
     Idle,
     Starting,
     Stopping,
@@ -31,11 +33,6 @@ pub enum ZapretOperationState {
     Upgrading,
 }
 
-impl Default for ZapretOperationState {
-    fn default() -> Self {
-        ZapretOperationState::Idle
-    }
-}
 
 /// Разделение желаемого (desired), наблюдаемого (observed) и операционного (operation) состояний (Z-01)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,8 +246,8 @@ pub fn validate_dns_response(query_id: (u8, u8), buf: &[u8]) -> bool {
         return false;
     }
     // QR bit (старший бит первого байта флагов: 0 = Query, 1 = Response)
-    let is_response = (buf[2] & 0x80) != 0;
-    is_response
+    
+    (buf[2] & 0x80) != 0
 }
 
 /// Валидация готовности DNS-сервиса перед перенаправлением на порт 1053 (Z-02 & AGH-00)
@@ -386,7 +383,7 @@ pub fn detect_dns_loop_risk(nameservers: &[String], local_ports: &[u16]) -> Resu
     for ns in nameservers {
         let trimmed = ns.trim().trim_start_matches("udp://").trim_start_matches("tcp://");
         let host_port: Vec<&str> = trimmed.split(':').collect();
-        let host = host_port.get(0).copied().unwrap_or("").trim();
+        let host = host_port.first().copied().unwrap_or("").trim();
         let port: u16 = host_port.get(1).and_then(|p| p.parse().ok()).unwrap_or(53);
 
         let is_localhost = host == "127.0.0.1" || host == "localhost" || host == "0.0.0.0" || host == "::1";
@@ -535,7 +532,7 @@ pub fn serialize_zapret_conf(cfg: &crate::config::ZapretConfig) -> String {
         crate::api::build_nfqws_args(cfg)
     };
 
-    let sanitized_args = args.replace('\r', " ").replace('\n', " ").replace('"', "");
+    let sanitized_args = args.replace(['\r', '\n'], " ").replace('"', "");
 
     let excluded_ips_str = cfg
         .excluded_devices

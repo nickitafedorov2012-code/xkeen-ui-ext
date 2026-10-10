@@ -200,9 +200,9 @@ fn get_wan_interfaces() -> Vec<String> {
 }
 
 /// Чтение счетчиков байт WAN-интерфейсов из /proc/net/dev
-fn read_wan_bytes(wan_ifaces: &[String]) -> (u64, u64) {
-    let mut rx = 0u64;
-    let mut tx = 0u64;
+fn read_wan_bytes(_wan_ifaces: &[String]) -> (u64, u64) {
+    let rx = 0u64;
+    let tx = 0u64;
     #[cfg(target_os = "linux")]
     if let Ok(content) = std::fs::read_to_string("/proc/net/dev") {
         for line in content.lines().skip(2) {
@@ -269,8 +269,8 @@ async fn run_wan_polling() {
         let p_down = PROXY_DOWN.load(Ordering::Relaxed);
         let p_up = PROXY_UP.load(Ordering::Relaxed);
 
-        let d_down = if wan_rx_speed > p_down { wan_rx_speed - p_down } else { 0 };
-        let d_up = if wan_tx_speed > p_up { wan_tx_speed - p_up } else { 0 };
+        let d_down = wan_rx_speed.saturating_sub(p_down);
+        let d_up = wan_tx_speed.saturating_sub(p_up);
 
         DIRECT_DOWN.store(d_down, Ordering::Relaxed);
         DIRECT_UP.store(d_up, Ordering::Relaxed);

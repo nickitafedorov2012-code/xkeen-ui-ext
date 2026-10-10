@@ -91,7 +91,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
             "v1_installed": is_nfqws1_available(),
             "v2_installed": is_nfqws2_available(),
             "update_available": cfg.zapret.update_available
-                && cfg.zapret.latest_version.as_deref().map_or(false, |lat| crate::updater::is_newer(lat, &zapret_ver)),
+                && cfg.zapret.latest_version.as_deref().is_some_and(|lat| crate::updater::is_newer(lat, &zapret_ver)),
             "latest_version": cfg.zapret.latest_version,
         },
         "gaming": {
@@ -1465,10 +1465,10 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
     match out {
         Err(_) => {
             log_w!("Таймаут (15 сек) выполнения '{} {}'", init_script, script_arg);
-            return api_err(format!("Превышен таймаут выполнения '{} {}'", init_script, script_arg));
+            api_err(format!("Превышен таймаут выполнения '{} {}'", init_script, script_arg))
         }
         Ok(Err(e)) => {
-            return api_err(format!("Ошибка запуска скрипта '{}': {}", init_script, e));
+            api_err(format!("Ошибка запуска скрипта '{}': {}", init_script, e))
         }
         Ok(Ok(o)) => {
             log_i!(
@@ -2377,7 +2377,7 @@ Write-Host ""
 
 fn base64_encode(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let b0 = chunk[0] as usize;
         let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
@@ -2854,7 +2854,7 @@ pub async fn save_config_file(
         }
     } else {
         let is_yaml = body.file.starts_with("provider:")
-            || path.extension().map_or(false, |ext| ext == "yaml" || ext == "yml");
+            || path.extension().is_some_and(|ext| ext == "yaml" || ext == "yml");
         if let Err(e) = tx.set_extra_file(&path, &body.content, is_yaml).await {
             return api_err(e);
         }
@@ -3341,9 +3341,9 @@ pub async fn import_node(
         if !current_content.contains("proxies:") {
             current_content = format!("proxies:\n{}", current_content);
         }
-        current_content.push_str("\n");
+        current_content.push('\n');
         current_content.push_str(yaml);
-        current_content.push_str("\n");
+        current_content.push('\n');
 
         if let Err(e) = tx.set_extra_file(&path, current_content, true).await {
             return api_err(e);
@@ -5749,11 +5749,7 @@ pub async fn detect_zapret_hardware(state: &AppState) -> ZapretHardwareInfo {
     let endian_str = parts.get(3).map(|s| s.trim()).unwrap_or("");
     let is_little_endian = if endian_str.starts_with('1') || endian_str.starts_with("01") {
         true
-    } else if endian_str.is_empty() {
-        cfg!(target_endian = "little")
-    } else {
-        false
-    };
+    } else { endian_str.is_empty() };
 
     build_zapret_hardware_info(
         &raw_model,
@@ -6186,7 +6182,7 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
             build_nfqws_args(cfg)
         }
     };
-    let sanitized_args = args.replace('\r', " ").replace('\n', " ").replace('"', "");
+    let sanitized_args = args.replace(['\r', '\n'], " ").replace('"', "");
     let excluded_ips_str = cfg
         .excluded_devices
         .iter()
@@ -6424,7 +6420,7 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
         "version": zapret_ver,
         "version_label": zapret_label,
         "update_available": cfg.zapret.update_available
-            && cfg.zapret.latest_version.as_deref().map_or(false, |lat| crate::updater::is_newer(lat, &zapret_ver)),
+            && cfg.zapret.latest_version.as_deref().is_some_and(|lat| crate::updater::is_newer(lat, &zapret_ver)),
         "latest_version": cfg.zapret.latest_version,
         "v2_installed": v2_installed,
         "v1_installed": v1_installed,
@@ -6856,7 +6852,7 @@ pub async fn zapret_action(
             (code, time)
         };
 
-        let (yt_p_code, yt_p_time) = parts.get(0).map(|s| parse_one(s)).unwrap_or((0, 0.0));
+        let (yt_p_code, yt_p_time) = parts.first().map(|s| parse_one(s)).unwrap_or((0, 0.0));
         let (dc_p_code, dc_p_time) = parts.get(1).map(|s| parse_one(s)).unwrap_or((0, 0.0));
 
         let yt_d_code = if zapret_active { 204 } else { 0 };
@@ -6871,7 +6867,7 @@ pub async fn zapret_action(
                 "ok": zapret_active,
                 "proxy_code": yt_p_code,
                 "proxy_time_secs": yt_p_time,
-                "proxy_ok": yt_p_code >= 200 && yt_p_code < 400,
+                "proxy_ok": (200..400).contains(&yt_p_code),
             },
             "discord": {
                 "code": dc_d_code,
@@ -6879,7 +6875,7 @@ pub async fn zapret_action(
                 "ok": zapret_active,
                 "proxy_code": dc_p_code,
                 "proxy_time_secs": dc_p_time,
-                "proxy_ok": dc_p_code >= 200 && dc_p_code < 400,
+                "proxy_ok": (200..400).contains(&dc_p_code),
             },
             "service_running": is_running,
             "iptables_active": ipt_ok,
@@ -6912,11 +6908,10 @@ pub async fn zapret_action(
                         cfg.zapret.engine = normalize_engine_choice(clean_val).to_string();
                     } else if key == "DISCORD_VOICE_ENABLED" {
                         cfg.zapret.discord_voice_udp = clean_val == "1";
-                    } else if key == "SMART_TV_MODE" || key == "BLOCK_QUIC" {
-                        if clean_val == "1" {
+                    } else if (key == "SMART_TV_MODE" || key == "BLOCK_QUIC")
+                        && clean_val == "1" {
                             cfg.zapret.smart_tv_mode = true;
                         }
-                    }
                 }
             }
 
@@ -7390,7 +7385,7 @@ pub async fn zapret_action(
 
         // Обнаружение CDN (известные бандлы + DNS поддомены + HTML сканер) БЕЗ удержания блокировок
         let proxy_url = state.config.read().await.mihomo_proxy_url();
-        let discovered = crate::cdn_discovery::discover_all_cdns(&[clean.clone()], &proxy_url).await;
+        let discovered = crate::cdn_discovery::discover_all_cdns(std::slice::from_ref(&clean), &proxy_url).await;
         let cdns_vec: Vec<String> = discovered
             .into_iter()
             .map(|c| crate::config::normalize_domain(&c))
@@ -7553,7 +7548,7 @@ pub async fn zapret_action(
 
         // Обнаружение CDN без удержания глобальных блокировок
         let proxy_url = state.config.read().await.mihomo_proxy_url();
-        let discovered = crate::cdn_discovery::discover_all_cdns(&[raw_domain.clone()], &proxy_url).await;
+        let discovered = crate::cdn_discovery::discover_all_cdns(std::slice::from_ref(&raw_domain), &proxy_url).await;
         let cdns_vec: Vec<String> = discovered
             .into_iter()
             .map(|c| crate::config::normalize_domain(&c))
@@ -7688,7 +7683,7 @@ pub async fn zapret_action(
                     .map(|o| {
                         let out_s = String::from_utf8_lossy(&o.stdout);
                         out_s.split_whitespace().any(|pid_s| {
-                            pid_s.parse::<u32>().map_or(false, |p| crate::zapret::is_zapret_pid_valid(p))
+                            pid_s.parse::<u32>().is_ok_and(crate::zapret::is_zapret_pid_valid)
                         })
                     })
                     .unwrap_or(false);
@@ -7905,11 +7900,11 @@ pub async fn run_mini_blockcheck(State(state): State<AppState>) -> Response {
             let tls = sp.next().and_then(|x| x.parse().ok()).unwrap_or(t * 0.65);
             (c, t, tls)
         };
-        let (y_c, y_t, y_tls) = parts.get(0).map(|x| parse_triple(x)).unwrap_or((204, 0.085, 0.055));
+        let (y_c, y_t, y_tls) = parts.first().map(|x| parse_triple(x)).unwrap_or((204, 0.085, 0.055));
         let (d_c, d_t, d_tls) = parts.get(1).map(|x| parse_triple(x)).unwrap_or((200, 0.110, 0.070));
         let (yc_c, _, _) = parts.get(2).map(|x| parse_triple(x)).unwrap_or((200, 0.075, 0.050));
         let (dc_c, _, _) = parts.get(3).map(|x| parse_triple(x)).unwrap_or((200, 0.095, 0.060));
-        (y_c, y_t, y_tls, d_c, d_t, d_tls, yc_c >= 200 && yc_c < 500, dc_c >= 200 && dc_c < 500)
+        (y_c, y_t, y_tls, d_c, d_t, d_tls, (200..500).contains(&yc_c), (200..500).contains(&dc_c))
     } else {
         (204, 0.085, 0.055, 200, 0.110, 0.070, true, true)
     };
@@ -7942,12 +7937,12 @@ pub async fn run_mini_blockcheck(State(state): State<AppState>) -> Response {
 
     for (idx, (id, name, desc, args)) in BLOCKCHECK_STRATEGIES.iter().enumerate() {
         let jitter = (idx as f64) * 0.005;
-        let yt_time = if base_yt_code >= 200 && base_yt_code < 400 && base_yt_time > 0.0 {
+        let yt_time = if (200..400).contains(&base_yt_code) && base_yt_time > 0.0 {
             base_yt_time + jitter
         } else {
             0.080 + jitter
         };
-        let dc_time = if base_dc_code >= 200 && base_dc_code < 400 && base_dc_time > 0.0 {
+        let dc_time = if (200..400).contains(&base_dc_code) && base_dc_time > 0.0 {
             base_dc_time + jitter
         } else {
             0.105 + jitter
@@ -7958,12 +7953,12 @@ pub async fn run_mini_blockcheck(State(state): State<AppState>) -> Response {
         let has_rnd_sid = args.contains("tls_mod=rnd,dupsid");
         let has_seqovl = args.contains("seqovl");
 
-        let yt_ok = if base_yt_code >= 200 && base_yt_code < 400 {
+        let yt_ok = if (200..400).contains(&base_yt_code) {
             true
         } else {
             *id == "multisplit" || *id == "seqovl_ack" || *id == "aggressive_dupsid" || (has_ts && (has_midsld || has_seqovl || *id == "tcp_fooling_ts"))
         };
-        let dc_ok = if base_dc_code >= 200 && base_dc_code < 400 {
+        let dc_ok = if (200..400).contains(&base_dc_code) {
             true
         } else {
             has_ts && (has_rnd_sid || has_seqovl || args.contains("multidisorder"))
@@ -8322,7 +8317,7 @@ fn resolve_group_leaf(proxies: &std::collections::BTreeMap<String, serde_json::V
             break;
         }
         match sub.get("now").and_then(|n| n.as_str()) {
-            Some(next) if !next.is_empty() && next != &cur => cur = next.to_string(),
+            Some(next) if !next.is_empty() && next != cur => cur = next.to_string(),
             _ => break,
         }
     }

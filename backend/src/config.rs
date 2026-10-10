@@ -205,6 +205,7 @@ impl Default for LogsConfig {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
+#[derive(Default)]
 pub struct AuthConfig {
     pub enabled: bool,
     pub password_hash: String,
@@ -212,19 +213,10 @@ pub struct AuthConfig {
     pub session_secret: String,
 }
 
-impl Default for AuthConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            password_hash: String::new(),
-            salt: String::new(),
-            session_secret: String::new(),
-        }
-    }
-}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
+#[derive(Default)]
 pub struct NotificationsConfig {
     pub telegram_enabled: bool,
     pub telegram_bot_token: String,
@@ -232,16 +224,6 @@ pub struct NotificationsConfig {
     pub webhook_url: String,
 }
 
-impl Default for NotificationsConfig {
-    fn default() -> Self {
-        Self {
-            telegram_enabled: false,
-            telegram_bot_token: String::new(),
-            telegram_chat_id: String::new(),
-            webhook_url: String::new(),
-        }
-    }
-}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct DeviceDomainRule {
@@ -339,18 +321,15 @@ impl Default for GamingPlatforms {
 /// соединения выбранного устройства через отдельную группу Mihomo.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum GamingMode {
+    #[default]
     Compatibility,
     BypassRu,
     SmartSplit,
     KnownServices,
 }
 
-impl Default for GamingMode {
-    fn default() -> Self {
-        Self::Compatibility
-    }
-}
 
 /// Игровое LAN-устройство. MAC — постоянный идентификатор, IP/IPv6 — последний
 /// известный адрес; перед активацией они обновляются по данным Keenetic.
@@ -566,7 +545,7 @@ pub fn normalize_domain(input: &str) -> String {
         .split('#')
         .next()
         .unwrap_or("");
-    let no_user = host_part.split('@').last().unwrap_or(host_part);
+    let no_user = host_part.split('@').next_back().unwrap_or(host_part);
     let no_port = no_user.split(':').next().unwrap_or(no_user);
     let clean = no_port
         .trim_start_matches("www.")

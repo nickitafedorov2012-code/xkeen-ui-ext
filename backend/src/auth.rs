@@ -41,15 +41,15 @@ pub fn fill_crypto_random_bytes(dest: &mut [u8]) {
     let pid = std::process::id();
     let stack_addr = dest.as_ptr() as usize;
 
-    hasher.update(&count.to_ne_bytes());
-    hasher.update(&now.to_ne_bytes());
-    hasher.update(&pid.to_ne_bytes());
-    hasher.update(&stack_addr.to_ne_bytes());
+    hasher.update(count.to_ne_bytes());
+    hasher.update(now.to_ne_bytes());
+    hasher.update(pid.to_ne_bytes());
+    hasher.update(stack_addr.to_ne_bytes());
 
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
     let state = RandomState::new().build_hasher().finish();
-    hasher.update(&state.to_ne_bytes());
+    hasher.update(state.to_ne_bytes());
 
     let hash = hasher.finalize();
     let mut offset = 0;
@@ -167,13 +167,13 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
         opad[i] ^= k[i];
     }
     let mut inner = Sha256::new();
-    inner.update(&ipad);
+    inner.update(ipad);
     inner.update(data);
     let inner_hash = inner.finalize();
 
     let mut outer = Sha256::new();
-    outer.update(&opad);
-    outer.update(&inner_hash);
+    outer.update(opad);
+    outer.update(inner_hash);
     outer.finalize().into()
 }
 
@@ -591,7 +591,7 @@ pub fn cli_reset_password(config_path: &Path) -> std::io::Result<()> {
     cfg.auth.password_hash.clear();
     cfg.auth.salt.clear();
     cfg.auth.session_secret.clear();
-    let serialized = serde_json::to_string_pretty(&cfg).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let serialized = serde_json::to_string_pretty(&cfg).map_err(std::io::Error::other)?;
     let tmp_path = config_path.with_extension("tmp");
     std::fs::write(&tmp_path, serialized)?;
     std::fs::rename(&tmp_path, config_path)?;
@@ -613,7 +613,7 @@ pub fn cli_set_password(config_path: &Path, password: &str) -> std::io::Result<(
     cfg.auth.salt = salt;
     cfg.auth.password_hash = hash;
     cfg.auth.session_secret = generate_secret();
-    let serialized = serde_json::to_string_pretty(&cfg).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let serialized = serde_json::to_string_pretty(&cfg).map_err(std::io::Error::other)?;
     let tmp_path = config_path.with_extension("tmp");
     std::fs::write(&tmp_path, serialized)?;
     std::fs::rename(&tmp_path, config_path)?;

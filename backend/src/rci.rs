@@ -182,14 +182,13 @@ async fn ensure_auth_locked(http: &reqwest::Client, cfg: &AppConfig) -> Result<S
         }
         AUTHED.store(false, Ordering::Release);
     }
-    if !cfg.rci.password.is_empty() {
-        if challenge_auth(http, &cfg.base_url(), &cfg.rci.login, &cfg.rci.password)
+    if !cfg.rci.password.is_empty()
+        && challenge_auth(http, &cfg.base_url(), &cfg.rci.login, &cfg.rci.password)
             .await
             .is_ok()
         {
             return Ok(String::new());
         }
-    }
     // Последняя попытка: RCI без авторизации (типично для localhost на KeeneticOS 4/5)
     let probe = http
         .get(format!("{}/rci/show/version", cfg.base_url()))

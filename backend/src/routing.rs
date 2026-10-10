@@ -95,7 +95,7 @@ pub fn ip_key_from_group(gname: &str) -> Option<String> {
 
 /// Имя группы устройства: '{чистое имя} {ip_с_подчёркиваниями}' или 'DEV_{ip}'.
 pub fn group_name_for(ip: &str, name: &str) -> String {
-    let safe_ip = ip.replace('.', "_").replace(':', "_");
+    let safe_ip = ip.replace(['.', ':'], "_");
     let clean: String = name
         .chars()
         .filter(|c| !matches!(c, '\r' | '\n' | ',' | '\'' | '"' | '#'))

@@ -108,7 +108,7 @@ pub fn spawn(state: AppState) {
                     let needs_device = !device_routing.is_empty() || !device_domains.is_empty();
                     let needs_force = !force_domains.is_empty();
                     let needs_ignore = !ignore_servers.is_empty();
-                    let needs_flow = flow_server.as_ref().map_or(false, |s| !s.trim().is_empty());
+                    let needs_flow = flow_server.as_ref().is_some_and(|s| !s.trim().is_empty());
                     let needs_zapret = zapret_cfg.enabled
                         && (zapret_cfg.hybrid_youtube
                             || zapret_cfg.hybrid_discord
@@ -238,7 +238,7 @@ pub fn spawn_schedules_monitor(state: AppState) {
                 .collect();
 
             let mut removed_keys = Vec::new();
-            for (key, _) in &active_schedules {
+            for key in active_schedules.keys() {
                 if !current_ids.contains(key) {
                     removed_keys.push(key.clone());
                 }
@@ -276,7 +276,7 @@ pub fn spawn_schedules_monitor(state: AppState) {
                 };
 
                 if in_range {
-                    if !active_schedules.contains_key(&key) {
+                    if let std::collections::hash_map::Entry::Vacant(e) = active_schedules.entry(key) {
                         let current_node = proxies_opt
                             .as_ref()
                             .and_then(|p| p.get(&group_name))
@@ -300,7 +300,7 @@ pub fn spawn_schedules_monitor(state: AppState) {
                         };
 
                         if switch_ok {
-                            active_schedules.insert(key, ActiveScheduleEntry {
+                            e.insert(ActiveScheduleEntry {
                                 schedule_id: s.id.clone(),
                                 device_ip: s.ip.clone(),
                                 group_name,
@@ -394,11 +394,10 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
                         if path.exists() {
                             if let Ok(raw_yaml) = tokio::fs::read_to_string(path).await {
                                 if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &new_cfg) {
-                                    if crate::api::atomic_write_file(path, &new_yaml).await.is_ok() {
-                                        if mihomo::reload_config(&state.http, &new_cfg).await.is_ok() {
+                                    if crate::api::atomic_write_file(path, &new_yaml).await.is_ok()
+                                        && mihomo::reload_config(&state.http, &new_cfg).await.is_ok() {
                                             log_i!("[DHCP-WATCHDOG] ✓ Маршрут игрового режима успешно переприменен для нового IP");
                                         }
-                                    }
                                 }
                             }
                         }

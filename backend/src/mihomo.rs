@@ -251,8 +251,6 @@ pub async fn force_update_all_providers(http: &reqwest::Client, cfg: &AppConfig)
 }
 
 /// Рекурсивное разрешение активного «листа» из цепочек selector/fallback/urltest.
-
-/// Рекурсивное разрешение активного «листа» из цепочек selector/fallback/urltest.
 pub fn resolve_active_leaf(proxies: &BTreeMap<String, Value>) -> String {
     let mut initial = ["PROXY", "GLOBAL", "Proxy", "auto", "Fallback"]
         .iter()
@@ -262,7 +260,7 @@ pub fn resolve_active_leaf(proxies: &BTreeMap<String, Value>) -> String {
         .unwrap_or_default();
     // Универсальный fallback: нет привычных имён — берём первый selector.
     if initial.is_empty() {
-        for (_, p) in proxies.iter() {
+        for p in proxies.values() {
             let typ = p.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
             if typ == "selector" {
                 if let Some(now) = p.get("now").and_then(|n| n.as_str()) {
@@ -290,7 +288,7 @@ pub fn resolve_active_leaf(proxies: &BTreeMap<String, Value>) -> String {
             break;
         }
         match sub.get("now").and_then(|n| n.as_str()) {
-            Some(next) if !next.is_empty() && next != &cur => cur = next.to_string(),
+            Some(next) if !next.is_empty() && next != cur => cur = next.to_string(),
             _ => break,
         }
     }
@@ -427,7 +425,7 @@ pub fn fix_mojibake(s: &str) -> Option<String> {
         // Рекурсия на случай двойного перекодирования.
         let candidate = fix_mojibake(&fixed).unwrap_or(fixed);
         let score = repair_score(&candidate);
-        if best.as_ref().map_or(true, |(bs, _)| score > *bs) {
+        if best.as_ref().is_none_or(|(bs, _)| score > *bs) {
             best = Some((score, candidate));
         }
     }

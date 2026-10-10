@@ -743,8 +743,8 @@ pub async fn mihomo_releases(State(state): State<AppState>) -> Response {
     let arch = detect_mihomo_arch().await;
 
     // Определяем текущую установленную версию Mihomo
-    let mut current_ver = crate::mihomo::get_version(&state.http, &cfg).await.unwrap_or_default();
-    let mut full_ver = current_ver.clone();
+    let current_ver = crate::mihomo::get_version(&state.http, &cfg).await.unwrap_or_default();
+    let full_ver = current_ver.clone();
 
     #[cfg(unix)]
     {
@@ -1108,8 +1108,8 @@ pub async fn mihomo_install(
     if !check_ok {
         crate::log_w!("[Mihomo Update] Ядро не ответило после обновления. Выполняется автоматический откат...");
         let mut rollback_ok = false;
-        if bak_bin.exists() {
-            if tokio::fs::copy(bak_bin, target_bin).await.is_ok() {
+        if bak_bin.exists()
+            && tokio::fs::copy(bak_bin, target_bin).await.is_ok() {
                 let _ = tokio::process::Command::new("sh")
                     .arg(&cfg.system.xkeen_init)
                     .arg("restart")
@@ -1123,7 +1123,6 @@ pub async fn mihomo_install(
                     rollback_ok = true;
                 }
             }
-        }
         if rollback_ok {
             return api_err("Ядро Mihomo не запустилось после обновления. Выполнен автоматический откат на предыдущую версию.");
         } else {

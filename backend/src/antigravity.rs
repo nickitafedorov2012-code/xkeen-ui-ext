@@ -307,7 +307,7 @@ impl AntigravityManager {
             return;
         }
 
-        let main_target = targets.get(0).cloned().unwrap_or_else(|| "cloudcode-pa.googleapis.com".into());
+        let main_target = targets.first().cloned().unwrap_or_else(|| "cloudcode-pa.googleapis.com".into());
 
         // 1. Получаем эталонные адреса Google через 8.8.8.8
         let ref_ips: Vec<Ipv4Addr> = match self.query_udp("8.8.8.8:53", &main_target).await {
