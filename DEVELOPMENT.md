@@ -1084,6 +1084,17 @@
   * **Ежесуточная проверка в 5:00 утра:** Фоновый планировщик с защитой от рассинхронизации часов до поднятия NTP роутера (year >= 2024).
 - **Исправление установки Zapret 2.0 и Mini-Blockcheck (api.rs, Zapret.tsx)**:
 
+## v1.8.1 (Gaming UDP TPROXY Policy Routing Fix & Complete Local Socket Delivery)
+- **Исправление policy routing для игрового UDP TPROXY туннеля (`backend/src/api.rs`)**:
+  * **Проблема**: В версии v1.8.0 пакеты игровых UDP дейтаграмм перехватывались таргетом `TPROXY --tproxy-mark 0x111/0xffffffff`, однако в системном стеке ядра Linux Keenetic отсутствовала таблица маршрутизации policy routing. Без правил `ip rule fwmark 0x111 lookup 111` и локального маршрута `ip route replace local default dev lo table 111` ядро роутера не могло доставить дейтаграммы на локальный прозрачный сокет Mihomo (`127.0.0.1:5001`), из-за чего все пакеты подключения к игровым матчам (Unreal Engine / Unity Dedicated Servers) тихо дропались на роутере.
+  * **Решение**:
+    - В функции `build_gaming_full_tunnel_commands` и `sync_gaming_full_tunnel` добавлена обязательная привязка policy routing:
+      `ip route replace local default dev lo table 111` (для IPv4 и IPv6).
+      `ip rule add fwmark 0x111/0xff lookup 111 priority 100` (для IPv4 и IPv6).
+    - Обеспечен надёжный атомарный сброс правил policy routing и очистка таблицы 111 (`ip route flush table 111`) при отключении режима или остановке сервисов.
+- **Анти-регрессионный тест**:
+  * Добавлен unit-тест `test_sync_gaming_full_tunnel_creates_tproxy_policy_routing_and_cleanup` в `backend/src/api.rs`, гарантирующий постоянное наличие правил `ip rule fwmark 0x111 lookup 111 priority 100`, `ip route replace local default dev lo table 111` и команд очистки.
+
 ## v1.8.0 (Gaming UDP TPROXY Interception, Dedicated Game Server Session Fix & Anti-Regression Suite)
 - **Полный перехват игрового UDP трафика в Режиме совместимости (`backend/src/api.rs`, `backend/src/routing.rs`, `backend/src/watchdog.rs`)**:
   * **Проблема**: В мультиплеерных играх на движках Unreal Engine / Unity (включая Wardogs) при выборе сервера из браузера серверов игра соединялась по REST API (порт 443 TCP) через туннель, а игровой UDP-трафик рукопожатия (порты 7777, 27015, динамические порты матчей) летел напрямую к IP серверов (AWS, Azure, Leaseweb, Scaleway, SkillHost). Из-за отсутствия UDP-правила в `mangle` пакеты вылетали через `geo_exclude -> RETURN` мимо туннеля, вызывая конфликт IP сессии (IP mismatch) и возврат на экран лобби Frontend.
