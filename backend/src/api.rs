@@ -8574,7 +8574,11 @@ pub fn build_gaming_full_tunnel_commands(cfg: &config::GamingConfig, redir_port:
 
     let cleanup_cmd = "while iptables -t nat -D xkeen -m comment --comment 'xkeen-gaming-compat' 2>/dev/null; do :; done; \
 while iptables -t mangle -D xkeen -m comment --comment 'xkeen-gaming-compat' 2>/dev/null; do :; done; \
+while ip rule del fwmark 0x111 lookup 111 2>/dev/null; do :; done; \
+while ip rule del fwmark 0x111/0x111 lookup 111 2>/dev/null; do :; done; \
 while ip rule del fwmark 0x111/0xff lookup 111 2>/dev/null; do :; done; \
+while ip -6 rule del fwmark 0x111 lookup 111 2>/dev/null; do :; done; \
+while ip -6 rule del fwmark 0x111/0x111 lookup 111 2>/dev/null; do :; done; \
 while ip -6 rule del fwmark 0x111/0xff lookup 111 2>/dev/null; do :; done; \
 ip route flush table 111 2>/dev/null || true; \
 ip -6 route flush table 111 2>/dev/null || true".to_string();
@@ -8588,23 +8592,42 @@ ip -6 route flush table 111 2>/dev/null || true".to_string();
         }).collect();
 
         if !active_devices.is_empty() {
+            // Ослабление rp_filter для корректного прохождения TPROXY-пакетов через сетевой мост LAN
+            setup_cmds.push("sysctl -w net.ipv4.conf.all.rp_filter=2 2>/dev/null || true".to_string());
+            setup_cmds.push("sysctl -w net.ipv4.conf.default.rp_filter=2 2>/dev/null || true".to_string());
+
             // TPROXY policy routing: связывание fwmark 0x111 с локальной таблицей сокетов dev lo table 111
             setup_cmds.push("ip route replace local default dev lo table 111 2>/dev/null || true".to_string());
-            setup_cmds.push("while ip rule del fwmark 0x111/0xff lookup 111 2>/dev/null; do :; done; ip rule add fwmark 0x111/0xff lookup 111 priority 100 2>/dev/null || true".to_string());
+            setup_cmds.push("while ip rule del fwmark 0x111 lookup 111 2>/dev/null; do :; done; while ip rule del fwmark 0x111/0x111 lookup 111 2>/dev/null; do :; done; ip rule add fwmark 0x111 lookup 111 priority 100 2>/dev/null || ip rule add fwmark 0x111/0x111 lookup 111 priority 100 2>/dev/null || true".to_string());
             setup_cmds.push("ip -6 route replace local default dev lo table 111 2>/dev/null || true".to_string());
-            setup_cmds.push("while ip -6 rule del fwmark 0x111/0xff lookup 111 2>/dev/null; do :; done; ip -6 rule add fwmark 0x111/0xff lookup 111 priority 100 2>/dev/null || true".to_string());
+            setup_cmds.push("while ip -6 rule del fwmark 0x111 lookup 111 2>/dev/null; do :; done; while ip -6 rule del fwmark 0x111/0x111 lookup 111 2>/dev/null; do :; done; ip -6 rule add fwmark 0x111 lookup 111 priority 100 2>/dev/null || ip -6 rule add fwmark 0x111/0x111 lookup 111 priority 100 2>/dev/null || true".to_string());
 
             for dev in active_devices {
                 let ip = dev.ip.trim();
                 if !ip.is_empty() {
-                    // TCP -> REDIRECT
+                    // TCP -> REDIRECT (исключая локальные адреса LAN и роутера)
                     setup_cmds.push(format!(
                         "iptables -t nat -I xkeen 1 -s {ip} -p tcp -m comment --comment 'xkeen-gaming-compat' -j REDIRECT --to-ports {r_port}"
                     ));
-
-                    // UDP -> TPROXY (полный перехват игровых UDP дейтаграмм в туннель минуя geo_exclude)
                     setup_cmds.push(format!(
-                        "iptables -t mangle -I xkeen 1 -s {ip} -p udp -m comment --comment 'xkeen-gaming-compat' -j TPROXY --tproxy-mark 0x111/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1"
+                        "iptables -t nat -I xkeen 1 -s {ip} -d 127.0.0.0/8 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                    ));
+                    setup_cmds.push(format!(
+                        "iptables -t nat -I xkeen 1 -s {ip} -d 192.168.0.0/16 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                    ));
+
+                    // UDP -> TPROXY (полный перехват игровых UDP дейтаграмм в туннель, исключая LAN/broadcast)
+                    setup_cmds.push(format!(
+                        "iptables -t mangle -I xkeen 1 -s {ip} -p udp -m comment --comment 'xkeen-gaming-compat' -j TPROXY --tproxy-mark 0x111/0x111 --on-port {tp_port} --on-ip 0.0.0.0"
+                    ));
+                    setup_cmds.push(format!(
+                        "iptables -t mangle -I xkeen 1 -s {ip} -d 224.0.0.0/4 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                    ));
+                    setup_cmds.push(format!(
+                        "iptables -t mangle -I xkeen 1 -s {ip} -d 255.255.255.255 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                    ));
+                    setup_cmds.push(format!(
+                        "iptables -t mangle -I xkeen 1 -s {ip} -d 192.168.0.0/16 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
                     ));
                 }
             }
@@ -8618,14 +8641,34 @@ pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16
     #[cfg(target_os = "linux")]
     {
         let (cleanup_cmd, setup_cmds) = build_gaming_full_tunnel_commands(cfg, redir_port, tproxy_port);
-        let _ = tokio::process::Command::new("sh")
+        let clean_out = tokio::process::Command::new("sh")
             .arg("-c")
             .arg(&cleanup_cmd)
-            .status()
+            .output()
             .await;
+        if let Ok(o) = clean_out {
+            if !o.status.success() {
+                let err = String::from_utf8_lossy(&o.stderr);
+                if !err.trim().is_empty() {
+                    log_w!("[GAMING_TUNNEL] Предупреждение при очистке: {}", err.trim());
+                }
+            }
+        }
 
         for cmd in setup_cmds {
-            let _ = tokio::process::Command::new("sh").arg("-c").arg(&cmd).status().await;
+            let out = tokio::process::Command::new("sh").arg("-c").arg(&cmd).output().await;
+            match out {
+                Ok(o) if !o.status.success() => {
+                    let err = String::from_utf8_lossy(&o.stderr);
+                    if !err.trim().is_empty() {
+                        log_w!("[GAMING_TUNNEL] Ошибка команды '{}': {}", cmd, err.trim());
+                    }
+                }
+                Err(e) => {
+                    log_e!("[GAMING_TUNNEL] Сбой запуска команды '{}': {}", cmd, e);
+                }
+                _ => {}
+            }
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -8634,6 +8677,7 @@ pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16
     }
     Ok(())
 }
+
 
 /// GET /api/gaming/status — статус, конфиг, активный узел, туннель, перехват и реальные соединения
 pub async fn get_gaming_status(State(state): State<AppState>) -> Response {
@@ -9750,26 +9794,30 @@ mod tests {
         // Проверяем команду очистки: должна сбрасывать и iptables, и ip rule, и ip route table 111
         assert!(cleanup_cmd.contains("iptables -t nat -D xkeen"), "Cleanup must remove NAT rules");
         assert!(cleanup_cmd.contains("iptables -t mangle -D xkeen"), "Cleanup must remove mangle rules");
-        assert!(cleanup_cmd.contains("ip rule del fwmark 0x111/0xff lookup 111"), "Cleanup must remove IPv4 policy rule 111");
-        assert!(cleanup_cmd.contains("ip -6 rule del fwmark 0x111/0xff lookup 111"), "Cleanup must remove IPv6 policy rule 111");
+        assert!(cleanup_cmd.contains("ip rule del fwmark 0x111 lookup 111"), "Cleanup must remove IPv4 policy rule 111");
+        assert!(cleanup_cmd.contains("ip -6 rule del fwmark 0x111 lookup 111"), "Cleanup must remove IPv6 policy rule 111");
         assert!(cleanup_cmd.contains("ip route flush table 111"), "Cleanup must flush IPv4 table 111");
         assert!(cleanup_cmd.contains("ip -6 route flush table 111"), "Cleanup must flush IPv6 table 111");
 
-        // Проверяем команды настройки: обязательны TPROXY local routing и iptables
+        // Проверяем команды настройки: обязательны TPROXY local routing, rp_filter, LAN-исключения и iptables
         let setup_all = setup_cmds.join("\n");
+        assert!(setup_all.contains("sysctl -w net.ipv4.conf.all.rp_filter=2"), "Setup must relax rp_filter for TPROXY");
         assert!(setup_all.contains("ip route replace local default dev lo table 111"), "Setup must bind table 111 to local lo interface");
-        assert!(setup_all.contains("ip rule add fwmark 0x111/0xff lookup 111 priority 100"), "Setup must add fwmark 0x111 rule pointing to table 111");
+        assert!(setup_all.contains("ip rule add fwmark 0x111 lookup 111 priority 100"), "Setup must add fwmark 0x111 rule pointing to table 111");
+        assert!(!setup_all.contains("0x111/0xff"), "Setup MUST NOT contain mathematically invalid mask 0x111/0xff");
         assert!(setup_all.contains("ip -6 route replace local default dev lo table 111"), "Setup must bind IPv6 table 111 to lo interface");
-        assert!(setup_all.contains("ip -6 rule add fwmark 0x111/0xff lookup 111 priority 100"), "Setup must add IPv6 fwmark 0x111 rule pointing to table 111");
+        assert!(setup_all.contains("ip -6 rule add fwmark 0x111 lookup 111 priority 100"), "Setup must add IPv6 fwmark 0x111 rule pointing to table 111");
 
+        // LAN exclusions must be present for both TCP and UDP
+        assert!(setup_all.contains("-s 192.168.2.118 -d 192.168.0.0/16 -m comment --comment 'xkeen-gaming-compat' -j RETURN"), "Setup must exclude LAN from interception");
         assert!(setup_all.contains("-s 192.168.2.118 -p tcp -m comment --comment 'xkeen-gaming-compat' -j REDIRECT --to-ports 5000"), "Setup must create TCP REDIRECT rule");
-        assert!(setup_all.contains("-s 192.168.2.118 -p udp -m comment --comment 'xkeen-gaming-compat' -j TPROXY --tproxy-mark 0x111/0xffffffff --on-port 5001 --on-ip 127.0.0.1"), "Setup must create UDP TPROXY rule");
+        assert!(setup_all.contains("-s 192.168.2.118 -p udp -m comment --comment 'xkeen-gaming-compat' -j TPROXY --tproxy-mark 0x111/0x111 --on-port 5001 --on-ip 0.0.0.0"), "Setup must create UDP TPROXY rule with 0.0.0.0 on-ip");
 
         // 2. Проверяем отключенный режим: setup_cmds пустой, cleanup_cmd сбрасывает маршруты
         cfg.enabled = false;
         let (cleanup_disabled, setup_disabled) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
         assert!(setup_disabled.is_empty(), "Disabled mode must not produce setup commands");
-        assert!(cleanup_disabled.contains("ip rule del fwmark 0x111/0xff lookup 111"), "Disabled mode must still clean up policy rules");
+        assert!(cleanup_disabled.contains("ip rule del fwmark 0x111 lookup 111"), "Disabled mode must still clean up policy rules");
 
         // 3. Проверяем режим KnownServices: setup_cmds пустой (нет full tunnel)
         cfg.enabled = true;
