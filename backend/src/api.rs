@@ -8572,7 +8572,9 @@ pub fn build_gaming_full_tunnel_commands(cfg: &config::GamingConfig, redir_port:
     let r_port = if redir_port > 0 { redir_port } else { 5000 };
     let tp_port = if tproxy_port > 0 { tproxy_port } else { 5001 };
 
-    let cleanup_cmd = "while iptables -t nat -D xkeen -m comment --comment 'xkeen-gaming-compat' 2>/dev/null; do :; done; \
+    let cleanup_cmd = "while iptables -t nat -D PREROUTING -m comment --comment 'xkeen-gaming-compat' 2>/dev/null; do :; done; \
+while iptables -t mangle -D PREROUTING -m comment --comment 'xkeen-gaming-compat' 2>/dev/null; do :; done; \
+while iptables -t nat -D xkeen -m comment --comment 'xkeen-gaming-compat' 2>/dev/null; do :; done; \
 while iptables -t mangle -D xkeen -m comment --comment 'xkeen-gaming-compat' 2>/dev/null; do :; done; \
 while ip rule del fwmark 0x111 lookup 111 2>/dev/null; do :; done; \
 while ip rule del fwmark 0x111/0x111 lookup 111 2>/dev/null; do :; done; \
@@ -8605,33 +8607,32 @@ ip -6 route flush table 111 2>/dev/null || true".to_string();
             for dev in active_devices {
                 let ip = dev.ip.trim();
                 if !ip.is_empty() && ip != "0.0.0.0" {
-                    // TCP -> REDIRECT (исключая локальные адреса LAN и роутера)
+                    // TCP -> REDIRECT в корень PREROUTING (гарантированный перехват мимо любых фильтров, кроме LAN)
                     setup_cmds.push(format!(
-                        "iptables -t nat -I xkeen 1 -s {ip} -p tcp -m comment --comment 'xkeen-gaming-compat' -j REDIRECT --to-ports {r_port}"
+                        "iptables -t nat -I PREROUTING 1 -s {ip} -p tcp -m comment --comment 'xkeen-gaming-compat' -j REDIRECT --to-ports {r_port}"
                     ));
                     setup_cmds.push(format!(
-                        "iptables -t nat -I xkeen 1 -s {ip} -d 127.0.0.0/8 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                        "iptables -t nat -I PREROUTING 1 -s {ip} -d 127.0.0.0/8 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
                     ));
                     setup_cmds.push(format!(
-                        "iptables -t nat -I xkeen 1 -s {ip} -d 192.168.0.0/16 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                        "iptables -t nat -I PREROUTING 1 -s {ip} -d 192.168.0.0/16 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
                     ));
 
-                    // UDP -> TPROXY (полный перехват игровых UDP дейтаграмм в туннель, исключая LAN/broadcast)
-                    // Используем canonical 127.0.0.1 и марку 0x111/0xffffffff точно как в нативных правилах ядра XKeen
+                    // UDP -> TPROXY в корень PREROUTING (гарантированный перехват игровых UDP дейтаграмм в туннель, исключая LAN/broadcast)
                     setup_cmds.push(format!(
-                        "iptables -t mangle -I xkeen 1 -s {ip} -p udp -m comment --comment 'xkeen-gaming-compat' -j TPROXY --tproxy-mark 0x111/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1"
+                        "iptables -t mangle -I PREROUTING 1 -s {ip} -p udp -m comment --comment 'xkeen-gaming-compat' -j TPROXY --tproxy-mark 0x111/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1"
                     ));
                     setup_cmds.push(format!(
-                        "iptables -t mangle -I xkeen 1 -s {ip} -p udp -m socket --transparent -m comment --comment 'xkeen-gaming-compat' -j MARK --set-mark 0x111"
+                        "iptables -t mangle -I PREROUTING 1 -s {ip} -p udp -m socket --transparent -m comment --comment 'xkeen-gaming-compat' -j MARK --set-mark 0x111"
                     ));
                     setup_cmds.push(format!(
-                        "iptables -t mangle -I xkeen 1 -s {ip} -d 224.0.0.0/4 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                        "iptables -t mangle -I PREROUTING 1 -s {ip} -d 224.0.0.0/4 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
                     ));
                     setup_cmds.push(format!(
-                        "iptables -t mangle -I xkeen 1 -s {ip} -d 255.255.255.255 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                        "iptables -t mangle -I PREROUTING 1 -s {ip} -d 255.255.255.255 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
                     ));
                     setup_cmds.push(format!(
-                        "iptables -t mangle -I xkeen 1 -s {ip} -d 192.168.0.0/16 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                        "iptables -t mangle -I PREROUTING 1 -s {ip} -d 192.168.0.0/16 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
                     ));
                 }
             }
@@ -8679,12 +8680,12 @@ pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16
         if cfg.enabled && cfg.mode == config::GamingMode::Compatibility {
             let diag = tokio::process::Command::new("sh")
                 .arg("-c")
-                .arg("ip rule show; echo '--- table 111:'; ip route show table 111")
+                .arg("ip rule show; echo '--- table 111:'; ip route show table 111; echo '--- PREROUTING mangle:'; iptables -t mangle -S PREROUTING | grep compat || true; echo '--- PREROUTING nat:'; iptables -t nat -S PREROUTING | grep compat || true")
                 .output()
                 .await;
             if let Ok(d) = diag {
                 let txt = String::from_utf8_lossy(&d.stdout);
-                log_i!("[GAMING_TUNNEL] Диагностика policy routing:\n{}", txt.trim());
+                log_i!("[GAMING_TUNNEL] Диагностика policy routing и PREROUTING:\n{}", txt.trim());
             }
         }
     }
@@ -9808,9 +9809,9 @@ mod tests {
         // 1. Проверяем генерацию правил в режиме совместимости
         let (cleanup_cmd, setup_cmds) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
 
-        // Проверяем команду очистки: должна сбрасывать и iptables, и ip rule, и ip route table 111
-        assert!(cleanup_cmd.contains("iptables -t nat -D xkeen"), "Cleanup must remove NAT rules");
-        assert!(cleanup_cmd.contains("iptables -t mangle -D xkeen"), "Cleanup must remove mangle rules");
+        // Проверяем команду очистки: должна сбрасывать и iptables (PREROUTING + xkeen), и ip rule, и ip route table 111
+        assert!(cleanup_cmd.contains("iptables -t nat -D PREROUTING"), "Cleanup must remove PREROUTING NAT rules");
+        assert!(cleanup_cmd.contains("iptables -t mangle -D PREROUTING"), "Cleanup must remove PREROUTING mangle rules");
         assert!(cleanup_cmd.contains("ip rule del fwmark 0x111 lookup 111"), "Cleanup must remove IPv4 policy rule 111");
         assert!(cleanup_cmd.contains("ip -6 rule del fwmark 0x111 lookup 111"), "Cleanup must remove IPv6 policy rule 111");
         assert!(cleanup_cmd.contains("ip route flush table 111"), "Cleanup must flush IPv4 table 111");
@@ -9827,7 +9828,7 @@ mod tests {
 
         // LAN exclusions must be present for both TCP and UDP
         assert!(setup_all.contains("-s 192.168.2.118 -d 192.168.0.0/16 -m comment --comment 'xkeen-gaming-compat' -j RETURN"), "Setup must exclude LAN from interception");
-        assert!(setup_all.contains("-s 192.168.2.118 -p tcp -m comment --comment 'xkeen-gaming-compat' -j REDIRECT --to-ports 5000"), "Setup must create TCP REDIRECT rule");
+        assert!(setup_all.contains("-s 192.168.2.118 -p tcp -m comment --comment 'xkeen-gaming-compat' -j REDIRECT --to-ports 5000"), "Setup must create TCP REDIRECT rule in PREROUTING");
         assert!(setup_all.contains("-s 192.168.2.118 -p udp -m comment --comment 'xkeen-gaming-compat' -j TPROXY --tproxy-mark 0x111/0xffffffff --on-port 5001 --on-ip 127.0.0.1"), "Setup must create UDP TPROXY rule matching XKeen native config");
         assert!(setup_all.contains("-s 192.168.2.118 -p udp -m socket --transparent"), "Setup must include transparent socket match for established UDP");
 
