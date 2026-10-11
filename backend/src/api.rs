@@ -8597,14 +8597,14 @@ ip -6 route flush table 111 2>/dev/null || true".to_string();
             setup_cmds.push("sysctl -w net.ipv4.conf.default.rp_filter=2 2>/dev/null || true".to_string());
 
             // TPROXY policy routing: связывание fwmark 0x111 с локальной таблицей сокетов dev lo table 111
-            setup_cmds.push("ip route replace local default dev lo table 111 2>/dev/null || true".to_string());
-            setup_cmds.push("while ip rule del fwmark 0x111 lookup 111 2>/dev/null; do :; done; while ip rule del fwmark 0x111/0x111 lookup 111 2>/dev/null; do :; done; ip rule add fwmark 0x111 lookup 111 priority 100 2>/dev/null || ip rule add fwmark 0x111/0x111 lookup 111 priority 100 2>/dev/null || true".to_string());
-            setup_cmds.push("ip -6 route replace local default dev lo table 111 2>/dev/null || true".to_string());
-            setup_cmds.push("while ip -6 rule del fwmark 0x111 lookup 111 2>/dev/null; do :; done; while ip -6 rule del fwmark 0x111/0x111 lookup 111 2>/dev/null; do :; done; ip -6 rule add fwmark 0x111 lookup 111 priority 100 2>/dev/null || ip -6 rule add fwmark 0x111/0x111 lookup 111 priority 100 2>/dev/null || true".to_string());
+            setup_cmds.push("ip route replace local default dev lo table 111 2>/dev/null || ip route add local 0.0.0.0/0 dev lo table 111 2>/dev/null || true".to_string());
+            setup_cmds.push("while ip rule del fwmark 0x111 lookup 111 2>/dev/null; do :; done; while ip rule del fwmark 0x111/0x111 lookup 111 2>/dev/null; do :; done; ip rule add fwmark 0x111 lookup 111 priority 100 2>/dev/null || ip rule add fwmark 0x111/0x111 lookup 111 priority 100 2>/dev/null || ip rule add fwmark 0x111 lookup 111 2>/dev/null || true".to_string());
+            setup_cmds.push("ip -6 route replace local default dev lo table 111 2>/dev/null || ip -6 route add local ::/0 dev lo table 111 2>/dev/null || true".to_string());
+            setup_cmds.push("while ip -6 rule del fwmark 0x111 lookup 111 2>/dev/null; do :; done; while ip -6 rule del fwmark 0x111/0x111 lookup 111 2>/dev/null; do :; done; ip -6 rule add fwmark 0x111 lookup 111 priority 100 2>/dev/null || ip -6 rule add fwmark 0x111/0x111 lookup 111 priority 100 2>/dev/null || ip -6 rule add fwmark 0x111 lookup 111 2>/dev/null || true".to_string());
 
             for dev in active_devices {
                 let ip = dev.ip.trim();
-                if !ip.is_empty() {
+                if !ip.is_empty() && ip != "0.0.0.0" {
                     // TCP -> REDIRECT (исключая локальные адреса LAN и роутера)
                     setup_cmds.push(format!(
                         "iptables -t nat -I xkeen 1 -s {ip} -p tcp -m comment --comment 'xkeen-gaming-compat' -j REDIRECT --to-ports {r_port}"
@@ -8617,8 +8617,12 @@ ip -6 route flush table 111 2>/dev/null || true".to_string();
                     ));
 
                     // UDP -> TPROXY (полный перехват игровых UDP дейтаграмм в туннель, исключая LAN/broadcast)
+                    // Используем canonical 127.0.0.1 и марку 0x111/0xffffffff точно как в нативных правилах ядра XKeen
                     setup_cmds.push(format!(
-                        "iptables -t mangle -I xkeen 1 -s {ip} -p udp -m comment --comment 'xkeen-gaming-compat' -j TPROXY --tproxy-mark 0x111/0x111 --on-port {tp_port} --on-ip 0.0.0.0"
+                        "iptables -t mangle -I xkeen 1 -s {ip} -p udp -m comment --comment 'xkeen-gaming-compat' -j TPROXY --tproxy-mark 0x111/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1"
+                    ));
+                    setup_cmds.push(format!(
+                        "iptables -t mangle -I xkeen 1 -s {ip} -p udp -m socket --transparent -m comment --comment 'xkeen-gaming-compat' -j MARK --set-mark 0x111"
                     ));
                     setup_cmds.push(format!(
                         "iptables -t mangle -I xkeen 1 -s {ip} -d 224.0.0.0/4 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
@@ -8668,6 +8672,19 @@ pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16
                     log_e!("[GAMING_TUNNEL] Сбой запуска команды '{}': {}", cmd, e);
                 }
                 _ => {}
+            }
+        }
+
+        // Диагностика состояния маршрутизации и таблицы 111 для системного журнала
+        if cfg.enabled && cfg.mode == config::GamingMode::Compatibility {
+            let diag = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg("ip rule show; echo '--- table 111:'; ip route show table 111")
+                .output()
+                .await;
+            if let Ok(d) = diag {
+                let txt = String::from_utf8_lossy(&d.stdout);
+                log_i!("[GAMING_TUNNEL] Диагностика policy routing:\n{}", txt.trim());
             }
         }
     }
@@ -9804,14 +9821,15 @@ mod tests {
         assert!(setup_all.contains("sysctl -w net.ipv4.conf.all.rp_filter=2"), "Setup must relax rp_filter for TPROXY");
         assert!(setup_all.contains("ip route replace local default dev lo table 111"), "Setup must bind table 111 to local lo interface");
         assert!(setup_all.contains("ip rule add fwmark 0x111 lookup 111 priority 100"), "Setup must add fwmark 0x111 rule pointing to table 111");
-        assert!(!setup_all.contains("0x111/0xff"), "Setup MUST NOT contain mathematically invalid mask 0x111/0xff");
+        assert!(!setup_all.contains("0x111/0xff lookup"), "Setup MUST NOT contain mathematically invalid mask 0x111/0xff");
         assert!(setup_all.contains("ip -6 route replace local default dev lo table 111"), "Setup must bind IPv6 table 111 to lo interface");
         assert!(setup_all.contains("ip -6 rule add fwmark 0x111 lookup 111 priority 100"), "Setup must add IPv6 fwmark 0x111 rule pointing to table 111");
 
         // LAN exclusions must be present for both TCP and UDP
         assert!(setup_all.contains("-s 192.168.2.118 -d 192.168.0.0/16 -m comment --comment 'xkeen-gaming-compat' -j RETURN"), "Setup must exclude LAN from interception");
         assert!(setup_all.contains("-s 192.168.2.118 -p tcp -m comment --comment 'xkeen-gaming-compat' -j REDIRECT --to-ports 5000"), "Setup must create TCP REDIRECT rule");
-        assert!(setup_all.contains("-s 192.168.2.118 -p udp -m comment --comment 'xkeen-gaming-compat' -j TPROXY --tproxy-mark 0x111/0x111 --on-port 5001 --on-ip 0.0.0.0"), "Setup must create UDP TPROXY rule with 0.0.0.0 on-ip");
+        assert!(setup_all.contains("-s 192.168.2.118 -p udp -m comment --comment 'xkeen-gaming-compat' -j TPROXY --tproxy-mark 0x111/0xffffffff --on-port 5001 --on-ip 127.0.0.1"), "Setup must create UDP TPROXY rule matching XKeen native config");
+        assert!(setup_all.contains("-s 192.168.2.118 -p udp -m socket --transparent"), "Setup must include transparent socket match for established UDP");
 
         // 2. Проверяем отключенный режим: setup_cmds пустой, cleanup_cmd сбрасывает маршруты
         cfg.enabled = false;
