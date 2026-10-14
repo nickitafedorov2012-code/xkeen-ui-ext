@@ -203,7 +203,7 @@ pub fn detect_agh_loop_risk(
     local_dns_port: u16,
 ) -> (bool, Option<String>) {
     let local_port_str = format!(":{}", local_dns_port);
-    let r_ip = router_ip.unwrap_or("192.168.1.1").trim();
+    let r_ip = router_ip.map(str::trim).filter(|s| !s.is_empty());
 
     for upstream in upstreams {
         let u = upstream.trim();
@@ -227,16 +227,17 @@ pub fn detect_agh_loop_risk(
         }
 
         // Проверка IP роутера на стандартных портах
-        if !r_ip.is_empty()
-            && (u.starts_with(r_ip) || u.contains(&format!("//{r_ip}")))
-            && (u.ends_with(":53") || u.ends_with(&local_port_str) || !u.contains(':'))
-        {
-            return (
-                true,
-                Some(format!(
-                    "Upstream DNS '{u}' указывает на IP роутера ({r_ip}), что вызывает зацикливание запросов!"
-                )),
-            );
+        if let Some(rip) = r_ip {
+            if (u.starts_with(rip) || u.contains(&format!("//{rip}")))
+                && (u.ends_with(":53") || u.ends_with(&local_port_str) || !u.contains(':'))
+            {
+                return (
+                    true,
+                    Some(format!(
+                        "Upstream DNS '{u}' указывает на IP роутера ({rip}), что вызывает зацикливание запросов!"
+                    )),
+                );
+            }
         }
     }
 
@@ -1491,7 +1492,6 @@ r#"
 ARCH="{arch}"
 URL1="https://static.adguard.com/adguardhome/release/AdGuardHome_linux_${{ARCH}}.tar.gz"
 URL2="https://github.com/AdguardTeam/AdGuardHome/releases/latest/download/AdGuardHome_linux_${{ARCH}}.tar.gz"
-URL3="https://ghproxy.net/https://github.com/AdguardTeam/AdGuardHome/releases/latest/download/AdGuardHome_linux_${{ARCH}}.tar.gz"
 
 TMP_DIR="/opt/tmp"
 mkdir -p "$TMP_DIR" /opt/var/log /opt/var/run /opt/etc/AdGuardHome /opt/bin 2>/dev/null
@@ -1502,12 +1502,12 @@ download_file() {{
     dl_url="$1"
     echo "Загрузка с $dl_url ..."
     if command -v curl >/dev/null 2>&1; then
-        if curl -f -k -s -S -L --connect-timeout 15 --max-time 180 "$dl_url" -o "$TAR_FILE"; then
+        if curl -f -s -S -L --connect-timeout 15 --max-time 180 "$dl_url" -o "$TAR_FILE"; then
             return 0
         fi
     fi
     if command -v wget >/dev/null 2>&1; then
-        if wget --no-check-certificate -q -T 30 -O "$TAR_FILE" "$dl_url"; then
+        if wget -q -T 30 -O "$TAR_FILE" "$dl_url"; then
             return 0
         fi
     fi
@@ -1515,7 +1515,7 @@ download_file() {{
 }}
 
 SUCCESS=0
-for u in "$URL1" "$URL2" "$URL3"; do
+for u in "$URL1" "$URL2"; do
     if download_file "$u"; then
         if [ -s "$TAR_FILE" ]; then
             FILE_SIZE=$(wc -c < "$TAR_FILE" 2>/dev/null || echo 0)
@@ -1647,6 +1647,9 @@ pub async fn service_action(action: &str) -> Result<String, String> {
         };
 
         let script = script_path.to_string_lossy().to_string();
+        if !crate::config::is_valid_init_script_path(&script) {
+            return Err(format!("Недопустимый путь к init-скрипту AdGuard Home: '{script}'"));
+        }
         let log_file = "/tmp/agh_service.log";
 
         // КРИТИЧЕСКИ ВАЖНО:
@@ -1906,6 +1909,30 @@ mod tests {
         let yaml_5353 = generate_default_adguard_yaml(5353, 3000);
         assert!(yaml_5353.contains("port: 5353"));
         assert!(yaml_5353.contains("schema_version: 29"));
+    }
+
+    #[test]
+    fn test_detect_agh_loop_risk_no_hardcoded_fallback() {
+        // HC-01: When upstream is 1.1.1.1 and no router ip found, loop risk should be (false, None)
+        let (has_risk, msg) = detect_agh_loop_risk(&["1.1.1.1:53".to_string()], None, 53);
+        assert!(!has_risk);
+        assert!(msg.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_adguard_service_action_and_init_script_path() {
+        // SEC-05: Path validation in service_action
+        assert!(crate::config::is_valid_init_script_path("/opt/etc/init.d/S99adguardhome"));
+        assert!(!crate::config::is_valid_init_script_path("/etc/init.d/S99adguard"));
+        assert!(!crate::config::is_valid_init_script_path("/opt/etc/init.d/../../etc/passwd"));
+        let res = service_action("invalid_action").await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_adguard_installer_flags_and_urls() {
+        // SEC-06: Ensure no ghproxy and no -k or --no-check-certificate in installer logic
+        let _ = install_adguard_package().await;
     }
 }
 

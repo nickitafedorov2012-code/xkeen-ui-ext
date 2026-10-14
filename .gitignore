@@ -14,3 +14,7 @@ config.json
 xkeen-route-*
 audit_full_prompt*.txt
 
+# Scratch bundle scripts & artifacts
+bundle_codebase.py
+generate_*.py
+xkeen_*.md

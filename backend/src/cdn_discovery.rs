@@ -191,7 +191,7 @@ fn proxied_client(proxy_url: &str) -> reqwest::Client {
 pub async fn scan_html_cdns(domain: &str, proxy_url: &str) -> Vec<String> {
     let mut found = BTreeSet::new();
     let clean = domain.trim().trim_start_matches("www.").to_lowercase();
-    if clean.is_empty() {
+    if clean.is_empty() || !crate::config::is_valid_domain(&clean) {
         return Vec::new();
     }
 

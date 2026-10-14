@@ -224,6 +224,13 @@ pub async fn get_settings(State(state): State<AppState>) -> impl IntoResponse {
             }
         }
     }
+    if let Some(adguard) = val.get_mut("adguard") {
+        if let Some(pw) = adguard.get_mut("password") {
+            if !pw.as_str().unwrap_or("").is_empty() {
+                *pw = serde_json::Value::String("******".into());
+            }
+        }
+    }
 
     api_ok(val)
 }
@@ -354,14 +361,8 @@ pub async fn ping_flow_servers(State(state): State<AppState>) -> Response {
 
     for (name, &ping) in &pings {
         if ping > 0 && ping < min_ping {
-            let lower = name.to_lowercase();
-            let is_us_ca = lower.contains("сша") || lower.contains("usa") || lower.contains("us ") ||
-                lower.contains("chicago") || lower.contains("чикаго") || lower.contains("канад") ||
-                lower.contains("canada") || lower.contains("вашингтон") || lower.contains("washington") ||
-                lower.contains("майами") || lower.contains("miami") || lower.contains("сиэтл") ||
-                lower.contains("seattle") || lower.contains("атланта") || lower.contains("atlanta") ||
-                lower.contains("феникс") || lower.contains("phoenix") || lower.contains("лос-анджелес") ||
-                lower.contains("los angeles");
+            let country = crate::mihomo::detect_server_country(name);
+            let is_us_ca = country == "US" || country == "CA";
             if is_us_ca {
                 min_ping = ping;
                 best_server = Some(name.clone());
@@ -419,13 +420,12 @@ pub async fn switch_flow_server(
     State(state): State<AppState>,
     axum::extract::Json(body): axum::extract::Json<FlowSwitchReq>,
 ) -> Response {
-    let cfg = state.config.read().await.clone();
     let srv_id = body.server_id.trim();
     if srv_id.is_empty() {
         return api_err("Не указан server_id для Google Flow");
     }
 
-    match mihomo::switch_flow_server(&state.http, &cfg, srv_id).await {
+    match mihomo::switch_flow_server(&state, srv_id).await {
         Ok(msg) => {
             log_i!("[Google Flow] {}", msg);
             // Сохраняем flow_server в config.json БЕЗ изменения failover.priority_server / priority_chain!
@@ -462,14 +462,8 @@ pub async fn repair_flow(State(state): State<AppState>) -> Response {
 
     for (name, &ping) in &pings {
         if ping > 0 && ping < min_ping {
-            let lower = name.to_lowercase();
-            let is_us_ca = lower.contains("сша") || lower.contains("usa") || lower.contains("us ") ||
-                lower.contains("chicago") || lower.contains("чикаго") || lower.contains("канад") ||
-                lower.contains("canada") || lower.contains("вашингтон") || lower.contains("washington") ||
-                lower.contains("майами") || lower.contains("miami") || lower.contains("сиэтл") ||
-                lower.contains("seattle") || lower.contains("атланта") || lower.contains("atlanta") ||
-                lower.contains("феникс") || lower.contains("phoenix") || lower.contains("лос-анджелес") ||
-                lower.contains("los angeles");
+            let country = crate::mihomo::detect_server_country(name);
+            let is_us_ca = country == "US" || country == "CA";
             if is_us_ca {
                 min_ping = ping;
                 best_server = Some(name.clone());
@@ -484,12 +478,11 @@ pub async fn repair_flow(State(state): State<AppState>) -> Response {
             // Ищем сервер США из mihomo::get_servers, либо первый доступный узел
             if let Ok(servers) = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
                 let us_cand = servers.iter().find(|s| {
-                    let l = s.id.to_lowercase();
-                    !s.id.is_empty() && s.id != "Fastest" && s.id != "Fallback" &&
-                        (l.contains("сша") || l.contains("usa") || l.contains("us ") ||
-                         l.contains("chicago") || l.contains("washington") || l.contains("miami") ||
-                         l.contains("seattle") || l.contains("atlanta") || l.contains("phoenix") ||
-                         l.contains("los angeles") || l.contains("canada"))
+                    if s.id.is_empty() || s.id == "Fastest" || s.id == "Fallback" {
+                        return false;
+                    }
+                    let country = crate::mihomo::detect_server_country(&s.id);
+                    country == "US" || country == "CA"
                 });
                 if let Some(us_srv) = us_cand {
                     us_srv.id.clone()
@@ -505,7 +498,7 @@ pub async fn repair_flow(State(state): State<AppState>) -> Response {
     };
 
     // 2. Переключение Flow сервера и проверка результата в runtime (DIAG-04)
-    if let Err(e) = mihomo::switch_flow_server(&state.http, &cfg, &target_server).await {
+    if let Err(e) = mihomo::switch_flow_server(&state, &target_server).await {
         return api_err(format!("Не удалось переключить маршрут Google AI на сервер '{}': {}", target_server, e));
     }
 
@@ -555,11 +548,8 @@ pub async fn auto_select_flow_server(
     State(state): State<AppState>,
     Json(req): Json<FlowAutoSelectReq>,
 ) -> Response {
-    let _cfg_guard = state.config_lock.lock().await;
-    let mut mut_cfg = (**state.config.read().await).clone();
-
-    let target_enabled = req.enabled.unwrap_or(!mut_cfg.flow_auto_select);
-    mut_cfg.flow_auto_select = target_enabled;
+    let current_cfg = state.config.read().await.clone();
+    let target_enabled = req.enabled.unwrap_or(!current_cfg.flow_auto_select);
 
     let mut message = if target_enabled {
         "Автоматический подбор сервера Google AI включен".to_string()
@@ -570,19 +560,13 @@ pub async fn auto_select_flow_server(
     let mut chosen_ping: Option<i64> = None;
 
     if target_enabled {
-        let pings = mihomo::ping_flow_servers(&state.http, &mut_cfg, 3500).await;
+        let pings = mihomo::ping_flow_servers(&state.http, &current_cfg, 3500).await;
         let mut min_ping = i64::MAX;
 
         for (name, &ping) in &pings {
             if ping > 0 && ping < min_ping {
-                let lower = name.to_lowercase();
-                let is_us_ca = lower.contains("сша") || lower.contains("usa") || lower.contains("us ") ||
-                    lower.contains("chicago") || lower.contains("чикаго") || lower.contains("канад") ||
-                    lower.contains("canada") || lower.contains("вашингтон") || lower.contains("washington") ||
-                    lower.contains("майами") || lower.contains("miami") || lower.contains("сиэтл") ||
-                    lower.contains("seattle") || lower.contains("атланта") || lower.contains("atlanta") ||
-                    lower.contains("феникс") || lower.contains("phoenix") || lower.contains("лос-анджелес") ||
-                    lower.contains("los angeles");
+                let country = crate::mihomo::detect_server_country(name);
+                let is_us_ca = country == "US" || country == "CA";
                 if is_us_ca {
                     min_ping = ping;
                     best_server_id = Some(name.clone());
@@ -601,18 +585,25 @@ pub async fn auto_select_flow_server(
 
         if let Some(ref target) = best_server_id {
             chosen_ping = Some(min_ping);
-            if let Ok(_msg) = mihomo::switch_flow_server(&state.http, &mut_cfg, target).await {
-                mut_cfg.flow_server = Some(target.clone());
-                let _ = mihomo::close_all_connections(&state.http, &mut_cfg).await;
+            if let Ok(_msg) = mihomo::switch_flow_server(&state, target).await {
+                let _ = mihomo::close_all_connections(&state.http, &current_cfg).await;
                 message = format!("Автоматически выбран лучший сервер для Google AI: '{target}' ({min_ping} мс)");
             }
         }
     }
 
-    if let Err(e) = config::save(&state.config_path, &mut_cfg).await {
-        return api_err(format!("Ошибка сохранения: {e}"));
+    {
+        let _cfg_guard = state.config_lock.lock().await;
+        let mut mut_cfg = (**state.config.read().await).clone();
+        mut_cfg.flow_auto_select = target_enabled;
+        if let Some(ref target) = best_server_id {
+            mut_cfg.flow_server = Some(target.clone());
+        }
+        if let Err(e) = config::save(&state.config_path, &mut_cfg).await {
+            return api_err(format!("Ошибка сохранения: {e}"));
+        }
+        *state.config.write().await = std::sync::Arc::new(mut_cfg);
     }
-    *state.config.write().await = std::sync::Arc::new(mut_cfg);
 
     api_ok(json!({
         "saved": true,
@@ -858,9 +849,11 @@ pub struct IgnoreReq {
 
 /// POST /api/ignore — сохранить игнор-лист, применить exclude-filter к config.yaml, reload Mihomo.
 pub async fn set_ignore(State(state): State<AppState>, Json(req): Json<IgnoreReq>) -> Response {
-    let _cfg_guard = state.config_lock.lock().await;
-    let _guard = state.routing_lock.lock().await; // как в остальных правках config.yaml
-    let mut cfg = (**state.config.read().await).clone();
+    let mut tx = match ConfigTx::begin(&state).await {
+        Ok(t) => t,
+        Err(e) => return api_err(format!("Ошибка начала транзакции: {e}")),
+    };
+
     let mut servers: Vec<String> = req
         .servers
         .into_iter()
@@ -875,33 +868,32 @@ pub async fn set_ignore(State(state): State<AppState>, Json(req): Json<IgnoreReq
     servers.extend(repaired);
     servers.sort();
     servers.dedup();
-    cfg.ignore_servers = servers.clone();
 
-    let yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+    let yaml = match tx.read_yaml().await {
         Ok(y) => y,
-        Err(e) => return api_err(format!("Не удалось прочитать {}: {e}", cfg.mihomo.config_path)),
+        Err(e) => return api_err(e),
     };
     let new_yaml = match routing::apply_ignore_to_groups(&yaml, &servers) {
         Ok(y) => y,
         Err(e) => return api_err(e),
     };
-    let mut saved = cfg.provider_filters.clone();
+
+    let mut current_cfg = tx.config().clone();
+    current_cfg.ignore_servers = servers.clone();
+    let mut saved = current_cfg.provider_filters.clone();
     let new_yaml = routing::apply_ignore_to_providers(&new_yaml, &servers, &mut saved);
-    cfg.provider_filters = saved;
-    if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
-        return api_err(format!("Ошибка сохранения config.yaml: {e}"));
-    }
+    current_cfg.provider_filters = saved;
 
-    let reload_err = mihomo::reload_config(&state.http, &cfg).await.err();
-    // exclude-filter провайдера применяется только при его загрузке — принудительно
-    // перечитываем провайдеры, иначе игнор не подействует до планового обновления.
+    if let Err(e) = tx.set_yaml(new_yaml) {
+        return api_err(e);
+    }
+    tx.stage_json(current_cfg);
+
+    let reload_res = tx.commit_and_reload().await;
+    let cfg = state.config.read().await.clone();
     let updated = mihomo::force_update_all_providers(&state.http, &cfg).await;
-    if let Err(e) = config::save(&state.config_path, &cfg).await {
-        return api_err(format!("Ошибка сохранения конфига: {e}"));
-    }
-    *state.config.write().await = std::sync::Arc::new(cfg);
 
-    if let Some(err) = reload_err {
+    if let Err(err) = reload_res {
         return api_ok(json!({
             "applied": servers.len(),
             "providers_updated": updated,
@@ -914,12 +906,13 @@ pub async fn set_ignore(State(state): State<AppState>, Json(req): Json<IgnoreReq
 /// POST /api/servers/fix-names — ремонт mojibake-имён статических прокси в config.yaml
 /// (глобальная замена битого имени на починенное затрагивает и группы, и правила), reload.
 pub async fn fix_names(State(state): State<AppState>) -> Response {
-    let _cfg_guard = state.config_lock.lock().await;
-    let _guard = state.routing_lock.lock().await;
-    let cfg = state.config.read().await.clone();
-    let yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+    let mut tx = match ConfigTx::begin(&state).await {
+        Ok(t) => t,
+        Err(e) => return api_err(format!("Ошибка начала транзакции: {e}")),
+    };
+    let yaml = match tx.read_yaml().await {
         Ok(y) => y,
-        Err(e) => return api_err(format!("Не удалось прочитать {}: {e}", cfg.mihomo.config_path)),
+        Err(e) => return api_err(e),
     };
     let mut new_yaml = yaml.clone();
     let mut fixed: Vec<String> = Vec::new();
@@ -950,10 +943,10 @@ pub async fn fix_names(State(state): State<AppState>) -> Response {
     if fixed.is_empty() {
         return api_ok(json!({ "fixed": 0, "names": fixed }));
     }
-    if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
-        return api_err(format!("Ошибка сохранения config.yaml: {e}"));
+    if let Err(e) = tx.set_yaml(new_yaml) {
+        return api_err(e);
     }
-    if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
+    if let Err(e) = tx.commit_and_reload().await {
         return api_err(format!("Имена исправлены, но reload Mihomo не удался: {e}"));
     }
     api_ok(json!({ "fixed": fixed.len(), "names": fixed }))
@@ -1187,12 +1180,14 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
 
     let (n_direct, n_force) = (tx.config().direct_domains.len(), tx.config().force_domains.len());
     let auto_cdns_list: Vec<String> = auto_cdns.into_iter().collect();
+    let new_rev = calc_domains_revision(&tx.config().direct_domains, &tx.config().force_domains);
 
     api_ok(json!({
         "direct": n_direct,
         "force": n_force,
         "auto_cdns": auto_cdns_list,
-        "overridden_ips": overridden
+        "overridden_ips": overridden,
+        "revision": new_rev
     }))
 }
 
@@ -1372,16 +1367,8 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
         return api_err("Недопустимое действие (start/stop/restart/restart_all/status)");
     }
     let init_script = cfg.system.xkeen_init.trim();
-    if !init_script.starts_with("/opt/")
-        || init_script.contains("..")
-        || init_script.contains('\0')
-        || init_script.contains(';')
-        || init_script.contains('&')
-        || init_script.contains('|')
-        || init_script.contains('`')
-        || init_script.contains('$')
-    {
-        return api_err("Недопустимый путь к init-скрипту (разрешены только пути в /opt/)");
+    if !crate::config::is_valid_init_script_path(init_script) {
+        return api_err("Недопустимый путь к init-скрипту (разрешены только пути в /opt/ и символы [a-zA-Z0-9_-./])");
     }
 
     if action == "stop" {
@@ -2129,6 +2116,9 @@ pub async fn add_provider(State(state): State<AppState>, Json(req): Json<AddProv
     if id.is_empty() || raw_url.is_empty() {
         return api_err("ID и URL подписки не могут быть пустыми");
     }
+    if !crate::config::is_valid_provider_id(id) {
+        return api_err("Некорректный ID подписки: разрешены только символы [a-zA-Z0-9_-], длина до 64 символов");
+    }
 
     let hwid_trimmed = req.hwid.as_deref().map(str::trim).filter(|h| !h.is_empty());
     let mut final_url = raw_url.to_string();
@@ -2142,18 +2132,22 @@ pub async fn add_provider(State(state): State<AppState>, Json(req): Json<AddProv
         }
     }
 
-    let cfg = state.config.read().await.clone();
-    let yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+    let mut tx = match ConfigTx::begin(&state).await {
+        Ok(t) => t,
+        Err(e) => return api_err(format!("Ошибка захвата транзакции: {e}")),
+    };
+
+    let yaml = match tx.read_yaml().await {
         Ok(y) => y,
-        Err(e) => return api_err(format!("Ошибка чтения {}: {e}", cfg.mihomo.config_path)),
+        Err(e) => return api_err(e),
     };
 
     let new_yaml = match crate::routing::add_provider_to_yaml_full(
         &yaml,
         id,
         &final_url,
-        Some(cfg.health_check_url()),
-        Some(cfg.mihomo.health_check_interval),
+        Some(tx.config().health_check_url()),
+        Some(tx.config().mihomo.health_check_interval),
         hwid_trimmed,
         req.user_agent.as_deref(),
     ) {
@@ -2161,20 +2155,20 @@ pub async fn add_provider(State(state): State<AppState>, Json(req): Json<AddProv
         Err(e) => return api_err(e),
     };
 
-    if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
-        return api_err(format!("Ошибка сохранения config.yaml: {e}"));
+    if let Err(e) = tx.set_yaml(new_yaml) {
+        return api_err(format!("Ошибка валидации YAML: {e}"));
     }
 
     // Если указано пользовательское имя — сохраняем псевдоним
     if let Some(alias) = req.name.filter(|n| !n.trim().is_empty()) {
-        let _guard = state.config_lock.lock().await;
-        let mut new_cfg = (**state.config.read().await).clone();
-        new_cfg.provider_aliases.insert(id.to_string(), alias.trim().to_string());
-        let _ = config::save(&state.config_path, &new_cfg).await;
-        *state.config.write().await = std::sync::Arc::new(new_cfg);
+        tx.config_mut().provider_aliases.insert(id.to_string(), alias.trim().to_string());
     }
 
-    let _ = mihomo::reload_config(&state.http, &cfg).await;
+    if let Err(e) = tx.commit_and_reload().await {
+        return api_err(format!("Ошибка сохранения и применения подписки: {e}"));
+    }
+
+    let cfg = state.config.read().await.clone();
     let _ = mihomo::force_update_provider(&state.http, &cfg, id).await;
 
     api_ok(json!({ "added": true, "message": format!("Подписка '{id}' успешно добавлена") }))
@@ -2192,11 +2186,18 @@ pub async fn delete_provider(State(state): State<AppState>, Json(req): Json<Dele
     if id.is_empty() {
         return api_err("ID подписки не может быть пустым");
     }
+    if !crate::config::is_valid_provider_id(id) {
+        return api_err("Некорректный ID подписки: разрешены только символы [a-zA-Z0-9_-], длина до 64 символов");
+    }
 
-    let cfg = state.config.read().await.clone();
-    let yaml = match tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+    let mut tx = match ConfigTx::begin(&state).await {
+        Ok(t) => t,
+        Err(e) => return api_err(format!("Ошибка захвата транзакции: {e}")),
+    };
+
+    let yaml = match tx.read_yaml().await {
         Ok(y) => y,
-        Err(e) => return api_err(format!("Ошибка чтения {}: {e}", cfg.mihomo.config_path)),
+        Err(e) => return api_err(e),
     };
 
     let new_yaml = match crate::routing::delete_provider_from_yaml(&yaml, id) {
@@ -2204,7 +2205,15 @@ pub async fn delete_provider(State(state): State<AppState>, Json(req): Json<Dele
         Err(e) => return api_err(e),
     };
 
-    if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
+    if let Err(e) = tx.set_yaml(new_yaml) {
+        return api_err(format!("Ошибка валидации YAML: {e}"));
+    }
+
+    // Удаляем псевдоним и фильтры из AppConfig
+    tx.config_mut().provider_aliases.remove(id);
+    tx.config_mut().provider_filters.remove(id);
+
+    if let Err(e) = tx.commit_and_reload().await {
         return api_err(format!("Ошибка сохранения config.yaml: {e}"));
     }
 
@@ -2213,28 +2222,6 @@ pub async fn delete_provider(State(state): State<AppState>, Json(req): Json<Dele
     let prov_cache_json = format!("/opt/etc/mihomo/providers/{id}.json");
     let _ = tokio::fs::remove_file(&prov_cache_yaml).await;
     let _ = tokio::fs::remove_file(&prov_cache_json).await;
-
-    // Удаляем псевдоним и фильтры из AppConfig
-    {
-        let _guard = state.config_lock.lock().await;
-        let mut new_cfg = (**state.config.read().await).clone();
-        let mut changed = false;
-        if new_cfg.provider_aliases.remove(id).is_some() {
-            changed = true;
-        }
-        if new_cfg.provider_filters.remove(id).is_some() {
-            changed = true;
-        }
-        if changed {
-            let _ = config::save(&state.config_path, &new_cfg).await;
-            *state.config.write().await = std::sync::Arc::new(new_cfg);
-        }
-    }
-
-    let reload_res = mihomo::reload_config(&state.http, &cfg).await;
-    if let Err(e) = &reload_res {
-        crate::log_w!("Внимание: Mihomo reload вернул ошибку после удаления провайдера '{id}': {e}");
-    }
 
     api_ok(json!({ "deleted": true, "message": format!("Подписка '{id}' успешно удалена") }))
 }
@@ -2260,36 +2247,45 @@ pub async fn set_antigravity_settings(
     State(state): State<AppState>,
     Json(req): Json<AntigravitySettingsReq>,
 ) -> Response {
-    let _guard = state.config_lock.lock().await;
-    let mut new_cfg = (**state.config.read().await).clone();
+    let mut tx = match ConfigTx::begin(&state).await {
+        Ok(tx) => tx,
+        Err(e) => return api_err(format!("Ошибка захвата конфигурации: {e}")).into_response(),
+    };
 
     if let Some(enabled) = req.enabled {
-        new_cfg.antigravity.enabled = enabled;
+        tx.config_mut().antigravity.enabled = enabled;
     }
     if let Some(mode) = req.mode {
-        new_cfg.antigravity.mode = mode;
+        tx.config_mut().antigravity.mode = mode;
     }
     if let Some(port) = req.proxy_port {
-        new_cfg.antigravity.proxy_port = port;
+        tx.config_mut().antigravity.proxy_port = port;
     }
     if let Some(pe) = req.proxy_enabled {
-        new_cfg.antigravity.proxy_enabled = pe;
+        tx.config_mut().antigravity.proxy_enabled = pe;
     }
     if let Some(interval) = req.health_check_interval {
-        new_cfg.antigravity.health_check_interval = interval.max(30);
+        tx.config_mut().antigravity.health_check_interval = interval.max(30);
     }
     if let Some(own_proxy) = req.own_proxy {
-        new_cfg.antigravity.own_proxy = own_proxy;
+        tx.config_mut().antigravity.own_proxy = own_proxy;
     }
 
-    if let Err(e) = config::save(&state.config_path, &new_cfg).await {
+    let proxy_port = tx.config().antigravity.proxy_port;
+    let proxy_active = tx.config().antigravity.enabled && tx.config().antigravity.proxy_enabled;
+
+    if let Err(e) = tx.commit().await {
         return api_err(format!("Ошибка сохранения: {e}")).into_response();
     }
-    *state.config.write().await = std::sync::Arc::new(new_cfg);
 
-    // Фоновая проверка сразу после смены настроек
+    // Фоновое управление прокси и проверка сразу после смены настроек (BUG-02)
     let ag = state.antigravity.clone();
     tokio::spawn(async move {
+        if proxy_active {
+            ag.clone().restart_proxy(proxy_port).await;
+        } else {
+            ag.stop_proxy().await;
+        }
         ag.check_and_update().await;
     });
 
@@ -3297,7 +3293,13 @@ pub async fn test_notification(
         return api_err("Укажите Telegram Bot Token и Chat ID или Webhook URL для теста");
     }
 
-    api_ok(json!({ "results": results }))
+    let has_error = results.iter().any(|r| r.contains('❌'));
+    let msg = results.join("\n");
+    if has_error {
+        api_err(msg)
+    } else {
+        api_ok(json!({ "results": results, "message": msg }))
+    }
 }
 
 // ==================== ИМПОРТ НОД (OUTBOUND GENERATOR) ====================
@@ -3326,6 +3328,10 @@ pub async fn import_node(
 
     if body.target == "provider" {
         let prov_name = body.provider_name.unwrap_or_else(|| "custom".to_string());
+        let prov_name = prov_name.trim();
+        if !crate::config::is_valid_provider_id(prov_name) {
+            return api_err("Некорректное имя провайдера: разрешены только символы [a-zA-Z0-9_-], длина до 64 символов");
+        }
         let providers_dir = std::path::Path::new(&tx.config().mihomo.config_path)
             .parent()
             .map(|p| p.join("providers"))
@@ -3338,7 +3344,9 @@ pub async fn import_node(
         }
 
         let mut current_content = tokio::fs::read_to_string(&path).await.unwrap_or_else(|_| "proxies:\n".to_string());
-        if !current_content.contains("proxies:") {
+        if current_content.contains("proxies: []") {
+            current_content = current_content.replace("proxies: []", "proxies:");
+        } else if !current_content.contains("proxies:") {
             current_content = format!("proxies:\n{}", current_content);
         }
         current_content.push('\n');
@@ -3353,7 +3361,8 @@ pub async fn import_node(
             Ok(y) => y,
             Err(e) => return api_err(e),
         };
-        if !config_yaml.contains(&format!("{}:", prov_name)) {
+        let existing_provs = crate::routing::parse_provider_names(&config_yaml);
+        if !existing_provs.iter().any(|p| p.eq_ignore_ascii_case(prov_name)) {
             let health_url = tx.config().health_check_url();
             let interval = tx.config().mihomo.health_check_interval;
             if let Ok(new_yaml) = crate::routing::add_provider_to_yaml(
@@ -3383,12 +3392,14 @@ pub async fn import_node(
     };
 
     let mut lines: Vec<String> = config_yaml.lines().map(|s| s.to_string()).collect();
-    let proxies_idx = match lines.iter().position(|l| l.trim_end() == "proxies:") {
-        Some(idx) => idx,
-        None => {
-            lines.insert(0, "proxies:".to_string());
-            0
-        }
+    let proxies_idx = if let Some(idx) = lines.iter().position(|l| l.trim_end() == "proxies:") {
+        idx
+    } else if let Some(idx) = lines.iter().position(|l| l.trim() == "proxies: []") {
+        lines[idx] = "proxies:".to_string();
+        idx
+    } else {
+        lines.insert(0, "proxies:".to_string());
+        0
     };
 
     lines.insert(proxies_idx + 1, yaml.to_string());
@@ -4989,13 +5000,11 @@ add_fw() {
     iptables -t mangle -A zapret -p udp --dport 50000:65535 -j NFQUEUE --queue-num 200 --queue-bypass 2>/dev/null || true
   fi
 
-  # Hook into PREROUTING for client LAN bridge packets (br+, Bridge+)
-  iptables -t mangle -I PREROUTING 1 -i br+ -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null || \
-  iptables -t mangle -I PREROUTING 1 -i Bridge+ -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null || {
-    echo "ERROR: failed to hook zapret chain into PREROUTING for br+/Bridge+" >&2
-    remove_fw_rules
-    return 1
-  }
+  # Hook into PREROUTING for client LAN bridge packets (both br+ and Bridge+) (HC-03)
+  for iface in br+ Bridge+; do
+    iptables -t mangle -I PREROUTING 1 -i "$iface" -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null || \
+    iptables -t mangle -I PREROUTING 1 -i "$iface" -j zapret 2>/dev/null || true
+  done
 
   # Z-02 & NET-01: Guard DNS redirect before PREROUTING to port 1053 to prevent LAN blackout & loops
   if check_dns_resolver_ready; then
@@ -6186,15 +6195,15 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
     let excluded_ips_str = cfg
         .excluded_devices
         .iter()
-        .filter(|d| !d.contains(':'))
-        .cloned()
+        .map(|d| d.trim())
+        .filter(|d| crate::config::is_valid_ip_or_cidr(d))
         .collect::<Vec<_>>()
         .join(" ");
     let excluded_macs_str = cfg
         .excluded_devices
         .iter()
-        .filter(|d| d.contains(':'))
-        .cloned()
+        .map(|d| d.trim())
+        .filter(|d| crate::config::is_valid_mac(d))
         .collect::<Vec<_>>()
         .join(" ");
     let block_quic_str = if cfg.smart_tv_mode { "1" } else { "0" };
@@ -6452,10 +6461,32 @@ pub async fn zapret_action(
 ) -> Response {
     let act = body.action.trim();
 
+    // BUG-26: Межпроцессная блокировка и фиксация операционного состояния
+    let op_state = match act {
+        "start" => crate::zapret::ZapretOperationState::Starting,
+        "stop" => crate::zapret::ZapretOperationState::Stopping,
+        "restart" => crate::zapret::ZapretOperationState::Restarting,
+        "upgrade_zapret2" | "rollback_v1" => crate::zapret::ZapretOperationState::Upgrading,
+        "toggle_feature" | "set_features" | "reset_features" | "add_custom_domain" | "remove_custom_domain" | "toggle_custom_domain" | "boost_custom_domain" | "apply_strategy" => crate::zapret::ZapretOperationState::Reloading,
+        _ => crate::zapret::ZapretOperationState::Configuring,
+    };
+
+    let _zapret_guard = if act != "test_dpi" {
+        match crate::zapret::ZapretLockGuard::acquire(state.zapret_lock.clone(), op_state, 10).await {
+            Ok(g) => Some(g),
+            Err(e) => return api_err(format!("Служба Zapret занята другой операцией: {e}")),
+        }
+    } else {
+        None
+    };
+
+    let proxy_url = state.config.read().await.mihomo_proxy_url();
+
     // 0.05 1-клик обновление до Zapret 2 (nfqws2 + Lua библиотеки в /opt/zapret2) с сохранением резервной копии v1
     if act == "upgrade_zapret2" {
         let hw = detect_zapret_hardware(&state).await;
         let upgrade_cmd = r#"
+            PROXY="${MIHOMO_PROXY:-http://127.0.0.1:7890}"
             ARCH=$(uname -m)
             case "$ARCH" in
               aarch64|arm64) TARGET_ARCH="linux-arm64"; Z2_ARCH="arm64" ;;
@@ -6499,7 +6530,7 @@ pub async fn zapret_action(
               "https://github.com/bol-van/zapret2/archive/refs/heads/master.tar.gz" \
               "https://ghproxy.net/https://github.com/bol-van/zapret2/archive/refs/heads/master.tar.gz" \
               "https://github.com/bol-van/zapret2/releases/download/v1.0.5.2/zapret2-v1.0.5.2.tar.gz"; do
-              if curl -fsSL --connect-timeout 10 -m 60 -x http://127.0.0.1:7890 "$url" -o "$STAGE_DIR/z2.tar.gz" 2>/dev/null || \
+              if curl -fsSL --connect-timeout 10 -m 60 -x "$PROXY" "$url" -o "$STAGE_DIR/z2.tar.gz" 2>/dev/null || \
                  curl -fsSL --connect-timeout 10 -m 60 "$url" -o "$STAGE_DIR/z2.tar.gz" 2>/dev/null; then
                 if [ -s "$STAGE_DIR/z2.tar.gz" ] && [ $(wc -c < "$STAGE_DIR/z2.tar.gz" 2>/dev/null || echo 0) -gt 10000 ]; then
                   echo "Архив успешно загружен с: $url"
@@ -6552,7 +6583,7 @@ pub async fn zapret_action(
             for lf in zapret-lib.lua zapret-antidpi.lua zapret-auto.lua; do
               if [ ! -s "/opt/zapret2/lua/$lf" ] || [ $(wc -c < "/opt/zapret2/lua/$lf" 2>/dev/null || echo 0) -lt 80 ] || grep -q "404: Not Found" "/opt/zapret2/lua/$lf" 2>/dev/null; then
                 rm -f "/opt/zapret2/lua/$lf"
-                (curl -fsSL -x http://127.0.0.1:7890 "https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf" || \
+                (curl -fsSL -x "$PROXY" "https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf" || \
                  curl -fsSL "https://ghproxy.net/https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf" || \
                  curl -fsSL "https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf") 2>/dev/null || true
                 if [ $(wc -c < "/opt/zapret2/lua/$lf" 2>/dev/null || echo 0) -lt 80 ] || grep -q "404: Not Found" "/opt/zapret2/lua/$lf" 2>/dev/null; then
@@ -6568,7 +6599,7 @@ pub async fn zapret_action(
             echo "Установка Zapret 2.0 (v1.0.5.2) успешно завершена."
         "#;
 
-        match tokio::process::Command::new("sh").arg("-c").arg(upgrade_cmd).output().await {
+        match tokio::process::Command::new("sh").arg("-c").arg(upgrade_cmd).env("MIHOMO_PROXY", &proxy_url).output().await {
             Ok(out) => {
                 let output_str = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
                 if !is_nfqws2_available() {
@@ -6656,10 +6687,11 @@ pub async fn zapret_action(
                     x86_64) TARGET_ARCH="linux-x86_64" ;;
                     *) TARGET_ARCH="linux-arm64" ;;
                   esac
+                  PROXY="${MIHOMO_PROXY:-http://127.0.0.1:7890}"
                   for url in \
                     "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" \
                     "https://ghproxy.net/https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz"; do
-                    if curl -fsSL --connect-timeout 10 -m 60 -x http://127.0.0.1:7890 "$url" -o /tmp/z1.tar.gz 2>/dev/null || \
+                    if curl -fsSL --connect-timeout 10 -m 60 -x "$PROXY" "$url" -o /tmp/z1.tar.gz 2>/dev/null || \
                        curl -fsSL --connect-timeout 10 -m 60 "$url" -o /tmp/z1.tar.gz 2>/dev/null; then
                       tar -xzf /tmp/z1.tar.gz -C /tmp/ 2>/dev/null || true
                       rm -f /tmp/z1.tar.gz
@@ -6675,7 +6707,7 @@ pub async fn zapret_action(
                   done
                 fi
             "#;
-            let _ = tokio::process::Command::new("sh").arg("-c").arg(restore_v1_cmd).output().await;
+            let _ = tokio::process::Command::new("sh").arg("-c").arg(restore_v1_cmd).env("MIHOMO_PROXY", &proxy_url).output().await;
 
             if !is_nfqws1_available() && !std::path::Path::new("/opt/etc/zapret/zapret.v1.conf.bak").exists() {
                 return api_err("Не удалось активировать Zapret 1: исполняемый файл nfqws не найден.");
@@ -6832,16 +6864,19 @@ pub async fn zapret_action(
             .map(|s| s.success())
             .unwrap_or(false);
 
-        let zapret_active = is_running && ipt_ok;
+        let cfg = state.config.read().await.clone();
+        let proxy_url = cfg.mihomo_proxy_url();
 
-        // Быстрая параллельная проверка доступности через прокси Mihomo mixed-port 7890 (макс 2.5 сек)
-        let test_cmd = r#"
-            p_yt=$(curl -4 -k -m 2.5 -s -o /dev/null -w "%{http_code}:%{time_total}" -x http://127.0.0.1:7890 https://www.youtube.com/generate_204 2>/dev/null || echo "000:0.0") &
-            p_dc=$(curl -4 -k -m 2.5 -s -o /dev/null -w "%{http_code}:%{time_total}" -x http://127.0.0.1:7890 https://discord.com 2>/dev/null || echo "000:0.0") &
+        // Быстрая параллельная проверка доступности: прямой запрос и через прокси Mihomo (макс 2.5 сек)
+        let test_cmd = format!(r#"
+            d_yt=$(curl -4 -k -m 2.5 -s -o /dev/null -w "%{{http_code}}:%{{time_total}}" https://www.youtube.com/generate_204 2>/dev/null || echo "000:0.0") &
+            d_dc=$(curl -4 -k -m 2.5 -s -o /dev/null -w "%{{http_code}}:%{{time_total}}" https://discord.com 2>/dev/null || echo "000:0.0") &
+            p_yt=$(curl -4 -k -m 2.5 -s -o /dev/null -w "%{{http_code}}:%{{time_total}}" -x {proxy_url} https://www.youtube.com/generate_204 2>/dev/null || echo "000:0.0") &
+            p_dc=$(curl -4 -k -m 2.5 -s -o /dev/null -w "%{{http_code}}:%{{time_total}}" -x {proxy_url} https://discord.com 2>/dev/null || echo "000:0.0") &
             wait
-            echo "$p_yt#$p_dc"
-        "#;
-        let out = tokio::process::Command::new("sh").arg("-c").arg(test_cmd).output().await;
+            echo "$d_yt#$d_dc#$p_yt#$p_dc"
+        "#);
+        let out = tokio::process::Command::new("sh").arg("-c").arg(&test_cmd).output().await;
         let line = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
         let parts: Vec<&str> = line.split('#').collect();
 
@@ -6852,19 +6887,19 @@ pub async fn zapret_action(
             (code, time)
         };
 
-        let (yt_p_code, yt_p_time) = parts.first().map(|s| parse_one(s)).unwrap_or((0, 0.0));
-        let (dc_p_code, dc_p_time) = parts.get(1).map(|s| parse_one(s)).unwrap_or((0, 0.0));
+        let (yt_d_code, yt_d_time) = parts.first().map(|s| parse_one(s)).unwrap_or((0, 0.0));
+        let (dc_d_code, dc_d_time) = parts.get(1).map(|s| parse_one(s)).unwrap_or((0, 0.0));
+        let (yt_p_code, yt_p_time) = parts.get(2).map(|s| parse_one(s)).unwrap_or((0, 0.0));
+        let (dc_p_code, dc_p_time) = parts.get(3).map(|s| parse_one(s)).unwrap_or((0, 0.0));
 
-        let yt_d_code = if zapret_active { 204 } else { 0 };
-        let yt_d_time = if zapret_active { 0.045 } else { 0.0 };
-        let dc_d_code = if zapret_active { 200 } else { 0 };
-        let dc_d_time = if zapret_active { 0.058 } else { 0.0 };
+        let yt_d_ok = (200..400).contains(&yt_d_code);
+        let dc_d_ok = (200..400).contains(&dc_d_code);
 
         return api_ok(json!({
             "youtube": {
                 "code": yt_d_code,
                 "time_secs": yt_d_time,
-                "ok": zapret_active,
+                "ok": yt_d_ok,
                 "proxy_code": yt_p_code,
                 "proxy_time_secs": yt_p_time,
                 "proxy_ok": (200..400).contains(&yt_p_code),
@@ -6872,7 +6907,7 @@ pub async fn zapret_action(
             "discord": {
                 "code": dc_d_code,
                 "time_secs": dc_d_time,
-                "ok": zapret_active,
+                "ok": dc_d_ok,
                 "proxy_code": dc_p_code,
                 "proxy_time_secs": dc_p_time,
                 "proxy_ok": (200..400).contains(&dc_p_code),
@@ -6893,47 +6928,8 @@ pub async fn zapret_action(
             let prev_zapret = cfg.zapret.clone();
             let prev_conf = tokio::fs::read_to_string("/opt/etc/zapret/zapret.conf").await.ok();
 
-            let mut parsed_nfqws_args: Option<String> = None;
-            for line in content.lines() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() || trimmed.starts_with('#') {
-                    continue;
-                }
-                if let Some((k, v)) = trimmed.split_once('=') {
-                    let key = k.trim();
-                    let clean_val = v.trim().trim_matches('"').trim_matches('\'').trim();
-                    if key == "NFQWS_ARGS" && !clean_val.is_empty() {
-                        parsed_nfqws_args = Some(clean_val.to_string());
-                    } else if key == "ZAPRET_ENGINE" {
-                        cfg.zapret.engine = normalize_engine_choice(clean_val).to_string();
-                    } else if key == "DISCORD_VOICE_ENABLED" {
-                        cfg.zapret.discord_voice_udp = clean_val == "1";
-                    } else if (key == "SMART_TV_MODE" || key == "BLOCK_QUIC")
-                        && clean_val == "1" {
-                            cfg.zapret.smart_tv_mode = true;
-                        }
-                }
-            }
-
-            if let Some(raw_args) = parsed_nfqws_args {
-                let mut tmp_zapret = cfg.zapret.clone();
-                tmp_zapret.custom_args = None;
-                let (default_args, _) = if should_use_nfqws2(&cfg.zapret) {
-                    build_nfqws2_args(&tmp_zapret)
-                } else {
-                    build_nfqws_args(&tmp_zapret)
-                };
-                if raw_args.trim() == default_args.trim() {
-                    cfg.zapret.custom_args = None;
-                } else {
-                    let effective = if !should_use_nfqws2(&cfg.zapret) && (raw_args.contains("--lua-desync") || raw_args.contains("multisplit")) {
-                        convert_lua_to_legacy_desync(&raw_args)
-                    } else {
-                        raw_args
-                    };
-                    cfg.zapret.custom_args = Some(effective);
-                }
-            }
+            // BUG-26: Симметричный парсинг конфигурации через zapret::parse_zapret_conf (включая корректный сброс SMART_TV_MODE="0")
+            cfg.zapret = crate::zapret::parse_zapret_conf(&content, &cfg.zapret);
 
             let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
             if let Err(e) = atomic_write_file("/opt/etc/zapret/zapret.conf", &content).await {
@@ -7166,13 +7162,14 @@ pub async fn zapret_action(
             cd /opt
             echo "[2/4] Загрузка дистрибутива Zapret 2..."
             rm -f /tmp/z2.tar.gz
+            PROXY="${MIHOMO_PROXY:-http://127.0.0.1:7890}"
             for url in \
               "https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" \
               "https://ghproxy.net/https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" \
               "https://github.com/bol-van/zapret2/archive/refs/heads/master.tar.gz" \
               "https://ghproxy.net/https://github.com/bol-van/zapret2/archive/refs/heads/master.tar.gz" \
               "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz"; do
-              if curl -fsSL --connect-timeout 10 -m 60 -x http://127.0.0.1:7890 "$url" -o /tmp/z2.tar.gz 2>/dev/null || \
+              if curl -fsSL --connect-timeout 10 -m 60 -x "$PROXY" "$url" -o /tmp/z2.tar.gz 2>/dev/null || \
                  curl -fsSL --connect-timeout 10 -m 60 "$url" -o /tmp/z2.tar.gz 2>/dev/null; then
                 if [ -s /tmp/z2.tar.gz ] && [ $(wc -c < /tmp/z2.tar.gz 2>/dev/null || echo 0) -gt 10000 ]; then
                   break
@@ -7225,7 +7222,7 @@ pub async fn zapret_action(
             for lf in zapret-lib.lua zapret-antidpi.lua zapret-auto.lua; do
               if [ ! -s "/opt/zapret2/lua/$lf" ] || [ $(wc -c < "/opt/zapret2/lua/$lf" 2>/dev/null || echo 0) -lt 80 ] || grep -q "404: Not Found" "/opt/zapret2/lua/$lf" 2>/dev/null; then
                 rm -f "/opt/zapret2/lua/$lf"
-                (curl -sSL -x http://127.0.0.1:7890 "https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf" || \
+                (curl -sSL -x "$PROXY" "https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf" || \
                  curl -sSL "https://ghproxy.net/https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf" || \
                  curl -sSL "https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf") 2>/dev/null || true
                 if [ $(wc -c < "/opt/zapret2/lua/$lf" 2>/dev/null || echo 0) -lt 80 ] || grep -q "404: Not Found" "/opt/zapret2/lua/$lf" 2>/dev/null; then
@@ -7240,7 +7237,7 @@ pub async fn zapret_action(
             echo "v1.0.5.2" > /opt/zapret2/version.txt
             echo "Установка Zapret успешно завершена."
         "#;
-        match tokio::process::Command::new("sh").arg("-c").arg(install_cmd).output().await {
+        match tokio::process::Command::new("sh").arg("-c").arg(install_cmd).env("MIHOMO_PROXY", &proxy_url).output().await {
             Ok(out) => {
                 let output_str = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
                 let _ = tokio::fs::create_dir_all("/opt/zapret2").await;
@@ -7803,9 +7800,11 @@ pub async fn get_zapret_analytics(State(state): State<AppState>) -> Response {
         cfg.zapret.period_saved_bytes = cfg.zapret.period_saved_bytes.saturating_add(delta_bytes).max(total_bytes);
         let p = cfg.zapret.period_saved_bytes;
         *state.config.write().await = std::sync::Arc::new(cfg.clone());
-        // Периодически сохраняем на диск при накоплении >= 5 МБ, чтобы не изнашивать flash
+        // Периодически сохраняем на диск при накоплении >= 5 МБ под защитой мьютекса (BUG-12)
         if delta_bytes >= 5 * 1024 * 1024 {
-            let _ = config::save(&state.config_path, &cfg).await;
+            if let Ok(_guard) = state.config_lock.try_lock() {
+                let _ = config::save(&state.config_path, &cfg).await;
+            }
         }
         p
     } else {
@@ -7814,10 +7813,12 @@ pub async fn get_zapret_analytics(State(state): State<AppState>) -> Response {
     };
 
     // Process memory & uptime stats
-    let nfqws_cpu_pct: f32 = 0.0;
+    let mut nfqws_cpu_pct: f32 = 0.0;
     let mut nfqws_mem_bytes: u64 = 0;
     let mut uptime_seconds: u64 = 0;
     let mut is_running = false;
+
+    static LAST_NFQWS_CPU: std::sync::Mutex<Option<(std::time::Instant, u64)>> = std::sync::Mutex::new(None);
 
     if let Ok(out) = tokio::process::Command::new("sh").arg("-c").arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null").output().await {
         let pids_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -7833,6 +7834,25 @@ pub async fn get_zapret_analytics(State(state): State<AppState>) -> Response {
                     tokio::fs::read_to_string("/proc/uptime").await,
                     tokio::fs::read_to_string(format!("/proc/{}/stat", pid)).await,
                 ) {
+                    let tokens: Vec<&str> = stat_str.split_whitespace().collect();
+                    if tokens.len() >= 15 {
+                        let utime: u64 = tokens[13].parse().unwrap_or(0);
+                        let stime: u64 = tokens[14].parse().unwrap_or(0);
+                        let current_ticks = utime + stime;
+                        let now = std::time::Instant::now();
+                        if let Ok(mut guard) = LAST_NFQWS_CPU.lock() {
+                            if let Some((prev_time, prev_ticks)) = *guard {
+                                let elapsed = now.duration_since(prev_time).as_secs_f64();
+                                if elapsed >= 0.2 && current_ticks >= prev_ticks {
+                                    let delta_ticks = (current_ticks - prev_ticks) as f64;
+                                    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+                                    nfqws_cpu_pct = crate::rci::calculate_normalized_cpu_pct(delta_ticks, elapsed, cores) as f32;
+                                }
+                            }
+                            *guard = Some((now, current_ticks));
+                        }
+                    }
+
                     if let Some(sys_sec) = sys_uptime_str.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()) {
                         if let Some(start_tick) = stat_str.split_whitespace().nth(21).and_then(|s| s.parse::<f64>().ok()) {
                             let start_sec = start_tick / 100.0;
@@ -7900,13 +7920,13 @@ pub async fn run_mini_blockcheck(State(state): State<AppState>) -> Response {
             let tls = sp.next().and_then(|x| x.parse().ok()).unwrap_or(t * 0.65);
             (c, t, tls)
         };
-        let (y_c, y_t, y_tls) = parts.first().map(|x| parse_triple(x)).unwrap_or((204, 0.085, 0.055));
-        let (d_c, d_t, d_tls) = parts.get(1).map(|x| parse_triple(x)).unwrap_or((200, 0.110, 0.070));
-        let (yc_c, _, _) = parts.get(2).map(|x| parse_triple(x)).unwrap_or((200, 0.075, 0.050));
-        let (dc_c, _, _) = parts.get(3).map(|x| parse_triple(x)).unwrap_or((200, 0.095, 0.060));
+        let (y_c, y_t, y_tls) = parts.first().map(|x| parse_triple(x)).unwrap_or((0, 0.0, 0.0));
+        let (d_c, d_t, d_tls) = parts.get(1).map(|x| parse_triple(x)).unwrap_or((0, 0.0, 0.0));
+        let (yc_c, _, _) = parts.get(2).map(|x| parse_triple(x)).unwrap_or((0, 0.0, 0.0));
+        let (dc_c, _, _) = parts.get(3).map(|x| parse_triple(x)).unwrap_or((0, 0.0, 0.0));
         (y_c, y_t, y_tls, d_c, d_t, d_tls, (200..500).contains(&yc_c), (200..500).contains(&dc_c))
     } else {
-        (204, 0.085, 0.055, 200, 0.110, 0.070, true, true)
+        (0, 0.0, 0.0, 0, 0.0, 0.0, false, false)
     };
 
     let mut results: Vec<serde_json::Value> = Vec::new();
@@ -7940,12 +7960,12 @@ pub async fn run_mini_blockcheck(State(state): State<AppState>) -> Response {
         let yt_time = if (200..400).contains(&base_yt_code) && base_yt_time > 0.0 {
             base_yt_time + jitter
         } else {
-            0.080 + jitter
+            0.0
         };
         let dc_time = if (200..400).contains(&base_dc_code) && base_dc_time > 0.0 {
             base_dc_time + jitter
         } else {
-            0.105 + jitter
+            0.0
         };
 
         let has_ts = args.contains("tcp_ts_up");
@@ -7953,20 +7973,16 @@ pub async fn run_mini_blockcheck(State(state): State<AppState>) -> Response {
         let has_rnd_sid = args.contains("tls_mod=rnd,dupsid");
         let has_seqovl = args.contains("seqovl");
 
-        let yt_ok = if (200..400).contains(&base_yt_code) {
-            true
-        } else {
-            *id == "multisplit" || *id == "seqovl_ack" || *id == "aggressive_dupsid" || (has_ts && (has_midsld || has_seqovl || *id == "tcp_fooling_ts"))
-        };
-        let dc_ok = if (200..400).contains(&base_dc_code) {
-            true
-        } else {
-            has_ts && (has_rnd_sid || has_seqovl || args.contains("multidisorder"))
-        };
+        let yt_ok = (200..400).contains(&base_yt_code);
+        let dc_ok = (200..400).contains(&base_dc_code);
 
         let yt_ms = (yt_time * 1000.0).round() as u32;
         let dc_ms = (dc_time * 1000.0).round() as u32;
-        let tls_handshake_ms = (((base_yt_tls + base_dc_tls) * 0.5 + jitter * 0.6) * 1000.0).round().max(18.0) as u32;
+        let tls_handshake_ms = if yt_ok || dc_ok {
+            (((base_yt_tls + base_dc_tls) * 0.5 + jitter * 0.6) * 1000.0).round().max(18.0) as u32
+        } else {
+            0
+        };
 
         // Многофакторная оценка стратегии (0..100 баллов):
         // 1. Доступность YouTube Web + googlevideo CDN (до 30 баллов)
@@ -8079,6 +8095,12 @@ pub async fn do_sync_community_hostlist(
         (final_url, cfg.zapret.community_hostlist_auto_update, cfg.mihomo_proxy_url())
     };
 
+    // SEC-10: Валидация URL от SSRF во внутреннюю сеть роутера (только https и безопасные хосты)
+    if !target_url.starts_with("https://") {
+        return Err("Разрешены только https:// URL для загрузки community hostlist".to_string());
+    }
+    crate::notifications::validate_webhook_url(&target_url)?;
+
     let client = state.http.clone();
     let resp = match client.get(&target_url).timeout(std::time::Duration::from_secs(15)).send().await {
         Ok(r) if r.status().is_success() => Ok(r),
@@ -8188,6 +8210,12 @@ pub async fn toggle_device_zapret(
 
     if target_ip.is_empty() && target_mac.is_empty() {
         return api_err("Не указан IP или MAC адрес устройства");
+    }
+    if !target_ip.is_empty() && !crate::config::is_valid_ip_or_cidr(&target_ip) {
+        return api_err("Некорректный IP-адрес устройства");
+    }
+    if !target_mac.is_empty() && !crate::config::is_valid_mac(&target_mac) {
+        return api_err("Некорректный MAC-адрес устройства");
     }
 
     let _guard = state.config_lock.lock().await;
@@ -8605,36 +8633,52 @@ ip -6 route flush table 111 2>/dev/null || true".to_string();
             setup_cmds.push("while ip -6 rule del fwmark 0x111 lookup 111 2>/dev/null; do :; done; while ip -6 rule del fwmark 0x111/0x111 lookup 111 2>/dev/null; do :; done; ip -6 rule add fwmark 0x111 lookup 111 priority 100 2>/dev/null || ip -6 rule add fwmark 0x111/0x111 lookup 111 priority 100 2>/dev/null || ip -6 rule add fwmark 0x111 lookup 111 2>/dev/null || true".to_string());
 
             for dev in active_devices {
-                let ip = dev.ip.trim();
-                if !ip.is_empty() && ip != "0.0.0.0" {
-                    // TCP -> REDIRECT в корень PREROUTING (гарантированный перехват мимо любых фильтров, кроме LAN)
-                    setup_cmds.push(format!(
-                        "iptables -t nat -I PREROUTING 1 -s {ip} -p tcp -m comment --comment 'xkeen-gaming-compat' -j REDIRECT --to-ports {r_port}"
-                    ));
-                    setup_cmds.push(format!(
-                        "iptables -t nat -I PREROUTING 1 -s {ip} -d 127.0.0.0/8 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
-                    ));
-                    setup_cmds.push(format!(
-                        "iptables -t nat -I PREROUTING 1 -s {ip} -d 192.168.0.0/16 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
-                    ));
+                let ip_trimmed = dev.ip.trim();
+                let ipv4 = match ip_trimmed.parse::<std::net::Ipv4Addr>() {
+                    Ok(addr) if !addr.is_unspecified() => addr,
+                    _ => continue,
+                };
+                let ip = ipv4.to_string();
 
-                    // UDP -> TPROXY в корень PREROUTING (гарантированный перехват игровых UDP дейтаграмм в туннель, исключая LAN/broadcast)
-                    setup_cmds.push(format!(
-                        "iptables -t mangle -I PREROUTING 1 -s {ip} -p udp -m comment --comment 'xkeen-gaming-compat' -j TPROXY --tproxy-mark 0x111/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1"
-                    ));
-                    setup_cmds.push(format!(
-                        "iptables -t mangle -I PREROUTING 1 -s {ip} -p udp -m socket --transparent -m comment --comment 'xkeen-gaming-compat' -j MARK --set-mark 0x111"
-                    ));
-                    setup_cmds.push(format!(
-                        "iptables -t mangle -I PREROUTING 1 -s {ip} -d 224.0.0.0/4 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
-                    ));
-                    setup_cmds.push(format!(
-                        "iptables -t mangle -I PREROUTING 1 -s {ip} -d 255.255.255.255 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
-                    ));
-                    setup_cmds.push(format!(
-                        "iptables -t mangle -I PREROUTING 1 -s {ip} -d 192.168.0.0/16 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
-                    ));
-                }
+                // TCP -> REDIRECT в корень PREROUTING (гарантированный перехват мимо любых фильтров, кроме LAN)
+                setup_cmds.push(format!(
+                    "iptables -t nat -I PREROUTING 1 -s {ip} -p tcp -m comment --comment 'xkeen-gaming-compat' -j REDIRECT --to-ports {r_port}"
+                ));
+                setup_cmds.push(format!(
+                    "iptables -t nat -I PREROUTING 1 -s {ip} -d 127.0.0.0/8 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                ));
+                setup_cmds.push(format!(
+                    "iptables -t nat -I PREROUTING 1 -s {ip} -d 10.0.0.0/8 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                ));
+                setup_cmds.push(format!(
+                    "iptables -t nat -I PREROUTING 1 -s {ip} -d 172.16.0.0/12 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                ));
+                setup_cmds.push(format!(
+                    "iptables -t nat -I PREROUTING 1 -s {ip} -d 192.168.0.0/16 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                ));
+
+                // UDP -> TPROXY в корень PREROUTING (гарантированный перехват игровых UDP дейтаграмм в туннель, исключая LAN/broadcast)
+                setup_cmds.push(format!(
+                    "iptables -t mangle -I PREROUTING 1 -s {ip} -p udp -m comment --comment 'xkeen-gaming-compat' -j TPROXY --tproxy-mark 0x111/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1"
+                ));
+                setup_cmds.push(format!(
+                    "iptables -t mangle -I PREROUTING 1 -s {ip} -p udp -m socket --transparent -m comment --comment 'xkeen-gaming-compat' -j MARK --set-mark 0x111"
+                ));
+                setup_cmds.push(format!(
+                    "iptables -t mangle -I PREROUTING 1 -s {ip} -d 224.0.0.0/4 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                ));
+                setup_cmds.push(format!(
+                    "iptables -t mangle -I PREROUTING 1 -s {ip} -d 255.255.255.255 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                ));
+                setup_cmds.push(format!(
+                    "iptables -t mangle -I PREROUTING 1 -s {ip} -d 10.0.0.0/8 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                ));
+                setup_cmds.push(format!(
+                    "iptables -t mangle -I PREROUTING 1 -s {ip} -d 172.16.0.0/12 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                ));
+                setup_cmds.push(format!(
+                    "iptables -t mangle -I PREROUTING 1 -s {ip} -d 192.168.0.0/16 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                ));
             }
         }
     }
@@ -8660,8 +8704,8 @@ pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16
             }
         }
 
-        for cmd in setup_cmds {
-            let out = tokio::process::Command::new("sh").arg("-c").arg(&cmd).output().await;
+        for cmd in &setup_cmds {
+            let out = tokio::process::Command::new("sh").arg("-c").arg(cmd).output().await;
             match out {
                 Ok(o) if !o.status.success() => {
                     let err = String::from_utf8_lossy(&o.stderr);
@@ -8674,6 +8718,30 @@ pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16
                 }
                 _ => {}
             }
+        }
+
+        // BUG-10: NDM netfilter hook для автоматического восстановления правил при перезагрузке фаервола роутером
+        let hook_path = std::path::Path::new("/opt/etc/ndm/netfilter.d/060-xkeen-gaming.sh");
+        if cfg.enabled && cfg.mode == config::GamingMode::Compatibility && !setup_cmds.is_empty() {
+            if let Some(parent) = hook_path.parent() {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
+            let mut script = String::from("#!/bin/sh\n[ \"$type\" = \"ip6tables\" ] && exit 0\n[ \"$table\" != \"nat\" ] && [ \"$table\" != \"mangle\" ] && [ -n \"$table\" ] && exit 0\n");
+            script.push_str(&cleanup_cmd);
+            script.push('\n');
+            for cmd in &setup_cmds {
+                script.push_str(cmd);
+                script.push('\n');
+            }
+            if let Ok(()) = tokio::fs::write(hook_path, script).await {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = tokio::fs::set_permissions(hook_path, std::fs::Permissions::from_mode(0o755)).await;
+                }
+            }
+        } else {
+            let _ = tokio::fs::remove_file(hook_path).await;
         }
 
         // Диагностика состояния маршрутизации и таблицы 111 для системного журнала
@@ -9309,13 +9377,19 @@ pub async fn adguard_install() -> Response {
 /// GET /api/adguard/config
 pub async fn adguard_get_config(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
-    api_ok(json!(cfg.adguard))
+    let mut adguard = cfg.adguard.clone();
+    if let Some(ref pw) = adguard.password {
+        if !pw.is_empty() {
+            adguard.password = Some("******".to_string());
+        }
+    }
+    api_ok(json!(adguard))
 }
 
 /// POST /api/adguard/config
 pub async fn adguard_set_config(
     State(state): State<AppState>,
-    Json(new_adguard): Json<crate::config::AdGuardConfig>,
+    Json(mut new_adguard): Json<crate::config::AdGuardConfig>,
 ) -> Response {
     let tx_res = crate::transaction::ConfigTx::begin(&state).await;
     let mut tx = match tx_res {
@@ -9324,10 +9398,15 @@ pub async fn adguard_set_config(
     };
 
     let mut current = tx.config().clone();
+    if let Some(ref pw) = new_adguard.password {
+        if pw == "******" {
+            new_adguard.password = current.adguard.password.clone();
+        }
+    }
     current.adguard = new_adguard;
     tx.stage_json(current);
 
-    match tx.commit_and_reload().await {
+    match tx.commit_without_reload().await {
         Ok(_) => {
             log_i!("Конфигурация AdGuard Home успешно обновлена и сохранена");
             api_ok(json!({ "saved": true }))
@@ -9867,6 +9946,59 @@ mod tests {
         cfg.enabled = false;
         let res_disabled = sync_gaming_full_tunnel(&cfg, 5000, 5001).await;
         assert!(res_disabled.is_ok(), "disabled mode must clean up cleanly");
+    }
+
+    #[test]
+    fn test_gaming_full_tunnel_rfc1918_exclusions_and_ip_validation() {
+        // SEC-09 & HC-06: Test RFC1918 exclusions and strict IP parsing
+        let mut cfg = config::GamingConfig::default();
+        cfg.enabled = true;
+        cfg.mode = config::GamingMode::Compatibility;
+        cfg.devices = vec![
+            config::GamingDevice {
+                name: "Legit PC".into(),
+                ip: "192.168.1.100".into(),
+                mac: "aa:bb:cc:dd:ee:ff".into(),
+                ipv6: vec![],
+                enabled: true,
+                server: Some("PROXY".into()),
+            },
+            config::GamingDevice {
+                name: "Injected Device".into(),
+                ip: "192.168.1.100; rm -rf /".into(),
+                mac: "11:22:33:44:55:66".into(),
+                ipv6: vec![],
+                enabled: true,
+                server: Some("PROXY".into()),
+            },
+        ];
+
+        let (_, setup_cmds) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
+        let all_cmds = setup_cmds.join("\n");
+
+        // Verify RFC1918 subnets are excluded
+        assert!(all_cmds.contains("-d 10.0.0.0/8"));
+        assert!(all_cmds.contains("-d 172.16.0.0/12"));
+        assert!(all_cmds.contains("-d 192.168.0.0/16"));
+
+        // Verify valid IP is present and malicious injected IP is rejected
+        assert!(all_cmds.contains("-s 192.168.1.100 "));
+        assert!(!all_cmds.contains("; rm -rf /"));
+    }
+
+    #[test]
+    fn test_import_node_empty_array_handling() {
+        // BUG-04: Test empty proxies array replacement
+        let provider_content = "proxies: []\n";
+        let mut fixed_content = if provider_content.contains("proxies: []") {
+            provider_content.replace("proxies: []", "proxies:")
+        } else {
+            provider_content.to_string()
+        };
+        fixed_content.push('\n');
+        fixed_content.push_str("  - name: test_node\n    type: ss");
+        assert!(fixed_content.starts_with("proxies:\n"));
+        assert!(fixed_content.contains("test_node"));
     }
 }
 

@@ -15,7 +15,11 @@ describe('api client', () => {
 
     const res = await apiGet<typeof mockData>('status')
     expect(res).toEqual(mockData)
-    expect(global.fetch).toHaveBeenCalledWith('/api/status', {})
+    expect(global.fetch).toHaveBeenCalledWith('/api/status', expect.objectContaining({
+      headers: expect.any(Headers),
+    }))
+    const callHeaders = (global.fetch as any).mock.calls[0][1].headers as Headers
+    expect(callHeaders.get('X-Requested-With')).toBe('XMLHttpRequest')
   })
 
   it('apiGet handles HTTP 204 No Content without json parse', async () => {
@@ -83,11 +87,13 @@ describe('api client', () => {
     } as any)
 
     await apiPost('servers/switch', { server_id: 'srv1' })
-    expect(global.fetch).toHaveBeenCalledWith('/api/servers/switch', {
+    expect(global.fetch).toHaveBeenCalledWith('/api/servers/switch', expect.objectContaining({
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ server_id: 'srv1' }),
-    })
+    }))
+    const callHeaders = (global.fetch as any).mock.calls[0][1].headers as Headers
+    expect(callHeaders.get('Content-Type')).toBe('application/json')
+    expect(callHeaders.get('X-Requested-With')).toBe('XMLHttpRequest')
   })
 
   it('apiPut sends PUT request with json body', async () => {
@@ -97,11 +103,13 @@ describe('api client', () => {
     } as any)
 
     await apiPut('settings', { theme: 'dark' })
-    expect(global.fetch).toHaveBeenCalledWith('/api/settings', {
+    expect(global.fetch).toHaveBeenCalledWith('/api/settings', expect.objectContaining({
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ theme: 'dark' }),
-    })
+    }))
+    const callHeaders = (global.fetch as any).mock.calls[0][1].headers as Headers
+    expect(callHeaders.get('Content-Type')).toBe('application/json')
+    expect(callHeaders.get('X-Requested-With')).toBe('XMLHttpRequest')
   })
 
   it('apiDelete sends DELETE request', async () => {
@@ -111,11 +119,13 @@ describe('api client', () => {
     } as any)
 
     await apiDelete('backups/delete', { name: 'old_backup' })
-    expect(global.fetch).toHaveBeenCalledWith('/api/backups/delete', {
+    expect(global.fetch).toHaveBeenCalledWith('/api/backups/delete', expect.objectContaining({
       method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: 'old_backup' }),
-    })
+    }))
+    const callHeaders = (global.fetch as any).mock.calls[0][1].headers as Headers
+    expect(callHeaders.get('Content-Type')).toBe('application/json')
+    expect(callHeaders.get('X-Requested-With')).toBe('XMLHttpRequest')
   })
 
   it('getWsUrl converts http/https host to ws/wss', () => {
@@ -134,11 +144,13 @@ describe('api client', () => {
       new_password: 'new',
     })
     expect(res).toEqual({ saved: true, enabled: true })
-    expect(global.fetch).toHaveBeenCalledWith('/api/auth/change-password', {
+    expect(global.fetch).toHaveBeenCalledWith('/api/auth/change-password', expect.objectContaining({
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: true, current_password: 'old', new_password: 'new' }),
-    })
+    }))
+    const callHeaders = (global.fetch as any).mock.calls[0][1].headers as Headers
+    expect(callHeaders.get('Content-Type')).toBe('application/json')
+    expect(callHeaders.get('X-Requested-With')).toBe('XMLHttpRequest')
   })
 
   it('anti-regression (API-02): devices/domain-rules receives { rules: ... } DTO without data loss', async () => {
@@ -186,5 +198,31 @@ describe('api client', () => {
       json: async () => ({ success: true, data: { ok: true } }),
     } as any)
     await expect(apiGet('rules')).rejects.toThrow('отсутствует массив правил rules')
+  })
+
+  it('anti-regression (FE-03): notifications/test validates results structure and detects failures', async () => {
+    const mockSuccess = {
+      results: ['Telegram: ✓ Сообщение успешно отправлено'],
+      message: 'Telegram: ✓ Сообщение успешно отправлено',
+    }
+    global.fetch = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({ success: true, data: mockSuccess }),
+    } as any)
+
+    const resSuccess = await apiPost<{ results: string[]; message: string }>('notifications/test', {})
+    expect(resSuccess.results).toHaveLength(1)
+    expect(resSuccess.results.some((r) => r.includes('❌'))).toBe(false)
+
+    const mockFailure = {
+      success: false,
+      error: 'Telegram: ❌ Chat not found',
+    }
+    global.fetch = vi.fn().mockResolvedValue({
+      status: 400,
+      json: async () => mockFailure,
+    } as any)
+
+    await expect(apiPost('notifications/test', {})).rejects.toThrow('Chat not found')
   })
 })

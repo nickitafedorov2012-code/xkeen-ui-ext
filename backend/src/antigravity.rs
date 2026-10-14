@@ -49,9 +49,29 @@ pub struct AntigravityStatus {
     pub own_proxy: String,
 }
 
+/// Проверка, является ли IP адрес внутренним, loopback, link-local, unspecified или SSRF-уязвимым
+pub fn is_ssrf_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ipv4) => {
+            ipv4.is_loopback()
+                || ipv4.is_private()
+                || ipv4.is_link_local()
+                || ipv4.is_unspecified()
+                || ipv4.is_broadcast()
+        }
+        std::net::IpAddr::V6(ipv6) => {
+            ipv6.is_loopback()
+                || ipv6.is_unspecified()
+                || ((ipv6.segments()[0] & 0xfe00) == 0xfc00) // ULA fc00::/7
+                || ((ipv6.segments()[0] & 0xffc0) == 0xfe80) // Link-local fe80::/10
+        }
+    }
+}
+
 pub struct AntigravityManager {
     pub config: Arc<RwLock<Arc<crate::config::AppConfig>>>,
     pub state: Arc<RwLock<AntigravityInternalState>>,
+    pub proxy_cancel_tx: Arc<tokio::sync::Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
     http: reqwest::Client,
 }
 
@@ -116,12 +136,38 @@ pub fn build_dns_query(domain: &str, tx_id: u16) -> Vec<u8> {
     buf
 }
 
-// Разбор A-записей из ответа DNS
+/// Пропуск доменного имени в DNS-пакете с поддержкой меток и сжатых указателей 0xC0 (RFC 1035).
+/// Возвращает смещение в буфере сразу после конца имени.
+pub fn skip_dns_name(buf: &[u8], mut pos: usize) -> Option<usize> {
+    while pos < buf.len() {
+        let b = buf[pos];
+        if b == 0 {
+            return Some(pos + 1);
+        }
+        if (b & 0xC0) == 0xC0 {
+            // Сжатый указатель (2 байта). Указатель завершает имя в данном месте пакета.
+            if pos + 2 <= buf.len() {
+                return Some(pos + 2);
+            } else {
+                return None;
+            }
+        }
+        let len = b as usize;
+        if len > 63 || pos + 1 + len > buf.len() {
+            return None;
+        }
+        pos += 1 + len;
+    }
+    None
+}
+
+// Разбор A-записей из ответа DNS с корректной поддержкой сжатых указателей 0xC0 (BUG-01)
 pub fn parse_dns_a_records(buf: &[u8]) -> Vec<Ipv4Addr> {
     let mut ips = Vec::new();
     if buf.len() < 12 {
         return ips;
     }
+    let qdcount = u16::from_be_bytes([buf[4], buf[5]]) as usize;
     let ancount = u16::from_be_bytes([buf[6], buf[7]]) as usize;
     if ancount == 0 {
         return ips;
@@ -129,33 +175,24 @@ pub fn parse_dns_a_records(buf: &[u8]) -> Vec<Ipv4Addr> {
 
     // Пропуск секции Question
     let mut pos = 12;
-    while pos < buf.len() {
-        let len = buf[pos] as usize;
-        if len == 0 {
-            pos += 5; // 0 + QTYPE(2) + QCLASS(2)
-            break;
+    let q_count = if qdcount == 0 { 1 } else { qdcount };
+    for _ in 0..q_count {
+        pos = match skip_dns_name(buf, pos) {
+            Some(p) => p,
+            None => return ips,
+        };
+        if pos + 4 > buf.len() {
+            return ips;
         }
-        if len >= 192 {
-            pos += 6; // pointer(2) + QTYPE(2) + QCLASS(2)
-            break;
-        }
-        pos += 1 + len;
+        pos += 4; // QTYPE(2) + QCLASS(2)
     }
 
     // Разбор Answers
     for _ in 0..ancount {
-        if pos >= buf.len() {
-            break;
-        }
-        if buf[pos] >= 192 {
-            pos += 2;
-        } else {
-            while pos < buf.len() && buf[pos] != 0 {
-                let l = buf[pos] as usize;
-                pos += 1 + l;
-            }
-            pos += 1;
-        }
+        pos = match skip_dns_name(buf, pos) {
+            Some(p) => p,
+            None => break,
+        };
         if pos + 10 > buf.len() {
             break;
         }
@@ -164,6 +201,9 @@ pub fn parse_dns_a_records(buf: &[u8]) -> Vec<Ipv4Addr> {
         pos += 10;
         if atype == 1 && rdlength == 4 && pos + 4 <= buf.len() {
             ips.push(Ipv4Addr::new(buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]));
+        }
+        if pos + rdlength > buf.len() {
+            break;
         }
         pos += rdlength;
     }
@@ -215,8 +255,64 @@ impl AntigravityManager {
         Self {
             config,
             state: Arc::new(RwLock::new(AntigravityInternalState::new())),
+            proxy_cancel_tx: Arc::new(tokio::sync::Mutex::new(None)),
             http,
         }
+    }
+
+    /// Остановка HTTP CONNECT прокси
+    pub async fn stop_proxy(&self) {
+        let mut cancel_guard = self.proxy_cancel_tx.lock().await;
+        if let Some(old_tx) = cancel_guard.take() {
+            let _ = old_tx.send(true);
+        }
+        let mut st = self.state.write().await;
+        st.proxy_running = false;
+    }
+
+    /// Перезапуск HTTP CONNECT прокси на новом порту
+    pub async fn restart_proxy(self: Arc<Self>, port: u16) {
+        self.stop_proxy().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        self.start_proxy(port);
+    }
+
+    /// Получение эталонного DNS-сервера (из настроек AdGuard /etc/resolv.conf или 1.1.1.1:53)
+    pub async fn get_reference_dns_server(&self) -> String {
+        let cfg_dns = {
+            let c = self.config.read().await;
+            if !c.adguard.upstream_dns.is_empty() {
+                c.adguard.upstream_dns.first().cloned()
+            } else {
+                None
+            }
+        };
+        if let Some(dns) = cfg_dns {
+            let trimmed = dns.trim();
+            if let Ok(ip) = trimmed.parse::<Ipv4Addr>() {
+                return format!("{ip}:53");
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(resolv) = tokio::fs::read_to_string("/etc/resolv.conf").await {
+                for line in resolv.lines() {
+                    let line = line.trim();
+                    if line.starts_with("nameserver") {
+                        if let Some(ns) = line.strip_prefix("nameserver").map(str::trim) {
+                            if let Ok(ip) = ns.parse::<Ipv4Addr>() {
+                                if !ip.is_loopback() && !ip.is_unspecified() {
+                                    return format!("{ip}:53");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        "1.1.1.1:53".to_string()
     }
 
     /// Запрос по обычному UDP DNS
@@ -309,8 +405,9 @@ impl AntigravityManager {
 
         let main_target = targets.first().cloned().unwrap_or_else(|| "cloudcode-pa.googleapis.com".into());
 
-        // 1. Получаем эталонные адреса Google через 8.8.8.8
-        let ref_ips: Vec<Ipv4Addr> = match self.query_udp("8.8.8.8:53", &main_target).await {
+        // 1. Получаем эталонные адреса Google через системный / настроенный DNS
+        let ref_server = self.get_reference_dns_server().await;
+        let ref_ips: Vec<Ipv4Addr> = match self.query_udp(&ref_server, &main_target).await {
             Ok((ips, _)) => ips,
             Err(_) => Vec::new(),
         };
@@ -450,33 +547,41 @@ impl AntigravityManager {
 
     /// Применение DNS-записей в KeeneticOS и добавление маршрута мимо VPN
     async fn apply_keenetic_rules(&self, ip: Ipv4Addr, targets: &[String], prev_ip: Option<Ipv4Addr>) {
-        // 1. Очистка прошлого IP из маршрутизации и ipset (ошибки ожидаемы, если правила не было)
+        // 1. Очистка прошлого IP из маршрутизации и ipset с дедупликацией (BUG-01)
         if let Some(old) = prev_ip {
             let old_str = old.to_string();
             let old_rule = format!("{old}/32");
-            let _ = run_cmd("ip", &["rule", "del", "to", &old_rule, "table", "main", "priority", "90"]).await;
+            while run_cmd("ip", &["rule", "del", "to", &old_rule, "table", "main", "priority", "90"]).await.is_ok() {}
             let _ = run_cmd("ipset", &["del", "user_exclude", &old_str]).await;
         }
 
-        // 2. Исключение подменного IP из перехвата Mihomo (ipset user_exclude)
+        // 2. Дедуплицированное удаление старых правил ip rule для нового IP перед добавлением (BUG-01)
+        let ip_rule = format!("{ip}/32");
         let ip_str = ip.to_string();
+        while run_cmd("ip", &["rule", "del", "to", &ip_rule, "table", "main", "priority", "90"]).await.is_ok() {}
+
+        // 3. Исключение подменного IP из перехвата Mihomo (ipset user_exclude)
         if let Err(e) = run_cmd("ipset", &["add", "user_exclude", &ip_str, "-exist"]).await {
             crate::log_w!("[ANTIGRAVITY] Не удалось добавить {ip_str} в ipset user_exclude: {e}");
         }
 
-        // 3. Добавление правила маршрутизации напрямую через основной WAN (таблица main)
-        let ip_rule = format!("{ip}/32");
+        // 4. Добавление правила маршрутизации напрямую через основной WAN (таблица main)
         if let Err(e) = run_cmd("ip", &["rule", "add", "to", &ip_rule, "table", "main", "priority", "90"]).await {
             crate::log_w!("[ANTIGRAVITY] Не удалось добавить ip rule для {ip_rule}: {e}");
         }
 
-        // 4. Установка статических DNS-записей в Keenetic ndnproxy (с предварительной очисткой старых записей)
+        // 5. Установка статических DNS-записей в Keenetic ndnproxy с валидацией доменов (SEC-02)
         for target in targets {
-            let clean_cmd = format!("no ip host {target}");
+            let clean_target = target.trim();
+            if !crate::config::is_valid_domain(clean_target) {
+                crate::log_w!("[ANTIGRAVITY] Пропуск невалидного домена: {target}");
+                continue;
+            }
+            let clean_cmd = format!("no ip host {clean_target}");
             let _ = run_cmd("ndmc", &["-c", &clean_cmd]).await;
-            let cmd = format!("ip host {target} {ip}");
+            let cmd = format!("ip host {clean_target} {ip}");
             if let Err(e) = run_cmd("ndmc", &["-c", &cmd]).await {
-                crate::log_w!("[ANTIGRAVITY] Не удалось установить DNS запись {target} -> {ip}: {e}");
+                crate::log_w!("[ANTIGRAVITY] Не удалось установить DNS запись {clean_target} -> {ip}: {e}");
             }
         }
     }
@@ -486,7 +591,7 @@ impl AntigravityManager {
         if let Some(ip) = active_ip {
             let ip_rule = format!("{ip}/32");
             let ip_str = ip.to_string();
-            let _ = run_cmd("ip", &["rule", "del", "to", &ip_rule, "table", "main", "priority", "90"]).await;
+            while run_cmd("ip", &["rule", "del", "to", &ip_rule, "table", "main", "priority", "90"]).await.is_ok() {}
             let _ = run_cmd("ipset", &["del", "user_exclude", &ip_str]).await;
         }
 
@@ -496,7 +601,11 @@ impl AntigravityManager {
         };
 
         for target in targets {
-            let cmd = format!("no ip host {target}");
+            let clean_target = target.trim();
+            if !crate::config::is_valid_domain(clean_target) {
+                continue;
+            }
+            let cmd = format!("no ip host {clean_target}");
             let _ = run_cmd("ndmc", &["-c", &cmd]).await;
         }
     }
@@ -518,34 +627,56 @@ impl AntigravityManager {
                 }
             };
 
+            let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+            {
+                let mut guard = self.proxy_cancel_tx.lock().await;
+                if let Some(old) = guard.take() {
+                    let _ = old.send(true);
+                }
+                *guard = Some(cancel_tx);
+            }
+
             let sem = Arc::new(tokio::sync::Semaphore::new(64));
 
             loop {
-                if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+                if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) || *cancel_rx.borrow() {
                     break;
                 }
-                let (stream, _) = match listener.accept().await {
-                    Ok(res) => res,
-                    Err(_) => continue,
-                };
 
-                let permit = match sem.clone().try_acquire_owned() {
-                    Ok(p) => p,
-                    Err(_) => {
-                        crate::log_w!("[ANTIGRAVITY] Превышен лимит параллельных подключений к прокси (64)");
-                        continue;
+                tokio::select! {
+                    _ = cancel_rx.changed() => {
+                        if *cancel_rx.borrow() {
+                            break;
+                        }
                     }
-                };
+                    res = listener.accept() => {
+                        let (stream, _) = match res {
+                            Ok(r) => r,
+                            Err(_) => continue,
+                        };
 
-                let mgr = self.clone();
-                tokio::spawn(async move {
-                    let _permit = permit;
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(60),
-                        handle_proxy_conn(stream, mgr)
-                    ).await;
-                });
+                        let permit = match sem.clone().try_acquire_owned() {
+                            Ok(p) => p,
+                            Err(_) => {
+                                crate::log_w!("[ANTIGRAVITY] Превышен лимит параллельных подключений к прокси (64)");
+                                continue;
+                            }
+                        };
+
+                        let mgr = self.clone();
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            let _ = tokio::time::timeout(
+                                std::time::Duration::from_secs(60),
+                                handle_proxy_conn(stream, mgr)
+                            ).await;
+                        });
+                    }
+                }
             }
+
+            let mut st = self.state.write().await;
+            st.proxy_running = false;
         });
     }
 
@@ -648,26 +779,71 @@ async fn handle_proxy_conn(mut client: TcpStream, mgr: Arc<AntigravityManager>) 
     }
 
     let target_host_port = parts[1];
-    let host_only = target_host_port.split(':').next().unwrap_or(target_host_port);
+    let (host, port) = match target_host_port.rsplit_once(':') {
+        Some((h, p)) => (h, p.parse::<u16>().unwrap_or(0)),
+        None => (target_host_port, 443),
+    };
 
-    // Определяем, куда отправлять трафик:
+    // SEC-04: Разрешаем CONNECT-прокси только на порт 443
+    if port != 443 {
+        crate::log_w!("[ANTIGRAVITY] Отклонён CONNECT-запрос на неразрешённый порт: {port}");
+        client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+        return Ok(());
+    }
+
+    // SEC-04: Проверка, что домен входит в список разрешённых targets
     let targets = {
         let c = mgr.config.read().await;
         c.antigravity.targets.clone()
     };
+    let is_target_allowed = targets.iter().any(|t| t.eq_ignore_ascii_case(host));
+    if !is_target_allowed {
+        crate::log_w!("[ANTIGRAVITY] Отклонён CONNECT-запрос к недопустимому домену: {host}");
+        client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+        return Ok(());
+    }
 
-    let destination = if targets.iter().any(|t| t.eq_ignore_ascii_case(host_only)) {
+    // SEC-04: Если передан литеральный IP, проверяем на SSRF
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if is_ssrf_ip(ip) {
+            crate::log_w!("[ANTIGRAVITY] Отклонён CONNECT-запрос к SSRF IP: {ip}");
+            client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+            return Ok(());
+        }
+    }
+
+    // Определяем, куда отправлять трафик:
+    let destination = {
         let st = mgr.state.read().await;
         if let Some(sub_ip) = st.active_ip {
+            if is_ssrf_ip(std::net::IpAddr::V4(sub_ip)) {
+                crate::log_w!("[ANTIGRAVITY] Заблокирована попытка соединения с SSRF active_ip: {sub_ip}");
+                client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+                return Ok(());
+            }
             format!("{sub_ip}:443")
         } else {
-            target_host_port.to_string()
+            format!("{host}:443")
         }
-    } else {
-        target_host_port.to_string()
     };
 
-    let mut server = match tokio::time::timeout(std::time::Duration::from_secs(10), TcpStream::connect(&destination)).await {
+    // SEC-04: Разрешаем и проверяем IP адреса назначения перед подключением
+    let addrs = match tokio::net::lookup_host(&destination).await {
+        Ok(iter) => iter.collect::<Vec<_>>(),
+        Err(e) => {
+            let resp = format!("HTTP/1.1 502 Bad Gateway\r\nX-Error: {}\r\n\r\n", e);
+            client.write_all(resp.as_bytes()).await?;
+            return Ok(());
+        }
+    };
+
+    if addrs.is_empty() || addrs.iter().any(|a| is_ssrf_ip(a.ip())) {
+        crate::log_w!("[ANTIGRAVITY] Отклонён запрос к адресу из черного списка SSRF: {destination}");
+        client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+        return Ok(());
+    }
+
+    let mut server = match tokio::time::timeout(std::time::Duration::from_secs(10), TcpStream::connect(&addrs[..])).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
             let resp = format!("HTTP/1.1 502 Bad Gateway\r\nX-Error: {}\r\n\r\n", e);
@@ -732,5 +908,120 @@ mod tests {
         assert!(!alt_dns.is_loopback());
         assert!(!proxy_node.is_loopback());
         assert!(!is_google_ip(&proxy_node));
+    }
+
+    #[test]
+    fn test_skip_dns_name_and_compressed_pointers() {
+        // Standard uncompressed name: \x03www\x06google\x03com\x00
+        let uncompressed = b"\x03www\x06google\x03com\x00extra";
+        assert_eq!(skip_dns_name(uncompressed, 0), Some(16));
+
+        // RFC 1035 compressed pointer 0xC0 0x0C (2 bytes)
+        let ptr_only = b"\xC0\x0C";
+        assert_eq!(skip_dns_name(ptr_only, 0), Some(2));
+
+        // Label prefix with compressed pointer: \x04mail\xC0\x0C
+        let label_and_ptr = b"\x04mail\xC0\x0Crest";
+        assert_eq!(skip_dns_name(label_and_ptr, 0), Some(7));
+
+        // Malformed / truncated cases
+        assert_eq!(skip_dns_name(b"\xC0", 0), None); // pointer truncated
+        assert_eq!(skip_dns_name(b"\x05abc", 0), None); // label exceeds buffer
+        assert_eq!(skip_dns_name(b"", 0), None);
+    }
+
+    #[test]
+    fn test_parse_dns_a_records_with_compressed_pointers_0xc0() {
+        let mut packet = Vec::new();
+        // DNS Header (12 bytes)
+        packet.extend_from_slice(&[0x12, 0x34]); // ID
+        packet.extend_from_slice(&[0x81, 0x80]); // Flags (QR, RD, RA)
+        packet.extend_from_slice(&[0x00, 0x01]); // QDCOUNT: 1
+        packet.extend_from_slice(&[0x00, 0x02]); // ANCOUNT: 2
+        packet.extend_from_slice(&[0x00, 0x00]); // NSCOUNT: 0
+        packet.extend_from_slice(&[0x00, 0x00]); // ARCOUNT: 0
+
+        // Question: example.com, QTYPE=A, QCLASS=IN
+        // Offset 12:
+        packet.extend_from_slice(b"\x07example\x03com\x00");
+        packet.extend_from_slice(&[0x00, 0x01]); // QTYPE: A
+        packet.extend_from_slice(&[0x00, 0x01]); // QCLASS: IN
+
+        // Answer 1: name points to question name via 0xC00C
+        packet.extend_from_slice(&[0xC0, 0x0C]); // Name pointer
+        packet.extend_from_slice(&[0x00, 0x01]); // TYPE: A (1)
+        packet.extend_from_slice(&[0x00, 0x01]); // CLASS: IN (1)
+        packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x3C]); // TTL: 60s
+        packet.extend_from_slice(&[0x00, 0x04]); // RDLENGTH: 4
+        packet.extend_from_slice(&[93, 184, 216, 34]); // RDATA IP: 93.184.216.34
+
+        // Answer 2: name with label prefix + pointer (0x03sub 0xC00C)
+        packet.extend_from_slice(b"\x03sub");
+        packet.extend_from_slice(&[0xC0, 0x0C]);
+        packet.extend_from_slice(&[0x00, 0x01]); // TYPE: A (1)
+        packet.extend_from_slice(&[0x00, 0x01]); // CLASS: IN (1)
+        packet.extend_from_slice(&[0x00, 0x00, 0x00, 0x3C]); // TTL: 60s
+        packet.extend_from_slice(&[0x00, 0x04]); // RDLENGTH: 4
+        packet.extend_from_slice(&[8, 8, 8, 8]); // RDATA IP: 8.8.8.8
+
+        let ips = parse_dns_a_records(&packet);
+        assert_eq!(ips.len(), 2);
+        assert_eq!(ips[0], Ipv4Addr::new(93, 184, 216, 34));
+        assert_eq!(ips[1], Ipv4Addr::new(8, 8, 8, 8));
+    }
+
+    #[test]
+    fn test_antigravity_ssrf_and_port_restriction() {
+        // SEC-04: Test SSRF IP detection
+        use std::net::IpAddr;
+        assert!(is_ssrf_ip("127.0.0.1".parse::<IpAddr>().unwrap()));
+        assert!(is_ssrf_ip("10.0.0.1".parse::<IpAddr>().unwrap()));
+        assert!(is_ssrf_ip("172.16.0.1".parse::<IpAddr>().unwrap()));
+        assert!(is_ssrf_ip("192.168.1.1".parse::<IpAddr>().unwrap()));
+        assert!(is_ssrf_ip("169.254.1.1".parse::<IpAddr>().unwrap()));
+        assert!(is_ssrf_ip("0.0.0.0".parse::<IpAddr>().unwrap()));
+        assert!(is_ssrf_ip("255.255.255.255".parse::<IpAddr>().unwrap()));
+        assert!(is_ssrf_ip("::1".parse::<IpAddr>().unwrap()));
+        assert!(is_ssrf_ip("fc00::1".parse::<IpAddr>().unwrap()));
+        assert!(is_ssrf_ip("fe80::1".parse::<IpAddr>().unwrap()));
+
+        // Public IPs are not SSRF
+        assert!(!is_ssrf_ip("142.250.185.206".parse::<IpAddr>().unwrap()));
+        assert!(!is_ssrf_ip("1.1.1.1".parse::<IpAddr>().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn test_antigravity_proxy_restart_channel() {
+        // BUG-02: Test proxy cancellation and restart
+        let cfg = Arc::new(tokio::sync::RwLock::new(Arc::new(crate::config::AppConfig::default())));
+        let mgr = Arc::new(AntigravityManager::new(cfg));
+        mgr.stop_proxy().await;
+        let st = mgr.get_status().await;
+        assert!(!st.proxy_running);
+
+        mgr.clone().restart_proxy(18888).await;
+        let mut running = false;
+        for _ in 0..15 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if mgr.get_status().await.proxy_running {
+                running = true;
+                break;
+            }
+        }
+        assert!(running, "Proxy should be running after restart");
+        mgr.stop_proxy().await;
+        let st3 = mgr.get_status().await;
+        assert!(!st3.proxy_running);
+    }
+
+    #[tokio::test]
+    async fn test_antigravity_dns_fallback_no_hardcoded_8888() {
+        // HC-01: Test reference DNS does not default to 8.8.8.8
+        let cfg = Arc::new(tokio::sync::RwLock::new(Arc::new(crate::config::AppConfig::default())));
+        let mgr = AntigravityManager::new(cfg);
+        let dns = mgr.get_reference_dns_server().await;
+        assert!(!dns.is_empty());
+        // Fallback should be 1.1.1.1:53 if no AdGuard DNS configured, never 8.8.8.8:53
+        assert_ne!(dns, "8.8.8.8:53");
     }
 }

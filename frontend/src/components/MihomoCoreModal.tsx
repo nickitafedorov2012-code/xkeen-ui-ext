@@ -50,8 +50,9 @@ export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: 
   }, [notify])
 
   useEffect(() => {
+    if (!isOpen) return
     loadReleases()
-  }, [loadReleases])
+  }, [isOpen, loadReleases])
 
   const handleInstall = async (tag: string, customUrl?: string) => {
     if (!tag) return

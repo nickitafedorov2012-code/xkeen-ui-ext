@@ -645,7 +645,7 @@ pub fn mock_snapshot() -> TaskManagerSnapshot {
     }
 }
 
-pub async fn kill_process_by_pid(pid: u32, _signal: Option<&str>) -> Result<String, String> {
+pub async fn kill_process_by_pid(pid: u32, signal: Option<&str>) -> Result<String, String> {
     if pid <= 2 {
         return Err("Запрещено: системные процессы ядра/init (PID <= 2) защищены от завершения".into());
     }
@@ -691,9 +691,11 @@ pub async fn kill_process_by_pid(pid: u32, _signal: Option<&str>) -> Result<Stri
             }
         }
 
-        // Принудительный SIGKILL (-9) через UI запрещен во избежание сбоев ядра, зависания сокетов и повреждения данных;
-        // допускается только штатный SIGTERM (-15).
-        let sig_flag = "-15";
+        // FE-04: Поддержка SIGKILL (-9) при явном запросе из UI для зависших процессов
+        let sig_flag = match signal {
+            Some("KILL") | Some("-9") | Some("9") => "-9",
+            _ => "-15",
+        };
 
         let output = tokio::process::Command::new("kill")
             .arg(sig_flag)
@@ -712,8 +714,8 @@ pub async fn kill_process_by_pid(pid: u32, _signal: Option<&str>) -> Result<Stri
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (pid, _signal);
-        Ok(format!("(Симуляция) Сигнал успешно отправлен процессу PID {}", pid))
+        let sig = signal.unwrap_or("-15");
+        Ok(format!("(Симуляция) Сигнал {sig} успешно отправлен процессу PID {pid}"))
     }
 }
 

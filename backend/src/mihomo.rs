@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use crate::config::AppConfig;
 use crate::routing::ip_key_from_group;
+use crate::AppState;
 
 /// 'Big PC 192_168_2_118' → '192.168.2.118' (формат AUTO-DEVICE групп).
 /// Единая реализация с routing::ip_key_from_group.
@@ -666,7 +667,8 @@ pub fn ip_groups_from_rules(rules: &Value) -> BTreeMap<String, String> {
             let ptype = r.get("type").and_then(|t| t.as_str()).unwrap_or("").to_uppercase();
             let payload = r.get("payload").and_then(|p| p.as_str()).unwrap_or("").to_string();
             let target = r.get("proxy").and_then(|p| p.as_str()).unwrap_or("").to_string();
-            if (ptype.contains("SRC-IP") || payload.contains('/')) && !target.is_empty() {
+            let ptype_norm = ptype.replace('-', "").replace('_', "");
+            if ptype_norm.contains("SRCIP") && !target.is_empty() {
                 let ip = payload.split('/').next().unwrap_or("").trim().to_string();
                 if !ip.is_empty() {
                     out.insert(ip, target);
@@ -837,13 +839,14 @@ pub async fn get_flow_status(http: &reqwest::Client, cfg: &AppConfig) -> Result<
     }))
 }
 
-/// Переключить выделенный сервер для Google Flow & AI без изменения глобального PROXY / Failover
-pub async fn switch_flow_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &str) -> Result<String, String> {
+/// Переключить выделенный сервер для Google Flow & AI с использованием ConfigTx и локов (BUG-15)
+pub async fn switch_flow_server(state: &AppState, server_id: &str) -> Result<String, String> {
     let target = server_id.trim();
     if target.is_empty() {
         return Err("Имя сервера не может быть пустым".into());
     }
-    let proxies = get_proxies(http, cfg).await.unwrap_or_default();
+    let cfg = state.config.read().await.clone();
+    let proxies = get_proxies(&state.http, &cfg).await.unwrap_or_default();
 
     let mut flow_group: Option<String> = None;
     for gname in ["Google AI", "Google-AI", "GoogleFlow", "Flow", "AI"] {
@@ -861,27 +864,26 @@ pub async fn switch_flow_server(http: &reqwest::Client, cfg: &AppConfig, server_
             .map(|members| members.iter().any(|m| m.as_str() == Some(target)));
 
         if member == Some(true) {
-            m_put(http, cfg, &format!("/proxies/{}", urlencoding_lite(g)), json!({ "name": target }), 3).await?;
-            let _ = close_all_connections(http, cfg).await;
+            m_put(&state.http, &cfg, &format!("/proxies/{}", urlencoding_lite(g)), json!({ "name": target }), 3).await?;
+            let _ = close_all_connections(&state.http, &cfg).await;
             return Ok(format!("Выделенный маршрут Google Flow & AI переключен на '{target}'"));
         }
     }
 
-    // Если группы нет в Mihomo или сервер в неё не входит, прописываем правила напрямую в config.yaml
-    let yaml_path = &cfg.mihomo.config_path;
-    if let Ok(yaml) = tokio::fs::read_to_string(yaml_path).await {
-        let new_yaml = crate::routing::apply_flow_rules(&yaml, target, flow_group.as_deref())?;
-        if new_yaml != yaml {
-            crate::api::atomic_write_file(yaml_path, &new_yaml).await?;
-            let _ = reload_config(http, cfg).await;
-        }
+    // Если группы нет в Mihomo или сервер в неё не входит, прописываем правила через ConfigTx
+    let mut tx = crate::transaction::ConfigTx::begin(state).await?;
+    let yaml = tx.read_yaml().await?;
+    let new_yaml = crate::routing::apply_flow_rules(&yaml, target, flow_group.as_deref())?;
+    if new_yaml != yaml {
+        tx.set_yaml(new_yaml)?;
+        tx.commit_and_reload().await?;
     }
 
     if let Some(ref g) = flow_group {
-        let _ = m_put(http, cfg, &format!("/proxies/{}", urlencoding_lite(g)), json!({ "name": target }), 3).await;
+        let _ = m_put(&state.http, &cfg, &format!("/proxies/{}", urlencoding_lite(g)), json!({ "name": target }), 3).await;
     }
 
-    let _ = close_all_connections(http, cfg).await;
+    let _ = close_all_connections(&state.http, &cfg).await;
     Ok(format!("Выделенный маршрут Google Flow & AI переключен на '{target}'"))
 }
 
@@ -1678,6 +1680,34 @@ mod tests {
         assert!(cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case("sub1")));
         assert!(cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case("OLD_PROVIDER")));
         assert!(!cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case("active_sub")));
+    }
+
+    #[test]
+    fn test_ip_groups_from_rules_rejects_dst_ip_cidr() {
+        let rules_json = serde_json::json!({
+            "rules": [
+                {
+                    "type": "SRC-IP-CIDR",
+                    "payload": "192.168.1.55/32",
+                    "proxy": "GamingGroup"
+                },
+                {
+                    "type": "IP-CIDR",
+                    "payload": "8.8.8.0/24",
+                    "proxy": "DIRECT"
+                },
+                {
+                    "type": "DST-IP-CIDR",
+                    "payload": "1.1.1.0/24",
+                    "proxy": "PROXY"
+                }
+            ]
+        });
+
+        let map = ip_groups_from_rules(&rules_json);
+        assert_eq!(map.get("192.168.1.55").map(|s| s.as_str()), Some("GamingGroup"));
+        assert_eq!(map.get("8.8.8.0"), None, "IP-CIDR must NOT be mapped as a LAN device!");
+        assert_eq!(map.get("1.1.1.0"), None, "DST-IP-CIDR must NOT be mapped as a LAN device!");
     }
 }
 

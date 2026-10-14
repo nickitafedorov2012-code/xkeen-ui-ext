@@ -203,16 +203,6 @@ export default function App() {
     notify('Вы вышли из веб-панели')
   }
 
-  const switchTab = (t: TabId) => {
-    setTab(t)
-    if (window.location.hash !== '#' + t) {
-      window.location.hash = t
-    }
-    if (t === 'dashboard' || t === 'settings') {
-      refresh()
-    }
-  }
-
   const notify = useCallback((msg: string, error = false) => {
     const id = toastSeq++
     setToasts((prev) => [...prev, { id, msg, error }])
@@ -229,6 +219,16 @@ export default function App() {
       setConnected(false)
     }
   }, [])
+
+  const switchTab = useCallback((t: TabId) => {
+    setTab(t)
+    if (window.location.hash !== '#' + t) {
+      window.location.hash = t
+    }
+    if (t === 'dashboard' || t === 'settings') {
+      refresh()
+    }
+  }, [refresh])
 
   useEffect(() => {
     refresh()

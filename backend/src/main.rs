@@ -634,6 +634,7 @@ async fn main() {
         // 404 JSON для несуществующих маршрутов API (вместо отдачи HTML через SPA fallback)
         .route("/api/{*path}", any(api::api_not_found))
         .fallback(frontend::serve)
+        .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(auth_state, auth::auth_middleware))
         .layer(middleware::from_fn(no_cache))
         .layer(middleware::from_fn(log_requests))

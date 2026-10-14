@@ -23,6 +23,7 @@ export default function Settings({ notify, status, refresh }: Props) {
   const [cdnsCollapsed, setCdnsCollapsed] = useState(true)
   const [savingDomains, setSavingDomains] = useState(false)
   const [scanningCdn, setScanningCdn] = useState(false)
+  const [domainsRevision, setDomainsRevision] = useState<string | undefined>(undefined)
 
   // Модальные окна
   const [configEditorOpen, setConfigEditorOpen] = useState(false)
@@ -143,11 +144,12 @@ export default function Settings({ notify, status, refresh }: Props) {
     apiGet<{ servers: ServerInfo[] }>('servers')
       .then((d) => setServers(d.servers))
       .catch(() => {})
-    apiGet<{ direct: string[]; force: string[]; auto_cdns?: string[] }>('domains')
+    apiGet<{ direct: string[]; force: string[]; auto_cdns?: string[]; revision?: string }>('domains')
       .then((d) => {
         setDirectDomains(d.direct.join('\n'))
         setForceDomains(d.force.join('\n'))
         if (d.auto_cdns) setAutoCdns(d.auto_cdns)
+        if (d.revision) setDomainsRevision(d.revision)
       })
       .catch(() => {})
     apiGet<DnsMode>('dns/mode')
@@ -253,7 +255,18 @@ export default function Settings({ notify, status, refresh }: Props) {
   const save = async () => {
     setSaving(true)
     try {
-      await apiPut('settings', settings)
+      const updatedSettings = settings ? {
+        ...settings,
+        notifications: {
+          ...settings.notifications,
+          telegram_enabled: telegramEnabled,
+          telegram_bot_token: telegramBotToken,
+          telegram_chat_id: telegramChatId,
+          webhook_url: webhookUrl,
+        }
+      } : settings
+      await apiPut('settings', updatedSettings)
+      if (updatedSettings) setSettings(updatedSettings)
       notify('Настройки сохранены')
       refresh?.()
     } catch (e) {
@@ -349,11 +362,14 @@ export default function Settings({ notify, status, refresh }: Props) {
         force: number
         auto_cdns?: string[]
         overridden_ips?: number
+        revision?: string
       }>('domains', {
         direct: directDomains.split('\n'),
         force: forceDomains.split('\n'),
+        expected_revision: domainsRevision,
       })
       if (data.auto_cdns) setAutoCdns(data.auto_cdns)
+      if (data.revision) setDomainsRevision(data.revision)
       const cdnMsg = data.auto_cdns && data.auto_cdns.length > 0 ? `, CDN: +${data.auto_cdns.length}` : ''
       const ipMsg = data.overridden_ips ? `, IP: ${data.overridden_ips}` : ''
       notify(`Домены сохранены: напрямую ${data.direct}, через прокси ${data.force}${cdnMsg}${ipMsg}`)
@@ -525,12 +541,15 @@ export default function Settings({ notify, status, refresh }: Props) {
   const handleTestNotification = async () => {
     setNotifTesting(true)
     try {
-      const res = await apiPost<{ message: string }>('notifications/test', {
+      const res = await apiPost<{ message?: string; results?: string[] }>('notifications/test', {
         telegram_bot_token: telegramBotToken.trim() || undefined,
         telegram_chat_id: telegramChatId.trim() || undefined,
         webhook_url: webhookUrl.trim() || undefined,
       })
-      notify(res.message || 'Тестовое оповещение успешно отправлено')
+      const results = res.results || []
+      const hasError = results.some((r) => r.includes('❌'))
+      const summary = results.join('\n') || res.message || 'Тестовое оповещение успешно отправлено'
+      notify(summary, hasError)
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Ошибка отправки тестового сообщения', true)
     } finally {
@@ -1454,7 +1473,7 @@ export default function Settings({ notify, status, refresh }: Props) {
             {authEnabled ? '🟢 защита включена' : '⚪ без пароля'}
           </span>
         </div>
-        <p className="muted small">Защита веб-панели паролем с постоянной сессией (30 дней).</p>
+        <p className="muted small">Защита веб-панели паролем с сессией (24 часа).</p>
         <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
           <b>Включить защиту паролем</b>
           <label className="switch">

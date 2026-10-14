@@ -37,6 +37,42 @@ pub async fn send_telegram(
     }
 }
 
+/// Экранирование HTML-спецсимволов для безопасной отправки сообщений в Telegram HTML mode (SEC-14).
+pub fn escape_html(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Валидация webhook URL для защиты от SSRF во внутреннюю сеть роутера (SEC-14).
+pub fn validate_webhook_url(url_str: &str) -> Result<(), String> {
+    let trimmed = url_str.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    let parsed = reqwest::Url::parse(trimmed).map_err(|e| format!("Некорректный URL вебхука: {e}"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("Поддерживаются только http и https URL для Webhook".to_string());
+    }
+    let host = parsed.host_str().ok_or_else(|| "В URL вебхука отсутствует хост".to_string())?;
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err("Запрещен вызов localhost через Webhook".to_string());
+    }
+    let host_unbracketed = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = host_unbracketed.parse::<std::net::IpAddr>() {
+        let is_unsafe = match ip {
+            std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_link_local() || v4.is_unspecified(),
+            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+        };
+        if is_unsafe {
+            return Err("Запрещен вызов loopback/link-local адресов через Webhook".to_string());
+        }
+    }
+    Ok(())
+}
+
 /// Отправка webhook POST запроса.
 pub async fn send_webhook(
     http: &reqwest::Client,
@@ -48,6 +84,7 @@ pub async fn send_webhook(
     if webhook_url.trim().is_empty() {
         return Ok(());
     }
+    validate_webhook_url(webhook_url)?;
 
     let payload = json!({
         "source": "xkeen-route",
@@ -90,9 +127,11 @@ pub async fn notify_failover(
         };
 
         let now = chrono::Local::now().format("%d.%m.%Y %H:%M:%S");
+        let safe_title = escape_html(title);
+        let safe_details = escape_html(details);
         let html_msg = format!(
             "<b>{} XKeen Route Failover</b>\n\n<b>{}</b>\n{}\n\n<i>🕒 {}</i>",
-            icon, title, details, now
+            icon, safe_title, safe_details, now
         );
 
         if let Err(e) = send_telegram(http, &cfg.telegram_bot_token, &cfg.telegram_chat_id, &html_msg).await {
@@ -106,5 +145,30 @@ pub async fn notify_failover(
         if let Err(e) = send_webhook(http, &cfg.webhook_url, event_type, title, details).await {
             log_w!("Не удалось отправить Webhook: {}", e);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_escape_html_special_chars() {
+        assert_eq!(escape_html("Server <Node 1> & Co \"Quote\""), "Server &lt;Node 1&gt; &amp; Co &quot;Quote&quot;");
+        assert_eq!(escape_html("Plain string"), "Plain string");
+        assert_eq!(escape_html("<script>alert(1)</script>"), "&lt;script&gt;alert(1)&lt;/script&gt;");
+    }
+
+    #[test]
+    fn test_validate_webhook_url() {
+        assert!(validate_webhook_url("https://discord.com/api/webhooks/123/abc").is_ok());
+        assert!(validate_webhook_url("http://webhook.site/my-uuid").is_ok());
+        assert!(validate_webhook_url("").is_ok());
+
+        // Rejection of invalid schemes and loopback addresses
+        assert!(validate_webhook_url("ftp://example.com/hook").is_err());
+        assert!(validate_webhook_url("http://localhost:8080/hook").is_err());
+        assert!(validate_webhook_url("http://127.0.0.1:9090/clash").is_err());
+        assert!(validate_webhook_url("http://[::1]:9090/clash").is_err());
     }
 }

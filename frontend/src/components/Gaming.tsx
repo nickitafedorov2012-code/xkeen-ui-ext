@@ -1293,11 +1293,11 @@ export default function Gaming({ notify }: GamingProps) {
                 </thead>
                 <tbody>
                   {status.recent_gaming_conns.map((conn, idx) => {
-                    const target = conn.destination || conn.host
+                    const target = conn.target || conn.host || conn.destination
                     return (
                       <tr key={idx} style={{ borderBottom: '1px solid rgba(255, 255, 255, 0.04)', height: 32 }}>
                         <td style={{ padding: '6px 8px', fontFamily: 'Consolas, monospace', fontSize: 11.5 }}>
-                          <span title={conn.destination}>{conn.host || conn.destination}</span>
+                          <span title={conn.destination}>{conn.target || conn.host || conn.destination}</span>
                         </td>
                         <td style={{ padding: '6px 8px' }}>
                           <span
@@ -1580,38 +1580,31 @@ export default function Gaming({ notify }: GamingProps) {
       {/* 6. Опции оптимизации и пользовательские домены */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14 }}>
         <div className="card">
-          <h3 style={{ margin: '0 0 10px', fontSize: 14.5, fontWeight: 700 }}>⚡ Оптимизации задержки и NAT</h3>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '0 0 10px' }}>
+            <h3 style={{ margin: 0, fontSize: 14.5, fontWeight: 700 }}>⚡ Оптимизации задержки и NAT</h3>
+            <span className="badge badge-subtle" style={{ fontSize: 11 }}>Встроено в правила</span>
+          </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                checked={cfg.smart_split}
-                onChange={(e) => setCfg({ ...cfg, smart_split: e.target.checked })}
-                style={{ marginTop: 2 }}
-              />
-              <div>
-                <b style={{ fontSize: 13 }}>Smart Split-Tunneling (Рекомендуется)</b>
-                <p className="muted small" style={{ margin: '2px 0 0' }}>
-                  Проксировать только авторизацию, сервисы обновлений и заблокированные API, сохраняя прямой матч на минимальном пинге.
-                </p>
+            <div style={{ opacity: 0.9 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ color: 'var(--color-success, #10b981)' }}>✓</span>
+                <b style={{ fontSize: 13 }}>Smart Split-Tunneling (Активно)</b>
               </div>
-            </label>
+              <p className="muted small" style={{ margin: '2px 0 0 18px' }}>
+                Проксирование только авторизации, сервисов обновлений и заблокированных API при сохранении прямого матча на минимальном пинге.
+              </p>
+            </div>
 
-            <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                checked={cfg.fix_nat_fake_ip}
-                onChange={(e) => setCfg({ ...cfg, fix_nat_fake_ip: e.target.checked })}
-                style={{ marginTop: 2 }}
-              />
-              <div>
+            <div style={{ opacity: 0.9 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ color: 'var(--color-success, #10b981)' }}>✓</span>
                 <b style={{ fontSize: 13 }}>Anti-Cheat & Strict NAT Fix (Fake-IP Bypass)</b>
-                <p className="muted small" style={{ margin: '2px 0 0' }}>
-                  Предотвращает предупреждения «Strict NAT» (Type 3) на PlayStation/Xbox и конфликты античитов (Vanguard, BattlEye, EasyAntiCheat) с диапазоном 198.18.0.0/16.
-                </p>
               </div>
-            </label>
+              <p className="muted small" style={{ margin: '2px 0 0 18px' }}>
+                Предотвращает предупреждения «Strict NAT» (Type 3) на PlayStation/Xbox и конфликты античитов (Vanguard, BattlEye, EasyAntiCheat).
+              </p>
+            </div>
           </div>
         </div>
 

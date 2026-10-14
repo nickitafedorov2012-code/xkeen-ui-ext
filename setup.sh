@@ -34,8 +34,8 @@ msg() { printf "%b\n" "$1"; }
 get_arch() {
   case "$(opkg print-architecture)" in
     *aarch64*) echo 'arm64-v8a' ;;
-    *mipsel*)  echo 'mips32le' ;;
-    *mips*)    echo 'mips32' ;;
+    *mips32le*|*mipsel*) echo 'mipsel' ;;
+    *mips32*|*mips*)     echo 'mips' ;;
     *armv7*|*cortex-a9*|*cortex-a7*|*arm_*) echo 'armv7-v7a' ;;
     *) msg "${RED} ❌ Не удалось определить архитектуру${NC}"; exit 1 ;;
   esac
@@ -45,8 +45,29 @@ download_url() {
   # Через API: первый browser_download_url в списке релизов = самый свежий.
   # (прямой /releases/latest/download ненадёжен: «latest» может не иметь ассета)
   # busybox grep не умеет -m1 — берём head -1.
-  curl -s https://api.github.com/repos/$REPO/releases | \
-    grep '"browser_download_url".*xkeen-route-'"$ARCH"'"' | head -1 | cut -d '"' -f4
+  local candidates
+  case "$ARCH" in
+    mipsel|mips32le) candidates="mipsel mips32le" ;;
+    mips|mips32)     candidates="mips mips32" ;;
+    armv7-v7a|armv7) candidates="armv7-v7a armv7" ;;
+    *)               candidates="$ARCH" ;;
+  esac
+
+  local api_url="https://api.github.com/repos/$REPO/releases/latest"
+  [ "$BETA" = "true" ] && api_url="https://api.github.com/repos/$REPO/releases"
+  local releases_json
+  releases_json=$(curl -s "$api_url")
+  if [ -z "$releases_json" ] || echo "$releases_json" | grep -q '"message": "Not Found"'; then
+    releases_json=$(curl -s "https://api.github.com/repos/$REPO/releases")
+  fi
+  for cand in $candidates; do
+    local url
+    url=$(echo "$releases_json" | grep '"browser_download_url".*xkeen-route-'"$cand"'"' | head -1 | cut -d '"' -f4)
+    if [ -n "$url" ]; then
+      echo "$url"
+      return 0
+    fi
+  done
 }
 
 do_install() {

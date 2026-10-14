@@ -608,6 +608,35 @@ pub fn is_valid_ip_or_cidr(s: &str) -> bool {
     false
 }
 
+/// Проверяет, является ли строка корректным аппаратным MAC-адресом (например, "AA:BB:CC:DD:EE:FF" или "aa-bb-cc-dd-ee-ff").
+pub fn is_valid_mac(s: &str) -> bool {
+    let clean = s.trim();
+    let parts: Vec<&str> = if clean.contains(':') {
+        clean.split(':').collect()
+    } else if clean.contains('-') {
+        clean.split('-').collect()
+    } else {
+        return false;
+    };
+    if parts.len() != 6 {
+        return false;
+    }
+    parts.iter().all(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Строгая проверка идентификатора провайдера/подписки для предотвращения Path Traversal и инъекций.
+/// Разрешены только символы [a-zA-Z0-9_-], длина 1..=64, запрещены '..', '/', '\'.
+pub fn is_valid_provider_id(id: &str) -> bool {
+    let s = id.trim();
+    if s.is_empty() || s.len() > 64 {
+        return false;
+    }
+    if s.contains("..") || s.contains('/') || s.contains('\\') {
+        return false;
+    }
+    s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// Умные режимы и гибридная маршрутизация Zapret DPI.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -861,6 +890,33 @@ pub fn parse_config_strict(content: &str) -> Result<AppConfig, String> {
     Ok(cfg)
 }
 
+/// Проверка безопасности пути к init-скрипту (разрешены только пути в /opt/ и символы [a-zA-Z0-9_\-\./])
+pub fn is_valid_init_script_path(path: &str) -> bool {
+    let p = path.trim();
+    if !p.starts_with("/opt/") || p.contains("..") {
+        return false;
+    }
+    !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/')
+}
+
+/// Извлечение строкового поля из синтаксически поврежденного JSON через поиск подстроки
+pub fn extract_string_field_fallback(content: &str, field_name: &str) -> Option<String> {
+    let key = format!("\"{field_name}\"");
+    let key_pos = content.find(&key)?;
+    let after_key = &content[key_pos + key.len()..];
+    let colon_pos = after_key.find(':')?;
+    let after_colon = &after_key[colon_pos + 1..];
+    let quote_start = after_colon.find('"')?;
+    let after_start_quote = &after_colon[quote_start + 1..];
+    let quote_end = after_start_quote.find('"')?;
+    let val = &after_start_quote[..quote_end];
+    if !val.is_empty() {
+        Some(val.to_string())
+    } else {
+        None
+    }
+}
+
 pub(crate) fn parse_config_content(content: &str, path_display: &str) -> AppConfig {
     match parse_config_strict(content) {
         Ok(c) => c,
@@ -883,6 +939,15 @@ pub(crate) fn parse_config_content(content: &str, path_display: &str) -> AppConf
             if !preserved_auth && (content.contains("\"password_hash\"") || content.contains("\"auth\"")) {
                 eprintln!("[SECURITY] Обнаружены следы авторизации в поврежденном конфиге! Сохраняем защитный режим auth.");
                 fallback.auth.enabled = true;
+                if let Some(hash) = extract_string_field_fallback(content, "password_hash") {
+                    fallback.auth.password_hash = hash;
+                }
+                if let Some(salt) = extract_string_field_fallback(content, "salt") {
+                    fallback.auth.salt = salt;
+                }
+                if let Some(secret) = extract_string_field_fallback(content, "session_secret") {
+                    fallback.auth.session_secret = secret;
+                }
             }
 
             fallback
@@ -953,6 +1018,11 @@ pub async fn load_async(path: &Path) -> AppConfig {
 
 /// Сохранение конфига атомарно (tmp + rename).
 pub async fn save(path: &Path, cfg: &AppConfig) -> Result<(), String> {
+    // BUG-11: Блокировка стирания пароля при включенной авторизации
+    if cfg.auth.enabled && cfg.auth.password_hash.trim().is_empty() {
+        return Err("Отказ сохранения: попытка сохранить включенную авторизацию с пустым хэшем пароля".to_string());
+    }
+
     let serialized = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let _ = tokio::fs::create_dir_all(parent).await;
@@ -1119,5 +1189,83 @@ mod tests {
         assert!(!is_valid_ip_or_cidr("192.168.1.50/33"));
         assert!(!is_valid_ip_or_cidr("2001:db8::1/129"));
         assert!(!is_valid_ip_or_cidr("192.168.1.50/32/32"));
+    }
+
+    #[test]
+    fn test_is_valid_mac() {
+        assert!(is_valid_mac("AA:BB:CC:DD:EE:FF"));
+        assert!(is_valid_mac("aa:bb:cc:dd:ee:ff"));
+        assert!(is_valid_mac("00:11:22:33:44:55"));
+        assert!(is_valid_mac("00-11-22-33-44-55"));
+        assert!(!is_valid_mac(""));
+        assert!(!is_valid_mac("00:11:22:33:44"));
+        assert!(!is_valid_mac("00:11:22:33:44:55:66"));
+        assert!(!is_valid_mac("00:11:22:33:44:ZZ"));
+        assert!(!is_valid_mac("00:11:22:33:44:55; rm -rf /"));
+        assert!(!is_valid_mac("192.168.1.1"));
+    }
+
+    #[test]
+    fn test_is_valid_provider_id() {
+        assert!(is_valid_provider_id("provider_1"));
+        assert!(is_valid_provider_id("custom-sub"));
+        assert!(is_valid_provider_id("subscription123"));
+        assert!(is_valid_provider_id("ABC_xyz-09"));
+        assert!(!is_valid_provider_id(""));
+        assert!(!is_valid_provider_id("../etc/passwd"));
+        assert!(!is_valid_provider_id("..\\etc\\passwd"));
+        assert!(!is_valid_provider_id("prov/sub"));
+        assert!(!is_valid_provider_id("prov\\sub"));
+        assert!(!is_valid_provider_id("prov sub"));
+        assert!(!is_valid_provider_id("prov;rm"));
+        assert!(!is_valid_provider_id(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn test_is_valid_init_script_path() {
+        // SEC-05: Path traversal and prefix validation
+        assert!(is_valid_init_script_path("/opt/etc/init.d/S51zapret"));
+        assert!(is_valid_init_script_path("/opt/bin/xkeen"));
+        assert!(is_valid_init_script_path("/opt/sbin/service-run"));
+
+        // Reject non-/opt/, path traversal, and malicious characters
+        assert!(!is_valid_init_script_path("/etc/init.d/S51zapret"));
+        assert!(!is_valid_init_script_path("/opt/etc/init.d/../../etc/passwd"));
+        assert!(!is_valid_init_script_path("/opt/etc/init.d/..\\..\\windows\\system32"));
+        assert!(!is_valid_init_script_path("/opt/bin/script.sh; rm -rf /"));
+        assert!(!is_valid_init_script_path("/opt/bin/script.sh | sh"));
+        assert!(!is_valid_init_script_path(""));
+    }
+
+    #[test]
+    fn test_corrupted_auth_recovery_from_json() {
+        // BUG-11: Fallback regex recovery of auth credentials from corrupted JSON
+        let corrupted_json = r#"{
+            "auth": {
+                "enabled": true,
+                "password_hash": "a1b2c3d4e5f67890",
+                "salt": "supersalt123",
+                "session_secret": "secret999"
+            },
+            "broken_trailing_comma":,
+        }"#;
+
+        let parsed = parse_config_content(corrupted_json, "test_config.json");
+        assert!(parsed.auth.enabled, "Auth should be kept enabled when credentials exist");
+        assert_eq!(parsed.auth.password_hash, "a1b2c3d4e5f67890");
+        assert_eq!(parsed.auth.salt, "supersalt123");
+        assert_eq!(parsed.auth.session_secret, "secret999");
+    }
+
+    #[tokio::test]
+    async fn test_save_blank_password_prevention() {
+        // BUG-11: Prevent wiping password hash when auth is enabled
+        let mut cfg = AppConfig::default();
+        cfg.auth.enabled = true;
+        cfg.auth.password_hash = "   ".to_string();
+
+        let tmp_file = std::env::temp_dir().join("xkeen_test_save_blank_pw.json");
+        let res = save(&tmp_file, &cfg).await;
+        assert!(res.is_err(), "Saving config with enabled auth but blank password hash must be rejected");
     }
 }

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { apiGet, apiPost } from '../api'
 
 interface UpdateInfoResponse {
@@ -32,6 +32,13 @@ export default function UpdateModal({
   const [stage, setStage] = useState('')
   const [countdown, setCountdown] = useState<number | null>(null)
   const [installError, setInstallError] = useState<string | null>(null)
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current)
+    }
+  }, [])
 
   const checkUpdates = useCallback(async () => {
     setChecking(true)
@@ -47,8 +54,9 @@ export default function UpdateModal({
   }, [notify])
 
   useEffect(() => {
+    if (!isOpen) return
     checkUpdates()
-  }, [checkUpdates])
+  }, [isOpen, checkUpdates])
 
   const curVer = updData?.current || initialCurrent || '—'
   const latVer = updData?.latest || initialLatest || '—'
@@ -67,11 +75,12 @@ export default function UpdateModal({
 
       let left = 6
       setCountdown(left)
-      const timer = setInterval(() => {
+      if (timerRef.current) clearInterval(timerRef.current)
+      timerRef.current = setInterval(() => {
         left -= 1
         setCountdown(left)
         if (left <= 0) {
-          clearInterval(timer)
+          if (timerRef.current) clearInterval(timerRef.current)
           window.location.reload()
         }
       }, 1000)

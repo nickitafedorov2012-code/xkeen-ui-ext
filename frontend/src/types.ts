@@ -540,9 +540,11 @@ export interface GamingConfig {
 }
 
 export interface RecentGamingConn {
-  host: string
+  host?: string
+  target?: string
   destination: string
   network: string
+  device_ip?: string
   last_seen: string
   ignored: boolean
 }

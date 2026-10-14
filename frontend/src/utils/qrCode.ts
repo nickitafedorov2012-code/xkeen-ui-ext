@@ -97,7 +97,8 @@ function selectVersion(dataLength: number): VersionSpec {
       return v;
     }
   }
-  return VERSIONS[VERSIONS.length - 1];
+  const maxCap = VERSIONS[VERSIONS.length - 1].dataCodewords - Math.ceil((4 + 16 + 4) / 8);
+  throw new Error(`Текст слишком длинный для QR-кода (${dataLength} байт, максимум ${maxCap} байт)`);
 }
 
 class BitBuffer {

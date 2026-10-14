@@ -59,6 +59,7 @@ export default function TrafficGraph() {
     activeRef.current = true
 
     const poll = async () => {
+      if (document.hidden && initialHistoryLoaded.current) return
       try {
         const data = await apiGet<TrafficPayload>('traffic/poll')
         if (!activeRef.current || !data) return

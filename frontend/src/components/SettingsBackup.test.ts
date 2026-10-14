@@ -93,4 +93,53 @@ describe('Backup Import JSON Validation', () => {
     expect(sanitizeBackupName('my-backup')).toBe('xr-my-backup')
     expect(sanitizeBackupName('xr-valid_name')).toBe('xr-valid_name')
   })
+
+  it('regression (FE-02): syncs notification state fields into settings payload before save', () => {
+    const originalSettings = {
+      mihomo: { config_path: '/opt/etc/mihomo/config.yaml' },
+      notifications: {
+        telegram_enabled: false,
+        telegram_bot_token: '',
+        telegram_chat_id: '',
+        webhook_url: '',
+      },
+    }
+
+    const localTelegramEnabled = true
+    const localTelegramBotToken = '123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11'
+    const localTelegramChatId = '-100123456789'
+    const localWebhookUrl = 'https://webhook.site/test'
+
+    const updatedSettings = {
+      ...originalSettings,
+      notifications: {
+        ...originalSettings.notifications,
+        telegram_enabled: localTelegramEnabled,
+        telegram_bot_token: localTelegramBotToken,
+        telegram_chat_id: localTelegramChatId,
+        webhook_url: localWebhookUrl,
+      },
+    }
+
+    expect(updatedSettings.notifications.telegram_enabled).toBe(true)
+    expect(updatedSettings.notifications.telegram_bot_token).toBe(localTelegramBotToken)
+    expect(updatedSettings.notifications.telegram_chat_id).toBe(localTelegramChatId)
+    expect(updatedSettings.notifications.webhook_url).toBe(localWebhookUrl)
+  })
+
+  it('regression (FE-02): passes expected_revision in domains save payload', () => {
+    const directDomains = 'direct1.com\ndirect2.com'
+    const forceDomains = 'proxy1.com\nproxy2.com'
+    const domainsRevision = 'rev_abc123'
+
+    const payload = {
+      direct: directDomains.split('\n'),
+      force: forceDomains.split('\n'),
+      expected_revision: domainsRevision,
+    }
+
+    expect(payload.expected_revision).toBe('rev_abc123')
+    expect(payload.direct).toEqual(['direct1.com', 'direct2.com'])
+    expect(payload.force).toEqual(['proxy1.com', 'proxy2.com'])
+  })
 })

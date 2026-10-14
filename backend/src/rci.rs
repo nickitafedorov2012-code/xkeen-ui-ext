@@ -471,6 +471,15 @@ pub fn get_process_rss(proc_name: &str) -> f64 {
     }
 }
 
+/// Нормализованный расчет CPU% с учетом количества логических ядер (BUG-20).
+pub fn calculate_normalized_cpu_pct(delta_ticks: f64, elapsed: f64, cores: usize) -> f64 {
+    if elapsed <= 0.0 || cores == 0 {
+        return 0.0;
+    }
+    let p = ((delta_ticks / (100.0 * elapsed)) * 100.0) / (cores as f64);
+    (p * 10.0).round() / 10.0
+}
+
 /// Получение показателей потребления собственного процесса (память RSS в МБ и CPU%).
 pub fn get_proc_stats() -> (f64, f64) {
     #[cfg(target_os = "linux")]
@@ -506,8 +515,8 @@ pub fn get_proc_stats() -> (f64, f64) {
                         let elapsed = now.duration_since(prev_time).as_secs_f64();
                         if elapsed >= 0.2 && current_ticks >= prev_ticks {
                             let delta_ticks = (current_ticks - prev_ticks) as f64;
-                            let p = (delta_ticks / (100.0 * elapsed)) * 100.0;
-                            cpu_pct = (p * 10.0).round() / 10.0;
+                            let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+                            cpu_pct = calculate_normalized_cpu_pct(delta_ticks, elapsed, cores);
                         }
                     }
                     *guard = Some((now, current_ticks));

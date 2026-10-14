@@ -265,4 +265,29 @@ trojan://pass2@node2.com:443#Node2
     expect(reparsedTuic?.raw.password).toBe('secret@pass#extra')
     expect(reparsedTuic?.raw['congestion-controller']).toBe('bbr')
   })
+
+  it('correctly serializes ALPN arrays in YAML (FE-09)', () => {
+    const tuicLink = 'tuic://uuid-user-1234:secret@tuic.example.com:8443?alpn=h3,h2&congestion_control=bbr#TuicAlpn'
+    const parsedTuic = parseProxyLink(tuicLink)
+    expect(parsedTuic).not.toBeNull()
+    expect(parsedTuic?.raw.alpn).toEqual(['h3', 'h2'])
+    expect(parsedTuic?.yaml).toContain('alpn: ["h3", "h2"]')
+  })
+
+  it('strips query parameters and slashes from Shadowsocks hostport (FE-09)', () => {
+    // Base64 of aes-128-gcm:mypassword is YWVzLTEyOC1nY206bXlwYXNzd29yZA==
+    const ssLinkWithPlugin = 'ss://WVl6LTEyOC1nY206bXlwYXNzd29yZA==@198.51.100.1:8388/?plugin=v2ray-plugin%3Bhost%3Dcdn.com#SSPlugin'
+    const parsed = parseProxyLink(ssLinkWithPlugin)
+    expect(parsed).not.toBeNull()
+    expect(parsed?.raw.server).toBe('198.51.100.1')
+    expect(parsed?.raw.port).toBe(8388)
+    expect(parsed?.yaml).toContain('server: "198.51.100.1"')
+    expect(parsed?.yaml).toContain('port: 8388')
+
+    const ssLinkNoSlash = 'ss://WVl6LTEyOC1nY206bXlwYXNzd29yZA==@198.51.100.2:8389?plugin=obfs-local#SSPlugin2'
+    const parsed2 = parseProxyLink(ssLinkNoSlash)
+    expect(parsed2).not.toBeNull()
+    expect(parsed2?.raw.server).toBe('198.51.100.2')
+    expect(parsed2?.raw.port).toBe(8389)
+  })
 })

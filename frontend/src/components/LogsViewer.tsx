@@ -239,7 +239,7 @@ export default function LogsViewer({ notify }: LogsViewerProps) {
       </div>
 
       <div className="logs-status-bar muted">
-        <span>Источник: <b>{source === 'daemon' ? 'xkeen-route (порт 1001)' : 'Mihomo Core (порт 9090)'}</b></span>
+        <span>Источник: <b>{source === 'daemon' ? `xkeen-route (порт ${window.location.port || '1001'})` : 'Mihomo Core (REST API)'}</b></span>
         <span>Отображается строк: <b>{filteredLines.length}</b> из {lines.length}</span>
         {paused && <span className="logs-paused-badge">⏸ Поток на паузе</span>}
       </div>

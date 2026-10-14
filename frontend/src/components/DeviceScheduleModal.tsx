@@ -12,13 +12,18 @@ export interface DeviceSchedule {
   target_server?: string
 }
 
+export interface ScheduleServerOption {
+  id: string
+  name: string
+}
+
 interface DeviceScheduleModalProps {
   isOpen: boolean
   onClose: () => void
   deviceIp: string
   deviceName: string
   notify: (msg: string, error?: boolean) => void
-  availableServers: string[]
+  availableServers: Array<ScheduleServerOption | string>
 }
 
 const DAY_NAMES = [
@@ -50,6 +55,18 @@ export default function DeviceScheduleModal({
   const [selectedDays, setSelectedDays] = useState<number[]>([1, 2, 3, 4, 5, 6, 7])
   const [action, setAction] = useState<'block' | 'direct' | 'proxy'>('block')
   const [targetServer, setTargetServer] = useState('')
+
+  const getServerName = (targetId?: string) => {
+    if (!targetId) return ''
+    for (const s of availableServers) {
+      if (typeof s === 'string') {
+        if (s === targetId) return s
+      } else {
+        if (s.id === targetId) return s.name
+      }
+    }
+    return targetId
+  }
 
   const load = async () => {
     setLoading(true)
@@ -182,7 +199,7 @@ export default function DeviceScheduleModal({
                       🕒 {s.time_start} — {s.time_end}
                     </span>
                     <span className={`schedule-action-badge ${s.action}`}>
-                      {s.action === 'block' ? '🚫 Блокировка' : s.action === 'direct' ? '⚡ DIRECT' : `🛰 ${s.target_server || 'Прокси'}`}
+                      {s.action === 'block' ? '🚫 Блокировка' : s.action === 'direct' ? '⚡ DIRECT' : `🛰 ${getServerName(s.target_server) || 'Прокси'}`}
                     </span>
                     <button
                       className="btn btn-xs btn-secondary"
@@ -274,9 +291,15 @@ export default function DeviceScheduleModal({
                   required
                 >
                   <option value="">-- Выберите сервер --</option>
-                  {availableServers.map((s) => (
-                    <option key={s} value={s}>{s}</option>
-                  ))}
+                  {availableServers.map((s) => {
+                    const id = typeof s === 'string' ? s : s.id
+                    const label = typeof s === 'string' ? s : s.name
+                    return (
+                      <option key={id} value={id}>
+                        {label}
+                      </option>
+                    )
+                  })}
                 </select>
               </div>
             )}

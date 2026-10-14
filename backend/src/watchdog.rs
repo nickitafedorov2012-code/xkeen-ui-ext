@@ -68,11 +68,12 @@ pub fn spawn(state: AppState) {
                 }
             }
 
-            let (config_path_str, force_domains, device_routing, ignore_servers, device_domains, adblock_enabled, flow_server, zapret_cfg, gaming_cfg) = {
+            let (config_path_str, force_domains, direct_domains, device_routing, ignore_servers, device_domains, adblock_enabled, flow_server, zapret_cfg, gaming_cfg, schedules) = {
                 let cfg = state.config.read().await;
                 (
                     cfg.mihomo.config_path.clone(),
                     cfg.force_domains.clone(),
+                    cfg.direct_domains.clone(),
                     cfg.device_routing.clone(),
                     cfg.ignore_servers.clone(),
                     cfg.device_domain_rules.clone(),
@@ -80,6 +81,7 @@ pub fn spawn(state: AppState) {
                     cfg.flow_server.clone(),
                     cfg.zapret.clone(),
                     cfg.gaming.clone(),
+                    cfg.schedules.clone(),
                 )
             };
 
@@ -105,8 +107,28 @@ pub fn spawn(state: AppState) {
 
                 // Читаем содержимое и проверяем наличие сохраненных маркер-блоков
                 if let Ok(content) = tokio::fs::read_to_string(path).await {
-                    let needs_device = !device_routing.is_empty() || !device_domains.is_empty();
-                    let needs_force = !force_domains.is_empty();
+                    // BUG-16: Проверка эффективной необходимости вставок
+                    let has_active_device_assignments = device_routing.values().any(|dr| {
+                        dr.servers.first().is_some_and(|s| !s.trim().is_empty() && s.trim() != "default")
+                    }) || schedules.iter().any(|s| s.enabled)
+                       || (gaming_cfg.enabled && gaming_cfg.devices.iter().any(|d| d.enabled && d.server.as_ref().is_some_and(|s| !s.trim().is_empty())));
+                    let needs_device = has_active_device_assignments;
+                    let needs_dev_domains = !device_domains.is_empty() && device_domains.values().any(|v| !v.is_empty());
+
+                    let needs_force = force_domains.iter().any(|d| {
+                        let clean = crate::config::normalize_domain(d);
+                        if clean.is_empty() || !clean.contains('.') {
+                            return false;
+                        }
+                        if direct_domains.iter().any(|dir| crate::config::normalize_domain(dir) == clean) {
+                            return false;
+                        }
+                        if zapret_cfg.enabled && routing::is_zapret_direct_domain(&clean, &zapret_cfg) {
+                            return false;
+                        }
+                        true
+                    });
+
                     let needs_ignore = !ignore_servers.is_empty();
                     let needs_flow = flow_server.as_ref().is_some_and(|s| !s.trim().is_empty());
                     let needs_zapret = zapret_cfg.enabled
@@ -121,6 +143,7 @@ pub fn spawn(state: AppState) {
                     let needs_gaming = gaming_cfg.enabled;
 
                     let missing_device = needs_device && !content.contains("AUTO-DEVICE");
+                    let missing_dev_domains = needs_dev_domains && !content.contains("AUTO-DEVICE-DOMAINS");
                     let missing_force = needs_force && !content.contains("AUTO-FORCE");
                     let missing_ignore = needs_ignore && !content.contains("exclude-filter:");
                     let missing_adblock = adblock_enabled && !content.contains("AUTO-ADBLOCK");
@@ -128,10 +151,12 @@ pub fn spawn(state: AppState) {
                     let missing_zapret = needs_zapret && !content.contains("AUTO-ZAPRET-HYBRID");
                     let missing_gaming = needs_gaming && !content.contains("AUTO-GAMING");
 
-                    if missing_device || missing_force || missing_ignore || missing_adblock || missing_flow || missing_zapret || missing_gaming {
+                    if missing_device || missing_dev_domains || missing_force || missing_ignore || missing_adblock || missing_flow || missing_zapret || missing_gaming {
                         log_w!("[WATCHDOG] Обнаружена перезапись config.yaml (рестарт XKeen)! Восстановление маршрутизации...");
 
-                        let _guard = state.routing_lock.lock().await;
+                        // BUG-15: Строгий порядок блокировок (config_lock -> routing_lock)
+                        let _cfg_guard = state.config_lock.lock().await;
+                        let _routing_guard = state.routing_lock.lock().await;
                         let cfg = state.config.read().await.clone();
 
                         // Повторное применение маршрутизации
@@ -393,11 +418,14 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
                         let path = Path::new(&new_cfg.mihomo.config_path);
                         if path.exists() {
                             if let Ok(raw_yaml) = tokio::fs::read_to_string(path).await {
-                                if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &new_cfg) {
+                                if let Ok(new_yaml) = routing::apply_gaming_rules(&raw_yaml, &new_cfg.gaming, &[]) {
                                     if crate::api::atomic_write_file(path, &new_yaml).await.is_ok()
                                         && mihomo::reload_config(&state.http, &new_cfg).await.is_ok() {
                                             log_i!("[DHCP-WATCHDOG] ✓ Маршрут игрового режима успешно переприменен для нового IP");
                                         }
+                                    let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
+                                    let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
+                                    let _ = crate::api::sync_gaming_full_tunnel(&new_cfg.gaming, redir_port, tproxy_port).await;
                                 }
                             }
                         }
@@ -659,6 +687,8 @@ pub fn spawn_zapret_update_checker(state: AppState) {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RecentGamingConn {
     pub target: String,
+    #[serde(default)]
+    pub host: String,
     pub destination: String,
     pub network: String,
     pub device_ip: String,
@@ -671,6 +701,9 @@ static RECENT_GAMING_CONNS: std::sync::Mutex<Vec<RecentGamingConn>> = std::sync:
 pub fn get_recent_gaming_conns(ignored_list: &[String]) -> Vec<RecentGamingConn> {
     let mut list = RECENT_GAMING_CONNS.lock().map(|g| g.clone()).unwrap_or_default();
     for item in &mut list {
+        if item.host.is_empty() && !item.target.is_empty() {
+            item.host = item.target.clone();
+        }
         item.ignored = is_conn_target_ignored(&item.target, &item.destination, ignored_list);
     }
     list
@@ -713,10 +746,10 @@ pub fn is_gaming_connection_match(
             }
         }
     }
-    // Для UDP соединений с игрового устройства: высокие игровые порты (не DNS/QUIC/NTP/SSDP/mDNS)
+    // Для UDP соединений с игрового устройства: высокие игровые порты (не DNS/QUIC/NTP/SSDP/mDNS и не STUN/WebRTC/VoIP)
     if network.eq_ignore_ascii_case("udp") && !dest_ip.is_empty() {
         if let Ok(port_num) = dest_port.parse::<u16>() {
-            if !matches!(port_num, 53 | 80 | 123 | 443 | 853 | 1900 | 5353) && port_num >= 1024 {
+            if !matches!(port_num, 53 | 80 | 123 | 443 | 853 | 1900 | 3478..=3481 | 5060 | 5061 | 5349 | 5353 | 19302..=19309) && port_num >= 1024 {
                 return true;
             }
         }
@@ -824,6 +857,7 @@ pub fn spawn_smart_gaming_monitor(state: AppState) {
                         };
                         let ignored = is_conn_target_ignored(&target, &destination, &cfg.gaming.ignored_game_conns);
                         record_recent_gaming_conn(RecentGamingConn {
+                            host: target.clone(),
                             target: target.clone(),
                             destination,
                             network: net.to_uppercase(),
@@ -859,7 +893,9 @@ pub fn spawn_smart_gaming_monitor(state: AppState) {
                         let _routing_guard = state.routing_lock.lock().await;
                         let mut new_cfg = (**state.config.read().await).clone();
                         new_cfg.gaming.enabled = true;
-                        new_cfg.gaming.mode = config::GamingMode::Compatibility;
+                        if new_cfg.gaming.mode != config::GamingMode::BypassRu {
+                            new_cfg.gaming.mode = config::GamingMode::Compatibility;
+                        }
                         let path = Path::new(&new_cfg.mihomo.config_path);
                         if path.exists() {
                             if let Ok(raw_yaml) = tokio::fs::read_to_string(path).await {
@@ -940,6 +976,78 @@ mod tests {
         assert!(is_conn_target_ignored("api.steamcommunity.com", "1.2.3.4:443", &ignored));
         assert!(is_conn_target_ignored("155.133.248.34:27015", "155.133.248.34:27015", &ignored));
         assert!(!is_conn_target_ignored("discord.gg", "162.159.130.234:443", &ignored));
+    }
+
+    #[test]
+    fn test_watchdog_effective_needs_checks_prevents_infinite_loop() {
+        // BUG-16: When all force_domains are intercepted by Zapret Direct (e.g. youtube.com),
+        // needs_force must be FALSE, preventing missing_force = true and 4-second reload loop.
+        let mut zapret_cfg = crate::config::ZapretConfig::default();
+        zapret_cfg.enabled = true;
+        zapret_cfg.hybrid_youtube = true;
+
+        let force_domains = vec!["youtube.com".to_string(), "googlevideo.com".to_string()];
+        let direct_domains: Vec<String> = vec![];
+
+        let needs_force = force_domains.iter().any(|d| {
+            let clean = crate::config::normalize_domain(d);
+            if clean.is_empty() || !clean.contains('.') {
+                return false;
+            }
+            if direct_domains.iter().any(|dir| crate::config::normalize_domain(dir) == clean) {
+                return false;
+            }
+            if zapret_cfg.enabled && routing::is_zapret_direct_domain(&clean, &zapret_cfg) {
+                return false;
+            }
+            true
+        });
+        assert!(!needs_force, "needs_force must be false when all domains are intercepted by zapret hybrid");
+
+        // When device_routing has entries but none have active servers
+        let mut dev_routing = std::collections::BTreeMap::new();
+        dev_routing.insert("192.168.1.50".to_string(), crate::config::DeviceRouting { servers: vec![], ..Default::default() });
+        dev_routing.insert("192.168.1.51".to_string(), crate::config::DeviceRouting { servers: vec!["default".to_string()], ..Default::default() });
+        let schedules: Vec<crate::config::DeviceSchedule> = vec![];
+        let gaming_cfg = crate::config::GamingConfig::default();
+
+        let has_active_device_assignments = dev_routing.values().any(|dr| {
+            dr.servers.first().is_some_and(|s| !s.trim().is_empty() && s.trim() != "default")
+        }) || schedules.iter().any(|s| s.enabled)
+           || (gaming_cfg.enabled && gaming_cfg.devices.iter().any(|d| d.enabled && d.server.as_ref().is_some_and(|s| !s.trim().is_empty())));
+
+        assert!(!has_active_device_assignments, "needs_device must be false when no device has an active non-default server");
+    }
+
+    #[test]
+    fn test_gaming_watchdog_port_exclusions() {
+        // BUG-23: Exclude STUN, VoIP, and WebRTC ports from gaming match
+        let domains = vec!["steamcommunity.com".to_string()];
+        // STUN / VoIP / WebRTC ports should return false
+        assert!(!is_gaming_connection_match("", "1.2.3.4", "3478", "udp", "MATCH", &domains));
+        assert!(!is_gaming_connection_match("", "1.2.3.4", "5060", "udp", "MATCH", &domains));
+        assert!(!is_gaming_connection_match("", "1.2.3.4", "5061", "tcp", "MATCH", &domains));
+        assert!(!is_gaming_connection_match("", "1.2.3.4", "5349", "udp", "MATCH", &domains));
+        assert!(!is_gaming_connection_match("", "1.2.3.4", "19302", "udp", "MATCH", &domains));
+        assert!(!is_gaming_connection_match("", "1.2.3.4", "19309", "udp", "MATCH", &domains));
+
+        // Actual game server port should return true
+        assert!(is_gaming_connection_match("", "155.133.248.34", "27015", "udp", "MATCH", &domains));
+    }
+
+    #[test]
+    fn test_gaming_conn_struct_sync() {
+        // BUG-24: Host and target fields in RecentGamingConn
+        let conn = RecentGamingConn {
+            target: "155.133.248.34:27015".into(),
+            host: "155.133.248.34:27015".into(),
+            destination: "155.133.248.34:27015".into(),
+            network: "udp".into(),
+            device_ip: "192.168.1.100".into(),
+            last_seen: "12:00:00".into(),
+            ignored: false,
+        };
+        assert_eq!(conn.host, conn.target);
     }
 }
 

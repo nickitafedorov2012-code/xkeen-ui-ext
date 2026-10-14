@@ -537,16 +537,16 @@ pub fn serialize_zapret_conf(cfg: &crate::config::ZapretConfig) -> String {
     let excluded_ips_str = cfg
         .excluded_devices
         .iter()
-        .filter(|d| !d.contains(':'))
-        .cloned()
+        .map(|d| d.trim())
+        .filter(|d| crate::config::is_valid_ip_or_cidr(d))
         .collect::<Vec<_>>()
         .join(" ");
 
     let excluded_macs_str = cfg
         .excluded_devices
         .iter()
-        .filter(|d| d.contains(':'))
-        .cloned()
+        .map(|d| d.trim())
+        .filter(|d| crate::config::is_valid_mac(d))
         .collect::<Vec<_>>()
         .join(" ");
 
@@ -692,6 +692,28 @@ mod tests {
         assert_eq!(parsed.excluded_devices.len(), 2);
         assert!(parsed.excluded_devices.contains(&"192.168.1.50".to_string()));
         assert!(parsed.excluded_devices.contains(&"00:11:22:33:44:55".to_string()));
+    }
+
+    #[test]
+    fn test_serialize_zapret_conf_filters_injections_and_invalid_devices() {
+        let mut cfg = crate::config::ZapretConfig::default();
+        cfg.excluded_devices = vec![
+            "192.168.1.50".to_string(),
+            "10.0.0.0/24".to_string(),
+            "00:11:22:33:44:55".to_string(),
+            "00-11-22-33-44-66".to_string(),
+            "192.168.1.1; rm -rf /".to_string(),
+            "00:11:22:33:44:GG".to_string(),
+            "invalid_host".to_string(),
+            "  ".to_string(),
+        ];
+
+        let serialized = serialize_zapret_conf(&cfg);
+        assert!(serialized.contains("EXCLUDED_IPS=\"192.168.1.50 10.0.0.0/24\""));
+        assert!(serialized.contains("EXCLUDED_MACS=\"00:11:22:33:44:55 00-11-22-33-44-66\""));
+        assert!(!serialized.contains("rm -rf"));
+        assert!(!serialized.contains("invalid_host"));
+        assert!(!serialized.contains("GG"));
     }
 
     #[test]

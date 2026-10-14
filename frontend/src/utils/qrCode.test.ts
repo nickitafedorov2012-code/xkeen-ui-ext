@@ -62,4 +62,9 @@ describe('Offline QR Code Generator (SEC-03)', () => {
     const unicodeQr = generateQrSvg('Привет мир! 🚀')
     expect(unicodeQr.startsWith('data:image/svg+xml;charset=utf-8,')).toBe(true)
   })
+
+  it('throws an informative error when data exceeds maximum capacity', () => {
+    const hugeText = 'a'.repeat(1200)
+    expect(() => generateQrSvg(hugeText)).toThrow(/слишком длинный для QR-кода/)
+  })
 })

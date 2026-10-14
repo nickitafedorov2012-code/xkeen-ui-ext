@@ -210,7 +210,7 @@ export default function Devices({ notify }: Props) {
         return 0
       })
     },
-    [sortCol, sortAsc, serverByIp],
+    [sortCol, sortAsc, serverByIp, trafficMap],
   )
 
   const sortedOnline = useMemo(() => sortDevices(onlineDevices), [onlineDevices, sortDevices])
@@ -855,7 +855,7 @@ export default function Devices({ notify }: Props) {
           isOpen={true}
           deviceIp={scheduleTarget.ip}
           deviceName={scheduleTarget.name}
-          availableServers={servers.map((s) => s.name)}
+          availableServers={servers.map((s) => ({ id: s.id, name: s.name }))}
           onClose={() => setScheduleTarget(null)}
           notify={notify}
         />

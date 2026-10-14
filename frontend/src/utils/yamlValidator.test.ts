@@ -61,4 +61,16 @@ port: 443
     const res = validateYaml(yaml)
     expect(res.valid).toBe(true)
   })
+
+  it('allows URL schemes and IPv6 addresses without false-positive colon errors (FE-11)', () => {
+    const yaml = `
+proxies:
+  - vless://550e8400@198.51.100.1:443?type=tcp
+  - tls://example.com:8443
+  - hysteria2://pass@example.com:443
+server: 2606:4700::1
+`
+    const res = validateYaml(yaml)
+    expect(res.valid).toBe(true)
+  })
 })

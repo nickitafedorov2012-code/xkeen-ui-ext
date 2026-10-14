@@ -14,7 +14,7 @@ fn groups_name_re() -> &'static Regex {
 }
 
 fn rules_cidr_re() -> &'static Regex {
-    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*- SRC-IP-CIDR,(.+?)/(?:32|128),").unwrap());
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*- SRC-IP-CIDR,([0-9a-fA-F\.:]+)(?:/([0-9]{1,3}))?,").unwrap());
     &RE
 }
 
@@ -81,6 +81,12 @@ pub fn ip_key_from_group(gname: &str) -> Option<String> {
     if let Some(stripped) = token.strip_prefix("DEV_") {
         token = stripped;
     }
+    let parts: Vec<&str> = token.split('_').collect();
+    if parts.len() == 5 && parts[..4].iter().all(|p| p.parse::<u8>().is_ok()) && parts[4].parse::<u8>().is_ok() {
+        let ip_cand = parts[..4].join(".");
+        let prefix = parts[4];
+        return Some(format!("{ip_cand}/{prefix}"));
+    }
     let cand = token.replace('_', ".");
     let parts: Vec<&str> = cand.split('.').collect();
     if parts.len() == 4 && parts.iter().all(|p| p.parse::<u8>().is_ok()) {
@@ -95,7 +101,7 @@ pub fn ip_key_from_group(gname: &str) -> Option<String> {
 
 /// Имя группы устройства: '{чистое имя} {ip_с_подчёркиваниями}' или 'DEV_{ip}'.
 pub fn group_name_for(ip: &str, name: &str) -> String {
-    let safe_ip = ip.replace(['.', ':'], "_");
+    let safe_ip = ip.replace(['.', ':', '/'], "_");
     let clean: String = name
         .chars()
         .filter(|c| !matches!(c, '\r' | '\n' | ',' | '\'' | '"' | '#'))
@@ -245,6 +251,14 @@ pub fn add_provider_to_yaml_full(
         return Err("ID подписки и URL не могут быть пустыми".into());
     }
 
+    let forbidden_chars = ['\r', '\n', '"', '\'', ','];
+    if [id, url].iter().any(|s| s.chars().any(|c| forbidden_chars.contains(&c)))
+        || hwid.map(|h| h.chars().any(|c| forbidden_chars.contains(&c))).unwrap_or(false)
+        || user_agent.map(|u| u.chars().any(|c| forbidden_chars.contains(&c))).unwrap_or(false)
+    {
+        return Err("Параметры подписки содержат недопустимые символы (переводы строк, кавычки или запятые)".into());
+    }
+
     let existing = parse_provider_names(yaml);
     if existing.iter().any(|p| p.eq_ignore_ascii_case(id)) {
         return Err(format!("Подписка с ID '{id}' уже существует"));
@@ -259,9 +273,17 @@ pub fn add_provider_to_yaml_full(
         header_lines.push_str(&format!("\n      x-hwid: [\"{h}\"]"));
     }
 
+    let is_crlf = yaml.contains("\r\n");
+    let eol = if is_crlf { "\r\n" } else { "\n" };
+
     let new_block = format!(
         "  {id}:\n    type: http\n    url: \"{url}\"\n    interval: {PROVIDER_DEFAULT_INTERVAL_SECS}\n    health-check:\n      enable: true\n      lazy: true\n      url: \"{hc_url}\"\n      interval: {hc_interval}\n      expected-status: {PROVIDER_HEALTH_CHECK_EXPECTED_STATUS}\n{header_lines}\n    override:\n      udp: true\n      tfo: true"
     );
+    let new_block_formatted = if is_crlf {
+        new_block.replace('\n', "\r\n")
+    } else {
+        new_block
+    };
 
     let mut out = Vec::new();
     let mut in_providers = false;
@@ -274,7 +296,7 @@ pub fn add_provider_to_yaml_full(
         if line.trim_end() == "proxy-providers:" {
             in_providers = true;
             out.push(line.to_string());
-            out.push(new_block.clone());
+            out.push(new_block_formatted.clone());
             inserted = true;
             continue;
         }
@@ -285,11 +307,11 @@ pub fn add_provider_to_yaml_full(
     }
 
     if !inserted {
-        out.push("\nproxy-providers:".to_string());
-        out.push(new_block);
+        out.push(format!("{eol}proxy-providers:"));
+        out.push(new_block_formatted);
     }
 
-    Ok(out.join("\n"))
+    Ok(out.join(eol))
 }
 
 /// Добавить новую HTTP-подписку в блок proxy-providers в config.yaml
@@ -395,7 +417,9 @@ pub fn delete_provider_from_yaml(yaml: &str, id: &str) -> Result<String, String>
         out.push(line.to_string());
     }
 
-    Ok(out.join("\n"))
+    let is_crlf = yaml.contains("\r\n");
+    let eol = if is_crlf { "\r\n" } else { "\n" };
+    Ok(out.join(eol))
 }
 
 /// Домены: очистка и нормализация (нижний регистр, без портов/протоколов/путей/userinfo).
@@ -739,6 +763,12 @@ pub fn find_flow_group_name(yaml: &str) -> Option<String> {
 /// Применение выделенного маршрута Google Flow & AI в rules: (после AdBlock).
 pub fn apply_flow_rules(yaml: &str, target: &str, group_name: Option<&str>) -> Result<String, String> {
     crate::routing::validate_marker_pair(yaml, GOOGLE_AI_BEGIN, GOOGLE_AI_END)?;
+    let forbidden_chars = ['\r', '\n', '"', '\'', ','];
+    if target.chars().any(|c| forbidden_chars.contains(&c))
+        || group_name.map(|g| g.chars().any(|c| forbidden_chars.contains(&c))).unwrap_or(false)
+    {
+        return Err("Параметры правила Flow содержат недопустимые символы (переводы строк, кавычки или запятые)".into());
+    }
     let content = remove_flow_rules(yaml);
     let target_dest = if let Some(g) = group_name { g } else { target };
     if target_dest.is_empty() {
@@ -861,6 +891,11 @@ pub fn find_proxy_target_group(yaml: &str) -> String {
             {
                 return gname.to_string();
             }
+        }
+    }
+    for g in parse_existing_group_names(yaml) {
+        if g != "DIRECT" && g != "REJECT" && g != "GLOBAL" && g != GAMING_GROUP_NAME {
+            return g;
         }
     }
     "PROXY".to_string()
@@ -1502,12 +1537,13 @@ pub fn apply_domain_rules(
                 out.push(DIRECT_END.to_string());
             }
 
-            // 3. Принудительные домены (PROXY, исключая специализированные Google AI домены)
+            // 3. Принудительные домены (динамическая прокси-группа, исключая специализированные Google AI домены)
             if !force.is_empty() {
+                let proxy_target = find_proxy_target_group(&content);
                 out.push(FORCE_BEGIN.to_string());
                 for d in &force {
                     if !FLOW_DOMAINS.iter().any(|g| g.eq_ignore_ascii_case(d)) {
-                        out.push(format!("  - DOMAIN-SUFFIX,{d},PROXY"));
+                        out.push(format!("  - DOMAIN-SUFFIX,{d},{proxy_target}"));
                     }
                 }
                 out.push(FORCE_END.to_string());
@@ -1594,9 +1630,16 @@ pub fn parse_rules(yaml: &str) -> BTreeMap<String, String> {
     let re = rules_cidr_re();
     for line in block.split('\n') {
         if let Some(c) = re.captures(line) {
-            let ip = c.get(1).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
-            if !ip.is_empty() {
-                out.insert(ip, line.trim_end().to_string());
+            let base_ip = c.get(1).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
+            let prefix = c.get(2).map(|m| m.as_str().trim());
+            if !base_ip.is_empty() {
+                let trimmed_line = line.trim_end().to_string();
+                if let Some(p) = prefix {
+                    if p != "32" && p != "128" {
+                        out.insert(format!("{base_ip}/{p}"), trimmed_line.clone());
+                    }
+                }
+                out.insert(base_ip, trimmed_line);
             }
         }
     }
@@ -1962,36 +2005,31 @@ pub fn parse_tproxy_port(yaml: &str) -> Option<u16> {
     None
 }
 
-/// Применение всей сохраненной в AppConfig маршрутизации к сырому YAML Mihomo.
-pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> Result<(String, usize), String> {
+/// Очистка устаревших ipset списков при смене режимов маршрутизации (BUG-19).
+pub async fn cleanup_stale_mode_ipsets() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        for set in &["xkeen_stale_temp", "xkeen_gaming_stale"] {
+            let _ = tokio::process::Command::new("ipset")
+                .args(["flush", set])
+                .output()
+                .await;
+            let _ = tokio::process::Command::new("ipset")
+                .args(["destroy", set])
+                .output()
+                .await;
+        }
+    }
+    Ok(())
+}
+
+/// Применение всей сохраненной в AppConfig маршрутизации к сырому YAML Mihomo с сохранением фильтров провайдеров.
+pub fn apply_routing_with_filters(
+    yaml: &str,
+    cfg: &crate::config::AppConfig,
+    filters: &mut std::collections::BTreeMap<String, String>,
+) -> Result<(String, usize), String> {
     let mut current = yaml.to_string();
-
-    // 0. Блокировка рекламы на роутере (AdBlock)
-    if let Ok(with_adblock) = apply_adblock_rules(&current, cfg.adblock_enabled) {
-        current = with_adblock;
-    }
-
-    // 1. Доменные правила (DIRECT / FORCE / PER-DEVICE DOMAINS)
-    // Фильтруем force_domains: домены, которые активно обрабатываются Zapret DIRECT,
-    // не должны попадать в блок FORCE_BEGIN как PROXY
-    let direct = &cfg.direct_domains;
-    let mut active_force: Vec<String> = cfg.force_domains.clone();
-    if cfg.zapret.enabled {
-        active_force.retain(|d| !is_zapret_direct_domain(d, &cfg.zapret));
-    }
-    let device_domains = &cfg.device_domain_rules;
-    current = apply_domain_rules(&current, direct, &active_force, device_domains)?;
-
-    // 2. Умные гибридные правила Zapret (YouTube / Discord / GitHub / Torrents / Adult -> DIRECT, AI -> PROXY)
-    // Вставляются ПЕРЕД FORCE_BEGIN (если есть), гарантируя DIRECT-приоритет локального nfqws
-    current = apply_zapret_hybrid_rules(&current, &cfg.zapret)?;
-
-    // 3. Выделенный маршрут Google Flow & AI (высший приоритет — на самом верху секции rules)
-    let flow_target = cfg.flow_server.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or("PROXY");
-    let flow_group = find_flow_group_name(&current);
-    if let Ok(with_flow) = apply_flow_rules(&current, flow_target.trim(), flow_group.as_deref()) {
-        current = with_flow;
-    }
 
     let providers = if !cfg.mihomo.device_providers.is_empty() {
         cfg.mihomo.device_providers.clone()
@@ -1999,7 +2037,9 @@ pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> Result<(Stri
         parse_provider_names(&current)
     };
 
-    // 4. Per-device назначения
+    // 1. Per-device назначения (базовый маршрут уровня устройства: SRC-IP-CIDR)
+    // Вставляется ПЕРВЫМ в rules, чтобы более специфичные правила (домены, AdBlock, Zapret, Flow, Gaming)
+    // вставлялись поверх него и имели безусловный приоритет (BUG-18 FIFO-порядок).
     let mut assignments = Vec::new();
     for (ip, dr) in &cfg.device_routing {
         if let Some(srv) = dr.servers.first() {
@@ -2041,17 +2081,46 @@ pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> Result<(Stri
         current = with_devices;
     }
 
-    // 5. Игнор-лист
+    // 2. Игнор-лист
     if let Ok(with_ig) = apply_ignore_to_groups(&current, &cfg.ignore_servers) {
         current = with_ig;
     }
-    let mut filters = cfg.provider_filters.clone();
-    current = apply_ignore_to_providers(&current, &cfg.ignore_servers, &mut filters);
+    current = apply_ignore_to_providers(&current, &cfg.ignore_servers, filters);
+
+    // 3. Доменные правила (DIRECT / FORCE / PER-DEVICE DOMAINS)
+    // Вставляются поверх правил устройств
+    let direct = &cfg.direct_domains;
+    let mut active_force: Vec<String> = cfg.force_domains.clone();
+    if cfg.zapret.enabled {
+        active_force.retain(|d| !is_zapret_direct_domain(d, &cfg.zapret));
+    }
+    let device_domains = &cfg.device_domain_rules;
+    current = apply_domain_rules(&current, direct, &active_force, device_domains)?;
+
+    // 4. Умные гибридные правила Zapret (YouTube / Discord / GitHub / Torrents / Adult -> DIRECT, AI -> PROXY)
+    current = apply_zapret_hybrid_rules(&current, &cfg.zapret)?;
+
+    // 5. Блокировка рекламы на роутере (AdBlock) — применяется ко всем устройствам
+    if let Ok(with_adblock) = apply_adblock_rules(&current, cfg.adblock_enabled) {
+        current = with_adblock;
+    }
 
     // 6. Игровой режим (приоритетный маршрут устройства и селектор-группа 🎮 Gaming)
     current = apply_gaming_rules(&current, &cfg.gaming, &providers)?;
 
+    // 7. Выделенный маршрут Google Flow & AI (высший приоритет — на самом верху секции rules)
+    let flow_target = cfg.flow_server.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or("PROXY");
+    let flow_group = find_flow_group_name(&current);
+    if let Ok(with_flow) = apply_flow_rules(&current, flow_target.trim(), flow_group.as_deref()) {
+        current = with_flow;
+    }
+
     Ok((current, count))
+}
+
+pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> Result<(String, usize), String> {
+    let mut filters = cfg.provider_filters.clone();
+    apply_routing_with_filters(yaml, cfg, &mut filters)
 }
 
 #[cfg(test)]
@@ -2970,6 +3039,110 @@ rules:
 
         let yaml3 = "redir-port: 5000\n";
         assert_eq!(parse_tproxy_port(yaml3), None);
+    }
+
+    #[test]
+    fn test_provider_and_flow_char_validation() {
+        // SEC-12: Reject injection chars in add_provider_to_yaml_full and apply_flow_rules
+        let yaml = "proxy-providers:\n  sub1:\n    type: http\n    url: \"https://foo.bar/sub\"\nrules:\n  - MATCH,DIRECT";
+        assert!(add_provider_to_yaml_full(yaml, "bad\nid", "https://foo.bar/sub", None, None, None, None).is_err());
+        assert!(add_provider_to_yaml_full(yaml, "sub2", "https://foo.bar/sub\"evil", None, None, None, None).is_err());
+        assert!(add_provider_to_yaml_full(yaml, "sub2", "https://foo.bar/sub\nevil", None, None, None, None).is_err());
+        assert!(add_provider_to_yaml_full(yaml, "sub2", "https://foo.bar/sub", None, None, Some("hwid\"inject"), None).is_err());
+        assert!(add_provider_to_yaml_full(yaml, "sub2", "https://foo.bar/sub", None, None, None, Some("ua\ninject")).is_err());
+
+        assert!(apply_flow_rules(yaml, "evil.com\"injected", Some("PROXY")).is_err());
+        assert!(apply_flow_rules(yaml, "evil.com\ninjected", Some("PROXY")).is_err());
+        assert!(apply_flow_rules(yaml, "evil.com", Some("PROXY\"injected")).is_err());
+    }
+
+    #[test]
+    fn test_apply_domain_rules_dynamic_group() {
+        // BUG-17: Dynamic group resolution in apply_domain_rules
+        let yaml = "proxy-groups:\n  - name: MY_CUSTOM_PROXY\n    type: select\nrules:\n  - MATCH,DIRECT";
+        let empty_device_domains = std::collections::BTreeMap::new();
+        let out = apply_domain_rules(yaml, &[], &["customforce.com".to_string()], &empty_device_domains).unwrap();
+        assert!(out.contains("DOMAIN-SUFFIX,customforce.com,MY_CUSTOM_PROXY"));
+        assert!(!out.contains("DOMAIN-SUFFIX,customforce.com,PROXY"));
+    }
+
+    #[test]
+    fn test_bug18_rule_hierarchy_adblock_and_direct_precede_device_assignment() {
+        // BUG-18: Rules hierarchy must be FIFO: AdBlock, Direct, Zapret hybrid must precede device rules
+        let yaml = "port: 7890\nproxy-groups:\nrules:\n  - MATCH,PROXY\n";
+        let mut app_cfg = crate::config::AppConfig::default();
+        app_cfg.adblock_enabled = true;
+        app_cfg.direct_domains = vec!["mysite.direct.ru".to_string()];
+        app_cfg.zapret.enabled = true;
+        app_cfg.zapret.hybrid_youtube = true;
+        app_cfg.device_routing.insert(
+            "192.168.1.55".into(),
+            crate::config::DeviceRouting {
+                servers: vec!["AssignedNode".into()],
+                ..Default::default()
+            },
+        );
+
+        let (applied, _) = apply_routing(yaml, &app_cfg).expect("apply_routing should succeed");
+        let adblock_pos = applied.find(ADBLOCK_BEGIN).expect("ADBLOCK_BEGIN must exist");
+        let direct_pos = applied.find(DIRECT_BEGIN).expect("DIRECT_BEGIN must exist");
+        let zapret_pos = applied.find(ZAPRET_HYBRID_BEGIN).expect("ZAPRET_HYBRID_BEGIN must exist");
+        let device_pos = applied.find(RULES_BEGIN).expect("RULES_BEGIN must exist");
+
+        assert!(adblock_pos < device_pos, "AdBlock must be placed before device assignments so ads are blocked");
+        assert!(direct_pos < device_pos, "Direct domains must be placed before device assignments so direct traffic is not proxied");
+        assert!(zapret_pos < device_pos, "Zapret hybrid rules must be placed before device assignments");
+    }
+
+    #[test]
+    fn test_bug20_parse_and_preserve_nonstandard_cidr_masks() {
+        // BUG-20: Correct parsing, group mapping and formatting for non-/32 and non-/128 CIDRs
+        let yaml = "rules:\n# --- AUTO-DEVICE-RULES-BEGIN ---\n  - SRC-IP-CIDR,192.168.10.0/24,OfficeSubnet\n  - SRC-IP-CIDR,10.0.0.0/8,VpnSubnet\n  - SRC-IP-CIDR,2001:db8::/64,Ipv6Subnet\n# --- AUTO-DEVICE-RULES-END ---\n";
+        let parsed = parse_rules(yaml);
+        assert!(parsed.contains_key("192.168.10.0/24"), "Must parse /24 mask");
+        assert!(parsed.contains_key("10.0.0.0/8"), "Must parse /8 mask");
+        assert!(parsed.contains_key("2001:db8::/64"), "Must parse /64 mask");
+
+        // Group name encoding & decoding roundtrip
+        let gname = group_name_for("192.168.10.0/24", "Office Network");
+        assert_eq!(gname, "Office Network 192_168_10_0_24");
+        let decoded = ip_key_from_group(&gname);
+        assert_eq!(decoded, Some("192.168.10.0/24".to_string()));
+
+        // Formatting
+        assert_eq!(format_src_ip_cidr("192.168.10.0/24"), "192.168.10.0/24");
+        assert_eq!(format_src_ip_cidr("10.0.0.0/8"), "10.0.0.0/8");
+        assert_eq!(format_src_ip_cidr("2001:db8::/64"), "2001:db8::/64");
+    }
+
+    #[test]
+    fn test_bug07_provider_yaml_formatting_and_crlf_lf_preservation() {
+        // BUG-07: Consistent 2-space indentation and CRLF/LF preservation
+        let lf_yaml = "proxy-providers:\n  sub1:\n    type: http\n    url: \"https://a.b/c\"\nrules:\n  - MATCH,DIRECT\n";
+        let out_lf = add_provider_to_yaml(lf_yaml, "sub2", "https://x.y/z", None, None).expect("added");
+        assert!(!out_lf.contains("\r\n"), "LF input must preserve LF");
+        assert!(out_lf.contains("  sub2:\n    type: http\n    url: \"https://x.y/z\""), "Must use 2-space indentation hierarchy");
+
+        let crlf_yaml = "proxy-providers:\r\n  sub1:\r\n    type: http\r\n    url: \"https://a.b/c\"\r\nrules:\r\n  - MATCH,DIRECT\r\n";
+        let out_crlf = add_provider_to_yaml(crlf_yaml, "sub2", "https://x.y/z", None, None).expect("added");
+        assert!(out_crlf.contains("\r\n"), "CRLF input must preserve CRLF");
+        assert!(out_crlf.contains("  sub2:\r\n    type: http\r\n    url: \"https://x.y/z\""));
+
+        let deleted = delete_provider_from_yaml(&out_crlf, "sub2").expect("deleted");
+        assert!(deleted.contains("\r\n"), "CRLF deletion must preserve CRLF");
+        assert!(!deleted.contains("sub2:"));
+    }
+
+    #[test]
+    fn test_bug19_provider_filters_preserved_in_apply_routing() {
+        // BUG-19: Provider filters must be preserved when apply_routing_with_filters is called
+        let yaml = "proxy-providers:\n  myprov:\n    type: http\n    url: \"https://a.b/c\"\n    exclude-filter: 'existing'\nrules:\n  - MATCH,DIRECT\n";
+        let mut app_cfg = crate::config::AppConfig::default();
+        app_cfg.ignore_servers = vec!["BadNode".to_string()];
+        let mut filters = std::collections::BTreeMap::new();
+        let (out, _) = apply_routing_with_filters(yaml, &app_cfg, &mut filters).expect("applied");
+        assert!(out.contains("BadNode"), "Exclude-filter must include ignored server");
+        assert_eq!(filters.get("myprov").map(|s| s.as_str()), Some("existing"), "Original filter must be preserved in map");
     }
 }
 

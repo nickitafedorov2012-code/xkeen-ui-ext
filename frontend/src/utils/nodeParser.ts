@@ -267,7 +267,8 @@ function parseShadowsocks(link: string): ParsedNode | null {
     const colonIdx = decodedUser.indexOf(':')
     cipher = decodedUser.slice(0, colonIdx)
     password = decodedUser.slice(colonIdx + 1)
-    const hp = parseHostPort(hostport, 8388)
+    const cleanHp = hostport.split('?')[0].split('/')[0]
+    const hp = parseHostPort(cleanHp, 8388)
     server = hp.server
     port = hp.port
   } else {
@@ -277,7 +278,8 @@ function parseShadowsocks(link: string): ParsedNode | null {
       const colonIdx = userinfo.indexOf(':')
       cipher = userinfo.slice(0, colonIdx)
       password = userinfo.slice(colonIdx + 1)
-      const hp = parseHostPort(hostport, 8388)
+      const cleanHp = hostport.split('?')[0].split('/')[0]
+      const hp = parseHostPort(cleanHp, 8388)
       server = hp.server
       port = hp.port
     }
@@ -463,6 +465,8 @@ function objectToYamlNode(obj: Record<string, any>): string {
           }
         }
       }
+    } else if (Array.isArray(val)) {
+      lines.push(`    ${k}: [${val.map((v) => JSON.stringify(String(v))).join(', ')}]`)
     } else if (typeof val === 'boolean' || typeof val === 'number') {
       lines.push(`    ${k}: ${val}`)
     } else {

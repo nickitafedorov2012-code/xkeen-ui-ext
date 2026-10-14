@@ -304,9 +304,9 @@ pub fn validate_elf_header(header: &[u8], target_arch: &str) -> Result<(), Strin
 
     let valid_arch = match target_arch {
         "aarch64" => ei_class == 2 && e_machine == 183,
-        "arm" => ei_class == 1 && e_machine == 40,
-        "mipsel" => ei_class == 1 && ei_data == 1 && e_machine == 8,
-        "mips" => ei_class == 1 && ei_data == 2 && e_machine == 8,
+        "arm" | "armv7" | "armv7-v7a" => ei_class == 1 && e_machine == 40,
+        "mipsel" | "mips32le" => ei_class == 1 && ei_data == 1 && e_machine == 8,
+        "mips" | "mips32" => ei_class == 1 && ei_data == 2 && e_machine == 8,
         "x86_64" => ei_class == 2 && e_machine == 62,
         "x86" => ei_class == 1 && e_machine == 3,
         _ => true,
@@ -318,6 +318,17 @@ pub fn validate_elf_header(header: &[u8], target_arch: &str) -> Result<(), Strin
         ));
     }
     Ok(())
+}
+
+/// Список кандидатов на имя ассета в релизах GitHub для заданной архитектуры.
+pub fn get_asset_candidates(arch: &str) -> Vec<&'static str> {
+    match arch {
+        "aarch64" => vec!["xkeen-route-arm64-v8a"],
+        "mipsel" | "mips32le" => vec!["xkeen-route-mipsel", "xkeen-route-mips32le"],
+        "mips" | "mips32" => vec!["xkeen-route-mips", "xkeen-route-mips32"],
+        "arm" | "armv7" | "armv7-v7a" => vec!["xkeen-route-armv7-v7a", "xkeen-route-armv7"],
+        _ => vec![],
+    }
 }
 
 /// POST /api/update/install — скачать бинарь релиза, проверить, атомарно заменить с бэкапом и перезапустить сервис.
@@ -341,13 +352,10 @@ pub async fn install(State(state): State<AppState>) -> Response {
     }
 
     let arch = current_arch();
-    let asset_candidates: Vec<&'static str> = match arch {
-        "aarch64" => vec!["xkeen-route-arm64-v8a"],
-        "mipsel" => vec!["xkeen-route-mipsel"],
-        "mips" => vec!["xkeen-route-mips"],
-        "arm" => vec!["xkeen-route-armv7-v7a", "xkeen-route-armv7"],
-        _ => return api_err(format!("Архитектура {arch} не поддерживается автообновлением")),
-    };
+    let asset_candidates = get_asset_candidates(arch);
+    if asset_candidates.is_empty() {
+        return api_err(format!("Архитектура {arch} не поддерживается автообновлением"));
+    }
 
     let proxied = proxied_client(&proxy_url);
     let http = proxied.as_ref().unwrap_or(&state.http);
@@ -746,9 +754,11 @@ pub async fn mihomo_releases(State(state): State<AppState>) -> Response {
     let mut current_ver = crate::mihomo::get_version(&state.http, &cfg).await.unwrap_or_default();
     let mut full_ver = current_ver.clone();
 
+    let bin_path = if cfg.system.mihomo_bin.is_empty() { "/opt/sbin/mihomo" } else { &cfg.system.mihomo_bin };
+
     #[cfg(unix)]
     {
-        if let Ok(out) = tokio::process::Command::new("/opt/sbin/mihomo").arg("-v").output().await {
+        if let Ok(out) = tokio::process::Command::new(bin_path).arg("-v").output().await {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !s.is_empty() {
                 full_ver = s.clone();
@@ -828,7 +838,11 @@ pub async fn mihomo_install(
 
     // Определяем URL для загрузки
     let download_url = if let Some(ref cu) = req.custom_url {
-        cu.clone()
+        let cu_trim = cu.trim();
+        if !cu_trim.starts_with("https://github.com/MetaCubeX/mihomo/releases/download/") {
+            return api_err("Недопустимый URL загрузки ядра: разрешены только официальные релизы https://github.com/MetaCubeX/mihomo/releases/download/");
+        }
+        cu_trim.to_string()
     } else {
         let rels = fetch_mihomo_releases_cached(&state.http, &proxy_url).await.unwrap_or_default();
         let matched = rels.iter()
@@ -1057,7 +1071,7 @@ pub async fn mihomo_install(
     if tokio::fs::rename(&bin_path, staged_bin).await.is_err() {
         if let Err(copy_err) = tokio::fs::copy(&bin_path, staged_bin).await {
             let _ = tokio::fs::remove_file(&bin_path).await;
-            return api_err(format!("Ошибка копирования бинарника в /opt/sbin/mihomo.new: {copy_err}"));
+            return api_err(format!("Ошибка копирования бинарника в {}: {copy_err}", staged_bin.display()));
         }
         let _ = tokio::fs::remove_file(&bin_path).await;
     }
@@ -1072,7 +1086,7 @@ pub async fn mihomo_install(
         // Не удаляем target_bin при ошибке rename — безопасно копируем поверх
         if let Err(copy_err) = tokio::fs::copy(staged_bin, target_bin).await {
             let _ = tokio::fs::remove_file(staged_bin).await;
-            return api_err(format!("Ошибка установки бинарника в /opt/sbin/mihomo: {copy_err} (rename: {e})"));
+            return api_err(format!("Ошибка установки бинарника в {}: {copy_err} (rename: {e})", target_bin.display()));
         }
         let _ = tokio::fs::remove_file(staged_bin).await;
     }
@@ -1232,12 +1246,36 @@ mod tests {
         mipsel_hdr[5] = 1; // LSB
         mipsel_hdr[18] = 8;
         assert!(validate_elf_header(&mipsel_hdr, "mipsel").is_ok());
+        assert!(validate_elf_header(&mipsel_hdr, "mips32le").is_ok());
         // Alien test: mipsel on mips (MSB) -> MUST fail
         assert!(validate_elf_header(&mipsel_hdr, "mips").is_err());
+        assert!(validate_elf_header(&mipsel_hdr, "mips32").is_err());
+
+        // Valid MIPS (MSB, class=1, data=2, machine=8)
+        let mut mips_hdr = [0u8; 20];
+        mips_hdr[0..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+        mips_hdr[4] = 1;
+        mips_hdr[5] = 2; // MSB
+        mips_hdr[18] = 0;
+        mips_hdr[19] = 8;
+        assert!(validate_elf_header(&mips_hdr, "mips").is_ok());
+        assert!(validate_elf_header(&mips_hdr, "mips32").is_ok());
+        assert!(validate_elf_header(&mips_hdr, "mipsel").is_err());
+        assert!(validate_elf_header(&mips_hdr, "mips32le").is_err());
 
         // Corrupted / non-ELF header
         let text_hdr = b"<!DOCTYPE html><html>";
         assert!(validate_elf_header(text_hdr, "aarch64").is_err());
+    }
+
+    #[test]
+    fn test_get_asset_candidates_mips_and_archs() {
+        assert_eq!(get_asset_candidates("mipsel"), vec!["xkeen-route-mipsel", "xkeen-route-mips32le"]);
+        assert_eq!(get_asset_candidates("mips32le"), vec!["xkeen-route-mipsel", "xkeen-route-mips32le"]);
+        assert_eq!(get_asset_candidates("mips"), vec!["xkeen-route-mips", "xkeen-route-mips32"]);
+        assert_eq!(get_asset_candidates("mips32"), vec!["xkeen-route-mips", "xkeen-route-mips32"]);
+        assert_eq!(get_asset_candidates("aarch64"), vec!["xkeen-route-arm64-v8a"]);
+        assert_eq!(get_asset_candidates("arm"), vec!["xkeen-route-armv7-v7a", "xkeen-route-armv7"]);
     }
 
     #[test]
@@ -1260,5 +1298,15 @@ mod tests {
 
         let notes_fallback = extract_notes_from_markdown(md, "v9.9.9");
         assert!(notes_fallback.contains("Restored Zapret button with active glowing state"));
+    }
+
+    #[test]
+    fn test_mihomo_custom_url_whitelist() {
+        // SEC-13: Validate custom_url whitelist in mihomo_install
+        let is_valid_url = |url: &str| url.starts_with("https://github.com/MetaCubeX/mihomo/releases/download/");
+        assert!(is_valid_url("https://github.com/MetaCubeX/mihomo/releases/download/v1.19.31/mihomo-linux-amd64-v1.19.31.gz"));
+        assert!(!is_valid_url("https://evil-mirror.com/mihomo.gz"));
+        assert!(!is_valid_url("http://github.com/MetaCubeX/mihomo/releases/download/v1.19.31/mihomo-linux-amd64.gz"));
+        assert!(!is_valid_url("https://github.com/attacker/mihomo/releases/download/v1.0/mihomo.gz"));
     }
 }

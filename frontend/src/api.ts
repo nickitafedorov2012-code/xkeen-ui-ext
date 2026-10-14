@@ -44,7 +44,14 @@ export function validateEndpointData(cleanPath: string, data: any): void {
 
 async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
   const cleanPath = path.replace(/^\//, '')
-  const res = await fetch(`/api/${cleanPath}`, options)
+  const headers = new Headers(options.headers || {})
+  if (!headers.has('X-Requested-With')) {
+    headers.set('X-Requested-With', 'XMLHttpRequest')
+  }
+  const res = await fetch(`/api/${cleanPath}`, {
+    ...options,
+    headers,
+  })
   if (res.status === 401) {
     window.dispatchEvent(new CustomEvent('xr:auth-required'))
   }

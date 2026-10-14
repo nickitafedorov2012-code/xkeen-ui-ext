@@ -23,7 +23,7 @@ export default function FlowRepairModal({
   const [copiedLink, setCopiedLink] = useState(false)
 
   const cleanUrl = 'https://flow.google.com/?authuser=0&hl=en'
-  const extensionZipUrl = '/flow-unlock-extension.zip'
+  const extensionZipUrl = '/api/flow/extension.zip'
 
   const handleRepair = async () => {
     setRepairing(true)

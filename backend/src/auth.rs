@@ -67,26 +67,51 @@ pub fn random_hex(len_bytes: usize) -> String {
     hex::encode(bytes)
 }
 
-static REVOKED_TOKENS: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+static REVOKED_TOKENS: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> = std::sync::Mutex::new(None);
 
 /// Инвалидация токена сессии на стороне сервера при выходе (logout).
 pub fn revoke_token(token: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     let mut guard = REVOKED_TOKENS.lock().unwrap_or_else(|e| e.into_inner());
-    let set = guard.get_or_insert_with(std::collections::HashSet::new);
-    if set.len() > 10_000 {
-        set.clear();
+    let map = guard.get_or_insert_with(std::collections::HashMap::new);
+
+    // Очищаем естественно истекшие токены (SEC-11)
+    if map.len() > 1000 {
+        map.retain(|_, &mut exp| exp > now);
     }
-    set.insert(token.to_string());
+    // Если после очистки размер все еще превышает 10_000, сохраняем самые свежие токены
+    if map.len() > 10_000 {
+        let mut entries: Vec<_> = map.drain().collect();
+        entries.sort_by_key(|(_, exp)| *exp);
+        for (tok, exp) in entries.into_iter().rev().take(5000) {
+            map.insert(tok, exp);
+        }
+    }
+    let exp = now + SESSION_TTL_SECS;
+    map.insert(token.to_string(), exp);
 }
 
 /// Проверка, был ли токен сессии отозван на сервере.
 pub fn is_token_revoked(token: &str) -> bool {
-    let guard = REVOKED_TOKENS.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(set) = guard.as_ref() {
-        set.contains(token)
-    } else {
-        false
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut guard = REVOKED_TOKENS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(map) = guard.as_mut() {
+        if let Some(&exp) = map.get(token) {
+            if exp > now {
+                return true;
+            } else {
+                map.remove(token);
+                return false;
+            }
+        }
     }
+    false
 }
 
 fn check_rate_limit(ip: IpAddr) -> bool {
@@ -96,9 +121,14 @@ fn check_rate_limit(ip: IpAddr) -> bool {
         .as_secs();
     let mut guard = FAILED_LOGIN_ATTEMPTS.lock().unwrap_or_else(|e| e.into_inner());
     let map = guard.get_or_insert_with(HashMap::new);
+
+    // Очищаем устаревшие IP из памяти (SEC-11)
+    map.retain(|_, attempts| {
+        attempts.retain(|&ts| now.saturating_sub(ts) < 60);
+        !attempts.is_empty()
+    });
+
     let list = map.entry(ip).or_default();
-    // Удаляем попытки старше 60 секунд
-    list.retain(|&ts| now.saturating_sub(ts) < 60);
     // Лимит: максимум 5 неудачных попыток в минуту с одного IP
     list.len() < 5
 }
@@ -401,9 +431,16 @@ pub async fn login(
 }
 
 /// POST /api/auth/logout
-pub async fn logout(req: Request) -> Response {
+pub async fn logout(State(state): State<AppState>, req: Request) -> Response {
     if let Some(token) = extract_token(&req) {
-        revoke_token(&token);
+        let secret = {
+            let cfg = state.config.read().await;
+            cfg.auth.session_secret.clone()
+        };
+        // Отзываем токен только если он криптографически валиден (защита от спама инвалидацией)
+        if verify_session_token(&token, &secret) {
+            revoke_token(&token);
+        }
     }
     let cookie_val = format!("{}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax", COOKIE_NAME);
     let mut response = api_ok(json!({ "authenticated": false }));
@@ -474,16 +511,12 @@ pub fn is_trusted_origin(origin_or_referer: &str, host_header: Option<&str>) -> 
         }
     }
 
-    // 2. Локальные адреса loopback, LAN и официальные домены KeenDNS
+    // 2. Локальные адреса loopback и LAN (RFC 1918)
     if origin_host_only.eq_ignore_ascii_case("localhost")
         || origin_host_only == "127.0.0.1"
         || origin_host_only == "::1"
         || origin_host_only.starts_with("192.168.")
         || origin_host_only.starts_with("10.")
-        || origin_host_only.ends_with(".keenetic.pro")
-        || origin_host_only.ends_with(".keenetic.link")
-        || origin_host_only.ends_with(".keenetic.name")
-        || origin_host_only.eq_ignore_ascii_case("my.keenetic.net")
     {
         return true;
     }
@@ -518,7 +551,7 @@ pub async fn auth_middleware(
         || path == "/api/antigravity/fix.cmd"
         || path == "/api/flow/extension.zip";
 
-    // Разрешаем статику фронтенда и явно открытые эндпоинты
+    // Разрешаем статики фронтенда и явно открытые эндпоинты
     if !is_protected || is_exempt {
         return next.run(req).await;
     }
@@ -544,6 +577,24 @@ pub async fn auth_middleware(
                         "success": false,
                         "error": "forbidden",
                         "message": "Отклонено политикой CSRF: недопустимый Origin"
+                    })),
+                ).into_response();
+            }
+        } else {
+            // SEC-08: Требуем X-Requested-With или X-CSRF-Token для мутирующих запросов без Origin/Referer
+            let x_requested_with = req.headers().get("x-requested-with").and_then(|h| h.to_str().ok());
+            let x_csrf_token = req.headers().get("x-csrf-token").and_then(|h| h.to_str().ok());
+            let is_xhr = x_requested_with.map(|v| v.eq_ignore_ascii_case("xmlhttprequest")).unwrap_or(false);
+            let has_csrf = x_csrf_token.map(|v| !v.trim().is_empty()).unwrap_or(false);
+
+            if !is_xhr && !has_csrf {
+                log_w!("[AUTH] ⚠️ Отклонен мутирующий запрос без Origin/Referer и без CSRF-заголовков к {}", path);
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({
+                        "success": false,
+                        "error": "forbidden",
+                        "message": "Отклонено политикой CSRF: отсутствует заголовок X-Requested-With или X-CSRF-Token"
                     })),
                 ).into_response();
             }
@@ -715,18 +766,32 @@ mod tests {
         assert!(is_trusted_origin("https://10.0.0.1", None));
         assert!(is_trusted_origin("http://172.16.0.1", None));
         assert!(is_trusted_origin("http://172.31.255.254", None));
-        assert!(is_trusted_origin("https://myrouter.keenetic.pro:1001", None));
-        assert!(is_trusted_origin("https://my.keenetic.net", None));
-
-        // 2. Источник совпадает с заголовком Host
+        // 2. Источник совпадает с заголовком Host (включая KeenDNS)
+        assert!(is_trusted_origin("https://myrouter.keenetic.pro:1001", Some("myrouter.keenetic.pro:1001")));
+        assert!(is_trusted_origin("https://my.keenetic.net", Some("my.keenetic.net")));
         assert!(is_trusted_origin("http://mycustombox:1001/dashboard", Some("mycustombox:1001")));
         assert!(is_trusted_origin("https://router.lan", Some("router.lan")));
 
         // 3. Злонамеренные внешние источники (CSRF-атаки) ОБЯЗАНЫ блокироваться!
+        // Включая чужие домены keenetic.pro без совпадения с Host (SEC-08)
+        assert!(!is_trusted_origin("https://attacker.keenetic.pro", Some("myrouter.keenetic.pro:1001")));
+        assert!(!is_trusted_origin("https://myrouter.keenetic.pro:1001", None));
+        assert!(!is_trusted_origin("https://my.keenetic.net", None));
         assert!(!is_trusted_origin("http://evil-attacker.com", None));
         assert!(!is_trusted_origin("http://evil-attacker.com", Some("192.168.1.1:1001")));
         assert!(!is_trusted_origin("http://172.32.0.1", None), "172.32.* вне приватного диапазона");
         assert!(!is_trusted_origin("http://8.8.8.8", None));
         assert!(!is_trusted_origin("http://phishing-keenetic.com", None));
+    }
+
+    #[test]
+    fn test_revoked_tokens_expiration_and_capacity() {
+        let tok1 = "token_valid_1";
+        let tok2 = "token_valid_2";
+        revoke_token(tok1);
+        revoke_token(tok2);
+        assert!(is_token_revoked(tok1));
+        assert!(is_token_revoked(tok2));
+        assert!(!is_token_revoked("unrevoked_token"));
     }
 }

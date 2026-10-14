@@ -167,6 +167,46 @@ pub fn validate_yaml_syntax(content: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Валидация структуры и обязательных секций config.yaml Mihomo (BUG-05).
+/// Требует синтаксической валидности YAML и наличия обязательных секций:
+/// proxy-groups, rules, и (proxies или proxy-providers).
+pub fn validate_mihomo_yaml(content: &str) -> Result<(), String> {
+    validate_yaml_syntax(content)?;
+
+    let mut has_proxies = false;
+    let mut has_groups = false;
+    let mut has_rules = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.is_empty() {
+            continue;
+        }
+        // Секции верхнего уровня не имеют отступа
+        if !line.starts_with(' ') && !line.starts_with('\t') {
+            if trimmed.starts_with("proxies:") || trimmed.starts_with("proxy-providers:") {
+                has_proxies = true;
+            } else if trimmed.starts_with("proxy-groups:") {
+                has_groups = true;
+            } else if trimmed.starts_with("rules:") {
+                has_rules = true;
+            }
+        }
+    }
+
+    if !has_proxies {
+        return Err("В конфигурации config.yaml отсутствует обязательная секция 'proxies' или 'proxy-providers'".to_string());
+    }
+    if !has_groups {
+        return Err("В конфигурации config.yaml отсутствует обязательная секция 'proxy-groups'".to_string());
+    }
+    if !has_rules {
+        return Err("В конфигурации config.yaml отсутствует обязательная секция 'rules'".to_string());
+    }
+
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TxStatus {
     Active,

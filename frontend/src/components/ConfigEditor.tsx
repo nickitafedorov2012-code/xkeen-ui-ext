@@ -193,6 +193,28 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
     }
   }
 
+  const handleSearchNext = (term: string) => {
+    if (!term || !textareaRef.current) return
+    const ta = textareaRef.current
+    const lower = content.toLowerCase()
+    const target = term.toLowerCase()
+    const startPos = ta.selectionEnd || 0
+    let idx = lower.indexOf(target, startPos)
+    if (idx === -1) {
+      idx = lower.indexOf(target, 0)
+    }
+    if (idx !== -1) {
+      ta.focus()
+      ta.setSelectionRange(idx, idx + target.length)
+      const linesBefore = content.substring(0, idx).split('\n').length
+      const lineHeight = 20
+      ta.scrollTop = Math.max(0, (linesBefore - 5) * lineHeight)
+      if (lineNumbersRef.current) {
+        lineNumbersRef.current.scrollTop = ta.scrollTop
+      }
+    }
+  }
+
   // Сохранение файла
   const handleSave = async () => {
     // UI-01: Запретить сохранение файла, если последняя загрузка завершилась ошибкой или файл не совпадает
@@ -278,7 +300,16 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
                   placeholder="Поиск в файле (Ctrl+F)…"
                   className="input-text editor-search-input"
                   value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
+                  onChange={(e) => {
+                    setSearchTerm(e.target.value)
+                    handleSearchNext(e.target.value)
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault()
+                      handleSearchNext(searchTerm)
+                    }
+                  }}
                   autoFocus
                 />
               </div>

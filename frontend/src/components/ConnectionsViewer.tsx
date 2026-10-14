@@ -199,7 +199,10 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
     loadData(true)
     let interval: any = null
     if (autoRefresh) {
-      interval = setInterval(() => loadData(false), 2500)
+      interval = setInterval(() => {
+        if (document.hidden) return
+        loadData(false)
+      }, 2500)
     }
     return () => {
       activeRef.current = false
