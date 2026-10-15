@@ -610,4 +610,71 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
     const statusLabel = container?.querySelector('[data-testid="header-status-label"]')
     expect(statusLabel?.textContent).toContain('остановлены')
   })
+
+  it('renders AdGuard status chip and switches to adguard tab when clicked', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation(async (path: string) => {
+      if (path.includes('adguard/status')) {
+        return { running: true, protection_enabled: true }
+      }
+      return {}
+    })
+
+    await act(async () => {
+      root!.render(
+        <Header
+          status={mockStatus}
+          notify={notifyMock}
+          refresh={refreshMock}
+          onSwitchTab={onSwitchTabMock}
+          activeTab="dashboard"
+        />
+      )
+    })
+
+    const adguardPill = container?.querySelector('[data-testid="header-adguard-pill"]') as HTMLElement | null
+    expect(adguardPill).not.toBeNull()
+    expect(adguardPill?.textContent).toContain('AdGuard')
+
+    await act(async () => {
+      adguardPill?.click()
+    })
+
+    expect(onSwitchTabMock).toHaveBeenCalledWith('adguard')
+  })
+
+  it('toggles AdGuard protection via mini switch without triggering tab switch', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation(async (path: string) => {
+      if (path.includes('adguard/status')) {
+        return { running: true, protection_enabled: true }
+      }
+      return {}
+    })
+    const postSpy = vi.spyOn(api, 'apiPost').mockResolvedValue({ enabled: false })
+
+    await act(async () => {
+      root!.render(
+        <Header
+          status={mockStatus}
+          notify={notifyMock}
+          refresh={refreshMock}
+          onSwitchTab={onSwitchTabMock}
+          activeTab="dashboard"
+        />
+      )
+    })
+
+    const toggleSwitch = container?.querySelector('[data-testid="header-adguard-toggle-switch"]') as HTMLButtonElement | null
+    expect(toggleSwitch).not.toBeNull()
+
+    onSwitchTabMock.mockClear()
+
+    await act(async () => {
+      toggleSwitch?.click()
+    })
+
+    // Mini switch must toggle protection via API and stop propagation
+    expect(postSpy).toHaveBeenCalledWith('/adguard/protection', { enabled: false })
+    expect(onSwitchTabMock).not.toHaveBeenCalled()
+    expect(notifyMock).toHaveBeenCalledWith('Защита AdGuard Home приостановлена')
+  })
 })

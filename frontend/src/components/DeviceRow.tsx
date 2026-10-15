@@ -28,6 +28,7 @@ interface Props {
   onToggleZapret?: (ip: string, mac: string, enabled: boolean) => void
   gamingActive?: boolean
   onToggleGaming?: (mac: string, ip: string, enabled: boolean) => void
+  isGamingCompat?: boolean
 }
 
 function fmtBytes(bytes: number): string {
@@ -151,6 +152,7 @@ const DeviceRow = memo(function DeviceRow({
   onToggleZapret,
   gamingActive = false,
   onToggleGaming,
+  isGamingCompat = false,
 }: Props) {
   return (
     <tr className={`device-row ${selected ? 'selected' : ''} ${d.is_current_device ? 'me' : ''}`}>
@@ -215,22 +217,43 @@ const DeviceRow = memo(function DeviceRow({
         )}
       </td>
       <td>
-        <select
-          className="device-select"
-          value={assigned || 'default'}
-          disabled={busy}
-          onChange={(e) => applyServer(d.ip, d.name, e.target.value)}
-        >
-          <option value="default">Default (PROXY)</option>
-          {assigned && !servers.some((s) => s.id === assigned) && (
-            <option value={assigned}>{serverLabel(assigned)}</option>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+          <select
+            className="device-select"
+            value={assigned || 'default'}
+            disabled={busy}
+            onChange={(e) => applyServer(d.ip, d.name, e.target.value)}
+          >
+            <option value="default">Default (PROXY)</option>
+            {assigned && !servers.some((s) => s.id === assigned) && (
+              <option value={assigned}>{serverLabel(assigned)}</option>
+            )}
+            {servers.map((s) => (
+              <option key={s.id} value={s.id}>
+                {serverLabel(s.id)}
+              </option>
+            ))}
+          </select>
+          {isGamingCompat && (
+            <span
+              className="badge badge-gaming-compat"
+              data-testid="badge-gaming-compat"
+              title="100% Gaming Proxy: весь TCP/UDP трафик устройства направляется через игровой туннель"
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                color: '#ec4899',
+                background: 'rgba(236, 72, 153, 0.12)',
+                border: '1px solid rgba(236, 72, 153, 0.3)',
+                borderRadius: 6,
+                padding: '2px 6px',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              🎮 100% Gaming
+            </span>
           )}
-          {servers.map((s) => (
-            <option key={s.id} value={s.id}>
-              {serverLabel(s.id)}
-            </option>
-          ))}
-        </select>
+        </div>
         {(drEntry?.servers?.length ?? 0) > 1 && (
           <div className="device-reserve-hint">
             резерв: {drEntry!.servers.slice(1).map(serverLabel).join(', ')}

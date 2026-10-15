@@ -484,6 +484,55 @@ body {
   display: none;
 }
 
+/* AdGuard Header Status Chip & Mini-Switch */
+.header-adguard-pill {
+  cursor: pointer;
+  user-select: none;
+}
+
+.header-adguard-pill.active {
+  border-color: var(--accent);
+  background: rgba(79, 140, 255, 0.16);
+}
+
+.header-pill-mini-switch {
+  width: 26px;
+  height: 14px;
+  border-radius: 7px;
+  background: var(--border, #475569);
+  border: none;
+  padding: 1px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  transition: background-color 0.2s ease;
+  margin-left: 4px;
+  position: relative;
+}
+
+.header-pill-mini-switch.active {
+  background: #22c55e;
+}
+
+.header-pill-mini-switch:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.mini-switch-knob {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #ffffff;
+  display: block;
+  transition: transform 0.2s ease;
+  transform: translateX(0);
+}
+
+.header-pill-mini-switch.active .mini-switch-knob {
+  transform: translateX(12px);
+}
+
 .update-pill-badge,
 .update-pill-badge-blue {
   display: inline-flex;
@@ -6562,4 +6611,73 @@ table.devices-table td {
 [data-theme="light"] .agh-table tr:hover td {
   background: #f8fafc;
 }
+
+/* ============================================================================
+ * Стили для карточки Swap и умного баннера
+ * ============================================================================ */
+
+.progress-bar {
+  width: 100%;
+  height: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.3s ease, background-color 0.3s ease;
+}
+
+.badge-success {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border: 1px solid rgba(34, 197, 94, 0.35);
+}
+
+.badge-muted {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--muted, #94a3b8);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+}
+
+.btn-tab {
+  background: transparent;
+  color: var(--muted, #94a3b8);
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 0.15s ease;
+}
+
+.btn-tab:hover {
+  color: var(--text, #f8fafc);
+}
+
+.btn-tab.active {
+  background: var(--accent, #38bdf8);
+  color: #0f172a;
+  font-weight: 600;
+}
+
+.btn-warning {
+  background: #eab308;
+  color: #0f172a;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.15s ease;
+}
+
+.btn-warning:hover {
+  opacity: 0.9;
+}
+
 

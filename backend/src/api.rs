@@ -79,6 +79,9 @@ pub async fn status(State(state): State<AppState>) -> Response {
             "auto_restore_priority": cfg.failover.auto_restore_priority,
             "interval_secs": cfg.failover.interval_secs,
             "device_failover_enabled": cfg.failover.device_failover_enabled,
+            "best_ping_enabled": cfg.failover.best_ping_enabled,
+            "best_ping_pool_size": cfg.failover.best_ping_pool_size,
+            "best_ping_hysteresis_ms": cfg.failover.best_ping_hysteresis_ms,
         },
         "refresh_interval_sec": cfg.refresh_interval_sec,
         "adblock_enabled": cfg.adblock_enabled,
@@ -129,6 +132,52 @@ pub async fn kill_process(
         Err(err) => api_err(err).into_response(),
     }
 }
+
+#[derive(Debug, serde::Deserialize)]
+pub struct CreateSwapRequest {
+    #[serde(default = "default_swap_size_mb")]
+    pub size_mb: u64,
+}
+
+fn default_swap_size_mb() -> u64 {
+    512
+}
+
+/// GET /api/system/swap/status — получение текущего состояния Swap
+pub async fn get_swap_status() -> Response {
+    let status = tokio::task::spawn_blocking(crate::system::get_swap_status)
+        .await
+        .unwrap_or_else(|_| crate::system::get_swap_status());
+    api_ok(serde_json::to_value(status).unwrap_or_default()).into_response()
+}
+
+/// POST /api/system/swap/create — создание и активация файла подкачки на /opt
+pub async fn create_swap(Json(payload): Json<CreateSwapRequest>) -> Response {
+    let size_mb = payload.size_mb;
+    let res = tokio::task::spawn_blocking(move || crate::system::create_and_enable_swap(size_mb))
+        .await
+        .map_err(|e| format!("Внутренняя ошибка задачи: {}", e))
+        .and_then(|r| r);
+
+    match res {
+        Ok(status) => api_ok(serde_json::to_value(status).unwrap_or_default()).into_response(),
+        Err(err_msg) => api_err(err_msg).into_response(),
+    }
+}
+
+/// POST /api/system/swap/remove — безопасное отключение и удаление Swap
+pub async fn remove_swap() -> Response {
+    let res = tokio::task::spawn_blocking(crate::system::disable_and_remove_swap)
+        .await
+        .map_err(|e| format!("Внутренняя ошибка задачи: {}", e))
+        .and_then(|r| r);
+
+    match res {
+        Ok(status) => api_ok(serde_json::to_value(status).unwrap_or_default()).into_response(),
+        Err(err_msg) => api_err(err_msg).into_response(),
+    }
+}
+
 
 
 
@@ -1388,10 +1437,16 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
                 while $ipt -t $tbl -D POSTROUTING -j zapret 2>/dev/null; do :; done
                 while $ipt -t $tbl -D PREROUTING -j zapret 2>/dev/null; do :; done
                 while $ipt -t $tbl -D OUTPUT -j zapret 2>/dev/null; do :; done
+                while $ipt -t $tbl -D PREROUTING -j XKEEN_GAMING 2>/dev/null; do :; done
                 $ipt -t $tbl -F xkeen 2>/dev/null || true
                 $ipt -t $tbl -F xkeen_mask 2>/dev/null || true
                 $ipt -t $tbl -F zapret 2>/dev/null || true
+                $ipt -t $tbl -F XKEEN_GAMING 2>/dev/null || true
+                $ipt -t $tbl -X XKEEN_GAMING 2>/dev/null || true
               done
+              while ip6tables -D FORWARD -j XKEEN_GAMING 2>/dev/null; do :; done
+              ip6tables -F XKEEN_GAMING 2>/dev/null || true
+              ip6tables -X XKEEN_GAMING 2>/dev/null || true
               $ipt -t nat -S PREROUTING 2>/dev/null | grep 'to-ports 1053' | while read -r rule; do
                 del_cmd=$(echo "$rule" | sed 's/^-A/-D/')
                 $ipt -t nat $del_cmd 2>/dev/null || true
@@ -1407,6 +1462,15 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
             done
             while ip rule del fwmark 0x111/0xff lookup 111 2>/dev/null; do :; done
             while ip -6 rule del fwmark 0x111/0xff lookup 111 2>/dev/null; do :; done
+            while ip rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done
+            while ip rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done
+            while ip -6 rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done
+            while ip -6 rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done
+            ip route del local default dev lo table 115 2>/dev/null || ip route del local 0.0.0.0/0 dev lo table 115 2>/dev/null || true
+            ip route flush table 115 2>/dev/null || true
+            ip -6 route del local default dev lo table 115 2>/dev/null || true
+            ip -6 route flush table 115 2>/dev/null || true
+            rm -f /opt/etc/ndm/netfilter.d/060-xkeen-gaming.sh 2>/dev/null || true
             echo "Все службы (XKeen, Mihomo, Zapret) остановлены. Трафик устройств переведен на прямой выход (DIRECT)."
             "#
         );
@@ -1912,7 +1976,7 @@ pub async fn get_routing(State(state): State<AppState>) -> Response {
     };
     let groups = routing::parse_groups(&yaml);
     let live = mihomo::live_device_servers(&state.http, &cfg).await;
-    let assignments: Vec<serde_json::Value> = groups
+    let mut assignments: Vec<serde_json::Value> = groups
         .iter()
         .map(|(ip, gname)| {
             json!({
@@ -1922,6 +1986,45 @@ pub async fn get_routing(State(state): State<AppState>) -> Response {
             })
         })
         .collect();
+
+    // Синхронизация серверов для устройств в режиме «Игры» (100% proxy / Compatibility Mode):
+    // Если для игрового устройства задан конкретный сервер (dev.server) или активен целевой сервер (target_server),
+    // в выпадающем списке на вкладке «Устройства» отображается именно он.
+    if cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility {
+        let has_explicit = cfg.gaming.devices.iter().any(|d| d.enabled);
+        for dev in &cfg.gaming.devices {
+            let is_active = if has_explicit { dev.enabled } else { cfg.gaming.devices.len() == 1 };
+            if !is_active || dev.ip.trim().is_empty() {
+                continue;
+            }
+            let dev_ip = dev.ip.trim();
+            let effective_server = dev.server.as_ref()
+                .filter(|s| !s.trim().is_empty() && s.trim() != "default")
+                .cloned()
+                .unwrap_or_else(|| {
+                    if !cfg.gaming.target_server.trim().is_empty() {
+                        cfg.gaming.target_server.clone()
+                    } else {
+                        "Fastest".to_string()
+                    }
+                });
+
+            if let Some(existing) = assignments.iter_mut().find(|a| a.get("ip").and_then(|v| v.as_str()) == Some(dev_ip)) {
+                if let Some(obj) = existing.as_object_mut() {
+                    obj.insert("current_server".to_string(), json!(effective_server));
+                    obj.insert("is_gaming".to_string(), json!(true));
+                }
+            } else {
+                assignments.push(json!({
+                    "ip": dev_ip,
+                    "group": routing::GAMING_GROUP_NAME,
+                    "current_server": effective_server,
+                    "is_gaming": true,
+                }));
+            }
+        }
+    }
+
     api_ok(json!({ "assignments": assignments, "config_path": cfg.mihomo.config_path }))
 }
 
@@ -1963,17 +2066,53 @@ pub async fn apply_routing(State(state): State<AppState>, Json(req): Json<Routin
         .into_iter()
         .map(|a| routing::Assignment { ip: a.ip, name: a.name, server: a.server })
         .collect();
-    let new_yaml = match routing::apply_assignments(&yaml, &assignments, &device_providers_for(tx.config(), &yaml)) {
+
+    // Синхронизация выбора сервера для игровых устройств в режиме 100% Compatibility:
+    let mut updated_gaming = false;
+    if tx.config().gaming.enabled && tx.config().gaming.mode == config::GamingMode::Compatibility {
+        for a in &assignments {
+            let a_ip = a.ip.trim();
+            for dev in &mut tx.config_mut().gaming.devices {
+                if dev.ip == a_ip {
+                    let s = a.server.as_deref().unwrap_or("").trim();
+                    let new_val = if s.is_empty() || s == "default" {
+                        None
+                    } else {
+                        Some(s.to_string())
+                    };
+                    if dev.server != new_val {
+                        dev.server = new_val;
+                        updated_gaming = true;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut new_yaml = match routing::apply_assignments(&yaml, &assignments, &device_providers_for(tx.config(), &yaml)) {
         Ok(y) => y,
         Err(e) => return api_err(e),
     };
 
-    if let Err(e) = tx.set_yaml(new_yaml) {
+    if updated_gaming {
+        let providers = device_providers_for(tx.config(), &new_yaml);
+        if let Ok(g_yaml) = routing::apply_gaming_rules(&new_yaml, &tx.config().gaming, &providers) {
+            new_yaml = g_yaml;
+        }
+    }
+
+    if let Err(e) = tx.set_yaml(new_yaml.clone()) {
         return api_err(e);
     }
 
     if let Err(e) = tx.commit_and_reload().await {
         return api_err(format!("Ошибка применения конфигурации маршрутов: {e}"));
+    }
+
+    if updated_gaming {
+        let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
+        let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
+        let _ = sync_gaming_full_tunnel(&state.config.read().await.gaming, redir_port, tproxy_port).await;
     }
 
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -8596,24 +8735,35 @@ async fn apply_and_verify_gaming(
 
 /// Синхронизация перехвата полного туннеля в iptables для Compatibility-режима (100% Всё в прокси)
 /// Генерация shell-команд для полной изоляции/перехвата игрового режима (iptables REDIRECT, TPROXY, policy routing).
-pub fn build_gaming_full_tunnel_commands(cfg: &config::GamingConfig, redir_port: u16, tproxy_port: u16) -> (String, Vec<String>) {
+pub fn build_gaming_full_tunnel_commands(
+    cfg: &config::GamingConfig,
+    redir_port: u16,
+    tproxy_port: u16,
+) -> (String, Vec<String>, Vec<String>) {
     let r_port = if redir_port > 0 { redir_port } else { 5000 };
     let tp_port = if tproxy_port > 0 { tproxy_port } else { 5001 };
 
-    let cleanup_cmd = "while iptables -t nat -D PREROUTING -m comment --comment 'xkeen-gaming-compat' 2>/dev/null; do :; done; \
-while iptables -t mangle -D PREROUTING -m comment --comment 'xkeen-gaming-compat' 2>/dev/null; do :; done; \
-while iptables -t nat -D xkeen -m comment --comment 'xkeen-gaming-compat' 2>/dev/null; do :; done; \
-while iptables -t mangle -D xkeen -m comment --comment 'xkeen-gaming-compat' 2>/dev/null; do :; done; \
-while ip rule del fwmark 0x111 lookup 111 2>/dev/null; do :; done; \
-while ip rule del fwmark 0x111/0x111 lookup 111 2>/dev/null; do :; done; \
-while ip rule del fwmark 0x111/0xff lookup 111 2>/dev/null; do :; done; \
-while ip -6 rule del fwmark 0x111 lookup 111 2>/dev/null; do :; done; \
-while ip -6 rule del fwmark 0x111/0x111 lookup 111 2>/dev/null; do :; done; \
-while ip -6 rule del fwmark 0x111/0xff lookup 111 2>/dev/null; do :; done; \
-ip route flush table 111 2>/dev/null || true; \
-ip -6 route flush table 111 2>/dev/null || true".to_string();
+    let cleanup_cmd = "\
+while iptables -t nat -D PREROUTING -j XKEEN_GAMING 2>/dev/null; do :; done; \
+iptables -t nat -F XKEEN_GAMING 2>/dev/null || true; \
+iptables -t nat -X XKEEN_GAMING 2>/dev/null || true; \
+while iptables -t mangle -D PREROUTING -j XKEEN_GAMING 2>/dev/null; do :; done; \
+iptables -t mangle -F XKEEN_GAMING 2>/dev/null || true; \
+iptables -t mangle -X XKEEN_GAMING 2>/dev/null || true; \
+while ip6tables -D FORWARD -j XKEEN_GAMING 2>/dev/null; do :; done; \
+ip6tables -F XKEEN_GAMING 2>/dev/null || true; \
+ip6tables -X XKEEN_GAMING 2>/dev/null || true; \
+while ip rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; \
+while ip rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; \
+while ip -6 rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; \
+while ip -6 rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; \
+ip route del local default dev lo table 115 2>/dev/null || ip route del local 0.0.0.0/0 dev lo table 115 2>/dev/null || true; \
+ip route flush table 115 2>/dev/null || true; \
+ip -6 route del local default dev lo table 115 2>/dev/null || true; \
+ip -6 route flush table 115 2>/dev/null || true".to_string();
 
     let mut setup_cmds = Vec::new();
+    let mut conntrack_cmds = Vec::new();
 
     if cfg.enabled && cfg.mode == config::GamingMode::Compatibility {
         let has_explicit_enabled = cfg.devices.iter().any(|d| d.enabled);
@@ -8626,97 +8776,169 @@ ip -6 route flush table 111 2>/dev/null || true".to_string();
             setup_cmds.push("sysctl -w net.ipv4.conf.all.rp_filter=2 2>/dev/null || true".to_string());
             setup_cmds.push("sysctl -w net.ipv4.conf.default.rp_filter=2 2>/dev/null || true".to_string());
 
-            // TPROXY policy routing: связывание fwmark 0x111 с локальной таблицей сокетов dev lo table 111
-            setup_cmds.push("ip route replace local default dev lo table 111 2>/dev/null || ip route add local 0.0.0.0/0 dev lo table 111 2>/dev/null || true".to_string());
-            setup_cmds.push("while ip rule del fwmark 0x111 lookup 111 2>/dev/null; do :; done; while ip rule del fwmark 0x111/0x111 lookup 111 2>/dev/null; do :; done; ip rule add fwmark 0x111 lookup 111 priority 100 2>/dev/null || ip rule add fwmark 0x111/0x111 lookup 111 priority 100 2>/dev/null || ip rule add fwmark 0x111 lookup 111 2>/dev/null || true".to_string());
-            setup_cmds.push("ip -6 route replace local default dev lo table 111 2>/dev/null || ip -6 route add local ::/0 dev lo table 111 2>/dev/null || true".to_string());
-            setup_cmds.push("while ip -6 rule del fwmark 0x111 lookup 111 2>/dev/null; do :; done; while ip -6 rule del fwmark 0x111/0x111 lookup 111 2>/dev/null; do :; done; ip -6 rule add fwmark 0x111 lookup 111 priority 100 2>/dev/null || ip -6 rule add fwmark 0x111/0x111 lookup 111 priority 100 2>/dev/null || ip -6 rule add fwmark 0x111 lookup 111 2>/dev/null || true".to_string());
+            // TPROXY policy routing: связывание fwmark 0x115 с локальной таблицей сокетов dev lo table 115
+            setup_cmds.push("ip route replace local default dev lo table 115 2>/dev/null || ip route add local 0.0.0.0/0 dev lo table 115 2>/dev/null || true".to_string());
+            setup_cmds.push("while ip rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; while ip rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; ip rule add fwmark 0x115 lookup 115 priority 100 2>/dev/null || ip rule add fwmark 0x115/0x115 lookup 115 priority 100 2>/dev/null || ip rule add fwmark 0x115 lookup 115 2>/dev/null || true".to_string());
+            setup_cmds.push("ip -6 route replace local default dev lo table 115 2>/dev/null || ip -6 route add local default dev lo table 115 2>/dev/null || true".to_string());
+            setup_cmds.push("while ip -6 rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; while ip -6 rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; ip -6 rule add fwmark 0x115 lookup 115 priority 100 2>/dev/null || ip -6 rule add fwmark 0x115/0x115 lookup 115 priority 100 2>/dev/null || ip -6 rule add fwmark 0x115 lookup 115 2>/dev/null || true".to_string());
+
+            // Изолированные цепочки XKEEN_GAMING
+            setup_cmds.push("iptables -t nat -N XKEEN_GAMING 2>/dev/null || true".to_string());
+            setup_cmds.push("iptables -t nat -I PREROUTING 1 -j XKEEN_GAMING".to_string());
+            setup_cmds.push("iptables -t mangle -N XKEEN_GAMING 2>/dev/null || true".to_string());
+            setup_cmds.push("iptables -t mangle -I PREROUTING 1 -j XKEEN_GAMING".to_string());
+            setup_cmds.push("ip6tables -N XKEEN_GAMING 2>/dev/null || true".to_string());
+            setup_cmds.push("ip6tables -I FORWARD 1 -j XKEEN_GAMING 2>/dev/null || true".to_string());
+
+            let mut seen_ips = std::collections::HashSet::new();
 
             for dev in active_devices {
-                let ip_trimmed = dev.ip.trim();
-                let ipv4 = match ip_trimmed.parse::<std::net::Ipv4Addr>() {
-                    Ok(addr) if !addr.is_unspecified() => addr,
+                let ip_raw = dev.ip.trim();
+                let ip_clean = ip_raw.split('/').next().unwrap_or(ip_raw).trim();
+                let ipv4 = match ip_clean.parse::<std::net::Ipv4Addr>() {
+                    Ok(addr) if !addr.is_unspecified() && !addr.is_loopback() && !addr.is_multicast() && !addr.is_broadcast() => addr,
                     _ => continue,
                 };
+                if !seen_ips.insert(ipv4) {
+                    continue;
+                }
                 let ip = ipv4.to_string();
 
-                // TCP -> REDIRECT в корень PREROUTING (гарантированный перехват мимо любых фильтров, кроме LAN)
+                // Сброс conntrack-сессий устройства (только для прямого вызова из API, исключается из NDM-хука)
+                conntrack_cmds.push(format!("conntrack -D -s {ip} 2>/dev/null || true"));
+
+                // IPv6: блокировка транзитного IPv6 для игрового устройства (предотвращение утечки трафика мимо туннеля)
+                let mac = dev.mac.trim().to_lowercase().replace('-', ":");
+                let is_valid_mac = mac != "00:00:00:00:00:00"
+                    && mac != "ff:ff:ff:ff:ff:ff"
+                    && mac.split(':').count() == 6
+                    && mac.split(':').all(|p| p.len() == 2 && u8::from_str_radix(p, 16).is_ok());
+                if is_valid_mac {
+                    setup_cmds.push(format!(
+                        "ip6tables -A XKEEN_GAMING -m mac --mac-source {mac} -j REJECT 2>/dev/null || true"
+                    ));
+                }
+                for v6_raw in &dev.ipv6 {
+                    let v6_clean = v6_raw.trim().split('/').next().unwrap_or(v6_raw).trim();
+                    if let Ok(v6) = v6_clean.parse::<std::net::Ipv6Addr>() {
+                        if !v6.is_unspecified() && !v6.is_loopback() && !v6.is_multicast() && (v6.segments()[0] & 0xffc0 != 0xfe80) {
+                            setup_cmds.push(format!(
+                                "ip6tables -A XKEEN_GAMING -s {v6} -j REJECT 2>/dev/null || true"
+                            ));
+                        }
+                    }
+                }
+
+                // NAT: прямой порядок правил (-A) в цепочке XKEEN_GAMING
+                // 1. Перехват DNS (UDP/TCP 53) -> REDIRECT --to-ports 1053 (до локальных подсетей)
                 setup_cmds.push(format!(
-                    "iptables -t nat -I PREROUTING 1 -s {ip} -p tcp -m comment --comment 'xkeen-gaming-compat' -j REDIRECT --to-ports {r_port}"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p udp --dport 53 -j REDIRECT --to-ports 1053"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t nat -I PREROUTING 1 -s {ip} -d 127.0.0.0/8 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p tcp --dport 53 -j REDIRECT --to-ports 1053"
+                ));
+                // 2. Байпас локальных сетей через -j RETURN: 127.0.0.0/8, 169.254.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                setup_cmds.push(format!(
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 127.0.0.0/8 -j RETURN"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t nat -I PREROUTING 1 -s {ip} -d 10.0.0.0/8 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 169.254.0.0/16 -j RETURN"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t nat -I PREROUTING 1 -s {ip} -d 172.16.0.0/12 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 10.0.0.0/8 -j RETURN"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t nat -I PREROUTING 1 -s {ip} -d 192.168.0.0/16 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 172.16.0.0/12 -j RETURN"
+                ));
+                setup_cmds.push(format!(
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 192.168.0.0/16 -j RETURN"
+                ));
+                // 3. Весь остальной TCP -> REDIRECT --to-ports {r_port}
+                setup_cmds.push(format!(
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p tcp -j REDIRECT --to-ports {r_port}"
                 ));
 
-                // UDP -> TPROXY в корень PREROUTING (гарантированный перехват игровых UDP дейтаграмм в туннель, исключая LAN/broadcast)
+                // MANGLE: прямой порядок правил (-A) в цепочке XKEEN_GAMING
+                // 1. Пропуск DNS: -p udp --dport 53 -j RETURN (чтобы уходил в NAT REDIRECT 1053)
                 setup_cmds.push(format!(
-                    "iptables -t mangle -I PREROUTING 1 -s {ip} -p udp -m comment --comment 'xkeen-gaming-compat' -j TPROXY --tproxy-mark 0x111/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -p udp --dport 53 -j RETURN"
+                ));
+                // 2. Байпас локальных сетей через -j RETURN: 127.0.0.0/8, 169.254.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32
+                setup_cmds.push(format!(
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 127.0.0.0/8 -j RETURN"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t mangle -I PREROUTING 1 -s {ip} -p udp -m socket --transparent -m comment --comment 'xkeen-gaming-compat' -j MARK --set-mark 0x111"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 169.254.0.0/16 -j RETURN"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t mangle -I PREROUTING 1 -s {ip} -d 224.0.0.0/4 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 10.0.0.0/8 -j RETURN"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t mangle -I PREROUTING 1 -s {ip} -d 255.255.255.255 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 172.16.0.0/12 -j RETURN"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t mangle -I PREROUTING 1 -s {ip} -d 10.0.0.0/8 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 192.168.0.0/16 -j RETURN"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t mangle -I PREROUTING 1 -s {ip} -d 172.16.0.0/12 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 224.0.0.0/4 -j RETURN"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t mangle -I PREROUTING 1 -s {ip} -d 192.168.0.0/16 -m comment --comment 'xkeen-gaming-compat' -j RETURN"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 255.255.255.255/32 -j RETURN"
+                ));
+                // 3. Весь остальной UDP -> TPROXY --tproxy-mark 0x115/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1
+                setup_cmds.push(format!(
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -p udp -j TPROXY --tproxy-mark 0x115/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1"
                 ));
             }
         }
     }
 
-    (cleanup_cmd, setup_cmds)
+    (cleanup_cmd, setup_cmds, conntrack_cmds)
 }
 
 pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16, tproxy_port: u16) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let (cleanup_cmd, setup_cmds) = build_gaming_full_tunnel_commands(cfg, redir_port, tproxy_port);
-        let clean_out = tokio::process::Command::new("sh")
+        let (cleanup_cmd, setup_cmds, conntrack_cmds) = build_gaming_full_tunnel_commands(cfg, redir_port, tproxy_port);
+        let script = format!("{}\n{}", cleanup_cmd, setup_cmds.join("\n"));
+        let out = tokio::process::Command::new("sh")
             .arg("-c")
-            .arg(&cleanup_cmd)
+            .arg(&script)
             .output()
             .await;
-        if let Ok(o) = clean_out {
-            if !o.status.success() {
-                let err = String::from_utf8_lossy(&o.stderr);
-                if !err.trim().is_empty() {
-                    log_w!("[GAMING_TUNNEL] Предупреждение при очистке: {}", err.trim());
+        match out {
+            Ok(o) => {
+                if !o.status.success() {
+                    let err = String::from_utf8_lossy(&o.stderr);
+                    if !err.trim().is_empty() {
+                        log_w!("[GAMING_TUNNEL] Предупреждение при настройке правил: {}", err.trim());
+                    }
                 }
+            }
+            Err(e) => {
+                log_w!("[GAMING_TUNNEL] Не удалось запустить sh для настройки правил: {}", e);
             }
         }
 
-        for cmd in &setup_cmds {
-            let out = tokio::process::Command::new("sh").arg("-c").arg(cmd).output().await;
-            match out {
-                Ok(o) if !o.status.success() => {
-                    let err = String::from_utf8_lossy(&o.stderr);
-                    if !err.trim().is_empty() {
-                        log_w!("[GAMING_TUNNEL] Ошибка команды '{}': {}", cmd, err.trim());
+        if !conntrack_cmds.is_empty() {
+            let conntrack_script = conntrack_cmds.join("\n");
+            let ct_out = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(&conntrack_script)
+                .output()
+                .await;
+            match ct_out {
+                Ok(o) => {
+                    if !o.status.success() {
+                        let err = String::from_utf8_lossy(&o.stderr);
+                        if !err.trim().is_empty() {
+                            log_w!("[GAMING_TUNNEL] Предупреждение при сбросе conntrack: {}", err.trim());
+                        }
                     }
                 }
                 Err(e) => {
-                    log_e!("[GAMING_TUNNEL] Сбой запуска команды '{}': {}", cmd, e);
+                    log_w!("[GAMING_TUNNEL] Не удалось запустить sh для conntrack: {}", e);
                 }
-                _ => {}
             }
         }
 
@@ -8726,14 +8948,14 @@ pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16
             if let Some(parent) = hook_path.parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
-            let mut script = String::from("#!/bin/sh\n[ \"$type\" = \"ip6tables\" ] && exit 0\n[ \"$table\" != \"nat\" ] && [ \"$table\" != \"mangle\" ] && [ -n \"$table\" ] && exit 0\n");
-            script.push_str(&cleanup_cmd);
-            script.push('\n');
+            let mut hook_content = String::from("#!/bin/sh\n[ \"$table\" != \"nat\" ] && [ \"$table\" != \"mangle\" ] && [ \"$table\" != \"filter\" ] && [ -n \"$table\" ] && exit 0\n");
+            hook_content.push_str(&cleanup_cmd);
+            hook_content.push('\n');
             for cmd in &setup_cmds {
-                script.push_str(cmd);
-                script.push('\n');
+                hook_content.push_str(cmd);
+                hook_content.push('\n');
             }
-            if let Ok(()) = tokio::fs::write(hook_path, script).await {
+            if let Ok(()) = tokio::fs::write(hook_path, hook_content).await {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
@@ -8744,11 +8966,11 @@ pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16
             let _ = tokio::fs::remove_file(hook_path).await;
         }
 
-        // Диагностика состояния маршрутизации и таблицы 111 для системного журнала
+        // Диагностика состояния маршрутизации и таблицы 115 для системного журнала
         if cfg.enabled && cfg.mode == config::GamingMode::Compatibility {
             let diag = tokio::process::Command::new("sh")
                 .arg("-c")
-                .arg("ip rule show; echo '--- table 111:'; ip route show table 111; echo '--- PREROUTING mangle:'; iptables -t mangle -S PREROUTING | grep compat || true; echo '--- PREROUTING nat:'; iptables -t nat -S PREROUTING | grep compat || true")
+                .arg("ip rule show; echo '--- table 115:'; ip route show table 115; echo '--- PREROUTING mangle:'; iptables -t mangle -S PREROUTING | grep -E 'compat|XKEEN_GAMING' || true; echo '--- PREROUTING nat:'; iptables -t nat -S PREROUTING | grep -E 'compat|XKEEN_GAMING' || true; echo '--- XKEEN_GAMING mangle:'; iptables -t mangle -S XKEEN_GAMING 2>/dev/null || true; echo '--- XKEEN_GAMING nat:'; iptables -t nat -S XKEEN_GAMING 2>/dev/null || true")
                 .output()
                 .await;
             if let Ok(d) = diag {
@@ -9877,51 +10099,112 @@ mod tests {
         cfg.devices = vec![
             config::GamingDevice {
                 name: "Big PC".into(),
-                ip: "192.168.2.118".into(),
+                ip: "192.168.1.118".into(),
                 mac: "fc:22:1c:37:48:55".into(),
-                ipv6: vec!["2001:db8::1".into()],
+                ipv6: vec!["2001:db8::1".into(), "fe80::1234".into()],
                 enabled: true,
                 server: Some("PROXY".into()),
             }
         ];
 
         // 1. Проверяем генерацию правил в режиме совместимости
-        let (cleanup_cmd, setup_cmds) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
+        let (cleanup_cmd, setup_cmds, conntrack_cmds) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
 
-        // Проверяем команду очистки: должна сбрасывать и iptables (PREROUTING + xkeen), и ip rule, и ip route table 111
-        assert!(cleanup_cmd.contains("iptables -t nat -D PREROUTING"), "Cleanup must remove PREROUTING NAT rules");
-        assert!(cleanup_cmd.contains("iptables -t mangle -D PREROUTING"), "Cleanup must remove PREROUTING mangle rules");
-        assert!(cleanup_cmd.contains("ip rule del fwmark 0x111 lookup 111"), "Cleanup must remove IPv4 policy rule 111");
-        assert!(cleanup_cmd.contains("ip -6 rule del fwmark 0x111 lookup 111"), "Cleanup must remove IPv6 policy rule 111");
-        assert!(cleanup_cmd.contains("ip route flush table 111"), "Cleanup must flush IPv4 table 111");
-        assert!(cleanup_cmd.contains("ip -6 route flush table 111"), "Cleanup must flush IPv6 table 111");
+        // Проверяем команду очистки: сброс цепочек XKEEN_GAMING, правил jump и таблицы 115 (IPv4 и IPv6)
+        assert!(cleanup_cmd.contains("while iptables -t nat -D PREROUTING -j XKEEN_GAMING"), "Cleanup must remove PREROUTING NAT jump rule");
+        assert!(cleanup_cmd.contains("iptables -t nat -F XKEEN_GAMING"), "Cleanup must flush NAT XKEEN_GAMING chain");
+        assert!(cleanup_cmd.contains("iptables -t nat -X XKEEN_GAMING"), "Cleanup must delete NAT XKEEN_GAMING chain");
+        assert!(cleanup_cmd.contains("while iptables -t mangle -D PREROUTING -j XKEEN_GAMING"), "Cleanup must remove PREROUTING mangle jump rule");
+        assert!(cleanup_cmd.contains("iptables -t mangle -F XKEEN_GAMING"), "Cleanup must flush mangle XKEEN_GAMING chain");
+        assert!(cleanup_cmd.contains("iptables -t mangle -X XKEEN_GAMING"), "Cleanup must delete mangle XKEEN_GAMING chain");
+        assert!(cleanup_cmd.contains("while ip6tables -D FORWARD -j XKEEN_GAMING"), "Cleanup must remove IPv6 FORWARD jump rule");
+        assert!(cleanup_cmd.contains("ip6tables -F XKEEN_GAMING"), "Cleanup must flush IPv6 XKEEN_GAMING chain");
+        assert!(cleanup_cmd.contains("ip6tables -X XKEEN_GAMING"), "Cleanup must delete IPv6 XKEEN_GAMING chain");
+        assert!(cleanup_cmd.contains("ip rule del fwmark 0x115 lookup 115"), "Cleanup must remove IPv4 policy rule 115");
+        assert!(cleanup_cmd.contains("ip -6 rule del fwmark 0x115 lookup 115"), "Cleanup must remove IPv6 policy rule 115");
+        assert!(cleanup_cmd.contains("ip route flush table 115"), "Cleanup must flush IPv4 table 115");
+        assert!(cleanup_cmd.contains("ip -6 route flush table 115"), "Cleanup must flush IPv6 table 115");
+        assert!(!cleanup_cmd.contains("111"), "Cleanup must NOT touch table 111 (reserved for main XKeen service)");
 
-        // Проверяем команды настройки: обязательны TPROXY local routing, rp_filter, LAN-исключения и iptables
+        // Проверяем команды настройки: обязательны TPROXY local routing (table 115), rp_filter, цепочки XKEEN_GAMING
         let setup_all = setup_cmds.join("\n");
         assert!(setup_all.contains("sysctl -w net.ipv4.conf.all.rp_filter=2"), "Setup must relax rp_filter for TPROXY");
-        assert!(setup_all.contains("ip route replace local default dev lo table 111"), "Setup must bind table 111 to local lo interface");
-        assert!(setup_all.contains("ip rule add fwmark 0x111 lookup 111 priority 100"), "Setup must add fwmark 0x111 rule pointing to table 111");
-        assert!(!setup_all.contains("0x111/0xff lookup"), "Setup MUST NOT contain mathematically invalid mask 0x111/0xff");
-        assert!(setup_all.contains("ip -6 route replace local default dev lo table 111"), "Setup must bind IPv6 table 111 to lo interface");
-        assert!(setup_all.contains("ip -6 rule add fwmark 0x111 lookup 111 priority 100"), "Setup must add IPv6 fwmark 0x111 rule pointing to table 111");
+        assert!(setup_all.contains("ip route replace local default dev lo table 115"), "Setup must bind table 115 to local lo interface");
+        assert!(setup_all.contains("ip rule add fwmark 0x115 lookup 115 priority 100"), "Setup must add fwmark 0x115 rule pointing to table 115");
+        assert!(!setup_all.contains("0x111"), "Setup MUST NOT contain old mark 0x111");
+        assert!(!setup_all.contains("table 111"), "Setup MUST NOT contain old table 111");
+        assert!(setup_all.contains("ip -6 route replace local default dev lo table 115"), "Setup must bind IPv6 table 115 to lo interface");
+        assert!(setup_all.contains("ip -6 rule add fwmark 0x115 lookup 115 priority 100"), "Setup must add IPv6 fwmark 0x115 rule pointing to table 115");
 
-        // LAN exclusions must be present for both TCP and UDP
-        assert!(setup_all.contains("-s 192.168.2.118 -d 192.168.0.0/16 -m comment --comment 'xkeen-gaming-compat' -j RETURN"), "Setup must exclude LAN from interception");
-        assert!(setup_all.contains("-s 192.168.2.118 -p tcp -m comment --comment 'xkeen-gaming-compat' -j REDIRECT --to-ports 5000"), "Setup must create TCP REDIRECT rule in PREROUTING");
-        assert!(setup_all.contains("-s 192.168.2.118 -p udp -m comment --comment 'xkeen-gaming-compat' -j TPROXY --tproxy-mark 0x111/0xffffffff --on-port 5001 --on-ip 127.0.0.1"), "Setup must create UDP TPROXY rule matching XKeen native config");
-        assert!(setup_all.contains("-s 192.168.2.118 -p udp -m socket --transparent"), "Setup must include transparent socket match for established UDP");
+        // Chain creation & jumps
+        assert!(setup_all.contains("iptables -t nat -N XKEEN_GAMING"), "Setup must create NAT XKEEN_GAMING chain");
+        assert!(setup_all.contains("iptables -t nat -I PREROUTING 1 -j XKEEN_GAMING"), "Setup must insert NAT jump rule");
+        assert!(setup_all.contains("iptables -t mangle -N XKEEN_GAMING"), "Setup must create mangle XKEEN_GAMING chain");
+        assert!(setup_all.contains("iptables -t mangle -I PREROUTING 1 -j XKEEN_GAMING"), "Setup must insert mangle jump rule");
+        assert!(setup_all.contains("ip6tables -N XKEEN_GAMING"), "Setup must create ip6tables XKEEN_GAMING chain");
+        assert!(setup_all.contains("ip6tables -I FORWARD 1 -j XKEEN_GAMING"), "Setup must insert ip6tables jump rule");
+
+        // Conntrack flush is isolated in conntrack_cmds and NOT present in setup_cmds (to avoid NDM hook connection dropping)
+        assert!(!setup_all.contains("conntrack -D"), "setup_cmds must NOT contain conntrack command (isolated from NDM hook)");
+        let conntrack_all = conntrack_cmds.join("\n");
+        assert!(conntrack_all.contains("conntrack -D -s 192.168.1.118"), "conntrack_cmds must flush conntrack sessions for gaming device");
+
+        // IPv6 rejection in XKEEN_GAMING chain
+        assert!(setup_all.contains("ip6tables -A XKEEN_GAMING -m mac --mac-source fc:22:1c:37:48:55 -j REJECT"), "Setup must block IPv6 transit by MAC in XKEEN_GAMING chain");
+        assert!(setup_all.contains("ip6tables -A XKEEN_GAMING -s 2001:db8::1 -j REJECT"), "Setup must block non-link-local IPv6 addresses in XKEEN_GAMING chain");
+        assert!(!setup_all.contains("-s fe80::1234"), "Setup must ignore link-local IPv6");
+
+        // DNS redirection: UDP and TCP port 53 redirected to 1053 in NAT chain, and mangle returns port 53
+        assert!(setup_all.contains("iptables -t nat -A XKEEN_GAMING -s 192.168.1.118 -p udp --dport 53 -j REDIRECT --to-ports 1053"), "Setup must redirect UDP DNS to 1053");
+        assert!(setup_all.contains("iptables -t nat -A XKEEN_GAMING -s 192.168.1.118 -p tcp --dport 53 -j REDIRECT --to-ports 1053"), "Setup must redirect TCP DNS to 1053");
+        assert!(setup_all.contains("iptables -t mangle -A XKEEN_GAMING -s 192.168.1.118 -p udp --dport 53 -j RETURN"), "Mangle setup must return UDP DNS to let NAT redirect work");
+
+        // Local subnets bypass (127.0.0.0/8, 169.254.0.0/16, RFC1918, multicast/broadcast)
+        assert!(setup_all.contains("iptables -t nat -A XKEEN_GAMING -s 192.168.1.118 -d 127.0.0.0/8 -j RETURN"), "NAT setup must exclude loopback");
+        assert!(setup_all.contains("iptables -t nat -A XKEEN_GAMING -s 192.168.1.118 -d 169.254.0.0/16 -j RETURN"), "NAT setup must exclude link-local");
+        assert!(setup_all.contains("iptables -t nat -A XKEEN_GAMING -s 192.168.1.118 -d 10.0.0.0/8 -j RETURN"), "NAT setup must exclude 10.0.0.0/8");
+        assert!(setup_all.contains("iptables -t nat -A XKEEN_GAMING -s 192.168.1.118 -d 172.16.0.0/12 -j RETURN"), "NAT setup must exclude 172.16.0.0/12");
+        assert!(setup_all.contains("iptables -t nat -A XKEEN_GAMING -s 192.168.1.118 -d 192.168.0.0/16 -j RETURN"), "NAT setup must exclude 192.168.0.0/16");
+
+        assert!(setup_all.contains("iptables -t mangle -A XKEEN_GAMING -s 192.168.1.118 -d 127.0.0.0/8 -j RETURN"), "Mangle setup must exclude loopback");
+        assert!(setup_all.contains("iptables -t mangle -A XKEEN_GAMING -s 192.168.1.118 -d 169.254.0.0/16 -j RETURN"), "Mangle setup must exclude link-local");
+        assert!(setup_all.contains("iptables -t mangle -A XKEEN_GAMING -s 192.168.1.118 -d 10.0.0.0/8 -j RETURN"), "Mangle setup must exclude 10.0.0.0/8");
+        assert!(setup_all.contains("iptables -t mangle -A XKEEN_GAMING -s 192.168.1.118 -d 172.16.0.0/12 -j RETURN"), "Mangle setup must exclude 172.16.0.0/12");
+        assert!(setup_all.contains("iptables -t mangle -A XKEEN_GAMING -s 192.168.1.118 -d 192.168.0.0/16 -j RETURN"), "Mangle setup must exclude 192.168.0.0/16");
+        assert!(setup_all.contains("iptables -t mangle -A XKEEN_GAMING -s 192.168.1.118 -d 224.0.0.0/4 -j RETURN"), "Mangle setup must exclude multicast");
+        assert!(setup_all.contains("iptables -t mangle -A XKEEN_GAMING -s 192.168.1.118 -d 255.255.255.255/32 -j RETURN"), "Mangle setup must exclude broadcast");
+
+        // TCP REDIRECT and UDP TPROXY with mark 0x115
+        assert!(setup_all.contains("iptables -t nat -A XKEEN_GAMING -s 192.168.1.118 -p tcp -j REDIRECT --to-ports 5000"), "Setup must create TCP REDIRECT rule in XKEEN_GAMING");
+        assert!(setup_all.contains("iptables -t mangle -A XKEEN_GAMING -s 192.168.1.118 -p udp -j TPROXY --tproxy-mark 0x115/0xffffffff --on-port 5001 --on-ip 127.0.0.1"), "Setup must create UDP TPROXY rule matching mark 0x115");
+        assert!(!setup_all.contains("-m socket --transparent"), "Setup MUST NOT contain non-terminal socket match");
+
+        // Verify direct ordering (-A): DNS redirect before LAN return, and LAN return before full tunnel REDIRECT/TPROXY
+        let pos_nat_dns = setup_all.find("iptables -t nat -A XKEEN_GAMING -s 192.168.1.118 -p udp --dport 53").unwrap();
+        let pos_nat_lan = setup_all.find("iptables -t nat -A XKEEN_GAMING -s 192.168.1.118 -d 192.168.0.0/16").unwrap();
+        let pos_nat_tcp = setup_all.find("iptables -t nat -A XKEEN_GAMING -s 192.168.1.118 -p tcp -j REDIRECT").unwrap();
+        assert!(pos_nat_dns < pos_nat_lan, "DNS redirect must precede LAN returns in NAT chain");
+        assert!(pos_nat_lan < pos_nat_tcp, "LAN returns must precede general TCP redirect in NAT chain");
+
+        let pos_mangle_dns = setup_all.find("iptables -t mangle -A XKEEN_GAMING -s 192.168.1.118 -p udp --dport 53").unwrap();
+        let pos_mangle_lan = setup_all.find("iptables -t mangle -A XKEEN_GAMING -s 192.168.1.118 -d 192.168.0.0/16").unwrap();
+        let pos_mangle_tproxy = setup_all.find("iptables -t mangle -A XKEEN_GAMING -s 192.168.1.118 -p udp -j TPROXY").unwrap();
+        assert!(pos_mangle_dns < pos_mangle_lan, "DNS return must precede LAN returns in mangle chain");
+        assert!(pos_mangle_lan < pos_mangle_tproxy, "LAN returns must precede general UDP TPROXY in mangle chain");
 
         // 2. Проверяем отключенный режим: setup_cmds пустой, cleanup_cmd сбрасывает маршруты
         cfg.enabled = false;
-        let (cleanup_disabled, setup_disabled) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
+        let (cleanup_disabled, setup_disabled, conntrack_disabled) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
         assert!(setup_disabled.is_empty(), "Disabled mode must not produce setup commands");
-        assert!(cleanup_disabled.contains("ip rule del fwmark 0x111 lookup 111"), "Disabled mode must still clean up policy rules");
+        assert!(conntrack_disabled.is_empty(), "Disabled mode must not produce conntrack commands");
+        assert!(cleanup_disabled.contains("ip rule del fwmark 0x115 lookup 115"), "Disabled mode must still clean up policy rules");
 
         // 3. Проверяем режим KnownServices: setup_cmds пустой (нет full tunnel)
         cfg.enabled = true;
         cfg.mode = config::GamingMode::KnownServices;
-        let (_, setup_known) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
+        let (_, setup_known, conntrack_known) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
         assert!(setup_known.is_empty(), "KnownServices mode must not produce full tunnel commands");
+        assert!(conntrack_known.is_empty(), "KnownServices mode must not produce conntrack commands");
     }
 
     #[tokio::test]
@@ -9932,7 +10215,7 @@ mod tests {
         cfg.devices = vec![
             config::GamingDevice {
                 name: "Big PC".into(),
-                ip: "192.168.2.118".into(),
+                ip: "192.168.1.118".into(),
                 mac: "fc:22:1c:37:48:55".into(),
                 ipv6: vec![],
                 enabled: true,
@@ -9973,10 +10256,12 @@ mod tests {
             },
         ];
 
-        let (_, setup_cmds) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
+        let (_, setup_cmds, conntrack_cmds) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
         let all_cmds = setup_cmds.join("\n");
 
-        // Verify RFC1918 subnets are excluded
+        // Verify loopback, link-local and RFC1918 subnets are excluded
+        assert!(all_cmds.contains("-d 127.0.0.0/8"));
+        assert!(all_cmds.contains("-d 169.254.0.0/16"));
         assert!(all_cmds.contains("-d 10.0.0.0/8"));
         assert!(all_cmds.contains("-d 172.16.0.0/12"));
         assert!(all_cmds.contains("-d 192.168.0.0/16"));
@@ -9984,6 +10269,114 @@ mod tests {
         // Verify valid IP is present and malicious injected IP is rejected
         assert!(all_cmds.contains("-s 192.168.1.100 "));
         assert!(!all_cmds.contains("; rm -rf /"));
+        let ct_cmds = conntrack_cmds.join("\n");
+        assert!(ct_cmds.contains("192.168.1.100"));
+        assert!(!ct_cmds.contains("; rm -rf /"));
+    }
+
+    #[test]
+    fn test_gaming_ndm_hook_and_regression_safety() {
+        // Anti-regression: NDM hook header must support nat, mangle and filter (IPv6), and conntrack must never be in hook
+        let mut cfg = config::GamingConfig::default();
+        cfg.enabled = true;
+        cfg.mode = config::GamingMode::Compatibility;
+        cfg.devices = vec![
+            config::GamingDevice {
+                name: "Console".into(),
+                ip: "192.168.1.150".into(),
+                mac: "aa:bb:cc:dd:ee:ff".into(),
+                ipv6: vec!["2001:db8::2".into()],
+                enabled: true,
+                server: Some("PROXY".into()),
+            }
+        ];
+
+        let (cleanup_cmd, setup_cmds, conntrack_cmds) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
+
+        // NDM hook generation logic test
+        let mut hook_content = String::from("#!/bin/sh\n[ \"$table\" != \"nat\" ] && [ \"$table\" != \"mangle\" ] && [ \"$table\" != \"filter\" ] && [ -n \"$table\" ] && exit 0\n");
+        hook_content.push_str(&cleanup_cmd);
+        hook_content.push('\n');
+        for cmd in &setup_cmds {
+            hook_content.push_str(cmd);
+            hook_content.push('\n');
+        }
+
+        // 1. Hook MUST NOT contain $type = ip6tables exit (prevents IPv6 leak rule loss on reload)
+        assert!(!hook_content.contains("[ \"$type\" = \"ip6tables\" ] && exit 0"));
+        // 2. Hook MUST allow filter table for ip6tables FORWARD chain
+        assert!(hook_content.contains("[ \"$table\" != \"filter\" ]"));
+        // 3. Hook MUST NOT contain conntrack commands (prevents mid-game disconnections on netfilter events)
+        assert!(!hook_content.contains("conntrack -D"));
+        // 4. conntrack_cmds contains the command for the API to run directly
+        assert_eq!(conntrack_cmds.len(), 1);
+        assert!(conntrack_cmds[0].contains("conntrack -D -s 192.168.1.150"));
+        // 5. No mark 0x111 or table 111 in hook
+        assert!(!hook_content.contains("0x111"));
+        assert!(!hook_content.contains("table 111"));
+        // 6. Hook has table 115 and mark 0x115
+        assert!(hook_content.contains("0x115"));
+        assert!(hook_content.contains("table 115"));
+    }
+
+    #[test]
+    fn test_gaming_full_tunnel_cidr_ip_and_deduplication() {
+        // Anti-regression: Test CIDR notation in dev.ip, duplicate IP deduplication, and MAC validation
+        let mut cfg = config::GamingConfig::default();
+        cfg.enabled = true;
+        cfg.mode = config::GamingMode::Compatibility;
+        cfg.devices = vec![
+            config::GamingDevice {
+                name: "Device With CIDR".into(),
+                ip: "192.168.1.118/32".into(),
+                mac: "fc:22:1c:37:48:55".into(),
+                ipv6: vec!["2001:db8::1/64".into()],
+                enabled: true,
+                server: Some("PROXY".into()),
+            },
+            config::GamingDevice {
+                name: "Duplicate IP Device".into(),
+                ip: "192.168.1.118".into(),
+                mac: "aa:bb:cc:dd:ee:ff".into(),
+                ipv6: vec![],
+                enabled: true,
+                server: Some("PROXY".into()),
+            },
+            config::GamingDevice {
+                name: "Device With Zero MAC".into(),
+                ip: "192.168.1.119".into(),
+                mac: "00:00:00:00:00:00".into(),
+                ipv6: vec![],
+                enabled: true,
+                server: Some("PROXY".into()),
+            },
+        ];
+
+        let (cleanup_cmd, setup_cmds, conntrack_cmds) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
+        let all_cmds = setup_cmds.join("\n");
+
+        // 1. CIDR /32 must be correctly parsed into pure IPv4
+        assert!(all_cmds.contains("-s 192.168.1.118 "), "Setup must include rules for 192.168.1.118 parsed from 192.168.1.118/32");
+        assert!(!all_cmds.contains("-s 192.168.1.118/32"), "Setup must NOT contain raw CIDR suffix in -s flag");
+
+        // 2. Duplicate IP must not result in duplicate NAT redirect rules
+        let nat_redirect_count = setup_cmds.iter().filter(|c| c.contains("-s 192.168.1.118 -p tcp -j REDIRECT")).count();
+        assert_eq!(nat_redirect_count, 1, "There must be exactly 1 TCP redirect rule for 192.168.1.118 despite duplicates");
+
+        // 3. Zero MAC must NOT be rejected in ip6tables
+        assert!(!all_cmds.contains("00:00:00:00:00:00"), "Setup must NOT emit reject rule for zero MAC");
+
+        // 4. IPv6 CIDR /64 must be cleanly stripped and parsed
+        assert!(all_cmds.contains("ip6tables -A XKEEN_GAMING -s 2001:db8::1 -j REJECT"), "Setup must block IPv6 2001:db8::1 stripped of /64");
+
+        // 5. Cleanup must support both Busybox explicit route deletion and iproute2 flush
+        assert!(cleanup_cmd.contains("ip route del local default dev lo table 115"), "Cleanup must include explicit route del for BusyBox");
+        assert!(cleanup_cmd.contains("ip route flush table 115"), "Cleanup must include route flush");
+
+        // 6. Conntrack commands must include each valid unique IP
+        assert_eq!(conntrack_cmds.len(), 2);
+        assert!(conntrack_cmds[0].contains("192.168.1.118"));
+        assert!(conntrack_cmds[1].contains("192.168.1.119"));
     }
 
     #[test]

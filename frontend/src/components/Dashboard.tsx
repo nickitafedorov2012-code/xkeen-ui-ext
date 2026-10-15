@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
-import { pingClass, type FailoverEventInfo, type StatusInfo, type AghStatus } from '../types'
+import { pingClass, type FailoverEventInfo, type StatusInfo, type AghStatus, type SwapStatus } from '../types'
 import TrafficGraph from './TrafficGraph'
 
 interface Props {
@@ -8,6 +8,51 @@ interface Props {
   notify: (msg: string, isError?: boolean) => void
   refresh?: () => void
   onSwitchTab?: (tab: 'dashboard' | 'servers' | 'devices' | 'settings' | 'google-ai') => void
+}
+
+export function SwapRecommendationBanner({
+  status,
+  onSwitchTab,
+}: {
+  status: SwapStatus | null
+  onSwitchTab?: (tab: 'dashboard' | 'servers' | 'devices' | 'settings' | 'google-ai') => void
+}) {
+  if (!status?.recommend_swap || status?.swap_active) {
+    return null
+  }
+
+  return (
+    <div
+      className="notice-banner"
+      style={{
+        background: 'rgba(234, 179, 8, 0.1)',
+        border: '1px solid #eab308',
+        padding: 12,
+        borderRadius: 8,
+        marginBottom: 16,
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        gap: 12,
+        flexWrap: 'wrap',
+      }}
+      data-testid="swap-recommendation-banner"
+    >
+      <div>
+        <b style={{ color: '#eab308' }}>⚠️ Мало оперативной памяти ({status.ram_free_mb} МБ свободно)</b>
+        <p style={{ margin: '4px 0 0', fontSize: 12 }} className="muted">
+          Для защиты служб Mihomo, Zapret и AdGuard Home от вылетов рекомендуется включить файл подкачки на USB.
+        </p>
+      </div>
+      <button
+        className="btn btn-warning"
+        onClick={() => onSwitchTab?.('settings')}
+        data-testid="swap-recommendation-btn"
+      >
+        ⚡ Включить Swap в 1 клик
+      </button>
+    </div>
+  )
 }
 
 interface GroupedEvent {
@@ -137,6 +182,14 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
     }
     window.addEventListener('xr:adguard-protection-changed', handleSync)
     return () => window.removeEventListener('xr:adguard-protection-changed', handleSync)
+  }, [])
+
+  const [swapStatus, setSwapStatus] = useState<SwapStatus | null>(null)
+
+  useEffect(() => {
+    apiGet<SwapStatus>('system/swap/status')
+      .then(setSwapStatus)
+      .catch((err) => console.warn('Не удалось получить статус Swap:', err))
   }, [])
 
   useEffect(() => {
@@ -269,6 +322,9 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
           </button>
         </div>
       </div>
+
+      {/* Умный баннер рекомендации Swap при нехватке ОЗУ */}
+      <SwapRecommendationBanner status={swapStatus} onSwitchTab={onSwitchTab} />
 
       {/* График трафика в реальном времени */}
       <TrafficGraph />
@@ -472,6 +528,14 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
               <li><span>Резервы</span><b>{f!.priority_chain!.slice(1).length} сервер(ов)</b></li>
             )}
             <li><span>Интервал проверки</span><b>{f ? `${f.interval_secs} с` : '—'}</b></li>
+            {f?.best_ping_enabled && (
+              <li>
+                <span>Режим Best-Ping</span>
+                <b style={{ color: '#00D3F2' }} data-testid="dashboard-best-ping-status">
+                  🚀 Активен (пул {f.best_ping_pool_size ?? 15} узлов, ±{f.best_ping_hysteresis_ms ?? 40} мс)
+                </b>
+              </li>
+            )}
           </ul>
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>

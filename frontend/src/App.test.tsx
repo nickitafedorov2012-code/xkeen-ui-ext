@@ -204,7 +204,7 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
     expect(container?.querySelector('[data-testid="settings-view"]')).not.toBeNull()
   })
 
-  it('renders AdGuard tab button and switches to AdGuard view when clicked', async () => {
+  it('does not render AdGuard in navbar tabs and switches to AdGuard view when header chip is clicked', async () => {
     await act(async () => {
       root!.render(<App />)
     })
@@ -212,10 +212,13 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
     const adguardTabBtn = Array.from(container?.querySelectorAll('nav.tabs button') || []).find((b) =>
       b.textContent?.includes('AdGuard')
     ) as HTMLButtonElement | undefined
-    expect(adguardTabBtn).toBeDefined()
+    expect(adguardTabBtn).toBeUndefined()
+
+    const adguardPill = container?.querySelector('[data-testid="header-adguard-pill"]') as HTMLElement | null
+    expect(adguardPill).not.toBeNull()
 
     await act(async () => {
-      adguardTabBtn?.click()
+      adguardPill?.click()
     })
 
     expect(container?.querySelector('[data-testid="adguard-view"]')).not.toBeNull()
@@ -239,4 +242,27 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
     expect(container?.querySelector('[data-testid="xbox-dns-view"]')).not.toBeNull()
     window.location.hash = ''
   })
+
+  it('renders #adguard hash as adguard view on direct initial navigation and hashchange', async () => {
+    window.location.hash = '#adguard'
+    await act(async () => {
+      root!.render(<App />)
+    })
+    expect(container?.querySelector('[data-testid="adguard-view"]')).not.toBeNull()
+
+    // Test hashchange event
+    window.location.hash = '#settings'
+    await act(async () => {
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    })
+    expect(container?.querySelector('[data-testid="settings-view"]')).not.toBeNull()
+
+    window.location.hash = '#adguard'
+    await act(async () => {
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    })
+    expect(container?.querySelector('[data-testid="adguard-view"]')).not.toBeNull()
+    window.location.hash = ''
+  })
 })
+

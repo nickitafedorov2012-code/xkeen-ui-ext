@@ -94,6 +94,47 @@ async fn record_switch() {
     *LAST_SWITCH.lock().await = Some(Instant::now());
 }
 
+/// Ступенчатый опрос списка серверов через семафор (по 4 потока) с интервалом между запусками,
+/// чтобы минимизировать нагрузку на CPU роутера Keenetic.
+pub async fn ping_servers_staggered(
+    http: &reqwest::Client,
+    cfg: &crate::config::AppConfig,
+    ids: &[String],
+    timeout_ms: u64,
+    concurrency: usize,
+    interval_ms: u64,
+) -> std::collections::BTreeMap<String, i64> {
+    let mut out = std::collections::BTreeMap::new();
+    if ids.is_empty() {
+        return out;
+    }
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let shared_cfg = std::sync::Arc::new(cfg.clone());
+    let mut handles = Vec::new();
+
+    for id in ids {
+        let http_c = http.clone();
+        let cfg_c = shared_cfg.clone();
+        let sem_c = sem.clone();
+        let id_c = id.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = sem_c.acquire().await.ok();
+            let ms = mihomo::ping_server_url(&http_c, &cfg_c, &id_c, timeout_ms, None).await;
+            (id_c, ms)
+        }));
+        if interval_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+        }
+    }
+
+    for h in handles {
+        if let Ok((id, ms)) = h.await {
+            out.insert(id, ms);
+        }
+    }
+    out
+}
+
 /// Одна итерация проверки. Возвращает текст решения (для ручного прогона).
 pub async fn run_check(state: &AppState) -> Result<String, String> {
     // DIAG-01: Изоляция от Speedtest — если выполняется замер скорости, пропускаем переключение failover
@@ -124,6 +165,124 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         .find(|s| s.is_active && s.id != "Fastest" && s.id != "Fallback")
         .or_else(|| servers.iter().find(|s| s.is_active))
         .cloned();
+
+    // 0. Режим Best-Ping Failover (динамический выбор лучшего по пингу из пула до 15 серверов со ступенчатым опросом и гистерезисом)
+    if cfg.failover.best_ping_enabled {
+        let pool_limit = cfg.failover.best_ping_pool_size.clamp(2, 30);
+        let mut pool: Vec<String> = Vec::with_capacity(pool_limit);
+
+        // 1. Сначала серверы из цепочки приоритетов
+        for id in &cfg.failover.priority_chain {
+            if pool.len() >= pool_limit {
+                break;
+            }
+            if !pool.contains(id) && servers.iter().any(|s| &s.id == id && !s.is_pool && s.id != "Fastest" && s.id != "Fallback" && s.id != "DIRECT") {
+                pool.push(id.clone());
+            }
+        }
+
+        // 2. Дополняем первыми доступными серверами до лимита (по умолчанию 15)
+        for s in &servers {
+            if pool.len() >= pool_limit {
+                break;
+            }
+            if !pool.contains(&s.id) && !s.is_pool && s.id != "Fastest" && s.id != "Fallback" && s.id != "DIRECT" {
+                pool.push(s.id.clone());
+            }
+        }
+
+        // 3. Обязательно включаем текущий активный сервер в пул для замера его реального пинга
+        if let Some(ref act) = active {
+            if !pool.contains(&act.id) && !act.is_pool && act.id != "Fastest" && act.id != "Fallback" && act.id != "DIRECT" {
+                pool.push(act.id.clone());
+            }
+        }
+
+        if pool.is_empty() {
+            let msg = "Best-Ping: нет доступных серверов для проверки".to_string();
+            state.failover_log.push(&msg, false).await;
+            return Err(msg);
+        }
+
+        let ping_timeout = calc_ping_timeout(threshold);
+        // Ступенчатый опрос через семафор (по 4 потока с интервалом 25 мс)
+        let pings = ping_servers_staggered(&state.http, &cfg, &pool, ping_timeout, 4, 25).await;
+
+        let act_id = active.as_ref().map(|s| s.id.as_str()).unwrap_or("");
+        let act_name = active.as_ref().map(|s| s.name.as_str()).unwrap_or("Неизвестный");
+        let act_ping = if !act_id.is_empty() {
+            pings.get(act_id).copied().unwrap_or(-1)
+        } else {
+            -1
+        };
+
+        // Отбираем живые серверы (пинг > 0)
+        let mut valid_candidates: Vec<(String, i64)> = pings
+            .iter()
+            .filter(|(id, ms)| **ms > 0 && id.as_str() != "Fastest" && id.as_str() != "Fallback" && id.as_str() != "DIRECT")
+            .map(|(id, ms)| (id.clone(), *ms))
+            .collect();
+
+        valid_candidates.sort_by_key(|(_, ms)| *ms);
+
+        let hysteresis = (cfg.failover.best_ping_hysteresis_ms as i64).clamp(30, 100);
+
+        if let Some((best_id, best_ms)) = valid_candidates.first() {
+            let best_name = servers.iter().find(|s| &s.id == best_id).map(|s| s.name.as_str()).unwrap_or(best_id.as_str());
+
+            if best_id.as_str() == act_id {
+                let msg = format!(
+                    "Best-Ping: активный '{}' ({act_ping} мс) остаётся лучшим в пуле из {} серверов",
+                    act_name, pool.len()
+                );
+                return Ok(msg);
+            }
+
+            // Переключаемся, если активный узел недоступен или лучший быстрее с запасом на гистерезис (30-50 мс)
+            let should_switch = act_ping <= 0 || (*best_ms + hysteresis < act_ping);
+
+            if should_switch {
+                let diff_note = if act_ping > 0 {
+                    format!("пинг {best_ms} мс против {act_ping} мс, выигрыш {} мс > гистерезиса {hysteresis} мс", act_ping - *best_ms)
+                } else {
+                    format!("активный недоступен, пинг {best_ms} мс")
+                };
+                let msg = format!(
+                    "Best-Ping Failover: '{}' → переключение на лучший узел '{best_name}' ({diff_note})",
+                    act_name
+                );
+                return match mihomo::switch_server(&state.http, &cfg, best_id).await {
+                    Ok(_) => {
+                        record_switch().await;
+                        state.failover_log.push(&msg, true).await;
+                        crate::notifications::notify_failover(
+                            &state.http,
+                            &cfg.notifications,
+                            "switch",
+                            "Best-Ping Failover — выбор лучшего сервера",
+                            &msg,
+                        ).await;
+                        Ok(msg)
+                    }
+                    Err(e) => {
+                        state.failover_log.push(format!("{msg} — ошибка: {e}"), false).await;
+                        Err(e)
+                    }
+                };
+            } else {
+                let msg = format!(
+                    "Best-Ping: активный '{}' ({act_ping} мс) сохранён; кандидат '{best_name}' ({best_ms} мс) быстрее менее чем на {hysteresis} мс (гистерезис)",
+                    act_name
+                );
+                return Ok(msg);
+            }
+        } else {
+            let msg = format!("Best-Ping: все {} серверов в пуле не ответили на пинг", pool.len());
+            state.failover_log.push(&msg, false).await;
+            return Err(msg);
+        }
+    }
+
     // Цепочка приоритетов: только существующие сейчас серверы, по порядку.
     let chain: Vec<Server> = cfg
         .failover
@@ -599,6 +758,53 @@ mod tests {
         assert!(last.is_some());
         let elapsed = last.unwrap().elapsed();
         assert!(elapsed < std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_best_ping_hysteresis_logic() {
+        let hysteresis = 40i64;
+
+        // 1. Текущий сервер 100мс, лучший кандидат 70мс.
+        // 70 + 40 = 110 >= 100 -> переключение НЕ должно произойти (гистерезис защищает от флэппинга)
+        let act_ping = 100i64;
+        let best_ms = 70i64;
+        let should_switch = act_ping <= 0 || (best_ms + hysteresis < act_ping);
+        assert!(!should_switch, "Hysteresis must prevent switching when improvement is within margin");
+
+        // 2. Текущий сервер 125мс, лучший кандидат 70мс.
+        // 70 + 40 = 110 < 125 -> переключение ДОЛЖНО произойти
+        let act_ping = 125i64;
+        let should_switch = act_ping <= 0 || (best_ms + hysteresis < act_ping);
+        assert!(should_switch, "Switching must occur when latency improvement exceeds hysteresis");
+
+        // 3. Текущий сервер недоступен (-1).
+        let act_ping = -1i64;
+        let should_switch = act_ping <= 0 || (best_ms + hysteresis < act_ping);
+        assert!(should_switch, "Must switch immediately when active server is dead");
+    }
+
+    #[test]
+    fn test_best_ping_pool_size_selection() {
+        let chain = vec!["P1".to_string(), "P2".to_string()];
+        let all_servers: Vec<String> = (1..=25).map(|i| format!("S{i}")).collect();
+        let pool_size = 15;
+
+        // Формирование пула как в run_check
+        let mut pool: Vec<String> = chain.clone();
+        for s in all_servers {
+            if pool.len() >= pool_size {
+                break;
+            }
+            if !pool.contains(&s) {
+                pool.push(s);
+            }
+        }
+
+        assert_eq!(pool.len(), 15, "Pool must be capped at pool_size (15)");
+        assert_eq!(pool[0], "P1", "Priority servers must be placed first in pool");
+        assert_eq!(pool[1], "P2", "Priority servers must be placed first in pool");
+        assert_eq!(pool[2], "S1");
+        assert_eq!(pool[14], "S13");
     }
 
     #[test]

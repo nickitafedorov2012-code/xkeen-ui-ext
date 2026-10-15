@@ -499,6 +499,10 @@ async fn main() {
         .route("/api/system/metrics", get(api::get_system_metrics))
         .route("/api/system/processes", get(api::get_system_processes))
         .route("/api/system/processes/kill", post(api::kill_process))
+        .route("/api/system/swap/status", get(api::get_swap_status))
+        .route("/api/system/swap/create", post(api::create_swap))
+        .route("/api/system/swap/remove", post(api::remove_swap))
+        .route("/api/system/swap", delete(api::remove_swap))
         // Серверы
         .route("/api/servers", get(api::get_servers))
         .route("/api/servers/switch", post(api::switch_server))

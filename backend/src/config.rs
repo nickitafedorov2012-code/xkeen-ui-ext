@@ -114,6 +114,14 @@ pub struct FailoverPresetSlot {
     pub chain: Vec<String>,
 }
 
+fn default_best_ping_pool_size() -> usize {
+    15
+}
+
+fn default_best_ping_hysteresis_ms() -> u32 {
+    40
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct FailoverConfig {
@@ -129,6 +137,15 @@ pub struct FailoverConfig {
     pub device_failover_enabled: bool,
     /// Именованные слоты настроенных пресетов для мгновенного переключения
     pub presets: Vec<FailoverPresetSlot>,
+    /// Динамический выбор лучшего по пингу (Best-Ping Failover)
+    #[serde(default)]
+    pub best_ping_enabled: bool,
+    /// Размер пула серверов для Best-Ping проверки (по умолчанию 15)
+    #[serde(default = "default_best_ping_pool_size")]
+    pub best_ping_pool_size: usize,
+    /// Гистерезис пинга в миллисекундах (30-50 мс, по умолчанию 40)
+    #[serde(default = "default_best_ping_hysteresis_ms")]
+    pub best_ping_hysteresis_ms: u32,
 }
 
 impl Default for FailoverConfig {
@@ -142,6 +159,9 @@ impl Default for FailoverConfig {
             interval_secs: 60,
             device_failover_enabled: false,
             presets: Vec::new(),
+            best_ping_enabled: false,
+            best_ping_pool_size: 15,
+            best_ping_hysteresis_ms: 40,
         }
     }
 }
@@ -988,9 +1008,6 @@ pub fn load(path: &Path) -> AppConfig {
 
 /// Асинхронная загрузка конфига (не блокирует воркеры Tokio в обработчиках API).
 pub async fn load_async(path: &Path) -> AppConfig {
-    if !path.exists() {
-        return AppConfig::default();
-    }
     match tokio::fs::read_to_string(path).await {
         Ok(content) => {
             match parse_config_strict(&content) {
@@ -1006,6 +1023,9 @@ pub async fn load_async(path: &Path) -> AppConfig {
                     parse_config_content(&content, &path.display().to_string())
                 }
             }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            AppConfig::default()
         }
         Err(e) => {
             eprintln!("[ERROR] Не удалось прочитать существующий конфиг {}: {e}", path.display());

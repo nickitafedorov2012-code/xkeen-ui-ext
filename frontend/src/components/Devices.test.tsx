@@ -236,4 +236,78 @@ describe('Devices Component — Per-Device Zapret DPI (Feature 3)', () => {
     expect(zapretBtn.className).toContain('inactive')
     expect(zapretBtn.textContent).toContain('Zapret OFF')
   })
+
+  it('renders 100% Gaming badge for compatibility mode gaming devices and synchronizes server', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'devices') {
+        return Promise.resolve({ devices: mockDevices })
+      }
+      if (path === 'policies') {
+        return Promise.resolve({ policies: [{ id: 'default', name: 'Основная', is_default: true }] })
+      }
+      if (path === 'servers') {
+        return Promise.resolve({
+          servers: [
+            { id: 'node_de', name: 'Frankfurt-1', protocol: 'vless', host: '1.2.3.4', port: 443, ping_ms: 45, is_active: false, is_priority: false },
+            { id: 'node_nl', name: 'Amsterdam-1', protocol: 'vless', host: '1.2.3.5', port: 443, ping_ms: 50, is_active: false, is_priority: false },
+          ]
+        })
+      }
+      if (path === 'routing') {
+        return Promise.resolve({
+          assignments: [
+            { ip: '192.168.1.100', group: '🎮 Gaming', current_server: 'node_de', is_gaming: true },
+          ]
+        })
+      }
+      if (path === 'device-routing') {
+        return Promise.resolve({ routing: {}, device_failover_enabled: false })
+      }
+      if (path === 'devices/zapret') {
+        return Promise.resolve({ excluded_devices: [] })
+      }
+      if (path === 'gaming/status') {
+        return Promise.resolve({
+          is_active: true,
+          enabled: true,
+          config: {
+            enabled: true,
+            mode: 'compatibility',
+            devices: [{ mac: 'AA:BB:CC:DD:EE:01', enabled: true, server: 'node_de' }]
+          }
+        })
+      }
+      if (path === 'devices/traffic') {
+        return Promise.resolve({ download_total: 0, upload_total: 0, devices: {} })
+      }
+      return Promise.resolve({})
+    })
+
+    const postSpy = vi.spyOn(api, 'apiPost').mockResolvedValue({ applied: 1 })
+
+    await act(async () => {
+      root!.render(<Devices notify={notifyMock} />)
+    })
+
+    // Check badge 🎮 100% Gaming for 192.168.1.100
+    const gamingBadge = container?.querySelector('[data-testid="badge-gaming-compat"]') as HTMLElement | null
+    expect(gamingBadge).not.toBeNull()
+    expect(gamingBadge?.textContent).toContain('100% Gaming')
+
+    // Change server dropdown for the gaming device
+    const serverSelects = container?.querySelectorAll('select.device-select')
+    expect(serverSelects?.length).toBeGreaterThan(0)
+
+    const select = serverSelects?.[1] as HTMLSelectElement | undefined // second select in the row (first is policy)
+    if (select) {
+      await act(async () => {
+        select.value = 'node_nl'
+        select.dispatchEvent(new Event('change', { bubbles: true }))
+      })
+
+      expect(postSpy).toHaveBeenCalledWith('routing', {
+        assignments: [{ ip: '192.168.1.100', name: 'Smart TV Samsung', server: 'node_nl' }]
+      })
+    }
+  })
 })

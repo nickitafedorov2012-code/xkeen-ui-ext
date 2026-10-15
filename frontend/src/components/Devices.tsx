@@ -146,6 +146,14 @@ export default function Devices({ notify }: Props) {
     return m
   }, [routing])
 
+  const isGamingCompatByIp = useMemo(() => {
+    const s = new Set<string>()
+    for (const a of routing) {
+      if (a.is_gaming) s.add(a.ip)
+    }
+    return s
+  }, [routing])
+
   // Поиск по имени, IP, MAC
   const q = filter.trim().toLowerCase()
   const matchesSearch = useCallback(
@@ -646,6 +654,7 @@ export default function Devices({ notify }: Props) {
                       onToggleZapret={handleToggleZapret}
                       gamingActive={gamingDeviceMacs.has(d.mac.toLowerCase())}
                       onToggleGaming={handleToggleGaming}
+                      isGamingCompat={isGamingCompatByIp.has(d.ip)}
                     />
                   ))}
                 </>
@@ -699,6 +708,7 @@ export default function Devices({ notify }: Props) {
                         onToggleZapret={handleToggleZapret}
                         gamingActive={gamingDeviceMacs.has(d.mac.toLowerCase())}
                         onToggleGaming={handleToggleGaming}
+                        isGamingCompat={isGamingCompatByIp.has(d.ip)}
                       />
                     ))}
                 </>
@@ -743,6 +753,7 @@ export default function Devices({ notify }: Props) {
                       onToggleZapret={handleToggleZapret}
                       gamingActive={gamingDeviceMacs.has(d.mac.toLowerCase())}
                       onToggleGaming={handleToggleGaming}
+                      isGamingCompat={isGamingCompatByIp.has(d.ip)}
                     />
                   ))}
                 </>

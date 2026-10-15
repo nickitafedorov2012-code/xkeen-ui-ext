@@ -54,6 +54,9 @@ export interface StatusInfo {
     auto_restore_priority: boolean
     interval_secs: number
     device_failover_enabled?: boolean
+    best_ping_enabled?: boolean
+    best_ping_pool_size?: number
+    best_ping_hysteresis_ms?: number
   }
   refresh_interval_sec: number
   adblock_enabled?: boolean
@@ -220,6 +223,7 @@ export interface RoutingAssignmentInfo {
   ip: string
   group: string
   current_server: string
+  is_gaming?: boolean
 }
 
 export interface DeviceRoutingEntry {
@@ -251,6 +255,9 @@ export interface AppSettings {
     auto_restore_priority: boolean
     interval_secs: number
     device_failover_enabled: boolean
+    best_ping_enabled?: boolean
+    best_ping_pool_size?: number
+    best_ping_hysteresis_ms?: number
     presets?: FailoverPresetSlot[]
   }
   refresh_interval_sec: number
@@ -771,5 +778,28 @@ export interface XboxDnsCheckResponse {
   results: XboxDnsCheckResult[]
 }
 
+// ============================================================================
+// Типы для функционала «Swap в 1 клик» (Keenetic / Entware)
+// ============================================================================
 
+export type SwapSizePresetMb = 256 | 512 | 1024
 
+export interface SwapStatus {
+  swap_supported: boolean
+  swap_active: boolean
+  swap_total_mb: number
+  swap_used_mb: number
+  swap_free_mb: number
+  swap_file_exists: boolean
+  swap_file_path: string
+  swappiness: number
+  opt_disk_free_mb: number
+  opt_disk_total_mb: number
+  ram_total_mb: number
+  ram_free_mb: number
+  recommend_swap: boolean
+}
+
+export interface CreateSwapRequest {
+  size_mb: SwapSizePresetMb
+}

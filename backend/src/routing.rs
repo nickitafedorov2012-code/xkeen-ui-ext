@@ -2062,8 +2062,10 @@ pub fn apply_routing_with_filters(
         }
     }
     // Включаем игровые устройства с выделенным сервером
+    let has_explicit_gaming = cfg.gaming.devices.iter().any(|d| d.enabled);
     for d in &cfg.gaming.devices {
-        if d.enabled {
+        let is_active = if has_explicit_gaming { d.enabled } else { cfg.gaming.devices.len() == 1 };
+        if is_active {
             if let Some(ref srv) = d.server {
                 if !srv.trim().is_empty() && !assignments.iter().any(|a| a.ip == d.ip) {
                     assignments.push(Assignment {

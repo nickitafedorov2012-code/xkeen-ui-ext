@@ -813,4 +813,442 @@ mod tests {
         // Гарантирует наличие и работоспособность функции проверки процесса по имени (предотвращает регрессию сборки в Linux CI)
         assert!(is_process_running("AdGuardHome"));
     }
+
+    #[test]
+    fn test_swap_size_presets_validation() {
+        assert!(ALLOWED_SWAP_SIZES_MB.contains(&256));
+        assert!(ALLOWED_SWAP_SIZES_MB.contains(&512));
+        assert!(ALLOWED_SWAP_SIZES_MB.contains(&1024));
+        assert_eq!(ALLOWED_SWAP_SIZES_MB.len(), 3);
+
+        // Invalid sizes must be rejected
+        let res_invalid = create_and_enable_swap(128);
+        assert!(res_invalid.is_err());
+        assert!(res_invalid.err().unwrap().contains("Недопустимый размер Swap: 128 МБ"));
+
+        let res_too_large = create_and_enable_swap(2048);
+        assert!(res_too_large.is_err());
+    }
+
+    #[test]
+    fn test_parse_meminfo_str() {
+        let sample = "\
+MemTotal:         256000 kB
+MemFree:           16000 kB
+MemAvailable:      24000 kB
+Buffers:            4000 kB
+Cached:            12000 kB
+SwapTotal:        524288 kB
+SwapFree:         500000 kB
+";
+        let (total_ram, free_ram, total_swap, free_swap) = parse_meminfo_str(sample);
+        assert_eq!(total_ram, 250); // 256000 / 1024
+        assert_eq!(free_ram, 23);   // 24000 / 1024
+        assert_eq!(total_swap, 512); // 524288 / 1024
+        assert_eq!(free_swap, 488);  // 500000 / 1024
+    }
+
+    #[test]
+    fn test_parse_df_output() {
+        let df_sample = "\
+Filesystem           1K-blocks      Used Available Use% Mounted on
+/dev/sda1              3840000    500000   3140000  14% /opt
+";
+        let (avail_mb, total_mb) = parse_df_output(df_sample).expect("df parse must succeed");
+        assert_eq!(avail_mb, 3066); // 3140000 / 1024
+        assert_eq!(total_mb, 3750); // 3840000 / 1024
+    }
+
+    #[test]
+    fn test_swap_init_script_content_sanity() {
+        assert!(INIT_SCRIPT_CONTENT.contains("swapon /opt/swapfile"));
+        assert!(INIT_SCRIPT_CONTENT.contains("swapoff /opt/swapfile"));
+        assert!(INIT_SCRIPT_CONTENT.contains("sysctl -w vm.swappiness=10"));
+    }
+
+    #[test]
+    fn test_swap_status_serialization_roundtrip() {
+        let status = SwapStatus {
+            swap_supported: true,
+            swap_active: true,
+            swap_total_mb: 512,
+            swap_used_mb: 12,
+            swap_free_mb: 500,
+            swap_file_exists: true,
+            swap_file_path: SWAP_FILE_PATH.to_string(),
+            swappiness: 10,
+            opt_disk_free_mb: 2048,
+            opt_disk_total_mb: 4096,
+            ram_total_mb: 256,
+            ram_free_mb: 30,
+            recommend_swap: false,
+        };
+        let json_val = serde_json::to_value(&status).expect("Serialization must succeed");
+        assert_eq!(json_val["swap_total_mb"], 512);
+        assert_eq!(json_val["swap_file_path"], "/opt/swapfile");
+        assert_eq!(json_val["swappiness"], 10);
+    }
+}
+
+// ============================================================================
+// Системная логика «Swap в 1 клик» (Keenetic / Entware)
+// ============================================================================
+
+pub const SWAP_FILE_PATH: &str = "/opt/swapfile";
+pub const INIT_SCRIPT_PATH: &str = "/opt/etc/init.d/S01swap";
+pub const SAFETY_MARGIN_MB: u64 = 300;
+pub const TARGET_SWAPPINESS: u32 = 10;
+pub const ALLOWED_SWAP_SIZES_MB: [u64; 3] = [256, 512, 1024];
+
+pub const INIT_SCRIPT_CONTENT: &str = r#"#!/bin/sh
+case "$1" in
+  start)
+    [ -f /opt/swapfile ] && swapon /opt/swapfile && sysctl -w vm.swappiness=10 >/dev/null 2>&1
+    ;;
+  stop)
+    swapoff /opt/swapfile 2>/dev/null
+    ;;
+  *)
+    echo "Usage: $0 {start|stop}"
+    exit 1
+    ;;
+esac
+exit 0
+"#;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct SwapStatus {
+    pub swap_supported: bool,
+    pub swap_active: bool,
+    pub swap_total_mb: u64,
+    pub swap_used_mb: u64,
+    pub swap_free_mb: u64,
+    pub swap_file_exists: bool,
+    pub swap_file_path: String,
+    pub swappiness: u32,
+    pub opt_disk_free_mb: u64,
+    pub opt_disk_total_mb: u64,
+    pub ram_total_mb: u64,
+    pub ram_free_mb: u64,
+    pub recommend_swap: bool,
+}
+
+/// Читает `/proc/meminfo` и возвращает:
+/// `(ram_total_mb, ram_free_mb, swap_total_mb, swap_free_mb)`
+pub fn read_meminfo() -> (u64, u64, u64, u64) {
+    #[cfg(target_os = "linux")]
+    {
+        parse_meminfo_str(&std::fs::read_to_string("/proc/meminfo").unwrap_or_default())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        (256, 64, 0, 0)
+    }
+}
+
+pub fn parse_meminfo_str(content: &str) -> (u64, u64, u64, u64) {
+    let mut mem_total_kb = 0u64;
+    let mut mem_free_kb = 0u64;
+    let mut mem_available_kb = None;
+    let mut swap_total_kb = 0u64;
+    let mut swap_free_kb = 0u64;
+
+    for line in content.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 2 {
+            continue;
+        }
+        let val = parts[1].parse::<u64>().unwrap_or(0);
+        match parts[0] {
+            "MemTotal:" => mem_total_kb = val,
+            "MemFree:" => mem_free_kb = val,
+            "MemAvailable:" => mem_available_kb = Some(val),
+            "SwapTotal:" => swap_total_kb = val,
+            "SwapFree:" => swap_free_kb = val,
+            _ => {}
+        }
+    }
+
+    let effective_free_kb = mem_available_kb.unwrap_or(mem_free_kb);
+    (
+        mem_total_kb / 1024,
+        effective_free_kb / 1024,
+        swap_total_kb / 1024,
+        swap_free_kb / 1024,
+    )
+}
+
+/// Проверяет, активен ли `/opt/swapfile` (или иной swap) через `/proc/swaps`
+pub fn is_swap_active(swap_total_mb: u64) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(swaps) = std::fs::read_to_string("/proc/swaps") {
+            if swaps.lines().skip(1).any(|line| !line.trim().is_empty()) {
+                return true;
+            }
+        }
+        swap_total_mb > 0
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        swap_total_mb > 0
+    }
+}
+
+/// Проверяет поддержку swap ядром Linux и наличие примонтированного `/opt`
+pub fn is_swap_supported() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new("/proc/swaps").exists() && std::path::Path::new("/opt").is_dir()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
+/// Читает текущее значение `vm.swappiness`
+pub fn read_swappiness() -> u32 {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/sys/vm/swappiness")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .unwrap_or(60)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        10
+    }
+}
+
+/// Парсер строки вывода df -k /opt
+pub fn parse_df_output(stdout: &str) -> Result<(u64, u64), String> {
+    let data_line = stdout
+        .lines()
+        .skip(1)
+        .last()
+        .ok_or_else(|| "Не удалось разобрать вывод df -k /opt".to_string())?;
+
+    let cols: Vec<&str> = data_line.split_whitespace().collect();
+    if cols.len() >= 5 {
+        let total = cols[cols.len() - 5].parse::<u64>().unwrap_or(0);
+        let avail = cols[cols.len() - 3].parse::<u64>().unwrap_or(0);
+        Ok((avail / 1024, total / 1024))
+    } else {
+        Err("Некорректный формат вывода df -k /opt".to_string())
+    }
+}
+
+/// Возвращает `(opt_disk_free_mb, opt_disk_total_mb)` для раздела `/opt` через `df -k /opt`
+pub fn get_opt_disk_space_mb() -> Result<(u64, u64), String> {
+    #[cfg(target_os = "linux")]
+    {
+        if !std::path::Path::new("/opt").exists() {
+            return Err("Раздел /opt не найден на устройстве".to_string());
+        }
+
+        let output = std::process::Command::new("df")
+            .args(["-k", "/opt"])
+            .output()
+            .map_err(|e| format!("Ошибка вызова df -k /opt: {}", e))?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "Команда df завершилась с ошибкой: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        parse_df_output(&stdout)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok((2048, 4096))
+    }
+}
+
+/// Собирает полный статус Swap для `GET /api/system/swap/status`
+pub fn get_swap_status() -> SwapStatus {
+    let (ram_total_mb, ram_free_mb, swap_total_mb, swap_free_mb) = read_meminfo();
+    let swap_used_mb = swap_total_mb.saturating_sub(swap_free_mb);
+    let swap_active = is_swap_active(swap_total_mb);
+    let swap_file_exists = std::path::Path::new(SWAP_FILE_PATH).exists();
+    let swap_supported = is_swap_supported();
+    let swappiness = read_swappiness();
+    let (opt_disk_free_mb, opt_disk_total_mb) = get_opt_disk_space_mb().unwrap_or((0, 0));
+
+    // Рекомендуем включить Swap на роутерах с ОЗУ <= 256 МБ (или при свободной ОЗУ < 32 МБ), если Swap не активен
+    let recommend_swap =
+        swap_supported && !swap_active && (ram_total_mb <= 256 || ram_free_mb < 32);
+
+    SwapStatus {
+        swap_supported,
+        swap_active,
+        swap_total_mb,
+        swap_used_mb,
+        swap_free_mb,
+        swap_file_exists,
+        swap_file_path: SWAP_FILE_PATH.to_string(),
+        swappiness,
+        opt_disk_free_mb,
+        opt_disk_total_mb,
+        ram_total_mb,
+        ram_free_mb,
+        recommend_swap,
+    }
+}
+
+/// Создаёт и мгновенно активирует файл подкачки `/opt/swapfile` заданного размера (256, 512 или 1024 МБ)
+pub fn create_and_enable_swap(size_mb: u64) -> Result<SwapStatus, String> {
+    if !ALLOWED_SWAP_SIZES_MB.contains(&size_mb) {
+        return Err(format!(
+            "Недопустимый размер Swap: {} МБ (допустимые значения: 256, 512, 1024 МБ)",
+            size_mb
+        ));
+    }
+
+    // 1. Проверка свободного места на `/opt` (требуется Размер_Swap + 300 МБ)
+    let (free_mb, _total_mb) = get_opt_disk_space_mb()?;
+    let existing_swap_mb = std::fs::metadata(SWAP_FILE_PATH)
+        .map(|m| m.len() / (1024 * 1024))
+        .unwrap_or(0);
+    let effective_free_mb = free_mb.saturating_add(existing_swap_mb);
+    let required_mb = size_mb.saturating_add(SAFETY_MARGIN_MB);
+
+    if effective_free_mb < required_mb {
+        return Err(format!(
+            "Недостаточно места на накопителе: свободно {} МБ, требуется {} МБ",
+            effective_free_mb, required_mb
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Если прежний swapfile был активен, отключаем его перед пересозданием
+        let _ = std::process::Command::new("swapoff").arg(SWAP_FILE_PATH).output();
+
+        // 2. Безопасное выделение файла без фрагментации («No Holes») через `dd`
+        let dd_out = std::process::Command::new("dd")
+            .args([
+                "if=/dev/zero",
+                &format!("of={}", SWAP_FILE_PATH),
+                "bs=1M",
+                &format!("count={}", size_mb),
+            ])
+            .output()
+            .map_err(|e| format!("Не удалось запустить dd: {}", e))?;
+
+        if !dd_out.status.success() {
+            let _ = std::fs::remove_file(SWAP_FILE_PATH);
+            return Err(format!(
+                "Ошибка при создании файла подкачки (dd): {}",
+                String::from_utf8_lossy(&dd_out.stderr).trim()
+            ));
+        }
+
+        // 3. Строгие права `chmod 600 /opt/swapfile`
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = std::fs::set_permissions(SWAP_FILE_PATH, std::fs::Permissions::from_mode(0o600)) {
+                let _ = std::fs::remove_file(SWAP_FILE_PATH);
+                return Err(format!(
+                    "Не удалось установить права 600 на {}: {}",
+                    SWAP_FILE_PATH, e
+                ));
+            }
+        }
+
+        // 4. Форматирование `mkswap /opt/swapfile`
+        let mkswap_out = std::process::Command::new("mkswap")
+            .arg(SWAP_FILE_PATH)
+            .output()
+            .map_err(|e| format!("Не удалось запустить mkswap: {}", e))?;
+
+        if !mkswap_out.status.success() {
+            let _ = std::fs::remove_file(SWAP_FILE_PATH);
+            return Err(format!(
+                "Ошибка mkswap: {}",
+                String::from_utf8_lossy(&mkswap_out.stderr).trim()
+            ));
+        }
+
+        // 5. Мгновенная активация `swapon /opt/swapfile`
+        let swapon_out = std::process::Command::new("swapon")
+            .arg(SWAP_FILE_PATH)
+            .output()
+            .map_err(|e| format!("Не удалось запустить swapon: {}", e))?;
+
+        if !swapon_out.status.success() {
+            let _ = std::fs::remove_file(SWAP_FILE_PATH);
+            return Err(format!(
+                "Ошибка активации swapon: {}",
+                String::from_utf8_lossy(&swapon_out.stderr).trim()
+            ));
+        }
+
+        // 6. Защита от износа флеш-памяти: `sysctl -w vm.swappiness=10`
+        let sysctl_out = std::process::Command::new("sysctl")
+            .args(["-w", &format!("vm.swappiness={}", TARGET_SWAPPINESS)])
+            .output()
+            .map_err(|e| format!("Не удалось запустить sysctl: {}", e))?;
+
+        if !sysctl_out.status.success() {
+            let _ = std::fs::write("/proc/sys/vm/swappiness", format!("{}\n", TARGET_SWAPPINESS));
+        }
+
+        // 7. Создание автозагрузочного скрипта `/opt/etc/init.d/S01swap` с правами `chmod +x`
+        if let Some(parent) = std::path::Path::new(INIT_SCRIPT_PATH).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(INIT_SCRIPT_PATH, INIT_SCRIPT_CONTENT)
+            .map_err(|e| format!("Не удалось записать {}: {}", INIT_SCRIPT_PATH, e))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(INIT_SCRIPT_PATH, std::fs::Permissions::from_mode(0o755)).map_err(|e| {
+                format!(
+                    "Не удалось установить права +x на {}: {}",
+                    INIT_SCRIPT_PATH, e
+                )
+            })?;
+        }
+    }
+
+    Ok(get_swap_status())
+}
+
+/// Отключает и полностью удаляет `/opt/swapfile` и `/opt/etc/init.d/S01swap`
+pub fn disable_and_remove_swap() -> Result<SwapStatus, String> {
+    #[cfg(target_os = "linux")]
+    {
+        if std::path::Path::new(SWAP_FILE_PATH).exists() {
+            let swapoff_out = std::process::Command::new("swapoff")
+                .arg(SWAP_FILE_PATH)
+                .output()
+                .map_err(|e| format!("Не удалось запустить swapoff: {}", e))?;
+
+            if !swapoff_out.status.success() {
+                let swaps = std::fs::read_to_string("/proc/swaps").unwrap_or_default();
+                if swaps.contains(SWAP_FILE_PATH) {
+                    return Err(format!(
+                        "Не удалось отключить Swap (возможно, недостаточно свободной ОЗУ для выгрузки страниц): {}",
+                        String::from_utf8_lossy(&swapoff_out.stderr).trim()
+                    ));
+                }
+            }
+
+            std::fs::remove_file(SWAP_FILE_PATH)
+                .map_err(|e| format!("Не удалось удалить {}: {}", SWAP_FILE_PATH, e))?;
+        }
+
+        if std::path::Path::new(INIT_SCRIPT_PATH).exists() {
+            std::fs::remove_file(INIT_SCRIPT_PATH)
+                .map_err(|e| format!("Не удалось удалить {}: {}", INIT_SCRIPT_PATH, e))?;
+        }
+    }
+
+    Ok(get_swap_status())
 }

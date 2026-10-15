@@ -48,7 +48,6 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'google-ai', label: '🤖 Google AI' },
   { id: 'connections', label: '🌐 Соединения & Диагностика' },
   { id: 'rules', label: '📋 Правила' },
-  { id: 'adguard', label: '🛡️ AdGuard' },
 ]
 
 interface Toast {
@@ -86,7 +85,7 @@ export default function App() {
     const h = window.location.hash.replace('#', '')
     if (h === 'antigravity') return 'google-ai'
     if (h === 'diagnostics') return 'connections'
-    return (TABS.some((t) => t.id === h) || h === 'settings' || h === 'help' ? h : 'dashboard') as TabId
+    return (TABS.some((t) => t.id === h) || h === 'settings' || h === 'help' || h === 'adguard' ? h : 'dashboard') as TabId
   })()
   const [tab, setTab] = useState<TabId>(initial)
   const [status, setStatus] = useState<StatusInfo | null>(null)
@@ -181,7 +180,7 @@ export default function App() {
     const handleLocationChange = () => {
       const h = window.location.hash.replace('#', '')
       const targetTab = (h === 'antigravity' ? 'google-ai' : h) as TabId
-      if (TABS.some((t) => t.id === targetTab) || targetTab === 'settings' || targetTab === 'help') {
+      if (TABS.some((t) => t.id === targetTab) || targetTab === 'settings' || targetTab === 'help' || targetTab === 'adguard') {
         setTab(targetTab)
       }
     }

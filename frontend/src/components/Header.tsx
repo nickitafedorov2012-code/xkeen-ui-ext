@@ -60,6 +60,14 @@ function IconZap() {
   )
 }
 
+function IconShield() {
+  return (
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+    </svg>
+  )
+}
+
 
 function IconRefresh({ className = '' }: { className?: string }) {
   return (
@@ -326,6 +334,62 @@ export default function Header({
     }
   }, [])
 
+  // AdGuard Home: статус и управление защитой в хедере
+  const [adguardRunning, setAdguardRunning] = useState<boolean | null>(null)
+  const [adguardProtection, setAdguardProtection] = useState<boolean | null>(null)
+  const [adguardPending, setAdguardPending] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    const checkAdguard = async () => {
+      if (document.hidden) return
+      try {
+        const res = await apiGet<{ running?: boolean; protection_enabled?: boolean }>('adguard/status')
+        if (active && res) {
+          if (res.running !== undefined) setAdguardRunning(Boolean(res.running))
+          if (res.protection_enabled !== undefined) setAdguardProtection(Boolean(res.protection_enabled))
+        }
+      } catch {
+        /* AdGuard может быть не установлен или временно недоступен */
+      }
+    }
+
+    checkAdguard()
+    const timer = setInterval(checkAdguard, 15_000)
+
+    const handleProtectionSync = (e: Event) => {
+      const detail = (e as CustomEvent<{ enabled: boolean }>).detail
+      if (detail && typeof detail.enabled === 'boolean') {
+        setAdguardProtection(detail.enabled)
+      }
+    }
+    window.addEventListener('xr:adguard-protection-changed', handleProtectionSync)
+
+    return () => {
+      active = false
+      clearInterval(timer)
+      window.removeEventListener('xr:adguard-protection-changed', handleProtectionSync)
+    }
+  }, [])
+
+  const handleToggleAdguardProtection = async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (adguardPending) return
+    const nextState = !adguardProtection
+    setAdguardPending(true)
+    try {
+      await apiPost<{ enabled: boolean }>('/adguard/protection', { enabled: nextState })
+      await apiPost('adblock/toggle', { enabled: nextState }).catch(() => null)
+      setAdguardProtection(nextState)
+      window.dispatchEvent(new CustomEvent('xr:adguard-protection-changed', { detail: { enabled: nextState } }))
+      notify(nextState ? 'Защита AdGuard Home включена' : 'Защита AdGuard Home приостановлена')
+    } catch (err: any) {
+      notify(`Ошибка переключения защиты AdGuard: ${err.message || err}`, true)
+    } finally {
+      setAdguardPending(false)
+    }
+  }
+
   // Память и CPU (живые из 1-секундного таймера либо из статуса)
   const currentMetrics = liveMetrics || status?.system
   const memUsed = Math.round(currentMetrics?.memory_used_mb ?? 0)
@@ -573,6 +637,54 @@ export default function Header({
             </span>
           )}
         </button>
+
+        <div
+          role="button"
+          tabIndex={0}
+          data-testid="header-adguard-pill"
+          className={`header-pill-btn header-adguard-pill ${activeTab === 'adguard' ? 'active' : ''}`}
+          onClick={() => onSwitchTab('adguard')}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              onSwitchTab('adguard')
+            }
+          }}
+          title={
+            adguardRunning === false
+              ? 'AdGuard Home не запущен. Нажмите для открытия вкладки AdGuard'
+              : adguardProtection
+              ? 'AdGuard Home: Защита включена. Кликните для открытия вкладки или тумблер для паузы'
+              : 'AdGuard Home: Защита приостановлена. Кликните для открытия вкладки или тумблер для включения'
+          }
+        >
+          <IconShield />
+          <span className="header-pill-title">AdGuard</span>
+          <span
+            className="header-pill-subtitle"
+            data-testid="header-adguard-status-text"
+          >
+            {adguardRunning === false
+              ? 'Выкл'
+              : adguardProtection === true
+              ? 'В защите'
+              : adguardProtection === false
+              ? 'Пауза'
+              : '—'}
+          </span>
+          {adguardRunning !== false && (
+            <button
+              type="button"
+              className={`header-pill-mini-switch ${adguardProtection ? 'active' : ''}`}
+              onClick={handleToggleAdguardProtection}
+              disabled={adguardPending}
+              data-testid="header-adguard-toggle-switch"
+              title={adguardProtection ? 'Приостановить защиту AdGuard' : 'Включить защиту AdGuard'}
+            >
+              <span className="mini-switch-knob" />
+            </button>
+          )}
+        </div>
       </div>
 
       {/* 4. ЗАПУСК / ОСТАНОВКА (82px: высота 38px, красный только для остановки) */}

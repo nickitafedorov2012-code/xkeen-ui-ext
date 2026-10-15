@@ -1,11 +1,175 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
-import { pingClass, type AppSettings, type DnsMode, type DnsEnhancedMode, type ServerInfo, type StatusInfo } from '../types'
+import {
+  pingClass,
+  type AppSettings,
+  type DnsMode,
+  type DnsEnhancedMode,
+  type ServerInfo,
+  type StatusInfo,
+  type SwapStatus,
+  type SwapSizePresetMb,
+} from '../types'
 import NumberInput from './NumberInput'
 import ConfigEditor from './ConfigEditor'
 import PresetCatalogModal from './PresetCatalogModal'
 import LogsViewer from './LogsViewer'
 import TaskManager from './TaskManager'
+
+export function SwapManager({ notify }: { notify: (msg: string, isErr?: boolean) => void }) {
+  const [status, setStatus] = useState<SwapStatus | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [selectedSize, setSelectedSize] = useState<SwapSizePresetMb>(512)
+
+  const loadStatus = useCallback(async () => {
+    try {
+      const data = await apiGet<SwapStatus>('system/swap/status')
+      setStatus(data)
+    } catch (e: any) {
+      console.warn('Ошибка получения статуса Swap:', e)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadStatus()
+  }, [loadStatus])
+
+  const handleCreate = async () => {
+    setLoading(true)
+    notify(`⏳ Выделение файла подкачки ${selectedSize} МБ на USB... Подождите 10-20 сек.`)
+    try {
+      const res = await apiPost<SwapStatus>('system/swap/create', { size_mb: selectedSize })
+      setStatus(res)
+      notify(`✓ Файл подкачки ${selectedSize} МБ успешно создан и активирован!`)
+    } catch (err: any) {
+      notify(err.message || 'Ошибка создания Swap', true)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleRemove = async () => {
+    if (typeof window !== 'undefined' && !window.confirm('Отключить и удалить файл подкачки?')) return
+    setLoading(true)
+    try {
+      const res = await apiPost<SwapStatus>('system/swap/remove', {})
+      setStatus(res)
+      notify('Файл подкачки отключен и удален')
+    } catch (err: any) {
+      notify(err.message || 'Ошибка отключения Swap', true)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  if (!status || !status.swap_supported) return null
+
+  const ramUsedMb = Math.max(0, status.ram_total_mb - status.ram_free_mb)
+  const ramPercent = Math.min(100, Math.round((ramUsedMb / (status.ram_total_mb || 1)) * 100))
+  const swapPercent =
+    status.swap_total_mb > 0
+      ? Math.min(100, Math.round((status.swap_used_mb / status.swap_total_mb) * 100))
+      : 0
+
+  return (
+    <div className="card" style={{ marginTop: 16 }} data-testid="swap-manager-card">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h3 style={{ margin: 0 }}>🚀 Память и файл подкачки (Swap)</h3>
+        <span
+          className={`badge ${status.swap_active ? 'badge-success' : 'badge-muted'}`}
+          data-testid="swap-status-badge"
+        >
+          {status.swap_active ? '🟢 Swap активен' : '⚪ Swap выключен'}
+        </span>
+      </div>
+      <p className="muted small" style={{ margin: '8px 0 16px' }}>
+        Технология защиты от вылетов ядра и нехватки ОЗУ на роутере Keenetic.
+        Используется щадящий режим флешки (swappiness=10).
+      </p>
+
+      {/* Метрики памяти */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12, marginBottom: 16 }}>
+        <div style={{ background: 'rgba(255,255,255,0.03)', padding: 12, borderRadius: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 6 }}>
+            <span>ОЗУ роутера</span>
+            <b>{ramUsedMb} / {status.ram_total_mb} МБ ({ramPercent}%)</b>
+          </div>
+          <div className="progress-bar">
+            <div
+              className="progress-fill"
+              style={{
+                width: `${ramPercent}%`,
+                background: ramPercent > 85 ? '#ef4444' : '#38bdf8',
+              }}
+            />
+          </div>
+          <div className="muted small" style={{ marginTop: 4 }}>
+            Свободно: {status.ram_free_mb} МБ
+          </div>
+        </div>
+
+        <div style={{ background: 'rgba(255,255,255,0.03)', padding: 12, borderRadius: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 6 }}>
+            <span>Файл подкачки (Swap)</span>
+            <b>{status.swap_used_mb} / {status.swap_total_mb} МБ ({swapPercent}%)</b>
+          </div>
+          <div className="progress-bar">
+            <div
+              className="progress-fill"
+              style={{ width: `${swapPercent}%`, background: '#22c55e' }}
+            />
+          </div>
+          <div className="muted small" style={{ marginTop: 4 }}>
+            Накопитель /opt: свободно {status.opt_disk_free_mb} МБ
+          </div>
+        </div>
+      </div>
+
+      {/* Управление */}
+      {!status.swap_active ? (
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', background: 'rgba(255,255,255,0.05)', borderRadius: 6, padding: 3 }}>
+            {([256, 512, 1024] as const).map((sz) => (
+              <button
+                key={sz}
+                type="button"
+                className={`btn-tab ${selectedSize === sz ? 'active' : ''}`}
+                style={{ padding: '6px 14px', fontSize: 12 }}
+                onClick={() => setSelectedSize(sz)}
+                data-testid={`swap-preset-${sz}`}
+              >
+                {sz} МБ {sz === 512 ? '★' : ''}
+              </button>
+            ))}
+          </div>
+          <button
+            className="btn btn-primary"
+            disabled={loading}
+            onClick={handleCreate}
+            style={{ minWidth: 200 }}
+            data-testid="swap-create-button"
+          >
+            {loading ? '⏳ Создание (15 сек)...' : `🚀 Создать Swap ${selectedSize} МБ в 1 клик`}
+          </button>
+        </div>
+      ) : (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <span className="small muted">
+            Файл <code>{status.swap_file_path}</code> ({status.swap_total_mb} МБ) активен. Автозапуск настроен в <code>S01swap</code>.
+          </span>
+          <button
+            className="btn btn-danger"
+            disabled={loading}
+            onClick={handleRemove}
+            data-testid="swap-remove-button"
+          >
+            {loading ? '⏳ Удаление...' : '🗑 Отключить и удалить Swap'}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
 
 interface Props {
   notify: (msg: string, isError?: boolean) => void
@@ -921,6 +1085,55 @@ export default function Settings({ notify, status, refresh }: Props) {
               </div>
             </div>
 
+            {/* Best-Ping Failover (Динамический выбор узла с наименьшей задержкой) */}
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <b style={{ display: 'block', fontSize: 13 }}>🚀 Режим Best-Ping (пул до 15 узлов)</b>
+                <span className="muted small">Автоматический опрос пула серверов и переключение на узел с минимальным пингом</span>
+              </div>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+                <label className="switch" title="Включить режим динамического выбора лучшего пинга">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(settings.failover.best_ping_enabled)}
+                    onChange={(e) => patch((s) => (s.failover.best_ping_enabled = e.target.checked))}
+                    data-testid="settings-best-ping-toggle"
+                  />
+                  <span className="slider" />
+                </label>
+                <span style={{ fontSize: 13, minWidth: 64, color: settings.failover.best_ping_enabled ? 'var(--green)' : 'var(--muted)' }}>
+                  {settings.failover.best_ping_enabled ? 'Включён' : 'Выключен'}
+                </span>
+              </div>
+            </div>
+
+            {settings.failover.best_ping_enabled && (
+              <div className="row-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, background: 'rgba(0, 211, 242, 0.04)', padding: '10px 12px', borderRadius: 8, border: '1px solid rgba(0, 211, 242, 0.15)' }}>
+                <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                  <span style={{ fontSize: 12 }}>Размер пула серверов (шт.)</span>
+                  <NumberInput
+                    min={3}
+                    max={30}
+                    step={1}
+                    fallback={15}
+                    value={settings.failover.best_ping_pool_size ?? 15}
+                    onChange={(val) => patch((s) => (s.failover.best_ping_pool_size = val))}
+                  />
+                </label>
+                <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                  <span style={{ fontSize: 12 }}>Гистерезис переключения (мс)</span>
+                  <NumberInput
+                    min={10}
+                    max={200}
+                    step={5}
+                    fallback={40}
+                    value={settings.failover.best_ping_hysteresis_ms ?? 40}
+                    onChange={(val) => patch((s) => (s.failover.best_ping_hysteresis_ms = val))}
+                  />
+                </label>
+              </div>
+            )}
+
             <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center', marginTop: 4, flexWrap: 'wrap' }}>
               <button className="btn" onClick={testCheck}>🔍 Тестовая проверка сейчас</button>
               <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
@@ -1530,6 +1743,9 @@ export default function Settings({ notify, status, refresh }: Props) {
           💡 Сброс пароля при утере через SSH: <code style={{ color: 'var(--accent)' }}>xkeen-route reset-password</code>
         </p>
       </section>
+
+      {/* ФАЙЛ ПОДКАЧКИ (SWAP НА USB) */}
+      <SwapManager notify={notify} />
 
       {/* ДИСПЕТЧЕР ЗАДАЧ (HTOP) */}
       <section id="task-manager-section" className="card" style={{ padding: 16 }}>
