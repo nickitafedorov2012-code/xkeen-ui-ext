@@ -257,6 +257,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                         state.failover_log.push(&msg, true).await;
                         crate::notifications::notify_failover(
                             &state.http,
+                            Some(&cfg.mihomo_proxy_url()),
                             &cfg.notifications,
                             "switch",
                             "Best-Ping Failover — выбор лучшего сервера",
@@ -317,6 +318,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                                 state.failover_log.push(&msg, true).await;
                                 crate::notifications::notify_failover(
                                     &state.http,
+                                    Some(&cfg.mihomo_proxy_url()),
                                     &cfg.notifications,
                                     "restore",
                                     "Восстановление основного сервера",
@@ -396,6 +398,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                     state.failover_log.push(&msg, true).await;
                     crate::notifications::notify_failover(
                         &state.http,
+                        Some(&cfg.mihomo_proxy_url()),
                         &cfg.notifications,
                         "switch",
                         "Сбой сервера — переключение на резерв",
@@ -443,6 +446,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                     state.failover_log.push(&msg, true).await;
                     crate::notifications::notify_failover(
                         &state.http,
+                        Some(&cfg.mihomo_proxy_url()),
                         &cfg.notifications,
                         "switch",
                         "Сбой сервера — переключение на резерв",
@@ -461,6 +465,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             state.failover_log.push(&msg, false).await;
             crate::notifications::notify_failover(
                 &state.http,
+                Some(&cfg.mihomo_proxy_url()),
                 &cfg.notifications,
                 "all_down",
                 "Критический сбой: Все серверы недоступны!",

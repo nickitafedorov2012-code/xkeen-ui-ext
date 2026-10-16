@@ -204,7 +204,7 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
     expect(container?.querySelector('[data-testid="settings-view"]')).not.toBeNull()
   })
 
-  it('does not render AdGuard in navbar tabs and switches to AdGuard view when header chip is clicked', async () => {
+  it('renders AdGuard tab button and switches to AdGuard view when clicked', async () => {
     await act(async () => {
       root!.render(<App />)
     })
@@ -212,13 +212,13 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
     const adguardTabBtn = Array.from(container?.querySelectorAll('nav.tabs button') || []).find((b) =>
       b.textContent?.includes('AdGuard')
     ) as HTMLButtonElement | undefined
-    expect(adguardTabBtn).toBeUndefined()
+    expect(adguardTabBtn).toBeDefined()
 
     const adguardPill = container?.querySelector('[data-testid="header-adguard-pill"]') as HTMLElement | null
-    expect(adguardPill).not.toBeNull()
+    expect(adguardPill).toBeNull()
 
     await act(async () => {
-      adguardPill?.click()
+      adguardTabBtn?.click()
     })
 
     expect(container?.querySelector('[data-testid="adguard-view"]')).not.toBeNull()

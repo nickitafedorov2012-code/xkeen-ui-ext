@@ -258,3 +258,132 @@ describe('SwapRecommendationBanner Component', () => {
   })
 })
 
+describe('Settings Component — Notifications Guidance & Validation', () => {
+  let container: HTMLDivElement | null = null
+  let root: ReturnType<typeof createRoot> | null = null
+  const notifyMock = vi.fn()
+  const refreshMock = vi.fn().mockResolvedValue(undefined)
+
+  beforeEach(() => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    vi.restoreAllMocks()
+    notifyMock.mockClear()
+    refreshMock.mockClear()
+
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'settings') {
+        return Promise.resolve({
+          ...mockSettings,
+          notifications: {
+            telegram_enabled: true,
+            telegram_bot_token: '8959891087:AAHWkeSw_WL6b8k3J9tONrms-7F2NgE2Yfo',
+            telegram_chat_id: '123456789',
+            webhook_url: '',
+          },
+        })
+      }
+      if (path === 'servers') return Promise.resolve({ servers: [] })
+      if (path === 'domains') return Promise.resolve({ direct: [], force: [] })
+      if (path === 'dns/mode') return Promise.resolve({ enhanced_mode: 'fake-ip' })
+      if (path === 'backups') return Promise.resolve([])
+      if (path === 'system/swap/status' || path === 'system/swap-status') return Promise.resolve(mockSwapInactive)
+      if (path === 'system/geo-info') return Promise.resolve({ geoip: { size: 100, updated_at: '' }, geosite: { size: 100, updated_at: '' } })
+      if (path === 'adblock') return Promise.resolve({ enabled: false })
+      if (path === 'zapret/status') return Promise.resolve({ installed: false, running: false })
+      return Promise.reject(new Error(`Unhandled path: ${path}`))
+    })
+  })
+
+  afterEach(() => {
+    if (root && container) {
+      act(() => {
+        root!.unmount()
+      })
+      container.remove()
+    }
+  })
+
+  it('renders help badges (?) for Bot Token, Chat ID, and Webhook URL and toggles instructions', async () => {
+    await act(async () => {
+      root!.render(<Settings notify={notifyMock} refresh={refreshMock} />)
+    })
+
+    const helpButtons = container?.querySelectorAll('.badge-help-btn') as NodeListOf<HTMLButtonElement>
+    expect(helpButtons.length).toBe(3)
+
+    // Initially no help-box-tip is visible
+    expect(container?.querySelector('.help-box-tip')).toBeNull()
+
+    // Click Bot Token help button
+    await act(async () => {
+      helpButtons[0].click()
+    })
+
+    let tip = container?.querySelector('.help-box-tip')
+    expect(tip).not.toBeNull()
+    expect(tip?.textContent).toContain('Как получить Bot Token')
+    expect(tip?.textContent).toContain('@BotFather')
+
+    // Click again to toggle off
+    await act(async () => {
+      helpButtons[0].click()
+    })
+    expect(container?.querySelector('.help-box-tip')).toBeNull()
+
+    // Click Chat ID help button
+    await act(async () => {
+      helpButtons[1].click()
+    })
+    tip = container?.querySelector('.help-box-tip')
+    expect(tip).not.toBeNull()
+    expect(tip?.textContent).toContain('Как узнать ваш Chat ID')
+    expect(tip?.textContent).toContain('@userinfobot')
+  })
+
+  it('detects when Chat ID matches bot ID and warns user', async () => {
+    await act(async () => {
+      root!.render(<Settings notify={notifyMock} refresh={refreshMock} />)
+    })
+
+    // Find Chat ID input
+    const inputs = container?.querySelectorAll('.card input.input') as NodeListOf<HTMLInputElement>
+    // Search input with current chat id
+    const chatInput = Array.from(inputs).find((inp) => inp.value === '123456789')
+    expect(chatInput).toBeDefined()
+
+    // Set Chat ID to the bot ID prefix '8959891087'
+    await act(async () => {
+      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+      nativeInputValueSetter?.call(chatInput, '8959891087')
+      chatInput!.dispatchEvent(new Event('input', { bubbles: true }))
+      chatInput!.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+
+    expect(container?.textContent).toContain('Вы указали ID самого бота (8959891087)! Бот не может писать сам себе')
+  })
+
+  it('detects when Bot Token is missing bot ID and warns user', async () => {
+    await act(async () => {
+      root!.render(<Settings notify={notifyMock} refresh={refreshMock} />)
+    })
+
+    const inputs = container?.querySelectorAll('.card input.input') as NodeListOf<HTMLInputElement>
+    const tokenInput = Array.from(inputs).find((inp) => inp.value.includes('8959891087:'))
+    expect(tokenInput).toBeDefined()
+
+    // Cut off bot ID (as in user screenshot 2)
+    await act(async () => {
+      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+      nativeInputValueSetter?.call(tokenInput, 'AAHWkeSw_WL6b8k3J9tONrms-7F2NgE2Yfo')
+      tokenInput!.dispatchEvent(new Event('input', { bubbles: true }))
+      tokenInput!.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+
+    expect(container?.textContent).toContain('Токен неполный! В начале обязательно должен быть числовой ID бота и двоеточие')
+  })
+})
+
+
+

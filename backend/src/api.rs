@@ -3404,14 +3404,27 @@ pub async fn test_notification(
     let bot_token = body.telegram_bot_token.unwrap_or_else(|| cfg.notifications.telegram_bot_token.clone());
     let chat_id = body.telegram_chat_id.unwrap_or_else(|| cfg.notifications.telegram_chat_id.clone());
     let webhook = body.webhook_url.unwrap_or_else(|| cfg.notifications.webhook_url.clone());
+    let proxy_url = cfg.mihomo_proxy_url();
 
     let mut results = Vec::new();
 
-    if !bot_token.is_empty() && !chat_id.is_empty() {
-        let test_msg = "<b>🔔 Тестовое уведомление XKeen Route</b>\n\nСвязь с Telegram Bot API успешно установлена!\nВы будете получать оповещения при сбоях и переключениях серверов Failover.";
-        match crate::notifications::send_telegram(&state.http, &bot_token, &chat_id, test_msg).await {
-            Ok(_) => results.push("Telegram: ✓ Сообщение успешно отправлено".to_string()),
-            Err(e) => results.push(format!("Telegram: ❌ {}", e)),
+    if !bot_token.trim().is_empty() || !chat_id.trim().is_empty() {
+        if bot_token.trim().is_empty() {
+            results.push("Telegram: ❌ Не указан Bot Token".to_string());
+        } else if chat_id.trim().is_empty() {
+            results.push("Telegram: ❌ Не указан Chat ID".to_string());
+        } else {
+            let test_msg = "<b>🔔 Тестовое уведомление XKeen Route</b>\n\nСвязь с Telegram Bot API успешно установлена!\nВы будете получать оповещения при сбоях и переключениях серверов Failover.";
+            match crate::notifications::send_telegram_with_proxy(
+                &state.http,
+                Some(&proxy_url),
+                &bot_token,
+                &chat_id,
+                test_msg,
+            ).await {
+                Ok(_) => results.push("Telegram: ✓ Сообщение успешно отправлено".to_string()),
+                Err(e) => results.push(format!("Telegram: ❌ {}", e)),
+            }
         }
     }
 

@@ -46,7 +46,8 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'gaming', label: '🎮 Игры' },
   { id: 'xbox-dns', label: '🎮 Xbox DNS' },
   { id: 'google-ai', label: '🤖 Google AI' },
-  { id: 'connections', label: '🌐 Соединения & Диагностика' },
+  { id: 'adguard', label: '🛡️ AdGuard' },
+  { id: 'connections', label: '🌐 Соединения' },
   { id: 'rules', label: '📋 Правила' },
 ]
 

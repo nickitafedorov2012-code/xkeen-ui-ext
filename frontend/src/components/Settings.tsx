@@ -211,6 +211,35 @@ export default function Settings({ notify, status, refresh }: Props) {
   const [webhookUrl, setWebhookUrl] = useState('')
   const [notifTesting, setNotifTesting] = useState(false)
   const [notifSaving, setNotifSaving] = useState(false)
+  const [activeNotifHelp, setActiveNotifHelp] = useState<'token' | 'chatId' | 'webhook' | null>(null)
+
+  // Валидация настроек Telegram
+  const cleanNotifToken = telegramBotToken.trim().replace(/^['"]|['"]$/g, '')
+  const cleanNotifChatId = telegramChatId.trim().replace(/^['"]|['"]$/g, '')
+
+  let notifTokenWarning: string | null = null
+  if (cleanNotifToken) {
+    if (cleanNotifToken.startsWith('@') || cleanNotifToken.startsWith('http://') || cleanNotifToken.startsWith('https://') || cleanNotifToken.startsWith('t.me/')) {
+      notifTokenWarning = 'Введена ссылка или юзернейм вместо токена. Скопируйте токен целиком из @BotFather (вид: 123456789:ABCdef...)'
+    } else {
+      const parts = cleanNotifToken.split(':')
+      if (parts.length !== 2 || !parts[0] || !parts[1] || !/^\d+$/.test(parts[0])) {
+        notifTokenWarning = 'Токен неполный! В начале обязательно должен быть числовой ID бота и двоеточие (например: 8959891087:AAHW...)'
+      }
+    }
+  }
+
+  let notifChatIdWarning: string | null = null
+  if (cleanNotifChatId) {
+    const botIdFromToken = cleanNotifToken.includes(':') ? cleanNotifToken.split(':')[0] : ''
+    if (botIdFromToken && cleanNotifChatId === botIdFromToken) {
+      notifChatIdWarning = `⚠️ Вы указали ID самого бота (${cleanNotifChatId})! Бот не может писать сам себе. Получите ваш личный Chat ID через @userinfobot`
+    } else if (cleanNotifChatId.startsWith('@')) {
+      notifChatIdWarning = 'Личный Chat ID должен быть числовым (получите через @userinfobot). @username работает только для публичных каналов'
+    } else if (!/^-?\d+$/.test(cleanNotifChatId)) {
+      notifChatIdWarning = 'Chat ID должен состоять только из цифр (для групп допустим знак минус, например -100...)'
+    }
+  }
 
   // --- Сервис XKeen ---
   const [svcBusy, setSvcBusy] = useState('')
@@ -703,6 +732,16 @@ export default function Settings({ notify, status, refresh }: Props) {
   }
 
   const handleTestNotification = async () => {
+    if (telegramEnabled) {
+      if (notifTokenWarning) {
+        notify(notifTokenWarning, true)
+        return
+      }
+      if (notifChatIdWarning) {
+        notify(notifChatIdWarning, true)
+        return
+      }
+    }
     setNotifTesting(true)
     try {
       const res = await apiPost<{ message?: string; results?: string[] }>('notifications/test', {
@@ -1264,34 +1303,127 @@ export default function Settings({ notify, status, refresh }: Props) {
                 <span className="slider" />
               </label>
             </div>
-            <label className="row">
-              <span>Bot Token</span>
-              <input
-                className="input"
-                placeholder="123456789:ABCdefGhIJKlmNoPQRstuVWXyz"
-                value={telegramBotToken}
-                onChange={(e) => setTelegramBotToken(e.target.value)}
-              />
+
+            {/* BOT TOKEN */}
+            <label className="row" style={{ alignItems: 'flex-start', marginTop: 8 }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, paddingTop: 6 }}>
+                Bot Token
+                <button
+                  type="button"
+                  className={`badge-help-btn ${activeNotifHelp === 'token' ? 'active' : ''}`}
+                  title="Где взять токен бота? Нажмите для инструкции"
+                  onClick={() => setActiveNotifHelp((prev) => (prev === 'token' ? null : 'token'))}
+                >
+                  ?
+                </button>
+              </span>
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                <input
+                  className="input"
+                  placeholder="123456789:ABCdefGhIJKlmNoPQRstuVWXyz"
+                  value={telegramBotToken}
+                  onChange={(e) => setTelegramBotToken(e.target.value)}
+                  style={notifTokenWarning ? { borderColor: 'var(--red, #ef4444)' } : undefined}
+                />
+                {notifTokenWarning && (
+                  <span style={{ fontSize: 11, color: 'var(--red, #ef4444)', lineHeight: 1.3 }}>
+                    ⚠️ {notifTokenWarning}
+                  </span>
+                )}
+              </div>
             </label>
-            <label className="row">
-              <span>Chat ID</span>
-              <input
-                className="input"
-                placeholder="123456789 или -1001234567890"
-                value={telegramChatId}
-                onChange={(e) => setTelegramChatId(e.target.value)}
-              />
+            {activeNotifHelp === 'token' && (
+              <div className="help-box-tip" style={{ marginTop: 4, marginBottom: 8 }}>
+                <div style={{ fontWeight: 600, marginBottom: 4, color: 'var(--accent, #38bdf8)' }}>🤖 Как получить Bot Token:</div>
+                <ol style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 1.5 }}>
+                  <li>Откройте официального бота <a href="https://t.me/BotFather" target="_blank" rel="noreferrer" style={{ color: 'var(--accent, #38bdf8)', textDecoration: 'underline' }}>@BotFather</a> в Telegram.</li>
+                  <li>Отправьте команду <code>/newbot</code>, укажите имя и username (должен оканчиваться на <code>bot</code>).</li>
+                  <li>Скопируйте выданный токен <b>целиком</b> (вид: <code>8959891087:AAHWke...</code>) и вставьте в это поле. Не удаляйте цифры в начале!</li>
+                </ol>
+              </div>
+            )}
+
+            {/* CHAT ID */}
+            <label className="row" style={{ alignItems: 'flex-start', marginTop: 8 }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, paddingTop: 6 }}>
+                Chat ID
+                <button
+                  type="button"
+                  className={`badge-help-btn ${activeNotifHelp === 'chatId' ? 'active' : ''}`}
+                  title="Как узнать свой Chat ID? Нажмите для инструкции"
+                  onClick={() => setActiveNotifHelp((prev) => (prev === 'chatId' ? null : 'chatId'))}
+                >
+                  ?
+                </button>
+              </span>
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                <input
+                  className="input"
+                  placeholder="123456789 или -1001234567890"
+                  value={telegramChatId}
+                  onChange={(e) => setTelegramChatId(e.target.value)}
+                  style={notifChatIdWarning ? { borderColor: 'var(--red, #ef4444)' } : undefined}
+                />
+                {notifChatIdWarning && (
+                  <span style={{ fontSize: 11, color: 'var(--red, #ef4444)', lineHeight: 1.3 }}>
+                    {notifChatIdWarning}
+                  </span>
+                )}
+              </div>
             </label>
-            <label className="row">
-              <span>Webhook URL</span>
-              <input
-                className="input"
-                placeholder="https://my-server.com/api/failover-hook"
-                value={webhookUrl}
-                onChange={(e) => setWebhookUrl(e.target.value)}
-              />
+            {activeNotifHelp === 'chatId' && (
+              <div className="help-box-tip" style={{ marginTop: 4, marginBottom: 8 }}>
+                <div style={{ fontWeight: 600, marginBottom: 4, color: 'var(--accent, #38bdf8)' }}>🆔 Как узнать ваш Chat ID:</div>
+                <ol style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 1.5 }}>
+                  <li>Откройте бота <a href="https://t.me/userinfobot" target="_blank" rel="noreferrer" style={{ color: 'var(--accent, #38bdf8)', textDecoration: 'underline' }}>@userinfobot</a> (или @getmyid_bot) и нажмите <b>/start</b>.</li>
+                  <li>Скопируйте ваш числовой <code>Id</code> (например, <code>712345678</code>) и вставьте в это поле.</li>
+                  <li>⚠️ <b>Обязательно:</b> зайдите в вашего <b>созданного бота</b> и нажмите кнопку <b>СТАРТ (/start)</b>, иначе Telegram запретит боту писать вам!</li>
+                  <li><i>Для группы: добавьте бота в группу и укажите ID группы (начинается с <code>-100...</code>).</i></li>
+                </ol>
+              </div>
+            )}
+
+            {/* WEBHOOK URL */}
+            <label className="row" style={{ alignItems: 'flex-start', marginTop: 8 }}>
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, paddingTop: 6 }}>
+                Webhook URL
+                <button
+                  type="button"
+                  className={`badge-help-btn ${activeNotifHelp === 'webhook' ? 'active' : ''}`}
+                  title="Что такое Webhook URL? Нажмите для справки"
+                  onClick={() => setActiveNotifHelp((prev) => (prev === 'webhook' ? null : 'webhook'))}
+                >
+                  ?
+                </button>
+              </span>
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                <input
+                  className="input"
+                  placeholder="https://my-server.com/api/failover-hook"
+                  value={webhookUrl}
+                  onChange={(e) => setWebhookUrl(e.target.value)}
+                />
+                <span className="muted small" style={{ fontSize: 11 }}>
+                  💡 Не требуется для Telegram! Используется только для Discord, Home Assistant или внешних серверов.
+                </span>
+              </div>
             </label>
-            <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+            {activeNotifHelp === 'webhook' && (
+              <div className="help-box-tip" style={{ marginTop: 4, marginBottom: 8 }}>
+                <div style={{ fontWeight: 600, marginBottom: 4, color: 'var(--accent, #38bdf8)' }}>🔗 Для чего нужно поле Webhook URL:</div>
+                <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5 }}>
+                  Если вы настраиваете оповещения в <b>Telegram</b> — оставьте это поле <b>пустым</b>.<br />
+                  Webhook URL нужен только для автоматической отправки JSON-событий в сторонние сервисы:
+                </p>
+                <ul style={{ margin: '4px 0 0 0', paddingLeft: 18, fontSize: 12, lineHeight: 1.5 }}>
+                  <li><b>Discord</b> (URL вебхука текстового канала из настроек сервера)</li>
+                  <li><b>Home Assistant / Node-RED / n8n</b> (умный дом)</li>
+                  <li>Собственные сервера и скрипты мониторинга</li>
+                </ul>
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
               <button className="btn primary" onClick={handleSaveNotifications} disabled={notifSaving}>
                 {notifSaving ? 'Сохранение…' : '💾 Сохранить оповещения'}
               </button>
