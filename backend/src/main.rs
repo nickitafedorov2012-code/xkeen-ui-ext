@@ -19,6 +19,7 @@ mod notifications;
 pub mod traffic;
 mod system;
 pub mod adguard;
+pub mod bot;
 
 use axum::extract::Request;
 use axum::middleware::{self, Next};
@@ -397,6 +398,7 @@ async fn main() {
     failover::spawn(state.clone());
     watchdog::spawn(state.clone());
     traffic::spawn(state.clone());
+    bot::spawn(state.clone());
 
     // Синхронизация файлов и Keenetic ndm хуков Zapret при старте панели
     let zapret_sync_state = state.clone();
