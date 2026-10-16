@@ -6608,6 +6608,138 @@ pub struct ZapretActionReq {
     pub engine: Option<String>,
 }
 
+/// Применение пресета конфигурации Zapret (используется и веб-панелью, и Telegram-ботом)
+pub async fn apply_zapret_preset_action(
+    state: &AppState,
+    p: &str,
+    custom_args_opt: Option<&str>,
+) -> Result<String, String> {
+    let _cfg_guard = state.config_lock.lock().await;
+    let _routing_guard = state.routing_lock.lock().await;
+    let mut cfg = (**state.config.read().await).clone();
+
+    match p {
+        "youtube" => {
+            cfg.zapret.custom_args = None;
+            cfg.zapret.youtube_turbo = true;
+            cfg.zapret.hybrid_youtube = true;
+            cfg.zapret.hybrid_discord = false;
+            cfg.zapret.discord_voice_udp = false;
+            cfg.zapret.general_bypass = false;
+            cfg.zapret.aggressive_dpi = false;
+            cfg.zapret.bypass_github = false;
+            cfg.zapret.bypass_torrents = false;
+            cfg.zapret.bypass_adult = false;
+        }
+        "discord" => {
+            cfg.zapret.custom_args = None;
+            cfg.zapret.youtube_turbo = false;
+            cfg.zapret.hybrid_youtube = false;
+            cfg.zapret.hybrid_discord = true;
+            cfg.zapret.discord_voice_udp = true;
+            cfg.zapret.general_bypass = false;
+            cfg.zapret.aggressive_dpi = false;
+            cfg.zapret.bypass_github = false;
+            cfg.zapret.bypass_torrents = false;
+            cfg.zapret.bypass_adult = false;
+        }
+        "gamer" | "media" => {
+            cfg.zapret.custom_args = None;
+            cfg.zapret.youtube_turbo = true;
+            cfg.zapret.hybrid_youtube = true;
+            cfg.zapret.hybrid_discord = true;
+            cfg.zapret.discord_voice_udp = true;
+            cfg.zapret.general_bypass = true;
+            cfg.zapret.aggressive_dpi = false;
+            cfg.zapret.isolated_proxy = true;
+            cfg.zapret.bypass_github = true;
+            cfg.zapret.bypass_torrents = true;
+            cfg.zapret.bypass_adult = false;
+        }
+        "aggressive" => {
+            cfg.zapret.custom_args = None;
+            cfg.zapret.youtube_turbo = true;
+            cfg.zapret.hybrid_youtube = true;
+            cfg.zapret.hybrid_discord = true;
+            cfg.zapret.discord_voice_udp = true;
+            cfg.zapret.general_bypass = true;
+            cfg.zapret.aggressive_dpi = true;
+            cfg.zapret.isolated_proxy = true;
+            cfg.zapret.bypass_github = true;
+            cfg.zapret.bypass_torrents = true;
+            cfg.zapret.bypass_adult = true;
+        }
+        "custom" => {
+            if let Some(custom) = custom_args_opt {
+                let clean = custom.trim().to_string();
+                if !clean.is_empty() {
+                    validate_custom_args(&clean)?;
+                    let effective = if !should_use_nfqws2(&cfg.zapret) && (clean.contains("--lua-desync") || clean.contains("multisplit")) {
+                        convert_lua_to_legacy_desync(&clean)
+                    } else {
+                        clean
+                    };
+                    cfg.zapret.custom_args = Some(effective);
+                }
+            }
+        }
+        _ => {
+            // "general" / "all"
+            cfg.zapret.custom_args = None;
+            cfg.zapret.youtube_turbo = true;
+            cfg.zapret.hybrid_youtube = true;
+            cfg.zapret.hybrid_discord = true;
+            cfg.zapret.discord_voice_udp = true;
+            cfg.zapret.general_bypass = true;
+            cfg.zapret.aggressive_dpi = false;
+            cfg.zapret.isolated_proxy = true;
+            cfg.zapret.bypass_github = true;
+            cfg.zapret.bypass_torrents = true;
+            cfg.zapret.bypass_adult = true;
+        }
+    }
+
+    sync_zapret_files(&cfg.zapret).await.map_err(|e| format!("Ошибка синхронизации файлов Zapret: {e}"))?;
+    let _ = crate::rci::set_clean_dns_servers(&state.http, &cfg).await;
+
+    // Обновляем правила в config.yaml ядра Mihomo через apply_routing
+    if std::path::Path::new(&cfg.mihomo.config_path).exists() {
+        if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+            if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &cfg) {
+                let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
+                let _ = mihomo::reload_config(&state.http, &cfg).await;
+            }
+        }
+    }
+
+    let _ = config::save(&state.config_path, &cfg).await;
+    *state.config.write().await = std::sync::Arc::new(cfg.clone());
+
+    #[cfg(unix)]
+    {
+        let is_running = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null")
+            .output()
+            .await
+            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+            .unwrap_or(false);
+        if is_running && !cfg.zapret.enabled {
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("stop").output().await;
+        } else if cfg.zapret.enabled {
+            let cmd_arg = if is_running { "restart" } else { "start" };
+            if let Ok(out) = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg(cmd_arg).output().await {
+                if !out.status.success() {
+                    let err_msg = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+                    return Err(format!("Ошибка перезапуска Zapret при применении пресета '{p}':\n{}", err_msg.trim()));
+                }
+            }
+        }
+    }
+
+    Ok(format!("Применен пресет '{p}'"))
+}
+
 /// POST /api/zapret/action — запуск, остановка, переключение, пресеты и тест DPI
 pub async fn zapret_action(
     State(state): State<AppState>,
@@ -7162,131 +7294,13 @@ pub async fn zapret_action(
     // 3. Выбор пресета / быстрых бандлов стратегий
     if act == "set_preset" {
         let p = body.preset.as_deref().unwrap_or("general");
-        let _cfg_guard = state.config_lock.lock().await;
-        let _routing_guard = state.routing_lock.lock().await;
-        let mut cfg = (**state.config.read().await).clone();
-
-        match p {
-            "youtube" => {
-                cfg.zapret.custom_args = None;
-                cfg.zapret.youtube_turbo = true;
-                cfg.zapret.hybrid_youtube = true;
-                cfg.zapret.hybrid_discord = false;
-                cfg.zapret.discord_voice_udp = false;
-                cfg.zapret.general_bypass = false;
-                cfg.zapret.aggressive_dpi = false;
-                cfg.zapret.bypass_github = false;
-                cfg.zapret.bypass_torrents = false;
-                cfg.zapret.bypass_adult = false;
+        match apply_zapret_preset_action(&state, p, body.custom_args.as_deref()).await {
+            Ok(msg) => {
+                let cfg = state.config.read().await;
+                return api_ok(json!({ "preset": p, "features": cfg.zapret, "message": msg }));
             }
-            "discord" => {
-                cfg.zapret.custom_args = None;
-                cfg.zapret.youtube_turbo = false;
-                cfg.zapret.hybrid_youtube = false;
-                cfg.zapret.hybrid_discord = true;
-                cfg.zapret.discord_voice_udp = true;
-                cfg.zapret.general_bypass = false;
-                cfg.zapret.aggressive_dpi = false;
-                cfg.zapret.bypass_github = false;
-                cfg.zapret.bypass_torrents = false;
-                cfg.zapret.bypass_adult = false;
-            }
-            "gamer" | "media" => {
-                cfg.zapret.custom_args = None;
-                cfg.zapret.youtube_turbo = true;
-                cfg.zapret.hybrid_youtube = true;
-                cfg.zapret.hybrid_discord = true;
-                cfg.zapret.discord_voice_udp = true;
-                cfg.zapret.general_bypass = true;
-                cfg.zapret.aggressive_dpi = false;
-                cfg.zapret.isolated_proxy = true;
-                cfg.zapret.bypass_github = true;
-                cfg.zapret.bypass_torrents = true;
-                cfg.zapret.bypass_adult = false;
-            }
-            "aggressive" => {
-                cfg.zapret.custom_args = None;
-                cfg.zapret.youtube_turbo = true;
-                cfg.zapret.hybrid_youtube = true;
-                cfg.zapret.hybrid_discord = true;
-                cfg.zapret.discord_voice_udp = true;
-                cfg.zapret.general_bypass = true;
-                cfg.zapret.aggressive_dpi = true;
-                cfg.zapret.isolated_proxy = true;
-                cfg.zapret.bypass_github = true;
-                cfg.zapret.bypass_torrents = true;
-                cfg.zapret.bypass_adult = true;
-            }
-            "custom" => {
-                if let Some(custom) = &body.custom_args {
-                    let clean = custom.trim().to_string();
-                    if !clean.is_empty() {
-                        if let Err(e) = validate_custom_args(&clean) {
-                            return api_err(e);
-                        }
-                        let effective = if !should_use_nfqws2(&cfg.zapret) && (clean.contains("--lua-desync") || clean.contains("multisplit")) {
-                            convert_lua_to_legacy_desync(&clean)
-                        } else {
-                            clean
-                        };
-                        cfg.zapret.custom_args = Some(effective);
-                    }
-                }
-            }
-            _ => {
-                // "general" / "all"
-                cfg.zapret.custom_args = None;
-                cfg.zapret.youtube_turbo = true;
-                cfg.zapret.hybrid_youtube = true;
-                cfg.zapret.hybrid_discord = true;
-                cfg.zapret.discord_voice_udp = true;
-                cfg.zapret.general_bypass = true;
-                cfg.zapret.aggressive_dpi = false;
-                cfg.zapret.isolated_proxy = true;
-                cfg.zapret.bypass_github = true;
-                cfg.zapret.bypass_torrents = true;
-                cfg.zapret.bypass_adult = true;
-            }
+            Err(e) => return api_err(e),
         }
-
-        if let Err(e) = sync_zapret_files(&cfg.zapret).await {
-            return api_err(format!("Ошибка синхронизации файлов Zapret: {e}"));
-        }
-        let _ = crate::rci::set_clean_dns_servers(&state.http, &cfg).await;
-
-        // Обновляем правила в config.yaml ядра Mihomo через apply_routing
-        if std::path::Path::new(&cfg.mihomo.config_path).exists() {
-            if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-                if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &cfg) {
-                    let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
-                    let _ = mihomo::reload_config(&state.http, &cfg).await;
-                }
-            }
-        }
-
-        let _ = config::save(&state.config_path, &cfg).await;
-        *state.config.write().await = std::sync::Arc::new(cfg.clone());
-
-        let is_running = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null")
-            .output()
-            .await
-            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-            .unwrap_or(false);
-        if is_running && !cfg.zapret.enabled {
-            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("stop").output().await;
-        } else if cfg.zapret.enabled {
-            let cmd_arg = if is_running { "restart" } else { "start" };
-            if let Ok(out) = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg(cmd_arg).output().await {
-                if !out.status.success() {
-                    let err_msg = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-                    return api_err(format!("Ошибка перезапуска Zapret при применении пресета '{p}':\n{}", err_msg.trim()));
-                }
-            }
-        }
-
-        return api_ok(json!({ "preset": p, "features": cfg.zapret, "message": format!("Применен пресет '{p}'") }));
     }
 
     // 4. Установка службы Zapret

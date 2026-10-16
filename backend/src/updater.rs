@@ -220,8 +220,8 @@ async fn fetch_notes(http: &reqwest::Client, tag: &str) -> String {
     extract_notes_from_markdown(EMBEDDED_DEV_MD, tag)
 }
 
-/// GET /api/update/check — текущая/последняя версия + список изменений (всегда включает changelog).
-pub async fn check(State(state): State<AppState>) -> Response {
+/// Кэшированная проверка обновлений (текущая версия, последняя версия, доступность, список изменений).
+pub async fn check_update_info(state: &AppState) -> (String, String, bool, Vec<String>) {
     let proxy_url = {
         let cfg = state.config.read().await;
         cfg.mihomo_proxy_url()
@@ -230,14 +230,13 @@ pub async fn check(State(state): State<AppState>) -> Response {
     let rel = match get_latest_cached(&state.http, &proxy_url).await {
         Ok(r) => r,
         Err(_) => {
-            // Даже если GitHub недоступен, возвращаем информацию о текущей версии и её список изменений
             let fallback_notes = extract_notes_from_markdown(EMBEDDED_DEV_MD, &current_tag);
-            return api_ok(json!({
-                "current": VERSION,
-                "latest": current_tag,
-                "update_available": false,
-                "notes": notes_lines(&fallback_notes, 12),
-            }));
+            return (
+                VERSION.to_string(),
+                current_tag,
+                false,
+                notes_lines(&fallback_notes, 12),
+            );
         }
     };
     let latest = rel.tag_name.clone();
@@ -256,11 +255,22 @@ pub async fn check(State(state): State<AppState>) -> Response {
     } else {
         extract_notes_from_markdown(EMBEDDED_DEV_MD, &latest)
     };
+    (
+        VERSION.to_string(),
+        if update_available { latest } else { current_tag },
+        update_available,
+        notes_lines(&body_to_use, 12),
+    )
+}
+
+/// GET /api/update/check — текущая/последняя версия + список изменений (всегда включает changelog).
+pub async fn check(State(state): State<AppState>) -> Response {
+    let (current, latest, update_available, notes) = check_update_info(&state).await;
     api_ok(json!({
-        "current": VERSION,
-        "latest": if update_available { latest } else { current_tag },
+        "current": current,
+        "latest": latest,
         "update_available": update_available,
-        "notes": notes_lines(&body_to_use, 12),
+        "notes": notes,
     }))
 }
 
