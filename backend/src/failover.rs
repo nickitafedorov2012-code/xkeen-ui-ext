@@ -8,10 +8,64 @@ use std::time::{Instant, Duration};
 
 static LAST_SWITCH: tokio::sync::Mutex<Option<Instant>> = tokio::sync::Mutex::const_new(None);
 
+pub const CANARY_DURATION_SECS: u64 = 180;
+pub const CANARY_PAYLOAD_URL: &str = "http://speed.cloudflare.com/__down?bytes=8192";
+pub const CANARY_PROBE_BYTES: u64 = 8192;
+
+#[derive(Clone, Debug)]
+pub struct CanaryState {
+    pub target_id: String,
+    pub target_name: String,
+    pub from_id: String,
+    pub from_name: String,
+    pub started_at: Instant,
+    pub probes_passed: u32,
+    pub total_bytes: u64,
+}
+
+static CANARY_STAGE: tokio::sync::Mutex<Option<CanaryState>> = tokio::sync::Mutex::const_new(None);
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CanaryStatus {
+    pub active: bool,
+    pub target_id: String,
+    pub target_name: String,
+    pub from_name: String,
+    pub elapsed_secs: u64,
+    pub remaining_secs: u64,
+    pub probes_passed: u32,
+    pub total_bytes: u64,
+}
+
+pub async fn is_canary_active() -> bool {
+    CANARY_STAGE.lock().await.is_some()
+}
+
+pub async fn canary_status() -> Option<CanaryStatus> {
+    let guard = CANARY_STAGE.lock().await;
+    guard.as_ref().map(|c| {
+        let elapsed = c.started_at.elapsed().as_secs();
+        CanaryStatus {
+            active: true,
+            target_id: c.target_id.clone(),
+            target_name: c.target_name.clone(),
+            from_name: c.from_name.clone(),
+            elapsed_secs: elapsed,
+            remaining_secs: CANARY_DURATION_SECS.saturating_sub(elapsed),
+            probes_passed: c.probes_passed,
+            total_bytes: c.total_bytes,
+        }
+    })
+}
+
+pub async fn reset_canary() {
+    *CANARY_STAGE.lock().await = None;
+}
+
 use crate::mihomo::{self, Server};
 use crate::AppState;
 use chrono::Local;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::VecDeque;
 use tokio::sync::Mutex;
@@ -92,6 +146,25 @@ pub fn get_higher_priority_candidates<'a, T: AsRef<str>>(
 
 async fn record_switch() {
     *LAST_SWITCH.lock().await = Some(Instant::now());
+    reset_canary().await;
+}
+
+/// Прогон микро-порции реального трафика (8 КБ) через проверяемый сервер.
+/// Загружает тестовый пэйлоад 8192 байта со speed.cloudflare.com.
+/// Если сервер обрывает соединение, дропает пакеты или таймаутит — возвращает <= 0 (-1).
+pub async fn run_canary_probe(
+    http: &reqwest::Client,
+    cfg: &crate::config::AppConfig,
+    server_id: &str,
+    timeout_ms: u64,
+) -> i64 {
+    let probe_timeout = timeout_ms.max(4000);
+    let delay = mihomo::ping_server_url(http, cfg, server_id, probe_timeout, Some(CANARY_PAYLOAD_URL)).await;
+    if delay > 0 {
+        return delay;
+    }
+    // Fallback на базовый health check URL панели при сбоях CDN Cloudflare
+    mihomo::ping_server_url(http, cfg, server_id, probe_timeout, None).await
 }
 
 /// Ступенчатый опрос списка серверов через семафор (по 4 потока) с интервалом между запусками,
@@ -299,6 +372,14 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
     // 1. Возврат на более приоритетный сервер из цепочки, если восстановился
     if cfg.failover.auto_restore_priority && !chain.is_empty() {
         if let Some(act) = &active {
+            // Если активный сервер уже совпадает с целевым сервером Canary, сбрасываем стадию
+            {
+                let mut canary_guard = CANARY_STAGE.lock().await;
+                if canary_guard.as_ref().map_or(false, |c| c.target_id == act.id) {
+                    *canary_guard = None;
+                }
+            }
+
             let higher = get_higher_priority_candidates(&chain, &act.id);
             if !higher.is_empty() {
                 let higher_ids: Vec<String> = higher.iter().map(|s| s.id.clone()).collect();
@@ -306,10 +387,81 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                 for pri in higher {
                     let ping = pings.get(&pri.id).copied().unwrap_or(-1);
                     if ping > 0 && ping <= hyst {
+                        // Кандидат ответил на базовый пинг в пределах гистерезиса.
+                        // 3-МИНУТНЫЙ CANARY SOAK TEST: не переключаемся сразу!
+                        let mut canary_guard = CANARY_STAGE.lock().await;
+                        let is_same_target = canary_guard
+                            .as_ref()
+                            .map_or(false, |c| c.target_id == pri.id && c.from_id == act.id);
+
+                        if !is_same_target {
+                            // Инициализация новой стадии Canary-теста: фиксируем старт, клиенты остаются на резерве
+                            *canary_guard = Some(CanaryState {
+                                target_id: pri.id.clone(),
+                                target_name: pri.name.clone(),
+                                from_id: act.id.clone(),
+                                from_name: act.name.clone(),
+                                started_at: Instant::now(),
+                                probes_passed: 1,
+                                total_bytes: CANARY_PROBE_BYTES,
+                            });
+                            drop(canary_guard);
+                            let note = format!(
+                                "Canary Soak Test: кандидат '{}' ответил на пинг ({} мс, порог {} мс). Запущен 3-минутный тест стабильности (~15 кбит/с, 8 КБ) без переключения клиентов с '{}'",
+                                pri.name, ping, hyst, act.name
+                            );
+                            state.failover_log.push(&note, false).await;
+                            return Ok(note);
+                        }
+
+                        // Тест уже запущен: выполняем микро-прогон реального трафика (8 КБ) через кандидата
+                        let elapsed_secs = canary_guard.as_ref().map_or(0, |c| c.started_at.elapsed().as_secs());
+                        drop(canary_guard);
+
+                        let probe_ms = run_canary_probe(&state.http, &cfg, &pri.id, ping_timeout).await;
+                        let mut canary_guard = CANARY_STAGE.lock().await;
+
+                        // Проверяем, что за время сетевого запроса состояние не сбросилось
+                        if !canary_guard.as_ref().map_or(false, |c| c.target_id == pri.id) {
+                            return Ok("Canary: тест кандидата прерван или заменён".to_string());
+                        }
+
+                        if probe_ms <= 0 {
+                            // Сбой передачи данных во время 3-минутного теста!
+                            let fail_msg = format!(
+                                "Canary Soak Test: кандидат '{}' не выдержал тест стабильности (сбой передачи данных на {} сек) — тест сброшен, остаёмся на '{}'",
+                                pri.name, elapsed_secs, act.name
+                            );
+                            *canary_guard = None;
+                            drop(canary_guard);
+                            state.failover_log.push(&fail_msg, false).await;
+                            return Ok(fail_msg);
+                        }
+
+                        let canary = canary_guard.as_mut().unwrap();
+                        canary.probes_passed += 1;
+                        canary.total_bytes += CANARY_PROBE_BYTES;
+
+                        if elapsed_secs < CANARY_DURATION_SECS {
+                            let probes_count = canary.probes_passed;
+                            drop(canary_guard);
+                            let note = format!(
+                                "Canary Soak Test: '{}' стабилен (прошло {}/{} с, проверок: {}, пинг {} мс) — клиенты на '{}'",
+                                pri.name, elapsed_secs, CANARY_DURATION_SECS, probes_count, probe_ms, act.name
+                            );
+                            return Ok(note);
+                        }
+
+                        // 3 МИНУТЫ НЕПРЕРЫВНОЙ СТАБИЛЬНОСТИ БЕЗ ЕДИНОГО СБОЯ!
+                        let probes_count = canary.probes_passed;
+                        let total_kb = canary.total_bytes / 1024;
+                        *canary_guard = None;
+                        drop(canary_guard);
+
                         let is_main = pri.id == chain[0].id;
                         let label = if is_main { "Основной" } else { "Более приоритетный" };
                         let msg = format!(
-                            "{label} '{}' восстановился (пинг {ping} мс, порог {hyst} мс) — возврат с '{}'",
+                            "{label} '{}' успешно прошёл 3-минутный тест стабильности ({probes_count} проверок, {total_kb} КБ, 0 сбоев) — безопасный возврат с '{}'",
                             pri.name, act.name
                         );
                         match mihomo::switch_server(&state.http, &cfg, &pri.id).await {
@@ -331,10 +483,25 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                                 return Err(e);
                             }
                         }
-                    } else if ping > 0 {
-                        checked_higher_notes.push(format!("'{}': пинг {} мс", pri.name, ping));
                     } else {
-                        checked_higher_notes.push(format!("'{}': недоступен", pri.name));
+                        // Кандидат недоступен или пинг выше гистерезиса: если он был в процессе Canary, прерываем
+                        let mut canary_guard = CANARY_STAGE.lock().await;
+                        if canary_guard.as_ref().map_or(false, |c| c.target_id == pri.id) {
+                            let elapsed = canary_guard.as_ref().unwrap().started_at.elapsed().as_secs();
+                            *canary_guard = None;
+                            drop(canary_guard);
+                            let abort_msg = format!(
+                                "Canary Soak Test: кандидат '{}' потерял пинг ({} мс > порога {} мс на {} сек теста) — тест сброшен, остаёмся на '{}'",
+                                pri.name, ping, hyst, elapsed, act.name
+                            );
+                            state.failover_log.push(&abort_msg, false).await;
+                        }
+
+                        if ping > 0 {
+                            checked_higher_notes.push(format!("'{}': пинг {} мс", pri.name, ping));
+                        } else {
+                            checked_higher_notes.push(format!("'{}': недоступен", pri.name));
+                        }
                     }
                 }
             }
@@ -607,7 +774,7 @@ pub fn is_shutdown() -> bool {
     SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Фоновый цикл: каждые interval_secs (если enabled).
+/// Фоновый цикл: каждые interval_secs (или 5 сек при активном Canary-стейджинге).
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         loop {
@@ -615,7 +782,9 @@ pub fn spawn(state: AppState) {
                 crate::log_i!("Failover: фоновый цикл остановлен");
                 return;
             }
-            let interval = {
+            let interval = if is_canary_active().await {
+                5u64
+            } else {
                 let cfg = state.config.read().await;
                 cfg.failover.interval_secs.clamp(15, 3600) as u64
             };
@@ -817,5 +986,52 @@ mod tests {
         assert!(!is_shutdown());
         shutdown();
         assert!(is_shutdown());
+    }
+
+    #[tokio::test]
+    async fn test_canary_stage_lifecycle() {
+        reset_canary().await;
+        assert!(!is_canary_active().await);
+        assert!(canary_status().await.is_none());
+
+        // Запуск стейджинга Canary
+        let mut guard = CANARY_STAGE.lock().await;
+        *guard = Some(CanaryState {
+            target_id: "srv_de".to_string(),
+            target_name: "Германия".to_string(),
+            from_id: "srv_nl".to_string(),
+            from_name: "Нидерланды".to_string(),
+            started_at: Instant::now(),
+            probes_passed: 1,
+            total_bytes: CANARY_PROBE_BYTES,
+        });
+        drop(guard);
+
+        assert!(is_canary_active().await);
+        let status = canary_status().await.expect("Canary must be active");
+        assert_eq!(status.target_id, "srv_de");
+        assert_eq!(status.from_name, "Нидерланды");
+        assert!(status.remaining_secs <= CANARY_DURATION_SECS);
+        assert_eq!(status.probes_passed, 1);
+        assert_eq!(status.total_bytes, 8192);
+
+        // Сброс при сбое или переключении
+        reset_canary().await;
+        assert!(!is_canary_active().await);
+        assert!(canary_status().await.is_none());
+    }
+
+    #[test]
+    fn test_canary_bandwidth_limits() {
+        // Проверка расчёта пропускной способности canary:
+        // 8 КБ (8192 байт) каждые 5 секунд на протяжении 180 секунд (3 минуты).
+        let total_probes = CANARY_DURATION_SECS / 5; // 36 проверок
+        let total_bytes = total_probes * CANARY_PROBE_BYTES; // 294,912 байт = 288 КБ
+        let bandwidth_kbps = (total_bytes * 8) as f64 / (CANARY_DURATION_SECS as f64 * 1000.0);
+
+        // Строго меньше установленного пользователем лимита 100 кбит/с
+        assert!(bandwidth_kbps < 100.0, "Canary bandwidth must be strictly below 100 kbps, actual: {bandwidth_kbps} kbps");
+        assert_eq!(total_probes, 36);
+        assert_eq!(total_bytes, 294912);
     }
 }

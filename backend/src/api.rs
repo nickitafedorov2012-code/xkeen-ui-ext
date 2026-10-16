@@ -82,6 +82,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
             "best_ping_enabled": cfg.failover.best_ping_enabled,
             "best_ping_pool_size": cfg.failover.best_ping_pool_size,
             "best_ping_hysteresis_ms": cfg.failover.best_ping_hysteresis_ms,
+            "canary": failover::canary_status().await,
         },
         "refresh_interval_sec": cfg.refresh_interval_sec,
         "adblock_enabled": cfg.adblock_enabled,
@@ -347,6 +348,7 @@ pub async fn switch_server(State(state): State<AppState>, Json(req): Json<Switch
     match mihomo::switch_server(&state.http, &cfg, &req.server_id).await {
         Ok(msg) => {
             log_i!("Смена сервера: {} — {}", req.server_id, msg);
+            failover::reset_canary().await;
             // Если переключен конкретный сервер, обновляем его как основной в цепочке приоритетов,
             // чтобы фоновый failover не откатывал выбор пользователя обратно через 30-60 секунд.
             if !req.server_id.is_empty() && req.server_id != "Fastest" && req.server_id != "Fallback" {
