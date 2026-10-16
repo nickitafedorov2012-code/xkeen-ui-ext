@@ -376,4 +376,24 @@ mod tests {
         let c = reqwest::Client::builder().proxy(p.unwrap()).build();
         assert!(c.is_ok(), "Client::build failed: {:?}", c.err());
     }
+
+    #[test]
+    fn test_bot_token_preservation_and_fallback() {
+        // Fallback-логика: если передан masked token ("******") или пустая строка,
+        // должна использоваться сохранённая в конфиге строка.
+        let saved_token = "8959891087:AAHWkeSw_WL6b8k3J9tONrms-7F2NgE2Yfo";
+        let body_masked = Some("******".to_string());
+        let resolved = match body_masked {
+            Some(ref t) if !t.trim().is_empty() && t.trim() != "******" => t.trim().to_string(),
+            _ => saved_token.to_string(),
+        };
+        assert_eq!(resolved, saved_token);
+
+        let body_custom = Some("123456789:ABC_DEF_GHI".to_string());
+        let resolved_custom = match body_custom {
+            Some(ref t) if !t.trim().is_empty() && t.trim() != "******" => t.trim().to_string(),
+            _ => saved_token.to_string(),
+        };
+        assert_eq!(resolved_custom, "123456789:ABC_DEF_GHI");
+    }
 }

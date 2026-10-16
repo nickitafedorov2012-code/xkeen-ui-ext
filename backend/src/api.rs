@@ -266,13 +266,6 @@ pub async fn get_settings(State(state): State<AppState>) -> impl IntoResponse {
             }
         }
     }
-    if let Some(notif) = val.get_mut("notifications") {
-        if let Some(bot) = notif.get_mut("telegram_bot_token") {
-            if !bot.as_str().unwrap_or("").is_empty() {
-                *bot = serde_json::Value::String("******".into());
-            }
-        }
-    }
     if let Some(adguard) = val.get_mut("adguard") {
         if let Some(pw) = adguard.get_mut("password") {
             if !pw.as_str().unwrap_or("").is_empty() {
@@ -3401,9 +3394,18 @@ pub async fn test_notification(
     Json(body): Json<TestNotificationRequest>,
 ) -> Response {
     let cfg = state.config.read().await.clone();
-    let bot_token = body.telegram_bot_token.unwrap_or_else(|| cfg.notifications.telegram_bot_token.clone());
-    let chat_id = body.telegram_chat_id.unwrap_or_else(|| cfg.notifications.telegram_chat_id.clone());
-    let webhook = body.webhook_url.unwrap_or_else(|| cfg.notifications.webhook_url.clone());
+    let bot_token = match body.telegram_bot_token {
+        Some(ref t) if !t.trim().is_empty() && t.trim() != "******" => t.trim().to_string(),
+        _ => cfg.notifications.telegram_bot_token.clone(),
+    };
+    let chat_id = match body.telegram_chat_id {
+        Some(ref c) if !c.trim().is_empty() => c.trim().to_string(),
+        _ => cfg.notifications.telegram_chat_id.clone(),
+    };
+    let webhook = match body.webhook_url {
+        Some(ref w) if !w.trim().is_empty() => w.trim().to_string(),
+        _ => cfg.notifications.webhook_url.clone(),
+    };
     let proxy_url = cfg.mihomo_proxy_url();
 
     let mut results = Vec::new();

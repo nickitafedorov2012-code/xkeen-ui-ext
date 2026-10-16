@@ -217,8 +217,18 @@ export default function Settings({ notify, status, refresh }: Props) {
   const cleanNotifToken = telegramBotToken.trim().replace(/^['"]|['"]$/g, '')
   const cleanNotifChatId = telegramChatId.trim().replace(/^['"]|['"]$/g, '')
 
+  // Сохраняем введённые данные в localStorage, чтобы они не терялись при обновлении страницы или панели
+  useEffect(() => {
+    if (cleanNotifToken && cleanNotifToken !== '******') {
+      try { localStorage.setItem('xkeen_tg_bot_token', cleanNotifToken); } catch {}
+    }
+    if (cleanNotifChatId) {
+      try { localStorage.setItem('xkeen_tg_chat_id', cleanNotifChatId); } catch {}
+    }
+  }, [cleanNotifToken, cleanNotifChatId]);
+
   let notifTokenWarning: string | null = null
-  if (cleanNotifToken) {
+  if (cleanNotifToken && cleanNotifToken !== '******') {
     if (cleanNotifToken.startsWith('@') || cleanNotifToken.startsWith('http://') || cleanNotifToken.startsWith('https://') || cleanNotifToken.startsWith('t.me/')) {
       notifTokenWarning = 'Введена ссылка или юзернейм вместо токена. Скопируйте токен целиком из @BotFather (вид: 123456789:ABCdef...)'
     } else {
@@ -329,8 +339,16 @@ export default function Settings({ notify, status, refresh }: Props) {
       setSettings(s)
       setAuthEnabled(s.auth?.enabled ?? false)
       setTelegramEnabled(s.notifications?.telegram_enabled ?? false)
-      setTelegramBotToken(s.notifications?.telegram_bot_token ?? '')
-      setTelegramChatId(s.notifications?.telegram_chat_id ?? '')
+      const token = s.notifications?.telegram_bot_token ?? ''
+      const chatId = s.notifications?.telegram_chat_id ?? ''
+      let cachedToken = ''
+      let cachedChatId = ''
+      try {
+        cachedToken = localStorage.getItem('xkeen_tg_bot_token') ?? ''
+        cachedChatId = localStorage.getItem('xkeen_tg_chat_id') ?? ''
+      } catch {}
+      setTelegramBotToken(token && token !== '******' ? token : (cachedToken || token))
+      setTelegramChatId(chatId || cachedChatId)
       setWebhookUrl(s.notifications?.webhook_url ?? '')
     }).catch((e) => notify(e instanceof Error ? e.message : 'Ошибка', true))
 
@@ -744,9 +762,10 @@ export default function Settings({ notify, status, refresh }: Props) {
     }
     setNotifTesting(true)
     try {
+      const tokenForTest = cleanNotifToken === '******' ? undefined : (cleanNotifToken || undefined);
       const res = await apiPost<{ message?: string; results?: string[] }>('notifications/test', {
-        telegram_bot_token: telegramBotToken.trim() || undefined,
-        telegram_chat_id: telegramChatId.trim() || undefined,
+        telegram_bot_token: tokenForTest,
+        telegram_chat_id: cleanNotifChatId || undefined,
         webhook_url: webhookUrl.trim() || undefined,
       })
       const results = res.results || []
