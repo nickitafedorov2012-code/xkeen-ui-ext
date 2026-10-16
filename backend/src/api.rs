@@ -17,21 +17,26 @@ pub async fn status(State(state): State<AppState>) -> Response {
     let router = router_res.ok();
     let system = system_res.ok();
 
-    let active = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain)
-        .await
-        .ok()
-        .and_then(|servers| {
-            servers
+    let (active, priority_chain_pings) = match mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
+        Ok(servers) => {
+            let act = servers
                 .iter()
                 .find(|s| s.is_active && s.id != "Fastest" && s.id != "Fallback")
                 .or_else(|| servers.iter().find(|s| s.is_active))
                 .cloned()
-        })
-        .map(|s| json!({
-            "id": s.id, "name": s.name, "ping_ms": s.ping_ms,
-            "protocol": s.protocol, "host": s.host, "port": s.port,
-            "provider": s.provider, "provider_name": s.provider_name,
-        }));
+                .map(|s| json!({
+                    "id": s.id, "name": s.name, "ping_ms": s.ping_ms,
+                    "protocol": s.protocol, "host": s.host, "port": s.port,
+                    "provider": s.provider, "provider_name": s.provider_name,
+                }));
+            let mut pings = std::collections::HashMap::new();
+            for s in &servers {
+                pings.insert(s.id.clone(), s.ping_ms);
+            }
+            (act, pings)
+        }
+        Err(_) => (None, std::collections::HashMap::new()),
+    };
 
     let zapret_engine = if normalize_engine_choice(&cfg.zapret.engine) == "v1" {
         "v1"
@@ -76,6 +81,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
                 cfg.failover.priority_chain.first().cloned().unwrap_or_default()
             },
             "priority_chain": cfg.failover.priority_chain,
+            "priority_chain_pings": priority_chain_pings,
             "auto_restore_priority": cfg.failover.auto_restore_priority,
             "interval_secs": cfg.failover.interval_secs,
             "device_failover_enabled": cfg.failover.device_failover_enabled,
@@ -1229,7 +1235,7 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
         Ok(y) => y,
         Err(e) => return api_err(e),
     };
-    if let Ok(with_zapret) = routing::apply_zapret_hybrid_rules(&new_yaml, &tx.config().zapret) {
+    if let Ok(with_zapret) = routing::apply_zapret_hybrid_rules_with_force(&new_yaml, &tx.config().zapret, &all_force) {
         new_yaml = with_zapret;
     }
     if let Err(e) = tx.set_yaml(new_yaml) {
@@ -1385,7 +1391,7 @@ pub async fn force_add_domain(
             Ok(y) => y,
             Err(e) => return api_err(e),
         };
-        if let Ok(with_zapret) = routing::apply_zapret_hybrid_rules(&new_yaml, &tx.config().zapret) {
+        if let Ok(with_zapret) = routing::apply_zapret_hybrid_rules_with_force(&new_yaml, &tx.config().zapret, &force_list) {
             new_yaml = with_zapret;
         }
 
@@ -5020,6 +5026,7 @@ BLOCK_QUIC="0"
 SMART_TV_MODE="0"
 EXCLUDED_IPS=""
 EXCLUDED_MACS=""
+ADGUARD_ENABLED="0"
 
 # Safe key-value parser for zapret.conf (no source / eval)
 if [ -f "$CONF" ]; then
@@ -5076,9 +5083,24 @@ if [ -f "$CONF" ]; then
         val="${val%\'}"
         EXCLUDED_MACS="$val"
         ;;
+      ADGUARD_ENABLED)
+        val="${val#\"}"
+        val="${val%\"}"
+        val="${val#\'}"
+        val="${val%\'}"
+        ADGUARD_ENABLED="$val"
+        ;;
     esac
   done < "$CONF"
 fi
+
+check_adguard_active() {
+  [ "$ADGUARD_ENABLED" = "1" ] && return 0
+  if pgrep -f AdGuardHome >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
 
 BIN=$(find_bin)
 
@@ -5190,10 +5212,25 @@ add_fw() {
     iptables -t mangle -I PREROUTING 1 -i "$iface" -j zapret 2>/dev/null || true
   done
 
+  # Hook router-local outbound traffic (e.g., Mihomo DIRECT outbound connections) to Zapret
+  iptables -t mangle -I OUTPUT 1 -m mark ! --mark 0x40000000/0x40000000 -p tcp -m multiport --dports 80,443 -m comment --comment "xkeen-route-zapret" -j zapret 2>/dev/null || \
+  iptables -t mangle -I OUTPUT 1 -m mark ! --mark 0x40000000/0x40000000 -p tcp -m multiport --dports 80,443 -j zapret 2>/dev/null || true
+
   # Z-02 & NET-01: Guard DNS redirect before PREROUTING to port 1053 to prevent LAN blackout & loops
-  if check_dns_resolver_ready; then
+  # CRITICAL: If AdGuard Home is active, DO NOT redirect DNS port 53 to 1053.
+  # AdGuard Home must receive client queries on port 53 for local DNS filtering and ad blocking.
+  if ! check_adguard_active && check_dns_resolver_ready; then
     iptables -t nat -A PREROUTING -i br+ -d 127.0.0.1 -j RETURN 2>/dev/null || true
     iptables -t nat -A PREROUTING -i Bridge+ -d 127.0.0.1 -j RETURN 2>/dev/null || true
+    if [ -n "$EXCLUDED_IPS" ]; then
+      for ex_ip in $EXCLUDED_IPS; do
+        [ -n "$ex_ip" ] || continue
+        iptables -t nat -A PREROUTING -i br+ -s "$ex_ip" -p udp --dport 53 -j RETURN 2>/dev/null || true
+        iptables -t nat -A PREROUTING -i br+ -s "$ex_ip" -p tcp --dport 53 -j RETURN 2>/dev/null || true
+        iptables -t nat -A PREROUTING -i Bridge+ -s "$ex_ip" -p udp --dport 53 -j RETURN 2>/dev/null || true
+        iptables -t nat -A PREROUTING -i Bridge+ -s "$ex_ip" -p tcp --dport 53 -j RETURN 2>/dev/null || true
+      done
+    fi
     iptables -t nat -A PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null || \
     iptables -t nat -A PREROUTING -i br+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
     iptables -t nat -A PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null || \
@@ -5203,7 +5240,11 @@ add_fw() {
     iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null || \
     iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
   else
-    echo "DNS resolver port 1053 not listening; client DNS redirect skipped to prevent LAN blackout" >&2
+    if check_adguard_active; then
+      echo "AdGuard Home is active; client DNS redirect to 1053 skipped so AdGuard handles DNS" >&2
+    else
+      echo "DNS resolver port 1053 not listening; client DNS redirect skipped to prevent LAN blackout" >&2
+    fi
   fi
 
   return 0
@@ -6264,8 +6305,8 @@ pub fn validate_zapret_conf(content: &str) -> Result<(), String> {
                 if clean_val != "v1" && clean_val != "v2" && clean_val != "legacy" && clean_val != "modern" {
                     return Err(format!("Недопустимое значение ZAPRET_ENGINE: '{clean_val}'. Разрешены только v1, v2"));
                 }
-            } else if k != "DISCORD_VOICE_ENABLED" && k != "BLOCK_QUIC" && k != "SMART_TV_MODE" && k != "EXCLUDED_IPS" && k != "EXCLUDED_MACS" {
-                return Err(format!("Неизвестный параметр в zapret.conf: '{k}'. Разрешены только ZAPRET_ENGINE, NFQWS_ARGS, DISCORD_VOICE_ENABLED, BLOCK_QUIC, SMART_TV_MODE, EXCLUDED_IPS, EXCLUDED_MACS"));
+            } else if k != "DISCORD_VOICE_ENABLED" && k != "BLOCK_QUIC" && k != "SMART_TV_MODE" && k != "EXCLUDED_IPS" && k != "EXCLUDED_MACS" && k != "ADGUARD_ENABLED" {
+                return Err(format!("Неизвестный параметр в zapret.conf: '{k}'. Разрешены только ZAPRET_ENGINE, NFQWS_ARGS, DISCORD_VOICE_ENABLED, BLOCK_QUIC, SMART_TV_MODE, EXCLUDED_IPS, EXCLUDED_MACS, ADGUARD_ENABLED"));
             }
         } else {
             return Err("Некорректная строка в zapret.conf: должна быть в формате КЛЮЧ=\"ЗНАЧЕНИЕ\"".to_string());
@@ -6392,16 +6433,24 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
         .join(" ");
     let block_quic_str = if cfg.smart_tv_mode { "1" } else { "0" };
     let smart_tv_str = if cfg.smart_tv_mode { "1" } else { "0" };
+    let adguard_enabled = std::path::Path::new("/opt/etc/xkeen-route/config.json")
+        .exists()
+        .then(|| crate::config::load(std::path::Path::new("/opt/etc/xkeen-route/config.json")).adguard.enabled)
+        .unwrap_or(false)
+        || std::path::Path::new("/opt/etc/init.d/S99adguardhome").exists()
+        || crate::system::is_process_running("AdGuardHome");
+    let adguard_str = if adguard_enabled { "1" } else { "0" };
 
     let conf_data = format!(
-        "ZAPRET_ENGINE=\"{}\"\nNFQWS_ARGS=\"{}\"\nDISCORD_VOICE_ENABLED=\"{}\"\nBLOCK_QUIC=\"{}\"\nSMART_TV_MODE=\"{}\"\nEXCLUDED_IPS=\"{}\"\nEXCLUDED_MACS=\"{}\"\n",
+        "ZAPRET_ENGINE=\"{}\"\nNFQWS_ARGS=\"{}\"\nDISCORD_VOICE_ENABLED=\"{}\"\nBLOCK_QUIC=\"{}\"\nSMART_TV_MODE=\"{}\"\nEXCLUDED_IPS=\"{}\"\nEXCLUDED_MACS=\"{}\"\nADGUARD_ENABLED=\"{}\"\n",
         engine_str,
         sanitized_args.trim(),
         if voice_enabled { "1" } else { "0" },
         block_quic_str,
         smart_tv_str,
         excluded_ips_str.trim(),
-        excluded_macs_str.trim()
+        excluded_macs_str.trim(),
+        adguard_str
     );
     atomic_write_file("/opt/etc/zapret/zapret.conf", &conf_data)
         .await
@@ -10002,7 +10051,7 @@ mod tests {
             "BIN=$(find_bin) must be evaluated after reading ZAPRET_ENGINE from zapret.conf"
         );
 
-        let valid_conf = "ZAPRET_ENGINE=\"v2\"\nNFQWS_ARGS=\"--daemon --qnum=200\"\nDISCORD_VOICE_ENABLED=\"1\"\n";
+        let valid_conf = "ZAPRET_ENGINE=\"v2\"\nNFQWS_ARGS=\"--daemon --qnum=200\"\nDISCORD_VOICE_ENABLED=\"1\"\nADGUARD_ENABLED=\"1\"\n";
         assert!(validate_zapret_conf(valid_conf).is_ok());
 
         let invalid_engine_conf = "ZAPRET_ENGINE=\"v3\"\n";
@@ -10010,6 +10059,14 @@ mod tests {
 
         // Anti-regression: S51ZAPRET_SCRIPT must verify lua-desync capability before passing --lua-init
         assert!(S51ZAPRET_SCRIPT.contains("\"$BIN\" --help 2>&1 | grep -q \"lua-desync\""));
+        // Anti-regression: S51ZAPRET_SCRIPT must parse ADGUARD_ENABLED and protect AdGuard Home port 53 DNS
+        assert!(S51ZAPRET_SCRIPT.contains("ADGUARD_ENABLED)"));
+        assert!(S51ZAPRET_SCRIPT.contains("check_adguard_active"));
+        assert!(S51ZAPRET_SCRIPT.contains("! check_adguard_active && check_dns_resolver_ready"));
+
+        // Anti-regression: S51ZAPRET_SCRIPT must hook OUTPUT chain for router-local TCP (Mihomo Fake-IP DIRECT)
+        assert!(S51ZAPRET_SCRIPT.contains("iptables -t mangle -I OUTPUT 1 -m mark ! --mark 0x40000000/0x40000000 -p tcp -m multiport --dports 80,443"));
+
         // Anti-regression: BLOCKCHECK_STRATEGIES must have 10 strategies with valid Zapret 2 Lua syntax
         assert_eq!(BLOCKCHECK_STRATEGIES.len(), 10);
         for (id, name, desc, args) in BLOCKCHECK_STRATEGIES {

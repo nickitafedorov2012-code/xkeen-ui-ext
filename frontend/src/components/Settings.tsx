@@ -368,6 +368,25 @@ export default function Settings({ notify, status, refresh }: Props) {
       .catch(() => {})
   }, [notify])
 
+  // Синхронизация актуальных пингов серверов с глобальным статусом панели (Failover Priority Chain & Dashboard)
+  useEffect(() => {
+    if (status?.failover?.priority_chain_pings) {
+      const pings = status.failover.priority_chain_pings
+      setServers((prev) => {
+        let changed = false
+        const next = prev.map((s) => {
+          const updated = pings[s.id]
+          if (updated !== undefined && updated !== s.ping_ms) {
+            changed = true
+            return { ...s, ping_ms: updated }
+          }
+          return s
+        })
+        return changed ? next : prev
+      })
+    }
+  }, [status?.failover?.priority_chain_pings])
+
   const loadBackups = useCallback(async () => {
     try {
       const d = await apiGet<{ backups: { name: string }[]; dir: string }>('backups')
@@ -1008,6 +1027,9 @@ export default function Settings({ notify, status, refresh }: Props) {
                 )}
                 {chain.map((id, i) => {
                   const sv = servers.find((x) => x.id === id)
+                  const livePing = (status?.failover?.priority_chain_pings && status.failover.priority_chain_pings[id] !== undefined)
+                    ? status.failover.priority_chain_pings[id]
+                    : (status?.active_server && status.active_server.id === id ? status.active_server.ping_ms : (sv?.ping_ms ?? 0))
                   return (
                     <div
                       key={id}
@@ -1058,9 +1080,9 @@ export default function Settings({ notify, status, refresh }: Props) {
                         {sv ? sv.name : `${id} (недоступен)`}
                       </span>
 
-                      {sv && (
-                        <span className={'ping ' + pingClass(sv.ping_ms)}>
-                          {sv.ping_ms > 0 ? `${sv.ping_ms} мс` : '—'}
+                      {(sv || livePing > 0) && (
+                        <span className={'ping ' + pingClass(livePing)}>
+                          {livePing > 0 ? `${livePing} мс` : '—'}
                         </span>
                       )}
 
@@ -1108,11 +1130,16 @@ export default function Settings({ notify, status, refresh }: Props) {
                   <optgroup label="🌐 Узлы и серверы">
                     {servers
                       .filter((s) => !s.is_pool && !chain.includes(s.id))
-                      .map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.provider_name ? `[${s.provider_name}] ` : s.provider ? `[${s.provider}] ` : ''}{s.name} · {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
-                        </option>
-                      ))}
+                      .map((s) => {
+                        const optPing = (status?.failover?.priority_chain_pings && status.failover.priority_chain_pings[s.id] !== undefined)
+                          ? status.failover.priority_chain_pings[s.id]
+                          : s.ping_ms
+                        return (
+                          <option key={s.id} value={s.id}>
+                            {s.provider_name ? `[${s.provider_name}] ` : s.provider ? `[${s.provider}] ` : ''}{s.name} · {optPing > 0 ? `${optPing} мс` : '—'}
+                          </option>
+                        )
+                      })}
                   </optgroup>
                 </select>
               </div>

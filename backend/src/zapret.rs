@@ -552,16 +552,24 @@ pub fn serialize_zapret_conf(cfg: &crate::config::ZapretConfig) -> String {
 
     let block_quic_str = if cfg.smart_tv_mode { "1" } else { "0" };
     let smart_tv_str = if cfg.smart_tv_mode { "1" } else { "0" };
+    let adguard_enabled = std::path::Path::new("/opt/etc/xkeen-route/config.json")
+        .exists()
+        .then(|| crate::config::load(std::path::Path::new("/opt/etc/xkeen-route/config.json")).adguard.enabled)
+        .unwrap_or(false)
+        || std::path::Path::new("/opt/etc/init.d/S99adguardhome").exists()
+        || crate::system::is_process_running("AdGuardHome");
+    let adguard_str = if adguard_enabled { "1" } else { "0" };
 
     format!(
-        "ZAPRET_ENGINE=\"{}\"\nNFQWS_ARGS=\"{}\"\nDISCORD_VOICE_ENABLED=\"{}\"\nBLOCK_QUIC=\"{}\"\nSMART_TV_MODE=\"{}\"\nEXCLUDED_IPS=\"{}\"\nEXCLUDED_MACS=\"{}\"\n",
+        "ZAPRET_ENGINE=\"{}\"\nNFQWS_ARGS=\"{}\"\nDISCORD_VOICE_ENABLED=\"{}\"\nBLOCK_QUIC=\"{}\"\nSMART_TV_MODE=\"{}\"\nEXCLUDED_IPS=\"{}\"\nEXCLUDED_MACS=\"{}\"\nADGUARD_ENABLED=\"{}\"\n",
         engine_str,
         sanitized_args.trim(),
         if voice_enabled { "1" } else { "0" },
         block_quic_str,
         smart_tv_str,
         excluded_ips_str.trim(),
-        excluded_macs_str.trim()
+        excluded_macs_str.trim(),
+        adguard_str
     )
 }
 
@@ -625,6 +633,7 @@ pub fn parse_zapret_conf(
                         }
                     }
                 }
+                "ADGUARD_ENABLED" => {}
                 _ => {}
             }
         }

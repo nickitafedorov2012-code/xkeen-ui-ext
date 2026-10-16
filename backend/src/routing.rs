@@ -903,11 +903,33 @@ pub fn find_proxy_target_group(yaml: &str) -> String {
 
 /// Применение правил Zapret Hybrid (YouTube DIRECT, Discord DIRECT, Изоляция PROXY).
 pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretConfig) -> Result<String, String> {
+    apply_zapret_hybrid_rules_with_force(yaml, zapret_cfg, &[])
+}
+
+/// Применение правил Zapret Hybrid с учетом пользовательских принудительных доменов (force_domains).
+/// Любой домен, явно указанный пользователем в force_domains (PROXY), имеет абсолютный приоритет
+/// и исключается из автоматических DIRECT-правил Zapret.
+pub fn apply_zapret_hybrid_rules_with_force(
+    yaml: &str,
+    zapret_cfg: &crate::config::ZapretConfig,
+    force_domains: &[String],
+) -> Result<String, String> {
     crate::routing::validate_marker_pair(yaml, ZAPRET_HYBRID_BEGIN, ZAPRET_HYBRID_END)?;
     let content = remove_zapret_hybrid_rules(yaml);
     if !zapret_cfg.enabled {
         return Ok(content);
     }
+
+    let is_forced = |domain: &str| -> bool {
+        let d = crate::config::normalize_domain(domain);
+        if d.is_empty() {
+            return false;
+        }
+        force_domains.iter().any(|f| {
+            let clean_f = crate::config::normalize_domain(f);
+            !clean_f.is_empty() && (d == clean_f || d.ends_with(&format!(".{clean_f}")) || clean_f.ends_with(&format!(".{d}")))
+        })
+    };
 
     let proxy_target = find_proxy_target_group(yaml);
     let mut rules_to_add: Vec<String> = Vec::new();
@@ -944,9 +966,11 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
     // 2. YouTube -> DIRECT (максимальная скорость с локальных кэшей GGC)
     if zapret_cfg.hybrid_youtube {
         for d in YOUTUBE_HYBRID_DOMAINS {
-            let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
-            if !rules_to_add.contains(&rule) {
-                rules_to_add.push(rule);
+            if !is_forced(d) {
+                let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
+                if !rules_to_add.contains(&rule) {
+                    rules_to_add.push(rule);
+                }
             }
         }
     }
@@ -954,9 +978,11 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
     // 2.1 Smart TV профиль -> DIRECT (оптимизация всех CDN/GGC кэшей)
     if zapret_cfg.smart_tv_mode {
         for d in SMART_TV_GGC_DOMAINS {
-            let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
-            if !rules_to_add.contains(&rule) {
-                rules_to_add.push(rule);
+            if !is_forced(d) {
+                let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
+                if !rules_to_add.contains(&rule) {
+                    rules_to_add.push(rule);
+                }
             }
         }
     }
@@ -964,9 +990,11 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
     // 3. Discord -> DIRECT (минимальный пинг, прямые шлюзы)
     if zapret_cfg.hybrid_discord {
         for d in DISCORD_HYBRID_DOMAINS {
-            let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
-            if !rules_to_add.contains(&rule) {
-                rules_to_add.push(rule);
+            if !is_forced(d) {
+                let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
+                if !rules_to_add.contains(&rule) {
+                    rules_to_add.push(rule);
+                }
             }
         }
     }
@@ -974,9 +1002,11 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
     // 4. GitHub -> DIRECT (высокая скорость git clone и релизов без расхода VPS)
     if zapret_cfg.bypass_github {
         for d in GITHUB_DOMAINS {
-            let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
-            if !rules_to_add.contains(&rule) {
-                rules_to_add.push(rule);
+            if !is_forced(d) {
+                let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
+                if !rules_to_add.contains(&rule) {
+                    rules_to_add.push(rule);
+                }
             }
         }
     }
@@ -984,9 +1014,11 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
     // 5. Торренты & Трекеры -> DIRECT
     if zapret_cfg.bypass_torrents {
         for d in TORRENT_DOMAINS {
-            let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
-            if !rules_to_add.contains(&rule) {
-                rules_to_add.push(rule);
+            if !is_forced(d) {
+                let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
+                if !rules_to_add.contains(&rule) {
+                    rules_to_add.push(rule);
+                }
             }
         }
     }
@@ -994,9 +1026,11 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
     // 6. 18+ Контент -> DIRECT
     if zapret_cfg.bypass_adult {
         for d in ADULT_DOMAINS {
-            let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
-            if !rules_to_add.contains(&rule) {
-                rules_to_add.push(rule);
+            if !is_forced(d) {
+                let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
+                if !rules_to_add.contains(&rule) {
+                    rules_to_add.push(rule);
+                }
             }
         }
     }
@@ -1005,7 +1039,7 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
     for entry in &zapret_cfg.custom_entries {
         if entry.enabled {
             let clean = crate::config::normalize_domain(&entry.domain);
-            if !clean.is_empty() && !FLOW_DOMAINS.contains(&clean.as_str()) {
+            if !clean.is_empty() && !FLOW_DOMAINS.contains(&clean.as_str()) && !is_forced(&clean) {
                 let rule = format!("  - DOMAIN-SUFFIX,{clean},DIRECT");
                 if !rules_to_add.contains(&rule) {
                     rules_to_add.push(rule);
@@ -1013,7 +1047,7 @@ pub fn apply_zapret_hybrid_rules(yaml: &str, zapret_cfg: &crate::config::ZapretC
             }
             for cdn in &entry.cdns {
                 let clean_cdn = crate::config::normalize_domain(cdn);
-                if !clean_cdn.is_empty() && !FLOW_DOMAINS.contains(&clean_cdn.as_str()) {
+                if !clean_cdn.is_empty() && !FLOW_DOMAINS.contains(&clean_cdn.as_str()) && !is_forced(&clean_cdn) {
                     let rule = format!("  - DOMAIN-SUFFIX,{clean_cdn},DIRECT");
                     if !rules_to_add.contains(&rule) {
                         rules_to_add.push(rule);
@@ -2092,15 +2126,13 @@ pub fn apply_routing_with_filters(
     // 3. Доменные правила (DIRECT / FORCE / PER-DEVICE DOMAINS)
     // Вставляются поверх правил устройств
     let direct = &cfg.direct_domains;
-    let mut active_force: Vec<String> = cfg.force_domains.clone();
-    if cfg.zapret.enabled {
-        active_force.retain(|d| !is_zapret_direct_domain(d, &cfg.zapret));
-    }
+    let active_force = &cfg.force_domains;
     let device_domains = &cfg.device_domain_rules;
-    current = apply_domain_rules(&current, direct, &active_force, device_domains)?;
+    current = apply_domain_rules(&current, direct, active_force, device_domains)?;
 
     // 4. Умные гибридные правила Zapret (YouTube / Discord / GitHub / Torrents / Adult -> DIRECT, AI -> PROXY)
-    current = apply_zapret_hybrid_rules(&current, &cfg.zapret)?;
+    // Пользовательские force_domains имеют абсолютный приоритет над DIRECT-правилами Zapret
+    current = apply_zapret_hybrid_rules_with_force(&current, &cfg.zapret, active_force)?;
 
     // 5. Блокировка рекламы на роутере (AdBlock) — применяется ко всем устройствам
     if let Ok(with_adblock) = apply_adblock_rules(&current, cfg.adblock_enabled) {
@@ -2546,44 +2578,46 @@ proxy-groups:
 
         let (applied, _) = apply_routing(yaml, &app_cfg).expect("apply_routing should succeed");
 
-        // 1. Zapret Hybrid rules must be present
+        // 1. All user-forced domains must be strictly preserved in FORCE_BEGIN block
+        let force_pos = applied.find(FORCE_BEGIN).expect("FORCE_BEGIN must be present");
+        let force_end_pos = applied.find(FORCE_END).expect("FORCE_END must be present");
+        let force_block = &applied[force_pos..force_end_pos];
+
+        assert!(force_block.contains("DOMAIN-SUFFIX,github.com,PROXY"), "github.com must remain in FORCE block");
+        assert!(force_block.contains("DOMAIN-SUFFIX,data.shirogames.com,PROXY"), "data.shirogames.com must remain in FORCE block");
+        assert!(force_block.contains("DOMAIN-SUFFIX,pornhub.com,PROXY"), "pornhub.com must remain in FORCE block");
+
+        // 2. Zapret DIRECT rules must NOT duplicate or override domains that user explicitly forced
+        assert!(!applied.contains("DOMAIN-SUFFIX,github.com,DIRECT"), "github.com must not be in Zapret DIRECT when user forced it to PROXY");
+        assert!(!applied.contains("DOMAIN-SUFFIX,pornhub.com,DIRECT"), "pornhub.com must not be in Zapret DIRECT when user forced it to PROXY");
+
+        // 3. Other Zapret bypasses not forced by the user must still be active
         assert!(applied.contains(ZAPRET_HYBRID_BEGIN));
-        assert!(applied.contains("DOMAIN-SUFFIX,github.com,DIRECT"));
-        assert!(applied.contains("DOMAIN-SUFFIX,pornhub.com,DIRECT"));
-
-        // 2. Zapret DIRECT rules must appear BEFORE FORCE block
-        let zapret_pos = applied.find(ZAPRET_HYBRID_BEGIN).expect("must contain ZAPRET_HYBRID_BEGIN");
-        let force_pos = applied.find(FORCE_BEGIN).expect("FORCE_BEGIN must be present for data.shirogames.com");
-        assert!(zapret_pos < force_pos, "Zapret hybrid rules must be placed BEFORE force_domains block!");
-
-        // Active Zapret domains must be excluded from FORCE block, while unrelated force domains remain
-        let force_block = &applied[force_pos..applied.find(FORCE_END).unwrap_or(applied.len())];
-        assert!(!force_block.contains("github.com,PROXY"), "github.com must not be in FORCE block when Zapret handles it");
-        assert!(!force_block.contains("pornhub.com,PROXY"), "pornhub.com must not be in FORCE block when Zapret handles it");
-        assert!(force_block.contains("data.shirogames.com,PROXY"), "Unrelated force domains must remain in FORCE block");
+        assert!(applied.contains("DOMAIN-SUFFIX,xvideos.com,DIRECT"), "Unforced adult domains must remain in Zapret DIRECT");
     }
 
     #[test]
-    fn test_zapret_hybrid_precedence_with_direct_and_no_force() {
+    fn test_user_force_domains_preserved_with_zapret_enabled() {
         let yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\nrules:\n  - MATCH,PROXY\n";
         let mut app_cfg = crate::config::AppConfig::default();
-        app_cfg.direct_domains = vec!["mysite.direct".to_string()];
-        app_cfg.force_domains = vec!["github.com".to_string()];
+        app_cfg.force_domains = vec!["youtube.com".to_string(), "discord.com".to_string()];
         app_cfg.zapret.enabled = true;
-        app_cfg.zapret.bypass_github = true;
+        app_cfg.zapret.hybrid_youtube = true;
+        app_cfg.zapret.hybrid_discord = true;
 
         let (applied, _) = apply_routing(yaml, &app_cfg).expect("apply_routing should succeed");
 
-        // github.com is handled by Zapret, so active_force is empty: FORCE_BEGIN should NOT exist
-        assert!(!applied.contains(FORCE_BEGIN));
-        // DIRECT_BEGIN must be present
-        assert!(applied.contains(DIRECT_BEGIN));
-        assert!(applied.contains(ZAPRET_HYBRID_BEGIN));
+        // User forced youtube.com and discord.com -> they must be PROXY in FORCE block
+        assert!(applied.contains("DOMAIN-SUFFIX,youtube.com,PROXY"));
+        assert!(applied.contains("DOMAIN-SUFFIX,discord.com,PROXY"));
 
-        // DIRECT block must appear BEFORE ZAPRET block
-        let direct_end_pos = applied.find(DIRECT_END).expect("must contain DIRECT_END");
-        let zapret_pos = applied.find(ZAPRET_HYBRID_BEGIN).expect("must contain ZAPRET_HYBRID_BEGIN");
-        assert!(direct_end_pos < zapret_pos, "Direct domains block must be placed BEFORE Zapret hybrid rules!");
+        // They must NOT be in Zapret DIRECT
+        assert!(!applied.contains("DOMAIN-SUFFIX,youtube.com,DIRECT"));
+        assert!(!applied.contains("DOMAIN-SUFFIX,discord.com,DIRECT"));
+
+        // But other subdomains/related domains not in force_domains must still be accelerated via Zapret DIRECT
+        assert!(applied.contains("DOMAIN-SUFFIX,googlevideo.com,DIRECT"));
+        assert!(applied.contains("DOMAIN-SUFFIX,discord.gg,DIRECT"));
     }
 
     #[test]

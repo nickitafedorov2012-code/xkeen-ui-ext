@@ -57,6 +57,7 @@ export interface StatusInfo {
     best_ping_enabled?: boolean
     best_ping_pool_size?: number
     best_ping_hysteresis_ms?: number
+    priority_chain_pings?: Record<string, number>
   }
   refresh_interval_sec: number
   adblock_enabled?: boolean
