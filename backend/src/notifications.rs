@@ -106,24 +106,30 @@ pub async fn send_telegram_with_proxy(
     if let Some(proxy_addr) = proxy_url {
         let p_trimmed = proxy_addr.trim();
         if !p_trimmed.is_empty() {
-            if let Ok(proxy) = reqwest::Proxy::all(p_trimmed) {
-                if let Ok(c) = reqwest::Client::builder()
-                    .proxy(proxy)
-                    .timeout(std::time::Duration::from_secs(10))
-                    .build()
-                {
-                    clients.push(("Mihomo Proxy", c));
+            match reqwest::Proxy::all(p_trimmed) {
+                Ok(proxy) => {
+                    match reqwest::Client::builder()
+                        .proxy(proxy)
+                        .timeout(std::time::Duration::from_secs(10))
+                        .build()
+                    {
+                        Ok(c) => clients.push(("Mihomo Proxy", c)),
+                        Err(e) => log_w!("[NOTIF] Ошибка создания HTTP-клиента с прокси {}: {}", p_trimmed, e),
+                    }
                 }
+                Err(e) => log_w!("[NOTIF] Ошибка создания reqwest::Proxy({}): {}", p_trimmed, e),
             }
         }
     }
     clients.push(("Прямое соединение", direct_http.clone()));
 
-    let mut last_err = String::new();
+    let mut err_details = Vec::new();
 
     for (name, client) in clients {
+        log_i!("[NOTIF] Отправка уведомления в Telegram через {}...", name);
         let req = client
             .post(&url)
+            .header("User-Agent", "xkeen-route")
             .json(&payload)
             .timeout(std::time::Duration::from_secs(10))
             .send()
@@ -131,25 +137,27 @@ pub async fn send_telegram_with_proxy(
 
         match req {
             Ok(res) => {
-                if res.status().is_success() {
+                let status = res.status();
+                if status.is_success() {
+                    log_i!("[NOTIF] ✓ Сообщение Telegram успешно доставлено через {}", name);
                     return Ok(());
                 } else {
-                    let status = res.status();
                     let body = res.text().await.unwrap_or_default();
-                    // Если сам сервер Telegram вернул прикладную ошибку (400, 401, 403, 404),
-                    // запрос успешно доставлен — возвращаем расшифрованную ошибку.
-                    return Err(translate_telegram_error(status, &body));
+                    let translated = translate_telegram_error(status, &body);
+                    log_w!("[NOTIF] Telegram API вернул HTTP {}: {}", status, translated);
+                    return Err(translated);
                 }
             }
             Err(e) => {
-                last_err = format!("Через {}: {}", name, e);
+                log_w!("[NOTIF] Сбой отправки через {}: {}", name, e);
+                err_details.push(format!("{}: {}", name, e));
             }
         }
     }
 
     Err(format!(
         "Не удалось подключиться к Telegram API ({}). Проверьте, включен ли прокси Mihomo и есть ли доступ в интернет на роутере",
-        last_err
+        err_details.join("; ")
     ))
 }
 
@@ -359,5 +367,13 @@ mod tests {
             r#"{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}"#,
         );
         assert!(err_400.contains("Чат не найден"));
+    }
+
+    #[test]
+    fn test_proxy_builder_webpki() {
+        let p = reqwest::Proxy::all("http://127.0.0.1:7890");
+        assert!(p.is_ok(), "Proxy::all failed: {:?}", p.err());
+        let c = reqwest::Client::builder().proxy(p.unwrap()).build();
+        assert!(c.is_ok(), "Client::build failed: {:?}", c.err());
     }
 }
