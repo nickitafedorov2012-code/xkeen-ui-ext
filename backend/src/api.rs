@@ -83,6 +83,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
             "best_ping_pool_size": cfg.failover.best_ping_pool_size,
             "best_ping_hysteresis_ms": cfg.failover.best_ping_hysteresis_ms,
             "canary": failover::canary_status().await,
+            "quarantine": failover::quarantine_status().await,
         },
         "refresh_interval_sec": cfg.refresh_interval_sec,
         "adblock_enabled": cfg.adblock_enabled,
@@ -348,7 +349,7 @@ pub async fn switch_server(State(state): State<AppState>, Json(req): Json<Switch
     match mihomo::switch_server(&state.http, &cfg, &req.server_id).await {
         Ok(msg) => {
             log_i!("Смена сервера: {} — {}", req.server_id, msg);
-            failover::reset_canary().await;
+            failover::record_manual_switch(&req.server_id).await;
             // Если переключен конкретный сервер, обновляем его как основной в цепочке приоритетов,
             // чтобы фоновый failover не откатывал выбор пользователя обратно через 30-60 секунд.
             if !req.server_id.is_empty() && req.server_id != "Fastest" && req.server_id != "Fallback" {
@@ -717,6 +718,32 @@ pub async fn failover_events(State(state): State<AppState>) -> Response {
     api_ok(json!({ "events": events }))
 }
 
+#[derive(Default, Deserialize)]
+pub struct QuarantineClearReq {
+    pub server_id: Option<String>,
+}
+
+/// GET /api/failover/quarantine — список серверов в карантине (анти-флеппинг).
+pub async fn failover_quarantine_list() -> Response {
+    let list = failover::quarantine_status().await;
+    api_ok(json!({ "quarantine": list }))
+}
+
+/// POST /api/failover/quarantine/clear — снятие карантина для одного сервера или всех.
+pub async fn failover_quarantine_clear(Json(req): Json<QuarantineClearReq>) -> Response {
+    if let Some(id) = req.server_id {
+        let clean = id.trim();
+        if !clean.is_empty() {
+            failover::clear_quarantine(clean).await;
+            log_i!("Карантин сервера '{}' снят вручную", clean);
+            return api_ok(json!({ "message": format!("Карантин сервера '{clean}' снят") }));
+        }
+    }
+    failover::clear_all_quarantine().await;
+    log_i!("Карантин всех серверов сброшен вручную");
+    api_ok(json!({ "message": "Карантин всех серверов сброшен" }))
+}
+
 #[derive(Deserialize)]
 pub struct FailoverToggleReq {
     pub enabled: bool,
@@ -787,6 +814,7 @@ pub async fn set_priority(State(state): State<AppState>, Json(req): Json<Priorit
         return api_err(format!("Ошибка сохранения: {e}"));
     }
     *state.config.write().await = std::sync::Arc::new(cfg);
+    failover::clear_all_quarantine().await;
     api_ok(json!({ "saved": true, "message": message }))
 }
 

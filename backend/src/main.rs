@@ -551,6 +551,8 @@ async fn main() {
         .route("/api/failover/check", post(api::failover_check))
         .route("/api/failover/toggle", post(api::failover_toggle).put(api::failover_toggle))
         .route("/api/failover/events", get(api::failover_events))
+        .route("/api/failover/quarantine", get(api::failover_quarantine_list))
+        .route("/api/failover/quarantine/clear", post(api::failover_quarantine_clear))
         .route("/api/notifications/test", post(api::test_notification))
         // Провайдеры
         .route("/api/providers", get(api::get_providers))

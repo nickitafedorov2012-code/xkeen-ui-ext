@@ -488,12 +488,18 @@ pub fn fix_mojibake_smart(s: &str) -> String {
     }
 }
 
-fn last_delay(p: &Value) -> i64 {
+pub fn last_delay(p: &Value) -> i64 {
+    if let Some(alive) = p.get("alive").and_then(|a| a.as_bool()) {
+        if !alive {
+            return -1;
+        }
+    }
     p.get("history")
         .and_then(|h| h.as_array())
         .and_then(|a| a.last())
         .and_then(|e| e.get("delay"))
         .and_then(|d| d.as_i64())
+        .filter(|&d| d > 0)
         .unwrap_or(-1)
 }
 
@@ -1020,6 +1026,11 @@ pub async fn ping_server_url(
         if let Some(p) = providers.get(server_id) {
             let alive = p.get("alive").and_then(|a| a.as_bool()).unwrap_or(true);
             if !alive {
+                return -1;
+            }
+            // Если передан кастомный test_url (например, Canary payload URL),
+            // мы не можем использовать закэшированный delay от generate_204 ядра Mihomo!
+            if test_url.is_some() {
                 return -1;
             }
             let d = last_delay(p);
@@ -1708,6 +1719,44 @@ mod tests {
         assert_eq!(map.get("192.168.1.55").map(|s| s.as_str()), Some("GamingGroup"));
         assert_eq!(map.get("8.8.8.0"), None, "IP-CIDR must NOT be mapped as a LAN device!");
         assert_eq!(map.get("1.1.1.0"), None, "DST-IP-CIDR must NOT be mapped as a LAN device!");
+    }
+
+    #[test]
+    fn test_last_delay_respects_alive_flag_and_filters_zero() {
+        // 1. Alive = false: must return -1 even with old positive delay in history
+        let dead_proxy = serde_json::json!({
+            "alive": false,
+            "history": [
+                { "time": "2026-10-16T10:00:00Z", "delay": 75 }
+            ]
+        });
+        assert_eq!(last_delay(&dead_proxy), -1);
+
+        // 2. Alive = true, positive delay: returns delay
+        let live_proxy = serde_json::json!({
+            "alive": true,
+            "history": [
+                { "time": "2026-10-16T10:00:00Z", "delay": 75 },
+                { "time": "2026-10-16T10:05:00Z", "delay": 84 }
+            ]
+        });
+        assert_eq!(last_delay(&live_proxy), 84);
+
+        // 3. Delay = 0 (failed check): returns -1
+        let zero_delay_proxy = serde_json::json!({
+            "alive": true,
+            "history": [
+                { "time": "2026-10-16T10:00:00Z", "delay": 0 }
+            ]
+        });
+        assert_eq!(last_delay(&zero_delay_proxy), -1);
+
+        // 4. Empty history: returns -1
+        let no_hist_proxy = serde_json::json!({
+            "alive": true,
+            "history": []
+        });
+        assert_eq!(last_delay(&no_hist_proxy), -1);
     }
 }
 
