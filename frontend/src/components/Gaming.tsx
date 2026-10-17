@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { apiGet, apiPost } from '../api'
+import XboxDns from './XboxDns'
 import type {
   DeviceInfo,
   GamingConfig,
@@ -1630,7 +1631,12 @@ export default function Gaming({ notify }: GamingProps) {
         </div>
       </div>
 
-      {/* 7. Плавающая нижняя панель сохранения */}
+      {/* 7. Интеграция Xbox DNS & SmartDNS Bypass */}
+      <div style={{ marginTop: 20, marginBottom: 16 }}>
+        <XboxDns notify={notify} />
+      </div>
+
+      {/* 8. Плавающая нижняя панель сохранения */}
       <div
         className="card"
         style={{

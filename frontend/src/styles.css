@@ -2171,16 +2171,16 @@ table.devices-table th.sortable {
 table.devices-table th.sortable:hover {
   color: #cbd5e1;
 }
-table.devices-table th:nth-child(1) { width: 32px; } /* checkbox */
-table.devices-table th:nth-child(2) { width: auto; min-width: 160px; } /* device */
-table.devices-table th:nth-child(3) { width: 100px; } /* IP */
-table.devices-table th:nth-child(4) { width: 110px; } /* policy */
+table.devices-table th:nth-child(1) { width: 34px; } /* checkbox */
+table.devices-table th:nth-child(2) { width: 190px; } /* device */
+table.devices-table th:nth-child(3) { width: 115px; } /* IP */
+table.devices-table th:nth-child(4) { width: 115px; } /* policy */
 table.devices-table th:nth-child(5) { width: 75px; } /* speed */
-table.devices-table th:nth-child(6) { width: 75px; } /* traffic */
-table.devices-table th:nth-child(7) { width: 125px; } /* server */
-table.devices-table th:nth-child(8) { width: 92px; text-align: center; } /* zapret */
-table.devices-table th:nth-child(9) { width: 88px; text-align: center; } /* gaming */
-table.devices-table th:nth-child(10) { width: 68px; text-align: center; } /* gear */
+table.devices-table th:nth-child(6) { width: 80px; } /* traffic */
+table.devices-table th:nth-child(7) { width: 140px; } /* server */
+table.devices-table th:nth-child(8) { width: 112px; text-align: center; } /* zapret */
+table.devices-table th:nth-child(9) { width: 105px; text-align: center; } /* gaming */
+table.devices-table th:nth-child(10) { width: 72px; text-align: center; } /* gear */
 
 /* Ввод ограничения скорости (Мбит/с) */
 .device-speed-input-wrap {
@@ -7023,6 +7023,8 @@ table.devices-table td {
 
 .servers-main-content {
   width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 /* --- Apple-Style Signal Quality Meter --- */
@@ -7102,11 +7104,28 @@ table.devices-table td {
 
 .cols-0 .btn-label-short,
 .cols-2 .btn-label-short,
-.cols-3 .btn-label-short,
-.cols-4 .btn-label-short {
+.cols-3 .btn-label-short {
   display: inline;
   font-size: 11px;
   font-weight: 600;
+}
+
+.cols-4 .btn-label-short {
+  display: none !important;
+}
+
+.cols-4 .server-card-action-primary,
+.cols-4 .server-card-action-secondary {
+  flex-shrink: 1;
+}
+
+.cols-4 .server-card-actions {
+  gap: 3px;
+}
+
+.cols-4 .server-card-actions .btn.sm {
+  padding: 3px 5px;
+  min-width: 24px;
 }
 
 /* --- Universal Apple-Style Beta Notice Banner --- */

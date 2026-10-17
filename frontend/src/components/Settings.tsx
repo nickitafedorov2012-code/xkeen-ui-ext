@@ -1158,7 +1158,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                         display: 'flex',
                         gap: 8,
                         alignItems: 'center',
-                        flexWrap: 'wrap',
+                        flexWrap: 'nowrap',
                         background: isActive
                           ? 'rgba(34, 197, 94, 0.08)'
                           : i === 0
@@ -1171,6 +1171,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                             : '1px solid var(--border)',
                         borderRadius: 8,
                         padding: '6px 10px',
+                        minWidth: 0,
                       }}
                     >
                       {/* Роль в цепочке */}
@@ -1183,6 +1184,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                           background: i === 0 ? 'rgba(56, 189, 248, 0.25)' : 'rgba(255, 255, 255, 0.08)',
                           color: i === 0 ? '#38bdf8' : 'var(--muted)',
                           whiteSpace: 'nowrap',
+                          flexShrink: 0,
                         }}
                       >
                         {i === 0 ? '👑 ОСНОВНОЙ (№1)' : `⚡ РЕЗЕРВ (№${i + 1})`}
@@ -1200,6 +1202,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                             color: '#4ade80',
                             border: '1px solid rgba(34, 197, 94, 0.4)',
                             whiteSpace: 'nowrap',
+                            flexShrink: 0,
                           }}
                         >
                           🟢 ИСПОЛЬЗУЕТСЯ СЕЙЧАС
@@ -1215,6 +1218,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                             color: '#c084fc',
                             border: '1px solid rgba(168, 85, 247, 0.4)',
                             whiteSpace: 'nowrap',
+                            flexShrink: 0,
                           }}
                         >
                           🧪 ТЕСТ ({canaryInfo?.remaining_secs ?? 0}с)
@@ -1230,6 +1234,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                             color: '#fb923c',
                             border: '1px solid rgba(249, 115, 22, 0.4)',
                             whiteSpace: 'nowrap',
+                            flexShrink: 0,
                           }}
                         >
                           🛡️ Карантин ({Math.ceil((quarantineInfo?.remaining_secs || 0) / 60)} мин)
@@ -1245,6 +1250,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                             color: '#f87171',
                             border: '1px solid rgba(239, 68, 68, 0.35)',
                             whiteSpace: 'nowrap',
+                            flexShrink: 0,
                           }}
                         >
                           ❌ Таймаут
@@ -1259,6 +1265,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                             background: 'rgba(255, 255, 255, 0.05)',
                             color: 'var(--muted)',
                             whiteSpace: 'nowrap',
+                            flexShrink: 0,
                           }}
                         >
                           💤 В резерве
@@ -1274,22 +1281,34 @@ export default function Settings({ notify, status, refresh }: Props) {
                             padding: '1px 6px',
                             borderRadius: 4,
                             fontWeight: 600,
+                            flexShrink: 0,
                           }}
                         >
                           🔀 ПУЛ
                         </span>
                       ) : sv?.provider ? (
-                        <span className="tag-provider" style={{ fontSize: 10, padding: '1px 5px', cursor: 'default' }}>
+                        <span className="tag-provider" style={{ fontSize: 10, padding: '1px 5px', cursor: 'default', flexShrink: 0 }}>
                           📦 {sv.provider_name || sv.provider}
                         </span>
                       ) : null}
 
-                      <span className="server-name" style={{ flex: 1, fontWeight: isActive || i === 0 ? 600 : 400 }} title={id}>
+                      <span
+                        className="server-name"
+                        style={{
+                          flex: 1,
+                          fontWeight: isActive || i === 0 ? 600 : 400,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          minWidth: 0,
+                        }}
+                        title={sv ? `${sv.name} (${id})` : id}
+                      >
                         {sv ? sv.name : `${id} (недоступен)`}
                       </span>
 
                       {(sv || livePing > 0) && (
-                        <span className={'ping ' + pingClass(livePing)}>
+                        <span className={'ping ' + pingClass(livePing)} style={{ flexShrink: 0 }}>
                           {livePing > 0 ? `${livePing} мс` : '—'}
                         </span>
                       )}
@@ -1313,6 +1332,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                             cursor: 'pointer',
                             fontWeight: 600,
                             whiteSpace: 'nowrap',
+                            flexShrink: 0,
                           }}
                           title="Принудительно переключиться на этот сервер"
                           onClick={async () => {
@@ -1329,15 +1349,15 @@ export default function Settings({ notify, status, refresh }: Props) {
                         </button>
                       )}
 
-                      <button className="btn sm ghost" disabled={i === 0} onClick={() => chainMove(i, -1)} title="Повысить приоритет">
+                      <button className="btn sm ghost" style={{ flexShrink: 0 }} disabled={i === 0} onClick={() => chainMove(i, -1)} title="Повысить приоритет">
                         ↑
                       </button>
-                      <button className="btn sm ghost" disabled={i === chain.length - 1} onClick={() => chainMove(i, 1)} title="Понизить приоритет">
+                      <button className="btn sm ghost" style={{ flexShrink: 0 }} disabled={i === chain.length - 1} onClick={() => chainMove(i, 1)} title="Понизить приоритет">
                         ↓
                       </button>
                       <button
                         className="btn sm ghost"
-                        style={{ color: '#ef4444' }}
+                        style={{ color: '#ef4444', flexShrink: 0 }}
                         onClick={() => patch((s) => (s.failover.priority_chain = chain.filter((x) => x !== id)))}
                         title="Удалить из цепочки"
                       >

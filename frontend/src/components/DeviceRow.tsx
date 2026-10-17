@@ -231,7 +231,7 @@ const DeviceRow = memo(function DeviceRow({
               applyServer(d.ip, d.name, e.target.value)
             }}
           >
-            <option value="default">Default (PROXY)</option>
+            <option value="default">🌐 Общий активный узел</option>
             {assigned && !servers.some((s) => s.id === assigned) && (
               <option value={assigned}>{serverLabel(assigned)}</option>
             )}

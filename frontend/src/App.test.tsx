@@ -234,12 +234,12 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
     window.location.hash = ''
   })
 
-  it('renders #xbox-dns hash as xbox-dns view and renders Xbox DNS tab', async () => {
+  it('renders #xbox-dns hash as gaming view with integrated xbox-dns', async () => {
     window.location.hash = '#xbox-dns'
     await act(async () => {
       root!.render(<App />)
     })
-    expect(container?.querySelector('[data-testid="xbox-dns-view"]')).not.toBeNull()
+    expect(container?.querySelector('[data-testid="gaming-view"]')).not.toBeNull()
     window.location.hash = ''
   })
 

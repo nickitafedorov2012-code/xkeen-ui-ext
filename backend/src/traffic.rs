@@ -200,12 +200,13 @@ async fn run_mihomo_stream(state: AppState) {
                                 buffer.drain(..=pos);
                                 if !line.is_empty() {
                                     if let Ok(msg) = serde_json::from_str::<MihomoTrafficChunk>(&line) {
-                                        PROXY_DOWN.store(msg.down, Ordering::Relaxed);
-                                        PROXY_UP.store(msg.up, Ordering::Relaxed);
+                                        // Инверсия направления Mihomo -> клиент: данные, отдаваемые Mihomo клиенту, являются Загрузкой (DOWN)
+                                        PROXY_DOWN.store(msg.up, Ordering::Relaxed);
+                                        PROXY_UP.store(msg.down, Ordering::Relaxed);
                                         TOTAL_PROXY_BYTES.fetch_add(msg.down + msg.up, Ordering::Relaxed);
                                         if WHITELIST_ACTIVE.load(Ordering::Relaxed) {
-                                            WHITELIST_DOWN.store(msg.down, Ordering::Relaxed);
-                                            WHITELIST_UP.store(msg.up, Ordering::Relaxed);
+                                            WHITELIST_DOWN.store(msg.up, Ordering::Relaxed);
+                                            WHITELIST_UP.store(msg.down, Ordering::Relaxed);
                                             TOTAL_WHITELIST_BYTES.fetch_add(msg.down + msg.up, Ordering::Relaxed);
                                         } else {
                                             WHITELIST_DOWN.store(0, Ordering::Relaxed);
@@ -408,5 +409,21 @@ mod tests {
         // Reset back to inactive
         set_whitelist_active(false);
         assert!(!is_whitelist_active());
+    }
+
+    #[test]
+    fn test_anti_regression_traffic_direction_mihomo_to_client_perspective() {
+        // Проверка: Mihomo chunk 'up' (данные, отдаваемые прокси клиенту) парсится
+        // и направляется в Загрузку (DOWN), а chunk 'down' (от клиента к прокси) — в Отдачу (UP).
+        let chunk_json = r#"{"up":15000000,"down":250000}"#;
+        let msg: MihomoTrafficChunk = serde_json::from_str(chunk_json).expect("valid chunk");
+        
+        // В run_mihomo_stream:
+        PROXY_DOWN.store(msg.up, Ordering::Relaxed);
+        PROXY_UP.store(msg.down, Ordering::Relaxed);
+
+        let snap = get_snapshot();
+        assert_eq!(snap.proxy.down, 15000000, "Mihomo up must map to client download (DOWN)");
+        assert_eq!(snap.proxy.up, 250000, "Mihomo down must map to client upload (UP)");
     }
 }

@@ -3627,8 +3627,10 @@ pub async fn get_devices_traffic(State(state): State<AppState>) -> Response {
         Err(e) => return api_err(format!("Ошибка опроса /connections: {}", e)),
     };
 
-    let download_total = resp_val.get("downloadTotal").and_then(|v| v.as_u64()).unwrap_or(0);
-    let upload_total = resp_val.get("uploadTotal").and_then(|v| v.as_u64()).unwrap_or(0);
+    // В Mihomo 'upload' от прокси к клиенту соответствует клиентской Загрузке (download),
+    // а 'download' от клиента в прокси — клиентской Отдаче (upload).
+    let download_total = resp_val.get("uploadTotal").and_then(|v| v.as_u64()).unwrap_or(0);
+    let upload_total = resp_val.get("downloadTotal").and_then(|v| v.as_u64()).unwrap_or(0);
 
     let mut per_device: std::collections::BTreeMap<String, serde_json::Value> = std::collections::BTreeMap::new();
 
@@ -3644,8 +3646,8 @@ pub async fn get_devices_traffic(State(state): State<AppState>) -> Response {
                 continue;
             }
 
-            let dl = conn.get("download").and_then(|v| v.as_u64()).unwrap_or(0);
-            let ul = conn.get("upload").and_then(|v| v.as_u64()).unwrap_or(0);
+            let dl = conn.get("upload").and_then(|v| v.as_u64()).unwrap_or(0);
+            let ul = conn.get("download").and_then(|v| v.as_u64()).unwrap_or(0);
             let host = conn.get("metadata")
                 .and_then(|m| m.get("host"))
                 .and_then(|h| h.as_str())

@@ -865,7 +865,7 @@ export default function Devices({ notify }: Props) {
                 style={{ textAlign: 'left', marginBottom: 4 }}
                 onClick={() => handleBatchServerApply('default')}
               >
-                Default (PROXY)
+                🌐 Общий активный узел
               </button>
               {servers.map((s) => (
                 <button

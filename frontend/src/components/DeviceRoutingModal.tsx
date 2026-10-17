@@ -112,7 +112,7 @@ export default function DeviceRoutingModal({
           </p>
           <div className="modal-list" style={{ maxHeight: 180, marginBottom: 8 }}>
             {modal.servers.length === 0 && (
-              <p className="muted small" style={{ margin: '4px 0' }}>Цепочка пуста — устройство использует глобальный PROXY.</p>
+              <p className="muted small" style={{ margin: '4px 0' }}>Цепочка пуста — устройство использует общий активный узел.</p>
             )}
             {modal.servers.map((id, i) => {
               const s = servers.find((x) => x.id === id)
@@ -233,7 +233,7 @@ export default function DeviceRoutingModal({
               style={{ width: 140 }}
             >
               <option value="DIRECT">DIRECT (Напрямую)</option>
-              <option value="PROXY">PROXY (По умолчанию)</option>
+              <option value="PROXY">🌐 Общий активный узел</option>
               <option value="REJECT">REJECT (Блокировать)</option>
               {servers.map((s) => (
                 <option key={s.id} value={s.id}>

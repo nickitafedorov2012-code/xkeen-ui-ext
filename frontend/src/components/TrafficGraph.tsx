@@ -299,14 +299,16 @@ export default function TrafficGraph() {
               </div>
             )}
 
-            {/* Синий бейдж: Проксированный трафик */}
-            <div className="traffic-badge proxy" title={`Проксированный трафик через Mihomo/VPS\nПик: ${formatSpeed(peakProxy)}`}>
-              <span className="badge-label">🔵 Прокси:</span>
-              <span className="badge-arrow">↓</span>
-              <span className="badge-val">{formatSpeed(currentProxy.down)}</span>
-              <span className="badge-arrow">↑</span>
-              <span className="badge-val">{formatSpeed(currentProxy.up)}</span>
-            </div>
+            {/* Синий бейдж: Проксированный трафик (скрываем при активном аварийном туннеле белых списков во избежание дублирования) */}
+            {!isWhitelistActive && (
+              <div className="traffic-badge proxy" title={`Проксированный трафик через Mihomo/VPS\nПик: ${formatSpeed(peakProxy)}`}>
+                <span className="badge-label">🔵 Прокси:</span>
+                <span className="badge-arrow">↓</span>
+                <span className="badge-val">{formatSpeed(currentProxy.down)}</span>
+                <span className="badge-arrow">↑</span>
+                <span className="badge-val">{formatSpeed(currentProxy.up)}</span>
+              </div>
+            )}
 
             {/* Суммарный трафик */}
             <div className="traffic-badge total" title="Суммарная нагрузка на канал WAN">

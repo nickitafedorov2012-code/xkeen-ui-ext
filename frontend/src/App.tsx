@@ -16,7 +16,6 @@ import MihomoCoreModal from './components/MihomoCoreModal'
 import ZapretCoreModal from './components/ZapretCoreModal'
 import Zapret from './components/Zapret'
 import Gaming from './components/Gaming'
-import XboxDns from './components/XboxDns'
 import AdGuard from './components/AdGuard'
 import Help from './components/Help'
 import { apiGet, apiPost } from './api'
@@ -44,7 +43,6 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'devices', label: '📱 Устройства' },
   { id: 'zapret', label: '⚡ Zapret' },
   { id: 'gaming', label: '🎮 Игры' },
-  { id: 'xbox-dns', label: '🎮 Xbox DNS' },
   { id: 'google-ai', label: '🤖 Google AI' },
   { id: 'adguard', label: '🛡️ AdGuard' },
   { id: 'connections', label: '🌐 Соединения' },
@@ -86,6 +84,7 @@ export default function App() {
     const h = window.location.hash.replace('#', '')
     if (h === 'antigravity') return 'google-ai'
     if (h === 'diagnostics') return 'connections'
+    if (h === 'xbox-dns') return 'gaming'
     return (TABS.some((t) => t.id === h) || h === 'settings' || h === 'help' || h === 'adguard' ? h : 'dashboard') as TabId
   })()
   const [tab, setTab] = useState<TabId>(initial)
@@ -180,7 +179,7 @@ export default function App() {
   useEffect(() => {
     const handleLocationChange = () => {
       const h = window.location.hash.replace('#', '')
-      const targetTab = (h === 'antigravity' ? 'google-ai' : h) as TabId
+      const targetTab = (h === 'antigravity' ? 'google-ai' : h === 'xbox-dns' ? 'gaming' : h) as TabId
       if (TABS.some((t) => t.id === targetTab) || targetTab === 'settings' || targetTab === 'help' || targetTab === 'adguard') {
         setTab(targetTab)
       }
@@ -352,8 +351,7 @@ export default function App() {
           {tab === 'servers' && <Servers notify={notify} status={status} refresh={refresh} />}
           {tab === 'devices' && <Devices notify={notify} />}
           {tab === 'zapret' && <Zapret notify={notify} />}
-          {tab === 'gaming' && <Gaming notify={notify} />}
-          {tab === 'xbox-dns' && <XboxDns notify={notify} />}
+          {(tab === 'gaming' || tab === 'xbox-dns') && <Gaming notify={notify} />}
           {(tab === 'google-ai' || tab === 'antigravity') && <Antigravity notify={notify} />}
           {tab === 'connections' && <ConnectionsViewer notify={notify} />}
           {tab === 'rules' && <RulesViewer notify={notify} />}

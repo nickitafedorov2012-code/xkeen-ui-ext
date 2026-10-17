@@ -90,6 +90,36 @@ const PROVIDER_COLORS = [
   '#6366f1', // indigo
 ]
 
+function formatSpeed(bytesPerSec: number): string {
+  if (!bytesPerSec || bytesPerSec <= 0) return '0 Б/с'
+  if (bytesPerSec < 1024) return `${bytesPerSec} Б/с`
+  if (bytesPerSec < 1024 * 1024) return `${(bytesPerSec / 1024).toFixed(1)} КБ/с`
+  if (bytesPerSec < 1024 * 1024 * 1024) return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} МБ/с`
+  return `${(bytesPerSec / (1024 * 1024 * 1024)).toFixed(2)} ГБ/с`
+}
+
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return '0 Б'
+  if (bytes < 1024) return `${bytes} Б`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} ГБ`
+}
+
+function buildSparklinePath(pings: number[], width: number, height: number): string {
+  if (pings.length < 2) return ''
+  const min = Math.min(...pings)
+  const max = Math.max(...pings)
+  const range = max - min || 1
+  return pings
+    .map((p, i) => {
+      const x = (i / (pings.length - 1)) * width
+      const y = height - 2 - ((p - min) / range) * (height - 4)
+      return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`
+    })
+    .join(' ')
+}
+
 export default function Servers({ notify, status, refresh }: Props) {
   const [servers, setServers] = useState<ServerInfo[]>([])
   const [providers, setProviders] = useState<ProviderInfo[]>([])
@@ -275,6 +305,31 @@ export default function Servers({ notify, status, refresh }: Props) {
     }
   }, [pingAll])
 
+  // Живая телеметрия активного узла: трафик и история пинга
+  const [liveTraffic, setLiveTraffic] = useState<{
+    proxy?: { down: number; up: number }
+    proxy_bytes?: number
+  } | null>(null)
+  const [pingHistory, setPingHistory] = useState<number[]>([])
+
+  useEffect(() => {
+    let active = true
+    const pollTraffic = async () => {
+      try {
+        const snap = await apiGet<{ proxy?: { down: number; up: number }; proxy_bytes?: number }>('traffic/poll')
+        if (active && snap) {
+          setLiveTraffic(snap)
+        }
+      } catch {}
+    }
+    pollTraffic()
+    const interval = setInterval(pollTraffic, 1500)
+    return () => {
+      active = false
+      clearInterval(interval)
+    }
+  }, [])
+
   const flowCount = useMemo(() => {
     return servers.filter((s) => getFlowStatus(s) === 'ok').length
   }, [servers])
@@ -322,6 +377,10 @@ export default function Servers({ notify, status, refresh }: Props) {
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase()
     const list = servers.filter((s) => {
+      // Исключённые серверы скрываем полностью из общего списка (доступны только в модалке Игнор-лист)
+      if (ignored.has(s.id)) {
+        return false
+      }
       if (poolOnly && !s.is_pool) {
         return false
       }
@@ -387,12 +446,21 @@ export default function Servers({ notify, status, refresh }: Props) {
       })
     }
     return sorted
-  }, [servers, filter, selectedProviders, flowOnly, poolOnly, hideOffline, sortMode])
+  }, [servers, filter, selectedProviders, flowOnly, poolOnly, hideOffline, sortMode, ignored])
 
   // Активный сервер (из списка или глобального статуса)
   const activeServer = useMemo(() => {
     return servers.find((s) => s.is_active) || (status?.active_server ? servers.find((s) => s.id === status.active_server?.id) : undefined)
   }, [servers, status?.active_server])
+
+  useEffect(() => {
+    if (activeServer?.ping_ms && activeServer.ping_ms > 0 && activeServer.ping_ms < 9999) {
+      setPingHistory((prev) => {
+        const next = [...prev, activeServer.ping_ms]
+        return next.slice(-15)
+      })
+    }
+  }, [activeServer?.ping_ms, activeServer?.id])
 
   const activate = async (s: ServerInfo) => {
     try {
@@ -760,8 +828,97 @@ export default function Servers({ notify, status, refresh }: Props) {
                     )}
                   </div>
                 )}
-                <div className="muted small" style={{ marginTop: 2, fontSize: 11 }}>
-                  Хост: <code>{activeServer.host}{activeServer.port ? `:${activeServer.port}` : ''}</code>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
+                  <div className="muted small" style={{ fontSize: 11 }}>
+                    Хост: <code>{activeServer.host}{activeServer.port ? `:${activeServer.port}` : ''}</code>
+                  </div>
+                  {/* Роль в Failover-цепочке */}
+                  {status?.failover && (
+                    <span
+                      className="badge"
+                      style={{
+                        fontSize: 10.5,
+                        fontWeight: 700,
+                        padding: '2px 7px',
+                        borderRadius: 4,
+                        background:
+                          status.failover.priority_server === activeServer.id || status.failover.priority_chain?.[0] === activeServer.id
+                            ? 'rgba(56, 189, 248, 0.2)'
+                            : status.failover.priority_chain?.includes(activeServer.id)
+                            ? 'rgba(245, 158, 11, 0.2)'
+                            : 'rgba(255, 255, 255, 0.06)',
+                        color:
+                          status.failover.priority_server === activeServer.id || status.failover.priority_chain?.[0] === activeServer.id
+                            ? '#38bdf8'
+                            : status.failover.priority_chain?.includes(activeServer.id)
+                            ? '#fbbf24'
+                            : 'var(--muted)',
+                        border: '1px solid rgba(255, 255, 255, 0.1)',
+                      }}
+                      title="Позиция узла в автоматической цепочке защиты от сбоев (Failover)"
+                    >
+                      {status.failover.priority_server === activeServer.id || status.failover.priority_chain?.[0] === activeServer.id
+                        ? '👑 Основной сервер'
+                        : status.failover.priority_chain?.includes(activeServer.id)
+                        ? `⚡ Резерв #${status.failover.priority_chain.indexOf(activeServer.id) + 1}`
+                        : '🌐 Ручной выбор'}
+                    </span>
+                  )}
+                </div>
+
+                {/* Apple-style Live-телеметрия узла: скорость, трафик и спарклайн задержки */}
+                <div
+                  className="active-node-telemetry"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                    padding: '6px 12px',
+                    background: 'rgba(15, 23, 42, 0.55)',
+                    border: '1px solid rgba(56, 189, 248, 0.18)',
+                    borderRadius: 8,
+                    marginTop: 8,
+                    marginBottom: 4,
+                    flexWrap: 'wrap',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+                    <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 600 }}>Live-трафик:</span>
+                    <span style={{ color: '#38bdf8', fontWeight: 700, fontFamily: 'Consolas, monospace' }}>
+                      ↓ {formatSpeed(liveTraffic?.proxy?.down ?? 0)}
+                    </span>
+                    <span style={{ color: '#c084fc', fontWeight: 700, fontFamily: 'Consolas, monospace' }}>
+                      ↑ {formatSpeed(liveTraffic?.proxy?.up ?? 0)}
+                    </span>
+                    {Boolean(liveTraffic?.proxy_bytes) && (
+                      <span className="muted" style={{ fontSize: 11, marginLeft: 2 }}>
+                        (всего {formatBytes(liveTraffic?.proxy_bytes ?? 0)})
+                      </span>
+                    )}
+                  </div>
+
+                  {pingHistory.length > 1 && (
+                    <div
+                      style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                      title={`История задержки узла: мин ${Math.min(...pingHistory)} мс, макс ${Math.max(...pingHistory)} мс`}
+                    >
+                      <span style={{ fontSize: 10, color: '#94a3b8' }}>джиттер:</span>
+                      <svg width="68" height="18" style={{ overflow: 'visible', verticalAlign: 'middle' }}>
+                        <path
+                          d={buildSparklinePath(pingHistory, 68, 18)}
+                          fill="none"
+                          stroke="#38bdf8"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                      <span style={{ fontSize: 10.5, fontFamily: 'Consolas, monospace', color: '#38bdf8' }}>
+                        {pingHistory[pingHistory.length - 1]} мс
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -1276,7 +1433,10 @@ export default function Servers({ notify, status, refresh }: Props) {
                   <div className="server-card-actions">
                     <div className="server-card-action-primary">
                       {s.is_active ? (
-                        <span className="tag current-active-badge">✓ ПОДКЛЮЧЁН</span>
+                        <span className="tag current-active-badge">
+                          <span>✓</span>
+                          <span className="btn-label-optional">ПОДКЛЮЧЁН</span>
+                        </span>
                       ) : (
                         <button
                           type="button"
@@ -1284,7 +1444,8 @@ export default function Servers({ notify, status, refresh }: Props) {
                           onClick={() => activate(s)}
                           title="Сделать этот сервер активным"
                         >
-                          🔌 Подключить
+                          <span>🔌</span>
+                          <span className="btn-label-optional">Подключить</span>
                         </button>
                       )}
                     </div>
@@ -1298,7 +1459,7 @@ export default function Servers({ notify, status, refresh }: Props) {
                         title="Замерить реальную скорость загрузки через этот прокси"
                       >
                         <span>{speedtestingId === s.id ? '⏳' : '🚀'}</span>
-                        <span>{speedtestingId === s.id ? 'Замер…' : 'Скорость'}</span>
+                        <span className="btn-label-optional">{speedtestingId === s.id ? 'Замер…' : 'Скорость'}</span>
                       </button>
 
                       <button
