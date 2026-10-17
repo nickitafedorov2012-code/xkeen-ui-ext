@@ -147,7 +147,7 @@ export default function DeviceRoutingModal({
           >
             <option value="">+ добавить сервер в цепочку…</option>
             {servers
-              .filter((s) => !modal.servers.includes(s.id))
+              .filter((s) => !s.is_pool && s.id !== 'PROXY' && s.id !== 'GLOBAL' && s.id !== 'Fastest' && s.id !== 'Fallback' && !modal.servers.includes(s.id))
               .map((s) => (
                 <option key={s.id} value={s.id}>{serverLabel(s.id)}</option>
               ))}
@@ -235,11 +235,13 @@ export default function DeviceRoutingModal({
               <option value="DIRECT">DIRECT (Напрямую)</option>
               <option value="PROXY">🌐 Общий активный узел</option>
               <option value="REJECT">REJECT (Блокировать)</option>
-              {servers.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
+              {servers
+                .filter((s) => !s.is_pool && s.id !== 'PROXY' && s.id !== 'GLOBAL' && s.id !== 'DIRECT' && s.id !== 'REJECT')
+                .map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}
+                  </option>
+                ))}
             </select>
             <button type="submit" className="btn sm" disabled={!newDomain.trim()}>
               ＋ Добавить

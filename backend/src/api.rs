@@ -764,6 +764,9 @@ pub async fn switch_flow_server(
     if srv_id.is_empty() {
         return api_err("Не указан server_id для Google Flow");
     }
+    if ["PROXY", "GLOBAL", "Fastest", "Fallback", "DIRECT", "REJECT"].contains(&srv_id) {
+        return api_err(format!("'{srv_id}' является системной группой/селектором, а не конкретным выходным сервером для Google Flow"));
+    }
 
     match mihomo::switch_flow_server(&state, srv_id).await {
         Ok(msg) => {
@@ -818,7 +821,7 @@ pub async fn repair_flow(State(state): State<AppState>) -> Response {
             // Ищем сервер США из mihomo::get_servers, либо первый доступный узел
             if let Ok(servers) = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
                 let us_cand = servers.iter().find(|s| {
-                    if s.id.is_empty() || s.id == "Fastest" || s.id == "Fallback" {
+                    if s.id.is_empty() || s.id == "Fastest" || s.id == "Fallback" || s.is_pool || s.id == "PROXY" || s.id == "GLOBAL" {
                         return false;
                     }
                     let country = crate::mihomo::detect_server_country(&s.id);
@@ -826,7 +829,7 @@ pub async fn repair_flow(State(state): State<AppState>) -> Response {
                 });
                 if let Some(us_srv) = us_cand {
                     us_srv.id.clone()
-                } else if let Some(first_valid) = servers.into_iter().find(|s| !s.id.is_empty() && s.id != "Fastest" && s.id != "Fallback") {
+                } else if let Some(first_valid) = servers.into_iter().find(|s| !s.id.is_empty() && s.id != "Fastest" && s.id != "Fallback" && !s.is_pool && s.id != "PROXY" && s.id != "GLOBAL" && s.id != "DIRECT" && s.id != "REJECT") {
                     first_valid.id
                 } else {
                     return api_err("В конфигурации ядра Mihomo не найдено ни одного действительного прокси-сервера для маршрута Google Flow");
@@ -902,8 +905,14 @@ pub async fn auto_select_flow_server(
     if target_enabled {
         let pings = mihomo::ping_flow_servers(&state.http, &current_cfg, 3500).await;
         let mut min_ping = i64::MAX;
+        let is_excluded_selector = |name: &str| -> bool {
+            ["PROXY", "GLOBAL", "Fastest", "Fallback", "DIRECT", "REJECT", "Google AI", "YouTube", "Discord", "Telegram", "Steam", "Twitch", "Torrent"].contains(&name)
+        };
 
         for (name, &ping) in &pings {
+            if is_excluded_selector(name) {
+                continue;
+            }
             if ping > 0 && ping < min_ping {
                 let country = crate::mihomo::detect_server_country(name);
                 let is_us_ca = country == "US" || country == "CA";
@@ -916,6 +925,9 @@ pub async fn auto_select_flow_server(
 
         if best_server_id.is_none() {
             for (name, &ping) in &pings {
+                if is_excluded_selector(name) {
+                    continue;
+                }
                 if ping > 0 && ping < min_ping {
                     min_ping = ping;
                     best_server_id = Some(name.clone());
@@ -10847,6 +10859,50 @@ mod tests {
         fixed_content.push_str("  - name: test_node\n    type: ss");
         assert!(fixed_content.starts_with("proxies:\n"));
         assert!(fixed_content.contains("test_node"));
+    }
+
+    #[test]
+    fn test_anti_regression_flow_server_rejects_proxy_selector_groups() {
+        let excluded = ["PROXY", "GLOBAL", "Fastest", "Fallback", "DIRECT", "REJECT"];
+        for name in excluded {
+            assert!(["PROXY", "GLOBAL", "Fastest", "Fallback", "DIRECT", "REJECT"].contains(&name));
+        }
+
+        let servers = vec![
+            crate::mihomo::Server {
+                id: "PROXY".into(),
+                name: "🌐 PROXY".into(),
+                protocol: "POOL (SELECT)".into(),
+                host: "Выбран: test".into(),
+                port: 0,
+                is_active: true,
+                is_priority: false,
+                ping_ms: 79,
+                provider: Some("__pool__".into()),
+                provider_name: Some("Группа / Пул".into()),
+                is_pool: true,
+            },
+            crate::mihomo::Server {
+                id: "US-Node".into(),
+                name: "🇺🇸 US Node".into(),
+                protocol: "VLESS".into(),
+                host: "us.example.com".into(),
+                port: 443,
+                is_active: false,
+                is_priority: false,
+                ping_ms: 120,
+                provider: Some("sub1".into()),
+                provider_name: Some("Sub 1".into()),
+                is_pool: false,
+            },
+        ];
+
+        let valid_flow_cand = servers.iter().find(|s| {
+            !s.id.is_empty() && s.id != "Fastest" && s.id != "Fallback" && !s.is_pool && s.id != "PROXY" && s.id != "GLOBAL"
+        });
+
+        assert!(valid_flow_cand.is_some());
+        assert_eq!(valid_flow_cand.unwrap().id, "US-Node");
     }
 }
 

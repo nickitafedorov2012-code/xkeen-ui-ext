@@ -76,28 +76,36 @@ export default function Antigravity({ notify }: Props) {
     try {
       const data = await apiGet<{ servers: ServerInfo[] }>('servers')
       const all = data.servers || []
-      const cleanNodes = all.filter((s) => getFlowStatus(s) === 'ok')
-      setFlowServers(all)
+      const realServers = all.filter(
+        (s) => !s.is_pool && s.id !== 'PROXY' && s.id !== 'GLOBAL' && s.id !== 'Fastest' && s.id !== 'Fallback' && s.id !== 'DIRECT' && s.id !== 'REJECT'
+      )
+      const cleanNodes = realServers.filter((s) => getFlowStatus(s) === 'ok')
+      setFlowServers(realServers)
 
       let flowSrv = ''
       try {
         const fStatus = await apiGet<{ flow_server?: string; flow_auto_select?: boolean }>('flow/status')
-        if (fStatus.flow_server) flowSrv = fStatus.flow_server
+        if (fStatus.flow_server && fStatus.flow_server !== 'PROXY' && fStatus.flow_server !== 'GLOBAL') {
+          flowSrv = fStatus.flow_server
+        }
         if (typeof fStatus.flow_auto_select === 'boolean') {
           setAutoSelectFlow(fStatus.flow_auto_select)
         }
       } catch {}
 
       if (!flowSrv) {
-        flowSrv = localStorage.getItem('xr_flow_server') || ''
+        const stored = localStorage.getItem('xr_flow_server') || ''
+        if (stored !== 'PROXY' && stored !== 'GLOBAL') {
+          flowSrv = stored
+        }
       }
 
-      if (flowSrv && all.some((s) => s.id === flowSrv)) {
+      if (flowSrv && realServers.some((s) => s.id === flowSrv)) {
         setSelectedFlowServer(flowSrv)
       } else if (cleanNodes.length > 0) {
         setSelectedFlowServer(cleanNodes[0].id)
-      } else if (all.length > 0) {
-        setSelectedFlowServer(all[0].id)
+      } else if (realServers.length > 0) {
+        setSelectedFlowServer(realServers[0].id)
       }
     } catch {
       // ignore
@@ -316,55 +324,24 @@ export default function Antigravity({ notify }: Props) {
       {/* СЕКЦИЯ 1: GOOGLE FLOW & GEMINI LABS */}
       <section className="card" style={{ marginBottom: 20 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div style={{ fontSize: 32 }}>✨</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 240 }}>
+            <div style={{ fontSize: 30 }}>✨</div>
             <div>
-              <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: 'var(--text)' }}>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: 'var(--text)' }}>
                 Google Flow & Gemini Labs
               </h2>
-              <div style={{ color: 'var(--muted)', fontSize: 13, marginTop: 2 }}>
-                Выделенная маршрутизация и диагностика чистоты узлов для генератора видео и интерфейсов Google Flow
+              <div style={{ color: 'var(--muted)', fontSize: 12.5, marginTop: 2 }}>
+                Выделенная маршрутизация и диагностика чистоты узлов для Google Flow, Gemini и AI Studio
               </div>
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            <button
-              type="button"
-              className="btn"
-              style={{
-                background: 'linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%)',
-                border: 'none',
-                color: '#fff',
-                fontWeight: 600,
-                boxShadow: '0 2px 8px rgba(236, 72, 153, 0.25)',
-              }}
-              onClick={() => setRepairModalOpen(true)}
-              title="Обход регионального фильтра cPZSdc (Tampermonkey) и сброс зависшего редиректа"
-            >
-              🔓 Анлок и починка Flow
-            </button>
-            <button
-              className="btn"
-              onClick={checkFlowAccess}
-              disabled={checkingFlow}
-              title="Проверить, как Google определяет текущий узел"
-            >
-              {checkingFlow ? '⏳ Тестирование…' : '🧪 Проверить статус Flow'}
-            </button>
-            <button
-              className="btn"
-              onClick={pingFlowNodes}
-              disabled={pingingFlow}
-              title="Замерить пинг по flow.google.com для всех узлов"
-            >
-              {pingingFlow ? '⏳ Пинг Flow…' : '⚡ Пинг узлов Flow'}
-            </button>
             <a
               href="https://flow.google.com"
               target="_blank"
               rel="noreferrer"
               className="btn primary"
-              style={{ textDecoration: 'none' }}
+              style={{ textDecoration: 'none', padding: '6px 12px', fontSize: 12.5 }}
               title="Открыть генератор Google Flow в новой вкладке"
             >
               🚀 Открыть Flow ↗
@@ -374,7 +351,7 @@ export default function Antigravity({ notify }: Props) {
               target="_blank"
               rel="noreferrer"
               className="btn"
-              style={{ textDecoration: 'none' }}
+              style={{ textDecoration: 'none', padding: '6px 12px', fontSize: 12.5 }}
               title="Открыть Google AI Studio в новой вкладке"
             >
               ⚡ AI Studio ↗
@@ -382,7 +359,7 @@ export default function Antigravity({ notify }: Props) {
           </div>
         </div>
 
-        {/* Статус чистоты Google */}
+        {/* Статус чистоты Google и диагностика */}
         <div style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
@@ -391,11 +368,11 @@ export default function Antigravity({ notify }: Props) {
           background: 'var(--panel-2, rgba(255,255,200,0.02))',
           borderRadius: 8,
           border: '1px solid var(--border)',
-          marginBottom: 16
+          marginBottom: 14,
         }}>
           <div>
             <div className="muted small">Статус доступа к Flow</div>
-            <div style={{ fontSize: 15, fontWeight: 600, marginTop: 4 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, marginTop: 4 }}>
               {googleGeo ? (
                 googleGeo.is_clean ? (
                   <span style={{ color: '#4ade80' }}>🟢 Разрешён (Чистый IP)</span>
@@ -403,75 +380,131 @@ export default function Antigravity({ notify }: Props) {
                   <span style={{ color: '#f87171' }}>🔴 Заблокирован ({googleGeo.google_country || 'RU'})</span>
                 )
               ) : (
-                <span className="muted">Нажмите «Проверить статус Flow»</span>
+                <span className="muted">Не проверено</span>
               )}
             </div>
           </div>
 
           <div>
             <div className="muted small">Регион по Google Search / AI</div>
-            <div style={{ fontSize: 15, fontWeight: 600, marginTop: 4 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, marginTop: 4 }}>
               {googleGeo?.google_country ? `${googleGeo.google_country} (${googleGeo.google_domain})` : '—'}
             </div>
           </div>
 
-          <div>
-            <div className="muted small">Выделенный узел Google Flow & AI (только AI)</div>
-            <div style={{ display: 'flex', gap: 6, marginTop: 4 }}>
-              <select
-                className="input"
-                style={{ padding: '4px 8px', fontSize: 13, flex: 1 }}
-                value={selectedFlowServer}
-                title="Трафик Google Flow, Gemini, AI Studio и Labs пойдет через этот узел. Основной прокси и Failover не изменяются."
-                onChange={(e) => {
-                  setSelectedFlowServer(e.target.value)
-                  switchGoogleAiServer(e.target.value)
-                }}
-                disabled={switchingFlowServer || pingingFlow}
-              >
-                <option value="">-- Выберите сервер для AI ({flowServers.length}) --</option>
-                {usCaServers.length > 0 && (
-                  <optgroup label="🇺🇸 🇨🇦 Проверенные для Google Flow (США / Канада)">
-                    {usCaServers.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {formatFlowServerName(s.name)} {s.ping_ms > 0 ? `(${s.ping_ms} мс)` : ''} ★ Flow
-                      </option>
-                    ))}
-                  </optgroup>
-                )}
-                {otherServers.length > 0 && (
-                  <optgroup label="🌐 Все остальные серверы">
-                    {otherServers.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name} {s.ping_ms > 0 ? `(${s.ping_ms} мс)` : ''}
-                      </option>
-                    ))}
-                  </optgroup>
-                )}
-              </select>
-              <button
-                type="button"
-                className={`btn sm ${autoSelectFlow ? 'primary' : 'ghost'}`}
-                style={{
-                  fontWeight: 600,
-                  whiteSpace: 'nowrap',
-                  background: autoSelectFlow ? 'rgba(34, 197, 94, 0.2)' : 'rgba(255, 255, 255, 0.05)',
-                  borderColor: autoSelectFlow ? 'rgba(34, 197, 94, 0.6)' : 'var(--border)',
-                  color: autoSelectFlow ? '#4ade80' : 'var(--muted)',
-                }}
-                title={autoSelectFlow ? 'Автоподбор активен: роутер пингует и выбирает чистый сервер США' : 'Включить автоматический подбор чистого и быстрого сервера США для Google AI'}
-                disabled={togglingAutoSelect}
-                onClick={toggleAutoSelect}
-              >
-                {togglingAutoSelect ? '⏳…' : autoSelectFlow ? '🤖 Авто: ВКЛ' : '🤖 Авто: ВЫКЛ'}
-              </button>
-            </div>
-            {autoSelectFlow && (
-              <div style={{ fontSize: 11, color: '#4ade80', marginTop: 4 }}>
-                ✓ Роутер автоматически пингует доступные узлы и переключает на чистый валидный сервер Google AI
-              </div>
-            )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'flex-start', flexWrap: 'wrap' }}>
+            <button
+              className="btn sm"
+              onClick={checkFlowAccess}
+              disabled={checkingFlow}
+              title="Проверить, как Google определяет текущий узел"
+              style={{ fontSize: 12 }}
+            >
+              {checkingFlow ? '⏳ Тестирование…' : '🧪 Проверить статус'}
+            </button>
+            <button
+              type="button"
+              className="btn sm"
+              style={{
+                background: 'linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%)',
+                border: 'none',
+                color: '#fff',
+                fontWeight: 600,
+                fontSize: 12,
+              }}
+              onClick={() => setRepairModalOpen(true)}
+              title="Обход регионального фильтра cPZSdc (Tampermonkey) и сброс зависшего редиректа"
+            >
+              🔓 Починка Flow
+            </button>
           </div>
+        </div>
+
+        {/* Командный блок выбора выделенного узла Google Flow & AI */}
+        <div style={{
+          padding: '12px 16px',
+          background: 'rgba(56, 189, 248, 0.05)',
+          border: '1px solid rgba(56, 189, 248, 0.2)',
+          borderRadius: 8,
+          marginBottom: 14,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+            <span style={{ fontWeight: 600, fontSize: 13, color: '#38bdf8' }}>
+              🎯 Выделенный узел Google Flow & AI (только AI)
+            </span>
+            <span className="muted small" style={{ fontSize: 11.5 }}>
+              Основной прокси роутера и цепочка Failover не изменяются
+            </span>
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <select
+              className="input"
+              style={{ padding: '6px 10px', fontSize: 13, flex: '1 1 240px', minWidth: 200 }}
+              value={selectedFlowServer}
+              title="Трафик Google Flow, Gemini, AI Studio и Labs пойдет через этот узел. Основной прокси и Failover не изменяются."
+              onChange={(e) => {
+                setSelectedFlowServer(e.target.value)
+                switchGoogleAiServer(e.target.value)
+              }}
+              disabled={switchingFlowServer || pingingFlow}
+            >
+              <option value="">-- Выберите сервер для AI ({flowServers.length}) --</option>
+              {usCaServers.length > 0 && (
+                <optgroup label="🇺🇸 🇨🇦 Проверенные для Google Flow (США / Канада)">
+                  {usCaServers.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {formatFlowServerName(s.name)} {s.ping_ms > 0 ? `(${s.ping_ms} мс)` : ''} ★ Flow
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {otherServers.length > 0 && (
+                <optgroup label="🌐 Все остальные серверы">
+                  {otherServers.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} {s.ping_ms > 0 ? `(${s.ping_ms} мс)` : ''}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+
+            <button
+              type="button"
+              className={`btn sm ${autoSelectFlow ? 'primary' : 'ghost'}`}
+              style={{
+                fontWeight: 600,
+                whiteSpace: 'nowrap',
+                background: autoSelectFlow ? 'rgba(34, 197, 94, 0.2)' : 'rgba(255, 255, 255, 0.05)',
+                borderColor: autoSelectFlow ? 'rgba(34, 197, 94, 0.6)' : 'var(--border)',
+                color: autoSelectFlow ? '#4ade80' : 'var(--muted)',
+                padding: '6px 12px',
+                fontSize: 12.5,
+              }}
+              title={autoSelectFlow ? 'Автоподбор активен: роутер пингует и выбирает чистый сервер США' : 'Включить автоматический подбор чистого и быстрого сервера США для Google AI'}
+              disabled={togglingAutoSelect}
+              onClick={toggleAutoSelect}
+            >
+              {togglingAutoSelect ? '⏳…' : autoSelectFlow ? '🤖 Авто: ВКЛ' : '🤖 Авто: ВЫКЛ'}
+            </button>
+
+            <button
+              className="btn sm"
+              onClick={pingFlowNodes}
+              disabled={pingingFlow}
+              title="Замерить пинг по flow.google.com для всех узлов"
+              style={{ whiteSpace: 'nowrap', padding: '6px 12px', fontSize: 12.5 }}
+            >
+              {pingingFlow ? '⏳ Пинг…' : '⚡ Пинг узлов'}
+            </button>
+          </div>
+
+          {autoSelectFlow && (
+            <div style={{ fontSize: 11.5, color: '#4ade80', marginTop: 6 }}>
+              ✓ Роутер автоматически пингует доступные узлы и переключает на чистый валидный сервер Google AI
+            </div>
+          )}
         </div>
 
         {/* Проверка конфликта с прямым режимом (DIRECT / Игровой режим) */}
@@ -480,7 +513,7 @@ export default function Antigravity({ notify }: Props) {
           background: 'rgba(56, 189, 248, 0.08)',
           border: '1px solid rgba(56, 189, 248, 0.25)',
           borderRadius: 8,
-          marginBottom: 16,
+          marginBottom: 14,
           fontSize: 12.5,
           display: 'flex',
           alignItems: 'center',
@@ -564,7 +597,17 @@ export default function Antigravity({ notify }: Props) {
               'gemini.google.com',
               'deepmind.google',
             ].map((d) => (
-              <span key={d} className="badge" style={{ background: 'rgba(59, 130, 246, 0.1)', color: '#60a5fa', borderColor: 'rgba(59, 130, 246, 0.25)' }}>
+              <span
+                key={d}
+                className="badge"
+                style={{
+                  background: 'rgba(59, 130, 246, 0.1)',
+                  color: '#60a5fa',
+                  borderColor: 'rgba(59, 130, 246, 0.25)',
+                  wordBreak: 'break-all',
+                  maxWidth: '100%',
+                }}
+              >
                 ✨ {d}
               </span>
             ))}

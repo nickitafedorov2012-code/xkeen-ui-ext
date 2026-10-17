@@ -2647,6 +2647,8 @@ table.devices-table td {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  max-width: 100%;
+  overflow-x: hidden;
 }
 
 /* Главная карточка статуса */

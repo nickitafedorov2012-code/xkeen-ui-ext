@@ -865,6 +865,9 @@ pub async fn switch_flow_server(state: &AppState, server_id: &str) -> Result<Str
     if target.is_empty() {
         return Err("Имя сервера не может быть пустым".into());
     }
+    if ["PROXY", "GLOBAL", "Fastest", "Fallback", "DIRECT", "REJECT"].contains(&target) {
+        return Err(format!("'{target}' является системной группой/селектором, а не конкретным выходным сервером для Google Flow"));
+    }
     let cfg = state.config.read().await.clone();
     let proxies = get_proxies(&state.http, &cfg).await.unwrap_or_default();
 

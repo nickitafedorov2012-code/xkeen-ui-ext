@@ -1048,13 +1048,15 @@ export default function Gaming({ notify }: GamingProps) {
               style={{ width: '100%', boxSizing: 'border-box' }}
             >
               <option value="Fastest">⚡ Fastest (Авто-выбор ноды с мин. пингом)</option>
-              <option value="PROXY">🔒 PROXY (Основной туннель)</option>
+              <option value="PROXY">🌐 Общий активный узел</option>
               <option value="DIRECT">⏭ DIRECT (Прямой выход)</option>
-              {servers.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name || s.id} {s.ping_ms ? `(${s.ping_ms} ms)` : ''}
-                </option>
-              ))}
+              {servers
+                .filter((s) => !s.is_pool && s.id !== 'PROXY' && s.id !== 'GLOBAL')
+                .map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name || s.id} {s.ping_ms ? `(${s.ping_ms} ms)` : ''}
+                  </option>
+                ))}
             </select>
           </div>
 
@@ -1179,13 +1181,15 @@ export default function Gaming({ notify }: GamingProps) {
                     >
                       <option value="">⚡ Как в группе ({cfg.target_server})</option>
                       <option value="Fastest">⚡ Fastest (Мин. пинг)</option>
-                      <option value="PROXY">🔒 PROXY (Основной туннель)</option>
+                      <option value="PROXY">🌐 Общий активный узел</option>
                       <option value="DIRECT">⏭ DIRECT (Прямой выход)</option>
-                      {servers.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name || s.id} {s.ping_ms ? `(${s.ping_ms} ms)` : ''}
-                        </option>
-                      ))}
+                      {servers
+                        .filter((s) => !s.is_pool && s.id !== 'PROXY' && s.id !== 'GLOBAL')
+                        .map((s) => (
+                          <option key={s.id} value={s.id}>
+                            {s.name || s.id} {s.ping_ms ? `(${s.ping_ms} ms)` : ''}
+                          </option>
+                        ))}
                     </select>
                   </div>
 

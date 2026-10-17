@@ -232,14 +232,16 @@ const DeviceRow = memo(function DeviceRow({
             }}
           >
             <option value="default">🌐 Общий активный узел</option>
-            {assigned && !servers.some((s) => s.id === assigned) && (
+            {assigned && assigned !== 'default' && assigned !== 'PROXY' && !servers.some((s) => s.id === assigned) && (
               <option value={assigned}>{serverLabel(assigned)}</option>
             )}
-            {servers.map((s) => (
-              <option key={s.id} value={s.id}>
-                {serverLabel(s.id)}
-              </option>
-            ))}
+            {servers
+              .filter((s) => !s.is_pool && s.id !== 'PROXY' && s.id !== 'GLOBAL' && s.id !== 'Fastest' && s.id !== 'Fallback')
+              .map((s) => (
+                <option key={s.id} value={s.id}>
+                  {serverLabel(s.id)}
+                </option>
+              ))}
           </select>
           {isGamingCompat && (
             <span

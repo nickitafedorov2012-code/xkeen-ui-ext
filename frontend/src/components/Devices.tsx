@@ -149,6 +149,11 @@ export default function Devices({ notify }: Props) {
     return m
   }, [routing])
 
+  const individualServers = useMemo(
+    () => servers.filter((s) => !s.is_pool && s.id !== 'PROXY' && s.id !== 'GLOBAL' && s.id !== 'Fastest' && s.id !== 'Fallback'),
+    [servers]
+  )
+
   const isGamingCompatByIp = useMemo(() => {
     const s = new Set<string>()
     for (const a of routing) {
@@ -674,7 +679,7 @@ export default function Devices({ notify }: Props) {
                       key={d.mac}
                       d={d}
                       policies={policies}
-                      servers={servers}
+                      servers={individualServers}
                       assigned={serverByIp.get(d.ip)}
                       drEntry={drMap[d.ip]}
                       devFailover={devFailover}
@@ -729,7 +734,7 @@ export default function Devices({ notify }: Props) {
                         key={d.mac}
                         d={d}
                         policies={policies}
-                        servers={servers}
+                        servers={individualServers}
                         assigned={serverByIp.get(d.ip)}
                         drEntry={drMap[d.ip]}
                         devFailover={devFailover}
@@ -774,7 +779,7 @@ export default function Devices({ notify }: Props) {
                       key={d.mac}
                       d={d}
                       policies={policies}
-                      servers={servers}
+                      servers={individualServers}
                       assigned={serverByIp.get(d.ip)}
                       drEntry={drMap[d.ip]}
                       devFailover={devFailover}
@@ -867,7 +872,7 @@ export default function Devices({ notify }: Props) {
               >
                 🌐 Общий активный узел
               </button>
-              {servers.map((s) => (
+              {individualServers.map((s) => (
                 <button
                   key={s.id}
                   className="btn wide"
@@ -889,7 +894,7 @@ export default function Devices({ notify }: Props) {
       {drModal && (
         <DeviceRoutingModal
           modal={drModal}
-          servers={servers}
+          servers={individualServers}
           whitelistProviders={whitelistProviders}
           busy={busy}
           hasExisting={!!drMap[drModal.ip]}
@@ -906,7 +911,7 @@ export default function Devices({ notify }: Props) {
           isOpen={true}
           deviceIp={scheduleTarget.ip}
           deviceName={scheduleTarget.name}
-          availableServers={servers.map((s) => ({ id: s.id, name: s.name }))}
+          availableServers={individualServers.map((s) => ({ id: s.id, name: s.name }))}
           onClose={() => setScheduleTarget(null)}
           notify={notify}
         />

@@ -86,4 +86,40 @@ describe('v1.9.3 Anti-Regression: Layout, Telemetry & Direction Bug Fixes', () =
     expect(serversContent).toContain('👑 Основной сервер')
     expect(serversContent).toContain('джиттер:')
   })
+
+  it('ensures PROXY and pool groups are filtered from individual device server dropdowns across Devices, DeviceRow, and DeviceRoutingModal', () => {
+    const devicesPath = path.resolve(__dirname, 'components/Devices.tsx')
+    const devicesContent = fs.readFileSync(devicesPath, 'utf8')
+    expect(devicesContent).toContain('const individualServers = useMemo')
+    expect(devicesContent).toContain("s.id !== 'PROXY'")
+
+    const deviceRowPath = path.resolve(__dirname, 'components/DeviceRow.tsx')
+    const deviceRowContent = fs.readFileSync(deviceRowPath, 'utf8')
+    expect(deviceRowContent).toContain("assigned !== 'PROXY'")
+    expect(deviceRowContent).toContain("s.id !== 'PROXY'")
+
+    const routingModalPath = path.resolve(__dirname, 'components/DeviceRoutingModal.tsx')
+    const routingModalContent = fs.readFileSync(routingModalPath, 'utf8')
+    expect(routingModalContent).toContain("!s.is_pool && s.id !== 'PROXY'")
+  })
+
+  it('ensures Antigravity.tsx filters PROXY and pool groups from Google Flow server selection and has responsive layout without overflow', () => {
+    const agPath = path.resolve(__dirname, 'components/Antigravity.tsx')
+    const agContent = fs.readFileSync(agPath, 'utf8')
+    expect(agContent).toContain("s.id !== 'PROXY'")
+    expect(agContent).toContain("flow_server !== 'PROXY'")
+    expect(agContent).toContain("🎯 Выделенный узел Google Flow & AI (только AI)")
+
+    const cssPath = path.resolve(__dirname, 'styles.css')
+    const cssContent = fs.readFileSync(cssPath, 'utf8')
+    expect(cssContent).toMatch(/\.antigravity-page\s*\{[^}]*overflow-x:\s*hidden/s)
+    expect(cssContent).toMatch(/\.antigravity-page\s*\{[^}]*max-width:\s*100%/s)
+  })
+
+  it('ensures Gaming.tsx renames PROXY to 🌐 Общий активный узел and filters PROXY from custom servers', () => {
+    const gamingPath = path.resolve(__dirname, 'components/Gaming.tsx')
+    const gamingContent = fs.readFileSync(gamingPath, 'utf8')
+    expect(gamingContent).toContain('<option value="PROXY">🌐 Общий активный узел</option>')
+    expect(gamingContent).not.toContain('<option value="PROXY">🔒 PROXY (Основной туннель)</option>')
+  })
 })
