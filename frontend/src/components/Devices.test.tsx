@@ -310,4 +310,32 @@ describe('Devices Component — Per-Device Zapret DPI (Feature 3)', () => {
       })
     }
   })
+
+  it('anti-regression: renders exactly 10 table columns with aligned buttons and actions without overflowing', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((endpoint: string) => {
+      if (endpoint === 'devices') return Promise.resolve({ devices: mockDevices })
+      if (endpoint === 'policies') return Promise.resolve({ policies: [{ id: 'default', name: 'Основная', is_default: true }] })
+      if (endpoint === 'servers') return Promise.resolve({ servers: [] })
+      if (endpoint === 'routing') return Promise.resolve({ assignments: [] })
+      if (endpoint === 'device-routing') return Promise.resolve({ routing: {}, device_failover_enabled: false })
+      if (endpoint === 'devices/zapret') return Promise.resolve({ excluded_devices: [] })
+      if (endpoint === 'devices/traffic') return Promise.resolve({ download_total: 0, upload_total: 0, devices: {} })
+      return Promise.resolve({})
+    })
+
+    await act(async () => {
+      root!.render(<Devices notify={notifyMock} />)
+    })
+
+    const ths = container?.querySelectorAll('table.devices-table thead th')
+    expect(ths?.length).toBe(10)
+
+    const firstRowTds = container?.querySelector('table.devices-table tbody tr.device-row')?.querySelectorAll('td')
+    expect(firstRowTds?.length).toBe(10)
+
+    // Check actions cell (last td) contains both gear button and schedule button
+    const actionsTd = firstRowTds?.[9]
+    const actionButtons = actionsTd?.querySelectorAll('button.device-gear-btn')
+    expect(actionButtons?.length).toBe(2)
+  })
 })

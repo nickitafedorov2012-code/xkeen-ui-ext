@@ -838,15 +838,11 @@ pub fn matches_target_needle(comm_trim: &str, pid: u32, needle: &str, cmdline: O
 pub fn get_stack_memory_info() -> StackMemoryInfo {
     #[cfg(target_os = "linux")]
     {
-        // 1. Читаем /proc/meminfo
-        let (total_kb, free_kb, _avail_kb, _cached_kb) = read_meminfo();
-        let keenetic_total_mb = ((total_kb as f64) / 1024.0 * 10.0).round() / 10.0;
-        let keenetic_free_mb = ((free_kb as f64) / 1024.0 * 10.0).round() / 10.0;
-        let keenetic_available_mb = if _avail_kb > 0 {
-            ((_avail_kb as f64) / 1024.0 * 10.0).round() / 10.0
-        } else {
-            keenetic_free_mb
-        };
+        // 1. Читаем /proc/meminfo через read_meminfo() (возвращает значения уже в МБ: ram_total_mb, ram_free_mb, swap_total_mb, swap_free_mb)
+        let (ram_total_mb, ram_free_mb, _swap_total_mb, _swap_free_mb) = read_meminfo();
+        let keenetic_total_mb = ram_total_mb as f64;
+        let keenetic_free_mb = ram_free_mb as f64;
+        let keenetic_available_mb = ram_free_mb as f64;
 
         // 2. Сканируем /proc на целевые процессы
         struct TargetDef {
@@ -1075,11 +1071,26 @@ mod tests {
     #[test]
     fn test_stack_memory_info_structure() {
         let mem = get_stack_memory_info();
-        assert!(mem.keenetic_total_mb >= 0.0);
+        assert!(mem.keenetic_total_mb >= 16.0, "Keenetic total RAM must be >= 16 MB, not double-divided (was {})", mem.keenetic_total_mb);
+        assert!(mem.keenetic_free_mb >= 1.0, "Keenetic free RAM must be >= 1 MB (was {})", mem.keenetic_free_mb);
         assert!(!mem.processes.is_empty());
         assert!(mem.processes.iter().any(|p| p.name == "mihomo"));
         assert!(mem.processes.iter().any(|p| p.name == "xkeen-route"));
         assert!(mem.processes.iter().any(|p| p.name == "AdGuardHome"));
+    }
+
+    #[test]
+    fn test_anti_regression_keenetic_ram_not_double_divided() {
+        // Защита от багов "0 МБ свободно из 1 МБ":
+        // Проверяем, что meminfo для роутера 512 МБ корректно парсится в 512 МБ (а не в 0.5 МБ)
+        let sample_512mb = "\
+MemTotal:         524288 kB
+MemFree:          131072 kB
+MemAvailable:     262144 kB
+";
+        let (total_ram, free_ram, _, _) = parse_meminfo_str(sample_512mb);
+        assert_eq!(total_ram, 512, "524288 kB must equal 512 MB");
+        assert_eq!(free_ram, 256, "262144 kB must equal 256 MB");
     }
 
     #[test]

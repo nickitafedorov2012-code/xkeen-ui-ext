@@ -15,36 +15,67 @@ interface Props {
 const PAGE = 20
 
 function Sparkline({ ping }: { ping: number }) {
+  // 4 полосы качества сигнала Apple-style (высоты: 4px, 7px, 10px, 14px)
+  const barHeights = [4, 7, 10, 14]
+
   if (ping <= 0 || ping >= 9999) {
     return (
-      <div className="sparkline-wrap" title="Потеря пакетов / таймаут">
-        <span className="jitter-dot bad" />
-        {Array.from({ length: 5 }).map((_, idx) => (
-          <span key={idx} className="sparkline-bar" style={{ height: 3, background: '#ef4444', opacity: 0.7 }} />
-        ))}
+      <div
+        className="signal-bars-meter timeout"
+        title="Таймаут соединения: сервер не отвечает на ICMP/TCP пинг (оффлайн)"
+      >
+        <span className="signal-dot timeout" />
+        <div className="signal-bars-wrap">
+          {barHeights.map((h, idx) => (
+            <span
+              key={idx}
+              className="signal-bar bar-timeout"
+              style={{ height: h }}
+            />
+          ))}
+        </div>
       </div>
     )
   }
-  const jitterEstimated = Math.max(1, Math.round((ping % 23) * 1.5))
-  const jitterClass = jitterEstimated < 5 ? 'good' : jitterEstimated > 30 ? 'bad' : 'warn'
-  const jitterText = jitterEstimated < 5 ? 'джиттер < 5 мс' : jitterEstimated > 30 ? 'джиттер > 30 мс' : `джиттер ~${jitterEstimated} мс`
 
-  const baseH = Math.max(4, Math.min(16, Math.round(18 - (ping / 600) * 12)))
-  const heights = [
-    Math.max(3, baseH - 1),
-    baseH,
-    Math.min(16, baseH + 2),
-    Math.max(4, baseH - 1),
-    baseH,
-  ]
-  const barColor = jitterClass === 'good' ? '#22c55e' : jitterClass === 'warn' ? '#38bdf8' : '#f59e0b'
+  // Оценка качества по пингу:
+  // < 80 мс: 4/4 (зеленый)
+  // 80..160 мс: 3/4 (голубой)
+  // 160..300 мс: 2/4 (янтарный)
+  // >= 300 мс: 1/4 (красный)
+  const activeBars = ping < 80 ? 4 : ping < 160 ? 3 : ping < 300 ? 2 : 1
+  const qualityColor =
+    activeBars === 4 ? '#22c55e' : activeBars === 3 ? '#38bdf8' : activeBars === 2 ? '#f59e0b' : '#ef4444'
+  const qualityLabel =
+    activeBars === 4
+      ? 'Отличное (4/4)'
+      : activeBars === 3
+      ? 'Хорошее (3/4)'
+      : activeBars === 2
+      ? 'Среднее (2/4)'
+      : 'Слабое (1/4)'
 
   return (
-    <div className="sparkline-wrap" title={`Пинг: ${ping} мс | Стабильность: ${jitterText}`}>
-      <span className={`jitter-dot ${jitterClass}`} />
-      {heights.map((h, idx) => (
-        <span key={idx} className="sparkline-bar" style={{ height: h, background: barColor }} />
-      ))}
+    <div
+      className="signal-bars-meter"
+      title={`Качество связи: ${qualityLabel} • Пинг: ${ping} мс • Стабильное соединение`}
+    >
+      <span className="signal-dot" style={{ backgroundColor: qualityColor, boxShadow: `0 0 6px ${qualityColor}` }} />
+      <div className="signal-bars-wrap">
+        {barHeights.map((h, idx) => {
+          const isActive = idx < activeBars
+          return (
+            <span
+              key={idx}
+              className={`signal-bar ${isActive ? 'active' : 'dimmed'}`}
+              style={{
+                height: h,
+                backgroundColor: isActive ? qualityColor : undefined,
+              }}
+            />
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -635,24 +666,10 @@ export default function Servers({ notify, status, refresh }: Props) {
 
   return (
     <section className="card">
-      {/* ИСТИННЫЙ ДВУХКОЛОНОЧНЫЙ ДЕСКТОПНЫЙ ЛЕЙАУТ (True Two-Column Desktop Layout) */}
-      <div className="servers-desktop-layout">
-        {/* ЛЕВАЯ КОЛОНКА: Закрепленная командная плашка активного сервера */}
-        <aside className="servers-left-column">
-          <div
-            className="servers-active-command-pill"
-          style={{
-            background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.08) 0%, rgba(56, 189, 248, 0.04) 100%)',
-            border: '1px solid rgba(34, 197, 94, 0.35)',
-            borderRadius: 12,
-            padding: '12px 14px',
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'space-between',
-            gap: 10,
-            boxShadow: '0 4px 16px rgba(0, 0, 0, 0.2)',
-          }}
-        >
+      {/* ВЕРХНИЙ ДЕК: Активный узел слева, Поиск/Фильтры/Действия справа — сбалансированная командная строка */}
+      <div className="servers-top-deck">
+        {/* Активный узел */}
+        <div className="servers-active-deck-card">
           {activeServer ? (
             <>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
@@ -780,12 +797,12 @@ export default function Servers({ notify, status, refresh }: Props) {
                   </button>
                   <button
                     type="button"
-                    className={`btn sm ghost btn-whitelist ${activeServer.is_whitelist ? 'is-whitelist' : ''}`}
+                    className={`btn sm btn-whitelist ${activeServer.is_whitelist ? 'is-whitelist' : 'ghost'}`}
                     onClick={() => toggleWhitelist(activeServer.id)}
                     title={activeServer.is_whitelist ? 'Удалить из белого списка (аварийный туннель)' : 'Включить в белый список (аварийный 100% туннель)'}
-                    style={{ color: activeServer.is_whitelist ? '#a855f7' : undefined }}
                   >
-                    <span>{activeServer.is_whitelist ? '🟣' : '⚪'}</span>
+                    <span style={{ fontSize: 11 }}>{activeServer.is_whitelist ? '🟣' : '⚪'}</span>
+                    <span style={{ fontSize: 11, fontWeight: 600 }}>{activeServer.is_whitelist ? 'В белом списке' : 'Белый список'}</span>
                   </button>
                 </div>
               </div>
@@ -796,23 +813,9 @@ export default function Servers({ notify, status, refresh }: Props) {
             </div>
           )}
         </div>
-      </aside>
 
-      {/* ПРАВАЯ КОЛОНКА: Поиск, фильтры, управление + список серверов */}
-      <main className="servers-right-column">
-        <div
-          className="servers-controls-column"
-          style={{
-            background: 'rgba(255, 255, 255, 0.02)',
-            border: '1px solid var(--border)',
-            borderRadius: 12,
-            padding: '12px 14px',
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'space-between',
-            gap: 10,
-          }}
-        >
+        {/* Поиск, фильтры и управление */}
+        <div className="servers-controls-deck-card">
           {/* Строка поиска + счетчик */}
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <div style={{ position: 'relative', flex: 1 }}>
@@ -1107,7 +1110,10 @@ export default function Servers({ notify, status, refresh }: Props) {
             </div>
           </div>
         </div>
+      </div>
 
+      {/* ОСНОВНОЙ СПИСОК СЕРВЕРОВ: на ВСЮ ширину страницы (полноценные 3-4 колонки) */}
+      <div className="servers-main-content">
         {loading ? (
         /* Скелетоны при загрузке (Skeleton Shimmers) */
         <div className={`server-list cols-${columns}`} style={{ marginTop: 12 }}>
@@ -1317,13 +1323,13 @@ export default function Servers({ notify, status, refresh }: Props) {
 
                       <button
                         type="button"
-                        className={`btn sm ghost btn-whitelist ${s.is_whitelist ? 'is-whitelist' : ''}`}
+                        className={`btn sm btn-whitelist ${s.is_whitelist ? 'is-whitelist' : 'ghost'}`}
                         onClick={() => toggleWhitelist(s.id)}
                         title={s.is_whitelist ? 'Удалить из белого списка (аварийный туннель)' : 'Включить в белый список (аварийный 100% туннель)'}
-                        style={{ color: s.is_whitelist ? '#a855f7' : undefined }}
                       >
-                        <span>{s.is_whitelist ? '🟣' : '⚪'}</span>
-                        <span className="btn-label-optional">{s.is_whitelist ? 'В белом списке' : 'Белый список'}</span>
+                        <span style={{ fontSize: 11 }}>{s.is_whitelist ? '🟣' : '⚪'}</span>
+                        <span className="btn-label-full">{s.is_whitelist ? 'В белом списке' : 'Белый список'}</span>
+                        <span className="btn-label-short">{s.is_whitelist ? 'БС ON' : 'БС'}</span>
                       </button>
                     </div>
                   </div>
@@ -1468,12 +1474,14 @@ export default function Servers({ notify, status, refresh }: Props) {
                       {s.is_priority ? '★' : '☆'}
                     </button>
                     <button
-                      className={`btn sm ghost btn-whitelist ${s.is_whitelist ? 'is-whitelist' : ''}`}
+                      type="button"
+                      className={`btn sm btn-whitelist ${s.is_whitelist ? 'is-whitelist' : 'ghost'}`}
                       onClick={() => toggleWhitelist(s.id)}
-                      style={{ padding: '3px 8px', color: s.is_whitelist ? '#a855f7' : undefined }}
+                      style={{ padding: '3px 8px' }}
                       title={s.is_whitelist ? 'Удалить из белого списка' : 'В белый список (аварийный туннель)'}
                     >
-                      {s.is_whitelist ? '🟣' : '⚪'}
+                      <span style={{ fontSize: 11 }}>{s.is_whitelist ? '🟣' : '⚪'}</span>
+                      <span style={{ fontSize: 11, fontWeight: 600 }}>{s.is_whitelist ? 'БС ON' : 'БС'}</span>
                     </button>
                   </div>
                 </div>
@@ -1491,8 +1499,7 @@ export default function Servers({ notify, status, refresh }: Props) {
           )}
         </div>
       )}
-    </main>
-  </div>
+      </div>
 
       {/* МОДАЛЬНОЕ ОКНО ИГНОР-ЛИСТА */}
       {ignoreOpen && (

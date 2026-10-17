@@ -77,7 +77,7 @@ body {
 .header-bar,
 .toolbar.header-bar {
   display: grid;
-  grid-template-columns: 150px 270px minmax(380px, 1fr) 82px 159px;
+  grid-template-columns: auto auto 1fr auto auto;
   grid-template-areas: "logo status versions service utility";
   align-items: center;
   gap: 12px;
@@ -95,10 +95,9 @@ body {
   width: 100%;
 }
 
-/* 1. Группа логотипа: 150 px */
+/* 1. Группа логотипа */
 .header-brand-group {
   grid-area: logo;
-  width: 150px;
   display: flex;
   align-items: center;
   flex-shrink: 0;
@@ -141,13 +140,13 @@ body {
   -webkit-text-fill-color: transparent;
 }
 
-/* 2. Группа статуса: 270 px, 2 строки внутри карточки высотой 44 px */
+/* 2. Группа статуса: компактный бейдж со встроенным поповером стека процессов */
 .header-status-group {
   grid-area: status;
-  width: 270px;
   display: flex;
   align-items: center;
   flex-shrink: 0;
+  position: relative;
 }
 
 .status-badge-custom {
@@ -159,11 +158,13 @@ body {
   border-radius: 8px;
   padding: 3px 10px;
   height: 44px;
-  width: 270px;
+  min-width: 210px;
+  max-width: 250px;
   box-sizing: border-box;
   position: relative;
-  overflow: hidden;
+  overflow: visible;
   user-select: none;
+  cursor: pointer;
   transition: all 0.25s ease;
 }
 
@@ -172,9 +173,19 @@ body {
   box-shadow: 0 0 10px rgba(34, 197, 94, 0.15), inset 0 0 6px rgba(34, 197, 94, 0.05);
 }
 
+.status-badge-running:hover {
+  border-color: rgba(34, 197, 94, 0.75);
+  box-shadow: 0 0 14px rgba(34, 197, 94, 0.3);
+}
+
 .status-badge-stopped {
   border-color: rgba(239, 68, 68, 0.45);
   box-shadow: 0 0 10px rgba(239, 68, 68, 0.15), inset 0 0 6px rgba(239, 68, 68, 0.05);
+}
+
+.status-badge-stopped:hover {
+  border-color: rgba(239, 68, 68, 0.75);
+  box-shadow: 0 0 14px rgba(239, 68, 68, 0.3);
 }
 
 .status-badge-content {
@@ -253,14 +264,108 @@ body {
   letter-spacing: 0.2px;
 }
 
-/* 3. Группа версий: всё оставшееся место (не меньше 380 px), бейджи высотой 36 px с промежутком 6 px */
+/* Всплывающее Apple-style окно информации о службах XKeen и ресурсах роутера */
+.header-status-popover {
+  display: none;
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 290px;
+  background: rgba(17, 21, 32, 0.96);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 12px;
+  padding: 12px 14px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.55);
+  z-index: 1000;
+  pointer-events: none;
+  text-align: left;
+  animation: fadeIn 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.status-badge-custom:hover .header-status-popover {
+  display: block;
+}
+
+.status-popover-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  margin-bottom: 8px;
+}
+
+.status-popover-section {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 8px;
+}
+
+.status-popover-sec-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted, #94a3b8);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.status-popover-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text, #e2e8f0);
+}
+
+.status-popover-proc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 8px;
+  padding: 6px 8px;
+  margin-top: 2px;
+}
+
+.status-popover-proc-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11.5px;
+  color: var(--text, #e2e8f0);
+}
+
+.proc-val-active {
+  font-weight: 600;
+  color: #38bdf8;
+  font-variant-numeric: tabular-nums;
+}
+
+.proc-val-dim {
+  color: var(--muted, #64748b);
+  font-weight: 400;
+}
+
+.status-popover-hint {
+  font-size: 10.5px;
+  color: #38bdf8;
+  text-align: center;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  opacity: 0.85;
+}
+
+/* 3. Группа версий: без жесткого min-width: 380px */
 .header-versions-group {
   grid-area: versions;
   display: flex;
   align-items: center;
   gap: 6px;
   flex: 1 1 auto;
-  min-width: 380px;
+  min-width: 0;
 }
 
 .header-beta-badge {
@@ -2053,9 +2158,9 @@ table.devices-table {
 table.devices-table th {
   text-align: left;
   color: #94a3b8;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
-  padding: 10px 10px;
+  padding: 8px 6px;
   border-bottom: 1px solid #1e2638;
   user-select: none;
   white-space: nowrap;
@@ -2066,16 +2171,16 @@ table.devices-table th.sortable {
 table.devices-table th.sortable:hover {
   color: #cbd5e1;
 }
-table.devices-table th:nth-child(1) { width: 36px; } /* checkbox */
-table.devices-table th:nth-child(2) { width: 220px; } /* device */
-table.devices-table th:nth-child(3) { width: 120px; } /* IP */
-table.devices-table th:nth-child(4) { width: 130px; } /* policy */
-table.devices-table th:nth-child(5) { width: 95px; } /* speed */
-table.devices-table th:nth-child(6) { width: 90px; } /* traffic */
-table.devices-table th:nth-child(7) { width: 140px; } /* server */
-table.devices-table th:nth-child(8) { width: 110px; text-align: center; } /* zapret */
-table.devices-table th:nth-child(9) { width: 95px; text-align: center; } /* gaming */
-table.devices-table th:nth-child(10) { width: 50px; text-align: center; } /* gear */
+table.devices-table th:nth-child(1) { width: 32px; } /* checkbox */
+table.devices-table th:nth-child(2) { width: auto; min-width: 160px; } /* device */
+table.devices-table th:nth-child(3) { width: 100px; } /* IP */
+table.devices-table th:nth-child(4) { width: 110px; } /* policy */
+table.devices-table th:nth-child(5) { width: 75px; } /* speed */
+table.devices-table th:nth-child(6) { width: 75px; } /* traffic */
+table.devices-table th:nth-child(7) { width: 125px; } /* server */
+table.devices-table th:nth-child(8) { width: 92px; text-align: center; } /* zapret */
+table.devices-table th:nth-child(9) { width: 88px; text-align: center; } /* gaming */
+table.devices-table th:nth-child(10) { width: 68px; text-align: center; } /* gear */
 
 /* Ввод ограничения скорости (Мбит/с) */
 .device-speed-input-wrap {
@@ -2158,9 +2263,9 @@ table.devices-table tr.device-row.me {
 }
 
 table.devices-table td {
-  padding: 10px 12px;
+  padding: 8px 6px;
   vertical-align: middle;
-  font-size: 13px;
+  font-size: 12.5px;
   color: #e2e8f0;
 }
 
@@ -2243,8 +2348,8 @@ table.devices-table td {
 }
 
 .device-gear-btn {
-  width: 32px;
-  height: 32px;
+  width: 26px;
+  height: 26px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2254,6 +2359,7 @@ table.devices-table td {
   color: #94a3b8;
   cursor: pointer;
   transition: all 0.15s ease;
+  box-sizing: border-box;
 }
 .device-gear-btn:hover {
   background: #25334c;
@@ -2267,16 +2373,17 @@ table.devices-table td {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  height: 28px;
-  padding: 0 10px;
+  gap: 4px;
+  height: 26px;
+  padding: 0 6px;
   border-radius: 6px;
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   user-select: none;
   white-space: nowrap;
+  box-sizing: border-box;
 }
 
 .device-zapret-btn.active {
@@ -2344,16 +2451,17 @@ table.devices-table td {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
-  height: 28px;
-  padding: 0 10px;
+  gap: 4px;
+  height: 26px;
+  padding: 0 6px;
   border-radius: 6px;
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   user-select: none;
   white-space: nowrap;
+  box-sizing: border-box;
 }
 
 .device-gaming-btn.active {
@@ -3047,6 +3155,16 @@ table.devices-table td {
 [data-theme="light"] .status-badge-custom {
   background: #f8fafc;
   border-color: #cbd5e1;
+}
+
+[data-theme="light"] .header-status-popover {
+  background: rgba(255, 255, 255, 0.98);
+  border-color: rgba(59, 130, 246, 0.3);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.15);
+}
+
+[data-theme="light"] .status-popover-proc-list {
+  background: rgba(0, 0, 0, 0.04);
 }
 
 [data-theme="light"] .header-action-btn.header-action-btn-stop {
@@ -6860,45 +6978,135 @@ table.devices-table td {
   animation: fadeIn 0.2s ease-out;
 }
 
-/* --- True Two-Column Desktop Servers Tab Layout --- */
-.servers-desktop-layout {
-  display: flex;
-  gap: 18px;
-  align-items: flex-start;
+/* --- Balanced Top Command Deck in Servers Tab --- */
+.servers-top-deck {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  align-items: stretch;
+  margin-bottom: 16px;
   width: 100%;
 }
 
-.servers-left-column {
-  width: 360px;
-  min-width: 340px;
-  max-width: 380px;
-  position: sticky;
-  top: 16px;
-  align-self: flex-start;
+.servers-active-deck-card {
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.08) 0%, rgba(56, 189, 248, 0.04) 100%);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  border-radius: 12px;
+  padding: 12px 14px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  flex-shrink: 0;
+  justify-content: space-between;
+  gap: 10px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+  box-sizing: border-box;
+  min-height: 100%;
 }
 
-.servers-right-column {
-  flex: 1;
-  min-width: 0;
+.servers-controls-deck-card {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  justify-content: space-between;
+  gap: 10px;
+  box-sizing: border-box;
+  min-height: 100%;
 }
 
 @media (max-width: 900px) {
-  .servers-desktop-layout {
-    flex-direction: column;
+  .servers-top-deck {
+    grid-template-columns: 1fr;
   }
-  .servers-left-column {
-    width: 100%;
-    min-width: 0;
-    max-width: 100%;
-    position: static;
-  }
+}
+
+.servers-main-content {
+  width: 100%;
+}
+
+/* --- Apple-Style Signal Quality Meter --- */
+.signal-bars-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  user-select: none;
+}
+
+.signal-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+.signal-dot.timeout {
+  background-color: #ef4444;
+  box-shadow: 0 0 6px #ef4444;
+}
+
+.signal-bars-wrap {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 14px;
+}
+
+.signal-bar {
+  width: 3.5px;
+  border-radius: 1px;
+  transition: all 0.25s ease;
+}
+
+.signal-bar.dimmed {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.signal-bar.bar-timeout {
+  background: rgba(239, 68, 68, 0.35);
+}
+
+[data-theme="light"] .signal-bar.dimmed {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+/* --- Whitelist Button Styling --- */
+.btn-whitelist {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.btn-whitelist.is-whitelist {
+  background: rgba(168, 85, 247, 0.18) !important;
+  border-color: rgba(168, 85, 247, 0.6) !important;
+  color: #c084fc !important;
+  font-weight: 600;
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.25);
+}
+
+.btn-label-short {
+  display: none;
+}
+.btn-label-full {
+  display: inline;
+}
+
+.cols-0 .btn-label-full,
+.cols-2 .btn-label-full,
+.cols-3 .btn-label-full,
+.cols-4 .btn-label-full {
+  display: none;
+}
+
+.cols-0 .btn-label-short,
+.cols-2 .btn-label-short,
+.cols-3 .btn-label-short,
+.cols-4 .btn-label-short {
+  display: inline;
+  font-size: 11px;
+  font-weight: 600;
 }
 
 /* --- Universal Apple-Style Beta Notice Banner --- */

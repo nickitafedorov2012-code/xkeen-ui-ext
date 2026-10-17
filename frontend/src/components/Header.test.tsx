@@ -632,5 +632,49 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
     expect(container?.querySelector('[data-testid="header-app-pill"]')).not.toBeNull()
     expect(container?.querySelector('[data-testid="header-zapret-pill"]')).not.toBeNull()
     expect(container?.querySelector('[data-testid="header-adguard-pill"]')).toBeNull()
+    // Кнопка сервисов убрана из блока версий для предотвращения наложения интерфейса
+    expect(container?.querySelector('.header-stack-mem-pill')).toBeNull()
+  })
+
+  it('anti-regression: header does not render header-beta-badge and provides hover popover on status badge', async () => {
+    vi.spyOn(api, 'apiGet').mockResolvedValue({})
+
+    const statusWithStack: StatusInfo = {
+      ...mockStatus,
+      stack_memory: {
+        total_stack_rss_mb: 66.2,
+        keenetic_free_mb: 256.0,
+        keenetic_total_mb: 512.0,
+        keenetic_available_mb: 280.0,
+        processes: [
+          { name: 'mihomo', display_name: 'Mihomo (Ядро)', rss_bytes: 25690112, rss_mb: 24.5, running: true },
+          { name: 'xkeen-route', display_name: 'XKeen Route (Панель)', rss_bytes: 19084083, rss_mb: 18.2, running: true },
+        ],
+      },
+    }
+
+    await act(async () => {
+      root!.render(
+        <Header
+          status={statusWithStack}
+          notify={notifyMock}
+          refresh={refreshMock}
+          onSwitchTab={onSwitchTabMock}
+          activeTab="dashboard"
+        />
+      )
+    })
+
+    // 1. Бейдж BETA убран из шапки во избежание коллизий и наложения элементов
+    expect(container?.querySelector('.header-beta-badge')).toBeNull()
+
+    // 2. Всплывающее окно статуса содержит стек процессов XKeen и метрики памяти KeeneticOS
+    const popover = container?.querySelector('.header-status-popover')
+    expect(popover).not.toBeNull()
+    expect(popover?.textContent).toContain('KeeneticOS & Оборудование')
+    expect(popover?.textContent).toContain('256 МБ своб. из 512 МБ')
+    expect(popover?.textContent).toContain('Стек процессов XKeen')
+    expect(popover?.textContent).toContain('Mihomo (Ядро)')
+    expect(popover?.textContent).toContain('XKeen Route (Панель)')
   })
 })

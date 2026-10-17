@@ -78,3 +78,62 @@ describe('Devices table offline dimming and actions lock', () => {
     expect(isActionDisabled({ ip: '192.168.1.100', online: true })).toBe(false)
   })
 })
+
+describe('Signal quality bars indicator (Apple-style cellular bars)', () => {
+  const getSignalBars = (ping: number) => {
+    if (ping <= 0 || ping >= 9999) return { active: 0, status: 'timeout' }
+    if (ping < 80) return { active: 4, status: 'excellent', color: '#22c55e' }
+    if (ping < 160) return { active: 3, status: 'good', color: '#38bdf8' }
+    if (ping < 300) return { active: 2, status: 'medium', color: '#f59e0b' }
+    return { active: 1, status: 'slow', color: '#ef4444' }
+  }
+
+  it('reports timeout when ping is 0 or >= 9999', () => {
+    expect(getSignalBars(0)).toEqual({ active: 0, status: 'timeout' })
+    expect(getSignalBars(9999)).toEqual({ active: 0, status: 'timeout' })
+    expect(getSignalBars(-1)).toEqual({ active: 0, status: 'timeout' })
+  })
+
+  it('allocates 4 green bars for ping < 80ms', () => {
+    expect(getSignalBars(45)).toEqual({ active: 4, status: 'excellent', color: '#22c55e' })
+  })
+
+  it('allocates 3 cyan bars for ping 80..160ms', () => {
+    expect(getSignalBars(120)).toEqual({ active: 3, status: 'good', color: '#38bdf8' })
+  })
+
+  it('allocates 2 amber bars for ping 160..300ms', () => {
+    expect(getSignalBars(220)).toEqual({ active: 2, status: 'medium', color: '#f59e0b' })
+  })
+
+  it('allocates 1 red bar for slow ping >= 300ms', () => {
+    expect(getSignalBars(450)).toEqual({ active: 1, status: 'slow', color: '#ef4444' })
+  })
+})
+
+describe('Whitelist button label display per column mode', () => {
+  const getWhitelistButtonLabels = (columns: number, isWhitelisted: boolean) => {
+    const isMultiCol = columns === 0 || columns >= 2
+    return {
+      full: isWhitelisted ? 'В белом списке' : 'Белый список',
+      short: isWhitelisted ? 'БС ON' : 'БС',
+      effectiveDisplay: isMultiCol ? (isWhitelisted ? 'БС ON' : 'БС') : (isWhitelisted ? 'В белом списке' : 'Белый список'),
+    }
+  }
+
+  it('shows short label БС in multi-column modes (0, 2, 3, 4) to prevent vanishing labels', () => {
+    for (const col of [0, 2, 3, 4]) {
+      const active = getWhitelistButtonLabels(col, true)
+      expect(active.effectiveDisplay).toBe('БС ON')
+      const inactive = getWhitelistButtonLabels(col, false)
+      expect(inactive.effectiveDisplay).toBe('БС')
+    }
+  })
+
+  it('shows full label in 1 column mode', () => {
+    const active = getWhitelistButtonLabels(1, true)
+    expect(active.effectiveDisplay).toBe('В белом списке')
+    const inactive = getWhitelistButtonLabels(1, false)
+    expect(inactive.effectiveDisplay).toBe('Белый список')
+  })
+})

@@ -405,7 +405,7 @@ export default function Header({
 
   return (
     <header className="header-bar header-toolbar">
-      {/* 1. ЛОГОТИП (150px) */}
+      {/* 1. ЛОГОТИП (компактный без бейджа, чтобы освободить место) */}
       <div className="header-brand-group">
         <a
           href="#dashboard"
@@ -417,13 +417,18 @@ export default function Header({
         >
           <BrandLogoIcon />
           <span className="header-brand-text">XRoute</span>
-          <span className="header-beta-badge" title="Версия с поддержкой Zapret 2, Gaming и AdGuard Home">🧪 BETA</span>
         </a>
       </div>
 
-      {/* 2. СТАТУС (270px: 2 строки внутри карточки высотой 44px) */}
-      <div className="header-status-group">
-        <div className={`status-badge-custom ${isRunning ? 'status-badge-running' : 'status-badge-stopped'}`}>
+      {/* 2. СТАТУС (компактный статус-виджет + выпадающий Apple-style стек сервисов и памяти при наведении) */}
+      <div className="header-status-group" data-testid="header-status-group">
+        <div
+          className={`status-badge-custom ${isRunning ? 'status-badge-running' : 'status-badge-stopped'}`}
+          onClick={() => onSwitchTab('dashboard')}
+          role="button"
+          tabIndex={0}
+          title="Нажмите для перехода в Dashboard / Диспетчер задач"
+        >
           <div className="status-badge-content">
             <div className="status-badge-row1">
               <span className={`status-dot ${isRunning ? 'status-dot-running' : 'status-dot-stopped'}`} />
@@ -478,10 +483,65 @@ export default function Header({
               )}
             </div>
           </div>
+
+          {/* Всплывающее Apple-style окно информации о сервисах и памяти при наведении на статус */}
+          <div className="header-status-popover">
+            <div className="status-popover-header">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span className={`status-dot ${isRunning ? 'status-dot-running' : 'status-dot-stopped'}`} />
+                <span style={{ fontWeight: 600, color: 'var(--text-bright, #fff)' }}>
+                  {isRunning ? 'Службы XKeen активны' : 'Службы остановлены'}
+                </span>
+              </div>
+              <span style={{ fontSize: 11, color: 'var(--muted, #94a3b8)' }}>
+                {status?.router?.model || 'Keenetic'}
+              </span>
+            </div>
+
+            <div className="status-popover-section">
+              <div className="status-popover-sec-title">KeeneticOS & Оборудование</div>
+              <div className="status-popover-row">
+                <span>Память ОЗУ</span>
+                <span style={{ fontWeight: 600, color: '#38bdf8' }}>
+                  {status?.stack_memory
+                    ? `${status.stack_memory.keenetic_free_mb.toFixed(0)} МБ своб. из ${status.stack_memory.keenetic_total_mb.toFixed(0)} МБ`
+                    : memTotal > 0 ? `${memTotal - memUsed} МБ своб. из ${memTotal} МБ` : '—'}
+                </span>
+              </div>
+              <div className="status-popover-row">
+                <span>Загрузка ЦП</span>
+                <span style={{ fontWeight: 600, color: cpuPercent > 80 ? '#ef4444' : '#22c55e' }}>
+                  {cpuPercent}% {cpuTemp ? `(${cpuTemp}°C)` : ''}
+                </span>
+              </div>
+            </div>
+
+            {status?.stack_memory && (
+              <div className="status-popover-section">
+                <div className="status-popover-sec-title">
+                  Стек процессов XKeen ({Math.round(status.stack_memory.total_stack_rss_mb)} МБ)
+                </div>
+                <div className="status-popover-proc-list">
+                  {status.stack_memory.processes.map((p) => (
+                    <div key={p.name} className="status-popover-proc-item">
+                      <span>{p.display_name}</span>
+                      <span className={p.running ? 'proc-val-active' : 'proc-val-dim'}>
+                        {p.running ? `${p.rss_mb.toFixed(1)} МБ` : 'выкл'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="status-popover-hint">
+              Кликните для перехода в Диспетчер задач ➔
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* 3. БЛОК ВЕРСИЙ (>= 380px: 3 компактных бейджа высотой 36px) */}
+      {/* 3. БЛОК ВЕРСИЙ: 3 компактных бейджа (Mihomo, XRoute, Zapret) без перекрытия кнопок справа */}
       <div className="header-versions-group">
         <button
           type="button"
@@ -574,39 +634,6 @@ export default function Header({
             </span>
           )}
         </button>
-
-        {status?.stack_memory && (
-          <div className="header-stack-mem-container">
-            <button
-              type="button"
-              className="header-pill-btn header-stack-mem-pill"
-              title="Физическая память (RSS) ключевых процессов стека"
-              onClick={() => onSwitchTab('dashboard')}
-            >
-              <span style={{ fontSize: 13 }}>📦</span>
-              <span className="header-pill-title">Сервисы</span>
-              <span className="header-pill-subtitle">{Math.round(status.stack_memory.total_stack_rss_mb)} МБ</span>
-            </button>
-            <div className="header-stack-mem-tooltip">
-              <div className="stack-mem-header">Стек процессов XKeen</div>
-              <div className="stack-mem-list">
-                {status.stack_memory.processes.map((p) => (
-                  <div key={p.name} className="stack-mem-item">
-                    <span className="stack-mem-name">{p.display_name}</span>
-                    <span className={`stack-mem-val ${p.running ? '' : 'stack-mem-dim'}`}>
-                      {p.running ? `${p.rss_mb.toFixed(1)} МБ` : 'выкл'}
-                    </span>
-                  </div>
-                ))}
-              </div>
-              <div className="stack-mem-divider" />
-              <div className="stack-mem-footer">
-                <span>KeeneticOS:</span>
-                <span>{status.stack_memory.keenetic_free_mb.toFixed(0)} МБ своб. / {status.stack_memory.keenetic_total_mb.toFixed(0)} МБ</span>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
 
       {/* 4. ЗАПУСК / ОСТАНОВКА (82px: высота 38px, красный только для остановки) */}
