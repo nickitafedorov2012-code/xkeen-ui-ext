@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { apiPost } from '../api'
 
 interface LoginModalProps {
@@ -11,6 +11,13 @@ export default function LoginModal({ isOpen = true, onSuccess, notify }: LoginMo
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!isOpen) {
+      setPassword('')
+      setError(null)
+    }
+  }, [isOpen])
 
   const handleLogin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault()

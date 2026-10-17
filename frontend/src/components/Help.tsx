@@ -1197,7 +1197,7 @@ export default function Help({ status }: Props) {
                 desc: 'Управление индивидуальной привязкой серверов и цепочек failover к IP-адресам устройств.',
               },
               {
-                name: 'GET /api/config/files & GET /api/config/read & POST /api/config/write',
+                name: 'GET /api/config-files/list & GET /api/config-files/read & POST /api/config-files/save',
                 desc: 'Чтение и запись конфигурационных файлов с валидацией синтаксиса и hot-reload ядра.',
               },
               {

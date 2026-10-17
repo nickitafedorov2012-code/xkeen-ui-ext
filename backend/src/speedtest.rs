@@ -61,6 +61,58 @@ pub async fn restore_groups_snapshot(
     }
 }
 
+/// RAII guard для гарантированного восстановления конфигурации групп Selector при любом выходе/отмене
+pub struct NodeGroupGuard {
+    http: reqwest::Client,
+    cfg: AppConfig,
+    snapshot: Option<HashMap<String, String>>,
+    need_restore: bool,
+}
+
+impl NodeGroupGuard {
+    pub fn new(
+        http: &reqwest::Client,
+        cfg: &AppConfig,
+        snapshot: HashMap<String, String>,
+        need_restore: bool,
+    ) -> Self {
+        Self {
+            http: http.clone(),
+            cfg: cfg.clone(),
+            snapshot: Some(snapshot),
+            need_restore,
+        }
+    }
+
+    pub async fn restore(&mut self) {
+        if self.need_restore {
+            if let Some(snapshot) = self.snapshot.take() {
+                restore_groups_snapshot(&self.http, &self.cfg, &snapshot).await;
+                self.need_restore = false;
+            }
+        }
+    }
+
+    pub fn defuse(&mut self) {
+        self.need_restore = false;
+        self.snapshot = None;
+    }
+}
+
+impl Drop for NodeGroupGuard {
+    fn drop(&mut self) {
+        if self.need_restore {
+            if let Some(snapshot) = self.snapshot.take() {
+                let http = self.http.clone();
+                let cfg = self.cfg.clone();
+                tokio::spawn(async move {
+                    restore_groups_snapshot(&http, &cfg, &snapshot).await;
+                });
+            }
+        }
+    }
+}
+
 /// Выполнение замера скорости загрузки через выбранный прокси-сервер.
 pub async fn run_speedtest(
     _http: &reqwest::Client,
@@ -87,16 +139,12 @@ pub async fn run_speedtest(
         false
     };
 
+    let mut guard = NodeGroupGuard::new(_http, _cfg, group_snapshot, need_restore);
+
     // 3. Подтверждение тестового маршрута в runtime (DIAG-01)
-    // Маршрут должен быть строго подтвержден в runtime:
-    // либо активный leaf равен target_server, либо основной селектор (PROXY/GLOBAL/etc)
-    // переключен на target_server (если target_server сам является группой или селектором)
     let current_proxies = match crate::mihomo::get_proxies(_http, _cfg).await {
         Ok(p) => p,
         Err(e) => {
-            if need_restore {
-                restore_groups_snapshot(_http, _cfg, &group_snapshot).await;
-            }
             return Err(format!("Ошибка проверки прокси ядра Mihomo: {}", e));
         }
     };
@@ -114,9 +162,6 @@ pub async fn run_speedtest(
     };
 
     if !is_confirmed {
-        if need_restore {
-            restore_groups_snapshot(_http, _cfg, &group_snapshot).await;
-        }
         return Err(format!(
             "Подтверждение тестового маршрута не удалось: сервер '{}' не стал активным в ядре Mihomo (текущий: '{}')",
             target_server,
@@ -143,9 +188,7 @@ pub async fn run_speedtest(
     let proxy = match reqwest::Proxy::all(&proxy_url) {
         Ok(p) => p,
         Err(e) => {
-            if need_restore {
-                restore_groups_snapshot(_http, _cfg, &group_snapshot).await;
-            }
+            guard.restore().await;
             return Err(format!("Ошибка создания прокси: {}", e));
         }
     };
@@ -157,9 +200,7 @@ pub async fn run_speedtest(
     {
         Ok(c) => c,
         Err(e) => {
-            if need_restore {
-                restore_groups_snapshot(_http, _cfg, &group_snapshot).await;
-            }
+            guard.restore().await;
             return Err(format!("Ошибка инициализации HTTP клиента: {}", e));
         }
     };
@@ -204,9 +245,7 @@ pub async fn run_speedtest(
     }
 
     // 7. Восстанавливаем исходную структуру групп выбора сразу после замера
-    if need_restore {
-        restore_groups_snapshot(_http, _cfg, &group_snapshot).await;
-    }
+    guard.restore().await;
 
     if !success || total_bytes == 0 {
         return Err("Не удалось выполнить тест скорости: тестовые узлы недоступны".to_string());
@@ -262,5 +301,20 @@ mod tests {
     fn test_calculate_speed_zero_bytes() {
         let speed = calculate_speed(0, 1.0);
         assert_eq!(speed, 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_node_group_guard_raii_drop() {
+        let http = reqwest::Client::new();
+        let cfg = AppConfig::default();
+        let mut snapshot = HashMap::new();
+        snapshot.insert("PROXY".to_string(), "ServerA".to_string());
+
+        let mut guard = NodeGroupGuard::new(&http, &cfg, snapshot, true);
+        assert!(guard.need_restore);
+        assert!(guard.snapshot.is_some());
+        guard.defuse();
+        assert!(!guard.need_restore);
+        assert!(guard.snapshot.is_none());
     }
 }

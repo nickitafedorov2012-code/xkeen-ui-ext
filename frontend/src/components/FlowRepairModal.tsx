@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { apiPost } from '../api'
 import { copyToClipboard } from '../utils/clipboard'
 
@@ -21,6 +21,15 @@ export default function FlowRepairModal({
   const [isVerified, setIsVerified] = useState<boolean>(false)
   const [repairError, setRepairError] = useState<string | null>(null)
   const [copiedLink, setCopiedLink] = useState(false)
+  const [hasRepaired, setHasRepaired] = useState(false)
+
+  const isMountedRef = useRef(true)
+  useEffect(() => {
+    isMountedRef.current = true
+    return () => {
+      isMountedRef.current = false
+    }
+  }, [])
 
   const cleanUrl = 'https://flow.google.com/?authuser=0&hl=en'
   const extensionZipUrl = '/api/flow/extension.zip'
@@ -30,6 +39,8 @@ export default function FlowRepairModal({
     setRepairError(null)
     try {
       const res = await apiPost<{ success?: boolean; flow_server?: string; verified?: boolean; message?: string }>('flow/repair', {})
+      if (!isMountedRef.current) return
+      setHasRepaired(true)
       if (res && res.flow_server) {
         setActiveServer(res.flow_server)
         setIsVerified(Boolean(res.verified))
@@ -40,17 +51,22 @@ export default function FlowRepairModal({
         notify(res?.message || '✓ Сокеты ядра Mihomo сброшены')
       }
     } catch (e: any) {
+      if (!isMountedRef.current) return
+      setHasRepaired(true)
       setRepairError(e.message || 'Ошибка выполнения сброса на роутере')
       setIsVerified(false)
       notify(e.message || 'Ошибка выполнения сброса на роутере', true)
     } finally {
-      setRepairing(false)
+      if (isMountedRef.current) {
+        setRepairing(false)
+      }
     }
   }
 
+  // REPAIR-01: Repair is executed strictly on explicit user button click, never automatically on open.
   useEffect(() => {
     if (isOpen) {
-      handleRepair()
+      // Intentionally empty: do not auto-invoke handleRepair()
     }
   }, [isOpen])
 
@@ -140,6 +156,37 @@ export default function FlowRepairModal({
                 🔄 Повторить
               </button>
             </div>
+          ) : !hasRepaired ? (
+            <div
+              style={{
+                background: 'rgba(59, 130, 246, 0.08)',
+                border: '1px solid rgba(59, 130, 246, 0.25)',
+                borderRadius: 8,
+                padding: '10px 14px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+              }}
+            >
+              <div>
+                <div style={{ fontWeight: 600, color: 'var(--text)', fontSize: 13 }}>
+                  Маршрутизация Google Flow
+                </div>
+                <div className="muted small" style={{ marginTop: 2 }}>
+                  Сброс TCP-сокетов ядра и применение маршрута Flow
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn btn-sm primary"
+                onClick={handleRepair}
+                disabled={repairing}
+                data-testid="flow-repair-btn"
+                title="Сбросить сокеты и настроить маршрут на роутере"
+              >
+                🔄 Сбросить сокеты
+              </button>
+            </div>
           ) : (
             <div
               style={{
@@ -165,6 +212,7 @@ export default function FlowRepairModal({
                 className="btn btn-sm ghost"
                 onClick={handleRepair}
                 disabled={repairing}
+                data-testid="flow-repair-retry-btn"
                 title="Повторить сброс сокетов на роутере"
               >
                 🔄 Повторить

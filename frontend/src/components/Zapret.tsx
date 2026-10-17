@@ -413,13 +413,14 @@ export default function Zapret({ notify }: ZapretProps) {
         /* ignore */
       }
       notify(res.message || '🚀 Zapret 2.0 (nfqws2 + Lua) успешно установлен в /opt/zapret2')
+      const resolvedVersion = status?.version || status?.latest_version || 'v2'
       window.dispatchEvent(
         new CustomEvent('xr:zapret-updated', {
           detail: {
             update_available: false,
             engine: 'v2',
-            version: 'v1.0.5.2',
-            latest_version: 'v1.0.5.2',
+            version: resolvedVersion,
+            latest_version: resolvedVersion,
           },
         })
       )

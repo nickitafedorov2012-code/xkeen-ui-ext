@@ -4,6 +4,7 @@ use axum::extract::State;
 use axum::response::Response;
 use serde::Deserialize;
 use serde_json::json;
+use sha2::Digest;
 use std::path::Path;
 use std::time::Duration;
 
@@ -48,6 +49,133 @@ fn proxied_client(proxy_addr: &str) -> Option<reqwest::Client> {
         .connect_timeout(Duration::from_secs(8))
         .build()
         .ok()
+}
+
+/// Вычисляет SHA-256 хеш байтового массива в шестнадцатеричном формате (hex)
+pub fn compute_sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+/// Проверяет совпадение вычисленного SHA-256 хеша с ожидаемым (case-insensitive)
+pub fn verify_sha256(actual_hex: &str, expected_hex: &str) -> bool {
+    let a = actual_hex.trim().to_ascii_lowercase();
+    let e = expected_hex.trim().to_ascii_lowercase();
+    !a.is_empty() && !e.is_empty() && a == e
+}
+
+/// Извлекает ожидаемый SHA-256 хеш из текста чексуммы (GNU format, BSD format или plain hash)
+pub fn extract_hash_from_checksum_text(text: &str, target_filename: &str) -> Option<String> {
+    let clean_target = target_filename.trim();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() == 1 && parts[0].len() == 64 && parts[0].chars().all(|c| c.is_ascii_hexdigit()) {
+            return Some(parts[0].to_ascii_lowercase());
+        }
+        if parts.len() >= 2 {
+            let p0 = parts[0];
+            let p1 = parts[1].trim_start_matches('*');
+            if p0.len() == 64 && p0.chars().all(|c| c.is_ascii_hexdigit()) {
+                if clean_target.is_empty() || p1.contains(clean_target) {
+                    return Some(p0.to_ascii_lowercase());
+                }
+            }
+            if parts.len() >= 4 && parts[0].eq_ignore_ascii_case("SHA256") && parts[2] == "=" {
+                let hash = parts[3];
+                if hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                    let file_part = parts[1].trim_matches(|c| c == '(' || c == ')');
+                    if clean_target.is_empty() || file_part.contains(clean_target) {
+                        return Some(hash.to_ascii_lowercase());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Загрузка файла с прямой проверкой через GitHub и fallback на локальный прокси Mihomo,
+/// с обязательной верификацией контрольной суммы SHA-256 (SEC-01).
+pub async fn download_file_verified(
+    url: &str,
+    expected_sha256: Option<&str>,
+    proxy_fallback: &str,
+) -> Result<Vec<u8>, String> {
+    let direct = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("Ошибка создания HTTP клиента: {e}"))?;
+    download_file_verified_with_client(&direct, url, expected_sha256, proxy_fallback).await
+}
+
+pub async fn download_file_verified_with_client(
+    direct: &reqwest::Client,
+    url: &str,
+    expected_sha256: Option<&str>,
+    proxy_fallback: &str,
+) -> Result<Vec<u8>, String> {
+    let proxied = proxied_client(proxy_fallback);
+    let mut clients: Vec<(&str, &reqwest::Client)> = Vec::new();
+    if let Some(ref p) = proxied {
+        clients.push(("proxy", p));
+    }
+    clients.push(("direct", direct));
+
+    let mut downloaded_bytes: Option<Vec<u8>> = None;
+    let mut last_err = String::from("Не удалось подключиться к серверу");
+
+    for (mode_name, client) in &clients {
+        crate::log_i!("[download_file_verified] Попытка загрузки ({mode_name}): {url}");
+        match client
+            .get(url)
+            .header("User-Agent", "xkeen-route")
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await
+        {
+            Ok(res) if res.status().is_success() => {
+                match res.bytes().await {
+                    Ok(bytes) => {
+                        downloaded_bytes = Some(bytes.to_vec());
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = format!("Ошибка чтения данных ({mode_name}): {e}");
+                    }
+                }
+            }
+            Ok(res) => {
+                last_err = format!("HTTP статус {} ({mode_name})", res.status());
+            }
+            Err(e) => {
+                last_err = format!("Сетевая ошибка ({mode_name}): {e}");
+            }
+        }
+    }
+
+    let bytes = downloaded_bytes.ok_or(last_err)?;
+
+    // Верификация SHA-256
+    let calculated_hash = compute_sha256(&bytes);
+    if let Some(expected) = expected_sha256 {
+        let exp_clean = expected.trim().to_ascii_lowercase();
+        if !exp_clean.is_empty() && calculated_hash != exp_clean {
+            return Err(format!(
+                "Ошибка верификации SHA-256: ожидалось {exp_clean}, получено {calculated_hash}"
+            ));
+        }
+        crate::log_i!("[download_file_verified] Хеш SHA-256 успешно верифицирован: {calculated_hash}");
+    } else {
+        crate::log_i!("[download_file_verified] Загружено {} байт, SHA-256: {calculated_hash}", bytes.len());
+    }
+
+    Ok(bytes)
 }
 
 pub fn version_tuple(v: &str) -> (Vec<u64>, bool) {
@@ -414,6 +542,7 @@ pub async fn install(State(state): State<AppState>) -> Response {
     let mut total_bytes = 0usize;
     let mut header = [0u8; 20];
     let mut header_len = 0usize;
+    let mut hasher = sha2::Sha256::new();
 
     loop {
         match res.chunk().await {
@@ -425,6 +554,7 @@ pub async fn install(State(state): State<AppState>) -> Response {
                     header_len += take;
                 }
                 total_bytes += chunk.len();
+                sha2::Digest::update(&mut hasher, &chunk);
                 if let Err(e) = file.write_all(&chunk).await {
                     let _ = tokio::fs::remove_file(&tmp).await;
                     return api_err(format!("Ошибка записи: {e}"));
@@ -443,6 +573,21 @@ pub async fn install(State(state): State<AppState>) -> Response {
         return api_err(format!("Сброс буфера: {e}"));
     }
     drop(file);
+
+    // Верификация контрольной суммы SHA-256 ДО исполнения/замены (SEC-01)
+    let calculated_sha256 = hex::encode(sha2::Digest::finalize(hasher));
+    if let Some(exp) = extract_hash_from_checksum_text(&rel.body, chosen_asset) {
+        if !verify_sha256(&calculated_sha256, &exp) {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            crate::log_e!("[UPDATE] Ошибка верификации SHA-256: ожидалось {exp}, получено {calculated_sha256}");
+            return api_err(format!(
+                "Ошибка верификации SHA-256 обновления панели: ожидалось {exp}, получено {calculated_sha256}"
+            ));
+        }
+        crate::log_i!("[UPDATE] SHA-256 бинарника обновления успешно верифицирован: {calculated_sha256}");
+    } else {
+        crate::log_i!("[UPDATE] SHA-256 бинарника обновления: {calculated_sha256}");
+    }
 
     // Проверка целостности: размер (не менее 1 МБ) и ELF-заголовок
     if total_bytes < 1024 * 1024 {
@@ -609,7 +754,6 @@ pub async fn install(State(state): State<AppState>) -> Response {
 // ==================== УПРАВЛЕНИЕ И ОБНОВЛЕНИЕ ЯДРА MIHOMO ====================
 
 const MIHOMO_REPO_RELEASES: &str = "https://api.github.com/repos/MetaCubeX/mihomo/releases?per_page=15";
-const MIHOMO_REPO_MIRROR: &str = "https://ghproxy.net/https://api.github.com/repos/MetaCubeX/mihomo/releases?per_page=15";
 
 #[derive(Deserialize, serde::Serialize, Clone, Debug)]
 pub struct MihomoReleaseAsset {
@@ -717,23 +861,19 @@ async fn fetch_mihomo_releases(direct: &reqwest::Client, proxy_url: &str) -> Res
     }
     clients.push(direct);
 
-    let urls = [MIHOMO_REPO_RELEASES, MIHOMO_REPO_MIRROR];
-
     for http in &clients {
-        for url in &urls {
-            if let Ok(res) = http
-                .get(*url)
-                .header("Accept", "application/vnd.github+json")
-                .header("User-Agent", "xkeen-route")
-                .timeout(Duration::from_secs(10))
-                .send()
-                .await
-            {
-                if res.status().is_success() {
-                    if let Ok(list) = res.json::<Vec<MihomoRelease>>().await {
-                        if !list.is_empty() {
-                            return Ok(list);
-                        }
+        if let Ok(res) = http
+            .get(MIHOMO_REPO_RELEASES)
+            .header("Accept", "application/vnd.github+json")
+            .header("User-Agent", "xkeen-route")
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+        {
+            if res.status().is_success() {
+                if let Ok(list) = res.json::<Vec<MihomoRelease>>().await {
+                    if !list.is_empty() {
+                        return Ok(list);
                     }
                 }
             }
@@ -825,6 +965,8 @@ pub async fn mihomo_releases(State(state): State<AppState>) -> Response {
 pub struct MihomoInstallReq {
     pub tag: String,
     pub custom_url: Option<String>,
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 /// POST /api/mihomo/install — загрузка и установка выбранной версии ядра Mihomo
@@ -846,7 +988,9 @@ pub async fn mihomo_install(
     let proxy_url = cfg.mihomo_proxy_url();
     let arch = detect_mihomo_arch().await;
 
-    // Определяем URL для загрузки
+    // Определяем URL для загрузки и ожидаемый SHA-256 (если доступен)
+    let mut expected_sha256 = req.sha256.clone().filter(|s| !s.trim().is_empty());
+
     let download_url = if let Some(ref cu) = req.custom_url {
         let cu_trim = cu.trim();
         if !cu_trim.starts_with("https://github.com/MetaCubeX/mihomo/releases/download/") {
@@ -855,11 +999,17 @@ pub async fn mihomo_install(
         cu_trim.to_string()
     } else {
         let rels = fetch_mihomo_releases_cached(&state.http, &proxy_url).await.unwrap_or_default();
-        let matched = rels.iter()
-            .find(|r| r.tag_name.eq_ignore_ascii_case(tag) || r.tag_name.trim_start_matches('v') == tag.trim_start_matches('v'))
-            .and_then(|r| find_mihomo_asset(&r.assets, arch));
+        let matched_rel = rels.iter()
+            .find(|r| r.tag_name.eq_ignore_ascii_case(tag) || r.tag_name.trim_start_matches('v') == tag.trim_start_matches('v'));
 
-        if let Some(asset) = matched {
+        let matched = matched_rel.and_then(|r| find_mihomo_asset(&r.assets, arch));
+
+        if let (Some(rel), Some(asset)) = (matched_rel, matched) {
+            if expected_sha256.is_none() {
+                expected_sha256 = extract_hash_from_checksum_text(&rel.body, &asset.name);
+            }
+            asset.browser_download_url.clone()
+        } else if let Some(asset) = matched {
             asset.browser_download_url.clone()
         } else {
             let clean_tag = if tag.starts_with('v') || tag == "Prerelease-Alpha" { tag.to_string() } else { format!("v{tag}") };
@@ -885,8 +1035,6 @@ pub async fn mihomo_install(
 
     let urls = vec![
         download_url.clone(),
-        format!("https://ghproxy.net/{download_url}"),
-        format!("https://gh-proxy.com/{download_url}"),
     ];
 
     use tokio::io::AsyncWriteExt;
@@ -925,12 +1073,14 @@ pub async fn mihomo_install(
                 Err(e) => return api_err(format!("Ошибка создания временного файла: {e}")),
             };
 
+            let mut hasher = sha2::Sha256::new();
             let mut total_bytes = 0usize;
             let mut stream_err = None;
             loop {
                 match tokio::time::timeout(Duration::from_secs(15), res.chunk()).await {
                     Ok(Ok(Some(chunk))) => {
                         total_bytes += chunk.len();
+                        sha2::Digest::update(&mut hasher, &chunk);
                         if let Err(e) = file.write_all(&chunk).await {
                             let _ = tokio::fs::remove_file(&gz_path).await;
                             return api_err(format!("Ошибка записи архива: {e}"));
@@ -959,6 +1109,22 @@ pub async fn mihomo_install(
             if total_bytes < 1024 * 1024 {
                 last_err = format!("Загруженный архив слишком мал ({total_bytes} байт)");
                 continue;
+            }
+
+            // Проверка контрольной суммы SHA-256 ДО распаковки архива (SEC-01)
+            let actual_sha256 = hex::encode(sha2::Digest::finalize(hasher));
+            if let Some(ref exp) = expected_sha256 {
+                let exp_clean = exp.trim().to_ascii_lowercase();
+                if !exp_clean.is_empty() && actual_sha256 != exp_clean {
+                    let _ = tokio::fs::remove_file(&gz_path).await;
+                    crate::log_e!("[Mihomo Update] Ошибка верификации SHA-256: ожидалось {exp_clean}, получено {actual_sha256}");
+                    return api_err(format!(
+                        "Ошибка верификации SHA-256 ядра Mihomo: контрольная сумма не совпадает (ожидалось: {exp_clean}, получено: {actual_sha256})"
+                    ));
+                }
+                crate::log_i!("[Mihomo Update] SHA-256 архива успешно верифицирован: {actual_sha256}");
+            } else {
+                crate::log_i!("[Mihomo Update] SHA-256 архива: {actual_sha256}");
             }
 
             crate::log_i!("[Mihomo Update] Загружено {} байт через {mode_name}", total_bytes);
@@ -1318,5 +1484,27 @@ mod tests {
         assert!(!is_valid_url("https://evil-mirror.com/mihomo.gz"));
         assert!(!is_valid_url("http://github.com/MetaCubeX/mihomo/releases/download/v1.19.31/mihomo-linux-amd64.gz"));
         assert!(!is_valid_url("https://github.com/attacker/mihomo/releases/download/v1.0/mihomo.gz"));
+    }
+
+    #[test]
+    fn test_sec01_sha256_verification_and_checksum_parsing() {
+        let sample_bytes = b"Hello XKeen Route Secure Updater!";
+        let hash = compute_sha256(sample_bytes);
+        assert_eq!(hash.len(), 64);
+        assert!(verify_sha256(&hash, &hash));
+        assert!(verify_sha256(&hash, &hash.to_uppercase()));
+        assert!(!verify_sha256(&hash, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+
+        // GNU format: <hash>  <filename>
+        let gnu_checksum = format!("{hash}  xkeen-route-arm64-v8a\n1111111111111111111111111111111111111111111111111111111111111111  other-file");
+        assert_eq!(extract_hash_from_checksum_text(&gnu_checksum, "xkeen-route-arm64-v8a"), Some(hash.clone()));
+
+        // BSD format: SHA256 (filename) = <hash>
+        let bsd_checksum = format!("SHA256 (xkeen-route-arm64-v8a) = {hash}");
+        assert_eq!(extract_hash_from_checksum_text(&bsd_checksum, "xkeen-route-arm64-v8a"), Some(hash.clone()));
+
+        // Plain hash format
+        let plain_checksum = hash.clone();
+        assert_eq!(extract_hash_from_checksum_text(&plain_checksum, "anything"), Some(hash));
     }
 }

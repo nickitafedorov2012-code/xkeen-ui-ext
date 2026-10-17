@@ -122,6 +122,12 @@ describe('Diagnostics & FlowRepair Truthfulness Components (Milestone 5)', () =>
       root!.render(<FlowRepairModal isOpen={true} onClose={vi.fn()} notify={vi.fn()} />)
     })
 
+    const btn = container!.querySelector('[data-testid="flow-repair-btn"]') as HTMLButtonElement
+    expect(btn).not.toBeNull()
+    await act(async () => {
+      btn.click()
+    })
+
     expect(container!.textContent).toContain('Не удалось подтвердить маршрут Flow')
     expect(container!.textContent).toContain('Маршрут Google AI в ядре Mihomo не подтвердил выбор узла в runtime')
     expect(container!.textContent).not.toContain('Маршрут подтвержден и активен')
@@ -137,6 +143,12 @@ describe('Diagnostics & FlowRepair Truthfulness Components (Milestone 5)', () =>
 
     await act(async () => {
       root!.render(<FlowRepairModal isOpen={true} onClose={vi.fn()} notify={vi.fn()} />)
+    })
+
+    const btn = container!.querySelector('[data-testid="flow-repair-btn"]') as HTMLButtonElement
+    expect(btn).not.toBeNull()
+    await act(async () => {
+      btn.click()
     })
 
     expect(container!.textContent).toContain('Маршрут подтвержден и активен')

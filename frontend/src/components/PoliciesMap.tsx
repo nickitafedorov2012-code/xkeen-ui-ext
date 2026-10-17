@@ -15,6 +15,7 @@ interface PolicyNode {
   name: string
   description?: string
   is_main?: boolean
+  is_default?: boolean
 }
 
 interface ServerNode {
@@ -131,7 +132,7 @@ export default function PoliciesMap({ notify }: PoliciesMapProps) {
                   <div className="node-title">
                     <span className="node-icon">🛡️</span>
                     <strong>{p.name}</strong>
-                    {p.is_main && <span className="badge-main">Main</span>}
+                    {(p.is_main || p.is_default) && <span className="badge-main">Main</span>}
                   </div>
                   <div className="node-sub muted">{p.description || `ID: ${p.id}`}</div>
                   {isLinked && (

@@ -225,4 +225,23 @@ describe('api client', () => {
 
     await expect(apiPost('notifications/test', {})).rejects.toThrow('Chat not found')
   })
+
+  it('anti-regression (API-01): allows legitimate null data payloads when success is true', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({ success: true, data: null }),
+    } as any)
+
+    const res = await apiGet<any>('settings/optional-field')
+    expect(res).toBeNull()
+  })
+
+  it('anti-regression (API-01): rejects when data is undefined even if success is true', async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      status: 200,
+      json: async () => ({ success: true }),
+    } as any)
+
+    await expect(apiGet<any>('some-endpoint')).rejects.toThrow('отсутствует поле data')
+  })
 })

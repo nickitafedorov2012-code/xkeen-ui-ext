@@ -180,10 +180,7 @@ pub async fn get_swap_status() -> Response {
 /// POST /api/system/swap/create — создание и активация файла подкачки на /opt
 pub async fn create_swap(Json(payload): Json<CreateSwapRequest>) -> Response {
     let size_mb = payload.size_mb;
-    let res = tokio::task::spawn_blocking(move || crate::system::create_and_enable_swap(size_mb))
-        .await
-        .map_err(|e| format!("Внутренняя ошибка задачи: {}", e))
-        .and_then(|r| r);
+    let res = crate::system::create_and_enable_swap(size_mb).await;
 
     match res {
         Ok(status) => api_ok(serde_json::to_value(status).unwrap_or_default()).into_response(),
@@ -4201,9 +4198,16 @@ pub async fn toggle_adblock(
         None => !tx.config().adblock_enabled,
     };
     tx.config_mut().adblock_enabled = target_enabled;
+    tx.config_mut().adguard.enabled = target_enabled;
 
     // Синхронизируем состояние защиты с AdGuard Home (если служба доступна)
     let _ = crate::adguard::set_protection(&state.http, &tx.config().adguard, target_enabled).await;
+    if target_enabled {
+        let active_port = crate::adguard::detect_adguard_dns_port().unwrap_or(tx.config().adguard.dns_port);
+        let _ = crate::adguard::apply_adguard_iptables(active_port);
+    } else {
+        let _ = crate::adguard::remove_adguard_iptables();
+    }
 
     let raw_yaml = match tx.read_yaml().await {
         Ok(c) => c,
@@ -5568,17 +5572,7 @@ add_fw() {
     iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
   else
     if check_adguard_active; then
-      echo "AdGuard Home is active; client DNS redirect to 1053 skipped so AdGuard handles DNS on port 3053" >&2
-      iptables -t nat -A PREROUTING -i br+ -d 127.0.0.1 -j RETURN 2>/dev/null || true
-      iptables -t nat -A PREROUTING -i Bridge+ -d 127.0.0.1 -j RETURN 2>/dev/null || true
-      iptables -t nat -A PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-adguard" -j REDIRECT --to-ports 3053 2>/dev/null || \
-      iptables -t nat -A PREROUTING -i br+ -p udp --dport 53 -j REDIRECT --to-ports 3053 2>/dev/null || true
-      iptables -t nat -A PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-adguard" -j REDIRECT --to-ports 3053 2>/dev/null || \
-      iptables -t nat -A PREROUTING -i br+ -p tcp --dport 53 -j REDIRECT --to-ports 3053 2>/dev/null || true
-      iptables -t nat -A PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-adguard" -j REDIRECT --to-ports 3053 2>/dev/null || \
-      iptables -t nat -A PREROUTING -i Bridge+ -p udp --dport 53 -j REDIRECT --to-ports 3053 2>/dev/null || true
-      iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-adguard" -j REDIRECT --to-ports 3053 2>/dev/null || \
-      iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -j REDIRECT --to-ports 3053 2>/dev/null || true
+      echo "AdGuard Home is active; DNS redirection is managed exclusively by XKEEN_ADGUARD chain" >&2
     else
       echo "DNS resolver port 1053 not listening; client DNS redirect skipped to prevent LAN blackout" >&2
     fi
@@ -5642,10 +5636,7 @@ remove_fw_rules() {
   while iptables -t nat -D PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
   while iptables -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
   while iptables -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-adguard" -j REDIRECT --to-ports 3053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-adguard" -j REDIRECT --to-ports 3053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-adguard" -j REDIRECT --to-ports 3053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-adguard" -j REDIRECT --to-ports 3053 2>/dev/null; do :; done
+
 
   # Remove TCPMSS clamping rule (NET-02 / NET-04)
   while iptables -t mangle -D zapret -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
@@ -7232,9 +7223,7 @@ pub async fn zapret_action(
             echo "[2/4] Загрузка дистрибутива Zapret 2 в $STAGE_DIR..."
             for url in \
               "https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" \
-              "https://ghproxy.net/https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" \
               "https://github.com/bol-van/zapret2/archive/refs/heads/master.tar.gz" \
-              "https://ghproxy.net/https://github.com/bol-van/zapret2/archive/refs/heads/master.tar.gz" \
               "https://github.com/bol-van/zapret2/releases/download/v1.0.5.2/zapret2-v1.0.5.2.tar.gz"; do
               if curl -fsSL --connect-timeout 10 -m 60 -x "$PROXY" "$url" -o "$STAGE_DIR/z2.tar.gz" 2>/dev/null || \
                  curl -fsSL --connect-timeout 10 -m 60 "$url" -o "$STAGE_DIR/z2.tar.gz" 2>/dev/null; then
@@ -7265,8 +7254,9 @@ pub async fn zapret_action(
                   NEW_BIN="$Z2_DIR/nfqws2"
                 fi
                 if [ -n "$NEW_BIN" ] && [ -f "$NEW_BIN" ]; then
-                  if ! head -c 4 "$NEW_BIN" 2>/dev/null | grep -q "7fELF" && [ "$(od -t x1 -N 4 "$NEW_BIN" 2>/dev/null | head -n 1 | awk '{$1=""; print $0}' | tr -d ' ')" != "7f454c46" ]; then
-                    echo "ERROR: Invalid ELF header in $NEW_BIN (expected 7f 45 4c 46)" >&2
+                  MAGIC=$(hexdump -n 4 -e '4/1 "%02x"' "$NEW_BIN" 2>/dev/null || od -An -tx1 -N4 "$NEW_BIN" 2>/dev/null | tr -d ' \r\n')
+                  if [ "$MAGIC" != "7f454c46" ]; then
+                    echo "ERROR: Invalid ELF header in $NEW_BIN (expected 7f 45 4c 46, got $MAGIC)" >&2
                     rm -rf "$STAGE_DIR"
                     exit 1
                   fi
@@ -7290,7 +7280,6 @@ pub async fn zapret_action(
               if [ ! -s "/opt/zapret2/lua/$lf" ] || [ $(wc -c < "/opt/zapret2/lua/$lf" 2>/dev/null || echo 0) -lt 80 ] || grep -q "404: Not Found" "/opt/zapret2/lua/$lf" 2>/dev/null; then
                 rm -f "/opt/zapret2/lua/$lf"
                 (curl -fsSL -x "$PROXY" "https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf" || \
-                 curl -fsSL "https://ghproxy.net/https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf" || \
                  curl -fsSL "https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf") 2>/dev/null || true
                 if [ $(wc -c < "/opt/zapret2/lua/$lf" 2>/dev/null || echo 0) -lt 80 ] || grep -q "404: Not Found" "/opt/zapret2/lua/$lf" 2>/dev/null; then
                   rm -f "/opt/zapret2/lua/$lf"
@@ -7395,8 +7384,7 @@ pub async fn zapret_action(
                   esac
                   PROXY="${MIHOMO_PROXY:-http://127.0.0.1:7890}"
                   for url in \
-                    "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz" \
-                    "https://ghproxy.net/https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz"; do
+                    "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz"; do
                     if curl -fsSL --connect-timeout 10 -m 60 -x "$PROXY" "$url" -o /tmp/z1.tar.gz 2>/dev/null || \
                        curl -fsSL --connect-timeout 10 -m 60 "$url" -o /tmp/z1.tar.gz 2>/dev/null; then
                       tar -xzf /tmp/z1.tar.gz -C /tmp/ 2>/dev/null || true
@@ -7753,9 +7741,7 @@ pub async fn zapret_action(
             PROXY="${MIHOMO_PROXY:-http://127.0.0.1:7890}"
             for url in \
               "https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" \
-              "https://ghproxy.net/https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" \
               "https://github.com/bol-van/zapret2/archive/refs/heads/master.tar.gz" \
-              "https://ghproxy.net/https://github.com/bol-van/zapret2/archive/refs/heads/master.tar.gz" \
               "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz"; do
               if curl -fsSL --connect-timeout 10 -m 60 -x "$PROXY" "$url" -o /tmp/z2.tar.gz 2>/dev/null || \
                  curl -fsSL --connect-timeout 10 -m 60 "$url" -o /tmp/z2.tar.gz 2>/dev/null; then
@@ -7785,10 +7771,10 @@ pub async fn zapret_action(
                 elif [ -f "$Z2_DIR/nfqws2" ]; then
                   cp -f "$Z2_DIR/nfqws2" /opt/zapret2/nfqws2
                   echo "Скопирован nfqws2"
-                elif [ -n "$Z2_ARCH" ] && [ -f "$Z2_DIR/binaries/$Z2_ARCH/nfqws" ]; then
-                  cp -f "$Z2_DIR/binaries/$Z2_ARCH/nfqws" /opt/zapret2/nfqws2
-                elif [ -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws" ]; then
-                  cp -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws" /opt/zapret2/nfqws2
+                else
+                  echo "ОШИБКА: nfqws2 не найден в архиве Zapret 2 для $TARGET_ARCH" >&2
+                  rm -rf "$Z2_DIR" /tmp/zapret-v* 2>/dev/null || true
+                  exit 1
                 fi
                 if [ -d "$Z2_DIR/files/lua" ]; then
                   cp -rf "$Z2_DIR/files/lua/"* /opt/zapret2/lua/ 2>/dev/null || true
@@ -7798,11 +7784,6 @@ pub async fn zapret_action(
                   cp -rf "$Z2_DIR/lua/"* /opt/zapret2/lua/ 2>/dev/null || true
                   echo "Скопированы Lua библиотеки из lua в /opt/zapret2/lua"
                 fi
-                if [ ! -f /opt/zapret2/nfqws2 ] && [ -d /tmp/zapret-v* ]; then
-                  rm -rf /opt/zapret
-                  mv /tmp/zapret-v* /opt/zapret
-                  cd /opt/zapret && ./install_bin.sh 2>/dev/null || true
-                fi
                 rm -rf "$Z2_DIR" /tmp/zapret-v* 2>/dev/null || true
               fi
             fi
@@ -7811,7 +7792,6 @@ pub async fn zapret_action(
               if [ ! -s "/opt/zapret2/lua/$lf" ] || [ $(wc -c < "/opt/zapret2/lua/$lf" 2>/dev/null || echo 0) -lt 80 ] || grep -q "404: Not Found" "/opt/zapret2/lua/$lf" 2>/dev/null; then
                 rm -f "/opt/zapret2/lua/$lf"
                 (curl -sSL -x "$PROXY" "https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf" || \
-                 curl -sSL "https://ghproxy.net/https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf" || \
                  curl -sSL "https://raw.githubusercontent.com/bol-van/zapret2/master/lua/$lf" -o "/opt/zapret2/lua/$lf") 2>/dev/null || true
                 if [ $(wc -c < "/opt/zapret2/lua/$lf" 2>/dev/null || echo 0) -lt 80 ] || grep -q "404: Not Found" "/opt/zapret2/lua/$lf" 2>/dev/null; then
                   rm -f "/opt/zapret2/lua/$lf"
@@ -9910,7 +9890,14 @@ pub async fn adguard_set_protection(
         Ok(now_enabled) => {
             if let Ok(mut tx) = ConfigTx::begin(&state).await {
                 tx.config_mut().adblock_enabled = now_enabled;
+                tx.config_mut().adguard.enabled = now_enabled;
                 let _ = tx.commit().await;
+            }
+            if now_enabled {
+                let active_port = crate::adguard::detect_adguard_dns_port().unwrap_or(cfg.adguard.dns_port);
+                let _ = crate::adguard::apply_adguard_iptables(active_port);
+            } else {
+                let _ = crate::adguard::remove_adguard_iptables();
             }
             api_ok(json!({ "enabled": now_enabled }))
         }

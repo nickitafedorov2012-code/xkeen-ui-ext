@@ -713,12 +713,21 @@ pub fn spawn_adguard_monitor(state: AppState) {
                 continue;
             }
 
-            let (enabled, host, dns_port) = {
+            let (enabled, host, configured_port) = {
                 let cfg = state.config.read().await;
-                (cfg.adguard.enabled, cfg.adguard.host.clone(), cfg.adguard.dns_port)
+                (cfg.adguard.enabled || cfg.adblock_enabled, cfg.adguard.host.clone(), cfg.adguard.dns_port)
             };
+            let dns_port = crate::adguard::detect_adguard_dns_port().unwrap_or(configured_port);
 
             let iptables_active = crate::adguard::is_adguard_iptables_active(dns_port);
+
+            if !enabled {
+                if iptables_active {
+                    let _ = crate::adguard::remove_adguard_iptables();
+                }
+                iptables_temporarily_suspended = false;
+                continue;
+            }
 
             if iptables_active || iptables_temporarily_suspended {
                 let listener_ok = crate::adguard::test_agh_dns_listener(&host, dns_port).await;

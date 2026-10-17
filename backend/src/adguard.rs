@@ -1048,14 +1048,6 @@ pub fn remove_adguard_iptables() -> Result<(), String> {
                         break;
                     }
                 }
-                for _ in 0..20 {
-                    let out = std::process::Command::new("iptables")
-                        .args(["-t", "nat", "-D", "PREROUTING", "-i", iface, "-p", proto, "--dport", "53", "-j", "REDIRECT", "--to-ports", "3053"])
-                        .output();
-                    if !out.map(|o| o.status.success()).unwrap_or(false) {
-                        break;
-                    }
-                }
             }
         }
         let _ = std::process::Command::new("iptables")
@@ -1258,10 +1250,50 @@ pub fn find_adguard_config() -> Option<PathBuf> {
     None
 }
 
+/// Определение активного DNS-порта AdGuard Home из конфигурационного файла (AdGuardHome.yaml)
+pub fn detect_adguard_dns_port() -> Option<u16> {
+    let conf_path = find_adguard_config()?;
+    let content = std::fs::read_to_string(&conf_path).ok()?;
+    parse_adguard_dns_port_from_yaml(&content)
+}
+
+/// Извлечение порта DNS из содержимого YAML AdGuard Home
+pub fn parse_adguard_dns_port_from_yaml(yaml: &str) -> Option<u16> {
+    let mut in_dns = false;
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed == "dns:" {
+            in_dns = true;
+            continue;
+        }
+        if in_dns {
+            if !line.starts_with(' ') && !line.starts_with('\t') && line.contains(':') {
+                break;
+            }
+            if trimmed.starts_with("port:") {
+                let parts: Vec<&str> = trimmed.split(':').collect();
+                if parts.len() >= 2 {
+                    if let Ok(port) = parts[1].trim().parse::<u16>() {
+                        if port > 0 {
+                            return Some(port);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Генерация автономного скрипта инициализации /opt/etc/init.d/S99adguardhome
 pub fn generate_adguard_init_script_content(bin_path: &str, conf_path: &str, work_dir: &str) -> String {
     format!(
 r#"#!/bin/sh
+
+export PATH="/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 NAME="AdGuardHome"
 BIN="{bin_path}"
@@ -1419,7 +1451,6 @@ language: ru
 rlimit_nofile: 0
 dns:
   bind_hosts:
-    - 127.0.0.1
     - 0.0.0.0
   port: {dns_port}
   statistics_interval: 1
@@ -1538,7 +1569,7 @@ pub fn ensure_adguard_init_script() -> Result<PathBuf, String> {
 
     let conf = find_adguard_config().unwrap_or_else(|| {
         let is_53_free = std::net::UdpSocket::bind("0.0.0.0:53").is_ok();
-        let port = if is_53_free { 53 } else { 3053 };
+        let port = if is_53_free { 53 } else { 5353 };
         ensure_default_adguard_config(port, 3000)
     });
     let work_dir = conf
@@ -1686,7 +1717,7 @@ echo "AdGuard Home успешно установлен."
 
         // Создаем готовый конфиг AdGuardHome.yaml (если его еще нет), чтобы не требовалось проходить визард
         let is_53_free = std::net::UdpSocket::bind("0.0.0.0:53").is_ok();
-        let dns_port = if is_53_free { 53 } else { 3053 };
+        let dns_port = if is_53_free { 53 } else { 5353 };
         let conf_path = ensure_default_adguard_config(dns_port, 3000);
 
         // Создаем init-скрипт службы
@@ -1791,18 +1822,16 @@ pub async fn service_action(action: &str) -> Result<String, String> {
         tokio::time::sleep(Duration::from_millis(800)).await;
         let mut is_running = crate::system::is_process_running("AdGuardHome");
 
-        // Если процесс не запустился из-за конфликта порта 53 (ndnproxy на Keenetic), автоматически переключаем на 3053
+        // Если процесс не запустился из-за конфликта порта 53 (ndnproxy на Keenetic), автоматически переключаем на 5353
         if !is_running && (act == "start" || act == "restart") {
             if let Ok(agh_log) = tokio::fs::read_to_string("/opt/var/log/adguardhome.log").await {
                 if agh_log.contains("address already in use") || agh_log.contains("bind: address already in use") {
-                    crate::log_w!("Обнаружен конфликт порта DNS 53. Автоматическое переключение DNS-порта AdGuard Home на 3053...");
+                    crate::log_w!("Обнаружен конфликт порта DNS 53. Автоматическое переключение DNS-порта AdGuard Home на 5353...");
                     if let Some(conf_path) = find_adguard_config() {
                         if let Ok(conf_str) = tokio::fs::read_to_string(&conf_path).await {
                             let patched = conf_str
-                                .replace("port: 53\r\n", "port: 3053\r\n")
-                                .replace("port: 53\n", "port: 3053\n")
-                                .replace("port: 5353\r\n", "port: 3053\r\n")
-                                .replace("port: 5353\n", "port: 3053\n");
+                                .replace("port: 53\r\n", "port: 5353\r\n")
+                                .replace("port: 53\n", "port: 5353\n");
                             let _ = tokio::fs::write(&conf_path, patched).await;
                             let cmd_retry = format!("exec '{script}' '{act}' </dev/null >'{log_file}' 2>&1");
                             let _ = tokio::process::Command::new("sh").arg("-c").arg(&cmd_retry).status().await;
@@ -1816,7 +1845,8 @@ pub async fn service_action(action: &str) -> Result<String, String> {
 
         if is_running {
             if act == "start" || act == "restart" {
-                let _ = apply_adguard_iptables(3053);
+                let active_port = detect_adguard_dns_port().unwrap_or(5353);
+                let _ = apply_adguard_iptables(active_port);
             }
             let msg = if !log_content.is_empty() {
                 format!("Служба AdGuard Home успешно выполнила команду '{act}': {log_content}")
@@ -2037,9 +2067,47 @@ mod tests {
     #[test]
     fn test_adguard_iptables_dedicated_chain() {
         assert_eq!(AGH_IPTABLES_CHAIN, "XKEEN_ADGUARD");
-        let active = is_adguard_iptables_active(3053);
+        let active = is_adguard_iptables_active(5353);
         assert!(!active);
         assert!(remove_adguard_iptables().is_ok());
+    }
+
+    #[test]
+    fn test_dns03_bind_hosts_strictly_single_all_interfaces() {
+        let yaml = generate_default_adguard_yaml(5353, 3000);
+        // Ensure strictly 0.0.0.0 bind, never duplicate with 127.0.0.1 (DNS-03)
+        assert!(yaml.contains("bind_hosts:\n    - 0.0.0.0") || yaml.contains("bind_hosts:\r\n    - 0.0.0.0"));
+        assert!(!yaml.contains("127.0.0.1"));
+    }
+
+    #[test]
+    fn test_dns01_dns02_parse_adguard_dns_port_and_defaults() {
+        let yaml_5353 = "
+dns:
+  bind_hosts:
+    - 0.0.0.0
+  port: 5353
+  statistics_interval: 1
+";
+        assert_eq!(parse_adguard_dns_port_from_yaml(yaml_5353), Some(5353));
+
+        let yaml_custom = "
+dns:
+  port: 53
+";
+        assert_eq!(parse_adguard_dns_port_from_yaml(yaml_custom), Some(53));
+
+        let yaml_none = "
+http:
+  port: 3000
+";
+        assert_eq!(parse_adguard_dns_port_from_yaml(yaml_none), None);
+    }
+
+    #[test]
+    fn test_ins03_adguard_init_script_has_path_export() {
+        let script = generate_adguard_init_script_content("/opt/bin/AdGuardHome", "/opt/etc/AdGuardHome.yaml", "/opt/etc/AdGuardHome");
+        assert!(script.contains("export PATH=\"/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin\""));
     }
 }
 

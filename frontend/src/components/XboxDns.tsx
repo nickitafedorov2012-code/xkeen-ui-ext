@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { apiGet, apiPost } from '../api'
+import { copyToClipboard as safeCopyToClipboard } from '../utils/clipboard'
 import type { XboxDnsCheckResponse, XboxDnsStatusResponse, XboxDnsServerInfo } from '../types'
 
 interface XboxDnsProps {
@@ -68,11 +69,15 @@ export default function XboxDns({ notify }: XboxDnsProps) {
     }
   }
 
-  const copyToClipboard = (text: string, label: string) => {
-    navigator.clipboard?.writeText(text)
-    setCopiedItem(label)
-    notify(`Скопировано в буфер: ${text}`)
-    setTimeout(() => setCopiedItem(null), 2500)
+  const copyToClipboard = async (text: string, label: string) => {
+    const ok = await safeCopyToClipboard(text)
+    if (ok) {
+      setCopiedItem(label)
+      notify(`Скопировано в буфер: ${text}`)
+      setTimeout(() => setCopiedItem(null), 2500)
+    } else {
+      notify('Не удалось скопировать в буфер обмена', true)
+    }
   }
 
   const servers = status?.servers && status.servers.length > 0 ? status.servers : DEFAULT_SERVERS

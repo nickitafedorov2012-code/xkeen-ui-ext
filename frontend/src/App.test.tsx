@@ -264,5 +264,47 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
     expect(container?.querySelector('[data-testid="adguard-view"]')).not.toBeNull()
     window.location.hash = ''
   })
+
+  it('anti-regression (DIAG-01): renders #diagnostics hash directly without redirecting to connections', async () => {
+    window.location.hash = '#diagnostics'
+    await act(async () => {
+      root!.render(<App />)
+    })
+    expect(container?.querySelector('[data-testid="diagnostics-view"]')).not.toBeNull()
+    expect(container?.querySelector('[data-testid="connections-view"]')).toBeNull()
+    window.location.hash = ''
+  })
+
+  it('anti-regression (DIAG-01): renders Diagnostics tab button in bottom navigation', async () => {
+    await act(async () => {
+      root!.render(<App />)
+    })
+    const diagTab = Array.from(container?.querySelectorAll('nav.tabs button') || []).find((b) =>
+      b.textContent?.includes('Диагностика')
+    )
+    expect(diagTab).toBeDefined()
+  })
+
+  it('anti-regression (POLL-01): clamps refresh interval to minimum 3 seconds when refresh_interval_sec is 0 or negative', async () => {
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval')
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'status') {
+        return Promise.resolve({
+          version: '1.9.4',
+          service_running: true,
+          refresh_interval_sec: 0,
+        })
+      }
+      return Promise.resolve({})
+    })
+
+    await act(async () => {
+      root!.render(<App />)
+    })
+
+    const intervals = setIntervalSpy.mock.calls.map((c) => c[1])
+    expect(intervals.some((ms) => typeof ms === 'number' && ms >= 3000)).toBe(true)
+    expect(intervals.some((ms) => typeof ms === 'number' && ms > 0 && ms < 3000)).toBe(false)
+  })
 })
 

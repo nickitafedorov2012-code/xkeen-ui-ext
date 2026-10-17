@@ -82,8 +82,26 @@ export default function DeviceScheduleModal({
   }
 
   useEffect(() => {
+    let isMounted = true
     if (!isOpen) return
-    load()
+    const fetchSchedules = async () => {
+      setLoading(true)
+      try {
+        const res = await apiGet<{ schedules: DeviceSchedule[]; revision?: string }>('schedules')
+        if (!isMounted) return
+        setAllSchedules(res.schedules || [])
+        setRevision(res.revision)
+      } catch (e: any) {
+        if (!isMounted) return
+        notify('Ошибка загрузки расписаний: ' + e.message, true)
+      } finally {
+        if (isMounted) setLoading(false)
+      }
+    }
+    fetchSchedules()
+    return () => {
+      isMounted = false
+    }
   }, [isOpen, notify])
 
   if (!isOpen) return null

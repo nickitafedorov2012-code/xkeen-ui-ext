@@ -544,7 +544,7 @@ export function exportServerToLink(server: {
   if (proto === 'shadowsocks' || proto === 'ss' || raw.type?.toLowerCase() === 'ss') {
     const cipher = raw.cipher || 'chacha20-ietf-poly1305'
     const password = raw.password || 'password'
-    const userinfo = btoa(`${cipher}:${password}`)
+    const userinfo = btoa(unescape(encodeURIComponent(`${cipher}:${password}`)))
     return `ss://${userinfo}@${host}:${port}#${name}`
   }
 

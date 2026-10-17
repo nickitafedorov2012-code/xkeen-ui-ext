@@ -132,15 +132,16 @@ export function validateYaml(content: string): YamlValidationResult {
     if (colonIdx !== -1) {
       const before = rawLine.slice(0, colonIdx).trim()
       const after = rawLine.slice(colonIdx + 1)
-      const isUrlScheme = /^(https?|tls|quic|vless|vmess|trojan|ss|ssr|hysteria2?|wireguard|grpc|wss?|socks5?)$/i.test(before)
-      const isIpv6 = after.startsWith(':') || (/^[0-9a-f]{1,4}$/i.test(before) && /^[0-9a-f:]/i.test(after))
-      if (!before.startsWith('-') && !rawLine.startsWith('#') && !isUrlScheme && !isIpv6) {
+      const keyPart = before.replace(/^-\s*/, '').trim()
+      const isUrlScheme = /^(https?|tls|quic|vless|vmess|trojan|ss|ssr|hysteria2?|wireguard|grpc|wss?|socks5?)$/i.test(keyPart)
+      const isIpv6 = after.startsWith(':') || (/^[0-9a-f]{1,4}$/i.test(keyPart) && /^[0-9a-f:]/i.test(after))
+      if (keyPart.length > 0 && !rawLine.startsWith('#') && !isUrlScheme && !isIpv6) {
         if (after.length > 0 && !after.startsWith(' ') && !after.startsWith('/')) {
           const hasScheme = /^[a-z0-9+-.]+:\/\//i.test(trimmed)
           if (!hasScheme) {
             return {
               valid: false,
-              error: `Строка ${lineNum}: пропущен пробел после двоеточия в '${before}:'`,
+              error: `Строка ${lineNum}: пропущен пробел после двоеточия в '${keyPart}:'`,
               line: lineNum,
             }
           }

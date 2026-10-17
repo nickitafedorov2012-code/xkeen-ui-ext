@@ -493,6 +493,35 @@ pub async fn change_password(
     api_ok(json!({ "saved": true, "enabled": body.enabled }))
 }
 
+/// Извлекает хост без порта, корректно обрабатывая IPv6 в квадратных скобках
+fn extract_host_only(host_part: &str) -> &str {
+    let host_trimmed = host_part.trim();
+    if host_trimmed.starts_with('[') {
+        if let Some(end_bracket) = host_trimmed.find(']') {
+            &host_trimmed[..=end_bracket]
+        } else {
+            host_trimmed.split(':').next().unwrap_or("").trim()
+        }
+    } else {
+        host_trimmed.split(':').next().unwrap_or("").trim()
+    }
+}
+
+/// Строгая проверка хоста Origin на принадлежность к доверенным адресам LAN, loopback или разрешенным локальным именам (SEC-02).
+pub fn is_valid_origin(origin_host_only: &str) -> bool {
+    let unbracketed = origin_host_only.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = unbracketed.parse::<std::net::IpAddr>() {
+        match ip {
+            std::net::IpAddr::V4(ipv4) => ipv4.is_private() || ipv4.is_loopback(),
+            std::net::IpAddr::V6(ipv6) => ipv6.is_loopback(),
+        }
+    } else {
+        origin_host_only.eq_ignore_ascii_case("localhost")
+            || origin_host_only.eq_ignore_ascii_case("my.keenetic.net")
+            || origin_host_only.eq_ignore_ascii_case("router")
+    }
+}
+
 /// Проверка безопасности Origin/Referer для защиты от межсайтовых атак (CSRF)
 pub fn is_trusted_origin(origin_or_referer: &str, host_header: Option<&str>) -> bool {
     let stripped = origin_or_referer
@@ -500,40 +529,19 @@ pub fn is_trusted_origin(origin_or_referer: &str, host_header: Option<&str>) -> 
         .trim_start_matches("https://");
 
     let origin_host_part = stripped.split('/').next().unwrap_or("").trim();
-    let origin_host_only = origin_host_part.split(':').next().unwrap_or("").trim();
+    let origin_host_only = extract_host_only(origin_host_part);
 
     // 1. Совпадение с переданным Host header
     if let Some(host) = host_header {
         let host_trimmed = host.trim();
-        let host_only = host_trimmed.split(':').next().unwrap_or("").trim();
+        let host_only = extract_host_only(host_trimmed);
         if origin_host_part.eq_ignore_ascii_case(host_trimmed) || origin_host_only.eq_ignore_ascii_case(host_only) {
             return true;
         }
     }
 
-    // 2. Локальные адреса loopback и LAN (RFC 1918)
-    if origin_host_only.eq_ignore_ascii_case("localhost")
-        || origin_host_only == "127.0.0.1"
-        || origin_host_only == "::1"
-        || origin_host_only.starts_with("192.168.")
-        || origin_host_only.starts_with("10.")
-    {
-        return true;
-    }
-
-    // 3. Подсеть 172.16.0.0/12 (172.16.* - 172.31.*)
-    if origin_host_only.starts_with("172.") {
-        let parts: Vec<&str> = origin_host_only.split('.').collect();
-        if parts.len() >= 2 {
-            if let Ok(second) = parts[1].parse::<u8>() {
-                if (16..=31).contains(&second) {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
+    // 2. Локальные адреса loopback, LAN (RFC 1918) и доверенные имена роутера
+    is_valid_origin(origin_host_only)
 }
 
 /// Middleware защиты API и reverse-proxy Clash
@@ -776,12 +784,48 @@ mod tests {
         // Включая чужие домены keenetic.pro без совпадения с Host (SEC-08)
         assert!(!is_trusted_origin("https://attacker.keenetic.pro", Some("myrouter.keenetic.pro:1001")));
         assert!(!is_trusted_origin("https://myrouter.keenetic.pro:1001", None));
-        assert!(!is_trusted_origin("https://my.keenetic.net", None));
+        assert!(is_trusted_origin("https://my.keenetic.net", None));
+        assert!(is_trusted_origin("http://router:1001", None));
         assert!(!is_trusted_origin("http://evil-attacker.com", None));
         assert!(!is_trusted_origin("http://evil-attacker.com", Some("192.168.1.1:1001")));
         assert!(!is_trusted_origin("http://172.32.0.1", None), "172.32.* вне приватного диапазона");
         assert!(!is_trusted_origin("http://8.8.8.8", None));
         assert!(!is_trusted_origin("http://phishing-keenetic.com", None));
+
+        // SEC-02: Предотвращение обхода через prefix-matching доменов
+        assert!(!is_trusted_origin("http://192.168.attacker.com", None));
+        assert!(!is_trusted_origin("http://192.168.attacker.com:1001", None));
+        assert!(!is_trusted_origin("http://10.attacker.com", None));
+        assert!(!is_trusted_origin("http://172.16.attacker.com", None));
+        assert!(!is_trusted_origin("http://192.168.1.1.attacker.com", None));
+        assert!(!is_trusted_origin("http://192.168.attacker.com:1001", Some("192.168.1.1:1001")));
+    }
+
+    #[test]
+    fn test_sec02_is_valid_origin_strict_parsing() {
+        // Доверенные приватные адреса, loopback и стандартные локальные имена
+        assert!(is_valid_origin("127.0.0.1"));
+        assert!(is_valid_origin("::1"));
+        assert!(is_valid_origin("[::1]"));
+        assert!(is_valid_origin("192.168.1.1"));
+        assert!(is_valid_origin("192.168.2.1"));
+        assert!(is_valid_origin("10.0.0.1"));
+        assert!(is_valid_origin("172.16.0.1"));
+        assert!(is_valid_origin("172.31.255.254"));
+        assert!(is_valid_origin("localhost"));
+        assert!(is_valid_origin("my.keenetic.net"));
+        assert!(is_valid_origin("router"));
+
+        // Вредоносные поддельные домены с префиксами IP и локальных имен
+        assert!(!is_valid_origin("192.168.attacker.com"));
+        assert!(!is_valid_origin("10.attacker.com"));
+        assert!(!is_valid_origin("172.16.attacker.com"));
+        assert!(!is_valid_origin("192.168.1.1.attacker.com"));
+        assert!(!is_valid_origin("my.keenetic.net.attacker.com"));
+        assert!(!is_valid_origin("router.evil.com"));
+        assert!(!is_valid_origin("8.8.8.8"));
+        assert!(!is_valid_origin("172.32.0.1"));
+        assert!(!is_valid_origin("1.1.1.1"));
     }
 
     #[test]

@@ -167,7 +167,15 @@ export default function Antigravity({ notify }: Props) {
   const switchGoogleAiServer = async (serverId: string) => {
     if (!serverId) return
     setSwitchingFlowServer(true)
+    // ANTIGRAV-01: Invalidate cached googleGeo on server switch to prevent stale block/clean alerts
+    setGoogleGeo(null)
     try {
+      localStorage.removeItem('xr_google_geo')
+    } catch {
+      /* ignore */
+    }
+    try {
+      setSelectedFlowServer(serverId)
       localStorage.setItem('xr_flow_server', serverId)
       await apiPost('flow/switch', { server_id: serverId })
       notify(`Выделенный узел Google Flow переключен на '${serverId}'. Основной прокси и Failover сохранены.`)
@@ -188,6 +196,12 @@ export default function Antigravity({ notify }: Props) {
       if (res.best_server) {
         setSelectedFlowServer(res.best_server)
         localStorage.setItem('xr_flow_server', res.best_server)
+        setGoogleGeo(null)
+        try {
+          localStorage.removeItem('xr_google_geo')
+        } catch {
+          /* ignore */
+        }
       }
       notify(res.message || (res.enabled ? 'Автоподбор сервера включен' : 'Автоподбор выключен'))
       setTimeout(checkFlowAccess, 1000)
@@ -307,7 +321,7 @@ export default function Antigravity({ notify }: Props) {
     .sort((a, b) => a.ping_ms - b.ping_ms)[0] || usCaServers[0]
 
   const activeFlowServerObj = flowServers.find((s) => s.id === selectedFlowServer)
-  const isCurrentBlocked = googleGeo
+  const isCurrentBlocked = googleGeo && (!googleGeo.server_name || googleGeo.server_name === selectedFlowServer)
     ? !googleGeo.is_clean
     : activeFlowServerObj
     ? getFlowStatus(activeFlowServerObj) === 'blocked'

@@ -257,16 +257,20 @@ export default function Gaming({ notify }: GamingProps) {
     const updatedCfg: GamingConfig = { ...cfg, enabled: val, mode: targetMode, devices: currentDevices }
     setCfg(updatedCfg)
     try {
-      const preferredMac = currentDevices.find((d) => d.enabled)?.mac || (val && devices[0]?.mac) || undefined
-      const payload: any = { enabled: val }
-      if (val) {
-        payload.mode = targetMode
-        if (preferredMac) {
-          payload.device_mac = preferredMac
-        }
-        if (cfg.target_server) {
-          payload.target_server = cfg.target_server
-        }
+      const preferredMac =
+        currentDevices.find((d) => d.enabled)?.mac ||
+        devices.find((d) => d.is_current_device)?.mac ||
+        devices[0]?.mac ||
+        undefined
+      const payload: any = {
+        enabled: val,
+        mode: targetMode,
+      }
+      if (preferredMac) {
+        payload.device_mac = preferredMac
+      }
+      if (cfg.target_server) {
+        payload.target_server = cfg.target_server
       }
       await apiPost('gaming/toggle', payload)
       notify(

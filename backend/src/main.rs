@@ -431,11 +431,13 @@ async fn main() {
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         let cfg = adguard_sync_state.config.read().await;
-        if cfg.adguard.enabled {
-            let listener_ok = adguard::test_agh_dns_listener(&cfg.adguard.host, cfg.adguard.dns_port).await;
+        let is_enabled = cfg.adguard.enabled || cfg.adblock_enabled;
+        if is_enabled {
+            let active_port = adguard::detect_adguard_dns_port().unwrap_or(cfg.adguard.dns_port);
+            let listener_ok = adguard::test_agh_dns_listener(&cfg.adguard.host, active_port).await;
             if listener_ok {
-                let _ = adguard::apply_adguard_iptables(cfg.adguard.dns_port);
-                log_i!("[STARTUP] ✓ AdGuard Home DNS redirection to port {} applied", cfg.adguard.dns_port);
+                let _ = adguard::apply_adguard_iptables(active_port);
+                log_i!("[STARTUP] ✓ AdGuard Home DNS redirection to port {} applied", active_port);
             }
         }
     });

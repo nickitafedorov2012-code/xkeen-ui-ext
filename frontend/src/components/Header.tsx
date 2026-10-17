@@ -147,9 +147,13 @@ export default function Header({
   const [updateAvailable, setUpdateAvailable] = useState(false)
   const [latestVersion, setLatestVersion] = useState('')
 
-  const isRunning = status?.service_stopped
+  const isRunning = !status
     ? false
-    : (status?.service_running !== undefined ? status.service_running : (status ? Boolean(status.failover?.enabled) : true))
+    : status.service_stopped
+    ? false
+    : status.service_running !== undefined
+    ? status.service_running
+    : Boolean(status.failover?.enabled)
 
   // Периодическое обновление метрик (раз в 3 сек для минимизации нагрузки на CPU роутера)
   useEffect(() => {
@@ -653,7 +657,7 @@ export default function Header({
           data-testid="header-toggle-btn"
           className={`header-action-btn ${isRunning ? 'header-action-btn-stop' : 'header-action-btn-start'}`}
           onClick={handleToggle}
-          disabled={pending}
+          disabled={pending || !status}
           title={pending ? 'Выполняется переключение служб…' : (isRunning ? 'Остановить сервис (все службы остановятся, прямой выход для всех устройств)' : 'Запустить сервис')}
         >
           {isRunning ? <IconStop /> : <IconPlay />}

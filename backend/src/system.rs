@@ -1107,19 +1107,19 @@ MemAvailable:     262144 kB
         assert!(matches_target_needle("sh", 700, "transmission-daemon", Some("/usr/bin/transmission-daemon --config-dir /opt/etc")));
     }
 
-    #[test]
-    fn test_swap_size_presets_validation() {
+    #[tokio::test]
+    async fn test_swap_size_presets_validation() {
         assert!(ALLOWED_SWAP_SIZES_MB.contains(&256));
         assert!(ALLOWED_SWAP_SIZES_MB.contains(&512));
         assert!(ALLOWED_SWAP_SIZES_MB.contains(&1024));
         assert_eq!(ALLOWED_SWAP_SIZES_MB.len(), 3);
 
         // Invalid sizes must be rejected
-        let res_invalid = create_and_enable_swap(128);
+        let res_invalid = create_and_enable_swap(128).await;
         assert!(res_invalid.is_err());
         assert!(res_invalid.err().unwrap().contains("Недопустимый размер Swap: 128 МБ"));
 
-        let res_too_large = create_and_enable_swap(2048);
+        let res_too_large = create_and_enable_swap(2048).await;
         assert!(res_too_large.is_err());
     }
 
@@ -1394,7 +1394,7 @@ pub fn get_swap_status() -> SwapStatus {
 }
 
 /// Создаёт и мгновенно активирует файл подкачки `/opt/swapfile` заданного размера (256, 512 или 1024 МБ)
-pub fn create_and_enable_swap(size_mb: u64) -> Result<SwapStatus, String> {
+pub async fn create_and_enable_swap(size_mb: u64) -> Result<SwapStatus, String> {
     if !ALLOWED_SWAP_SIZES_MB.contains(&size_mb) {
         return Err(format!(
             "Недопустимый размер Swap: {} МБ (допустимые значения: 256, 512, 1024 МБ)",
@@ -1420,10 +1420,10 @@ pub fn create_and_enable_swap(size_mb: u64) -> Result<SwapStatus, String> {
     #[cfg(target_os = "linux")]
     {
         // Если прежний swapfile был активен, отключаем его перед пересозданием
-        let _ = std::process::Command::new("swapoff").arg(SWAP_FILE_PATH).output();
+        let _ = tokio::process::Command::new("swapoff").arg(SWAP_FILE_PATH).output().await;
 
-        // 2. Безопасное выделение файла без фрагментации («No Holes») через `dd`
-        let dd_out = std::process::Command::new("dd")
+        // 2. Безопасное выделение файла без фрагментации («No Holes») через асинхронный `dd` (SYS-01)
+        let dd_out = tokio::process::Command::new("dd")
             .args([
                 "if=/dev/zero",
                 &format!("of={}", SWAP_FILE_PATH),
@@ -1431,10 +1431,11 @@ pub fn create_and_enable_swap(size_mb: u64) -> Result<SwapStatus, String> {
                 &format!("count={}", size_mb),
             ])
             .output()
+            .await
             .map_err(|e| format!("Не удалось запустить dd: {}", e))?;
 
         if !dd_out.status.success() {
-            let _ = std::fs::remove_file(SWAP_FILE_PATH);
+            let _ = tokio::fs::remove_file(SWAP_FILE_PATH).await;
             return Err(format!(
                 "Ошибка при создании файла подкачки (dd): {}",
                 String::from_utf8_lossy(&dd_out.stderr).trim()
@@ -1446,7 +1447,7 @@ pub fn create_and_enable_swap(size_mb: u64) -> Result<SwapStatus, String> {
         {
             use std::os::unix::fs::PermissionsExt;
             if let Err(e) = std::fs::set_permissions(SWAP_FILE_PATH, std::fs::Permissions::from_mode(0o600)) {
-                let _ = std::fs::remove_file(SWAP_FILE_PATH);
+                let _ = tokio::fs::remove_file(SWAP_FILE_PATH).await;
                 return Err(format!(
                     "Не удалось установить права 600 на {}: {}",
                     SWAP_FILE_PATH, e
@@ -1455,13 +1456,14 @@ pub fn create_and_enable_swap(size_mb: u64) -> Result<SwapStatus, String> {
         }
 
         // 4. Форматирование `mkswap /opt/swapfile`
-        let mkswap_out = std::process::Command::new("mkswap")
+        let mkswap_out = tokio::process::Command::new("mkswap")
             .arg(SWAP_FILE_PATH)
             .output()
+            .await
             .map_err(|e| format!("Не удалось запустить mkswap: {}", e))?;
 
         if !mkswap_out.status.success() {
-            let _ = std::fs::remove_file(SWAP_FILE_PATH);
+            let _ = tokio::fs::remove_file(SWAP_FILE_PATH).await;
             return Err(format!(
                 "Ошибка mkswap: {}",
                 String::from_utf8_lossy(&mkswap_out.stderr).trim()
@@ -1469,13 +1471,14 @@ pub fn create_and_enable_swap(size_mb: u64) -> Result<SwapStatus, String> {
         }
 
         // 5. Мгновенная активация `swapon /opt/swapfile`
-        let swapon_out = std::process::Command::new("swapon")
+        let swapon_out = tokio::process::Command::new("swapon")
             .arg(SWAP_FILE_PATH)
             .output()
+            .await
             .map_err(|e| format!("Не удалось запустить swapon: {}", e))?;
 
         if !swapon_out.status.success() {
-            let _ = std::fs::remove_file(SWAP_FILE_PATH);
+            let _ = tokio::fs::remove_file(SWAP_FILE_PATH).await;
             return Err(format!(
                 "Ошибка активации swapon: {}",
                 String::from_utf8_lossy(&swapon_out.stderr).trim()
@@ -1483,30 +1486,32 @@ pub fn create_and_enable_swap(size_mb: u64) -> Result<SwapStatus, String> {
         }
 
         // 6. Защита от износа флеш-памяти: `sysctl -w vm.swappiness=10`
-        let sysctl_out = std::process::Command::new("sysctl")
+        let sysctl_out = tokio::process::Command::new("sysctl")
             .args(["-w", &format!("vm.swappiness={}", TARGET_SWAPPINESS)])
             .output()
+            .await
             .map_err(|e| format!("Не удалось запустить sysctl: {}", e))?;
 
         if !sysctl_out.status.success() {
-            let _ = std::fs::write("/proc/sys/vm/swappiness", format!("{}\n", TARGET_SWAPPINESS));
+            let _ = tokio::fs::write("/proc/sys/vm/swappiness", format!("{}\n", TARGET_SWAPPINESS)).await;
         }
 
         // 7. Создание автозагрузочного скрипта `/opt/etc/init.d/S01swap` с правами `chmod +x`
         if let Some(parent) = std::path::Path::new(INIT_SCRIPT_PATH).parent() {
-            let _ = std::fs::create_dir_all(parent);
+            let _ = tokio::fs::create_dir_all(parent).await;
         }
-        std::fs::write(INIT_SCRIPT_PATH, INIT_SCRIPT_CONTENT)
+        tokio::fs::write(INIT_SCRIPT_PATH, INIT_SCRIPT_CONTENT)
+            .await
             .map_err(|e| format!("Не удалось записать {}: {}", INIT_SCRIPT_PATH, e))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(INIT_SCRIPT_PATH, std::fs::Permissions::from_mode(0o755)).map_err(|e| {
-                format!(
+            if let Err(e) = std::fs::set_permissions(INIT_SCRIPT_PATH, std::fs::Permissions::from_mode(0o755)) {
+                return Err(format!(
                     "Не удалось установить права +x на {}: {}",
                     INIT_SCRIPT_PATH, e
-                )
-            })?;
+                ));
+            }
         }
     }
 

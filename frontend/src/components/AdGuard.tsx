@@ -162,7 +162,6 @@ export default function AdGuard({ notify }: AdGuardProps) {
     setActionPending(true)
     try {
       await apiPost<{ enabled: boolean }>('/adguard/protection', { enabled: nextState })
-      await apiPost('adblock/toggle', { enabled: nextState }).catch(() => null)
       setStatus({ ...status, protection_enabled: nextState })
       window.dispatchEvent(new CustomEvent('xr:adguard-protection-changed', { detail: { enabled: nextState } }))
       notify(nextState ? 'Защита AdGuard Home включена' : 'Защита AdGuard Home временно отключена')

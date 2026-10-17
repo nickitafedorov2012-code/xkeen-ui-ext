@@ -193,7 +193,12 @@ describe('Gaming Component', () => {
       toggleBtn?.click()
     })
 
-    expect(postSpy).toHaveBeenCalledWith('gaming/toggle', { enabled: false })
+    expect(postSpy).toHaveBeenCalledWith('gaming/toggle', {
+      enabled: false,
+      mode: 'compatibility',
+      device_mac: '00:11:22:33:44:55',
+      target_server: 'Fastest',
+    })
     expect(notify).toHaveBeenCalledWith('⚪ Игровой режим выключен')
   })
 

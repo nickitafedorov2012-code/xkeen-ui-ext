@@ -177,6 +177,7 @@ describe('AdGuard Component — Dashboard, Query Log, Filtering & Rewrites', () 
     })
 
     expect(api.apiPost).toHaveBeenCalledWith('/adguard/protection', { enabled: false })
+    expect(api.apiPost).not.toHaveBeenCalledWith('adblock/toggle', expect.anything())
   })
 
   it('switches to Query Log tab and displays DNS query items', async () => {

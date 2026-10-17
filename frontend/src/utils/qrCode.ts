@@ -241,7 +241,11 @@ function createMatrix(spec: VersionSpec, codewords: Uint8Array): boolean[][] {
   const coords = spec.alignments;
   for (const r of coords) {
     for (const c of coords) {
-      if (matrix[r][c] !== null) continue; // Skip finder areas
+      const inFinder =
+        (r < 9 && c < 9) ||
+        (r < 9 && c >= size - 9) ||
+        (r >= size - 9 && c < 9);
+      if (inFinder) continue;
       for (let dr = -2; dr <= 2; dr++) {
         for (let dc = -2; dc <= 2; dc++) {
           const isEdge = Math.abs(dr) === 2 || Math.abs(dc) === 2;
@@ -252,8 +256,8 @@ function createMatrix(spec: VersionSpec, codewords: Uint8Array): boolean[][] {
     }
   }
 
-  // 4. Dark module
-  matrix[4 * spec.version + 9][8] = true;
+  // 4. Dark module (size - 8, 8)
+  matrix[size - 8][8] = true;
 
   // 5. Reserve format info areas
   for (let i = 0; i < 9; i++) {
@@ -264,6 +268,7 @@ function createMatrix(spec: VersionSpec, codewords: Uint8Array): boolean[][] {
     if (matrix[8][i] === null) matrix[8][i] = false;
     if (matrix[i][8] === null) matrix[i][8] = false;
   }
+  matrix[size - 8][8] = true;
 
   // 6. Place data bits in zigzag pattern
   let bitIdx = 0;
@@ -295,14 +300,14 @@ function createMatrix(spec: VersionSpec, codewords: Uint8Array): boolean[][] {
     upwards = !upwards;
   }
 
-  // 7. Write format info (Mask 0, EC L)
+  // 7. Write format info (Mask 0, EC L) - ISO/IEC 18004 LSB bit ordering
   const format = FORMAT_INFO_L[0];
   const formatBits: boolean[] = [];
   for (let i = 0; i < 15; i++) {
-    formatBits.push(((format >>> (14 - i)) & 1) === 1);
+    formatBits.push(((format >>> i) & 1) === 1);
   }
 
-  // Top-left finder
+  // Top-left finder (b0..b14)
   setModule(8, 0, formatBits[0]);
   setModule(8, 1, formatBits[1]);
   setModule(8, 2, formatBits[2]);
@@ -319,13 +324,18 @@ function createMatrix(spec: VersionSpec, codewords: Uint8Array): boolean[][] {
   setModule(1, 8, formatBits[13]);
   setModule(0, 8, formatBits[14]);
 
-  // Top-right and bottom-left split
-  for (let i = 0; i < 7; i++) {
-    setModule(8, size - 1 - i, formatBits[14 - i]);
-  }
+  // Top-right finder (8 bits: b0..b7)
   for (let i = 0; i < 8; i++) {
-    setModule(size - 8 + i, 8, formatBits[7 - i]);
+    setModule(8, size - 1 - i, formatBits[i]);
   }
+
+  // Bottom-left finder (7 bits: b8..b14, preserving dark module at size - 8, 8)
+  for (let i = 0; i < 7; i++) {
+    setModule(size - 7 + i, 8, formatBits[8 + i]);
+  }
+
+  // Dark module is at (size - 8, 8) and must always remain dark
+  matrix[size - 8][8] = true;
 
   return matrix.map((row) => row.map((cell) => cell ?? false));
 }

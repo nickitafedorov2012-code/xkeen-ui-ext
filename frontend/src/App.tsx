@@ -47,6 +47,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'adguard', label: '🛡️ AdGuard' },
   { id: 'connections', label: '🌐 Соединения' },
   { id: 'rules', label: '📋 Правила' },
+  { id: 'diagnostics', label: '🩺 Диагностика' },
 ]
 
 interface Toast {
@@ -83,9 +84,8 @@ export default function App() {
   const initial = (() => {
     const h = window.location.hash.replace('#', '')
     if (h === 'antigravity') return 'google-ai'
-    if (h === 'diagnostics') return 'connections'
     if (h === 'xbox-dns') return 'gaming'
-    return (TABS.some((t) => t.id === h) || h === 'settings' || h === 'help' || h === 'adguard' ? h : 'dashboard') as TabId
+    return (TABS.some((t) => t.id === h) || h === 'settings' || h === 'help' || h === 'adguard' || h === 'diagnostics' ? h : 'dashboard') as TabId
   })()
   const [tab, setTab] = useState<TabId>(initial)
   const [status, setStatus] = useState<StatusInfo | null>(null)
@@ -231,7 +231,8 @@ export default function App() {
 
   useEffect(() => {
     refresh()
-    const interval = setInterval(refresh, (status?.refresh_interval_sec ?? 10) * 1000)
+    const intervalMs = Math.max(3, status?.refresh_interval_sec ?? 10) * 1000
+    const interval = setInterval(refresh, intervalMs)
     return () => clearInterval(interval)
   }, [refresh, status?.refresh_interval_sec])
 

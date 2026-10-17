@@ -16,8 +16,11 @@ export function getWsUrl(path: string): string {
  */
 export function validateEndpointData(cleanPath: string, data: any): void {
   const base = cleanPath.split('?')[0].replace(/^\/+|\/+$/g, '')
-  if (data === null || data === undefined) {
-    throw new Error(`Эндпоинт /api/${base} вернул пустые данные (null/undefined)`)
+  if (data === undefined) {
+    throw new Error(`Эндпоинт /api/${base} вернул некорректный ответ (отсутствует поле data)`)
+  }
+  if (data === null) {
+    return
   }
   if (base === 'config-files/read') {
     if (typeof data !== 'object' || typeof data.content !== 'string') {

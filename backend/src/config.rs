@@ -498,7 +498,7 @@ fn default_agh_http_port() -> u16 {
 }
 
 fn default_agh_dns_port() -> u16 {
-    3053
+    5353
 }
 
 fn default_agh_mode() -> String {

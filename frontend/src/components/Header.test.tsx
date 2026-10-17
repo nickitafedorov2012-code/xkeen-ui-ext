@@ -677,4 +677,25 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
     expect(popover?.textContent).toContain('Mihomo (Ядро)')
     expect(popover?.textContent).toContain('XKeen Route (Панель)')
   })
+
+  it('anti-regression (HEADER-01): disables toggle button when status is null and does not evaluate to running', async () => {
+    vi.spyOn(api, 'apiGet').mockResolvedValue({})
+
+    await act(async () => {
+      root!.render(
+        <Header
+          status={null}
+          notify={notifyMock}
+          refresh={refreshMock}
+          onSwitchTab={onSwitchTabMock}
+          activeTab="dashboard"
+        />
+      )
+    })
+
+    const toggleBtn = container?.querySelector('[data-testid="header-toggle-btn"]') as HTMLButtonElement | null
+    expect(toggleBtn).not.toBeNull()
+    expect(toggleBtn?.hasAttribute('disabled')).toBe(true)
+    expect(toggleBtn?.className).toContain('header-action-btn-start')
+  })
 })

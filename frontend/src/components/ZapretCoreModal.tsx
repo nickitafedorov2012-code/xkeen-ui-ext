@@ -82,11 +82,12 @@ export default function ZapretCoreModal({ isOpen, onClose, notify, onUpdated }: 
         action: 'upgrade_zapret2',
       })
       notify(res?.message || 'Zapret 2.0 успешно установлен')
+      const resolvedVersion = status?.version || updInfo?.latest_version || updInfo?.current_version || 'v2'
       window.dispatchEvent(
         new CustomEvent('xr:zapret-updated', {
           detail: {
             engine: 'v2',
-            version: status?.version || updInfo?.latest_version || '',
+            version: resolvedVersion,
             update_available: false,
           },
         })

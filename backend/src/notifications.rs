@@ -191,17 +191,38 @@ pub fn validate_webhook_url(url_str: &str) -> Result<(), String> {
         return Err("Поддерживаются только http и https URL для Webhook".to_string());
     }
     let host = parsed.host_str().ok_or_else(|| "В URL вебхука отсутствует хост".to_string())?;
-    if host.eq_ignore_ascii_case("localhost") {
-        return Err("Запрещен вызов localhost через Webhook".to_string());
+    if host.eq_ignore_ascii_case("localhost")
+        || host.eq_ignore_ascii_case("router")
+        || host.eq_ignore_ascii_case("my.keenetic.net")
+    {
+        return Err("Запрещен вызов локальных адресов роутера через Webhook".to_string());
     }
     let host_unbracketed = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = host_unbracketed.parse::<std::net::IpAddr>() {
         let is_unsafe = match ip {
-            std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_link_local() || v4.is_unspecified(),
-            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified(),
+            std::net::IpAddr::V4(v4) => {
+                v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast()
+            }
+            std::net::IpAddr::V6(v6) => {
+                if v6.is_loopback()
+                    || v6.is_unspecified()
+                    || (v6.segments()[0] & 0xffc0 == 0xfe80)
+                    || (v6.segments()[0] & 0xfe00 == 0xfc00)
+                {
+                    true
+                } else if let Some(mapped_v4) = v6.to_ipv4_mapped().or_else(|| v6.to_ipv4()) {
+                    mapped_v4.is_loopback()
+                        || mapped_v4.is_private()
+                        || mapped_v4.is_link_local()
+                        || mapped_v4.is_unspecified()
+                        || mapped_v4.is_broadcast()
+                } else {
+                    false
+                }
+            }
         };
         if is_unsafe {
-            return Err("Запрещен вызов loopback/link-local адресов через Webhook".to_string());
+            return Err("Запрещен вызов внутренних/локальных (private, loopback, link-local) адресов через Webhook".to_string());
         }
     }
     Ok(())
@@ -298,6 +319,7 @@ mod tests {
     fn test_validate_webhook_url() {
         assert!(validate_webhook_url("https://discord.com/api/webhooks/123/abc").is_ok());
         assert!(validate_webhook_url("http://webhook.site/my-uuid").is_ok());
+        assert!(validate_webhook_url("https://api.telegram.org/bot123/send").is_ok());
         assert!(validate_webhook_url("").is_ok());
 
         // Rejection of invalid schemes and loopback addresses
@@ -305,6 +327,18 @@ mod tests {
         assert!(validate_webhook_url("http://localhost:8080/hook").is_err());
         assert!(validate_webhook_url("http://127.0.0.1:9090/clash").is_err());
         assert!(validate_webhook_url("http://[::1]:9090/clash").is_err());
+
+        // SEC-03: Rejection of private, link-local, and router addresses (SSRF)
+        assert!(validate_webhook_url("http://192.168.1.1:79/rci/").is_err());
+        assert!(validate_webhook_url("http://192.168.2.1:1001/api/status").is_err());
+        assert!(validate_webhook_url("http://10.0.0.1/hook").is_err());
+        assert!(validate_webhook_url("http://172.16.0.1:8080").is_err());
+        assert!(validate_webhook_url("http://169.254.1.1/metadata").is_err());
+        assert!(validate_webhook_url("http://[fe80::1]/hook").is_err());
+        assert!(validate_webhook_url("http://[fd00::1]/hook").is_err());
+        assert!(validate_webhook_url("http://[::ffff:192.168.1.1]/hook").is_err());
+        assert!(validate_webhook_url("http://router/hook").is_err());
+        assert!(validate_webhook_url("http://my.keenetic.net/hook").is_err());
     }
 
     #[test]

@@ -290,4 +290,25 @@ trojan://pass2@node2.com:443#Node2
     expect(parsed2?.raw.server).toBe('198.51.100.2')
     expect(parsed2?.raw.port).toBe(8389)
   })
+
+  it('anti-regression (SS-01): exportServerToLink handles Shadowsocks with Unicode/Cyrillic characters in password without DOMException', () => {
+    const exported = exportServerToLink({
+      name: 'SS-Unicode',
+      protocol: 'Shadowsocks',
+      host: '1.2.3.4',
+      port: 8388,
+      raw: {
+        type: 'ss',
+        cipher: 'chacha20-ietf-poly1305',
+        password: 'Пароль!🚀123',
+      },
+    })
+
+    expect(exported).toContain('ss://')
+    expect(exported).toContain('@1.2.3.4:8388#SS-Unicode')
+
+    const parsed = parseProxyLink(exported)
+    expect(parsed).not.toBeNull()
+    expect(parsed?.raw.password).toBe('Пароль!🚀123')
+  })
 })
