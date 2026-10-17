@@ -1115,6 +1115,24 @@
 
 ## v1.5.20 (Header Settings Navigation, Zapret Version Status Chip, Red Pulse 5 AM Updates & Mini-Blockcheck YouTube Fix)
 - **Перенос вкладки Настройки и чип статуса Zapret в верхней панели (Header.tsx, App.tsx, Zapret.tsx)**:
+## v1.9.10 (AdGuard Filter Proxy Pipeline, Anti-Loop Resolution & DoH Bypass Protection)
+- **Обновление фильтров через локальный прокси (`http_proxy: "http://127.0.0.1:7890"`)**:
+  * AdGuard Home теперь автоматически настраивается на использование локального прокси ядра Mihomo (`http://127.0.0.1:7890`) для загрузки и автообновления баз фильтрации.
+  * Устранены зависания и таймауты при загрузке правил с GitHub Pages (`adguardteam.github.io`) и других CDN, блокируемых или замедляемых отечественными провайдерами в РФ.
+- **Устранение циклического DNS-лупа (Mihomo nameserver 5354 <-> AdGuard upstream 1053)**:
+  * Ликвидирован бесконечный цикл пересылки DNS: из `upstream_dns` конфигурации AdGuard Home удалены локальные сокеты `127.0.0.1:1053` и `127.0.0.1:53`.
+  * AdGuard Home переведен на чистые, быстрые внешние резолверы (`77.88.8.8`, `77.88.8.1`, `1.1.1.1`, `8.8.8.8`, `https://dns.google/dns-query`), исключив паразитный трафик `127.0.0.1` в журнале запросов.
+- **Автоматическое подключение баз AdGuard Russian Filter и HaGeZi Multi Pro**:
+  * В конфигурацию AdGuard Home «из коробки» внедрены официальный AdGuard Russian Filter (125k+ правил для блокировки рекламы Yandex Direct, Mail.ru, VK) и HaGeZi Multi Pro (200k+ правил против трекеров, телеметрии и рекламы).
+  * Функция самоисцеления `sanitize_and_heal_adguard_yaml` автоматически добавляет недостающие подписки при каждом старте или проверке.
+- **Защита от скрытого DoH-обхода в браузерах (DoH Bootstrap Blocking)**:
+  * В `user_rules` AdGuard Home добавлены блокировки Bootstrap-доменов DoH (`chrome.cloudflare-dns.com`, `mozilla.cloudflare-dns.com`, `cloudflare-dns.com`, `dns.google`) и прямых рекламных хостов (`yabs.yandex.ru`, `ads.vk.com`).
+  * Браузеры Chrome, Edge и Firefox при попытке включить Secure DNS получают блокировку контрольного домена и автоматически переключаются на системный DNS роутера, обеспечивая 100% учет и блокировку всей рекламы на клиентских устройствах.
+- **Анти-регрессия и тесты**:
+  * Добавлен unit-тест `test_anti_regression_adguard_loop_prevention_and_doh_blocking`.
+  * Обновлен тест миграции и заживления `test_adguard_yaml_healing_and_port_5354_migration`.
+  * Все 245 тестов бэкенда и 223 теста фронтенда успешно проходят.
+
 ## v1.9.9 (Avahi mDNS Conflict Resolution, AdGuard Port 5354 Migration & Proxy DNS Upstream Pipeline)
 - **Разрешение системного конфликта mDNS Avahi и переход на порт 5354 (Port 5354 Migration)**:
   * На роутерах KeeneticOS системный демон `avahi-daemon` (Bonjour/mDNS) слушает UDP `0.0.0.0:5353` (RFC 6762). Из-за этого AdGuard Home не мог занять сокет на всех интерфейсах и слушал только `127.0.0.1:5353`.

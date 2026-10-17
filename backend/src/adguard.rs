@@ -1549,7 +1549,7 @@ r#"bind_host: 0.0.0.0
 bind_port: {http_port}
 auth_attempts: 5
 block_auth_min: 15
-http_proxy: ""
+http_proxy: "http://127.0.0.1:7890"
 language: ru
 rlimit_nofile: 0
 dns:
@@ -1573,11 +1573,15 @@ dns:
   ratelimit_whitelist: []
   refuse_any: true
   upstream_dns:
-    - 127.0.0.1:1053
     - 77.88.8.8
+    - 77.88.8.1
+    - 1.1.1.1
+    - 8.8.8.8
+    - https://dns.google/dns-query
   upstream_dns_file: ""
   bootstrap_dns:
     - 77.88.8.8
+    - 1.1.1.1
   fallback_dns:
     - 77.88.8.8
   all_servers: false
@@ -1619,8 +1623,22 @@ filters:
     url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
     name: AdGuard Base Filter
     id: 1
+  - enabled: true
+    url: https://filters.adtidy.org/extension/chromium/filters/2.txt
+    name: AdGuard Russian Filter
+    id: 1792272695
+  - enabled: true
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_48.txt
+    name: HaGeZi Multi Pro
+    id: 1792272696
 whitelist_filters: []
-user_rules: []
+user_rules:
+  - "||chrome.cloudflare-dns.com^"
+  - "||mozilla.cloudflare-dns.com^"
+  - "||cloudflare-dns.com^"
+  - "||dns.google^"
+  - "||yabs.yandex.ru^"
+  - "||ads.vk.com^"
 dhcp:
   enabled: false
 clients:
@@ -1650,8 +1668,11 @@ schema_version: 29
 /// Автоматическое исправление/миграция конфигурации AdGuard Home:
 /// 1. Переключение с конфликтующего порта 5353 (занят avahi-daemon на KeeneticOS) на 5354.
 /// 2. Исключение дублирования 127.0.0.1 в bind_hosts (оставляем только 0.0.0.0 для dual-stack).
-/// 3. Добавление рабочего upstream (127.0.0.1:1053 для Mihomo fake-ip под прокси + 77.88.8.8).
-/// 4. Добавление rewrite для probe.test -> 127.0.0.1 для мгновенного ответа на healthcheck.
+/// 3. Настройка http_proxy ("http://127.0.0.1:7890") для мгновенного обновления фильтров через локальный прокси.
+/// 4. Удаление 127.0.0.1:1053 из upstream_dns для устранения бесконечного зацикливания с Mihomo и добавление быстрых апстримов (77.88.8.8, 1.1.1.1).
+/// 5. Добавление rewrite для probe.test -> 127.0.0.1 для мгновенного ответа на healthcheck.
+/// 6. Защита от DoH-обхода в браузерах (chrome.cloudflare-dns.com, mozilla.cloudflare-dns.com) и блокировка рекламы в user_rules.
+/// 7. Внедрение AdGuard Russian Filter и HaGeZi Multi Pro в список подписок filters.
 pub fn sanitize_and_heal_adguard_yaml(content: &str, target_port: u16) -> (String, bool) {
     let mut changed = false;
     let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
@@ -1711,19 +1732,48 @@ pub fn sanitize_and_heal_adguard_yaml(content: &str, target_port: u16) -> (Strin
         });
     }
 
-    // 3. Добавляем upstream_dns: 127.0.0.1:1053 если его нет
+    // 3. Настройка http_proxy для скачивания фильтров через Mihomo (обход блокировок GitHub/CDN)
+    let mut has_http_proxy = false;
+    for line in &mut lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with("http_proxy:") {
+            has_http_proxy = true;
+            if trimmed == "http_proxy: \"\"" || trimmed == "http_proxy:" || trimmed == "http_proxy: ''" {
+                *line = "http_proxy: \"http://127.0.0.1:7890\"".to_string();
+                changed = true;
+            }
+        }
+    }
+    if !has_http_proxy {
+        lines.insert(0, "http_proxy: \"http://127.0.0.1:7890\"".to_string());
+        changed = true;
+    }
+
+    // 4. Устранение циклического DNS-лупа (Mihomo nameserver 5354 <-> AdGuard upstream 1053):
+    // Удаляем 127.0.0.1:1053 и 127.0.0.1:53 из upstream_dns, гарантируя прямые чистые резолверы.
+    lines.retain(|l| {
+        let t = l.trim();
+        if t == "- 127.0.0.1:1053" || t == "- 127.0.0.1:53" || t == "- localhost:1053" {
+            changed = true;
+            false
+        } else {
+            true
+        }
+    });
+
     let content_joined = lines.join("\n");
-    if !content_joined.contains("127.0.0.1:1053") {
+    if !content_joined.contains("77.88.8.8") {
         let mut new_lines = Vec::with_capacity(lines.len() + 4);
         let mut added_upstream = false;
         for line in lines {
             let trimmed = line.trim();
             new_lines.push(line.clone());
             if trimmed == "upstream_dns:" && !added_upstream {
-                new_lines.push("    - 127.0.0.1:1053".to_string());
-                if !content_joined.contains("77.88.8.8") {
-                    new_lines.push("    - 77.88.8.8".to_string());
-                }
+                new_lines.push("    - 77.88.8.8".to_string());
+                new_lines.push("    - 77.88.8.1".to_string());
+                new_lines.push("    - 1.1.1.1".to_string());
+                new_lines.push("    - 8.8.8.8".to_string());
+                new_lines.push("    - https://dns.google/dns-query".to_string());
                 added_upstream = true;
                 changed = true;
             }
@@ -1731,7 +1781,7 @@ pub fn sanitize_and_heal_adguard_yaml(content: &str, target_port: u16) -> (Strin
         lines = new_lines;
     }
 
-    // 4. Добавляем probe.test в rewrites если его нет
+    // 5. Добавляем probe.test в rewrites если его нет
     let content_with_upstreams = lines.join("\n");
     if !content_with_upstreams.contains("probe.test") {
         let mut new_lines = Vec::with_capacity(lines.len() + 4);
@@ -1746,6 +1796,81 @@ pub fn sanitize_and_heal_adguard_yaml(content: &str, target_port: u16) -> (Strin
                 changed = true;
             } else {
                 new_lines.push(line);
+            }
+        }
+        lines = new_lines;
+    }
+
+    // 6. Защита от DoH-обхода браузеров (Chrome, Firefox, Edge) и явная блокировка рекламы в user_rules
+    let content_rules = lines.join("\n");
+    if !content_rules.contains("chrome.cloudflare-dns.com") {
+        let mut new_lines = Vec::with_capacity(lines.len() + 8);
+        let mut added_rules = false;
+        for line in lines {
+            let trimmed = line.trim();
+            if (trimmed == "user_rules: []" || trimmed == "user_rules:") && !added_rules {
+                new_lines.push("user_rules:".to_string());
+                new_lines.push("  - \"||chrome.cloudflare-dns.com^\"".to_string());
+                new_lines.push("  - \"||mozilla.cloudflare-dns.com^\"".to_string());
+                new_lines.push("  - \"||cloudflare-dns.com^\"".to_string());
+                new_lines.push("  - \"||dns.google^\"".to_string());
+                new_lines.push("  - \"||yabs.yandex.ru^\"".to_string());
+                new_lines.push("  - \"||ads.vk.com^\"".to_string());
+                added_rules = true;
+                changed = true;
+            } else {
+                new_lines.push(line);
+            }
+        }
+        lines = new_lines;
+    }
+
+    // 7. Автоматическое добавление русской подписки и HaGeZi Multi Pro в filters
+    let content_filters = lines.join("\n");
+    let needs_russian = !content_filters.contains("filters/2.txt") && !content_filters.contains("AdGuard Russian Filter");
+    let needs_hagezi = !content_filters.contains("filter_48.txt") && !content_filters.contains("HaGeZi Multi Pro");
+
+    if needs_russian || needs_hagezi {
+        let mut new_lines = Vec::with_capacity(lines.len() + 16);
+        let mut injected_filters = false;
+        for line in lines {
+            let trimmed = line.trim();
+            if (trimmed == "filters:" || trimmed == "filters: []") && !injected_filters {
+                new_lines.push("filters:".to_string());
+                if needs_russian {
+                    new_lines.push("  - enabled: true".to_string());
+                    new_lines.push("    url: https://filters.adtidy.org/extension/chromium/filters/2.txt".to_string());
+                    new_lines.push("    name: AdGuard Russian Filter".to_string());
+                    new_lines.push("    id: 1792272695".to_string());
+                    changed = true;
+                }
+                if needs_hagezi {
+                    new_lines.push("  - enabled: true".to_string());
+                    new_lines.push("    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_48.txt".to_string());
+                    new_lines.push("    name: HaGeZi Multi Pro".to_string());
+                    new_lines.push("    id: 1792272696".to_string());
+                    changed = true;
+                }
+                injected_filters = true;
+            } else {
+                new_lines.push(line);
+            }
+        }
+        if !injected_filters {
+            new_lines.push("filters:".to_string());
+            if needs_russian {
+                new_lines.push("  - enabled: true".to_string());
+                new_lines.push("    url: https://filters.adtidy.org/extension/chromium/filters/2.txt".to_string());
+                new_lines.push("    name: AdGuard Russian Filter".to_string());
+                new_lines.push("    id: 1792272695".to_string());
+                changed = true;
+            }
+            if needs_hagezi {
+                new_lines.push("  - enabled: true".to_string());
+                new_lines.push("    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_48.txt".to_string());
+                new_lines.push("    name: HaGeZi Multi Pro".to_string());
+                new_lines.push("    id: 1792272696".to_string());
+                changed = true;
             }
         }
         lines = new_lines;
@@ -2297,10 +2422,15 @@ mod tests {
         // Ensure strictly 0.0.0.0 bind, never duplicate with 127.0.0.1 in bind_hosts (DNS-03)
         assert!(yaml.contains("bind_hosts:\n    - 0.0.0.0") || yaml.contains("bind_hosts:\r\n    - 0.0.0.0"));
         assert!(!yaml.contains("bind_hosts:\n    - 127.0.0.1") && !yaml.contains("bind_hosts:\r\n    - 127.0.0.1"));
-        // Anti-regression: Ensure fallback port is 5354 (non-mDNS) and upstream includes Mihomo + rewrite for probe.test
+        // Anti-regression: Ensure fallback port is 5354 (non-mDNS) and upstream includes clean resolvers + rewrite for probe.test
         assert!(yaml.contains("port: 5354"));
-        assert!(yaml.contains("127.0.0.1:1053"));
+        assert!(yaml.contains("77.88.8.8"));
+        assert!(!yaml.contains("127.0.0.1:1053"), "Must not loop with Mihomo on 1053");
         assert!(yaml.contains("probe.test"));
+        assert!(yaml.contains("http_proxy: \"http://127.0.0.1:7890\""));
+        assert!(yaml.contains("chrome.cloudflare-dns.com"));
+        assert!(yaml.contains("AdGuard Russian Filter"));
+        assert!(yaml.contains("HaGeZi Multi Pro"));
     }
 
     #[test]
@@ -2312,10 +2442,13 @@ dns:
     - 0.0.0.0
   port: 5353
   upstream_dns:
+    - 127.0.0.1:1053
     - 8.8.8.8
   bootstrap_dns:
     - 1.1.1.1
   rewrites: []
+filters: []
+user_rules: []
 "#;
         let (healed, changed) = sanitize_and_heal_adguard_yaml(old_conf, 5354);
         assert!(changed);
@@ -2323,8 +2456,44 @@ dns:
         assert!(!healed.contains("port: 5353"));
         assert!(!healed.contains("- 127.0.0.1\n    - 0.0.0.0"));
         assert!(healed.contains("- 0.0.0.0"));
-        assert!(healed.contains("127.0.0.1:1053"));
+        assert!(!healed.contains("127.0.0.1:1053"), "Circular loop upstream must be removed");
+        assert!(healed.contains("77.88.8.8"));
         assert!(healed.contains("probe.test"));
+        assert!(healed.contains("http_proxy: \"http://127.0.0.1:7890\""));
+        assert!(healed.contains("chrome.cloudflare-dns.com"));
+        assert!(healed.contains("AdGuard Russian Filter"));
+        assert!(healed.contains("HaGeZi Multi Pro"));
+    }
+
+    #[test]
+    fn test_anti_regression_adguard_loop_prevention_and_doh_blocking() {
+        // Anti-regression: Ensure infinite DNS loops with Mihomo 1053 are healed and DoH bypass is prevented
+        let looping_conf = r#"
+http_proxy: ""
+dns:
+  bind_hosts:
+    - 0.0.0.0
+  port: 5354
+  upstream_dns:
+    - 127.0.0.1:1053
+    - 127.0.0.1:53
+filters:
+  - enabled: true
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
+    name: AdGuard Base Filter
+    id: 1
+user_rules: []
+rewrites: []
+"#;
+        let (healed, changed) = sanitize_and_heal_adguard_yaml(looping_conf, 5354);
+        assert!(changed);
+        assert!(!healed.contains("- 127.0.0.1:1053"));
+        assert!(!healed.contains("- 127.0.0.1:53"));
+        assert!(healed.contains("http_proxy: \"http://127.0.0.1:7890\""));
+        assert!(healed.contains("chrome.cloudflare-dns.com"));
+        assert!(healed.contains("mozilla.cloudflare-dns.com"));
+        assert!(healed.contains("AdGuard Russian Filter"));
+        assert!(healed.contains("HaGeZi Multi Pro"));
     }
 
     #[test]
