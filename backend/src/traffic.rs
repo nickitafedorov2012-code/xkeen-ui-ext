@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -10,6 +10,21 @@ pub static DIRECT_DOWN: AtomicU64 = AtomicU64::new(0);
 pub static DIRECT_UP: AtomicU64 = AtomicU64::new(0);
 pub static WAN_DOWN: AtomicU64 = AtomicU64::new(0);
 pub static WAN_UP: AtomicU64 = AtomicU64::new(0);
+
+pub static WHITELIST_DOWN: AtomicU64 = AtomicU64::new(0);
+pub static WHITELIST_UP: AtomicU64 = AtomicU64::new(0);
+pub static TOTAL_WHITELIST_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static TOTAL_DIRECT_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static TOTAL_PROXY_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static WHITELIST_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_whitelist_active(active: bool) {
+    WHITELIST_ACTIVE.store(active, Ordering::Release);
+}
+
+pub fn is_whitelist_active() -> bool {
+    WHITELIST_ACTIVE.load(Ordering::Acquire)
+}
 
 #[derive(Deserialize)]
 struct MihomoTrafficChunk {
@@ -29,7 +44,11 @@ pub struct TrafficSpeed {
 pub struct TrafficSnapshot {
     pub direct: TrafficSpeed,
     pub proxy: TrafficSpeed,
+    pub whitelist: TrafficSpeed,
     pub total: TrafficSpeed,
+    pub whitelist_bytes: u64,
+    pub direct_bytes: u64,
+    pub proxy_bytes: u64,
     // Для совместимости со старыми вызовами:
     pub down: u64,
     pub up: u64,
@@ -42,11 +61,20 @@ pub fn get_snapshot() -> TrafficSnapshot {
     let d_up = DIRECT_UP.load(Ordering::Relaxed);
     let w_down = WAN_DOWN.load(Ordering::Relaxed);
     let w_up = WAN_UP.load(Ordering::Relaxed);
+    let wl_down = WHITELIST_DOWN.load(Ordering::Relaxed);
+    let wl_up = WHITELIST_UP.load(Ordering::Relaxed);
+    let wl_bytes = TOTAL_WHITELIST_BYTES.load(Ordering::Relaxed);
+    let d_bytes = TOTAL_DIRECT_BYTES.load(Ordering::Relaxed);
+    let p_bytes = TOTAL_PROXY_BYTES.load(Ordering::Relaxed);
 
     TrafficSnapshot {
         direct: TrafficSpeed { down: d_down, up: d_up },
         proxy: TrafficSpeed { down: p_down, up: p_up },
+        whitelist: TrafficSpeed { down: wl_down, up: wl_up },
         total: TrafficSpeed { down: w_down, up: w_up },
+        whitelist_bytes: wl_bytes,
+        direct_bytes: d_bytes,
+        proxy_bytes: p_bytes,
         down: p_down,
         up: p_up,
     }
@@ -59,25 +87,44 @@ pub fn get_snapshot_json() -> serde_json::Value {
     let d_up = DIRECT_UP.load(Ordering::Relaxed);
     let w_down = WAN_DOWN.load(Ordering::Relaxed);
     let w_up = WAN_UP.load(Ordering::Relaxed);
+    let wl_down = WHITELIST_DOWN.load(Ordering::Relaxed);
+    let wl_up = WHITELIST_UP.load(Ordering::Relaxed);
+    let wl_bytes = TOTAL_WHITELIST_BYTES.load(Ordering::Relaxed);
+    let d_bytes = TOTAL_DIRECT_BYTES.load(Ordering::Relaxed);
+    let p_bytes = TOTAL_PROXY_BYTES.load(Ordering::Relaxed);
+    let is_wl_active = WHITELIST_ACTIVE.load(Ordering::Relaxed);
 
     let history = get_history_json();
     json!({
         "direct": {
             "down": d_down,
             "up": d_up,
+            "bytes": d_bytes,
             "estimated": true,
             "source": "WAN (/proc/net/dev) - Mihomo (/traffic)"
         },
         "proxy": {
             "down": p_down,
             "up": p_up,
+            "bytes": p_bytes,
             "source": "Mihomo (/traffic)"
+        },
+        "whitelist": {
+            "down": wl_down,
+            "up": wl_up,
+            "bytes": wl_bytes,
+            "active": is_wl_active,
+            "source": "Whitelist 100% Tunnel"
         },
         "total": {
             "down": w_down,
             "up": w_up,
             "source": "WAN interfaces (/proc/net/dev)"
         },
+        "whitelist_bytes": wl_bytes,
+        "direct_bytes": d_bytes,
+        "proxy_bytes": p_bytes,
+        "whitelist_active": is_wl_active,
         "down": p_down,
         "up": p_up,
         "history": history,
@@ -155,6 +202,15 @@ async fn run_mihomo_stream(state: AppState) {
                                     if let Ok(msg) = serde_json::from_str::<MihomoTrafficChunk>(&line) {
                                         PROXY_DOWN.store(msg.down, Ordering::Relaxed);
                                         PROXY_UP.store(msg.up, Ordering::Relaxed);
+                                        TOTAL_PROXY_BYTES.fetch_add(msg.down + msg.up, Ordering::Relaxed);
+                                        if WHITELIST_ACTIVE.load(Ordering::Relaxed) {
+                                            WHITELIST_DOWN.store(msg.down, Ordering::Relaxed);
+                                            WHITELIST_UP.store(msg.up, Ordering::Relaxed);
+                                            TOTAL_WHITELIST_BYTES.fetch_add(msg.down + msg.up, Ordering::Relaxed);
+                                        } else {
+                                            WHITELIST_DOWN.store(0, Ordering::Relaxed);
+                                            WHITELIST_UP.store(0, Ordering::Relaxed);
+                                        }
                                     }
                                 }
                             }
@@ -169,6 +225,8 @@ async fn run_mihomo_stream(state: AppState) {
         }
         PROXY_DOWN.store(0, Ordering::Relaxed);
         PROXY_UP.store(0, Ordering::Relaxed);
+        WHITELIST_DOWN.store(0, Ordering::Relaxed);
+        WHITELIST_UP.store(0, Ordering::Relaxed);
         for _ in 0..4 {
             if SHUTDOWN.load(Ordering::Acquire) {
                 return;
@@ -274,10 +332,16 @@ async fn run_wan_polling() {
 
         DIRECT_DOWN.store(d_down, Ordering::Relaxed);
         DIRECT_UP.store(d_up, Ordering::Relaxed);
+        TOTAL_DIRECT_BYTES.fetch_add(d_down + d_up, Ordering::Relaxed);
+
+        let is_wl_active = WHITELIST_ACTIVE.load(Ordering::Relaxed);
+        let wl_d = if is_wl_active { p_down } else { 0 };
+        let wl_u = if is_wl_active { p_up } else { 0 };
 
         record_history_point(json!({
             "direct": { "down": d_down, "up": d_up, "estimated": true, "source": "WAN - Mihomo" },
             "proxy": { "down": p_down, "up": p_up, "source": "Mihomo" },
+            "whitelist": { "down": wl_d, "up": wl_u, "active": is_wl_active },
             "total": { "down": wan_rx_speed, "up": wan_tx_speed, "source": "WAN" },
             "down": p_down,
             "up": p_up,
@@ -318,5 +382,31 @@ mod tests {
         assert!(!is_shutdown());
         shutdown();
         assert!(is_shutdown());
+    }
+
+    #[test]
+    fn test_whitelist_traffic_active_and_counters() {
+        set_whitelist_active(false);
+        assert!(!is_whitelist_active());
+        set_whitelist_active(true);
+        assert!(is_whitelist_active());
+
+        WHITELIST_DOWN.store(1024, Ordering::Relaxed);
+        WHITELIST_UP.store(512, Ordering::Relaxed);
+        TOTAL_WHITELIST_BYTES.fetch_add(1536, Ordering::Relaxed);
+
+        let snapshot = get_snapshot();
+        assert_eq!(snapshot.whitelist.down, 1024);
+        assert_eq!(snapshot.whitelist.up, 512);
+
+        let json = get_snapshot_json();
+        assert_eq!(json["whitelist_active"], true);
+        assert!(json["whitelist"].is_object());
+        assert_eq!(json["whitelist"]["active"], true);
+        assert!(json["whitelist_bytes"].as_u64().unwrap_or(0) >= 1536);
+
+        // Reset back to inactive
+        set_whitelist_active(false);
+        assert!(!is_whitelist_active());
     }
 }

@@ -6,11 +6,14 @@ interface SpeedPair {
   up: number
   estimated?: boolean
   source?: string
+  bytes?: number
+  active?: boolean
 }
 
 interface TrafficHistoryPoint {
   direct?: SpeedPair
   proxy?: SpeedPair
+  whitelist?: SpeedPair
   down?: number
   up?: number
 }
@@ -18,7 +21,12 @@ interface TrafficHistoryPoint {
 interface TrafficPayload {
   direct?: SpeedPair
   proxy?: SpeedPair
+  whitelist?: SpeedPair
   total?: SpeedPair
+  whitelist_active?: boolean
+  whitelist_bytes?: number
+  direct_bytes?: number
+  proxy_bytes?: number
   down?: number
   up?: number
   history?: TrafficHistoryPoint[]
@@ -38,6 +46,14 @@ function formatSpeed(bytesPerSec: number): string {
   return `${(bytesPerSec / (1024 * 1024 * 1024)).toFixed(2)} GB/s`
 }
 
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return '0 B'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
 export default function TrafficGraph() {
   const [history, setHistory] = useState<TrafficHistoryItem[]>(() =>
     Array(60).fill({ directDown: 0, directUp: 0, proxyDown: 0, proxyUp: 0 })
@@ -45,6 +61,9 @@ export default function TrafficGraph() {
 
   const [currentDirect, setCurrentDirect] = useState<SpeedPair>({ down: 0, up: 0 })
   const [currentProxy, setCurrentProxy] = useState<SpeedPair>({ down: 0, up: 0 })
+  const [currentWhitelist, setCurrentWhitelist] = useState<SpeedPair>({ down: 0, up: 0 })
+  const [isWhitelistActive, setIsWhitelistActive] = useState(false)
+  const [whitelistBytes, setWhitelistBytes] = useState(0)
   const [peakDirect, setPeakDirect] = useState(0)
   const [peakProxy, setPeakProxy] = useState(0)
   const [isDirectEstimated, setIsDirectEstimated] = useState(false)
@@ -68,6 +87,15 @@ export default function TrafficGraph() {
         const pUp = data.proxy?.up ?? data.up ?? 0
         const dDown = data.direct?.down ?? 0
         const dUp = data.direct?.up ?? 0
+        const wlActive = Boolean(data.whitelist_active ?? data.whitelist?.active)
+
+        setIsWhitelistActive(wlActive)
+        if (data.whitelist) {
+          setCurrentWhitelist({ down: data.whitelist.down, up: data.whitelist.up })
+        }
+        if (typeof data.whitelist_bytes === 'number') {
+          setWhitelistBytes(data.whitelist_bytes)
+        }
 
         setCurrentDirect({ down: dDown, up: dUp, estimated: data.direct?.estimated, source: data.direct?.source })
         setCurrentProxy({ down: pDown, up: pUp })
@@ -202,9 +230,15 @@ export default function TrafficGraph() {
           <div>
             <h3 style={{ margin: 0, fontSize: 15 }}>Трафик в реальном времени</h3>
             <div className="traffic-legend-chips">
-              <span className="legend-chip direct">
-                <span className="legend-dot green" /> Прямой трафик (Direct) {isDirectEstimated && <span style={{ opacity: 0.75, fontSize: '0.85em' }}>(оценка)</span>}
-              </span>
+              {isWhitelistActive ? (
+                <span className="legend-chip whitelist" style={{ color: '#c084fc' }}>
+                  <span className="legend-dot purple" style={{ background: '#a855f7' }} /> 🟣 Обход белых списков (100% туннель)
+                </span>
+              ) : (
+                <span className="legend-chip direct">
+                  <span className="legend-dot green" /> Прямой трафик (Direct) {isDirectEstimated && <span style={{ opacity: 0.75, fontSize: '0.85em' }}>(оценка)</span>}
+                </span>
+              )}
               <span className="legend-chip proxy">
                 <span className="legend-dot blue" /> Проксированный (Proxy)
               </span>
@@ -242,14 +276,28 @@ export default function TrafficGraph() {
           </div>
 
           <div className="traffic-stats">
-            {/* Зеленый бейдж: Прямой трафик */}
-            <div className="traffic-badge direct" title={`Прямой трафик роутера (мимо прокси${isDirectEstimated ? ', оценочный расчёт' : ''})\nПик: ${formatSpeed(peakDirect)}`}>
-              <span className="badge-label">🟢 Прямой{isDirectEstimated ? ' (оценка)' : ''}:</span>
-              <span className="badge-arrow">↓</span>
-              <span className="badge-val">{formatSpeed(currentDirect.down)}</span>
-              <span className="badge-arrow">↑</span>
-              <span className="badge-val">{formatSpeed(currentDirect.up)}</span>
-            </div>
+            {/* Трафик: Прямой или Белые списки */}
+            {isWhitelistActive ? (
+              <div
+                className="traffic-badge whitelist"
+                style={{ background: 'rgba(168, 85, 247, 0.12)', borderColor: 'rgba(168, 85, 247, 0.4)' }}
+                title={`Аварийный туннель белых списков (100% LAN трафика)\nНакоплено: ${formatBytes(whitelistBytes)}`}
+              >
+                <span className="badge-label" style={{ color: '#c084fc', fontWeight: 600 }}>🟣 Белые списки:</span>
+                <span className="badge-arrow" style={{ color: '#c084fc' }}>↓</span>
+                <span className="badge-val">{formatSpeed(currentWhitelist.down > 0 ? currentWhitelist.down : currentDirect.down)}</span>
+                <span className="badge-arrow" style={{ color: '#c084fc' }}>↑</span>
+                <span className="badge-val">{formatSpeed(currentWhitelist.up > 0 ? currentWhitelist.up : currentDirect.up)}</span>
+              </div>
+            ) : (
+              <div className="traffic-badge direct" title={`Прямой трафик роутера (мимо прокси${isDirectEstimated ? ', оценочный расчёт' : ''})\nПик: ${formatSpeed(peakDirect)}`}>
+                <span className="badge-label">🟢 Прямой{isDirectEstimated ? ' (оценка)' : ''}:</span>
+                <span className="badge-arrow">↓</span>
+                <span className="badge-val">{formatSpeed(currentDirect.down)}</span>
+                <span className="badge-arrow">↑</span>
+                <span className="badge-val">{formatSpeed(currentDirect.up)}</span>
+              </div>
+            )}
 
             {/* Синий бейдж: Проксированный трафик */}
             <div className="traffic-badge proxy" title={`Проксированный трафик через Mihomo/VPS\nПик: ${formatSpeed(peakProxy)}`}>
@@ -272,10 +320,10 @@ export default function TrafficGraph() {
       <div className="traffic-svg-wrapper">
         <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className="traffic-svg">
           <defs>
-            {/* Зеленый градиент (Прямой трафик) */}
+            {/* Градиент первого канала (Прямой или Белые списки) */}
             <linearGradient id="directGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#22c55e" stopOpacity="0.32" />
-              <stop offset="100%" stopColor="#22c55e" stopOpacity="0.0" />
+              <stop offset="0%" stopColor={isWhitelistActive ? "#a855f7" : "#22c55e"} stopOpacity="0.32" />
+              <stop offset="100%" stopColor={isWhitelistActive ? "#a855f7" : "#22c55e"} stopOpacity="0.0" />
             </linearGradient>
             {/* Синий градиент (Проксированный трафик) */}
             <linearGradient id="proxyGrad" x1="0" y1="0" x2="0" y2="1">
@@ -293,11 +341,11 @@ export default function TrafficGraph() {
           <path d={areaD(directPoints)} fill="url(#directGrad)" />
           <path d={areaD(proxyPoints)} fill="url(#proxyGrad)" />
 
-          {/* Зеленая линия (Прямой трафик) */}
+          {/* Линия первого канала (Прямой или Белые списки) */}
           <path
             d={lineD(directPoints)}
             fill="none"
-            stroke="#22c55e"
+            stroke={isWhitelistActive ? "#a855f7" : "#22c55e"}
             strokeWidth="2.5"
             strokeLinecap="round"
             strokeLinejoin="round"

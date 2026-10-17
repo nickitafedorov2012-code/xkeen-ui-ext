@@ -15,6 +15,7 @@ export interface DrModalState {
 interface Props {
   modal: DrModalState
   servers: ServerInfo[]
+  whitelistProviders?: string[]
   busy: boolean
   hasExisting: boolean
   onChange: (m: DrModalState) => void
@@ -27,6 +28,7 @@ interface Props {
 export default function DeviceRoutingModal({
   modal,
   servers,
+  whitelistProviders,
   busy,
   hasExisting,
   onChange,
@@ -38,6 +40,9 @@ export default function DeviceRoutingModal({
   const [newDomain, setNewDomain] = useState('')
   const [newTarget, setNewTarget] = useState('DIRECT')
   const [savingRules, setSavingRules] = useState(false)
+
+  const hasWhitelistConfigured =
+    servers.some((s) => s.is_whitelist) || (whitelistProviders && whitelistProviders.length > 0)
 
   // Загрузка персональных правил для доменов устройства
   useEffect(() => {
@@ -169,14 +174,16 @@ export default function DeviceRoutingModal({
               />
               автовозврат на основной
             </label>
-            <label className="check" style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13 }} title="При активации узла из белых списков перенаправлять 100% трафика в туннель">
-              <input
-                type="checkbox"
-                checked={modal.followWhitelist ?? true}
-                onChange={(e) => onChange({ ...modal, followWhitelist: e.target.checked })}
-              />
-              🟣 следовать белым спискам (100% туннель)
-            </label>
+            {hasWhitelistConfigured && (
+              <label className="check" style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13 }} title="При активации узла из белых списков перенаправлять 100% трафика в туннель">
+                <input
+                  type="checkbox"
+                  checked={modal.followWhitelist ?? true}
+                  onChange={(e) => onChange({ ...modal, followWhitelist: e.target.checked })}
+                />
+                🟣 следовать белым спискам (100% туннель)
+              </label>
+            )}
           </div>
         </div>
 

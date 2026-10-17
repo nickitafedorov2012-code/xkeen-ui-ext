@@ -514,6 +514,23 @@ export default function Servers({ notify, status, refresh }: Props) {
     }
   }
 
+  const [togglingWhitelistSub, setTogglingWhitelistSub] = useState<string | null>(null)
+
+  const toggleProviderWhitelist = async (provId: string, currentWhitelist: boolean) => {
+    setTogglingWhitelistSub(provId)
+    try {
+      const target = !currentWhitelist
+      await apiPost('whitelist/providers', { provider_id: provId, enabled: target })
+      notify(target ? `Подписка "${provId}" добавлена в белые списки (аварийный туннель)` : `Подписка "${provId}" исключена из белых списков`)
+      setProviders((prev) => prev.map((p) => (p.id === provId ? { ...p, is_whitelist: target } : p)))
+      load()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка переключения белого списка для подписки', true)
+    } finally {
+      setTogglingWhitelistSub(null)
+    }
+  }
+
   const updateProviderNow = async (id: string) => {
     setUpdatingProvider(id)
     try {
@@ -618,20 +635,12 @@ export default function Servers({ notify, status, refresh }: Props) {
 
   return (
     <section className="card">
-      {/* ДВУХКОЛОНОЧНЫЙ СПЛИТ-ДАШБОРД (Apple 2-Column Split Dashboard) */}
-      <div
-        className="servers-split-dashboard"
-        style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
-          gap: 14,
-          marginBottom: 16,
-          alignItems: 'stretch',
-        }}
-      >
-        {/* ЛЕВАЯ КОЛОНКА: Командная плашка активного сервера */}
-        <div
-          className="servers-active-command-pill"
+      {/* ИСТИННЫЙ ДВУХКОЛОНОЧНЫЙ ДЕСКТОПНЫЙ ЛЕЙАУТ (True Two-Column Desktop Layout) */}
+      <div className="servers-desktop-layout">
+        {/* ЛЕВАЯ КОЛОНКА: Закрепленная командная плашка активного сервера */}
+        <aside className="servers-left-column">
+          <div
+            className="servers-active-command-pill"
           style={{
             background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.08) 0%, rgba(56, 189, 248, 0.04) 100%)',
             border: '1px solid rgba(34, 197, 94, 0.35)',
@@ -787,8 +796,10 @@ export default function Servers({ notify, status, refresh }: Props) {
             </div>
           )}
         </div>
+      </aside>
 
-        {/* ПРАВАЯ КОЛОНКА: Поиск, фильтры, сортировка и переключатели */}
+      {/* ПРАВАЯ КОЛОНКА: Поиск, фильтры, управление + список серверов */}
+      <main className="servers-right-column">
         <div
           className="servers-controls-column"
           style={{
@@ -1096,9 +1107,8 @@ export default function Servers({ notify, status, refresh }: Props) {
             </div>
           </div>
         </div>
-      </div>
 
-      {loading ? (
+        {loading ? (
         /* Скелетоны при загрузке (Skeleton Shimmers) */
         <div className={`server-list cols-${columns}`} style={{ marginTop: 12 }}>
           {Array.from({ length: 8 }).map((_, idx) => (
@@ -1481,6 +1491,8 @@ export default function Servers({ notify, status, refresh }: Props) {
           )}
         </div>
       )}
+    </main>
+  </div>
 
       {/* МОДАЛЬНОЕ ОКНО ИГНОР-ЛИСТА */}
       {ignoreOpen && (
@@ -1676,6 +1688,11 @@ export default function Servers({ notify, status, refresh }: Props) {
                           }}
                         />
                         <b style={{ fontSize: 14 }}>{p.name}</b>
+                        {p.is_whitelist && (
+                          <span className="badge" style={{ background: 'rgba(168, 85, 247, 0.25)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.5)', fontSize: 10, fontWeight: 600 }}>
+                            🟣 Белый список
+                          </span>
+                        )}
                         <span
                           style={{
                             fontFamily: 'Consolas, monospace',
@@ -1707,7 +1724,7 @@ export default function Servers({ notify, status, refresh }: Props) {
                         )}
                       </div>
 
-                      {/* Кнопки переключения, обновления и удаления */}
+                      {/* Кнопки переключения, обновления, белых списков и удаления */}
                       <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                         <button
                           type="button"
@@ -1724,6 +1741,21 @@ export default function Servers({ notify, status, refresh }: Props) {
                           onClick={() => toggleProviderEnable(p.id, p.enabled !== false)}
                         >
                           {togglingProvider === p.id ? '⏳…' : p.enabled !== false ? '● Активна' : '○ Отключена'}
+                        </button>
+                        <button
+                          type="button"
+                          className={`btn sm ghost btn-whitelist ${p.is_whitelist ? 'is-whitelist' : ''}`}
+                          style={{
+                            color: p.is_whitelist ? '#c084fc' : undefined,
+                            borderColor: p.is_whitelist ? 'rgba(168, 85, 247, 0.5)' : undefined,
+                            background: p.is_whitelist ? 'rgba(168, 85, 247, 0.15)' : undefined,
+                            fontWeight: p.is_whitelist ? 600 : 400,
+                          }}
+                          title={p.is_whitelist ? 'Исключить подписку из белых списков' : 'Включить всю подписку в белые списки (100% туннель)'}
+                          disabled={togglingWhitelistSub === p.id || deletingSub}
+                          onClick={() => toggleProviderWhitelist(p.id, Boolean(p.is_whitelist))}
+                        >
+                          {togglingWhitelistSub === p.id ? '⏳…' : p.is_whitelist ? '🟣 В белом списке' : '⚪ Белые списки'}
                         </button>
                         <button
                           type="button"

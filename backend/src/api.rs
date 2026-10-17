@@ -62,7 +62,11 @@ pub async fn status(State(state): State<AppState>) -> Response {
     let service_running = !service_stopped && mihomo_ver.is_some();
     let stack_memory = crate::system::get_stack_memory_info();
     let active_id = active.as_ref().and_then(|a| a.get("id")).and_then(|v| v.as_str()).unwrap_or("");
-    let whitelist_mode_active = !cfg.whitelist_servers.is_empty() && cfg.whitelist_servers.iter().any(|s| s == active_id);
+    let active_prov = active.as_ref().and_then(|a| a.get("provider")).and_then(|v| v.as_str()).unwrap_or("");
+    let is_server_wl = !cfg.whitelist_servers.is_empty() && cfg.whitelist_servers.iter().any(|s| s == active_id);
+    let is_prov_wl = !cfg.whitelist_providers.is_empty() && cfg.whitelist_providers.iter().any(|p| p == active_prov);
+    let whitelist_mode_active = (!cfg.whitelist_servers.is_empty() || !cfg.whitelist_providers.is_empty()) && (is_server_wl || is_prov_wl);
+    crate::traffic::set_whitelist_active(whitelist_mode_active);
 
     api_ok(json!({
         "version": VERSION,
@@ -76,6 +80,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
         "stack_memory": stack_memory,
         "whitelist_mode_active": whitelist_mode_active,
         "whitelist_servers": cfg.whitelist_servers,
+        "whitelist_providers": cfg.whitelist_providers,
         "server_aliases": cfg.server_aliases,
         "mihomo": { "host": cfg.mihomo.host, "port": cfg.mihomo.port },
         "rci": { "host": cfg.rci.host, "port": cfg.rci.port },
@@ -333,7 +338,8 @@ pub async fn get_servers(State(state): State<AppState>) -> Response {
                         .as_ref()
                         .map_or(s.is_active, |fs| fs == &s.id);
                     let custom_alias = cfg.server_aliases.get(&s.id).cloned();
-                    let is_whitelist = cfg.whitelist_servers.iter().any(|ws| ws == &s.id);
+                    let is_whitelist = cfg.whitelist_servers.iter().any(|ws| ws == &s.id)
+                        || s.provider.as_ref().map_or(false, |p| cfg.whitelist_providers.iter().any(|wp| wp == p));
                     json!({
                         "id": s.id, "name": s.name, "protocol": s.protocol,
                         "host": s.host, "port": s.port,
@@ -353,6 +359,7 @@ pub async fn get_servers(State(state): State<AppState>) -> Response {
                 "servers": list,
                 "server_aliases": cfg.server_aliases,
                 "whitelist_servers": cfg.whitelist_servers,
+                "whitelist_providers": cfg.whitelist_providers,
             }))
         }
         Err(e) => api_err(e),
@@ -399,12 +406,26 @@ pub struct ServerWhitelistReq {
 }
 
 /// Синхронизация 100% туннелирования для режима обхода белых списков.
-/// Если активный узел входит в whitelist_servers, автоматически активируется полный туннель (REDIRECT + TPROXY)
-/// для всех LAN-устройств, у которых включено следование белому списку (follow_whitelist).
-/// Если активный узел не входит в whitelist_servers, восстанавливается обычный игровой режим или снимаются правила.
+/// Если активный узел входит в whitelist_servers или принадлежит whitelist_providers,
+/// автоматически активируется полный туннель (REDIRECT + TPROXY) для всех активных LAN-устройств.
+/// Если активный узел не входит в белый список, восстанавливается обычный игровой режим или снимаются правила.
 pub async fn sync_whitelist_mode_tunnel(state: &AppState, target_server_id: &str) -> Result<(), String> {
     let cfg = state.config.read().await.clone();
-    let is_whitelist = !cfg.whitelist_servers.is_empty() && cfg.whitelist_servers.iter().any(|s| s == target_server_id);
+    let is_server_wl = !cfg.whitelist_servers.is_empty() && cfg.whitelist_servers.iter().any(|s| s == target_server_id);
+    let mut is_prov_wl = false;
+    if !cfg.whitelist_providers.is_empty() {
+        if let Ok(servers) = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
+            if let Some(s) = servers.iter().find(|srv| srv.id == target_server_id) {
+                if let Some(ref prov) = s.provider {
+                    if cfg.whitelist_providers.iter().any(|p| p == prov) {
+                        is_prov_wl = true;
+                    }
+                }
+            }
+        }
+    }
+    let is_whitelist = is_server_wl || is_prov_wl;
+    crate::traffic::set_whitelist_active(is_whitelist);
 
     let (redir_port, tproxy_port) = if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
         (
@@ -417,14 +438,14 @@ pub async fn sync_whitelist_mode_tunnel(state: &AppState, target_server_id: &str
 
     if is_whitelist {
         log_i!(
-            "[WHITELIST_EMERGENCY] 🟣 Активация 100% туннелирования: узел '{}' входит в белый список",
-            target_server_id
+            "[WHITELIST_EMERGENCY] 🟣 Активация 100% туннелирования: узел '{}' (server_wl={}, prov_wl={})",
+            target_server_id, is_server_wl, is_prov_wl
         );
         let mut tunnel_cfg = cfg.gaming.clone();
         tunnel_cfg.enabled = true;
         tunnel_cfg.mode = config::GamingMode::Compatibility;
 
-        // Добавляем все устройства, следующие режиму белых списков
+        // 1. Добавляем устройства из настроек маршрутизации (следующие белым спискам)
         for (ip, dr) in &cfg.device_routing {
             if dr.follow_whitelist {
                 if !tunnel_cfg.devices.iter().any(|d| d.ip == *ip) {
@@ -439,6 +460,77 @@ pub async fn sync_whitelist_mode_tunnel(state: &AppState, target_server_id: &str
                 }
             }
         }
+
+        // 2. Добавляем все активные устройства из RCI (KeeneticOS)
+        if let Ok(policies) = rci::get_policies(&state.http, &cfg).await {
+            if let Ok(rci_devs) = rci::get_devices(&state.http, &cfg, &policies, "").await {
+                for d in rci_devs {
+                    if d.online && !d.ip.is_empty() && d.ip != "0.0.0.0" {
+                        if !tunnel_cfg.devices.iter().any(|td| td.ip == d.ip) {
+                            tunnel_cfg.devices.push(config::GamingDevice {
+                                ip: d.ip.clone(),
+                                mac: d.mac.clone(),
+                                name: d.name.clone(),
+                                enabled: true,
+                                server: None,
+                                ipv6: d.ipv6.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Добавляем все активные LAN-устройства из таблицы ARP (/proc/net/arp)
+        if let Ok(arp_content) = tokio::fs::read_to_string("/proc/net/arp").await {
+            for line in arp_content.lines().skip(1) {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 4 {
+                    let ip = parts[0];
+                    let flags = parts[2];
+                    let mac = parts[3];
+                    if (flags == "0x2" || flags == "2") && ip.parse::<std::net::Ipv4Addr>().is_ok() && !ip.starts_with("127.") {
+                        if !tunnel_cfg.devices.iter().any(|td| td.ip == ip) {
+                            tunnel_cfg.devices.push(config::GamingDevice {
+                                ip: ip.to_string(),
+                                mac: mac.to_string(),
+                                name: format!("Device ({})", ip),
+                                enabled: true,
+                                server: None,
+                                ipv6: Vec::new(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Добавляем устройства из DHCP-аренд (dnsmasq leases)
+        for leases_path in &["/opt/var/lib/misc/dnsmasq.leases", "/var/lib/misc/dnsmasq.leases", "/tmp/dnsmasq.leases"] {
+            if let Ok(leases) = tokio::fs::read_to_string(leases_path).await {
+                for line in leases.lines() {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 4 {
+                        let mac = parts[1];
+                        let ip = parts[2];
+                        let name = parts[3];
+                        if ip.parse::<std::net::Ipv4Addr>().is_ok() && !ip.starts_with("127.") {
+                            if !tunnel_cfg.devices.iter().any(|td| td.ip == ip) {
+                                tunnel_cfg.devices.push(config::GamingDevice {
+                                    ip: ip.to_string(),
+                                    mac: mac.to_string(),
+                                    name: if name != "*" { name.to_string() } else { format!("Device ({})", ip) },
+                                    enabled: true,
+                                    server: None,
+                                    ipv6: Vec::new(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         sync_gaming_full_tunnel(&tunnel_cfg, redir_port, tproxy_port).await
     } else if cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility {
         log_i!("[WHITELIST_EMERGENCY] Активный узел не входит в белый список. Возврат к стандартным настройкам игрового режима.");
@@ -475,6 +567,7 @@ pub async fn set_server_whitelist(
         return api_err(format!("Ошибка сохранения белого списка серверов: {e}"));
     }
     let wl = cfg.whitelist_servers.clone();
+    let wl_p = cfg.whitelist_providers.clone();
     *state.config.write().await = std::sync::Arc::new(cfg.clone());
     log_i!("Обновлён список серверов белых списков (всего: {})", wl.len());
 
@@ -483,7 +576,54 @@ pub async fn set_server_whitelist(
         let _ = sync_whitelist_mode_tunnel(&state, &active_id).await;
     }
 
-    api_ok(json!({ "whitelist_servers": wl }))
+    api_ok(json!({ "whitelist_servers": wl, "whitelist_providers": wl_p }))
+}
+
+#[derive(Deserialize)]
+pub struct ProviderWhitelistReq {
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub providers: Option<Vec<String>>,
+}
+
+/// POST /api/whitelist/providers — добавить/удалить подписку из белого списка (обход белых списков)
+pub async fn set_provider_whitelist(
+    State(state): State<AppState>,
+    Json(req): Json<ProviderWhitelistReq>,
+) -> Response {
+    let _cfg_guard = state.config_lock.lock().await;
+    let mut cfg = (**state.config.read().await).clone();
+    if let Some(providers) = req.providers {
+        cfg.whitelist_providers = providers;
+    } else if let Some(provider_id) = req.provider_id.or(req.provider) {
+        let enable = req.enabled.unwrap_or(true);
+        if enable {
+            if !cfg.whitelist_providers.contains(&provider_id) {
+                cfg.whitelist_providers.push(provider_id);
+            }
+        } else {
+            cfg.whitelist_providers.retain(|p| p != &provider_id);
+        }
+    }
+    if let Err(e) = config::save(&state.config_path, &cfg).await {
+        return api_err(format!("Ошибка сохранения белого списка подписок: {e}"));
+    }
+    let wl_p = cfg.whitelist_providers.clone();
+    let wl_s = cfg.whitelist_servers.clone();
+    *state.config.write().await = std::sync::Arc::new(cfg.clone());
+    log_i!("Обновлён список подписок белых списков (всего: {})", wl_p.len());
+
+    let active_id = mihomo::get_active_server(&state.http, &cfg).await.ok().flatten().map(|s| s.id).unwrap_or_default();
+    if !active_id.is_empty() {
+        let _ = sync_whitelist_mode_tunnel(&state, &active_id).await;
+    }
+
+    api_ok(json!({ "whitelist_providers": wl_p, "whitelist_servers": wl_s }))
 }
 
 #[derive(Deserialize)]
@@ -2329,7 +2469,23 @@ pub struct RenameProviderReq {
 pub async fn get_providers(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
     match mihomo::get_providers_info(&state.http, &cfg).await {
-        Ok(providers) => api_ok(json!({ "providers": providers })),
+        Ok(providers) => {
+            let list: Vec<serde_json::Value> = providers
+                .into_iter()
+                .map(|p| {
+                    let is_wl = cfg.whitelist_providers.iter().any(|wp| wp == &p.id);
+                    let mut val = serde_json::to_value(&p).unwrap_or_default();
+                    if let Some(obj) = val.as_object_mut() {
+                        obj.insert("is_whitelist".to_string(), serde_json::Value::Bool(is_wl));
+                    }
+                    val
+                })
+                .collect();
+            api_ok(json!({
+                "providers": list,
+                "whitelist_providers": cfg.whitelist_providers,
+            }))
+        }
         Err(e) => api_err(e),
     }
 }

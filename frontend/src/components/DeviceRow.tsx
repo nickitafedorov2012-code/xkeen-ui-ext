@@ -155,10 +155,11 @@ const DeviceRow = memo(function DeviceRow({
   isGamingCompat = false,
 }: Props) {
   const cleanName = d.name.replace(/\s*-\s*Home network.*$/i, '').trim()
-  const cleanIp = (!d.ip || d.ip === '0.0.0.0') ? '—' : d.ip
+  const isOfflineOrNoIp = !d.online || !d.ip || d.ip === '0.0.0.0' || d.ip === '—'
+  const cleanIp = isOfflineOrNoIp ? '—' : d.ip
 
   return (
-    <tr className={`device-row ${selected ? 'selected' : ''} ${d.is_current_device ? 'me' : ''} ${!d.online ? 'device-row-offline' : ''}`}>
+    <tr className={`device-row ${selected ? 'selected' : ''} ${d.is_current_device ? 'me' : ''} ${isOfflineOrNoIp ? 'device-row-offline' : ''}`}>
       <td>
         <input
           type="checkbox"
@@ -224,8 +225,11 @@ const DeviceRow = memo(function DeviceRow({
           <select
             className="device-select"
             value={assigned || 'default'}
-            disabled={busy}
-            onChange={(e) => applyServer(d.ip, d.name, e.target.value)}
+            disabled={busy || isOfflineOrNoIp}
+            onChange={(e) => {
+              if (isOfflineOrNoIp) return
+              applyServer(d.ip, d.name, e.target.value)
+            }}
           >
             <option value="default">Default (PROXY)</option>
             {assigned && !servers.some((s) => s.id === assigned) && (
@@ -272,8 +276,8 @@ const DeviceRow = memo(function DeviceRow({
           onClick={() => onToggleZapret?.(d.ip, d.mac, !zapretActive)}
           title={
             zapretActive
-              ? `Zapret DPI включен для ${d.name} (${d.ip}). Трафик обходит блокировки напрямую. Нажмите для отключения.`
-              : `Zapret DPI выключен для ${d.name} (${d.ip}). Трафик исключен из NFQUEUE zapret. Нажмите для включения.`
+              ? `Zapret DPI включен для ${d.name} (${d.ip || d.mac}). Трафик обходит блокировки напрямую. Нажмите для отключения.`
+              : `Zapret DPI выключен для ${d.name} (${d.ip || d.mac}). Трафик исключен из NFQUEUE zapret. Нажмите для включения.`
           }
         >
           <span className="device-zapret-icon">
@@ -302,8 +306,8 @@ const DeviceRow = memo(function DeviceRow({
           onClick={() => onToggleGaming?.(d.mac, d.ip, !gamingActive)}
           title={
             gamingActive
-              ? `Игровой режим включен для ${d.name} (${d.ip}). Нажмите для отключения.`
-              : `Игровой режим выключен для ${d.name} (${d.ip}). Нажмите для включения.`
+              ? `Игровой режим включен для ${d.name} (${d.ip || d.mac}). Нажмите для отключения.`
+              : `Игровой режим выключен для ${d.name} (${d.ip || d.mac}). Нажмите для включения.`
           }
         >
           <span className="device-gaming-icon">🎮</span>
@@ -314,9 +318,12 @@ const DeviceRow = memo(function DeviceRow({
         <button
           type="button"
           className="device-gear-btn"
-          title="Настройка резервирования (Failover)"
-          disabled={busy}
-          onClick={() => openDrModal(d, assigned)}
+          title={isOfflineOrNoIp ? 'Устройство оффлайн' : 'Настройка резервирования (Failover)'}
+          disabled={busy || isOfflineOrNoIp}
+          onClick={() => {
+            if (isOfflineOrNoIp) return
+            openDrModal(d, assigned)
+          }}
         >
           <svg
             width="15"
@@ -335,9 +342,12 @@ const DeviceRow = memo(function DeviceRow({
         <button
           type="button"
           className="device-gear-btn"
-          title="Расписание (автоблокировка/переключение по времени)"
-          disabled={busy}
-          onClick={() => onOpenSchedule?.(d)}
+          title={isOfflineOrNoIp ? 'Устройство оффлайн' : 'Расписание (автоблокировка/переключение по времени)'}
+          disabled={busy || isOfflineOrNoIp}
+          onClick={() => {
+            if (isOfflineOrNoIp) return
+            onOpenSchedule?.(d)
+          }}
           style={{ marginLeft: 6 }}
         >
           <svg

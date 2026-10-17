@@ -2047,6 +2047,7 @@ table.devices tr.me { background: rgba(79, 140, 255, 0.05); }
 table.devices-table {
   width: 100%;
   border-collapse: collapse;
+  table-layout: fixed;
 }
 
 table.devices-table th {
@@ -2065,14 +2066,16 @@ table.devices-table th.sortable {
 table.devices-table th.sortable:hover {
   color: #cbd5e1;
 }
-table.devices-table th:nth-child(1) { width: 34px; } /* checkbox */
-table.devices-table th:nth-child(2) { width: 20%; min-width: 120px; } /* device */
-table.devices-table th:nth-child(3) { width: 12%; min-width: 100px; } /* IP */
-table.devices-table th:nth-child(4) { width: 14%; min-width: 105px; } /* policy */
-table.devices-table th:nth-child(5) { width: 13%; min-width: 95px; } /* speed */
-table.devices-table th:nth-child(6) { width: 12%; min-width: 85px; } /* traffic */
-table.devices-table th:nth-child(7) { width: 25%; min-width: 135px; } /* server */
-table.devices-table th:nth-child(8) { width: 38px; text-align: center; } /* gear */
+table.devices-table th:nth-child(1) { width: 36px; } /* checkbox */
+table.devices-table th:nth-child(2) { width: 220px; } /* device */
+table.devices-table th:nth-child(3) { width: 120px; } /* IP */
+table.devices-table th:nth-child(4) { width: 130px; } /* policy */
+table.devices-table th:nth-child(5) { width: 95px; } /* speed */
+table.devices-table th:nth-child(6) { width: 90px; } /* traffic */
+table.devices-table th:nth-child(7) { width: 140px; } /* server */
+table.devices-table th:nth-child(8) { width: 110px; text-align: center; } /* zapret */
+table.devices-table th:nth-child(9) { width: 95px; text-align: center; } /* gaming */
+table.devices-table th:nth-child(10) { width: 50px; text-align: center; } /* gear */
 
 /* Ввод ограничения скорости (Мбит/с) */
 .device-speed-input-wrap {
@@ -2465,6 +2468,10 @@ table.devices-table td {
 .offline-accordion-preview {
   font-size: 12px;
   color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 /* --- Плавающая нижняя панель массовых действий (Floating batch bar) --- */
@@ -6852,6 +6859,76 @@ table.devices-table td {
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
   animation: fadeIn 0.2s ease-out;
 }
+
+/* --- True Two-Column Desktop Servers Tab Layout --- */
+.servers-desktop-layout {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+  width: 100%;
+}
+
+.servers-left-column {
+  width: 360px;
+  min-width: 340px;
+  max-width: 380px;
+  position: sticky;
+  top: 16px;
+  align-self: flex-start;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.servers-right-column {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+@media (max-width: 900px) {
+  .servers-desktop-layout {
+    flex-direction: column;
+  }
+  .servers-left-column {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    position: static;
+  }
+}
+
+/* --- Universal Apple-Style Beta Notice Banner --- */
+.beta-notice-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 10px 0 16px;
+  padding: 8px 16px;
+  background: rgba(59, 130, 246, 0.08);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(59, 130, 246, 0.22);
+  border-radius: 10px;
+  color: #93c5fd;
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: -0.1px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  text-align: center;
+}
+
+[data-theme="light"] .beta-notice-banner {
+  background: rgba(59, 130, 246, 0.06);
+  border-color: rgba(59, 130, 246, 0.25);
+  color: #1d4ed8;
+  box-shadow: 0 2px 10px rgba(59, 130, 246, 0.08);
+}
+
 
 
 

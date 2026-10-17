@@ -37,3 +37,44 @@ describe('Servers grid column layout logic', () => {
     }
   })
 })
+
+describe('DeviceRoutingModal zero-clutter rule for whitelist toggle', () => {
+  const checkWhitelistVisible = (
+    servers: Array<{ id: string; is_whitelist?: boolean }>,
+    whitelistProviders?: string[]
+  ) => {
+    return Boolean(servers.some((s) => s.is_whitelist) || (whitelistProviders && whitelistProviders.length > 0))
+  }
+
+  it('hides whitelist toggle when no servers and no providers are whitelisted', () => {
+    const servers = [{ id: 's1', is_whitelist: false }, { id: 's2' }]
+    expect(checkWhitelistVisible(servers, [])).toBe(false)
+    expect(checkWhitelistVisible(servers, undefined)).toBe(false)
+  })
+
+  it('shows whitelist toggle when at least one server is whitelisted', () => {
+    const servers = [{ id: 's1', is_whitelist: true }, { id: 's2', is_whitelist: false }]
+    expect(checkWhitelistVisible(servers, [])).toBe(true)
+  })
+
+  it('shows whitelist toggle when at least one subscription provider is whitelisted', () => {
+    const servers = [{ id: 's1', is_whitelist: false }]
+    expect(checkWhitelistVisible(servers, ['provider_1'])).toBe(true)
+  })
+})
+
+describe('Devices table offline dimming and actions lock', () => {
+  const isActionDisabled = (device: { ip?: string; online?: boolean }) => {
+    return !device.ip || !device.online
+  }
+
+  it('disables actions when device is offline or has no IP', () => {
+    expect(isActionDisabled({ ip: '', online: false })).toBe(true)
+    expect(isActionDisabled({ ip: '192.168.1.100', online: false })).toBe(true)
+    expect(isActionDisabled({ ip: '', online: true })).toBe(true)
+  })
+
+  it('enables actions when device has valid IP and is online', () => {
+    expect(isActionDisabled({ ip: '192.168.1.100', online: true })).toBe(false)
+  })
+})

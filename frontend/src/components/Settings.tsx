@@ -171,6 +171,14 @@ export function SwapManager({ notify }: { notify: (msg: string, isErr?: boolean)
   )
 }
 
+function fmtTrafficBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return '0 B'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
 interface Props {
   notify: (msg: string, isError?: boolean) => void
   status?: StatusInfo | null
@@ -188,6 +196,42 @@ export default function Settings({ notify, status, refresh }: Props) {
   const [savingDomains, setSavingDomains] = useState(false)
   const [scanningCdn, setScanningCdn] = useState(false)
   const [domainsRevision, setDomainsRevision] = useState<string | undefined>(undefined)
+
+  // --- Сводка сетевого трафика ---
+  const [trafficSummary, setTrafficSummary] = useState<{
+    direct_bytes: number
+    proxy_bytes: number
+    whitelist_bytes: number
+    whitelist_active: boolean
+  }>({
+    direct_bytes: 0,
+    proxy_bytes: 0,
+    whitelist_bytes: 0,
+    whitelist_active: false,
+  })
+
+  useEffect(() => {
+    let active = true
+    const loadTraffic = async () => {
+      try {
+        const data = await apiGet<any>('traffic/poll')
+        if (active && data) {
+          setTrafficSummary({
+            direct_bytes: data.direct_bytes ?? data.direct?.bytes ?? 0,
+            proxy_bytes: data.proxy_bytes ?? data.proxy?.bytes ?? 0,
+            whitelist_bytes: data.whitelist_bytes ?? data.whitelist?.bytes ?? 0,
+            whitelist_active: Boolean(data.whitelist_active ?? data.whitelist?.active),
+          })
+        }
+      } catch {}
+    }
+    loadTraffic()
+    const timer = setInterval(loadTraffic, 5000)
+    return () => {
+      active = false
+      clearInterval(timer)
+    }
+  }, [])
 
   // Модальные окна
   const [configEditorOpen, setConfigEditorOpen] = useState(false)
@@ -847,6 +891,67 @@ export default function Settings({ notify, status, refresh }: Props) {
           </button>
         </div>
       </div>
+
+      {/* СВОДКА СЕТЕВОГО ТРАФИКА */}
+      <section className="card" style={{ marginBottom: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 18 }}>📊</span>
+            <h3 style={{ margin: 0, fontSize: 15 }}>Сводка сетевого трафика</h3>
+          </div>
+          {trafficSummary.whitelist_active && (
+            <span className="badge" style={{ background: 'rgba(168, 85, 247, 0.2)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.4)', fontSize: 11, fontWeight: 600 }}>
+              🟣 Белые списки активны
+            </span>
+          )}
+        </div>
+        <p className="muted small" style={{ margin: '0 0 14px' }}>
+          Накопленный объем трафика по направлениям маршрутизации с момента старта службы.
+        </p>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
+          {/* Прямой трафик */}
+          <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border)', borderRadius: 10, padding: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, color: '#4ade80', fontSize: 12.5, fontWeight: 600 }}>
+              <span>🟢</span>
+              <span>Прямой трафик (Direct)</span>
+            </div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-bright)' }}>
+              {fmtTrafficBytes(trafficSummary.direct_bytes)}
+            </div>
+            <div className="muted small" style={{ marginTop: 2, fontSize: 11 }}>
+              Мимо прокси / локальный
+            </div>
+          </div>
+
+          {/* Проксированный трафик */}
+          <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border)', borderRadius: 10, padding: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, color: '#38bdf8', fontSize: 12.5, fontWeight: 600 }}>
+              <span>🔵</span>
+              <span>Проксированный (Proxy)</span>
+            </div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-bright)' }}>
+              {fmtTrafficBytes(trafficSummary.proxy_bytes)}
+            </div>
+            <div className="muted small" style={{ marginTop: 2, fontSize: 11 }}>
+              Через ядро Mihomo / VPS
+            </div>
+          </div>
+
+          {/* Белые списки */}
+          <div style={{ background: trafficSummary.whitelist_active ? 'rgba(168, 85, 247, 0.08)' : 'rgba(255,255,255,0.02)', border: trafficSummary.whitelist_active ? '1px solid rgba(168, 85, 247, 0.4)' : '1px solid var(--border)', borderRadius: 10, padding: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, color: '#c084fc', fontSize: 12.5, fontWeight: 600 }}>
+              <span>🟣</span>
+              <span>Белые списки (100% туннель)</span>
+            </div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-bright)' }}>
+              {fmtTrafficBytes(trafficSummary.whitelist_bytes)}
+            </div>
+            <div className="muted small" style={{ marginTop: 2, fontSize: 11 }}>
+              {trafficSummary.whitelist_active ? 'Туннель активен для LAN устройств' : 'Накоплено в аварийном режиме'}
+            </div>
+          </div>
+        </div>
+      </section>
 
       <div className="settings-columns">
         {/* ЛЕВАЯ КОЛОНКА */}

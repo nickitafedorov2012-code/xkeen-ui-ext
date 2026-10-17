@@ -359,6 +359,11 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                             📁 {status.active_server.provider_name || status.active_server.provider}
                           </span>
                         )}
+                        {status?.whitelist_mode_active && (
+                          <span className="badge" style={{ background: 'rgba(168, 85, 247, 0.25)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.5)', fontSize: 10, fontWeight: 700 }}>
+                            🟣 ОБХОД БЕЛЫХ СПИСКОВ
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>

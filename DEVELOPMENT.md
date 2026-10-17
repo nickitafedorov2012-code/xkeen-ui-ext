@@ -209,6 +209,17 @@
 
 ## 📋 Ченжлог
 
+## v1.9.1 — Apple Polish, Fixed Devices Table & Whitelist Tunneling
+
+- **Devices Table 10-Column Fixed Layout**: Зафиксированы размеры всех 10 колонок в таблице устройств (`table-layout: fixed`). Устранены скачки и смещения строк при открытии аккордеона оффлайн-устройств.
+- **Offline Devices Polish**: Добавлено безопасное отключение действий для оффлайн-устройств без IP, удалена лишняя англоязычная плашка OFFLINE SECTION, внедрен мерцающий скелетон загрузки (`Skeleton Shimmer`).
+- **Two-Column Desktop Servers Layout**: Двухколоночный интерфейс на десктопе — фиксированная командная карточка активного сервера слева (~360px, sticky) и сетка серверов с фильтрами, поиском и пагинацией справа (сворачивание на экранах < 900px).
+- **Entire Subscriptions Whitelist (`whitelist_providers`)**: Поддержка добавления целых провайдеров/подписок в белые списки (`POST /api/whitelist/providers`) с переключателем в модалке провайдеров.
+- **Dynamic LAN Discovery on Whitelist Failover**: Автоматическое сканирование всех подключенных LAN-устройств через ARP и DHCP-аренды при переходе на узел из белого списка со 100% туннелированием.
+- **Whitelist Traffic Tracking & Indicators**: Отображение `🟣 Обход белых списков (100% туннель)` в графике трафика (`TrafficGraph.tsx`), карточке активного сервера (`Dashboard.tsx`) и сводке трафика в Настройках (`Settings.tsx`).
+- **Device Routing Zero-Clutter**: Скрытие переключателя белых списков в настройках маршрутизации устройства, если в системе нет настроенных узлов или подписок белых списков.
+- **Universal Apple-Style Beta Notice**: Универсальная матовая плашка (`.beta-notice-banner`) под вкладками навигации, информирующая о стадии бета-тестирования.
+
 ## v1.8.14 — Apple-grade Zero-Touch Upgrade (13 ключевых улучшений)
 
 - **AdGuard Home DNS Redirection (Port 3053)**: выделенная цепочка iptables `XKEEN_ADGUARD`, безопасное удаление/добавление правил, интеграция в S51zapret и сторожевой мониторинг DNS.

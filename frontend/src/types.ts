@@ -36,6 +36,7 @@ export interface StatusInfo {
   stack_memory?: StackMemoryInfo | null
   whitelist_mode_active?: boolean
   whitelist_servers?: string[]
+  whitelist_providers?: string[]
   server_aliases?: Record<string, string>
   mihomo_version?: string | null
   zapret?: {
@@ -129,6 +130,7 @@ export interface ProviderInfo {
   url?: string
   hwid?: string
   enabled?: boolean
+  is_whitelist?: boolean
 }
 
 export interface ZapretCustomEntry {

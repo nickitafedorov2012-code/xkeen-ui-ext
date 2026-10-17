@@ -96,13 +96,14 @@ export default function Devices({ notify }: Props) {
   } | null>(null)
 
   const [gamingDeviceMacs, setGamingDeviceMacs] = useState<Set<string>>(new Set())
+  const [whitelistProviders, setWhitelistProviders] = useState<string[]>([])
 
   const load = useCallback(async () => {
     try {
       const [d, p, s, r, dr, zDev, gamingRes] = await Promise.all([
         apiGet<{ devices: DeviceInfo[] }>('devices'),
         apiGet<{ policies: PolicyInfo[] }>('policies'),
-        apiGet<{ servers: ServerInfo[] }>('servers'),
+        apiGet<{ servers: ServerInfo[]; whitelist_providers?: string[] }>('servers'),
         apiGet<{ assignments: RoutingAssignmentInfo[] }>('routing'),
         apiGet<{ routing: Record<string, DeviceRoutingEntry>; device_failover_enabled: boolean }>('device-routing').catch(() => ({
           routing: {} as Record<string, DeviceRoutingEntry>,
@@ -116,6 +117,7 @@ export default function Devices({ notify }: Props) {
       setDevices(d.devices)
       setPolicies(p.policies)
       setServers(s.servers)
+      setWhitelistProviders((s as any)?.whitelist_providers || [])
       setRouting(r.assignments)
       setDrMap(dr.routing)
       setDevFailover(dr.device_failover_enabled)
@@ -578,7 +580,40 @@ export default function Devices({ notify }: Props) {
       </div>
 
       {loading ? (
-        <p className="muted" style={{ padding: '20px 18px' }}>Загрузка устройств…</p>
+        <div className="devices-table-wrap" data-testid="devices-skeleton">
+          <table className="devices-table">
+            <thead>
+              <tr>
+                <th><input type="checkbox" disabled /></th>
+                <th>Device</th>
+                <th>IP</th>
+                <th>Policy</th>
+                <th>Speed</th>
+                <th>Traffic</th>
+                <th>Server</th>
+                <th style={{ textAlign: 'center' }}>Zapret (DPI)</th>
+                <th style={{ textAlign: 'center' }}>Игры 🎮</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {Array.from({ length: 6 }).map((_, i) => (
+                <tr key={i} className="device-row">
+                  <td><div className="skeleton-shimmer" style={{ width: 16, height: 16 }} /></td>
+                  <td><div className="skeleton-shimmer" style={{ width: '80%', height: 16 }} /></td>
+                  <td><div className="skeleton-shimmer" style={{ width: 90, height: 16 }} /></td>
+                  <td><div className="skeleton-shimmer" style={{ width: 100, height: 24, borderRadius: 6 }} /></td>
+                  <td><div className="skeleton-shimmer" style={{ width: 70, height: 24, borderRadius: 6 }} /></td>
+                  <td><div className="skeleton-shimmer" style={{ width: 60, height: 16 }} /></td>
+                  <td><div className="skeleton-shimmer" style={{ width: 110, height: 24, borderRadius: 6 }} /></td>
+                  <td style={{ textAlign: 'center' }}><div className="skeleton-shimmer" style={{ width: 85, height: 24, borderRadius: 6 }} /></td>
+                  <td style={{ textAlign: 'center' }}><div className="skeleton-shimmer" style={{ width: 75, height: 24, borderRadius: 6 }} /></td>
+                  <td style={{ textAlign: 'center' }}><div className="skeleton-shimmer" style={{ width: 40, height: 24, borderRadius: 6 }} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       ) : activeView === 'map' ? (
         <PoliciesMap notify={notify} />
       ) : (
@@ -611,8 +646,8 @@ export default function Devices({ notify }: Props) {
                 <th className="sortable" onClick={() => handleSort('server')}>
                   Server{sortIndicator('server')}
                 </th>
-                <th style={{ textAlign: 'center', width: 110 }}>Zapret (DPI)</th>
-                <th style={{ textAlign: 'center', width: 90 }}>Игры 🎮</th>
+                <th style={{ textAlign: 'center' }}>Zapret (DPI)</th>
+                <th style={{ textAlign: 'center' }}>Игры 🎮</th>
                 <th />
               </tr>
             </thead>
@@ -668,7 +703,6 @@ export default function Devices({ notify }: Props) {
                 <>
                   <tr>
                     <td colSpan={10} style={{ padding: '16px 14px 4px', borderBottom: 'none' }}>
-                      <div className="offline-section-title">OFFLINE SECTION</div>
                       <div
                         className="offline-accordion-row"
                         onClick={() => setOfflineExpanded((prev) => !prev)}
@@ -856,6 +890,7 @@ export default function Devices({ notify }: Props) {
         <DeviceRoutingModal
           modal={drModal}
           servers={servers}
+          whitelistProviders={whitelistProviders}
           busy={busy}
           hasExisting={!!drMap[drModal.ip]}
           onChange={setDrModal}

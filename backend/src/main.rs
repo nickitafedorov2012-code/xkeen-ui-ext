@@ -535,6 +535,8 @@ async fn main() {
         .route("/api/servers", get(api::get_servers))
         .route("/api/servers/alias", post(api::set_server_alias))
         .route("/api/servers/whitelist", post(api::set_server_whitelist))
+        .route("/api/whitelist/providers", post(api::set_provider_whitelist))
+        .route("/api/providers/whitelist", post(api::set_provider_whitelist))
         .route("/api/servers/switch", post(api::switch_server))
         .route("/api/servers/active", put(api::switch_server))
         .route("/api/servers/ping", post(api::ping_servers))

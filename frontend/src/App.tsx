@@ -327,6 +327,11 @@ export default function App() {
         ))}
       </nav>
 
+      {/* Универсальная плашка бета-версии (Apple-style Frosted Glass) */}
+      <div className="beta-notice-banner">
+        <span>🧪 Бета-версия XKeen Route: функционал находится в стадии активного тестирования.</span>
+      </div>
+
       {!connected && (
         <div
           style={{

@@ -307,6 +307,9 @@ pub struct AppConfig {
     /// Серверы, отмеченные для обхода белых списков.
     #[serde(default)]
     pub whitelist_servers: Vec<String>,
+    /// Подписки (провайдеры), целиком отмеченные для обхода белых списков.
+    #[serde(default)]
+    pub whitelist_providers: Vec<String>,
 }
 
 /// Платформы и сервисы для игрового режима.
@@ -848,6 +851,7 @@ impl Default for AppConfig {
             adguard: AdGuardConfig::default(),
             server_aliases: std::collections::HashMap::new(),
             whitelist_servers: Vec::new(),
+            whitelist_providers: Vec::new(),
         }
     }
 }
@@ -1298,5 +1302,18 @@ mod tests {
         let tmp_file = std::env::temp_dir().join("xkeen_test_save_blank_pw.json");
         let res = save(&tmp_file, &cfg).await;
         assert!(res.is_err(), "Saving config with enabled auth but blank password hash must be rejected");
+    }
+
+    #[test]
+    fn test_whitelist_providers_serialization_and_default() {
+        let json_empty = r#"{}"#;
+        let parsed = parse_config_content(json_empty, "test_empty.json");
+        assert!(parsed.whitelist_providers.is_empty());
+
+        let json_with_providers = r#"{
+            "whitelist_providers": ["sub_alpha", "sub_beta"]
+        }"#;
+        let parsed2 = parse_config_content(json_with_providers, "test_prov.json");
+        assert_eq!(parsed2.whitelist_providers, vec!["sub_alpha", "sub_beta"]);
     }
 }
