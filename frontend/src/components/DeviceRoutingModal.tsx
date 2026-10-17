@@ -9,6 +9,7 @@ export interface DrModalState {
   servers: string[]
   threshold: number
   autoRestore: boolean
+  followWhitelist?: boolean
 }
 
 interface Props {
@@ -167,6 +168,14 @@ export default function DeviceRoutingModal({
                 onChange={(e) => onChange({ ...modal, autoRestore: e.target.checked })}
               />
               автовозврат на основной
+            </label>
+            <label className="check" style={{ display: 'inline-flex', gap: 6, alignItems: 'center', fontSize: 13 }} title="При активации узла из белых списков перенаправлять 100% трафика в туннель">
+              <input
+                type="checkbox"
+                checked={modal.followWhitelist ?? true}
+                onChange={(e) => onChange({ ...modal, followWhitelist: e.target.checked })}
+              />
+              🟣 следовать белым спискам (100% туннель)
             </label>
           </div>
         </div>

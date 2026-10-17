@@ -1125,6 +1125,12 @@ export default function Zapret({ notify }: ZapretProps) {
           animation: zapretGlowPulsePurple 1.2s ease-in-out infinite !important;
         }
       `}</style>
+      <div className="beta-banner">
+        <span style={{ fontSize: 16 }}>🧪</span>
+        <div>
+          <strong>Бета-функция:</strong> Сетевые службы (Zapret, Игровой режим, AdGuard Home) работают с изоляцией netfilter/iptables.
+        </div>
+      </div>
       {/* 1. ГЛАВНАЯ КАРТОЧКА С ВЫКЛЮЧАТЕЛЕМ */}
       <section
         className="card"

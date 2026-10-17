@@ -655,11 +655,10 @@ pub async fn set_protection(http: &reqwest::Client, cfg: &AdGuardConfig, enabled
     if !status.running {
         return Err("AdGuard Home перестал отвечать после изменения статуса защиты".to_string());
     }
-    if status.protection_enabled != enabled {
-        return Err(format!(
-            "Не удалось применить статус защиты (запрошено: {}, текущее: {})",
-            enabled, status.protection_enabled
-        ));
+    if status.protection_enabled {
+        let _ = apply_adguard_iptables(cfg.dns_port);
+    } else {
+        let _ = remove_adguard_iptables();
     }
 
     Ok(status.protection_enabled)
@@ -982,6 +981,110 @@ pub struct AghDiagnostics {
     pub recommendations: Vec<String>,
 }
 
+pub const AGH_IPTABLES_CHAIN: &str = "XKEEN_ADGUARD";
+
+/// Применение изолированной цепочки XKEEN_ADGUARD в iptables -t nat для перехвата портов 53 UDP/TCP
+pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        // 1. Создаем цепочку XKEEN_ADGUARD, если она не создана, и очищаем ее
+        let _ = std::process::Command::new("iptables")
+            .args(["-t", "nat", "-N", AGH_IPTABLES_CHAIN])
+            .output();
+        let _ = std::process::Command::new("iptables")
+            .args(["-t", "nat", "-F", AGH_IPTABLES_CHAIN])
+            .output();
+
+        // 2. Исключаем трафик loopback
+        let _ = std::process::Command::new("iptables")
+            .args(["-t", "nat", "-A", AGH_IPTABLES_CHAIN, "-d", "127.0.0.1", "-j", "RETURN"])
+            .output();
+
+        // 3. Редирект входящих DNS-запросов (порт 53) на порт AdGuard Home
+        let port_str = dns_port.to_string();
+        let _ = std::process::Command::new("iptables")
+            .args(["-t", "nat", "-A", AGH_IPTABLES_CHAIN, "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", &port_str])
+            .output();
+        let _ = std::process::Command::new("iptables")
+            .args(["-t", "nat", "-A", AGH_IPTABLES_CHAIN, "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", &port_str])
+            .output();
+
+        // 4. Встраиваем переход в XKEEN_ADGUARD в PREROUTING для LAN мостов (br+ и Bridge+)
+        for iface in &["br+", "Bridge+"] {
+            let check_udp = std::process::Command::new("iptables")
+                .args(["-t", "nat", "-C", "PREROUTING", "-i", iface, "-p", "udp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
+                .output();
+            if !check_udp.map(|o| o.status.success()).unwrap_or(false) {
+                let _ = std::process::Command::new("iptables")
+                    .args(["-t", "nat", "-I", "PREROUTING", "1", "-i", iface, "-p", "udp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
+                    .output();
+            }
+
+            let check_tcp = std::process::Command::new("iptables")
+                .args(["-t", "nat", "-C", "PREROUTING", "-i", iface, "-p", "tcp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
+                .output();
+            if !check_tcp.map(|o| o.status.success()).unwrap_or(false) {
+                let _ = std::process::Command::new("iptables")
+                    .args(["-t", "nat", "-I", "PREROUTING", "1", "-i", iface, "-p", "tcp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
+                    .output();
+            }
+        }
+    }
+    let _ = dns_port;
+    Ok(())
+}
+
+/// Полное и чистое удаление правил XKEEN_ADGUARD из iptables
+pub fn remove_adguard_iptables() -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        for iface in &["br+", "Bridge+"] {
+            for proto in &["udp", "tcp"] {
+                for _ in 0..20 {
+                    let out = std::process::Command::new("iptables")
+                        .args(["-t", "nat", "-D", "PREROUTING", "-i", iface, "-p", proto, "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
+                        .output();
+                    if !out.map(|o| o.status.success()).unwrap_or(false) {
+                        break;
+                    }
+                }
+                for _ in 0..20 {
+                    let out = std::process::Command::new("iptables")
+                        .args(["-t", "nat", "-D", "PREROUTING", "-i", iface, "-p", proto, "--dport", "53", "-j", "REDIRECT", "--to-ports", "3053"])
+                        .output();
+                    if !out.map(|o| o.status.success()).unwrap_or(false) {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = std::process::Command::new("iptables")
+            .args(["-t", "nat", "-F", AGH_IPTABLES_CHAIN])
+            .output();
+        let _ = std::process::Command::new("iptables")
+            .args(["-t", "nat", "-X", AGH_IPTABLES_CHAIN])
+            .output();
+    }
+    Ok(())
+}
+
+/// Проверка активности редиректа AdGuard в iptables
+pub fn is_adguard_iptables_active(dns_port: u16) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(out) = std::process::Command::new("iptables")
+            .args(["-t", "nat", "-S"])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let port_str = format!("--to-ports {}", dns_port);
+            return text.contains(AGH_IPTABLES_CHAIN) || (text.contains("--dport 53") && text.contains(&port_str));
+        }
+    }
+    let _ = dns_port;
+    false
+}
+
 /// Запуск комплексной диагностики интеграции AdGuard Home
 pub async fn get_diagnostics(
     http: &reqwest::Client,
@@ -1010,20 +1113,8 @@ pub async fn get_diagnostics(
     let detected_config_path = find_adguard_config().map(|p| p.to_string_lossy().to_string());
     let detected_binary_path = find_adguard_binary().map(|p| p.to_string_lossy().to_string());
 
-    // 3. Проверка iptables NAT редиректов (Linux)
-    #[allow(unused_mut)]
-    let mut iptables_redirect_active = false;
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(out) = std::process::Command::new("iptables")
-            .args(["-t", "nat", "-S"])
-            .output()
-        {
-            let text = String::from_utf8_lossy(&out.stdout);
-            iptables_redirect_active = text.contains("--dport 53 -j REDIRECT") || text.contains("REDIRECT --to-ports 53");
-        }
-    }
-
+    // 3. Проверка iptables NAT редиректов (Linux) с точным поиском порта AdGuard / XKEEN_ADGUARD
+    let iptables_redirect_active = is_adguard_iptables_active(cfg.dns_port);
     let dnsmasq_redirect_active = iptables_redirect_active;
 
     // 4. Проверка риска циклов
@@ -1447,7 +1538,7 @@ pub fn ensure_adguard_init_script() -> Result<PathBuf, String> {
 
     let conf = find_adguard_config().unwrap_or_else(|| {
         let is_53_free = std::net::UdpSocket::bind("0.0.0.0:53").is_ok();
-        let port = if is_53_free { 53 } else { 5353 };
+        let port = if is_53_free { 53 } else { 3053 };
         ensure_default_adguard_config(port, 3000)
     });
     let work_dir = conf
@@ -1595,7 +1686,7 @@ echo "AdGuard Home успешно установлен."
 
         // Создаем готовый конфиг AdGuardHome.yaml (если его еще нет), чтобы не требовалось проходить визард
         let is_53_free = std::net::UdpSocket::bind("0.0.0.0:53").is_ok();
-        let dns_port = if is_53_free { 53 } else { 5353 };
+        let dns_port = if is_53_free { 53 } else { 3053 };
         let conf_path = ensure_default_adguard_config(dns_port, 3000);
 
         // Создаем init-скрипт службы
@@ -1678,6 +1769,7 @@ pub async fn service_action(action: &str) -> Result<String, String> {
             .to_string();
 
         if act == "stop" {
+            let _ = remove_adguard_iptables();
             let _ = tokio::process::Command::new("sh")
                 .arg("-c")
                 .arg("killall -9 AdGuardHome 2>/dev/null || true")
@@ -1699,14 +1791,18 @@ pub async fn service_action(action: &str) -> Result<String, String> {
         tokio::time::sleep(Duration::from_millis(800)).await;
         let mut is_running = crate::system::is_process_running("AdGuardHome");
 
-        // Если процесс не запустился из-за конфликта порта 53 (dnsmasq на роутере), автоматически переключаем на 5353
+        // Если процесс не запустился из-за конфликта порта 53 (ndnproxy на Keenetic), автоматически переключаем на 3053
         if !is_running && (act == "start" || act == "restart") {
             if let Ok(agh_log) = tokio::fs::read_to_string("/opt/var/log/adguardhome.log").await {
                 if agh_log.contains("address already in use") || agh_log.contains("bind: address already in use") {
-                    crate::log_w!("Обнаружен конфликт порта DNS 53. Автоматическое переключение DNS-порта AdGuard Home на 5353...");
+                    crate::log_w!("Обнаружен конфликт порта DNS 53. Автоматическое переключение DNS-порта AdGuard Home на 3053...");
                     if let Some(conf_path) = find_adguard_config() {
                         if let Ok(conf_str) = tokio::fs::read_to_string(&conf_path).await {
-                            let patched = conf_str.replace("port: 53\n", "port: 5353\n");
+                            let patched = conf_str
+                                .replace("port: 53\r\n", "port: 3053\r\n")
+                                .replace("port: 53\n", "port: 3053\n")
+                                .replace("port: 5353\r\n", "port: 3053\r\n")
+                                .replace("port: 5353\n", "port: 3053\n");
                             let _ = tokio::fs::write(&conf_path, patched).await;
                             let cmd_retry = format!("exec '{script}' '{act}' </dev/null >'{log_file}' 2>&1");
                             let _ = tokio::process::Command::new("sh").arg("-c").arg(&cmd_retry).status().await;
@@ -1719,6 +1815,9 @@ pub async fn service_action(action: &str) -> Result<String, String> {
         }
 
         if is_running {
+            if act == "start" || act == "restart" {
+                let _ = apply_adguard_iptables(3053);
+            }
             let msg = if !log_content.is_empty() {
                 format!("Служба AdGuard Home успешно выполнила команду '{act}': {log_content}")
             } else {
@@ -1933,6 +2032,14 @@ mod tests {
     async fn test_adguard_installer_flags_and_urls() {
         // SEC-06: Ensure no ghproxy and no -k or --no-check-certificate in installer logic
         let _ = install_adguard_package().await;
+    }
+
+    #[test]
+    fn test_adguard_iptables_dedicated_chain() {
+        assert_eq!(AGH_IPTABLES_CHAIN, "XKEEN_ADGUARD");
+        let active = is_adguard_iptables_active(3053);
+        assert!(!active);
+        assert!(remove_adguard_iptables().is_ok());
     }
 }
 

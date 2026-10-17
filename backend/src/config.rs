@@ -189,6 +189,8 @@ pub struct DeviceRouting {
     pub servers: Vec<String>,
     pub ping_threshold_ms: u32,
     pub auto_restore: bool,
+    #[serde(default = "default_true")]
+    pub follow_whitelist: bool,
 }
 
 impl Default for DeviceRouting {
@@ -197,6 +199,7 @@ impl Default for DeviceRouting {
             servers: Vec::new(),
             ping_threshold_ms: 300,
             auto_restore: true,
+            follow_whitelist: true,
         }
     }
 }
@@ -298,6 +301,12 @@ pub struct AppConfig {
     pub gaming: GamingConfig,
     /// Полноценная интеграция AdGuard Home.
     pub adguard: AdGuardConfig,
+    /// Пользовательские названия серверов (server_id -> alias).
+    #[serde(default)]
+    pub server_aliases: std::collections::HashMap<String, String>,
+    /// Серверы, отмеченные для обхода белых списков.
+    #[serde(default)]
+    pub whitelist_servers: Vec<String>,
 }
 
 /// Платформы и сервисы для игрового режима.
@@ -486,7 +495,7 @@ fn default_agh_http_port() -> u16 {
 }
 
 fn default_agh_dns_port() -> u16 {
-    53
+    3053
 }
 
 fn default_agh_mode() -> String {
@@ -837,6 +846,8 @@ impl Default for AppConfig {
             zapret: ZapretConfig::default(),
             gaming: GamingConfig::default(),
             adguard: AdGuardConfig::default(),
+            server_aliases: std::collections::HashMap::new(),
+            whitelist_servers: Vec::new(),
         }
     }
 }

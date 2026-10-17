@@ -1384,6 +1384,8 @@ pub fn apply_gaming_rules(
             // а весь остальной трафик направляем в туннель/сервер
             let mut routed_any = false;
             let has_explicit_enabled = cfg.devices.iter().any(|d| d.enabled);
+            let has_ru_ruleset = content.contains("category-ru@domain");
+            let has_ip_ruleset = content.contains("category-ru@ipcidr");
             for dev in &cfg.devices {
                 let is_active = if has_explicit_enabled {
                     dev.enabled
@@ -1403,8 +1405,14 @@ pub fn apply_gaming_rules(
                 if !ip.is_empty() {
                     let cidr = if ip.contains('/') { ip.to_string() } else { format!("{ip}/32") };
                     gaming_rules.push(format!("  - AND,((SRC-IP-CIDR,{cidr}),(GEOIP,RU)),DIRECT"));
-                    gaming_rules.push(format!("  - AND,((SRC-IP-CIDR,{cidr}),(GEOSITE,category-gov-ru)),DIRECT"));
-                    gaming_rules.push(format!("  - AND,((SRC-IP-CIDR,{cidr}),(GEOSITE,ru)),DIRECT"));
+                    if has_ru_ruleset {
+                        gaming_rules.push(format!("  - AND,((SRC-IP-CIDR,{cidr}),(RULE-SET,category-ru@domain)),DIRECT"));
+                        if has_ip_ruleset {
+                            gaming_rules.push(format!("  - AND,((SRC-IP-CIDR,{cidr}),(RULE-SET,category-ru@ipcidr)),DIRECT"));
+                        }
+                    } else {
+                        gaming_rules.push(format!("  - AND,((SRC-IP-CIDR,{cidr}),(GEOSITE,category-ru)),DIRECT"));
+                    }
                     gaming_rules.push(format!("  - SRC-IP-CIDR,{cidr},{target}"));
                     routed_any = true;
                 }
@@ -1414,8 +1422,14 @@ pub fn apply_gaming_rules(
                     if !v6.is_empty() && !v6_lower.starts_with("fe80:") && !v6_lower.starts_with("::1") {
                         let cidr = if v6.contains('/') { v6.to_string() } else { format!("{v6}/128") };
                         gaming_rules.push(format!("  - AND,((SRC-IP-CIDR,{cidr}),(GEOIP,RU)),DIRECT"));
-                        gaming_rules.push(format!("  - AND,((SRC-IP-CIDR,{cidr}),(GEOSITE,category-gov-ru)),DIRECT"));
-                        gaming_rules.push(format!("  - AND,((SRC-IP-CIDR,{cidr}),(GEOSITE,ru)),DIRECT"));
+                        if has_ru_ruleset {
+                            gaming_rules.push(format!("  - AND,((SRC-IP-CIDR,{cidr}),(RULE-SET,category-ru@domain)),DIRECT"));
+                            if has_ip_ruleset {
+                                gaming_rules.push(format!("  - AND,((SRC-IP-CIDR,{cidr}),(RULE-SET,category-ru@ipcidr)),DIRECT"));
+                            }
+                        } else {
+                            gaming_rules.push(format!("  - AND,((SRC-IP-CIDR,{cidr}),(GEOSITE,category-ru)),DIRECT"));
+                        }
                         gaming_rules.push(format!("  - SRC-IP-CIDR,{cidr},{target}"));
                         routed_any = true;
                     }
@@ -3048,9 +3062,33 @@ rules:
 
         let applied = apply_gaming_rules(yaml, &cfg, &[]).expect("applied");
         assert!(applied.contains("AND,((SRC-IP-CIDR,192.168.2.10/32),(GEOIP,RU)),DIRECT"), "RU GeoIP must be direct in BypassRu");
-        assert!(applied.contains("AND,((SRC-IP-CIDR,192.168.2.10/32),(GEOSITE,ru)),DIRECT"), "RU Geosite must be direct in BypassRu");
-        assert!(applied.contains("AND,((SRC-IP-CIDR,192.168.2.10/32),(GEOSITE,category-gov-ru)),DIRECT"), "Gov-RU must be direct in BypassRu");
+        assert!(applied.contains("AND,((SRC-IP-CIDR,192.168.2.10/32),(GEOSITE,category-ru)),DIRECT"), "RU Geosite must be category-ru");
+        assert!(!applied.contains("(GEOSITE,ru))"), "Must never generate invalid (GEOSITE,ru)");
         assert!(applied.contains("SRC-IP-CIDR,192.168.2.10/32,Finland-Node"), "Remaining traffic must route to Finland-Node");
+    }
+
+    #[test]
+    fn test_apply_gaming_bypass_ru_with_ruleset() {
+        let yaml = "port: 7890\nrule-providers:\n  category-ru@domain: {}\n  category-ru@ipcidr: {}\nproxy-groups:\nrules:\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::GamingConfig::default();
+        cfg.enabled = true;
+        cfg.mode = crate::config::GamingMode::BypassRu;
+        cfg.target_server = "Fastest".into();
+        cfg.devices.push(crate::config::GamingDevice {
+            mac: "11:11:11:11:11:11".into(),
+            ip: "192.168.2.10".into(),
+            ipv6: vec![],
+            name: "PC-Gamer".into(),
+            enabled: true,
+            server: Some("Finland-Node".into()),
+        });
+
+        let applied = apply_gaming_rules(yaml, &cfg, &[]).expect("applied");
+        assert!(applied.contains("AND,((SRC-IP-CIDR,192.168.2.10/32),(GEOIP,RU)),DIRECT"));
+        assert!(applied.contains("AND,((SRC-IP-CIDR,192.168.2.10/32),(RULE-SET,category-ru@domain)),DIRECT"));
+        assert!(applied.contains("AND,((SRC-IP-CIDR,192.168.2.10/32),(RULE-SET,category-ru@ipcidr)),DIRECT"));
+        assert!(!applied.contains("GEOSITE,ru"), "Must not use GEOSITE when RULE-SET is available");
+        assert!(applied.contains("SRC-IP-CIDR,192.168.2.10/32,Finland-Node"));
     }
 
     #[test]

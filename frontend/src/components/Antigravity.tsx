@@ -307,6 +307,12 @@ export default function Antigravity({ notify }: Props) {
 
   return (
     <div className="tab-pane antigravity-page">
+      <div className="beta-banner">
+        <span style={{ fontSize: 16 }}>🧪</span>
+        <div>
+          <strong>Бета-функция:</strong> Сетевые службы (Zapret, Игровой режим, AdGuard Home) работают с изоляцией netfilter/iptables.
+        </div>
+      </div>
       {/* СЕКЦИЯ 1: GOOGLE FLOW & GEMINI LABS */}
       <section className="card" style={{ marginBottom: 20 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: 16 }}>

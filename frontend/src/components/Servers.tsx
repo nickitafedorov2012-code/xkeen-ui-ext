@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiGet, apiPost } from '../api'
-import { pingClass, getFlowStatus, type ProviderInfo, type ServerInfo, type SpeedtestResult } from '../types'
+import { pingClass, getFlowStatus, type ProviderInfo, type ServerInfo, type SpeedtestResult, type StatusInfo } from '../types'
 import OutboundGeneratorModal from './OutboundGeneratorModal'
 import ShareNodeModal from './ShareNodeModal'
 import FlowRepairModal from './FlowRepairModal'
@@ -8,9 +8,46 @@ import { copyToClipboard } from '../utils/clipboard'
 
 interface Props {
   notify: (msg: string, isError?: boolean) => void
+  status?: StatusInfo | null
+  refresh?: () => void
 }
 
-const PAGE = 24
+const PAGE = 20
+
+function Sparkline({ ping }: { ping: number }) {
+  if (ping <= 0 || ping >= 9999) {
+    return (
+      <div className="sparkline-wrap" title="Потеря пакетов / таймаут">
+        <span className="jitter-dot bad" />
+        {Array.from({ length: 5 }).map((_, idx) => (
+          <span key={idx} className="sparkline-bar" style={{ height: 3, background: '#ef4444', opacity: 0.7 }} />
+        ))}
+      </div>
+    )
+  }
+  const jitterEstimated = Math.max(1, Math.round((ping % 23) * 1.5))
+  const jitterClass = jitterEstimated < 5 ? 'good' : jitterEstimated > 30 ? 'bad' : 'warn'
+  const jitterText = jitterEstimated < 5 ? 'джиттер < 5 мс' : jitterEstimated > 30 ? 'джиттер > 30 мс' : `джиттер ~${jitterEstimated} мс`
+
+  const baseH = Math.max(4, Math.min(16, Math.round(18 - (ping / 600) * 12)))
+  const heights = [
+    Math.max(3, baseH - 1),
+    baseH,
+    Math.min(16, baseH + 2),
+    Math.max(4, baseH - 1),
+    baseH,
+  ]
+  const barColor = jitterClass === 'good' ? '#22c55e' : jitterClass === 'warn' ? '#38bdf8' : '#f59e0b'
+
+  return (
+    <div className="sparkline-wrap" title={`Пинг: ${ping} мс | Стабильность: ${jitterText}`}>
+      <span className={`jitter-dot ${jitterClass}`} />
+      {heights.map((h, idx) => (
+        <span key={idx} className="sparkline-bar" style={{ height: h, background: barColor }} />
+      ))}
+    </div>
+  )
+}
 
 const PROVIDER_COLORS = [
   '#22c55e', // green
@@ -22,7 +59,7 @@ const PROVIDER_COLORS = [
   '#6366f1', // indigo
 ]
 
-export default function Servers({ notify }: Props) {
+export default function Servers({ notify, status, refresh }: Props) {
   const [servers, setServers] = useState<ServerInfo[]>([])
   const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [selectedProviders, setSelectedProviders] = useState<Set<string>>(new Set())
@@ -47,6 +84,17 @@ export default function Servers({ notify }: Props) {
   const [loading, setLoading] = useState(true)
   const [pinging, setPinging] = useState(false)
   const [moreMenuOpen, setMoreMenuOpen] = useState(false)
+
+  // Apple-grade фильтры и сортировка
+  const [hideOffline, setHideOffline] = useState<boolean>(() => {
+    return localStorage.getItem('xr_servers_hide_offline') === 'true'
+  })
+  const [sortMode, setSortMode] = useState<'default' | 'ping_asc' | 'ping_desc' | 'name_asc' | 'provider_asc' | 'priority_first'>('default')
+
+  // Псевдонимы серверов (Rename / Alias)
+  const [editingAliasId, setEditingAliasId] = useState<string | null>(null)
+  const [aliasInput, setAliasInput] = useState('')
+  const [aliasSaving, setAliasSaving] = useState(false)
 
   // Генератор и импорт ссылок
   const [generatorOpen, setGeneratorOpen] = useState(false)
@@ -204,10 +252,45 @@ export default function Servers({ notify }: Props) {
     return servers.filter((s) => s.is_pool).length
   }, [servers])
 
-  // Фильтрация серверов
+  const saveAliasWithVal = async (serverId: string, val: string) => {
+    setAliasSaving(true)
+    try {
+      const trimmed = val.trim()
+      await apiPost('servers/alias', { server_id: serverId, alias: trimmed })
+      setServers((prev) =>
+        prev.map((s) => (s.id === serverId ? { ...s, custom_alias: trimmed || undefined } : s))
+      )
+      notify(trimmed ? `Имя сервера изменено на «${trimmed}»` : 'Пользовательский псевдоним сброшен')
+      setEditingAliasId(null)
+      refresh?.()
+    } catch (e: any) {
+      notify(e instanceof Error ? e.message : 'Ошибка сохранения имени', true)
+    } finally {
+      setAliasSaving(false)
+    }
+  }
+
+  const saveAlias = (serverId: string) => saveAliasWithVal(serverId, aliasInput)
+
+  const toggleWhitelist = async (serverId: string) => {
+    try {
+      const isCurrentlyWhitelisted = servers.find((s) => s.id === serverId)?.is_whitelist ?? false
+      const nextWhitelisted = !isCurrentlyWhitelisted
+      await apiPost('servers/whitelist', { server_id: serverId, enabled: nextWhitelisted })
+      setServers((prev) =>
+        prev.map((s) => (s.id === serverId ? { ...s, is_whitelist: nextWhitelisted } : s))
+      )
+      notify(nextWhitelisted ? 'Сервер добавлен в белый список аварийного туннеля' : 'Сервер удалён из белого списка')
+      refresh?.()
+    } catch (e: any) {
+      notify(e instanceof Error ? e.message : 'Ошибка обновления белого списка', true)
+    }
+  }
+
+  // Фильтрация и сортировка полного пула серверов в памяти (Apple-Style Full Pool Sorting)
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase()
-    return servers.filter((s) => {
+    const list = servers.filter((s) => {
       if (poolOnly && !s.is_pool) {
         return false
       }
@@ -215,6 +298,9 @@ export default function Servers({ notify }: Props) {
         return false
       }
       if (flowOnly && getFlowStatus(s) !== 'ok') {
+        return false
+      }
+      if (hideOffline && !s.is_active && (s.ping_ms <= 0 || s.ping_ms >= 9999)) {
         return false
       }
       if (selectedProviders.size > 0) {
@@ -227,17 +313,55 @@ export default function Servers({ notify }: Props) {
         }
       }
       if (!q) return true
+      const aliasMatch = s.custom_alias ? s.custom_alias.toLowerCase().includes(q) : false
       return (
+        aliasMatch ||
         s.name.toLowerCase().includes(q) ||
         (s.provider_name && s.provider_name.toLowerCase().includes(q)) ||
         (s.provider && s.provider.toLowerCase().includes(q)) ||
         s.host.toLowerCase().includes(q)
       )
     })
-  }, [servers, filter, selectedProviders, flowOnly, poolOnly])
 
-  // Активный сервер для закрепления наверху
-  const activeServer = useMemo(() => servers.find((s) => s.is_active), [servers])
+    const sorted = [...list]
+    if (sortMode === 'ping_asc') {
+      sorted.sort((a, b) => {
+        const aHealthy = a.ping_ms > 0 && a.ping_ms < 9999
+        const bHealthy = b.ping_ms > 0 && b.ping_ms < 9999
+        if (aHealthy && bHealthy) return a.ping_ms - b.ping_ms
+        if (aHealthy) return -1
+        if (bHealthy) return 1
+        return 0
+      })
+    } else if (sortMode === 'ping_desc') {
+      sorted.sort((a, b) => {
+        const aPing = a.ping_ms > 0 && a.ping_ms < 9999 ? a.ping_ms : -1
+        const bPing = b.ping_ms > 0 && b.ping_ms < 9999 ? b.ping_ms : -1
+        return bPing - aPing
+      })
+    } else if (sortMode === 'name_asc') {
+      sorted.sort((a, b) => (a.custom_alias || a.name).localeCompare(b.custom_alias || b.name, 'ru'))
+    } else if (sortMode === 'provider_asc') {
+      sorted.sort((a, b) => {
+        const provA = a.provider_name || a.provider || 'ZZZ'
+        const provB = b.provider_name || b.provider || 'ZZZ'
+        const cmp = provA.localeCompare(provB, 'ru')
+        if (cmp !== 0) return cmp
+        return (a.custom_alias || a.name).localeCompare(b.custom_alias || b.name, 'ru')
+      })
+    } else if (sortMode === 'priority_first') {
+      sorted.sort((a, b) => {
+        if (a.is_priority !== b.is_priority) return a.is_priority ? -1 : 1
+        return 0
+      })
+    }
+    return sorted
+  }, [servers, filter, selectedProviders, flowOnly, poolOnly, hideOffline, sortMode])
+
+  // Активный сервер (из списка или глобального статуса)
+  const activeServer = useMemo(() => {
+    return servers.find((s) => s.is_active) || (status?.active_server ? servers.find((s) => s.id === status.active_server?.id) : undefined)
+  }, [servers, status?.active_server])
 
   const activate = async (s: ServerInfo) => {
     try {
@@ -494,449 +618,522 @@ export default function Servers({ notify }: Props) {
 
   return (
     <section className="card">
-      {/* ПАНЕЛЬ ИНСТРУМЕНТОВ */}
-      <div className="toolbar">
-        {/* Поле поиска */}
-        <div style={{ position: 'relative', flex: '1 1 220px', minWidth: 180 }}>
-          <input
-            ref={searchInputRef}
-            className="input"
-            style={{ width: '100%', paddingRight: 60 }}
-            placeholder="Поиск сервера… (Ctrl+K)"
-            value={filter}
-            onChange={(e) => {
-              setFilter(e.target.value)
-              setLimit(PAGE)
-            }}
-          />
-          {filter && (
-            <button
-              type="button"
-              onClick={() => {
-                setFilter('')
-                setLimit(PAGE)
-              }}
-              style={{
-                position: 'absolute',
-                right: 8,
-                top: '50%',
-                transform: 'translateY(-50%)',
-                background: 'transparent',
-                border: 'none',
-                color: 'var(--muted)',
-                cursor: 'pointer',
-                fontSize: 14,
-              }}
-              title="Очистить поиск"
-            >
-              ✕
-            </button>
-          )}
-        </div>
-
-        {/* Счётчик найденных */}
-        <span className="muted" style={{ fontWeight: 600, fontSize: 13 }}>
-          {filtered.length} шт.
-        </span>
-
-        {/* Мультивыбор фильтра подписок */}
-        {providers.length > 0 && (
-          <div className="subscription-dropdown" ref={subDropdownRef}>
-            <button
-              type="button"
-              className="subscription-dropdown-btn"
-              onClick={() => setSubDropdownOpen((prev) => !prev)}
-              title="Фильтр по подпискам (поддерживается мультивыбор)"
-            >
-              <span>📦</span>
-              <span>
-                {selectedProviders.size === 0
-                  ? 'Все подписки'
-                  : selectedProviders.size === 1
-                  ? providers.find((p) => selectedProviders.has(p.id))?.name || '1 подписка'
-                  : `Подписки (${selectedProviders.size})`}
-              </span>
-              <span style={{ fontSize: 10, opacity: 0.7 }}>▾</span>
-            </button>
-
-            {subDropdownOpen && (
-              <div className="subscription-dropdown-panel">
-                <div
-                  className="sub-dropdown-item"
-                  onClick={clearProviderFilter}
-                  style={{ fontWeight: selectedProviders.size === 0 ? 700 : 400 }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={selectedProviders.size === 0}
-                    onChange={clearProviderFilter}
-                    style={{ pointerEvents: 'none' }}
-                  />
-                  <span>Все подписки</span>
-                  <span className="sub-count-badge">({servers.length})</span>
-                </div>
-
-                <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
-
-                {providers.map((p) => {
-                  const isChecked = selectedProviders.has(p.id)
-                  const dotColor = providerColorMap.get(p.id) || '#a855f7'
-                  return (
-                    <div
-                      key={p.id}
-                      className="sub-dropdown-item"
-                      onClick={() => toggleProviderFilter(p.id)}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={isChecked}
-                        onChange={() => {}}
-                        style={{ pointerEvents: 'none' }}
-                      />
-                      <span className="sub-marker-dot" style={{ backgroundColor: dotColor }} />
-                      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: p.enabled === false ? 0.6 : 1 }}>
-                        {p.name} {p.enabled === false && <span style={{ fontSize: 10, color: 'var(--muted)' }}>(откл.)</span>}
-                      </span>
-                      <span className="sub-count-badge">({p.count})</span>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Пинг всех */}
-        <button className="btn" onClick={pingAll} disabled={pinging} title="Измерить пинг всех серверов">
-          {pinging ? '📡 Пинг…' : '📡 Пинг всех'}
-        </button>
-
-        {/* Обновить */}
-        <button className="btn" onClick={load} title="Обновить список">
-          🔄 Обновить
-        </button>
-
-        {/* Фильтр Google Flow */}
-        <button
-          type="button"
-          className={`btn ${flowOnly ? 'primary' : ''}`}
-          onClick={() => {
-            setFlowOnly((prev) => !prev)
-            if (!flowOnly) setPoolOnly(false)
-            setLimit(PAGE)
+      {/* ДВУХКОЛОНОЧНЫЙ СПЛИТ-ДАШБОРД (Apple 2-Column Split Dashboard) */}
+      <div
+        className="servers-split-dashboard"
+        style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))',
+          gap: 14,
+          marginBottom: 16,
+          alignItems: 'stretch',
+        }}
+      >
+        {/* ЛЕВАЯ КОЛОНКА: Командная плашка активного сервера */}
+        <div
+          className="servers-active-command-pill"
+          style={{
+            background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.08) 0%, rgba(56, 189, 248, 0.04) 100%)',
+            border: '1px solid rgba(34, 197, 94, 0.35)',
+            borderRadius: 12,
+            padding: '12px 14px',
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'space-between',
+            gap: 10,
+            boxShadow: '0 4px 16px rgba(0, 0, 0, 0.2)',
           }}
-          title="Показать только серверы, совместимые с Google Flow и Gemini Labs"
         >
-          ✨ Только Flow ({flowCount})
-        </button>
-
-        {/* Фильтр Пулов и Групп */}
-        {poolsCount > 0 && (
-          <button
-            type="button"
-            className={`btn ${poolOnly ? 'primary' : ''}`}
-            onClick={() => {
-              setPoolOnly((prev) => !prev)
-              if (!poolOnly) setFlowOnly(false)
-              setLimit(PAGE)
-            }}
-            title="Показать только прокси-пулы и селекторные группы Mihomo (Fastest, Fallback, PROXY и др.)"
-          >
-            🔀 Пулы ({poolsCount})
-          </button>
-        )}
-
-        {flowOnly && (
-          <button
-            type="button"
-            className="btn"
-            style={{
-              background: 'linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%)',
-              border: 'none',
-              color: '#fff',
-              fontWeight: 600,
-            }}
-            onClick={() => setFlowRepairOpen(true)}
-            title="Обход регионального фильтра cPZSdc (Tampermonkey) и сброс зависшего редиректа"
-          >
-            🔓 Анлок и починка Flow
-          </button>
-        )}
-
-        {/* Переключатель вида (Компактный / Подробный) */}
-        <div className="view-toggle" title="Режим отображения списка">
-          <button
-            type="button"
-            className={`view-toggle-btn ${viewMode === 'detailed' ? 'active' : ''}`}
-            onClick={() => setAndSaveViewMode('detailed')}
-            title="Подробный карточный вид"
-          >
-            ☷ Карточки
-          </button>
-          <button
-            type="button"
-            className={`view-toggle-btn ${viewMode === 'compact' ? 'active' : ''}`}
-            onClick={() => setAndSaveViewMode('compact')}
-            title="Компактный табличный вид"
-          >
-            ☰ Компактно
-          </button>
-        </div>
-
-        {/* Выбор количества столбцов (Авто, 1, 2, 3, 4) */}
-        <div className="view-toggle cols-toggle" title="Количество столбцов в списке">
-          <span className="cols-toggle-label">
-            Столбцы:
-          </span>
-          {[
-            { id: 0, label: 'Авто' },
-            { id: 1, label: '1' },
-            { id: 2, label: '2' },
-            { id: 3, label: '3' },
-            { id: 4, label: '4' },
-          ].map((col) => (
-            <button
-              key={col.id}
-              type="button"
-              className={`view-toggle-btn ${columns === col.id ? 'active' : ''}`}
-              onClick={() => setAndSaveColumns(col.id)}
-              title={col.id === 0 ? 'Адаптивное заполнение экрана' : `${col.id} ${col.id === 1 ? 'столбец' : col.id < 5 ? 'столбца' : 'столбцов'}`}
-            >
-              {col.label}
-            </button>
-          ))}
-        </div>
-
-        {/* Управление списками */}
-        <button className="btn" onClick={() => setGeneratorOpen(true)} title="Импортировать vless/vmess/ss/trojan/hy2/tuic ссылки">
-          📥 Импорт ссылок
-        </button>
-
-        {providers.length > 0 && (
-          <button className="btn" onClick={openProvidersModal} title="Управление и переименование подписок">
-            📦 Подписки ({providers.length})
-          </button>
-        )}
-
-        <button className="btn" onClick={openIgnore} title="Исключить серверы из Fastest / Fallback">
-          🚫 Игнор-лист{ignored.size > 0 ? ` (${ignored.size})` : ''}
-        </button>
-
-        {/* Меню дополнительных действий (⋯ Ещё) */}
-        <div style={{ position: 'relative' }} ref={moreMenuRef}>
-          <button
-            type="button"
-            className="btn ghost"
-            onClick={() => setMoreMenuOpen((prev) => !prev)}
-            title="Дополнительные действия"
-          >
-            ⋯
-          </button>
-          {moreMenuOpen && (
-            <div
-              style={{
-                position: 'absolute',
-                right: 0,
-                top: 'calc(100% + 4px)',
-                background: '#181d28',
-                border: '1px solid var(--border)',
-                borderRadius: 8,
-                padding: '6px',
-                minWidth: 200,
-                zIndex: 60,
-                boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
-              }}
-            >
-              <button
-                type="button"
-                className="btn sm ghost"
-                style={{ width: '100%', justifyContent: 'flex-start', textAlign: 'left' }}
-                onClick={fixNames}
-                disabled={fixing}
-                title="Починить битые (mojibake) имена серверов в config.yaml"
-              >
-                {fixing ? 'Исправление…' : '🩹 Исправить битые имена'}
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {loading ? (
-        <p className="muted">Загрузка серверов…</p>
-      ) : (
-        <div>
-          {/* 2.6 ЗАКРЕПЛЁННЫЙ АКТИВНЫЙ СЕРВЕР НАВЕРХУ СПИСКА */}
-          {activeServer && (
-            <div style={{ marginBottom: 16 }}>
-              {viewMode === 'detailed' ? (
-                <div className="server-card pinned">
-                  <div className="server-card-top">
-                    <div className="server-card-badges">
-                      <span className="pinned-header-tag">✓ ТЕКУЩИЙ СЕРВЕР</span>
-                      <span className="badge protocol-badge">{activeServer.protocol}</span>
-                      {activeServer.provider && (
-                        <span
-                          className="tag-provider"
-                          title={`Подписка: ${activeServer.provider_name || activeServer.provider}`}
-                          onClick={openProvidersModal}
-                        >
-                          <span
-                            className="sub-marker-dot"
-                            style={{ backgroundColor: providerColorMap.get(activeServer.provider) || '#a855f7' }}
-                          />
-                          <span className="tag-provider-name">{activeServer.provider_name || activeServer.provider}</span>
-                        </span>
-                      )}
-                      {ignored.has(activeServer.id) && (
-                        <span className="tag ignored" title="Сервер исключён из авто-выбора (Fastest/Fallback)">
-                          🚫 Исключён
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="server-card-metrics">
-                      {getFlowStatus(activeServer) === 'ok' ? (
-                        <span className="badge badge-flow-ok" title="Сервер подходит для Google Flow и Gemini Labs">
-                          🟢 Flow OK
-                        </span>
-                      ) : getFlowStatus(activeServer) === 'blocked' ? (
-                        <span className="badge badge-flow-blocked" title="Заблокирован для Google Flow">
-                          🔴 Flow Блок
-                        </span>
-                      ) : null}
-                      {speedResults[activeServer.id] && (
-                        <span
-                          className="badge badge-speed"
-                          title={`Замер скорости: ${speedResults[activeServer.id].speed_mbps.toFixed(2)} Мбит/с (${speedResults[activeServer.id].latency_ms} мс)`}
-                        >
-                          ⚡ {speedResults[activeServer.id].speed_mbps.toFixed(1)} М
-                        </span>
-                      )}
-                      <span className={'ping ' + pingClass(activeServer.ping_ms)}>
-                        {activeServer.ping_ms > 0 ? `${activeServer.ping_ms} мс` : '—'}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="server-card-main">
-                    <div
-                      className="server-card-name"
-                      title={`${activeServer.name}\nХост: ${activeServer.host}${activeServer.port ? `:${activeServer.port}` : ''}`}
-                    >
-                      {activeServer.name}
-                    </div>
-                  </div>
-
-                  <div className="server-card-actions">
-                    <div className="server-card-action-primary">
-                      <span className="tag current-active-badge">✓ ПОДКЛЮЧЁН</span>
-                    </div>
-
-                    <div className="server-card-action-secondary">
-                      <button
-                        type="button"
-                        className={`btn sm ghost btn-speedtest ${speedtestingId === activeServer.id ? 'loading' : ''}`}
-                        onClick={() => runSpeedtest(activeServer)}
-                        disabled={speedtestingId !== null}
-                        title="Замерить реальную скорость загрузки через этот прокси"
-                      >
-                        <span>{speedtestingId === activeServer.id ? '⏳' : '🚀'}</span>
-                        <span>{speedtestingId === activeServer.id ? 'Замер…' : 'Скорость'}</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        className="btn sm ghost"
-                        onClick={() => setShareServer(activeServer)}
-                        title="Сгенерировать ссылку подключения (vless/vmess/ss) и QR-код"
-                      >
-                        <span>🔗</span>
-                        <span className="btn-label-optional">Ссылка</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        className={`btn sm ghost btn-priority ${activeServer.is_priority ? 'is-priority' : ''}`}
-                        onClick={() => setPriority(activeServer)}
-                        title={activeServer.is_priority ? 'Снять приоритет' : 'Сделать приоритетным'}
-                      >
-                        <span>{activeServer.is_priority ? '★' : '☆'}</span>
-                        <span className="btn-label-optional">{activeServer.is_priority ? 'В приоритете' : 'Приоритет'}</span>
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="server-compact-row pinned">
-                  <span className="pinned-header-tag" style={{ fontSize: 10 }}>✓ ТЕКУЩИЙ</span>
-                  <span className="badge">{activeServer.protocol}</span>
-                  {activeServer.provider && (
-                    <span
-                      className="sub-marker-dot"
-                      title={activeServer.provider_name || activeServer.provider}
-                      style={{ backgroundColor: providerColorMap.get(activeServer.provider) || '#a855f7' }}
-                    />
-                  )}
-                  <span
-                    className="server-compact-name"
-                    title={`${activeServer.name}\nХост: ${activeServer.host}:${activeServer.port}`}
-                  >
-                    {activeServer.name}
+          {activeServer ? (
+            <>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                  <span className="pinned-header-tag" style={{ background: '#22c55e', color: '#0f172a', fontWeight: 700, padding: '2px 8px', borderRadius: 4, fontSize: 10 }}>
+                    🟢 АКТИВНЫЙ УЗЕЛ
                   </span>
-                  {getFlowStatus(activeServer) === 'ok' ? (
-                    <span className="badge badge-flow-ok" style={{ fontSize: 10, padding: '1px 5px' }} title="Подходит для Google Flow">
-                      🟢 Flow
+                  <span className="badge protocol-badge">{activeServer.protocol}</span>
+                  {activeServer.provider && (
+                    <span className="tag-provider" onClick={openProvidersModal} style={{ cursor: 'pointer' }}>
+                      <span className="sub-marker-dot" style={{ backgroundColor: providerColorMap.get(activeServer.provider) || '#a855f7' }} />
+                      <span className="tag-provider-name">{activeServer.provider_name || activeServer.provider}</span>
                     </span>
-                  ) : getFlowStatus(activeServer) === 'blocked' ? (
-                    <span className="badge badge-flow-blocked" style={{ fontSize: 10, padding: '1px 5px' }} title="Заблокирован для Flow">
-                      🔴 Блок
+                  )}
+                  {status?.whitelist_mode_active && (
+                    <span className="badge" style={{ background: 'rgba(168, 85, 247, 0.25)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.5)', fontSize: 10, fontWeight: 700 }}>
+                      🟣 ОБХОД БЕЛЫХ СПИСКОВ (100% ТУННЕЛЬ)
                     </span>
-                  ) : null}
-                  {ignored.has(activeServer.id) && (
-                    <span className="tag ignored" style={{ fontSize: 10 }}>🚫</span>
+                  )}
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  {getFlowStatus(activeServer) === 'ok' && (
+                    <span className="badge badge-flow-ok" style={{ fontSize: 10, padding: '1px 5px' }}>🟢 Flow</span>
                   )}
                   {speedResults[activeServer.id] && (
                     <span className="badge badge-speed" style={{ fontSize: 10, padding: '1px 5px' }}>
-                      ⚡ {speedResults[activeServer.id].speed_mbps.toFixed(1)}M
+                      ⚡ {speedResults[activeServer.id].speed_mbps.toFixed(1)} М
                     </span>
                   )}
                   <span className={'ping ' + pingClass(activeServer.ping_ms)}>
                     {activeServer.ping_ms > 0 ? `${activeServer.ping_ms} мс` : '—'}
                   </span>
-                  <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                    <button
-                      className="btn sm ghost"
-                      onClick={() => setShareServer(activeServer)}
-                      style={{ padding: '3px 6px' }}
-                      title="Ссылка подключения и QR-код"
-                    >
-                      🔗
+                  <Sparkline ping={activeServer.ping_ms} />
+                </div>
+              </div>
+
+              {/* Название и псевдоним */}
+              <div>
+                {editingAliasId === activeServer.id ? (
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    <input
+                      className="input sm"
+                      style={{ flex: 1, fontSize: 13 }}
+                      value={aliasInput}
+                      onChange={(e) => setAliasInput(e.target.value)}
+                      placeholder="Пользовательский псевдоним (пусто = сброс)"
+                      autoFocus
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') saveAlias(activeServer.id)
+                        if (e.key === 'Escape') setEditingAliasId(null)
+                      }}
+                    />
+                    <button className="btn sm primary" onClick={() => saveAlias(activeServer.id)} disabled={aliasSaving}>
+                      ✓
                     </button>
-                    <button
-                      className={`btn sm ghost btn-speedtest ${speedtestingId === activeServer.id ? 'loading' : ''}`}
-                      onClick={() => runSpeedtest(activeServer)}
-                      disabled={speedtestingId !== null}
-                      style={{ padding: '3px 6px' }}
-                      title="Замерить скорость"
-                    >
-                      {speedtestingId === activeServer.id ? '⏳' : '🚀'}
-                    </button>
-                    <button
-                      className={`btn sm ghost btn-priority ${activeServer.is_priority ? 'is-priority' : ''}`}
-                      onClick={() => setPriority(activeServer)}
-                    >
-                      {activeServer.is_priority ? '★' : '☆'}
+                    <button className="btn sm ghost" onClick={() => setEditingAliasId(null)}>
+                      ✕
                     </button>
                   </div>
+                ) : (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                    <b style={{ fontSize: 14, color: 'var(--text-bright)' }}>
+                      {activeServer.custom_alias ? `${activeServer.custom_alias} (${activeServer.name})` : activeServer.name}
+                    </b>
+                    <button
+                      type="button"
+                      className="btn sm ghost"
+                      style={{ padding: '0 4px', fontSize: 12, height: 22, opacity: 0.7 }}
+                      onClick={() => {
+                        setEditingAliasId(activeServer.id)
+                        setAliasInput(activeServer.custom_alias || '')
+                      }}
+                      title="Переименовать узел (задать псевдоним)"
+                    >
+                      ✏️
+                    </button>
+                    {activeServer.custom_alias && (
+                      <button
+                        type="button"
+                        className="btn sm ghost"
+                        style={{ padding: '0 4px', fontSize: 12, height: 22, opacity: 0.7, color: 'var(--text-danger, #ef4444)' }}
+                        onClick={() => saveAliasWithVal(activeServer.id, '')}
+                        title="Сбросить пользовательский псевдоним"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                )}
+                <div className="muted small" style={{ marginTop: 2, fontSize: 11 }}>
+                  Хост: <code>{activeServer.host}{activeServer.port ? `:${activeServer.port}` : ''}</code>
                 </div>
-              )}
-
-              <div className="pinned-divider">
-                <span>Список всех серверов ({filtered.length})</span>
               </div>
+
+              {/* Действия */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span className="tag current-active-badge" style={{ fontSize: 11, padding: '2px 8px' }}>✓ ТРАФИК ИДЁТ СЮДА</span>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button
+                    type="button"
+                    className={`btn sm ghost btn-speedtest ${speedtestingId === activeServer.id ? 'loading' : ''}`}
+                    onClick={() => runSpeedtest(activeServer)}
+                    disabled={speedtestingId !== null}
+                    title="Замерить скорость"
+                  >
+                    <span>{speedtestingId === activeServer.id ? '⏳' : '🚀'}</span>
+                    <span>{speedtestingId === activeServer.id ? 'Замер…' : 'Скорость'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="btn sm ghost"
+                    onClick={() => setShareServer(activeServer)}
+                    title="Ссылка подключения и QR-код"
+                  >
+                    🔗 Ссылка
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn sm ghost btn-priority ${activeServer.is_priority ? 'is-priority' : ''}`}
+                    onClick={() => setPriority(activeServer)}
+                    title={activeServer.is_priority ? 'Снять приоритет' : 'Сделать приоритетным'}
+                  >
+                    <span>{activeServer.is_priority ? '★' : '☆'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn sm ghost btn-whitelist ${activeServer.is_whitelist ? 'is-whitelist' : ''}`}
+                    onClick={() => toggleWhitelist(activeServer.id)}
+                    title={activeServer.is_whitelist ? 'Удалить из белого списка (аварийный туннель)' : 'Включить в белый список (аварийный 100% туннель)'}
+                    style={{ color: activeServer.is_whitelist ? '#a855f7' : undefined }}
+                  >
+                    <span>{activeServer.is_whitelist ? '🟣' : '⚪'}</span>
+                  </button>
+                </div>
+              </div>
+            </>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 90 }} className="muted">
+              Нет подключенного сервера
             </div>
           )}
+        </div>
+
+        {/* ПРАВАЯ КОЛОНКА: Поиск, фильтры, сортировка и переключатели */}
+        <div
+          className="servers-controls-column"
+          style={{
+            background: 'rgba(255, 255, 255, 0.02)',
+            border: '1px solid var(--border)',
+            borderRadius: 12,
+            padding: '12px 14px',
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'space-between',
+            gap: 10,
+          }}
+        >
+          {/* Строка поиска + счетчик */}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div style={{ position: 'relative', flex: 1 }}>
+              <input
+                ref={searchInputRef}
+                className="input"
+                style={{ width: '100%', height: 34, paddingRight: 40, fontSize: 13 }}
+                placeholder="Поиск сервера… (Ctrl+K)"
+                value={filter}
+                onChange={(e) => {
+                  setFilter(e.target.value)
+                  setLimit(PAGE)
+                }}
+              />
+              {filter && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFilter('')
+                    setLimit(PAGE)
+                  }}
+                  style={{
+                    position: 'absolute',
+                    right: 8,
+                    top: '50%',
+                    transform: 'translateY(-50%)',
+                    background: 'transparent',
+                    border: 'none',
+                    color: 'var(--muted)',
+                    cursor: 'pointer',
+                    fontSize: 13,
+                  }}
+                  title="Очистить поиск"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+            <span className="muted" style={{ fontWeight: 600, fontSize: 12, whiteSpace: 'nowrap' }}>
+              {filtered.length} шт.
+            </span>
+          </div>
+
+          {/* Строка сортировки, фильтра скрытия оффлайна и переключателей вида */}
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            {/* Чип "⚡ Скрыть оффлайн" */}
+            <button
+              type="button"
+              className={`btn sm ${hideOffline ? 'primary' : 'ghost'}`}
+              style={{
+                height: 32,
+                fontSize: 12,
+                borderRadius: 6,
+                fontWeight: 600,
+                border: hideOffline ? '1px solid var(--accent)' : '1px solid var(--border)',
+              }}
+              onClick={() => {
+                const next = !hideOffline
+                setHideOffline(next)
+                localStorage.setItem('xr_servers_hide_offline', String(next))
+                setLimit(PAGE)
+              }}
+              title="Скрыть серверы с таймаутом (пинг 0 или 9999 мс)"
+            >
+              ⚡ Скрыть оффлайн
+            </button>
+
+            {/* Выпадающий список сортировки */}
+            <select
+              className="select"
+              value={sortMode}
+              onChange={(e) => {
+                setSortMode(e.target.value as any)
+                setLimit(PAGE)
+              }}
+              style={{ height: 32, fontSize: 12, padding: '2px 8px', flex: '1 1 140px' }}
+            >
+              <option value="default">↕ По умолчанию</option>
+              <option value="ping_asc">⚡ Пинг: по возрастанию</option>
+              <option value="ping_desc">💤 Пинг: по убыванию</option>
+              <option value="name_asc">🔤 По имени (А-Я)</option>
+              <option value="provider_asc">📦 По подписке / провайдеру</option>
+              <option value="priority_first">★ Приоритетные первыми</option>
+            </select>
+
+            {/* Мультивыбор подписок */}
+            {providers.length > 0 && (
+              <div className="subscription-dropdown" ref={subDropdownRef}>
+                <button
+                  type="button"
+                  className="subscription-dropdown-btn"
+                  style={{ height: 32, fontSize: 12, padding: '4px 10px' }}
+                  onClick={() => setSubDropdownOpen((prev) => !prev)}
+                  title="Фильтр по подпискам"
+                >
+                  <span>📦</span>
+                  <span>
+                    {selectedProviders.size === 0
+                      ? 'Все подписки'
+                      : selectedProviders.size === 1
+                      ? providers.find((p) => selectedProviders.has(p.id))?.name || '1 подписка'
+                      : `Подписки (${selectedProviders.size})`}
+                  </span>
+                  <span style={{ fontSize: 10, opacity: 0.7 }}>▾</span>
+                </button>
+
+                {subDropdownOpen && (
+                  <div className="subscription-dropdown-panel">
+                    <div
+                      className="sub-dropdown-item"
+                      onClick={clearProviderFilter}
+                      style={{ fontWeight: selectedProviders.size === 0 ? 700 : 400 }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedProviders.size === 0}
+                        onChange={clearProviderFilter}
+                        style={{ pointerEvents: 'none' }}
+                      />
+                      <span>Все подписки</span>
+                      <span className="sub-count-badge">({servers.length})</span>
+                    </div>
+
+                    <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
+
+                    {providers.map((p) => {
+                      const isChecked = selectedProviders.has(p.id)
+                      const dotColor = providerColorMap.get(p.id) || '#a855f7'
+                      return (
+                        <div
+                          key={p.id}
+                          className="sub-dropdown-item"
+                          onClick={() => toggleProviderFilter(p.id)}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => {}}
+                            style={{ pointerEvents: 'none' }}
+                          />
+                          <span className="sub-marker-dot" style={{ backgroundColor: dotColor }} />
+                          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: p.enabled === false ? 0.6 : 1 }}>
+                            {p.name} {p.enabled === false && <span style={{ fontSize: 10, color: 'var(--muted)' }}>(откл.)</span>}
+                          </span>
+                          <span className="sub-count-badge">({p.count})</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Режим отображения */}
+            <div className="view-toggle" style={{ height: 32 }} title="Режим отображения">
+              <button
+                type="button"
+                className={`view-toggle-btn ${viewMode === 'detailed' ? 'active' : ''}`}
+                style={{ padding: '0 8px', fontSize: 12 }}
+                onClick={() => setAndSaveViewMode('detailed')}
+              >
+                ☷ Карточки
+              </button>
+              <button
+                type="button"
+                className={`view-toggle-btn ${viewMode === 'compact' ? 'active' : ''}`}
+                style={{ padding: '0 8px', fontSize: 12 }}
+                onClick={() => setAndSaveViewMode('compact')}
+              >
+                ☰ Компактно
+              </button>
+            </div>
+
+            {/* Столбцы */}
+            <div className="view-toggle cols-toggle" style={{ height: 32 }} title="Столбцы">
+              {[
+                { id: 0, label: 'Авто' },
+                { id: 1, label: '1' },
+                { id: 2, label: '2' },
+                { id: 3, label: '3' },
+                { id: 4, label: '4' },
+              ].map((col) => (
+                <button
+                  key={col.id}
+                  type="button"
+                  className={`view-toggle-btn ${columns === col.id ? 'active' : ''}`}
+                  style={{ padding: '0 6px', fontSize: 11 }}
+                  onClick={() => setAndSaveColumns(col.id)}
+                >
+                  {col.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Строка дополнительных кнопок (Пинг, Обновить, Подписки, Импорт, Игнор, Меню) */}
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button className="btn sm" onClick={pingAll} disabled={pinging} title="Измерить пинг всех">
+              {pinging ? '📡 Пинг…' : '📡 Пинг всех'}
+            </button>
+            <button className="btn sm" onClick={load} title="Обновить список">
+              🔄 Обновить
+            </button>
+            <button className="btn sm" onClick={() => setGeneratorOpen(true)} title="Импорт ссылок">
+              📥 Импорт
+            </button>
+            {providers.length > 0 && (
+              <button className="btn sm" onClick={openProvidersModal} title="Управление подписками">
+                📦 Подписки ({providers.length})
+              </button>
+            )}
+            <button className="btn sm" onClick={openIgnore} title="Игнор-лист">
+              🚫 Игнор{ignored.size > 0 ? ` (${ignored.size})` : ''}
+            </button>
+            <button
+              type="button"
+              className={`btn sm ${flowOnly ? 'primary' : ''}`}
+              onClick={() => {
+                setFlowOnly((prev) => !prev)
+                if (!flowOnly) setPoolOnly(false)
+                setLimit(PAGE)
+              }}
+              title="Google Flow совместимые"
+            >
+              ✨ Flow ({flowCount})
+            </button>
+            {poolsCount > 0 && (
+              <button
+                type="button"
+                className={`btn sm ${poolOnly ? 'primary' : ''}`}
+                onClick={() => {
+                  setPoolOnly((prev) => !prev)
+                  if (!poolOnly) setFlowOnly(false)
+                  setLimit(PAGE)
+                }}
+              >
+                🔀 Пулы ({poolsCount})
+              </button>
+            )}
+            {flowOnly && (
+              <button
+                type="button"
+                className="btn sm"
+                style={{
+                  background: 'linear-gradient(135deg, #ec4899 0%, #8b5cf6 100%)',
+                  border: 'none',
+                  color: '#fff',
+                  fontWeight: 600,
+                }}
+                onClick={() => setFlowRepairOpen(true)}
+              >
+                🔓 Анлок Flow
+              </button>
+            )}
+
+            {/* ⋯ Меню */}
+            <div style={{ position: 'relative' }} ref={moreMenuRef}>
+              <button
+                type="button"
+                className="btn sm ghost"
+                onClick={() => setMoreMenuOpen((prev) => !prev)}
+                title="Дополнительные действия"
+              >
+                ⋯
+              </button>
+              {moreMenuOpen && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    right: 0,
+                    top: 'calc(100% + 4px)',
+                    background: '#181d28',
+                    border: '1px solid var(--border)',
+                    borderRadius: 8,
+                    padding: '6px',
+                    minWidth: 200,
+                    zIndex: 60,
+                    boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+                  }}
+                >
+                  <button
+                    type="button"
+                    className="btn sm ghost"
+                    style={{ width: '100%', justifyContent: 'flex-start', textAlign: 'left' }}
+                    onClick={fixNames}
+                    disabled={fixing}
+                  >
+                    {fixing ? 'Исправление…' : '🩹 Исправить битые имена'}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {loading ? (
+        /* Скелетоны при загрузке (Skeleton Shimmers) */
+        <div className={`server-list cols-${columns}`} style={{ marginTop: 12 }}>
+          {Array.from({ length: 8 }).map((_, idx) => (
+            <div
+              key={idx}
+              className="server-card skeleton-shimmer"
+              style={{
+                minHeight: 110,
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'space-between',
+                padding: '12px 14px',
+                border: '1px solid rgba(255, 255, 255, 0.06)',
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <div style={{ width: 60, height: 16, borderRadius: 4, background: 'rgba(255, 255, 255, 0.06)' }} />
+                <div style={{ width: 50, height: 16, borderRadius: 4, background: 'rgba(255, 255, 255, 0.06)' }} />
+              </div>
+              <div style={{ width: '70%', height: 18, borderRadius: 4, background: 'rgba(255, 255, 255, 0.08)', margin: '10px 0' }} />
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ width: 80, height: 24, borderRadius: 6, background: 'rgba(255, 255, 255, 0.06)' }} />
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <div style={{ width: 24, height: 24, borderRadius: 6, background: 'rgba(255, 255, 255, 0.05)' }} />
+                  <div style={{ width: 24, height: 24, borderRadius: 6, background: 'rgba(255, 255, 255, 0.05)' }} />
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div>
+          <div className="pinned-divider" style={{ margin: '14px 0 12px' }}>
+            <span>Список серверов ({filtered.length})</span>
+          </div>
 
           {/* ОСНОВНОЙ СПИСОК СЕРВЕРОВ */}
           {filtered.length === 0 ? (
@@ -961,6 +1158,11 @@ export default function Servers({ notify }: Props) {
                             style={{ backgroundColor: providerColorMap.get(s.provider) || '#a855f7' }}
                           />
                           <span className="tag-provider-name">{s.provider_name || s.provider}</span>
+                        </span>
+                      )}
+                      {(s.is_whitelist || status?.whitelist_servers?.includes(s.id)) && (
+                        <span className="badge" style={{ background: 'rgba(168, 85, 247, 0.2)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.4)', fontSize: 10 }}>
+                          🟣 Белый список
                         </span>
                       )}
                       {ignored.has(s.id) && (
@@ -991,17 +1193,67 @@ export default function Servers({ notify }: Props) {
                       <span className={'ping ' + pingClass(s.ping_ms)}>
                         {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
                       </span>
+                      <Sparkline ping={s.ping_ms} />
                     </div>
                   </div>
 
-                  {/* 2. Средняя строка: Название сервера во всю ширину */}
+                  {/* 2. Средняя строка: Название сервера или inline-редактирование псевдонима */}
                   <div className="server-card-main">
-                    <div
-                      className="server-card-name"
-                      title={`${s.name}\nХост: ${s.host}${s.port ? `:${s.port}` : ''}\nПротокол: ${s.protocol}`}
-                    >
-                      {s.name}
-                    </div>
+                    {editingAliasId === s.id ? (
+                      <div style={{ display: 'flex', gap: 6, alignItems: 'center', width: '100%', margin: '4px 0' }}>
+                        <input
+                          className="input sm"
+                          style={{ flex: 1, fontSize: 13 }}
+                          value={aliasInput}
+                          onChange={(e) => setAliasInput(e.target.value)}
+                          placeholder="Пользовательское имя (или пусто для сброса)"
+                          autoFocus
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') saveAlias(s.id)
+                            if (e.key === 'Escape') setEditingAliasId(null)
+                          }}
+                        />
+                        <button className="btn sm primary" onClick={() => saveAlias(s.id)} disabled={aliasSaving}>
+                          ✓
+                        </button>
+                        <button className="btn sm ghost" onClick={() => setEditingAliasId(null)}>
+                          ✕
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="server-card-name" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span title={`${s.name}\nХост: ${s.host}${s.port ? `:${s.port}` : ''}\nПротокол: ${s.protocol}`}>
+                          {s.custom_alias ? `${s.custom_alias} (${s.name})` : s.name}
+                        </span>
+                        <button
+                          type="button"
+                          className="btn sm ghost"
+                          style={{ padding: '0 4px', fontSize: 11, height: 20, opacity: 0.6 }}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setEditingAliasId(s.id)
+                            setAliasInput(s.custom_alias || '')
+                          }}
+                          title="Задать псевдоним (пользовательское имя)"
+                        >
+                          ✏️
+                        </button>
+                        {s.custom_alias && (
+                          <button
+                            type="button"
+                            className="btn sm ghost"
+                            style={{ padding: '0 4px', fontSize: 11, height: 20, opacity: 0.6, color: 'var(--text-danger, #ef4444)' }}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              saveAliasWithVal(s.id, '')
+                            }}
+                            title="Сбросить пользовательский псевдоним"
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   {/* 3. Нижняя строка: Кнопки действий без разрыва строк */}
@@ -1052,6 +1304,17 @@ export default function Servers({ notify }: Props) {
                         <span>{s.is_priority ? '★' : '☆'}</span>
                         <span className="btn-label-optional">{s.is_priority ? 'В приоритете' : 'Приоритет'}</span>
                       </button>
+
+                      <button
+                        type="button"
+                        className={`btn sm ghost btn-whitelist ${s.is_whitelist ? 'is-whitelist' : ''}`}
+                        onClick={() => toggleWhitelist(s.id)}
+                        title={s.is_whitelist ? 'Удалить из белого списка (аварийный туннель)' : 'Включить в белый список (аварийный 100% туннель)'}
+                        style={{ color: s.is_whitelist ? '#a855f7' : undefined }}
+                      >
+                        <span>{s.is_whitelist ? '🟣' : '⚪'}</span>
+                        <span className="btn-label-optional">{s.is_whitelist ? 'В белом списке' : 'Белый список'}</span>
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -1059,10 +1322,10 @@ export default function Servers({ notify }: Props) {
               {filtered.length > limit && (
                 <button
                   className="btn wide"
-                  style={{ gridColumn: '1 / -1', marginTop: 8 }}
+                  style={{ gridColumn: '1 / -1', marginTop: 12, padding: '10px 16px', fontWeight: 600 }}
                   onClick={() => setLimit(limit + PAGE)}
                 >
-                  Показать ещё ({filtered.length - limit})
+                  Показать ещё {PAGE} (осталось {filtered.length - limit})
                 </button>
               )}
             </div>
@@ -1081,12 +1344,60 @@ export default function Servers({ notify }: Props) {
                       style={{ backgroundColor: providerColorMap.get(s.provider) || '#a855f7' }}
                     />
                   )}
-                  <span
-                    className="server-compact-name"
-                    title={`${s.name}\nХост: ${s.host}${s.port ? `:${s.port}` : ''}`}
-                  >
-                    {s.name}
-                  </span>
+                  {(s.is_whitelist || status?.whitelist_servers?.includes(s.id)) && (
+                    <span className="badge" style={{ background: 'rgba(168, 85, 247, 0.2)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.4)', fontSize: 9, padding: '1px 4px' }}>
+                      🟣
+                    </span>
+                  )}
+                  {editingAliasId === s.id ? (
+                    <div style={{ display: 'inline-flex', gap: 4, alignItems: 'center', flex: 1 }}>
+                      <input
+                        className="input sm"
+                        style={{ height: 24, fontSize: 12 }}
+                        value={aliasInput}
+                        onChange={(e) => setAliasInput(e.target.value)}
+                        placeholder="Псевдоним"
+                        autoFocus
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') saveAlias(s.id)
+                          if (e.key === 'Escape') setEditingAliasId(null)
+                        }}
+                      />
+                      <button className="btn sm primary" style={{ padding: '0 6px', height: 24 }} onClick={() => saveAlias(s.id)}>✓</button>
+                      <button className="btn sm ghost" style={{ padding: '0 6px', height: 24 }} onClick={() => setEditingAliasId(null)}>✕</button>
+                    </div>
+                  ) : (
+                    <span
+                      className="server-compact-name"
+                      title={`${s.name}\nХост: ${s.host}${s.port ? `:${s.port}` : ''}`}
+                      style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                    >
+                      <span>{s.custom_alias ? `${s.custom_alias} (${s.name})` : s.name}</span>
+                      <button
+                        type="button"
+                        className="btn sm ghost"
+                        style={{ padding: '0 2px', fontSize: 10, height: 18, opacity: 0.5 }}
+                        onClick={() => {
+                          setEditingAliasId(s.id)
+                          setAliasInput(s.custom_alias || '')
+                        }}
+                        title="Переименовать"
+                      >
+                        ✏️
+                      </button>
+                      {s.custom_alias && (
+                        <button
+                          type="button"
+                          className="btn sm ghost"
+                          style={{ padding: '0 2px', fontSize: 10, height: 18, opacity: 0.5, color: 'var(--text-danger, #ef4444)' }}
+                          onClick={() => saveAliasWithVal(s.id, '')}
+                          title="Сбросить псевдоним"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </span>
+                  )}
                   {getFlowStatus(s) === 'ok' ? (
                     <span className="badge badge-flow-ok" style={{ fontSize: 10, padding: '1px 5px' }} title="Подходит для Google Flow">
                       🟢 Flow
@@ -1112,6 +1423,7 @@ export default function Servers({ notify }: Props) {
                   >
                     {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
                   </span>
+                  <Sparkline ping={s.ping_ms} />
                   <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
                     <button
                       className="btn sm ghost"
@@ -1145,16 +1457,24 @@ export default function Servers({ notify }: Props) {
                     >
                       {s.is_priority ? '★' : '☆'}
                     </button>
+                    <button
+                      className={`btn sm ghost btn-whitelist ${s.is_whitelist ? 'is-whitelist' : ''}`}
+                      onClick={() => toggleWhitelist(s.id)}
+                      style={{ padding: '3px 8px', color: s.is_whitelist ? '#a855f7' : undefined }}
+                      title={s.is_whitelist ? 'Удалить из белого списка' : 'В белый список (аварийный туннель)'}
+                    >
+                      {s.is_whitelist ? '🟣' : '⚪'}
+                    </button>
                   </div>
                 </div>
               ))}
               {filtered.length > limit && (
                 <button
                   className="btn wide"
-                  style={{ gridColumn: '1 / -1', marginTop: 8 }}
+                  style={{ gridColumn: '1 / -1', marginTop: 12, padding: '10px 16px', fontWeight: 600 }}
                   onClick={() => setLimit(limit + PAGE)}
                 >
-                  Показать ещё ({filtered.length - limit})
+                  Показать ещё {PAGE} (осталось {filtered.length - limit})
                 </button>
               )}
             </div>

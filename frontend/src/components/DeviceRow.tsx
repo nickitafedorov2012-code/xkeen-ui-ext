@@ -154,8 +154,11 @@ const DeviceRow = memo(function DeviceRow({
   onToggleGaming,
   isGamingCompat = false,
 }: Props) {
+  const cleanName = d.name.replace(/\s*-\s*Home network.*$/i, '').trim()
+  const cleanIp = (!d.ip || d.ip === '0.0.0.0') ? '—' : d.ip
+
   return (
-    <tr className={`device-row ${selected ? 'selected' : ''} ${d.is_current_device ? 'me' : ''}`}>
+    <tr className={`device-row ${selected ? 'selected' : ''} ${d.is_current_device ? 'me' : ''} ${!d.online ? 'device-row-offline' : ''}`}>
       <td>
         <input
           type="checkbox"
@@ -166,12 +169,12 @@ const DeviceRow = memo(function DeviceRow({
       <td>
         <div className="device-name-wrap">
           <span className={`device-dot ${d.online ? 'online' : 'offline'}`} />
-          <b className="device-name-text" title={`${d.mac}${d.interface ? ` · ${d.interface}` : ''}`}>{d.name}</b>
+          <b className="device-name-text" title={`${d.mac}${d.interface ? ` · ${d.interface}` : ''}`}>{cleanName || d.name}</b>
           {d.is_current_device && <span className="badge-you">you</span>}
         </div>
       </td>
       <td>
-        <span className="device-ip-text">{d.ip}</span>
+        <span className="device-ip-text">{cleanIp}</span>
       </td>
       <td>
         <select

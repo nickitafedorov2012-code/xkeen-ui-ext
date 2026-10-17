@@ -263,6 +263,151 @@ body {
   min-width: 380px;
 }
 
+.header-beta-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  background: rgba(245, 158, 11, 0.18);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  padding: 2px 6px;
+  border-radius: 6px;
+  margin-left: 6px;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+}
+
+.header-stack-mem-container {
+  position: relative;
+  display: inline-flex;
+}
+
+.header-stack-mem-tooltip {
+  display: none;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 6px;
+  width: 250px;
+  background: var(--panel-2, #1c2130);
+  border: 1px solid var(--border, #262c3b);
+  border-radius: 10px;
+  padding: 10px 12px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+  z-index: 1000;
+  pointer-events: none;
+  text-align: left;
+}
+
+.header-stack-mem-container:hover .header-stack-mem-tooltip {
+  display: block;
+}
+
+.stack-mem-header {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted, #94a3b8);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+
+.stack-mem-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stack-mem-item {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.stack-mem-name {
+  color: var(--text, #e6e9ef);
+}
+
+.stack-mem-val {
+  font-weight: 600;
+  color: #38bdf8;
+  font-variant-numeric: tabular-nums;
+}
+
+.stack-mem-dim {
+  color: var(--muted, #64748b);
+  font-weight: 400;
+}
+
+.stack-mem-divider {
+  height: 1px;
+  background: var(--border, #262c3b);
+  margin: 6px 0;
+}
+
+.stack-mem-footer {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--muted, #94a3b8);
+}
+
+.beta-banner {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #fbbf24;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  line-height: 1.4;
+}
+
+.device-row-offline {
+  opacity: 0.65;
+}
+
+.skeleton-shimmer {
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.03) 25%, rgba(255, 255, 255, 0.08) 50%, rgba(255, 255, 255, 0.03) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 8px;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.sparkline-wrap {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 16px;
+  padding: 0 4px;
+}
+
+.sparkline-bar {
+  width: 3px;
+  background: #38bdf8;
+  border-radius: 1px;
+  transition: height 0.2s ease;
+}
+
+.jitter-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.jitter-dot.good { background-color: #22c55e; box-shadow: 0 0 4px #22c55e; }
+.jitter-dot.warn { background-color: #eab308; box-shadow: 0 0 4px #eab308; }
+.jitter-dot.bad { background-color: #ef4444; box-shadow: 0 0 4px #ef4444; }
+
 /* 4. Группа запуск/остановка: 82 px (кнопки высотой 38 px, промежуток 6 px) */
 .header-service-actions {
   grid-area: service;
@@ -649,11 +794,12 @@ body {
   display: flex;
   gap: 4px;
   margin-bottom: 20px;
+  padding-top: 6px;
   padding-bottom: 12px;
   border-bottom: 1px solid var(--border);
   flex-wrap: nowrap;
   overflow-x: auto;
-  overflow-y: hidden;
+  overflow-y: visible;
   align-items: center;
   scrollbar-width: none; /* Firefox */
   -ms-overflow-style: none; /* IE/Edge */
@@ -1274,6 +1420,22 @@ select option, .select option, .editor-select option {
 .btn-priority.is-priority:hover {
   border-color: #eab308;
   background: rgba(234, 179, 8, 0.2);
+}
+.btn-whitelist {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.15s;
+}
+.btn-whitelist.is-whitelist {
+  color: #c084fc;
+  border-color: rgba(168, 85, 247, 0.5);
+  background: rgba(168, 85, 247, 0.12);
+  font-weight: 600;
+}
+.btn-whitelist.is-whitelist:hover {
+  border-color: #a855f7;
+  background: rgba(168, 85, 247, 0.2);
 }
 
 /* Выпадающее меню подписок с мультивыбором */
@@ -2044,16 +2206,21 @@ table.devices-table td {
 
 .device-select {
   width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   height: 32px;
   background: #141923;
   border: 1px solid #232c3f;
   border-radius: 6px;
   color: #cbd5e1;
-  padding: 0 8px;
+  padding: 0 20px 0 8px;
   font-size: 12.5px;
   outline: none;
   cursor: pointer;
   transition: all 0.15s ease;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
 }
 .device-select:hover {
   border-color: #334155;
@@ -2276,11 +2443,13 @@ table.devices-table td {
   font-size: 16px;
   color: #94a3b8;
   line-height: 1;
-  transition: transform 0.2s ease;
+  display: inline-block;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   margin-top: 2px;
 }
 .offline-accordion-chevron.expanded {
-  color: #3b82f6;
+  color: #38bdf8;
+  transform: rotate(90deg);
 }
 
 .offline-accordion-info {

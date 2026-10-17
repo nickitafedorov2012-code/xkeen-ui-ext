@@ -60,6 +60,9 @@ pub async fn status(State(state): State<AppState>) -> Response {
     let zapret_installed = std::path::Path::new("/opt/etc/init.d/S51zapret").exists();
     let service_stopped = crate::watchdog::is_service_stopped();
     let service_running = !service_stopped && mihomo_ver.is_some();
+    let stack_memory = crate::system::get_stack_memory_info();
+    let active_id = active.as_ref().and_then(|a| a.get("id")).and_then(|v| v.as_str()).unwrap_or("");
+    let whitelist_mode_active = !cfg.whitelist_servers.is_empty() && cfg.whitelist_servers.iter().any(|s| s == active_id);
 
     api_ok(json!({
         "version": VERSION,
@@ -70,6 +73,10 @@ pub async fn status(State(state): State<AppState>) -> Response {
         "service_running": service_running,
         "service_stopped": service_stopped,
         "active_server": active,
+        "stack_memory": stack_memory,
+        "whitelist_mode_active": whitelist_mode_active,
+        "whitelist_servers": cfg.whitelist_servers,
+        "server_aliases": cfg.server_aliases,
         "mihomo": { "host": cfg.mihomo.host, "port": cfg.mihomo.port },
         "rci": { "host": cfg.rci.host, "port": cfg.rci.port },
         "failover": {
@@ -128,6 +135,12 @@ pub async fn get_system_metrics(State(state): State<AppState>) -> Response {
 pub async fn get_system_processes(State(_state): State<AppState>) -> Response {
     let snapshot = crate::system::get_task_manager_snapshot().await;
     api_ok(serde_json::to_value(snapshot).unwrap_or_default()).into_response()
+}
+
+/// GET /api/system/stack-memory — физическая память (RSS) ключевых процессов стека
+pub async fn get_stack_memory(State(_state): State<AppState>) -> Response {
+    let stack_info = crate::system::get_stack_memory_info();
+    api_ok(serde_json::to_value(stack_info).unwrap_or_default()).into_response()
 }
 
 /// POST /api/system/processes/kill — безопасное завершение процесса роутера
@@ -319,6 +332,8 @@ pub async fn get_servers(State(state): State<AppState>) -> Response {
                     let is_google_ai = flow_server
                         .as_ref()
                         .map_or(s.is_active, |fs| fs == &s.id);
+                    let custom_alias = cfg.server_aliases.get(&s.id).cloned();
+                    let is_whitelist = cfg.whitelist_servers.iter().any(|ws| ws == &s.id);
                     json!({
                         "id": s.id, "name": s.name, "protocol": s.protocol,
                         "host": s.host, "port": s.port,
@@ -329,13 +344,146 @@ pub async fn get_servers(State(state): State<AppState>) -> Response {
                         "provider": s.provider,
                         "provider_name": s.provider_name,
                         "is_pool": s.is_pool,
+                        "custom_alias": custom_alias,
+                        "is_whitelist": is_whitelist,
                     })
                 })
                 .collect();
-            api_ok(json!({ "servers": list }))
+            api_ok(json!({
+                "servers": list,
+                "server_aliases": cfg.server_aliases,
+                "whitelist_servers": cfg.whitelist_servers,
+            }))
         }
         Err(e) => api_err(e),
     }
+}
+
+#[derive(Deserialize)]
+pub struct ServerAliasReq {
+    pub server_id: String,
+    #[serde(default)]
+    pub alias: String,
+}
+
+/// POST /api/servers/alias — задать или сбросить пользовательское имя (alias) сервера
+pub async fn set_server_alias(
+    State(state): State<AppState>,
+    Json(req): Json<ServerAliasReq>,
+) -> Response {
+    let _cfg_guard = state.config_lock.lock().await;
+    let mut cfg = (**state.config.read().await).clone();
+    let alias_trimmed = req.alias.trim();
+    if alias_trimmed.is_empty() {
+        cfg.server_aliases.remove(&req.server_id);
+    } else {
+        cfg.server_aliases.insert(req.server_id.clone(), alias_trimmed.to_string());
+    }
+    if let Err(e) = config::save(&state.config_path, &cfg).await {
+        return api_err(format!("Ошибка сохранения алиаса сервера: {e}"));
+    }
+    let aliases = cfg.server_aliases.clone();
+    *state.config.write().await = std::sync::Arc::new(cfg);
+    log_i!("Алиас сервера '{}' установлен в '{}'", req.server_id, alias_trimmed);
+    api_ok(json!({ "server_aliases": aliases }))
+}
+
+#[derive(Deserialize)]
+pub struct ServerWhitelistReq {
+    #[serde(default)]
+    pub server_id: Option<String>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub servers: Option<Vec<String>>,
+}
+
+/// Синхронизация 100% туннелирования для режима обхода белых списков.
+/// Если активный узел входит в whitelist_servers, автоматически активируется полный туннель (REDIRECT + TPROXY)
+/// для всех LAN-устройств, у которых включено следование белому списку (follow_whitelist).
+/// Если активный узел не входит в whitelist_servers, восстанавливается обычный игровой режим или снимаются правила.
+pub async fn sync_whitelist_mode_tunnel(state: &AppState, target_server_id: &str) -> Result<(), String> {
+    let cfg = state.config.read().await.clone();
+    let is_whitelist = !cfg.whitelist_servers.is_empty() && cfg.whitelist_servers.iter().any(|s| s == target_server_id);
+
+    let (redir_port, tproxy_port) = if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+        (
+            routing::parse_redir_port(&yaml).unwrap_or(5000),
+            routing::parse_tproxy_port(&yaml).unwrap_or(5001),
+        )
+    } else {
+        (5000, 5001)
+    };
+
+    if is_whitelist {
+        log_i!(
+            "[WHITELIST_EMERGENCY] 🟣 Активация 100% туннелирования: узел '{}' входит в белый список",
+            target_server_id
+        );
+        let mut tunnel_cfg = cfg.gaming.clone();
+        tunnel_cfg.enabled = true;
+        tunnel_cfg.mode = config::GamingMode::Compatibility;
+
+        // Добавляем все устройства, следующие режиму белых списков
+        for (ip, dr) in &cfg.device_routing {
+            if dr.follow_whitelist {
+                if !tunnel_cfg.devices.iter().any(|d| d.ip == *ip) {
+                    tunnel_cfg.devices.push(config::GamingDevice {
+                        ip: ip.clone(),
+                        mac: String::new(),
+                        name: format!("Device ({})", ip),
+                        enabled: true,
+                        server: None,
+                        ipv6: Vec::new(),
+                    });
+                }
+            }
+        }
+        sync_gaming_full_tunnel(&tunnel_cfg, redir_port, tproxy_port).await
+    } else if cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility {
+        log_i!("[WHITELIST_EMERGENCY] Активный узел не входит в белый список. Возврат к стандартным настройкам игрового режима.");
+        sync_gaming_full_tunnel(&cfg.gaming, redir_port, tproxy_port).await
+    } else {
+        let disabled_gaming = config::GamingConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        sync_gaming_full_tunnel(&disabled_gaming, redir_port, tproxy_port).await
+    }
+}
+
+/// POST /api/servers/whitelist — добавить/удалить сервер из белого списка (обход белых списков)
+pub async fn set_server_whitelist(
+    State(state): State<AppState>,
+    Json(req): Json<ServerWhitelistReq>,
+) -> Response {
+    let _cfg_guard = state.config_lock.lock().await;
+    let mut cfg = (**state.config.read().await).clone();
+    if let Some(servers) = req.servers {
+        cfg.whitelist_servers = servers;
+    } else if let Some(server_id) = req.server_id {
+        let enable = req.enabled.unwrap_or(true);
+        if enable {
+            if !cfg.whitelist_servers.contains(&server_id) {
+                cfg.whitelist_servers.push(server_id);
+            }
+        } else {
+            cfg.whitelist_servers.retain(|s| s != &server_id);
+        }
+    }
+    if let Err(e) = config::save(&state.config_path, &cfg).await {
+        return api_err(format!("Ошибка сохранения белого списка серверов: {e}"));
+    }
+    let wl = cfg.whitelist_servers.clone();
+    *state.config.write().await = std::sync::Arc::new(cfg.clone());
+    log_i!("Обновлён список серверов белых списков (всего: {})", wl.len());
+
+    let active_id = mihomo::get_active_server(&state.http, &cfg).await.ok().flatten().map(|s| s.id).unwrap_or_default();
+    if !active_id.is_empty() {
+        let _ = sync_whitelist_mode_tunnel(&state, &active_id).await;
+    }
+
+    api_ok(json!({ "whitelist_servers": wl }))
 }
 
 #[derive(Deserialize)]
@@ -356,6 +504,7 @@ pub async fn switch_server(State(state): State<AppState>, Json(req): Json<Switch
         Ok(msg) => {
             log_i!("Смена сервера: {} — {}", req.server_id, msg);
             failover::record_manual_switch(&req.server_id).await;
+            let _ = sync_whitelist_mode_tunnel(&state, &req.server_id).await;
             // Если переключен конкретный сервер, обновляем его как основной в цепочке приоритетов,
             // чтобы фоновый failover не откатывал выбор пользователя обратно через 30-60 секунд.
             if !req.server_id.is_empty() && req.server_id != "Fastest" && req.server_id != "Fallback" {
@@ -1066,6 +1215,8 @@ pub struct DeviceRoutingReq {
     pub ping_threshold_ms: u32,
     #[serde(default = "default_true")]
     pub auto_restore: bool,
+    #[serde(default = "default_true")]
+    pub follow_whitelist: bool,
 }
 
 fn default_true() -> bool {
@@ -1105,6 +1256,7 @@ pub async fn set_device_routing(State(state): State<AppState>, Json(req): Json<D
                 servers: servers.clone(),
                 ping_threshold_ms: req.ping_threshold_ms,
                 auto_restore: req.auto_restore,
+                follow_whitelist: req.follow_whitelist,
             },
         );
     }
@@ -1142,6 +1294,11 @@ pub async fn set_device_routing(State(state): State<AppState>, Json(req): Json<D
         if mihomo::switch_group(&state.http, tx.config(), &gname, primary).await.is_ok() {
             reselected = true;
         }
+    }
+
+    let active_id = mihomo::get_active_server(&state.http, tx.config()).await.ok().flatten().map(|s| s.id).unwrap_or_default();
+    if !active_id.is_empty() {
+        let _ = sync_whitelist_mode_tunnel(&state, &active_id).await;
     }
 
     api_ok(json!({
@@ -5241,7 +5398,17 @@ add_fw() {
     iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null || true
   else
     if check_adguard_active; then
-      echo "AdGuard Home is active; client DNS redirect to 1053 skipped so AdGuard handles DNS" >&2
+      echo "AdGuard Home is active; client DNS redirect to 1053 skipped so AdGuard handles DNS on port 3053" >&2
+      iptables -t nat -A PREROUTING -i br+ -d 127.0.0.1 -j RETURN 2>/dev/null || true
+      iptables -t nat -A PREROUTING -i Bridge+ -d 127.0.0.1 -j RETURN 2>/dev/null || true
+      iptables -t nat -A PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-adguard" -j REDIRECT --to-ports 3053 2>/dev/null || \
+      iptables -t nat -A PREROUTING -i br+ -p udp --dport 53 -j REDIRECT --to-ports 3053 2>/dev/null || true
+      iptables -t nat -A PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-adguard" -j REDIRECT --to-ports 3053 2>/dev/null || \
+      iptables -t nat -A PREROUTING -i br+ -p tcp --dport 53 -j REDIRECT --to-ports 3053 2>/dev/null || true
+      iptables -t nat -A PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-adguard" -j REDIRECT --to-ports 3053 2>/dev/null || \
+      iptables -t nat -A PREROUTING -i Bridge+ -p udp --dport 53 -j REDIRECT --to-ports 3053 2>/dev/null || true
+      iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-adguard" -j REDIRECT --to-ports 3053 2>/dev/null || \
+      iptables -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -j REDIRECT --to-ports 3053 2>/dev/null || true
     else
       echo "DNS resolver port 1053 not listening; client DNS redirect skipped to prevent LAN blackout" >&2
     fi
@@ -5305,6 +5472,10 @@ remove_fw_rules() {
   while iptables -t nat -D PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
   while iptables -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
   while iptables -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-adguard" -j REDIRECT --to-ports 3053 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-adguard" -j REDIRECT --to-ports 3053 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-adguard" -j REDIRECT --to-ports 3053 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-adguard" -j REDIRECT --to-ports 3053 2>/dev/null; do :; done
 
   # Remove TCPMSS clamping rule (NET-02 / NET-04)
   while iptables -t mangle -D zapret -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; do :; done
@@ -9733,12 +9904,22 @@ pub async fn adguard_set_config(
             new_adguard.password = current.adguard.password.clone();
         }
     }
+    let adguard_enabled_changed = current.adguard.enabled != new_adguard.enabled;
+    let new_enabled = new_adguard.enabled;
+    let new_port = new_adguard.dns_port;
     current.adguard = new_adguard;
     tx.stage_json(current);
 
     match tx.commit_without_reload().await {
         Ok(_) => {
             log_i!("Конфигурация AdGuard Home успешно обновлена и сохранена");
+            if adguard_enabled_changed {
+                if new_enabled {
+                    let _ = crate::adguard::apply_adguard_iptables(new_port);
+                } else {
+                    let _ = crate::adguard::remove_adguard_iptables();
+                }
+            }
             api_ok(json!({ "saved": true }))
         }
         Err(e) => api_err(format!("Ошибка сохранения конфигурации AdGuard Home: {e}")),

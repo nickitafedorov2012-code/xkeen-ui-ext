@@ -426,6 +426,31 @@ async fn main() {
         }
     });
 
+    // Синхронизация AdGuard Home DNS-редиректа при старте панели
+    let adguard_sync_state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let cfg = adguard_sync_state.config.read().await;
+        if cfg.adguard.enabled {
+            let listener_ok = adguard::test_agh_dns_listener(&cfg.adguard.host, cfg.adguard.dns_port).await;
+            if listener_ok {
+                let _ = adguard::apply_adguard_iptables(cfg.adguard.dns_port);
+                log_i!("[STARTUP] ✓ AdGuard Home DNS redirection to port {} applied", cfg.adguard.dns_port);
+            }
+        }
+    });
+
+    // Синхронизация режима обхода белых списков (100% full tunnel) при старте панели
+    let wl_sync_state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+        let cfg = wl_sync_state.config.read().await;
+        let active_id = mihomo::get_active_server(&wl_sync_state.http, &cfg).await.ok().flatten().map(|s| s.id).unwrap_or_default();
+        if !active_id.is_empty() {
+            let _ = api::sync_whitelist_mode_tunnel(&wl_sync_state, &active_id).await;
+        }
+    });
+
     // Начальная быстрая синхронизация известных бандлов IP принудительно проксируемых доменов с geo_override
     let sync_state = state.clone();
     tokio::spawn(async move {
@@ -501,12 +526,15 @@ async fn main() {
         .route("/api/system/metrics", get(api::get_system_metrics))
         .route("/api/system/processes", get(api::get_system_processes))
         .route("/api/system/processes/kill", post(api::kill_process))
+        .route("/api/system/stack-memory", get(api::get_stack_memory))
         .route("/api/system/swap/status", get(api::get_swap_status))
         .route("/api/system/swap/create", post(api::create_swap))
         .route("/api/system/swap/remove", post(api::remove_swap))
         .route("/api/system/swap", delete(api::remove_swap))
         // Серверы
         .route("/api/servers", get(api::get_servers))
+        .route("/api/servers/alias", post(api::set_server_alias))
+        .route("/api/servers/whitelist", post(api::set_server_whitelist))
         .route("/api/servers/switch", post(api::switch_server))
         .route("/api/servers/active", put(api::switch_server))
         .route("/api/servers/ping", post(api::ping_servers))

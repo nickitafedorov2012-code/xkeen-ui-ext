@@ -92,6 +92,7 @@ export default function Devices({ notify }: Props) {
     servers: string[]
     threshold: number
     autoRestore: boolean
+    followWhitelist?: boolean
   } | null>(null)
 
   const [gamingDeviceMacs, setGamingDeviceMacs] = useState<Set<string>>(new Set())
@@ -332,6 +333,7 @@ export default function Devices({ notify }: Props) {
       servers: entry?.servers?.length ? [...entry.servers] : assigned ? [assigned] : [],
       threshold: entry?.ping_threshold_ms || 300,
       autoRestore: entry?.auto_restore ?? true,
+      followWhitelist: entry?.follow_whitelist ?? true,
     })
   }
 
@@ -345,6 +347,7 @@ export default function Devices({ notify }: Props) {
         servers: drModal.servers,
         ping_threshold_ms: drModal.threshold,
         auto_restore: drModal.autoRestore,
+        follow_whitelist: drModal.followWhitelist ?? true,
       })
       notify(drModal.servers.length ? `Failover chain saved: ${drModal.servers.length} server(s)` : 'Routing cleared')
       setDrModal(null)
@@ -671,15 +674,17 @@ export default function Devices({ notify }: Props) {
                         onClick={() => setOfflineExpanded((prev) => !prev)}
                       >
                         <span className={`offline-accordion-chevron ${offlineExpanded ? 'expanded' : ''}`}>
-                          {offlineExpanded ? '⌄' : '›'}
+                          ›
                         </span>
                         <div className="offline-accordion-info">
                           <span className="offline-accordion-heading">
                             Offline ({sortedOffline.length})
                           </span>
-                          <span className="offline-accordion-preview">
-                            {offlinePreview}
-                          </span>
+                          {!offlineExpanded && (
+                            <span className="offline-accordion-preview">
+                              {offlinePreview}
+                            </span>
+                          )}
                         </div>
                       </div>
                     </td>

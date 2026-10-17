@@ -346,6 +346,12 @@ export default function AdGuard({ notify }: AdGuardProps) {
 
   return (
     <div className="agh-container" data-testid="adguard-view">
+      <div className="beta-banner">
+        <span style={{ fontSize: 16 }}>🧪</span>
+        <div>
+          <strong>Бета-функция:</strong> Сетевые службы (Zapret, Игровой режим, AdGuard Home) работают с изоляцией netfilter/iptables.
+        </div>
+      </div>
       {/* 0. СТАТУСНАЯ ПОЛОСКА И ДУБЛИРОВАННАЯ КНОПКА С ГЛАВНОЙ СТРАНИЦЫ */}
       <div className="dash-info-strip" style={{ marginBottom: 14 }}>
         <div className="dash-info-group">

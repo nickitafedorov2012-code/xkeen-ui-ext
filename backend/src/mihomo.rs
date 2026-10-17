@@ -685,6 +685,20 @@ pub fn ip_groups_from_rules(rules: &Value) -> BTreeMap<String, String> {
     out
 }
 
+/// Получить текущий активный сервер Mihomo
+pub async fn get_active_server(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+) -> Result<Option<Server>, String> {
+    let servers = get_servers(http, cfg, &cfg.failover.priority_chain).await?;
+    let act = servers
+        .iter()
+        .find(|s| s.is_active && !s.is_pool)
+        .or_else(|| servers.iter().find(|s| s.is_active))
+        .cloned();
+    Ok(act)
+}
+
 /// Типы прокси, не являющиеся реальными серверами (служебные/групповые).
 const SKIP_TYPES: &[&str] = &[
     "direct", "reject", "reject-drop", "rejectdrop", "pass", "passrule",

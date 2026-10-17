@@ -86,6 +86,48 @@ export function extractCleanDomain(rawHost: string): { host: string; rootDomain:
   return { host: clean, rootDomain: clean, isIp: false }
 }
 
+export function detectAppFromConn(c: ConnectionItem): { name: string; icon: string; category: string } {
+  const host = (c.metadata.host || c.metadata.destinationIP || '').toLowerCase()
+  const proc = (c.metadata.processPath || '').toLowerCase()
+
+  if (proc.includes('telegram') || host.includes('telegram') || host.includes('t.me') || host.includes('telesco.pe')) {
+    return { name: 'Telegram', icon: '✈️', category: 'Мессенджеры' }
+  }
+  if (proc.includes('discord') || host.includes('discord') || host.includes('discordapp') || host.includes('discord.gg')) {
+    return { name: 'Discord', icon: '💬', category: 'Мессенджеры' }
+  }
+  if (proc.includes('youtube') || host.includes('youtube') || host.includes('googlevideo') || host.includes('ytimg')) {
+    return { name: 'YouTube', icon: '▶️', category: 'Медиа & Видео' }
+  }
+  if (host.includes('openai') || host.includes('chatgpt') || host.includes('anthropic') || host.includes('claude') || host.includes('gemini') || host.includes('generativelanguage')) {
+    return { name: 'AI / ChatGPT & Claude', icon: '🤖', category: 'Искусственный интеллект' }
+  }
+  if (proc.includes('steam') || host.includes('steam') || host.includes('valve') || host.includes('epicgames') || host.includes('riotgames') || host.includes('playstation') || host.includes('xbox')) {
+    return { name: 'Игры & Платформы', icon: '🎮', category: 'Гейминг' }
+  }
+  if (proc.includes('github') || host.includes('github') || host.includes('gitlab') || host.includes('npmjs') || host.includes('docker')) {
+    return { name: 'GitHub & Разработка', icon: '🐙', category: 'Разработка' }
+  }
+  if (host.includes('netflix') || host.includes('spotify') || host.includes('twitch') || host.includes('tiktok') || host.includes('instagram') || host.includes('facebook') || host.includes('twitter') || host.includes('x.com')) {
+    return { name: 'Медиа & Стриминг', icon: '🎬', category: 'Медиа & Видео' }
+  }
+  if (host.includes('apple') || host.includes('icloud') || host.includes('aaplimg') || host.includes('mzstatic')) {
+    return { name: 'Apple Services', icon: '🍎', category: 'Экосистемы' }
+  }
+  if (host.includes('microsoft') || host.includes('windowsupdate') || host.includes('live.com') || host.includes('office')) {
+    return { name: 'Microsoft / Windows', icon: '🪟', category: 'Экосистемы' }
+  }
+  if (host.includes('google') || host.includes('gstatic') || host.includes('1e100')) {
+    return { name: 'Google Services', icon: '🔍', category: 'Поиск & Сервисы' }
+  }
+  if (host.startsWith('192.168.') || host.startsWith('10.') || host.startsWith('172.16.') || host.includes('keenetic') || host.includes('local')) {
+    return { name: 'Локальная сеть / Keenetic', icon: '📡', category: 'LAN' }
+  }
+
+  const { rootDomain } = extractCleanDomain(host)
+  return { name: rootDomain || host || 'Прочий трафик', icon: '🌐', category: 'Веб-трафик' }
+}
+
 export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
   const [connections, setConnections] = useState<ConnectionItem[]>([])
   const [closedConnections, setClosedConnections] = useState<ConnectionItem[]>([])
@@ -97,11 +139,13 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
   const [sortBy, setSortBy] = useState<'download' | 'upload' | 'time'>('download')
   const [mainView, setMainView] = useState<'connections' | 'diagnostics'>('connections')
   const [filterTab, setFilterTab] = useState<'all' | 'active' | 'proxy' | 'direct' | 'closed'>('all')
+  const [groupByApp, setGroupByApp] = useState(false)
 
   // Имена устройств локальной сети (IP -> имя)
   const [deviceNames, setDeviceNames] = useState<Record<string, string>>({})
-  // Список принудительно проксируемых доменов (для индикации «✓ В прокси»)
+  // Списки проксируемых и direct доменов
   const [forceDomains, setForceDomains] = useState<string[]>([])
+  const [directDomains, setDirectDomains] = useState<string[]>([])
 
   // Состояние модального окна «Жестко отправить в прокси»
   const [modal, setModal] = useState<ForceProxyModalState>({
@@ -125,7 +169,7 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
     try {
       const [devRes, domRes] = await Promise.allSettled([
         apiGet<{ devices: Array<{ ip: string; name: string }> }>('devices'),
-        apiGet<{ force: string[] }>('domains'),
+        apiGet<{ direct: string[]; force: string[] }>('domains'),
       ])
       if (devRes.status === 'fulfilled' && devRes.value.devices) {
         const map: Record<string, string> = {}
@@ -134,8 +178,9 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
         }
         setDeviceNames(map)
       }
-      if (domRes.status === 'fulfilled' && domRes.value.force) {
-        setForceDomains(domRes.value.force.map((d) => d.toLowerCase()))
+      if (domRes.status === 'fulfilled' && domRes.value) {
+        if (domRes.value.force) setForceDomains(domRes.value.force.map((d) => d.toLowerCase()))
+        if (domRes.value.direct) setDirectDomains(domRes.value.direct.map((d) => d.toLowerCase()))
       }
     } catch {
       // Игнорируем ошибки фоновой загрузки доп. данных
@@ -337,6 +382,34 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
     }
   }
 
+  // 1-клик отправка домена соединения в обход (Direct)
+  const handleOneClickDirect = async (c: ConnectionItem) => {
+    const host = c.metadata.host || c.metadata.destinationIP || ''
+    const { host: cleanHost, rootDomain } = extractCleanDomain(host)
+    const domain = rootDomain || cleanHost
+    if (!domain) return
+    try {
+      const domRes = await apiGet<{ direct: string[]; force: string[] }>('domains')
+      const curDirect = domRes.direct || []
+      const curForce = domRes.force || []
+      if (!curDirect.some((d) => d.toLowerCase() === domain)) {
+        await apiPost('domains', {
+          direct: [...curDirect, domain],
+          force: curForce.filter((d) => d.toLowerCase() !== domain),
+        })
+      }
+      if (!c.isClosed) {
+        await apiDelete(`connections/${c.id}`).catch(() => {})
+      }
+      setDirectDomains((prev) => (prev.includes(domain) ? prev : [...prev, domain]))
+      setForceDomains((prev) => prev.filter((d) => d !== domain))
+      notify(`✓ Домен «${domain}» направлен напрямую (Direct)`)
+      loadData(false)
+    } catch (e: any) {
+      notify('Ошибка направления напрямую: ' + e.message, true)
+    }
+  }
+
   // Проверка: находится ли домен хоста уже в force_domains
   const isHostAlreadyForced = useCallback(
     (rawHost: string): boolean => {
@@ -349,6 +422,20 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
       )
     },
     [forceDomains]
+  )
+
+  // Проверка: находится ли домен хоста уже в direct_domains
+  const isHostAlreadyDirect = useCallback(
+    (rawHost: string): boolean => {
+      if (!rawHost) return false
+      const { host, rootDomain } = extractCleanDomain(rawHost)
+      return (
+        directDomains.includes(host) ||
+        directDomains.includes(rootDomain) ||
+        directDomains.some((dd) => host.endsWith(`.${dd}`))
+      )
+    },
+    [directDomains]
   )
 
   // Объединяем активные и завершённые сессии
@@ -401,6 +488,29 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
     })
     return copy
   }, [filtered, sortBy])
+
+  // Группировка потоков по приложениям (Live Flow Inspector)
+  const groupedApps = useMemo(() => {
+    if (!groupByApp) return []
+    const map = new Map<string, { app: { name: string; icon: string; category: string }; conns: ConnectionItem[]; download: number; upload: number }>()
+    for (const c of sorted) {
+      const app = detectAppFromConn(c)
+      const existing = map.get(app.name)
+      if (existing) {
+        existing.conns.push(c)
+        existing.download += c.download
+        existing.upload += c.upload
+      } else {
+        map.set(app.name, {
+          app,
+          conns: [c],
+          download: c.download,
+          upload: c.upload,
+        })
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => (b.download + b.upload) - (a.download + a.upload))
+  }, [groupByApp, sorted])
 
   // Подсчёт количеств для табов
   const counts = useMemo(() => {
@@ -528,6 +638,14 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
 
           <div className="connections-actions-group">
             <button
+              type="button"
+              className={`btn btn-sm ${groupByApp ? 'btn-primary' : 'btn-secondary'}`}
+              onClick={() => setGroupByApp((prev) => !prev)}
+              title="Инспектор потоков: группировать по приложениям"
+            >
+              📦 {groupByApp ? 'Группировка: Вкл' : 'По приложениям'}
+            </button>
+            <button
               className="btn btn-sm btn-primary"
               onClick={() => openForceProxyModal()}
               title="Добавить любой домен принудительно в прокси вручную"
@@ -590,6 +708,180 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
         <div className="card empty-placeholder">
           {search ? '🔍 Соединений по данному запросу не найдено' : 'Подключения в данном разделе отсутствуют'}
         </div>
+      ) : groupByApp ? (
+        /* РЕЖИМ ГРУППИРОВКИ ПО ПРИЛОЖЕНИЯМ (Live Flow Inspector) */
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          {groupedApps.map(({ app, conns, download, upload }) => (
+            <div
+              key={app.name}
+              className="card"
+              style={{
+                background: 'rgba(255, 255, 255, 0.02)',
+                border: '1px solid var(--border)',
+                borderRadius: 10,
+                padding: '12px 16px',
+              }}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: 10,
+                  marginBottom: 10,
+                  borderBottom: '1px solid rgba(255,255,255,0.06)',
+                  paddingBottom: 8,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 20 }}>{app.icon}</span>
+                  <div>
+                    <b style={{ fontSize: 14, color: 'var(--text-bright)' }}>{app.name}</b>
+                    <span className="badge" style={{ marginLeft: 8, fontSize: 10, background: 'rgba(255,255,255,0.06)' }}>
+                      {app.category}
+                    </span>
+                    <span className="muted small" style={{ marginLeft: 8, fontSize: 11 }}>
+                      {conns.length} сессий
+                    </span>
+                  </div>
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#38bdf8' }}>↓ {formatBytes(download)}</span>
+                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#a855f7' }}>↑ {formatBytes(upload)}</span>
+                  <button
+                    type="button"
+                    className="btn btn-xs"
+                    style={{
+                      background: 'rgba(56, 189, 248, 0.15)',
+                      color: '#38bdf8',
+                      border: '1px solid rgba(56, 189, 248, 0.4)',
+                      borderRadius: 6,
+                      padding: '3px 8px',
+                      fontWeight: 600,
+                    }}
+                    onClick={() => {
+                      if (conns[0]) handleOneClickDirect(conns[0])
+                    }}
+                    title="Направить домен первого соединения этого приложения напрямую (Direct)"
+                  >
+                    ⚡ В обход (Direct)
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-xs btn-force-proxy"
+                    style={{ borderRadius: 6, padding: '3px 8px', fontWeight: 600 }}
+                    onClick={() => {
+                      if (conns[0]) openForceProxyModal(conns[0])
+                    }}
+                    title="Направить в прокси"
+                  >
+                    ⚡ В прокси
+                  </button>
+                </div>
+              </div>
+
+              {/* Мини-таблица соединений приложения */}
+              <div className="table-responsive">
+                <table className="connections-table" style={{ fontSize: 12 }}>
+                  <tbody>
+                    {conns.map((c) => {
+                      const host = c.metadata.host || c.metadata.destinationIP || 'Неизвестно'
+                      const isProxy = c.chains && c.chains.length > 0 && c.chains[0].toUpperCase() !== 'DIRECT'
+                      const isForced = isHostAlreadyForced(host)
+                      return (
+                        <tr key={c.id}>
+                          <td style={{ width: 60 }}>
+                            <span className={`net-badge ${c.metadata.network.toLowerCase()}`}>{c.metadata.network}</span>
+                          </td>
+                          <td className="host-cell" title={`${host}:${c.metadata.destinationPort}`}>
+                            <span className="host-name">{host}</span>
+                            <span className="host-port muted">:{c.metadata.destinationPort}</span>
+                          </td>
+                          <td style={{ width: 140 }}>
+                            <span className="client-ip">{c.metadata.sourceIP}</span>
+                          </td>
+                          <td style={{ width: 100 }}>
+                            <span className="chain-badge">{c.chains?.[0] || 'DIRECT'}</span>
+                          </td>
+                          <td className="traffic-cell down-color" style={{ width: 90 }}>↓ {formatBytes(c.download)}</td>
+                          <td className="traffic-cell up-color" style={{ width: 90 }}>↑ {formatBytes(c.upload)}</td>
+                          <td style={{ width: 130, textAlign: 'right' }}>
+                            <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+                              {isProxy ? (
+                                isHostAlreadyDirect(host) ? (
+                                  <span
+                                    className="badge-already-forced"
+                                    style={{
+                                      background: 'rgba(56, 189, 248, 0.12)',
+                                      color: '#38bdf8',
+                                      borderColor: 'rgba(56, 189, 248, 0.35)',
+                                      padding: '2px 4px',
+                                      fontSize: 10,
+                                    }}
+                                    title="Уже в обходе (Direct)"
+                                  >
+                                    ✓ В обход
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="btn btn-xs"
+                                    style={{
+                                      background: 'rgba(56, 189, 248, 0.12)',
+                                      color: '#38bdf8',
+                                      border: '1px solid rgba(56, 189, 248, 0.35)',
+                                      padding: '2px 5px',
+                                      fontSize: 10,
+                                      fontWeight: 600,
+                                    }}
+                                    title="Направить напрямую (Direct)"
+                                    onClick={() => handleOneClickDirect(c)}
+                                  >
+                                    ⚡ Обход
+                                  </button>
+                                )
+                              ) : isForced ? (
+                                <span
+                                  className="badge-already-forced"
+                                  style={{ padding: '2px 4px', fontSize: 10 }}
+                                  title="Уже в прокси"
+                                >
+                                  ✓ В прокси
+                                </span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  className="btn btn-xs btn-force-proxy"
+                                  style={{ padding: '2px 5px', fontSize: 10 }}
+                                  title="Направить в прокси"
+                                  onClick={() => openForceProxyModal(c)}
+                                >
+                                  ⚡ Прокси
+                                </button>
+                              )}
+                              {!c.isClosed && (
+                                <button
+                                  type="button"
+                                  className="btn-icon-danger"
+                                  style={{ width: 20, height: 20, fontSize: 10 }}
+                                  onClick={() => handleCloseOne(c.id)}
+                                >
+                                  ✕
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+        </div>
       ) : (
         <div className="card table-card">
           <div className="table-responsive">
@@ -603,7 +895,7 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
                   <th>Правило</th>
                   <th>Скачано (↓)</th>
                   <th>Отдано (↑)</th>
-                  <th style={{ width: 140, textAlign: 'center' }}>Действие</th>
+                  <th style={{ width: 160, textAlign: 'center' }}>Действие</th>
                 </tr>
               </thead>
               <tbody>
@@ -613,6 +905,7 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
                   const clientName = deviceNames[client]
                   const chain = c.chains && c.chains.length > 0 ? c.chains.join(' → ') : 'DIRECT'
                   const isForced = isHostAlreadyForced(host)
+                  const isProxy = c.chains && c.chains.length > 0 && c.chains[0].toUpperCase() !== 'DIRECT'
 
                   return (
                     <tr key={c.id} className={c.isClosed ? 'conn-row-closed' : ''}>
@@ -664,6 +957,42 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
                             >
                               ⚡ В прокси
                             </button>
+                          )}
+                          {isProxy && (
+                            isHostAlreadyDirect(host) ? (
+                              <span
+                                className="badge-already-forced"
+                                style={{
+                                  background: 'rgba(56, 189, 248, 0.15)',
+                                  color: '#38bdf8',
+                                  borderColor: 'rgba(56, 189, 248, 0.35)',
+                                  borderRadius: 4,
+                                  padding: '2px 6px',
+                                  fontSize: 11,
+                                }}
+                                title="Домен уже в списке прямого подключения (Direct)"
+                              >
+                                ✓ В обход
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                className="btn btn-xs"
+                                style={{
+                                  background: 'rgba(56, 189, 248, 0.15)',
+                                  color: '#38bdf8',
+                                  border: '1px solid rgba(56, 189, 248, 0.35)',
+                                  borderRadius: 4,
+                                  padding: '2px 6px',
+                                  fontSize: 11,
+                                  fontWeight: 600,
+                                }}
+                                title="Направить домен в обход прокси (Direct)"
+                                onClick={() => handleOneClickDirect(c)}
+                              >
+                                ⚡ В обход
+                              </button>
+                            )
                           )}
                           {!c.isClosed && (
                             <button

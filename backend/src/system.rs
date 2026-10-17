@@ -54,6 +54,25 @@ pub struct TaskManagerSnapshot {
     pub processes: Vec<ProcessInfo>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProcessMemoryInfo {
+    pub name: String,
+    pub display_name: String,
+    pub pid: Option<u32>,
+    pub rss_bytes: u64,
+    pub rss_mb: f64,
+    pub running: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StackMemoryInfo {
+    pub total_stack_rss_mb: f64,
+    pub keenetic_free_mb: f64,
+    pub keenetic_total_mb: f64,
+    pub keenetic_available_mb: f64,
+    pub processes: Vec<ProcessMemoryInfo>,
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct KillRequest {
     pub pid: u32,
@@ -789,6 +808,245 @@ pub fn is_process_running(expected_name: &str) -> bool {
     }
 }
 
+/// Проверяет совпадение имени процесса с учетом ограничения длины TASK_COMM_LEN в Linux (15 символов)
+/// и резервной проверки строки аргументов cmdline.
+pub fn matches_target_needle(comm_trim: &str, pid: u32, needle: &str, cmdline: Option<&str>) -> bool {
+    let comm_lower = comm_trim.to_lowercase();
+    let needle_lower = needle.to_lowercase();
+    if comm_lower == needle_lower {
+        return true;
+    }
+    if needle == "xkeen-route" && (comm_lower.contains("xkeen-route") || pid == std::process::id()) {
+        return true;
+    }
+    // Ограничение Linux TASK_COMM_LEN: в /proc/<pid>/comm помещается максимум 15 символов.
+    // Например, transmission-daemon (19 символов) усекается ядром Linux до transmission-da.
+    if comm_lower.len() >= 14 && needle_lower.starts_with(&comm_lower) {
+        return true;
+    }
+    if let Some(cmd) = cmdline {
+        let cmd_lower = cmd.to_lowercase();
+        if cmd_lower.contains(&needle_lower) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Замер физической оперативной памяти (RSS) ключевых процессов стека (Mihomo, XRoute, AdGuard Home, Zapret, SMB, Transmission)
+/// и свободной памяти KeeneticOS.
+pub fn get_stack_memory_info() -> StackMemoryInfo {
+    #[cfg(target_os = "linux")]
+    {
+        // 1. Читаем /proc/meminfo
+        let (total_kb, free_kb, _avail_kb, _cached_kb) = read_meminfo();
+        let keenetic_total_mb = ((total_kb as f64) / 1024.0 * 10.0).round() / 10.0;
+        let keenetic_free_mb = ((free_kb as f64) / 1024.0 * 10.0).round() / 10.0;
+        let keenetic_available_mb = if _avail_kb > 0 {
+            ((_avail_kb as f64) / 1024.0 * 10.0).round() / 10.0
+        } else {
+            keenetic_free_mb
+        };
+
+        // 2. Сканируем /proc на целевые процессы
+        struct TargetDef {
+            needle: &'static str,
+            display: &'static str,
+            is_optional: bool,
+        }
+
+        let targets = [
+            TargetDef { needle: "mihomo", display: "Mihomo (Ядро)", is_optional: false },
+            TargetDef { needle: "xkeen-route", display: "XKeen Route (Панель)", is_optional: false },
+            TargetDef { needle: "AdGuardHome", display: "AdGuard Home", is_optional: false },
+            TargetDef { needle: "nfqws2", display: "Zapret (nfqws2)", is_optional: false },
+            TargetDef { needle: "nfqws", display: "Zapret (nfqws)", is_optional: false },
+            TargetDef { needle: "smbd", display: "Samba (smbd)", is_optional: true },
+            TargetDef { needle: "transmission-daemon", display: "Transmission", is_optional: true },
+        ];
+
+        let mut found_map: HashMap<&'static str, (u32, u64)> = HashMap::new(); // needle -> (pid, rss_kb)
+
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_dir() { continue; }
+                let file_name = match path.file_name().and_then(|n| n.to_str()) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let pid: u32 = match file_name.parse() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+
+                let comm = std::fs::read_to_string(path.join("comm")).unwrap_or_default();
+                let comm_trim = comm.trim();
+                let cmdline = std::fs::read(path.join("cmdline"))
+                    .ok()
+                    .map(|b| String::from_utf8_lossy(&b).replace('\0', " "));
+
+                for t in &targets {
+                    if matches_target_needle(comm_trim, pid, t.needle, cmdline.as_deref()) {
+                        let mut rss_kb = 0u64;
+                        if let Ok(status) = std::fs::read_to_string(path.join("status")) {
+                            for line in status.lines() {
+                                if line.starts_with("VmRSS:") {
+                                    if let Some(val) = line.split_whitespace().nth(1).and_then(|s| s.parse().ok()) {
+                                        rss_kb = val;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        found_map.entry(t.needle).and_modify(|(_, existing_rss)| *existing_rss += rss_kb).or_insert((pid, rss_kb));
+                    }
+                }
+            }
+        }
+
+        let mut processes = Vec::new();
+        let mut total_rss_kb = 0u64;
+
+        // Mihomo
+        let (m_pid, m_rss) = found_map.get("mihomo").copied().unwrap_or((0, 0));
+        let m_running = m_pid > 0 || m_rss > 0;
+        total_rss_kb += m_rss;
+        processes.push(ProcessMemoryInfo {
+            name: "mihomo".to_string(),
+            display_name: "Mihomo (Ядро)".to_string(),
+            pid: if m_pid > 0 { Some(m_pid) } else { None },
+            rss_bytes: m_rss * 1024,
+            rss_mb: ((m_rss as f64) / 1024.0 * 10.0).round() / 10.0,
+            running: m_running,
+        });
+
+        // XKeen Route
+        let (xr_pid, xr_rss) = found_map.get("xkeen-route").copied().unwrap_or((std::process::id(), 0));
+        total_rss_kb += xr_rss;
+        processes.push(ProcessMemoryInfo {
+            name: "xkeen-route".to_string(),
+            display_name: "XKeen Route (Панель)".to_string(),
+            pid: Some(xr_pid),
+            rss_bytes: xr_rss * 1024,
+            rss_mb: ((xr_rss as f64) / 1024.0 * 10.0).round() / 10.0,
+            running: true,
+        });
+
+        // AdGuard Home
+        let (agh_pid, agh_rss) = found_map.get("AdGuardHome").copied().unwrap_or((0, 0));
+        let agh_running = agh_pid > 0 || agh_rss > 0;
+        total_rss_kb += agh_rss;
+        processes.push(ProcessMemoryInfo {
+            name: "AdGuardHome".to_string(),
+            display_name: "AdGuard Home".to_string(),
+            pid: if agh_pid > 0 { Some(agh_pid) } else { None },
+            rss_bytes: agh_rss * 1024,
+            rss_mb: ((agh_rss as f64) / 1024.0 * 10.0).round() / 10.0,
+            running: agh_running,
+        });
+
+        // Zapret
+        let (z_pid, z_rss, z_name, z_display) = if let Some(&(pid, rss)) = found_map.get("nfqws2") {
+            (pid, rss, "nfqws2", "Zapret 2 (nfqws2)")
+        } else if let Some(&(pid, rss)) = found_map.get("nfqws") {
+            (pid, rss, "nfqws", "Zapret (nfqws)")
+        } else {
+            (0, 0, "nfqws2", "Zapret (DPI)")
+        };
+        let z_running = z_pid > 0 || z_rss > 0;
+        total_rss_kb += z_rss;
+        processes.push(ProcessMemoryInfo {
+            name: z_name.to_string(),
+            display_name: z_display.to_string(),
+            pid: if z_pid > 0 { Some(z_pid) } else { None },
+            rss_bytes: z_rss * 1024,
+            rss_mb: ((z_rss as f64) / 1024.0 * 10.0).round() / 10.0,
+            running: z_running,
+        });
+
+        // smbd (если обнаружен)
+        if let Some(&(smb_pid, smb_rss)) = found_map.get("smbd") {
+            total_rss_kb += smb_rss;
+            processes.push(ProcessMemoryInfo {
+                name: "smbd".to_string(),
+                display_name: "Samba (smbd)".to_string(),
+                pid: Some(smb_pid),
+                rss_bytes: smb_rss * 1024,
+                rss_mb: ((smb_rss as f64) / 1024.0 * 10.0).round() / 10.0,
+                running: true,
+            });
+        }
+
+        // transmission-daemon (если обнаружен)
+        if let Some(&(tr_pid, tr_rss)) = found_map.get("transmission-daemon") {
+            total_rss_kb += tr_rss;
+            processes.push(ProcessMemoryInfo {
+                name: "transmission-daemon".to_string(),
+                display_name: "Transmission".to_string(),
+                pid: Some(tr_pid),
+                rss_bytes: tr_rss * 1024,
+                rss_mb: ((tr_rss as f64) / 1024.0 * 10.0).round() / 10.0,
+                running: true,
+            });
+        }
+
+        let total_stack_rss_mb = ((total_rss_kb as f64) / 1024.0 * 10.0).round() / 10.0;
+
+        StackMemoryInfo {
+            total_stack_rss_mb,
+            keenetic_free_mb,
+            keenetic_total_mb,
+            keenetic_available_mb,
+            processes,
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        StackMemoryInfo {
+            total_stack_rss_mb: 66.5,
+            keenetic_free_mb: 284.5,
+            keenetic_total_mb: 512.0,
+            keenetic_available_mb: 310.0,
+            processes: vec![
+                ProcessMemoryInfo {
+                    name: "mihomo".to_string(),
+                    display_name: "Mihomo (Ядро)".to_string(),
+                    pid: Some(1042),
+                    rss_bytes: 25375744,
+                    rss_mb: 24.2,
+                    running: true,
+                },
+                ProcessMemoryInfo {
+                    name: "xkeen-route".to_string(),
+                    display_name: "XKeen Route (Панель)".to_string(),
+                    pid: Some(std::process::id()),
+                    rss_bytes: 19398656,
+                    rss_mb: 18.5,
+                    running: true,
+                },
+                ProcessMemoryInfo {
+                    name: "AdGuardHome".to_string(),
+                    display_name: "AdGuard Home".to_string(),
+                    pid: Some(2150),
+                    rss_bytes: 20761804,
+                    rss_mb: 19.8,
+                    running: true,
+                },
+                ProcessMemoryInfo {
+                    name: "nfqws2".to_string(),
+                    display_name: "Zapret 2 (nfqws2)".to_string(),
+                    pid: Some(3021),
+                    rss_bytes: 4194304,
+                    rss_mb: 4.0,
+                    running: true,
+                },
+            ],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -812,6 +1070,30 @@ mod tests {
     fn test_is_process_running_regression() {
         // Гарантирует наличие и работоспособность функции проверки процесса по имени (предотвращает регрессию сборки в Linux CI)
         assert!(is_process_running("AdGuardHome"));
+    }
+
+    #[test]
+    fn test_stack_memory_info_structure() {
+        let mem = get_stack_memory_info();
+        assert!(mem.keenetic_total_mb >= 0.0);
+        assert!(!mem.processes.is_empty());
+        assert!(mem.processes.iter().any(|p| p.name == "mihomo"));
+        assert!(mem.processes.iter().any(|p| p.name == "xkeen-route"));
+        assert!(mem.processes.iter().any(|p| p.name == "AdGuardHome"));
+    }
+
+    #[test]
+    fn test_matches_target_needle_handles_linux_comm_truncation() {
+        // Проверка усечения длинного имени transmission-daemon (19 символов) ядром Linux до 15 символов
+        assert!(matches_target_needle("transmission-da", 1234, "transmission-daemon", None));
+        assert!(matches_target_needle("mihomo", 100, "mihomo", None));
+        assert!(matches_target_needle("AdGuardHome", 200, "AdGuardHome", None));
+        assert!(matches_target_needle("nfqws2", 300, "nfqws2", None));
+        assert!(matches_target_needle("nfqws", 400, "nfqws", None));
+        assert!(matches_target_needle("smbd", 500, "smbd", None));
+        assert!(!matches_target_needle("other", 600, "transmission-daemon", None));
+        // Проверка через аргументы cmdline
+        assert!(matches_target_needle("sh", 700, "transmission-daemon", Some("/usr/bin/transmission-daemon --config-dir /opt/etc")));
     }
 
     #[test]

@@ -387,6 +387,13 @@ export default function Settings({ notify, status, refresh }: Props) {
     }
   }, [status?.failover?.priority_chain_pings])
 
+  // Ускоренный поллинг статуса (1.8с) во вкладке Настройки / Failover
+  useEffect(() => {
+    if (!refresh) return
+    const interval = setInterval(refresh, 1800)
+    return () => clearInterval(interval)
+  }, [refresh])
+
   const loadBackups = useCallback(async () => {
     try {
       const d = await apiGet<{ backups: { name: string }[]; dir: string }>('backups')
@@ -1030,6 +1037,14 @@ export default function Settings({ notify, status, refresh }: Props) {
                   const livePing = (status?.failover?.priority_chain_pings && status.failover.priority_chain_pings[id] !== undefined)
                     ? status.failover.priority_chain_pings[id]
                     : (status?.active_server && status.active_server.id === id ? status.active_server.ping_ms : (sv?.ping_ms ?? 0))
+
+                  const isActive = Boolean(status?.active_server && status.active_server.id === id)
+                  const canaryInfo = status?.failover?.canary
+                  const isCanary = Boolean(canaryInfo?.active && canaryInfo.target_id === id)
+                  const quarantineInfo = status?.failover?.quarantine?.find((q) => q.server_id === id)
+                  const isQuarantined = Boolean(quarantineInfo && quarantineInfo.remaining_secs > 0)
+                  const isTimeout = livePing <= 0 || livePing >= 9999
+
                   return (
                     <div
                       key={id}
@@ -1038,12 +1053,22 @@ export default function Settings({ notify, status, refresh }: Props) {
                         display: 'flex',
                         gap: 8,
                         alignItems: 'center',
-                        background: i === 0 ? 'rgba(56, 189, 248, 0.08)' : 'rgba(255, 255, 255, 0.02)',
-                        border: i === 0 ? '1px solid rgba(56, 189, 248, 0.3)' : '1px solid var(--border)',
+                        flexWrap: 'wrap',
+                        background: isActive
+                          ? 'rgba(34, 197, 94, 0.08)'
+                          : i === 0
+                            ? 'rgba(56, 189, 248, 0.08)'
+                            : 'rgba(255, 255, 255, 0.02)',
+                        border: isActive
+                          ? '1px solid rgba(34, 197, 94, 0.4)'
+                          : i === 0
+                            ? '1px solid rgba(56, 189, 248, 0.3)'
+                            : '1px solid var(--border)',
                         borderRadius: 8,
                         padding: '6px 10px',
                       }}
                     >
+                      {/* Роль в цепочке */}
                       <span
                         style={{
                           fontSize: 10.5,
@@ -1052,10 +1077,88 @@ export default function Settings({ notify, status, refresh }: Props) {
                           borderRadius: 4,
                           background: i === 0 ? 'rgba(56, 189, 248, 0.25)' : 'rgba(255, 255, 255, 0.08)',
                           color: i === 0 ? '#38bdf8' : 'var(--muted)',
+                          whiteSpace: 'nowrap',
                         }}
                       >
-                        {i === 0 ? '👑 ОСНОВНОЙ' : `⚡ РЕЗЕРВ ${i}`}
+                        {i === 0 ? '👑 ОСНОВНОЙ (№1)' : `⚡ РЕЗЕРВ (№${i + 1})`}
                       </span>
+
+                      {/* Живой статус работы */}
+                      {isActive ? (
+                        <span
+                          style={{
+                            fontSize: 10,
+                            fontWeight: 700,
+                            padding: '2px 6px',
+                            borderRadius: 4,
+                            background: 'rgba(34, 197, 94, 0.2)',
+                            color: '#4ade80',
+                            border: '1px solid rgba(34, 197, 94, 0.4)',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          🟢 ИСПОЛЬЗУЕТСЯ СЕЙЧАС
+                        </span>
+                      ) : isCanary ? (
+                        <span
+                          style={{
+                            fontSize: 10,
+                            fontWeight: 700,
+                            padding: '2px 6px',
+                            borderRadius: 4,
+                            background: 'rgba(168, 85, 247, 0.2)',
+                            color: '#c084fc',
+                            border: '1px solid rgba(168, 85, 247, 0.4)',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          🧪 ТЕСТ ({canaryInfo?.remaining_secs ?? 0}с)
+                        </span>
+                      ) : isQuarantined ? (
+                        <span
+                          style={{
+                            fontSize: 10,
+                            fontWeight: 700,
+                            padding: '2px 6px',
+                            borderRadius: 4,
+                            background: 'rgba(249, 115, 22, 0.2)',
+                            color: '#fb923c',
+                            border: '1px solid rgba(249, 115, 22, 0.4)',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          🛡️ Карантин ({Math.ceil((quarantineInfo?.remaining_secs || 0) / 60)} мин)
+                        </span>
+                      ) : isTimeout ? (
+                        <span
+                          style={{
+                            fontSize: 10,
+                            fontWeight: 700,
+                            padding: '2px 6px',
+                            borderRadius: 4,
+                            background: 'rgba(239, 68, 68, 0.15)',
+                            color: '#f87171',
+                            border: '1px solid rgba(239, 68, 68, 0.35)',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          ❌ Таймаут
+                        </span>
+                      ) : (
+                        <span
+                          style={{
+                            fontSize: 10,
+                            fontWeight: 600,
+                            padding: '2px 6px',
+                            borderRadius: 4,
+                            background: 'rgba(255, 255, 255, 0.05)',
+                            color: 'var(--muted)',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          💤 В резерве
+                        </span>
+                      )}
 
                       {sv?.is_pool ? (
                         <span
@@ -1076,7 +1179,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                         </span>
                       ) : null}
 
-                      <span className="server-name" style={{ flex: 1, fontWeight: i === 0 ? 600 : 400 }} title={id}>
+                      <span className="server-name" style={{ flex: 1, fontWeight: isActive || i === 0 ? 600 : 400 }} title={id}>
                         {sv ? sv.name : `${id} (недоступен)`}
                       </span>
 
@@ -1084,6 +1187,41 @@ export default function Settings({ notify, status, refresh }: Props) {
                         <span className={'ping ' + pingClass(livePing)}>
                           {livePing > 0 ? `${livePing} мс` : '—'}
                         </span>
+                      )}
+
+                      {!isActive && (
+                        <button
+                          type="button"
+                          className="btn sm"
+                          style={{
+                            height: 26,
+                            padding: '0 8px',
+                            fontSize: 11,
+                            lineHeight: '24px',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                            borderRadius: 6,
+                            background: 'rgba(56, 189, 248, 0.12)',
+                            border: '1px solid rgba(56, 189, 248, 0.35)',
+                            color: '#38bdf8',
+                            cursor: 'pointer',
+                            fontWeight: 600,
+                            whiteSpace: 'nowrap',
+                          }}
+                          title="Принудительно переключиться на этот сервер"
+                          onClick={async () => {
+                            try {
+                              await apiPost('servers/switch', { id })
+                              notify(`Переключение на ${sv?.name || id}...`)
+                              refresh?.()
+                            } catch (e: any) {
+                              notify(e.message || 'Ошибка переключения', true)
+                            }
+                          }}
+                        >
+                          ⚡ Включить
+                        </button>
                       )}
 
                       <button className="btn sm ghost" disabled={i === 0} onClick={() => chainMove(i, -1)} title="Повысить приоритет">
@@ -1856,70 +1994,104 @@ export default function Settings({ notify, status, refresh }: Props) {
         </div>
       </div>
 
-      {/* БЕЗОПАСНОСТЬ И ПАРОЛЬ (В САМЫЙ КОНЕЦ НАСТРОЕК) */}
-      <section className="card">
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-          <h2 style={{ margin: 0 }}>🔐 Безопасность и пароль</h2>
-          <span className={`badge ${authEnabled ? 'badge-online' : ''}`}>
-            {authEnabled ? '🟢 защита включена' : '⚪ без пароля'}
-          </span>
-        </div>
-        <p className="muted small">Защита веб-панели паролем с сессией (24 часа).</p>
-        <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-          <b>Включить защиту паролем</b>
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={authEnabled}
-              onChange={(e) => setAuthEnabled(e.target.checked)}
-            />
-            <span className="slider" />
-          </label>
+      {/* БЕЗОПАСНОСТЬ И ПАРОЛЬ (Сжатая Apple-карточка) */}
+      <section className="card" style={{ padding: authEnabled ? '16px' : '8px 16px', transition: 'all 0.25s ease' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', minHeight: authEnabled ? 'auto' : 36 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 16 }}>🔐</span>
+            <div>
+              <b style={{ fontSize: 13.5 }}>Безопасность и пароль</b>
+              {!authEnabled && (
+                <span className="muted small" style={{ marginLeft: 8, fontSize: 12 }}>
+                  (пароль выключен — свободный вход)
+                </span>
+              )}
+            </div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span className={`badge ${authEnabled ? 'badge-online' : ''}`} style={{ fontSize: 11, padding: '2px 8px' }}>
+              {authEnabled ? '🟢 защита включена' : '⚪ без пароля'}
+            </span>
+            <label className="switch" style={{ margin: 0 }}>
+              <input
+                type="checkbox"
+                checked={authEnabled}
+                onChange={async (e) => {
+                  const checked = e.target.checked
+                  setAuthEnabled(checked)
+                  if (!checked && settings?.auth?.enabled) {
+                    if (window.confirm('Отключить защиту паролем для веб-панели?')) {
+                      setAuthSaving(true)
+                      try {
+                        await apiPost('auth/change-password', {
+                          enabled: false,
+                          new_password: '',
+                        })
+                        notify('Авторизация отключена')
+                        refresh?.()
+                      } catch (err: any) {
+                        notify(err.message || 'Ошибка отключения пароля', true)
+                        setAuthEnabled(true)
+                      } finally {
+                        setAuthSaving(false)
+                      }
+                    } else {
+                      setAuthEnabled(true)
+                    }
+                  }
+                }}
+              />
+              <span className="slider" />
+            </label>
+          </div>
         </div>
 
         {authEnabled && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 8 }}>
-            {settings?.auth?.enabled && (
+          <div style={{ marginTop: 12, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 12 }}>
+            <p className="muted small" style={{ margin: '0 0 10px' }}>Защита веб-панели паролем с сессией (24 часа).</p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {settings?.auth?.enabled && (
+                <label className="row">
+                  <span>Текущий пароль</span>
+                  <input
+                    className="input"
+                    type="password"
+                    placeholder="Текущий пароль (для подтверждения)"
+                    value={currentPassword}
+                    onChange={(e) => setCurrentPassword(e.target.value)}
+                  />
+                </label>
+              )}
               <label className="row">
-                <span>Текущий пароль</span>
+                <span>Новый пароль</span>
                 <input
                   className="input"
                   type="password"
-                  placeholder="Текущий пароль (для подтверждения)"
-                  value={currentPassword}
-                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  placeholder="Введите новый пароль"
+                  value={newPassword}
+                  onChange={(e) => setNewPassword(e.target.value)}
                 />
               </label>
-            )}
-            <label className="row">
-              <span>Новый пароль</span>
-              <input
-                className="input"
-                type="password"
-                placeholder="Введите новый пароль"
-                value={newPassword}
-                onChange={(e) => setNewPassword(e.target.value)}
-              />
-            </label>
-            <label className="row">
-              <span>Повторите пароль</span>
-              <input
-                className="input"
-                type="password"
-                placeholder="Повторите новый пароль"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-              />
-            </label>
+              <label className="row">
+                <span>Повторите пароль</span>
+                <input
+                  className="input"
+                  type="password"
+                  placeholder="Повторите новый пароль"
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                />
+              </label>
+            </div>
+
+            <button className="btn primary" style={{ marginTop: 12 }} onClick={handleSaveAuth} disabled={authSaving}>
+              {authSaving ? 'Сохранение…' : '💾 Сохранить настройки доступа'}
+            </button>
+            <p className="muted small" style={{ marginTop: 8, marginBottom: 0 }}>
+              💡 Сброс пароля при утере через SSH: <code style={{ color: 'var(--accent)' }}>xkeen-route reset-password</code>
+            </p>
           </div>
         )}
-
-        <button className="btn primary" style={{ marginTop: 10 }} onClick={handleSaveAuth} disabled={authSaving}>
-          {authSaving ? 'Сохранение…' : '💾 Сохранить настройки доступа'}
-        </button>
-        <p className="muted small" style={{ marginTop: 8 }}>
-          💡 Сброс пароля при утере через SSH: <code style={{ color: 'var(--accent)' }}>xkeen-route reset-password</code>
-        </p>
       </section>
 
       {/* ФАЙЛ ПОДКАЧКИ (SWAP НА USB) */}

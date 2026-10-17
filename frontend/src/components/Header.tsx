@@ -417,6 +417,7 @@ export default function Header({
         >
           <BrandLogoIcon />
           <span className="header-brand-text">XRoute</span>
+          <span className="header-beta-badge" title="Версия с поддержкой Zapret 2, Gaming и AdGuard Home">🧪 BETA</span>
         </a>
       </div>
 
@@ -573,6 +574,39 @@ export default function Header({
             </span>
           )}
         </button>
+
+        {status?.stack_memory && (
+          <div className="header-stack-mem-container">
+            <button
+              type="button"
+              className="header-pill-btn header-stack-mem-pill"
+              title="Физическая память (RSS) ключевых процессов стека"
+              onClick={() => onSwitchTab('dashboard')}
+            >
+              <span style={{ fontSize: 13 }}>📦</span>
+              <span className="header-pill-title">Сервисы</span>
+              <span className="header-pill-subtitle">{Math.round(status.stack_memory.total_stack_rss_mb)} МБ</span>
+            </button>
+            <div className="header-stack-mem-tooltip">
+              <div className="stack-mem-header">Стек процессов XKeen</div>
+              <div className="stack-mem-list">
+                {status.stack_memory.processes.map((p) => (
+                  <div key={p.name} className="stack-mem-item">
+                    <span className="stack-mem-name">{p.display_name}</span>
+                    <span className={`stack-mem-val ${p.running ? '' : 'stack-mem-dim'}`}>
+                      {p.running ? `${p.rss_mb.toFixed(1)} МБ` : 'выкл'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div className="stack-mem-divider" />
+              <div className="stack-mem-footer">
+                <span>KeeneticOS:</span>
+                <span>{status.stack_memory.keenetic_free_mb.toFixed(0)} МБ своб. / {status.stack_memory.keenetic_total_mb.toFixed(0)} МБ</span>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 4. ЗАПУСК / ОСТАНОВКА (82px: высота 38px, красный только для остановки) */}

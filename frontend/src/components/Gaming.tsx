@@ -479,6 +479,12 @@ export default function Gaming({ notify }: GamingProps) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <div className="beta-banner">
+        <span style={{ fontSize: 16 }}>🧪</span>
+        <div>
+          <strong>Бета-функция:</strong> Сетевые службы (Zapret, Игровой режим, AdGuard Home) работают с изоляцией netfilter/iptables.
+        </div>
+      </div>
       {/* 1. Главная карточка статуса, узла и действия */}
       <div
         className="card"

@@ -33,6 +33,7 @@ pub fn spawn(state: AppState) {
     spawn_community_hostlist_updater(state.clone());
     spawn_zapret_update_checker(state.clone());
     spawn_smart_gaming_monitor(state.clone());
+    spawn_adguard_monitor(state.clone());
     tokio::spawn(async move {
         // Начальная пауза перед запуском монитора
         for _ in 0..10 {
@@ -679,6 +680,74 @@ pub fn spawn_zapret_update_checker(state: AppState) {
                     return;
                 }
                 sleep(Duration::from_secs(1)).await;
+            }
+        }
+    });
+}
+
+/// Фоновый сторож AdGuard Home: предотвращение DNS-блэкаутов при падении службы.
+/// Если iptables-редирект XKEEN_ADGUARD активен, но AdGuard DNS listener не отвечает,
+/// сторож временно снимает правила iptables для спасения доступа в интернет на роутере и в LAN.
+/// Как только AdGuard оживает, правила автоматически восстанавливаются.
+pub fn spawn_adguard_monitor(state: AppState) {
+    tokio::spawn(async move {
+        // Начальная пауза для старта служб
+        for _ in 0..12 {
+            if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+
+        let mut iptables_temporarily_suspended = false;
+
+        loop {
+            for _ in 0..6 {
+                if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                sleep(Duration::from_secs(1)).await;
+            }
+
+            if is_service_stopped() {
+                continue;
+            }
+
+            let (enabled, host, dns_port) = {
+                let cfg = state.config.read().await;
+                (cfg.adguard.enabled, cfg.adguard.host.clone(), cfg.adguard.dns_port)
+            };
+
+            let iptables_active = crate::adguard::is_adguard_iptables_active(dns_port);
+
+            if iptables_active || iptables_temporarily_suspended {
+                let listener_ok = crate::adguard::test_agh_dns_listener(&host, dns_port).await;
+
+                if !listener_ok && iptables_active {
+                    // AdGuard Home упал или завис при активных правилах перенаправления!
+                    log_w!(
+                        "[WATCHDOG] ⚠️ AdGuard Home DNS-listener на {}:{} не отвечает! Временное отключение XKEEN_ADGUARD iptables для защиты от DNS-блэкаута...",
+                        host,
+                        dns_port
+                    );
+                    let _ = crate::adguard::remove_adguard_iptables();
+                    iptables_temporarily_suspended = true;
+                } else if listener_ok && iptables_temporarily_suspended {
+                    // AdGuard Home восстановился
+                    log_i!(
+                        "[WATCHDOG] ✓ AdGuard Home DNS-listener на {}:{} восстановил работу! Повторное включение XKEEN_ADGUARD iptables.",
+                        host,
+                        dns_port
+                    );
+                    let _ = crate::adguard::apply_adguard_iptables(dns_port);
+                    iptables_temporarily_suspended = false;
+                }
+            } else if enabled && !iptables_active && !iptables_temporarily_suspended {
+                // Если служба запущена и отвечает, но правила слетели (например, сброс KeeneticOS iptables)
+                let listener_ok = crate::adguard::test_agh_dns_listener(&host, dns_port).await;
+                if listener_ok {
+                    let _ = crate::adguard::apply_adguard_iptables(dns_port);
+                }
             }
         }
     });

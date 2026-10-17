@@ -351,32 +351,34 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         .or_else(|| servers.iter().find(|s| s.is_active))
         .cloned();
 
-    // 0. Режим Best-Ping Failover (динамический выбор лучшего по пингу из пула до 15 серверов со ступенчатым опросом и гистерезисом)
+    // 0. Режим Best-Ping Failover (строго внутри Failover: выбор лучшего по пингу только при сбое активного узла)
     if cfg.failover.best_ping_enabled {
         let pool_limit = cfg.failover.best_ping_pool_size.clamp(2, 30);
         let mut pool: Vec<String> = Vec::with_capacity(pool_limit);
 
-        // 1. Сначала серверы из цепочки приоритетов
-        for id in &cfg.failover.priority_chain {
-            if pool.len() >= pool_limit {
-                break;
+        // 1. Ограничиваем кандидатов строго цепочкой приоритетов (если она настроена)
+        if !cfg.failover.priority_chain.is_empty() {
+            for id in &cfg.failover.priority_chain {
+                if pool.len() >= pool_limit {
+                    break;
+                }
+                if !pool.contains(id) && servers.iter().any(|s| &s.id == id && !s.is_pool && s.id != "Fastest" && s.id != "Fallback" && s.id != "DIRECT") {
+                    pool.push(id.clone());
+                }
             }
-            if !pool.contains(id) && servers.iter().any(|s| &s.id == id && !s.is_pool && s.id != "Fastest" && s.id != "Fallback" && s.id != "DIRECT") {
-                pool.push(id.clone());
+        } else {
+            // Если цепочка не задана, берем доступные серверы до лимита
+            for s in &servers {
+                if pool.len() >= pool_limit {
+                    break;
+                }
+                if !pool.contains(&s.id) && !s.is_pool && s.id != "Fastest" && s.id != "Fallback" && s.id != "DIRECT" {
+                    pool.push(s.id.clone());
+                }
             }
         }
 
-        // 2. Дополняем первыми доступными серверами до лимита (по умолчанию 15)
-        for s in &servers {
-            if pool.len() >= pool_limit {
-                break;
-            }
-            if !pool.contains(&s.id) && !s.is_pool && s.id != "Fastest" && s.id != "Fallback" && s.id != "DIRECT" {
-                pool.push(s.id.clone());
-            }
-        }
-
-        // 3. Обязательно включаем текущий активный сервер в пул для замера его реального пинга
+        // 2. Обязательно включаем текущий активный сервер в пул для замера его реального пинга
         if let Some(ref act) = active {
             if !pool.contains(&act.id) && !act.is_pool && act.id != "Fastest" && act.id != "Fallback" && act.id != "DIRECT" {
                 pool.push(act.id.clone());
@@ -390,7 +392,6 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         }
 
         let ping_timeout = calc_ping_timeout(threshold);
-        // Ступенчатый опрос через семафор (по 4 потока с интервалом 25 мс)
         let pings = ping_servers_staggered(&state.http, &cfg, &pool, ping_timeout, 4, 25).await;
 
         let act_id = active.as_ref().map(|s| s.id.as_str()).unwrap_or("");
@@ -401,69 +402,62 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             -1
         };
 
-        // Отбираем живые серверы (пинг > 0)
-        let mut valid_candidates: Vec<(String, i64)> = pings
-            .iter()
-            .filter(|(id, ms)| **ms > 0 && id.as_str() != "Fastest" && id.as_str() != "Fallback" && id.as_str() != "DIRECT")
-            .map(|(id, ms)| (id.clone(), *ms))
-            .collect();
+        // PURE FAILOVER RULE: Не переключаемся, пока текущий активный сервер в норме (latency <= threshold)
+        if act_ping > 0 && act_ping <= threshold as i64 {
+            let msg = format!(
+                "Best-Ping Failover: активный '{}' работает штатно (пинг {act_ping} мс <= порога {threshold} мс), переключение не требуется",
+                act_name
+            );
+            return Ok(msg);
+        }
+
+        // Активный сервер сбоит (пинг <= 0 или пинг > threshold). Отбираем живых кандидатов без карантина.
+        let mut valid_candidates: Vec<(String, i64)> = Vec::new();
+        for (id, ms) in &pings {
+            if *ms > 0 && id.as_str() != "Fastest" && id.as_str() != "Fallback" && id.as_str() != "DIRECT" && id.as_str() != act_id {
+                if !is_quarantined(id).await {
+                    valid_candidates.push((id.clone(), *ms));
+                }
+            }
+        }
 
         valid_candidates.sort_by_key(|(_, ms)| *ms);
-
-        let hysteresis = (cfg.failover.best_ping_hysteresis_ms as i64).clamp(30, 100);
 
         if let Some((best_id, best_ms)) = valid_candidates.first() {
             let best_name = servers.iter().find(|s| &s.id == best_id).map(|s| s.name.as_str()).unwrap_or(best_id.as_str());
 
-            if best_id.as_str() == act_id {
-                let msg = format!(
-                    "Best-Ping: активный '{}' ({act_ping} мс) остаётся лучшим в пуле из {} серверов",
-                    act_name, pool.len()
-                );
-                return Ok(msg);
-            }
-
-            // Переключаемся, если активный узел недоступен или лучший быстрее с запасом на гистерезис (30-50 мс)
-            let should_switch = act_ping <= 0 || (*best_ms + hysteresis < act_ping);
-
-            if should_switch {
-                let diff_note = if act_ping > 0 {
-                    format!("пинг {best_ms} мс против {act_ping} мс, выигрыш {} мс > гистерезиса {hysteresis} мс", act_ping - *best_ms)
-                } else {
-                    format!("активный недоступен, пинг {best_ms} мс")
-                };
-                let msg = format!(
-                    "Best-Ping Failover: '{}' → переключение на лучший узел '{best_name}' ({diff_note})",
-                    act_name
-                );
-                return match mihomo::switch_server(&state.http, &cfg, best_id).await {
-                    Ok(_) => {
-                        record_switch(best_id).await;
-                        state.failover_log.push(&msg, true).await;
-                        crate::notifications::notify_failover(
-                            &state.http,
-                            Some(&cfg.mihomo_proxy_url()),
-                            &cfg.notifications,
-                            "switch",
-                            "Best-Ping Failover — выбор лучшего сервера",
-                            &msg,
-                        ).await;
-                        Ok(msg)
-                    }
-                    Err(e) => {
-                        state.failover_log.push(format!("{msg} — ошибка: {e}"), false).await;
-                        Err(e)
-                    }
-                };
+            let fail_reason = if act_ping <= 0 {
+                "таймаут / недоступен".to_string()
             } else {
-                let msg = format!(
-                    "Best-Ping: активный '{}' ({act_ping} мс) сохранён; кандидат '{best_name}' ({best_ms} мс) быстрее менее чем на {hysteresis} мс (гистерезис)",
-                    act_name
-                );
-                return Ok(msg);
-            }
+                format!("пинг {act_ping} мс > порога {threshold} мс")
+            };
+
+            let msg = format!(
+                "Best-Ping Failover: активный '{}' сбоит ({fail_reason}) → переключение на лучший узел '{best_name}' (пинг {best_ms} мс)",
+                act_name
+            );
+            return match mihomo::switch_server(&state.http, &cfg, best_id).await {
+                Ok(_) => {
+                    record_switch(best_id).await;
+                    let _ = crate::api::sync_whitelist_mode_tunnel(&state, best_id).await;
+                    state.failover_log.push(&msg, true).await;
+                    crate::notifications::notify_failover(
+                        &state.http,
+                        Some(&cfg.mihomo_proxy_url()),
+                        &cfg.notifications,
+                        "switch",
+                        "Best-Ping Failover — переключение при сбое",
+                        &msg,
+                    ).await;
+                    Ok(msg)
+                }
+                Err(e) => {
+                    state.failover_log.push(format!("{msg} — ошибка: {e}"), false).await;
+                    Err(e)
+                }
+            };
         } else {
-            let msg = format!("Best-Ping: все {} серверов в пуле не ответили на пинг", pool.len());
+            let msg = format!("Best-Ping Failover: активный '{}' сбоит, но в пуле из {} серверов нет доступных узлов вне карантина", act_name, pool.len());
             state.failover_log.push(&msg, false).await;
             return Err(msg);
         }
@@ -592,6 +586,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                             match mihomo::switch_server(&state.http, &cfg, &pri.id).await {
                                 Ok(_) => {
                                     record_switch(&pri.id).await;
+                                    let _ = crate::api::sync_whitelist_mode_tunnel(&state, &pri.id).await;
                                     state.failover_log.push(&msg, true).await;
                                     crate::notifications::notify_failover(
                                         &state.http,
@@ -736,6 +731,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             return match mihomo::switch_server(&state.http, &cfg, id).await {
                 Ok(_) => {
                     record_switch(id).await;
+                    let _ = crate::api::sync_whitelist_mode_tunnel(&state, id).await;
                     state.failover_log.push(&msg, true).await;
                     crate::notifications::notify_failover(
                         &state.http,
@@ -796,6 +792,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             match mihomo::switch_server(&state.http, &cfg, best_id).await {
                 Ok(_) => {
                     record_switch(best_id).await;
+                    let _ = crate::api::sync_whitelist_mode_tunnel(&state, best_id).await;
                     state.failover_log.push(&msg, true).await;
                     crate::notifications::notify_failover(
                         &state.http,
@@ -1174,8 +1171,11 @@ mod tests {
         assert!(is_shutdown());
     }
 
+    static FAILOVER_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn test_canary_stage_lifecycle() {
+        let _lock = FAILOVER_TEST_LOCK.lock().await;
         reset_canary().await;
         assert!(!is_canary_active().await);
         assert!(canary_status().await.is_none());
@@ -1223,6 +1223,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_quarantine_lifecycle_and_escalation() {
+        let _lock = FAILOVER_TEST_LOCK.lock().await;
         clear_all_quarantine().await;
         assert!(!is_quarantined("srv_germany").await);
         assert_eq!(get_quarantine_remaining("srv_germany").await, None);
@@ -1257,6 +1258,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_manual_switch_clears_quarantine() {
+        let _lock = FAILOVER_TEST_LOCK.lock().await;
         clear_all_quarantine().await;
         add_quarantine("srv_target", "Целевой", "таймаут").await;
         assert!(is_quarantined("srv_target").await);

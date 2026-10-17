@@ -44,6 +44,16 @@ pub const KNOWN_BUNDLES: &[(&str, &[&str])] = &[
     ("instagram.com", &["cdninstagram.com", "ig.me"]),
     ("ntc.party", &["ntc-party.discourse-cdn.com"]),
     (
+        "avito.ru",
+        &[
+            "avito.st",
+            "static.avito.st",
+            "avitocdn.net",
+            "oavito.com",
+            "oavito.ru",
+        ],
+    ),
+    (
         "github.com",
         &[
             "githubassets.com",
@@ -314,5 +324,17 @@ mod tests {
         assert!(expanded.contains("raw.githubusercontent.com"));
         assert!(expanded.contains("objects.githubusercontent.com"));
         assert!(!expanded.contains("github.com"));
+    }
+
+    #[test]
+    fn test_expand_avito_bundle() {
+        let domains = vec!["avito.ru".to_string()];
+        let expanded = expand_bundles(&domains);
+        assert!(expanded.contains("avito.st"));
+        assert!(expanded.contains("static.avito.st"));
+        assert!(expanded.contains("avitocdn.net"));
+        assert!(expanded.contains("oavito.com"));
+        assert!(expanded.contains("oavito.ru"));
+        assert!(!expanded.contains("avito.ru"));
     }
 }

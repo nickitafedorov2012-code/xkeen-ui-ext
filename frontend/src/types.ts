@@ -9,6 +9,23 @@ export interface SystemStats {
   cpu_temp_c?: number | null
 }
 
+export interface ProcessMemoryInfo {
+  name: string
+  display_name: string
+  pid?: number | null
+  rss_bytes: number
+  rss_mb: number
+  running: boolean
+}
+
+export interface StackMemoryInfo {
+  total_stack_rss_mb: number
+  keenetic_free_mb: number
+  keenetic_total_mb: number
+  keenetic_available_mb: number
+  processes: ProcessMemoryInfo[]
+}
+
 export interface StatusInfo {
   version: string
   config_path: string
@@ -16,6 +33,10 @@ export interface StatusInfo {
   service_stopped?: boolean
   router: { model?: string; version?: string; hostname?: string; uptime?: string } | null
   system?: SystemStats | null
+  stack_memory?: StackMemoryInfo | null
+  whitelist_mode_active?: boolean
+  whitelist_servers?: string[]
+  server_aliases?: Record<string, string>
   mihomo_version?: string | null
   zapret?: {
     engine: 'v1' | 'v2'
@@ -58,6 +79,23 @@ export interface StatusInfo {
     best_ping_pool_size?: number
     best_ping_hysteresis_ms?: number
     priority_chain_pings?: Record<string, number>
+    canary?: {
+      active: boolean
+      target_id: string
+      target_name: string
+      from_name: string
+      elapsed_secs: number
+      remaining_secs: number
+      probes_passed: number
+      total_bytes: number
+    } | null
+    quarantine?: Array<{
+      server_id: string
+      server_name: string
+      fail_count: number
+      remaining_secs: number
+      reason: string
+    }>
   }
   refresh_interval_sec: number
   adblock_enabled?: boolean
@@ -77,6 +115,8 @@ export interface ServerInfo {
   provider?: string
   provider_name?: string
   is_pool?: boolean
+  custom_alias?: string
+  is_whitelist?: boolean
   raw?: Record<string, any>
 }
 
@@ -231,6 +271,7 @@ export interface DeviceRoutingEntry {
   servers: string[]
   ping_threshold_ms: number
   auto_restore: boolean
+  follow_whitelist?: boolean
 }
 
 export interface FailoverEventInfo {
