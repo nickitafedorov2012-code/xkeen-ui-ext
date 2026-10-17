@@ -426,7 +426,8 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
                                         }
                                     let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
                                     let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
-                                    let _ = crate::api::sync_gaming_full_tunnel(&new_cfg.gaming, redir_port, tproxy_port).await;
+                                    let dns_port = crate::api::resolve_active_dns_port(&new_cfg);
+                                    let _ = crate::api::sync_gaming_full_tunnel(&new_cfg.gaming, redir_port, tproxy_port, dns_port).await;
                                 }
                             }
                         }
@@ -988,7 +989,8 @@ pub fn spawn_smart_gaming_monitor(state: AppState) {
                                     let _ = mihomo::switch_group(&state.http, &new_cfg, routing::GAMING_GROUP_NAME, target_srv).await;
                                     let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
                                     let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
-                                    let _ = crate::api::sync_gaming_full_tunnel(&new_cfg.gaming, redir_port, tproxy_port).await;
+                                    let dns_port = crate::api::resolve_active_dns_port(&new_cfg);
+                                    let _ = crate::api::sync_gaming_full_tunnel(&new_cfg.gaming, redir_port, tproxy_port, dns_port).await;
                                 }
                             }
                         }
@@ -1019,7 +1021,8 @@ pub fn spawn_smart_gaming_monitor(state: AppState) {
                                 let _ = mihomo::reload_config(&state.http, &new_cfg).await;
                                 let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
                                 let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
-                                let _ = crate::api::sync_gaming_full_tunnel(&new_cfg.gaming, redir_port, tproxy_port).await;
+                                let dns_port = crate::api::resolve_active_dns_port(&new_cfg);
+                                let _ = crate::api::sync_gaming_full_tunnel(&new_cfg.gaming, redir_port, tproxy_port, dns_port).await;
                             }
                         }
                     }

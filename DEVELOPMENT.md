@@ -1115,6 +1115,19 @@
 
 ## v1.5.20 (Header Settings Navigation, Zapret Version Status Chip, Red Pulse 5 AM Updates & Mini-Blockcheck YouTube Fix)
 - **Перенос вкладки Настройки и чип статуса Zapret в верхней панели (Header.tsx, App.tsx, Zapret.tsx)**:
+## v1.9.8 (Eliminate Gaming Mode DNS Hijack & Universal Wi-Fi AdGuard Ingress)
+- **Устранение перехвата DNS в Gaming Mode (XKEEN_GAMING ➔ 5353 AdGuard Home)**:
+  * Ликвидирован жесткий хардкод перехвата DNS на порт 1053 (Mihomo Fake-IP) в цепочке `XKEEN_GAMING`: функция `build_gaming_full_tunnel_commands` теперь динамически принимает активный порт AdGuard Home (5353) и направляет запросы клиентских устройств прямо в фильтр AdGuard.
+  * При включенном AdGuard Home все устройства игрового режима (ПК, консоли, смартфоны) фильтруют рекламу и отображаются в статистике AdGuard, сохраняя полное проксирование TCP/UDP трафика через ядро Mihomo с TLS SNI сниффингом.
+  * При отключении AdGuard Home цепочка `XKEEN_GAMING` автоматически переключает DNS обратно на порт 1053 ядра Mihomo.
+- **Универсальный сетевой ингресс для Wi-Fi и LAN (`br+`, `Bridge+`, `ra+`, `apcli+`)**:
+  * В `adguard.rs` расширен список сетевых интерфейсов для цепочки `XKEEN_ADGUARD` в таблице NAT (`PREROUTING`), включив Wi-Fi интерфейсы Keenetic Mediatek (`ra+`, `apcli+`), устранив обход фильтрации беспроводными клиентами.
+  * В цепочке `INPUT` таблицы `filter` порт AdGuard Home (5353) разрешен безусловно для всех LAN/Wi-Fi интерфейсов, предотвращая отбрасывание перенаправленных DNS-пакетов.
+  * Обновлен хук NDM `/opt/etc/ndm/netfilter.d/040-adguard.sh` для надежного сохранения правил при сетевых событиях KeeneticOS.
+- **Тестирование и анти-регрессия**:
+  * Добавлен unit-тест `test_gaming_dns_redirect_respects_adguard_port` в `backend/src/api.rs`, проверяющий генерацию редиректа на 5353 при включенном AdGuard и отсутствие хардкода 1053.
+  * 100% успешное прохождение всех 243 тестов бэкенда и 223 тестов фронтенда (всего 466 тестов).
+
 ## v1.9.7 (AdGuard Autonomous Self-Healing & Transaction Auto-Commit Fix)
 - **Автономное самолечение AdGuard Home при запуске (Zero-Touch Self-Healing)**:
   * Фоновый сторож старта панели (`main.rs`) опрашивает запущенный сервис AdGuard Home: если AdGuard Home активен и фильтрация включена, система автоматически переводит `adguard.enabled` в `true`, фиксирует реальный рабочий DNS-порт (5353) и инжектирует AdGuard DNS upstream в `config.yaml` ядра Mihomo с перезагрузкой.

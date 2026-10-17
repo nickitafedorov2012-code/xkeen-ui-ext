@@ -983,6 +983,7 @@ pub struct AghDiagnostics {
 }
 
 pub const AGH_IPTABLES_CHAIN: &str = "XKEEN_ADGUARD";
+pub const AGH_LAN_INTERFACES: &[&str] = &["br+", "Bridge+", "ra+", "apcli+"];
 
 /// Применение изолированной цепочки XKEEN_ADGUARD в iptables -t nat для перехвата портов 53 UDP/TCP
 pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
@@ -1010,8 +1011,8 @@ pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
             .args(["-t", "nat", "-A", AGH_IPTABLES_CHAIN, "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", &port_str])
             .output();
 
-        // 4. Встраиваем переход в XKEEN_ADGUARD в PREROUTING для LAN мостов (br+ и Bridge+)
-        for iface in &["br+", "Bridge+"] {
+        // 4. Встраиваем переход в XKEEN_ADGUARD в PREROUTING для LAN мостов и Wi-Fi интерфейсов (br+, Bridge+, ra+, apcli+)
+        for iface in AGH_LAN_INTERFACES {
             let check_udp = std::process::Command::new("iptables")
                 .args(["-t", "nat", "-C", "PREROUTING", "-i", iface, "-p", "udp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
                 .output();
@@ -1029,21 +1030,35 @@ pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
                     .args(["-t", "nat", "-I", "PREROUTING", "1", "-i", iface, "-p", "tcp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
                     .output();
             }
+        }
 
-            // 5. Разрешаем входящий трафик на порт AdGuard в цепочке INPUT таблицы filter (устраняет DROP перенаправленного DNS роутером)
-            for proto in &["udp", "tcp"] {
-                let check_input = std::process::Command::new("iptables")
-                    .args(["-t", "filter", "-C", "INPUT", "-i", iface, "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
+        // 5. Разрешаем входящий трафик на порт AdGuard в цепочке INPUT таблицы filter (устраняет DROP перенаправленного DNS роутером)
+        for proto in &["udp", "tcp"] {
+            let check_input = std::process::Command::new("iptables")
+                .args(["-t", "filter", "-C", "INPUT", "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
+                .output();
+            if !check_input.map(|o| o.status.success()).unwrap_or(false) {
+                let _ = std::process::Command::new("iptables")
+                    .args(["-t", "filter", "-I", "INPUT", "1", "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
                     .output();
-                if !check_input.map(|o| o.status.success()).unwrap_or(false) {
-                    let _ = std::process::Command::new("iptables")
-                        .args(["-t", "filter", "-I", "INPUT", "1", "-i", iface, "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
-                        .output();
-                }
             }
         }
 
-        // 6. Устанавливаем NDM hook для защиты от сброса правил фаервола системой KeeneticOS
+        // 6. Синхронизируем XKEEN_GAMING, если цепочка активна (устраняет конфликт перехвата DNS игровым режимом на 1053)
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "iptables -t nat -S XKEEN_GAMING 2>/dev/null | grep 'to-ports 1053' | while read -r line; do \
+                    del_cmd=$(echo \"$line\" | sed 's/^-A/-D/'); \
+                    add_cmd=$(echo \"$line\" | sed 's/--to-ports 1053/--to-ports {port}/'); \
+                    iptables -t nat $del_cmd 2>/dev/null || true; \
+                    iptables -t nat $add_cmd 2>/dev/null || true; \
+                done",
+                port = port_str
+            ))
+            .output();
+
+        // 7. Устанавливаем NDM hook для защиты от сброса правил фаервола системой KeeneticOS
         let hook_path = std::path::Path::new("/opt/etc/ndm/netfilter.d/040-adguard.sh");
         if let Some(parent) = hook_path.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -1055,11 +1070,17 @@ pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
             iptables -t nat -A {chain} -d 127.0.0.1 -j RETURN 2>/dev/null || true\n\
             iptables -t nat -A {chain} -p udp --dport 53 -j REDIRECT --to-ports {port} 2>/dev/null || true\n\
             iptables -t nat -A {chain} -p tcp --dport 53 -j REDIRECT --to-ports {port} 2>/dev/null || true\n\
-            for iface in br+ Bridge+; do\n\
+            for iface in br+ Bridge+ ra+ apcli+; do\n\
                 iptables -t nat -C PREROUTING -i \"$iface\" -p udp --dport 53 -j {chain} 2>/dev/null || iptables -t nat -I PREROUTING 1 -i \"$iface\" -p udp --dport 53 -j {chain} 2>/dev/null || true\n\
                 iptables -t nat -C PREROUTING -i \"$iface\" -p tcp --dport 53 -j {chain} 2>/dev/null || iptables -t nat -I PREROUTING 1 -i \"$iface\" -p tcp --dport 53 -j {chain} 2>/dev/null || true\n\
-                iptables -t filter -C INPUT -i \"$iface\" -p udp --dport {port} -j ACCEPT 2>/dev/null || iptables -t filter -I INPUT 1 -i \"$iface\" -p udp --dport {port} -j ACCEPT 2>/dev/null || true\n\
-                iptables -t filter -C INPUT -i \"$iface\" -p tcp --dport {port} -j ACCEPT 2>/dev/null || iptables -t filter -I INPUT 1 -i \"$iface\" -p tcp --dport {port} -j ACCEPT 2>/dev/null || true\n\
+            done\n\
+            iptables -t filter -C INPUT -p udp --dport {port} -j ACCEPT 2>/dev/null || iptables -t filter -I INPUT 1 -p udp --dport {port} -j ACCEPT 2>/dev/null || true\n\
+            iptables -t filter -C INPUT -p tcp --dport {port} -j ACCEPT 2>/dev/null || iptables -t filter -I INPUT 1 -p tcp --dport {port} -j ACCEPT 2>/dev/null || true\n\
+            iptables -t nat -S XKEEN_GAMING 2>/dev/null | grep 'to-ports 1053' | while read -r line; do \
+                del_cmd=$(echo \"$line\" | sed 's/^-A/-D/'); \
+                add_cmd=$(echo \"$line\" | sed 's/--to-ports 1053/--to-ports {port}/'); \
+                iptables -t nat $del_cmd 2>/dev/null || true; \
+                iptables -t nat $add_cmd 2>/dev/null || true; \
             done\n",
             chain = AGH_IPTABLES_CHAIN,
             port = port_str
@@ -1083,7 +1104,7 @@ pub fn remove_adguard_iptables() -> Result<(), String> {
         let port = detect_adguard_dns_port().unwrap_or(5353);
         let port_str = port.to_string();
 
-        for iface in &["br+", "Bridge+"] {
+        for iface in AGH_LAN_INTERFACES {
             for proto in &["udp", "tcp"] {
                 for _ in 0..20 {
                     let out = std::process::Command::new("iptables")
@@ -1093,16 +1114,32 @@ pub fn remove_adguard_iptables() -> Result<(), String> {
                         break;
                     }
                 }
-                for _ in 0..20 {
-                    let out = std::process::Command::new("iptables")
-                        .args(["-t", "filter", "-D", "INPUT", "-i", iface, "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
-                        .output();
-                    if !out.map(|o| o.status.success()).unwrap_or(false) {
-                        break;
-                    }
+            }
+        }
+        for proto in &["udp", "tcp"] {
+            for _ in 0..20 {
+                let out = std::process::Command::new("iptables")
+                    .args(["-t", "filter", "-D", "INPUT", "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
+                    .output();
+                if !out.map(|o| o.status.success()).unwrap_or(false) {
+                    break;
                 }
             }
         }
+        // Возвращаем XKEEN_GAMING на порт 1053 (Mihomo)
+        let _ = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "iptables -t nat -S XKEEN_GAMING 2>/dev/null | grep -E 'to-ports ({port}|5353)' | grep 'dport 53' | while read -r line; do \
+                    del_cmd=$(echo \"$line\" | sed 's/^-A/-D/'); \
+                    add_cmd=$(echo \"$line\" | sed -E 's/--to-ports [0-9]+/--to-ports 1053/'); \
+                    iptables -t nat $del_cmd 2>/dev/null || true; \
+                    iptables -t nat $add_cmd 2>/dev/null || true; \
+                done",
+                port = port_str
+            ))
+            .output();
+
         let _ = std::process::Command::new("iptables")
             .args(["-t", "nat", "-F", AGH_IPTABLES_CHAIN])
             .output();

@@ -528,16 +528,19 @@ pub async fn sync_whitelist_mode_tunnel(state: &AppState, target_server_id: &str
             }
         }
 
-        sync_gaming_full_tunnel(&tunnel_cfg, redir_port, tproxy_port).await
+        let dns_port = resolve_active_dns_port(cfg.as_ref());
+        sync_gaming_full_tunnel(&tunnel_cfg, redir_port, tproxy_port, dns_port).await
     } else if cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility {
         log_i!("[WHITELIST_EMERGENCY] Активный узел не входит в белый список. Возврат к стандартным настройкам игрового режима.");
-        sync_gaming_full_tunnel(&cfg.gaming, redir_port, tproxy_port).await
+        let dns_port = resolve_active_dns_port(cfg.as_ref());
+        sync_gaming_full_tunnel(&cfg.gaming, redir_port, tproxy_port, dns_port).await
     } else {
         let disabled_gaming = config::GamingConfig {
             enabled: false,
             ..Default::default()
         };
-        sync_gaming_full_tunnel(&disabled_gaming, redir_port, tproxy_port).await
+        let dns_port = resolve_active_dns_port(cfg.as_ref());
+        sync_gaming_full_tunnel(&disabled_gaming, redir_port, tproxy_port, dns_port).await
     }
 }
 
@@ -2447,7 +2450,9 @@ pub async fn apply_routing(State(state): State<AppState>, Json(req): Json<Routin
     if updated_gaming {
         let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
         let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
-        let _ = sync_gaming_full_tunnel(&state.config.read().await.gaming, redir_port, tproxy_port).await;
+        let cfg_guard = state.config.read().await;
+        let dns_port = resolve_active_dns_port(&cfg_guard);
+        let _ = sync_gaming_full_tunnel(&cfg_guard.gaming, redir_port, tproxy_port, dns_port).await;
     }
 
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -4225,6 +4230,14 @@ pub async fn toggle_adblock(
 
     if let Err(e) = tx.commit_and_reload().await {
         return api_err(e);
+    }
+
+    let latest_cfg = state.config.read().await.clone();
+    if latest_cfg.gaming.enabled && latest_cfg.gaming.mode == config::GamingMode::Compatibility {
+        let redir_port = 5000;
+        let tproxy_port = 5001;
+        let dns_port = resolve_active_dns_port(&latest_cfg);
+        let _ = sync_gaming_full_tunnel(&latest_cfg.gaming, redir_port, tproxy_port, dns_port).await;
     }
 
     api_ok(json!({ "enabled": target_enabled, "saved": true, "applied": true }))
@@ -9157,9 +9170,19 @@ async fn apply_and_verify_gaming(
     // пакеты устройств в Compat-режиме направляются в REDIRECT (TCP) и TPROXY (UDP) минуя geo_exclude RETURN
     let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
     let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
-    let _ = sync_gaming_full_tunnel(&tx.config().gaming, redir_port, tproxy_port).await;
+    let dns_port = resolve_active_dns_port(tx.config());
+    let _ = sync_gaming_full_tunnel(&tx.config().gaming, redir_port, tproxy_port, dns_port).await;
 
     Ok(())
+}
+
+/// Определение активного DNS-порта для перехвата (AdGuard 5353 или Mihomo 1053)
+pub fn resolve_active_dns_port(app_cfg: &config::AppConfig) -> u16 {
+    if app_cfg.adguard.enabled || app_cfg.adblock_enabled {
+        crate::adguard::detect_adguard_dns_port().unwrap_or(if app_cfg.adguard.dns_port > 0 { app_cfg.adguard.dns_port } else { 5353 })
+    } else {
+        1053
+    }
 }
 
 /// Синхронизация перехвата полного туннеля в iptables для Compatibility-режима (100% Всё в прокси)
@@ -9168,9 +9191,11 @@ pub fn build_gaming_full_tunnel_commands(
     cfg: &config::GamingConfig,
     redir_port: u16,
     tproxy_port: u16,
+    dns_port: u16,
 ) -> (String, Vec<String>, Vec<String>) {
     let r_port = if redir_port > 0 { redir_port } else { 5000 };
     let tp_port = if tproxy_port > 0 { tproxy_port } else { 5001 };
+    let d_port = if dns_port > 0 { dns_port } else { 1053 };
 
     let cleanup_cmd = "\
 while iptables -t nat -D PREROUTING -j XKEEN_GAMING 2>/dev/null; do :; done; \
@@ -9259,12 +9284,12 @@ ip -6 route flush table 115 2>/dev/null || true".to_string();
                 }
 
                 // NAT: прямой порядок правил (-A) в цепочке XKEEN_GAMING
-                // 1. Перехват DNS (UDP/TCP 53) -> REDIRECT --to-ports 1053 (до локальных подсетей)
+                // 1. Перехват DNS (UDP/TCP 53) -> REDIRECT --to-ports {d_port} (до локальных подсетей)
                 setup_cmds.push(format!(
-                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p udp --dport 53 -j REDIRECT --to-ports 1053"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p udp --dport 53 -j REDIRECT --to-ports {d_port}"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p tcp --dport 53 -j REDIRECT --to-ports 1053"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p tcp --dport 53 -j REDIRECT --to-ports {d_port}"
                 ));
                 // 2. Байпас локальных сетей через -j RETURN: 127.0.0.0/8, 169.254.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
                 setup_cmds.push(format!(
@@ -9288,7 +9313,7 @@ ip -6 route flush table 115 2>/dev/null || true".to_string();
                 ));
 
                 // MANGLE: прямой порядок правил (-A) в цепочке XKEEN_GAMING
-                // 1. Пропуск DNS: -p udp --dport 53 -j RETURN (чтобы уходил в NAT REDIRECT 1053)
+                // 1. Пропуск DNS: -p udp --dport 53 -j RETURN (чтобы уходил в NAT REDIRECT)
                 setup_cmds.push(format!(
                     "iptables -t mangle -A XKEEN_GAMING -s {ip} -p udp --dport 53 -j RETURN"
                 ));
@@ -9325,10 +9350,10 @@ ip -6 route flush table 115 2>/dev/null || true".to_string();
     (cleanup_cmd, setup_cmds, conntrack_cmds)
 }
 
-pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16, tproxy_port: u16) -> Result<(), String> {
+pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16, tproxy_port: u16, dns_port: u16) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let (cleanup_cmd, setup_cmds, conntrack_cmds) = build_gaming_full_tunnel_commands(cfg, redir_port, tproxy_port);
+        let (cleanup_cmd, setup_cmds, conntrack_cmds) = build_gaming_full_tunnel_commands(cfg, redir_port, tproxy_port, dns_port);
         let script = format!("{}\n{}", cleanup_cmd, setup_cmds.join("\n"));
         let out = tokio::process::Command::new("sh")
             .arg("-c")
@@ -9410,7 +9435,7 @@ pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (cfg, redir_port, tproxy_port);
+        let _ = (cfg, redir_port, tproxy_port, dns_port);
     }
     Ok(())
 }
@@ -9909,6 +9934,13 @@ pub async fn adguard_set_protection(
                 let _ = crate::adguard::apply_adguard_iptables(active_port);
             } else {
                 let _ = crate::adguard::remove_adguard_iptables();
+            }
+            let latest_cfg = state.config.read().await.clone();
+            if latest_cfg.gaming.enabled && latest_cfg.gaming.mode == config::GamingMode::Compatibility {
+                let redir_port = 5000;
+                let tproxy_port = 5001;
+                let dns_port = resolve_active_dns_port(&latest_cfg);
+                let _ = sync_gaming_full_tunnel(&latest_cfg.gaming, redir_port, tproxy_port, dns_port).await;
             }
             api_ok(json!({ "enabled": now_enabled }))
         }
@@ -10589,7 +10621,7 @@ mod tests {
         ];
 
         // 1. Проверяем генерацию правил в режиме совместимости
-        let (cleanup_cmd, setup_cmds, conntrack_cmds) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
+        let (cleanup_cmd, setup_cmds, conntrack_cmds) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001, 1053);
 
         // Проверяем команду очистки: сброс цепочек XKEEN_GAMING, правил jump и таблицы 115 (IPv4 и IPv6)
         assert!(cleanup_cmd.contains("while iptables -t nat -D PREROUTING -j XKEEN_GAMING"), "Cleanup must remove PREROUTING NAT jump rule");
@@ -10675,7 +10707,7 @@ mod tests {
 
         // 2. Проверяем отключенный режим: setup_cmds пустой, cleanup_cmd сбрасывает маршруты
         cfg.enabled = false;
-        let (cleanup_disabled, setup_disabled, conntrack_disabled) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
+        let (cleanup_disabled, setup_disabled, conntrack_disabled) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001, 1053);
         assert!(setup_disabled.is_empty(), "Disabled mode must not produce setup commands");
         assert!(conntrack_disabled.is_empty(), "Disabled mode must not produce conntrack commands");
         assert!(cleanup_disabled.contains("ip rule del fwmark 0x115 lookup 115"), "Disabled mode must still clean up policy rules");
@@ -10683,7 +10715,7 @@ mod tests {
         // 3. Проверяем режим KnownServices: setup_cmds пустой (нет full tunnel)
         cfg.enabled = true;
         cfg.mode = config::GamingMode::KnownServices;
-        let (_, setup_known, conntrack_known) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
+        let (_, setup_known, conntrack_known) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001, 1053);
         assert!(setup_known.is_empty(), "KnownServices mode must not produce full tunnel commands");
         assert!(conntrack_known.is_empty(), "KnownServices mode must not produce conntrack commands");
     }
@@ -10704,12 +10736,42 @@ mod tests {
             }
         ];
 
-        let res = sync_gaming_full_tunnel(&cfg, 5000, 5001).await;
+        let res = sync_gaming_full_tunnel(&cfg, 5000, 5001, 1053).await;
         assert!(res.is_ok(), "sync_gaming_full_tunnel must succeed without errors");
 
         cfg.enabled = false;
-        let res_disabled = sync_gaming_full_tunnel(&cfg, 5000, 5001).await;
+        let res_disabled = sync_gaming_full_tunnel(&cfg, 5000, 5001, 1053).await;
         assert!(res_disabled.is_ok(), "disabled mode must clean up cleanly");
+    }
+
+    #[test]
+    fn test_gaming_dns_redirect_respects_adguard_port() {
+        let mut cfg = config::GamingConfig::default();
+        cfg.enabled = true;
+        cfg.mode = config::GamingMode::Compatibility;
+        cfg.devices = vec![
+            config::GamingDevice {
+                name: "Gaming Rig".into(),
+                ip: "192.168.2.63".into(),
+                mac: "aa:bb:cc:dd:ee:ff".into(),
+                ipv6: vec![],
+                enabled: true,
+                server: Some("PROXY".into()),
+            }
+        ];
+
+        // AdGuard enabled: redirect to 5353
+        let (_, setup_adguard, _) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001, 5353);
+        let all_adguard = setup_adguard.join("\n");
+        assert!(all_adguard.contains("iptables -t nat -A XKEEN_GAMING -s 192.168.2.63 -p udp --dport 53 -j REDIRECT --to-ports 5353"));
+        assert!(all_adguard.contains("iptables -t nat -A XKEEN_GAMING -s 192.168.2.63 -p tcp --dport 53 -j REDIRECT --to-ports 5353"));
+        assert!(!all_adguard.contains("to-ports 1053"), "Must not contain hardcoded 1053 when AdGuard port 5353 is provided");
+
+        // AdGuard disabled: fallback to 1053
+        let (_, setup_default, _) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001, 0);
+        let all_default = setup_default.join("\n");
+        assert!(all_default.contains("iptables -t nat -A XKEEN_GAMING -s 192.168.2.63 -p udp --dport 53 -j REDIRECT --to-ports 1053"));
+        assert!(all_default.contains("iptables -t nat -A XKEEN_GAMING -s 192.168.2.63 -p tcp --dport 53 -j REDIRECT --to-ports 1053"));
     }
 
     #[test]
@@ -10737,7 +10799,7 @@ mod tests {
             },
         ];
 
-        let (_, setup_cmds, conntrack_cmds) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
+        let (_, setup_cmds, conntrack_cmds) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001, 1053);
         let all_cmds = setup_cmds.join("\n");
 
         // Verify loopback, link-local and RFC1918 subnets are excluded
@@ -10772,7 +10834,7 @@ mod tests {
             }
         ];
 
-        let (cleanup_cmd, setup_cmds, conntrack_cmds) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
+        let (cleanup_cmd, setup_cmds, conntrack_cmds) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001, 1053);
 
         // NDM hook generation logic test
         let mut hook_content = String::from("#!/bin/sh\n[ \"$table\" != \"nat\" ] && [ \"$table\" != \"mangle\" ] && [ \"$table\" != \"filter\" ] && [ -n \"$table\" ] && exit 0\n");
@@ -10833,7 +10895,7 @@ mod tests {
             },
         ];
 
-        let (cleanup_cmd, setup_cmds, conntrack_cmds) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001);
+        let (cleanup_cmd, setup_cmds, conntrack_cmds) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001, 1053);
         let all_cmds = setup_cmds.join("\n");
 
         // 1. CIDR /32 must be correctly parsed into pure IPv4

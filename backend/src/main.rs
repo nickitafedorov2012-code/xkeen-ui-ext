@@ -421,7 +421,8 @@ async fn main() {
             if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
                 let redir_port = routing::parse_redir_port(&yaml).unwrap_or(5000);
                 let tproxy_port = routing::parse_tproxy_port(&yaml).unwrap_or(5001);
-                let _ = api::sync_gaming_full_tunnel(&cfg.gaming, redir_port, tproxy_port).await;
+                let dns_port = api::resolve_active_dns_port(&cfg);
+                let _ = api::sync_gaming_full_tunnel(&cfg.gaming, redir_port, tproxy_port, dns_port).await;
             }
         }
     });
@@ -440,6 +441,9 @@ async fn main() {
             if listener_ok {
                 let _ = adguard::apply_adguard_iptables(active_port);
                 log_i!("[STARTUP] ✓ AdGuard Home DNS redirection to port {} applied", active_port);
+                if cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility {
+                    let _ = api::sync_gaming_full_tunnel(&cfg.gaming, 5000, 5001, active_port).await;
+                }
             }
 
             // Автоматическая синхронизация AdGuard DNS upstream в config.yaml и config.json
