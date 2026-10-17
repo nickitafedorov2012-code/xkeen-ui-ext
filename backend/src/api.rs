@@ -9891,6 +9891,11 @@ pub async fn adguard_set_protection(
             if let Ok(mut tx) = ConfigTx::begin(&state).await {
                 tx.config_mut().adblock_enabled = now_enabled;
                 tx.config_mut().adguard.enabled = now_enabled;
+                if let Ok(raw_yaml) = tx.read_yaml().await {
+                    if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, tx.config()) {
+                        let _ = tx.set_yaml(new_yaml);
+                    }
+                }
                 let _ = tx.commit().await;
             }
             if now_enabled {
@@ -10062,15 +10067,24 @@ pub async fn adguard_set_config(
         }
     }
     let adguard_enabled_changed = current.adguard.enabled != new_adguard.enabled;
+    let port_changed = current.adguard.dns_port != new_adguard.dns_port;
     let new_enabled = new_adguard.enabled;
     let new_port = new_adguard.dns_port;
     current.adguard = new_adguard;
     tx.stage_json(current);
 
-    match tx.commit_without_reload().await {
+    if adguard_enabled_changed || port_changed {
+        if let Ok(raw_yaml) = tx.read_yaml().await {
+            if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, tx.config()) {
+                let _ = tx.set_yaml(new_yaml);
+            }
+        }
+    }
+
+    match tx.commit().await {
         Ok(_) => {
             log_i!("Конфигурация AdGuard Home успешно обновлена и сохранена");
-            if adguard_enabled_changed {
+            if adguard_enabled_changed || port_changed {
                 if new_enabled {
                     let _ = crate::adguard::apply_adguard_iptables(new_port);
                 } else {

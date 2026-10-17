@@ -447,6 +447,11 @@ pub const ADBLOCK_BEGIN: &str = "# --- AUTO-ADBLOCK-RULES-BEGIN ---";
 pub const ADBLOCK_END: &str = "# --- AUTO-ADBLOCK-RULES-END ---";
 pub const ADBLOCK_RULE: &str = "  - GEOSITE,category-ads-all,REJECT";
 
+pub const AGH_DNS_BEGIN: &str = "# --- AUTO-ADGUARD-DNS-BEGIN ---";
+pub const AGH_DNS_END: &str = "# --- AUTO-ADGUARD-DNS-END ---";
+pub const AGH_DIRECT_DNS_BEGIN: &str = "# --- AUTO-ADGUARD-DIRECT-DNS-BEGIN ---";
+pub const AGH_DIRECT_DNS_END: &str = "# --- AUTO-ADGUARD-DIRECT-DNS-END ---";
+
 pub const GOOGLE_AI_BEGIN: &str = "# --- AUTO-GOOGLE-AI-BEGIN ---";
 pub const GOOGLE_AI_END: &str = "# --- AUTO-GOOGLE-AI-END ---";
 
@@ -844,6 +849,76 @@ pub fn apply_adblock_rules(yaml: &str, enabled: bool) -> Result<String, String> 
             out.push(ADBLOCK_END.to_string());
         }
     }
+    Ok(out.join("\n"))
+}
+
+/// Чистое удаление инжектированных адресов AdGuard Home из секции DNS
+pub fn remove_adguard_dns_upstream(yaml: &str) -> String {
+    let mut out = Vec::new();
+    let mut skip_dns = false;
+    let mut skip_direct = false;
+    for line in yaml.lines() {
+        let t = line.trim();
+        if t == AGH_DNS_BEGIN {
+            skip_dns = true;
+            continue;
+        }
+        if t == AGH_DNS_END {
+            skip_dns = false;
+            continue;
+        }
+        if t == AGH_DIRECT_DNS_BEGIN {
+            skip_direct = true;
+            continue;
+        }
+        if t == AGH_DIRECT_DNS_END {
+            skip_direct = false;
+            continue;
+        }
+        if !skip_dns && !skip_direct {
+            out.push(line);
+        }
+    }
+    out.join("\n")
+}
+
+/// Применение интеграции AdGuard Home в секцию DNS ядра Mihomo (nameserver / direct-nameserver).
+/// Перенаправляет весь DNS-трафик под прокси в локальный AdGuard Home (127.0.0.1:{agh_port}).
+pub fn apply_adguard_dns_upstream(yaml: &str, agh_port: u16, enabled: bool) -> Result<String, String> {
+    let content = remove_adguard_dns_upstream(yaml);
+    if !enabled || agh_port == 0 {
+        return Ok(content);
+    }
+
+    let port = if agh_port > 0 { agh_port } else { 5353 };
+    let agh_addr = format!("127.0.0.1:{}", port);
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut out = Vec::with_capacity(lines.len() + 8);
+    let mut injected_nameserver = false;
+    let mut injected_direct = false;
+
+    for line in lines {
+        out.push(line.to_string());
+        let trimmed = line.trim();
+
+        if trimmed == "nameserver:" && !injected_nameserver {
+            let base_indent = line.len() - line.trim_start().len();
+            let item_indent = " ".repeat(base_indent + 2);
+            out.push(format!("{}{}", item_indent, AGH_DNS_BEGIN));
+            out.push(format!("{}- {}", item_indent, agh_addr));
+            out.push(format!("{}{}", item_indent, AGH_DNS_END));
+            injected_nameserver = true;
+        } else if trimmed == "direct-nameserver:" && !injected_direct {
+            let base_indent = line.len() - line.trim_start().len();
+            let item_indent = " ".repeat(base_indent + 2);
+            out.push(format!("{}{}", item_indent, AGH_DIRECT_DNS_BEGIN));
+            out.push(format!("{}- {}", item_indent, agh_addr));
+            out.push(format!("{}{}", item_indent, AGH_DIRECT_DNS_END));
+            injected_direct = true;
+        }
+    }
+
     Ok(out.join("\n"))
 }
 
@@ -2153,6 +2228,13 @@ pub fn apply_routing_with_filters(
         current = with_adblock;
     }
 
+    // 5.1. Интеграция AdGuard Home DNS под прокси (Mihomo nameserver -> 127.0.0.1:5353)
+    let agh_enabled = cfg.adguard.enabled || cfg.adblock_enabled;
+    let agh_port = if cfg.adguard.dns_port > 0 { cfg.adguard.dns_port } else { 5353 };
+    if let Ok(with_agh_dns) = apply_adguard_dns_upstream(&current, agh_port, agh_enabled) {
+        current = with_agh_dns;
+    }
+
     // 6. Игровой режим (приоритетный маршрут устройства и селектор-группа 🎮 Gaming)
     current = apply_gaming_rules(&current, &cfg.gaming, &providers)?;
 
@@ -3218,6 +3300,43 @@ rules:
         assert!(out.contains("BadNode"), "Exclude-filter must include ignored server");
         assert_eq!(filters.get("myprov").map(|s| s.as_str()), Some("existing"), "Original filter must be preserved in map");
     }
+
+    #[test]
+    fn test_apply_adguard_dns_upstream_lifecycle() {
+        let sample_yaml = r#"
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  nameserver:
+    - 77.88.8.8
+    - 1.1.1.1
+  direct-nameserver:
+    - 77.88.8.8
+rules:
+  - MATCH,DIRECT
+"#;
+        // 1. Включение AdGuard Home (порт 5353)
+        let applied = apply_adguard_dns_upstream(sample_yaml, 5353, true).expect("must succeed");
+        assert!(applied.contains(AGH_DNS_BEGIN));
+        assert!(applied.contains("- 127.0.0.1:5353"));
+        assert!(applied.contains(AGH_DNS_END));
+        assert!(applied.contains(AGH_DIRECT_DNS_BEGIN));
+        assert!(applied.contains(AGH_DIRECT_DNS_END));
+        assert!(applied.contains("- 77.88.8.8"), "Existing nameservers must be preserved as fallbacks");
+
+        // 2. Идемпотентность (повторный вызов не дублирует блоки)
+        let re_applied = apply_adguard_dns_upstream(&applied, 5353, true).expect("must succeed");
+        assert_eq!(re_applied.matches(AGH_DNS_BEGIN).count(), 1, "Must contain exactly one AGH_DNS_BEGIN");
+        assert_eq!(re_applied.matches("127.0.0.1:5353").count(), 2, "Must contain 127.0.0.1:5353 once for nameserver and once for direct-nameserver");
+
+        // 3. Отключение AdGuard Home — чистое удаление
+        let disabled = apply_adguard_dns_upstream(&re_applied, 5353, false).expect("must succeed");
+        assert!(!disabled.contains(AGH_DNS_BEGIN));
+        assert!(!disabled.contains("127.0.0.1:5353"));
+        assert!(!disabled.contains(AGH_DNS_END));
+        assert!(disabled.contains("- 77.88.8.8"), "Original resolvers must remain intact");
+    }
 }
+
 
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, Fragment } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
 import {
   pingClass,
@@ -1131,7 +1131,50 @@ export default function Settings({ notify, status, refresh }: Props) {
                 <span className="muted small">{chain.length} узлов в цепочке</span>
               </div>
 
-              <div className="modal-list" style={{ maxHeight: 280, display: 'flex', flexDirection: 'column', gap: 4 }}>
+              <div className="modal-list" style={{ maxHeight: 380, display: 'flex', flexDirection: 'column', gap: 6, overflowY: 'auto' }}>
+                {chain.length > 1 && (
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      overflowX: 'auto',
+                      padding: '8px 12px',
+                      background: 'rgba(255, 255, 255, 0.02)',
+                      borderRadius: 8,
+                      border: '1px dashed rgba(255, 255, 255, 0.12)',
+                      marginBottom: 4,
+                      fontSize: 11,
+                    }}
+                  >
+                    <span style={{ color: 'var(--muted)', fontWeight: 600, flexShrink: 0 }}>Траектория сбоя:</span>
+                    {chain.map((id, idx) => {
+                      const sv = servers.find((x) => x.id === id)
+                      const isCur = Boolean(status?.active_server && status.active_server.id === id)
+                      const name = sv ? sv.name : id
+                      return (
+                        <Fragment key={id}>
+                          {idx > 0 && <span style={{ color: 'var(--muted)', opacity: 0.6, flexShrink: 0 }}>➔</span>}
+                          <span
+                            style={{
+                              padding: '2px 8px',
+                              borderRadius: 6,
+                              background: isCur ? 'rgba(34, 197, 94, 0.2)' : 'rgba(255, 255, 255, 0.05)',
+                              color: isCur ? '#4ade80' : 'var(--text)',
+                              border: isCur ? '1px solid rgba(34, 197, 94, 0.4)' : '1px solid transparent',
+                              fontWeight: isCur ? 700 : 500,
+                              whiteSpace: 'nowrap',
+                              flexShrink: 0,
+                            }}
+                            title={name}
+                          >
+                            {idx === 0 ? '👑 ' : `${idx + 1}. `}{name}
+                          </span>
+                        </Fragment>
+                      )
+                    })}
+                  </div>
+                )}
                 {chain.length === 0 && (
                   <p className="muted small" style={{ margin: '8px 0' }}>
                     Цепочка не задана — failover автоматически выбирает лучший доступный сервер.
@@ -1156,9 +1199,8 @@ export default function Settings({ notify, status, refresh }: Props) {
                       className="check-row"
                       style={{
                         display: 'flex',
-                        gap: 8,
-                        alignItems: 'center',
-                        flexWrap: 'nowrap',
+                        flexDirection: 'column',
+                        gap: 6,
                         background: isActive
                           ? 'rgba(34, 197, 94, 0.08)'
                           : i === 0
@@ -1169,200 +1211,241 @@ export default function Settings({ notify, status, refresh }: Props) {
                           : i === 0
                             ? '1px solid rgba(56, 189, 248, 0.3)'
                             : '1px solid var(--border)',
-                        borderRadius: 8,
-                        padding: '6px 10px',
+                        borderRadius: 10,
+                        padding: '8px 12px',
                         minWidth: 0,
                       }}
                     >
-                      {/* Роль в цепочке */}
-                      <span
+                      {/* УРОВЕНЬ 1: Номер, Название сервера и Задержка */}
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'nowrap' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
+                          <span
+                            style={{
+                              fontSize: 11,
+                              fontWeight: 700,
+                              padding: '2px 8px',
+                              borderRadius: 6,
+                              background: i === 0 ? 'rgba(56, 189, 248, 0.25)' : 'rgba(255, 255, 255, 0.08)',
+                              color: i === 0 ? '#38bdf8' : 'var(--muted)',
+                              whiteSpace: 'nowrap',
+                              flexShrink: 0,
+                            }}
+                          >
+                            {i === 0 ? '👑 #1 Основной' : `⚡ #${i + 1} Резерв`}
+                          </span>
+
+                          <span
+                            className="server-name"
+                            style={{
+                              fontWeight: 600,
+                              fontSize: 13,
+                              color: isActive ? '#4ade80' : 'var(--text)',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                              minWidth: 120,
+                            }}
+                            title={sv ? `${sv.name} (${id})` : id}
+                          >
+                            {sv ? sv.name : `${id} (недоступен)`}
+                          </span>
+                        </div>
+
+                        {/* Задержка и бейдж превышения порога */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                          {livePing > (settings.failover.ping_threshold_ms || 300) && !isTimeout && (
+                            <span
+                              style={{
+                                fontSize: 10,
+                                padding: '1px 6px',
+                                borderRadius: 4,
+                                background: 'rgba(249, 115, 22, 0.15)',
+                                color: '#fb923c',
+                                border: '1px solid rgba(249, 115, 22, 0.35)',
+                                fontWeight: 600,
+                                whiteSpace: 'nowrap',
+                              }}
+                              title={`Пинг превышает порог ${settings.failover.ping_threshold_ms} мс. При сбое узел будет пропущен.`}
+                            >
+                              ⚠️ &gt; {settings.failover.ping_threshold_ms || 300} мс
+                            </span>
+                          )}
+                          <span className={'ping ' + pingClass(livePing)} style={{ fontSize: 12, fontWeight: 700 }}>
+                            {livePing > 0 && livePing < 9999 ? `${livePing} мс` : '—'}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* УРОВЕНЬ 2: Метаданные, Живой статус и Кнопки действий */}
+                      <div
                         style={{
-                          fontSize: 10.5,
-                          fontWeight: 700,
-                          padding: '2px 6px',
-                          borderRadius: 4,
-                          background: i === 0 ? 'rgba(56, 189, 248, 0.25)' : 'rgba(255, 255, 255, 0.08)',
-                          color: i === 0 ? '#38bdf8' : 'var(--muted)',
-                          whiteSpace: 'nowrap',
-                          flexShrink: 0,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: 8,
+                          paddingTop: 4,
+                          borderTop: '1px solid rgba(255, 255, 255, 0.05)',
                         }}
                       >
-                        {i === 0 ? '👑 ОСНОВНОЙ (№1)' : `⚡ РЕЗЕРВ (№${i + 1})`}
-                      </span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          {isActive ? (
+                            <span
+                              style={{
+                                fontSize: 10,
+                                fontWeight: 700,
+                                padding: '2px 6px',
+                                borderRadius: 4,
+                                background: 'rgba(34, 197, 94, 0.2)',
+                                color: '#4ade80',
+                                border: '1px solid rgba(34, 197, 94, 0.4)',
+                              }}
+                            >
+                              🟢 Активен сейчас
+                            </span>
+                          ) : isCanary ? (
+                            <span
+                              style={{
+                                fontSize: 10,
+                                fontWeight: 700,
+                                padding: '2px 6px',
+                                borderRadius: 4,
+                                background: 'rgba(168, 85, 247, 0.2)',
+                                color: '#c084fc',
+                                border: '1px solid rgba(168, 85, 247, 0.4)',
+                              }}
+                            >
+                              🧪 Тест ({canaryInfo?.remaining_secs ?? 0}с)
+                            </span>
+                          ) : isQuarantined ? (
+                            <span
+                              style={{
+                                fontSize: 10,
+                                fontWeight: 700,
+                                padding: '2px 6px',
+                                borderRadius: 4,
+                                background: 'rgba(249, 115, 22, 0.2)',
+                                color: '#fb923c',
+                                border: '1px solid rgba(249, 115, 22, 0.4)',
+                              }}
+                            >
+                              🛡️ Карантин ({Math.ceil((quarantineInfo?.remaining_secs || 0) / 60)} мин)
+                            </span>
+                          ) : isTimeout ? (
+                            <span
+                              style={{
+                                fontSize: 10,
+                                fontWeight: 700,
+                                padding: '2px 6px',
+                                borderRadius: 4,
+                                background: 'rgba(239, 68, 68, 0.15)',
+                                color: '#f87171',
+                                border: '1px solid rgba(239, 68, 68, 0.35)',
+                              }}
+                            >
+                              ❌ Таймаут
+                            </span>
+                          ) : (
+                            <span
+                              style={{
+                                fontSize: 10,
+                                fontWeight: 500,
+                                padding: '2px 6px',
+                                borderRadius: 4,
+                                background: 'rgba(255, 255, 255, 0.05)',
+                                color: 'var(--muted)',
+                              }}
+                            >
+                              💤 В резерве
+                            </span>
+                          )}
 
-                      {/* Живой статус работы */}
-                      {isActive ? (
-                        <span
-                          style={{
-                            fontSize: 10,
-                            fontWeight: 700,
-                            padding: '2px 6px',
-                            borderRadius: 4,
-                            background: 'rgba(34, 197, 94, 0.2)',
-                            color: '#4ade80',
-                            border: '1px solid rgba(34, 197, 94, 0.4)',
-                            whiteSpace: 'nowrap',
-                            flexShrink: 0,
-                          }}
-                        >
-                          🟢 ИСПОЛЬЗУЕТСЯ СЕЙЧАС
-                        </span>
-                      ) : isCanary ? (
-                        <span
-                          style={{
-                            fontSize: 10,
-                            fontWeight: 700,
-                            padding: '2px 6px',
-                            borderRadius: 4,
-                            background: 'rgba(168, 85, 247, 0.2)',
-                            color: '#c084fc',
-                            border: '1px solid rgba(168, 85, 247, 0.4)',
-                            whiteSpace: 'nowrap',
-                            flexShrink: 0,
-                          }}
-                        >
-                          🧪 ТЕСТ ({canaryInfo?.remaining_secs ?? 0}с)
-                        </span>
-                      ) : isQuarantined ? (
-                        <span
-                          style={{
-                            fontSize: 10,
-                            fontWeight: 700,
-                            padding: '2px 6px',
-                            borderRadius: 4,
-                            background: 'rgba(249, 115, 22, 0.2)',
-                            color: '#fb923c',
-                            border: '1px solid rgba(249, 115, 22, 0.4)',
-                            whiteSpace: 'nowrap',
-                            flexShrink: 0,
-                          }}
-                        >
-                          🛡️ Карантин ({Math.ceil((quarantineInfo?.remaining_secs || 0) / 60)} мин)
-                        </span>
-                      ) : isTimeout ? (
-                        <span
-                          style={{
-                            fontSize: 10,
-                            fontWeight: 700,
-                            padding: '2px 6px',
-                            borderRadius: 4,
-                            background: 'rgba(239, 68, 68, 0.15)',
-                            color: '#f87171',
-                            border: '1px solid rgba(239, 68, 68, 0.35)',
-                            whiteSpace: 'nowrap',
-                            flexShrink: 0,
-                          }}
-                        >
-                          ❌ Таймаут
-                        </span>
-                      ) : (
-                        <span
-                          style={{
-                            fontSize: 10,
-                            fontWeight: 600,
-                            padding: '2px 6px',
-                            borderRadius: 4,
-                            background: 'rgba(255, 255, 255, 0.05)',
-                            color: 'var(--muted)',
-                            whiteSpace: 'nowrap',
-                            flexShrink: 0,
-                          }}
-                        >
-                          💤 В резерве
-                        </span>
-                      )}
+                          {sv?.is_pool ? (
+                            <span
+                              style={{
+                                fontSize: 10,
+                                background: 'rgba(168, 85, 247, 0.2)',
+                                color: '#c084fc',
+                                padding: '1px 6px',
+                                borderRadius: 4,
+                                fontWeight: 600,
+                              }}
+                            >
+                              🔀 ПУЛ
+                            </span>
+                          ) : sv?.provider ? (
+                            <span className="tag-provider" style={{ fontSize: 10, padding: '1px 5px', cursor: 'default' }}>
+                              📦 {sv.provider_name || sv.provider}
+                            </span>
+                          ) : null}
 
-                      {sv?.is_pool ? (
-                        <span
-                          style={{
-                            fontSize: 10,
-                            background: 'rgba(168, 85, 247, 0.2)',
-                            color: '#c084fc',
-                            padding: '1px 6px',
-                            borderRadius: 4,
-                            fontWeight: 600,
-                            flexShrink: 0,
-                          }}
-                        >
-                          🔀 ПУЛ
-                        </span>
-                      ) : sv?.provider ? (
-                        <span className="tag-provider" style={{ fontSize: 10, padding: '1px 5px', cursor: 'default', flexShrink: 0 }}>
-                          📦 {sv.provider_name || sv.provider}
-                        </span>
-                      ) : null}
+                          {sv?.protocol && (
+                            <span className="badge-subtle" style={{ fontSize: 9.5, opacity: 0.7 }}>
+                              {sv.protocol}
+                            </span>
+                          )}
+                        </div>
 
-                      <span
-                        className="server-name"
-                        style={{
-                          flex: 1,
-                          fontWeight: isActive || i === 0 ? 600 : 400,
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
-                          minWidth: 0,
-                        }}
-                        title={sv ? `${sv.name} (${id})` : id}
-                      >
-                        {sv ? sv.name : `${id} (недоступен)`}
-                      </span>
+                        {/* Кнопки действий */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                          {!isActive && (
+                            <button
+                              type="button"
+                              className="btn sm"
+                              style={{
+                                height: 24,
+                                padding: '0 8px',
+                                fontSize: 10.5,
+                                lineHeight: '22px',
+                                borderRadius: 6,
+                                background: 'rgba(56, 189, 248, 0.12)',
+                                border: '1px solid rgba(56, 189, 248, 0.35)',
+                                color: '#38bdf8',
+                                cursor: 'pointer',
+                                fontWeight: 600,
+                              }}
+                              title="Принудительно переключиться на этот сервер"
+                              onClick={async () => {
+                                try {
+                                  await apiPost('servers/switch', { id })
+                                  notify(`Переключение на ${sv?.name || id}...`)
+                                  refresh?.()
+                                } catch (e: any) {
+                                  notify(e.message || 'Ошибка переключения', true)
+                                }
+                              }}
+                            >
+                              ⚡ Включить
+                            </button>
+                          )}
 
-                      {(sv || livePing > 0) && (
-                        <span className={'ping ' + pingClass(livePing)} style={{ flexShrink: 0 }}>
-                          {livePing > 0 ? `${livePing} мс` : '—'}
-                        </span>
-                      )}
-
-                      {!isActive && (
-                        <button
-                          type="button"
-                          className="btn sm"
-                          style={{
-                            height: 26,
-                            padding: '0 8px',
-                            fontSize: 11,
-                            lineHeight: '24px',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: 4,
-                            borderRadius: 6,
-                            background: 'rgba(56, 189, 248, 0.12)',
-                            border: '1px solid rgba(56, 189, 248, 0.35)',
-                            color: '#38bdf8',
-                            cursor: 'pointer',
-                            fontWeight: 600,
-                            whiteSpace: 'nowrap',
-                            flexShrink: 0,
-                          }}
-                          title="Принудительно переключиться на этот сервер"
-                          onClick={async () => {
-                            try {
-                              await apiPost('servers/switch', { id })
-                              notify(`Переключение на ${sv?.name || id}...`)
-                              refresh?.()
-                            } catch (e: any) {
-                              notify(e.message || 'Ошибка переключения', true)
-                            }
-                          }}
-                        >
-                          ⚡ Включить
-                        </button>
-                      )}
-
-                      <button className="btn sm ghost" style={{ flexShrink: 0 }} disabled={i === 0} onClick={() => chainMove(i, -1)} title="Повысить приоритет">
-                        ↑
-                      </button>
-                      <button className="btn sm ghost" style={{ flexShrink: 0 }} disabled={i === chain.length - 1} onClick={() => chainMove(i, 1)} title="Понизить приоритет">
-                        ↓
-                      </button>
-                      <button
-                        className="btn sm ghost"
-                        style={{ color: '#ef4444', flexShrink: 0 }}
-                        onClick={() => patch((s) => (s.failover.priority_chain = chain.filter((x) => x !== id)))}
-                        title="Удалить из цепочки"
-                      >
-                        ✕
-                      </button>
+                          <button
+                            className="btn sm ghost"
+                            style={{ height: 24, padding: '0 6px', fontSize: 11 }}
+                            disabled={i === 0}
+                            onClick={() => chainMove(i, -1)}
+                            title="Повысить приоритет"
+                          >
+                            ▲
+                          </button>
+                          <button
+                            className="btn sm ghost"
+                            style={{ height: 24, padding: '0 6px', fontSize: 11 }}
+                            disabled={i === chain.length - 1}
+                            onClick={() => chainMove(i, 1)}
+                            title="Понизить приоритет"
+                          >
+                            ▼
+                          </button>
+                          <button
+                            className="btn sm ghost"
+                            style={{ height: 24, padding: '0 6px', color: '#ef4444', fontSize: 11 }}
+                            onClick={() => patch((s) => (s.failover.priority_chain = chain.filter((x) => x !== id)))}
+                            title="Удалить из цепочки"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   )
                 })}

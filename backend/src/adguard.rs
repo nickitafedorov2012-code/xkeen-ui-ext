@@ -1028,6 +1028,47 @@ pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
                     .args(["-t", "nat", "-I", "PREROUTING", "1", "-i", iface, "-p", "tcp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
                     .output();
             }
+
+            // 5. Разрешаем входящий трафик на порт AdGuard в цепочке INPUT таблицы filter (устраняет DROP перенаправленного DNS роутером)
+            for proto in &["udp", "tcp"] {
+                let check_input = std::process::Command::new("iptables")
+                    .args(["-t", "filter", "-C", "INPUT", "-i", iface, "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
+                    .output();
+                if !check_input.map(|o| o.status.success()).unwrap_or(false) {
+                    let _ = std::process::Command::new("iptables")
+                        .args(["-t", "filter", "-I", "INPUT", "1", "-i", iface, "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
+                        .output();
+                }
+            }
+        }
+
+        // 6. Устанавливаем NDM hook для защиты от сброса правил фаервола системой KeeneticOS
+        let hook_path = std::path::Path::new("/opt/etc/ndm/netfilter.d/040-adguard.sh");
+        if let Some(parent) = hook_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let hook_content = format!(
+            "#!/bin/sh\n[ \"$table\" != \"nat\" ] && [ \"$table\" != \"filter\" ] && [ -n \"$table\" ] && exit 0\n\
+            iptables -t nat -N {chain} 2>/dev/null || true\n\
+            iptables -t nat -F {chain} 2>/dev/null || true\n\
+            iptables -t nat -A {chain} -d 127.0.0.1 -j RETURN 2>/dev/null || true\n\
+            iptables -t nat -A {chain} -p udp --dport 53 -j REDIRECT --to-ports {port} 2>/dev/null || true\n\
+            iptables -t nat -A {chain} -p tcp --dport 53 -j REDIRECT --to-ports {port} 2>/dev/null || true\n\
+            for iface in br+ Bridge+; do\n\
+                iptables -t nat -C PREROUTING -i \"$iface\" -p udp --dport 53 -j {chain} 2>/dev/null || iptables -t nat -I PREROUTING 1 -i \"$iface\" -p udp --dport 53 -j {chain} 2>/dev/null || true\n\
+                iptables -t nat -C PREROUTING -i \"$iface\" -p tcp --dport 53 -j {chain} 2>/dev/null || iptables -t nat -I PREROUTING 1 -i \"$iface\" -p tcp --dport 53 -j {chain} 2>/dev/null || true\n\
+                iptables -t filter -C INPUT -i \"$iface\" -p udp --dport {port} -j ACCEPT 2>/dev/null || iptables -t filter -I INPUT 1 -i \"$iface\" -p udp --dport {port} -j ACCEPT 2>/dev/null || true\n\
+                iptables -t filter -C INPUT -i \"$iface\" -p tcp --dport {port} -j ACCEPT 2>/dev/null || iptables -t filter -I INPUT 1 -i \"$iface\" -p tcp --dport {port} -j ACCEPT 2>/dev/null || true\n\
+            done\n",
+            chain = AGH_IPTABLES_CHAIN,
+            port = port_str
+        );
+        if let Ok(()) = std::fs::write(hook_path, hook_content) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(hook_path, std::fs::Permissions::from_mode(0o755));
+            }
         }
     }
     let _ = dns_port;
@@ -1038,11 +1079,22 @@ pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
 pub fn remove_adguard_iptables() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
+        let port = detect_adguard_dns_port().unwrap_or(5353);
+        let port_str = port.to_string();
+
         for iface in &["br+", "Bridge+"] {
             for proto in &["udp", "tcp"] {
                 for _ in 0..20 {
                     let out = std::process::Command::new("iptables")
                         .args(["-t", "nat", "-D", "PREROUTING", "-i", iface, "-p", proto, "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
+                        .output();
+                    if !out.map(|o| o.status.success()).unwrap_or(false) {
+                        break;
+                    }
+                }
+                for _ in 0..20 {
+                    let out = std::process::Command::new("iptables")
+                        .args(["-t", "filter", "-D", "INPUT", "-i", iface, "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
                         .output();
                     if !out.map(|o| o.status.success()).unwrap_or(false) {
                         break;
@@ -1056,6 +1108,9 @@ pub fn remove_adguard_iptables() -> Result<(), String> {
         let _ = std::process::Command::new("iptables")
             .args(["-t", "nat", "-X", AGH_IPTABLES_CHAIN])
             .output();
+
+        let hook_path = std::path::Path::new("/opt/etc/ndm/netfilter.d/040-adguard.sh");
+        let _ = std::fs::remove_file(hook_path);
     }
     Ok(())
 }
