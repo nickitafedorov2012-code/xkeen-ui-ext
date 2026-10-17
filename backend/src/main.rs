@@ -435,6 +435,9 @@ async fn main() {
         let agh_status = adguard::get_status(&adguard_sync_state.http, &cfg.adguard).await;
         let is_running_protected = agh_status.running && agh_status.protection_enabled;
         let is_enabled = cfg.adguard.enabled || cfg.adblock_enabled || is_running_protected;
+        if agh_status.running {
+            let _ = adguard::heal_adguard_live_config(&adguard_sync_state.http, &cfg.adguard, Some(&cfg.rci.host)).await;
+        }
         if is_enabled {
             let active_port = adguard::detect_adguard_dns_port().unwrap_or(if agh_status.dns_port > 0 { agh_status.dns_port } else { cfg.adguard.dns_port });
             let listener_ok = adguard::test_agh_dns_listener(&cfg.adguard.host, active_port).await;

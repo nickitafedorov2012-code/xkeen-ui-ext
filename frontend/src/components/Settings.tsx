@@ -1165,50 +1165,56 @@ export default function Settings({ notify, status, refresh }: Props) {
                 <span className="muted small">{chain.length} узлов в цепочке</span>
               </div>
 
+              {chain.length > 1 && (
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    overflowX: 'auto',
+                    overflowY: 'hidden',
+                    flexShrink: 0,
+                    minHeight: 44,
+                    padding: '8px 12px',
+                    background: 'rgba(255, 255, 255, 0.03)',
+                    borderRadius: 8,
+                    border: '1px dashed rgba(255, 255, 255, 0.15)',
+                    marginBottom: 4,
+                    fontSize: 11,
+                    scrollbarWidth: 'thin',
+                  }}
+                >
+                  <span style={{ color: 'var(--muted)', fontWeight: 600, flexShrink: 0 }}>Траектория сбоя:</span>
+                  {chain.map((id, idx) => {
+                    const sv = servers.find((x) => x.id === id)
+                    const isCur = Boolean(status?.active_server && status.active_server.id === id)
+                    const name = sv ? sv.name : id
+                    return (
+                      <Fragment key={id}>
+                        {idx > 0 && <span style={{ color: 'var(--muted)', opacity: 0.6, flexShrink: 0 }}>➔</span>}
+                        <span
+                          style={{
+                            padding: '3px 8px',
+                            lineHeight: '18px',
+                            borderRadius: 6,
+                            background: isCur ? 'rgba(34, 197, 94, 0.2)' : 'rgba(255, 255, 255, 0.05)',
+                            color: isCur ? '#4ade80' : 'var(--text)',
+                            border: isCur ? '1px solid rgba(34, 197, 94, 0.4)' : '1px solid transparent',
+                            fontWeight: isCur ? 700 : 500,
+                            whiteSpace: 'nowrap',
+                            flexShrink: 0,
+                          }}
+                          title={name}
+                        >
+                          {idx === 0 ? '👑 ' : `${idx + 1}. `}{name}
+                        </span>
+                      </Fragment>
+                    )
+                  })}
+                </div>
+              )}
+
               <div className="modal-list" style={{ maxHeight: 380, display: 'flex', flexDirection: 'column', gap: 6, overflowY: 'auto' }}>
-                {chain.length > 1 && (
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                      overflowX: 'auto',
-                      padding: '8px 12px',
-                      background: 'rgba(255, 255, 255, 0.02)',
-                      borderRadius: 8,
-                      border: '1px dashed rgba(255, 255, 255, 0.12)',
-                      marginBottom: 4,
-                      fontSize: 11,
-                    }}
-                  >
-                    <span style={{ color: 'var(--muted)', fontWeight: 600, flexShrink: 0 }}>Траектория сбоя:</span>
-                    {chain.map((id, idx) => {
-                      const sv = servers.find((x) => x.id === id)
-                      const isCur = Boolean(status?.active_server && status.active_server.id === id)
-                      const name = sv ? sv.name : id
-                      return (
-                        <Fragment key={id}>
-                          {idx > 0 && <span style={{ color: 'var(--muted)', opacity: 0.6, flexShrink: 0 }}>➔</span>}
-                          <span
-                            style={{
-                              padding: '2px 8px',
-                              borderRadius: 6,
-                              background: isCur ? 'rgba(34, 197, 94, 0.2)' : 'rgba(255, 255, 255, 0.05)',
-                              color: isCur ? '#4ade80' : 'var(--text)',
-                              border: isCur ? '1px solid rgba(34, 197, 94, 0.4)' : '1px solid transparent',
-                              fontWeight: isCur ? 700 : 500,
-                              whiteSpace: 'nowrap',
-                              flexShrink: 0,
-                            }}
-                            title={name}
-                          >
-                            {idx === 0 ? '👑 ' : `${idx + 1}. `}{name}
-                          </span>
-                        </Fragment>
-                      )
-                    })}
-                  </div>
-                )}
                 {chain.length === 0 && (
                   <p className="muted small" style={{ margin: '8px 0' }}>
                     Цепочка не задана — failover автоматически выбирает лучший доступный сервер.

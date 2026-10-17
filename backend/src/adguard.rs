@@ -323,6 +323,182 @@ pub async fn get_health(
     }
 }
 
+/// Очистка списка upstream_dns AdGuard Home от локальных петель и гарантирование надежных публичных резолверов
+pub fn clean_adguard_upstreams(upstreams: &[String], router_ip: Option<&str>) -> (Vec<String>, bool) {
+    let r_ip = router_ip.map(str::trim).filter(|s| !s.is_empty());
+    let mut modified = false;
+
+    let mut cleaned: Vec<String> = upstreams
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| {
+            if s.is_empty() {
+                return false;
+            }
+            if s.contains("127.0.0.1:1053")
+                || s.contains("localhost:1053")
+                || s.contains("127.0.0.1:53")
+                || s.contains("localhost:53")
+                || s.contains("127.0.0.1:7874")
+            {
+                modified = true;
+                return false;
+            }
+            if let Some(rip) = r_ip {
+                if (s.starts_with(rip) || s.contains(&format!("//{rip}")))
+                    && (s.ends_with(":53") || s.ends_with(":1053") || !s.contains(':'))
+                {
+                    modified = true;
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+
+    let fast_defaults = [
+        "77.88.8.8",
+        "77.88.8.1",
+        "1.1.1.1",
+        "8.8.8.8",
+        "https://dns.google/dns-query",
+    ];
+    for def in &fast_defaults {
+        if !cleaned.iter().any(|u| u == *def) {
+            cleaned.push(def.to_string());
+            modified = true;
+        }
+    }
+
+    (cleaned, modified)
+}
+
+/// Очистка bootstrap_dns AdGuard Home от локальных петель
+pub fn clean_adguard_bootstrap_dns(bootstrap: &[String], router_ip: Option<&str>) -> (Vec<String>, bool) {
+    let r_ip = router_ip.map(str::trim).filter(|s| !s.is_empty());
+    let mut modified = false;
+
+    let mut cleaned: Vec<String> = bootstrap
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| {
+            if s.is_empty() {
+                return false;
+            }
+            if s.contains("127.0.0.1") || s.contains("localhost") {
+                modified = true;
+                return false;
+            }
+            if let Some(rip) = r_ip {
+                if s.starts_with(rip) || s.contains(&format!("//{rip}")) {
+                    modified = true;
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+
+    let bootstrap_defaults = ["77.88.8.8", "1.1.1.1"];
+    for def in &bootstrap_defaults {
+        if !cleaned.iter().any(|u| u == *def) {
+            cleaned.push(def.to_string());
+            modified = true;
+        }
+    }
+
+    (cleaned, modified)
+}
+
+/// Лечение всех найденных файлов AdGuardHome.yaml на диске
+pub async fn heal_all_adguard_yaml_configs(dns_port: u16) {
+    let standard = [
+        "/opt/etc/AdGuardHome/AdGuardHome.yaml",
+        "/opt/etc/AdGuardHome.yaml",
+        "/opt/AdGuardHome/AdGuardHome.yaml",
+        "/opt/root/AdGuardHome/AdGuardHome.yaml",
+    ];
+    for path_str in &standard {
+        let p = std::path::Path::new(path_str);
+        if p.is_file() {
+            if let Ok(content) = tokio::fs::read_to_string(p).await {
+                let (healed, changed) = sanitize_and_heal_adguard_yaml(&content, dns_port);
+                if changed {
+                    let _ = tokio::fs::write(p, healed).await;
+                    crate::log_i!("[ADGUARD] ✓ Конфигурационный файл {} очищен и обновлен на диске", path_str);
+                }
+            }
+        }
+    }
+}
+
+/// Автономное живое устранение DNS-петель в AdGuard Home через REST API и дисковые конфиги
+pub async fn heal_adguard_live_config(
+    http: &reqwest::Client,
+    cfg: &AdGuardConfig,
+    router_ip: Option<&str>,
+) -> Result<bool, String> {
+    let dns_info = match agh_request(http, cfg, reqwest::Method::GET, "/control/dns_info", None, 3).await {
+        Ok(v) => v,
+        Err(e) => return Err(e),
+    };
+
+    let mut current_upstreams: Vec<String> = Vec::new();
+    if let Some(arr) = dns_info.get("upstream_dns").and_then(|a| a.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                current_upstreams.push(s.to_string());
+            }
+        }
+    }
+
+    let mut current_bootstrap: Vec<String> = Vec::new();
+    if let Some(arr) = dns_info.get("bootstrap_dns").and_then(|a| a.as_array()) {
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                current_bootstrap.push(s.to_string());
+            }
+        }
+    }
+
+    let (cleaned_upstreams, upstreams_modified) = clean_adguard_upstreams(&current_upstreams, router_ip);
+    let (cleaned_bootstrap, bootstrap_modified) = clean_adguard_bootstrap_dns(&current_bootstrap, router_ip);
+
+    if upstreams_modified || bootstrap_modified {
+        let mut new_config = dns_info.clone();
+        if let Some(obj) = new_config.as_object_mut() {
+            if upstreams_modified {
+                obj.insert(
+                    "upstream_dns".to_string(),
+                    serde_json::to_value(&cleaned_upstreams).unwrap_or_default(),
+                );
+            }
+            if bootstrap_modified {
+                obj.insert(
+                    "bootstrap_dns".to_string(),
+                    serde_json::to_value(&cleaned_bootstrap).unwrap_or_default(),
+                );
+            }
+        }
+        let _ = agh_request(
+            http,
+            cfg,
+            reqwest::Method::POST,
+            "/control/dns_config",
+            Some(new_config),
+            5,
+        )
+        .await?;
+        crate::log_i!(
+            "[ADGUARD] ✓ Автономное устранение DNS-петли: параметры DNS успешно очищены и обновлены через Live API"
+        );
+    }
+
+    heal_all_adguard_yaml_configs(cfg.dns_port).await;
+
+    Ok(upstreams_modified || bootstrap_modified)
+}
+
 /// Тестирование локального UDP DNS слушателя AdGuard Home
 pub async fn test_agh_dns_listener(host: &str, port: u16) -> bool {
     let addr = match format!("{}:{}", host, port).parse::<SocketAddr>() {
@@ -1338,8 +1514,8 @@ pub fn find_adguard_binary() -> Option<PathBuf> {
 /// Поиск конфигурационного файла AdGuardHome.yaml
 pub fn find_adguard_config() -> Option<PathBuf> {
     let standard = [
-        "/opt/etc/AdGuardHome.yaml",
         "/opt/etc/AdGuardHome/AdGuardHome.yaml",
+        "/opt/etc/AdGuardHome.yaml",
         "/opt/AdGuardHome/AdGuardHome.yaml",
         "/opt/root/AdGuardHome/AdGuardHome.yaml",
         "AdGuardHome.yaml",
@@ -2524,6 +2700,45 @@ http:
     fn test_ins03_adguard_init_script_has_path_export() {
         let script = generate_adguard_init_script_content("/opt/bin/AdGuardHome", "/opt/etc/AdGuardHome.yaml", "/opt/etc/AdGuardHome");
         assert!(script.contains("export PATH=\"/opt/sbin:/opt/bin:/usr/sbin:/usr/bin:/sbin:/bin\""));
+    }
+
+    #[test]
+    fn test_anti_regression_clean_adguard_upstreams_live_healing() {
+        // Anti-regression: Ensure 127.0.0.1:1053, router IP loops, and local loopbacks are completely purged
+        // while valid custom resolvers like Quad9 are strictly preserved
+        let dirty_upstreams = vec![
+            "127.0.0.1:1053".to_string(),
+            "192.168.2.1:53".to_string(),
+            "localhost:1053".to_string(),
+            "127.0.0.1:53".to_string(),
+            "tls://dns.quad9.net".to_string(),
+        ];
+        let (cleaned, modified) = clean_adguard_upstreams(&dirty_upstreams, Some("192.168.2.1"));
+        assert!(modified);
+        assert!(!cleaned.contains(&"127.0.0.1:1053".to_string()));
+        assert!(!cleaned.contains(&"192.168.2.1:53".to_string()));
+        assert!(!cleaned.contains(&"localhost:1053".to_string()));
+        assert!(!cleaned.contains(&"127.0.0.1:53".to_string()));
+        assert!(cleaned.contains(&"tls://dns.quad9.net".to_string()));
+        assert!(cleaned.contains(&"77.88.8.8".to_string()));
+        assert!(cleaned.contains(&"1.1.1.1".to_string()));
+        assert!(cleaned.contains(&"8.8.8.8".to_string()));
+    }
+
+    #[test]
+    fn test_anti_regression_clean_adguard_bootstrap_dns() {
+        let dirty_bootstrap = vec![
+            "127.0.0.1".to_string(),
+            "192.168.2.1".to_string(),
+            "9.9.9.9".to_string(),
+        ];
+        let (cleaned, modified) = clean_adguard_bootstrap_dns(&dirty_bootstrap, Some("192.168.2.1"));
+        assert!(modified);
+        assert!(!cleaned.contains(&"127.0.0.1".to_string()));
+        assert!(!cleaned.contains(&"192.168.2.1".to_string()));
+        assert!(cleaned.contains(&"9.9.9.9".to_string()));
+        assert!(cleaned.contains(&"77.88.8.8".to_string()));
+        assert!(cleaned.contains(&"1.1.1.1".to_string()));
     }
 }
 

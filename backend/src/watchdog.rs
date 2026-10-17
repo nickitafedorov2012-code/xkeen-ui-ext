@@ -714,15 +714,44 @@ pub fn spawn_adguard_monitor(state: AppState) {
                 continue;
             }
 
-            let (enabled, host, configured_port) = {
+            let (mut enabled, host, configured_port, adguard_cfg, router_ip) = {
                 let cfg = state.config.read().await;
-                (cfg.adguard.enabled || cfg.adblock_enabled, cfg.adguard.host.clone(), cfg.adguard.dns_port)
+                (
+                    cfg.adguard.enabled || cfg.adblock_enabled,
+                    cfg.adguard.host.clone(),
+                    cfg.adguard.dns_port,
+                    cfg.adguard.clone(),
+                    cfg.rci.host.clone(),
+                )
             };
             let dns_port = crate::adguard::detect_adguard_dns_port().unwrap_or(configured_port);
 
+            // Автономный мониторинг фактического состояния службы AdGuard Home
+            let agh_status = crate::adguard::get_status(&state.http, &adguard_cfg).await;
+            let is_running_protected = agh_status.running && agh_status.protection_enabled;
+
+            // Если AdGuard запущен и активен, но в конфигурации был выключен — автоматически синхронизируем
+            if is_running_protected && !enabled {
+                enabled = true;
+                if let Ok(mut tx) = crate::transaction::ConfigTx::begin(&state).await {
+                    tx.config_mut().adguard.enabled = true;
+                    tx.config_mut().adblock_enabled = true;
+                    if dns_port > 0 {
+                        tx.config_mut().adguard.dns_port = dns_port;
+                    }
+                    let _ = tx.commit_and_reload().await;
+                    log_i!("[WATCHDOG] ✓ Автономная синхронизация: AdGuard Home активен, adguard.enabled=true зафиксирован в конфигурации");
+                }
+            }
+
+            // Автономное устранение петель (1053) через live API
+            if agh_status.running {
+                let _ = crate::adguard::heal_adguard_live_config(&state.http, &adguard_cfg, Some(&router_ip)).await;
+            }
+
             let iptables_active = crate::adguard::is_adguard_iptables_active(dns_port);
 
-            if !enabled {
+            if !enabled && !is_running_protected {
                 if iptables_active {
                     let _ = crate::adguard::remove_adguard_iptables();
                 }
@@ -752,11 +781,12 @@ pub fn spawn_adguard_monitor(state: AppState) {
                     let _ = crate::adguard::apply_adguard_iptables(dns_port);
                     iptables_temporarily_suspended = false;
                 }
-            } else if enabled && !iptables_active && !iptables_temporarily_suspended {
+            } else if (enabled || is_running_protected) && !iptables_active && !iptables_temporarily_suspended {
                 // Если служба запущена и отвечает, но правила слетели (например, сброс KeeneticOS iptables)
                 let listener_ok = crate::adguard::test_agh_dns_listener(&host, dns_port).await;
                 if listener_ok {
                     let _ = crate::adguard::apply_adguard_iptables(dns_port);
+                    log_i!("[WATCHDOG] ✓ Восстановлен системный редирект XKEEN_ADGUARD iptables (порт 53 -> {})", dns_port);
                 }
             }
         }

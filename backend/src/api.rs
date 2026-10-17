@@ -57,7 +57,8 @@ pub async fn status(State(state): State<AppState>) -> Response {
     } else {
         format!("Zapret 1 {zapret_ver}")
     };
-    let zapret_installed = std::path::Path::new("/opt/etc/init.d/S51zapret").exists();
+    let zapret_installed = std::path::Path::new("/opt/etc/init.d/S51zapret").exists()
+        && (is_nfqws2_available() || is_nfqws1_available());
     let service_stopped = crate::watchdog::is_service_stopped();
     let service_running = !service_stopped && mihomo_ver.is_some();
     let stack_memory = crate::system::get_stack_memory_info();
@@ -6825,7 +6826,7 @@ pub fn format_nfqws_proc_cmdline(raw: &[u8]) -> String {
 /// GET /api/zapret/status — статус nfqws/nfqws2, iptables и S51zapret
 pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
     let init_script = std::path::Path::new("/opt/etc/init.d/S51zapret");
-    let installed = init_script.exists();
+    let installed = init_script.exists() && (is_nfqws2_available() || is_nfqws1_available());
 
     let mut running = false;
     let mut pid: Option<u32> = None;
@@ -9933,6 +9934,7 @@ pub async fn adguard_set_protection(
             if now_enabled {
                 let active_port = crate::adguard::detect_adguard_dns_port().unwrap_or(cfg.adguard.dns_port);
                 let _ = crate::adguard::apply_adguard_iptables(active_port);
+                let _ = crate::adguard::heal_adguard_live_config(&state.http, &cfg.adguard, Some(&cfg.rci.host)).await;
             } else {
                 let _ = crate::adguard::remove_adguard_iptables();
             }
