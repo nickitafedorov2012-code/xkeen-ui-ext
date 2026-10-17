@@ -122,6 +122,10 @@ fn default_best_ping_hysteresis_ms() -> u32 {
     40
 }
 
+fn default_canary_duration_secs() -> u64 {
+    60
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct FailoverConfig {
@@ -133,6 +137,9 @@ pub struct FailoverConfig {
     pub priority_chain: Vec<String>,
     pub auto_restore_priority: bool,
     pub interval_secs: u32,
+    /// Длительность теста стабильности (Canary Soak Test) перед возвратом на приоритетный сервер (сек, по умолчанию 60)
+    #[serde(default = "default_canary_duration_secs")]
+    pub canary_duration_secs: u64,
     /// Per-device failover: мониторинг цепочек server+резервы (device_routing).
     pub device_failover_enabled: bool,
     /// Именованные слоты настроенных пресетов для мгновенного переключения
@@ -157,6 +164,7 @@ impl Default for FailoverConfig {
             priority_chain: Vec::new(),
             auto_restore_priority: true,
             interval_secs: 60,
+            canary_duration_secs: 60,
             device_failover_enabled: false,
             presets: Vec::new(),
             best_ping_enabled: false,

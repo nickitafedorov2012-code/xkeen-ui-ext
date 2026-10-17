@@ -75,6 +75,7 @@ export interface StatusInfo {
     priority_chain?: string[]
     auto_restore_priority: boolean
     interval_secs: number
+    canary_duration_secs?: number
     device_failover_enabled?: boolean
     best_ping_enabled?: boolean
     best_ping_pool_size?: number
@@ -86,6 +87,7 @@ export interface StatusInfo {
       target_name: string
       from_name: string
       elapsed_secs: number
+      duration_secs?: number
       remaining_secs: number
       probes_passed: number
       total_bytes: number
@@ -298,6 +300,7 @@ export interface AppSettings {
     priority_chain?: string[]
     auto_restore_priority: boolean
     interval_secs: number
+    canary_duration_secs?: number
     device_failover_enabled: boolean
     best_ping_enabled?: boolean
     best_ping_pool_size?: number

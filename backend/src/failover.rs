@@ -8,7 +8,7 @@ use std::time::{Instant, Duration};
 
 static LAST_SWITCH: tokio::sync::Mutex<Option<Instant>> = tokio::sync::Mutex::const_new(None);
 
-pub const CANARY_DURATION_SECS: u64 = 180;
+pub const CANARY_DURATION_SECS: u64 = 60;
 pub const CANARY_PAYLOAD_URL: &str = "http://speed.cloudflare.com/__down?bytes=8192";
 pub const CANARY_PROBE_BYTES: u64 = 8192;
 
@@ -21,6 +21,7 @@ pub struct CanaryState {
     pub started_at: Instant,
     pub probes_passed: u32,
     pub total_bytes: u64,
+    pub duration_secs: u64,
 }
 
 static CANARY_STAGE: tokio::sync::Mutex<Option<CanaryState>> = tokio::sync::Mutex::const_new(None);
@@ -32,6 +33,7 @@ pub struct CanaryStatus {
     pub target_name: String,
     pub from_name: String,
     pub elapsed_secs: u64,
+    pub duration_secs: u64,
     pub remaining_secs: u64,
     pub probes_passed: u32,
     pub total_bytes: u64,
@@ -51,7 +53,8 @@ pub async fn canary_status() -> Option<CanaryStatus> {
             target_name: c.target_name.clone(),
             from_name: c.from_name.clone(),
             elapsed_secs: elapsed,
-            remaining_secs: CANARY_DURATION_SECS.saturating_sub(elapsed),
+            duration_secs: c.duration_secs,
+            remaining_secs: c.duration_secs.saturating_sub(elapsed),
             probes_passed: c.probes_passed,
             total_bytes: c.total_bytes,
         }
@@ -475,166 +478,13 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
     let ping_timeout = calc_ping_timeout(threshold);
     let mut checked_higher_notes: Vec<String> = Vec::new();
 
-    // 1. Возврат на более приоритетный сервер из цепочки, если восстановился
-    if cfg.failover.auto_restore_priority && !chain.is_empty() {
-        if let Some(act) = &active {
-            // Если активный сервер уже совпадает с целевым сервером Canary, сбрасываем стадию
-            {
-                let mut canary_guard = CANARY_STAGE.lock().await;
-                if canary_guard.as_ref().map_or(false, |c| c.target_id == act.id) {
-                    *canary_guard = None;
-                }
-            }
-
-            let higher = get_higher_priority_candidates(&chain, &act.id);
-            if !higher.is_empty() {
-                let mut eligible_higher = Vec::new();
-                for s in higher {
-                    if is_quarantined(&s.id).await {
-                        if let Some(rem) = get_quarantine_remaining(&s.id).await {
-                            let mins = (rem + 59) / 60;
-                            checked_higher_notes.push(format!("'{}': в карантине (осталось {} мин)", s.name, mins));
-                        }
-                    } else {
-                        eligible_higher.push(s.clone());
-                    }
-                }
-
-                if !eligible_higher.is_empty() {
-                    let higher_ids: Vec<String> = eligible_higher.iter().map(|s| s.id.clone()).collect();
-                    let pings = mihomo::ping_all(&state.http, &cfg, &higher_ids, ping_timeout).await;
-                    for pri in &eligible_higher {
-                        let ping = pings.get(&pri.id).copied().unwrap_or(-1);
-                        if ping > 0 && ping <= hyst {
-                            // Кандидат ответил на базовый пинг в пределах гистерезиса.
-                            // 3-МИНУТНЫЙ CANARY SOAK TEST: не переключаемся сразу!
-                            let mut canary_guard = CANARY_STAGE.lock().await;
-                            let is_same_target = canary_guard
-                                .as_ref()
-                                .map_or(false, |c| c.target_id == pri.id && c.from_id == act.id);
-
-                            if !is_same_target {
-                                // Инициализация новой стадии Canary-теста: фиксируем старт, клиенты остаются на резерве
-                                *canary_guard = Some(CanaryState {
-                                    target_id: pri.id.clone(),
-                                    target_name: pri.name.clone(),
-                                    from_id: act.id.clone(),
-                                    from_name: act.name.clone(),
-                                    started_at: Instant::now(),
-                                    probes_passed: 1,
-                                    total_bytes: CANARY_PROBE_BYTES,
-                                });
-                                drop(canary_guard);
-                                let note = format!(
-                                    "Canary Soak Test: кандидат '{}' ответил на пинг ({} мс, порог {} мс). Запущен 3-минутный тест стабильности (~15 кбит/с, 8 КБ) без переключения клиентов с '{}'",
-                                    pri.name, ping, hyst, act.name
-                                );
-                                state.failover_log.push(&note, false).await;
-                                return Ok(note);
-                            }
-
-                            // Тест уже запущен: выполняем микро-прогон реального трафика (8 КБ) через кандидата
-                            let elapsed_secs = canary_guard.as_ref().map_or(0, |c| c.started_at.elapsed().as_secs());
-                            drop(canary_guard);
-
-                            let probe_ms = run_canary_probe(&state.http, &cfg, &pri.id, ping_timeout).await;
-                            let mut canary_guard = CANARY_STAGE.lock().await;
-
-                            // Проверяем, что за время сетевого запроса состояние не сбросилось
-                            if !canary_guard.as_ref().map_or(false, |c| c.target_id == pri.id) {
-                                return Ok("Canary: тест кандидата прерван или заменён".to_string());
-                            }
-
-                            if probe_ms <= 0 {
-                                // Сбой передачи данных во время 3-минутного теста!
-                                let fail_msg = format!(
-                                    "Canary Soak Test: кандидат '{}' не выдержал тест стабильности (сбой передачи данных на {} сек) — тест сброшен, остаёмся на '{}'",
-                                    pri.name, elapsed_secs, act.name
-                                );
-                                *canary_guard = None;
-                                drop(canary_guard);
-                                state.failover_log.push(&fail_msg, false).await;
-                                return Ok(fail_msg);
-                            }
-
-                            let canary = canary_guard.as_mut().unwrap();
-                            canary.probes_passed += 1;
-                            canary.total_bytes += CANARY_PROBE_BYTES;
-
-                            if elapsed_secs < CANARY_DURATION_SECS {
-                                let probes_count = canary.probes_passed;
-                                drop(canary_guard);
-                                let note = format!(
-                                    "Canary Soak Test: '{}' стабилен (прошло {}/{} с, проверок: {}, пинг {} мс) — клиенты на '{}'",
-                                    pri.name, elapsed_secs, CANARY_DURATION_SECS, probes_count, probe_ms, act.name
-                                );
-                                return Ok(note);
-                            }
-
-                            // 3 МИНУТЫ НЕПРЕРЫВНОЙ СТАБИЛЬНОСТИ БЕЗ ЕДИНОГО СБОЯ!
-                            let probes_count = canary.probes_passed;
-                            let total_kb = canary.total_bytes / 1024;
-                            *canary_guard = None;
-                            drop(canary_guard);
-
-                            let is_main = pri.id == chain[0].id;
-                            let label = if is_main { "Основной" } else { "Более приоритетный" };
-                            let msg = format!(
-                                "{label} '{}' успешно прошёл 3-минутный тест стабильности ({probes_count} проверок, {total_kb} КБ, 0 сбоев) — безопасный возврат с '{}'",
-                                pri.name, act.name
-                            );
-                            match mihomo::switch_server(&state.http, &cfg, &pri.id).await {
-                                Ok(_) => {
-                                    record_switch(&pri.id).await;
-                                    let _ = crate::api::sync_whitelist_mode_tunnel(&state, &pri.id).await;
-                                    state.failover_log.push(&msg, true).await;
-                                    crate::notifications::notify_failover(
-                                        &state.http,
-                                        Some(&cfg.mihomo_proxy_url()),
-                                        &cfg.notifications,
-                                        "restore",
-                                        "Восстановление основного сервера",
-                                        &msg,
-                                    ).await;
-                                    return Ok(msg);
-                                }
-                                Err(e) => {
-                                    state.failover_log.push(format!("{msg}, но переключение не удалось: {e}"), false).await;
-                                    return Err(e);
-                                }
-                            }
-                        } else {
-                            // Кандидат недоступен или пинг выше гистерезиса: если он был в процессе Canary, прерываем
-                            let mut canary_guard = CANARY_STAGE.lock().await;
-                            if canary_guard.as_ref().map_or(false, |c| c.target_id == pri.id) {
-                                let elapsed = canary_guard.as_ref().unwrap().started_at.elapsed().as_secs();
-                                *canary_guard = None;
-                                drop(canary_guard);
-                                let abort_msg = format!(
-                                    "Canary Soak Test: кандидат '{}' потерял пинг ({} мс > порога {} мс на {} сек теста) — тест сброшен, остаёмся на '{}'",
-                                    pri.name, ping, hyst, elapsed, act.name
-                                );
-                                state.failover_log.push(&abort_msg, false).await;
-                            }
-
-                            if ping > 0 {
-                                checked_higher_notes.push(format!("'{}': пинг {} мс", pri.name, ping));
-                            } else {
-                                checked_higher_notes.push(format!("'{}': недоступен", pri.name));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 2. Проверка активного
+    // 1. Проверка текущего активного сервера
     let Some(active) = active else {
         let msg = "Активный сервер не определён".to_string();
         state.failover_log.push(&msg, false).await;
         return Err(msg);
     };
+
     let mut current = mihomo::ping_server(&state.http, &cfg, &active.id, ping_timeout).await;
     // Защита от дребезга (flapping): при единичном сбое или повышенном пинге
     // делаем повторную проверку через 750 мс для подтверждения, исключая ложные переключения
@@ -645,185 +495,355 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             current = retry_ping;
         }
     }
-    if current > 0 && current <= threshold {
-        let note = if !checked_higher_notes.is_empty() {
-            format!("; приоритетные: {}", checked_higher_notes.join(", "))
-        } else {
-            String::new()
-        };
-        let msg = format!("Активный '{}' — пинг {current} мс (в норме{note})", active.name);
-        // Не засоряем журнал событий при штатном пинге каждые 15 сек.
-        return Ok(msg);
-    }
-    let reason = if current > 0 {
-        format!("высокий пинг {current} мс (> {threshold})")
-    } else {
-        "сервер не отвечает".to_string()
-    };
 
-    // Анти-флеппинг: если активный сервер упал вскоре после включения (< 300 сек),
-    // отправляем его в карантин, чтобы остановить бесконечный цикл переключений
-    let (is_early_failure, elapsed_secs) = {
-        let last_act = LAST_ACTIVATED_SERVER.lock().await;
-        if let Some((ref act_id, activated_at)) = *last_act {
-            if act_id == &active.id {
-                let el = activated_at.elapsed().as_secs();
-                (el < EARLY_FAILURE_WINDOW_SECS, Some(el))
+    let is_active_healthy = current > 0 && current <= threshold;
+
+    // СЦЕНАРИЙ А: АКТИВНЫЙ СЕРВЕР СБОИТ (ТАЙМАУТ ИЛИ ПИНГ ВЫШЕ ПОРОГА)
+    // ЭКСТРЕННОЕ ПЕРЕКЛЮЧЕНИЕ: немедленно отменяем любой Canary-тест и переключаем клиентов без задержек!
+    if !is_active_healthy {
+        // Критически важно: если активный резерв упал, клиенты без интернета.
+        // Нельзя оставлять их ждать 180с Canary-теста — сбрасываем стадию теста!
+        reset_canary().await;
+
+        let reason = if current > 0 {
+            format!("высокий пинг {current} мс (> {threshold})")
+        } else {
+            "сервер не отвечает".to_string()
+        };
+
+        // Анти-флеппинг: если активный сервер упал вскоре после включения (< 300 сек),
+        // отправляем его в карантин, чтобы остановить бесконечный цикл переключений
+        let (is_early_failure, elapsed_secs) = {
+            let last_act = LAST_ACTIVATED_SERVER.lock().await;
+            if let Some((ref act_id, activated_at)) = *last_act {
+                if act_id == &active.id {
+                    let el = activated_at.elapsed().as_secs();
+                    (el < EARLY_FAILURE_WINDOW_SECS, Some(el))
+                } else {
+                    (false, None)
+                }
             } else {
                 (false, None)
             }
-        } else {
-            (false, None)
-        }
-    };
+        };
 
-    if is_early_failure {
-        let q_secs = add_quarantine(&active.id, &active.name, &reason).await;
-        let q_mins = q_secs / 60;
-        let el_str = elapsed_secs.map(|s| format!(" спустя {s} с после включения")).unwrap_or_default();
-        let q_note = format!(
-            "⚠️ Анти-флеппинг: сервер '{}' дал сбой{el_str} ({reason}) → помещён в карантин на {q_mins} мин",
-            active.name
-        );
-        state.failover_log.push(&q_note, false).await;
-        crate::notifications::notify_failover(
-            &state.http,
-            Some(&cfg.mihomo_proxy_url()),
-            &cfg.notifications,
-            "quarantine",
-            "Карантин нестабильного сервера (анти-флеппинг)",
-            &q_note,
-        ).await;
-    }
-
-    // 3. Кандидат: сначала цепочка приоритетов по порядку, затем best-of-rest.
-    let chain_candidates: Vec<String> = chain
-        .iter()
-        .filter(|s| s.id != active.id)
-        .map(|s| s.id.clone())
-        .collect();
-    if !chain_candidates.is_empty() {
-        let pings = mihomo::ping_all(&state.http, &cfg, &chain_candidates, ping_timeout).await;
-        // Первый живой в порядке цепочки (пинг в пределах порога), отдавая предпочтение узлам НЕ в карантине
-        let mut non_quarantined_cands = Vec::new();
-        for id in &chain_candidates {
-            if !is_quarantined(id).await {
-                non_quarantined_cands.push(id.clone());
-            }
-        }
-
-        let best_chain_id = non_quarantined_cands
-            .iter()
-            .find(|id| pings.get(*id).is_some_and(|ms| *ms > 0 && *ms <= threshold))
-            .or_else(|| {
-                chain_candidates
-                    .iter()
-                    .find(|id| pings.get(*id).is_some_and(|ms| *ms > 0 && *ms <= threshold))
-            });
-
-        if let Some(id) = best_chain_id {
-            let ms = pings[id];
-            let name = servers.iter().find(|s| &s.id == id).map(|s| s.name.clone()).unwrap_or_else(|| id.clone());
-            let msg = format!(
-                "Активный '{}' ({reason}) → переключение на '{name}' из цепочки приоритетов (пинг {ms} мс)",
+        if is_early_failure {
+            let q_secs = add_quarantine(&active.id, &active.name, &reason).await;
+            let q_mins = q_secs / 60;
+            let el_str = elapsed_secs.map(|s| format!(" спустя {s} с после включения")).unwrap_or_default();
+            let q_note = format!(
+                "⚠️ Анти-флеппинг: сервер '{}' дал сбой{el_str} ({reason}) → помещён в карантин на {q_mins} мин",
                 active.name
             );
-            return match mihomo::switch_server(&state.http, &cfg, id).await {
-                Ok(_) => {
-                    record_switch(id).await;
-                    let _ = crate::api::sync_whitelist_mode_tunnel(&state, id).await;
-                    state.failover_log.push(&msg, true).await;
-                    crate::notifications::notify_failover(
-                        &state.http,
-                        Some(&cfg.mihomo_proxy_url()),
-                        &cfg.notifications,
-                        "switch",
-                        "Сбой сервера — переключение на резерв",
-                        &msg,
-                    ).await;
-                    Ok(msg)
-                }
-                Err(e) => {
-                    state.failover_log.push(format!("{msg} — ошибка: {e}"), false).await;
-                    Err(e)
-                }
-            };
-        }
-    }
-
-    let candidate_ids: Vec<String> = servers
-        .iter()
-        .filter(|s| s.id != active.id && s.id != "Fastest" && s.id != "Fallback")
-        .take(20)
-        .map(|s| s.id.clone())
-        .collect();
-    if candidate_ids.is_empty() {
-        let msg = "Нет резервных серверов для переключения".to_string();
-        state.failover_log.push(&msg, false).await;
-        return Err(msg);
-    }
-
-    let mut non_quarantined_cands = Vec::new();
-    for id in &candidate_ids {
-        if !is_quarantined(id).await {
-            non_quarantined_cands.push(id.clone());
-        }
-    }
-    let eval_cands = if !non_quarantined_cands.is_empty() {
-        &non_quarantined_cands
-    } else {
-        &candidate_ids
-    };
-
-    let pings = mihomo::ping_all(&state.http, &cfg, eval_cands, ping_timeout).await;
-    let mut valid: Vec<(String, i64)> = pings.iter().filter(|(_, ms)| **ms > 0 && **ms <= threshold).map(|(id, ms)| (id.clone(), *ms)).collect();
-    if valid.is_empty() {
-        valid = pings.iter().filter(|(_, ms)| **ms > 0).map(|(id, ms)| (id.clone(), *ms)).collect();
-    }
-    valid.sort_by_key(|(_, ms)| *ms);
-
-    match valid.first() {
-        Some((best_id, best_ms)) => {
-            let best_name = servers.iter().find(|s| s.id == *best_id).map(|s| s.name.clone()).unwrap_or_else(|| best_id.clone());
-            let msg = format!(
-                "Активный '{}' ({reason}) → переключение на '{best_name}' (пинг {best_ms} мс)",
-                active.name
-            );
-            match mihomo::switch_server(&state.http, &cfg, best_id).await {
-                Ok(_) => {
-                    record_switch(best_id).await;
-                    let _ = crate::api::sync_whitelist_mode_tunnel(&state, best_id).await;
-                    state.failover_log.push(&msg, true).await;
-                    crate::notifications::notify_failover(
-                        &state.http,
-                        Some(&cfg.mihomo_proxy_url()),
-                        &cfg.notifications,
-                        "switch",
-                        "Сбой сервера — переключение на резерв",
-                        &msg,
-                    ).await;
-                    Ok(msg)
-                }
-                Err(e) => {
-                    state.failover_log.push(format!("{msg} — ошибка: {e}"), false).await;
-                    Err(e)
-                }
-            }
-        }
-        None => {
-            let msg = "Все резервные серверы недоступны".to_string();
-            state.failover_log.push(&msg, false).await;
+            state.failover_log.push(&q_note, false).await;
             crate::notifications::notify_failover(
                 &state.http,
                 Some(&cfg.mihomo_proxy_url()),
                 &cfg.notifications,
-                "all_down",
-                "Критический сбой: Все серверы недоступны!",
-                &msg,
+                "quarantine",
+                "Карантин нестабильного сервера (анти-флеппинг)",
+                &q_note,
             ).await;
-            Err(msg)
+        }
+
+        // Поиск живого кандидата из цепочки приоритетов (включая основной узел)
+        let chain_candidates: Vec<String> = chain
+            .iter()
+            .filter(|s| s.id != active.id)
+            .map(|s| s.id.clone())
+            .collect();
+        if !chain_candidates.is_empty() {
+            let pings = mihomo::ping_all(&state.http, &cfg, &chain_candidates, ping_timeout).await;
+            let mut non_quarantined_cands = Vec::new();
+            for id in &chain_candidates {
+                if !is_quarantined(id).await {
+                    non_quarantined_cands.push(id.clone());
+                }
+            }
+
+            let best_chain_id = non_quarantined_cands
+                .iter()
+                .find(|id| pings.get(*id).is_some_and(|ms| *ms > 0 && *ms <= threshold))
+                .or_else(|| {
+                    chain_candidates
+                        .iter()
+                        .find(|id| pings.get(*id).is_some_and(|ms| *ms > 0 && *ms <= threshold))
+                });
+
+            if let Some(id) = best_chain_id {
+                let ms = pings[id];
+                let name = servers.iter().find(|s| &s.id == id).map(|s| s.name.clone()).unwrap_or_else(|| id.clone());
+                let msg = format!(
+                    "Экстренный Failover: активный '{}' ({reason}) → немедленное переключение на '{name}' из цепочки приоритетов (пинг {ms} мс)",
+                    active.name
+                );
+                return match mihomo::switch_server(&state.http, &cfg, id).await {
+                    Ok(_) => {
+                        record_switch(id).await;
+                        let _ = crate::api::sync_whitelist_mode_tunnel(&state, id).await;
+                        state.failover_log.push(&msg, true).await;
+                        crate::notifications::notify_failover(
+                            &state.http,
+                            Some(&cfg.mihomo_proxy_url()),
+                            &cfg.notifications,
+                            "switch",
+                            "Сбой сервера — экстренное переключение",
+                            &msg,
+                        ).await;
+                        Ok(msg)
+                    }
+                    Err(e) => {
+                        state.failover_log.push(format!("{msg} — ошибка: {e}"), false).await;
+                        Err(e)
+                    }
+                };
+            }
+        }
+
+        // Резервный поиск среди всех остальных серверов (best-of-rest)
+        let candidate_ids: Vec<String> = servers
+            .iter()
+            .filter(|s| s.id != active.id && s.id != "Fastest" && s.id != "Fallback")
+            .take(20)
+            .map(|s| s.id.clone())
+            .collect();
+        if candidate_ids.is_empty() {
+            let msg = "Нет резервных серверов для переключения".to_string();
+            state.failover_log.push(&msg, false).await;
+            return Err(msg);
+        }
+
+        let mut non_quarantined_cands = Vec::new();
+        for id in &candidate_ids {
+            if !is_quarantined(id).await {
+                non_quarantined_cands.push(id.clone());
+            }
+        }
+        let eval_cands = if !non_quarantined_cands.is_empty() {
+            &non_quarantined_cands
+        } else {
+            &candidate_ids
+        };
+
+        let pings = mihomo::ping_all(&state.http, &cfg, eval_cands, ping_timeout).await;
+        let mut valid: Vec<(String, i64)> = pings.iter().filter(|(_, ms)| **ms > 0 && **ms <= threshold).map(|(id, ms)| (id.clone(), *ms)).collect();
+        if valid.is_empty() {
+            valid = pings.iter().filter(|(_, ms)| **ms > 0).map(|(id, ms)| (id.clone(), *ms)).collect();
+        }
+        valid.sort_by_key(|(_, ms)| *ms);
+
+        return match valid.first() {
+            Some((best_id, best_ms)) => {
+                let best_name = servers.iter().find(|s| s.id == *best_id).map(|s| s.name.clone()).unwrap_or_else(|| best_id.clone());
+                let msg = format!(
+                    "Экстренный Failover: активный '{}' ({reason}) → переключение на '{best_name}' (пинг {best_ms} мс)",
+                    active.name
+                );
+                match mihomo::switch_server(&state.http, &cfg, best_id).await {
+                    Ok(_) => {
+                        record_switch(best_id).await;
+                        let _ = crate::api::sync_whitelist_mode_tunnel(&state, best_id).await;
+                        state.failover_log.push(&msg, true).await;
+                        crate::notifications::notify_failover(
+                            &state.http,
+                            Some(&cfg.mihomo_proxy_url()),
+                            &cfg.notifications,
+                            "switch",
+                            "Сбой сервера — экстренное переключение",
+                            &msg,
+                        ).await;
+                        Ok(msg)
+                    }
+                    Err(e) => {
+                        state.failover_log.push(format!("{msg} — ошибка: {e}"), false).await;
+                        Err(e)
+                    }
+                }
+            }
+            None => {
+                let msg = "Все резервные серверы недоступны".to_string();
+                state.failover_log.push(&msg, false).await;
+                crate::notifications::notify_failover(
+                    &state.http,
+                    Some(&cfg.mihomo_proxy_url()),
+                    &cfg.notifications,
+                    "all_down",
+                    "Критический сбой: Все серверы недоступны!",
+                    &msg,
+                ).await;
+                Err(msg)
+            }
+        };
+    }
+
+    // СЦЕНАРИЙ Б: АКТИВНЫЙ СЕРВЕР РАБОТАЕТ ШТАТНО (ПИНГ В НОРМЕ)
+    // Клиенты имеют стабильный интернет. Только теперь проверяем автовозврат на более приоритетный сервер.
+    let canary_duration_secs = if cfg.failover.canary_duration_secs == 0 {
+        CANARY_DURATION_SECS
+    } else {
+        cfg.failover.canary_duration_secs.clamp(15, 300)
+    };
+
+    if cfg.failover.auto_restore_priority && !chain.is_empty() {
+        // Если активный сервер уже совпадает с целевым сервером Canary, сбрасываем стадию
+        {
+            let mut canary_guard = CANARY_STAGE.lock().await;
+            if canary_guard.as_ref().map_or(false, |c| c.target_id == active.id) {
+                *canary_guard = None;
+            }
+        }
+
+        let higher = get_higher_priority_candidates(&chain, &active.id);
+        if !higher.is_empty() {
+            let mut eligible_higher = Vec::new();
+            for s in higher {
+                if is_quarantined(&s.id).await {
+                    if let Some(rem) = get_quarantine_remaining(&s.id).await {
+                        let mins = (rem + 59) / 60;
+                        checked_higher_notes.push(format!("'{}': в карантине (осталось {} мин)", s.name, mins));
+                    }
+                } else {
+                    eligible_higher.push(s.clone());
+                }
+            }
+
+            if !eligible_higher.is_empty() {
+                let higher_ids: Vec<String> = eligible_higher.iter().map(|s| s.id.clone()).collect();
+                let pings = mihomo::ping_all(&state.http, &cfg, &higher_ids, ping_timeout).await;
+                for pri in &eligible_higher {
+                    let ping = pings.get(&pri.id).copied().unwrap_or(-1);
+                    if ping > 0 && ping <= hyst {
+                        // Кандидат ответил на базовый пинг в пределах гистерезиса.
+                        // CANARY SOAK TEST: не переключаемся сразу, проверяем стабильность!
+                        let mut canary_guard = CANARY_STAGE.lock().await;
+                        let is_same_target = canary_guard
+                            .as_ref()
+                            .map_or(false, |c| c.target_id == pri.id && c.from_id == active.id);
+
+                        if !is_same_target {
+                            // Инициализация новой стадии Canary-теста: фиксируем старт, клиенты остаются на стабильном сервере
+                            *canary_guard = Some(CanaryState {
+                                target_id: pri.id.clone(),
+                                target_name: pri.name.clone(),
+                                from_id: active.id.clone(),
+                                from_name: active.name.clone(),
+                                started_at: Instant::now(),
+                                probes_passed: 1,
+                                total_bytes: CANARY_PROBE_BYTES,
+                                duration_secs: canary_duration_secs,
+                            });
+                            drop(canary_guard);
+                            let note = format!(
+                                "Canary Soak Test: кандидат '{}' ответил на пинг ({} мс, порог {} мс). Запущен {}-секундный тест стабильности (~15 кбит/с, 8 КБ) без переключения клиентов с '{}'",
+                                pri.name, ping, hyst, canary_duration_secs, active.name
+                            );
+                            state.failover_log.push(&note, false).await;
+                            return Ok(note);
+                        }
+
+                        // Тест уже запущен: выполняем микро-прогон реального трафика (8 КБ) через кандидата
+                        let elapsed_secs = canary_guard.as_ref().map_or(0, |c| c.started_at.elapsed().as_secs());
+                        drop(canary_guard);
+
+                        let probe_ms = run_canary_probe(&state.http, &cfg, &pri.id, ping_timeout).await;
+                        let mut canary_guard = CANARY_STAGE.lock().await;
+
+                        // Проверяем, что за время сетевого запроса состояние не сбросилось
+                        if !canary_guard.as_ref().map_or(false, |c| c.target_id == pri.id) {
+                            return Ok("Canary: тест кандидата прерван или заменён".to_string());
+                        }
+
+                        if probe_ms <= 0 {
+                            // Сбой передачи данных во время теста стабильности!
+                            let fail_msg = format!(
+                                "Canary Soak Test: кандидат '{}' не выдержал тест стабильности (сбой передачи данных на {} сек) — тест сброшен, остаёмся на '{}'",
+                                pri.name, elapsed_secs, active.name
+                            );
+                            *canary_guard = None;
+                            drop(canary_guard);
+                            state.failover_log.push(&fail_msg, false).await;
+                            return Ok(fail_msg);
+                        }
+
+                        let canary = canary_guard.as_mut().unwrap();
+                        canary.probes_passed += 1;
+                        canary.total_bytes += CANARY_PROBE_BYTES;
+
+                        if elapsed_secs < canary_duration_secs {
+                            let probes_count = canary.probes_passed;
+                            drop(canary_guard);
+                            let note = format!(
+                                "Canary Soak Test: '{}' стабилен (прошло {}/{} с, проверок: {}, пинг {} мс) — клиенты на '{}'",
+                                pri.name, elapsed_secs, canary_duration_secs, probes_count, probe_ms, active.name
+                            );
+                            return Ok(note);
+                        }
+
+                        // УСПЕШНОЕ ОКОНЧАНИЕ ТЕСТА СТАБИЛЬНОСТИ БЕЗ ЕДИНОГО СБОЯ!
+                        let probes_count = canary.probes_passed;
+                        let total_kb = canary.total_bytes / 1024;
+                        *canary_guard = None;
+                        drop(canary_guard);
+
+                        let is_main = pri.id == chain[0].id;
+                        let label = if is_main { "Основной" } else { "Более приоритетный" };
+                        let msg = format!(
+                            "{label} '{}' успешно прошёл {canary_duration_secs}-секундный тест стабильности ({probes_count} проверок, {total_kb} КБ, 0 сбоев) — безопасный возврат с '{}'",
+                            pri.name, active.name
+                        );
+                        return match mihomo::switch_server(&state.http, &cfg, &pri.id).await {
+                            Ok(_) => {
+                                record_switch(&pri.id).await;
+                                let _ = crate::api::sync_whitelist_mode_tunnel(&state, &pri.id).await;
+                                state.failover_log.push(&msg, true).await;
+                                crate::notifications::notify_failover(
+                                    &state.http,
+                                    Some(&cfg.mihomo_proxy_url()),
+                                    &cfg.notifications,
+                                    "restore",
+                                    "Восстановление основного сервера",
+                                    &msg,
+                                ).await;
+                                Ok(msg)
+                            }
+                            Err(e) => {
+                                state.failover_log.push(format!("{msg}, но переключение не удалось: {e}"), false).await;
+                                Err(e)
+                            }
+                        };
+                    } else {
+                        // Кандидат недоступен или пинг выше гистерезиса: если он был в процессе Canary, прерываем
+                        let mut canary_guard = CANARY_STAGE.lock().await;
+                        if canary_guard.as_ref().map_or(false, |c| c.target_id == pri.id) {
+                            let elapsed = canary_guard.as_ref().unwrap().started_at.elapsed().as_secs();
+                            *canary_guard = None;
+                            drop(canary_guard);
+                            let abort_msg = format!(
+                                "Canary Soak Test: кандидат '{}' потерял пинг ({} мс > порога {} мс на {} сек теста) — тест сброшен, остаёмся на '{}'",
+                                pri.name, ping, hyst, elapsed, active.name
+                            );
+                            state.failover_log.push(&abort_msg, false).await;
+                        }
+
+                        if ping > 0 {
+                            checked_higher_notes.push(format!("'{}': пинг {} мс", pri.name, ping));
+                        } else {
+                            checked_higher_notes.push(format!("'{}': недоступен", pri.name));
+                        }
+                    }
+                }
+            }
         }
     }
+
+    // Если кандидатов нет или они не готовы, а активный в норме:
+    let note = if !checked_higher_notes.is_empty() {
+        format!("; приоритетные: {}", checked_higher_notes.join(", "))
+    } else {
+        String::new()
+    };
+    let msg = format!("Активный '{}' — пинг {current} мс (в норме{note})", active.name);
+    Ok(msg)
 }
 
 /// Per-device проверка: для каждого устройства с цепочкой серверов —
@@ -1190,6 +1210,7 @@ mod tests {
             started_at: Instant::now(),
             probes_passed: 1,
             total_bytes: CANARY_PROBE_BYTES,
+            duration_secs: CANARY_DURATION_SECS,
         });
         drop(guard);
 
@@ -1197,6 +1218,7 @@ mod tests {
         let status = canary_status().await.expect("Canary must be active");
         assert_eq!(status.target_id, "srv_de");
         assert_eq!(status.from_name, "Нидерланды");
+        assert_eq!(status.duration_secs, CANARY_DURATION_SECS);
         assert!(status.remaining_secs <= CANARY_DURATION_SECS);
         assert_eq!(status.probes_passed, 1);
         assert_eq!(status.total_bytes, 8192);
@@ -1207,18 +1229,46 @@ mod tests {
         assert!(canary_status().await.is_none());
     }
 
+    #[tokio::test]
+    async fn test_canary_aborted_when_active_server_fails() {
+        let _lock = FAILOVER_TEST_LOCK.lock().await;
+        reset_canary().await;
+
+        // Эмулируем запущенный Canary-тест (основной узел srv_de тестируется, клиенты на srv_nl)
+        let mut guard = CANARY_STAGE.lock().await;
+        *guard = Some(CanaryState {
+            target_id: "srv_de".to_string(),
+            target_name: "Германия".to_string(),
+            from_id: "srv_nl".to_string(),
+            from_name: "Нидерланды".to_string(),
+            started_at: Instant::now(),
+            probes_passed: 5,
+            total_bytes: CANARY_PROBE_BYTES * 5,
+            duration_secs: 60,
+        });
+        drop(guard);
+
+        assert!(is_canary_active().await);
+
+        // Анти-регрессия: если активный сервер падает, reset_canary() должен быть вызван немедленно,
+        // чтобы не удерживать пользователей на мертвом сервере
+        reset_canary().await;
+        assert!(!is_canary_active().await, "Canary must be immediately aborted when active server fails");
+        assert!(canary_status().await.is_none());
+    }
+
     #[test]
     fn test_canary_bandwidth_limits() {
         // Проверка расчёта пропускной способности canary:
-        // 8 КБ (8192 байт) каждые 5 секунд на протяжении 180 секунд (3 минуты).
-        let total_probes = CANARY_DURATION_SECS / 5; // 36 проверок
-        let total_bytes = total_probes * CANARY_PROBE_BYTES; // 294,912 байт = 288 КБ
+        // 8 КБ (8192 байт) каждые 5 секунд на протяжении 60 секунд (1 минута).
+        let total_probes = CANARY_DURATION_SECS / 5; // 12 проверок
+        let total_bytes = total_probes * CANARY_PROBE_BYTES; // 98,304 байт = 96 КБ
         let bandwidth_kbps = (total_bytes * 8) as f64 / (CANARY_DURATION_SECS as f64 * 1000.0);
 
         // Строго меньше установленного пользователем лимита 100 кбит/с
         assert!(bandwidth_kbps < 100.0, "Canary bandwidth must be strictly below 100 kbps, actual: {bandwidth_kbps} kbps");
-        assert_eq!(total_probes, 36);
-        assert_eq!(total_bytes, 294912);
+        assert_eq!(total_probes, 12);
+        assert_eq!(total_bytes, 98304);
     }
 
     #[tokio::test]

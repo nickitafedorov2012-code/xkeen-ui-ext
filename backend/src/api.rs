@@ -96,6 +96,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
             "priority_chain_pings": priority_chain_pings,
             "auto_restore_priority": cfg.failover.auto_restore_priority,
             "interval_secs": cfg.failover.interval_secs,
+            "canary_duration_secs": cfg.failover.canary_duration_secs,
             "device_failover_enabled": cfg.failover.device_failover_enabled,
             "best_ping_enabled": cfg.failover.best_ping_enabled,
             "best_ping_pool_size": cfg.failover.best_ping_pool_size,

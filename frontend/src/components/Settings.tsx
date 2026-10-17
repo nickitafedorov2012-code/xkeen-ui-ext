@@ -334,6 +334,26 @@ export default function Settings({ notify, status, refresh }: Props) {
   }
   const [zapretStatus, setZapretStatus] = useState<ZapretStatus | null>(null)
 
+  // --- Живой посекундный отсчет Canary-теста ---
+  const canaryInfo = status?.failover?.canary
+  const [canaryCountdown, setCanaryCountdown] = useState<number | null>(null)
+
+  useEffect(() => {
+    if (canaryInfo?.active && typeof canaryInfo.remaining_secs === 'number') {
+      setCanaryCountdown(canaryInfo.remaining_secs)
+    } else {
+      setCanaryCountdown(null)
+    }
+  }, [canaryInfo?.active, canaryInfo?.remaining_secs, canaryInfo?.target_id])
+
+  useEffect(() => {
+    if (canaryCountdown === null || canaryCountdown <= 0) return
+    const timer = setInterval(() => {
+      setCanaryCountdown((prev) => (prev !== null && prev > 0 ? prev - 1 : 0))
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [canaryCountdown !== null && canaryCountdown > 0])
+
   const loadQuickWins = useCallback(async () => {
     try {
       const adb = await apiGet<{ enabled: boolean }>('adblock')
@@ -1099,7 +1119,7 @@ export default function Settings({ notify, status, refresh }: Props) {
               </div>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
               <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
                 <span style={{ fontSize: 12 }}>Порог пинга для смены узла, мс</span>
                 <NumberInput
@@ -1121,6 +1141,20 @@ export default function Settings({ notify, status, refresh }: Props) {
                   fallback={60}
                   value={settings.failover.interval_secs}
                   onChange={(val) => patch((s) => (s.failover.interval_secs = val))}
+                />
+              </label>
+
+              <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                <span style={{ fontSize: 12 }} title="Длительность проверочного теста стабильности (Canary Soak Test) перед возвратом трафика на основной узел">
+                  Тест возврата (Canary), сек
+                </span>
+                <NumberInput
+                  min={15}
+                  max={300}
+                  step={5}
+                  fallback={60}
+                  value={settings.failover.canary_duration_secs || 60}
+                  onChange={(val) => patch((s) => (s.failover.canary_duration_secs = val))}
                 />
               </label>
             </div>
@@ -1187,8 +1221,8 @@ export default function Settings({ notify, status, refresh }: Props) {
                     : (status?.active_server && status.active_server.id === id ? status.active_server.ping_ms : (sv?.ping_ms ?? 0))
 
                   const isActive = Boolean(status?.active_server && status.active_server.id === id)
-                  const canaryInfo = status?.failover?.canary
                   const isCanary = Boolean(canaryInfo?.active && canaryInfo.target_id === id)
+                  const liveCanarySecs = isCanary ? (canaryCountdown ?? canaryInfo?.remaining_secs ?? 0) : 0
                   const quarantineInfo = status?.failover?.quarantine?.find((q) => q.server_id === id)
                   const isQuarantined = Boolean(quarantineInfo && quarantineInfo.remaining_secs > 0)
                   const isTimeout = livePing <= 0 || livePing >= 9999
@@ -1313,8 +1347,9 @@ export default function Settings({ notify, status, refresh }: Props) {
                                 color: '#c084fc',
                                 border: '1px solid rgba(168, 85, 247, 0.4)',
                               }}
+                              title="Канареечный тест стабильности узла перед возвратом трафика. Клиенты остаются на резерве, пока проверяется отсутствие обрывов."
                             >
-                              🧪 Тест ({canaryInfo?.remaining_secs ?? 0}с)
+                              🧪 Тест ({liveCanarySecs}с)
                             </span>
                           ) : isQuarantined ? (
                             <span
