@@ -656,7 +656,8 @@ pub async fn set_protection(http: &reqwest::Client, cfg: &AdGuardConfig, enabled
         return Err("AdGuard Home перестал отвечать после изменения статуса защиты".to_string());
     }
     if status.protection_enabled {
-        let _ = apply_adguard_iptables(cfg.dns_port);
+        let active_port = detect_adguard_dns_port().unwrap_or(cfg.dns_port);
+        let _ = apply_adguard_iptables(active_port);
     } else {
         let _ = remove_adguard_iptables();
     }

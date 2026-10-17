@@ -1115,7 +1115,12 @@
 
 ## v1.5.20 (Header Settings Navigation, Zapret Version Status Chip, Red Pulse 5 AM Updates & Mini-Blockcheck YouTube Fix)
 - **Перенос вкладки Настройки и чип статуса Zapret в верхней панели (Header.tsx, App.tsx, Zapret.tsx)**:
-  * **Настройки в шапке:** Кнопка Настройки перемещена в верхнюю панель, разгрузив нижний таб-бар; добавлены поддержка #settings хэш-маршрутизации и шорткат Ctrl+,.
+## v1.9.7 (AdGuard Autonomous Self-Healing & Transaction Auto-Commit Fix)
+- **Автономное самолечение AdGuard Home при запуске (Zero-Touch Self-Healing)**:
+  * Фоновый сторож старта панели (`main.rs`) опрашивает запущенный сервис AdGuard Home: если AdGuard Home активен и фильтрация включена, система автоматически переводит `adguard.enabled` в `true`, фиксирует реальный рабочий DNS-порт (5353) и инжектирует AdGuard DNS upstream в `config.yaml` ядра Mihomo с перезагрузкой.
+  * Исправлено сохранение транзакций (`ConfigTx`): замена `tx.commit()` на `tx.commit_and_reload()` в обработчиках переключения защиты (`/api/adguard/protection`) и сохранения настроек (`/api/adguard/config`), гарантирующая атомарную запись `config.json` и `config.yaml` на диск и немедленный reload ядра Mihomo.
+  * Синхронизация порта в `adguard.rs:set_protection`: использование динамически определенного слушающего порта (`detect_adguard_dns_port()`) вместо потенциально устаревшего значения из `config.json`.
+
 ## v1.9.6 (AdGuard under proxy DNS integration & Failover Card Pipeline Layout)
 - **Интеграция DNS AdGuard Home под прокси (Mihomo Policy0 / 🛡️ XKeen)**:
   * Автоматическое внедрение AdGuard Home DNS (`127.0.0.1:<port>`) в `nameserver` и `direct-nameserver` конфигурации Mihomo (`/opt/etc/mihomo/config.yaml`) через маркеры `# --- AUTO-ADGUARD-DNS-BEGIN ---` и `# --- AUTO-ADGUARD-DNS-END ---`.

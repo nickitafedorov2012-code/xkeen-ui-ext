@@ -429,15 +429,39 @@ async fn main() {
     // Синхронизация AdGuard Home DNS-редиректа при старте панели
     let adguard_sync_state = state.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        let cfg = adguard_sync_state.config.read().await;
-        let is_enabled = cfg.adguard.enabled || cfg.adblock_enabled;
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        let cfg = adguard_sync_state.config.read().await.clone();
+        let agh_status = adguard::get_status(&adguard_sync_state.http, &cfg.adguard).await;
+        let is_running_protected = agh_status.running && agh_status.protection_enabled;
+        let is_enabled = cfg.adguard.enabled || cfg.adblock_enabled || is_running_protected;
         if is_enabled {
-            let active_port = adguard::detect_adguard_dns_port().unwrap_or(cfg.adguard.dns_port);
+            let active_port = adguard::detect_adguard_dns_port().unwrap_or(if agh_status.dns_port > 0 { agh_status.dns_port } else { cfg.adguard.dns_port });
             let listener_ok = adguard::test_agh_dns_listener(&cfg.adguard.host, active_port).await;
             if listener_ok {
                 let _ = adguard::apply_adguard_iptables(active_port);
                 log_i!("[STARTUP] ✓ AdGuard Home DNS redirection to port {} applied", active_port);
+            }
+
+            // Автоматическая синхронизация AdGuard DNS upstream в config.yaml и config.json
+            if let Ok(mut tx) = crate::transaction::ConfigTx::begin(&adguard_sync_state).await {
+                let mut needs_save = false;
+                if is_running_protected && (!tx.config().adguard.enabled || tx.config().adguard.dns_port != active_port) {
+                    tx.config_mut().adguard.enabled = true;
+                    tx.config_mut().adguard.dns_port = active_port;
+                    needs_save = true;
+                }
+                if let Ok(raw_yaml) = tx.read_yaml().await {
+                    if !raw_yaml.contains("AUTO-ADGUARD-DNS-BEGIN") {
+                        if let Ok((new_yaml, _)) = crate::routing::apply_routing(&raw_yaml, tx.config()) {
+                            let _ = tx.set_yaml(new_yaml);
+                            needs_save = true;
+                        }
+                    }
+                }
+                if needs_save {
+                    let _ = tx.commit_and_reload().await;
+                    log_i!("[STARTUP] ✓ AdGuard Home DNS upstream synced into Mihomo config");
+                }
             }
         }
     });
