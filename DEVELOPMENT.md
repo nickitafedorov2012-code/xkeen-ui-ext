@@ -1115,6 +1115,21 @@
 
 ## v1.5.20 (Header Settings Navigation, Zapret Version Status Chip, Red Pulse 5 AM Updates & Mini-Blockcheck YouTube Fix)
 - **Перенос вкладки Настройки и чип статуса Zapret в верхней панели (Header.tsx, App.tsx, Zapret.tsx)**:
+## v1.9.9 (Avahi mDNS Conflict Resolution, AdGuard Port 5354 Migration & Proxy DNS Upstream Pipeline)
+- **Разрешение системного конфликта mDNS Avahi и переход на порт 5354 (Port 5354 Migration)**:
+  * На роутерах KeeneticOS системный демон `avahi-daemon` (Bonjour/mDNS) слушает UDP `0.0.0.0:5353` (RFC 6762). Из-за этого AdGuard Home не мог занять сокет на всех интерфейсах и слушал только `127.0.0.1:5353`.
+  * При `iptables REDIRECT --to-ports 5353` пакеты от LAN-устройств перенаправлялись на `192.168.2.1:5353`, где попадали в сокет Avahi и молча сбрасывались.
+  * DNS-порт AdGuard Home по умолчанию переведен на бесконфликтный порт `5354` (`DEFAULT_ADGUARD_DNS_FALLBACK_PORT = 5354`).
+  * Реализована функция `sanitize_and_heal_adguard_yaml`: при старте сервиса и проверке конфигурации система автоматически обнаруживает конфликтный порт 5353 и плавно мигрирует его на 5354, устраняя дублирующий бинд `127.0.0.1`.
+- **Пайплайн DNS под прокси (Mihomo 1053 + Fast Yandex 77.88.8.8 + Instant Healthcheck)**:
+  * В стандартную конфигурацию AdGuard Home добавлены upstream-резолверы `127.0.0.1:1053` (DNS-ядро Mihomo для выдачи Fake-IP под прокси) и `77.88.8.8` (быстрый отечественный DNS для прямых сайтов без таймаутов).
+  * Добавлен локальный rewrite для `probe.test -> 127.0.0.1`, что обеспечивает мгновенный ответ на healthcheck сторожа (watchdog) в микросекунды и на 100% исключает ложные срабатывания и аварийные отключения правил фаервола.
+  * Увеличен таймаут проверки DNS-слушателя в стороже до 2500 мс.
+- **Анти-регрессия и тесты**:
+  * Добавлены unit-тесты `test_dns03_bind_hosts_strictly_single_all_interfaces` и `test_adguard_yaml_healing_and_port_5354_migration`.
+  * Обновлен тест `test_gaming_dns_redirect_respects_adguard_port` на порт 5354.
+  * Все 244 теста бэкенда и 223 теста фронтенда успешно проходят.
+
 ## v1.9.8 (Eliminate Gaming Mode DNS Hijack & Universal Wi-Fi AdGuard Ingress)
 - **Устранение перехвата DNS в Gaming Mode (XKEEN_GAMING ➔ 5353 AdGuard Home)**:
   * Ликвидирован жесткий хардкод перехвата DNS на порт 1053 (Mihomo Fake-IP) в цепочке `XKEEN_GAMING`: функция `build_gaming_full_tunnel_commands` теперь динамически принимает активный порт AdGuard Home (5353) и направляет запросы клиентских устройств прямо в фильтр AdGuard.

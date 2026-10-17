@@ -498,7 +498,7 @@ fn default_agh_http_port() -> u16 {
 }
 
 fn default_agh_dns_port() -> u16 {
-    5353
+    5354
 }
 
 fn default_agh_mode() -> String {
@@ -507,9 +507,8 @@ fn default_agh_mode() -> String {
 
 fn default_agh_upstream() -> Vec<String> {
     vec![
-        "tls://1.1.1.1".to_string(),
-        "tls://8.8.8.8".to_string(),
-        "https://dns.google/dns-query".to_string(),
+        "127.0.0.1:1053".to_string(),
+        "77.88.8.8".to_string(),
     ]
 }
 

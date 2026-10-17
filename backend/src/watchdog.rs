@@ -828,7 +828,7 @@ pub fn is_gaming_connection_match(
     // Для UDP соединений с игрового устройства: высокие игровые порты (не DNS/QUIC/NTP/SSDP/mDNS и не STUN/WebRTC/VoIP)
     if network.eq_ignore_ascii_case("udp") && !dest_ip.is_empty() {
         if let Ok(port_num) = dest_port.parse::<u16>() {
-            if !matches!(port_num, 53 | 80 | 123 | 443 | 853 | 1900 | 3478..=3481 | 5060 | 5061 | 5349 | 5353 | 19302..=19309) && port_num >= 1024 {
+            if !matches!(port_num, 53 | 80 | 123 | 443 | 853 | 1900 | 3478..=3481 | 5060 | 5061 | 5349 | 5353 | 5354 | 19302..=19309) && port_num >= 1024 {
                 return true;
             }
         }

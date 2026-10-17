@@ -9179,7 +9179,7 @@ async fn apply_and_verify_gaming(
 /// Определение активного DNS-порта для перехвата (AdGuard 5353 или Mihomo 1053)
 pub fn resolve_active_dns_port(app_cfg: &config::AppConfig) -> u16 {
     if app_cfg.adguard.enabled || app_cfg.adblock_enabled {
-        crate::adguard::detect_adguard_dns_port().unwrap_or(if app_cfg.adguard.dns_port > 0 { app_cfg.adguard.dns_port } else { 5353 })
+        crate::adguard::detect_adguard_dns_port().unwrap_or(if app_cfg.adguard.dns_port > 0 { app_cfg.adguard.dns_port } else { crate::adguard::DEFAULT_ADGUARD_DNS_FALLBACK_PORT })
     } else {
         1053
     }
@@ -10760,12 +10760,12 @@ mod tests {
             }
         ];
 
-        // AdGuard enabled: redirect to 5353
-        let (_, setup_adguard, _) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001, 5353);
+        // AdGuard enabled: redirect to 5354
+        let (_, setup_adguard, _) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001, 5354);
         let all_adguard = setup_adguard.join("\n");
-        assert!(all_adguard.contains("iptables -t nat -A XKEEN_GAMING -s 192.168.2.63 -p udp --dport 53 -j REDIRECT --to-ports 5353"));
-        assert!(all_adguard.contains("iptables -t nat -A XKEEN_GAMING -s 192.168.2.63 -p tcp --dport 53 -j REDIRECT --to-ports 5353"));
-        assert!(!all_adguard.contains("to-ports 1053"), "Must not contain hardcoded 1053 when AdGuard port 5353 is provided");
+        assert!(all_adguard.contains("iptables -t nat -A XKEEN_GAMING -s 192.168.2.63 -p udp --dport 53 -j REDIRECT --to-ports 5354"));
+        assert!(all_adguard.contains("iptables -t nat -A XKEEN_GAMING -s 192.168.2.63 -p tcp --dport 53 -j REDIRECT --to-ports 5354"));
+        assert!(!all_adguard.contains("to-ports 1053"), "Must not contain hardcoded 1053 when AdGuard port 5354 is provided");
 
         // AdGuard disabled: fallback to 1053
         let (_, setup_default, _) = build_gaming_full_tunnel_commands(&cfg, 5000, 5001, 0);

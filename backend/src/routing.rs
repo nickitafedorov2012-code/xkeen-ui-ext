@@ -890,7 +890,7 @@ pub fn apply_adguard_dns_upstream(yaml: &str, agh_port: u16, enabled: bool) -> R
         return Ok(content);
     }
 
-    let port = if agh_port > 0 { agh_port } else { 5353 };
+    let port = if agh_port > 0 { agh_port } else { 5354 };
     let agh_addr = format!("127.0.0.1:{}", port);
 
     let lines: Vec<&str> = content.lines().collect();
@@ -2230,7 +2230,7 @@ pub fn apply_routing_with_filters(
 
     // 5.1. Интеграция AdGuard Home DNS под прокси (Mihomo nameserver -> 127.0.0.1:5353)
     let agh_enabled = cfg.adguard.enabled || cfg.adblock_enabled;
-    let agh_port = if cfg.adguard.dns_port > 0 { cfg.adguard.dns_port } else { 5353 };
+    let agh_port = if cfg.adguard.dns_port > 0 { cfg.adguard.dns_port } else { 5354 };
     if let Ok(with_agh_dns) = apply_adguard_dns_upstream(&current, agh_port, agh_enabled) {
         current = with_agh_dns;
     }

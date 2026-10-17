@@ -360,7 +360,7 @@ pub async fn test_agh_dns_listener(host: &str, port: u16) -> bool {
     }
 
     let mut buf = [0u8; 512];
-    match tokio::time::timeout(Duration::from_millis(1500), sock.recv(&mut buf)).await {
+    match tokio::time::timeout(Duration::from_millis(2500), sock.recv(&mut buf)).await {
         Ok(Ok(n)) => crate::zapret::validate_dns_response((0xAD, 0x64), &buf[..n]),
         _ => false,
     }
@@ -984,6 +984,7 @@ pub struct AghDiagnostics {
 
 pub const AGH_IPTABLES_CHAIN: &str = "XKEEN_ADGUARD";
 pub const AGH_LAN_INTERFACES: &[&str] = &["br+", "Bridge+", "ra+", "apcli+"];
+pub const DEFAULT_ADGUARD_DNS_FALLBACK_PORT: u16 = 5354;
 
 /// Применение изолированной цепочки XKEEN_ADGUARD в iptables -t nat для перехвата портов 53 UDP/TCP
 pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
@@ -1048,9 +1049,9 @@ pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
         let _ = std::process::Command::new("sh")
             .arg("-c")
             .arg(format!(
-                "iptables -t nat -S XKEEN_GAMING 2>/dev/null | grep 'to-ports 1053' | while read -r line; do \
+                "iptables -t nat -S XKEEN_GAMING 2>/dev/null | grep -E 'to-ports (1053|5353|5354)' | while read -r line; do \
                     del_cmd=$(echo \"$line\" | sed 's/^-A/-D/'); \
-                    add_cmd=$(echo \"$line\" | sed 's/--to-ports 1053/--to-ports {port}/'); \
+                    add_cmd=$(echo \"$line\" | sed -E 's/--to-ports [0-9]+/--to-ports {port}/'); \
                     iptables -t nat $del_cmd 2>/dev/null || true; \
                     iptables -t nat $add_cmd 2>/dev/null || true; \
                 done",
@@ -1076,9 +1077,9 @@ pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
             done\n\
             iptables -t filter -C INPUT -p udp --dport {port} -j ACCEPT 2>/dev/null || iptables -t filter -I INPUT 1 -p udp --dport {port} -j ACCEPT 2>/dev/null || true\n\
             iptables -t filter -C INPUT -p tcp --dport {port} -j ACCEPT 2>/dev/null || iptables -t filter -I INPUT 1 -p tcp --dport {port} -j ACCEPT 2>/dev/null || true\n\
-            iptables -t nat -S XKEEN_GAMING 2>/dev/null | grep 'to-ports 1053' | while read -r line; do \
+            iptables -t nat -S XKEEN_GAMING 2>/dev/null | grep -E 'to-ports (1053|5353|5354)' | while read -r line; do \
                 del_cmd=$(echo \"$line\" | sed 's/^-A/-D/'); \
-                add_cmd=$(echo \"$line\" | sed 's/--to-ports 1053/--to-ports {port}/'); \
+                add_cmd=$(echo \"$line\" | sed -E 's/--to-ports [0-9]+/--to-ports {port}/'); \
                 iptables -t nat $del_cmd 2>/dev/null || true; \
                 iptables -t nat $add_cmd 2>/dev/null || true; \
             done\n",
@@ -1101,7 +1102,7 @@ pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
 pub fn remove_adguard_iptables() -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        let port = detect_adguard_dns_port().unwrap_or(5353);
+        let port = detect_adguard_dns_port().unwrap_or(DEFAULT_ADGUARD_DNS_FALLBACK_PORT);
         let port_str = port.to_string();
 
         for iface in AGH_LAN_INTERFACES {
@@ -1125,12 +1126,21 @@ pub fn remove_adguard_iptables() -> Result<(), String> {
                     break;
                 }
             }
+            // Также подчищаем старый порт 5353, если он был прописан в filter INPUT
+            for _ in 0..20 {
+                let out = std::process::Command::new("iptables")
+                    .args(["-t", "filter", "-D", "INPUT", "-p", proto, "--dport", "5353", "-j", "ACCEPT"])
+                    .output();
+                if !out.map(|o| o.status.success()).unwrap_or(false) {
+                    break;
+                }
+            }
         }
         // Возвращаем XKEEN_GAMING на порт 1053 (Mihomo)
         let _ = std::process::Command::new("sh")
             .arg("-c")
             .arg(format!(
-                "iptables -t nat -S XKEEN_GAMING 2>/dev/null | grep -E 'to-ports ({port}|5353)' | grep 'dport 53' | while read -r line; do \
+                "iptables -t nat -S XKEEN_GAMING 2>/dev/null | grep -E 'to-ports ({port}|5353|5354)' | grep 'dport 53' | while read -r line; do \
                     del_cmd=$(echo \"$line\" | sed 's/^-A/-D/'); \
                     add_cmd=$(echo \"$line\" | sed -E 's/--to-ports [0-9]+/--to-ports 1053/'); \
                     iptables -t nat $del_cmd 2>/dev/null || true; \
@@ -1563,14 +1573,13 @@ dns:
   ratelimit_whitelist: []
   refuse_any: true
   upstream_dns:
-    - https://dns.google/dns-query
-    - tls://1.1.1.1
-    - 1.1.1.1
-    - 8.8.8.8
+    - 127.0.0.1:1053
+    - 77.88.8.8
   upstream_dns_file: ""
   bootstrap_dns:
-    - 1.1.1.1
-    - 8.8.8.8
+    - 77.88.8.8
+  fallback_dns:
+    - 77.88.8.8
   all_servers: false
   fastest_addr: true
   fastest_timeout: 1s
@@ -1595,7 +1604,9 @@ dns:
   parental_cache_size: 1048576
   cache_size: 4194304
   cache_time: 30
-  rewrites: []
+  rewrites:
+    - domain: probe.test
+      answer: 127.0.0.1
   blocked_services: []
   upstream_timeout: 10s
   private_networks: []
@@ -1636,9 +1647,120 @@ schema_version: 29
     )
 }
 
+/// Автоматическое исправление/миграция конфигурации AdGuard Home:
+/// 1. Переключение с конфликтующего порта 5353 (занят avahi-daemon на KeeneticOS) на 5354.
+/// 2. Исключение дублирования 127.0.0.1 в bind_hosts (оставляем только 0.0.0.0 для dual-stack).
+/// 3. Добавление рабочего upstream (127.0.0.1:1053 для Mihomo fake-ip под прокси + 77.88.8.8).
+/// 4. Добавление rewrite для probe.test -> 127.0.0.1 для мгновенного ответа на healthcheck.
+pub fn sanitize_and_heal_adguard_yaml(content: &str, target_port: u16) -> (String, bool) {
+    let mut changed = false;
+    let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+
+    // 1. Проверяем и правим порт если он 5353 или 53 (когда 53 занят)
+    for line in &mut lines {
+        let trimmed = line.trim();
+        if trimmed == "port: 5353" || (target_port != 53 && trimmed == "port: 53") {
+            *line = format!("  port: {}", target_port);
+            changed = true;
+        }
+    }
+
+    // 2. Убираем дублирование "- 127.0.0.1" из секции bind_hosts, если есть "- 0.0.0.0"
+    let mut in_dns = false;
+    let mut in_bind_hosts = false;
+    let mut has_zero_bind = false;
+    let mut has_loopback_bind = false;
+
+    for line in &lines {
+        let trimmed = line.trim();
+        if trimmed == "dns:" {
+            in_dns = true;
+            continue;
+        }
+        if in_dns && (trimmed == "bind_hosts:" || trimmed == "bind_hosts: []") {
+            in_bind_hosts = true;
+            continue;
+        }
+        if in_bind_hosts {
+            if !line.starts_with("    -") && !line.starts_with("\t\t-") {
+                if !trimmed.starts_with('-') {
+                    in_bind_hosts = false;
+                }
+            } else {
+                if trimmed == "- 0.0.0.0" {
+                    has_zero_bind = true;
+                } else if trimmed == "- 127.0.0.1" {
+                    has_loopback_bind = true;
+                }
+            }
+        }
+        if in_dns && !line.starts_with(' ') && !line.starts_with('\t') && line.contains(':') {
+            in_dns = false;
+        }
+    }
+
+    if has_zero_bind && has_loopback_bind {
+        lines.retain(|l| {
+            let t = l.trim();
+            if t == "- 127.0.0.1" {
+                changed = true;
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    // 3. Добавляем upstream_dns: 127.0.0.1:1053 если его нет
+    let content_joined = lines.join("\n");
+    if !content_joined.contains("127.0.0.1:1053") {
+        let mut new_lines = Vec::with_capacity(lines.len() + 4);
+        let mut added_upstream = false;
+        for line in lines {
+            let trimmed = line.trim();
+            new_lines.push(line.clone());
+            if trimmed == "upstream_dns:" && !added_upstream {
+                new_lines.push("    - 127.0.0.1:1053".to_string());
+                if !content_joined.contains("77.88.8.8") {
+                    new_lines.push("    - 77.88.8.8".to_string());
+                }
+                added_upstream = true;
+                changed = true;
+            }
+        }
+        lines = new_lines;
+    }
+
+    // 4. Добавляем probe.test в rewrites если его нет
+    let content_with_upstreams = lines.join("\n");
+    if !content_with_upstreams.contains("probe.test") {
+        let mut new_lines = Vec::with_capacity(lines.len() + 4);
+        let mut added_rewrite = false;
+        for line in lines {
+            let trimmed = line.trim();
+            if (trimmed == "rewrites: []" || trimmed == "rewrites:") && !added_rewrite {
+                new_lines.push("  rewrites:".to_string());
+                new_lines.push("    - domain: probe.test".to_string());
+                new_lines.push("      answer: 127.0.0.1".to_string());
+                added_rewrite = true;
+                changed = true;
+            } else {
+                new_lines.push(line);
+            }
+        }
+        lines = new_lines;
+    }
+
+    let mut result = lines.join("\n");
+    if content.ends_with('\n') && !result.ends_with('\n') {
+        result.push('\n');
+    }
+    (result, changed)
+}
+
 /// Гарантированное создание стандартного файла конфигурации, если он еще не существует
 pub fn ensure_default_adguard_config(dns_port: u16, http_port: u16) -> PathBuf {
-    let conf_path = PathBuf::from("/opt/etc/AdGuardHome/AdGuardHome.yaml");
+    let conf_path = find_adguard_config().unwrap_or_else(|| PathBuf::from("/opt/etc/AdGuardHome/AdGuardHome.yaml"));
     if let Some(parent) = conf_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -1646,6 +1768,12 @@ pub fn ensure_default_adguard_config(dns_port: u16, http_port: u16) -> PathBuf {
         let content = generate_default_adguard_yaml(dns_port, http_port);
         let _ = std::fs::write(&conf_path, content);
         crate::log_i!("Создана стандартная конфигурация AdGuard Home: {:?}", conf_path);
+    } else if let Ok(existing) = std::fs::read_to_string(&conf_path) {
+        let (healed, changed) = sanitize_and_heal_adguard_yaml(&existing, dns_port);
+        if changed {
+            let _ = std::fs::write(&conf_path, healed);
+            crate::log_i!("Конфигурация AdGuard Home автоматически оптимизирована и самоисцелена: {:?}", conf_path);
+        }
     }
     conf_path
 }
@@ -1662,7 +1790,7 @@ pub fn ensure_adguard_init_script() -> Result<PathBuf, String> {
 
     let conf = find_adguard_config().unwrap_or_else(|| {
         let is_53_free = std::net::UdpSocket::bind("0.0.0.0:53").is_ok();
-        let port = if is_53_free { 53 } else { 5353 };
+        let port = if is_53_free { 53 } else { DEFAULT_ADGUARD_DNS_FALLBACK_PORT };
         ensure_default_adguard_config(port, 3000)
     });
     let work_dir = conf
@@ -1915,16 +2043,14 @@ pub async fn service_action(action: &str) -> Result<String, String> {
         tokio::time::sleep(Duration::from_millis(800)).await;
         let mut is_running = crate::system::is_process_running("AdGuardHome");
 
-        // Если процесс не запустился из-за конфликта порта 53 (ndnproxy на Keenetic), автоматически переключаем на 5353
+        // Если процесс не запустился из-за конфликта порта 53 (ndnproxy на Keenetic) или 5353 (avahi-daemon), автоматически переключаем на 5354
         if !is_running && (act == "start" || act == "restart") {
             if let Ok(agh_log) = tokio::fs::read_to_string("/opt/var/log/adguardhome.log").await {
                 if agh_log.contains("address already in use") || agh_log.contains("bind: address already in use") {
-                    crate::log_w!("Обнаружен конфликт порта DNS 53. Автоматическое переключение DNS-порта AdGuard Home на 5353...");
+                    crate::log_w!("Обнаружен конфликт порта DNS. Автоматическое переключение DNS-порта AdGuard Home на {}...", DEFAULT_ADGUARD_DNS_FALLBACK_PORT);
                     if let Some(conf_path) = find_adguard_config() {
                         if let Ok(conf_str) = tokio::fs::read_to_string(&conf_path).await {
-                            let patched = conf_str
-                                .replace("port: 53\r\n", "port: 5353\r\n")
-                                .replace("port: 53\n", "port: 5353\n");
+                            let (patched, _) = sanitize_and_heal_adguard_yaml(&conf_str, DEFAULT_ADGUARD_DNS_FALLBACK_PORT);
                             let _ = tokio::fs::write(&conf_path, patched).await;
                             let cmd_retry = format!("exec '{script}' '{act}' </dev/null >'{log_file}' 2>&1");
                             let _ = tokio::process::Command::new("sh").arg("-c").arg(&cmd_retry).status().await;
@@ -1938,7 +2064,7 @@ pub async fn service_action(action: &str) -> Result<String, String> {
 
         if is_running {
             if act == "start" || act == "restart" {
-                let active_port = detect_adguard_dns_port().unwrap_or(5353);
+                let active_port = detect_adguard_dns_port().unwrap_or(DEFAULT_ADGUARD_DNS_FALLBACK_PORT);
                 let _ = apply_adguard_iptables(active_port);
             }
             let msg = if !log_content.is_empty() {
@@ -2167,10 +2293,38 @@ mod tests {
 
     #[test]
     fn test_dns03_bind_hosts_strictly_single_all_interfaces() {
-        let yaml = generate_default_adguard_yaml(5353, 3000);
-        // Ensure strictly 0.0.0.0 bind, never duplicate with 127.0.0.1 (DNS-03)
+        let yaml = generate_default_adguard_yaml(DEFAULT_ADGUARD_DNS_FALLBACK_PORT, 3000);
+        // Ensure strictly 0.0.0.0 bind, never duplicate with 127.0.0.1 in bind_hosts (DNS-03)
         assert!(yaml.contains("bind_hosts:\n    - 0.0.0.0") || yaml.contains("bind_hosts:\r\n    - 0.0.0.0"));
-        assert!(!yaml.contains("127.0.0.1"));
+        assert!(!yaml.contains("bind_hosts:\n    - 127.0.0.1") && !yaml.contains("bind_hosts:\r\n    - 127.0.0.1"));
+        // Anti-regression: Ensure fallback port is 5354 (non-mDNS) and upstream includes Mihomo + rewrite for probe.test
+        assert!(yaml.contains("port: 5354"));
+        assert!(yaml.contains("127.0.0.1:1053"));
+        assert!(yaml.contains("probe.test"));
+    }
+
+    #[test]
+    fn test_adguard_yaml_healing_and_port_5354_migration() {
+        let old_conf = r#"
+dns:
+  bind_hosts:
+    - 127.0.0.1
+    - 0.0.0.0
+  port: 5353
+  upstream_dns:
+    - 8.8.8.8
+  bootstrap_dns:
+    - 1.1.1.1
+  rewrites: []
+"#;
+        let (healed, changed) = sanitize_and_heal_adguard_yaml(old_conf, 5354);
+        assert!(changed);
+        assert!(healed.contains("port: 5354"));
+        assert!(!healed.contains("port: 5353"));
+        assert!(!healed.contains("- 127.0.0.1\n    - 0.0.0.0"));
+        assert!(healed.contains("- 0.0.0.0"));
+        assert!(healed.contains("127.0.0.1:1053"));
+        assert!(healed.contains("probe.test"));
     }
 
     #[test]
