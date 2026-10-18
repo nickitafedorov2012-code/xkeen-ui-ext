@@ -163,14 +163,18 @@ export default function Whitelist({ notify, refresh }: Props) {
   }
 
   // Переключение стратегии (Логика XKeen Route vs Стандартная)
+  const isStrictStrategy = config.strategy === 'strict_x_keen' || config.strategy === 'strict_xkeen'
   const handleStrategyChange = async (strategy: WhitelistStrategy) => {
-    if (config.strategy === strategy) return
+    const isTargetStrict = strategy === 'strict_x_keen' || strategy === 'strict_xkeen'
+    if (isStrictStrategy && isTargetStrict) return
+    if (!isStrictStrategy && strategy === 'standard') return
+
     setBusy(true)
     try {
       await apiPost('whitelist/strategy', { strategy })
       setConfig((prev) => ({ ...prev, strategy }))
       notify(
-        strategy === 'strict_xkeen'
+        isTargetStrict
           ? '🛡️ Включена специальная логика XKeen Route (100% туннель, 376 РФ напрямую, без конфликтов игр)'
           : '🌐 Включена стандартная логика маршрутизации (как у обычного сервера)'
       )
@@ -440,7 +444,7 @@ export default function Whitelist({ notify, refresh }: Props) {
           </div>
           <div className="whitelist-kpi-card">
             <div className="whitelist-kpi-value" data-testid="kpi-strategy" style={{ fontSize: 15 }}>
-              {config.strategy === 'strict_xkeen' ? '🛡️ XKeen Route' : '🌐 Стандартная'}
+              {isStrictStrategy ? '🛡️ XKeen Route' : '🌐 Стандартная'}
             </div>
             <div className="whitelist-kpi-label">Логика маршрутизации</div>
           </div>
@@ -470,17 +474,17 @@ export default function Whitelist({ notify, refresh }: Props) {
               gap: 12,
               padding: '12px 16px',
               borderRadius: 8,
-              background: config.strategy === 'strict_xkeen' ? 'rgba(16, 185, 129, 0.12)' : 'rgba(255,255,255,0.03)',
-              border: `1px solid ${config.strategy === 'strict_xkeen' ? '#10b981' : 'rgba(255,255,255,0.1)'}`,
+              background: isStrictStrategy ? 'rgba(16, 185, 129, 0.12)' : 'rgba(255,255,255,0.03)',
+              border: `1px solid ${isStrictStrategy ? '#10b981' : 'rgba(255,255,255,0.1)'}`,
               cursor: 'pointer',
             }}
           >
             <input
               type="radio"
               name="whitelist-strategy"
-              checked={config.strategy === 'strict_xkeen'}
+              checked={isStrictStrategy}
               disabled={busy}
-              onChange={() => handleStrategyChange('strict_xkeen')}
+              onChange={() => handleStrategyChange('strict_x_keen')}
               data-testid="radio-strategy-strict"
               style={{ marginTop: 3 }}
             />

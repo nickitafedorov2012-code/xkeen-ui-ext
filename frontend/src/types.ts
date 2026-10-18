@@ -906,7 +906,7 @@ export interface SystemDiagnostics {
 // Режим белых списков (Whitelist Mode)
 // ============================================================================
 
-export type WhitelistStrategy = 'strict_xkeen' | 'standard'
+export type WhitelistStrategy = 'strict_x_keen' | 'strict_xkeen' | 'standard'
 
 export interface WhitelistDevice {
   mac: string

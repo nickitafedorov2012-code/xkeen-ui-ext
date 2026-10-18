@@ -183,7 +183,7 @@ describe('Whitelist Component — Whitelist Tab (Overhaul & Anti-Regression)', (
     })
 
     expect(postSpy).toHaveBeenCalledWith('whitelist/strategy', {
-      strategy: 'strict_xkeen',
+      strategy: 'strict_x_keen',
     })
   })
 

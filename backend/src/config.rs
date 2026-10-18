@@ -596,6 +596,7 @@ impl Default for WhitelistDevice {
 #[serde(rename_all = "snake_case")]
 pub enum WhitelistStrategy {
     /// Специальный режим Белых списков XKeen Route: 100% трафик устройств в туннель, 376 отечественных сайтов DIRECT
+    #[serde(alias = "strict_xkeen")]
     StrictXKeen,
     /// Стандартная маршрутизация сервера (обычные правила и проксирование)
     Standard,
