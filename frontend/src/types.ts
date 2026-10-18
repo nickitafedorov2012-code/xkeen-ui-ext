@@ -850,3 +850,54 @@ export interface SwapStatus {
 export interface CreateSwapRequest {
   size_mb: SwapSizePresetMb
 }
+
+// ============================================================================
+// Глубокая системная диагностика (v1.9.13+)
+// ============================================================================
+
+export interface SystemDiagnostics {
+  status: 'healthy' | 'degraded' | 'error'
+  components: {
+    mihomo: {
+      installed: boolean
+      running: boolean
+      version?: string | null
+      tun_active: boolean
+      pid?: number | null
+    }
+    zapret: {
+      installed: boolean
+      running: boolean
+      version?: string | null
+      engine?: string | null
+      binaries_found: string[]
+      missing: string[]
+    }
+    adguard: {
+      installed: boolean
+      running: boolean
+      dns_port: number
+      loop_detected: boolean
+      pid?: number | null
+    }
+  }
+  iptables: {
+    redirect_active: boolean
+    adguard_chain_active: boolean
+    zapret_chain_active: boolean
+  }
+  storage: {
+    opt_mounted: boolean
+    opt_rw: boolean
+    free_space_mb: number
+    total_space_mb: number
+  }
+  listening_ports: Record<string, string>
+  system_summary: {
+    cpu_total_percent: number
+    ram_used_mb: number
+    ram_total_mb: number
+    uptime_seconds: number
+  }
+  timestamp: string
+}

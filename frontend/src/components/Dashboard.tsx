@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
 import { pingClass, type FailoverEventInfo, type StatusInfo, type AghStatus, type SwapStatus } from '../types'
 import TrafficGraph from './TrafficGraph'
+import SelfDiagnosticsCard from './SelfDiagnosticsCard'
 
 interface Props {
   status: StatusInfo | null
@@ -325,6 +326,9 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
 
       {/* Умный баннер рекомендации Swap при нехватке ОЗУ */}
       <SwapRecommendationBanner status={swapStatus} onSwitchTab={onSwitchTab} />
+
+      {/* Карточка «Самодиагностика в один клик» (Zero-Touch аудит здоровья роутера) */}
+      <SelfDiagnosticsCard notify={notify} onSwitchTab={onSwitchTab} refresh={refresh} />
 
       {/* График трафика в реальном времени */}
       <TrafficGraph />
