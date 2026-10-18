@@ -675,17 +675,19 @@ pub struct ServerWhitelistReq {
     pub servers: Option<Vec<String>>,
 }
 
-/// Синхронизация 100% туннелирования для режима обхода белых списков.
-/// Если активный узел входит в whitelist_servers или принадлежит whitelist_providers,
-/// автоматически активируется полный туннель (REDIRECT + TPROXY) для всех активных LAN-устройств.
-/// Если активный узел не входит в белый список, восстанавливается обычный игровой режим или снимаются правила.
+/// Синхронизация режима белых списков.
+/// Обновляет статус активности телеметрии (traffic::set_whitelist_active).
+/// Если включен режим следования за failover (follow_failover) и Whitelist включен,
+/// переключает селекторную группу '🛡️ Whitelist' в ядре Mihomo на актуальный узел без перезапуска даэмона.
+/// ПОЛНОСТЬЮ ОТВЯЗАНО ОТ GAMING MODE: не мутирует cfg.gaming и не затирает игровые устройства!
 pub async fn sync_whitelist_mode_tunnel(state: &AppState, target_server_id: &str) -> Result<(), String> {
     let cfg = state.config.read().await.clone();
-    let is_server_wl = !cfg.whitelist_servers.is_empty() && cfg.whitelist_servers.iter().any(|s| s == target_server_id);
+    let mut target_name = target_server_id.to_string();
     let mut is_prov_wl = false;
-    if !cfg.whitelist_providers.is_empty() {
+    if !target_server_id.is_empty() {
         if let Ok(servers) = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
             if let Some(s) = servers.iter().find(|srv| srv.id == target_server_id) {
+                target_name = s.name.clone();
                 if let Some(ref prov) = s.provider {
                     if cfg.whitelist_providers.iter().any(|p| p == prov) {
                         is_prov_wl = true;
@@ -694,128 +696,26 @@ pub async fn sync_whitelist_mode_tunnel(state: &AppState, target_server_id: &str
             }
         }
     }
-    let is_whitelist = is_server_wl || is_prov_wl;
+    let is_auto_detected = crate::failover::is_whitelist_server(&target_name, target_server_id, &cfg);
+    let is_whitelist = is_auto_detected || is_prov_wl || cfg.whitelist.enabled;
     crate::traffic::set_whitelist_active(is_whitelist);
 
-    let (redir_port, tproxy_port) = if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-        (
-            routing::parse_redir_port(&yaml).unwrap_or(5000),
-            routing::parse_tproxy_port(&yaml).unwrap_or(5001),
-        )
-    } else {
-        (5000, 5001)
-    };
-
-    if is_whitelist {
-        log_i!(
-            "[WHITELIST_EMERGENCY] 🟣 Активация 100% туннелирования: узел '{}' (server_wl={}, prov_wl={})",
-            target_server_id, is_server_wl, is_prov_wl
-        );
-        let mut tunnel_cfg = cfg.gaming.clone();
-        tunnel_cfg.enabled = true;
-        tunnel_cfg.mode = config::GamingMode::Compatibility;
-
-        // 1. Добавляем устройства из настроек маршрутизации (следующие белым спискам)
-        for (ip, dr) in &cfg.device_routing {
-            if dr.follow_whitelist {
-                if !tunnel_cfg.devices.iter().any(|d| d.ip == *ip) {
-                    tunnel_cfg.devices.push(config::GamingDevice {
-                        ip: ip.clone(),
-                        mac: String::new(),
-                        name: format!("Device ({})", ip),
-                        enabled: true,
-                        server: None,
-                        ipv6: Vec::new(),
-                    });
-                }
+    if cfg.whitelist.enabled {
+        let should_follow = cfg.whitelist.follow_failover
+            || cfg.whitelist.target_server.as_deref() == Some("follow_failover")
+            || cfg.whitelist.target_server.as_deref().map_or(true, |s| s.trim().is_empty());
+        if should_follow {
+            crate::failover::sync_whitelist_on_switch(&state.http, &cfg, target_server_id, &target_name).await;
+        } else if let Some(ref target) = cfg.whitelist.target_server {
+            if !target.trim().is_empty() {
+                let _ = mihomo::switch_group(&state.http, &cfg, routing::WHITELIST_GROUP_NAME, target.trim()).await;
             }
         }
-
-        // 2. Добавляем все активные устройства из RCI (KeeneticOS)
-        if let Ok(policies) = rci::get_policies(&state.http, &cfg).await {
-            if let Ok(rci_devs) = rci::get_devices(&state.http, &cfg, &policies, "").await {
-                for d in rci_devs {
-                    if d.online && !d.ip.is_empty() && d.ip != "0.0.0.0" {
-                        if !tunnel_cfg.devices.iter().any(|td| td.ip == d.ip) {
-                            tunnel_cfg.devices.push(config::GamingDevice {
-                                ip: d.ip.clone(),
-                                mac: d.mac.clone(),
-                                name: d.name.clone(),
-                                enabled: true,
-                                server: None,
-                                ipv6: d.ipv6.clone(),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        // 3. Добавляем все активные LAN-устройства из таблицы ARP (/proc/net/arp)
-        if let Ok(arp_content) = tokio::fs::read_to_string("/proc/net/arp").await {
-            for line in arp_content.lines().skip(1) {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 4 {
-                    let ip = parts[0];
-                    let flags = parts[2];
-                    let mac = parts[3];
-                    if (flags == "0x2" || flags == "2") && ip.parse::<std::net::Ipv4Addr>().is_ok() && !ip.starts_with("127.") {
-                        if !tunnel_cfg.devices.iter().any(|td| td.ip == ip) {
-                            tunnel_cfg.devices.push(config::GamingDevice {
-                                ip: ip.to_string(),
-                                mac: mac.to_string(),
-                                name: format!("Device ({})", ip),
-                                enabled: true,
-                                server: None,
-                                ipv6: Vec::new(),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-
-        // 4. Добавляем устройства из DHCP-аренд (dnsmasq leases)
-        for leases_path in &["/opt/var/lib/misc/dnsmasq.leases", "/var/lib/misc/dnsmasq.leases", "/tmp/dnsmasq.leases"] {
-            if let Ok(leases) = tokio::fs::read_to_string(leases_path).await {
-                for line in leases.lines() {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 4 {
-                        let mac = parts[1];
-                        let ip = parts[2];
-                        let name = parts[3];
-                        if ip.parse::<std::net::Ipv4Addr>().is_ok() && !ip.starts_with("127.") {
-                            if !tunnel_cfg.devices.iter().any(|td| td.ip == ip) {
-                                tunnel_cfg.devices.push(config::GamingDevice {
-                                    ip: ip.to_string(),
-                                    mac: mac.to_string(),
-                                    name: if name != "*" { name.to_string() } else { format!("Device ({})", ip) },
-                                    enabled: true,
-                                    server: None,
-                                    ipv6: Vec::new(),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let dns_port = resolve_active_dns_port(cfg.as_ref());
-        sync_gaming_full_tunnel(&tunnel_cfg, redir_port, tproxy_port, dns_port).await
-    } else if cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility {
-        log_i!("[WHITELIST_EMERGENCY] Активный узел не входит в белый список. Возврат к стандартным настройкам игрового режима.");
-        let dns_port = resolve_active_dns_port(cfg.as_ref());
-        sync_gaming_full_tunnel(&cfg.gaming, redir_port, tproxy_port, dns_port).await
-    } else {
-        let disabled_gaming = config::GamingConfig {
-            enabled: false,
-            ..Default::default()
-        };
-        let dns_port = resolve_active_dns_port(cfg.as_ref());
-        sync_gaming_full_tunnel(&disabled_gaming, redir_port, tproxy_port, dns_port).await
     }
+
+    Ok(())
 }
+
 
 /// POST /api/servers/whitelist — добавить/удалить сервер из белого списка (обход белых списков)
 pub async fn set_server_whitelist(
@@ -1416,6 +1316,9 @@ pub async fn get_devices(
             let arr: Vec<serde_json::Value> = devices
                 .iter()
                 .map(|d| {
+                    let is_whitelist = cfg.whitelist.devices.iter().any(|wd| {
+                        wd.enabled && (wd.mac.eq_ignore_ascii_case(&d.mac) || (!wd.ip.is_empty() && wd.ip == d.ip))
+                    });
                     json!({
                         "mac": d.mac, "name": d.name, "ip": d.ip,
                         "ipv6": d.ipv6,
@@ -1425,6 +1328,7 @@ pub async fn get_devices(
                         "rxbytes": d.rxbytes, "txbytes": d.txbytes,
                         "speed_limit_kbps": d.speed_limit_kbps,
                         "current_server": live.get(&d.ip).cloned().unwrap_or_default(),
+                        "is_whitelist": is_whitelist,
                     })
                 })
                 .collect();
@@ -10414,6 +10318,286 @@ pub async fn adguard_set_config(
         }
         Err(e) => api_err(format!("Ошибка сохранения конфигурации AdGuard Home: {e}")),
     }
+}
+
+// ============================================================================
+// Whitelist Mode (Белые списки) API
+// ============================================================================
+
+#[derive(Serialize)]
+pub struct WhitelistStatusResponse {
+    pub enabled: bool,
+    pub target_server: Option<String>,
+    pub follow_failover: bool,
+    pub devices: Vec<config::WhitelistDevice>,
+    pub custom_domains: Vec<String>,
+    pub domestic_catalog_count: usize,
+    pub active_server: String,
+    pub whitelist_servers: Vec<String>,
+    pub whitelist_providers: Vec<String>,
+}
+
+/// GET /api/whitelist — статус и конфигурация режима белых списков
+pub async fn get_whitelist(State(state): State<AppState>) -> Response {
+    let cfg = (**state.config.read().await).clone();
+    let domestic_catalog_count = routing::DOMESTIC_WHITELIST_DOMAINS.len();
+
+    let proxies_map = mihomo::get_proxies(&state.http, &cfg).await.ok();
+    let group_now = proxies_map.as_ref().and_then(|map| {
+        map.get(routing::WHITELIST_GROUP_NAME)
+            .or_else(|| map.get("PROXY"))
+            .and_then(|g| g.get("now"))
+            .and_then(|n| n.as_str())
+    }).unwrap_or("Fastest");
+
+    let active_server = proxies_map.as_ref()
+        .map(|map| resolve_group_leaf(map, group_now))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| group_now.to_string());
+
+    api_ok(json!(WhitelistStatusResponse {
+        enabled: cfg.whitelist.enabled,
+        target_server: cfg.whitelist.target_server,
+        follow_failover: cfg.whitelist.follow_failover,
+        devices: cfg.whitelist.devices,
+        custom_domains: cfg.whitelist.custom_domains,
+        domestic_catalog_count,
+        active_server,
+        whitelist_servers: cfg.whitelist_servers,
+        whitelist_providers: cfg.whitelist_providers,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct WhitelistUpdateReq {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub target_server: Option<String>,
+    #[serde(default)]
+    pub follow_failover: Option<bool>,
+    #[serde(default)]
+    pub devices: Option<Vec<config::WhitelistDevice>>,
+    #[serde(default)]
+    pub custom_domains: Option<Vec<String>>,
+}
+
+/// POST /api/whitelist — полное сохранение настроек режима белых списков
+pub async fn save_whitelist(
+    State(state): State<AppState>,
+    Json(body): Json<WhitelistUpdateReq>,
+) -> Response {
+    let mut tx = match ConfigTx::begin(&state).await {
+        Ok(tx) => tx,
+        Err(e) => return api_err(e),
+    };
+
+    if let Some(enabled) = body.enabled {
+        tx.config_mut().whitelist.enabled = enabled;
+    }
+    if let Some(target) = body.target_server {
+        let t = target.trim();
+        if t.is_empty() || t == "follow_failover" {
+            tx.config_mut().whitelist.target_server = None;
+            tx.config_mut().whitelist.follow_failover = true;
+        } else {
+            tx.config_mut().whitelist.target_server = Some(t.to_string());
+        }
+    }
+    if let Some(follow) = body.follow_failover {
+        tx.config_mut().whitelist.follow_failover = follow;
+    }
+    if let Some(devices) = body.devices {
+        for dev in &devices {
+            let ip = dev.ip.trim();
+            if !ip.is_empty() && !config::is_valid_ip_or_cidr(ip) {
+                return api_err(format!("Некорректный IP-адрес устройства: {ip}"));
+            }
+            let mac = dev.mac.trim();
+            if !mac.is_empty() && !config::is_valid_mac(mac) {
+                return api_err(format!("Некорректный MAC-адрес устройства: {mac}"));
+            }
+        }
+        tx.config_mut().whitelist.devices = devices;
+    }
+    if let Some(custom_domains) = body.custom_domains {
+        let mut clean_domains = Vec::new();
+        for d in custom_domains {
+            let clean = config::normalize_domain(&d);
+            if clean.is_empty() {
+                continue;
+            }
+            if !config::is_valid_domain(&clean) {
+                return api_err(format!("Некорректный домен в белом списке: {d}"));
+            }
+            if !clean_domains.contains(&clean) {
+                clean_domains.push(clean);
+            }
+        }
+        tx.config_mut().whitelist.custom_domains = clean_domains;
+    }
+
+    let raw_yaml = match tx.read_yaml().await {
+        Ok(y) => y,
+        Err(e) => return api_err(e),
+    };
+
+    let (new_yaml, _) = match routing::apply_routing(&raw_yaml, tx.config()) {
+        Ok(res) => res,
+        Err(e) => return api_err(format!("Ошибка генерации правил маршрутизации: {e}")),
+    };
+
+    if let Err(e) = tx.set_yaml(&new_yaml) {
+        return api_err(e);
+    }
+
+    if let Err(e) = tx.apply_and_reload().await {
+        return api_err(e);
+    }
+
+    if let Err(e) = tx.commit().await {
+        return api_err(format!("Ошибка сохранения config.json: {e}"));
+    }
+
+    if tx.config().whitelist.enabled {
+        let active_id = mihomo::get_active_server(&state.http, tx.config()).await.ok().flatten().map(|s| s.id).unwrap_or_default();
+        if !active_id.is_empty() {
+            let _ = sync_whitelist_mode_tunnel(&state, &active_id).await;
+        }
+    }
+
+    log_i!("Настройки режима белых списков успешно сохранены и применены");
+    api_ok(json!({ "saved": true, "whitelist": tx.config().whitelist }))
+}
+
+#[derive(Deserialize)]
+pub struct WhitelistDeviceToggleReq {
+    pub ip: Option<String>,
+    pub mac: Option<String>,
+    pub enabled: bool,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// POST /api/whitelist/device/toggle — быстрое переключение устройства в режиме белых списков
+pub async fn toggle_whitelist_device(
+    State(state): State<AppState>,
+    Json(body): Json<WhitelistDeviceToggleReq>,
+) -> Response {
+    let mut ip_str = body.ip.as_deref().unwrap_or("").trim().to_string();
+    let mut mac_str = body.mac.as_deref().unwrap_or("").trim().to_string();
+    let mut name_opt = body.name.clone();
+
+    if ip_str.is_empty() && mac_str.is_empty() {
+        return api_err("Не указан IP или MAC адрес устройства");
+    }
+
+    let cfg_snap = state.config.read().await.clone();
+    if ip_str.is_empty() || mac_str.is_empty() {
+        let policies = rci::get_policies(&state.http, &cfg_snap).await.unwrap_or_default();
+        if let Ok(devs) = rci::get_devices(&state.http, &cfg_snap, &policies, "").await {
+            if let Some(found) = devs.iter().find(|d| {
+                (!mac_str.is_empty() && d.mac.eq_ignore_ascii_case(&mac_str))
+                    || (!ip_str.is_empty() && d.ip == ip_str)
+            }) {
+                if ip_str.is_empty() { ip_str = found.ip.clone(); }
+                if mac_str.is_empty() { mac_str = found.mac.clone(); }
+                if name_opt.is_none() || name_opt.as_deref() == Some("") {
+                    name_opt = Some(found.name.clone());
+                }
+            }
+        }
+    }
+
+    if !ip_str.is_empty() && !config::is_valid_ip_or_cidr(&ip_str) {
+        return api_err("Некорректный IP-адрес устройства");
+    }
+    if !mac_str.is_empty() && !config::is_valid_mac(&mac_str) {
+        return api_err("Некорректный MAC-адрес устройства");
+    }
+
+    let mut tx = match ConfigTx::begin(&state).await {
+        Ok(tx) => tx,
+        Err(e) => return api_err(e),
+    };
+
+    let mut matched = false;
+    for dev in &mut tx.config_mut().whitelist.devices {
+        let match_mac = !mac_str.is_empty() && dev.mac.eq_ignore_ascii_case(&mac_str);
+        let match_ip = !ip_str.is_empty() && dev.ip == ip_str;
+        if match_mac || match_ip {
+            dev.enabled = body.enabled;
+            if !ip_str.is_empty() { dev.ip = ip_str.clone(); }
+            if !mac_str.is_empty() { dev.mac = mac_str.clone(); }
+            if let Some(ref n) = name_opt {
+                if !n.trim().is_empty() { dev.name = Some(n.clone()); }
+            }
+            matched = true;
+            break;
+        }
+    }
+
+    if !matched && body.enabled {
+        tx.config_mut().whitelist.devices.push(config::WhitelistDevice {
+            mac: mac_str.clone(),
+            ip: ip_str.clone(),
+            enabled: true,
+            name: name_opt.clone(),
+        });
+    }
+
+    if body.enabled && !tx.config().whitelist.enabled {
+        tx.config_mut().whitelist.enabled = true;
+    }
+
+    let raw_yaml = match tx.read_yaml().await {
+        Ok(y) => y,
+        Err(e) => return api_err(e),
+    };
+
+    let (new_yaml, _) = match routing::apply_routing(&raw_yaml, tx.config()) {
+        Ok(res) => res,
+        Err(e) => return api_err(format!("Ошибка генерации правил маршрутизации: {e}")),
+    };
+
+    if let Err(e) = tx.set_yaml(&new_yaml) {
+        return api_err(e);
+    }
+
+    if let Err(e) = tx.apply_and_reload().await {
+        return api_err(e);
+    }
+
+    if let Err(e) = tx.commit().await {
+        return api_err(format!("Ошибка сохранения config.json: {e}"));
+    }
+
+    log_i!(
+        "Режим белых списков переключен для устройства ip='{}', mac='{}' -> enabled={}",
+        ip_str, mac_str, body.enabled
+    );
+    api_ok(json!({
+        "toggled": true,
+        "ip": ip_str,
+        "mac": mac_str,
+        "enabled": body.enabled,
+        "whitelist_enabled": tx.config().whitelist.enabled,
+    }))
+}
+
+/// GET /api/whitelist/catalog — отечественный каталог из 376 базовых сервисов с категориями
+pub async fn get_whitelist_catalog() -> Response {
+    let mut categories_map: std::collections::BTreeMap<&'static str, Vec<&'static str>> = std::collections::BTreeMap::new();
+    for entry in routing::DOMESTIC_CATALOG {
+        categories_map.entry(entry.category).or_default().push(entry.domain);
+    }
+
+    api_ok(json!({
+        "total": routing::DOMESTIC_WHITELIST_DOMAINS.len(),
+        "domains": routing::DOMESTIC_WHITELIST_DOMAINS,
+        "categories": categories_map,
+        "items": routing::DOMESTIC_CATALOG,
+    }))
 }
 
 #[cfg(test)]

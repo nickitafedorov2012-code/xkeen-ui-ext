@@ -318,6 +318,9 @@ pub struct AppConfig {
     /// Подписки (провайдеры), целиком отмеченные для обхода белых списков.
     #[serde(default)]
     pub whitelist_providers: Vec<String>,
+    /// Настройки выделенного режима белых списков (376 domestic domains direct, proxy tunnel).
+    #[serde(default)]
+    pub whitelist: WhitelistConfig,
 }
 
 /// Платформы и сервисы для игрового режима.
@@ -562,6 +565,56 @@ impl Default for AdGuardConfig {
             upstream_dns: default_agh_upstream(),
             failsafe_rollback: true,
             config_path: default_agh_config_path(),
+        }
+    }
+}
+
+/// Устройство в режиме белых списков (100% туннель + отечественные сервисы напрямую).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct WhitelistDevice {
+    pub mac: String,
+    pub ip: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+impl Default for WhitelistDevice {
+    fn default() -> Self {
+        Self {
+            mac: String::new(),
+            ip: String::new(),
+            enabled: true,
+            name: None,
+        }
+    }
+}
+
+/// Настройки выделенного режима белых списков (Белые списки: 376 отечественных доменов напрямую, прокси-туннель).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(default)]
+pub struct WhitelistConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub target_server: Option<String>,
+    #[serde(default = "default_true")]
+    pub follow_failover: bool,
+    #[serde(default)]
+    pub devices: Vec<WhitelistDevice>,
+    #[serde(default)]
+    pub custom_domains: Vec<String>,
+}
+
+impl Default for WhitelistConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            target_server: None,
+            follow_failover: true,
+            devices: Vec::new(),
+            custom_domains: Vec::new(),
         }
     }
 }
@@ -859,6 +912,7 @@ impl Default for AppConfig {
             server_aliases: std::collections::HashMap::new(),
             whitelist_servers: Vec::new(),
             whitelist_providers: Vec::new(),
+            whitelist: WhitelistConfig::default(),
         }
     }
 }

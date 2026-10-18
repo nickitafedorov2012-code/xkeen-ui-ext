@@ -7,6 +7,8 @@
 use std::time::{Instant, Duration};
 
 static LAST_SWITCH: tokio::sync::Mutex<Option<Instant>> = tokio::sync::Mutex::const_new(None);
+static LAST_WHITELIST_SYNC: tokio::sync::Mutex<Option<(String, Instant)>> =
+    tokio::sync::Mutex::const_new(None);
 
 pub const CANARY_DURATION_SECS: u64 = 60;
 pub const CANARY_PAYLOAD_URL: &str = "http://speed.cloudflare.com/__down?bytes=8192";
@@ -264,6 +266,65 @@ async fn record_switch(target_id: &str) {
     record_switch_target(target_id).await;
 }
 
+/// Проверяет, является ли узел сервером белых списков:
+/// по ID из `cfg.whitelist_servers` или по тегам в названии `[БС]`, `(БС)`, `[WL]`, `(WL)`, `whitelist` (case-insensitive).
+pub fn is_whitelist_server(node_name: &str, node_id: &str, cfg: &crate::config::AppConfig) -> bool {
+    if !node_id.is_empty() && cfg.whitelist_servers.iter().any(|s| s == node_id) {
+        return true;
+    }
+    let check_tag = |s: &str| -> bool {
+        let lower = s.to_lowercase();
+        lower.contains("[бс]")
+            || lower.contains("(бс)")
+            || lower.contains("[бc]")
+            || lower.contains("(бc)")
+            || lower.contains("[wl]")
+            || lower.contains("(wl)")
+            || lower.contains("whitelist")
+    };
+    check_tag(node_name) || (!node_id.is_empty() && check_tag(node_id))
+}
+
+/// Синхронизация селекторной группы '🛡️ Whitelist' в ядре Mihomo при переключении узла.
+/// Если `cfg.whitelist.enabled` и включен режим следования за failover (`follow_failover`),
+/// переключает селекторную группу на новый узел (`node_id`) и логирует событие.
+pub async fn sync_whitelist_on_switch(
+    http: &reqwest::Client,
+    cfg: &crate::config::AppConfig,
+    node_id: &str,
+    node_name: &str,
+) {
+    if !cfg.whitelist.enabled {
+        return;
+    }
+
+    let is_auto = is_whitelist_server(node_name, node_id, cfg);
+    let should_follow = cfg.whitelist.follow_failover
+        || cfg.whitelist.target_server.as_deref() == Some("follow_failover")
+        || cfg.whitelist.target_server.as_deref().map_or(true, |s| s.trim().is_empty());
+
+    // Дедупликация: не спамить Mihomo API и логи, если тот же узел уже синхронизирован недавно (< 2 сек)
+    {
+        let mut last_sync = LAST_WHITELIST_SYNC.lock().await;
+        if let Some((ref last_id, ref last_time)) = *last_sync {
+            if last_id == node_id && last_time.elapsed() < Duration::from_secs(2) {
+                return;
+            }
+        }
+        *last_sync = Some((node_id.to_string(), Instant::now()));
+    }
+
+    if should_follow && !node_id.is_empty() {
+        let _ = crate::mihomo::switch_group(http, cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await;
+    }
+
+    crate::log_i!(
+        "[FAILOVER] Whitelist mode active server switched to: {} (auto-detected: {})",
+        node_name,
+        is_auto
+    );
+}
+
 /// Прогон микро-порции реального трафика (8 КБ) через проверяемый сервер.
 /// Загружает тестовый пэйлоад 8192 байта со speed.cloudflare.com.
 /// Если сервер обрывает соединение, дропает пакеты или таймаутит — возвращает <= 0 (-1).
@@ -442,6 +503,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             return match mihomo::switch_server(&state.http, &cfg, best_id).await {
                 Ok(_) => {
                     record_switch(best_id).await;
+                    sync_whitelist_on_switch(&state.http, &cfg, best_id, best_name).await;
                     let _ = crate::api::sync_whitelist_mode_tunnel(&state, best_id).await;
                     state.failover_log.push(&msg, true).await;
                     crate::notifications::notify_failover(
@@ -580,6 +642,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                 return match mihomo::switch_server(&state.http, &cfg, id).await {
                     Ok(_) => {
                         record_switch(id).await;
+                        sync_whitelist_on_switch(&state.http, &cfg, id, &name).await;
                         let _ = crate::api::sync_whitelist_mode_tunnel(&state, id).await;
                         state.failover_log.push(&msg, true).await;
                         crate::notifications::notify_failover(
@@ -642,6 +705,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                 match mihomo::switch_server(&state.http, &cfg, best_id).await {
                     Ok(_) => {
                         record_switch(best_id).await;
+                        sync_whitelist_on_switch(&state.http, &cfg, best_id, &best_name).await;
                         let _ = crate::api::sync_whitelist_mode_tunnel(&state, best_id).await;
                         state.failover_log.push(&msg, true).await;
                         crate::notifications::notify_failover(
@@ -794,6 +858,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                         return match mihomo::switch_server(&state.http, &cfg, &pri.id).await {
                             Ok(_) => {
                                 record_switch(&pri.id).await;
+                                sync_whitelist_on_switch(&state.http, &cfg, &pri.id, &pri.name).await;
                                 let _ = crate::api::sync_whitelist_mode_tunnel(&state, &pri.id).await;
                                 state.failover_log.push(&msg, true).await;
                                 crate::notifications::notify_failover(
@@ -1316,5 +1381,102 @@ mod tests {
         record_manual_switch("srv_target").await;
         assert!(!is_quarantined("srv_target").await, "Ручной выбор сервера должен снимать с него карантин");
         assert!(!is_canary_active().await);
+    }
+
+    #[test]
+    fn test_is_whitelist_server_tag_detection() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist_servers = vec!["wl_exact_id".into(), "special_srv".into()];
+
+        // 1. Cyrillic tags
+        assert!(is_whitelist_server("Сервер [БС] Москва", "node1", &cfg));
+        assert!(is_whitelist_server("Резерв [бс] Питер", "node2", &cfg));
+        assert!(is_whitelist_server("Канал (БС) Ростов", "node3", &cfg));
+        assert!(is_whitelist_server("Шлюз (бс) Казань", "node4", &cfg));
+
+        // 2. Latin tags
+        assert!(is_whitelist_server("Netherlands [WL] 01", "node5", &cfg));
+        assert!(is_whitelist_server("Finland [wl] Fast", "node6", &cfg));
+        assert!(is_whitelist_server("Germany (WL) Direct", "node7", &cfg));
+        assert!(is_whitelist_server("Sweden (wl) Cloud", "node8", &cfg));
+
+        // 3. Keyword whitelist (case-insensitive)
+        assert!(is_whitelist_server("Vless Whitelist Direct", "node9", &cfg));
+        assert!(is_whitelist_server("HYSTERIA WHITELIST 02", "node10", &cfg));
+        assert!(is_whitelist_server("node_whitelist_backup", "node11", &cfg));
+
+        // 4. Server ID match in cfg.whitelist_servers
+        assert!(is_whitelist_server("Generic Node", "wl_exact_id", &cfg));
+        assert!(is_whitelist_server("Ordinary Server", "special_srv", &cfg));
+
+        // 5. Negative non-matching cases
+        assert!(!is_whitelist_server("Ordinary Server", "normal_node", &cfg));
+        assert!(!is_whitelist_server("Fastest", "Fastest", &cfg));
+        assert!(!is_whitelist_server("Fallback", "Fallback", &cfg));
+        assert!(!is_whitelist_server("DIRECT", "DIRECT", &cfg));
+        assert!(!is_whitelist_server("", "", &cfg));
+    }
+
+    #[test]
+    fn test_failover_whitelist_follow_logic() {
+        let mut cfg = crate::config::AppConfig::default();
+
+        // When whitelist disabled: should not follow
+        cfg.whitelist.enabled = false;
+        cfg.whitelist.follow_failover = true;
+        let should_follow_disabled = cfg.whitelist.enabled && (
+            cfg.whitelist.follow_failover
+            || cfg.whitelist.target_server.as_deref() == Some("follow_failover")
+            || cfg.whitelist.target_server.as_deref().map_or(true, |s| s.trim().is_empty())
+        );
+        assert!(!should_follow_disabled);
+
+        // When whitelist enabled and follow_failover = true
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.follow_failover = true;
+        cfg.whitelist.target_server = None;
+        let should_follow_enabled = cfg.whitelist.enabled && (
+            cfg.whitelist.follow_failover
+            || cfg.whitelist.target_server.as_deref() == Some("follow_failover")
+            || cfg.whitelist.target_server.as_deref().map_or(true, |s| s.trim().is_empty())
+        );
+        assert!(should_follow_enabled);
+
+        // When target_server is explicitly "follow_failover"
+        cfg.whitelist.follow_failover = false;
+        cfg.whitelist.target_server = Some("follow_failover".into());
+        let should_follow_explicit = cfg.whitelist.enabled && (
+            cfg.whitelist.follow_failover
+            || cfg.whitelist.target_server.as_deref() == Some("follow_failover")
+            || cfg.whitelist.target_server.as_deref().map_or(true, |s| s.trim().is_empty())
+        );
+        assert!(should_follow_explicit);
+
+        // When pinned to specific target server and follow_failover = false
+        cfg.whitelist.follow_failover = false;
+        cfg.whitelist.target_server = Some("pinned-proxy-01".into());
+        let should_follow_pinned = cfg.whitelist.enabled && (
+            cfg.whitelist.follow_failover
+            || cfg.whitelist.target_server.as_deref() == Some("follow_failover")
+            || cfg.whitelist.target_server.as_deref().map_or(true, |s| s.trim().is_empty())
+        );
+        assert!(!should_follow_pinned);
+    }
+
+    #[test]
+    fn test_whitelist_group_switching_payload_and_urlencoding() {
+        // Проверка формирования URL и полезной нагрузки для переключения группы 🛡️ Whitelist
+        let group_name = crate::routing::WHITELIST_GROUP_NAME;
+        assert_eq!(group_name, "🛡️ Whitelist");
+
+        let encoded_group = crate::mihomo::urlencoding_lite(group_name);
+        assert!(encoded_group.contains("Whitelist"));
+        // Эмодзи щита и пробел должны быть закодированы через %XX
+        assert!(!encoded_group.contains(' '));
+        assert!(!encoded_group.contains('🛡'));
+
+        let target_node = "NL [БС] Fast";
+        let payload = serde_json::json!({ "name": target_node });
+        assert_eq!(payload["name"], "NL [БС] Fast");
     }
 }

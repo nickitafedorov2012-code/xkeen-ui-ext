@@ -901,3 +901,48 @@ export interface SystemDiagnostics {
   }
   timestamp: string
 }
+
+// ============================================================================
+// Режим белых списков (Whitelist Mode)
+// ============================================================================
+
+export interface WhitelistDevice {
+  mac: string
+  ip: string
+  name?: string
+  enabled: boolean
+}
+
+export interface WhitelistConfig {
+  enabled: boolean
+  target_server?: string | null
+  follow_failover: boolean
+  devices: WhitelistDevice[]
+  custom_domains: string[]
+}
+
+export interface WhitelistStatusResponse {
+  enabled: boolean
+  target_server?: string | null
+  follow_failover: boolean
+  devices: WhitelistDevice[]
+  custom_domains: string[]
+  domestic_catalog_count: number
+  active_server?: string
+  whitelist_servers?: string[]
+  whitelist_providers?: string[]
+}
+
+export interface WhitelistCatalogItem {
+  domain: string
+  category: string
+  name?: string
+  description?: string
+}
+
+export interface WhitelistCatalogResponse {
+  total: number
+  domains: string[]
+  categories: Record<string, string[]>
+  items?: WhitelistCatalogItem[]
+}

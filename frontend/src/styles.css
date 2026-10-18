@@ -2180,7 +2180,8 @@ table.devices-table th:nth-child(6) { width: 80px; } /* traffic */
 table.devices-table th:nth-child(7) { width: 140px; } /* server */
 table.devices-table th:nth-child(8) { width: 112px; text-align: center; } /* zapret */
 table.devices-table th:nth-child(9) { width: 105px; text-align: center; } /* gaming */
-table.devices-table th:nth-child(10) { width: 72px; text-align: center; } /* gear */
+table.devices-table th:nth-child(10) { width: 72px; text-align: center; } /* whitelist (БС) */
+table.devices-table th:nth-child(11) { width: 72px; text-align: center; } /* gear */
 
 /* Ввод ограничения скорости (Мбит/с) */
 .device-speed-input-wrap {
@@ -2524,7 +2525,319 @@ table.devices-table td {
   border-color: #cbd5e1;
 }
 
+/* --- Кнопка переключения Белого списка (БС) для устройства (Per-Device Whitelist) --- */
+.device-whitelist-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 26px;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  user-select: none;
+  white-space: nowrap;
+  box-sizing: border-box;
+}
+
+.device-whitelist-btn.active {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.22) 0%, rgba(52, 211, 153, 0.22) 100%);
+  color: #34d399;
+  border: 1px solid rgba(52, 211, 153, 0.65);
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.45), inset 0 0 8px rgba(16, 185, 129, 0.15);
+  text-shadow: 0 0 8px rgba(52, 211, 153, 0.5);
+}
+
+.device-whitelist-btn.active:hover {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.35) 0%, rgba(52, 211, 153, 0.35) 100%);
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.7), inset 0 0 10px rgba(16, 185, 129, 0.25);
+  border-color: #34d399;
+}
+
+.device-whitelist-btn.active .device-whitelist-icon,
+.device-whitelist-btn.active .btn-icon {
+  filter: drop-shadow(0 0 4px #34d399);
+  display: flex;
+  align-items: center;
+}
+
+.device-whitelist-btn.inactive {
+  background: rgba(255, 255, 255, 0.04);
+  color: #64748b;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: none;
+}
+
+.device-whitelist-btn.inactive:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #94a3b8;
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.device-whitelist-btn.inactive .device-whitelist-icon,
+.device-whitelist-btn.inactive .btn-icon {
+  filter: none;
+  opacity: 0.6;
+  display: flex;
+  align-items: center;
+}
+
+.device-whitelist-label,
+.device-whitelist-btn .btn-label {
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  letter-spacing: 0.2px;
+}
+
+[data-theme="light"] .device-whitelist-btn.active {
+  background: rgba(16, 185, 129, 0.15);
+  color: #059669;
+  border-color: #059669;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.35);
+  text-shadow: none;
+}
+
+[data-theme="light"] .device-whitelist-btn.inactive {
+  background: #f1f5f9;
+  color: #94a3b8;
+  border-color: #cbd5e1;
+}
+
+/* --- Стили страницы "Белые списки" (Whitelist Tab) --- */
+.whitelist-hero-card {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.08) 0%, rgba(5, 150, 105, 0.04) 100%);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 20px;
+  position: relative;
+  overflow: hidden;
+}
+
+.whitelist-hero-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.whitelist-hero-title-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.whitelist-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.whitelist-badge.active {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+  border: 1px solid rgba(52, 211, 153, 0.4);
+}
+
+.whitelist-badge.inactive {
+  background: rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.whitelist-master-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  user-select: none;
+}
+
+.whitelist-master-toggle-btn.btn-active {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  color: #ffffff;
+  border: none;
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.4);
+}
+
+.whitelist-master-toggle-btn.btn-active:hover {
+  background: linear-gradient(135deg, #059669 0%, #047857 100%);
+  box-shadow: 0 0 20px rgba(16, 185, 129, 0.6);
+}
+
+.whitelist-master-toggle-btn.btn-inactive {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.whitelist-master-toggle-btn.btn-inactive:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.whitelist-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.whitelist-kpi-card {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.whitelist-kpi-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: #f1f5f9;
+  font-family: Consolas, monospace;
+}
+
+.whitelist-kpi-label {
+  font-size: 11.5px;
+  color: #94a3b8;
+  margin-top: 2px;
+}
+
+.whitelist-pills {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+
+.whitelist-pill {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #94a3b8;
+  border-radius: 20px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.whitelist-pill:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #f1f5f9;
+}
+
+.whitelist-pill.active {
+  background: rgba(16, 185, 129, 0.2);
+  border-color: #10b981;
+  color: #34d399;
+  font-weight: 600;
+}
+
+.whitelist-catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.whitelist-domain-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  transition: all 0.15s ease;
+}
+
+.whitelist-domain-card:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(52, 211, 153, 0.3);
+}
+
+.whitelist-domain-name {
+  font-family: Consolas, monospace;
+  font-size: 13px;
+  color: #f1f5f9;
+  font-weight: 500;
+  word-break: break-all;
+}
+
+.whitelist-domain-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.whitelist-tag-direct {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.whitelist-tag-cat {
+  background: rgba(255, 255, 255, 0.06);
+  color: #94a3b8;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.whitelist-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  color: #34d399;
+  border-radius: 6px;
+  padding: 4px 8px 4px 10px;
+  font-size: 12px;
+  font-family: Consolas, monospace;
+}
+
+.whitelist-chip-remove {
+  background: transparent;
+  border: none;
+  color: #f87171;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.whitelist-chip-remove:hover {
+  color: #ef4444;
+}
+
 /* Offline Section */
+
 .offline-section-title {
   padding: 14px 0 6px;
   font-size: 11px;

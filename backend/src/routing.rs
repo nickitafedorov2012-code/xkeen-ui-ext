@@ -23,6 +23,16 @@ pub const GROUPS_END: &str = "# --- AUTO-DEVICE-GROUPS-END ---";
 pub const RULES_BEGIN: &str = "# --- AUTO-DEVICE-RULES-BEGIN ---";
 pub const RULES_END: &str = "# --- AUTO-DEVICE-RULES-END ---";
 
+pub use crate::whitelist_catalog::*;
+
+pub const WHITELIST_BEGIN: &str = "# --- AUTO-WHITELIST-BEGIN ---";
+pub const WHITELIST_END: &str = "# --- AUTO-WHITELIST-END ---";
+pub const WHITELIST_DNS_BEGIN: &str = "# --- AUTO-WHITELIST-DNS-BEGIN ---";
+pub const WHITELIST_DNS_END: &str = "# --- AUTO-WHITELIST-DNS-END ---";
+pub const WHITELIST_GROUP_BEGIN: &str = "# --- AUTO-WHITELIST-GROUP-BEGIN ---";
+pub const WHITELIST_GROUP_END: &str = "# --- AUTO-WHITELIST-GROUP-END ---";
+pub const WHITELIST_GROUP_NAME: &str = "🛡️ Whitelist";
+
 
 pub fn validate_marker_pair(yaml: &str, begin: &str, end: &str) -> Result<(), String> {
     let mut opened = false;
@@ -1556,6 +1566,309 @@ pub fn apply_gaming_rules(
     Ok(out.join("\n"))
 }
 
+/// Возвращает полный список доменов белого списка (376 базовых отечественных сервисов + пользовательские домены).
+pub fn get_all_whitelist_domains(whitelist_cfg: &crate::config::WhitelistConfig) -> Vec<String> {
+    let mut out: Vec<String> = DOMESTIC_WHITELIST_DOMAINS.iter().map(|&s| s.to_string()).collect();
+    for d in &whitelist_cfg.custom_domains {
+        let clean = crate::config::normalize_domain(d);
+        if !clean.is_empty() && crate::config::is_valid_domain(&clean) && !out.contains(&clean) {
+            out.push(clean);
+        }
+    }
+    out
+}
+
+/// Удаление блока правил и селектор-группы режима белых списков из YAML.
+pub fn remove_whitelist_rules(yaml: &str) -> String {
+    let mut out = Vec::new();
+    let mut skip_rules = false;
+    let mut skip_group = false;
+    for line in yaml.lines() {
+        let t = line.trim();
+        if t == WHITELIST_BEGIN {
+            skip_rules = true;
+            continue;
+        }
+        if t == WHITELIST_END {
+            skip_rules = false;
+            continue;
+        }
+        if t == WHITELIST_GROUP_BEGIN {
+            skip_group = true;
+            continue;
+        }
+        if t == WHITELIST_GROUP_END {
+            skip_group = false;
+            continue;
+        }
+        if !skip_rules && !skip_group {
+            out.push(line);
+        }
+    }
+    out.join("\n")
+}
+
+/// Удаление DNS-правил nameserver-policy режима белых списков из YAML.
+pub fn remove_whitelist_dns(yaml: &str) -> String {
+    if !yaml.contains(WHITELIST_DNS_BEGIN) {
+        return yaml.to_string();
+    }
+    let mut out = Vec::new();
+    let mut skipping = false;
+    for line in yaml.lines() {
+        let t = line.trim();
+        if t == WHITELIST_DNS_BEGIN {
+            skipping = true;
+            continue;
+        }
+        if t == WHITELIST_DNS_END {
+            skipping = false;
+            continue;
+        }
+        if !skipping {
+            out.push(line);
+        }
+    }
+    out.join("\n")
+}
+
+/// Применение правил режима белых списков:
+/// 1. Вставка селектор-группы '🛡️ Whitelist' в proxy-groups:
+/// 2. Вставка блока # --- AUTO-WHITELIST-BEGIN --- в rules:
+///    - Отечественные домены (376 базовых + custom) -> DIRECT (строго без GEOIP-RU)
+///    - Трафик назначенных устройств -> 🛡️ Whitelist (или выбранный target_server)
+/// Размещается непосредственно над AUTO-DEVICE-RULES.
+pub fn apply_whitelist_rules(
+    content: &str,
+    cfg: &crate::config::AppConfig,
+    active_tunnel_node: Option<&str>,
+) -> String {
+    let clean = remove_whitelist_rules(content);
+    let active_devices: Vec<&crate::config::WhitelistDevice> = cfg
+        .whitelist
+        .devices
+        .iter()
+        .filter(|d| d.enabled && !d.ip.trim().is_empty())
+        .collect();
+
+    if !cfg.whitelist.enabled || active_devices.is_empty() {
+        return clean;
+    }
+
+    // 1. Формирование и вставка proxy-group 🛡️ Whitelist если она отсутствует
+    let existing_groups = parse_existing_group_names(&clean);
+    let static_proxies = parse_static_proxy_names(&clean);
+    let has_providers_section = clean.contains("proxy-providers:");
+    let providers = parse_provider_names(&clean);
+
+    let target_srv = match cfg.whitelist.target_server.as_deref() {
+        Some(s) if !s.trim().is_empty() && s.trim() != "follow_failover" => s.trim(),
+        _ => match active_tunnel_node {
+            Some(node) if !node.trim().is_empty() => node.trim(),
+            _ => "Fastest",
+        },
+    };
+
+    let mut with_group = clean;
+    if !existing_groups.iter().any(|g| g == WHITELIST_GROUP_NAME) {
+        let lines: Vec<&str> = with_group.lines().collect();
+        if let Some(pg_idx) = lines.iter().position(|l| l.trim_end() == "proxy-groups:") {
+            let mut pg_out = Vec::with_capacity(lines.len() + 16);
+            for (i, line) in lines.iter().enumerate() {
+                pg_out.push(line.to_string());
+                if i == pg_idx {
+                    pg_out.push(WHITELIST_GROUP_BEGIN.to_string());
+                    pg_out.push(format!("  - name: '{WHITELIST_GROUP_NAME}'"));
+                    pg_out.push("    type: select".to_string());
+                    pg_out.push("    proxies:".to_string());
+
+                    let mut group_proxies = Vec::new();
+                    let target_is_static_or_group = target_srv == "DIRECT"
+                        || target_srv == "REJECT"
+                        || existing_groups.iter().any(|g| g == target_srv)
+                        || static_proxies.iter().any(|p| p == target_srv)
+                        || (!has_providers_section && existing_groups.len() <= 1 && static_proxies.is_empty());
+
+                    if target_is_static_or_group {
+                        group_proxies.push(target_srv.to_string());
+                    }
+                    for p in &["Fastest", "PROXY", "Fallback"] {
+                        let exists = existing_groups.iter().any(|g| g == *p)
+                            || with_group.contains(&format!("- {p}"))
+                            || existing_groups.is_empty();
+                        if exists && !group_proxies.iter().any(|x| x == *p) {
+                            group_proxies.push(p.to_string());
+                        }
+                    }
+                    for sp in &static_proxies {
+                        if !group_proxies.iter().any(|x| x == sp) {
+                            group_proxies.push(sp.clone());
+                        }
+                    }
+                    if !group_proxies.iter().any(|x| x == "DIRECT") {
+                        group_proxies.push("DIRECT".to_string());
+                    }
+                    for p in &group_proxies {
+                        if p.contains(':') || p.contains('[') || p.contains(']') || p.contains('#') || p.contains('\'') || p.contains('"') {
+                            pg_out.push(format!("      - '{}'", p.replace('\'', "''")));
+                        } else {
+                            pg_out.push(format!("      - {p}"));
+                        }
+                    }
+                    if !providers.is_empty() {
+                        pg_out.push("    use:".to_string());
+                        for p in &providers {
+                            let p_trim = p.trim();
+                            if !p_trim.is_empty() {
+                                pg_out.push(format!("      - {p_trim}"));
+                            }
+                        }
+                    }
+                    pg_out.push(WHITELIST_GROUP_END.to_string());
+                }
+            }
+            with_group = pg_out.join("\n");
+        }
+    }
+
+    // 2. Формирование правил rules:
+    // Отечественные домены -> DIRECT
+    // Устройства -> WHITELIST_GROUP_NAME (или явный target_server)
+    // ВАЖНО: Никакого GEOIP,RU wildcard!
+    let mut wl_rules = Vec::new();
+    wl_rules.push(WHITELIST_BEGIN.to_string());
+
+    let all_domains = get_all_whitelist_domains(&cfg.whitelist);
+    for dom in &all_domains {
+        wl_rules.push(format!("  - DOMAIN-SUFFIX,{dom},DIRECT"));
+    }
+
+    let dev_target = match cfg.whitelist.target_server.as_deref() {
+        Some(s) if !s.trim().is_empty() && s.trim() != "follow_failover" => s.trim(),
+        _ => WHITELIST_GROUP_NAME,
+    };
+
+    for dev in &active_devices {
+        let ip_trim = dev.ip.trim();
+        let cidr = if ip_trim.contains('/') {
+            ip_trim.to_string()
+        } else {
+            format!("{ip_trim}/32")
+        };
+        wl_rules.push(format!("  - SRC-IP-CIDR,{cidr},{dev_target}"));
+    }
+    wl_rules.push(WHITELIST_END.to_string());
+
+    // 3. Вставка в rules: непосредственно над AUTO-DEVICE-RULES (или перед fallback/в конце rules)
+    let lines: Vec<&str> = with_group.lines().collect();
+    let rules_pos = match lines.iter().position(|l| l.trim_end() == "rules:") {
+        Some(pos) => pos,
+        None => return with_group,
+    };
+
+    let target_insert_idx = if let Some(dev_rules_idx) = lines[rules_pos + 1..].iter().position(|l| l.trim() == RULES_BEGIN) {
+        rules_pos + 1 + dev_rules_idx
+    } else if let Some(fallback_idx) = lines[rules_pos + 1..].iter().position(|l| {
+        let t = l.trim();
+        t.starts_with("- GEOIP,") || t.starts_with("- MATCH,")
+    }) {
+        rules_pos + 1 + fallback_idx
+    } else {
+        rules_pos + 1
+    };
+
+    let mut out = Vec::with_capacity(lines.len() + wl_rules.len());
+    for (i, line) in lines.iter().enumerate() {
+        if i == target_insert_idx {
+            for r in &wl_rules {
+                out.push(r.clone());
+            }
+        }
+        out.push(line.to_string());
+    }
+    if target_insert_idx >= lines.len() {
+        for r in &wl_rules {
+            out.push(r.clone());
+        }
+    }
+
+    out.join("\n")
+}
+
+/// Применение DNS nameserver-policy для доменов режима белых списков.
+/// Направляет резолвинг отечественных доменов в локальный DNS роутера (127.0.0.1:53).
+pub fn apply_whitelist_dns(
+    content: &str,
+    cfg: &crate::config::AppConfig,
+    local_dns_endpoint: &str,
+) -> String {
+    let clean = remove_whitelist_dns(content);
+    let active_devices: Vec<&crate::config::WhitelistDevice> = cfg
+        .whitelist
+        .devices
+        .iter()
+        .filter(|d| d.enabled && !d.ip.trim().is_empty())
+        .collect();
+
+    if !cfg.whitelist.enabled || active_devices.is_empty() {
+        return clean;
+    }
+
+    let endpoint = if local_dns_endpoint.trim().is_empty() {
+        "127.0.0.1:53"
+    } else {
+        local_dns_endpoint.trim()
+    };
+
+    let all_domains = get_all_whitelist_domains(&cfg.whitelist);
+    let mut dns_block = Vec::with_capacity(all_domains.len() + 2);
+    dns_block.push(format!("    {WHITELIST_DNS_BEGIN}"));
+    for dom in &all_domains {
+        dns_block.push(format!("    '+.{dom}': '{endpoint}'"));
+    }
+    dns_block.push(format!("    {WHITELIST_DNS_END}"));
+
+    let lines: Vec<&str> = clean.lines().collect();
+    if let Some(pos) = lines.iter().position(|l| l.trim() == "nameserver-policy:") {
+        let mut out = Vec::with_capacity(lines.len() + dns_block.len());
+        for (i, line) in lines.iter().enumerate() {
+            out.push(line.to_string());
+            if i == pos {
+                for entry in &dns_block {
+                    out.push(entry.clone());
+                }
+            }
+        }
+        return out.join("\n");
+    }
+
+    if let Some(dns_pos) = lines.iter().position(|l| l.trim() == "dns:" || l.trim_end() == "dns:") {
+        let mut out = Vec::with_capacity(lines.len() + dns_block.len() + 2);
+        for (i, line) in lines.iter().enumerate() {
+            out.push(line.to_string());
+            if i == dns_pos {
+                out.push("  nameserver-policy:".to_string());
+                for entry in &dns_block {
+                    out.push(entry.clone());
+                }
+            }
+        }
+        return out.join("\n");
+    }
+
+    let mut out = Vec::with_capacity(lines.len() + dns_block.len() + 3);
+    for line in lines {
+        out.push(line.to_string());
+    }
+    out.push("dns:".to_string());
+    out.push("  enable: true".to_string());
+    out.push("  nameserver-policy:".to_string());
+    for entry in &dns_block {
+        out.push(entry.clone());
+    }
+    out.join("\n")
+}
+
 /// Удаление доменных блоков (DIRECT/FORCE/DEVICE-DOMAINS) из YAML.
 pub fn remove_domain_blocks(yaml: &str) -> String {
     let has_direct_end = yaml.contains(DIRECT_END);
@@ -2205,6 +2518,15 @@ pub fn apply_routing_with_filters(
     if let Ok(with_devices) = apply_assignments(&current, &assignments, &providers) {
         current = with_devices;
     }
+
+    // 1.1. Режим белых списков (376 отечественных сервисов напрямую, прокси-туннель для устройств)
+    // Размещается непосредственно над AUTO-DEVICE-RULES и под AdBlock
+    let active_wl_tunnel = match cfg.whitelist.target_server.as_deref() {
+        Some(s) if !s.trim().is_empty() && s.trim() != "follow_failover" => Some(s.trim()),
+        _ => None,
+    };
+    current = apply_whitelist_rules(&current, cfg, active_wl_tunnel);
+    current = apply_whitelist_dns(&current, cfg, "127.0.0.1:53");
 
     // 2. Игнор-лист
     if let Ok(with_ig) = apply_ignore_to_groups(&current, &cfg.ignore_servers) {
@@ -3335,6 +3657,173 @@ rules:
         assert!(!disabled.contains("127.0.0.1:5353"));
         assert!(!disabled.contains(AGH_DNS_END));
         assert!(disabled.contains("- 77.88.8.8"), "Original resolvers must remain intact");
+    }
+
+    #[test]
+    fn test_domestic_catalog_invariants() {
+        assert_eq!(DOMESTIC_WHITELIST_DOMAINS.len(), 376, "Must contain exactly 376 base domains");
+        assert_eq!(DOMESTIC_CATALOG.len(), 376, "Catalog entries must equal 376");
+
+        let mut seen = std::collections::HashSet::new();
+        for &dom in DOMESTIC_WHITELIST_DOMAINS {
+            assert!(seen.insert(dom), "Duplicate domain found in catalog: {}", dom);
+            assert!(crate::config::is_valid_domain(dom), "Domain failed validity check: {}", dom);
+            assert!(!dom.contains("://"), "Domain must not contain protocol: {}", dom);
+            assert!(!dom.contains('/'), "Domain must not contain path: {}", dom);
+            assert!(!dom.starts_with("www."), "Domain must not contain www prefix: {}", dom);
+        }
+    }
+
+    #[test]
+    fn test_apply_whitelist_rules_lifecycle() {
+        let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - GEOIP,RU,DIRECT\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.devices.push(crate::config::WhitelistDevice {
+            mac: "AA:BB:CC:DD:EE:01".into(),
+            ip: "192.168.1.105".into(),
+            enabled: true,
+            name: Some("Work Laptop".into()),
+        });
+
+        // 1. Применение правил
+        let applied = apply_whitelist_rules(base_yaml, &cfg, None);
+        assert!(applied.contains(WHITELIST_BEGIN));
+        assert!(applied.contains(WHITELIST_END));
+        assert!(applied.contains(WHITELIST_GROUP_BEGIN));
+        assert!(applied.contains(WHITELIST_GROUP_END));
+        assert!(applied.contains(&format!("- name: '{WHITELIST_GROUP_NAME}'")));
+        assert!(applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
+        assert!(applied.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
+        assert!(applied.contains("DOMAIN-SUFFIX,vk.com,DIRECT"));
+        assert!(applied.contains(&format!("SRC-IP-CIDR,192.168.1.105/32,{WHITELIST_GROUP_NAME}")));
+        assert!(validate_marker_pair(&applied, WHITELIST_BEGIN, WHITELIST_END).is_ok());
+        assert!(validate_marker_pair(&applied, WHITELIST_GROUP_BEGIN, WHITELIST_GROUP_END).is_ok());
+
+        // 2. Отключение — чистое удаление
+        cfg.whitelist.enabled = false;
+        let disabled = apply_whitelist_rules(&applied, &cfg, None);
+        assert!(!disabled.contains(WHITELIST_BEGIN));
+        assert!(!disabled.contains(WHITELIST_END));
+        assert!(!disabled.contains(WHITELIST_GROUP_BEGIN));
+        assert!(!disabled.contains(WHITELIST_GROUP_END));
+        assert!(!disabled.contains("SRC-IP-CIDR,192.168.1.105/32"));
+        assert!(disabled.contains("GEOIP,RU,DIRECT"), "Original fallback rules must be preserved");
+    }
+
+    #[test]
+    fn test_whitelist_strict_direct_no_geoip_ru_wildcard() {
+        let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - GEOIP,RU,DIRECT\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.devices.push(crate::config::WhitelistDevice {
+            mac: "AA:BB:CC:DD:EE:01".into(),
+            ip: "192.168.1.105".into(),
+            enabled: true,
+            name: Some("Work Laptop".into()),
+        });
+
+        let applied = apply_whitelist_rules(base_yaml, &cfg, None);
+        let start = applied.find(WHITELIST_BEGIN).expect("must find begin");
+        let end = applied.find(WHITELIST_END).expect("must find end");
+        let wl_block = &applied[start..end];
+
+        // Проверяем, что внутри блока белых списков НЕТ правила GEOIP,RU
+        assert!(
+            !wl_block.contains("GEOIP,RU"),
+            "CRITICAL REGRESSION: Whitelist block must NEVER contain broad GEOIP,RU wildcard!"
+        );
+        assert!(
+            !wl_block.contains("GEOIP"),
+            "Whitelist block must strictly use explicit DOMAIN-SUFFIX and SRC-IP-CIDR rules!"
+        );
+    }
+
+    #[test]
+    fn test_whitelist_rule_hierarchy_precedes_device_assignments() {
+        let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - GEOIP,RU,DIRECT\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.device_routing.insert("192.168.1.105".into(), crate::config::DeviceRouting {
+            servers: vec!["Fastest".into()],
+            ..Default::default()
+        });
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.devices.push(crate::config::WhitelistDevice {
+            mac: "AA:BB:CC:DD:EE:01".into(),
+            ip: "192.168.1.105".into(),
+            enabled: true,
+            name: Some("Work Laptop".into()),
+        });
+
+        let (applied, _) = apply_routing(base_yaml, &cfg).expect("apply_routing must succeed");
+        let wl_pos = applied.find(WHITELIST_BEGIN).expect("WHITELIST_BEGIN must be present");
+        let dev_pos = applied.find(RULES_BEGIN).expect("RULES_BEGIN must be present");
+
+        // AUTO-WHITELIST обязан быть ВЫШЕ AUTO-DEVICE-RULES в секции rules:
+        assert!(
+            wl_pos < dev_pos,
+            "CRITICAL REGRESSION: Whitelist rules ({}) must precede general device rules ({}) to avoid routing bypass",
+            wl_pos, dev_pos
+        );
+    }
+
+    #[test]
+    fn test_whitelist_nameserver_policy_injection() {
+        let base_yaml = "port: 7890\ndns:\n  enable: true\n  nameserver:\n    - 77.88.8.8\nrules:\n  - MATCH,DIRECT\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.devices.push(crate::config::WhitelistDevice {
+            mac: "AA:BB:CC:DD:EE:01".into(),
+            ip: "192.168.1.105".into(),
+            enabled: true,
+            name: Some("Phone".into()),
+        });
+
+        let applied = apply_whitelist_dns(base_yaml, &cfg, "127.0.0.1:53");
+        assert!(applied.contains(WHITELIST_DNS_BEGIN));
+        assert!(applied.contains(WHITELIST_DNS_END));
+        assert!(applied.contains("nameserver-policy:"));
+        assert!(applied.contains("'+.gosuslugi.ru': '127.0.0.1:53'"));
+        assert!(applied.contains("'+.sberbank.ru': '127.0.0.1:53'"));
+        assert!(applied.contains("- 77.88.8.8"), "Existing nameservers must be preserved");
+
+        // Отключение очищает nameserver-policy
+        cfg.whitelist.enabled = false;
+        let disabled = apply_whitelist_dns(&applied, &cfg, "127.0.0.1:53");
+        assert!(!disabled.contains(WHITELIST_DNS_BEGIN));
+        assert!(!disabled.contains(WHITELIST_DNS_END));
+        assert!(!disabled.contains("'+.gosuslugi.ru'"));
+        assert!(disabled.contains("- 77.88.8.8"));
+    }
+
+    #[test]
+    fn test_whitelist_marker_pair_validation() {
+        let valid_yaml = format!("rules:\n{}\n  - DOMAIN-SUFFIX,gosuslugi.ru,DIRECT\n{}\n", WHITELIST_BEGIN, WHITELIST_END);
+        assert!(validate_marker_pair(&valid_yaml, WHITELIST_BEGIN, WHITELIST_END).is_ok());
+
+        let missing_end = format!("rules:\n{}\n  - DOMAIN-SUFFIX,gosuslugi.ru,DIRECT\n", WHITELIST_BEGIN);
+        assert!(validate_marker_pair(&missing_end, WHITELIST_BEGIN, WHITELIST_END).is_err());
+
+        let duplicate_begin = format!("rules:\n{}\n{}\n{}\n", WHITELIST_BEGIN, WHITELIST_BEGIN, WHITELIST_END);
+        assert!(validate_marker_pair(&duplicate_begin, WHITELIST_BEGIN, WHITELIST_END).is_err());
+    }
+
+    #[test]
+    fn test_whitelist_custom_domains() {
+        let mut wl_cfg = crate::config::WhitelistConfig::default();
+        wl_cfg.custom_domains = vec![
+            "https://my-internal-portal.ru/index.html".into(),
+            "www.special-bank.ru".into(),
+            "invalid domain name with spaces".into(),
+            "192.168.1.1".into(),
+        ];
+
+        let all = get_all_whitelist_domains(&wl_cfg);
+        assert_eq!(all.len(), 376 + 2, "Must add exactly 2 valid custom domains");
+        assert!(all.contains(&"my-internal-portal.ru".to_string()));
+        assert!(all.contains(&"special-bank.ru".to_string()));
+        assert!(!all.contains(&"invalid domain name with spaces".to_string()));
+        assert!(!all.contains(&"192.168.1.1".to_string()));
     }
 }
 

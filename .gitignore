@@ -18,3 +18,4 @@ audit_full_prompt*.txt
 bundle_codebase.py
 generate_*.py
 xkeen_*.md
+.agents/

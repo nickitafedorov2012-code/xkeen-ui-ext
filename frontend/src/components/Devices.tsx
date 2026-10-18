@@ -12,6 +12,7 @@ import {
   type PolicyInfo,
   type RoutingAssignmentInfo,
   type ServerInfo,
+  type WhitelistStatusResponse,
 } from '../types'
 
 interface Props {
@@ -96,11 +97,12 @@ export default function Devices({ notify }: Props) {
   } | null>(null)
 
   const [gamingDeviceMacs, setGamingDeviceMacs] = useState<Set<string>>(new Set())
+  const [whitelistDeviceMacs, setWhitelistDeviceMacs] = useState<Set<string>>(new Set())
   const [whitelistProviders, setWhitelistProviders] = useState<string[]>([])
 
   const load = useCallback(async () => {
     try {
-      const [d, p, s, r, dr, zDev, gamingRes] = await Promise.all([
+      const [d, p, s, r, dr, zDev, gamingRes, whitelistRes] = await Promise.all([
         apiGet<{ devices: DeviceInfo[] }>('devices'),
         apiGet<{ policies: PolicyInfo[] }>('policies'),
         apiGet<{ servers: ServerInfo[]; whitelist_providers?: string[] }>('servers'),
@@ -113,6 +115,7 @@ export default function Devices({ notify }: Props) {
           excluded_devices: [] as string[],
         })),
         apiGet<{ is_active?: boolean; enabled?: boolean; config?: { enabled?: boolean; devices?: Array<{ mac: string; enabled: boolean }> } }>('gaming/status').catch(() => null),
+        apiGet<WhitelistStatusResponse>('whitelist/status').catch(() => null),
       ])
       setDevices(d.devices)
       setPolicies(p.policies)
@@ -132,6 +135,18 @@ export default function Devices({ notify }: Props) {
         }
         setGamingDeviceMacs(macs)
       }
+      const wlMacs = new Set<string>()
+      if (whitelistRes && whitelistRes.devices) {
+        for (const wd of whitelistRes.devices) {
+          if (wd.enabled) wlMacs.add(wd.mac.toLowerCase())
+        }
+      }
+      if (d && d.devices) {
+        for (const dev of d.devices) {
+          if ((dev as any).is_whitelist) wlMacs.add(dev.mac.toLowerCase())
+        }
+      }
+      setWhitelistDeviceMacs(wlMacs)
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка загрузки устройств', true)
     } finally {
@@ -482,6 +497,38 @@ export default function Devices({ notify }: Props) {
     }
   }
 
+  const handleToggleWhitelist = async (ip: string, mac: string, enabled: boolean) => {
+    const macLower = mac.toLowerCase()
+    setWhitelistDeviceMacs((prev) => {
+      const next = new Set(prev)
+      if (enabled) {
+        next.add(macLower)
+      } else {
+        next.delete(macLower)
+      }
+      return next
+    })
+    setBusy(true)
+    try {
+      await apiPost('whitelist/device/toggle', {
+        ip,
+        mac,
+        enabled,
+      })
+      notify(
+        enabled
+          ? `🛡️ Режим белых списков включен для ${ip || mac}`
+          : `⚪ Режим белых списков выключен для ${ip || mac}`
+      )
+      window.dispatchEvent(new CustomEvent('xr:refresh-status'))
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка переключения белого списка', true)
+      await load()
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const isDeviceZapretActive = (d: DeviceInfo) => {
     const isExcluded =
       (Boolean(d.ip) && excludedZapretDevices.has(d.ip)) ||
@@ -598,6 +645,7 @@ export default function Devices({ notify }: Props) {
                 <th>Server</th>
                 <th style={{ textAlign: 'center' }}>Zapret (DPI)</th>
                 <th style={{ textAlign: 'center' }}>Игры 🎮</th>
+                <th style={{ textAlign: 'center' }}>БС 🛡️</th>
                 <th />
               </tr>
             </thead>
@@ -613,6 +661,7 @@ export default function Devices({ notify }: Props) {
                   <td><div className="skeleton-shimmer" style={{ width: 110, height: 24, borderRadius: 6 }} /></td>
                   <td style={{ textAlign: 'center' }}><div className="skeleton-shimmer" style={{ width: 85, height: 24, borderRadius: 6 }} /></td>
                   <td style={{ textAlign: 'center' }}><div className="skeleton-shimmer" style={{ width: 75, height: 24, borderRadius: 6 }} /></td>
+                  <td style={{ textAlign: 'center' }}><div className="skeleton-shimmer" style={{ width: 68, height: 24, borderRadius: 6 }} /></td>
                   <td style={{ textAlign: 'center' }}><div className="skeleton-shimmer" style={{ width: 40, height: 24, borderRadius: 6 }} /></td>
                 </tr>
               ))}
@@ -653,6 +702,7 @@ export default function Devices({ notify }: Props) {
                 </th>
                 <th style={{ textAlign: 'center' }}>Zapret (DPI)</th>
                 <th style={{ textAlign: 'center' }}>Игры 🎮</th>
+                <th style={{ textAlign: 'center' }} title="Режим белых списков (БС)">БС 🛡️</th>
                 <th />
               </tr>
             </thead>
@@ -661,7 +711,7 @@ export default function Devices({ notify }: Props) {
               {(statusFilter === 'all' || statusFilter === 'online') && (
                 <>
                   <tr>
-                    <td colSpan={10} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
+                    <td colSpan={11} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
                       <span className="devices-group-header online">
                         Online ({sortedOnline.length})
                       </span>
@@ -669,7 +719,7 @@ export default function Devices({ notify }: Props) {
                   </tr>
                   {sortedOnline.length === 0 && (
                     <tr>
-                      <td colSpan={10} className="muted small" style={{ padding: '10px 14px' }}>
+                      <td colSpan={11} className="muted small" style={{ padding: '10px 14px' }}>
                         Нет устройств в сети
                       </td>
                     </tr>
@@ -698,6 +748,8 @@ export default function Devices({ notify }: Props) {
                       gamingActive={gamingDeviceMacs.has(d.mac.toLowerCase())}
                       onToggleGaming={handleToggleGaming}
                       isGamingCompat={isGamingCompatByIp.has(d.ip)}
+                      whitelistActive={whitelistDeviceMacs.has(d.mac.toLowerCase())}
+                      onToggleWhitelist={handleToggleWhitelist}
                     />
                   ))}
                 </>
@@ -707,7 +759,7 @@ export default function Devices({ notify }: Props) {
               {statusFilter === 'all' && (
                 <>
                   <tr>
-                    <td colSpan={10} style={{ padding: '16px 14px 4px', borderBottom: 'none' }}>
+                    <td colSpan={11} style={{ padding: '16px 14px 4px', borderBottom: 'none' }}>
                       <div
                         className="offline-accordion-row"
                         onClick={() => setOfflineExpanded((prev) => !prev)}
@@ -753,6 +805,8 @@ export default function Devices({ notify }: Props) {
                         gamingActive={gamingDeviceMacs.has(d.mac.toLowerCase())}
                         onToggleGaming={handleToggleGaming}
                         isGamingCompat={isGamingCompatByIp.has(d.ip)}
+                        whitelistActive={whitelistDeviceMacs.has(d.mac.toLowerCase())}
+                        onToggleWhitelist={handleToggleWhitelist}
                       />
                     ))}
                 </>
@@ -761,7 +815,7 @@ export default function Devices({ notify }: Props) {
               {statusFilter === 'offline' && (
                 <>
                   <tr>
-                    <td colSpan={10} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
+                    <td colSpan={11} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
                       <span className="devices-group-header">
                         Offline ({sortedOffline.length})
                       </span>
@@ -769,7 +823,7 @@ export default function Devices({ notify }: Props) {
                   </tr>
                   {sortedOffline.length === 0 && (
                     <tr>
-                      <td colSpan={10} className="muted small" style={{ padding: '10px 14px' }}>
+                      <td colSpan={11} className="muted small" style={{ padding: '10px 14px' }}>
                         Нет офлайн-устройств
                       </td>
                     </tr>
@@ -798,6 +852,8 @@ export default function Devices({ notify }: Props) {
                       gamingActive={gamingDeviceMacs.has(d.mac.toLowerCase())}
                       onToggleGaming={handleToggleGaming}
                       isGamingCompat={isGamingCompatByIp.has(d.ip)}
+                      whitelistActive={whitelistDeviceMacs.has(d.mac.toLowerCase())}
+                      onToggleWhitelist={handleToggleWhitelist}
                     />
                   ))}
                 </>

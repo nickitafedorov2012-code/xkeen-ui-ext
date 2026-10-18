@@ -20,6 +20,7 @@ pub mod traffic;
 mod system;
 pub mod adguard;
 pub mod bot;
+pub mod whitelist_catalog;
 
 use axum::extract::Request;
 use axum::middleware::{self, Next};
@@ -572,6 +573,13 @@ async fn main() {
         .route("/api/servers/whitelist", post(api::set_server_whitelist))
         .route("/api/whitelist/providers", post(api::set_provider_whitelist))
         .route("/api/providers/whitelist", post(api::set_provider_whitelist))
+        // Режим белых списков (Whitelist Mode)
+        .route("/api/whitelist", get(api::get_whitelist).post(api::save_whitelist))
+        .route("/api/whitelist/status", get(api::get_whitelist))
+        .route("/api/whitelist/save", post(api::save_whitelist))
+        .route("/api/whitelist/device/toggle", post(api::toggle_whitelist_device))
+        .route("/api/whitelist/toggle", post(api::toggle_whitelist_device))
+        .route("/api/whitelist/catalog", get(api::get_whitelist_catalog))
         .route("/api/servers/switch", post(api::switch_server))
         .route("/api/servers/active", put(api::switch_server))
         .route("/api/servers/ping", post(api::ping_servers))

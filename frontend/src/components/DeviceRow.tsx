@@ -29,6 +29,8 @@ interface Props {
   gamingActive?: boolean
   onToggleGaming?: (mac: string, ip: string, enabled: boolean) => void
   isGamingCompat?: boolean
+  whitelistActive?: boolean
+  onToggleWhitelist?: (ip: string, mac: string, enabled: boolean) => void
 }
 
 function fmtBytes(bytes: number): string {
@@ -153,6 +155,8 @@ const DeviceRow = memo(function DeviceRow({
   gamingActive = false,
   onToggleGaming,
   isGamingCompat = false,
+  whitelistActive = false,
+  onToggleWhitelist,
 }: Props) {
   const cleanName = d.name.replace(/\s*-\s*Home network.*$/i, '').trim()
   const isOfflineOrNoIp = !d.online || !d.ip || d.ip === '0.0.0.0' || d.ip === '—'
@@ -314,6 +318,23 @@ const DeviceRow = memo(function DeviceRow({
         >
           <span className="device-gaming-icon">🎮</span>
           <span className="device-gaming-label">{gamingActive ? 'Gaming ON' : 'Gaming OFF'}</span>
+        </button>
+      </td>
+      <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>
+        <button
+          type="button"
+          className={`device-whitelist-btn ${whitelistActive ? 'active' : 'inactive'}`}
+          data-testid={`device-whitelist-btn-${d.mac}`}
+          disabled={busy}
+          onClick={() => onToggleWhitelist?.(d.ip, d.mac, !whitelistActive)}
+          title={
+            whitelistActive
+              ? `Белые списки (БС) включены для ${d.name} (${d.ip || d.mac}). Нажмите для отключения.`
+              : `Белые списки (БС) выключены для ${d.name} (${d.ip || d.mac}). Нажмите для включения.`
+          }
+        >
+          <span className="btn-icon device-whitelist-icon">🛡️</span>
+          <span className="btn-label device-whitelist-label">{whitelistActive ? 'БС ON' : 'БС OFF'}</span>
         </button>
       </td>
       <td style={{ textAlign: 'center', whiteSpace: 'nowrap' }}>

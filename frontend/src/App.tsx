@@ -16,6 +16,7 @@ import MihomoCoreModal from './components/MihomoCoreModal'
 import ZapretCoreModal from './components/ZapretCoreModal'
 import Zapret from './components/Zapret'
 import Gaming from './components/Gaming'
+import Whitelist from './components/Whitelist'
 import AdGuard from './components/AdGuard'
 import Help from './components/Help'
 import { apiGet, apiPost } from './api'
@@ -25,6 +26,7 @@ type TabId =
   | 'dashboard'
   | 'servers'
   | 'devices'
+  | 'whitelist'
   | 'zapret'
   | 'gaming'
   | 'xbox-dns'
@@ -41,6 +43,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'dashboard', label: '📊 Дашборд' },
   { id: 'servers', label: '🛰 Серверы' },
   { id: 'devices', label: '📱 Устройства' },
+  { id: 'whitelist', label: '🛡️ Белые списки' },
   { id: 'zapret', label: '⚡ Zapret' },
   { id: 'gaming', label: '🎮 Игры' },
   { id: 'google-ai', label: '🤖 Google AI' },
@@ -85,6 +88,7 @@ export default function App() {
     const h = window.location.hash.replace('#', '')
     if (h === 'antigravity') return 'google-ai'
     if (h === 'xbox-dns') return 'gaming'
+    if (h === 'bs' || h === 'whitelists') return 'whitelist'
     return (TABS.some((t) => t.id === h) || h === 'settings' || h === 'help' || h === 'adguard' || h === 'diagnostics' ? h : 'dashboard') as TabId
   })()
   const [tab, setTab] = useState<TabId>(initial)
@@ -351,6 +355,7 @@ export default function App() {
           {tab === 'dashboard' && <Dashboard status={status} notify={notify} refresh={refresh} onSwitchTab={switchTab} />}
           {tab === 'servers' && <Servers notify={notify} status={status} refresh={refresh} />}
           {tab === 'devices' && <Devices notify={notify} />}
+          {tab === 'whitelist' && <Whitelist notify={notify} status={status} refresh={refresh} />}
           {tab === 'zapret' && <Zapret notify={notify} />}
           {(tab === 'gaming' || tab === 'xbox-dns') && <Gaming notify={notify} />}
           {(tab === 'google-ai' || tab === 'antigravity') && <Antigravity notify={notify} />}
