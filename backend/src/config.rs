@@ -591,18 +591,42 @@ impl Default for WhitelistDevice {
     }
 }
 
+/// Стратегия маршрутизации при активном сервере белых списков
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WhitelistStrategy {
+    /// Специальный режим Белых списков XKeen Route: 100% трафик устройств в туннель, 376 отечественных сайтов DIRECT
+    StrictXKeen,
+    /// Стандартная маршрутизация сервера (обычные правила и проксирование)
+    Standard,
+}
+
+impl Default for WhitelistStrategy {
+    fn default() -> Self {
+        Self::StrictXKeen
+    }
+}
+
 /// Настройки выделенного режима белых списков (Белые списки: 376 отечественных доменов напрямую, прокси-туннель).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(default)]
 pub struct WhitelistConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default = "default_true")]
+    pub auto_by_failover: bool,
+    #[serde(default)]
+    pub strategy: WhitelistStrategy,
     #[serde(default)]
     pub target_server: Option<String>,
     #[serde(default = "default_true")]
     pub follow_failover: bool,
     #[serde(default)]
+    pub excluded_devices: Vec<String>,
+    #[serde(default)]
     pub devices: Vec<WhitelistDevice>,
+    #[serde(default)]
+    pub gaming_suspended: bool,
     #[serde(default)]
     pub custom_domains: Vec<String>,
 }
@@ -611,9 +635,13 @@ impl Default for WhitelistConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            auto_by_failover: true,
+            strategy: WhitelistStrategy::StrictXKeen,
             target_server: None,
             follow_failover: true,
+            excluded_devices: Vec::new(),
             devices: Vec::new(),
+            gaming_suspended: false,
             custom_domains: Vec::new(),
         }
     }

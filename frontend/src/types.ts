@@ -906,6 +906,8 @@ export interface SystemDiagnostics {
 // Режим белых списков (Whitelist Mode)
 // ============================================================================
 
+export type WhitelistStrategy = 'strict_xkeen' | 'standard'
+
 export interface WhitelistDevice {
   mac: string
   ip: string
@@ -915,20 +917,29 @@ export interface WhitelistDevice {
 
 export interface WhitelistConfig {
   enabled: boolean
+  auto_by_failover?: boolean
+  strategy?: WhitelistStrategy
   target_server?: string | null
   follow_failover: boolean
+  excluded_devices?: string[]
   devices: WhitelistDevice[]
+  gaming_suspended?: boolean
   custom_domains: string[]
 }
 
 export interface WhitelistStatusResponse {
   enabled: boolean
+  auto_by_failover: boolean
+  strategy: WhitelistStrategy
   target_server?: string | null
   follow_failover: boolean
+  excluded_devices: string[]
   devices: WhitelistDevice[]
+  gaming_suspended: boolean
   custom_domains: string[]
   domestic_catalog_count: number
   active_server?: string
+  is_bs_server?: boolean
   whitelist_servers?: string[]
   whitelist_providers?: string[]
 }

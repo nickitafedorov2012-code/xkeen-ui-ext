@@ -577,6 +577,8 @@ async fn main() {
         .route("/api/whitelist", get(api::get_whitelist).post(api::save_whitelist))
         .route("/api/whitelist/status", get(api::get_whitelist))
         .route("/api/whitelist/save", post(api::save_whitelist))
+        .route("/api/whitelist/strategy", post(api::set_whitelist_strategy))
+        .route("/api/whitelist/exclude", post(api::toggle_whitelist_exclude))
         .route("/api/whitelist/device/toggle", post(api::toggle_whitelist_device))
         .route("/api/whitelist/toggle", post(api::toggle_whitelist_device))
         .route("/api/whitelist/catalog", get(api::get_whitelist_catalog))

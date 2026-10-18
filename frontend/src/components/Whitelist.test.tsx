@@ -9,15 +9,20 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 const mockWhitelistStatus = {
   enabled: true,
+  auto_by_failover: true,
+  strategy: 'strict_xkeen',
   target_server: null,
   follow_failover: true,
+  excluded_devices: ['11:22:33:44:55:02'],
   devices: [
     { mac: '11:22:33:44:55:01', ip: '192.168.1.10', name: 'PC Gaming', enabled: true },
     { mac: '11:22:33:44:55:02', ip: '192.168.1.20', name: 'MacBook Pro', enabled: false },
   ],
+  gaming_suspended: true,
   custom_domains: ['internal-bank.corp', 'my-cloud.io'],
   domestic_catalog_count: 376,
   active_server: 'NL-Amsterdam-Fast',
+  is_bs_server: false,
   whitelist_servers: ['node_nl_01'],
   whitelist_providers: ['sub_alpha'],
 }
@@ -76,7 +81,7 @@ const mockCatalog = {
   ],
 }
 
-describe('Whitelist Component — Whitelist Tab (Milestone 3)', () => {
+describe('Whitelist Component — Whitelist Tab (Overhaul & Anti-Regression)', () => {
   let container: HTMLDivElement | null = null
   let root: ReturnType<typeof createRoot> | null = null
   const notifyMock = vi.fn()
@@ -108,7 +113,7 @@ describe('Whitelist Component — Whitelist Tab (Milestone 3)', () => {
     }
   })
 
-  it('renders Master Switch hero card with active status, KPIs, and description', async () => {
+  it('renders Master Switch hero card with active status, gaming suspended badge, and KPIs', async () => {
     await act(async () => {
       root!.render(<Whitelist notify={notifyMock} refresh={refreshMock} />)
     })
@@ -116,12 +121,19 @@ describe('Whitelist Component — Whitelist Tab (Milestone 3)', () => {
     const badge = container?.querySelector('[data-testid="whitelist-status-badge"]')
     expect(badge?.textContent).toContain('🟢 АКТИВЕН')
 
+    const gamingBadge = container?.querySelector('[data-testid="gaming-suspended-badge"]')
+    expect(gamingBadge).toBeTruthy()
+    expect(gamingBadge?.textContent).toContain('🎮 Игровой режим на паузе')
+
     const masterBtn = container?.querySelector('[data-testid="whitelist-master-toggle"]') as HTMLButtonElement
     expect(masterBtn).toBeTruthy()
     expect(masterBtn.textContent).toContain('Выключить режим белых списков')
 
     const activeDevicesKpi = container?.querySelector('[data-testid="kpi-active-devices"]')
-    expect(activeDevicesKpi?.textContent).toBe('1')
+    expect(activeDevicesKpi?.textContent).toContain('искл: 1')
+
+    const strategyKpi = container?.querySelector('[data-testid="kpi-strategy"]')
+    expect(strategyKpi?.textContent).toContain('🛡️ XKeen Route')
 
     const catalogKpi = container?.querySelector('[data-testid="kpi-catalog-count"]')
     expect(catalogKpi?.textContent).toBe('376')
@@ -146,79 +158,90 @@ describe('Whitelist Component — Whitelist Tab (Milestone 3)', () => {
     expect(notifyMock).toHaveBeenCalledWith('⚪ Режим белых списков выключен')
   })
 
-  it('switches server mode between Follow Failover and manual fixed server', async () => {
+  it('switches Whitelist Strategy between StrictXKeen and Standard', async () => {
+    const postSpy = vi.spyOn(api, 'apiPost').mockResolvedValue({ strategy: 'standard' })
+
+    await act(async () => {
+      root!.render(<Whitelist notify={notifyMock} refresh={refreshMock} />)
+    })
+
+    const standardRadio = container?.querySelector('[data-testid="radio-strategy-standard"]') as HTMLInputElement
+    expect(standardRadio).toBeTruthy()
+
+    await act(async () => {
+      standardRadio.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('whitelist/strategy', {
+      strategy: 'standard',
+    })
+
+    // Switch back to StrictXKeen
+    const strictRadio = container?.querySelector('[data-testid="radio-strategy-strict"]') as HTMLInputElement
+    await act(async () => {
+      strictRadio.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('whitelist/strategy', {
+      strategy: 'strict_xkeen',
+    })
+  })
+
+  it('toggles Failover Auto-Activation switch', async () => {
     const postSpy = vi.spyOn(api, 'apiPost').mockResolvedValue({ saved: true })
 
     await act(async () => {
       root!.render(<Whitelist notify={notifyMock} refresh={refreshMock} />)
     })
 
-    const fixedRadio = container?.querySelector('[data-testid="radio-fixed-server"]') as HTMLInputElement
-    expect(fixedRadio).toBeTruthy()
+    const autoToggle = container?.querySelector('[data-testid="auto-failover-toggle"]') as HTMLInputElement
+    expect(autoToggle).toBeTruthy()
+    expect(autoToggle.checked).toBe(true)
 
     await act(async () => {
-      fixedRadio.click()
+      autoToggle.click()
     })
 
     expect(postSpy).toHaveBeenCalledWith('whitelist', {
+      auto_by_failover: false,
       follow_failover: false,
-      target_server: 'srv_nl',
-    })
-
-    // Switch back to follow failover
-    const failoverRadio = container?.querySelector('[data-testid="radio-follow-failover"]') as HTMLInputElement
-    await act(async () => {
-      failoverRadio.click()
-    })
-
-    expect(postSpy).toHaveBeenCalledWith('whitelist', {
-      follow_failover: true,
-      target_server: 'follow_failover',
     })
   })
 
-  it('displays device list with toggle buttons and toggles device inclusion', async () => {
-    const postSpy = vi.spyOn(api, 'apiPost').mockResolvedValue({ toggled: true })
+  it('displays Zero-Touch device list and allows excluding/including devices', async () => {
+    const postSpy = vi.spyOn(api, 'apiPost').mockResolvedValue({ success: true })
 
     await act(async () => {
       root!.render(<Whitelist notify={notifyMock} refresh={refreshMock} />)
     })
 
-    const macBookBtn = container?.querySelector('[data-testid="whitelist-device-btn-11:22:33:44:55:02"]') as HTMLButtonElement
-    expect(macBookBtn).toBeTruthy()
-    expect(macBookBtn.className).toContain('inactive')
-    expect(macBookBtn.textContent).toContain('БС OFF')
+    // Device 1 (PC Gaming) is NOT excluded -> should have exclude button
+    const excludePcBtn = container?.querySelector('[data-testid="btn-exclude-11:22:33:44:55:01"]') as HTMLButtonElement
+    expect(excludePcBtn).toBeTruthy()
+    expect(excludePcBtn.textContent).toContain('В БС (Защищено)')
 
     await act(async () => {
-      macBookBtn.click()
+      excludePcBtn.click()
     })
 
-    expect(postSpy).toHaveBeenCalledWith('whitelist/device/toggle', {
-      ip: '192.168.1.20',
-      mac: '11:22:33:44:55:02',
-      enabled: true,
+    expect(postSpy).toHaveBeenCalledWith('whitelist/exclude', {
+      id: '11:22:33:44:55:01',
+      excluded: true,
     })
-  })
 
-  it('handles batch enable all online devices', async () => {
-    const postSpy = vi.spyOn(api, 'apiPost').mockResolvedValue({ saved: true })
+    // Device 2 (MacBook Pro) IS in excluded_devices -> should have include button
+    const includeMacBtn = container?.querySelector('[data-testid="btn-include-11:22:33:44:55:02"]') as HTMLButtonElement
+    expect(includeMacBtn).toBeTruthy()
+    expect(includeMacBtn.textContent).toContain('Исключено (DIRECT)')
 
     await act(async () => {
-      root!.render(<Whitelist notify={notifyMock} refresh={refreshMock} />)
+      includeMacBtn.click()
     })
 
-    const batchBtn = container?.querySelector('[data-testid="btn-enable-all-online"]') as HTMLButtonElement
-    await act(async () => {
-      batchBtn.click()
+    expect(postSpy).toHaveBeenCalledWith('whitelist/exclude', {
+      id: '11:22:33:44:55:02',
+      excluded: false,
     })
-
-    expect(postSpy).toHaveBeenCalledWith('whitelist', expect.objectContaining({
-      enabled: true,
-      devices: expect.arrayContaining([
-        expect.objectContaining({ mac: '11:22:33:44:55:01', enabled: true }),
-        expect.objectContaining({ mac: '11:22:33:44:55:02', enabled: true }),
-      ]),
-    }))
   })
 
   function setInputValue(input: HTMLInputElement, val: string) {

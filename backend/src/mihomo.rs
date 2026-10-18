@@ -1106,7 +1106,7 @@ pub async fn ping_all_url(
     }
 
     if !remaining.is_empty() {
-        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(4));
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(2));
         let mut handles = Vec::new();
         let url_owned = test_url.map(|s| s.to_string());
         let shared_cfg = std::sync::Arc::new(cfg.clone());

@@ -8,6 +8,7 @@ import {
   type WhitelistCatalogResponse,
   type WhitelistConfig,
   type WhitelistStatusResponse,
+  type WhitelistStrategy,
 } from '../types'
 
 interface Props {
@@ -37,20 +38,25 @@ const CATEGORY_MAP: Record<string, { label: string; filterKey: string }> = {
 export default function Whitelist({ notify, refresh }: Props) {
   const [config, setConfig] = useState<WhitelistConfig>({
     enabled: false,
+    auto_by_failover: true,
+    strategy: 'strict_xkeen',
     target_server: null,
     follow_failover: true,
+    excluded_devices: [],
     devices: [],
+    gaming_suspended: false,
     custom_domains: [],
   })
-  const [activeServer, setActiveServer] = useState<string>('Follow Failover')
+  const [activeServer, setActiveServer] = useState<string>('')
+  const [isBsServer, setIsBsServer] = useState<boolean>(false)
   const [devicesList, setDevicesList] = useState<DeviceInfo[]>([])
-  const [serversList, setServersList] = useState<ServerInfo[]>([])
+  const [, setServersList] = useState<ServerInfo[]>([])
   const [catalogItems, setCatalogItems] = useState<DomesticCatalogEntryView[]>([])
   const [catalogTotal, setCatalogTotal] = useState<number>(376)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
 
-  // Поиск и фильтрация устройств
+  // Поиск устройств для исключений
   const [deviceSearch, setDeviceSearch] = useState('')
 
   // Вкладка менеджера доменов ('catalog' | 'custom')
@@ -75,14 +81,19 @@ export default function Whitelist({ notify, refresh }: Props) {
       if (wlStatus) {
         setConfig({
           enabled: Boolean(wlStatus.enabled),
+          auto_by_failover: wlStatus.auto_by_failover ?? true,
+          strategy: wlStatus.strategy || 'strict_xkeen',
           target_server: wlStatus.target_server || null,
           follow_failover: wlStatus.follow_failover ?? true,
+          excluded_devices: wlStatus.excluded_devices || [],
           devices: wlStatus.devices || [],
+          gaming_suspended: Boolean(wlStatus.gaming_suspended),
           custom_domains: wlStatus.custom_domains || [],
         })
         if (wlStatus.active_server) {
           setActiveServer(wlStatus.active_server)
         }
+        setIsBsServer(Boolean(wlStatus.is_bs_server))
       }
 
       if (devRes?.devices) {
@@ -151,112 +162,82 @@ export default function Whitelist({ notify, refresh }: Props) {
     }
   }
 
-  // Переключение выбора сервера
-  const handleServerModeChange = async (followFailover: boolean, targetServerId?: string | null) => {
+  // Переключение стратегии (Логика XKeen Route vs Стандартная)
+  const handleStrategyChange = async (strategy: WhitelistStrategy) => {
+    if (config.strategy === strategy) return
     setBusy(true)
     try {
-      const payload: Partial<WhitelistConfig> = {
-        follow_failover: followFailover,
-        target_server: followFailover ? 'follow_failover' : (targetServerId || null),
-      }
-      await apiPost('whitelist', payload)
-      setConfig((prev) => ({
-        ...prev,
-        follow_failover: followFailover,
-        target_server: followFailover ? null : (targetServerId || null),
-      }))
+      await apiPost('whitelist/strategy', { strategy })
+      setConfig((prev) => ({ ...prev, strategy }))
       notify(
-        followFailover
-          ? '🔄 Включен динамический выбор: следование за Failover'
-          : `🎯 Назначен фиксированный прокси-сервер: ${targetServerId || 'Основной'}`
+        strategy === 'strict_xkeen'
+          ? '🛡️ Включена специальная логика XKeen Route (100% туннель, 376 РФ напрямую, без конфликтов игр)'
+          : '🌐 Включена стандартная логика маршрутизации (как у обычного сервера)'
       )
       window.dispatchEvent(new CustomEvent('xr:refresh-status'))
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка смены сервера белых списков', true)
+      notify(e instanceof Error ? e.message : 'Ошибка смены логики работы', true)
       await loadData()
     } finally {
       setBusy(false)
     }
   }
 
-  // Переключение одного устройства
-  const handleToggleDevice = async (ip: string, mac: string, enabled: boolean) => {
+  // Переключение авто-активации при Failover
+  const handleAutoFailoverToggle = async () => {
+    const nextVal = !(config.auto_by_failover ?? true)
     setBusy(true)
-    const macLower = mac.toLowerCase()
     try {
-      await apiPost('whitelist/device/toggle', {
-        ip,
-        mac,
-        enabled,
+      await apiPost('whitelist', {
+        auto_by_failover: nextVal,
+        follow_failover: nextVal,
+      })
+      setConfig((prev) => ({ ...prev, auto_by_failover: nextVal, follow_failover: nextVal }))
+      notify(
+        nextVal
+          ? '🔄 Автоматическое включение белых списков при переходе Failover на [БС] включено'
+          : '⚪ Автоматическое включение при Failover выключено'
+      )
+      window.dispatchEvent(new CustomEvent('xr:refresh-status'))
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка изменения настройки Failover', true)
+      await loadData()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Исключение / возврат устройства в белый список (Zero-Touch Exclusions)
+  const handleToggleExclude = async (deviceKey: string, currentlyExcluded: boolean) => {
+    setBusy(true)
+    const nextExcluded = !currentlyExcluded
+    try {
+      await apiPost('whitelist/exclude', {
+        id: deviceKey,
+        excluded: nextExcluded,
       })
       setConfig((prev) => {
-        const nextDevices = [...prev.devices]
-        const idx = nextDevices.findIndex((d) => d.mac.toLowerCase() === macLower || (ip && d.ip === ip))
-        if (idx >= 0) {
-          nextDevices[idx] = { ...nextDevices[idx], enabled }
-        } else if (enabled) {
-          const foundInfo = devicesList.find((d) => d.mac.toLowerCase() === macLower)
-          nextDevices.push({
-            mac,
-            ip,
-            name: foundInfo?.name || '',
-            enabled: true,
-          })
+        const list = [...(prev.excluded_devices || [])]
+        if (nextExcluded) {
+          if (!list.some((x) => x.toLowerCase() === deviceKey.toLowerCase())) {
+            list.push(deviceKey)
+          }
+        } else {
+          return {
+            ...prev,
+            excluded_devices: list.filter((x) => x.toLowerCase() !== deviceKey.toLowerCase()),
+          }
         }
-        return {
-          ...prev,
-          enabled: enabled ? true : prev.enabled,
-          devices: nextDevices,
-        }
+        return { ...prev, excluded_devices: list }
       })
       notify(
-        enabled
-          ? `🛡️ Белые списки включены для ${ip || mac}`
-          : `⚪ Белые списки выключены для ${ip || mac}`
+        nextExcluded
+          ? `⚪ Устройство ${deviceKey} исключено из белых списков (DIRECT)`
+          : `🛡️ Устройство ${deviceKey} возвращено в режим белых списков`
       )
       window.dispatchEvent(new CustomEvent('xr:refresh-status'))
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка изменения белого списка для устройства', true)
-      await loadData()
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  // Массовое включение/выключение устройств
-  const handleBatchToggleAllOnline = async (enable: boolean) => {
-    setBusy(true)
-    try {
-      const onlineDevs = devicesList.filter((d) => d.online || d.is_current_device)
-      const currentDevicesMap = new Map(config.devices.map((d) => [d.mac.toLowerCase(), d]))
-
-      for (const od of onlineDevs) {
-        currentDevicesMap.set(od.mac.toLowerCase(), {
-          mac: od.mac,
-          ip: od.ip,
-          name: od.name,
-          enabled: enable,
-        })
-      }
-
-      const updatedDevices = Array.from(currentDevicesMap.values())
-      await apiPost('whitelist', {
-        devices: updatedDevices,
-        enabled: enable ? true : config.enabled,
-      })
-      setConfig((prev) => ({
-        ...prev,
-        enabled: enable ? true : prev.enabled,
-        devices: updatedDevices,
-      }))
-      notify(
-        enable
-          ? `🛡️ Включен режим белых списков для всех онлайн-устройств (${onlineDevs.length})`
-          : '⚪ Отключен режим белых списков для всех устройств'
-      )
-      window.dispatchEvent(new CustomEvent('xr:refresh-status'))
-    } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка массового переключения', true)
+      notify(e instanceof Error ? e.message : 'Ошибка обновления исключения устройства', true)
       await loadData()
     } finally {
       setBusy(false)
@@ -297,7 +278,7 @@ export default function Whitelist({ notify, refresh }: Props) {
       })
       setConfig((prev) => ({ ...prev, custom_domains: nextCustomDomains }))
       setNewDomainInput('')
-      notify(`✅ Домен "${clean}" добавлен в белый список`)
+      notify(`✅ Домен "${clean}" добавлен в прямой доступ (DIRECT)`)
       window.dispatchEvent(new CustomEvent('xr:refresh-status'))
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка сохранения домена', true)
@@ -315,7 +296,7 @@ export default function Whitelist({ notify, refresh }: Props) {
         custom_domains: nextCustomDomains,
       })
       setConfig((prev) => ({ ...prev, custom_domains: nextCustomDomains }))
-      notify(`🗑️ Домен "${domain}" удален из белого списка`)
+      notify(`🗑️ Домен "${domain}" удален из прямого доступа`)
       window.dispatchEvent(new CustomEvent('xr:refresh-status'))
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка удаления домена', true)
@@ -324,7 +305,7 @@ export default function Whitelist({ notify, refresh }: Props) {
     }
   }
 
-  // Фильтрация устройств в таблице
+  // Фильтрация устройств в таблице исключений
   const filteredDevices = useMemo(() => {
     const q = deviceSearch.trim().toLowerCase()
     return devicesList.filter((d) => {
@@ -364,16 +345,16 @@ export default function Whitelist({ notify, refresh }: Props) {
     return filteredCatalog.slice(start, start + pageSize)
   }, [filteredCatalog, catalogPage])
 
-  const activeDevicesCount = useMemo(() => {
-    return config.devices.filter((d) => d.enabled).length
-  }, [config.devices])
-
-  const isDeviceActiveInWl = (d: DeviceInfo) => {
-    const match = config.devices.find(
-      (wd) => wd.mac.toLowerCase() === d.mac.toLowerCase() || (d.ip && wd.ip === d.ip)
+  const isDeviceExcluded = (d: DeviceInfo) => {
+    const exList = config.excluded_devices || []
+    return exList.some(
+      (item) => item.toLowerCase() === d.mac.toLowerCase() || (d.ip && item === d.ip)
     )
-    return Boolean(match?.enabled)
   }
+
+  const excludedCount = useMemo(() => {
+    return (config.excluded_devices || []).length
+  }, [config.excluded_devices])
 
   if (loading) {
     return (
@@ -401,6 +382,23 @@ export default function Whitelist({ notify, refresh }: Props) {
             >
               {config.enabled ? '🟢 АКТИВЕН' : '⚪ ОТКЛЮЧЕН'}
             </span>
+            {config.gaming_suspended && (
+              <span
+                className="badge badge-warning"
+                data-testid="gaming-suspended-badge"
+                style={{
+                  fontSize: 11,
+                  padding: '3px 8px',
+                  borderRadius: 6,
+                  background: 'rgba(234, 179, 8, 0.15)',
+                  color: '#eab308',
+                  border: '1px solid rgba(234, 179, 8, 0.3)',
+                }}
+                title="Игровой режим временно приостановлен для предотвращения конфликтов маршрутизации"
+              >
+                🎮 Игровой режим на паузе
+              </span>
+            )}
           </div>
 
           <button
@@ -415,21 +413,36 @@ export default function Whitelist({ notify, refresh }: Props) {
         </div>
 
         <p className="muted" style={{ fontSize: 13, lineHeight: 1.5, margin: 0 }}>
-          Все исходящие соединения выбранных устройств направляются в защищенный туннель, исключая утечки и блокировки. 
-          При этом <strong>376 базовых отечественных сервисов</strong> (Госуслуги, Банки, СБП, Маркетплейсы, Медиа) 
-          и ваши персональные домены направляются строго <strong>напрямую (DIRECT)</strong> через локальный DNS без GeoIP-ошибок.
+          Автоматический режим для работы через сотовых операторов и провайдеров в условиях мобильных блокировок. 
+          Все устройства домашней сети автоматически направляются в защищенный туннель, исключая сбои интернета. 
+          При этом <strong>376 сервисов РФ</strong> (Госуслуги, Банки, СБП, Маркетплейсы, Медиа) 
+          и ваши персональные домены идут строго <strong>напрямую (DIRECT)</strong> через локальный DNS без ошибок VPN.
         </p>
+
+        {activeServer && (
+          <div style={{ marginTop: 10, fontSize: 12, color: '#94a3b8', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span>Активный сервер:</span>
+            <strong style={{ color: isBsServer ? '#34d399' : '#f1f5f9' }}>{activeServer}</strong>
+            {isBsServer && (
+              <span style={{ color: '#34d399', background: 'rgba(52, 211, 153, 0.1)', padding: '1px 6px', borderRadius: 4, fontSize: 11 }}>
+                🛡️ Нода белых списков [БС]
+              </span>
+            )}
+          </div>
+        )}
 
         <div className="whitelist-kpis">
           <div className="whitelist-kpi-card">
-            <div className="whitelist-kpi-value" data-testid="kpi-active-devices">{activeDevicesCount}</div>
-            <div className="whitelist-kpi-label">Активных устройств</div>
+            <div className="whitelist-kpi-value" data-testid="kpi-active-devices">
+              {excludedCount > 0 ? `Все (искл: ${excludedCount})` : 'Все (100%)'}
+            </div>
+            <div className="whitelist-kpi-label">Охват сети (Zero-Touch)</div>
           </div>
           <div className="whitelist-kpi-card">
-            <div className="whitelist-kpi-value" style={{ fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {config.follow_failover ? '🔄 Failover Auto' : (config.target_server || 'Default')}
+            <div className="whitelist-kpi-value" data-testid="kpi-strategy" style={{ fontSize: 15 }}>
+              {config.strategy === 'strict_xkeen' ? '🛡️ XKeen Route' : '🌐 Стандартная'}
             </div>
-            <div className="whitelist-kpi-label">Целевой узел туннеля</div>
+            <div className="whitelist-kpi-label">Логика маршрутизации</div>
           </div>
           <div className="whitelist-kpi-card">
             <div className="whitelist-kpi-value" data-testid="kpi-catalog-count">{catalogTotal}</div>
@@ -442,42 +455,43 @@ export default function Whitelist({ notify, refresh }: Props) {
         </div>
       </div>
 
-      {/* 2. Target Server Selector (Failover Awareness) */}
+      {/* 2. Strategy Selector Card: XKeen Route vs Standard */}
       <div className="card" style={{ marginBottom: 20 }}>
-        <h3 style={{ margin: '0 0 10px', fontSize: 16 }}>🎯 Настройка прокси-туннеля для режима</h3>
+        <h3 style={{ margin: '0 0 6px', fontSize: 16 }}>⚙️ Логика работы режима белых списков</h3>
         <p className="muted small" style={{ marginBottom: 14 }}>
-          Определяет, через какой прокси-сервер направлять не-российский трафик выбранных клиентов.
+          Определяет, как именно маршрутизируется трафик клиентов при активном режиме белых списков.
         </p>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           <label
             style={{
               display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              padding: '10px 14px',
+              alignItems: 'flex-start',
+              gap: 12,
+              padding: '12px 16px',
               borderRadius: 8,
-              background: config.follow_failover ? 'rgba(16, 185, 129, 0.12)' : 'rgba(255,255,255,0.03)',
-              border: `1px solid ${config.follow_failover ? '#10b981' : 'rgba(255,255,255,0.1)'}`,
+              background: config.strategy === 'strict_xkeen' ? 'rgba(16, 185, 129, 0.12)' : 'rgba(255,255,255,0.03)',
+              border: `1px solid ${config.strategy === 'strict_xkeen' ? '#10b981' : 'rgba(255,255,255,0.1)'}`,
               cursor: 'pointer',
             }}
           >
             <input
               type="radio"
-              name="server-mode"
-              checked={config.follow_failover}
+              name="whitelist-strategy"
+              checked={config.strategy === 'strict_xkeen'}
               disabled={busy}
-              onChange={() => handleServerModeChange(true)}
-              data-testid="radio-follow-failover"
+              onChange={() => handleStrategyChange('strict_xkeen')}
+              data-testid="radio-strategy-strict"
+              style={{ marginTop: 3 }}
             />
             <div>
-              <div style={{ fontWeight: 600, color: config.follow_failover ? '#34d399' : '#f1f5f9' }}>
-                🔄 Следовать за Failover (Рекомендуется)
+              <div style={{ fontWeight: 600, color: config.strategy === 'strict_xkeen' ? '#34d399' : '#f1f5f9', fontSize: 14 }}>
+                🛡️ Специальная логика XKeen Route (Рекомендуется)
               </div>
-              <div className="muted small">
-                Автоматически переключает туннель на активный сервер из модуля Резервирования (Failover). 
-                Приоритет отдается серверам с тегом [БС].
-                {activeServer && <span style={{ marginLeft: 6, color: '#94a3b8' }}>[Текущий узел: {activeServer}]</span>}
+              <div className="muted small" style={{ marginTop: 4, lineHeight: 1.5 }}>
+                • <strong>Весь трафик сети</strong> направляется в защищенный туннель [БС], предотвращая сбои интернета.<br />
+                • <strong>376 отечественных сервисов</strong> (Госуслуги, Банки, Ozon, WB) идут напрямую (DIRECT) без замедления и ошибок VPN.<br />
+                • <strong>Игровой режим временно приостанавливается</strong> для исключения конфликтов правил и утечек сессий.
               </div>
             </div>
           </label>
@@ -485,96 +499,99 @@ export default function Whitelist({ notify, refresh }: Props) {
           <label
             style={{
               display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              padding: '10px 14px',
+              alignItems: 'flex-start',
+              gap: 12,
+              padding: '12px 16px',
               borderRadius: 8,
-              background: !config.follow_failover ? 'rgba(56, 189, 248, 0.12)' : 'rgba(255,255,255,0.03)',
-              border: `1px solid ${!config.follow_failover ? '#38bdf8' : 'rgba(255,255,255,0.1)'}`,
+              background: config.strategy === 'standard' ? 'rgba(56, 189, 248, 0.12)' : 'rgba(255,255,255,0.03)',
+              border: `1px solid ${config.strategy === 'standard' ? '#38bdf8' : 'rgba(255,255,255,0.1)'}`,
               cursor: 'pointer',
             }}
           >
             <input
               type="radio"
-              name="server-mode"
-              checked={!config.follow_failover}
+              name="whitelist-strategy"
+              checked={config.strategy === 'standard'}
               disabled={busy}
-              onChange={() => {
-                const firstSrv = serversList[0]?.id || null
-                handleServerModeChange(false, config.target_server || firstSrv)
-              }}
-              data-testid="radio-fixed-server"
+              onChange={() => handleStrategyChange('standard')}
+              data-testid="radio-strategy-standard"
+              style={{ marginTop: 3 }}
             />
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 600, color: !config.follow_failover ? '#38bdf8' : '#f1f5f9' }}>
-                🎯 Фиксированный сервер
+            <div>
+              <div style={{ fontWeight: 600, color: config.strategy === 'standard' ? '#38bdf8' : '#f1f5f9', fontSize: 14 }}>
+                🌐 Стандартная логика (как у обычного сервера)
               </div>
-              <div className="muted small" style={{ marginBottom: 6 }}>
-                Весь трафик устройств будет направляться строго через выбранный узел.
+              <div className="muted small" style={{ marginTop: 4, lineHeight: 1.5 }}>
+                Используются обычные правила провайдеров и подписок без тотального перехвата локальных подсетей.
               </div>
-
-              {!config.follow_failover && (
-                <div style={{ marginTop: 8 }} onClick={(e) => e.stopPropagation()}>
-                  <select
-                    className="input"
-                    style={{ maxWidth: 380, width: '100%' }}
-                    value={config.target_server || ''}
-                    disabled={busy}
-                    data-testid="target-server-select"
-                    onChange={(e) => handleServerModeChange(false, e.target.value)}
-                  >
-                    <option value="">— Выберите сервер —</option>
-                    {serversList.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name} {s.ping_ms > 0 ? `(${s.ping_ms} ms)` : ''} {s.is_whitelist ? '🛡️ [БС]' : ''}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
             </div>
           </label>
         </div>
       </div>
 
-      {/* 3. Per-Device Whitelist Table */}
+      {/* 3. Failover Auto-Activation Card */}
       <div className="card" style={{ marginBottom: 20 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
           <div>
-            <h3 style={{ margin: 0, fontSize: 16 }}>📱 Устройства в режиме белых списков</h3>
-            <p className="muted small" style={{ margin: '4px 0 0' }}>
-              Включите режим для необходимых клиентов в один клик.
+            <h3 style={{ margin: 0, fontSize: 16 }}>🔄 Автоматическое включение при Failover</h3>
+            <p className="muted small" style={{ margin: '4px 0 0', maxWidth: 640 }}>
+              Когда основной сервер (Германия, Нидерланды) падает и модуль Резервирования переключается на ноду 
+              белых списков (помеченную [БС] или из провайдера БС) — режим белых списков включается автоматически. 
+              При возврате на обычный сервер режим отключается, а игровой режим восстанавливается.
             </p>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <label
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              cursor: 'pointer',
+              userSelect: 'none',
+              background: config.auto_by_failover ? 'rgba(16, 185, 129, 0.15)' : 'rgba(255,255,255,0.05)',
+              border: `1px solid ${config.auto_by_failover ? '#10b981' : 'rgba(255,255,255,0.15)'}`,
+              borderRadius: 20,
+              padding: '6px 14px',
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={Boolean(config.auto_by_failover)}
+              disabled={busy}
+              onChange={handleAutoFailoverToggle}
+              data-testid="auto-failover-toggle"
+            />
+            <span style={{ fontWeight: 600, fontSize: 13, color: config.auto_by_failover ? '#34d399' : '#94a3b8' }}>
+              {config.auto_by_failover ? 'Авто: ВКЛ 🟢' : 'Авто: ВЫКЛ ⚪'}
+            </span>
+          </label>
+        </div>
+      </div>
+
+      {/* 4. Zero-Touch Device Coverage & Exclusions */}
+      <div className="card" style={{ marginBottom: 20 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: 12 }}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span>📱</span>
+              <span>Охват устройств (Zero-Touch)</span>
+            </h3>
+            <p className="muted small" style={{ margin: '4px 0 0' }}>
+              Все устройства домашней сети защищены автоматически. Если какому-то устройству НЕ нужен режим БС, 
+              исключите его кнопкой ниже (оно будет направляться напрямую мимо туннеля).
+            </p>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <input
               type="text"
               className="input"
-              placeholder="🔍 Поиск по имени, IP, MAC..."
+              placeholder="🔍 Поиск устройства..."
               style={{ width: 220, height: 32, fontSize: 12 }}
               value={deviceSearch}
               onChange={(e) => setDeviceSearch(e.target.value)}
               data-testid="device-search-input"
             />
-            <button
-              type="button"
-              className="btn btn-xs btn-primary"
-              disabled={busy}
-              onClick={() => handleBatchToggleAllOnline(true)}
-              data-testid="btn-enable-all-online"
-            >
-              Включить все онлайн
-            </button>
-            <button
-              type="button"
-              className="btn btn-xs btn-secondary"
-              disabled={busy}
-              onClick={() => handleBatchToggleAllOnline(false)}
-              data-testid="btn-disable-all"
-            >
-              Отключить все
-            </button>
           </div>
         </div>
 
@@ -586,7 +603,7 @@ export default function Whitelist({ notify, refresh }: Props) {
                 <th>Устройство</th>
                 <th style={{ width: 130 }}>IP-адрес</th>
                 <th style={{ width: 150 }}>MAC-адрес</th>
-                <th style={{ width: 120, textAlign: 'center' }}>Режим БС</th>
+                <th style={{ width: 180, textAlign: 'center' }}>Маршрутизация в БС</th>
               </tr>
             </thead>
             <tbody>
@@ -598,7 +615,7 @@ export default function Whitelist({ notify, refresh }: Props) {
                 </tr>
               ) : (
                 filteredDevices.map((d) => {
-                  const active = isDeviceActiveInWl(d)
+                  const excluded = isDeviceExcluded(d)
                   return (
                     <tr key={d.mac} className="device-row">
                       <td style={{ textAlign: 'center' }}>
@@ -616,17 +633,31 @@ export default function Whitelist({ notify, refresh }: Props) {
                       <td style={{ fontFamily: 'Consolas, monospace', fontSize: 12 }}>{d.ip || '—'}</td>
                       <td style={{ fontFamily: 'Consolas, monospace', fontSize: 11, color: '#94a3b8' }}>{d.mac}</td>
                       <td style={{ textAlign: 'center' }}>
-                        <button
-                          type="button"
-                          className={`device-whitelist-btn ${active ? 'active' : 'inactive'}`}
-                          data-testid={`whitelist-device-btn-${d.mac}`}
-                          disabled={busy}
-                          onClick={() => handleToggleDevice(d.ip, d.mac, !active)}
-                          title={active ? 'Отключить режим белых списков' : 'Включить режим белых списков'}
-                        >
-                          <span className="btn-icon device-whitelist-icon">🛡️</span>
-                          <span className="btn-label device-whitelist-label">{active ? 'БС ON' : 'БС OFF'}</span>
-                        </button>
+                        {excluded ? (
+                          <button
+                            type="button"
+                            className="btn btn-xs btn-secondary"
+                            data-testid={`btn-include-${d.mac}`}
+                            disabled={busy}
+                            onClick={() => handleToggleExclude(d.mac, true)}
+                            title="Вернуть устройство в режим белых списков"
+                            style={{ minWidth: 120 }}
+                          >
+                            <span>⚪ Исключено (DIRECT)</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn btn-xs btn-primary"
+                            data-testid={`btn-exclude-${d.mac}`}
+                            disabled={busy}
+                            onClick={() => handleToggleExclude(d.mac, false)}
+                            title="Исключить устройство из режима белых списков"
+                            style={{ minWidth: 120, background: 'rgba(16, 185, 129, 0.2)', border: '1px solid #10b981', color: '#34d399' }}
+                          >
+                            <span>🛡️ В БС (Защищено)</span>
+                          </button>
+                        )}
                       </td>
                     </tr>
                   )
@@ -637,7 +668,7 @@ export default function Whitelist({ notify, refresh }: Props) {
         </div>
       </div>
 
-      {/* 4. Domain Manager: Built-in 376 Catalog & Custom Domains */}
+      {/* 5. Domain Manager: Built-in 376 Catalog & Custom Domains */}
       <div className="card">
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, borderBottom: '1px solid #1e2638', paddingBottom: 12, marginBottom: 14 }}>
           <button

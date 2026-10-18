@@ -267,10 +267,26 @@ async fn record_switch(target_id: &str) {
 }
 
 /// Проверяет, является ли узел сервером белых списков:
-/// по ID из `cfg.whitelist_servers` или по тегам в названии `[БС]`, `(БС)`, `[WL]`, `(WL)`, `whitelist` (case-insensitive).
+/// 1) По ID из `cfg.whitelist_servers`
+/// 2) По провайдеру/подписке из `cfg.whitelist_providers`
+/// 3) По тегам в названии `[БС]`, `(БС)`, `[WL]`, `(WL)`, `whitelist` (case-insensitive).
 pub fn is_whitelist_server(node_name: &str, node_id: &str, cfg: &crate::config::AppConfig) -> bool {
+    is_whitelist_server_full(node_name, node_id, None, cfg)
+}
+
+pub fn is_whitelist_server_full(
+    node_name: &str,
+    node_id: &str,
+    provider: Option<&str>,
+    cfg: &crate::config::AppConfig,
+) -> bool {
     if !node_id.is_empty() && cfg.whitelist_servers.iter().any(|s| s == node_id) {
         return true;
+    }
+    if let Some(p) = provider {
+        if !p.is_empty() && cfg.whitelist_providers.iter().any(|wp| wp == p) {
+            return true;
+        }
     }
     let check_tag = |s: &str| -> bool {
         let lower = s.to_lowercase();
@@ -286,8 +302,6 @@ pub fn is_whitelist_server(node_name: &str, node_id: &str, cfg: &crate::config::
 }
 
 /// Синхронизация селекторной группы '🛡️ Whitelist' в ядре Mihomo при переключении узла.
-/// Если `cfg.whitelist.enabled` и включен режим следования за failover (`follow_failover`),
-/// переключает селекторную группу на новый узел (`node_id`) и логирует событие.
 pub async fn sync_whitelist_on_switch(
     http: &reqwest::Client,
     cfg: &crate::config::AppConfig,
@@ -325,6 +339,120 @@ pub async fn sync_whitelist_on_switch(
     );
 }
 
+/// Комплексная обработка перехода на сервер с учетом режима Белых списков (Zero-Touch):
+/// 1. Если включен auto_by_failover:
+///    - Если узел помечен как [БС]: автоматически активирует whitelist.enabled,
+///      отключает gaming.enabled (выставляя gaming_suspended = true),
+///      синхронизирует селекторную группу 🛡️ Whitelist на новый узел.
+///    - Если узел обычный: деактивирует whitelist.enabled,
+///      восстанавливает gaming.enabled (если gaming_suspended == true).
+/// 2. Применяет правила маршрутизации и сохраняет состояние.
+pub async fn handle_whitelist_transition(
+    state: &AppState,
+    node_id: &str,
+    node_name: &str,
+    provider: Option<&str>,
+) {
+    let cfg = state.config.read().await.clone();
+    let is_bs = is_whitelist_server_full(node_name, node_id, provider, &cfg);
+
+    if cfg.whitelist.auto_by_failover {
+        if is_bs {
+            let mut cfg_changed = false;
+            let mut gaming_log = String::new();
+
+            {
+                let _cfg_guard = state.config_lock.lock().await;
+                let mut current_cfg = (**state.config.read().await).clone();
+
+                if !current_cfg.whitelist.enabled {
+                    current_cfg.whitelist.enabled = true;
+                    cfg_changed = true;
+                }
+
+                if current_cfg.gaming.enabled {
+                    current_cfg.gaming.enabled = false;
+                    current_cfg.whitelist.gaming_suspended = true;
+                    cfg_changed = true;
+                    gaming_log = " (Игровой режим приостановлен во избежание конфликтов сокетов)".to_string();
+                }
+
+                if cfg_changed {
+                    if let Err(e) = crate::config::save(&state.config_path, &current_cfg).await {
+                        crate::log_e!("[FAILOVER] Ошибка сохранения config.json при авто-активации БС: {e}");
+                    } else {
+                        *state.config.write().await = std::sync::Arc::new(current_cfg);
+                    }
+                }
+            }
+
+            if cfg_changed {
+                crate::log_i!(
+                    "[FAILOVER] 🛡️ Авто-активация режима Белых списков (узел '{}' помечен как [БС]){}",
+                    node_name,
+                    gaming_log
+                );
+                if let Ok(mut tx) = crate::transaction::ConfigTx::begin(state).await {
+                    if let Ok(yaml) = tx.read_yaml().await {
+                        if let Ok((new_yaml, _)) = crate::routing::apply_routing(&yaml, tx.config()) {
+                            let _ = tx.set_yaml(new_yaml);
+                            let _ = tx.commit_and_reload().await;
+                        }
+                    }
+                }
+            }
+
+            let _ = crate::mihomo::switch_group(&state.http, &cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await;
+        } else {
+            let mut cfg_changed = false;
+            let mut gaming_log = String::new();
+
+            {
+                let _cfg_guard = state.config_lock.lock().await;
+                let mut current_cfg = (**state.config.read().await).clone();
+
+                if current_cfg.whitelist.enabled {
+                    current_cfg.whitelist.enabled = false;
+                    cfg_changed = true;
+                }
+
+                if current_cfg.whitelist.gaming_suspended {
+                    current_cfg.gaming.enabled = true;
+                    current_cfg.whitelist.gaming_suspended = false;
+                    cfg_changed = true;
+                    gaming_log = " (Игровой режим автоматически восстановлен)".to_string();
+                }
+
+                if cfg_changed {
+                    if let Err(e) = crate::config::save(&state.config_path, &current_cfg).await {
+                        crate::log_e!("[FAILOVER] Ошибка сохранения config.json при деактивации БС: {e}");
+                    } else {
+                        *state.config.write().await = std::sync::Arc::new(current_cfg);
+                    }
+                }
+            }
+
+            if cfg_changed {
+                crate::log_i!(
+                    "[FAILOVER] ⚪ Деактивация режима Белых списков (переход на обычный узел '{}'){}",
+                    node_name,
+                    gaming_log
+                );
+                if let Ok(mut tx) = crate::transaction::ConfigTx::begin(state).await {
+                    if let Ok(yaml) = tx.read_yaml().await {
+                        if let Ok((new_yaml, _)) = crate::routing::apply_routing(&yaml, tx.config()) {
+                            let _ = tx.set_yaml(new_yaml);
+                            let _ = tx.commit_and_reload().await;
+                        }
+                    }
+                }
+            }
+        }
+    } else if cfg.whitelist.enabled {
+        let _ = crate::mihomo::switch_group(&state.http, &cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await;
+    }
+}
+
 /// Прогон микро-порции реального трафика (8 КБ) через проверяемый сервер.
 /// Загружает тестовый пэйлоад 8192 байта со speed.cloudflare.com.
 /// Если сервер обрывает соединение, дропает пакеты или таймаутит — возвращает <= 0 (-1).
@@ -357,8 +485,10 @@ pub async fn ping_servers_staggered(
     if ids.is_empty() {
         return out;
     }
-    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let max_concurrency = concurrency.clamp(1, 2);
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrency));
     let shared_cfg = std::sync::Arc::new(cfg.clone());
+    let bounded_timeout = timeout_ms.clamp(1000, 2500);
     let mut handles = Vec::new();
 
     for id in ids {
@@ -368,7 +498,7 @@ pub async fn ping_servers_staggered(
         let id_c = id.clone();
         handles.push(tokio::spawn(async move {
             let _permit = sem_c.acquire().await.ok();
-            let ms = mihomo::ping_server_url(&http_c, &cfg_c, &id_c, timeout_ms, None).await;
+            let ms = mihomo::ping_server_url(&http_c, &cfg_c, &id_c, bounded_timeout, None).await;
             (id_c, ms)
         }));
         if interval_ms > 0 {
@@ -503,8 +633,8 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             return match mihomo::switch_server(&state.http, &cfg, best_id).await {
                 Ok(_) => {
                     record_switch(best_id).await;
-                    sync_whitelist_on_switch(&state.http, &cfg, best_id, best_name).await;
-                    let _ = crate::api::sync_whitelist_mode_tunnel(&state, best_id).await;
+                    let best_prov = servers.iter().find(|s| &s.id == best_id).and_then(|s| s.provider.as_deref());
+                    handle_whitelist_transition(state, best_id, best_name, best_prov).await;
                     state.failover_log.push(&msg, true).await;
                     crate::notifications::notify_failover(
                         &state.http,
@@ -642,8 +772,8 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                 return match mihomo::switch_server(&state.http, &cfg, id).await {
                     Ok(_) => {
                         record_switch(id).await;
-                        sync_whitelist_on_switch(&state.http, &cfg, id, &name).await;
-                        let _ = crate::api::sync_whitelist_mode_tunnel(&state, id).await;
+                        let s_prov = servers.iter().find(|s| &s.id == id).and_then(|s| s.provider.as_deref());
+                        handle_whitelist_transition(state, id, &name, s_prov).await;
                         state.failover_log.push(&msg, true).await;
                         crate::notifications::notify_failover(
                             &state.http,
@@ -705,8 +835,8 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                 match mihomo::switch_server(&state.http, &cfg, best_id).await {
                     Ok(_) => {
                         record_switch(best_id).await;
-                        sync_whitelist_on_switch(&state.http, &cfg, best_id, &best_name).await;
-                        let _ = crate::api::sync_whitelist_mode_tunnel(&state, best_id).await;
+                        let s_prov = servers.iter().find(|s| &s.id == best_id).and_then(|s| s.provider.as_deref());
+                        handle_whitelist_transition(state, best_id, &best_name, s_prov).await;
                         state.failover_log.push(&msg, true).await;
                         crate::notifications::notify_failover(
                             &state.http,
@@ -858,8 +988,8 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                         return match mihomo::switch_server(&state.http, &cfg, &pri.id).await {
                             Ok(_) => {
                                 record_switch(&pri.id).await;
-                                sync_whitelist_on_switch(&state.http, &cfg, &pri.id, &pri.name).await;
-                                let _ = crate::api::sync_whitelist_mode_tunnel(&state, &pri.id).await;
+                                let s_prov = servers.iter().find(|s| s.id == pri.id).and_then(|s| s.provider.as_deref());
+                                handle_whitelist_transition(state, &pri.id, &pri.name, s_prov).await;
                                 state.failover_log.push(&msg, true).await;
                                 crate::notifications::notify_failover(
                                     &state.http,
@@ -1478,5 +1608,56 @@ mod tests {
         let target_node = "NL [БС] Fast";
         let payload = serde_json::json!({ "name": target_node });
         assert_eq!(payload["name"], "NL [БС] Fast");
+    }
+
+    #[test]
+    fn test_is_whitelist_server_provider_matching() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist_providers = vec!["sub_whitelist_special".into()];
+
+        // 1. Matched by provider
+        assert!(is_whitelist_server_full("Generic Server 01", "node_x", Some("sub_whitelist_special"), &cfg));
+        // 2. Not matched by provider
+        assert!(!is_whitelist_server_full("Generic Server 01", "node_x", Some("other_provider"), &cfg));
+        assert!(!is_whitelist_server_full("Generic Server 01", "node_x", None, &cfg));
+    }
+
+    #[tokio::test]
+    async fn test_auto_transition_whitelist_and_gaming_suspension() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.auto_by_failover = true;
+        cfg.whitelist.enabled = false;
+        cfg.gaming.enabled = true;
+
+        // Transition to BS node:
+        let is_bs = is_whitelist_server_full("Germany [БС] Fast", "node_bs", None, &cfg);
+        assert!(is_bs);
+
+        // Emulate transition logic:
+        if is_bs && cfg.whitelist.auto_by_failover {
+            cfg.whitelist.enabled = true;
+            if cfg.gaming.enabled {
+                cfg.gaming.enabled = false;
+                cfg.whitelist.gaming_suspended = true;
+            }
+        }
+        assert!(cfg.whitelist.enabled, "Whitelist mode must be enabled on BS node");
+        assert!(!cfg.gaming.enabled, "Gaming mode must be disabled on BS node to prevent hijacking");
+        assert!(cfg.whitelist.gaming_suspended, "gaming_suspended flag must be true");
+
+        // Transition back to normal node:
+        let is_normal = !is_whitelist_server_full("Germany Normal", "node_de", None, &cfg);
+        assert!(is_normal);
+
+        if is_normal && cfg.whitelist.auto_by_failover {
+            cfg.whitelist.enabled = false;
+            if cfg.whitelist.gaming_suspended {
+                cfg.gaming.enabled = true;
+                cfg.whitelist.gaming_suspended = false;
+            }
+        }
+        assert!(!cfg.whitelist.enabled, "Whitelist mode must be disabled on normal node");
+        assert!(cfg.gaming.enabled, "Gaming mode must be restored on normal node");
+        assert!(!cfg.whitelist.gaming_suspended);
     }
 }

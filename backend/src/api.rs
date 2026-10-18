@@ -817,7 +817,12 @@ pub async fn switch_server(State(state): State<AppState>, Json(req): Json<Switch
         Ok(msg) => {
             log_i!("Смена сервера: {} — {}", req.server_id, msg);
             failover::record_manual_switch(&req.server_id).await;
-            let _ = sync_whitelist_mode_tunnel(&state, &req.server_id).await;
+            let (srv_name, srv_prov) = if let Ok(servers) = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
+                servers.iter().find(|s| s.id == req.server_id).map(|s| (s.name.clone(), s.provider.clone())).unwrap_or_else(|| (req.server_id.clone(), None))
+            } else {
+                (req.server_id.clone(), None)
+            };
+            failover::handle_whitelist_transition(&state, &req.server_id, &srv_name, srv_prov.as_deref()).await;
             // Если переключен конкретный сервер, обновляем его как основной в цепочке приоритетов,
             // чтобы фоновый failover не откатывал выбор пользователя обратно через 30-60 секунд.
             if !req.server_id.is_empty() && req.server_id != "Fastest" && req.server_id != "Fallback" {
@@ -10327,12 +10332,17 @@ pub async fn adguard_set_config(
 #[derive(Serialize)]
 pub struct WhitelistStatusResponse {
     pub enabled: bool,
+    pub auto_by_failover: bool,
+    pub strategy: config::WhitelistStrategy,
     pub target_server: Option<String>,
     pub follow_failover: bool,
+    pub excluded_devices: Vec<String>,
     pub devices: Vec<config::WhitelistDevice>,
+    pub gaming_suspended: bool,
     pub custom_domains: Vec<String>,
     pub domestic_catalog_count: usize,
     pub active_server: String,
+    pub is_bs_server: bool,
     pub whitelist_servers: Vec<String>,
     pub whitelist_providers: Vec<String>,
 }
@@ -10350,22 +10360,138 @@ pub async fn get_whitelist(State(state): State<AppState>) -> Response {
             .and_then(|n| n.as_str())
     }).unwrap_or("Fastest");
 
-    let active_server = proxies_map.as_ref()
+    let fallback_active = proxies_map.as_ref()
         .map(|map| resolve_group_leaf(map, group_now))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| group_now.to_string());
 
+    let (active_server, is_bs_server) = if let Ok(servers) = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
+        if let Some(s) = servers.iter().find(|srv| srv.is_active && !srv.is_pool) {
+            let is_bs = failover::is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), &cfg);
+            (s.name.clone(), is_bs)
+        } else {
+            let is_bs = failover::is_whitelist_server(&fallback_active, &fallback_active, &cfg);
+            (fallback_active, is_bs)
+        }
+    } else {
+        let is_bs = failover::is_whitelist_server(&fallback_active, &fallback_active, &cfg);
+        (fallback_active, is_bs)
+    };
+
     api_ok(json!(WhitelistStatusResponse {
         enabled: cfg.whitelist.enabled,
+        auto_by_failover: cfg.whitelist.auto_by_failover,
+        strategy: cfg.whitelist.strategy,
         target_server: cfg.whitelist.target_server,
         follow_failover: cfg.whitelist.follow_failover,
+        excluded_devices: cfg.whitelist.excluded_devices,
         devices: cfg.whitelist.devices,
+        gaming_suspended: cfg.whitelist.gaming_suspended,
         custom_domains: cfg.whitelist.custom_domains,
         domestic_catalog_count,
         active_server,
+        is_bs_server,
         whitelist_servers: cfg.whitelist_servers,
         whitelist_providers: cfg.whitelist_providers,
     }))
+}
+
+#[derive(Deserialize)]
+pub struct WhitelistStrategyReq {
+    pub strategy: config::WhitelistStrategy,
+}
+
+/// POST /api/whitelist/strategy — переключить стратегию работы сервера белых списков
+pub async fn set_whitelist_strategy(
+    State(state): State<AppState>,
+    Json(body): Json<WhitelistStrategyReq>,
+) -> Response {
+    let mut tx = match ConfigTx::begin(&state).await {
+        Ok(tx) => tx,
+        Err(e) => return api_err(e),
+    };
+
+    tx.config_mut().whitelist.strategy = body.strategy;
+
+    let raw_yaml = match tx.read_yaml().await {
+        Ok(y) => y,
+        Err(e) => return api_err(e),
+    };
+
+    let (new_yaml, _) = match routing::apply_routing(&raw_yaml, tx.config()) {
+        Ok(res) => res,
+        Err(e) => return api_err(format!("Ошибка генерации правил маршрутизации: {e}")),
+    };
+
+    if let Err(e) = tx.set_yaml(&new_yaml) {
+        return api_err(e);
+    }
+
+    if let Err(e) = tx.apply_and_reload().await {
+        return api_err(e);
+    }
+
+    if let Err(e) = tx.commit().await {
+        return api_err(format!("Ошибка сохранения config.json: {e}"));
+    }
+
+    log_i!("Стратегия белых списков переключена на: {:?}", body.strategy);
+    api_ok(json!({ "strategy": body.strategy }))
+}
+
+#[derive(Deserialize)]
+pub struct WhitelistExcludeReq {
+    pub id: String, // IP or MAC
+    pub excluded: bool,
+}
+
+/// POST /api/whitelist/exclude — добавить или удалить устройство из списка исключений
+pub async fn toggle_whitelist_exclude(
+    State(state): State<AppState>,
+    Json(body): Json<WhitelistExcludeReq>,
+) -> Response {
+    let id_clean = body.id.trim().to_string();
+    if id_clean.is_empty() {
+        return api_err("Не указан идентификатор устройства (IP или MAC)");
+    }
+
+    let mut tx = match ConfigTx::begin(&state).await {
+        Ok(tx) => tx,
+        Err(e) => return api_err(e),
+    };
+
+    if body.excluded {
+        if !tx.config().whitelist.excluded_devices.iter().any(|d| d.eq_ignore_ascii_case(&id_clean)) {
+            tx.config_mut().whitelist.excluded_devices.push(id_clean.clone());
+        }
+    } else {
+        tx.config_mut().whitelist.excluded_devices.retain(|d| !d.eq_ignore_ascii_case(&id_clean));
+    }
+
+    let raw_yaml = match tx.read_yaml().await {
+        Ok(y) => y,
+        Err(e) => return api_err(e),
+    };
+
+    let (new_yaml, _) = match routing::apply_routing(&raw_yaml, tx.config()) {
+        Ok(res) => res,
+        Err(e) => return api_err(format!("Ошибка генерации правил маршрутизации: {e}")),
+    };
+
+    if let Err(e) = tx.set_yaml(&new_yaml) {
+        return api_err(e);
+    }
+
+    if let Err(e) = tx.apply_and_reload().await {
+        return api_err(e);
+    }
+
+    if let Err(e) = tx.commit().await {
+        return api_err(format!("Ошибка сохранения config.json: {e}"));
+    }
+
+    log_i!("Статус исключения устройства {} из белых списков: {}", id_clean, body.excluded);
+    api_ok(json!({ "excluded_devices": tx.config().whitelist.excluded_devices }))
 }
 
 #[derive(Deserialize)]
@@ -10373,9 +10499,15 @@ pub struct WhitelistUpdateReq {
     #[serde(default)]
     pub enabled: Option<bool>,
     #[serde(default)]
+    pub auto_by_failover: Option<bool>,
+    #[serde(default)]
+    pub strategy: Option<config::WhitelistStrategy>,
+    #[serde(default)]
     pub target_server: Option<String>,
     #[serde(default)]
     pub follow_failover: Option<bool>,
+    #[serde(default)]
+    pub excluded_devices: Option<Vec<String>>,
     #[serde(default)]
     pub devices: Option<Vec<config::WhitelistDevice>>,
     #[serde(default)]
@@ -10395,6 +10527,12 @@ pub async fn save_whitelist(
     if let Some(enabled) = body.enabled {
         tx.config_mut().whitelist.enabled = enabled;
     }
+    if let Some(auto_by_failover) = body.auto_by_failover {
+        tx.config_mut().whitelist.auto_by_failover = auto_by_failover;
+    }
+    if let Some(strategy) = body.strategy {
+        tx.config_mut().whitelist.strategy = strategy;
+    }
     if let Some(target) = body.target_server {
         let t = target.trim();
         if t.is_empty() || t == "follow_failover" {
@@ -10406,6 +10544,9 @@ pub async fn save_whitelist(
     }
     if let Some(follow) = body.follow_failover {
         tx.config_mut().whitelist.follow_failover = follow;
+    }
+    if let Some(excluded) = body.excluded_devices {
+        tx.config_mut().whitelist.excluded_devices = excluded;
     }
     if let Some(devices) = body.devices {
         for dev in &devices {

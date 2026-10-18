@@ -1637,6 +1637,45 @@ pub fn remove_whitelist_dns(yaml: &str) -> String {
 /// 2. Вставка блока # --- AUTO-WHITELIST-BEGIN --- в rules:
 ///    - Отечественные домены (376 базовых + custom) -> DIRECT (строго без GEOIP-RU)
 ///    - Трафик назначенных устройств -> 🛡️ Whitelist (или выбранный target_server)
+/// Разрешение IP-адресов исключенных из белых списков устройств (по IP или MAC).
+pub fn resolve_excluded_whitelist_ips(cfg: &crate::config::AppConfig) -> Vec<String> {
+    let mut ips = Vec::new();
+    for item in &cfg.whitelist.excluded_devices {
+        let clean = item.trim();
+        if clean.is_empty() {
+            continue;
+        }
+        if crate::config::is_valid_ip_or_cidr(clean) {
+            ips.push(clean.to_string());
+        } else {
+            if let Some(dev) = cfg.gaming.devices.iter().find(|d| d.mac.eq_ignore_ascii_case(clean)) {
+                if !dev.ip.trim().is_empty() {
+                    ips.push(dev.ip.trim().to_string());
+                }
+            }
+            if let Some(dev) = cfg.whitelist.devices.iter().find(|d| d.mac.eq_ignore_ascii_case(clean)) {
+                if !dev.ip.trim().is_empty() {
+                    ips.push(dev.ip.trim().to_string());
+                }
+            }
+            if let Some((ip, _)) = cfg.device_routing.iter().find(|(k, _)| k.eq_ignore_ascii_case(clean)) {
+                ips.push(ip.clone());
+            }
+        }
+    }
+    ips.sort();
+    ips.dedup();
+    ips
+}
+
+/// Применение правил режима белых списков:
+/// 1. Вставка селектор-группы '🛡️ Whitelist' в proxy-groups:
+/// 2. Вставка блока # --- AUTO-WHITELIST-BEGIN --- в rules:
+///    - Отечественные домены (376 базовых + custom) -> DIRECT (строго без GEOIP-RU)
+///    - При стратегии StrictXKeen:
+///      * Исключенные устройства -> DIRECT
+///      * Все остальные клиенты сети (Zero-Touch) -> 🛡️ Whitelist (или выбранный target_server)
+///    - При стратегии Standard: только селектор 🛡️ Whitelist без тотального перехвата
 /// Размещается непосредственно над AUTO-DEVICE-RULES.
 pub fn apply_whitelist_rules(
     content: &str,
@@ -1644,14 +1683,7 @@ pub fn apply_whitelist_rules(
     active_tunnel_node: Option<&str>,
 ) -> String {
     let clean = remove_whitelist_rules(content);
-    let active_devices: Vec<&crate::config::WhitelistDevice> = cfg
-        .whitelist
-        .devices
-        .iter()
-        .filter(|d| d.enabled && !d.ip.trim().is_empty())
-        .collect();
-
-    if !cfg.whitelist.enabled || active_devices.is_empty() {
+    if !cfg.whitelist.enabled {
         return clean;
     }
 
@@ -1743,20 +1775,46 @@ pub fn apply_whitelist_rules(
         wl_rules.push(format!("  - DOMAIN-SUFFIX,{dom},DIRECT"));
     }
 
-    let dev_target = match cfg.whitelist.target_server.as_deref() {
-        Some(s) if !s.trim().is_empty() && s.trim() != "follow_failover" => s.trim(),
-        _ => WHITELIST_GROUP_NAME,
-    };
-
-    for dev in &active_devices {
-        let ip_trim = dev.ip.trim();
-        let cidr = if ip_trim.contains('/') {
-            ip_trim.to_string()
-        } else {
-            format!("{ip_trim}/32")
+    // При стратегии StrictXKeen маршрутизируем всех клиентов сети в защищенный туннель (Zero-Touch)
+    if cfg.whitelist.strategy == crate::config::WhitelistStrategy::StrictXKeen {
+        let dev_target = match cfg.whitelist.target_server.as_deref() {
+            Some(s) if !s.trim().is_empty() && s.trim() != "follow_failover" => s.trim(),
+            _ => WHITELIST_GROUP_NAME,
         };
-        wl_rules.push(format!("  - SRC-IP-CIDR,{cidr},{dev_target}"));
+
+        // 2.1. Исключенные устройства -> DIRECT
+        let excluded_ips = resolve_excluded_whitelist_ips(cfg);
+        for ex_ip in &excluded_ips {
+            let cidr = if ex_ip.contains('/') {
+                ex_ip.clone()
+            } else {
+                format!("{ex_ip}/32")
+            };
+            wl_rules.push(format!("  - SRC-IP-CIDR,{cidr},DIRECT"));
+        }
+
+        // 2.2. Явно сконфигурированные устройства из whitelist.devices (если есть)
+        for dev in &cfg.whitelist.devices {
+            if dev.enabled && !dev.ip.trim().is_empty() && !excluded_ips.iter().any(|ex| ex == dev.ip.trim()) {
+                let ip_trim = dev.ip.trim();
+                let cidr = if ip_trim.contains('/') {
+                    ip_trim.to_string()
+                } else {
+                    format!("{ip_trim}/32")
+                };
+                let r = format!("  - SRC-IP-CIDR,{cidr},{dev_target}");
+                if !wl_rules.contains(&r) {
+                    wl_rules.push(r);
+                }
+            }
+        }
+
+        // 2.3. Zero-Touch: Все клиенты локальных сетей роутера -> в туннель Белых списков
+        for subnet in &["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"] {
+            wl_rules.push(format!("  - SRC-IP-CIDR,{subnet},{dev_target}"));
+        }
     }
+
     wl_rules.push(WHITELIST_END.to_string());
 
     // 3. Вставка в rules: непосредственно над AUTO-DEVICE-RULES (или перед fallback/в конце rules)
@@ -3824,6 +3882,69 @@ rules:
         assert!(all.contains(&"special-bank.ru".to_string()));
         assert!(!all.contains(&"invalid domain name with spaces".to_string()));
         assert!(!all.contains(&"192.168.1.1".to_string()));
+    }
+
+    #[test]
+    fn test_zero_touch_whitelist_subnet_rules_and_exclusions() {
+        let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
+        cfg.whitelist.excluded_devices = vec!["192.168.1.99".into()];
+
+        let applied = apply_whitelist_rules(base_yaml, &cfg, None);
+        assert!(applied.contains(WHITELIST_BEGIN));
+        assert!(applied.contains(WHITELIST_END));
+
+        // 1. Domestic domains -> DIRECT
+        assert!(applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
+        assert!(applied.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
+
+        // 2. Excluded device -> DIRECT
+        assert!(applied.contains("SRC-IP-CIDR,192.168.1.99/32,DIRECT"));
+
+        // 3. Zero-touch subnet coverage
+        assert!(applied.contains("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist"));
+        assert!(applied.contains("SRC-IP-CIDR,10.0.0.0/8,🛡️ Whitelist"));
+
+        // 4. Hierarchy inside whitelist block: domain DIRECT must be ABOVE subnet tunnel
+        let dom_pos = applied.find("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT").unwrap();
+        let ex_pos = applied.find("SRC-IP-CIDR,192.168.1.99/32,DIRECT").unwrap();
+        let sub_pos = applied.find("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist").unwrap();
+        assert!(dom_pos < sub_pos, "Domestic DIRECT rules must precede subnet redirection");
+        assert!(ex_pos < sub_pos, "Excluded devices must precede subnet redirection");
+    }
+
+    #[test]
+    fn test_standard_whitelist_strategy_no_subnet_redirection() {
+        let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.strategy = crate::config::WhitelistStrategy::Standard;
+
+        let applied = apply_whitelist_rules(base_yaml, &cfg, None);
+        assert!(applied.contains(WHITELIST_BEGIN));
+        assert!(applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
+        // В стандартном режиме blanket subnet перехват не должен добавляться
+        assert!(!applied.contains("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist"));
+    }
+
+    #[test]
+    fn test_resolve_excluded_whitelist_ips_with_mac_lookup() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.devices.push(crate::config::WhitelistDevice {
+            mac: "AA:BB:CC:DD:EE:01".into(),
+            ip: "192.168.1.150".into(),
+            name: Some("Smart TV".into()),
+            enabled: true,
+        });
+        cfg.whitelist.excluded_devices = vec![
+            "AA:BB:CC:DD:EE:01".into(), // by MAC
+            "192.168.1.151".into(),     // by IP
+        ];
+
+        let resolved = resolve_excluded_whitelist_ips(&cfg);
+        assert_eq!(resolved, vec!["192.168.1.150".to_string(), "192.168.1.151".to_string()]);
     }
 }
 
