@@ -11,10 +11,11 @@
 //! 9. Удержание блокировок до завершения восстановления runtime и надёжный атомарный откат в Drop (TX-03).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::sync::OwnedMutexGuard;
 
-use crate::{config, log_e, log_w, mihomo, AppState};
+use crate::{config, log_e, log_i, log_w, mihomo, AppState};
 
 /// Only NotFound means there is no original file. Any other read error must
 /// abort staging; otherwise rollback could delete an existing unreadable file.
@@ -799,6 +800,267 @@ impl Drop for ConfigTx {
     }
 }
 
+// ============================================================================
+// Механизм Commit-Confirmed и Dry-Run валидации (v1.9.13)
+// ============================================================================
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CommitConfirmedStatus {
+    pub pending: bool,
+    pub tx_id: Option<String>,
+    pub expires_in_seconds: Option<u64>,
+}
+
+pub struct PendingCommit {
+    pub tx_id: String,
+    pub created_at: Instant,
+    pub expires_at: Instant,
+    pub yaml_snapshot: Option<String>,
+    pub json_snapshot: Option<String>,
+    pub initial_config: config::AppConfig,
+    pub cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+static PENDING_COMMIT: OnceLock<StdMutex<Option<PendingCommit>>> = OnceLock::new();
+
+pub fn pending_commit_store() -> &'static StdMutex<Option<PendingCommit>> {
+    PENDING_COMMIT.get_or_init(|| StdMutex::new(None))
+}
+
+pub fn get_pending_commit_status() -> CommitConfirmedStatus {
+    if let Ok(g) = pending_commit_store().lock() {
+        if let Some(ref p) = *g {
+            let now = Instant::now();
+            let expires_in = if p.expires_at > now {
+                p.expires_at.duration_since(now).as_secs()
+            } else {
+                0
+            };
+            return CommitConfirmedStatus {
+                pending: true,
+                tx_id: Some(p.tx_id.clone()),
+                expires_in_seconds: Some(expires_in),
+            };
+        }
+    }
+    CommitConfirmedStatus {
+        pending: false,
+        tx_id: None,
+        expires_in_seconds: None,
+    }
+}
+
+pub async fn apply_with_confirmation(
+    state: &AppState,
+    rollback_seconds: u64,
+    new_yaml: Option<String>,
+    new_json: Option<config::AppConfig>,
+) -> Result<String, String> {
+    let tx_id = format!("tx-{}", crate::auth::random_hex(8));
+
+    // 1. Создаем транзакцию для безопасного применения файлов
+    let mut tx = ConfigTx::begin(state).await?;
+    let original_yaml = tx.original_yaml.clone();
+    let original_json = tx.original_json.clone();
+    let initial_config = tx.initial_config.clone();
+
+    if let Some(y) = new_yaml {
+        tx.set_yaml(y)?;
+    }
+    if let Some(j) = new_json {
+        tx.stage_json(j);
+    }
+
+    // Применяем файлы и перезагружаем ядро
+    tx.commit_and_reload().await?;
+
+    if rollback_seconds == 0 {
+        // Немедленная постоянная фиксация без отката
+        return Ok(tx_id);
+    }
+
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    let now = Instant::now();
+    let expires_at = now + Duration::from_secs(rollback_seconds);
+
+    // Сохраняем pending commit
+    {
+        let mut g = pending_commit_store()
+            .lock()
+            .map_err(|e| format!("Lock error: {e}"))?;
+        if let Some(mut prev) = g.take() {
+            if let Some(tx) = prev.cancel_tx.take() {
+                let _ = tx.send(());
+            }
+        }
+        *g = Some(PendingCommit {
+            tx_id: tx_id.clone(),
+            created_at: now,
+            expires_at,
+            yaml_snapshot: original_yaml.clone(),
+            json_snapshot: original_json.clone(),
+            initial_config: initial_config.clone(),
+            cancel_tx: Some(cancel_tx),
+        });
+    }
+
+    // Фоновый таймер отката
+    let state_clone = state.clone();
+    let tx_id_clone = tx_id.clone();
+    let yaml_backup = original_yaml;
+    let json_backup = original_json;
+    let initial_cfg = initial_config;
+
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(rollback_seconds)) => {
+                log_w!("[COMMIT-CONFIRMED] Время ожидания подтверждения истекло для tx_id={} ({} сек). Запуск автоотката...", tx_id_clone, rollback_seconds);
+                if let Some(ref y) = yaml_backup {
+                    let _ = crate::api::atomic_write_file(&initial_cfg.mihomo.config_path, y).await;
+                }
+                if let Some(ref j) = json_backup {
+                    let _ = crate::api::atomic_write_file(&*state_clone.config_path, j).await;
+                }
+                *state_clone.config.write().await = Arc::new(initial_cfg.clone());
+                let _ = crate::mihomo::reload_config(&state_clone.http, &initial_cfg).await;
+                log_i!("[COMMIT-CONFIRMED] Конфигурация успешно откатана к исходному состоянию после таймаута tx_id={}", tx_id_clone);
+
+                if let Ok(mut g) = pending_commit_store().lock() {
+                    if let Some(ref cur) = *g {
+                        if cur.tx_id == tx_id_clone {
+                            *g = None;
+                        }
+                    }
+                }
+            }
+            _ = cancel_rx => {
+                log_i!("[COMMIT-CONFIRMED] Транзакция tx_id={} успешно подтверждена клиентом.", tx_id_clone);
+            }
+        }
+    });
+
+    Ok(tx_id)
+}
+
+pub fn confirm_commit(tx_id: &str) -> Result<(), String> {
+    let mut g = pending_commit_store()
+        .lock()
+        .map_err(|e| format!("Lock error: {e}"))?;
+    if let Some(mut pending) = g.take() {
+        if pending.tx_id == tx_id {
+            if let Some(tx) = pending.cancel_tx.take() {
+                let _ = tx.send(());
+            }
+            Ok(())
+        } else {
+            *g = Some(pending);
+            Err(format!("Транзакция tx_id='{tx_id}' не совпадает с текущей активной транзакцией"))
+        }
+    } else {
+        Err("Нет активных неподтверждённых транзакций".to_string())
+    }
+}
+
+pub async fn rollback_pending_commit(state: &AppState, tx_id: &str) -> Result<(), String> {
+    let pending = {
+        let mut g = pending_commit_store()
+            .lock()
+            .map_err(|e| format!("Lock error: {e}"))?;
+        if let Some(mut p) = g.take() {
+            if p.tx_id == tx_id {
+                if let Some(tx) = p.cancel_tx.take() {
+                    let _ = tx.send(());
+                }
+                p
+            } else {
+                *g = Some(p);
+                return Err(format!("Транзакция tx_id='{tx_id}' не совпадает с текущей"));
+            }
+        } else {
+            return Err("Нет активных неподтверждённых транзакций".to_string());
+        }
+    };
+
+    if let Some(ref y) = pending.yaml_snapshot {
+        crate::api::atomic_write_file(&pending.initial_config.mihomo.config_path, y).await?;
+    }
+    if let Some(ref j) = pending.json_snapshot {
+        crate::api::atomic_write_file(&*state.config_path, j).await?;
+    }
+    *state.config.write().await = Arc::new(pending.initial_config.clone());
+    let _ = crate::mihomo::reload_config(&state.http, &pending.initial_config).await;
+    Ok(())
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ValidationResult {
+    pub valid: bool,
+    pub errors: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+pub fn validate_config_dry_run(
+    yaml_opt: Option<&str>,
+    json_val_opt: Option<&serde_json::Value>,
+) -> ValidationResult {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    if let Some(yaml) = yaml_opt {
+        if let Err(e) = validate_yaml_syntax(yaml) {
+            errors.push(format!("Ошибка синтаксиса YAML: {e}"));
+        } else if let Err(e) = validate_mihomo_yaml(yaml) {
+            warnings.push(format!("Предупреждение структуры Mihomo: {e}"));
+        }
+
+        // Проверка конфликтов системных портов
+        for line in yaml.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') {
+                continue;
+            }
+            if trimmed.starts_with("port: 1001")
+                || trimmed.starts_with("mixed-port: 1001")
+                || trimmed.starts_with("socks-port: 1001")
+                || trimmed.starts_with("redir-port: 1001")
+                || trimmed.starts_with("tproxy-port: 1001")
+            {
+                errors.push("Конфликт порта 1001: данный порт зарезервирован веб-панелью XKeen Route".to_string());
+            }
+            if trimmed.starts_with("port: 80")
+                || trimmed.starts_with("mixed-port: 80")
+                || trimmed.starts_with("port: 22")
+                || trimmed.starts_with("mixed-port: 22")
+            {
+                errors.push("Конфликт системных портов KeeneticOS (80/22)".to_string());
+            }
+        }
+    }
+
+    if let Some(json) = json_val_opt {
+        match serde_json::from_value::<config::AppConfig>(json.clone()) {
+            Ok(parsed) => {
+                if parsed.rci.port == 1001 {
+                    errors.push("Порт RCI не может быть равен 1001 (порт панели XKeen Route)".to_string());
+                }
+                if parsed.adguard.dns_port == 1001 {
+                    errors.push("Порт AdGuard DNS не может быть равен 1001".to_string());
+                }
+            }
+            Err(e) => {
+                errors.push(format!("Ошибка схемы JSON config.json: {e}"));
+            }
+        }
+    }
+
+    let valid = errors.is_empty();
+    ValidationResult {
+        valid,
+        errors,
+        warnings,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1137,5 +1399,35 @@ rules:
         assert_eq!(tx.applied_files.len(), 1);
 
         let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[test]
+    fn test_validate_config_detects_port_conflicts() {
+        // 1. Конфиг с конфликтом порта 1001 (панель XKeen Route)
+        let conflict_yaml = "port: 1001\nproxies:\n  - name: test\n    type: socks5\nproxy-groups:\n  - name: group\n    type: select\nrules:\n  - MATCH,DIRECT\n";
+        let res = validate_config_dry_run(Some(conflict_yaml), None);
+        assert!(!res.valid);
+        assert!(res.errors.iter().any(|e| e.contains("1001")));
+
+        // 2. Валидный конфиг без конфликтов
+        let valid_yaml = "port: 7890\nmixed-port: 7890\nproxies:\n  - name: test\n    type: socks5\nproxy-groups:\n  - name: group\n    type: select\nrules:\n  - MATCH,DIRECT\n";
+        let res_valid = validate_config_dry_run(Some(valid_yaml), None);
+        assert!(res_valid.valid);
+        assert!(res_valid.errors.is_empty());
+
+        // 3. Конфликт в JSON: rci.port == 1001
+        let invalid_json = serde_json::json!({
+            "rci": { "port": 1001 }
+        });
+        let res_json = validate_config_dry_run(None, Some(&invalid_json));
+        assert!(!res_json.valid);
+        assert!(res_json.errors.iter().any(|e| e.contains("1001")));
+    }
+
+    #[test]
+    fn test_pending_commit_status_empty() {
+        let status = get_pending_commit_status();
+        assert!(!status.pending);
+        assert!(status.tx_id.is_none());
     }
 }

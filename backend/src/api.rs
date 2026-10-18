@@ -215,6 +215,33 @@ pub fn api_err(error: impl Into<String>) -> axum::response::Response {
     Json(json!({ "success": false, "error": error.into() })).into_response()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiErrorResponse {
+    pub success: bool,
+    pub code: String,
+    pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_action: Option<String>,
+}
+
+pub fn api_err_detailed(
+    code: impl Into<String>,
+    error: impl Into<String>,
+    details: Option<serde_json::Value>,
+    suggested_action: Option<&str>,
+) -> axum::response::Response {
+    let err_str = error.into();
+    Json(json!({
+        "success": false,
+        "code": code.into(),
+        "error": err_str,
+        "details": details,
+        "suggested_action": suggested_action,
+    })).into_response()
+}
+
 /// Атомарная запись файла на диск (tmp + rename)
 pub async fn atomic_write_file(path: impl AsRef<std::path::Path>, content: &str) -> Result<(), String> {
     let p = path.as_ref();
@@ -247,6 +274,250 @@ pub async fn api_not_found() -> Response {
         })),
     )
         .into_response()
+}
+
+// ============================================================================
+// 1. GET /api/system/diagnostics — глубокая системная диагностика
+// ============================================================================
+pub async fn get_system_diagnostics(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+
+    // Mihomo
+    let mihomo_installed = std::path::Path::new("/opt/sbin/mihomo").exists()
+        || (!cfg.system.mihomo_bin.is_empty() && std::path::Path::new(&cfg.system.mihomo_bin).exists());
+    let mihomo_ver = crate::mihomo::get_version(&state.http, &cfg).await;
+    let service_stopped = crate::watchdog::is_service_stopped();
+    let mihomo_running = !service_stopped && mihomo_ver.is_some();
+    let tun_active = crate::system::is_tun_active();
+
+    // Zapret
+    let z_v1 = is_nfqws1_available();
+    let z_v2 = is_nfqws2_available();
+    let mut z_bins = Vec::new();
+    if z_v1 { z_bins.push("nfqws1".to_string()); }
+    if z_v2 { z_bins.push("nfqws2".to_string()); }
+    if std::path::Path::new("/opt/sbin/tpws").exists() { z_bins.push("tpws".to_string()); }
+    let zapret_installed = std::path::Path::new("/opt/etc/init.d/S51zapret").exists() && (z_v1 || z_v2);
+    let zapret_running = cfg.zapret.enabled && !service_stopped;
+    let zapret_engine = if normalize_engine_choice(&cfg.zapret.engine) == "v1" {
+        "v1"
+    } else if z_v2 {
+        "v2"
+    } else {
+        "v1"
+    };
+    let zapret_ver = if zapret_engine == "v2" {
+        detect_installed_zapret2_version().await
+    } else {
+        detect_installed_zapret1_version().await
+    };
+
+    // AdGuard
+    let agh_installed = std::path::Path::new("/opt/bin/AdGuardHome").exists()
+        || std::path::Path::new("/opt/etc/AdGuardHome/AdGuardHome.yaml").exists()
+        || std::path::Path::new("/opt/etc/AdGuardHome.yaml").exists();
+    let agh_status = crate::adguard::get_status(&state.http, &cfg.adguard).await;
+    let agh_running = agh_status.running;
+    let agh_port = if agh_status.dns_port > 0 {
+        agh_status.dns_port
+    } else {
+        cfg.adguard.dns_port
+    };
+    let agh_health = crate::adguard::get_health(&state.http, &cfg.adguard, Some(&cfg.rci.host)).await;
+    let agh_loop = agh_health.loop_risk;
+
+    // Порты
+    let ports = crate::system::detect_listening_ports(agh_port, cfg.mihomo.mixed_port, 1053);
+
+    // Iptables
+    let iptables_diag = crate::system::IptablesDiagnostics {
+        redirect_active: crate::adguard::is_adguard_iptables_active(agh_port),
+        adguard_chain_active: crate::adguard::is_adguard_iptables_active(agh_port),
+        zapret_chain_active: zapret_running,
+    };
+
+    // Хранилище /opt
+    let storage_diag = crate::system::check_opt_storage();
+
+    // Память и аптайм
+    let (mem_total, mem_free, _, _) = crate::system::read_meminfo();
+    let sys_resources = (mem_total / 1024, (mem_total.saturating_sub(mem_free)) / 1024);
+    let uptime_sec = match std::fs::read_to_string("/proc/uptime") {
+        Ok(s) => s.split_whitespace().next().and_then(|u| u.parse::<f64>().ok()).map(|u| u as u64).unwrap_or(0),
+        Err(_) => 0,
+    };
+
+    let overall_status = if !storage_diag.opt_rw || agh_loop || (mihomo_installed && !mihomo_running && !service_stopped) {
+        if !storage_diag.opt_rw || (mihomo_installed && !mihomo_running && !service_stopped) {
+            "error"
+        } else {
+            "degraded"
+        }
+    } else {
+        "healthy"
+    };
+
+    let diag = crate::system::SystemDiagnostics {
+        status: overall_status.to_string(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        components: crate::system::ComponentDiagnostics {
+            mihomo: crate::system::MihomoComponentDiag {
+                installed: mihomo_installed,
+                running: mihomo_running,
+                pid: None,
+                version: mihomo_ver,
+                tun_active,
+            },
+            zapret: crate::system::ZapretComponentDiag {
+                installed: zapret_installed,
+                running: zapret_running,
+                engine: zapret_engine.to_string(),
+                version: zapret_ver,
+                binaries_found: z_bins,
+                missing: vec![],
+            },
+            adguard: crate::system::AdguardComponentDiag {
+                installed: agh_installed,
+                running: agh_running,
+                pid: None,
+                dns_port: agh_port,
+                loop_detected: agh_loop,
+            },
+        },
+        listening_ports: ports,
+        iptables: iptables_diag,
+        storage: storage_diag,
+        system_summary: crate::system::SystemSummaryDiagnostics {
+            ram_total_mb: sys_resources.0,
+            ram_used_mb: sys_resources.1,
+            cpu_total_percent: 0.0,
+            uptime_seconds: uptime_sec,
+        },
+    };
+
+    api_ok(serde_json::to_value(diag).unwrap_or_default()).into_response()
+}
+
+// ============================================================================
+// 2. GET /api/system/logs/recent — кольцевой буфер последних логов
+// ============================================================================
+#[derive(Debug, Deserialize)]
+pub struct RecentLogsQuery {
+    pub level: Option<String>,
+    pub limit: Option<usize>,
+}
+
+pub async fn get_recent_logs(Query(q): Query<RecentLogsQuery>) -> Response {
+    let limit = q.limit.unwrap_or(50);
+    let entries = crate::logger::get_recent_logs(q.level.as_deref(), limit);
+    api_ok(json!({
+        "total": entries.len(),
+        "entries": entries,
+    })).into_response()
+}
+
+// ============================================================================
+// 3. POST /api/config/apply & confirm & rollback (Commit-Confirmed)
+// ============================================================================
+#[derive(Debug, Deserialize)]
+pub struct ApplyConfigRequest {
+    #[serde(default = "default_rollback_seconds")]
+    pub rollback_seconds: u64,
+    pub config_yaml: Option<String>,
+    pub config_json: Option<config::AppConfig>,
+}
+
+fn default_rollback_seconds() -> u64 {
+    30
+}
+
+pub async fn apply_config_tx(
+    State(state): State<AppState>,
+    Json(body): Json<ApplyConfigRequest>,
+) -> Response {
+    let json_val = body.config_json.as_ref().and_then(|c| serde_json::to_value(c).ok());
+    let val = crate::transaction::validate_config_dry_run(
+        body.config_yaml.as_deref(),
+        json_val.as_ref(),
+    );
+    if !val.valid {
+        return api_err_detailed(
+            "CONFIG_VALIDATION_FAILED",
+            format!("Ошибка валидации конфигурации: {}", val.errors.join("; ")),
+            Some(json!({ "errors": val.errors, "warnings": val.warnings })),
+            Some("Исправьте синтаксис или устраните конфликт портов перед применением"),
+        );
+    }
+
+    match crate::transaction::apply_with_confirmation(
+        &state,
+        body.rollback_seconds,
+        body.config_yaml,
+        body.config_json,
+    ).await {
+        Ok(tx_id) => api_ok(json!({
+            "applied": true,
+            "tx_id": tx_id,
+            "rollback_seconds": body.rollback_seconds,
+            "message": if body.rollback_seconds > 0 {
+                format!("Конфигурация успешно применена. Ожидается подтверждение в течение {} сек через POST /api/config/confirm", body.rollback_seconds)
+            } else {
+                "Конфигурация успешно зафиксирована на постоянной основе".to_string()
+            }
+        })),
+        Err(e) => api_err_detailed("APPLY_FAILED", e, None, Some("Проверьте права доступа и доступность ядра")),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConfirmConfigRequest {
+    pub tx_id: String,
+}
+
+pub async fn confirm_config_tx(
+    Json(body): Json<ConfirmConfigRequest>,
+) -> Response {
+    match crate::transaction::confirm_commit(&body.tx_id) {
+        Ok(()) => api_ok(json!({
+            "confirmed": true,
+            "tx_id": body.tx_id,
+            "message": "Конфигурация успешно подтверждена и зафиксирована на постоянной основе",
+        })),
+        Err(e) => api_err_detailed("CONFIRM_FAILED", e, None, Some("Возможно, транзакция уже завершилась или истекло время ожидания")),
+    }
+}
+
+pub async fn rollback_config_tx(
+    State(state): State<AppState>,
+    Json(body): Json<ConfirmConfigRequest>,
+) -> Response {
+    match crate::transaction::rollback_pending_commit(&state, &body.tx_id).await {
+        Ok(()) => api_ok(json!({
+            "rolled_back": true,
+            "tx_id": body.tx_id,
+            "message": "Конфигурация успешно откатана к исходному снимку",
+        })),
+        Err(e) => api_err_detailed("ROLLBACK_FAILED", e, None, None),
+    }
+}
+
+// ============================================================================
+// 4. POST /api/config/validate — Dry-Run атомарная валидация
+// ============================================================================
+#[derive(Debug, Deserialize)]
+pub struct ValidateConfigPayload {
+    pub config_yaml: Option<String>,
+    pub config_json: Option<serde_json::Value>,
+}
+
+pub async fn validate_config(
+    Json(body): Json<ValidateConfigPayload>,
+) -> Response {
+    let result = crate::transaction::validate_config_dry_run(
+        body.config_yaml.as_deref(),
+        body.config_json.as_ref(),
+    );
+    api_ok(serde_json::to_value(result).unwrap_or_default()).into_response()
 }
 
 /// GET /api/settings — получение настроек панели с маскированием конфиденциальных данных

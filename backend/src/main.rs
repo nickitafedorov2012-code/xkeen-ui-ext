@@ -556,6 +556,8 @@ async fn main() {
         .route("/api/auth/change-password", post(auth::change_password))
         // Статус и метрики
         .route("/api/status", get(api::status))
+        .route("/api/system/diagnostics", get(api::get_system_diagnostics))
+        .route("/api/system/logs/recent", get(api::get_recent_logs))
         .route("/api/system/metrics", get(api::get_system_metrics))
         .route("/api/system/processes", get(api::get_system_processes))
         .route("/api/system/processes/kill", post(api::kill_process))
@@ -601,6 +603,10 @@ async fn main() {
         .route("/api/dns/mode", get(api::get_dns_mode).post(api::set_dns_mode))
         // Сервис XKeen, бэкапы, конфиги
         .route("/api/xkeen/service", post(api::xkeen_service))
+        .route("/api/config/apply", post(api::apply_config_tx))
+        .route("/api/config/confirm", post(api::confirm_config_tx))
+        .route("/api/config/rollback", post(api::rollback_config_tx))
+        .route("/api/config/validate", post(api::validate_config))
         .route("/api/config-files/list", get(api::list_config_files))
         .route("/api/config-files/read", get(api::read_config_file))
         .route("/api/config-files/save", post(api::save_config_file))

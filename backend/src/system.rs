@@ -1550,3 +1550,256 @@ pub fn disable_and_remove_swap() -> Result<SwapStatus, String> {
 
     Ok(get_swap_status())
 }
+
+// ============================================================================
+// Глубокая системная диагностика (v1.9.13)
+// ============================================================================
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MihomoComponentDiag {
+    pub installed: bool,
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub version: Option<String>,
+    pub tun_active: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ZapretComponentDiag {
+    pub installed: bool,
+    pub running: bool,
+    pub engine: String,
+    pub version: String,
+    pub binaries_found: Vec<String>,
+    pub missing: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AdguardComponentDiag {
+    pub installed: bool,
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub dns_port: u16,
+    pub loop_detected: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ComponentDiagnostics {
+    pub mihomo: MihomoComponentDiag,
+    pub zapret: ZapretComponentDiag,
+    pub adguard: AdguardComponentDiag,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct IptablesDiagnostics {
+    pub redirect_active: bool,
+    pub adguard_chain_active: bool,
+    pub zapret_chain_active: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StorageDiagnostics {
+    pub opt_mounted: bool,
+    pub opt_rw: bool,
+    pub free_space_mb: u64,
+    pub total_space_mb: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SystemSummaryDiagnostics {
+    pub ram_used_mb: u64,
+    pub ram_total_mb: u64,
+    pub cpu_total_percent: f64,
+    pub uptime_seconds: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SystemDiagnostics {
+    pub status: String,
+    pub timestamp: String,
+    pub components: ComponentDiagnostics,
+    pub listening_ports: HashMap<u16, String>,
+    pub iptables: IptablesDiagnostics,
+    pub storage: StorageDiagnostics,
+    pub system_summary: SystemSummaryDiagnostics,
+}
+
+/// Быстрый парсер открытых слушающих портов из /proc/net/tcp и /proc/net/udp
+pub fn parse_listening_ports_from_proc_net(content: &str, is_udp: bool) -> Vec<u16> {
+    let mut ports = Vec::new();
+    for line in content.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let state = parts[3];
+        // 0A = TCP_LISTEN (10), для UDP все связанные сокеты слушающие
+        if (!is_udp && state == "0A") || is_udp {
+            if let Some((_ip_hex, port_hex)) = parts[1].split_once(':') {
+                if let Ok(port) = u16::from_str_radix(port_hex, 16) {
+                    if !ports.contains(&port) {
+                        ports.push(port);
+                    }
+                }
+            }
+        }
+    }
+    ports
+}
+
+/// Сопоставление порта со стандартным именем службы
+pub fn resolve_port_service(
+    port: u16,
+    agh_port: u16,
+    mihomo_mixed: u16,
+    mihomo_dns: u16,
+) -> &'static str {
+    match port {
+        53 => "dnsmasq (KeeneticOS)",
+        p if p == agh_port => "AdGuardHome",
+        p if p == mihomo_dns => "mihomo-dns",
+        p if p == mihomo_mixed => "mihomo-mixed",
+        1001 => "xkeen-route",
+        22 => "keenetic-ssh",
+        222 => "entware-dropbear",
+        80 => "keenetic-web",
+        443 => "keenetic-web-ssl",
+        445 => "keenetic-cifs",
+        5353 => "mDNS (Avahi)",
+        9090 => "mihomo-controller",
+        _ => "listening-service",
+    }
+}
+
+/// Сбор открытых портов из /proc/net (или мок при отсутствии на Windows)
+pub fn detect_listening_ports(agh_port: u16, mihomo_mixed: u16, mihomo_dns: u16) -> HashMap<u16, String> {
+    let mut map = HashMap::new();
+
+    let mut found_any = false;
+    for (path, is_udp) in [
+        ("/proc/net/tcp", false),
+        ("/proc/net/tcp6", false),
+        ("/proc/net/udp", true),
+        ("/proc/net/udp6", true),
+    ] {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            found_any = true;
+            for p in parse_listening_ports_from_proc_net(&content, is_udp) {
+                let service = resolve_port_service(p, agh_port, mihomo_mixed, mihomo_dns);
+                map.insert(p, service.to_string());
+            }
+        }
+    }
+
+    if !found_any {
+        // Fallback для сред тестирования / Windows
+        for p in [53, agh_port, 1001, mihomo_dns, mihomo_mixed, 222] {
+            let service = resolve_port_service(p, agh_port, mihomo_mixed, mihomo_dns);
+            map.insert(p, service.to_string());
+        }
+    }
+
+    map
+}
+
+/// Проверка состояния хранилища /opt
+pub fn check_opt_storage() -> StorageDiagnostics {
+    let (free_mb, total_mb) = get_opt_disk_space_mb().unwrap_or((0, 0));
+    let opt_mounted = std::path::Path::new("/opt").is_dir();
+    let opt_rw = match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open("/opt/.xkeen_write_test")
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file("/opt/.xkeen_write_test");
+            true
+        }
+        Err(_) => false,
+    };
+    StorageDiagnostics {
+        opt_mounted,
+        opt_rw,
+        free_space_mb: free_mb,
+        total_space_mb: total_mb,
+    }
+}
+
+/// Проверка активности виртуального tun интерфейса
+pub fn is_tun_active() -> bool {
+    std::path::Path::new("/sys/class/net/xkeen-tun").exists()
+        || std::path::Path::new("/sys/class/net/tun").exists()
+        || std::path::Path::new("/sys/class/net/tun0").exists()
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_proc_net_tcp() {
+        let sample_tcp = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n   0: 00000000:03E9 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12345 1 0000000000000000 100 0 0 10 0\n   1: 0100007F:041D 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12346 1 0000000000000000 100 0 0 10 0\n   2: 00000000:1ED2 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 12347 1 0000000000000000 100 0 0 10 0\n   3: 00000000:0050 00000000:0000 01 00000000:00000000 00:00000000 00000000     0        0 12348 1 0000000000000000 100 0 0 10 0\n";
+        let ports = parse_listening_ports_from_proc_net(sample_tcp, false);
+        assert_eq!(ports, vec![1001, 1053, 7890]); // 0x03E9 = 1001, 0x041D = 1053, 0x1ED2 = 7890
+    }
+
+    #[test]
+    fn test_diagnostics_json_serialization() {
+        let mut ports = HashMap::new();
+        ports.insert(1001, "xkeen-route".to_string());
+        ports.insert(5354, "AdGuardHome".to_string());
+
+        let diag = SystemDiagnostics {
+            status: "healthy".to_string(),
+            timestamp: "2026-10-18T00:00:00Z".to_string(),
+            components: ComponentDiagnostics {
+                mihomo: MihomoComponentDiag {
+                    installed: true,
+                    running: true,
+                    pid: Some(1234),
+                    version: Some("1.19.32".to_string()),
+                    tun_active: true,
+                },
+                zapret: ZapretComponentDiag {
+                    installed: true,
+                    running: false,
+                    engine: "v2".to_string(),
+                    version: "2.0".to_string(),
+                    binaries_found: vec!["nfqws2".to_string()],
+                    missing: vec![],
+                },
+                adguard: AdguardComponentDiag {
+                    installed: true,
+                    running: true,
+                    pid: Some(5678),
+                    dns_port: 5354,
+                    loop_detected: false,
+                },
+            },
+            listening_ports: ports,
+            iptables: IptablesDiagnostics {
+                redirect_active: true,
+                adguard_chain_active: true,
+                zapret_chain_active: false,
+            },
+            storage: StorageDiagnostics {
+                opt_mounted: true,
+                opt_rw: true,
+                free_space_mb: 4096,
+                total_space_mb: 8192,
+            },
+            system_summary: SystemSummaryDiagnostics {
+                ram_used_mb: 128,
+                ram_total_mb: 512,
+                cpu_total_percent: 2.5,
+                uptime_seconds: 86400,
+            },
+        };
+
+        let json = serde_json::to_string(&diag).expect("Serialization failed");
+        assert!(json.contains("\"status\":\"healthy\""));
+        assert!(json.contains("\"tun_active\":true"));
+        assert!(json.contains("\"dns_port\":5354"));
+        assert!(json.contains("\"opt_rw\":true"));
+    }
+}
