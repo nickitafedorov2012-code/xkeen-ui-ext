@@ -110,6 +110,71 @@ pub async fn close_all_connections(http: &reqwest::Client, cfg: &AppConfig) -> R
     })
 }
 
+/// Селективный сброс сокетов: закрывает только соединения, проходящие через указанный сервер.
+/// Соединения DIRECT (банки, Госуслуги, ТВ, SIP) остаются абсолютно нетронутыми!
+pub async fn close_server_connections(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    server_id: &str,
+) -> usize {
+    if server_id.is_empty() || server_id.eq_ignore_ascii_case("direct") {
+        return 0;
+    }
+    let Ok(val) = m_get(http, cfg, "/connections").await else {
+        return 0;
+    };
+    let Some(conns) = val.get("connections").and_then(|c| c.as_array()) else {
+        return 0;
+    };
+
+    let srv_lower = server_id.to_lowercase();
+    let mut ids_to_close = Vec::new();
+
+    for c in conns {
+        let Some(id) = c.get("id").and_then(|i| i.as_str()) else { continue; };
+        let in_chains = c.get("chains")
+            .and_then(|ch| ch.as_array())
+            .map(|arr| {
+                arr.iter().any(|item| {
+                    item.as_str().map(|s| s.to_lowercase() == srv_lower).unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+
+        if in_chains {
+            ids_to_close.push(id.to_string());
+        }
+    }
+
+    let count = ids_to_close.len();
+    if count == 0 {
+        return 0;
+    }
+
+    crate::log_i!(
+        "Селективный сброс сокетов: закрытие {count} соединений для упавшего узла '{server_id}' (DIRECT не затронут)"
+    );
+
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
+    let mut handles = Vec::with_capacity(count);
+
+    for cid in ids_to_close {
+        let http_c = http.clone();
+        let cfg_c = cfg.clone();
+        let sem_c = sem.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = sem_c.acquire().await.ok();
+            let _ = m_delete(&http_c, &cfg_c, &format!("/connections/{cid}"), 2).await;
+        }));
+    }
+
+    for h in handles {
+        let _ = h.await;
+    }
+
+    count
+}
+
 /// Mihomo отвечает на /proxies объектом {"proxies": {...}} — достаём карту.
 pub async fn get_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Result<BTreeMap<String, Value>, String> {
     let v = m_get(http, cfg, "/proxies").await?;
@@ -737,10 +802,17 @@ pub async fn live_device_servers(http: &reqwest::Client, cfg: &AppConfig) -> BTr
     out
 }
 
-/// Переключение активного сервера во всех основных select-группах.
-/// Универсально: группы обнаруживаются динамически (selector без IP в имени,
-/// кроме Fastest/Fallback и AUTO-DEVICE групп устройств).
 pub async fn switch_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &str) -> Result<String, String> {
+    switch_server_inner(http, cfg, server_id, false).await
+}
+
+/// Мягкое переключение сервера (Graceful): переключает селекторные группы,
+/// но не сбрасывает активные соединения старого узла.
+pub async fn switch_server_graceful(http: &reqwest::Client, cfg: &AppConfig, server_id: &str) -> Result<String, String> {
+    switch_server_inner(http, cfg, server_id, true).await
+}
+
+async fn switch_server_inner(http: &reqwest::Client, cfg: &AppConfig, server_id: &str, graceful: bool) -> Result<String, String> {
     let target = match server_id.to_lowercase().as_str() {
         "fastest" => "Fastest".to_string(),
         "fallback" => "Fallback".to_string(),
@@ -762,6 +834,7 @@ pub async fn switch_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &
         }
     }
     let proxies = get_proxies(http, cfg).await?;
+    let prev_active = resolve_active_leaf(&proxies);
     let mut groups: Vec<String> = Vec::new();
     for (name, p) in &proxies {
         let typ = p.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
@@ -814,7 +887,18 @@ pub async fn switch_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &
         }
     }
     if switched > 0 {
-        let _ = close_all_connections(http, cfg).await;
+        if !graceful {
+            if !prev_active.is_empty() && prev_active != target && !prev_active.eq_ignore_ascii_case("direct") {
+                let closed = close_server_connections(http, cfg, &prev_active).await;
+                if closed == 0 {
+                    let _ = close_all_connections(http, cfg).await;
+                }
+            } else {
+                let _ = close_all_connections(http, cfg).await;
+            }
+        } else {
+            crate::log_i!("Graceful Failback: группы переключены на '{target}', активные сокеты старого узла не сбрасываются");
+        }
         let skip_note = if skipped > 0 { format!(", пропущено: {skipped}") } else { String::new() };
         Ok(format!("Активный сервер переключен на '{target}' (групп: {switched}{skip_note})"))
     } else if skipped > 0 && last_err.is_empty() {
@@ -960,12 +1044,15 @@ pub async fn ping_group_url(
     out
 }
 
+pub const PRIMARY_L7_CHECK_URL: &str = "http://cp.cloudflare.com/generate_204";
+pub const SECONDARY_L7_CHECK_URL: &str = "https://www.gstatic.com/generate_204";
+
 /// Пинг сервера через delay-API Mihomo (мс; -1 = недоступен).
 pub async fn ping_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &str, timeout_ms: u64) -> i64 {
     ping_server_url(http, cfg, server_id, timeout_ms, None).await
 }
 
-/// Пинг сервера с произвольным тестовым URL.
+/// Пинг сервера с произвольным тестовым URL (автоматическое определение ожидаемого HTTP-статуса).
 pub async fn ping_server_url(
     http: &reqwest::Client,
     cfg: &AppConfig,
@@ -973,13 +1060,36 @@ pub async fn ping_server_url(
     timeout_ms: u64,
     test_url: Option<&str>,
 ) -> i64 {
+    let expected = match test_url {
+        Some(u) if u.contains("generate_204") => Some(204),
+        Some(u) if u.contains("__down") => Some(200),
+        Some(_) => None,
+        None => Some(204),
+    };
+    ping_server_url_expected(http, cfg, server_id, timeout_ms, test_url, expected).await
+}
+
+/// Пинг сервера с произвольным тестовым URL и валидацией статус-кода L7 (expected_status).
+/// Защищает от ложных срабатываний при Reality fallthrough и captive portal заглушках (200/302).
+pub async fn ping_server_url_expected(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    server_id: &str,
+    timeout_ms: u64,
+    test_url: Option<&str>,
+    expected_status: Option<u16>,
+) -> i64 {
     let enc = urlencoding_lite(server_id);
     let check_url = match test_url {
         Some(u) => urlencoding_lite(u),
         None => cfg.health_check_url_encoded(),
     };
+    let exp_param = match expected_status {
+        Some(code) => format!("&expected={code}"),
+        None => String::new(),
+    };
     let url = format!(
-        "{}/proxies/{enc}/delay?timeout={timeout_ms}&url={check_url}",
+        "{}/proxies/{enc}/delay?timeout={timeout_ms}&url={check_url}{exp_param}",
         cfg.mihomo_url()
     );
     let mut req = http.get(&url).timeout(std::time::Duration::from_millis(std::cmp::max(timeout_ms + 2000, 5000)));
@@ -1012,7 +1122,7 @@ pub async fn ping_server_url(
             if is_now {
                 let g_enc = urlencoding_lite(&group);
                 let g_url = format!(
-                    "{}/proxies/{g_enc}/delay?timeout={timeout_ms}&url={check_url}",
+                    "{}/proxies/{g_enc}/delay?timeout={timeout_ms}&url={check_url}{exp_param}",
                     cfg.mihomo_url()
                 );
                 let g_req_timeout = std::cmp::max(timeout_ms + 2000, 5000);
@@ -1058,6 +1168,24 @@ pub async fn ping_server_url(
     }
 
     -1
+}
+
+/// L7 Split-Target Probing:
+/// 1. Сначала пробует основной легковесный URL (Cloudflare generate_204 с expected=204)
+/// 2. При сбое/таймауте мгновенно пробует вторичный URL (Google generate_204 с expected=204)
+/// Исключает ложные тревоги при локальных сбоях конкретного CDN.
+pub async fn ping_server_l7_split(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    server_id: &str,
+    timeout_ms: u64,
+) -> i64 {
+    let ms1 = ping_server_url_expected(http, cfg, server_id, timeout_ms, Some(PRIMARY_L7_CHECK_URL), Some(204)).await;
+    if ms1 > 0 {
+        return ms1;
+    }
+    let ms2 = ping_server_url_expected(http, cfg, server_id, timeout_ms, Some(SECONDARY_L7_CHECK_URL), Some(204)).await;
+    ms2
 }
 
 /// Параллельный пинг списка серверов

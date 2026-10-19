@@ -479,9 +479,26 @@ async fn main() {
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(8)).await;
         let cfg = wl_sync_state.config.read().await;
-        let active_id = mihomo::get_active_server(&wl_sync_state.http, &cfg).await.ok().flatten().map(|s| s.id).unwrap_or_default();
+        let active_srv = mihomo::get_active_server(&wl_sync_state.http, &cfg).await.ok().flatten();
+        let active_id = active_srv.as_ref().map(|s| s.id.clone()).unwrap_or_default();
         if !active_id.is_empty() {
             let _ = api::sync_whitelist_mode_tunnel(&wl_sync_state, &active_id).await;
+        }
+
+        // Авто-восстановление игрового режима при перезагрузке роутера:
+        // Если флаг gaming_suspended == true, а текущий активный сервер не является [БС]
+        if cfg.whitelist.gaming_suspended {
+            let is_bs = active_srv.as_ref().map(|s| failover::is_whitelist_server(&s.name, &s.id, &cfg)).unwrap_or(false);
+            if !is_bs {
+                let _cfg_guard = wl_sync_state.config_lock.lock().await;
+                let mut current_cfg = (**wl_sync_state.config.read().await).clone();
+                current_cfg.gaming.enabled = true;
+                current_cfg.whitelist.gaming_suspended = false;
+                if let Ok(_) = config::save(&wl_sync_state.config_path, &current_cfg).await {
+                    *wl_sync_state.config.write().await = std::sync::Arc::new(current_cfg);
+                    log_i!("[STARTUP] ✓ Игровой режим автоматически восстановлен после перезагрузки (активный узел не является [БС])");
+                }
+            }
         }
     });
 

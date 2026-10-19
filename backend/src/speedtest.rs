@@ -61,6 +61,23 @@ pub async fn restore_groups_snapshot(
     }
 }
 
+static SPEEDTEST_ABORT_SIGNAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Принудительная отмена активного замера скорости при ручном выборе сервера пользователем.
+/// Аннулирует снимок отката (restore), чтобы выбор пользователя остался активным.
+pub fn cancel_active_speedtest() {
+    SPEEDTEST_ABORT_SIGNAL.store(true, std::sync::atomic::Ordering::SeqCst);
+    log_i!("Speedtest: получен сигнал прерывания ради ручного выбора сервера пользователем");
+}
+
+pub fn is_speedtest_aborted() -> bool {
+    SPEEDTEST_ABORT_SIGNAL.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+pub fn reset_speedtest_abort() {
+    SPEEDTEST_ABORT_SIGNAL.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// RAII guard для гарантированного восстановления конфигурации групп Selector при любом выходе/отмене
 pub struct NodeGroupGuard {
     http: reqwest::Client,
@@ -85,6 +102,10 @@ impl NodeGroupGuard {
     }
 
     pub async fn restore(&mut self) {
+        if is_speedtest_aborted() {
+            self.defuse();
+            return;
+        }
         if self.need_restore {
             if let Some(snapshot) = self.snapshot.take() {
                 restore_groups_snapshot(&self.http, &self.cfg, &snapshot).await;
@@ -101,6 +122,10 @@ impl NodeGroupGuard {
 
 impl Drop for NodeGroupGuard {
     fn drop(&mut self) {
+        if is_speedtest_aborted() {
+            self.defuse();
+            return;
+        }
         if self.need_restore {
             if let Some(snapshot) = self.snapshot.take() {
                 let http = self.http.clone();
@@ -125,9 +150,14 @@ pub async fn run_speedtest(
     }
 
     log_i!("Запуск теста скорости для сервера '{}'", target_server);
+    reset_speedtest_abort();
 
     // 1. Создание снимка текущего выбора всех групп Selector ядра Mihomo
     let (group_snapshot, original_server) = take_groups_snapshot(_http, _cfg).await?;
+
+    if is_speedtest_aborted() {
+        return Err("Тест скорости прерван пользователем".to_string());
+    }
 
     // 2. Переключение активного маршрута на запрошенный сервер (DIAG-01)
     let need_restore = if original_server != target_server {
@@ -140,6 +170,11 @@ pub async fn run_speedtest(
     };
 
     let mut guard = NodeGroupGuard::new(_http, _cfg, group_snapshot, need_restore);
+
+    if is_speedtest_aborted() {
+        guard.defuse();
+        return Err("Тест скорости прерван пользователем".to_string());
+    }
 
     // 3. Подтверждение тестового маршрута в runtime (DIAG-01)
     let current_proxies = match crate::mihomo::get_proxies(_http, _cfg).await {
@@ -211,6 +246,11 @@ pub async fn run_speedtest(
     let mut success = false;
 
     for url in &test_urls {
+        if is_speedtest_aborted() {
+            log_i!("Speedtest: получен сигнал прерывания перед скачиванием чанка");
+            guard.defuse();
+            return Err("Тест скорости прерван пользователем".to_string());
+        }
         let req_start = Instant::now();
         match client.get(*url).send().await {
             Ok(mut resp) => {
@@ -224,6 +264,11 @@ pub async fn run_speedtest(
                 let transfer_start = Instant::now();
                 let mut chunk_bytes = 0u64;
                 while let Ok(Some(chunk)) = resp.chunk().await {
+                    if is_speedtest_aborted() {
+                        log_i!("Speedtest: замер прерван пользователем во время потока, отменяем скачивание");
+                        guard.defuse();
+                        return Err("Тест скорости прерван пользователем".to_string());
+                    }
                     chunk_bytes += chunk.len() as u64;
                     // Если скачали больше 5 МБ или прошло больше 8 секунд — завершаем замер
                     if chunk_bytes >= 5 * 1024 * 1024 || transfer_start.elapsed().as_secs() >= 8 {
@@ -242,6 +287,12 @@ pub async fn run_speedtest(
                 log_w!("Ошибка скачивания с {}: {}", url, e);
             }
         }
+    }
+
+    if is_speedtest_aborted() {
+        log_i!("Speedtest: прерван пользователем, откат групп отменён");
+        guard.defuse();
+        return Err("Тест скорости прерван пользователем".to_string());
     }
 
     // 7. Восстанавливаем исходную структуру групп выбора сразу после замера
@@ -316,5 +367,29 @@ mod tests {
         guard.defuse();
         assert!(!guard.need_restore);
         assert!(guard.snapshot.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_active_speedtest_defuses_guard() {
+        let http = reqwest::Client::new();
+        let cfg = AppConfig::default();
+        let mut snapshot = HashMap::new();
+        snapshot.insert("PROXY".to_string(), "ServerOld".to_string());
+
+        reset_speedtest_abort();
+        assert!(!is_speedtest_aborted());
+
+        let mut guard = NodeGroupGuard::new(&http, &cfg, snapshot, true);
+        assert!(guard.need_restore);
+
+        // Пользователь переключает сервер вручную:
+        cancel_active_speedtest();
+        assert!(is_speedtest_aborted());
+
+        // Проверяем, что restore() при активном аборте сбрасывает флаг и не трогает группы
+        guard.restore().await;
+        assert!(!guard.need_restore);
+        assert!(guard.snapshot.is_none());
+        reset_speedtest_abort();
     }
 }

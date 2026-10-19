@@ -807,11 +807,9 @@ pub struct SwitchReq {
 
 /// POST /api/servers/switch
 pub async fn switch_server(State(state): State<AppState>, Json(req): Json<SwitchReq>) -> Response {
-    // DIAG-01: Изоляция от Speedtest
-    let _speedtest_guard = match state.speedtest_lock.try_lock() {
-        Ok(guard) => guard,
-        Err(_) => return api_err("Невозможно переключить сервер: в данный момент выполняется тест скорости (Speedtest)"),
-    };
+    // Ручной выбор пользователя имеет абсолютный приоритет:
+    // Немедленно прерываем запущенный Speedtest и отменяем возврат старого узла
+    crate::speedtest::cancel_active_speedtest();
     let cfg = state.config.read().await.clone();
     match mihomo::switch_server(&state.http, &cfg, &req.server_id).await {
         Ok(msg) => {

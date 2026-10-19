@@ -454,7 +454,7 @@ pub async fn handle_whitelist_transition(
 }
 
 /// Прогон микро-порции реального трафика (8 КБ) через проверяемый сервер.
-/// Загружает тестовый пэйлоад 8192 байта со speed.cloudflare.com.
+/// Загружает тестовый пэйлоад 8192 байта со speed.cloudflare.com с проверкой кода 200 OK.
 /// Если сервер обрывает соединение, дропает пакеты или таймаутит — возвращает <= 0 (-1).
 pub async fn run_canary_probe(
     http: &reqwest::Client,
@@ -463,12 +463,80 @@ pub async fn run_canary_probe(
     timeout_ms: u64,
 ) -> i64 {
     let probe_timeout = timeout_ms.max(4000);
-    let delay = mihomo::ping_server_url(http, cfg, server_id, probe_timeout, Some(CANARY_PAYLOAD_URL)).await;
+    let delay = mihomo::ping_server_url_expected(http, cfg, server_id, probe_timeout, Some(CANARY_PAYLOAD_URL), Some(200)).await;
     if delay > 0 {
         return delay;
     }
-    // Fallback на базовый health check URL панели при сбоях CDN Cloudflare
-    mihomo::ping_server_url(http, cfg, server_id, probe_timeout, None).await
+    // Fallback на сплит-пробник L7 (Cloudflare ➔ Google generate_204)
+    mihomo::ping_server_l7_split(http, cfg, server_id, probe_timeout).await
+}
+
+pub const WAN_CHECK_URL: &str = "http://ya.ru";
+
+/// Проверка физической доступности провайдера (WAN) напрямую через DIRECT.
+/// Если шлюз провайдера или кабель упал, возвращает false.
+pub async fn is_wan_online(http: &reqwest::Client, cfg: &crate::config::AppConfig) -> bool {
+    let ms = mihomo::ping_server_url_expected(
+        http,
+        cfg,
+        "DIRECT",
+        1500,
+        Some(WAN_CHECK_URL),
+        Some(200),
+    ).await;
+    ms > 0
+}
+
+/// Пассивный детектор "Чёрной дыры" (Zero-Download Anomaly):
+/// Проверяет сокеты активного прокси-узла на DPI-сброс полезной нагрузки.
+/// Если открыто >= 3 сокетов, клиенты передали суммарно > 5 КБ upload,
+/// а download равен строго 0 — нода объявляется зомби.
+pub async fn check_blackhole_anomaly(
+    http: &reqwest::Client,
+    cfg: &crate::config::AppConfig,
+    active_server_id: &str,
+) -> bool {
+    if active_server_id.is_empty() || active_server_id.eq_ignore_ascii_case("direct") {
+        return false;
+    }
+    let Ok(val) = mihomo::m_get(http, cfg, "/connections").await else {
+        return false;
+    };
+    let Some(conns) = val.get("connections").and_then(|c| c.as_array()) else {
+        return false;
+    };
+
+    let active_lower = active_server_id.to_lowercase();
+    let mut matched_sockets = 0usize;
+    let mut total_upload = 0u64;
+    let mut total_download = 0u64;
+
+    for c in conns {
+        let in_chains = c.get("chains")
+            .and_then(|ch| ch.as_array())
+            .map(|arr| {
+                arr.iter().any(|item| {
+                    item.as_str().map(|s| s.to_lowercase() == active_lower).unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+
+        if in_chains {
+            matched_sockets += 1;
+            total_upload += c.get("upload").and_then(|u| u.as_u64()).unwrap_or(0);
+            total_download += c.get("download").and_then(|d| d.as_u64()).unwrap_or(0);
+        }
+    }
+
+    if matched_sockets >= 3 && total_upload > 5120 && total_download == 0 {
+        crate::log_w!(
+            "Обнаружена аномалия 'Чёрная дыра' на сервере '{}': {} сокетов, upload: {} байт, download: 0 байт",
+            active_server_id, matched_sockets, total_upload
+        );
+        true
+    } else {
+        false
+    }
 }
 
 /// Ступенчатый опрос списка серверов через семафор (по 4 потока) с интервалом между запусками,
@@ -535,6 +603,14 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
     }
 
     let cfg = state.config.read().await.clone();
+
+    // WAN Down Detection: если физический линк провайдера лежит, не трогаем Failover
+    if !is_wan_online(&state.http, &cfg).await {
+        let msg = "WAN Down: физический канал провайдера недоступен (DIRECT сбой). Failover заморожен.".to_string();
+        state.failover_log.push_event_only(&msg, false).await;
+        return Ok(msg);
+    }
+
     let threshold = cfg.failover.ping_threshold_ms as i64;
     let servers = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await?;
 
@@ -677,34 +753,46 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         return Err(msg);
     };
 
-    let mut current = mihomo::ping_server(&state.http, &cfg, &active.id, ping_timeout).await;
-    // Защита от дребезга (flapping): при единичном сбое или повышенном пинге
-    // делаем повторную проверку через 750 мс для подтверждения, исключая ложные переключения
+    let mut current = mihomo::ping_server_l7_split(&state.http, &cfg, &active.id, ping_timeout).await;
+    // Fast Retry (защита от Bufferbloat и кратковременных скачков пинга):
+    // При сбое или превышении порога делаем 2 быстрых замера с интервалом 1.2 сек через сплит-пробник
     if current <= 0 || current > threshold {
-        tokio::time::sleep(Duration::from_millis(750)).await;
-        let retry_ping = mihomo::ping_server(&state.http, &cfg, &active.id, ping_timeout).await;
-        if retry_ping > 0 && retry_ping <= threshold {
-            current = retry_ping;
+        for _ in 1..=2 {
+            tokio::time::sleep(Duration::from_millis(1200)).await;
+            let retry_ping = mihomo::ping_server_l7_split(&state.http, &cfg, &active.id, ping_timeout).await;
+            if retry_ping > 0 && retry_ping <= threshold {
+                current = retry_ping;
+                break;
+            }
         }
     }
 
-    let is_active_healthy = current > 0 && current <= threshold;
+    // Пассивный детектор "Чёрной дыры" (DPI Zero-Download Anomaly):
+    // Если пинг формально в норме, но входящий трафик по активным сокетам равен 0 — объявляем зомби
+    let is_blackhole = if current > 0 && current <= threshold {
+        check_blackhole_anomaly(&state.http, &cfg, &active.id).await
+    } else {
+        false
+    };
 
-    // СЦЕНАРИЙ А: АКТИВНЫЙ СЕРВЕР СБОИТ (ТАЙМАУТ ИЛИ ПИНГ ВЫШЕ ПОРОГА)
+    let is_active_healthy = current > 0 && current <= threshold && !is_blackhole;
+
+    // СЦЕНАРИЙ А: АКТИВНЫЙ СЕРВЕР СБОИТ (ТАЙМАУТ, ВЫСОКИЙ ПИНГ ИЛИ АНОМАЛИЯ ЧЕРНОЙ ДЫРЫ)
     // ЭКСТРЕННОЕ ПЕРЕКЛЮЧЕНИЕ: немедленно отменяем любой Canary-тест и переключаем клиентов без задержек!
     if !is_active_healthy {
         // Критически важно: если активный резерв упал, клиенты без интернета.
         // Нельзя оставлять их ждать 180с Canary-теста — сбрасываем стадию теста!
         reset_canary().await;
 
-        let reason = if current > 0 {
+        let reason = if is_blackhole {
+            "Зомби-сервер (DPI сброс трафика: upload > 5KB, download == 0)".to_string()
+        } else if current > 0 {
             format!("высокий пинг {current} мс (> {threshold})")
         } else {
-            "сервер не отвечает".to_string()
+            "сервер не отвечает (L7 сбой)".to_string()
         };
 
-        // Анти-флеппинг: если активный сервер упал вскоре после включения (< 300 сек),
-        // отправляем его в карантин, чтобы остановить бесконечный цикл переключений
+        // Анти-флеппинг и карантин зомби:
         let (is_early_failure, elapsed_secs) = {
             let last_act = LAST_ACTIVATED_SERVER.lock().await;
             if let Some((ref act_id, activated_at)) = *last_act {
@@ -719,12 +807,12 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             }
         };
 
-        if is_early_failure {
+        if is_blackhole || is_early_failure {
             let q_secs = add_quarantine(&active.id, &active.name, &reason).await;
             let q_mins = q_secs / 60;
             let el_str = elapsed_secs.map(|s| format!(" спустя {s} с после включения")).unwrap_or_default();
             let q_note = format!(
-                "⚠️ Анти-флеппинг: сервер '{}' дал сбой{el_str} ({reason}) → помещён в карантин на {q_mins} мин",
+                "⚠️ Карантин: сервер '{}' дал сбой{el_str} ({reason}) → помещён в карантин на {q_mins} мин",
                 active.name
             );
             state.failover_log.push(&q_note, false).await;
@@ -733,7 +821,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                 Some(&cfg.mihomo_proxy_url()),
                 &cfg.notifications,
                 "quarantine",
-                "Карантин нестабильного сервера (анти-флеппинг)",
+                "Карантин нестабильного сервера",
                 &q_note,
             ).await;
         }
@@ -985,7 +1073,15 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                             "{label} '{}' успешно прошёл {canary_duration_secs}-секундный тест стабильности ({probes_count} проверок, {total_kb} КБ, 0 сбоев) — безопасный возврат с '{}'",
                             pri.name, active.name
                         );
-                        return match mihomo::switch_server(&state.http, &cfg, &pri.id).await {
+                        let is_from_bs = is_whitelist_server_full(&active.name, &active.id, active.provider.as_deref(), &cfg);
+                        let switch_res = if is_from_bs {
+                            // С [БС] возврат строгий: переключаем группы и сбрасываем сокеты
+                            mihomo::switch_server(&state.http, &cfg, &pri.id).await
+                        } else {
+                            // С обычного резерва на основной узел — мягкий Graceful возврат (не рвём текущие сессии)
+                            mihomo::switch_server_graceful(&state.http, &cfg, &pri.id).await
+                        };
+                        return match switch_res {
                             Ok(_) => {
                                 record_switch(&pri.id).await;
                                 let s_prov = servers.iter().find(|s| s.id == pri.id).and_then(|s| s.provider.as_deref());
@@ -1659,5 +1755,97 @@ mod tests {
         assert!(!cfg.whitelist.enabled, "Whitelist mode must be disabled on normal node");
         assert!(cfg.gaming.enabled, "Gaming mode must be restored on normal node");
         assert!(!cfg.whitelist.gaming_suspended);
+    }
+
+    #[test]
+    fn test_wan_check_url_definition() {
+        assert_eq!(WAN_CHECK_URL, "http://ya.ru");
+    }
+
+    #[test]
+    fn test_blackhole_connection_filtering_logic() {
+        let mock_connections = serde_json::json!({
+            "connections": [
+                {
+                    "id": "conn1",
+                    "chains": ["PROXY", "node_zombie"],
+                    "upload": 2048,
+                    "download": 0
+                },
+                {
+                    "id": "conn2",
+                    "chains": ["PROXY", "node_zombie"],
+                    "upload": 3500,
+                    "download": 0
+                },
+                {
+                    "id": "conn3",
+                    "chains": ["PROXY", "node_zombie"],
+                    "upload": 1024,
+                    "download": 0
+                },
+                {
+                    "id": "conn_direct",
+                    "chains": ["DIRECT"],
+                    "upload": 100000,
+                    "download": 500000
+                }
+            ]
+        });
+
+        let conns = mock_connections.get("connections").and_then(|c| c.as_array()).unwrap();
+        let target = "node_zombie".to_lowercase();
+        let mut matched = 0usize;
+        let mut up = 0u64;
+        let mut down = 0u64;
+
+        for c in conns {
+            let in_chains = c.get("chains")
+                .and_then(|ch| ch.as_array())
+                .map(|arr| arr.iter().any(|item| item.as_str().map(|s| s.to_lowercase() == target).unwrap_or(false)))
+                .unwrap_or(false);
+            if in_chains {
+                matched += 1;
+                up += c.get("upload").and_then(|u| u.as_u64()).unwrap_or(0);
+                down += c.get("download").and_then(|d| d.as_u64()).unwrap_or(0);
+            }
+        }
+
+        assert_eq!(matched, 3);
+        assert!(up > 5120);
+        assert_eq!(down, 0);
+        // Аномалия подтверждена:
+        assert!(matched >= 3 && up > 5120 && down == 0);
+    }
+
+    #[test]
+    fn test_selective_socket_target_identification() {
+        let mock_conns = serde_json::json!({
+            "connections": [
+                { "id": "c1", "chains": ["PROXY", "node_de"] },
+                { "id": "c2", "chains": ["DIRECT"] },
+                { "id": "c3", "chains": ["Streaming", "node_nl"] },
+                { "id": "c4", "chains": ["node_de"] }
+            ]
+        });
+
+        let target_de = "node_de".to_lowercase();
+        let conns = mock_conns.get("connections").and_then(|c| c.as_array()).unwrap();
+
+        let mut ids_to_close = Vec::new();
+        for c in conns {
+            let id = c.get("id").and_then(|i| i.as_str()).unwrap();
+            let in_chains = c.get("chains")
+                .and_then(|ch| ch.as_array())
+                .map(|arr| arr.iter().any(|item| item.as_str().map(|s| s.to_lowercase() == target_de).unwrap_or(false)))
+                .unwrap_or(false);
+            if in_chains {
+                ids_to_close.push(id);
+            }
+        }
+
+        assert_eq!(ids_to_close, vec!["c1", "c4"]);
+        assert!(!ids_to_close.contains(&"c2"), "DIRECT соединение ни в коем случае не должно закрываться!");
+        assert!(!ids_to_close.contains(&"c3"), "Соединения других серверов (node_nl) не должны закрываться!");
     }
 }
