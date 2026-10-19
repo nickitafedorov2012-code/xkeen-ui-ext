@@ -15,6 +15,7 @@ import ConfigEditor from './ConfigEditor'
 import PresetCatalogModal from './PresetCatalogModal'
 import LogsViewer from './LogsViewer'
 import TaskManager from './TaskManager'
+import { detectServerCountry } from '../utils/geo'
 
 export function SwapManager({ notify }: { notify: (msg: string, isErr?: boolean) => void }) {
   const [status, setStatus] = useState<SwapStatus | null>(null)
@@ -196,6 +197,13 @@ export default function Settings({ notify, status, refresh }: Props) {
   const [savingDomains, setSavingDomains] = useState(false)
   const [scanningCdn, setScanningCdn] = useState(false)
   const [domainsRevision, setDomainsRevision] = useState<string | undefined>(undefined)
+  const [failoverLastPolled, setFailoverLastPolled] = useState<string>(() => new Date().toLocaleTimeString())
+
+  useEffect(() => {
+    if (status) {
+      setFailoverLastPolled(new Date().toLocaleTimeString())
+    }
+  }, [status])
 
   // --- Сводка сетевого трафика ---
   const [trafficSummary, setTrafficSummary] = useState<{
@@ -1227,16 +1235,46 @@ export default function Settings({ notify, status, refresh }: Props) {
                     fontSize: 12,
                     display: 'flex',
                     alignItems: 'center',
-                    gap: 8,
+                    justifyContent: 'space-between',
+                    gap: 10,
                     background: 'rgba(59, 130, 246, 0.08)',
                     border: '1px solid rgba(59, 130, 246, 0.25)',
                     marginBottom: 4,
+                    flexWrap: 'wrap',
                   }}
                 >
-                  <span style={{ fontSize: 13 }}>⚡</span>
-                  <span style={{ fontWeight: 600, color: 'var(--text)' }}>
-                    Текущий статус: {status.failover.current_status}
-                  </span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
+                    <span className="pulse-live-dot" title="Мониторинг Failover активен (автообновление)" />
+                    <span style={{ fontSize: 13 }}>⚡</span>
+                    <span style={{ fontWeight: 600, color: 'var(--text)' }}>
+                      Текущий статус: {status.failover.current_status}
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                    <span className="muted" style={{ fontSize: 10.5 }}>
+                      Обновлено: {failoverLastPolled}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn sm ghost"
+                      style={{
+                        height: 22,
+                        padding: '0 6px',
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 4,
+                        fontSize: 10.5,
+                        borderRadius: 4,
+                      }}
+                      onClick={() => {
+                        refresh?.()
+                        notify('Запрос свежего статуса Failover...')
+                      }}
+                      title="Обновить статус прямо сейчас"
+                    >
+                      🔄
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -1292,6 +1330,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                 )}
                 {chain.map((id, i) => {
                   const sv = servers.find((x) => x.id === id)
+                  const country = detectServerCountry(sv?.name || id, id, sv?.host)
                   const livePing = (status?.failover?.priority_chain_pings && status.failover.priority_chain_pings[id] !== undefined)
                     ? status.failover.priority_chain_pings[id]
                     : (status?.active_server && status.active_server.id === id ? status.active_server.ping_ms : (sv?.ping_ms ?? 0))
@@ -1331,9 +1370,9 @@ export default function Settings({ notify, status, refresh }: Props) {
                         minWidth: 0,
                       }}
                     >
-                      {/* УРОВЕНЬ 1: Номер, Название сервера и Задержка */}
+                      {/* УРОВЕНЬ 1: Номер, Название сервера, Страна, Хост и Задержка */}
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'nowrap' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1, overflow: 'hidden' }}>
                           <span
                             style={{
                               fontSize: 11,
@@ -1358,12 +1397,60 @@ export default function Settings({ notify, status, refresh }: Props) {
                               overflow: 'hidden',
                               textOverflow: 'ellipsis',
                               whiteSpace: 'nowrap',
-                              minWidth: 120,
+                              minWidth: 90,
+                              flexShrink: 1,
                             }}
                             title={sv ? `${sv.name} (${id})` : id}
                           >
                             {sv ? sv.name : `${id} (недоступен)`}
                           </span>
+
+                          {/* Вариант Б: Детекция страны и флаг */}
+                          {country && (
+                            <span
+                              style={{
+                                fontSize: 10.5,
+                                fontWeight: 700,
+                                padding: '1px 6px',
+                                borderRadius: 4,
+                                background: 'rgba(255, 255, 255, 0.06)',
+                                border: '1px solid rgba(255, 255, 255, 0.12)',
+                                color: 'var(--text)',
+                                whiteSpace: 'nowrap',
+                                flexShrink: 0,
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 3,
+                              }}
+                              title={`Локация: ${country.name} (${country.code})`}
+                            >
+                              <span>{country.flag}</span>
+                              <span style={{ opacity: 0.85 }}>{country.code}</span>
+                            </span>
+                          )}
+
+                          {/* Вариант А: Сетевые параметры узла (Host:Port / IP) */}
+                          {sv?.host && sv.host !== sv.name && (
+                            <span
+                              style={{
+                                fontSize: 10.5,
+                                fontFamily: 'monospace',
+                                color: 'var(--muted)',
+                                padding: '1px 6px',
+                                borderRadius: 4,
+                                background: 'rgba(0, 0, 0, 0.25)',
+                                border: '1px solid rgba(255, 255, 255, 0.07)',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                                maxWidth: 190,
+                                flexShrink: 2,
+                              }}
+                              title={`Адрес подключения: ${sv.host}:${sv.port || 443}`}
+                            >
+                              🌐 {sv.host}:{sv.port || 443}
+                            </span>
+                          )}
                         </div>
 
                         {/* Задержка и бейдж превышения порога */}
