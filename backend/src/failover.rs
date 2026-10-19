@@ -67,6 +67,27 @@ pub async fn reset_canary() {
     *CANARY_STAGE.lock().await = None;
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CanaryLastResult {
+    pub server_id: String,
+    pub server_name: String,
+    pub timestamp: String,
+    pub success: bool,
+    pub is_zombie: bool,
+    pub reason: String,
+    pub elapsed_secs: u64,
+}
+
+static LAST_CANARY_RESULT: tokio::sync::Mutex<Option<CanaryLastResult>> = tokio::sync::Mutex::const_new(None);
+
+pub async fn canary_last_result() -> Option<CanaryLastResult> {
+    LAST_CANARY_RESULT.lock().await.clone()
+}
+
+pub async fn set_canary_last_result(res: CanaryLastResult) {
+    *LAST_CANARY_RESULT.lock().await = Some(res);
+}
+
 use crate::mihomo::{self, Server};
 use crate::AppState;
 use chrono::Local;
@@ -147,6 +168,30 @@ pub async fn add_quarantine(server_id: &str, server_name: &str, reason: &str) ->
         reason: reason.to_string(),
     });
     duration_secs
+}
+
+pub async fn add_quarantine_with_duration(server_id: &str, server_name: &str, reason: &str, duration_secs: u64) -> u64 {
+    let mut q = SERVER_QUARANTINE.lock().await;
+    let fail_count = q.get(server_id).map(|e| e.fail_count).unwrap_or(0) + 1;
+    let until = Instant::now() + Duration::from_secs(duration_secs);
+    q.insert(server_id.to_string(), InternalQuarantineEntry {
+        server_id: server_id.to_string(),
+        server_name: server_name.to_string(),
+        fail_count,
+        quarantined_until: until,
+        reason: reason.to_string(),
+    });
+    duration_secs
+}
+
+pub async fn get_zombie_servers() -> Vec<String> {
+    let mut q = SERVER_QUARANTINE.lock().await;
+    let now = Instant::now();
+    q.retain(|_, v| now < v.quarantined_until);
+    q.values()
+        .filter(|v| v.reason.to_lowercase().contains("зомби"))
+        .map(|v| v.server_id.clone())
+        .collect()
 }
 
 pub async fn clear_quarantine(server_id: &str) {
@@ -463,12 +508,12 @@ pub async fn run_canary_probe(
     timeout_ms: u64,
 ) -> i64 {
     let probe_timeout = timeout_ms.max(4000);
-    let delay = mihomo::ping_server_url_expected(http, cfg, server_id, probe_timeout, Some(CANARY_PAYLOAD_URL), Some(200)).await;
+    let delay = mihomo::probe_server_l7(http, cfg, server_id, probe_timeout, CANARY_PAYLOAD_URL, 200).await;
     if delay > 0 {
         return delay;
     }
     // Fallback на сплит-пробник L7 (Cloudflare ➔ Google generate_204)
-    mihomo::ping_server_l7_split(http, cfg, server_id, probe_timeout).await
+    mihomo::probe_server_l7(http, cfg, server_id, probe_timeout, mihomo::PRIMARY_L7_CHECK_URL, 204).await
 }
 
 pub const WAN_CHECK_URL: &str = "http://ya.ru";
@@ -1003,6 +1048,30 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                             .map_or(false, |c| c.target_id == pri.id && c.from_id == active.id);
 
                         if !is_same_target {
+                            // Проверяем первый зонд сразу перед стартом таймера стабильности
+                            let initial_probe = run_canary_probe(&state.http, &cfg, &pri.id, ping_timeout).await;
+                            if initial_probe <= 0 {
+                                let fail_msg = format!(
+                                    "Canary Soak Test: кандидат '{}' ответил на TCP-пинг, но провалил L7-пробу трафика — помечен как '🧟 Зомби-сервер', переход к следующему в цепочке",
+                                    pri.name
+                                );
+                                let now_str = Local::now().format("%H:%M:%S").to_string();
+                                set_canary_last_result(CanaryLastResult {
+                                    server_id: pri.id.clone(),
+                                    server_name: pri.name.clone(),
+                                    timestamp: now_str,
+                                    success: false,
+                                    is_zombie: true,
+                                    reason: "L7-сбой: сервер отвечает на TCP-пинг, но блокирует реальный веб-трафик".to_string(),
+                                    elapsed_secs: 0,
+                                }).await;
+
+                                add_quarantine_with_duration(&pri.id, &pri.name, "Зомби-сервер: L7-сбой передачи трафика", 600).await;
+                                state.failover_log.push(&fail_msg, false).await;
+                                checked_higher_notes.push(format!("'{}': 🧟 Зомби (L7 сбой)", pri.name));
+                                continue;
+                            }
+
                             // Инициализация новой стадии Canary-теста: фиксируем старт, клиенты остаются на стабильном сервере
                             *canary_guard = Some(CanaryState {
                                 target_id: pri.id.clone(),
@@ -1038,13 +1107,27 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                         if probe_ms <= 0 {
                             // Сбой передачи данных во время теста стабильности!
                             let fail_msg = format!(
-                                "Canary Soak Test: кандидат '{}' не выдержал тест стабильности (сбой передачи данных на {} сек) — тест сброшен, остаёмся на '{}'",
-                                pri.name, elapsed_secs, active.name
+                                "Canary Soak Test: кандидат '{}' не выдержал тест стабильности (сбой передачи данных на {} сек) — помечен как '🧟 Зомби-сервер', переход к следующему в цепочке",
+                                pri.name, elapsed_secs
                             );
                             *canary_guard = None;
                             drop(canary_guard);
+
+                            let now_str = Local::now().format("%H:%M:%S").to_string();
+                            set_canary_last_result(CanaryLastResult {
+                                server_id: pri.id.clone(),
+                                server_name: pri.name.clone(),
+                                timestamp: now_str,
+                                success: false,
+                                is_zombie: true,
+                                reason: format!("L7-сбой передачи данных на {} сек: таймаут / блокировка веб-трафика", elapsed_secs),
+                                elapsed_secs,
+                            }).await;
+
+                            add_quarantine_with_duration(&pri.id, &pri.name, "Зомби-сервер: L7-сбой передачи трафика", 600).await;
                             state.failover_log.push(&fail_msg, false).await;
-                            return Ok(fail_msg);
+                            checked_higher_notes.push(format!("'{}': 🧟 Зомби (L7 сбой)", pri.name));
+                            continue;
                         }
 
                         let canary = canary_guard.as_mut().unwrap();
@@ -1066,6 +1149,17 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                         let total_kb = canary.total_bytes / 1024;
                         *canary_guard = None;
                         drop(canary_guard);
+
+                        let now_str = Local::now().format("%H:%M:%S").to_string();
+                        set_canary_last_result(CanaryLastResult {
+                            server_id: pri.id.clone(),
+                            server_name: pri.name.clone(),
+                            timestamp: now_str,
+                            success: true,
+                            is_zombie: false,
+                            reason: format!("Успешно пройден {canary_duration_secs}-сек тест ({probes_count} проверок, {total_kb} КБ)"),
+                            elapsed_secs,
+                        }).await;
 
                         let is_main = pri.id == chain[0].id;
                         let label = if is_main { "Основной" } else { "Более приоритетный" };
@@ -1113,6 +1207,16 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                                 "Canary Soak Test: кандидат '{}' потерял пинг ({} мс > порога {} мс на {} сек теста) — тест сброшен, остаёмся на '{}'",
                                 pri.name, ping, hyst, elapsed, active.name
                             );
+                            let now_str = Local::now().format("%H:%M:%S").to_string();
+                            set_canary_last_result(CanaryLastResult {
+                                server_id: pri.id.clone(),
+                                server_name: pri.name.clone(),
+                                timestamp: now_str,
+                                success: false,
+                                is_zombie: false,
+                                reason: abort_msg.clone(),
+                                elapsed_secs: elapsed,
+                            }).await;
                             state.failover_log.push(&abort_msg, false).await;
                         }
 
@@ -1847,5 +1951,78 @@ mod tests {
         assert_eq!(ids_to_close, vec!["c1", "c4"]);
         assert!(!ids_to_close.contains(&"c2"), "DIRECT соединение ни в коем случае не должно закрываться!");
         assert!(!ids_to_close.contains(&"c3"), "Соединения других серверов (node_nl) не должны закрываться!");
+    }
+
+    #[tokio::test]
+    async fn test_zombie_server_quarantine_and_last_result() {
+        let _lock = FAILOVER_TEST_LOCK.lock().await;
+        clear_all_quarantine().await;
+
+        let srv_id = "test_node_zombie";
+        let srv_name = "Zombie Candidate";
+
+        // Добавляем в карантин как зомби
+        add_quarantine_with_duration(srv_id, srv_name, "Зомби-сервер: L7-сбой передачи трафика", 600).await;
+
+        assert!(is_quarantined(srv_id).await);
+        let zombies = get_zombie_servers().await;
+        assert!(zombies.contains(&srv_id.to_string()), "get_zombie_servers должен содержать помеченный узел");
+
+        // Проверяем фиксацию последнего теста
+        let last = CanaryLastResult {
+            server_id: srv_id.to_string(),
+            server_name: srv_name.to_string(),
+            timestamp: "15:02:10".to_string(),
+            success: false,
+            is_zombie: true,
+            reason: "L7-сбой передачи данных на 5 сек".to_string(),
+            elapsed_secs: 5,
+        };
+        set_canary_last_result(last).await;
+
+        let fetched = canary_last_result().await.expect("last_test должен быть сохранен");
+        assert_eq!(fetched.server_id, srv_id);
+        assert!(!fetched.success);
+        assert!(fetched.is_zombie);
+        assert_eq!(fetched.elapsed_secs, 5);
+
+        clear_all_quarantine().await;
+    }
+
+    #[tokio::test]
+    async fn test_failover_chain_skips_zombie_and_continues() {
+        let _lock = FAILOVER_TEST_LOCK.lock().await;
+        clear_all_quarantine().await;
+
+        let s1 = "node_1_zombie";
+        let s2 = "node_2_healthy";
+        let s3 = "node_3_active";
+
+        let chain = vec![
+            Server { id: s1.into(), name: "Zombie Node".into(), ping_ms: 70, is_active: false, protocol: "Vless".into(), host: "1.1.1.1".into(), port: 443, is_priority: true, provider: None, provider_name: None, is_pool: false },
+            Server { id: s2.into(), name: "Healthy Node".into(), ping_ms: 80, is_active: false, protocol: "Vless".into(), host: "2.2.2.2".into(), port: 443, is_priority: false, provider: None, provider_name: None, is_pool: false },
+            Server { id: s3.into(), name: "Active Node".into(), ping_ms: 90, is_active: true, protocol: "Vless".into(), host: "3.3.3.3".into(), port: 443, is_priority: false, provider: None, provider_name: None, is_pool: false },
+        ];
+
+        let higher = get_higher_priority_candidates(&chain, s3);
+        assert_eq!(higher.len(), 2);
+        assert_eq!(higher[0].id, s1);
+        assert_eq!(higher[1].id, s2);
+
+        // Помечаем s1 как зомби
+        add_quarantine_with_duration(s1, "Zombie Node", "Зомби-сервер: L7 сбой", 600).await;
+
+        let mut eligible_higher = Vec::new();
+        for s in higher {
+            if !is_quarantined(&s.id).await {
+                eligible_higher.push(s);
+            }
+        }
+
+        // s1 должен быть пропущен, а s2 доступен для проверки!
+        assert_eq!(eligible_higher.len(), 1);
+        assert_eq!(eligible_higher[0].id, s2, "Фейловер обязан перейти к следующему серверу s2, пропустив зомби s1");
+
+        clear_all_quarantine().await;
     }
 }

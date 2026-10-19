@@ -385,5 +385,89 @@ describe('Settings Component — Notifications Guidance & Validation', () => {
   })
 })
 
+describe('Settings Component — Failover Zombie Servers and Canary Last Result', () => {
+  let container: HTMLDivElement | null = null
+  let root: ReturnType<typeof createRoot> | null = null
+  const notifyMock = vi.fn()
+  const refreshMock = vi.fn().mockResolvedValue(undefined)
+
+  beforeEach(() => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    vi.restoreAllMocks()
+  })
+
+  afterEach(() => {
+    if (root && container) {
+      act(() => {
+        root!.unmount()
+      })
+      container.remove()
+    }
+  })
+
+  it('renders 🧟 Зомби badge and last test banner when candidate failed L7 test', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation(async (path: string) => {
+      if (path === 'settings') {
+        return {
+          ...mockSettings,
+          failover: {
+            ...mockSettings.failover,
+            priority_chain: ['germany_node', 'backup_node'],
+          },
+        }
+      }
+      if (path === 'servers') {
+        return {
+          servers: [
+            { id: 'germany_node', name: 'Германия', ping_ms: 120, is_active: false },
+            { id: 'backup_node', name: 'Резерв Нидерланды', ping_ms: 85, is_active: true },
+          ],
+        }
+      }
+      if (path === 'routes') return { routes: [] }
+      if (path === 'domains') return { direct: [], force: [] }
+      if (path === 'system/swap/status') return mockSwapInactive
+      return {}
+    })
+
+    const mockStatus: any = {
+      active_server: { id: 'backup_node', name: 'Резерв Нидерланды', ping_ms: 85 },
+      failover: {
+        enabled: true,
+        priority_chain: ['germany_node', 'backup_node'],
+        priority_chain_pings: { germany_node: -1, backup_node: 85 },
+        zombie_servers: ['germany_node'],
+        last_test: {
+          timestamp: Math.floor(Date.now() / 1000),
+          target_id: 'germany_node',
+          target_name: 'Германия',
+          success: false,
+          message: 'L7 Canary test failed (HTTP probe timeout / zero bytes)',
+          elapsed_secs: 5,
+        },
+      },
+    }
+
+    await act(async () => {
+      root!.render(<Settings notify={notifyMock} status={mockStatus} refresh={refreshMock} />)
+    })
+
+    const text = container?.textContent || ''
+    // Banner displays failure info
+    expect(text).toContain('L7-тест провален:')
+    expect(text).toContain('Германия')
+    expect(text).toContain('L7 Canary test failed')
+
+    // Zombie server has 🧟 Зомби badge
+    expect(text).toContain('🧟 Зомби')
+
+    // Tooltip includes explanation
+    const zombieElements = container?.querySelectorAll('[title*="L7-сбой передачи данных"]')
+    expect(zombieElements && zombieElements.length).toBeGreaterThan(0)
+  })
+})
+
 
 

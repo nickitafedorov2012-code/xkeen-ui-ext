@@ -99,9 +99,20 @@ export interface StatusInfo {
       remaining_secs: number
       reason: string
     }>
+    last_test?: CanaryLastResult | null
+    zombie_servers?: string[]
   }
   refresh_interval_sec: number
   adblock_enabled?: boolean
+}
+
+export interface CanaryLastResult {
+  timestamp: number
+  target_id: string
+  target_name: string
+  success: boolean
+  message: string
+  elapsed_secs: number
 }
 
 export interface ServerInfo {

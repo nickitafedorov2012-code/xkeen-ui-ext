@@ -233,6 +233,27 @@ export default function Settings({ notify, status, refresh }: Props) {
     }
   }, [])
 
+  const handleResetTraffic = async (target: string, label: string) => {
+    if (!window.confirm(`Вы действительно хотите сбросить накопленный счетчик ${label} в 0?`)) {
+      return
+    }
+    try {
+      const res = await apiPost<{ status: string; direct_bytes?: number; proxy_bytes?: number; whitelist_bytes?: number }>(
+        `traffic/reset?target=${target}`,
+        {}
+      )
+      notify(`Счётчик ${label} успешно сброшен`)
+      setTrafficSummary(prev => ({
+        ...prev,
+        direct_bytes: res.direct_bytes !== undefined ? res.direct_bytes : (target === 'direct' ? 0 : prev.direct_bytes),
+        proxy_bytes: res.proxy_bytes !== undefined ? res.proxy_bytes : (target === 'vps' ? 0 : prev.proxy_bytes),
+        whitelist_bytes: res.whitelist_bytes !== undefined ? res.whitelist_bytes : (target === 'whitelist' ? 0 : prev.whitelist_bytes),
+      }))
+    } catch (e: any) {
+      notify(`Ошибка сброса: ${e?.message || e}`, true)
+    }
+  }
+
   // Модальные окна
   const [configEditorOpen, setConfigEditorOpen] = useState(false)
   const [presetCatalogOpen, setPresetCatalogOpen] = useState(false)
@@ -926,14 +947,25 @@ export default function Settings({ notify, status, refresh }: Props) {
           )}
         </div>
         <p className="muted small" style={{ margin: '0 0 14px' }}>
-          Накопленный объем трафика по направлениям маршрутизации с момента старта службы.
+          Накопленный объем трафика по направлениям маршрутизации. Сохраняется между перезагрузками.
         </p>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 }}>
           {/* Прямой трафик */}
           <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border)', borderRadius: 10, padding: 12 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, color: '#4ade80', fontSize: 12.5, fontWeight: 600 }}>
-              <span>🟢</span>
-              <span>Прямой трафик (Direct)</span>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#4ade80', fontSize: 12.5, fontWeight: 600 }}>
+                <span>🟢</span>
+                <span>Прямой трафик (Direct)</span>
+              </div>
+              <button
+                type="button"
+                className="btn-icon-subtle"
+                title="Сбросить счетчик прямого трафика"
+                onClick={() => handleResetTraffic('direct', 'прямого трафика')}
+                style={{ fontSize: 11, padding: '2px 7px', background: 'rgba(255,255,255,0.04)', border: '1px solid var(--border)', borderRadius: 6, cursor: 'pointer', color: 'var(--muted)' }}
+              >
+                🔄 Сброс
+              </button>
             </div>
             <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-bright)' }}>
               {fmtTrafficBytes(trafficSummary.direct_bytes)}
@@ -943,31 +975,53 @@ export default function Settings({ notify, status, refresh }: Props) {
             </div>
           </div>
 
-          {/* Проксированный трафик */}
+          {/* VPS трафик (Безлимит) */}
           <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border)', borderRadius: 10, padding: 12 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, color: '#38bdf8', fontSize: 12.5, fontWeight: 600 }}>
-              <span>🔵</span>
-              <span>Проксированный (Proxy)</span>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#38bdf8', fontSize: 12.5, fontWeight: 600 }}>
+                <span>🔵</span>
+                <span>VPS трафик (Безлимит)</span>
+              </div>
+              <button
+                type="button"
+                className="btn-icon-subtle"
+                title="Сбросить счетчик VPS трафика"
+                onClick={() => handleResetTraffic('vps', 'VPS трафика')}
+                style={{ fontSize: 11, padding: '2px 7px', background: 'rgba(255,255,255,0.04)', border: '1px solid var(--border)', borderRadius: 6, cursor: 'pointer', color: '#38bdf8' }}
+              >
+                🔄 Сброс
+              </button>
             </div>
             <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-bright)' }}>
               {fmtTrafficBytes(trafficSummary.proxy_bytes)}
             </div>
             <div className="muted small" style={{ marginTop: 2, fontSize: 11 }}>
-              Через ядро Mihomo / VPS
+              Серверы без метки БС
             </div>
           </div>
 
-          {/* Белые списки */}
+          {/* БС трафик (Лимит) */}
           <div style={{ background: trafficSummary.whitelist_active ? 'rgba(168, 85, 247, 0.08)' : 'rgba(255,255,255,0.02)', border: trafficSummary.whitelist_active ? '1px solid rgba(168, 85, 247, 0.4)' : '1px solid var(--border)', borderRadius: 10, padding: 12 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, color: '#c084fc', fontSize: 12.5, fontWeight: 600 }}>
-              <span>🟣</span>
-              <span>Белые списки (100% туннель)</span>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#c084fc', fontSize: 12.5, fontWeight: 600 }}>
+                <span>🟣</span>
+                <span>БС трафик (Лимит)</span>
+              </div>
+              <button
+                type="button"
+                className="btn-icon-subtle"
+                title="Сбросить счетчик трафика БС"
+                onClick={() => handleResetTraffic('whitelist', 'трафика Белых списков (БС)')}
+                style={{ fontSize: 11, padding: '2px 7px', background: 'rgba(168, 85, 247, 0.12)', border: '1px solid rgba(168, 85, 247, 0.4)', borderRadius: 6, cursor: 'pointer', color: '#c084fc' }}
+              >
+                🔄 Сброс
+              </button>
             </div>
             <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--text-bright)' }}>
               {fmtTrafficBytes(trafficSummary.whitelist_bytes)}
             </div>
             <div className="muted small" style={{ marginTop: 2, fontSize: 11 }}>
-              {trafficSummary.whitelist_active ? 'Туннель активен для LAN устройств' : 'Накоплено в аварийном режиме'}
+              {trafficSummary.whitelist_active ? 'Туннель БС активен для LAN устройств' : 'Серверы с меткой [БС]'}
             </div>
           </div>
         </div>
@@ -1188,6 +1242,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                   {chain.map((id, idx) => {
                     const sv = servers.find((x) => x.id === id)
                     const isCur = Boolean(status?.active_server && status.active_server.id === id)
+                    const isZombie = Boolean(status?.failover?.zombie_servers?.includes(id))
                     const name = sv ? sv.name : id
                     return (
                       <Fragment key={id}>
@@ -1197,20 +1252,67 @@ export default function Settings({ notify, status, refresh }: Props) {
                             padding: '3px 8px',
                             lineHeight: '18px',
                             borderRadius: 6,
-                            background: isCur ? 'rgba(34, 197, 94, 0.2)' : 'rgba(255, 255, 255, 0.05)',
-                            color: isCur ? '#4ade80' : 'var(--text)',
-                            border: isCur ? '1px solid rgba(34, 197, 94, 0.4)' : '1px solid transparent',
-                            fontWeight: isCur ? 700 : 500,
+                            background: isCur
+                              ? 'rgba(34, 197, 94, 0.2)'
+                              : isZombie
+                                ? 'rgba(239, 68, 68, 0.15)'
+                                : 'rgba(255, 255, 255, 0.05)',
+                            color: isCur ? '#4ade80' : isZombie ? '#f87171' : 'var(--text)',
+                            border: isCur
+                              ? '1px solid rgba(34, 197, 94, 0.4)'
+                              : isZombie
+                                ? '1px dashed rgba(239, 68, 68, 0.6)'
+                                : '1px solid transparent',
+                            fontWeight: isCur || isZombie ? 700 : 500,
                             whiteSpace: 'nowrap',
                             flexShrink: 0,
                           }}
-                          title={name}
+                          title={isZombie ? `${name} — 🧟 Зомби (L7 сбой, исключён на 10 мин)` : name}
                         >
-                          {idx === 0 ? '👑 ' : `${idx + 1}. `}{name}
+                          {isZombie ? '🧟 ' : idx === 0 ? '👑 ' : `${idx + 1}. `}{name}
                         </span>
                       </Fragment>
                     )
                   })}
+                </div>
+              )}
+
+              {status?.failover?.last_test && (
+                <div
+                  style={{
+                    padding: '8px 12px',
+                    borderRadius: 8,
+                    fontSize: 11.5,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 8,
+                    background: status.failover.last_test.success
+                      ? 'rgba(34, 197, 94, 0.08)'
+                      : 'rgba(239, 68, 68, 0.12)',
+                    border: `1px solid ${
+                      status.failover.last_test.success
+                        ? 'rgba(34, 197, 94, 0.3)'
+                        : 'rgba(239, 68, 68, 0.35)'
+                    }`,
+                    marginBottom: 4,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, overflow: 'hidden' }}>
+                    <span style={{ fontSize: 13 }}>{status.failover.last_test.success ? '✅' : '🧟'}</span>
+                    <span style={{ fontWeight: 600 }}>
+                      {status.failover.last_test.success ? 'Тест пройден:' : 'L7-тест провален:'}
+                    </span>
+                    <span style={{ color: status.failover.last_test.success ? '#4ade80' : '#f87171', fontWeight: 700 }}>
+                      {status.failover.last_test.target_name}
+                    </span>
+                    <span className="muted" style={{ fontSize: 11, textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
+                      ({status.failover.last_test.message})
+                    </span>
+                  </div>
+                  <span className="muted" style={{ fontSize: 10.5, whiteSpace: 'nowrap', flexShrink: 0 }}>
+                    {new Date(status.failover.last_test.timestamp * 1000).toLocaleTimeString()}
+                  </span>
                 </div>
               )}
 
@@ -1230,6 +1332,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                   const isCanary = Boolean(canaryInfo?.active && canaryInfo.target_id === id)
                   const liveCanarySecs = isCanary ? (canaryCountdown ?? canaryInfo?.remaining_secs ?? 0) : 0
                   const quarantineInfo = status?.failover?.quarantine?.find((q) => q.server_id === id)
+                  const isZombie = Boolean(status?.failover?.zombie_servers?.includes(id) || quarantineInfo?.reason === 'zombie')
                   const isQuarantined = Boolean(quarantineInfo && quarantineInfo.remaining_secs > 0)
                   const isTimeout = livePing <= 0 || livePing >= 9999
 
@@ -1243,14 +1346,18 @@ export default function Settings({ notify, status, refresh }: Props) {
                         gap: 6,
                         background: isActive
                           ? 'rgba(34, 197, 94, 0.08)'
-                          : i === 0
-                            ? 'rgba(56, 189, 248, 0.08)'
-                            : 'rgba(255, 255, 255, 0.02)',
+                          : isZombie
+                            ? 'rgba(239, 68, 68, 0.06)'
+                            : i === 0
+                              ? 'rgba(56, 189, 248, 0.08)'
+                              : 'rgba(255, 255, 255, 0.02)',
                         border: isActive
                           ? '1px solid rgba(34, 197, 94, 0.4)'
-                          : i === 0
-                            ? '1px solid rgba(56, 189, 248, 0.3)'
-                            : '1px solid var(--border)',
+                          : isZombie
+                            ? '1px dashed rgba(239, 68, 68, 0.4)'
+                            : i === 0
+                              ? '1px solid rgba(56, 189, 248, 0.3)'
+                              : '1px solid var(--border)',
                         borderRadius: 10,
                         padding: '8px 12px',
                         minWidth: 0,
@@ -1279,7 +1386,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                             style={{
                               fontWeight: 600,
                               fontSize: 13,
-                              color: isActive ? '#4ade80' : 'var(--text)',
+                              color: isActive ? '#4ade80' : isZombie ? '#f87171' : 'var(--text)',
                               overflow: 'hidden',
                               textOverflow: 'ellipsis',
                               whiteSpace: 'nowrap',
@@ -1293,7 +1400,7 @@ export default function Settings({ notify, status, refresh }: Props) {
 
                         {/* Задержка и бейдж превышения порога */}
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                          {livePing > (settings.failover.ping_threshold_ms || 300) && !isTimeout && (
+                          {livePing > (settings.failover.ping_threshold_ms || 300) && !isTimeout && !isZombie && (
                             <span
                               style={{
                                 fontSize: 10,
@@ -1310,9 +1417,31 @@ export default function Settings({ notify, status, refresh }: Props) {
                               ⚠️ &gt; {settings.failover.ping_threshold_ms || 300} мс
                             </span>
                           )}
-                          <span className={'ping ' + pingClass(livePing)} style={{ fontSize: 12, fontWeight: 700 }}>
-                            {livePing > 0 && livePing < 9999 ? `${livePing} мс` : '—'}
-                          </span>
+                          {isZombie ? (
+                            <span
+                              className="ping"
+                              style={{
+                                fontSize: 11,
+                                fontWeight: 700,
+                                padding: '2px 7px',
+                                borderRadius: 5,
+                                background: 'rgba(239, 68, 68, 0.18)',
+                                color: '#f87171',
+                                border: '1px solid rgba(239, 68, 68, 0.4)',
+                                cursor: 'help',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 3,
+                              }}
+                              title="Сервер отвечает на TCP-пинг, но блокирует реальный веб-трафик (L7-сбой передачи данных). Временно исключён из цепочки на 10 мин."
+                            >
+                              🧟 Зомби
+                            </span>
+                          ) : (
+                            <span className={'ping ' + pingClass(livePing)} style={{ fontSize: 12, fontWeight: 700 }}>
+                              {livePing > 0 && livePing < 9999 ? `${livePing} мс` : '—'}
+                            </span>
+                          )}
                         </div>
                       </div>
 
@@ -1356,6 +1485,22 @@ export default function Settings({ notify, status, refresh }: Props) {
                               title="Канареечный тест стабильности узла перед возвратом трафика. Клиенты остаются на резерве, пока проверяется отсутствие обрывов."
                             >
                               🧪 Тест ({liveCanarySecs}с)
+                            </span>
+                          ) : isZombie ? (
+                            <span
+                              style={{
+                                fontSize: 10,
+                                fontWeight: 700,
+                                padding: '2px 6px',
+                                borderRadius: 4,
+                                background: 'rgba(239, 68, 68, 0.2)',
+                                color: '#f87171',
+                                border: '1px solid rgba(239, 68, 68, 0.45)',
+                                cursor: 'help',
+                              }}
+                              title="Сервер отвечает на TCP-пинг, но блокирует реальный веб-трафик (L7-сбой передачи данных). Временно исключён из цепочки на 10 мин."
+                            >
+                              🧟 Зомби ({quarantineInfo ? Math.ceil(quarantineInfo.remaining_secs / 60) : 10} мин)
                             </span>
                           ) : isQuarantined ? (
                             <span
@@ -1521,9 +1666,10 @@ export default function Settings({ notify, status, refresh }: Props) {
                         const optPing = (status?.failover?.priority_chain_pings && status.failover.priority_chain_pings[s.id] !== undefined)
                           ? status.failover.priority_chain_pings[s.id]
                           : s.ping_ms
+                        const isOptZombie = Boolean(status?.failover?.zombie_servers?.includes(s.id))
                         return (
                           <option key={s.id} value={s.id}>
-                            {s.provider_name ? `[${s.provider_name}] ` : s.provider ? `[${s.provider}] ` : ''}{s.name} · {optPing > 0 ? `${optPing} мс` : '—'}
+                            {s.provider_name ? `[${s.provider_name}] ` : s.provider ? `[${s.provider}] ` : ''}{s.name} · {isOptZombie ? '🧟 Зомби' : optPing > 0 ? `${optPing} мс` : '—'}
                           </option>
                         )
                       })}

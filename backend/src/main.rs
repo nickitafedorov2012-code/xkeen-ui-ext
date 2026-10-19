@@ -725,6 +725,7 @@ async fn main() {
         .route("/api/connections/{id}", delete(api::close_single_connection))
         // Монитор трафика
         .route("/api/traffic/poll", get(api::get_traffic_poll))
+        .route("/api/traffic/reset", post(api::post_traffic_reset))
         // Rules Viewer и «Куда пойдёт?»
         .route("/api/rules", get(api::get_rules))
         .route("/api/rules/test", post(api::test_rule_match))

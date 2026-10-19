@@ -66,6 +66,7 @@ pub fn get_snapshot() -> TrafficSnapshot {
     let wl_bytes = TOTAL_WHITELIST_BYTES.load(Ordering::Relaxed);
     let d_bytes = TOTAL_DIRECT_BYTES.load(Ordering::Relaxed);
     let p_bytes = TOTAL_PROXY_BYTES.load(Ordering::Relaxed);
+    let is_wl_active = WHITELIST_ACTIVE.load(Ordering::Relaxed);
 
     TrafficSnapshot {
         direct: TrafficSpeed { down: d_down, up: d_up },
@@ -75,8 +76,8 @@ pub fn get_snapshot() -> TrafficSnapshot {
         whitelist_bytes: wl_bytes,
         direct_bytes: d_bytes,
         proxy_bytes: p_bytes,
-        down: p_down,
-        up: p_up,
+        down: if is_wl_active { wl_down } else { p_down },
+        up: if is_wl_active { wl_up } else { p_up },
     }
 }
 
@@ -107,14 +108,14 @@ pub fn get_snapshot_json() -> serde_json::Value {
             "down": p_down,
             "up": p_up,
             "bytes": p_bytes,
-            "source": "Mihomo (/traffic)"
+            "source": "Mihomo VPS (Unlimited)"
         },
         "whitelist": {
             "down": wl_down,
             "up": wl_up,
             "bytes": wl_bytes,
             "active": is_wl_active,
-            "source": "Whitelist 100% Tunnel"
+            "source": "Whitelist (Metered)"
         },
         "total": {
             "down": w_down,
@@ -125,17 +126,102 @@ pub fn get_snapshot_json() -> serde_json::Value {
         "direct_bytes": d_bytes,
         "proxy_bytes": p_bytes,
         "whitelist_active": is_wl_active,
-        "down": p_down,
-        "up": p_up,
+        "down": if is_wl_active { wl_down } else { p_down },
+        "up": if is_wl_active { wl_up } else { p_up },
         "history": history,
         "estimated": true,
     })
+}
+
+static STATS_PATH: std::sync::RwLock<Option<std::path::PathBuf>> = std::sync::RwLock::new(None);
+
+#[derive(Serialize, Deserialize, Default, Debug, Clone)]
+pub struct StoredTrafficStats {
+    #[serde(default)]
+    pub direct_bytes: u64,
+    #[serde(default)]
+    pub proxy_bytes: u64,
+    #[serde(default)]
+    pub whitelist_bytes: u64,
+    #[serde(default)]
+    pub updated_at: u64,
+}
+
+pub fn set_stats_file(path: std::path::PathBuf) {
+    if let Ok(mut lock) = STATS_PATH.write() {
+        *lock = Some(path.clone());
+    }
+    load_stats_from_disk(&path);
+}
+
+pub fn load_stats_from_disk(path: &std::path::Path) {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        if let Ok(stored) = serde_json::from_str::<StoredTrafficStats>(&content) {
+            TOTAL_DIRECT_BYTES.store(stored.direct_bytes, Ordering::Relaxed);
+            TOTAL_PROXY_BYTES.store(stored.proxy_bytes, Ordering::Relaxed);
+            TOTAL_WHITELIST_BYTES.store(stored.whitelist_bytes, Ordering::Relaxed);
+            crate::log_i!(
+                "Загружена статистика трафика из {}: direct={} B, vps={} B, whitelist={} B",
+                path.display(),
+                stored.direct_bytes,
+                stored.proxy_bytes,
+                stored.whitelist_bytes
+            );
+        }
+    }
+}
+
+pub fn save_stats_to_disk() {
+    let path_opt = {
+        let lock = STATS_PATH.read().ok();
+        lock.and_then(|guard| guard.clone())
+    };
+    let Some(path) = path_opt else { return; };
+    let stats = StoredTrafficStats {
+        direct_bytes: TOTAL_DIRECT_BYTES.load(Ordering::Relaxed),
+        proxy_bytes: TOTAL_PROXY_BYTES.load(Ordering::Relaxed),
+        whitelist_bytes: TOTAL_WHITELIST_BYTES.load(Ordering::Relaxed),
+        updated_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    };
+    if let Ok(json_str) = serde_json::to_string_pretty(&stats) {
+        let tmp = path.with_extension("tmp");
+        if let Ok(_) = std::fs::write(&tmp, json_str.as_bytes()) {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
+pub fn reset_traffic(target: &str) -> TrafficSnapshot {
+    let t = target.trim().to_lowercase();
+    match t.as_str() {
+        "direct" => {
+            TOTAL_DIRECT_BYTES.store(0, Ordering::Relaxed);
+        }
+        "proxy" | "vps" => {
+            TOTAL_PROXY_BYTES.store(0, Ordering::Relaxed);
+        }
+        "whitelist" | "bs" => {
+            TOTAL_WHITELIST_BYTES.store(0, Ordering::Relaxed);
+        }
+        _ => {
+            // "all"
+            TOTAL_DIRECT_BYTES.store(0, Ordering::Relaxed);
+            TOTAL_PROXY_BYTES.store(0, Ordering::Relaxed);
+            TOTAL_WHITELIST_BYTES.store(0, Ordering::Relaxed);
+        }
+    }
+    save_stats_to_disk();
+    get_snapshot()
 }
 
 pub static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn shutdown() {
     SHUTDOWN.store(true, Ordering::Release);
+    save_stats_to_disk();
 }
 
 pub fn is_shutdown() -> bool {
@@ -201,14 +287,19 @@ async fn run_mihomo_stream(state: AppState) {
                                 if !line.is_empty() {
                                     if let Ok(msg) = serde_json::from_str::<MihomoTrafficChunk>(&line) {
                                         // Инверсия направления Mihomo -> клиент: данные, отдаваемые Mihomo клиенту, являются Загрузкой (DOWN)
-                                        PROXY_DOWN.store(msg.up, Ordering::Relaxed);
-                                        PROXY_UP.store(msg.down, Ordering::Relaxed);
-                                        TOTAL_PROXY_BYTES.fetch_add(msg.down + msg.up, Ordering::Relaxed);
+                                        let bytes = msg.down + msg.up;
                                         if WHITELIST_ACTIVE.load(Ordering::Relaxed) {
+                                            // Активен сервер / туннель Белых списков (БС) с лимитированным трафиком
                                             WHITELIST_DOWN.store(msg.up, Ordering::Relaxed);
                                             WHITELIST_UP.store(msg.down, Ordering::Relaxed);
-                                            TOTAL_WHITELIST_BYTES.fetch_add(msg.down + msg.up, Ordering::Relaxed);
+                                            TOTAL_WHITELIST_BYTES.fetch_add(bytes, Ordering::Relaxed);
+                                            PROXY_DOWN.store(0, Ordering::Relaxed);
+                                            PROXY_UP.store(0, Ordering::Relaxed);
                                         } else {
+                                            // Обычный VPS сервер (без метки БС) с безлимитным трафиком
+                                            PROXY_DOWN.store(msg.up, Ordering::Relaxed);
+                                            PROXY_UP.store(msg.down, Ordering::Relaxed);
+                                            TOTAL_PROXY_BYTES.fetch_add(bytes, Ordering::Relaxed);
                                             WHITELIST_DOWN.store(0, Ordering::Relaxed);
                                             WHITELIST_UP.store(0, Ordering::Relaxed);
                                         }
@@ -327,33 +418,70 @@ async fn run_wan_polling() {
 
         let p_down = PROXY_DOWN.load(Ordering::Relaxed);
         let p_up = PROXY_UP.load(Ordering::Relaxed);
+        let wl_down = WHITELIST_DOWN.load(Ordering::Relaxed);
+        let wl_up = WHITELIST_UP.load(Ordering::Relaxed);
 
-        let d_down = wan_rx_speed.saturating_sub(p_down);
-        let d_up = wan_tx_speed.saturating_sub(p_up);
+        let total_proxy_down = p_down + wl_down;
+        let total_proxy_up = p_up + wl_up;
+
+        let d_down = wan_rx_speed.saturating_sub(total_proxy_down);
+        let d_up = wan_tx_speed.saturating_sub(total_proxy_up);
 
         DIRECT_DOWN.store(d_down, Ordering::Relaxed);
         DIRECT_UP.store(d_up, Ordering::Relaxed);
         TOTAL_DIRECT_BYTES.fetch_add(d_down + d_up, Ordering::Relaxed);
 
         let is_wl_active = WHITELIST_ACTIVE.load(Ordering::Relaxed);
-        let wl_d = if is_wl_active { p_down } else { 0 };
-        let wl_u = if is_wl_active { p_up } else { 0 };
 
         record_history_point(json!({
             "direct": { "down": d_down, "up": d_up, "estimated": true, "source": "WAN - Mihomo" },
-            "proxy": { "down": p_down, "up": p_up, "source": "Mihomo" },
-            "whitelist": { "down": wl_d, "up": wl_u, "active": is_wl_active },
+            "proxy": { "down": p_down, "up": p_up, "source": "Mihomo VPS" },
+            "whitelist": { "down": wl_down, "up": wl_up, "active": is_wl_active },
             "total": { "down": wan_rx_speed, "up": wan_tx_speed, "source": "WAN" },
-            "down": p_down,
-            "up": p_up,
+            "down": if is_wl_active { wl_down } else { p_down },
+            "up": if is_wl_active { wl_up } else { p_up },
             "estimated": true,
         }));
     }
 }
 
+async fn run_periodic_stats_saver() {
+    let mut interval = tokio::time::interval(Duration::from_secs(300));
+    let mut last_direct = TOTAL_DIRECT_BYTES.load(Ordering::Relaxed);
+    let mut last_proxy = TOTAL_PROXY_BYTES.load(Ordering::Relaxed);
+    let mut last_wl = TOTAL_WHITELIST_BYTES.load(Ordering::Relaxed);
+
+    loop {
+        if SHUTDOWN.load(Ordering::Acquire) {
+            break;
+        }
+        interval.tick().await;
+
+        let cur_direct = TOTAL_DIRECT_BYTES.load(Ordering::Relaxed);
+        let cur_proxy = TOTAL_PROXY_BYTES.load(Ordering::Relaxed);
+        let cur_wl = TOTAL_WHITELIST_BYTES.load(Ordering::Relaxed);
+
+        if cur_direct != last_direct || cur_proxy != last_proxy || cur_wl != last_wl {
+            save_stats_to_disk();
+            last_direct = cur_direct;
+            last_proxy = cur_proxy;
+            last_wl = cur_wl;
+        }
+    }
+    save_stats_to_disk();
+}
+
 pub fn spawn(state: AppState) {
+    let stats_path = state
+        .config_path
+        .parent()
+        .unwrap_or(std::path::Path::new("/opt/etc/xkeen-route"))
+        .join("traffic_stats.json");
+    set_stats_file(stats_path);
+
     tokio::spawn(run_mihomo_stream(state.clone()));
     tokio::spawn(run_wan_polling());
+    tokio::spawn(run_periodic_stats_saver());
 }
 
 #[cfg(test)]
@@ -425,5 +553,85 @@ mod tests {
         let snap = get_snapshot();
         assert_eq!(snap.proxy.down, 15000000, "Mihomo up must map to client download (DOWN)");
         assert_eq!(snap.proxy.up, 250000, "Mihomo down must map to client upload (UP)");
+    }
+
+    #[test]
+    fn test_anti_regression_traffic_split_between_vps_and_whitelist() {
+        // Сбросим для чистоты теста
+        reset_traffic("all");
+        set_whitelist_active(false);
+
+        // 1. При неактивном Whitelist трафик должен идти в PROXY (VPS Безлимит)
+        let chunk_regular = MihomoTrafficChunk { down: 500, up: 1500 };
+        let bytes_regular = chunk_regular.down + chunk_regular.up;
+        if WHITELIST_ACTIVE.load(Ordering::Relaxed) {
+            TOTAL_WHITELIST_BYTES.fetch_add(bytes_regular, Ordering::Relaxed);
+        } else {
+            TOTAL_PROXY_BYTES.fetch_add(bytes_regular, Ordering::Relaxed);
+        }
+
+        assert_eq!(TOTAL_PROXY_BYTES.load(Ordering::Relaxed), 2000);
+        assert_eq!(TOTAL_WHITELIST_BYTES.load(Ordering::Relaxed), 0);
+
+        // 2. Активируем Whitelist: теперь трафик должен идти ТОЛЬКО в WHITELIST (БС Лимит)
+        set_whitelist_active(true);
+        let chunk_wl = MihomoTrafficChunk { down: 1000, up: 4000 };
+        let bytes_wl = chunk_wl.down + chunk_wl.up;
+        if WHITELIST_ACTIVE.load(Ordering::Relaxed) {
+            TOTAL_WHITELIST_BYTES.fetch_add(bytes_wl, Ordering::Relaxed);
+        } else {
+            TOTAL_PROXY_BYTES.fetch_add(bytes_wl, Ordering::Relaxed);
+        }
+
+        // Счетчик PROXY не должен измениться!
+        assert_eq!(TOTAL_PROXY_BYTES.load(Ordering::Relaxed), 2000);
+        assert_eq!(TOTAL_WHITELIST_BYTES.load(Ordering::Relaxed), 5000);
+
+        set_whitelist_active(false);
+    }
+
+    #[test]
+    fn test_traffic_reset_individual_counters() {
+        reset_traffic("all");
+        TOTAL_DIRECT_BYTES.store(100, Ordering::Relaxed);
+        TOTAL_PROXY_BYTES.store(200, Ordering::Relaxed);
+        TOTAL_WHITELIST_BYTES.store(300, Ordering::Relaxed);
+
+        // Сброс только direct
+        reset_traffic("direct");
+        assert_eq!(TOTAL_DIRECT_BYTES.load(Ordering::Relaxed), 0);
+        assert_eq!(TOTAL_PROXY_BYTES.load(Ordering::Relaxed), 200);
+        assert_eq!(TOTAL_WHITELIST_BYTES.load(Ordering::Relaxed), 300);
+
+        // Сброс только vps
+        reset_traffic("vps");
+        assert_eq!(TOTAL_PROXY_BYTES.load(Ordering::Relaxed), 0);
+        assert_eq!(TOTAL_WHITELIST_BYTES.load(Ordering::Relaxed), 300);
+
+        // Сброс whitelist
+        reset_traffic("whitelist");
+        assert_eq!(TOTAL_WHITELIST_BYTES.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_traffic_persistence_roundtrip() {
+        let tmp_dir = std::env::temp_dir();
+        let test_file = tmp_dir.join(format!("traffic_test_{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        
+        let stats = StoredTrafficStats {
+            direct_bytes: 12345,
+            proxy_bytes: 67890,
+            whitelist_bytes: 54321,
+            updated_at: 1000,
+        };
+        let json_str = serde_json::to_string_pretty(&stats).expect("json serialize");
+        std::fs::write(&test_file, json_str).expect("write file");
+
+        let loaded: StoredTrafficStats = serde_json::from_str(&std::fs::read_to_string(&test_file).expect("read file")).expect("parse");
+        assert_eq!(loaded.direct_bytes, 12345);
+        assert_eq!(loaded.proxy_bytes, 67890);
+        assert_eq!(loaded.whitelist_bytes, 54321);
+
+        let _ = std::fs::remove_file(&test_file);
     }
 }

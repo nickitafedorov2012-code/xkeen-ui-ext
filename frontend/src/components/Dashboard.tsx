@@ -537,6 +537,35 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
               <li><span>Резервы</span><b>{f!.priority_chain!.slice(1).length} сервер(ов)</b></li>
             )}
             <li><span>Интервал проверки</span><b>{f ? `${f.interval_secs} с` : '—'}</b></li>
+            {f?.canary?.active && (
+              <li>
+                <span>🧪 Тест узла</span>
+                <b style={{ color: '#c084fc' }}>
+                  {f.canary.target_name} ({f.canary.remaining_secs}с)
+                </b>
+              </li>
+            )}
+            {f?.last_test && (
+              <li>
+                <span>Последний тест</span>
+                <b>
+                  <span style={{ color: f.last_test.success ? '#4ade80' : '#f87171' }}>
+                    {f.last_test.success ? '✓' : '✗'} {f.last_test.target_name}
+                  </span>
+                  <span className="muted small" style={{ marginLeft: 6, fontWeight: 'normal' }}>
+                    ({new Date(f.last_test.timestamp * 1000).toLocaleTimeString()})
+                  </span>
+                </b>
+              </li>
+            )}
+            {f?.zombie_servers && f.zombie_servers.length > 0 && (
+              <li>
+                <span>Зомби-серверы</span>
+                <b style={{ color: '#f87171' }}>
+                  🧟 {f.zombie_servers.length} в карантине (10 мин)
+                </b>
+              </li>
+            )}
             {f?.best_ping_enabled && (
               <li>
                 <span>Режим Best-Ping</span>

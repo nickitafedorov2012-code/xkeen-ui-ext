@@ -33,6 +33,10 @@ pub async fn status(State(state): State<AppState>) -> Response {
             for s in &servers {
                 pings.insert(s.id.clone(), s.ping_ms);
             }
+            let zombie_list = failover::get_zombie_servers().await;
+            for zid in &zombie_list {
+                pings.insert(zid.clone(), -1);
+            }
             (act, pings)
         }
         Err(_) => (None, std::collections::HashMap::new()),
@@ -103,6 +107,8 @@ pub async fn status(State(state): State<AppState>) -> Response {
             "best_ping_pool_size": cfg.failover.best_ping_pool_size,
             "best_ping_hysteresis_ms": cfg.failover.best_ping_hysteresis_ms,
             "canary": failover::canary_status().await,
+            "last_test": failover::canary_last_result().await,
+            "zombie_servers": failover::get_zombie_servers().await,
             "quarantine": failover::quarantine_status().await,
         },
         "refresh_interval_sec": cfg.refresh_interval_sec,
@@ -4566,6 +4572,28 @@ pub async fn close_single_connection(
 /// GET /api/traffic/poll — текущая скорость прямого и проксированного трафика
 pub async fn get_traffic_poll(_state: State<AppState>) -> Response {
     api_ok(crate::traffic::get_snapshot_json())
+}
+
+#[derive(Deserialize, Default)]
+pub struct TrafficResetQuery {
+    pub target: Option<String>,
+}
+
+/// POST /api/traffic/reset — сброс одного или всех счётчиков накопленного трафика
+pub async fn post_traffic_reset(
+    State(_state): State<AppState>,
+    Query(query): Query<TrafficResetQuery>,
+) -> Response {
+    let target = query.target.as_deref().unwrap_or("all");
+    let snap = crate::traffic::reset_traffic(target);
+    crate::log_i!("Сброс статистики сетевого трафика: target='{}'", target);
+    api_ok(json!({
+        "status": "ok",
+        "target": target,
+        "direct_bytes": snap.direct_bytes,
+        "proxy_bytes": snap.proxy_bytes,
+        "whitelist_bytes": snap.whitelist_bytes,
+    }))
 }
 
 // ==================== RULES & MATCH TESTER («КУДА ПОЙДЁТ?») ====================

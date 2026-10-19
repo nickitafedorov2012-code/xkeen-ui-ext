@@ -1146,18 +1146,140 @@ pub async fn ping_server_url_expected(
     }
 
     // Для неактивных серверов из proxy-providers:
-    // НИ В КОЕМ СЛУЧАЕ не вызываем ping_group_url("PROXY"), так как это отправляет 142 одновременных
-    // TLS-рукопожатия ко всем серверам мира, забивая 100% CPU роутера и исчерпывая память!
-    // Вместо этого считываем закэшированную задержку/статус из /providers/proxies (память ядра Mihomo):
+    // Считываем проверенный L7-статус из /providers/proxies (память ядра Mihomo):
     if let Ok(providers) = get_provider_proxies(http, cfg).await {
         if let Some(p) = providers.get(server_id) {
             let alive = p.get("alive").and_then(|a| a.as_bool()).unwrap_or(true);
             if !alive {
                 return -1;
             }
-            // Если передан кастомный test_url (например, Canary payload URL),
-            // мы не можем использовать закэшированный delay от generate_204 ядра Mihomo!
-            if test_url.is_some() {
+            let d = last_delay(p);
+            if d > 0 {
+                return d;
+            }
+        }
+    }
+
+    -1
+}
+
+pub const CANARY_PROBE_GROUP_NAME: &str = "🛡️ Canary Probe";
+
+/// Параллельная L7-проверка сервера реальным трафиком без переключения селектора клиентов (PROXY).
+/// 1. Если сервер активен в основной группе (PROXY) — проверяем через неё.
+/// 2. Если в Mihomo доступен изолированный селектор '🛡️ Canary Probe' или 'Canary Probe' —
+///    переключаем его на проверяемый узел (без close_all_connections!) и делаем реальный HTTP-запрос.
+/// 3. Иначе проверяем прямой пинг /proxies/{id}/delay.
+/// 4. Для серверов из подписок (proxy-providers), пока селектор не создан —
+///    валидируем через подтвержденный L7 health-check ядра Mihomo (/providers/proxies).
+pub async fn probe_server_l7(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    server_id: &str,
+    timeout_ms: u64,
+    test_url: &str,
+    expected_status: u16,
+) -> i64 {
+    let proxies = get_proxies(http, cfg).await.unwrap_or_default();
+
+    // 1. Если узел уже активен в primary_group (PROXY)
+    if let Some(group) = find_primary_group(&proxies) {
+        let is_now = proxies
+            .get(&group)
+            .and_then(|p| p.get("now"))
+            .and_then(|n| n.as_str())
+            .map(|now| now == server_id)
+            .unwrap_or(false);
+
+        if is_now {
+            let enc = urlencoding_lite(&group);
+            let check_url = urlencoding_lite(test_url);
+            let url = format!(
+                "{}/proxies/{enc}/delay?timeout={timeout_ms}&url={check_url}&expected={expected_status}",
+                cfg.mihomo_url()
+            );
+            let mut req = http.get(&url).timeout(std::time::Duration::from_millis(std::cmp::max(timeout_ms + 2000, 5000)));
+            if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
+                req = req.header(k, v);
+            }
+            if let Ok(resp) = req.send().await {
+                if resp.status().is_success() {
+                    if let Ok(v) = resp.json::<Value>().await {
+                        if let Some(d) = v.get("delay").and_then(|d| d.as_i64()) {
+                            if d > 0 {
+                                return d;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Изолированная probe-группа
+    let probe_group_opt = if proxies.contains_key(CANARY_PROBE_GROUP_NAME) {
+        Some(CANARY_PROBE_GROUP_NAME)
+    } else if proxies.contains_key("Canary Probe") {
+        Some("Canary Probe")
+    } else {
+        None
+    };
+
+    if let Some(pg) = probe_group_opt {
+        let enc_pg = urlencoding_lite(pg);
+        // Переключаем только тестовую группу БЕЗ сброса клиентских соединений
+        if m_put(http, cfg, &format!("/proxies/{enc_pg}"), serde_json::json!({ "name": server_id }), 3).await.is_ok() {
+            let check_url = urlencoding_lite(test_url);
+            let url = format!(
+                "{}/proxies/{enc_pg}/delay?timeout={timeout_ms}&url={check_url}&expected={expected_status}",
+                cfg.mihomo_url()
+            );
+            let mut req = http.get(&url).timeout(std::time::Duration::from_millis(std::cmp::max(timeout_ms + 2000, 5000)));
+            if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
+                req = req.header(k, v);
+            }
+            if let Ok(resp) = req.send().await {
+                if resp.status().is_success() {
+                    if let Ok(v) = resp.json::<Value>().await {
+                        if let Some(d) = v.get("delay").and_then(|d| d.as_i64()) {
+                            if d > 0 {
+                                return d;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Прямой пинг одиночного прокси /proxies/{id}/delay
+    let enc_id = urlencoding_lite(server_id);
+    let check_url = urlencoding_lite(test_url);
+    let direct_url = format!(
+        "{}/proxies/{enc_id}/delay?timeout={timeout_ms}&url={check_url}&expected={expected_status}",
+        cfg.mihomo_url()
+    );
+    let mut req = http.get(&direct_url).timeout(std::time::Duration::from_millis(std::cmp::max(timeout_ms + 2000, 5000)));
+    if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
+        req = req.header(k, v);
+    }
+    if let Ok(resp) = req.send().await {
+        if resp.status().is_success() {
+            if let Ok(v) = resp.json::<Value>().await {
+                if let Some(d) = v.get("delay").and_then(|d| d.as_i64()) {
+                    if d > 0 {
+                        return d;
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Проверка по подтвержденному статусу L7 из proxy-provider
+    if let Ok(providers) = get_provider_proxies(http, cfg).await {
+        if let Some(p) = providers.get(server_id) {
+            let alive = p.get("alive").and_then(|a| a.as_bool()).unwrap_or(true);
+            if !alive {
                 return -1;
             }
             let d = last_delay(p);

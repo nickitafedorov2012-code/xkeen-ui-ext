@@ -232,7 +232,7 @@ export default function TrafficGraph() {
             <div className="traffic-legend-chips">
               {isWhitelistActive ? (
                 <span className="legend-chip whitelist" style={{ color: '#c084fc' }}>
-                  <span className="legend-dot purple" style={{ background: '#a855f7' }} /> 🟣 Обход белых списков (100% туннель)
+                  <span className="legend-dot purple" style={{ background: '#a855f7' }} /> 🟣 БС трафик (Лимит)
                 </span>
               ) : (
                 <span className="legend-chip direct">
@@ -240,7 +240,7 @@ export default function TrafficGraph() {
                 </span>
               )}
               <span className="legend-chip proxy">
-                <span className="legend-dot blue" /> Проксированный (Proxy)
+                <span className="legend-dot blue" /> VPS трафик (Безлимит)
               </span>
             </div>
           </div>
@@ -281,9 +281,9 @@ export default function TrafficGraph() {
               <div
                 className="traffic-badge whitelist"
                 style={{ background: 'rgba(168, 85, 247, 0.12)', borderColor: 'rgba(168, 85, 247, 0.4)' }}
-                title={`Аварийный туннель белых списков (100% LAN трафика)\nНакоплено: ${formatBytes(whitelistBytes)}`}
+                title={`Туннель белых списков (ноды [БС] с лимитом)\nНакоплено: ${formatBytes(whitelistBytes)}`}
               >
-                <span className="badge-label" style={{ color: '#c084fc', fontWeight: 600 }}>🟣 Белые списки:</span>
+                <span className="badge-label" style={{ color: '#c084fc', fontWeight: 600 }}>🟣 БС:</span>
                 <span className="badge-arrow" style={{ color: '#c084fc' }}>↓</span>
                 <span className="badge-val">{formatSpeed(currentWhitelist.down > 0 ? currentWhitelist.down : currentDirect.down)}</span>
                 <span className="badge-arrow" style={{ color: '#c084fc' }}>↑</span>
@@ -301,8 +301,8 @@ export default function TrafficGraph() {
 
             {/* Синий бейдж: Проксированный трафик (скрываем при активном аварийном туннеле белых списков во избежание дублирования) */}
             {!isWhitelistActive && (
-              <div className="traffic-badge proxy" title={`Проксированный трафик через Mihomo/VPS\nПик: ${formatSpeed(peakProxy)}`}>
-                <span className="badge-label">🔵 Прокси:</span>
+              <div className="traffic-badge proxy" title={`Трафик через серверы VPS (безлимитные)\nПик: ${formatSpeed(peakProxy)}`}>
+                <span className="badge-label">🔵 VPS:</span>
                 <span className="badge-arrow">↓</span>
                 <span className="badge-val">{formatSpeed(currentProxy.down)}</span>
                 <span className="badge-arrow">↑</span>
