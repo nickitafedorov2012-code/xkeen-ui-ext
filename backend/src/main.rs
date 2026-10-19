@@ -268,7 +268,37 @@ mod init_script_tests {
         assert!(script.contains("$BIN\" -p \"$PORT\""));
         assert!(script.contains("for p in $(pidof \"$NAME\" 2>/dev/null); do"));
     }
+
+    #[tokio::test]
+    async fn test_startup_whitelist_gaming_auto_recovery_no_deadlock() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.gaming.enabled = false;
+        cfg.whitelist.gaming_suspended = true;
+
+        let config_state = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(cfg)));
+        let config_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+
+        // 1. Scoped read (must not deadlock write)
+        let (gaming_suspended, is_bs) = {
+            let read_guard = config_state.read().await;
+            (read_guard.whitelist.gaming_suspended, false)
+        };
+
+        // 2. Write lock acquisition
+        if gaming_suspended && !is_bs {
+            let _cfg_guard = config_lock.lock().await;
+            let mut current_cfg = (**config_state.read().await).clone();
+            current_cfg.gaming.enabled = true;
+            current_cfg.whitelist.gaming_suspended = false;
+            *config_state.write().await = std::sync::Arc::new(current_cfg);
+        }
+
+        let final_cfg = config_state.read().await;
+        assert!(final_cfg.gaming.enabled);
+        assert!(!final_cfg.whitelist.gaming_suspended);
+    }
 }
+
 
 /// Запрет кэширования ответов панели (иначе браузер показывает устаревшие данные).
 async fn no_cache(req: Request, next: Next) -> Response {
@@ -478,26 +508,28 @@ async fn main() {
     let wl_sync_state = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-        let cfg = wl_sync_state.config.read().await;
-        let active_srv = mihomo::get_active_server(&wl_sync_state.http, &cfg).await.ok().flatten();
-        let active_id = active_srv.as_ref().map(|s| s.id.clone()).unwrap_or_default();
+        let (active_id, _active_srv, is_bs, gaming_suspended) = {
+            let cfg = wl_sync_state.config.read().await;
+            let active_srv = mihomo::get_active_server(&wl_sync_state.http, &cfg).await.ok().flatten();
+            let active_id = active_srv.as_ref().map(|s| s.id.clone()).unwrap_or_default();
+            let is_bs = active_srv.as_ref().map(|s| failover::is_whitelist_server(&s.name, &s.id, &cfg)).unwrap_or(false);
+            let gaming_suspended = cfg.whitelist.gaming_suspended;
+            (active_id, active_srv, is_bs, gaming_suspended)
+        };
         if !active_id.is_empty() {
             let _ = api::sync_whitelist_mode_tunnel(&wl_sync_state, &active_id).await;
         }
 
         // Авто-восстановление игрового режима при перезагрузке роутера:
         // Если флаг gaming_suspended == true, а текущий активный сервер не является [БС]
-        if cfg.whitelist.gaming_suspended {
-            let is_bs = active_srv.as_ref().map(|s| failover::is_whitelist_server(&s.name, &s.id, &cfg)).unwrap_or(false);
-            if !is_bs {
-                let _cfg_guard = wl_sync_state.config_lock.lock().await;
-                let mut current_cfg = (**wl_sync_state.config.read().await).clone();
-                current_cfg.gaming.enabled = true;
-                current_cfg.whitelist.gaming_suspended = false;
-                if let Ok(_) = config::save(&wl_sync_state.config_path, &current_cfg).await {
-                    *wl_sync_state.config.write().await = std::sync::Arc::new(current_cfg);
-                    log_i!("[STARTUP] ✓ Игровой режим автоматически восстановлен после перезагрузки (активный узел не является [БС])");
-                }
+        if gaming_suspended && !is_bs {
+            let _cfg_guard = wl_sync_state.config_lock.lock().await;
+            let mut current_cfg = (**wl_sync_state.config.read().await).clone();
+            current_cfg.gaming.enabled = true;
+            current_cfg.whitelist.gaming_suspended = false;
+            if let Ok(_) = config::save(&wl_sync_state.config_path, &current_cfg).await {
+                *wl_sync_state.config.write().await = std::sync::Arc::new(current_cfg);
+                log_i!("[STARTUP] ✓ Игровой режим автоматически восстановлен после перезагрузки (активный узел не является [БС])");
             }
         }
     });
