@@ -10,9 +10,9 @@ static LAST_SWITCH: tokio::sync::Mutex<Option<Instant>> = tokio::sync::Mutex::co
 static LAST_WHITELIST_SYNC: tokio::sync::Mutex<Option<(String, Instant)>> =
     tokio::sync::Mutex::const_new(None);
 
-pub const CANARY_DURATION_SECS: u64 = 60;
-pub const CANARY_PAYLOAD_URL: &str = "http://speed.cloudflare.com/__down?bytes=8192";
-pub const CANARY_PROBE_BYTES: u64 = 8192;
+pub const CANARY_DURATION_SECS: u64 = 180;
+pub const CANARY_PAYLOAD_URL: &str = "http://speed.cloudflare.com/__down?bytes=102400";
+pub const CANARY_PROBE_BYTES: u64 = 102400;
 
 #[derive(Clone, Debug)]
 pub struct CanaryState {
@@ -88,6 +88,51 @@ pub async fn set_canary_last_result(res: CanaryLastResult) {
     *LAST_CANARY_RESULT.lock().await = Some(res);
 }
 
+pub async fn current_live_status(
+    active_id: &str,
+    active_name: &str,
+    active_ping: i64,
+    cfg: &crate::config::AppConfig,
+) -> String {
+    if !cfg.failover.enabled {
+        return "Failover выключен".to_string();
+    }
+    if let Some(canary) = canary_status().await {
+        return format!(
+            "Тестирование кандидата '{}' под нагрузкой (3 сокета, {}/{} с, {} КБ)",
+            canary.target_name,
+            canary.elapsed_secs,
+            canary.duration_secs,
+            canary.total_bytes / 1024
+        );
+    }
+    let act_label = if !active_name.is_empty() { active_name } else if !active_id.is_empty() { active_id } else { "не выбран" };
+    let ping_str = if active_ping > 0 { format!("{active_ping} мс") } else { "—".to_string() };
+
+    let q = quarantine_status().await;
+    if !q.is_empty() {
+        let first = &q[0];
+        let remaining_mins = (first.remaining_secs + 59) / 60;
+        return format!(
+            "Активен '{}'. В карантине {} узлов ('{}' ещё {} мин)",
+            act_label,
+            q.len(),
+            first.server_name,
+            remaining_mins
+        );
+    }
+    if !cfg.failover.priority_chain.is_empty() {
+        if let Some(top_id) = cfg.failover.priority_chain.first() {
+            if top_id == active_id || top_id == act_label {
+                return format!("Штатно: активен приоритетный узел '{act_label}' ({ping_str})");
+            } else {
+                return format!("Удержание узла '{act_label}' ({ping_str}, поиск доступных в приоритете)");
+            }
+        }
+    }
+    format!("Активен '{act_label}' ({ping_str})")
+}
+
 use crate::mihomo::{self, Server};
 use crate::AppState;
 use chrono::Local;
@@ -115,6 +160,7 @@ struct InternalQuarantineEntry {
     server_name: String,
     fail_count: u32,
     quarantined_until: Instant,
+    last_failed_at: Instant,
     reason: String,
 }
 
@@ -123,11 +169,16 @@ static SERVER_QUARANTINE: std::sync::LazyLock<Mutex<std::collections::HashMap<St
 
 pub async fn is_quarantined(server_id: &str) -> bool {
     let mut q = SERVER_QUARANTINE.lock().await;
+    let now = Instant::now();
     if let Some(entry) = q.get(server_id) {
-        if Instant::now() < entry.quarantined_until {
+        if now < entry.quarantined_until {
             true
         } else {
-            q.remove(server_id);
+            // Не удаляем сразу fail_count, чтобы сохранялась история для прогрессивного бана.
+            // Полная амнистия наступает только через 12 часов непрерывной стабильности.
+            if now.duration_since(entry.last_failed_at) > Duration::from_secs(43200) {
+                q.remove(server_id);
+            }
             false
         }
     } else {
@@ -137,12 +188,14 @@ pub async fn is_quarantined(server_id: &str) -> bool {
 
 pub async fn get_quarantine_remaining(server_id: &str) -> Option<u64> {
     let mut q = SERVER_QUARANTINE.lock().await;
+    let now = Instant::now();
     if let Some(entry) = q.get(server_id) {
-        let now = Instant::now();
         if now < entry.quarantined_until {
             Some((entry.quarantined_until - now).as_secs())
         } else {
-            q.remove(server_id);
+            if now.duration_since(entry.last_failed_at) > Duration::from_secs(43200) {
+                q.remove(server_id);
+            }
             None
         }
     } else {
@@ -152,19 +205,26 @@ pub async fn get_quarantine_remaining(server_id: &str) -> Option<u64> {
 
 pub async fn add_quarantine(server_id: &str, server_name: &str, reason: &str) -> u64 {
     let mut q = SERVER_QUARANTINE.lock().await;
-    let fail_count = q.get(server_id).map(|e| e.fail_count).unwrap_or(0) + 1;
-    // Эскалация: 1-й сбой: 15 мин (900с), 2-й: 30 мин (1800с), 3-й+: 60 мин (3600с)
+    let now = Instant::now();
+    let prev_count = q.get(server_id)
+        .filter(|e| now.duration_since(e.last_failed_at) <= Duration::from_secs(43200))
+        .map(|e| e.fail_count)
+        .unwrap_or(0);
+    let fail_count = prev_count + 1;
+    // Эскалация: 1-й сбой: 15 мин (900с), 2-й: 30 мин (1800с), 3-й+: максимум 1 час (3600с)
+    // Строго по указанию пользователя: "больше часа не надо бана"
     let duration_secs = match fail_count {
         1 => 900,
         2 => 1800,
         _ => 3600,
     };
-    let until = Instant::now() + Duration::from_secs(duration_secs);
+    let until = now + Duration::from_secs(duration_secs);
     q.insert(server_id.to_string(), InternalQuarantineEntry {
         server_id: server_id.to_string(),
         server_name: server_name.to_string(),
         fail_count,
         quarantined_until: until,
+        last_failed_at: now,
         reason: reason.to_string(),
     });
     duration_secs
@@ -172,24 +232,31 @@ pub async fn add_quarantine(server_id: &str, server_name: &str, reason: &str) ->
 
 pub async fn add_quarantine_with_duration(server_id: &str, server_name: &str, reason: &str, duration_secs: u64) -> u64 {
     let mut q = SERVER_QUARANTINE.lock().await;
-    let fail_count = q.get(server_id).map(|e| e.fail_count).unwrap_or(0) + 1;
-    let until = Instant::now() + Duration::from_secs(duration_secs);
+    let now = Instant::now();
+    // Ограничиваем сверху 3600 с (1 час)
+    let capped_duration = std::cmp::min(duration_secs, 3600);
+    let prev_count = q.get(server_id)
+        .filter(|e| now.duration_since(e.last_failed_at) <= Duration::from_secs(43200))
+        .map(|e| e.fail_count)
+        .unwrap_or(0);
+    let fail_count = prev_count + 1;
+    let until = now + Duration::from_secs(capped_duration);
     q.insert(server_id.to_string(), InternalQuarantineEntry {
         server_id: server_id.to_string(),
         server_name: server_name.to_string(),
         fail_count,
         quarantined_until: until,
+        last_failed_at: now,
         reason: reason.to_string(),
     });
-    duration_secs
+    capped_duration
 }
 
 pub async fn get_zombie_servers() -> Vec<String> {
-    let mut q = SERVER_QUARANTINE.lock().await;
+    let q = SERVER_QUARANTINE.lock().await;
     let now = Instant::now();
-    q.retain(|_, v| now < v.quarantined_until);
     q.values()
-        .filter(|v| v.reason.to_lowercase().contains("зомби"))
+        .filter(|v| now < v.quarantined_until && v.reason.to_lowercase().contains("зомби"))
         .map(|v| v.server_id.clone())
         .collect()
 }
@@ -207,8 +274,9 @@ pub async fn clear_all_quarantine() {
 pub async fn quarantine_status() -> Vec<QuarantineInfo> {
     let mut q = SERVER_QUARANTINE.lock().await;
     let now = Instant::now();
-    q.retain(|_, v| now < v.quarantined_until);
+    q.retain(|_, v| now < v.quarantined_until || now.duration_since(v.last_failed_at) <= Duration::from_secs(43200));
     let mut res: Vec<QuarantineInfo> = q.values()
+        .filter(|v| now < v.quarantined_until)
         .map(|v| QuarantineInfo {
             server_id: v.server_id.clone(),
             server_name: v.server_name.clone(),
@@ -498,22 +566,26 @@ pub async fn handle_whitelist_transition(
     }
 }
 
-/// Прогон микро-порции реального трафика (8 КБ) через проверяемый сервер.
-/// Загружает тестовый пэйлоад 8192 байта со speed.cloudflare.com с проверкой кода 200 OK.
-/// Если сервер обрывает соединение, дропает пакеты или таймаутит — возвращает <= 0 (-1).
+/// Нагрузочный стресс-тест в 3 параллельных сокета через проверяемый узел.
+/// Симулирует реальный трафик клиентов (загрузка 100 КБ полезной нагрузки + 2 параллельных L7-пробника).
+/// Если сервер глушится DPI при открытии нескольких сокетов или таймаутит — возвращает <= 0 (-1).
 pub async fn run_canary_probe(
     http: &reqwest::Client,
     cfg: &crate::config::AppConfig,
     server_id: &str,
     timeout_ms: u64,
 ) -> i64 {
-    let probe_timeout = timeout_ms.max(4000);
-    let delay = mihomo::probe_server_l7(http, cfg, server_id, probe_timeout, CANARY_PAYLOAD_URL, 200).await;
-    if delay > 0 {
-        return delay;
+    let probe_timeout = timeout_ms.max(5000);
+    let (d1, d2, d3) = tokio::join!(
+        mihomo::probe_server_l7(http, cfg, server_id, probe_timeout, CANARY_PAYLOAD_URL, 200),
+        mihomo::probe_server_l7(http, cfg, server_id, probe_timeout, mihomo::SECONDARY_L7_CHECK_URL, 204),
+        mihomo::probe_server_l7(http, cfg, server_id, probe_timeout, mihomo::PRIMARY_L7_CHECK_URL, 204),
+    );
+    if d1 > 0 && d2 > 0 && d3 > 0 {
+        std::cmp::max(d1, std::cmp::max(d2, d3))
+    } else {
+        -1
     }
-    // Fallback на сплит-пробник L7 (Cloudflare ➔ Google generate_204)
-    mihomo::probe_server_l7(http, cfg, server_id, probe_timeout, mihomo::PRIMARY_L7_CHECK_URL, 204).await
 }
 
 pub const WAN_CHECK_URL: &str = "http://ya.ru";
@@ -1616,7 +1688,7 @@ mod tests {
         assert_eq!(status.duration_secs, CANARY_DURATION_SECS);
         assert!(status.remaining_secs <= CANARY_DURATION_SECS);
         assert_eq!(status.probes_passed, 1);
-        assert_eq!(status.total_bytes, 8192);
+        assert_eq!(status.total_bytes, CANARY_PROBE_BYTES);
 
         // Сброс при сбое или переключении
         reset_canary().await;
@@ -1654,16 +1726,16 @@ mod tests {
 
     #[test]
     fn test_canary_bandwidth_limits() {
-        // Проверка расчёта пропускной способности canary:
-        // 8 КБ (8192 байт) каждые 5 секунд на протяжении 60 секунд (1 минута).
-        let total_probes = CANARY_DURATION_SECS / 5; // 12 проверок
-        let total_bytes = total_probes * CANARY_PROBE_BYTES; // 98,304 байт = 96 КБ
+        // Проверка расчёта пропускной способности canary стресс-теста:
+        // 100 КБ (102400 байт) каждые 5 секунд на протяжении 180 секунд (3 минуты).
+        let total_probes = CANARY_DURATION_SECS / 5; // 36 проверок
+        let total_bytes = total_probes * CANARY_PROBE_BYTES; // 3,686,400 байт (~3.6 МБ)
         let bandwidth_kbps = (total_bytes * 8) as f64 / (CANARY_DURATION_SECS as f64 * 1000.0);
 
-        // Строго меньше установленного пользователем лимита 100 кбит/с
-        assert!(bandwidth_kbps < 100.0, "Canary bandwidth must be strictly below 100 kbps, actual: {bandwidth_kbps} kbps");
-        assert_eq!(total_probes, 12);
-        assert_eq!(total_bytes, 98304);
+        // Стресс-тест в 3 сокета генерирует умеренную нагрузку (~164 кбит/с / 20 КБ/с), достаточную для срабатывания DPI
+        assert!(bandwidth_kbps < 200.0, "Canary bandwidth must be strictly below 200 kbps, actual: {bandwidth_kbps} kbps");
+        assert_eq!(total_probes, 36);
+        assert_eq!(total_bytes, 3686400);
     }
 
     #[tokio::test]
@@ -2024,5 +2096,67 @@ mod tests {
         assert_eq!(eligible_higher[0].id, s2, "Фейловер обязан перейти к следующему серверу s2, пропустив зомби s1");
 
         clear_all_quarantine().await;
+    }
+
+    #[tokio::test]
+    async fn test_quarantine_caps_at_one_hour_and_persists_fail_count() {
+        let _lock = FAILOVER_TEST_LOCK.lock().await;
+        clear_all_quarantine().await;
+
+        let srv = "test_repeat_offender";
+        let name = "Flapping Node";
+
+        // 1-й сбой: 900 с (15 минут)
+        let d1 = add_quarantine(srv, name, "1st fail").await;
+        assert_eq!(d1, 900, "1-й сбой должен быть 15 минут (900с)");
+
+        // 2-й сбой: 1800 с (30 минут)
+        let d2 = add_quarantine(srv, name, "2nd fail").await;
+        assert_eq!(d2, 1800, "2-й сбой должен быть 30 минут (1800с)");
+
+        // 3-й сбой: 3600 с (1 час - жесткий потолок)
+        let d3 = add_quarantine(srv, name, "3rd fail").await;
+        assert_eq!(d3, 3600, "3-й сбой должен быть строго 1 час (3600с)");
+
+        // 4-й сбой: не более 3600 с!
+        let d4 = add_quarantine(srv, name, "4th fail").await;
+        assert_eq!(d4, 3600, "Карантин никогда не должен превышать 1 час (3600с)!");
+
+        // Попытка задать ручную длительность выше 1 часа:
+        let d_manual = add_quarantine_with_duration(srv, name, "manual excessive", 7200).await;
+        assert_eq!(d_manual, 3600, "add_quarantine_with_duration обязан ограничивать бан 3600 с!");
+
+        clear_all_quarantine().await;
+    }
+
+    #[tokio::test]
+    async fn test_current_live_status_reporting() {
+        let _lock = FAILOVER_TEST_LOCK.lock().await;
+        reset_canary().await;
+        clear_all_quarantine().await;
+
+        let active = Server {
+            id: "node_active".into(),
+            name: "Active Node".into(),
+            ping_ms: 45,
+            is_active: true,
+            protocol: "Hysteria2".into(),
+            host: "1.1.1.1".into(),
+            port: 443,
+            is_priority: true,
+            provider: None,
+            provider_name: None,
+            is_pool: false,
+        };
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.failover.enabled = true;
+        cfg.failover.priority_chain = vec!["node_active".into()];
+
+        let status_str = current_live_status(&active.id, &active.name, active.ping_ms as i64, &cfg).await;
+        assert!(status_str.contains("Active Node"));
+        assert!(status_str.contains("45 мс"));
+
+        clear_all_quarantine().await;
+        reset_canary().await;
     }
 }

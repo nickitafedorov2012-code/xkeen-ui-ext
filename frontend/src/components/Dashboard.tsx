@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
-import { pingClass, type FailoverEventInfo, type StatusInfo, type AghStatus, type SwapStatus } from '../types'
+import { pingClass, type FailoverEventInfo, type StatusInfo, type AghStatus, type SwapStatus, type DomainCheckResult } from '../types'
 import TrafficGraph from './TrafficGraph'
 import SelfDiagnosticsCard from './SelfDiagnosticsCard'
 
@@ -224,6 +224,42 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
       notify('Ошибка переключения AdGuard: ' + (e.message || e), true)
     } finally {
       setAdguardToggling(false)
+    }
+  }
+
+  const [domainQuery, setDomainQuery] = useState('')
+  const [domainChecking, setDomainChecking] = useState(false)
+  const [domainResult, setDomainResult] = useState<DomainCheckResult | null>(null)
+  const [unblocking, setUnblocking] = useState(false)
+
+  const handleCheckDomain = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault()
+    const d = domainQuery.trim()
+    if (!d) return
+    setDomainChecking(true)
+    setDomainResult(null)
+    try {
+      const res = await apiGet<DomainCheckResult>(`diagnostics/check-domain?domain=${encodeURIComponent(d)}`)
+      setDomainResult(res)
+    } catch (err: any) {
+      notify(`Ошибка проверки домена: ${err?.message || err}`, true)
+    } finally {
+      setDomainChecking(false)
+    }
+  }
+
+  const handleUnblockDomain = async (domain: string) => {
+    setUnblocking(true)
+    try {
+      const res = await apiPost<{ message: string; rule: string }>('diagnostics/unblock-domain', { domain })
+      notify(res?.message || `Домен ${domain} успешно разблокирован`)
+      if (domainResult) {
+        setDomainResult({ ...domainResult, is_blocked: false, block_reason: 'Разблокирован правилом исключения' })
+      }
+    } catch (err: any) {
+      notify(`Ошибка разблокировки: ${err?.message || err}`, true)
+    } finally {
+      setUnblocking(false)
     }
   }
 
@@ -553,7 +589,9 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                     {f.last_test.success ? '✓' : '✗'} {f.last_test.target_name}
                   </span>
                   <span className="muted small" style={{ marginLeft: 6, fontWeight: 'normal' }}>
-                    ({new Date(f.last_test.timestamp * 1000).toLocaleTimeString()})
+                    ({typeof f.last_test.timestamp === 'string'
+                      ? f.last_test.timestamp
+                      : new Date(f.last_test.timestamp > 1e11 ? f.last_test.timestamp : f.last_test.timestamp * 1000).toLocaleTimeString()})
                   </span>
                 </b>
               </li>
@@ -593,6 +631,92 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
           </div>
         </section>
       </div>
+
+      {/* КАРТОЧКА: Быстрая проверка домена («Почему не открывается?») */}
+      <section className="card" style={{ marginTop: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <h2 style={{ margin: 0, fontSize: 16 }}>🔍 Быстрая проверка домена («Почему не открывается?»)</h2>
+          </div>
+          <span className="muted small">AdGuard Home & Маршруты</span>
+        </div>
+
+        <form onSubmit={handleCheckDomain} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <input
+            type="text"
+            className="input"
+            placeholder="Введите домен или URL (например: adsrv.hh.ru или rutracker.org)"
+            value={domainQuery}
+            onChange={(e) => setDomainQuery(e.target.value)}
+            style={{ flex: 1, padding: '8px 12px', fontSize: 13 }}
+          />
+          <button
+            type="submit"
+            className="btn primary"
+            disabled={domainChecking || !domainQuery.trim()}
+            style={{ whiteSpace: 'nowrap' }}
+          >
+            {domainChecking ? 'Опрос…' : 'Проверить в 1 клик'}
+          </button>
+        </form>
+
+        {domainResult && (
+          <div
+            style={{
+              marginTop: 12,
+              padding: '12px 16px',
+              borderRadius: 8,
+              background: domainResult.is_blocked ? 'rgba(239, 68, 68, 0.08)' : 'rgba(34, 197, 94, 0.08)',
+              border: `1px solid ${domainResult.is_blocked ? 'rgba(239, 68, 68, 0.3)' : 'rgba(34, 197, 94, 0.3)'}`,
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 10 }}>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <span style={{ fontSize: 18 }}>{domainResult.is_blocked ? '🛡️' : '🟢'}</span>
+                  <b style={{ fontSize: 14, color: domainResult.is_blocked ? '#f87171' : '#4ade80' }}>
+                    {domainResult.is_blocked
+                      ? `Заблокирован AdGuard Home`
+                      : `Домен доступен (не блокируется AdGuard)`}
+                  </b>
+                  <span className="mono" style={{ fontSize: 13, background: 'rgba(255,255,255,0.06)', padding: '2px 6px', borderRadius: 4 }}>
+                    {domainResult.domain}
+                  </span>
+                </div>
+                {domainResult.is_blocked && (
+                  <div className="muted small" style={{ fontSize: 12, marginTop: 4 }}>
+                    {domainResult.rule && <span>Правило: <code className="mono">{domainResult.rule}</code></span>}
+                    {domainResult.filter_name && <span style={{ marginLeft: 8 }}>в фильтре: <b>{domainResult.filter_name}</b></span>}
+                  </div>
+                )}
+                <div style={{ fontSize: 12, marginTop: 6, color: 'var(--text)' }}>
+                  <span>🚀 Маршрутизация: <b>{domainResult.routing_target}</b></span>
+                </div>
+              </div>
+
+              {domainResult.is_blocked && (
+                <button
+                  type="button"
+                  className="btn success sm"
+                  disabled={unblocking}
+                  onClick={() => handleUnblockDomain(domainResult.domain)}
+                  style={{
+                    background: '#22c55e',
+                    color: '#fff',
+                    fontWeight: 600,
+                    padding: '6px 14px',
+                    borderRadius: 6,
+                    border: 'none',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {unblocking ? 'Разблокировка…' : '🔓 Разблокировать в 1 клик'}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+      </section>
 
       {/* КАРТОЧКА 3: Блок событий с группировкой и цветовой разметкой */}
       <section className="card" style={{ marginTop: 14 }}>

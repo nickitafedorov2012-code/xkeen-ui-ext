@@ -123,7 +123,7 @@ fn default_best_ping_hysteresis_ms() -> u32 {
 }
 
 fn default_canary_duration_secs() -> u64 {
-    60
+    180
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -164,7 +164,7 @@ impl Default for FailoverConfig {
             priority_chain: Vec::new(),
             auto_restore_priority: true,
             interval_secs: 60,
-            canary_duration_secs: 60,
+            canary_duration_secs: 180,
             device_failover_enabled: false,
             presets: Vec::new(),
             best_ping_enabled: false,

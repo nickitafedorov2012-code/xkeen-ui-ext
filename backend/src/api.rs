@@ -72,6 +72,9 @@ pub async fn status(State(state): State<AppState>) -> Response {
     let is_prov_wl = !cfg.whitelist_providers.is_empty() && cfg.whitelist_providers.iter().any(|p| p == active_prov);
     let whitelist_mode_active = (!cfg.whitelist_servers.is_empty() || !cfg.whitelist_providers.is_empty()) && (is_server_wl || is_prov_wl);
     crate::traffic::set_whitelist_active(whitelist_mode_active);
+    let active_name = active.as_ref().and_then(|a| a.get("name")).and_then(|v| v.as_str()).unwrap_or("");
+    let active_ping = active.as_ref().and_then(|a| a.get("ping_ms")).and_then(|v| v.as_i64()).unwrap_or(-1);
+    let current_failover_status = failover::current_live_status(active_id, active_name, active_ping, &cfg).await;
 
     api_ok(json!({
         "version": VERSION,
@@ -110,6 +113,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
             "last_test": failover::canary_last_result().await,
             "zombie_servers": failover::get_zombie_servers().await,
             "quarantine": failover::quarantine_status().await,
+            "current_status": current_failover_status,
         },
         "refresh_interval_sec": cfg.refresh_interval_sec,
         "adblock_enabled": cfg.adblock_enabled,
@@ -5238,6 +5242,43 @@ pub async fn test_dns_domain(
         "verdict": verdict,
         "recommendation": recommendation
     }))
+}
+
+#[derive(Deserialize)]
+pub struct CheckDomainQuery {
+    pub domain: String,
+}
+
+/// GET /api/diagnostics/check-domain — Быстрая диагностика («Почему не открывается?»)
+pub async fn check_domain(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<CheckDomainQuery>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    match crate::adguard::check_domain_adguard(&state.http, &cfg, &query.domain).await {
+        Ok(res) => api_ok(serde_json::to_value(res).unwrap_or(serde_json::Value::Null)),
+        Err(e) => api_err(&e),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UnblockDomainReq {
+    pub domain: String,
+}
+
+/// POST /api/diagnostics/unblock-domain — Разблокировать в 1 клик через AdGuard Home
+pub async fn unblock_domain(
+    State(state): State<AppState>,
+    axum::extract::Json(body): axum::extract::Json<UnblockDomainReq>,
+) -> Response {
+    let cfg = state.config.read().await.clone();
+    match crate::adguard::unblock_domain_adguard(&state.http, &cfg.adguard, &body.domain).await {
+        Ok(rule) => api_ok(json!({
+            "message": format!("Правило исключения '{}' успешно добавлено в AdGuard Home", rule),
+            "rule": rule,
+        })),
+        Err(e) => api_err(&e),
+    }
 }
 
 // ==================== KEENETIC POLICIES MAP ====================

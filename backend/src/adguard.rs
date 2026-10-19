@@ -2399,6 +2399,146 @@ pub async fn service_action(action: &str) -> Result<String, String> {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DomainCheckResult {
+    pub domain: String,
+    pub is_blocked: bool,
+    pub block_reason: Option<String>,
+    pub rule: Option<String>,
+    pub filter_name: Option<String>,
+    pub routing_target: String,
+    pub adguard_online: bool,
+}
+
+pub async fn check_domain_adguard(
+    http: &reqwest::Client,
+    cfg: &crate::config::AppConfig,
+    domain: &str,
+) -> Result<DomainCheckResult, String> {
+    let clean_domain = domain
+        .trim()
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .unwrap_or(domain)
+        .split(':')
+        .next()
+        .unwrap_or(domain)
+        .trim()
+        .to_lowercase();
+
+    if clean_domain.is_empty() {
+        return Err("Пустой домен для проверки".to_string());
+    }
+
+    // Определение маршрута XKeen Route
+    let mut routing_target = "Авто-маршрутизация (Mihomo Rule)".to_string();
+    if cfg.direct_domains.iter().any(|d| clean_domain.ends_with(&d.to_lowercase())) {
+        routing_target = "Прямое соединение (Исключение DIRECT)".to_string();
+    } else if cfg.force_domains.iter().any(|d| clean_domain.ends_with(&d.to_lowercase())) {
+        routing_target = "Прокси (Принудительно PROXY)".to_string();
+    } else if cfg.whitelist.enabled {
+        routing_target = "Белые списки (Туннель зарубежных)".to_string();
+    }
+
+    let check_path = format!("/control/filtering/check_host?name={}", clean_domain);
+    let agh_res = agh_request(http, &cfg.adguard, reqwest::Method::GET, &check_path, None, 5).await;
+
+    match agh_res {
+        Ok(val) => {
+            let reason = val.get("reason").and_then(|r| r.as_str()).unwrap_or("").to_string();
+            let is_blocked = reason.contains("BlackList")
+                || reason.contains("Blocked")
+                || (reason != "NotFilteredNotFound" && !reason.contains("WhiteList") && !reason.is_empty());
+
+            let rule = val.get("rule").and_then(|r| r.as_str()).map(|s| s.to_string())
+                .or_else(|| {
+                    val.get("rules")
+                        .and_then(|arr| arr.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|obj| obj.get("text"))
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())
+                });
+
+            let filter_id = val.get("filter_id").and_then(|id| id.as_i64())
+                .or_else(|| {
+                    val.get("rules")
+                        .and_then(|arr| arr.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|obj| obj.get("filter_list_id"))
+                        .and_then(|id| id.as_i64())
+                });
+
+            let mut filter_name = None;
+            if let Some(fid) = filter_id {
+                if let Ok(filt_status) = get_filtering(http, &cfg.adguard).await {
+                    for f in filt_status.filters {
+                        if f.id == fid {
+                            filter_name = Some(f.name);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            Ok(DomainCheckResult {
+                domain: clean_domain,
+                is_blocked,
+                block_reason: if !reason.is_empty() { Some(reason) } else { None },
+                rule,
+                filter_name,
+                routing_target,
+                adguard_online: true,
+            })
+        }
+        Err(_) => {
+            Ok(DomainCheckResult {
+                domain: clean_domain,
+                is_blocked: false,
+                block_reason: None,
+                rule: None,
+                filter_name: None,
+                routing_target,
+                adguard_online: false,
+            })
+        }
+    }
+}
+
+pub async fn unblock_domain_adguard(
+    http: &reqwest::Client,
+    cfg: &AdGuardConfig,
+    domain: &str,
+) -> Result<String, String> {
+    let clean_domain = domain
+        .trim()
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .unwrap_or(domain)
+        .split(':')
+        .next()
+        .unwrap_or(domain)
+        .trim()
+        .to_lowercase();
+
+    if clean_domain.is_empty() {
+        return Err("Не указан домен для разблокировки".to_string());
+    }
+
+    let unblock_rule = format!("@@||{clean_domain}^");
+    let filt_status = get_filtering(http, cfg).await?;
+    let mut rules = filt_status.user_rules;
+    if !rules.contains(&unblock_rule) {
+        rules.push(unblock_rule.clone());
+        set_user_rules(http, cfg, &rules).await?;
+    }
+    Ok(unblock_rule)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

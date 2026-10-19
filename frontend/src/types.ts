@@ -101,18 +101,33 @@ export interface StatusInfo {
     }>
     last_test?: CanaryLastResult | null
     zombie_servers?: string[]
+    current_status?: string
   }
   refresh_interval_sec: number
   adblock_enabled?: boolean
 }
 
 export interface CanaryLastResult {
-  timestamp: number
-  target_id: string
-  target_name: string
+  timestamp: number | string
+  server_id?: string
+  server_name?: string
+  target_id?: string
+  target_name?: string
   success: boolean
-  message: string
+  message?: string
+  reason?: string
+  is_zombie?: boolean
   elapsed_secs: number
+}
+
+export interface DomainCheckResult {
+  domain: string
+  is_blocked: boolean
+  block_reason?: string | null
+  rule?: string | null
+  filter_name?: string | null
+  routing_target: string
+  adguard_online: boolean
 }
 
 export interface ServerInfo {

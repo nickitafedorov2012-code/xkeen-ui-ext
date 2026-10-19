@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, Fragment } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
 import {
   pingClass,
@@ -1204,10 +1204,10 @@ export default function Settings({ notify, status, refresh }: Props) {
                 </span>
                 <NumberInput
                   min={15}
-                  max={300}
-                  step={5}
-                  fallback={60}
-                  value={settings.failover.canary_duration_secs || 60}
+                  max={600}
+                  step={15}
+                  fallback={180}
+                  value={settings.failover.canary_duration_secs || 180}
                   onChange={(val) => patch((s) => (s.failover.canary_duration_secs = val))}
                 />
               </label>
@@ -1219,61 +1219,24 @@ export default function Settings({ notify, status, refresh }: Props) {
                 <span className="muted small">{chain.length} узлов в цепочке</span>
               </div>
 
-              {chain.length > 1 && (
+              {status?.failover?.current_status && (
                 <div
                   style={{
+                    padding: '8px 12px',
+                    borderRadius: 8,
+                    fontSize: 12,
                     display: 'flex',
                     alignItems: 'center',
-                    gap: 6,
-                    overflowX: 'auto',
-                    overflowY: 'hidden',
-                    flexShrink: 0,
-                    minHeight: 44,
-                    padding: '8px 12px',
-                    background: 'rgba(255, 255, 255, 0.03)',
-                    borderRadius: 8,
-                    border: '1px dashed rgba(255, 255, 255, 0.15)',
+                    gap: 8,
+                    background: 'rgba(59, 130, 246, 0.08)',
+                    border: '1px solid rgba(59, 130, 246, 0.25)',
                     marginBottom: 4,
-                    fontSize: 11,
-                    scrollbarWidth: 'thin',
                   }}
                 >
-                  <span style={{ color: 'var(--muted)', fontWeight: 600, flexShrink: 0 }}>Траектория сбоя:</span>
-                  {chain.map((id, idx) => {
-                    const sv = servers.find((x) => x.id === id)
-                    const isCur = Boolean(status?.active_server && status.active_server.id === id)
-                    const isZombie = Boolean(status?.failover?.zombie_servers?.includes(id))
-                    const name = sv ? sv.name : id
-                    return (
-                      <Fragment key={id}>
-                        {idx > 0 && <span style={{ color: 'var(--muted)', opacity: 0.6, flexShrink: 0 }}>➔</span>}
-                        <span
-                          style={{
-                            padding: '3px 8px',
-                            lineHeight: '18px',
-                            borderRadius: 6,
-                            background: isCur
-                              ? 'rgba(34, 197, 94, 0.2)'
-                              : isZombie
-                                ? 'rgba(239, 68, 68, 0.15)'
-                                : 'rgba(255, 255, 255, 0.05)',
-                            color: isCur ? '#4ade80' : isZombie ? '#f87171' : 'var(--text)',
-                            border: isCur
-                              ? '1px solid rgba(34, 197, 94, 0.4)'
-                              : isZombie
-                                ? '1px dashed rgba(239, 68, 68, 0.6)'
-                                : '1px solid transparent',
-                            fontWeight: isCur || isZombie ? 700 : 500,
-                            whiteSpace: 'nowrap',
-                            flexShrink: 0,
-                          }}
-                          title={isZombie ? `${name} — 🧟 Зомби (L7 сбой, исключён на 10 мин)` : name}
-                        >
-                          {isZombie ? '🧟 ' : idx === 0 ? '👑 ' : `${idx + 1}. `}{name}
-                        </span>
-                      </Fragment>
-                    )
-                  })}
+                  <span style={{ fontSize: 13 }}>⚡</span>
+                  <span style={{ fontWeight: 600, color: 'var(--text)' }}>
+                    Текущий статус: {status.failover.current_status}
+                  </span>
                 </div>
               )}
 
@@ -1304,14 +1267,19 @@ export default function Settings({ notify, status, refresh }: Props) {
                       {status.failover.last_test.success ? 'Тест пройден:' : 'L7-тест провален:'}
                     </span>
                     <span style={{ color: status.failover.last_test.success ? '#4ade80' : '#f87171', fontWeight: 700 }}>
-                      {status.failover.last_test.target_name}
+                      {status.failover.last_test.target_name || status.failover.last_test.server_name || status.failover.last_test.target_id || ''}
                     </span>
                     <span className="muted" style={{ fontSize: 11, textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
-                      ({status.failover.last_test.message})
+                      ({status.failover.last_test.message || status.failover.last_test.reason || ''})
                     </span>
                   </div>
                   <span className="muted" style={{ fontSize: 10.5, whiteSpace: 'nowrap', flexShrink: 0 }}>
-                    {new Date(status.failover.last_test.timestamp * 1000).toLocaleTimeString()}
+                    {(() => {
+                      const ts = status.failover.last_test.timestamp;
+                      if (!ts) return '';
+                      if (typeof ts === 'string') return ts;
+                      return new Date(ts > 1e11 ? ts : ts * 1000).toLocaleTimeString();
+                    })()}
                   </span>
                 </div>
               )}
