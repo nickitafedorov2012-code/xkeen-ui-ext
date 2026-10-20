@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import Settings, { SwapManager } from './Settings'
+import Settings, { SwapManager, cleanServerDisplayName, formatActiveServerStatus } from './Settings'
 import { SwapRecommendationBanner } from './Dashboard'
 import * as api from '../api'
 import type { AppSettings, SwapStatus } from '../types'
@@ -455,17 +455,176 @@ describe('Settings Component — Failover Zombie Servers and Canary Last Result'
     })
 
     const text = container?.textContent || ''
-    // Banner displays failure info
-    expect(text).toContain('L7-тест провален:')
-    expect(text).toContain('Германия')
-    expect(text).toContain('L7 Canary test failed')
+    // Intrusive test block is completely removed per user requirements
+    expect(text).not.toContain('L7-тест провален:')
+    expect(text).not.toContain('Тест пройден:')
 
-    // Zombie server has 🧟 Зомби badge
+    // Zombie server has 🧟 Зомби badge and red border
     expect(text).toContain('🧟 Зомби')
 
     // Tooltip includes explanation
     const zombieElements = container?.querySelectorAll('[title*="L7-сбой передачи данных"]')
     expect(zombieElements && zombieElements.length).toBeGreaterThan(0)
+  })
+
+  it('anti-regression: renders clean priority-chain-card without DE DE duplication or redundant host labels', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation(async (path: string) => {
+      if (path === 'settings') {
+        return {
+          ...mockSettings,
+          failover: {
+            ...mockSettings.failover,
+            priority_chain: ['de_platinum', 'gb_real'],
+          },
+        }
+      }
+      if (path === 'servers') {
+        return {
+          servers: [
+            {
+              id: 'de_platinum',
+              name: 'Обход [Platinum] - Германия',
+              host: 'DE Обход [Platinum] - Германия',
+              port: 443,
+              protocol: 'vless',
+              provider_name: 'geodema2',
+              ping_ms: -1,
+            },
+            {
+              id: 'gb_real',
+              name: 'ObsV-gb_real_dir',
+              host: 'ObsV-gb_real_dir',
+              port: 443,
+              protocol: 'vless',
+              provider_name: 'geodema2',
+              ping_ms: -1,
+            },
+          ],
+        }
+      }
+      if (path === 'routes') return { routes: [] }
+      if (path === 'domains') return { direct: [], force: [] }
+      if (path === 'system/swap/status') return mockSwapInactive
+      return {}
+    })
+
+    const mockStatus: any = {
+      active_server: { id: 'de_platinum', name: 'Обход [Platinum] - Германия', ping_ms: 0 },
+      failover: {
+        enabled: true,
+        current_status: "Активен 'Silver-ne_cert_relay'. В карантине 2 узлов ('Нидерланды ADS' ещё 20 мин)",
+        priority_chain: ['de_platinum', 'gb_real'],
+        priority_chain_pings: { de_platinum: -1, gb_real: -1 },
+        last_test: {
+          timestamp: Math.floor(Date.now() / 1000),
+          target_id: 'de_platinum',
+          target_name: 'Обход [Platinum] - Германия',
+          success: true,
+          message: 'Успешно пройден 60-сек тест',
+        },
+      },
+    }
+
+    await act(async () => {
+      root!.render(<Settings notify={notifyMock} status={mockStatus} refresh={refreshMock} />)
+    })
+
+    const cards = container?.querySelectorAll('.priority-chain-card')
+    expect(cards && cards.length).toBe(2)
+
+    const text = container?.textContent || ''
+    // Ensure "DE DE" duplication does NOT happen
+    expect(text).not.toContain('DE DE')
+    expect(text).not.toContain('GB GB')
+
+    // Country badge is removed per user request
+    const countryBadges = container?.querySelectorAll('[title*="Локация:"]')
+    expect(countryBadges?.length || 0).toBe(0)
+
+    // Ensure streamlined single status block exists: Активный сервер (quarantine is card-only)
+    expect(text).toContain('Активный сервер')
+    expect(text).not.toContain('Серверы в карантине')
+
+    // Ensure duplicate host name is not displayed as raw redundant label
+    expect(text).not.toContain('🌐 DE Обход [Platinum] - Германия')
+
+    // Active server card has emerald accent left border
+    const firstCard = cards![0] as HTMLElement
+    expect(firstCard.style.borderLeft).toContain('4px solid #22c55e')
+  })
+
+  it('renders separated Quarantine block with zombie countdown when servers are quarantined', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation(async (path: string) => {
+      if (path === 'settings') return { ...mockSettings, failover: { ...mockSettings.failover, priority_chain: ['srv_zombie', 'srv_ok'] } }
+      if (path === 'presets') return { presets: [] }
+      if (path === 'servers') {
+        return {
+          servers: [
+            { id: 'srv_zombie', name: 'Zombie Node', host: '1.1.1.1', port: 443, protocol: 'vless', ping_ms: -1 },
+            { id: 'srv_ok', name: 'Working Node', host: '2.2.2.2', port: 443, protocol: 'vless', ping_ms: 50 },
+          ],
+        }
+      }
+      if (path === 'routes') return { routes: [] }
+      if (path === 'domains') return { direct: [], force: [] }
+      if (path === 'system/swap/status') return mockSwapInactive
+      return {}
+    })
+
+    const mockStatus: any = {
+      active_server: { id: 'srv_ok', name: 'Working Node', ping_ms: 50 },
+      failover: {
+        enabled: true,
+        current_status: 'Активен узел',
+        priority_chain: ['srv_zombie', 'srv_ok'],
+        priority_chain_pings: { srv_zombie: -1, srv_ok: 50 },
+        quarantine: [
+          {
+            server_id: 'srv_zombie',
+            server_name: 'Zombie Node',
+            fail_count: 1,
+            remaining_secs: 540,
+            reason: 'Зомби-сервер: L7-сбой передачи трафика',
+          },
+        ],
+        zombie_servers: ['srv_zombie'],
+      },
+    }
+
+    await act(async () => {
+      root!.render(<Settings notify={notifyMock} status={mockStatus} refresh={refreshMock} />)
+    })
+
+    const text = container?.textContent || ''
+    expect(text).toContain('Активный сервер')
+    expect(text).toContain('Working Node')
+    // Верхнего суммирующего блока карантина больше нет:
+    expect(text).not.toContain('Серверы в карантине')
+
+    // Zombie server in chain shows 🧟 Зомби badge and action buttons
+    const zombieCard = container?.querySelector('.priority-chain-card') as HTMLElement
+    expect(zombieCard.textContent).toContain('Зомби')
+    expect(zombieCard.textContent).toContain('9 мин')
+    expect(zombieCard.textContent).toContain('Снять карантин')
+    expect(zombieCard.textContent).toContain('Включить')
+    expect(zombieCard.style.borderLeft).toContain('4px solid #ef4444')
+  })
+
+  describe('cleanServerDisplayName & formatActiveServerStatus', () => {
+    it('strips Russian and English country names and removes trailing separators', () => {
+      expect(cleanServerDisplayName('Обход [Platinum] - Германия')).toBe('Обход [Platinum]')
+      expect(cleanServerDisplayName('[DE] Platinum Server - Нидерланды')).toBe('Platinum Server')
+      expect(cleanServerDisplayName('ObsV-gb_real_dir')).toBe('ObsV-real_dir')
+      expect(cleanServerDisplayName('VLESS - США (New York)')).toBe('VLESS (New York)')
+      expect(cleanServerDisplayName('Финляндия Helsinki Fast')).toBe('Helsinki Fast')
+      expect(cleanServerDisplayName('Node - Germany')).toBe('Node')
+    })
+
+    it('isolates active server status and cleans country names', () => {
+      const res = formatActiveServerStatus("Штатно: активен узел 'ObsV-gb_real_dir' (72 мс). В карантине 2 узлов")
+      expect(res).not.toContain('В карантине')
+      expect(res).toBe("Штатно: активен узел 'ObsV-real_dir' (72 мс)")
+    })
   })
 })
 

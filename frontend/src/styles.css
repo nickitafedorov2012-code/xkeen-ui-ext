@@ -87,8 +87,9 @@ body {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 12px;
-  margin-bottom: 16px;
-  position: relative;
+  position: sticky;
+  top: 0;
+  z-index: 1000;
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
   box-sizing: border-box;
   max-width: 100%;

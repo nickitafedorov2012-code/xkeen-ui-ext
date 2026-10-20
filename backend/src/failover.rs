@@ -109,18 +109,6 @@ pub async fn current_live_status(
     let act_label = if !active_name.is_empty() { active_name } else if !active_id.is_empty() { active_id } else { "не выбран" };
     let ping_str = if active_ping > 0 { format!("{active_ping} мс") } else { "—".to_string() };
 
-    let q = quarantine_status().await;
-    if !q.is_empty() {
-        let first = &q[0];
-        let remaining_mins = (first.remaining_secs + 59) / 60;
-        return format!(
-            "Активен '{}'. В карантине {} узлов ('{}' ещё {} мин)",
-            act_label,
-            q.len(),
-            first.server_name,
-            remaining_mins
-        );
-    }
     if !cfg.failover.priority_chain.is_empty() {
         if let Some(top_id) = cfg.failover.priority_chain.first() {
             if top_id == active_id || top_id == act_label {
@@ -256,7 +244,13 @@ pub async fn get_zombie_servers() -> Vec<String> {
     let q = SERVER_QUARANTINE.lock().await;
     let now = Instant::now();
     q.values()
-        .filter(|v| now < v.quarantined_until && v.reason.to_lowercase().contains("зомби"))
+        .filter(|v| {
+            if now >= v.quarantined_until {
+                return false;
+            }
+            let r = v.reason.to_lowercase();
+            r.contains("зомби") || r.contains("zombie") || r.contains("l7")
+        })
         .map(|v| v.server_id.clone())
         .collect()
 }
@@ -2058,6 +2052,11 @@ mod tests {
         assert!(fetched.is_zombie);
         assert_eq!(fetched.elapsed_secs, 5);
 
+        // Проверяем распознавание L7-сбоя как зомби
+        add_quarantine_with_duration("srv_l7_fail", "L7 Fail Node", "сервер не отвечает (L7 сбой)", 600).await;
+        let zombies_updated = get_zombie_servers().await;
+        assert!(zombies_updated.contains(&"srv_l7_fail".to_string()), "Узел с L7 сбоем обязан попадать в get_zombie_servers");
+
         clear_all_quarantine().await;
     }
 
@@ -2155,6 +2154,12 @@ mod tests {
         let status_str = current_live_status(&active.id, &active.name, active.ping_ms as i64, &cfg).await;
         assert!(status_str.contains("Active Node"));
         assert!(status_str.contains("45 мс"));
+
+        // Проверяем, что даже при наличии узлов в карантине, статус активного узла не захламляется строкой "В карантине"
+        add_quarantine("srv_dead", "Dead Node", "L7 failure").await;
+        let status_with_q = current_live_status(&active.id, &active.name, active.ping_ms as i64, &cfg).await;
+        assert!(!status_with_q.contains("В карантине"), "current_live_status не должен содержать строку карантина");
+        assert!(status_with_q.contains("Active Node"));
 
         clear_all_quarantine().await;
         reset_canary().await;

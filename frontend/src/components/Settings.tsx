@@ -15,7 +15,6 @@ import ConfigEditor from './ConfigEditor'
 import PresetCatalogModal from './PresetCatalogModal'
 import LogsViewer from './LogsViewer'
 import TaskManager from './TaskManager'
-import { detectServerCountry } from '../utils/geo'
 
 export function SwapManager({ notify }: { notify: (msg: string, isErr?: boolean) => void }) {
   const [status, setStatus] = useState<SwapStatus | null>(null)
@@ -178,6 +177,49 @@ function fmtTrafficBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
+export function cleanServerDisplayName(name: string): string {
+  if (!name) return ''
+  const countriesRegex =
+    /(?:^|[^а-яёa-z0-9_])(Германия|Германии|Нидерланды|Нидерландов|Великобритания|Великобритании|Англия|Англии|США|Франция|Франции|Финляндия|Финляндии|Швеция|Швеции|Польша|Польши|Казахстан|Казахстана|Турция|Турции|Сингапур|Сингапура|Россия|России|Germany|Netherlands|United Kingdom|USA|France|Finland|Sweden|Poland|Kazakhstan|Turkey|Singapore|Russia)(?=[^а-яёa-z0-9_]|$)/gi
+
+  return name
+    .replace(/^\[?(DE|GB|NL|US|FR|RU|SG|TR|FI|SE|PL|KZ|UA|UK)\]?\s*[-–—:]*\s*/i, '')
+    .replace(/[-_](de|gb|nl|us|fr|ru|sg|tr|fi|se|pl|kz|ua)[-_]/gi, '-')
+    .replace(/[-_](de|gb|nl|us|fr|ru|sg|tr|fi|se|pl|kz|ua)$/gi, '')
+    .replace(countriesRegex, ' ')
+    .replace(/\s*[-–—:]\s*(?=[(\[])/g, ' ')
+    .replace(/[-–—:]\s*$/g, '')
+    .replace(/^\s*[-–—:]/g, '')
+    .replace(/\s*[-–—:]\s*[-–—:]\s*/g, ' - ')
+    .replace(/\(\s*\)/g, '')
+    .replace(/\[\s*\]/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
+export function formatActiveServerStatus(statusText?: string, activeServer?: any, chain?: string[]): string {
+  if (chain && chain.length > 0 && activeServer?.id) {
+    const idx = chain.indexOf(activeServer.id)
+    if (idx === 0) {
+      return 'Штатно: активен основной узел #1'
+    } else if (idx > 0) {
+      return `Резерв #${idx + 1}: основной узел недоступен`
+    }
+  }
+  if (!statusText) {
+    return 'Штатный режим: переключения не требуются'
+  }
+  let s = statusText.replace(/\.?\s*В карантине.*$/i, '').trim()
+  s = cleanServerDisplayName(s)
+  if (s.length === 0) {
+    if (activeServer?.name) {
+      return `Штатно: активен узел '${cleanServerDisplayName(activeServer.name)}'`
+    }
+    return 'Штатный режим: переключения не требуются'
+  }
+  return s
 }
 
 interface Props {
@@ -1227,43 +1269,53 @@ export default function Settings({ notify, status, refresh }: Props) {
                 <span className="muted small">{chain.length} узлов в цепочке</span>
               </div>
 
-              {status?.failover?.current_status && (
-                <div
-                  style={{
-                    padding: '8px 12px',
-                    borderRadius: 8,
-                    fontSize: 12,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 10,
-                    background: 'rgba(59, 130, 246, 0.08)',
-                    border: '1px solid rgba(59, 130, 246, 0.25)',
-                    marginBottom: 4,
-                    flexWrap: 'wrap',
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
-                    <span className="pulse-live-dot" title="Мониторинг Failover активен (автообновление)" />
-                    <span style={{ fontSize: 13 }}>⚡</span>
-                    <span style={{ fontWeight: 600, color: 'var(--text)' }}>
-                      Текущий статус: {status.failover.current_status}
+              {/* ЕДИНЫЙ ЛАКОНИЧНЫЙ БЛОК: Активный сервер */}
+              <div
+                style={{
+                  background: 'rgba(255, 255, 255, 0.02)',
+                  border: '1px solid var(--border)',
+                  borderLeft: '4px solid #22c55e',
+                  borderRadius: 8,
+                  padding: '8px 12px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 6,
+                  marginBottom: 8,
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, minWidth: 0 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0, overflow: 'hidden' }}>
+                    <span className="pulse-live-dot" style={{ flexShrink: 0 }} title="Мониторинг Failover активен" />
+                    <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-bright)', whiteSpace: 'nowrap' }}>
+                      Активный сервер
                     </span>
+                    {status?.active_server ? (
+                      <span className="badge badge-online" style={{ fontSize: 9.5, padding: '1px 5px', whiteSpace: 'nowrap', lineHeight: 1.2, flexShrink: 0 }}>
+                        в сети
+                      </span>
+                    ) : (
+                      <span className="badge" style={{ fontSize: 9.5, padding: '1px 5px', color: 'var(--muted)', whiteSpace: 'nowrap', lineHeight: 1.2, flexShrink: 0 }}>
+                        не выбран
+                      </span>
+                    )}
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-                    <span className="muted" style={{ fontSize: 10.5 }}>
-                      Обновлено: {failoverLastPolled}
-                    </span>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+                    {failoverLastPolled && (
+                      <span className="muted" style={{ fontSize: 10, whiteSpace: 'nowrap' }}>
+                        {failoverLastPolled}
+                      </span>
+                    )}
                     <button
                       type="button"
                       className="btn sm ghost"
                       style={{
-                        height: 22,
-                        padding: '0 6px',
+                        height: 18,
+                        width: 18,
+                        padding: 0,
                         display: 'inline-flex',
                         alignItems: 'center',
-                        gap: 4,
-                        fontSize: 10.5,
+                        justifyContent: 'center',
+                        fontSize: 10,
                         borderRadius: 4,
                       }}
                       onClick={() => {
@@ -1276,53 +1328,38 @@ export default function Settings({ notify, status, refresh }: Props) {
                     </button>
                   </div>
                 </div>
-              )}
 
-              {status?.failover?.last_test && (
-                <div
-                  style={{
-                    padding: '8px 12px',
-                    borderRadius: 8,
-                    fontSize: 11.5,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 8,
-                    background: status.failover.last_test.success
-                      ? 'rgba(34, 197, 94, 0.08)'
-                      : 'rgba(239, 68, 68, 0.12)',
-                    border: `1px solid ${
-                      status.failover.last_test.success
-                        ? 'rgba(34, 197, 94, 0.3)'
-                        : 'rgba(239, 68, 68, 0.35)'
-                    }`,
-                    marginBottom: 4,
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0, overflow: 'hidden' }}>
-                    <span style={{ fontSize: 13 }}>{status.failover.last_test.success ? '✅' : '🧟'}</span>
-                    <span style={{ fontWeight: 600 }}>
-                      {status.failover.last_test.success ? 'Тест пройден:' : 'L7-тест провален:'}
-                    </span>
-                    <span style={{ color: status.failover.last_test.success ? '#4ade80' : '#f87171', fontWeight: 700 }}>
-                      {status.failover.last_test.target_name || status.failover.last_test.server_name || status.failover.last_test.target_id || ''}
-                    </span>
-                    <span className="muted" style={{ fontSize: 11, textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>
-                      ({status.failover.last_test.message || status.failover.last_test.reason || ''})
-                    </span>
+                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 6, minWidth: 0 }}>
+                  <div
+                    style={{
+                      fontSize: 13,
+                      fontWeight: 700,
+                      color: '#4ade80',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      minWidth: 0,
+                    }}
+                    title={status?.active_server?.name || status?.active_server?.id || ''}
+                  >
+                    {cleanServerDisplayName(status?.active_server?.name || status?.active_server?.id || 'Сервер не выбран')}
                   </div>
-                  <span className="muted" style={{ fontSize: 10.5, whiteSpace: 'nowrap', flexShrink: 0 }}>
-                    {(() => {
-                      const ts = status.failover.last_test.timestamp;
-                      if (!ts) return '';
-                      if (typeof ts === 'string') return ts;
-                      return new Date(ts > 1e11 ? ts : ts * 1000).toLocaleTimeString();
-                    })()}
-                  </span>
+                  {status?.active_server && status.active_server.ping_ms > 0 && (
+                    <span className={'ping ' + pingClass(status.active_server.ping_ms)} style={{ fontSize: 10.5, fontWeight: 700, whiteSpace: 'nowrap', flexShrink: 0 }}>
+                      {status.active_server.ping_ms} мс
+                    </span>
+                  )}
                 </div>
-              )}
 
-              <div className="modal-list" style={{ maxHeight: 380, display: 'flex', flexDirection: 'column', gap: 6, overflowY: 'auto' }}>
+                {canaryInfo && (
+                  <div style={{ fontSize: 10.5, color: '#c084fc', background: 'rgba(168, 85, 247, 0.1)', padding: '2px 5px', borderRadius: 4, border: '1px solid rgba(168, 85, 247, 0.25)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                    🧪 Тест <b>{cleanServerDisplayName(canaryInfo.target_name)}</b> ({canaryInfo.elapsed_secs}/{canaryInfo.duration_secs || 180}с)
+                  </div>
+                )}
+              </div>
+
+              {/* Список узлов цепочки в виде современных карточек с акцентным бордером */}
+              <div className="modal-list" style={{ maxHeight: 380, display: 'flex', flexDirection: 'column', gap: 8, overflowY: 'auto' }}>
                 {chain.length === 0 && (
                   <p className="muted small" style={{ margin: '8px 0' }}>
                     Цепочка не задана — failover автоматически выбирает лучший доступный сервер.
@@ -1330,7 +1367,6 @@ export default function Settings({ notify, status, refresh }: Props) {
                 )}
                 {chain.map((id, i) => {
                   const sv = servers.find((x) => x.id === id)
-                  const country = detectServerCountry(sv?.name || id, id, sv?.host)
                   const livePing = (status?.failover?.priority_chain_pings && status.failover.priority_chain_pings[id] !== undefined)
                     ? status.failover.priority_chain_pings[id]
                     : (status?.active_server && status.active_server.id === id ? status.active_server.ping_ms : (sv?.ping_ms ?? 0))
@@ -1339,47 +1375,60 @@ export default function Settings({ notify, status, refresh }: Props) {
                   const isCanary = Boolean(canaryInfo?.active && canaryInfo.target_id === id)
                   const liveCanarySecs = isCanary ? (canaryCountdown ?? canaryInfo?.remaining_secs ?? 0) : 0
                   const quarantineInfo = status?.failover?.quarantine?.find((q) => q.server_id === id)
-                  const isZombie = Boolean(status?.failover?.zombie_servers?.includes(id) || quarantineInfo?.reason === 'zombie')
+                  const isZombie = Boolean(
+                    status?.failover?.zombie_servers?.includes(id) ||
+                    quarantineInfo?.reason?.toLowerCase().includes('зомби') ||
+                    quarantineInfo?.reason?.toLowerCase().includes('zombie') ||
+                    quarantineInfo?.reason?.toLowerCase().includes('l7')
+                  )
                   const isQuarantined = Boolean(quarantineInfo && quarantineInfo.remaining_secs > 0)
                   const isTimeout = livePing <= 0 || livePing >= 9999
+
+                  // Определение цвета акцентного левого бордюра и фона карточки
+                  const accentColor = isActive
+                    ? '#22c55e'
+                    : isZombie
+                    ? '#ef4444'
+                    : isQuarantined
+                    ? '#f97316'
+                    : i === 0
+                    ? '#38bdf8'
+                    : 'rgba(255, 255, 255, 0.15)'
+
+                  const bgTint = isActive
+                    ? 'rgba(34, 197, 94, 0.05)'
+                    : isZombie
+                    ? 'rgba(239, 68, 68, 0.04)'
+                    : i === 0
+                    ? 'rgba(56, 189, 248, 0.03)'
+                    : 'rgba(255, 255, 255, 0.015)'
 
                   return (
                     <div
                       key={id}
-                      className="check-row"
+                      className="check-row priority-chain-card"
                       style={{
                         display: 'flex',
                         flexDirection: 'column',
                         gap: 6,
-                        background: isActive
-                          ? 'rgba(34, 197, 94, 0.08)'
-                          : isZombie
-                            ? 'rgba(239, 68, 68, 0.06)'
-                            : i === 0
-                              ? 'rgba(56, 189, 248, 0.08)'
-                              : 'rgba(255, 255, 255, 0.02)',
-                        border: isActive
-                          ? '1px solid rgba(34, 197, 94, 0.4)'
-                          : isZombie
-                            ? '1px dashed rgba(239, 68, 68, 0.4)'
-                            : i === 0
-                              ? '1px solid rgba(56, 189, 248, 0.3)'
-                              : '1px solid var(--border)',
-                        borderRadius: 10,
+                        background: bgTint,
+                        border: '1px solid var(--border)',
+                        borderLeft: `4px solid ${accentColor}`,
+                        borderRadius: 8,
                         padding: '8px 12px',
                         minWidth: 0,
                       }}
                     >
-                      {/* УРОВЕНЬ 1: Номер, Название сервера, Страна, Хост и Задержка */}
+                      {/* УРОВЕНЬ 1: Номер приоритета, Чистое имя --- Статус задержки */}
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'nowrap' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1, overflow: 'hidden' }}>
                           <span
                             style={{
-                              fontSize: 11,
+                              fontSize: 10.5,
                               fontWeight: 700,
-                              padding: '2px 8px',
-                              borderRadius: 6,
-                              background: i === 0 ? 'rgba(56, 189, 248, 0.25)' : 'rgba(255, 255, 255, 0.08)',
+                              padding: '2px 7px',
+                              borderRadius: 5,
+                              background: i === 0 ? 'rgba(56, 189, 248, 0.2)' : 'rgba(255, 255, 255, 0.07)',
                               color: i === 0 ? '#38bdf8' : 'var(--muted)',
                               whiteSpace: 'nowrap',
                               flexShrink: 0,
@@ -1393,135 +1442,83 @@ export default function Settings({ notify, status, refresh }: Props) {
                             style={{
                               fontWeight: 600,
                               fontSize: 13,
-                              color: isActive ? '#4ade80' : isZombie ? '#f87171' : 'var(--text)',
+                              color: isActive ? '#4ade80' : isZombie ? '#f87171' : 'var(--text-bright)',
                               overflow: 'hidden',
                               textOverflow: 'ellipsis',
                               whiteSpace: 'nowrap',
-                              minWidth: 90,
-                              flexShrink: 1,
+                              minWidth: 80,
                             }}
-                            title={sv ? `${sv.name} (${id})` : id}
+                            title={sv ? `${cleanServerDisplayName(sv.name)} (${id})` : id}
                           >
-                            {sv ? sv.name : `${id} (недоступен)`}
+                            {cleanServerDisplayName(sv ? sv.name : `${id} (недоступен)`)}
                           </span>
-
-                          {/* Вариант Б: Детекция страны и флаг */}
-                          {country && (
-                            <span
-                              style={{
-                                fontSize: 10.5,
-                                fontWeight: 700,
-                                padding: '1px 6px',
-                                borderRadius: 4,
-                                background: 'rgba(255, 255, 255, 0.06)',
-                                border: '1px solid rgba(255, 255, 255, 0.12)',
-                                color: 'var(--text)',
-                                whiteSpace: 'nowrap',
-                                flexShrink: 0,
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: 3,
-                              }}
-                              title={`Локация: ${country.name} (${country.code})`}
-                            >
-                              <span>{country.flag}</span>
-                              <span style={{ opacity: 0.85 }}>{country.code}</span>
-                            </span>
-                          )}
-
-                          {/* Вариант А: Сетевые параметры узла (Host:Port / IP) */}
-                          {sv?.host && sv.host !== sv.name && (
-                            <span
-                              style={{
-                                fontSize: 10.5,
-                                fontFamily: 'monospace',
-                                color: 'var(--muted)',
-                                padding: '1px 6px',
-                                borderRadius: 4,
-                                background: 'rgba(0, 0, 0, 0.25)',
-                                border: '1px solid rgba(255, 255, 255, 0.07)',
-                                overflow: 'hidden',
-                                textOverflow: 'ellipsis',
-                                whiteSpace: 'nowrap',
-                                maxWidth: 190,
-                                flexShrink: 2,
-                              }}
-                              title={`Адрес подключения: ${sv.host}:${sv.port || 443}`}
-                            >
-                              🌐 {sv.host}:{sv.port || 443}
-                            </span>
-                          )}
                         </div>
 
-                        {/* Задержка и бейдж превышения порога */}
+                        {/* Задержка / статус сети */}
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                          {livePing > (settings.failover.ping_threshold_ms || 300) && !isTimeout && !isZombie && (
+                          {livePing > (settings.failover.ping_threshold_ms || 300) && !isTimeout && (
                             <span
                               style={{
                                 fontSize: 10,
-                                padding: '1px 6px',
+                                padding: '1px 5px',
                                 borderRadius: 4,
                                 background: 'rgba(249, 115, 22, 0.15)',
                                 color: '#fb923c',
-                                border: '1px solid rgba(249, 115, 22, 0.35)',
+                                border: '1px solid rgba(249, 115, 22, 0.3)',
                                 fontWeight: 600,
                                 whiteSpace: 'nowrap',
                               }}
-                              title={`Пинг превышает порог ${settings.failover.ping_threshold_ms} мс. При сбое узел будет пропущен.`}
+                              title={`Пинг превышает порог ${settings.failover.ping_threshold_ms || 300} мс. При сбое узел будет пропущен.`}
                             >
                               ⚠️ &gt; {settings.failover.ping_threshold_ms || 300} мс
                             </span>
                           )}
-                          {isZombie ? (
+                          {isTimeout ? (
                             <span
-                              className="ping"
                               style={{
                                 fontSize: 11,
-                                fontWeight: 700,
-                                padding: '2px 7px',
-                                borderRadius: 5,
-                                background: 'rgba(239, 68, 68, 0.18)',
+                                fontWeight: 600,
+                                padding: '2px 6px',
+                                borderRadius: 4,
+                                background: 'rgba(239, 68, 68, 0.15)',
                                 color: '#f87171',
-                                border: '1px solid rgba(239, 68, 68, 0.4)',
-                                cursor: 'help',
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: 3,
+                                border: '1px solid rgba(239, 68, 68, 0.3)',
+                                whiteSpace: 'nowrap',
                               }}
-                              title="Сервер отвечает на TCP-пинг, но блокирует реальный веб-трафик (L7-сбой передачи данных). Временно исключён из цепочки на 10 мин."
                             >
-                              🧟 Зомби
+                              ❌ Таймаут
                             </span>
                           ) : (
-                            <span className={'ping ' + pingClass(livePing)} style={{ fontSize: 12, fontWeight: 700 }}>
+                            <span className={'ping ' + pingClass(livePing)} style={{ fontSize: 11.5, fontWeight: 700, whiteSpace: 'nowrap' }}>
                               {livePing > 0 && livePing < 9999 ? `${livePing} мс` : '—'}
                             </span>
                           )}
                         </div>
                       </div>
 
-                      {/* УРОВЕНЬ 2: Метаданные, Живой статус и Кнопки действий */}
+                      {/* УРОВЕНЬ 2: Метаданные (Состояние, Пул/Провайдер, Протокол) --- Панель действий */}
                       <div
                         style={{
                           display: 'flex',
                           alignItems: 'center',
                           justifyContent: 'space-between',
                           gap: 8,
-                          paddingTop: 4,
-                          borderTop: '1px solid rgba(255, 255, 255, 0.05)',
+                          paddingTop: 5,
+                          borderTop: '1px solid rgba(255, 255, 255, 0.04)',
                         }}
                       >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', minWidth: 0, flex: 1 }}>
                           {isActive ? (
                             <span
                               style={{
                                 fontSize: 10,
                                 fontWeight: 700,
-                                padding: '2px 6px',
+                                padding: '1px 6px',
                                 borderRadius: 4,
-                                background: 'rgba(34, 197, 94, 0.2)',
+                                background: 'rgba(34, 197, 94, 0.18)',
                                 color: '#4ade80',
-                                border: '1px solid rgba(34, 197, 94, 0.4)',
+                                border: '1px solid rgba(34, 197, 94, 0.35)',
+                                whiteSpace: 'nowrap',
                               }}
                             >
                               🟢 Активен сейчас
@@ -1531,11 +1528,12 @@ export default function Settings({ notify, status, refresh }: Props) {
                               style={{
                                 fontSize: 10,
                                 fontWeight: 700,
-                                padding: '2px 6px',
+                                padding: '1px 6px',
                                 borderRadius: 4,
                                 background: 'rgba(168, 85, 247, 0.2)',
                                 color: '#c084fc',
                                 border: '1px solid rgba(168, 85, 247, 0.4)',
+                                whiteSpace: 'nowrap',
                               }}
                               title="Канареечный тест стабильности узла перед возвратом трафика. Клиенты остаются на резерве, пока проверяется отсутствие обрывов."
                             >
@@ -1546,54 +1544,43 @@ export default function Settings({ notify, status, refresh }: Props) {
                               style={{
                                 fontSize: 10,
                                 fontWeight: 700,
-                                padding: '2px 6px',
+                                padding: '2px 7px',
                                 borderRadius: 4,
                                 background: 'rgba(239, 68, 68, 0.2)',
                                 color: '#f87171',
                                 border: '1px solid rgba(239, 68, 68, 0.45)',
                                 cursor: 'help',
+                                whiteSpace: 'nowrap',
                               }}
                               title="Сервер отвечает на TCP-пинг, но блокирует реальный веб-трафик (L7-сбой передачи данных). Временно исключён из цепочки на 10 мин."
                             >
-                              🧟 Зомби ({quarantineInfo ? Math.ceil(quarantineInfo.remaining_secs / 60) : 10} мин)
+                              🧟 Зомби (карантин {quarantineInfo ? Math.ceil(quarantineInfo.remaining_secs / 60) : 10} мин)
                             </span>
                           ) : isQuarantined ? (
                             <span
                               style={{
                                 fontSize: 10,
                                 fontWeight: 700,
-                                padding: '2px 6px',
+                                padding: '1px 6px',
                                 borderRadius: 4,
                                 background: 'rgba(249, 115, 22, 0.2)',
                                 color: '#fb923c',
                                 border: '1px solid rgba(249, 115, 22, 0.4)',
+                                whiteSpace: 'nowrap',
                               }}
                             >
                               🛡️ Карантин ({Math.ceil((quarantineInfo?.remaining_secs || 0) / 60)} мин)
-                            </span>
-                          ) : isTimeout ? (
-                            <span
-                              style={{
-                                fontSize: 10,
-                                fontWeight: 700,
-                                padding: '2px 6px',
-                                borderRadius: 4,
-                                background: 'rgba(239, 68, 68, 0.15)',
-                                color: '#f87171',
-                                border: '1px solid rgba(239, 68, 68, 0.35)',
-                              }}
-                            >
-                              ❌ Таймаут
                             </span>
                           ) : (
                             <span
                               style={{
                                 fontSize: 10,
                                 fontWeight: 500,
-                                padding: '2px 6px',
+                                padding: '1px 6px',
                                 borderRadius: 4,
                                 background: 'rgba(255, 255, 255, 0.05)',
                                 color: 'var(--muted)',
+                                whiteSpace: 'nowrap',
                               }}
                             >
                               💤 В резерве
@@ -1620,24 +1607,77 @@ export default function Settings({ notify, status, refresh }: Props) {
                           ) : null}
 
                           {sv?.protocol && (
-                            <span className="badge-subtle" style={{ fontSize: 9.5, opacity: 0.7 }}>
-                              {sv.protocol}
+                            <span className="badge-subtle" style={{ fontSize: 9.5, opacity: 0.8 }}>
+                              {sv.protocol.toUpperCase()}
                             </span>
                           )}
+
+                          {/* Адрес подключения (хост:порт): только если не дублирует имя сервера и не содержит пробелов */}
+                          {sv?.host &&
+                            sv.host !== sv.name &&
+                            !sv.name.toLowerCase().includes(sv.host.toLowerCase()) &&
+                            !sv.host.includes(' ') && (
+                              <span
+                                className="muted"
+                                style={{
+                                  fontSize: 10,
+                                  fontFamily: 'monospace',
+                                  maxWidth: 140,
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap',
+                                }}
+                                title={`Хост: ${sv.host}:${sv.port || 443}`}
+                              >
+                                {sv.host}:{sv.port || 443}
+                              </span>
+                            )}
                         </div>
 
-                        {/* Кнопки действий */}
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        {/* Панель кнопок действий */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+                          {(isZombie || isQuarantined) && (
+                            <button
+                              type="button"
+                              className="btn sm ghost"
+                              style={{
+                                height: 22,
+                                padding: '0 7px',
+                                fontSize: 10,
+                                lineHeight: '20px',
+                                borderRadius: 5,
+                                color: '#f87171',
+                                border: '1px solid rgba(239, 68, 68, 0.35)',
+                                background: 'rgba(239, 68, 68, 0.1)',
+                                cursor: 'pointer',
+                                fontWeight: 600,
+                                whiteSpace: 'nowrap',
+                              }}
+                              title="Досрочно снять карантин с узла"
+                              onClick={async () => {
+                                try {
+                                  await apiPost('failover/quarantine/clear', { server_id: id })
+                                  notify(`Карантин снят с ${cleanServerDisplayName(sv?.name || id)}`)
+                                  refresh?.()
+                                } catch (e: any) {
+                                  notify(e.message || 'Ошибка снятия карантина', true)
+                                }
+                              }}
+                            >
+                              🛡️ Снять карантин
+                            </button>
+                          )}
+
                           {!isActive && (
                             <button
                               type="button"
                               className="btn sm"
                               style={{
-                                height: 24,
+                                height: 22,
                                 padding: '0 8px',
                                 fontSize: 10.5,
-                                lineHeight: '22px',
-                                borderRadius: 6,
+                                lineHeight: '20px',
+                                borderRadius: 5,
                                 background: 'rgba(56, 189, 248, 0.12)',
                                 border: '1px solid rgba(56, 189, 248, 0.35)',
                                 color: '#38bdf8',
@@ -1647,8 +1687,11 @@ export default function Settings({ notify, status, refresh }: Props) {
                               title="Принудительно переключиться на этот сервер"
                               onClick={async () => {
                                 try {
+                                  if (isZombie || isQuarantined) {
+                                    await apiPost('failover/quarantine/clear', { server_id: id })
+                                  }
                                   await apiPost('servers/switch', { id })
-                                  notify(`Переключение на ${sv?.name || id}...`)
+                                  notify(`Переключение на ${cleanServerDisplayName(sv?.name || id)}...`)
                                   refresh?.()
                                 } catch (e: any) {
                                   notify(e.message || 'Ошибка переключения', true)
@@ -1660,8 +1703,9 @@ export default function Settings({ notify, status, refresh }: Props) {
                           )}
 
                           <button
+                            type="button"
                             className="btn sm ghost"
-                            style={{ height: 24, padding: '0 6px', fontSize: 11 }}
+                            style={{ height: 22, width: 22, padding: 0, fontSize: 10, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
                             disabled={i === 0}
                             onClick={() => chainMove(i, -1)}
                             title="Повысить приоритет"
@@ -1669,8 +1713,9 @@ export default function Settings({ notify, status, refresh }: Props) {
                             ▲
                           </button>
                           <button
+                            type="button"
                             className="btn sm ghost"
-                            style={{ height: 24, padding: '0 6px', fontSize: 11 }}
+                            style={{ height: 22, width: 22, padding: 0, fontSize: 10, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
                             disabled={i === chain.length - 1}
                             onClick={() => chainMove(i, 1)}
                             title="Понизить приоритет"
@@ -1678,8 +1723,9 @@ export default function Settings({ notify, status, refresh }: Props) {
                             ▼
                           </button>
                           <button
+                            type="button"
                             className="btn sm ghost"
-                            style={{ height: 24, padding: '0 6px', color: '#ef4444', fontSize: 11 }}
+                            style={{ height: 22, width: 22, padding: 0, color: '#ef4444', fontSize: 11, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
                             onClick={() => patch((s) => (s.failover.priority_chain = chain.filter((x) => x !== id)))}
                             title="Удалить из цепочки"
                           >
@@ -1690,7 +1736,10 @@ export default function Settings({ notify, status, refresh }: Props) {
                     </div>
                   )
                 })}
+              </div>
 
+              {/* Аккуратный футер в одну строку: выбор добавления сервера + кнопка очистки */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginTop: 4 }}>
                 <select
                   className="select"
                   value=""
@@ -1700,7 +1749,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                       patch((s) => (s.failover.priority_chain = [...chain, e.target.value]))
                     }
                   }}
-                  style={{ marginTop: 4 }}
+                  style={{ flex: 1, minWidth: 0, margin: 0 }}
                 >
                   <option value="">+ добавить сервер или пул в цепочку…</option>
                   {servers.some((s) => s.is_pool && !chain.includes(s.id)) && (
@@ -1721,7 +1770,14 @@ export default function Settings({ notify, status, refresh }: Props) {
                         const optPing = (status?.failover?.priority_chain_pings && status.failover.priority_chain_pings[s.id] !== undefined)
                           ? status.failover.priority_chain_pings[s.id]
                           : s.ping_ms
-                        const isOptZombie = Boolean(status?.failover?.zombie_servers?.includes(s.id))
+                        const isOptZombie = Boolean(
+                          status?.failover?.zombie_servers?.includes(s.id) ||
+                          status?.failover?.quarantine?.some((q) => q.server_id === s.id && (
+                            q.reason.toLowerCase().includes('зомби') ||
+                            q.reason.toLowerCase().includes('zombie') ||
+                            q.reason.toLowerCase().includes('l7')
+                          ))
+                        )
                         return (
                           <option key={s.id} value={s.id}>
                             {s.provider_name ? `[${s.provider_name}] ` : s.provider ? `[${s.provider}] ` : ''}{s.name} · {isOptZombie ? '🧟 Зомби' : optPing > 0 ? `${optPing} мс` : '—'}
@@ -1730,15 +1786,19 @@ export default function Settings({ notify, status, refresh }: Props) {
                       })}
                   </optgroup>
                 </select>
-              </div>
 
-              {chain.length > 0 && (
-                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 4 }}>
-                  <button className="btn sm ghost" onClick={() => patch((s) => (s.failover.priority_chain = []))}>
-                    Очистить цепочку
+                {chain.length > 0 && (
+                  <button
+                    type="button"
+                    className="btn sm ghost"
+                    style={{ whiteSpace: 'nowrap', flexShrink: 0, color: 'var(--muted)' }}
+                    onClick={() => patch((s) => (s.failover.priority_chain = []))}
+                    title="Полностью очистить цепочку приоритетов"
+                  >
+                    🗑️ Очистить цепочку
                   </button>
-                </div>
-              )}
+                )}
+              </div>
             </div>
 
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
@@ -2243,7 +2303,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                 <h2 style={{ margin: 0 }}>Zapret — Обход замедлений DPI</h2>
               </div>
               <span className="badge" style={{ color: zapretStatus?.running ? '#22c55e' : zapretStatus?.installed ? '#f59e0b' : 'var(--muted)' }}>
-                {zapretStatus?.running ? `🟢 Активен (PID: ${zapretStatus.pid})` : zapretStatus?.installed ? '⚪ Выключен' : '🔴 Не установлен'}
+                {zapretStatus?.running ? (zapretStatus.pid ? `🟢 Активен (PID: ${zapretStatus.pid})` : '🟢 Активен') : zapretStatus?.installed ? '⚪ Выключен' : '🔴 Не установлен'}
               </span>
             </div>
             <p className="muted small">
