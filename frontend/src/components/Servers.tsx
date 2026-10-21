@@ -332,6 +332,8 @@ export default function Servers({ notify, status, refresh }: Props) {
     whitelist_bytes?: number
   } | null>(null)
   const [pingHistory, setPingHistory] = useState<number[]>([])
+  const [jitterMeasuring, setJitterMeasuring] = useState(false)
+  const lastActiveServerIdRef = useRef<string | undefined>(undefined)
 
   const jitterVal = useMemo(() => {
     if (pingHistory.length < 2) return 0
@@ -489,13 +491,71 @@ export default function Servers({ notify, status, refresh }: Props) {
   }, [servers, status?.active_server])
 
   useEffect(() => {
-    if (activeServer?.ping_ms && activeServer.ping_ms > 0 && activeServer.ping_ms < 9999) {
+    const sId = activeServer?.id
+    if (!sId) {
+      setPingHistory([])
+      lastActiveServerIdRef.current = undefined
+      return
+    }
+
+    const ping = activeServer.ping_ms
+    const isValidPing = typeof ping === 'number' && ping > 0 && ping < 9999
+
+    if (lastActiveServerIdRef.current !== sId) {
+      lastActiveServerIdRef.current = sId
+      let stored: number[] = []
+      try {
+        const raw = sessionStorage.getItem(`xr_pings_${sId}`)
+        if (raw) stored = JSON.parse(raw)
+      } catch {}
+
+      if (isValidPing) {
+        if (stored.length === 0 || stored[stored.length - 1] !== ping) {
+          stored = [...stored, ping].slice(-15)
+          try {
+            sessionStorage.setItem(`xr_pings_${sId}`, JSON.stringify(stored))
+          } catch {}
+        }
+      }
+      setPingHistory(stored)
+    } else if (isValidPing) {
       setPingHistory((prev) => {
-        const next = [...prev, activeServer.ping_ms]
-        return next.slice(-15)
+        if (prev.length > 0 && prev[prev.length - 1] === ping) {
+          return prev
+        }
+        const next = [...prev, ping].slice(-15)
+        try {
+          sessionStorage.setItem(`xr_pings_${sId}`, JSON.stringify(next))
+        } catch {}
+        return next
       })
     }
-  }, [activeServer?.ping_ms, activeServer?.id])
+  }, [activeServer?.id, activeServer?.ping_ms])
+
+  const measureLiveJitter = async () => {
+    if (!activeServer?.id || jitterMeasuring) return
+    setJitterMeasuring(true)
+    try {
+      const res = await apiPost<{ pings: Record<string, number> }>('servers/ping', { server_id: activeServer.id })
+      const liveDelay = res?.pings?.[activeServer.id]
+      if (liveDelay && liveDelay > 0 && liveDelay < 9999) {
+        setPingHistory((prev) => {
+          const next = [...prev, liveDelay].slice(-15)
+          try {
+            sessionStorage.setItem(`xr_pings_${activeServer.id}`, JSON.stringify(next))
+          } catch {}
+          return next
+        })
+        notify(`Замер задержки: ${liveDelay} мс`)
+      } else {
+        notify('Сервер не ответил на пинг', true)
+      }
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка замера пинга', true)
+    } finally {
+      setJitterMeasuring(false)
+    }
+  }
 
   const activate = async (s: ServerInfo) => {
     try {
@@ -1016,30 +1076,62 @@ export default function Servers({ notify, status, refresh }: Props) {
                     )
                   })()}
 
-                  {pingHistory.length > 1 && (
+                  {activeServer && (
                     <div
+                      onClick={measureLiveJitter}
                       style={{
                         display: 'inline-flex',
                         alignItems: 'center',
                         gap: 5,
                         padding: '2px 8px',
                         borderRadius: 6,
-                        background: jitterVal > 25 ? 'rgba(239, 68, 68, 0.12)' : jitterVal > 10 ? 'rgba(234, 179, 8, 0.12)' : 'rgba(34, 197, 94, 0.12)',
-                        border: `1px solid ${jitterVal > 25 ? 'rgba(239, 68, 68, 0.35)' : jitterVal > 10 ? 'rgba(234, 179, 8, 0.35)' : 'rgba(34, 197, 94, 0.35)'}`,
+                        cursor: jitterMeasuring ? 'wait' : 'pointer',
+                        background:
+                          pingHistory.length < 2
+                            ? 'rgba(148, 163, 184, 0.1)'
+                            : jitterVal > 25
+                            ? 'rgba(239, 68, 68, 0.12)'
+                            : jitterVal > 10
+                            ? 'rgba(234, 179, 8, 0.12)'
+                            : 'rgba(34, 197, 94, 0.12)',
+                        border: `1px solid ${
+                          pingHistory.length < 2
+                            ? 'rgba(148, 163, 184, 0.25)'
+                            : jitterVal > 25
+                            ? 'rgba(239, 68, 68, 0.35)'
+                            : jitterVal > 10
+                            ? 'rgba(234, 179, 8, 0.35)'
+                            : 'rgba(34, 197, 94, 0.35)'
+                        }`,
                         fontSize: 11,
+                        userSelect: 'none',
+                        transition: 'all 0.2s ease',
                       }}
-                      title={`Задержка: ${activeServer.ping_ms} мс | Джиттер: ±${jitterVal} мс (разброс задержки) | Мин: ${Math.min(...pingHistory)} мс, Макс: ${Math.max(...pingHistory)} мс`}
+                      title={
+                        jitterMeasuring
+                          ? 'Выполняется измерение задержки...'
+                          : pingHistory.length < 2
+                          ? `Задержка: ${activeServer.ping_ms > 0 ? `${activeServer.ping_ms} мс` : '—'} | Джиттер: требуется от 2 замеров (нажмите для экспресс-замера)`
+                          : `Задержка: ${activeServer.ping_ms} мс | Джиттер: ±${jitterVal} мс (разброс по ${pingHistory.length} точкам) | Мин: ${Math.min(...pingHistory)} мс, Макс: ${Math.max(...pingHistory)} мс | Нажмите для экспресс-замера`
+                      }
                     >
-                      <span>📶</span>
+                      <span>{jitterMeasuring ? '⏳' : '📶'}</span>
                       <span style={{ color: 'var(--muted)', fontSize: 10.5 }}>Джиттер:</span>
                       <span
                         style={{
                           fontFamily: 'Consolas, monospace',
                           fontWeight: 600,
-                          color: jitterVal > 25 ? '#ef4444' : jitterVal > 10 ? '#eab308' : '#22c55e',
+                          color:
+                            pingHistory.length < 2
+                              ? 'var(--muted)'
+                              : jitterVal > 25
+                              ? '#ef4444'
+                              : jitterVal > 10
+                              ? '#eab308'
+                              : '#22c55e',
                         }}
                       >
-                        ±{jitterVal} мс
+                        {jitterMeasuring ? '...' : pingHistory.length < 2 ? '—' : `±${jitterVal} мс`}
                       </span>
                     </div>
                   )}

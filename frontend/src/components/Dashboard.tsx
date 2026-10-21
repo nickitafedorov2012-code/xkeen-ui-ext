@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
 import { pingClass, type FailoverEventInfo, type StatusInfo, type AghStatus, type SwapStatus, type DomainCheckResult } from '../types'
 import TrafficGraph from './TrafficGraph'
@@ -119,34 +119,50 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
   const [checking, setChecking] = useState(false)
   const [togglingFailover, setTogglingFailover] = useState(false)
   // История пинга активного сервера (для sparkline): {значение, было ли измерение}
-  const [pingHistory, setPingHistory] = useState<{ ms: number; ok: boolean }[]>(() => {
-    try {
-      const saved = sessionStorage.getItem('xr_ping_hist')
-      return saved ? JSON.parse(saved) : []
-    } catch {
-      return []
-    }
-  })
+  const [pingHistory, setPingHistory] = useState<{ ms: number; ok: boolean }[]>([])
+  const lastActiveServerIdRef = useRef<string | undefined>(undefined)
 
   useEffect(() => {
+    const sId = status?.active_server?.id || status?.active_server?.name
+    if (!sId) {
+      setPingHistory([])
+      lastActiveServerIdRef.current = undefined
+      return
+    }
+
     const ping = status?.active_server?.ping_ms
-    if (ping === undefined || ping <= 0) return
-    setPingHistory((prev) => {
-      let base = prev
-      if (base.length < 10) {
-        // Предзаполняем график 15 точками для наглядности
-        base = Array.from({ length: 15 }, (_, idx) => {
-          const jitter = ((idx % 3) - 1) * Math.max(1, Math.round(ping * 0.02))
-          return { ms: Math.max(1, ping + jitter), ok: true }
-        })
-      }
-      const next = [...base, { ms: ping, ok: true }].slice(-40)
+    const isValidPing = typeof ping === 'number' && ping > 0 && ping < 9999
+
+    if (lastActiveServerIdRef.current !== sId) {
+      lastActiveServerIdRef.current = sId
+      let stored: { ms: number; ok: boolean }[] = []
       try {
-        sessionStorage.setItem('xr_ping_hist', JSON.stringify(next))
+        const raw = sessionStorage.getItem(`xr_dash_pings_${sId}`)
+        if (raw) stored = JSON.parse(raw)
       } catch {}
-      return next
-    })
-  }, [status?.active_server?.ping_ms, status?.active_server?.name])
+
+      if (isValidPing) {
+        if (stored.length === 0 || stored[stored.length - 1].ms !== ping) {
+          stored = [...stored, { ms: ping, ok: true }].slice(-40)
+          try {
+            sessionStorage.setItem(`xr_dash_pings_${sId}`, JSON.stringify(stored))
+          } catch {}
+        }
+      }
+      setPingHistory(stored)
+    } else if (isValidPing) {
+      setPingHistory((prev) => {
+        if (prev.length > 0 && prev[prev.length - 1].ms === ping) {
+          return prev
+        }
+        const next = [...prev, { ms: ping, ok: true }].slice(-40)
+        try {
+          sessionStorage.setItem(`xr_dash_pings_${sId}`, JSON.stringify(next))
+        } catch {}
+        return next
+      })
+    }
+  }, [status?.active_server?.id, status?.active_server?.name, status?.active_server?.ping_ms])
 
   const [adblockEnabled, setAdblockEnabled] = useState<boolean>(() => !!status?.adblock_enabled)
   const [adguardStatus, setAdguardStatus] = useState<AghStatus | null>(null)
@@ -468,12 +484,14 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                 </ul>
 
                 {/* График стабильности задержки */}
-                {pingHistory.length >= 2 && (
+                {pingHistory.length >= 1 && (
                   <div className="active-server-sparkline-box">
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
-                      <span className="muted small" style={{ fontSize: 11 }}>Стабильность пинга ({pingHistory.length} точек):</span>
+                      <span className="muted small" style={{ fontSize: 11 }}>
+                        Стабильность пинга ({pingHistory.length} {pingHistory.length === 1 ? 'замер' : 'точек'}):
+                      </span>
                       <span className="muted small" style={{ fontSize: 11, fontFamily: 'monospace' }}>
-                        мин: {minPing} мс / макс: {maxPing} мс
+                        {pingHistory.length === 1 ? `${minPing} мс` : `мин: ${minPing} мс / макс: ${maxPing} мс`}
                       </span>
                     </div>
                     <PingSparkline data={pingHistory} />
@@ -776,6 +794,7 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
 function PingSparkline({ data }: { data: { ms: number; ok: boolean }[] }) {
   const W = 280
   const H = 40
+  if (!data || data.length === 0) return null
   const okVals = data.filter((d) => d.ok).map((d) => d.ms)
   const maxVal = okVals.length > 0 ? okVals.reduce((a, b) => Math.max(a, b)) : 100
   const minVal = okVals.length > 0 ? okVals.reduce((a, b) => Math.min(a, b)) : 0
@@ -785,9 +804,20 @@ function PingSparkline({ data }: { data: { ms: number; ok: boolean }[] }) {
   const step = data.length > 1 ? W / (data.length - 1) : W
   const y = (d: { ms: number; ok: boolean }) =>
     d.ok ? H - 4 - ((d.ms - min) / range) * (H - 8) : H - 2
+  const last = data[data.length - 1]
+
+  if (data.length === 1) {
+    const singleY = y(last)
+    return (
+      <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: 'block' }}>
+        <line x1="0" y1={singleY} x2={W} y2={singleY} stroke="#38bdf8" strokeWidth="1.5" strokeDasharray="4 4" opacity="0.6" />
+        <circle cx={W / 2} cy={singleY} r="3.5" fill="#38bdf8" />
+      </svg>
+    )
+  }
+
   const pts = data.map((d, i) => `${(i * step).toFixed(1)},${y(d).toFixed(1)}`).join(' ')
   const areaPts = `0,${H} ` + pts + ` ${W},${H}`
-  const last = data[data.length - 1]
   return (
     <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: 'block' }}>
       <defs>

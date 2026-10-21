@@ -2781,30 +2781,6 @@ pub async fn update_provider(State(state): State<AppState>, Json(req): Json<Upda
     let provider_urls = crate::routing::parse_provider_urls(&yaml_content);
     let provider_hwids = crate::routing::parse_provider_hwids(&yaml_content);
 
-    async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str, hwid: Option<&str>) -> Result<usize, String> {
-        let ua = "v2rayNG/1.8.12";
-        let mut req_builder = state.http.get(url).header("User-Agent", ua);
-        if let Some(h) = hwid.filter(|h| !h.is_empty()) {
-            req_builder = req_builder.header("x-hwid", h);
-        }
-        let resp = req_builder.send().await.map_err(|e| format!("HTTP {e}"))?;
-        if !resp.status().is_success() {
-            return Err(format!("HTTP статус {}", resp.status()));
-        }
-        let text = resp.text().await.map_err(|e| format!("Read text: {e}"))?;
-        let (conv_yaml, count) = crate::subscription_parser::convert_subscription_to_mihomo_yaml(&text)?;
-        let prov_dir = std::path::Path::new(&state.config.read().await.mihomo.config_path)
-            .parent()
-            .map(|p| p.join("providers"))
-            .unwrap_or_else(|| std::path::PathBuf::from("/opt/etc/mihomo/providers"));
-        let prov_path = prov_dir.join(format!("{id}.yaml"));
-        if let Some(parent) = prov_path.parent() {
-            let _ = tokio::fs::create_dir_all(parent).await;
-        }
-        tokio::fs::write(&prov_path, conv_yaml).await.map_err(|e| format!("Запись {}: {e}", prov_path.display()))?;
-        Ok(count)
-    }
-
     if let Some(pid) = req.provider_id.filter(|p| !p.trim().is_empty()) {
         let hwid = provider_hwids.get(&pid).map(|s| s.as_str());
         // 1. Проверяем уже зарегистрированные мобильные подписки
@@ -2841,34 +2817,90 @@ pub async fn update_provider(State(state): State<AppState>, Json(req): Json<Upda
             Err(e) => api_err(format!("Ошибка обновления подписки '{pid}': {e}")),
         }
     } else {
-        let mut mobile_count = 0;
-        for (pid, mobile_url) in &cfg.mobile_provider_urls {
-            let hwid = provider_hwids.get(pid).map(|s| s.as_str());
-            if refresh_mobile_sub(&state, pid, mobile_url, hwid).await.is_ok() {
-                mobile_count += 1;
-            }
-        }
-        for (pid, raw_url) in &provider_urls {
-            if !cfg.mobile_provider_urls.contains_key(pid) {
-                let hwid = provider_hwids.get(pid).map(|s| s.as_str());
-                if let Ok(count) = refresh_mobile_sub(&state, pid, raw_url, hwid).await {
-                    if let Ok(mut tx) = ConfigTx::begin(&state).await {
-                        if let Ok(y) = tx.read_yaml().await {
-                            if let Ok(new_y) = crate::routing::convert_http_provider_to_file_in_yaml(&y, pid, &format!("./providers/{pid}.yaml")) {
-                                let _ = tx.set_yaml(new_y);
-                                tx.config_mut().mobile_provider_urls.insert(pid.clone(), raw_url.clone());
-                                let _ = tx.commit_and_reload().await;
-                            }
-                        }
-                    }
-                    let _ = count;
-                    mobile_count += 1;
-                }
-            }
-        }
+        let mobile_count = sync_all_mobile_providers(&state).await;
         let count = mihomo::force_update_all_providers(&state.http, &cfg).await;
         api_ok(json!({ "updated": count + mobile_count, "message": format!("Обновлено подписок: {}", count + mobile_count) }))
     }
+}
+
+/// Загрузка мобильной подписки (V2Ray/JSON/Base64) через прокси Mihomo и сохранение в ./providers/{id}.yaml
+pub async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str, hwid: Option<&str>) -> Result<usize, String> {
+    let ua = "v2rayNG/1.8.12";
+    let proxy_url = {
+        let cfg = state.config.read().await;
+        cfg.mihomo_proxy_url()
+    };
+    let proxied = crate::updater::proxied_client(&proxy_url);
+    let client_ref = proxied.as_ref().unwrap_or(&state.http);
+    let mut req_builder = client_ref.get(url).header("User-Agent", ua);
+    if let Some(h) = hwid.filter(|h| !h.is_empty()) {
+        req_builder = req_builder.header("x-hwid", h);
+    }
+    let resp = match req_builder.send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => {
+            let mut direct_builder = state.http.get(url).header("User-Agent", ua);
+            if let Some(h) = hwid.filter(|h| !h.is_empty()) {
+                direct_builder = direct_builder.header("x-hwid", h);
+            }
+            direct_builder.send().await.map_err(|e| format!("HTTP {e}"))?
+        }
+    };
+    if !resp.status().is_success() {
+        return Err(format!("HTTP статус {}", resp.status()));
+    }
+    let text = resp.text().await.map_err(|e| format!("Read text: {e}"))?;
+    let (conv_yaml, count) = crate::subscription_parser::convert_subscription_to_mihomo_yaml(&text)?;
+    let prov_dir = std::path::Path::new(&state.config.read().await.mihomo.config_path)
+        .parent()
+        .map(|p| p.join("providers"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/opt/etc/mihomo/providers"));
+    let prov_path = prov_dir.join(format!("{id}.yaml"));
+    if let Some(parent) = prov_path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    tokio::fs::write(&prov_path, conv_yaml).await.map_err(|e| format!("Запись {}: {e}", prov_path.display()))?;
+    Ok(count)
+}
+
+/// Фоновое автообновление и автомиграция всех мобильных подписок:
+/// Проверяет зарегистрированные mobile_provider_urls, а также автоматически мигрирует
+/// любые HTTP-провайдеры, отдающие V2Ray/JSON подписки, в локальный type: file.
+pub async fn sync_all_mobile_providers(state: &AppState) -> usize {
+    let cfg = state.config.read().await.clone();
+    let yaml_content = tokio::fs::read_to_string(&cfg.mihomo.config_path).await.unwrap_or_default();
+    let provider_urls = crate::routing::parse_provider_urls(&yaml_content);
+    let provider_hwids = crate::routing::parse_provider_hwids(&yaml_content);
+
+    let mut mobile_count = 0;
+    for (pid, mobile_url) in &cfg.mobile_provider_urls {
+        let hwid = provider_hwids.get(pid).map(|s| s.as_str());
+        if let Ok(count) = refresh_mobile_sub(state, pid, mobile_url, hwid).await {
+            let _ = mihomo::force_update_provider(&state.http, &cfg, pid).await;
+            log_i!("[MOBILE-SUB] ✓ Мобильная подписка '{pid}' обновлена ({count} серверов)");
+            mobile_count += 1;
+        }
+    }
+    for (pid, raw_url) in &provider_urls {
+        if !cfg.mobile_provider_urls.contains_key(pid) {
+            let hwid = provider_hwids.get(pid).map(|s| s.as_str());
+            if let Ok(count) = refresh_mobile_sub(state, pid, raw_url, hwid).await {
+                if let Ok(mut tx) = ConfigTx::begin(state).await {
+                    if let Ok(y) = tx.read_yaml().await {
+                        if let Ok(new_y) = crate::routing::convert_http_provider_to_file_in_yaml(&y, pid, &format!("./providers/{pid}.yaml")) {
+                            let _ = tx.set_yaml(new_y);
+                            tx.config_mut().mobile_provider_urls.insert(pid.clone(), raw_url.clone());
+                            let _ = tx.commit_and_reload().await;
+                            let _ = mihomo::force_update_provider(&state.http, &cfg, pid).await;
+                            log_i!("[MOBILE-SUB] ✓ Подписка '{pid}' автоматически мигрирована в мобильный формат ({count} серверов с чистыми именами)");
+                            mobile_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    mobile_count
 }
 
 #[derive(Deserialize)]
@@ -2913,11 +2945,27 @@ pub async fn add_provider(State(state): State<AppState>, Json(req): Json<AddProv
 
     if is_explicit_mobile_ua || final_url.starts_with("http://") || final_url.starts_with("https://") {
         let ua = req.user_agent.as_deref().unwrap_or("v2rayNG/1.8.12");
-        let mut req_builder = state.http.get(&final_url).header("User-Agent", ua);
+        let proxy_url = {
+            let cfg = state.config.read().await;
+            cfg.mihomo_proxy_url()
+        };
+        let proxied = crate::updater::proxied_client(&proxy_url);
+        let client_ref = proxied.as_ref().unwrap_or(&state.http);
+        let mut req_builder = client_ref.get(&final_url).header("User-Agent", ua);
         if let Some(h) = hwid_trimmed {
             req_builder = req_builder.header("x-hwid", h);
         }
-        if let Ok(resp) = req_builder.send().await {
+        let resp = match req_builder.send().await {
+            Ok(r) if r.status().is_success() => Ok(r),
+            _ => {
+                let mut direct_builder = state.http.get(&final_url).header("User-Agent", ua);
+                if let Some(h) = hwid_trimmed {
+                    direct_builder = direct_builder.header("x-hwid", h);
+                }
+                direct_builder.send().await
+            }
+        };
+        if let Ok(resp) = resp {
             if resp.status().is_success() {
                 if let Ok(text) = resp.text().await {
                     if crate::subscription_parser::is_v2ray_or_base64_subscription(&text) {

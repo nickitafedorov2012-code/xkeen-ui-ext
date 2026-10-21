@@ -42,7 +42,7 @@ struct JsDelivrResolved {
 const EMBEDDED_DEV_MD: &str = include_str!("../../DEVELOPMENT.md");
 
 /// Клиент с проксированием через Mihomo mixed-port (обход блокировок ТСПУ для локальных процессов).
-fn proxied_client(proxy_addr: &str) -> Option<reqwest::Client> {
+pub fn proxied_client(proxy_addr: &str) -> Option<reqwest::Client> {
     let proxy = reqwest::Proxy::all(proxy_addr).ok()?;
     reqwest::Client::builder()
         .proxy(proxy)

@@ -80,6 +80,9 @@ pub fn is_v2ray_or_base64_subscription(raw: &str) -> bool {
     if trimmed.starts_with("proxies:") || trimmed.starts_with("proxy-providers:") || trimmed.starts_with("port:") {
         return false;
     }
+    if trimmed.starts_with('[') && trimmed.contains("\"remarks\"") && trimmed.contains("\"outbounds\"") {
+        return true;
+    }
     if trimmed.contains("vless://")
         || trimmed.contains("hy2://")
         || trimmed.contains("hysteria2://")
@@ -92,7 +95,8 @@ pub fn is_v2ray_or_base64_subscription(raw: &str) -> bool {
     if let Ok(bytes) = base64_decode(trimmed) {
         if let Ok(text) = std::str::from_utf8(&bytes) {
             let t = text.trim();
-            if t.contains("vless://")
+            if (t.starts_with('[') && t.contains("\"remarks\"") && t.contains("\"outbounds\""))
+                || t.contains("vless://")
                 || t.contains("hy2://")
                 || t.contains("hysteria2://")
                 || t.contains("trojan://")
@@ -323,11 +327,165 @@ pub fn parse_v2ray_line(line: &str) -> Option<Value> {
     }
 }
 
-/// Преобразование сырого контента подписки (Base64 или список URI) в YAML провайдера для Mihomo
+///// Парсинг одного профиля из Xray/V2Ray JSON-массива подписки
+pub fn parse_xray_json_profile(profile: &Value) -> Option<Value> {
+    let remarks = profile.get("remarks").and_then(|r| r.as_str())?.trim();
+    if remarks.is_empty() {
+        return None;
+    }
+    let outbounds = profile.get("outbounds").and_then(|o| o.as_array())?;
+    // Ищем первый исходящий узел, который не является direct/freedom/blackhole
+    let out = outbounds.iter().find(|o| {
+        let proto = o.get("protocol").and_then(|p| p.as_str()).unwrap_or("");
+        proto != "freedom" && proto != "blackhole" && proto != "direct" && proto != "block"
+    })?;
+
+    let proto = out.get("protocol").and_then(|p| p.as_str())?;
+    let settings = out.get("settings").unwrap_or(&Value::Null);
+    let stream_settings = out.get("streamSettings").unwrap_or(&Value::Null);
+
+    let mut map = serde_json::Map::new();
+    map.insert("name".into(), Value::String(remarks.to_string()));
+
+    match proto {
+        "vless" => {
+            let vnext = settings.get("vnext").and_then(|v| v.as_array())?.first()?;
+            let server = vnext.get("address").and_then(|a| a.as_str())?;
+            let port = vnext.get("port").and_then(|p| p.as_u64())?;
+            let user = vnext.get("users").and_then(|u| u.as_array())?.first()?;
+            let uuid = user.get("id").and_then(|i| i.as_str())?;
+            let flow = user.get("flow").and_then(|f| f.as_str()).unwrap_or("");
+
+            map.insert("type".into(), Value::String("vless".into()));
+            map.insert("server".into(), Value::String(server.to_string()));
+            map.insert("port".into(), json!(port));
+            map.insert("uuid".into(), Value::String(uuid.to_string()));
+            map.insert("udp".into(), Value::Bool(true));
+            if !flow.is_empty() {
+                map.insert("flow".into(), Value::String(flow.to_string()));
+            }
+
+            let network = stream_settings.get("network").and_then(|n| n.as_str()).unwrap_or("tcp");
+            if network != "tcp" {
+                map.insert("network".into(), Value::String(network.to_string()));
+            }
+
+            let security = stream_settings.get("security").and_then(|s| s.as_str()).unwrap_or("");
+            if security == "reality" {
+                map.insert("tls".into(), Value::Bool(true));
+                if let Some(reality) = stream_settings.get("realitySettings").and_then(|r| r.as_object()) {
+                    if let Some(sn) = reality.get("serverName").and_then(|s| s.as_str()) {
+                        map.insert("servername".into(), Value::String(sn.to_string()));
+                    }
+                    if let Some(fp) = reality.get("fingerprint").and_then(|f| f.as_str()) {
+                        map.insert("client-fingerprint".into(), Value::String(fp.to_string()));
+                    }
+                    let mut ropts = serde_json::Map::new();
+                    if let Some(pbk) = reality.get("publicKey").and_then(|p| p.as_str()) {
+                        ropts.insert("public-key".into(), Value::String(pbk.to_string()));
+                    }
+                    if let Some(sid) = reality.get("shortId").and_then(|s| s.as_str()) {
+                        ropts.insert("short-id".into(), Value::String(sid.to_string()));
+                    }
+                    map.insert("reality-opts".into(), Value::Object(ropts));
+                }
+            } else if security == "tls" {
+                map.insert("tls".into(), Value::Bool(true));
+                if let Some(tls) = stream_settings.get("tlsSettings").and_then(|t| t.as_object()) {
+                    if let Some(sn) = tls.get("serverName").and_then(|s| s.as_str()) {
+                        map.insert("servername".into(), Value::String(sn.to_string()));
+                    }
+                    if let Some(fp) = tls.get("fingerprint").and_then(|f| f.as_str()) {
+                        map.insert("client-fingerprint".into(), Value::String(fp.to_string()));
+                    }
+                    if let Some(alpn) = tls.get("alpn").and_then(|a| a.as_array()) {
+                        map.insert("alpn".into(), Value::Array(alpn.clone()));
+                    }
+                }
+            }
+
+            if network == "xhttp" {
+                if let Some(xh) = stream_settings.get("xhttpSettings").and_then(|x| x.as_object()) {
+                    let mut xopts = serde_json::Map::new();
+                    if let Some(mode) = xh.get("mode").and_then(|m| m.as_str()) {
+                        xopts.insert("mode".into(), Value::String(mode.to_string()));
+                    }
+                    if let Some(path) = xh.get("path").and_then(|p| p.as_str()) {
+                        xopts.insert("path".into(), Value::String(path.to_string()));
+                    }
+                    if let Some(host) = xh.get("host").and_then(|h| h.as_str()) {
+                        xopts.insert("host".into(), Value::String(host.to_string()));
+                    }
+                    map.insert("xhttp-opts".into(), Value::Object(xopts));
+                }
+            } else if network == "grpc" {
+                if let Some(grpc) = stream_settings.get("grpcSettings").and_then(|g| g.as_object()) {
+                    let mut gopts = serde_json::Map::new();
+                    if let Some(sn) = grpc.get("serviceName").and_then(|s| s.as_str()) {
+                        gopts.insert("grpc-service-name".into(), Value::String(sn.to_string()));
+                    }
+                    map.insert("grpc-opts".into(), Value::Object(gopts));
+                }
+            } else if network == "ws" {
+                if let Some(ws) = stream_settings.get("wsSettings").and_then(|w| w.as_object()) {
+                    let mut wopts = serde_json::Map::new();
+                    if let Some(path) = ws.get("path").and_then(|p| p.as_str()) {
+                        wopts.insert("path".into(), Value::String(path.to_string()));
+                    }
+                    if let Some(headers) = ws.get("headers").and_then(|h| h.as_object()) {
+                        wopts.insert("headers".into(), Value::Object(headers.clone()));
+                    }
+                    map.insert("ws-opts".into(), Value::Object(wopts));
+                }
+            }
+            Some(Value::Object(map))
+        }
+        "hysteria" | "hysteria2" => {
+            let server = settings.get("address").and_then(|a| a.as_str())?;
+            let port = settings.get("port").and_then(|p| p.as_u64())?;
+            let auth = stream_settings
+                .get("hysteriaSettings")
+                .and_then(|h| h.get("auth"))
+                .and_then(|a| a.as_str())
+                .unwrap_or("");
+            let sni = stream_settings
+                .get("tlsSettings")
+                .and_then(|t| t.get("serverName"))
+                .and_then(|s| s.as_str())
+                .unwrap_or(server);
+
+            map.insert("type".into(), Value::String("hysteria2".into()));
+            map.insert("server".into(), Value::String(server.to_string()));
+            map.insert("port".into(), json!(port));
+            map.insert("password".into(), Value::String(auth.to_string()));
+            map.insert("sni".into(), Value::String(sni.to_string()));
+            map.insert("alpn".into(), json!(["h3"]));
+            map.insert("skip-cert-verify".into(), Value::Bool(false));
+            Some(Value::Object(map))
+        }
+        "trojan" => {
+            let srv = settings.get("servers").and_then(|s| s.as_array())?.first()?;
+            let server = srv.get("address").and_then(|a| a.as_str())?;
+            let port = srv.get("port").and_then(|p| p.as_u64())?;
+            let pass = srv.get("password").and_then(|p| p.as_str())?;
+
+            map.insert("type".into(), Value::String("trojan".into()));
+            map.insert("server".into(), Value::String(server.to_string()));
+            map.insert("port".into(), json!(port));
+            map.insert("password".into(), Value::String(pass.to_string()));
+            map.insert("udp".into(), Value::Bool(true));
+            Some(Value::Object(map))
+        }
+        _ => None,
+    }
+}
+
+/// Преобразование сырого контента подписки (Base64, Xray JSON или список URI) в YAML провайдера для Mihomo
 pub fn convert_subscription_to_mihomo_yaml(raw_content: &str) -> Result<(String, usize), String> {
     let decoded_text = if let Ok(bytes) = base64_decode(raw_content.trim()) {
         if let Ok(text) = String::from_utf8(bytes) {
-            if text.contains("://") {
+            let t = text.trim();
+            if t.contains("://") || (t.starts_with('[') && t.contains("\"remarks\"")) {
                 text
             } else {
                 raw_content.to_string()
@@ -340,18 +498,34 @@ pub fn convert_subscription_to_mihomo_yaml(raw_content: &str) -> Result<(String,
     };
 
     let mut proxies = Vec::new();
-    for line in decoded_text.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
-            continue;
+    let trimmed = decoded_text.trim();
+
+    // 1. Попытка распарсить как Xray/V2Ray JSON-массив подписки
+    if trimmed.starts_with('[') {
+        if let Ok(profiles) = serde_json::from_str::<Vec<Value>>(trimmed) {
+            for p in &profiles {
+                if let Some(proxy_val) = parse_xray_json_profile(p) {
+                    proxies.push(proxy_val);
+                }
+            }
         }
-        if let Some(proxy_val) = parse_v2ray_line(trimmed) {
-            proxies.push(proxy_val);
+    }
+
+    // 2. Если не JSON, парсим построчно (VLESS/Hysteria2/Trojan URI ссылки)
+    if proxies.is_empty() {
+        for line in decoded_text.lines() {
+            let trimmed_line = line.trim();
+            if trimmed_line.is_empty() || trimmed_line.starts_with('#') || trimmed_line.starts_with("//") {
+                continue;
+            }
+            if let Some(proxy_val) = parse_v2ray_line(trimmed_line) {
+                proxies.push(proxy_val);
+            }
         }
     }
 
     if proxies.is_empty() {
-        return Err("Не удалось распарсить ни одного сервера из подписки V2Ray/Base64".into());
+        return Err("Не удалось распарсить ни одного сервера из подписки V2Ray/Base64/JSON".into());
     }
 
     let count = proxies.len();
@@ -380,13 +554,28 @@ pub fn convert_subscription_to_mihomo_yaml(raw_content: &str) -> Result<(String,
             yaml.push_str(&format!("    tls: {tls}\n"));
         }
         if let Some(sni) = obj.get("servername").or_else(|| obj.get("sni")).and_then(|v| v.as_str()) {
-            yaml.push_str(&format!("    servername: \"{sni}\"\n"));
+            if ptype == "hysteria2" {
+                yaml.push_str(&format!("    sni: \"{sni}\"\n"));
+            } else {
+                yaml.push_str(&format!("    servername: \"{sni}\"\n"));
+            }
         }
         if let Some(fp) = obj.get("client-fingerprint").and_then(|v| v.as_str()) {
             yaml.push_str(&format!("    client-fingerprint: \"{fp}\"\n"));
         }
         if let Some(flow) = obj.get("flow").and_then(|v| v.as_str()) {
             yaml.push_str(&format!("    flow: \"{flow}\"\n"));
+        }
+        if let Some(skip) = obj.get("skip-cert-verify").and_then(|v| v.as_bool()) {
+            yaml.push_str(&format!("    skip-cert-verify: {skip}\n"));
+        }
+        if let Some(alpn) = obj.get("alpn").and_then(|v| v.as_array()) {
+            yaml.push_str("    alpn:\n");
+            for a in alpn {
+                if let Some(s) = a.as_str() {
+                    yaml.push_str(&format!("      - {s}\n"));
+                }
+            }
         }
 
         if let Some(reality) = obj.get("reality-opts").and_then(|v| v.as_object()) {
@@ -417,10 +606,23 @@ pub fn convert_subscription_to_mihomo_yaml(raw_content: &str) -> Result<(String,
                     }
                 }
             } else if network == "grpc" {
-                if let Some(grpc) = obj.get("grpc-opts").and_then(|v| v.as_object()) {
+                if let Some(grpc) = obj.get("grpc-opts").and_then(|g| g.as_object()) {
                     yaml.push_str("    grpc-opts:\n");
                     if let Some(sn) = grpc.get("grpc-service-name").and_then(|v| v.as_str()) {
                         yaml.push_str(&format!("      grpc-service-name: \"{sn}\"\n"));
+                    }
+                }
+            } else if network == "xhttp" {
+                if let Some(xh) = obj.get("xhttp-opts").and_then(|x| x.as_object()) {
+                    yaml.push_str("    xhttp-opts:\n");
+                    if let Some(mode) = xh.get("mode").and_then(|m| m.as_str()) {
+                        yaml.push_str(&format!("      mode: \"{mode}\"\n"));
+                    }
+                    if let Some(path) = xh.get("path").and_then(|p| p.as_str()) {
+                        yaml.push_str(&format!("      path: \"{path}\"\n"));
+                    }
+                    if let Some(host) = xh.get("host").and_then(|h| h.as_str()) {
+                        yaml.push_str(&format!("      host: \"{host}\"\n"));
                     }
                 }
             }
@@ -482,5 +684,98 @@ mod tests {
         assert!(yaml.contains("🇳🇱 NL"));
         assert!(yaml.contains("type: vless"));
         assert!(yaml.contains("type: hysteria2"));
+    }
+
+    #[test]
+    fn test_parse_xray_json_subscription_array() {
+        let json_data = r#"[
+            {
+                "remarks": "🇵🇱 ⚡Обход  [Gold] - Польша",
+                "outbounds": [
+                    {
+                        "tag": "proxy",
+                        "protocol": "vless",
+                        "settings": {
+                            "vnext": [{
+                                "address": "gateway.console.pc-club.app",
+                                "port": 443,
+                                "users": [{"id": "a0d4c6fb-0057-4ff5-ac6a-80694a4b5c41", "encryption": "none", "flow": ""}]
+                            }]
+                        },
+                        "streamSettings": {
+                            "network": "xhttp",
+                            "xhttpSettings": {
+                                "mode": "packet-up",
+                                "host": "gateway.console.pc-club.app",
+                                "path": "/gateway/v1/ws/24e3db84acda637a"
+                            },
+                            "security": "tls",
+                            "tlsSettings": {
+                                "serverName": "gateway.console.pc-club.app",
+                                "fingerprint": "chrome",
+                                "alpn": ["h2"]
+                            }
+                        }
+                    },
+                    {"tag": "direct", "protocol": "freedom"}
+                ]
+            },
+            {
+                "remarks": "🇷🇺 ⚡ Обход [Cooper] - Россия",
+                "outbounds": [
+                    {
+                        "tag": "proxy",
+                        "protocol": "hysteria",
+                        "settings": {
+                            "address": "eu88.vaultberry.cloud",
+                            "port": 8448,
+                            "version": 2
+                        },
+                        "streamSettings": {
+                            "network": "hysteria",
+                            "hysteriaSettings": {
+                                "version": 2,
+                                "auth": "secret-auth-key-123"
+                            },
+                            "security": "tls",
+                            "tlsSettings": {
+                                "serverName": "eu88.vaultberry.cloud",
+                                "fingerprint": "firefox",
+                                "alpn": ["h3"]
+                            }
+                        }
+                    },
+                    {"tag": "direct", "protocol": "freedom"}
+                ]
+            }
+        ]"#;
+
+        assert!(is_v2ray_or_base64_subscription(json_data));
+        let (yaml, count) = convert_subscription_to_mihomo_yaml(json_data).expect("Must convert JSON subscription array");
+        assert_eq!(count, 2);
+        assert!(yaml.contains("🇵🇱 ⚡Обход  [Gold] - Польша"));
+        assert!(yaml.contains("type: vless"));
+        assert!(yaml.contains("network: xhttp"));
+        assert!(yaml.contains("mode: \"packet-up\""));
+        assert!(yaml.contains("path: \"/gateway/v1/ws/24e3db84acda637a\""));
+
+        assert!(yaml.contains("🇷🇺 ⚡ Обход [Cooper] - Россия"));
+        assert!(yaml.contains("type: hysteria2"));
+        assert!(yaml.contains("server: \"eu88.vaultberry.cloud\""));
+        assert!(yaml.contains("port: 8448"));
+        assert!(yaml.contains("password: \"secret-auth-key-123\""));
+        assert!(yaml.contains("sni: \"eu88.vaultberry.cloud\""));
+    }
+
+    #[test]
+    fn test_parse_real_geodema_subscription() {
+        if let Ok(data) = std::fs::read_to_string("../geodema2_sub.json") {
+            let (yaml, count) = convert_subscription_to_mihomo_yaml(&data).expect("Must parse real JSON");
+            assert_eq!(count, 13, "Real geodema subscription must parse exactly 13 servers");
+            assert!(yaml.contains("🇪🇺Авто Обход | Самый быстрый"));
+            assert!(yaml.contains("🇵🇱 ⚡Обход  [Gold] - Польша"));
+            assert!(yaml.contains("🇷🇺 Обход [Cooper] - Россия"));
+            assert!(yaml.contains("Silver — Германия"));
+        }
     }
 }

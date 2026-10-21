@@ -536,6 +536,28 @@ async fn main() {
         }
     });
 
+    // Авто-миграция и плановое авто-обновление мобильных подписок (чистые имена серверов)
+    let mobile_sub_state = state.clone();
+    tokio::spawn(async move {
+        // Ожидание старта Mihomo
+        tokio::time::sleep(std::time::Duration::from_secs(12)).await;
+        log_i!("[STARTUP] Запуск начальной проверки и синхронизации мобильных подписок...");
+        let migrated = api::sync_all_mobile_providers(&mobile_sub_state).await;
+        if migrated > 0 {
+            log_i!("[STARTUP] ✓ Синхронизировано мобильных подписок: {migrated}");
+        }
+
+        // Периодическое обновление каждые 12 часов
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(43200)).await;
+            if failover::is_shutdown() {
+                break;
+            }
+            log_i!("[MOBILE-SUB] Плановое обновление мобильных подписок (12h)...");
+            let _ = api::sync_all_mobile_providers(&mobile_sub_state).await;
+        }
+    });
+
     // Начальная быстрая синхронизация известных бандлов IP принудительно проксируемых доменов с geo_override
     let sync_state = state.clone();
     tokio::spawn(async move {
