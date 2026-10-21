@@ -1990,6 +1990,28 @@ export default function Settings({ notify, status, refresh }: Props) {
               </div>
             </div>
 
+            {/* Карантин сбойных серверов (зомби) */}
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <b style={{ display: 'block', fontSize: 13 }}>🛡️ Карантин сбойных серверов (зомби)</b>
+                <span className="muted small">Автоматически изолирует нестабильные узлы. Если выключено — серверы никогда не блокируются в карантине</span>
+              </div>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+                <label className="switch" title="Включить или выключить автоматический карантин">
+                  <input
+                    type="checkbox"
+                    checked={settings.failover.quarantine_enabled ?? true}
+                    onChange={(e) => patch((s) => (s.failover.quarantine_enabled = e.target.checked))}
+                    data-testid="settings-quarantine-toggle"
+                  />
+                  <span className="slider" />
+                </label>
+                <span style={{ fontSize: 13, minWidth: 64, color: (settings.failover.quarantine_enabled ?? true) ? 'var(--green)' : 'var(--muted)' }}>
+                  {(settings.failover.quarantine_enabled ?? true) ? 'Включён' : 'Выключен'}
+                </span>
+              </div>
+            </div>
+
             {/* Best-Ping Failover (Динамический выбор узла с наименьшей задержкой) */}
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
               <div>

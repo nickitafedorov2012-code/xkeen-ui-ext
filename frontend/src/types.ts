@@ -81,6 +81,7 @@ export interface StatusInfo {
     best_ping_enabled?: boolean
     best_ping_pool_size?: number
     best_ping_hysteresis_ms?: number
+    quarantine_enabled?: boolean
     priority_chain_pings?: Record<string, number>
     canary?: {
       active: boolean
@@ -337,6 +338,7 @@ export interface AppSettings {
     best_ping_enabled?: boolean
     best_ping_pool_size?: number
     best_ping_hysteresis_ms?: number
+    quarantine_enabled?: boolean
     presets?: FailoverPresetSlot[]
   }
   refresh_interval_sec: number

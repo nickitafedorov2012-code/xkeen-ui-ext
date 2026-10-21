@@ -778,4 +778,13 @@ mod tests {
             assert!(yaml.contains("Silver — Германия"));
         }
     }
+
+    #[test]
+    fn test_parse_real_main_geodema_subscription() {
+        if let Ok(data) = std::fs::read_to_string("../sub_geodema.json") {
+            let (yaml, count) = convert_subscription_to_mihomo_yaml(&data).expect("Must parse real main JSON");
+            assert!(count > 0, "Real main geodema subscription must parse servers");
+            assert!(yaml.contains("proxies:"));
+        }
+    }
 }

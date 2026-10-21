@@ -34,10 +34,8 @@ pub async fn status(State(state): State<AppState>) -> Response {
             for s in &servers {
                 pings.insert(s.id.clone(), s.ping_ms);
             }
-            let zombie_list = failover::get_zombie_servers().await;
-            for zid in &zombie_list {
-                pings.insert(zid.clone(), -1);
-            }
+            // Анти-регрессия: НЕ подменять реальный пинг на -1 (Таймаут),
+            // чтобы панель всегда отображала фактический живой пинг из Mihomo.
             (act, pings)
         }
         Err(_) => (None, std::collections::HashMap::new()),
@@ -113,8 +111,9 @@ pub async fn status(State(state): State<AppState>) -> Response {
             "best_ping_hysteresis_ms": cfg.failover.best_ping_hysteresis_ms,
             "canary": failover::canary_status().await,
             "last_test": failover::canary_last_result().await,
-            "zombie_servers": failover::get_zombie_servers().await,
-            "quarantine": failover::quarantine_status().await,
+            "quarantine_enabled": cfg.failover.quarantine_enabled,
+            "zombie_servers": if cfg.failover.quarantine_enabled { failover::get_zombie_servers().await } else { Vec::new() },
+            "quarantine": if cfg.failover.quarantine_enabled { failover::quarantine_status().await } else { Vec::new() },
             "current_status": current_failover_status,
         },
         "refresh_interval_sec": cfg.refresh_interval_sec,

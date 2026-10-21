@@ -54,6 +54,7 @@ const mockStatus = {
     auto_restore_priority: true,
     interval_secs: 45,
     device_failover_enabled: true,
+    quarantine_enabled: true,
     quarantine: [
       { server_id: "fi_trojan", server_name: "🇫🇮 Финляндия Helsinki [Trojan]", fail_count: 3, remaining_secs: 720, reason: "3x таймаут (>250мс)" }
     ]
@@ -190,7 +191,7 @@ const mockAntigravity = {
 const mockSettings = {
   rci: { host: "127.0.0.1", port: 79, login: "admin", password: "••••••••", use_https: false, token: "ndm_tkn_8841a" },
   mihomo: { host: "127.0.0.1", port: 9090, secret: "", config_path: "/opt/etc/mihomo/config.yaml", device_providers: ["sub1", "sub2"] },
-  failover: { enabled: true, ping_threshold_ms: 250, priority_server: "de_vless", priority_chain: ["de_vless", "nl_vless", "fi_trojan"], auto_restore_priority: true, interval_secs: 45, device_failover_enabled: true },
+  failover: { enabled: true, ping_threshold_ms: 250, priority_server: "de_vless", priority_chain: ["de_vless", "nl_vless", "fi_trojan"], auto_restore_priority: true, interval_secs: 45, device_failover_enabled: true, quarantine_enabled: true },
   refresh_interval_sec: 5,
   system: { xkeen_init: "/opt/etc/init.d/S05xkeen", backup_dir: "/opt/backups" },
   logs: { level: "info", remote_syslog: "", log_requests: true },

@@ -153,6 +153,9 @@ pub struct FailoverConfig {
     /// Гистерезис пинга в миллисекундах (30-50 мс, по умолчанию 40)
     #[serde(default = "default_best_ping_hysteresis_ms")]
     pub best_ping_hysteresis_ms: u32,
+    /// Включение механизма карантина сбойных серверов (зомби). По умолчанию true.
+    #[serde(default = "default_true")]
+    pub quarantine_enabled: bool,
 }
 
 impl Default for FailoverConfig {
@@ -170,6 +173,7 @@ impl Default for FailoverConfig {
             best_ping_enabled: false,
             best_ping_pool_size: 15,
             best_ping_hysteresis_ms: 40,
+            quarantine_enabled: true,
         }
     }
 }

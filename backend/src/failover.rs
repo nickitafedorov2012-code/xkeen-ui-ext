@@ -129,7 +129,7 @@ use serde_json::Value;
 use std::collections::VecDeque;
 use tokio::sync::Mutex;
 
-static LAST_ACTIVATED_SERVER: Mutex<Option<(String, Instant)>> = Mutex::const_new(None);
+static LAST_ACTIVATED_SERVER: Mutex<Option<(String, Instant, bool)>> = Mutex::const_new(None);
 
 pub const EARLY_FAILURE_WINDOW_SECS: u64 = 300; // 5 минут после переключения
 
@@ -249,7 +249,9 @@ pub async fn get_zombie_servers() -> Vec<String> {
                 return false;
             }
             let r = v.reason.to_lowercase();
-            r.contains("зомби") || r.contains("zombie") || r.contains("l7")
+            // Истинный зомби: подтверждённая аномалия "Чёрная дыра" (DPI drop) или явный зомби-сервер.
+            // Обычный таймаут или L7-сбой отдельного проверочного URL НЕ является зомби!
+            r.contains("зомби") || r.contains("zombie") || r.contains("черн") || r.contains("blackhole")
         })
         .map(|v| v.server_id.clone())
         .collect()
@@ -286,12 +288,15 @@ pub async fn quarantine_status() -> Vec<QuarantineInfo> {
 pub async fn record_switch_target(target_id: &str) {
     let now = Instant::now();
     *LAST_SWITCH.lock().await = Some(now);
-    *LAST_ACTIVATED_SERVER.lock().await = Some((target_id.to_string(), now));
+    *LAST_ACTIVATED_SERVER.lock().await = Some((target_id.to_string(), now, false));
     reset_canary().await;
 }
 
 pub async fn record_manual_switch(target_id: &str) {
-    record_switch_target(target_id).await;
+    let now = Instant::now();
+    *LAST_SWITCH.lock().await = Some(now);
+    *LAST_ACTIVATED_SERVER.lock().await = Some((target_id.to_string(), now, true));
+    reset_canary().await;
     clear_quarantine(target_id).await;
 }
 
@@ -650,6 +655,54 @@ pub async fn check_blackhole_anomaly(
     }
 }
 
+/// Проверка реального входящего клиентского трафика через активный узел в Mihomo.
+/// Возвращает (has_live_traffic, total_download_bytes).
+/// Если через сокеты узла клиенты успешно скачали > 1 КБ полезных данных — узел гарантированно живой.
+pub async fn check_active_download_traffic(
+    http: &reqwest::Client,
+    cfg: &crate::config::AppConfig,
+    active_server_id: &str,
+) -> (bool, u64) {
+    if active_server_id.is_empty() || active_server_id.eq_ignore_ascii_case("direct") {
+        return (false, 0);
+    }
+    let Ok(val) = mihomo::m_get(http, cfg, "/connections").await else {
+        return (false, 0);
+    };
+    let Some(conns) = val.get("connections").and_then(|c| c.as_array()) else {
+        return (false, 0);
+    };
+
+    let active_lower = active_server_id.to_lowercase();
+    let mut total_download = 0u64;
+
+    for c in conns {
+        let in_chains = c.get("chains")
+            .and_then(|ch| ch.as_array())
+            .map(|arr| {
+                arr.iter().any(|item| {
+                    item.as_str().map(|s| {
+                        let sl = s.to_lowercase();
+                        if sl == "proxy" || sl == "global" || sl == "direct" || sl == "reject" {
+                            false
+                        } else {
+                            sl == active_lower
+                                || (active_lower.len() >= 3 && sl.contains(&active_lower))
+                                || (sl.len() >= 3 && active_lower.contains(&sl))
+                        }
+                    }).unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+
+        if in_chains {
+            total_download += c.get("download").and_then(|d| d.as_u64()).unwrap_or(0);
+        }
+    }
+
+    (total_download > 1024, total_download)
+}
+
 /// Ступенчатый опрос списка серверов через семафор (по 4 потока) с интервалом между запусками,
 /// чтобы минимизировать нагрузку на CPU роутера Keenetic.
 pub async fn ping_servers_staggered(
@@ -890,7 +943,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         let mut valid_candidates: Vec<(String, i64)> = Vec::new();
         for (id, ms) in &pings {
             if *ms > 0 && id.as_str() != "Fastest" && id.as_str() != "Fallback" && id.as_str() != "DIRECT" && id.as_str() != act_id {
-                if !is_quarantined(id).await {
+                if !cfg.failover.quarantine_enabled || !is_quarantined(id).await {
                     valid_candidates.push((id.clone(), *ms));
                 }
             }
@@ -980,7 +1033,22 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         false
     };
 
-    let is_active_healthy = current > 0 && current <= threshold && !is_blackhole;
+    // Проверка реального входящего пользовательского трафика через активный узел:
+    let (has_live_traffic, dl_bytes) = check_active_download_traffic(&state.http, &cfg, &active.id).await;
+
+    // ПРИОРИТЕТ РЕАЛЬНОГО ТРАФИКА:
+    // Сервер признаётся живым и исправным:
+    // 1) Если клиенты прямо сейчас скачивают трафик (> 1 КБ) и нет аномалии черной дыры.
+    //    В этом случае сервер физически жив, даже если синтетический L7-пробник Cloudflare/Google сбоит!
+    // 2) ИЛИ если L7-пинг в норме (<= threshold) и нет аномалии черной дыры.
+    let is_active_healthy = !is_blackhole && ((current > 0 && current <= threshold) || has_live_traffic);
+
+    if has_live_traffic && (current <= 0 || current > threshold) {
+        crate::log_i!(
+            "Failover: контрольный L7-пробник узла '{}' не ответил (пинг {} мс), но через узел активно течёт реальный клиентский трафик ({} КБ) — узел исправен",
+            active.name, current, dl_bytes / 1024
+        );
+    }
 
     // СЦЕНАРИЙ А: АКТИВНЫЙ СЕРВЕР СБОИТ (ТАЙМАУТ, ВЫСОКИЙ ПИНГ ИЛИ АНОМАЛИЯ ЧЕРНОЙ ДЫРЫ)
     // ЭКСТРЕННОЕ ПЕРЕКЛЮЧЕНИЕ: немедленно отменяем любой Canary-тест и переключаем клиентов без задержек!
@@ -1000,8 +1068,9 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         // Анти-флеппинг и карантин зомби:
         let (is_early_failure, elapsed_secs) = {
             let last_act = LAST_ACTIVATED_SERVER.lock().await;
-            if let Some((ref act_id, activated_at)) = *last_act {
-                if act_id == &active.id {
+            if let Some((ref act_id, activated_at, is_manual)) = *last_act {
+                // Сервер, выбранный пользователем вручную, обладает полным иммунитетом к раннему карантину!
+                if act_id == &active.id && !is_manual {
                     let el = activated_at.elapsed().as_secs();
                     (el < EARLY_FAILURE_WINDOW_SECS, Some(el))
                 } else {
@@ -1012,7 +1081,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             }
         };
 
-        if is_blackhole || is_early_failure {
+        if cfg.failover.quarantine_enabled && (is_blackhole || is_early_failure) {
             let q_secs = add_quarantine(&active.id, &active.name, &reason).await;
             let q_mins = q_secs / 60;
             let el_str = elapsed_secs.map(|s| format!(" спустя {s} с после включения")).unwrap_or_default();
@@ -1041,7 +1110,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             let pings = mihomo::ping_all(&state.http, &cfg, &chain_candidates, ping_timeout).await;
             let mut non_quarantined_cands = Vec::new();
             for id in &chain_candidates {
-                if !is_quarantined(id).await {
+                if !cfg.failover.quarantine_enabled || !is_quarantined(id).await {
                     non_quarantined_cands.push(id.clone());
                 }
             }
@@ -1128,7 +1197,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
 
         let mut non_quarantined_cands = Vec::new();
         for id in &candidate_ids {
-            if !is_quarantined(id).await {
+            if !cfg.failover.quarantine_enabled || !is_quarantined(id).await {
                 non_quarantined_cands.push(id.clone());
             }
         }
@@ -1211,7 +1280,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         if !higher.is_empty() {
             let mut eligible_higher = Vec::new();
             for s in higher {
-                if is_quarantined(&s.id).await {
+                if cfg.failover.quarantine_enabled && is_quarantined(&s.id).await {
                     if let Some(rem) = get_quarantine_remaining(&s.id).await {
                         let mins = (rem + 59) / 60;
                         checked_higher_notes.push(format!("'{}': в карантине (осталось {} мин)", s.name, mins));
@@ -1253,7 +1322,9 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                                     elapsed_secs: 0,
                                 }).await;
 
-                                add_quarantine_with_duration(&pri.id, &pri.name, "Зомби-сервер: L7-сбой передачи трафика", 600).await;
+                                if cfg.failover.quarantine_enabled {
+                                    add_quarantine_with_duration(&pri.id, &pri.name, "Зомби-сервер: L7-сбой передачи трафика", 600).await;
+                                }
                                 state.failover_log.push(&fail_msg, false).await;
                                 checked_higher_notes.push(format!("'{}': 🧟 Зомби (L7 сбой)", pri.name));
                                 continue;
@@ -1311,7 +1382,9 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                                 elapsed_secs,
                             }).await;
 
-                            add_quarantine_with_duration(&pri.id, &pri.name, "Зомби-сервер: L7-сбой передачи трафика", 600).await;
+                            if cfg.failover.quarantine_enabled {
+                                add_quarantine_with_duration(&pri.id, &pri.name, "Зомби-сервер: L7-сбой передачи трафика", 600).await;
+                            }
                             state.failover_log.push(&fail_msg, false).await;
                             checked_higher_notes.push(format!("'{}': 🧟 Зомби (L7 сбой)", pri.name));
                             continue;
@@ -2173,12 +2246,67 @@ mod tests {
         assert!(fetched.is_zombie);
         assert_eq!(fetched.elapsed_secs, 5);
 
-        // Проверяем распознавание L7-сбоя как зомби
+        // Проверяем, что обычный L7-сбой больше НЕ признаётся зомби (Анти-регрессия Вариант 1)
         add_quarantine_with_duration("srv_l7_fail", "L7 Fail Node", "сервер не отвечает (L7 сбой)", 600).await;
         let zombies_updated = get_zombie_servers().await;
-        assert!(zombies_updated.contains(&"srv_l7_fail".to_string()), "Узел с L7 сбоем обязан попадать в get_zombie_servers");
+        assert!(!zombies_updated.contains(&"srv_l7_fail".to_string()), "Обычный L7 сбой не должен превращать сервер в зомби!");
+
+        // А вот подтверждённая аномалия 'Чёрная дыра' обязана считаться зомби:
+        add_quarantine_with_duration("srv_blackhole", "Blackhole Node", "Зомби-сервер (DPI сброс трафика: upload > 5KB, download == 0)", 600).await;
+        let zombies_blackhole = get_zombie_servers().await;
+        assert!(zombies_blackhole.contains(&"srv_blackhole".to_string()), "Аномалия Чёрная дыра обязана попадать в get_zombie_servers");
 
         clear_all_quarantine().await;
+    }
+
+    #[tokio::test]
+    async fn test_manual_switch_is_immune_to_early_failure() {
+        let _lock = FAILOVER_TEST_LOCK.lock().await;
+        record_manual_switch("manual_node").await;
+        let guard = LAST_ACTIVATED_SERVER.lock().await;
+        let entry = guard.as_ref().expect("manual switch recorded");
+        assert_eq!(entry.0, "manual_node");
+        assert!(entry.2, "Manual switch must set is_manual = true to prevent early failure quarantine!");
+    }
+
+    #[test]
+    fn test_active_download_traffic_detection() {
+        let conns = serde_json::json!({
+            "connections": [
+                { "id": "1", "chains": ["PROXY", "Silver"], "download": 2048576, "upload": 12040 },
+                { "id": "2", "chains": ["DIRECT"], "download": 50000, "upload": 5000 }
+            ]
+        });
+        let arr = conns.get("connections").and_then(|c| c.as_array()).unwrap();
+        let active_lower = "silver".to_lowercase();
+        let mut total_download = 0u64;
+        for c in arr {
+            let in_chains = c.get("chains")
+                .and_then(|ch| ch.as_array())
+                .map(|arr| {
+                    arr.iter().any(|item| {
+                        item.as_str().map(|s| {
+                            let sl = s.to_lowercase();
+                            if sl == "proxy" || sl == "global" || sl == "direct" || sl == "reject" {
+                                false
+                            } else {
+                                sl == active_lower || (active_lower.len() >= 3 && sl.contains(&active_lower)) || (sl.len() >= 3 && active_lower.contains(&sl))
+                            }
+                        }).unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            if in_chains {
+                total_download += c.get("download").and_then(|d| d.as_u64()).unwrap_or(0);
+            }
+        }
+        assert!(total_download > 1024, "Silver must detect active download traffic (> 1KB)");
+    }
+
+    #[test]
+    fn test_quarantine_enabled_config_default() {
+        let cfg = crate::config::FailoverConfig::default();
+        assert!(cfg.quarantine_enabled, "По умолчанию карантин включен");
     }
 
     #[tokio::test]
