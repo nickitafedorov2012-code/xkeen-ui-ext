@@ -106,20 +106,6 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} ГБ`
 }
 
-function buildSparklinePath(pings: number[], width: number, height: number): string {
-  if (pings.length < 2) return ''
-  const min = Math.min(...pings)
-  const max = Math.max(...pings)
-  const range = max - min || 1
-  return pings
-    .map((p, i) => {
-      const x = (i / (pings.length - 1)) * width
-      const y = height - 2 - ((p - min) / range) * (height - 4)
-      return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`
-    })
-    .join(' ')
-}
-
 export function isPoolServer(s: ServerInfo): boolean {
   if (s.is_pool) return true
   const proto = (s.protocol || '').toUpperCase()
@@ -1032,21 +1018,27 @@ export default function Servers({ notify, status, refresh }: Props) {
 
                   {pingHistory.length > 1 && (
                     <div
-                      style={{ display: 'flex', alignItems: 'center', gap: 6 }}
-                      title={`Задержка: ${activeServer.ping_ms} мс | Джиттер: ±${jitterVal} мс (разброс пинга) | Мин: ${Math.min(...pingHistory)} мс, Макс: ${Math.max(...pingHistory)} мс`}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: 5,
+                        padding: '2px 8px',
+                        borderRadius: 6,
+                        background: jitterVal > 25 ? 'rgba(239, 68, 68, 0.12)' : jitterVal > 10 ? 'rgba(234, 179, 8, 0.12)' : 'rgba(34, 197, 94, 0.12)',
+                        border: `1px solid ${jitterVal > 25 ? 'rgba(239, 68, 68, 0.35)' : jitterVal > 10 ? 'rgba(234, 179, 8, 0.35)' : 'rgba(34, 197, 94, 0.35)'}`,
+                        fontSize: 11,
+                      }}
+                      title={`Задержка: ${activeServer.ping_ms} мс | Джиттер: ±${jitterVal} мс (разброс задержки) | Мин: ${Math.min(...pingHistory)} мс, Макс: ${Math.max(...pingHistory)} мс`}
                     >
-                      <span style={{ fontSize: 10, color: '#94a3b8' }}>джиттер:</span>
-                      <svg width="68" height="18" style={{ overflow: 'visible', verticalAlign: 'middle' }}>
-                        <path
-                          d={buildSparklinePath(pingHistory, 68, 18)}
-                          fill="none"
-                          stroke={jitterVal > 30 ? '#ef4444' : jitterVal > 15 ? '#eab308' : '#38bdf8'}
-                          strokeWidth="2"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                      </svg>
-                      <span style={{ fontSize: 10.5, fontFamily: 'Consolas, monospace', color: jitterVal > 30 ? '#ef4444' : jitterVal > 15 ? '#eab308' : '#38bdf8' }}>
+                      <span>📶</span>
+                      <span style={{ color: 'var(--muted)', fontSize: 10.5 }}>Джиттер:</span>
+                      <span
+                        style={{
+                          fontFamily: 'Consolas, monospace',
+                          fontWeight: 600,
+                          color: jitterVal > 25 ? '#ef4444' : jitterVal > 10 ? '#eab308' : '#22c55e',
+                        }}
+                      >
                         ±{jitterVal} мс
                       </span>
                     </div>

@@ -126,11 +126,41 @@ pub fn read_direct_bytes() -> Option<(u64, u64)> {
             let s = String::from_utf8_lossy(&out.stdout);
             return parse_iptables_direct_bytes(&s);
         }
+
+        // Если цепочка слетела (например, сброс правил Netfilter в KeeneticOS ndm),
+        // автоматически восстанавливаем правила на лету и повторяем чтение
+        if init_direct_iptables() {
+            if let Ok(retry_out) = std::process::Command::new("iptables")
+                .args(["-t", "filter", "-L", DIRECT_CHAIN, "-v", "-n", "-x"])
+                .output()
+            {
+                if retry_out.status.success() {
+                    let s = String::from_utf8_lossy(&retry_out.stdout);
+                    return parse_iptables_direct_bytes(&s);
+                }
+            }
+        }
+
         None
     }
     #[cfg(not(target_os = "linux"))]
     {
         None
+    }
+}
+
+/// Проверка фактического присутствия цепочки XKEEN_DIRECT в FORWARD
+pub fn is_direct_iptables_active() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let check = std::process::Command::new("iptables")
+            .args(["-t", "filter", "-C", "FORWARD", "-j", DIRECT_CHAIN])
+            .output();
+        check.map_or(false, |o| o.status.success())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
     }
 }
 

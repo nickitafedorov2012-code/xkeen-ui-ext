@@ -547,6 +547,14 @@ pub fn spawn_zapret_monitor(state: AppState) {
                     }
                 }
 
+                // Проверка целостности аппаратного учёта прямого трафика (цепочка XKEEN_DIRECT)
+                if !crate::direct_traffic::is_direct_iptables_active() {
+                    log_w!("[WATCHDOG] ⚠️ Цепочка XKEEN_DIRECT отсутствует в iptables FORWARD (сброс правил KeeneticOS ndm)! Восстановление...");
+                    if crate::direct_traffic::init_direct_iptables() {
+                        log_i!("[WATCHDOG] ✓ Цепочка XKEEN_DIRECT успешно восстановлена в iptables");
+                    }
+                }
+
                 // NET-01: Контроль здоровья DNS-редиректа на порт 1053 во избежание блэкаута LAN
                 let dns_redirect_active = tokio::process::Command::new("sh")
                     .arg("-c")

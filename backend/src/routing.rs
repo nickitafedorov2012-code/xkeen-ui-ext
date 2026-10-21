@@ -192,11 +192,13 @@ pub fn parse_provider_urls(yaml: &str) -> std::collections::BTreeMap<String, Str
                 cur_provider = Some(trimmed.trim_end_matches(':').to_string());
                 continue;
             }
-            if trimmed.starts_with("url:") {
+            if line.starts_with("    url:") || (trimmed.starts_with("url:") && !line.starts_with("      ")) {
                 if let Some(ref p) = cur_provider {
-                    let val = trimmed.trim_start_matches("url:").trim().trim_matches('"').trim_matches('\'').to_string();
-                    if !val.is_empty() {
-                        out.insert(p.clone(), val);
+                    if !out.contains_key(p) {
+                        let val = trimmed.trim_start_matches("url:").trim().trim_matches('"').trim_matches('\'').to_string();
+                        if !val.is_empty() {
+                            out.insert(p.clone(), val);
+                        }
                     }
                 }
             }
@@ -395,6 +397,87 @@ pub fn add_file_provider_to_yaml(
         out.push(new_block_formatted);
     }
 
+    Ok(out.join(eol))
+}
+
+/// Преобразовать существующий HTTP-провайдер в локальный file-провайдер (type: file).
+/// Используется для предотвращения запросов ядра Mihomo с User-Agent: ClashMeta к провайдерам,
+/// которые отдают урезанные/технические имена серверов ObsV-.
+pub fn convert_http_provider_to_file_in_yaml(yaml: &str, id: &str, file_path: &str) -> Result<String, String> {
+    let id_trimmed = id.trim();
+    if id_trimmed.is_empty() {
+        return Err("ID провайдера не может быть пустым".into());
+    }
+    let eol = if yaml.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut out = Vec::new();
+    let mut in_providers = false;
+    let mut in_target = false;
+    let mut target_found = false;
+    let mut path_written = false;
+
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+
+        if line.trim_end() == "proxy-providers:" {
+            in_providers = true;
+            in_target = false;
+            out.push(line.to_string());
+            continue;
+        }
+        if in_providers && is_top {
+            in_providers = false;
+            in_target = false;
+            out.push(line.to_string());
+            continue;
+        }
+        if in_providers {
+            if line.starts_with("  ") && !line.starts_with("   ") && trimmed.ends_with(':') && !trimmed.starts_with('-') {
+                let prov_name = trimmed.trim_end_matches(':');
+                if prov_name.eq_ignore_ascii_case(id_trimmed) {
+                    in_target = true;
+                    target_found = true;
+                    path_written = false;
+                    out.push(line.to_string());
+                    continue;
+                } else {
+                    in_target = false;
+                }
+            }
+
+            if in_target {
+                if line.starts_with("    type:") {
+                    out.push("    type: file".to_string());
+                    if !path_written {
+                        out.push(format!("    path: \"{file_path}\""));
+                        path_written = true;
+                    }
+                    continue;
+                }
+                if line.starts_with("    path:") {
+                    if !path_written {
+                        out.push(format!("    path: \"{file_path}\""));
+                        path_written = true;
+                    }
+                    continue;
+                }
+                // Пропускаем url, interval и exclude-filter на верхнем уровне провайдера (4 пробела)
+                if line.starts_with("    url:")
+                    || line.starts_with("    interval:")
+                    || line.starts_with("    exclude-filter:")
+                {
+                    continue;
+                }
+                out.push(line.to_string());
+                continue;
+            }
+        }
+        out.push(line.to_string());
+    }
+
+    if !target_found {
+        return Err(format!("Провайдер '{id_trimmed}' не найден в config.yaml"));
+    }
     Ok(out.join(eol))
 }
 
@@ -2622,13 +2705,13 @@ pub fn apply_ignore_to_groups(yaml: &str, ignore: &[String]) -> Result<String, S
     }
     Ok(out.join("\n"))
 }
-/// Обновление exclude-filter провайдеров (proxy-providers): добавление игнор-подстрок.
-/// saved хранит оригинальные фильтры для восстановления при очистке игнор-листа.
-pub fn apply_ignore_to_providers(yaml: &str, ignore: &[String], saved: &mut std::collections::BTreeMap<String, String>) -> String {
-    let ig: Vec<String> = ignore.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
-    let mut out: Vec<String> = Vec::with_capacity(yaml.lines().count() + 4);
+/// Очистка и запрет exclude-filter у провайдеров (proxy-providers).
+/// По железному правилу проекта: exclude-filter в провайдерах категорически запрещён,
+/// чтобы ядро не срезало серверы Hysteria2 и RU с 13 до 10.
+pub fn apply_ignore_to_providers(yaml: &str, _ignore: &[String], saved: &mut std::collections::BTreeMap<String, String>) -> String {
+    saved.clear();
+    let mut out: Vec<String> = Vec::with_capacity(yaml.lines().count());
     let mut in_providers = false;
-    let mut cur_provider: Option<String> = None;
 
     for line in yaml.lines() {
         let trimmed = line.trim();
@@ -2636,52 +2719,17 @@ pub fn apply_ignore_to_providers(yaml: &str, ignore: &[String], saved: &mut std:
 
         if line.trim_end() == "proxy-providers:" {
             in_providers = true;
-            cur_provider = None;
             out.push(line.to_string());
             continue;
         }
         if in_providers && is_top {
             in_providers = false;
-            cur_provider = None;
             out.push(line.to_string());
             continue;
         }
         if in_providers {
-            // имя провайдера: строка "  name:" (ровно 2 пробела, ключ мапы)
-            if line.starts_with("  ") && !line.starts_with("   ") && trimmed.ends_with(':') && !trimmed.starts_with('-') {
-                cur_provider = Some(trimmed.trim_end_matches(':').to_string());
-                out.push(line.to_string());
-                continue;
-            }
             if trimmed.starts_with("exclude-filter:") {
-                if let Some(p) = &cur_provider {
-                    if ig.is_empty() {
-                        if let Some(orig) = saved.get(p) {
-                            out.push(format!("    exclude-filter: '{}'", orig.replace('\'', "''")));
-                        } else {
-                            out.push(line.to_string());
-                        }
-                        continue;
-                    }
-                    let orig = saved.entry(p.clone()).or_insert_with(|| extract_filter_value(trimmed));
-                    let mut parts: Vec<String> = orig
-                        .split('|')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    for i in &ig {
-                        let trimmed_i = i.trim();
-                        if trimmed_i.is_empty() || trimmed_i.chars().all(|c| c == '?' || c.is_whitespace() || c == '[' || c == ']') {
-                            continue;
-                        }
-                        let esc_i = regex_escape(trimmed_i);
-                        if !parts.iter().any(|p2| p2.eq_ignore_ascii_case(&esc_i)) {
-                            parts.push(esc_i);
-                        }
-                    }
-                    out.push(format!("    exclude-filter: '{}'", parts.join("|").replace('\'', "''")));
-                    continue;
-                }
+                continue;
             }
             out.push(line.to_string());
         } else {
@@ -2689,14 +2737,6 @@ pub fn apply_ignore_to_providers(yaml: &str, ignore: &[String], saved: &mut std:
         }
     }
     out.join("\n")
-}
-
-fn extract_filter_value(trimmed: &str) -> String {
-    let v = trimmed.strip_prefix("exclude-filter:").unwrap_or("").trim();
-    let v = v.strip_prefix('"').unwrap_or(v);
-    let v = v.strip_suffix('"').unwrap_or(v);
-    let v = v.strip_prefix('\'').unwrap_or(v);
-    v.strip_suffix('\'').unwrap_or(v).to_string()
 }
 
 /// Извлечение порта прозрачного перехвата (redir-port) из config.yaml Mihomo
@@ -3065,25 +3105,14 @@ mod tests {
     }
 
     #[test]
-    fn provider_filter_append_and_restore()
+    fn test_provider_filters_are_completely_stripped_and_never_resurrected()
     {
-        let pyaml = "proxy-providers:
-  geodema:
-    type: http
-    exclude-filter: \"(?i)DIRECT|Russia|RU\"
-    interval: 43200
-  geodema2:
-    type: http
-proxy-groups:
-  - name: PROXY
-    type: select
-";
+        let pyaml = "proxy-providers:\n  geodema:\n    type: http\n    exclude-filter: \"(?i)DIRECT|Russia|RU\"\n    interval: 43200\n  geodema2:\n    type: http\nproxy-groups:\n  - name: PROXY\n    type: select\n";
         let mut saved = std::collections::BTreeMap::new();
-        let out = apply_ignore_to_providers(pyaml, &["Германия".to_string(), "????????? [? ?????????? ]".to_string()], &mut saved);
-        assert!(out.contains("exclude-filter: '(?i)DIRECT|Russia|RU|Германия'"), "OUT={out}");
-        assert_eq!(saved.len(), 1);
-        let restored = apply_ignore_to_providers(&out, &[], &mut saved);
-        assert!(restored.contains("exclude-filter: '(?i)DIRECT|Russia|RU'"), "OUT={restored}");
+        saved.insert("geodema".to_string(), "(?i)DIRECT|Russia|RU".to_string());
+        let out = apply_ignore_to_providers(pyaml, &["Германия".to_string()], &mut saved);
+        assert!(!out.contains("exclude-filter"), "proxy-providers must NEVER contain exclude-filter: OUT={out}");
+        assert!(saved.is_empty(), "saved provider_filters map must be cleared to prevent resurrection");
     }
 
     #[test]
@@ -3939,15 +3968,58 @@ rules:
     }
 
     #[test]
-    fn test_bug19_provider_filters_preserved_in_apply_routing() {
-        // BUG-19: Provider filters must be preserved when apply_routing_with_filters is called
-        let yaml = "proxy-providers:\n  myprov:\n    type: http\n    url: \"https://a.b/c\"\n    exclude-filter: 'existing'\nrules:\n  - MATCH,DIRECT\n";
+    fn test_anti_regression_exclude_filter_completely_removed_from_providers_in_apply_routing() {
+        // Anti-regression: Exclude-filter in proxy-providers must be stripped to preserve all 13 servers
+        let yaml = "proxy-providers:\n  myprov:\n    type: http\n    url: \"https://a.b/c\"\n    exclude-filter: '(?i)DIRECT|Russia|RU'\nproxy-groups:\n  - name: Fastest\n    type: url-test\n    use:\n      - myprov\nrules:\n  - MATCH,DIRECT\n";
         let mut app_cfg = crate::config::AppConfig::default();
         app_cfg.ignore_servers = vec!["BadNode".to_string()];
         let mut filters = std::collections::BTreeMap::new();
+        filters.insert("myprov".to_string(), "(?i)DIRECT|Russia|RU".to_string());
         let (out, _) = apply_routing_with_filters(yaml, &app_cfg, &mut filters).expect("applied");
-        assert!(out.contains("BadNode"), "Exclude-filter must include ignored server");
-        assert_eq!(filters.get("myprov").map(|s| s.as_str()), Some("existing"), "Original filter must be preserved in map");
+        assert!(!out.contains("exclude-filter: '(?i)DIRECT|Russia|RU'"), "Provider exclude-filter must be completely stripped");
+        assert!(filters.is_empty(), "Filters map must be cleared to prevent resurrection");
+    }
+
+    #[test]
+    fn test_parse_provider_urls_does_not_get_overwritten_by_health_check() {
+        let yaml = r#"
+proxy-providers:
+  geodema2:
+    type: http
+    url: "https://my.subscription.org/sub/token123"
+    interval: 43200
+    health-check:
+      enable: true
+      url: "https://www.gstatic.com/generate_204"
+      interval: 300
+"#;
+        let map = parse_provider_urls(yaml);
+        assert_eq!(map.get("geodema2"), Some(&"https://my.subscription.org/sub/token123".to_string()));
+        assert_ne!(map.get("geodema2"), Some(&"https://www.gstatic.com/generate_204".to_string()));
+    }
+
+    #[test]
+    fn test_convert_http_provider_to_file_in_yaml() {
+        let yaml = r#"
+proxy-providers:
+  geodema2:
+    type: http
+    url: "https://my.subscription.org/sub/token123"
+    interval: 43200
+    exclude-filter: "(?i)DIRECT|Russia|RU"
+    health-check:
+      enable: true
+      url: "https://www.gstatic.com/generate_204"
+      interval: 300
+"#;
+        let converted = convert_http_provider_to_file_in_yaml(yaml, "geodema2", "./providers/geodema2.yaml").expect("converted");
+        assert!(converted.contains("    type: file"), "Must be type: file");
+        assert!(converted.contains("    path: \"./providers/geodema2.yaml\""), "Must contain path");
+        assert!(!converted.contains("    url: \"https://my.subscription.org"), "Provider-level url must be removed");
+        assert!(!converted.contains("    interval: 43200"), "Provider-level interval must be removed");
+        assert!(!converted.contains("exclude-filter"), "exclude-filter must be stripped");
+        assert!(converted.contains("health-check:"), "health-check must be preserved");
+        assert!(converted.contains("url: \"https://www.gstatic.com/generate_204\""), "health-check url must be preserved");
     }
 
     #[test]

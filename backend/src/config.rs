@@ -1016,6 +1016,7 @@ pub fn parse_config_strict(content: &str) -> Result<AppConfig, String> {
     let mut cfg: AppConfig = serde_json::from_value(base)
         .map_err(|e| format!("Некорректная структура конфигурации: {e}"))?;
     cfg.failover.migrate_priority();
+    cfg.provider_filters.clear();
     Ok(cfg)
 }
 
@@ -1152,7 +1153,9 @@ pub async fn save(path: &Path, cfg: &AppConfig) -> Result<(), String> {
         return Err("Отказ сохранения: попытка сохранить включенную авторизацию с пустым хэшем пароля".to_string());
     }
 
-    let serialized = serde_json::to_string_pretty(cfg).map_err(|e| e.to_string())?;
+    let mut cfg_to_save = cfg.clone();
+    cfg_to_save.provider_filters.clear();
+    let serialized = serde_json::to_string_pretty(&cfg_to_save).map_err(|e| e.to_string())?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let _ = tokio::fs::create_dir_all(parent).await;
 

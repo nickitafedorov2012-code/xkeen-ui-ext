@@ -84,7 +84,7 @@ describe('v1.9.3 Anti-Regression: Layout, Telemetry & Direction Bug Fixes', () =
     expect(serversContent).toContain('active-node-telemetry')
     expect(serversContent).toContain('Live-трафик:')
     expect(serversContent).toContain('👑 Основной сервер')
-    expect(serversContent).toContain('джиттер:')
+    expect(serversContent).toMatch(/[Дд]життер:/)
   })
 
   it('ensures PROXY and pool groups are filtered from individual device server dropdowns across Devices, DeviceRow, and DeviceRoutingModal', () => {

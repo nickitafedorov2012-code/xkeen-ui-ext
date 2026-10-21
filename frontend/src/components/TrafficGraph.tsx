@@ -35,8 +35,8 @@ interface TrafficPayload {
 interface TrafficHistoryItem {
   directDown: number
   directUp: number
-  proxyDown: number
-  proxyUp: number
+  tunnelDown: number
+  tunnelUp: number
 }
 
 function formatSpeed(bytesPerSec: number): string {
@@ -56,7 +56,7 @@ function formatBytes(bytes: number): string {
 
 export default function TrafficGraph() {
   const [history, setHistory] = useState<TrafficHistoryItem[]>(() =>
-    Array(60).fill({ directDown: 0, directUp: 0, proxyDown: 0, proxyUp: 0 })
+    Array(60).fill({ directDown: 0, directUp: 0, tunnelDown: 0, tunnelUp: 0 })
   )
 
   const [currentDirect, setCurrentDirect] = useState<SpeedPair>({ down: 0, up: 0 })
@@ -64,8 +64,10 @@ export default function TrafficGraph() {
   const [currentWhitelist, setCurrentWhitelist] = useState<SpeedPair>({ down: 0, up: 0 })
   const [isWhitelistActive, setIsWhitelistActive] = useState(false)
   const [whitelistBytes, setWhitelistBytes] = useState(0)
+  const [proxyBytes, setProxyBytes] = useState(0)
+  const [directBytes, setDirectBytes] = useState(0)
   const [peakDirect, setPeakDirect] = useState(0)
-  const [peakProxy, setPeakProxy] = useState(0)
+  const [peakTunnel, setPeakTunnel] = useState(0)
   const [isDirectEstimated, setIsDirectEstimated] = useState(false)
 
   // Режим отображения: 'down' (входящий) | 'up' (исходящий) | 'both' (сумма)
@@ -83,46 +85,60 @@ export default function TrafficGraph() {
         const data = await apiGet<TrafficPayload>('traffic/poll')
         if (!activeRef.current || !data) return
 
-        const pDown = data.proxy?.down ?? data.down ?? 0
-        const pUp = data.proxy?.up ?? data.up ?? 0
+        const wlActive = Boolean(data.whitelist_active ?? data.whitelist?.active)
         const dDown = data.direct?.down ?? 0
         const dUp = data.direct?.up ?? 0
-        const wlActive = Boolean(data.whitelist_active ?? data.whitelist?.active)
+        const pDown = data.proxy?.down ?? 0
+        const pUp = data.proxy?.up ?? 0
+        const wlDown = data.whitelist?.down ?? (wlActive ? (data.down ?? 0) : 0)
+        const wlUp = data.whitelist?.up ?? (wlActive ? (data.up ?? 0) : 0)
+
+        const activeTunnelDown = wlActive ? wlDown : (data.proxy?.down ?? data.down ?? 0)
+        const activeTunnelUp = wlActive ? wlUp : (data.proxy?.up ?? data.up ?? 0)
 
         setIsWhitelistActive(wlActive)
-        if (data.whitelist) {
-          setCurrentWhitelist({ down: data.whitelist.down, up: data.whitelist.up })
-        }
+        setCurrentWhitelist({ down: wlDown, up: wlUp })
+        setCurrentProxy({ down: pDown, up: pUp })
+        setCurrentDirect({ down: dDown, up: dUp, estimated: data.direct?.estimated, source: data.direct?.source })
+        setIsDirectEstimated(Boolean(data.direct?.estimated))
+
         if (typeof data.whitelist_bytes === 'number') {
           setWhitelistBytes(data.whitelist_bytes)
         }
-
-        setCurrentDirect({ down: dDown, up: dUp, estimated: data.direct?.estimated, source: data.direct?.source })
-        setCurrentProxy({ down: pDown, up: pUp })
-        setIsDirectEstimated(Boolean(data.direct?.estimated))
+        if (typeof data.proxy_bytes === 'number') {
+          setProxyBytes(data.proxy_bytes)
+        }
+        if (typeof data.direct_bytes === 'number') {
+          setDirectBytes(data.direct_bytes)
+        }
 
         setPeakDirect((prev) => Math.max(prev, dDown + dUp))
-        setPeakProxy((prev) => Math.max(prev, pDown + pUp))
+        setPeakTunnel((prev) => Math.max(prev, activeTunnelDown + activeTunnelUp))
 
         if (!initialHistoryLoaded.current && Array.isArray(data.history) && data.history.length > 0) {
-          const mapped: TrafficHistoryItem[] = data.history.map((h) => ({
-            directDown: h.direct?.down ?? 0,
-            directUp: h.direct?.up ?? 0,
-            proxyDown: h.proxy?.down ?? h.down ?? 0,
-            proxyUp: h.proxy?.up ?? h.up ?? 0,
-          }))
+          const mapped: TrafficHistoryItem[] = data.history.map((h) => {
+            const hWl = Boolean(data.whitelist_active ?? h.whitelist?.active)
+            const tDown = hWl ? (h.whitelist?.down ?? h.down ?? 0) : (h.proxy?.down ?? h.down ?? 0)
+            const tUp = hWl ? (h.whitelist?.up ?? h.up ?? 0) : (h.proxy?.up ?? h.up ?? 0)
+            return {
+              directDown: h.direct?.down ?? 0,
+              directUp: h.direct?.up ?? 0,
+              tunnelDown: tDown,
+              tunnelUp: tUp,
+            }
+          })
 
           let maxD = dDown + dUp
-          let maxP = pDown + pUp
+          let maxT = activeTunnelDown + activeTunnelUp
           for (const item of mapped) {
             maxD = Math.max(maxD, item.directDown + item.directUp)
-            maxP = Math.max(maxP, item.proxyDown + item.proxyUp)
+            maxT = Math.max(maxT, item.tunnelDown + item.tunnelUp)
           }
           setPeakDirect((prev) => Math.max(prev, maxD))
-          setPeakProxy((prev) => Math.max(prev, maxP))
+          setPeakTunnel((prev) => Math.max(prev, maxT))
 
           const padded = Array(Math.max(0, 60 - mapped.length))
-            .fill({ directDown: 0, directUp: 0, proxyDown: 0, proxyUp: 0 })
+            .fill({ directDown: 0, directUp: 0, tunnelDown: 0, tunnelUp: 0 })
             .concat(mapped)
           setHistory(padded.slice(-60))
           initialHistoryLoaded.current = true
@@ -132,8 +148,8 @@ export default function TrafficGraph() {
             {
               directDown: dDown,
               directUp: dUp,
-              proxyDown: pDown,
-              proxyUp: pUp,
+              tunnelDown: activeTunnelDown,
+              tunnelUp: activeTunnelUp,
             },
           ])
         }
@@ -151,21 +167,21 @@ export default function TrafficGraph() {
   }, [])
 
   // Вычисление отображаемого значения в зависимости от режима
-  const getValue = (item: TrafficHistoryItem, type: 'direct' | 'proxy') => {
+  const getValue = (item: TrafficHistoryItem, type: 'direct' | 'tunnel') => {
     if (type === 'direct') {
       if (metricMode === 'down') return item.directDown
       if (metricMode === 'up') return item.directUp
       return item.directDown + item.directUp
     } else {
-      if (metricMode === 'down') return item.proxyDown
-      if (metricMode === 'up') return item.proxyUp
-      return item.proxyDown + item.proxyUp
+      if (metricMode === 'down') return item.tunnelDown
+      if (metricMode === 'up') return item.tunnelUp
+      return item.tunnelDown + item.tunnelUp
     }
   }
 
   // Стабильное квантование шкалы скорости без скачков и дрожания
   const rawMax = Math.max(
-    ...history.map((h) => Math.max(getValue(h, 'direct'), getValue(h, 'proxy'))),
+    ...history.map((h) => Math.max(getValue(h, 'direct'), getValue(h, 'tunnel'))),
     1024 * 32
   )
 
@@ -199,7 +215,7 @@ export default function TrafficGraph() {
   const height = 130
   const step = width / (history.length - 1)
 
-  const getPoints = (type: 'direct' | 'proxy') => {
+  const getPoints = (type: 'direct' | 'tunnel') => {
     return history.map((d, i) => {
       const x = i * step
       const val = getValue(d, type)
@@ -209,7 +225,7 @@ export default function TrafficGraph() {
   }
 
   const directPoints = getPoints('direct')
-  const proxyPoints = getPoints('proxy')
+  const tunnelPoints = getPoints('tunnel')
 
   const lineD = (pts: { x: number; y: number }[]) =>
     pts.reduce((acc, p, i) => `${acc} ${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`, '')
@@ -219,8 +235,9 @@ export default function TrafficGraph() {
     return `${l} L ${width} ${height} L 0 ${height} Z`
   }
 
-  const totalDown = currentDirect.down + currentProxy.down
-  const totalUp = currentDirect.up + currentProxy.up
+  const activeTunnelDown = isWhitelistActive ? currentWhitelist.down : currentProxy.down
+  const activeTunnelUp = isWhitelistActive ? currentWhitelist.up : currentProxy.up
+  const totalSpeed = currentDirect.down + currentDirect.up + activeTunnelDown + activeTunnelUp
 
   return (
     <div className="traffic-graph-card card">
@@ -229,19 +246,20 @@ export default function TrafficGraph() {
           <span className="traffic-icon">📈</span>
           <div>
             <h3 style={{ margin: 0, fontSize: 15 }}>Трафик в реальном времени</h3>
+            {/* Строго два канала: 🟢 Прямой трафик (всегда) + активный туннель (БС фиолетовый / VPS синий) */}
             <div className="traffic-legend-chips">
+              <span className="legend-chip direct">
+                <span className="legend-dot green" /> Прямой трафик {isDirectEstimated && <span style={{ opacity: 0.75, fontSize: '0.85em' }}>(оценка)</span>}
+              </span>
               {isWhitelistActive ? (
                 <span className="legend-chip whitelist" style={{ color: '#c084fc' }}>
-                  <span className="legend-dot purple" style={{ background: '#a855f7' }} /> 🟣 Туннель белых списков
+                  <span className="legend-dot purple" style={{ background: '#a855f7' }} /> Туннель белых списков
                 </span>
               ) : (
-                <span className="legend-chip direct">
-                  <span className="legend-dot green" /> Прямой трафик {isDirectEstimated && <span style={{ opacity: 0.75, fontSize: '0.85em' }}>(оценка)</span>}
+                <span className="legend-chip proxy">
+                  <span className="legend-dot blue" /> Обычные серверы (VPS)
                 </span>
               )}
-              <span className="legend-chip proxy">
-                <span className="legend-dot blue" /> VPS трафик (Безлимит)
-              </span>
             </div>
           </div>
         </div>
@@ -276,32 +294,38 @@ export default function TrafficGraph() {
           </div>
 
           <div className="traffic-stats">
-            {/* Трафик: Прямой или Белые списки */}
+            {/* Канал 1: 🟢 Прямой трафик — ВСЕГДА отображается */}
+            <div
+              className="traffic-badge direct"
+              title={`Прямой трафик роутера (мимо прокси${isDirectEstimated ? ', оценочный расчёт' : ''})\nНакоплено: ${formatBytes(directBytes)}\nПик: ${formatSpeed(peakDirect)}`}
+            >
+              <span className="badge-label">🟢 Прямой{isDirectEstimated ? ' (оценка)' : ''}:</span>
+              <span className="badge-arrow">↓</span>
+              <span className="badge-val">{formatSpeed(currentDirect.down)}</span>
+              <span className="badge-arrow">↑</span>
+              <span className="badge-val">{formatSpeed(currentDirect.up)}</span>
+            </div>
+
+            {/* Канал 2: Проксированный туннель — динамически БС или VPS (никогда не оба сразу) */}
             {isWhitelistActive ? (
               <div
                 className="traffic-badge whitelist"
                 style={{ background: 'rgba(168, 85, 247, 0.12)', borderColor: 'rgba(168, 85, 247, 0.4)' }}
-                title={`Туннель белых списков (ноды [БС] с лимитом)\nНакоплено: ${formatBytes(whitelistBytes)}`}
+                title={`Туннель белых списков (ноды [БС] с лимитом)\nНакоплено: ${formatBytes(whitelistBytes)}\nПик: ${formatSpeed(peakTunnel)}`}
               >
                 <span className="badge-label" style={{ color: '#c084fc', fontWeight: 600 }}>🟣 БС:</span>
                 <span className="badge-arrow" style={{ color: '#c084fc' }}>↓</span>
-                <span className="badge-val">{formatSpeed(currentWhitelist.down > 0 ? currentWhitelist.down : currentDirect.down)}</span>
+                <span className="badge-val">{formatSpeed(currentWhitelist.down)}</span>
                 <span className="badge-arrow" style={{ color: '#c084fc' }}>↑</span>
-                <span className="badge-val">{formatSpeed(currentWhitelist.up > 0 ? currentWhitelist.up : currentDirect.up)}</span>
+                <span className="badge-val">{formatSpeed(currentWhitelist.up)}</span>
               </div>
-            ) : (
-              <div className="traffic-badge direct" title={`Прямой трафик роутера (мимо прокси${isDirectEstimated ? ', оценочный расчёт' : ''})\nПик: ${formatSpeed(peakDirect)}`}>
-                <span className="badge-label">🟢 Прямой{isDirectEstimated ? ' (оценка)' : ''}:</span>
-                <span className="badge-arrow">↓</span>
-                <span className="badge-val">{formatSpeed(currentDirect.down)}</span>
-                <span className="badge-arrow">↑</span>
-                <span className="badge-val">{formatSpeed(currentDirect.up)}</span>
-              </div>
-            )}
+            ) : null}
 
-            {/* Синий бейдж: Проксированный трафик (скрываем при активном аварийном туннеле белых списков во избежание дублирования) */}
             {!isWhitelistActive && (
-              <div className="traffic-badge proxy" title={`Трафик через серверы VPS (безлимитные)\nПик: ${formatSpeed(peakProxy)}`}>
+              <div
+                className="traffic-badge proxy"
+                title={`Трафик через серверы VPS (безлимитные)\nНакоплено: ${formatBytes(proxyBytes)}\nПик: ${formatSpeed(peakTunnel)}`}
+              >
                 <span className="badge-label">🔵 VPS:</span>
                 <span className="badge-arrow">↓</span>
                 <span className="badge-val">{formatSpeed(currentProxy.down)}</span>
@@ -310,10 +334,10 @@ export default function TrafficGraph() {
               </div>
             )}
 
-            {/* Суммарный трафик */}
-            <div className="traffic-badge total" title="Суммарная нагрузка на канал WAN">
+            {/* Суммарный трафик: честная сумма прямого и активного туннеля */}
+            <div className="traffic-badge total" title="Суммарная нагрузка на канал WAN (входящий + исходящий трафик)">
               <span className="badge-label">Всего:</span>
-              <span className="badge-val">{formatSpeed(totalDown + totalUp)}</span>
+              <span className="badge-val">{formatSpeed(totalSpeed)}</span>
             </div>
           </div>
         </div>
@@ -322,15 +346,15 @@ export default function TrafficGraph() {
       <div className="traffic-svg-wrapper">
         <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className="traffic-svg">
           <defs>
-            {/* Градиент первого канала (Прямой или Белые списки) */}
+            {/* Зелёный градиент прямого трафика (Канал 1) */}
             <linearGradient id="directGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor={isWhitelistActive ? "#a855f7" : "#22c55e"} stopOpacity="0.32" />
-              <stop offset="100%" stopColor={isWhitelistActive ? "#a855f7" : "#22c55e"} stopOpacity="0.0" />
+              <stop offset="0%" stopColor="#22c55e" stopOpacity="0.25" />
+              <stop offset="100%" stopColor="#22c55e" stopOpacity="0.0" />
             </linearGradient>
-            {/* Синий градиент (Проксированный трафик) */}
-            <linearGradient id="proxyGrad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.32" />
-              <stop offset="100%" stopColor="#38bdf8" stopOpacity="0.0" />
+            {/* Градиент активного туннеля (Канал 2: фиолетовый БС / синий VPS) */}
+            <linearGradient id="tunnelGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={isWhitelistActive ? "#a855f7" : "#38bdf8"} stopOpacity="0.32" />
+              <stop offset="100%" stopColor={isWhitelistActive ? "#a855f7" : "#38bdf8"} stopOpacity="0.0" />
             </linearGradient>
           </defs>
 
@@ -341,23 +365,23 @@ export default function TrafficGraph() {
 
           {/* Заливки областей */}
           <path d={areaD(directPoints)} fill="url(#directGrad)" />
-          <path d={areaD(proxyPoints)} fill="url(#proxyGrad)" />
+          <path d={areaD(tunnelPoints)} fill="url(#tunnelGrad)" />
 
-          {/* Линия первого канала (Прямой или Белые списки) */}
+          {/* Зеленая линия прямого трафика (Канал 1: Direct) */}
           <path
             d={lineD(directPoints)}
             fill="none"
-            stroke={isWhitelistActive ? "#a855f7" : "#22c55e"}
+            stroke="#22c55e"
             strokeWidth="2.5"
             strokeLinecap="round"
             strokeLinejoin="round"
           />
 
-          {/* Синяя линия (Проксированный трафик) */}
+          {/* Линия активного туннеля (Канал 2: БС фиолетовый / VPS синий) */}
           <path
-            d={lineD(proxyPoints)}
+            d={lineD(tunnelPoints)}
             fill="none"
-            stroke="#38bdf8"
+            stroke={isWhitelistActive ? "#a855f7" : "#38bdf8"}
             strokeWidth="2.5"
             strokeLinecap="round"
             strokeLinejoin="round"
