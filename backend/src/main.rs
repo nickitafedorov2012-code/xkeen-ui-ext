@@ -17,10 +17,12 @@ mod watchdog;
 mod speedtest;
 mod notifications;
 pub mod traffic;
+pub mod direct_traffic;
 mod system;
 pub mod adguard;
 pub mod bot;
 pub mod whitelist_catalog;
+pub mod subscription_parser;
 
 use axum::extract::Request;
 use axum::middleware::{self, Next};
@@ -687,6 +689,7 @@ async fn main() {
         .route("/api/providers/toggle", post(api::toggle_provider))
         .route("/api/providers/rename", post(api::rename_provider))
         .route("/api/providers/update", post(api::update_provider))
+        .route("/api/providers/hwid", post(api::update_provider_hwid))
         .route("/api/providers/add", post(api::add_provider))
         .route("/api/providers/delete", post(api::delete_provider))
         // Настройки и логи

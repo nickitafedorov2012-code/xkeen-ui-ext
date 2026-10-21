@@ -72,6 +72,8 @@ export default function SelfDiagnosticsCard({ notify, onSwitchTab, refresh }: Pr
     ? 'Обнаружен сбой службы'
     : 'Состояние неизвестно'
 
+  const hasData = Boolean(diag?.components?.adguard && diag?.components?.mihomo && diag?.components?.zapret && diag?.storage && diag?.iptables)
+
   return (
     <section
       className="card self-diagnostics-card"
@@ -144,7 +146,7 @@ export default function SelfDiagnosticsCard({ notify, onSwitchTab, refresh }: Pr
       </div>
 
       {/* Предупреждения и самолечение (Zero-Touch) */}
-      {diag && (
+      {hasData && diag && (
         <>
           {diag.components.adguard.loop_detected && (
             <div
@@ -228,7 +230,7 @@ export default function SelfDiagnosticsCard({ notify, onSwitchTab, refresh }: Pr
       )}
 
       {/* Сетка компонентов */}
-      {diag ? (
+      {hasData && diag ? (
         <div
           style={{
             display: 'grid',

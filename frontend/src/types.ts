@@ -32,6 +32,7 @@ export interface StatusInfo {
   service_running?: boolean
   service_stopped?: boolean
   router: { model?: string; version?: string; hostname?: string; uptime?: string } | null
+  router_ip?: string | null
   system?: SystemStats | null
   stack_memory?: StackMemoryInfo | null
   whitelist_mode_active?: boolean
@@ -136,6 +137,7 @@ export interface ServerInfo {
   protocol: string
   host: string
   port: number
+  resolved_ip?: string | null
   is_active: boolean
   is_priority: boolean
   is_google_ai?: boolean
@@ -159,6 +161,10 @@ export interface ProviderInfo {
   hwid?: string
   enabled?: boolean
   is_whitelist?: boolean
+  upload_bytes?: number | null
+  download_bytes?: number | null
+  total_bytes?: number | null
+  expire_timestamp?: number | null
 }
 
 export interface ZapretCustomEntry {
@@ -443,6 +449,7 @@ export interface AntigravityStatus {
   events: AntigravityEvent[]
   targets: string[]
   own_proxy: string
+  router_ip?: string | null
   health_check_interval?: number
 }
 

@@ -321,6 +321,9 @@ pub struct AppConfig {
     /// Настройки выделенного режима белых списков (376 domestic domains direct, proxy tunnel).
     #[serde(default)]
     pub whitelist: WhitelistConfig,
+    /// URL оригинальных мобильных V2Ray / Base64 подписок для автообновления
+    #[serde(default)]
+    pub mobile_provider_urls: std::collections::HashMap<String, String>,
 }
 
 /// Платформы и сервисы для игрового режима.
@@ -942,6 +945,7 @@ impl Default for AppConfig {
             whitelist_servers: Vec::new(),
             whitelist_providers: Vec::new(),
             whitelist: WhitelistConfig::default(),
+            mobile_provider_urls: std::collections::HashMap::new(),
         }
     }
 }

@@ -17,6 +17,7 @@ pub static TOTAL_WHITELIST_BYTES: AtomicU64 = AtomicU64::new(0);
 pub static TOTAL_DIRECT_BYTES: AtomicU64 = AtomicU64::new(0);
 pub static TOTAL_PROXY_BYTES: AtomicU64 = AtomicU64::new(0);
 pub static WHITELIST_ACTIVE: AtomicBool = AtomicBool::new(false);
+pub static DIRECT_IS_HARDWARE: AtomicBool = AtomicBool::new(false);
 
 pub fn set_whitelist_active(active: bool) {
     WHITELIST_ACTIVE.store(active, Ordering::Release);
@@ -96,13 +97,14 @@ pub fn get_snapshot_json() -> serde_json::Value {
     let is_wl_active = WHITELIST_ACTIVE.load(Ordering::Relaxed);
 
     let history = get_history_json();
+    let is_hw = DIRECT_IS_HARDWARE.load(Ordering::Relaxed);
     json!({
         "direct": {
             "down": d_down,
             "up": d_up,
             "bytes": d_bytes,
-            "estimated": true,
-            "source": "WAN (/proc/net/dev) - Mihomo (/traffic)"
+            "estimated": !is_hw,
+            "source": if is_hw { "iptables (XKEEN_DIRECT)" } else { "WAN (/proc/net/dev) - Mihomo (/traffic)" }
         },
         "proxy": {
             "down": p_down,
@@ -129,7 +131,7 @@ pub fn get_snapshot_json() -> serde_json::Value {
         "down": if is_wl_active { wl_down } else { p_down },
         "up": if is_wl_active { wl_up } else { p_up },
         "history": history,
-        "estimated": true,
+        "estimated": !is_hw,
     })
 }
 
@@ -222,6 +224,7 @@ pub static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 pub fn shutdown() {
     SHUTDOWN.store(true, Ordering::Release);
     save_stats_to_disk();
+    crate::direct_traffic::cleanup_direct_iptables();
 }
 
 pub fn is_shutdown() -> bool {
@@ -375,12 +378,16 @@ fn read_wan_bytes(wan_ifaces: &[String]) -> (u64, u64) {
     (rx, tx)
 }
 
-/// Подсчет реальной скорости прямого трафика роутера (WAN - PROXY)
+/// Подсчет реальной скорости прямого трафика роутера (аппаратные байты iptables XKEEN_DIRECT либо fallback WAN - PROXY)
 async fn run_wan_polling() {
     let mut last_ifaces = get_wan_interfaces();
     let mut last_ifaces_update = Instant::now();
     let (mut prev_rx, mut prev_tx) = read_wan_bytes(&last_ifaces);
     let mut prev_time = Instant::now();
+
+    let mut prev_direct_rx = 0u64;
+    let mut prev_direct_tx = 0u64;
+    let mut direct_initialized = false;
 
     let mut interval = tokio::time::interval(Duration::from_millis(1000));
     loop {
@@ -424,23 +431,51 @@ async fn run_wan_polling() {
         let total_proxy_down = p_down + wl_down;
         let total_proxy_up = p_up + wl_up;
 
-        let d_down = wan_rx_speed.saturating_sub(total_proxy_down);
-        let d_up = wan_tx_speed.saturating_sub(total_proxy_up);
+        // Точный аппаратный учёт через ядро Linux iptables (цепочка XKEEN_DIRECT)
+        let (d_down, d_up, is_hw) = if let Some((cur_dir_rx, cur_dir_tx)) = crate::direct_traffic::read_direct_bytes() {
+            if !direct_initialized {
+                prev_direct_rx = cur_dir_rx;
+                prev_direct_tx = cur_dir_tx;
+                direct_initialized = true;
+                (0, 0, true)
+            } else {
+                let delta_rx = cur_dir_rx.saturating_sub(prev_direct_rx);
+                let delta_tx = cur_dir_tx.saturating_sub(prev_direct_tx);
+                prev_direct_rx = cur_dir_rx;
+                prev_direct_tx = cur_dir_tx;
+
+                let dir_down_speed = (delta_rx as f64 / dt) as u64;
+                let dir_up_speed = (delta_tx as f64 / dt) as u64;
+                TOTAL_DIRECT_BYTES.fetch_add(delta_rx + delta_tx, Ordering::Relaxed);
+                (dir_down_speed, dir_up_speed, true)
+            }
+        } else {
+            // Безопасный fallback (Windows-среда разработки или при недоступности iptables)
+            let d_down = wan_rx_speed.saturating_sub(total_proxy_down);
+            let d_up = wan_tx_speed.saturating_sub(total_proxy_up);
+            TOTAL_DIRECT_BYTES.fetch_add(d_down + d_up, Ordering::Relaxed);
+            (d_down, d_up, false)
+        };
 
         DIRECT_DOWN.store(d_down, Ordering::Relaxed);
         DIRECT_UP.store(d_up, Ordering::Relaxed);
-        TOTAL_DIRECT_BYTES.fetch_add(d_down + d_up, Ordering::Relaxed);
+        DIRECT_IS_HARDWARE.store(is_hw, Ordering::Relaxed);
 
         let is_wl_active = WHITELIST_ACTIVE.load(Ordering::Relaxed);
 
         record_history_point(json!({
-            "direct": { "down": d_down, "up": d_up, "estimated": true, "source": "WAN - Mihomo" },
+            "direct": { 
+                "down": d_down, 
+                "up": d_up, 
+                "estimated": !is_hw, 
+                "source": if is_hw { "iptables (XKEEN_DIRECT)" } else { "WAN - Mihomo" } 
+            },
             "proxy": { "down": p_down, "up": p_up, "source": "Mihomo VPS" },
             "whitelist": { "down": wl_down, "up": wl_up, "active": is_wl_active },
             "total": { "down": wan_rx_speed, "up": wan_tx_speed, "source": "WAN" },
             "down": if is_wl_active { wl_down } else { p_down },
             "up": if is_wl_active { wl_up } else { p_up },
-            "estimated": true,
+            "estimated": !is_hw,
         }));
     }
 }
@@ -478,6 +513,8 @@ pub fn spawn(state: AppState) {
         .unwrap_or(std::path::Path::new("/opt/etc/xkeen-route"))
         .join("traffic_stats.json");
     set_stats_file(stats_path);
+
+    crate::direct_traffic::init_direct_iptables();
 
     tokio::spawn(run_mihomo_stream(state.clone()));
     tokio::spawn(run_wan_polling());

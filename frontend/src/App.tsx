@@ -351,7 +351,7 @@ export default function App() {
       )}
 
       <main className="content">
-        <ErrorBoundary>
+        <ErrorBoundary key={tab}>
           {tab === 'dashboard' && <Dashboard status={status} notify={notify} refresh={refresh} onSwitchTab={switchTab} />}
           {tab === 'servers' && <Servers notify={notify} status={status} refresh={refresh} />}
           {tab === 'devices' && <Devices notify={notify} />}

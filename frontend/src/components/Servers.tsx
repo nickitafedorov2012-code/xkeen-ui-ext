@@ -120,6 +120,18 @@ function buildSparklinePath(pings: number[], width: number, height: number): str
     .join(' ')
 }
 
+export function isPoolServer(s: ServerInfo): boolean {
+  if (s.is_pool) return true
+  const proto = (s.protocol || '').toUpperCase()
+  if (proto.includes('POOL') || proto === 'URL-TEST' || proto === 'FALLBACK' || proto === 'SELECTOR' || proto === 'LOAD-BALANCE') {
+    return true
+  }
+  if (s.id === 'Fastest' || s.id === 'Fallback' || s.id === 'PROXY' || s.id === 'GLOBAL') {
+    return true
+  }
+  return false
+}
+
 export default function Servers({ notify, status, refresh }: Props) {
   const [servers, setServers] = useState<ServerInfo[]>([])
   const [providers, setProviders] = useState<ProviderInfo[]>([])
@@ -140,6 +152,14 @@ export default function Servers({ notify, status, refresh }: Props) {
   const [filter, setFilter] = useState('')
   const [flowOnly, setFlowOnly] = useState(false)
   const [poolOnly, setPoolOnly] = useState(false)
+  const [showPools, setShowPools] = useState(false)
+  const [lastPingTime, setLastPingTime] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('xkeen_last_ping_check')
+    } catch {
+      return null
+    }
+  })
   const [flowRepairOpen, setFlowRepairOpen] = useState(false)
   const [limit, setLimit] = useState(PAGE)
   const [loading, setLoading] = useState(true)
@@ -179,12 +199,16 @@ export default function Servers({ notify, status, refresh }: Props) {
   const [confirmDeleteSub, setConfirmDeleteSub] = useState<{ id: string; name: string } | null>(null)
   const [deletingSub, setDeletingSub] = useState(false)
   const [editingAliases, setEditingAliases] = useState<Record<string, string>>({})
-  const [savedAliasFeedback, setSavedAliasFeedback] = useState<Record<string, boolean>>({})
   const [togglingProvider, setTogglingProvider] = useState<string | null>(null)
   const [updatingProvider, setUpdatingProvider] = useState<string | null>(null)
   const [updatingAllProviders, setUpdatingAllProviders] = useState(false)
   const [urlVisibility, setUrlVisibility] = useState<Record<string, boolean>>({})
   const [copiedUrlId, setCopiedUrlId] = useState<string | null>(null)
+  const [editingProviderNameId, setEditingProviderNameId] = useState<string | null>(null)
+  const [editingHwidId, setEditingHwidId] = useState<string | null>(null)
+  const [hwidInput, setHwidInput] = useState('')
+  const [copiedHwidId, setCopiedHwidId] = useState<string | null>(null)
+  const [savingHwidId, setSavingHwidId] = useState<string | null>(null)
 
   // Добавление новой подписки
   const [newSubOpen, setNewSubOpen] = useState(false)
@@ -249,15 +273,16 @@ export default function Servers({ notify, status, refresh }: Props) {
     }
   }, [notify])
 
-  useEffect(() => {
-    load()
-  }, [load])
-
   const pingAll = useCallback(async () => {
     setPinging(true)
     try {
       const data = await apiPost<{ pings: Record<string, number> }>('servers/ping', {})
       setServers((prev) => prev.map((s) => ({ ...s, ping_ms: data.pings[s.id] ?? s.ping_ms })))
+      const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      setLastPingTime(nowStr)
+      try {
+        localStorage.setItem('xkeen_last_ping_check', nowStr)
+      } catch {}
       notify('Пинг всех серверов завершён')
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка пинга', true)
@@ -265,6 +290,11 @@ export default function Servers({ notify, status, refresh }: Props) {
       setPinging(false)
     }
   }, [notify])
+
+  useEffect(() => {
+    load()
+    pingAll()
+  }, [load, pingAll])
 
   const runSpeedtest = async (s: ServerInfo) => {
     setSpeedtestingId(s.id)
@@ -308,15 +338,33 @@ export default function Servers({ notify, status, refresh }: Props) {
   // Живая телеметрия активного узла: трафик и история пинга
   const [liveTraffic, setLiveTraffic] = useState<{
     proxy?: { down: number; up: number }
+    whitelist?: { down: number; up: number }
+    whitelist_active?: boolean
+    down?: number
+    up?: number
     proxy_bytes?: number
+    whitelist_bytes?: number
   } | null>(null)
   const [pingHistory, setPingHistory] = useState<number[]>([])
+
+  const jitterVal = useMemo(() => {
+    if (pingHistory.length < 2) return 0
+    let sum = 0
+    for (let i = 1; i < pingHistory.length; i++) {
+      sum += Math.abs(pingHistory[i] - pingHistory[i - 1])
+    }
+    return Math.round(sum / (pingHistory.length - 1))
+  }, [pingHistory])
+
+  const failoverChain = useMemo(() => {
+    return status?.failover?.priority_chain ?? (status?.failover?.priority_server ? [status.failover.priority_server] : [])
+  }, [status?.failover?.priority_chain, status?.failover?.priority_server])
 
   useEffect(() => {
     let active = true
     const pollTraffic = async () => {
       try {
-        const snap = await apiGet<{ proxy?: { down: number; up: number }; proxy_bytes?: number }>('traffic/poll')
+        const snap = await apiGet<any>('traffic/poll')
         if (active && snap) {
           setLiveTraffic(snap)
         }
@@ -335,7 +383,7 @@ export default function Servers({ notify, status, refresh }: Props) {
   }, [servers])
 
   const poolsCount = useMemo(() => {
-    return servers.filter((s) => s.is_pool).length
+    return servers.filter(isPoolServer).length
   }, [servers])
 
   const saveAliasWithVal = async (serverId: string, val: string) => {
@@ -381,10 +429,11 @@ export default function Servers({ notify, status, refresh }: Props) {
       if (ignored.has(s.id)) {
         return false
       }
-      if (poolOnly && !s.is_pool) {
+      const isPool = isPoolServer(s)
+      if (poolOnly && !isPool) {
         return false
       }
-      if (!poolOnly && s.is_pool && !q && !selectedProviders.has('__pool__')) {
+      if (!poolOnly && !showPools && isPool && !selectedProviders.has('__pool__')) {
         return false
       }
       if (flowOnly && getFlowStatus(s) !== 'ok') {
@@ -446,7 +495,7 @@ export default function Servers({ notify, status, refresh }: Props) {
       })
     }
     return sorted
-  }, [servers, filter, selectedProviders, flowOnly, poolOnly, hideOffline, sortMode, ignored])
+  }, [servers, filter, selectedProviders, flowOnly, poolOnly, showPools, hideOffline, sortMode, ignored])
 
   // Активный сервер (из списка или глобального статуса)
   const activeServer = useMemo(() => {
@@ -472,14 +521,26 @@ export default function Servers({ notify, status, refresh }: Props) {
     }
   }
 
-  const setPriority = async (s: ServerInfo) => {
+  const addToFailover = async (serverId: string, position: 'start' | 'end') => {
     try {
-      const nextPriority = !s.is_priority
-      const data = await apiPost<{ message?: string }>('settings/priority', { server_id: nextPriority ? s.id : '' })
-      notify(data.message || (nextPriority ? `Сервер ${s.name} сделан приоритетным` : 'Приоритет снят'))
+      const currentChain = status?.failover?.priority_chain ?? (status?.failover?.priority_server ? [status.failover.priority_server] : [])
+      const filteredChain = currentChain.filter((id) => id !== serverId)
+      const isAtStart = currentChain[0] === serverId
+      const isAtEnd = currentChain[currentChain.length - 1] === serverId && currentChain.length > 1
+      const isRemoving = (position === 'start' && isAtStart) || (position === 'end' && isAtEnd)
+
+      const nextChain = isRemoving
+        ? filteredChain
+        : position === 'start'
+        ? [serverId, ...filteredChain]
+        : [...filteredChain, serverId]
+
+      const data = await apiPost<{ message?: string }>('settings/priority', { server_ids: nextChain })
+      notify(data.message || (isRemoving ? 'Узел удалён из Failover' : position === 'start' ? 'Узел перемещён в начало Failover (#1)' : 'Узел добавлен в конец Failover'))
       load()
+      if (refresh) refresh()
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка установки приоритета', true)
+      notify(e instanceof Error ? e.message : 'Ошибка настройки Failover', true)
     }
   }
 
@@ -577,7 +638,6 @@ export default function Servers({ notify, status, refresh }: Props) {
       initial[p.id] = p.name === p.id ? '' : p.name
     }
     setEditingAliases(initial)
-    setSavedAliasFeedback({})
     setUrlVisibility({})
     setCopiedUrlId(null)
     setNewSubOpen(false)
@@ -587,10 +647,6 @@ export default function Servers({ notify, status, refresh }: Props) {
   const saveProviderAlias = async (id: string, alias: string) => {
     try {
       await apiPost('providers/rename', { id, alias: alias.trim() })
-      setSavedAliasFeedback((prev) => ({ ...prev, [id]: true }))
-      setTimeout(() => {
-        setSavedAliasFeedback((prev) => ({ ...prev, [id]: false }))
-      }, 2000)
       notify(`Подписка сохранена: ${alias.trim() || id}`)
       load()
     } catch (e) {
@@ -698,6 +754,31 @@ export default function Servers({ notify, status, refresh }: Props) {
     }
   }
 
+  const handleSaveHwid = async (id: string, hwid: string) => {
+    setSavingHwidId(id)
+    try {
+      const clean = hwid.trim()
+      await apiPost('providers/hwid', { id, hwid: clean || undefined })
+      notify(clean ? `HWID подписки '${id}' сохранён` : `HWID подписки '${id}' удалён`)
+      setProviders((prev) =>
+        prev.map((p) => (p.id === id ? { ...p, hwid: clean || undefined } : p)),
+      )
+      setEditingHwidId(null)
+      load()
+    } catch (e: any) {
+      notify(e instanceof Error ? e.message : 'Ошибка сохранения HWID', true)
+    } finally {
+      setSavingHwidId(null)
+    }
+  }
+
+  const handleCopyHwid = async (id: string, hwid: string) => {
+    await copyToClipboard(hwid)
+    setCopiedHwidId(id)
+    notify('HWID скопирован в буфер обмена')
+    setTimeout(() => setCopiedHwidId(null), 2500)
+  }
+
   const handleDeleteSubscription = (id: string, name: string) => {
     setConfirmDeleteSub({ id, name })
   }
@@ -754,7 +835,7 @@ export default function Servers({ notify, status, refresh }: Props) {
                   )}
                   {status?.whitelist_mode_active && (
                     <span className="badge" style={{ background: 'rgba(168, 85, 247, 0.25)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.5)', fontSize: 10, fontWeight: 700 }}>
-                      🟣 ОБХОД БЕЛЫХ СПИСКОВ (100% ТУННЕЛЬ)
+                      🟣 ОБХОД БЕЛЫХ СПИСКОВ
                     </span>
                   )}
                 </div>
@@ -830,7 +911,14 @@ export default function Servers({ notify, status, refresh }: Props) {
                 )}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
                   <div className="muted small" style={{ fontSize: 11 }}>
-                    Хост: <code>{activeServer.host}{activeServer.port ? `:${activeServer.port}` : ''}</code>
+                    IP сервера:{' '}
+                    <code>
+                      {activeServer.resolved_ip || activeServer.host}
+                      {activeServer.resolved_ip && activeServer.resolved_ip !== activeServer.host
+                        ? ` (${activeServer.host})`
+                        : ''}
+                      {activeServer.port ? `:${activeServer.port}` : ''}
+                    </code>
                   </div>
                   {/* Роль в Failover-цепочке */}
                   {status?.failover && (
@@ -883,39 +971,83 @@ export default function Servers({ notify, status, refresh }: Props) {
                     flexWrap: 'wrap',
                   }}
                 >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
-                    <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 600 }}>Live-трафик:</span>
-                    <span style={{ color: '#38bdf8', fontWeight: 700, fontFamily: 'Consolas, monospace' }}>
-                      ↓ {formatSpeed(liveTraffic?.proxy?.down ?? 0)}
-                    </span>
-                    <span style={{ color: '#c084fc', fontWeight: 700, fontFamily: 'Consolas, monospace' }}>
-                      ↑ {formatSpeed(liveTraffic?.proxy?.up ?? 0)}
-                    </span>
-                    {Boolean(liveTraffic?.proxy_bytes) && (
-                      <span className="muted" style={{ fontSize: 11, marginLeft: 2 }}>
-                        (всего {formatBytes(liveTraffic?.proxy_bytes ?? 0)})
-                      </span>
-                    )}
-                  </div>
+                  {(() => {
+                    const isWl = Boolean(status?.whitelist_mode_active || activeServer.is_whitelist)
+                    const downSpeed = isWl
+                      ? (liveTraffic?.whitelist?.down ?? liveTraffic?.down ?? 0)
+                      : (liveTraffic?.proxy?.down ?? liveTraffic?.down ?? 0)
+                    const upSpeed = isWl
+                      ? (liveTraffic?.whitelist?.up ?? liveTraffic?.up ?? 0)
+                      : (liveTraffic?.proxy?.up ?? liveTraffic?.up ?? 0)
+                    const totalBytes = (liveTraffic?.proxy_bytes ?? 0) + (liveTraffic?.whitelist_bytes ?? 0)
+
+                    return (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+                        <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 600 }}>Live-трафик:</span>
+                        <span style={{ color: '#38bdf8', fontWeight: 700, fontFamily: 'Consolas, monospace' }}>
+                          ↓ {formatSpeed(downSpeed)}
+                        </span>
+                        <span style={{ color: '#c084fc', fontWeight: 700, fontFamily: 'Consolas, monospace' }}>
+                          ↑ {formatSpeed(upSpeed)}
+                        </span>
+                        {totalBytes > 0 && (
+                          <span className="muted" style={{ fontSize: 11, marginLeft: 2 }}>
+                            (всего {formatBytes(totalBytes)})
+                          </span>
+                        )}
+                      </div>
+                    )
+                  })()}
+
+                  {/* Квота подписки активного сервера */}
+                  {(() => {
+                    const prov = providers.find((p) => p.id === activeServer.provider)
+                    if (!prov || !prov.total_bytes || prov.total_bytes <= 0) return null
+                    const used = (prov.upload_bytes || 0) + (prov.download_bytes || 0)
+                    const total = prov.total_bytes
+                    const remaining = Math.max(0, total - used)
+                    const percent = Math.min(100, Math.round((used / total) * 100))
+                    return (
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          fontSize: 11,
+                          padding: '2px 8px',
+                          background: 'rgba(56, 189, 248, 0.08)',
+                          border: '1px solid rgba(56, 189, 248, 0.25)',
+                          borderRadius: 6,
+                        }}
+                        title={`Лимит: ${formatBytes(used)} из ${formatBytes(total)} (${percent}%)${prov.expire_timestamp ? ` · До ${new Date(prov.expire_timestamp * 1000).toLocaleDateString()}` : ''}`}
+                      >
+                        <span style={{ color: '#38bdf8', fontWeight: 600 }}>📊 Трафик подписки:</span>
+                        <span style={{ color: remaining === 0 ? '#ef4444' : '#4ade80', fontWeight: 700 }}>
+                          {formatBytes(remaining)} ост.
+                        </span>
+                        <span className="muted" style={{ fontSize: 10 }}>({percent}%)</span>
+                      </div>
+                    )
+                  })()}
 
                   {pingHistory.length > 1 && (
                     <div
                       style={{ display: 'flex', alignItems: 'center', gap: 6 }}
-                      title={`История задержки узла: мин ${Math.min(...pingHistory)} мс, макс ${Math.max(...pingHistory)} мс`}
+                      title={`Задержка: ${activeServer.ping_ms} мс | Джиттер: ±${jitterVal} мс (разброс пинга) | Мин: ${Math.min(...pingHistory)} мс, Макс: ${Math.max(...pingHistory)} мс`}
                     >
                       <span style={{ fontSize: 10, color: '#94a3b8' }}>джиттер:</span>
                       <svg width="68" height="18" style={{ overflow: 'visible', verticalAlign: 'middle' }}>
                         <path
                           d={buildSparklinePath(pingHistory, 68, 18)}
                           fill="none"
-                          stroke="#38bdf8"
+                          stroke={jitterVal > 30 ? '#ef4444' : jitterVal > 15 ? '#eab308' : '#38bdf8'}
                           strokeWidth="2"
                           strokeLinecap="round"
                           strokeLinejoin="round"
                         />
                       </svg>
-                      <span style={{ fontSize: 10.5, fontFamily: 'Consolas, monospace', color: '#38bdf8' }}>
-                        {pingHistory[pingHistory.length - 1]} мс
+                      <span style={{ fontSize: 10.5, fontFamily: 'Consolas, monospace', color: jitterVal > 30 ? '#ef4444' : jitterVal > 15 ? '#eab308' : '#38bdf8' }}>
+                        ±{jitterVal} мс
                       </span>
                     </div>
                   )}
@@ -944,19 +1076,38 @@ export default function Servers({ notify, status, refresh }: Props) {
                   >
                     🔗 Ссылка
                   </button>
-                  <button
-                    type="button"
-                    className={`btn sm ghost btn-priority ${activeServer.is_priority ? 'is-priority' : ''}`}
-                    onClick={() => setPriority(activeServer)}
-                    title={activeServer.is_priority ? 'Снять приоритет' : 'Сделать приоритетным'}
-                  >
-                    <span>{activeServer.is_priority ? '★' : '☆'}</span>
-                  </button>
+                  {(() => {
+                    const chainIdx = failoverChain.indexOf(activeServer.id)
+                    const isStart = chainIdx === 0
+
+                    return (
+                      <>
+                        <button
+                          type="button"
+                          className={`btn sm ghost ${isStart ? 'is-priority' : ''}`}
+                          onClick={() => addToFailover(activeServer.id, 'start')}
+                          style={isStart ? { background: 'rgba(56, 189, 248, 0.2)', color: '#38bdf8', borderColor: '#38bdf8', fontWeight: 700 } : undefined}
+                          title={isStart ? 'Основной узел Failover (#1). Нажмите для снятия' : 'Сделать основным узлом (в начало Failover)'}
+                        >
+                          <span>{isStart ? '👑 Основной' : '⚡↑ В начало'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className={`btn sm ghost ${chainIdx > 0 ? 'is-priority' : ''}`}
+                          onClick={() => addToFailover(activeServer.id, 'end')}
+                          style={chainIdx > 0 ? { background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', borderColor: '#fbbf24', fontWeight: 600 } : undefined}
+                          title={chainIdx > 0 ? `Резерв #${chainIdx + 1} в Failover. Нажмите для снятия` : 'Добавить резервом (в конец Failover)'}
+                        >
+                          <span>{chainIdx > 0 ? `⚡#${chainIdx + 1} Резерв` : '⚡↓ В конец'}</span>
+                        </button>
+                      </>
+                    )
+                  })()}
                   <button
                     type="button"
                     className={`btn sm btn-whitelist ${activeServer.is_whitelist ? 'is-whitelist' : 'ghost'}`}
                     onClick={() => toggleWhitelist(activeServer.id)}
-                    title={activeServer.is_whitelist ? 'Удалить из белого списка (аварийный туннель)' : 'Включить в белый список (аварийный 100% туннель)'}
+                    title={activeServer.is_whitelist ? 'Удалить из белого списка' : 'Включить в белый список (аварийный туннель)'}
                   >
                     <span style={{ fontSize: 11 }}>{activeServer.is_whitelist ? '🟣' : '⚪'}</span>
                     <span style={{ fontSize: 11, fontWeight: 600 }}>{activeServer.is_whitelist ? 'В белом списке' : 'Белый список'}</span>
@@ -1173,6 +1324,25 @@ export default function Servers({ notify, status, refresh }: Props) {
             <button className="btn sm" onClick={pingAll} disabled={pinging} title="Измерить пинг всех">
               {pinging ? '📡 Пинг…' : '📡 Пинг всех'}
             </button>
+            {lastPingTime && (
+              <span
+                style={{
+                  fontSize: 11,
+                  color: 'var(--muted)',
+                  background: 'rgba(255, 255, 255, 0.04)',
+                  padding: '3px 8px',
+                  borderRadius: 6,
+                  border: '1px solid rgba(255, 255, 255, 0.06)',
+                  whiteSpace: 'nowrap',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 4,
+                }}
+                title="Время последней проверки пинга серверов"
+              >
+                ⏱ Проверен: <b style={{ color: 'var(--text)' }}>{lastPingTime}</b>
+              </span>
+            )}
             <button className="btn sm" onClick={load} title="Обновить список">
               🔄 Обновить
             </button>
@@ -1202,14 +1372,14 @@ export default function Servers({ notify, status, refresh }: Props) {
             {poolsCount > 0 && (
               <button
                 type="button"
-                className={`btn sm ${poolOnly ? 'primary' : ''}`}
+                className={`btn sm ${showPools ? 'primary' : 'ghost'}`}
                 onClick={() => {
-                  setPoolOnly((prev) => !prev)
-                  if (!poolOnly) setFlowOnly(false)
+                  setShowPools((prev) => !prev)
                   setLimit(PAGE)
                 }}
+                title={showPools ? 'Скрыть пулы серверов' : 'Показать пулы серверов в общем списке'}
               >
-                🔀 Пулы ({poolsCount})
+                🔀 Пулы ({poolsCount}) {showPools ? '▼' : '▶'}
               </button>
             )}
             {flowOnly && (
@@ -1472,15 +1642,35 @@ export default function Servers({ notify, status, refresh }: Props) {
                         <span className="btn-label-optional">Ссылка</span>
                       </button>
 
-                      <button
-                        type="button"
-                        className={`btn sm ghost btn-priority ${s.is_priority ? 'is-priority' : ''}`}
-                        onClick={() => setPriority(s)}
-                        title={s.is_priority ? 'Снять приоритет' : 'Сделать приоритетным'}
-                      >
-                        <span>{s.is_priority ? '★' : '☆'}</span>
-                        <span className="btn-label-optional">{s.is_priority ? 'В приоритете' : 'Приоритет'}</span>
-                      </button>
+                      {(() => {
+                        const chainIdx = failoverChain.indexOf(s.id)
+                        const isStart = chainIdx === 0
+
+                        return (
+                          <>
+                            <button
+                              type="button"
+                              className={`btn sm ghost ${isStart ? 'is-priority' : ''}`}
+                              onClick={() => addToFailover(s.id, 'start')}
+                              style={isStart ? { background: 'rgba(56, 189, 248, 0.2)', color: '#38bdf8', borderColor: '#38bdf8', fontWeight: 700 } : undefined}
+                              title={isStart ? 'Основной узел Failover (#1). Нажмите для снятия' : 'Сделать основным узлом (в начало Failover)'}
+                            >
+                              <span>{isStart ? '👑' : '⚡↑'}</span>
+                              <span className="btn-label-optional">{isStart ? 'Основной' : 'В начало'}</span>
+                            </button>
+                            <button
+                              type="button"
+                              className={`btn sm ghost ${chainIdx > 0 ? 'is-priority' : ''}`}
+                              onClick={() => addToFailover(s.id, 'end')}
+                              style={chainIdx > 0 ? { background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', borderColor: '#fbbf24', fontWeight: 600 } : undefined}
+                              title={chainIdx > 0 ? `Резерв #${chainIdx + 1} в Failover. Нажмите для снятия` : 'Добавить резервом (в конец Failover)'}
+                            >
+                              <span>{chainIdx > 0 ? `⚡#${chainIdx + 1}` : '⚡↓'}</span>
+                              <span className="btn-label-optional">{chainIdx > 0 ? 'Резерв' : 'В конец'}</span>
+                            </button>
+                          </>
+                        )
+                      })()}
 
                       <button
                         type="button"
@@ -1626,14 +1816,38 @@ export default function Servers({ notify, status, refresh }: Props) {
                         🔌
                       </button>
                     )}
-                    <button
-                      className={`btn sm ghost btn-priority ${s.is_priority ? 'is-priority' : ''}`}
-                      onClick={() => setPriority(s)}
-                      style={{ padding: '3px 8px' }}
-                      title={s.is_priority ? 'Снять приоритет' : 'Сделать приоритетным'}
-                    >
-                      {s.is_priority ? '★' : '☆'}
-                    </button>
+                    {(() => {
+                      const chainIdx = failoverChain.indexOf(s.id)
+                      const isStart = chainIdx === 0
+                      return (
+                        <>
+                          <button
+                            type="button"
+                            className={`btn sm ghost ${isStart ? 'is-priority' : ''}`}
+                            onClick={() => addToFailover(s.id, 'start')}
+                            style={{
+                              padding: '3px 6px',
+                              ...(isStart ? { background: 'rgba(56, 189, 248, 0.2)', color: '#38bdf8', borderColor: '#38bdf8', fontWeight: 700 } : {}),
+                            }}
+                            title={isStart ? 'Основной узел Failover (#1). Нажмите для снятия' : 'В начало Failover (основной)'}
+                          >
+                            {isStart ? '👑' : '⚡↑'}
+                          </button>
+                          <button
+                            type="button"
+                            className={`btn sm ghost ${chainIdx > 0 ? 'is-priority' : ''}`}
+                            onClick={() => addToFailover(s.id, 'end')}
+                            style={{
+                              padding: '3px 6px',
+                              ...(chainIdx > 0 ? { background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', borderColor: '#fbbf24', fontWeight: 600 } : {}),
+                            }}
+                            title={chainIdx > 0 ? `Резерв #${chainIdx + 1} в Failover. Нажмите для снятия` : 'В конец Failover (резерв)'}
+                          >
+                            {chainIdx > 0 ? `⚡#${chainIdx + 1}` : '⚡↓'}
+                          </button>
+                        </>
+                      )
+                    })()}
                     <button
                       type="button"
                       className={`btn sm btn-whitelist ${s.is_whitelist ? 'is-whitelist' : 'ghost'}`}
@@ -1820,8 +2034,6 @@ export default function Servers({ notify, status, refresh }: Props) {
               {providers.length === 0 && <p className="muted">Нет активных подписок.</p>}
               {providers.map((p) => {
                 const draft = editingAliases[p.id] ?? (p.name === p.id ? '' : p.name)
-                const isChanged = (p.name === p.id ? '' : p.name) !== draft.trim()
-                const isSaved = savedAliasFeedback[p.id]
                 const dotColor = providerColorMap.get(p.id) || '#a855f7'
                 const showUrl = urlVisibility[p.id]
                 const isConfirming = confirmDeleteSub?.id === p.id
@@ -1855,7 +2067,72 @@ export default function Servers({ notify, status, refresh }: Props) {
                             boxShadow: `0 0 8px ${dotColor}66`,
                           }}
                         />
-                        <b style={{ fontSize: 14 }}>{p.name}</b>
+                        {editingProviderNameId === p.id ? (
+                          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                            <input
+                              className="input sm"
+                              style={{ width: 170, height: 26, fontSize: 13, padding: '2px 8px' }}
+                              value={draft}
+                              onChange={(e) =>
+                                setEditingAliases((prev) => ({ ...prev, [p.id]: e.target.value }))
+                              }
+                              autoFocus
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  saveProviderAlias(p.id, draft)
+                                  setEditingProviderNameId(null)
+                                }
+                                if (e.key === 'Escape') setEditingProviderNameId(null)
+                              }}
+                            />
+                            <button
+                              type="button"
+                              className="btn sm primary"
+                              style={{ padding: '0 6px', height: 26 }}
+                              onClick={() => {
+                                saveProviderAlias(p.id, draft)
+                                setEditingProviderNameId(null)
+                              }}
+                              title="Сохранить имя"
+                            >
+                              ✓
+                            </button>
+                            <button
+                              type="button"
+                              className="btn sm ghost"
+                              style={{ padding: '0 6px', height: 26 }}
+                              onClick={() => setEditingProviderNameId(null)}
+                              title="Отмена"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        ) : (
+                          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                            <b
+                              style={{ fontSize: 14, cursor: 'pointer' }}
+                              onClick={() => {
+                                setEditingAliases((prev) => ({ ...prev, [p.id]: p.name === p.id ? '' : p.name }))
+                                setEditingProviderNameId(p.id)
+                              }}
+                              title="Нажмите для переименования"
+                            >
+                              {p.name}
+                            </b>
+                            <button
+                              type="button"
+                              className="btn sm ghost"
+                              style={{ padding: '0 4px', fontSize: 11, height: 20, opacity: 0.7 }}
+                              onClick={() => {
+                                setEditingAliases((prev) => ({ ...prev, [p.id]: p.name === p.id ? '' : p.name }))
+                                setEditingProviderNameId(p.id)
+                              }}
+                              title="Переименовать подписку"
+                            >
+                              ✏️
+                            </button>
+                          </div>
+                        )}
                         {p.is_whitelist && (
                           <span className="badge" style={{ background: 'rgba(168, 85, 247, 0.25)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.5)', fontSize: 10, fontWeight: 600 }}>
                             🟣 Белый список
@@ -1987,98 +2264,232 @@ export default function Servers({ notify, status, refresh }: Props) {
                       </div>
                     )}
 
-                    {/* Поле переименования */}
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                      <input
-                        className="input sm"
-                        placeholder="Своё название подписки…"
-                        value={draft}
-                        onChange={(e) =>
-                          setEditingAliases((prev) => ({ ...prev, [p.id]: e.target.value }))
-                        }
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') saveProviderAlias(p.id, draft)
-                        }}
-                        style={{ flex: 1 }}
-                      />
-                      <button
-                        type="button"
-                        className={`btn sm ${isSaved ? 'primary' : ''}`}
-                        disabled={!isChanged && !isSaved}
-                        onClick={() => saveProviderAlias(p.id, draft)}
-                        style={{ minWidth: 95 }}
-                      >
-                        {isSaved ? '✓ Сохранено' : 'Сохранить'}
-                      </button>
-                    </div>
-
-                    {/* Строка HWID подписки */}
-                    {p.hwid && (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: '#38bdf8' }}>
-                        <span style={{ opacity: 0.7 }}>🔑 HWID:</span>
-                        <span
-                          style={{
-                            fontFamily: 'Consolas, monospace',
-                            background: 'rgba(56, 189, 248, 0.12)',
-                            padding: '2px 8px',
-                            borderRadius: 4,
-                            border: '1px solid rgba(56, 189, 248, 0.25)',
-                          }}
-                        >
-                          {p.hwid}
-                        </span>
-                      </div>
-                    )}
-
-                    {/* Строка URL подписки */}
-                    {p.url && (
+                    {/* Виджет квоты трафика подписки (если провайдер отдал Subscription-Userinfo) */}
+                    {p.total_bytes && p.total_bytes > 0 ? (
                       <div
                         style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 8,
-                          background: 'rgba(0,0,0,0.25)',
-                          padding: '6px 10px',
-                          borderRadius: 6,
-                          border: '1px solid rgba(255,255,255,0.05)',
+                          background: 'rgba(56, 189, 248, 0.05)',
+                          border: '1px solid rgba(56, 189, 248, 0.18)',
+                          borderRadius: 8,
+                          padding: '8px 12px',
+                          fontSize: 11.5,
                         }}
                       >
-                        <span className="muted small" style={{ flexShrink: 0, fontWeight: 500 }}>
-                          URL:
-                        </span>
-                        <span
-                          style={{
-                            flex: 1,
-                            fontFamily: 'Consolas, monospace',
-                            fontSize: 11.5,
-                            color: showUrl ? 'var(--text)' : 'var(--muted)',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
-                          }}
-                        >
-                          {showUrl ? p.url : '••••••••••••••••••••••••••••••••••••••••••••'}
-                        </span>
-                        <button
-                          type="button"
-                          className="btn sm ghost"
-                          onClick={() => setUrlVisibility((prev) => ({ ...prev, [p.id]: !showUrl }))}
-                          title={showUrl ? 'Скрыть URL' : 'Показать URL'}
-                          style={{ padding: '2px 8px', fontSize: 11 }}
-                        >
-                          {showUrl ? '🙈 Скрыть' : '👁 Показать'}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn sm ghost"
-                          onClick={() => copySubUrl(p.id, p.url!)}
-                          title="Скопировать URL в буфер обмена"
-                          style={{ padding: '2px 8px', fontSize: 11 }}
-                        >
-                          {copiedUrlId === p.id ? '✓ Скопировано' : '📋 Копировать'}
-                        </button>
+                        {(() => {
+                          const used = (p.upload_bytes || 0) + (p.download_bytes || 0)
+                          const total = p.total_bytes!
+                          const percent = Math.min(100, Math.round((used / total) * 100))
+                          const remaining = Math.max(0, total - used)
+                          const expireStr = p.expire_timestamp
+                            ? new Date(p.expire_timestamp * 1000).toLocaleDateString()
+                            : null
+
+                          return (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+                                <span style={{ color: '#38bdf8', fontWeight: 600 }}>
+                                  📊 Лимит трафика: {formatBytes(used)} / {formatBytes(total)} ({percent}%)
+                                </span>
+                                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                                  <span style={{ color: remaining === 0 ? '#ef4444' : remaining < total * 0.1 ? '#fbbf24' : '#4ade80', fontWeight: 600 }}>
+                                    Осталось: {formatBytes(remaining)}
+                                  </span>
+                                  {expireStr && (
+                                    <span className="muted" style={{ fontSize: 10.5 }}>
+                                      · До {expireStr}
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <div
+                                style={{
+                                  width: '100%',
+                                  height: 4,
+                                  background: 'rgba(255,255,255,0.08)',
+                                  borderRadius: 2,
+                                  overflow: 'hidden',
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    width: `${percent}%`,
+                                    height: '100%',
+                                    background: percent > 90 ? '#ef4444' : percent > 75 ? '#fbbf24' : '#38bdf8',
+                                    borderRadius: 2,
+                                    transition: 'width 0.3s ease',
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          )
+                        })()}
                       </div>
-                    )}
+                    ) : null}
+
+                    {/* Единый аккуратный блок реквизитов подписки (HWID + URL) */}
+                    <div
+                      className="provider-props-box"
+                      style={{
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 6,
+                        background: 'rgba(0, 0, 0, 0.22)',
+                        border: '1px solid rgba(255, 255, 255, 0.05)',
+                        borderRadius: 8,
+                        padding: '8px 10px',
+                      }}
+                    >
+                      {/* Строка HWID */}
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', minHeight: 28 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 200 }}>
+                          <span style={{ fontSize: 11, color: '#38bdf8', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
+                            🔑 HWID:
+                          </span>
+                          {editingHwidId === p.id ? (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 4, flex: 1 }}>
+                              <input
+                                className="input sm"
+                                style={{ flex: 1, height: 24, fontSize: 11.5, fontFamily: 'Consolas, monospace', padding: '2px 6px' }}
+                                value={hwidInput}
+                                onChange={(e) => setHwidInput(e.target.value)}
+                                placeholder="keenetic-router-xxx или ваш HWID"
+                                autoFocus
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter') handleSaveHwid(p.id, hwidInput)
+                                  if (e.key === 'Escape') setEditingHwidId(null)
+                                }}
+                              />
+                              <button
+                                type="button"
+                                className="btn sm primary"
+                                style={{ height: 24, padding: '0 6px', fontSize: 11 }}
+                                disabled={savingHwidId === p.id}
+                                onClick={() => handleSaveHwid(p.id, hwidInput)}
+                                title="Сохранить HWID"
+                              >
+                                ✓
+                              </button>
+                              <button
+                                type="button"
+                                className="btn sm ghost"
+                                style={{ height: 24, padding: '0 6px', fontSize: 11 }}
+                                onClick={() => setEditingHwidId(null)}
+                                title="Отмена"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          ) : p.hwid ? (
+                            <span
+                              style={{
+                                fontFamily: 'Consolas, monospace',
+                                fontSize: 11,
+                                color: '#38bdf8',
+                                background: 'rgba(56, 189, 248, 0.12)',
+                                padding: '1px 7px',
+                                borderRadius: 4,
+                                border: '1px solid rgba(56, 189, 248, 0.25)',
+                              }}
+                            >
+                              {p.hwid}
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn sm ghost"
+                              style={{ fontSize: 11, padding: '1px 6px', color: '#38bdf8', height: 22, borderStyle: 'dashed' }}
+                              onClick={() => {
+                                setEditingHwidId(p.id)
+                                setHwidInput('')
+                              }}
+                              title="Привязать уникальный идентификатор роутера к подписке"
+                            >
+                              ➕ Привязать HWID
+                            </button>
+                          )}
+                        </div>
+
+                        {editingHwidId !== p.id && p.hwid && (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <button
+                              type="button"
+                              className="btn sm ghost"
+                              style={{ padding: '2px 8px', fontSize: 11 }}
+                              onClick={() => handleCopyHwid(p.id, p.hwid!)}
+                              title="Скопировать HWID в буфер обмена"
+                            >
+                              {copiedHwidId === p.id ? '✓ Скопирован' : '📋 Скопировать HWID'}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn sm ghost"
+                              style={{ padding: '2px 6px', fontSize: 11 }}
+                              onClick={() => {
+                                setEditingHwidId(p.id)
+                                setHwidInput(p.hwid || '')
+                              }}
+                              title="Изменить HWID"
+                            >
+                              ✏️
+                            </button>
+                            <button
+                              type="button"
+                              className="btn sm ghost"
+                              style={{ padding: '2px 6px', fontSize: 11, color: '#ef4444' }}
+                              disabled={savingHwidId === p.id}
+                              onClick={() => handleSaveHwid(p.id, '')}
+                              title="Удалить HWID из подписки"
+                            >
+                              🗑
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Строка URL */}
+                      {p.url && (
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', paddingTop: 4, borderTop: '1px solid rgba(255,255,255,0.04)' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 200, overflow: 'hidden' }}>
+                            <span className="muted small" style={{ fontSize: 11, flexShrink: 0, fontWeight: 600 }}>
+                              URL:
+                            </span>
+                            <span
+                              style={{
+                                fontFamily: 'Consolas, monospace',
+                                fontSize: 11.5,
+                                color: showUrl ? 'var(--text)' : 'var(--muted)',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                              }}
+                              title={showUrl ? p.url : 'Нажмите «Показать» для просмотра полного URL'}
+                            >
+                              {showUrl ? p.url : '••••••••••••••••••••••••••••••••••••••••••••'}
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                            <button
+                              type="button"
+                              className="btn sm ghost"
+                              onClick={() => setUrlVisibility((prev) => ({ ...prev, [p.id]: !showUrl }))}
+                              title={showUrl ? 'Скрыть URL' : 'Показать URL'}
+                              style={{ padding: '2px 8px', fontSize: 11 }}
+                            >
+                              {showUrl ? '🙈 Скрыть' : '👁 Показать'}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn sm ghost"
+                              onClick={() => copySubUrl(p.id, p.url!)}
+                              title="Скопировать URL в буфер обмена"
+                              style={{ padding: '2px 8px', fontSize: 11 }}
+                            >
+                              {copiedUrlId === p.id ? '✓ Скопировано' : '📋 Копировать'}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )
               })}

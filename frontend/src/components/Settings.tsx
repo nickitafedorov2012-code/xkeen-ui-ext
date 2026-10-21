@@ -6,6 +6,7 @@ import {
   type DnsMode,
   type DnsEnhancedMode,
   type ServerInfo,
+  type ProviderInfo,
   type StatusInfo,
   type SwapStatus,
   type SwapSizePresetMb,
@@ -184,7 +185,8 @@ export function cleanServerDisplayName(name: string): string {
   const countriesRegex =
     /(?:^|[^а-яёa-z0-9_])(Германия|Германии|Нидерланды|Нидерландов|Великобритания|Великобритании|Англия|Англии|США|Франция|Франции|Финляндия|Финляндии|Швеция|Швеции|Польша|Польши|Казахстан|Казахстана|Турция|Турции|Сингапур|Сингапура|Россия|России|Germany|Netherlands|United Kingdom|USA|France|Finland|Sweden|Poland|Kazakhstan|Turkey|Singapore|Russia)(?=[^а-яёa-z0-9_]|$)/gi
 
-  return name
+  const cleaned = name
+    .replace(/[\uD83C][\uDDE6-\uDDFF][\uD83C][\uDDE6-\uDDFF]/g, '')
     .replace(/^\[?(DE|GB|NL|US|FR|RU|SG|TR|FI|SE|PL|KZ|UA|UK)\]?\s*[-–—:]*\s*/i, '')
     .replace(/[-_](de|gb|nl|us|fr|ru|sg|tr|fi|se|pl|kz|ua)[-_]/gi, '-')
     .replace(/[-_](de|gb|nl|us|fr|ru|sg|tr|fi|se|pl|kz|ua)$/gi, '')
@@ -197,6 +199,8 @@ export function cleanServerDisplayName(name: string): string {
     .replace(/\[\s*\]/g, '')
     .replace(/\s{2,}/g, ' ')
     .trim()
+
+  return cleaned.length > 0 ? cleaned : name
 }
 
 export function formatActiveServerStatus(statusText?: string, activeServer?: any, chain?: string[]): string {
@@ -231,6 +235,7 @@ interface Props {
 export default function Settings({ notify, status, refresh }: Props) {
   const [settings, setSettings] = useState<AppSettings | null>(null)
   const [servers, setServers] = useState<ServerInfo[]>([])
+  const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [saving, setSaving] = useState(false)
   const [directDomains, setDirectDomains] = useState('')
   const [forceDomains, setForceDomains] = useState('')
@@ -397,14 +402,6 @@ export default function Settings({ notify, status, refresh }: Props) {
   const [geoInfo, setGeoInfo] = useState<GeoInfo | null>(null)
   const [geoUpdating, setGeoUpdating] = useState(false)
 
-  // --- Zapret ---
-  interface ZapretStatus {
-    installed: boolean
-    running: boolean
-    pid?: number | null
-  }
-  const [zapretStatus, setZapretStatus] = useState<ZapretStatus | null>(null)
-
   // --- Живой посекундный отсчет Canary-теста ---
   const canaryInfo = status?.failover?.canary
   const [canaryCountdown, setCanaryCountdown] = useState<number | null>(null)
@@ -433,10 +430,6 @@ export default function Settings({ notify, status, refresh }: Props) {
     try {
       const geo = await apiGet<GeoInfo>('system/geo-info')
       setGeoInfo(geo)
-    } catch {}
-    try {
-      const zap = await apiGet<ZapretStatus>('zapret/status')
-      setZapretStatus(zap)
     } catch {}
   }, [])
 
@@ -489,6 +482,9 @@ export default function Settings({ notify, status, refresh }: Props) {
 
     apiGet<{ servers: ServerInfo[] }>('servers')
       .then((d) => setServers(d.servers))
+      .catch(() => {})
+    apiGet<{ providers: ProviderInfo[] }>('providers')
+      .then((d) => setProviders(d.providers || []))
       .catch(() => {})
     apiGet<{ direct: string[]; force: string[]; auto_cdns?: string[]; revision?: string }>('domains')
       .then((d) => {
@@ -1005,7 +1001,7 @@ export default function Settings({ notify, status, refresh }: Props) {
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#4ade80', fontSize: 12.5, fontWeight: 600 }}>
                 <span>🟢</span>
-                <span>Прямой трафик (Direct)</span>
+                <span>Прямой трафик</span>
               </div>
               <button
                 type="button"
@@ -1021,7 +1017,7 @@ export default function Settings({ notify, status, refresh }: Props) {
               {fmtTrafficBytes(trafficSummary.direct_bytes)}
             </div>
             <div className="muted small" style={{ marginTop: 2, fontSize: 11 }}>
-              Мимо прокси / локальный
+              Мимо прокси
             </div>
           </div>
 
@@ -1046,21 +1042,21 @@ export default function Settings({ notify, status, refresh }: Props) {
               {fmtTrafficBytes(trafficSummary.proxy_bytes)}
             </div>
             <div className="muted small" style={{ marginTop: 2, fontSize: 11 }}>
-              Серверы без метки БС
+              Обычные серверы
             </div>
           </div>
 
-          {/* БС трафик (Лимит) */}
+          {/* Туннель белых списков */}
           <div style={{ background: trafficSummary.whitelist_active ? 'rgba(168, 85, 247, 0.08)' : 'rgba(255,255,255,0.02)', border: trafficSummary.whitelist_active ? '1px solid rgba(168, 85, 247, 0.4)' : '1px solid var(--border)', borderRadius: 10, padding: 12 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#c084fc', fontSize: 12.5, fontWeight: 600 }}>
                 <span>🟣</span>
-                <span>БС трафик (Лимит)</span>
+                <span>Туннель белых списков</span>
               </div>
               <button
                 type="button"
                 className="btn-icon-subtle"
-                title="Сбросить счетчик трафика БС"
+                title="Сбросить счетчик трафика туннеля белых списков"
                 onClick={() => handleResetTraffic('whitelist', 'трафика Белых списков (БС)')}
                 style={{ fontSize: 11, padding: '2px 7px', background: 'rgba(168, 85, 247, 0.12)', border: '1px solid rgba(168, 85, 247, 0.4)', borderRadius: 6, cursor: 'pointer', color: '#c084fc' }}
               >
@@ -1073,6 +1069,47 @@ export default function Settings({ notify, status, refresh }: Props) {
             <div className="muted small" style={{ marginTop: 2, fontSize: 11 }}>
               {trafficSummary.whitelist_active ? 'Туннель БС активен для LAN устройств' : 'Серверы с меткой [БС]'}
             </div>
+
+            {/* Квота подписки белых списков (если задан лимит у провайдера) */}
+            {(() => {
+              const activeWlProv = providers.find((p) => p.is_whitelist && (p.total_bytes ?? 0) > 0) || providers.find((p) => (p.total_bytes ?? 0) > 0)
+              if (!activeWlProv || !activeWlProv.total_bytes || activeWlProv.total_bytes <= 0) return null
+              const used = (activeWlProv.upload_bytes || 0) + (activeWlProv.download_bytes || 0)
+              const total = activeWlProv.total_bytes
+              const remaining = Math.max(0, total - used)
+              const percent = Math.min(100, Math.round((used / total) * 100))
+              const expireStr = activeWlProv.expire_timestamp
+                ? new Date(activeWlProv.expire_timestamp * 1000).toLocaleDateString()
+                : null
+
+              return (
+                <div style={{ marginTop: 8, paddingTop: 6, borderTop: '1px solid rgba(168, 85, 247, 0.2)', fontSize: 11 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4, flexWrap: 'wrap', gap: 4 }}>
+                    <span style={{ color: '#c084fc', fontWeight: 600 }}>
+                      📊 Лимит подписки: {fmtTrafficBytes(used)} / {fmtTrafficBytes(total)} ({percent}%)
+                    </span>
+                    <span style={{ color: remaining === 0 ? '#ef4444' : '#4ade80', fontWeight: 600 }}>
+                      Осталось: {fmtTrafficBytes(remaining)}
+                    </span>
+                  </div>
+                  <div style={{ width: '100%', height: 4, background: 'rgba(255,255,255,0.08)', borderRadius: 2, overflow: 'hidden' }}>
+                    <div
+                      style={{
+                        width: `${percent}%`,
+                        height: '100%',
+                        background: percent > 90 ? '#ef4444' : percent > 75 ? '#fbbf24' : '#c084fc',
+                        borderRadius: 2,
+                      }}
+                    />
+                  </div>
+                  {expireStr && (
+                    <div className="muted" style={{ fontSize: 10, marginTop: 3 }}>
+                      Действует до: {expireStr}
+                    </div>
+                  )}
+                </div>
+              )
+            })()}
           </div>
         </div>
       </section>
@@ -1223,7 +1260,7 @@ export default function Settings({ notify, status, refresh }: Props) {
               </div>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 10 }}>
               <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
                 <span style={{ fontSize: 12 }}>Порог пинга для смены узла, мс</span>
                 <NumberInput
@@ -1249,8 +1286,8 @@ export default function Settings({ notify, status, refresh }: Props) {
               </label>
 
               <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
-                <span style={{ fontSize: 12 }} title="Длительность проверочного теста стабильности (Canary Soak Test) перед возвратом трафика на основной узел">
-                  Тест возврата (Canary), сек
+                <span style={{ fontSize: 12 }} title="Длительность проверочного теста стабильности перед возвратом трафика на основной узел">
+                  Тест возврата, сек
                 </span>
                 <NumberInput
                   min={15}
@@ -1269,93 +1306,228 @@ export default function Settings({ notify, status, refresh }: Props) {
                 <span className="muted small">{chain.length} узлов в цепочке</span>
               </div>
 
-              {/* ЕДИНЫЙ ЛАКОНИЧНЫЙ БЛОК: Активный сервер */}
-              <div
-                style={{
-                  background: 'rgba(255, 255, 255, 0.02)',
-                  border: '1px solid var(--border)',
-                  borderLeft: '4px solid #22c55e',
-                  borderRadius: 8,
-                  padding: '8px 12px',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 6,
-                  marginBottom: 8,
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, minWidth: 0 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0, overflow: 'hidden' }}>
-                    <span className="pulse-live-dot" style={{ flexShrink: 0 }} title="Мониторинг Failover активен" />
-                    <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-bright)', whiteSpace: 'nowrap' }}>
-                      Активный сервер
-                    </span>
-                    {status?.active_server ? (
-                      <span className="badge badge-online" style={{ fontSize: 9.5, padding: '1px 5px', whiteSpace: 'nowrap', lineHeight: 1.2, flexShrink: 0 }}>
-                        в сети
+              {/* ДВЕ РАЗДЕЛЬНЫЕ КАРТОЧКИ: 1. Активный сервер, 2. Карантин серверов (зомби) */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10, marginBottom: 8 }}>
+                {/* КАРТОЧКА 1: Активный сервер */}
+                <div
+                  style={{
+                    background: 'rgba(255, 255, 255, 0.02)',
+                    border: '1px solid var(--border)',
+                    borderLeft: '4px solid #22c55e',
+                    borderRadius: 8,
+                    padding: '10px 12px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 6,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, minWidth: 0 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0, overflow: 'hidden' }}>
+                      <span className="pulse-live-dot" style={{ flexShrink: 0 }} title="Мониторинг Failover активен" />
+                      <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-bright)', whiteSpace: 'nowrap' }}>
+                        Активный сервер
                       </span>
-                    ) : (
-                      <span className="badge" style={{ fontSize: 9.5, padding: '1px 5px', color: 'var(--muted)', whiteSpace: 'nowrap', lineHeight: 1.2, flexShrink: 0 }}>
-                        не выбран
-                      </span>
-                    )}
+                      {status?.active_server ? (
+                        <span className="badge badge-online" style={{ fontSize: 9.5, padding: '1px 5px', whiteSpace: 'nowrap', lineHeight: 1.2, flexShrink: 0 }}>
+                          в сети
+                        </span>
+                      ) : (
+                        <span className="badge" style={{ fontSize: 9.5, padding: '1px 5px', color: 'var(--muted)', whiteSpace: 'nowrap', lineHeight: 1.2, flexShrink: 0 }}>
+                          не выбран
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+                      {failoverLastPolled && (
+                        <span className="muted" style={{ fontSize: 10, whiteSpace: 'nowrap' }}>
+                          {failoverLastPolled}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        className="btn sm ghost"
+                        style={{
+                          height: 18,
+                          width: 18,
+                          padding: 0,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          fontSize: 10,
+                          borderRadius: 4,
+                        }}
+                        onClick={() => {
+                          refresh?.()
+                          notify('Запрос свежего статуса Failover...')
+                        }}
+                        title="Обновить статус прямо сейчас"
+                      >
+                        🔄
+                      </button>
+                    </div>
                   </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
-                    {failoverLastPolled && (
-                      <span className="muted" style={{ fontSize: 10, whiteSpace: 'nowrap' }}>
-                        {failoverLastPolled}
-                      </span>
-                    )}
-                    <button
-                      type="button"
-                      className="btn sm ghost"
-                      style={{
-                        height: 18,
-                        width: 18,
-                        padding: 0,
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        fontSize: 10,
-                        borderRadius: 4,
-                      }}
-                      onClick={() => {
-                        refresh?.()
-                        notify('Запрос свежего статуса Failover...')
-                      }}
-                      title="Обновить статус прямо сейчас"
-                    >
-                      🔄
-                    </button>
-                  </div>
-                </div>
 
-                <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 6, minWidth: 0 }}>
-                  <div
-                    style={{
-                      fontSize: 13,
-                      fontWeight: 700,
-                      color: '#4ade80',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      minWidth: 0,
-                    }}
-                    title={status?.active_server?.name || status?.active_server?.id || ''}
-                  >
-                    {cleanServerDisplayName(status?.active_server?.name || status?.active_server?.id || 'Сервер не выбран')}
+                  <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 6, minWidth: 0 }}>
+                    <div
+                      style={{
+                        fontSize: 13,
+                        fontWeight: 700,
+                        color: '#4ade80',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        minWidth: 0,
+                      }}
+                      title={status?.active_server?.name || status?.active_server?.id || ''}
+                    >
+                      {cleanServerDisplayName(status?.active_server?.name || status?.active_server?.id || 'Сервер не выбран')}
+                    </div>
+                    {status?.active_server && status.active_server.ping_ms > 0 && (
+                      <span className={'ping ' + pingClass(status.active_server.ping_ms)} style={{ fontSize: 10.5, fontWeight: 700, whiteSpace: 'nowrap', flexShrink: 0 }}>
+                        {status.active_server.ping_ms} мс
+                      </span>
+                    )}
                   </div>
-                  {status?.active_server && status.active_server.ping_ms > 0 && (
-                    <span className={'ping ' + pingClass(status.active_server.ping_ms)} style={{ fontSize: 10.5, fontWeight: 700, whiteSpace: 'nowrap', flexShrink: 0 }}>
-                      {status.active_server.ping_ms} мс
-                    </span>
+
+                  {/* Роль в цепочке */}
+                  {status?.failover && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      <span className="muted" style={{ fontSize: 11 }}>Позиция:</span>
+                      <span
+                        className="badge"
+                        style={{
+                          fontSize: 10,
+                          padding: '1px 6px',
+                          background:
+                            status.failover.priority_server === status.active_server?.id || status.failover.priority_chain?.[0] === status.active_server?.id
+                              ? 'rgba(56, 189, 248, 0.15)'
+                              : 'rgba(255, 255, 255, 0.06)',
+                          color:
+                            status.failover.priority_server === status.active_server?.id || status.failover.priority_chain?.[0] === status.active_server?.id
+                              ? '#38bdf8'
+                              : 'var(--muted)',
+                        }}
+                      >
+                        {status.failover.priority_server === status.active_server?.id || status.failover.priority_chain?.[0] === status.active_server?.id
+                          ? '👑 Основной сервер'
+                          : status.failover.priority_chain?.includes(status.active_server?.id || '')
+                          ? `⚡ Резерв #${status.failover.priority_chain.indexOf(status.active_server?.id || '') + 1}`
+                          : '🌐 Ручной выбор'}
+                      </span>
+                    </div>
+                  )}
+
+                  {canaryInfo && (
+                    <div style={{ fontSize: 10.5, color: '#c084fc', background: 'rgba(168, 85, 247, 0.1)', padding: '2px 5px', borderRadius: 4, border: '1px solid rgba(168, 85, 247, 0.25)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      🧪 Тест <b>{cleanServerDisplayName(canaryInfo.target_name)}</b> ({canaryInfo.elapsed_secs}/{canaryInfo.duration_secs || 180}с)
+                    </div>
                   )}
                 </div>
 
-                {canaryInfo && (
-                  <div style={{ fontSize: 10.5, color: '#c084fc', background: 'rgba(168, 85, 247, 0.1)', padding: '2px 5px', borderRadius: 4, border: '1px solid rgba(168, 85, 247, 0.25)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                    🧪 Тест <b>{cleanServerDisplayName(canaryInfo.target_name)}</b> ({canaryInfo.elapsed_secs}/{canaryInfo.duration_secs || 180}с)
-                  </div>
-                )}
+                {/* КАРТОЧКА 2: Карантин серверов (зомби) */}
+                {(() => {
+                  const qList = (status?.failover?.quarantine || []).filter((q) => q.remaining_secs > 0)
+                  const hasQuarantine = qList.length > 0
+
+                  return (
+                    <div
+                      style={{
+                        background: hasQuarantine ? 'rgba(239, 68, 68, 0.05)' : 'rgba(255, 255, 255, 0.02)',
+                        border: hasQuarantine ? '1px solid rgba(239, 68, 68, 0.35)' : '1px solid var(--border)',
+                        borderLeft: hasQuarantine ? '4px solid #ef4444' : '4px solid #38bdf8',
+                        borderRadius: 8,
+                        padding: '10px 12px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 6,
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <span style={{ fontSize: 13 }}>{hasQuarantine ? '🧟' : '🛡️'}</span>
+                          <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-bright)' }}>
+                            Карантин серверов (зомби)
+                          </span>
+                        </div>
+                        {hasQuarantine && (
+                          <button
+                            type="button"
+                            className="btn sm"
+                            style={{
+                              padding: '2px 8px',
+                              fontSize: 10.5,
+                              height: 22,
+                              background: 'rgba(239, 68, 68, 0.18)',
+                              color: '#f87171',
+                              border: '1px solid rgba(239, 68, 68, 0.4)',
+                              cursor: 'pointer',
+                              fontWeight: 600,
+                            }}
+                            onClick={async () => {
+                              try {
+                                await apiPost('failover/quarantine/clear', {})
+                                notify('Карантин всех серверов сброшен')
+                                refresh?.()
+                              } catch (e: any) {
+                                notify(e.message || 'Ошибка снятия карантина', true)
+                              }
+                            }}
+                            title="Мгновенно амнистировать все серверы и вернуть их в цепочку Failover"
+                          >
+                            🛡️ Снять весь карантин
+                          </button>
+                        )}
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        {hasQuarantine ? (
+                          <span className="badge" style={{ background: 'rgba(239, 68, 68, 0.2)', color: '#f87171', border: '1px solid rgba(239, 68, 68, 0.4)', fontSize: 10.5, fontWeight: 700 }}>
+                            ⚠️ В карантине: {qList.length} {qList.length === 1 ? 'узел' : 'узла(ов)'}
+                          </span>
+                        ) : (
+                          <span className="badge badge-online" style={{ fontSize: 10.5, padding: '2px 8px' }}>
+                            🟢 Все узлы в строю
+                          </span>
+                        )}
+                      </div>
+
+                      {hasQuarantine ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 90, overflowY: 'auto', marginTop: 2 }}>
+                          {qList.map((q) => {
+                            const sv = servers.find((s) => s.id === q.server_id)
+                            const minutesLeft = Math.ceil(q.remaining_secs / 60)
+                            return (
+                              <div
+                                key={q.server_id}
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  gap: 6,
+                                  fontSize: 11,
+                                  padding: '2px 6px',
+                                  background: 'rgba(0, 0, 0, 0.25)',
+                                  borderRadius: 4,
+                                }}
+                              >
+                                <span style={{ color: '#fca5a5', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                  {cleanServerDisplayName(sv?.name || q.server_id)}
+                                </span>
+                                <span className="muted" style={{ fontSize: 10, whiteSpace: 'nowrap' }}>
+                                  {q.reason || 'таймаут'} ({minutesLeft} мин)
+                                </span>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      ) : (
+                        <div className="muted small" style={{ fontSize: 11 }}>
+                          Защита от флэппинга активна. Зомби-узлы с L7-сбоями изолируются автоматически.
+                        </div>
+                      )}
+                    </div>
+                  )
+                })()}
               </div>
 
               {/* Список узлов цепочки в виде современных карточек с акцентным бордером */}
@@ -2252,73 +2424,6 @@ export default function Settings({ notify, status, refresh }: Props) {
             </div>
           </section>
 
-          {/* СТОРОЖЕВОЙ ТАЙМЕР ЯДРА (WATCHDOG & AUTO-HEALING) */}
-          <section className="card">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-              <h2 style={{ margin: 0 }}>🛡️ Сторожевой таймер ядра (Watchdog)</h2>
-              <span className="badge badge-online" style={{ color: '#22c55e' }}>
-                🟢 Активен (авто-лечение)
-              </span>
-            </div>
-            <p className="muted small">
-              Фоновый сторожевой процесс демона непрерывно контролирует целостность правил маршрутизации в <code>config.yaml</code>.
-            </p>
-            <div className="stats-grid four-col" style={{ marginTop: 12 }}>
-              <div className="stat-card">
-                <div className="stat-label">Статус сторожа</div>
-                <div className="stat-value" style={{ fontSize: 14, color: '#22c55e' }}>
-                  ✓ Авто-лечение
-                </div>
-                <div className="muted small">Контроль config.yaml</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-label">Интервал проверки</div>
-                <div className="stat-value" style={{ fontSize: 18 }}>
-                  4 сек
-                </div>
-                <div className="muted small">Фоновый демон</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-label">Защита блоков</div>
-                <div className="stat-value" style={{ fontSize: 13, color: 'var(--accent)', fontFamily: 'monospace' }}>
-                  DEVICE, FORCE, IGNORE
-                </div>
-                <div className="muted small">Авто-восстановление</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-label">При рестарте XKeen</div>
-                <div className="stat-value" style={{ fontSize: 13, color: '#38bdf8' }}>
-                  Без разрыва связи
-                </div>
-                <div className="muted small">Бесшовный накат правил</div>
-              </div>
-            </div>
-          </section>
-
-          {/* ZAPRET / DPI */}
-          <section className="card">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <span style={{ fontSize: 20 }}>⚡</span>
-                <h2 style={{ margin: 0 }}>Zapret — Обход замедлений DPI</h2>
-              </div>
-              <span className="badge" style={{ color: zapretStatus?.running ? '#22c55e' : zapretStatus?.installed ? '#f59e0b' : 'var(--muted)' }}>
-                {zapretStatus?.running ? (zapretStatus.pid ? `🟢 Активен (PID: ${zapretStatus.pid})` : '🟢 Активен') : zapretStatus?.installed ? '⚪ Выключен' : '🔴 Не установлен'}
-              </span>
-            </div>
-            <p className="muted small">
-              Все параметры обхода DPI (мульти-стратегии для YouTube, Discord, списки доменов и онлайн-тест) сосредоточены во вкладке <b>«⚡ Zapret (DPI)»</b>.
-            </p>
-            <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
-              <button
-                type="button"
-                className="btn primary sm"
-                onClick={() => window.dispatchEvent(new CustomEvent('xr:switch-tab', { detail: 'zapret' }))}
-              >
-                ⚡ Перейти в настройки Zapret →
-              </button>
-            </div>
-          </section>
 
           {/* GEOIP / GEOSITE */}
           <section className="card">

@@ -232,11 +232,11 @@ export default function TrafficGraph() {
             <div className="traffic-legend-chips">
               {isWhitelistActive ? (
                 <span className="legend-chip whitelist" style={{ color: '#c084fc' }}>
-                  <span className="legend-dot purple" style={{ background: '#a855f7' }} /> 🟣 БС трафик (Лимит)
+                  <span className="legend-dot purple" style={{ background: '#a855f7' }} /> 🟣 Туннель белых списков
                 </span>
               ) : (
                 <span className="legend-chip direct">
-                  <span className="legend-dot green" /> Прямой трафик (Direct) {isDirectEstimated && <span style={{ opacity: 0.75, fontSize: '0.85em' }}>(оценка)</span>}
+                  <span className="legend-dot green" /> Прямой трафик {isDirectEstimated && <span style={{ opacity: 0.75, fontSize: '0.85em' }}>(оценка)</span>}
                 </span>
               )}
               <span className="legend-chip proxy">

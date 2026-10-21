@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, useRef } from 'react'
 import { apiGet, apiPost } from '../api'
 import { getFlowStatus, formatFlowServerName, type AntigravityStatus, type ServerInfo } from '../types'
 import { copyToClipboard as doCopy } from '../utils/clipboard'
+import { computeAntigravityParams } from '../utils/antigravity_commands'
 import FlowRepairModal from './FlowRepairModal'
 
 interface Props {
@@ -15,6 +16,7 @@ export default function Antigravity({ notify }: Props) {
   const [saving, setSaving] = useState(false)
   const [copiedProxy, setCopiedProxy] = useState(false)
   const [copiedEnv, setCopiedEnv] = useState<string | null>(null)
+  const [patchShell, setPatchShell] = useState<'ps' | 'cmd'>('ps')
 
   // Google Flow & AI Geo State
   const [googleGeo, setGoogleGeo] = useState<{
@@ -289,10 +291,8 @@ export default function Antigravity({ notify }: Props) {
     notify('Скопировано в буфер обмена')
   }
 
-  const routerIp = window.location.hostname || '192.168.2.1'
-  const patchHost = window.location.host || `${routerIp}:1001`
-  const patchCommand = `irm http://${patchHost}/patch | iex`
-  const proxyUrl = `http://${routerIp}:${proxyPort}`
+  const { patchCommandPs, patchCommandCmd, proxyUrl } =
+    computeAntigravityParams(status?.router_ip, undefined, proxyPort)
 
   const getStatusBadge = () => {
     if (!status?.enabled) {
@@ -910,14 +910,36 @@ export default function Antigravity({ notify }: Props) {
             </a>
           </div>
 
-          {/* Способ 2: PowerShell однострочник */}
+          {/* Способ 2: Быстрый запуск патча (PowerShell / Windows CMD) */}
           <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border)', borderRadius: 8, padding: '16px', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
             <div>
-              <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span>⚡</span> Способ 2: Команда PowerShell
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8, flexWrap: 'wrap', gap: 6 }}>
+                <div style={{ fontWeight: 600, fontSize: 14, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span>⚡</span> Способ 2: Команда для терминала
+                </div>
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <button
+                    type="button"
+                    className={`btn sm ${patchShell === 'ps' ? 'primary' : 'ghost'}`}
+                    style={{ fontSize: 11.5, padding: '2px 8px' }}
+                    onClick={() => setPatchShell('ps')}
+                  >
+                    PowerShell
+                  </button>
+                  <button
+                    type="button"
+                    className={`btn sm ${patchShell === 'cmd' ? 'primary' : 'ghost'}`}
+                    style={{ fontSize: 11.5, padding: '2px 8px' }}
+                    onClick={() => setPatchShell('cmd')}
+                  >
+                    Windows CMD
+                  </button>
+                </div>
               </div>
-              <p className="muted small" style={{ marginBottom: 16 }}>
-                Выполните команду в окне PowerShell на ПК. Скрипт загрузится с роутера и выполнит моментальный патчинг без сохранения файлов на диск.
+              <p className="muted small" style={{ marginBottom: 12 }}>
+                {patchShell === 'ps'
+                  ? 'Выполните команду в окне PowerShell на ПК для моментального патчинга без сохранения файлов на диск:'
+                  : 'Выполните команду в командной строке Windows CMD (или Win+R) для запуска патча:'}
               </p>
             </div>
             <div>
@@ -926,16 +948,17 @@ export default function Antigravity({ notify }: Props) {
                   type="text"
                   readOnly
                   className="input mono small"
-                  value={patchCommand}
+                  value={patchShell === 'ps' ? patchCommandPs : patchCommandCmd}
                   style={{ flex: 1, fontSize: 12, padding: '8px 10px' }}
                   onClick={(e) => (e.target as HTMLInputElement).select()}
                 />
                 <button
+                  type="button"
                   className="btn primary"
-                  onClick={() => copyToClipboard(patchCommand, 'patch')}
+                  onClick={() => copyToClipboard(patchShell === 'ps' ? patchCommandPs : patchCommandCmd, 'patch')}
                   style={{ whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 6 }}
                 >
-                  {copiedEnv === 'patch' ? '✓ Скопировано' : '📋 Скопировать команду'}
+                  {copiedEnv === 'patch' ? '✓ Скопировано' : '📋 Скопировать'}
                 </button>
               </div>
             </div>

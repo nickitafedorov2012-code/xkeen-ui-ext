@@ -335,6 +335,69 @@ pub fn add_provider_to_yaml(
     add_provider_to_yaml_full(yaml, id, url, health_check_url, health_check_interval, None, None)
 }
 
+/// Добавить локальную file-подписку (для V2Ray / Base64 конвертированных списков) в config.yaml
+pub fn add_file_provider_to_yaml(
+    yaml: &str,
+    id: &str,
+    file_path: &str,
+    health_check_url: Option<&str>,
+    health_check_interval: Option<u32>,
+) -> Result<String, String> {
+    let id = id.trim();
+    let file_path = file_path.trim();
+    if id.is_empty() || file_path.is_empty() {
+        return Err("ID подписки и путь к файлу не могут быть пустыми".into());
+    }
+
+    let existing = parse_provider_names(yaml);
+    if existing.iter().any(|p| p.eq_ignore_ascii_case(id)) {
+        return Err(format!("Подписка с ID '{id}' уже существует"));
+    }
+
+    let hc_url = health_check_url.unwrap_or(PROVIDER_HEALTH_CHECK_URL);
+    let hc_interval = health_check_interval.unwrap_or(PROVIDER_HEALTH_CHECK_INTERVAL_SECS);
+
+    let is_crlf = yaml.contains("\r\n");
+    let eol = if is_crlf { "\r\n" } else { "\n" };
+
+    let new_block = format!(
+        "  {id}:\n    type: file\n    path: \"{file_path}\"\n    health-check:\n      enable: true\n      lazy: true\n      url: \"{hc_url}\"\n      interval: {hc_interval}\n      expected-status: {PROVIDER_HEALTH_CHECK_EXPECTED_STATUS}\n    override:\n      udp: true\n      tfo: true"
+    );
+    let new_block_formatted = if is_crlf {
+        new_block.replace('\n', "\r\n")
+    } else {
+        new_block
+    };
+
+    let mut out = Vec::new();
+    let mut in_providers = false;
+    let mut inserted = false;
+
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+
+        if line.trim_end() == "proxy-providers:" {
+            in_providers = true;
+            out.push(line.to_string());
+            out.push(new_block_formatted.clone());
+            inserted = true;
+            continue;
+        }
+        if in_providers && is_top {
+            in_providers = false;
+        }
+        out.push(line.to_string());
+    }
+
+    if !inserted {
+        out.push(format!("{eol}proxy-providers:"));
+        out.push(new_block_formatted);
+    }
+
+    Ok(out.join(eol))
+}
+
 /// Удалить подписку из блока proxy-providers и всех proxy-groups (секция use:) в config.yaml
 pub fn delete_provider_from_yaml(yaml: &str, id: &str) -> Result<String, String> {
     let id = id.trim();
@@ -429,6 +492,175 @@ pub fn delete_provider_from_yaml(yaml: &str, id: &str) -> Result<String, String>
 
     let is_crlf = yaml.contains("\r\n");
     let eol = if is_crlf { "\r\n" } else { "\n" };
+    Ok(out.join(eol))
+}
+
+fn replace_hwid_in_url_line(line: &str, new_hwid: &str) -> String {
+    if let Some(pos) = line.find("hwid=") {
+        let after = &line[pos + 5..];
+        let end_pos = after.find(|c: char| c == '&' || c == '"' || c == '\'' || c == ' ' || c == '\r' || c == '\n').unwrap_or(after.len());
+        format!("{}hwid={}{}", &line[..pos], new_hwid, &after[end_pos..])
+    } else {
+        line.to_string()
+    }
+}
+
+fn remove_hwid_from_url_line(line: &str) -> String {
+    if let Some(pos) = line.find("hwid=") {
+        let start_pos = if pos > 0 && (&line[pos - 1..pos] == "&" || &line[pos - 1..pos] == "?") {
+            pos - 1
+        } else {
+            pos
+        };
+        let after = &line[pos + 5..];
+        let end_pos = after.find(|c: char| c == '&' || c == '"' || c == '\'' || c == ' ' || c == '\r' || c == '\n').unwrap_or(after.len());
+        let rest = &after[end_pos..];
+        let was_question = pos > 0 && &line[pos - 1..pos] == "?";
+        if was_question && rest.starts_with('&') {
+            format!("{}?{}", &line[..start_pos], &rest[1..])
+        } else {
+            format!("{}{}", &line[..start_pos], rest)
+        }
+    } else {
+        line.to_string()
+    }
+}
+
+/// Обновить или удалить HWID подписки в config.yaml (в блоке header и query string URL)
+pub fn update_provider_hwid_in_yaml(yaml: &str, provider_id: &str, new_hwid: Option<&str>) -> Result<String, String> {
+    let id = provider_id.trim();
+    if id.is_empty() {
+        return Err("ID подписки не может быть пустым".into());
+    }
+
+    let is_crlf = yaml.contains("\r\n");
+    let eol = if is_crlf { "\r\n" } else { "\n" };
+
+    let mut out: Vec<String> = Vec::new();
+    let mut in_providers = false;
+    let mut in_target_provider = false;
+    let mut found_provider = false;
+    let mut in_header = false;
+    let mut header_indent = 4;
+    let mut handled_hwid = false;
+
+    let clean_hwid = new_hwid.map(str::trim).filter(|h| !h.is_empty());
+
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+
+        if line.trim_end() == "proxy-providers:" {
+            in_providers = true;
+            out.push(line.to_string());
+            continue;
+        }
+
+        if in_providers && is_top {
+            if in_target_provider && !handled_hwid {
+                if let Some(hwid) = clean_hwid {
+                    out.push(format!("    header:\n      x-hwid: [\"{hwid}\"]"));
+                    handled_hwid = true;
+                }
+            }
+            in_providers = false;
+            in_target_provider = false;
+            in_header = false;
+            out.push(line.to_string());
+            continue;
+        }
+
+        if in_providers {
+            if line.starts_with("  ") && !line.starts_with("   ") && trimmed.ends_with(':') && !trimmed.starts_with('-') {
+                let cur = trimmed.trim_end_matches(':').trim();
+                if in_target_provider && !handled_hwid {
+                    if let Some(hwid) = clean_hwid {
+                        out.push(format!("    header:\n      x-hwid: [\"{hwid}\"]"));
+                        handled_hwid = true;
+                    }
+                }
+                if cur.eq_ignore_ascii_case(id) {
+                    in_target_provider = true;
+                    found_provider = true;
+                    in_header = false;
+                    handled_hwid = false;
+                } else {
+                    in_target_provider = false;
+                    in_header = false;
+                }
+                out.push(line.to_string());
+                continue;
+            }
+
+            if in_target_provider {
+                if trimmed.starts_with("url:") {
+                    let url_line = if let Some(hwid) = clean_hwid {
+                        if line.contains("hwid=") {
+                            replace_hwid_in_url_line(line, hwid)
+                        } else {
+                            line.to_string()
+                        }
+                    } else if line.contains("hwid=") {
+                        remove_hwid_from_url_line(line)
+                    } else {
+                        line.to_string()
+                    };
+                    out.push(url_line);
+                    continue;
+                }
+
+                if trimmed == "header:" || trimmed.starts_with("header: ") {
+                    in_header = true;
+                    header_indent = line.len() - line.trim_start().len();
+                    out.push(line.to_string());
+                    continue;
+                }
+
+                if in_header {
+                    let indent = line.len() - line.trim_start().len();
+                    if indent > header_indent {
+                        if trimmed.starts_with("x-hwid:") {
+                            if let Some(hwid) = clean_hwid {
+                                let prefix = &line[..indent];
+                                out.push(format!("{prefix}x-hwid: [\"{hwid}\"]"));
+                                handled_hwid = true;
+                            }
+                            continue; // Если None - пропускаем строку (удаляем HWID)
+                        }
+                    } else if !trimmed.is_empty() {
+                        in_header = false;
+                        if !handled_hwid {
+                            if let Some(hwid) = clean_hwid {
+                                let prefix = " ".repeat(header_indent + 2);
+                                out.push(format!("{prefix}x-hwid: [\"{hwid}\"]"));
+                                handled_hwid = true;
+                            }
+                        }
+                    }
+                }
+
+                if (trimmed.starts_with("override:") || trimmed.starts_with("interval:")) && !handled_hwid {
+                    if let Some(hwid) = clean_hwid {
+                        out.push(format!("    header:\n      x-hwid: [\"{hwid}\"]"));
+                        handled_hwid = true;
+                    }
+                }
+            }
+        }
+
+        out.push(line.to_string());
+    }
+
+    if in_target_provider && !handled_hwid {
+        if let Some(hwid) = clean_hwid {
+            out.push(format!("    header:\n      x-hwid: [\"{hwid}\"]"));
+        }
+    }
+
+    if !found_provider {
+        return Err(format!("Подписка с ID '{id}' не найдена в config.yaml"));
+    }
+
     Ok(out.join(eol))
 }
 
@@ -2928,6 +3160,43 @@ proxy-groups:
 
         let hwids = parse_provider_hwids(&out);
         assert_eq!(hwids.get("geodema_test").map(String::as_str), Some("test-123"));
+    }
+
+    #[test]
+    fn test_update_provider_hwid_in_yaml() {
+        let yaml = r#"proxy-providers:
+  geodema:
+    type: http
+    url: "https://my.provider/sub?token=abc"
+    interval: 86400
+    path: ./providers/geodema.yaml
+    health-check:
+      enable: true
+"#;
+
+        // 1. Добавление HWID к провайдеру без HWID
+        let with_hwid = update_provider_hwid_in_yaml(yaml, "geodema", Some("my-hwid-999")).unwrap();
+        assert!(with_hwid.contains("x-hwid: [\"my-hwid-999\"]"));
+        let parsed_hwids = parse_provider_hwids(&with_hwid);
+        assert_eq!(parsed_hwids.get("geodema").map(String::as_str), Some("my-hwid-999"));
+
+        // 2. Обновление существующего HWID на новый
+        let updated_hwid = update_provider_hwid_in_yaml(&with_hwid, "geodema", Some("new-hwid-777")).unwrap();
+        assert!(updated_hwid.contains("x-hwid: [\"new-hwid-777\"]"));
+        assert!(!updated_hwid.contains("my-hwid-999"));
+        let parsed_hwids2 = parse_provider_hwids(&updated_hwid);
+        assert_eq!(parsed_hwids2.get("geodema").map(String::as_str), Some("new-hwid-777"));
+
+        // 3. Удаление HWID (передаём None)
+        let removed_hwid = update_provider_hwid_in_yaml(&updated_hwid, "geodema", None).unwrap();
+        assert!(!removed_hwid.contains("x-hwid"));
+        assert!(!removed_hwid.contains("new-hwid-777"));
+        let parsed_hwids3 = parse_provider_hwids(&removed_hwid);
+        assert_eq!(parsed_hwids3.get("geodema"), None);
+
+        // 4. Ошибка при несуществующем провайдере
+        let err = update_provider_hwid_in_yaml(yaml, "nonexistent", Some("hwid-123"));
+        assert!(err.is_err());
     }
 
     #[test]

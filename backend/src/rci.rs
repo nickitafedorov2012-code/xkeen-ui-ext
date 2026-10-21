@@ -876,6 +876,104 @@ pub async fn set_clean_dns_servers(http: &reqwest::Client, cfg: &AppConfig) -> R
     Ok(())
 }
 
+static ROUTER_IP_CACHE: tokio::sync::RwLock<Option<(String, std::time::Instant)>> =
+    tokio::sync::RwLock::const_new(None);
+
+pub fn extract_ip_from_interface_val(v: &Value) -> Option<String> {
+    if let Some(ip) = v.get("address").and_then(|x| x.as_str()) {
+        let trimmed = ip.trim();
+        if !trimmed.is_empty() && trimmed != "0.0.0.0" && trimmed.parse::<std::net::Ipv4Addr>().is_ok() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Some(ip) = v.get("ip").and_then(|x| x.get("address")).and_then(|x| x.as_str()) {
+        let trimmed = ip.trim();
+        if !trimmed.is_empty() && trimmed != "0.0.0.0" && trimmed.parse::<std::net::Ipv4Addr>().is_ok() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+/// Определение LAN IP-адреса роутера (Bridge0 / Home interface / шлюз)
+pub async fn get_router_lan_ip(http: &reqwest::Client, cfg: &AppConfig) -> Option<String> {
+    // 1. Проверяем кэш (TTL 60 секунд)
+    {
+        let cache = ROUTER_IP_CACHE.read().await;
+        if let Some((ref ip, timestamp)) = *cache {
+            if timestamp.elapsed() < std::time::Duration::from_secs(60) {
+                return Some(ip.clone());
+            }
+        }
+    }
+
+    // 2. Запрос через RCI API роутера
+    if let Ok(token) = ensure_auth(http, cfg).await {
+        for iface_path in &["/rci/show/interface/Bridge0", "/rci/show/interface/Home", "/rci/show/interface"] {
+            if let Ok(v) = rci_get(http, cfg, &token, iface_path).await {
+                if let Some(ip) = extract_ip_from_interface_val(&v) {
+                    let mut cache = ROUTER_IP_CACHE.write().await;
+                    *cache = Some((ip.clone(), std::time::Instant::now()));
+                    return Some(ip);
+                }
+                if let Some(arr) = v.as_array() {
+                    for item in arr {
+                        let id = item.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                        let desc = item.get("description").and_then(|x| x.as_str()).unwrap_or("");
+                        if id == "Bridge0" || desc.eq_ignore_ascii_case("Home") || id.starts_with("br") {
+                            if let Some(ip) = extract_ip_from_interface_val(item) {
+                                let mut cache = ROUTER_IP_CACHE.write().await;
+                                *cache = Some((ip.clone(), std::time::Instant::now()));
+                                return Some(ip);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Fallback: чтение локальных интерфейсов Linux
+    #[cfg(target_os = "linux")]
+    {
+        for iface in &["br0", "Bridge0", "br-lan"] {
+            if let Ok(out) = tokio::process::Command::new("ip")
+                .args(["-4", "addr", "show", iface])
+                .output()
+                .await
+            {
+                if out.status.success() {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    for line in text.lines() {
+                        let line = line.trim();
+                        if line.starts_with("inet ") {
+                            if let Some(cidr) = line.split_whitespace().nth(1) {
+                                if let Some(ip) = cidr.split('/').next() {
+                                    if let Ok(parsed) = ip.parse::<std::net::Ipv4Addr>() {
+                                        if !parsed.is_loopback() && !parsed.is_unspecified() {
+                                            let ip_str = parsed.to_string();
+                                            let mut cache = ROUTER_IP_CACHE.write().await;
+                                            *cache = Some((ip_str.clone(), std::time::Instant::now()));
+                                            return Some(ip_str);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Fallback: cfg.rci.host если он не является loopback/localhost
+    if !cfg.rci.host.is_empty() && cfg.rci.host != "127.0.0.1" && cfg.rci.host != "localhost" {
+        return Some(cfg.rci.host.clone());
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -899,6 +997,18 @@ mod tests {
         // In the fixed architecture, ensure_auth_locked is called when the lock is already held.
         drop(_guard);
         assert!(AUTH_LOCK.try_lock().is_ok());
+    }
+
+    #[test]
+    fn test_extract_ip_from_interface_val() {
+        let direct_addr = json!({ "id": "Bridge0", "address": "192.168.2.1" });
+        assert_eq!(extract_ip_from_interface_val(&direct_addr), Some("192.168.2.1".to_string()));
+
+        let nested_addr = json!({ "id": "Home", "ip": { "address": "192.168.1.1", "mask": "255.255.255.0" } });
+        assert_eq!(extract_ip_from_interface_val(&nested_addr), Some("192.168.1.1".to_string()));
+
+        let invalid = json!({ "id": "eth0", "address": "0.0.0.0" });
+        assert_eq!(extract_ip_from_interface_val(&invalid), None);
     }
 }
 

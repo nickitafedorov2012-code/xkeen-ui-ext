@@ -299,16 +299,46 @@ export default function UpdateModal({
                 padding: '14px 16px',
               }}
             >
-              <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 8, color: '#38bdf8' }}>
-                Что нового в {hasUpdate ? latVer : curVer}:
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700, fontSize: 13.5, marginBottom: 12, color: '#38bdf8' }}>
+                <span>✨</span>
+                <span>Что нового в {hasUpdate ? latVer : curVer}:</span>
               </div>
-              <ul style={{ margin: 0, paddingLeft: 18, fontSize: 13, lineHeight: 1.6 }}>
-                {notesList.map((n, i) => (
-                  <li key={i} style={{ marginBottom: 4 }}>
-                    {n}
-                  </li>
-                ))}
-              </ul>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {notesList.map((n, i) => {
+                  const parts = n.split(/(\*\*.*?\*\*)/g)
+                  return (
+                    <div
+                      key={i}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'flex-start',
+                        gap: 10,
+                        background: 'rgba(255, 255, 255, 0.025)',
+                        border: '1px solid rgba(255, 255, 255, 0.06)',
+                        borderRadius: 8,
+                        padding: '8px 12px',
+                        fontSize: 13,
+                        lineHeight: 1.5,
+                        color: 'var(--text)',
+                      }}
+                    >
+                      <span style={{ color: '#38bdf8', fontSize: 14, flexShrink: 0, marginTop: 1 }}>•</span>
+                      <div style={{ flex: 1 }}>
+                        {parts.map((p, idx) => {
+                          if (p.startsWith('**') && p.endsWith('**')) {
+                            return (
+                              <strong key={idx} style={{ color: 'var(--text-bright)', fontWeight: 600 }}>
+                                {p.slice(2, -2)}
+                              </strong>
+                            )
+                          }
+                          return <span key={idx}>{p}</span>
+                        })}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
             </div>
           )}
         </div>

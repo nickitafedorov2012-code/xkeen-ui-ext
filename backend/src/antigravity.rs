@@ -47,6 +47,7 @@ pub struct AntigravityStatus {
     pub events: Vec<AntigravityEvent>,
     pub targets: Vec<String>,
     pub own_proxy: String,
+    pub router_ip: Option<String>,
 }
 
 /// Проверка, является ли IP адрес внутренним, loopback, link-local, unspecified или SSRF-уязвимым
@@ -721,6 +722,7 @@ impl AntigravityManager {
             )
         };
 
+        let router_ip = crate::rci::get_router_lan_ip(&self.http, &*self.config.read().await).await;
         let st = self.state.read().await;
         AntigravityStatus {
             enabled,
@@ -739,6 +741,7 @@ impl AntigravityManager {
             events: st.events.iter().cloned().collect(),
             targets,
             own_proxy,
+            router_ip,
         }
     }
 }

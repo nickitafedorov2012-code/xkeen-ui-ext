@@ -693,6 +693,100 @@ pub async fn ping_servers_staggered(
     out
 }
 
+/// Логика отбора кандидата при аварийном переключении (Strict Chain Boundary vs Best-of-Rest)
+pub fn select_failover_target(
+    has_chain: bool,
+    chain_candidate_ids: &[String],
+    all_servers: &[Server],
+    active_id: &str,
+    is_quarantined_fn: impl Fn(&str) -> bool,
+    pings: &std::collections::HashMap<String, i64>,
+    threshold: i64,
+) -> Result<String, String> {
+    if has_chain {
+        let best_non_q = chain_candidate_ids
+            .iter()
+            .find(|id| !is_quarantined_fn(id.as_str()) && pings.get(id.as_str()).is_some_and(|ms| *ms > 0 && *ms <= threshold));
+
+        let best_chain_id = best_non_q.or_else(|| {
+            chain_candidate_ids
+                .iter()
+                .find(|id| pings.get(id.as_str()).is_some_and(|ms| *ms > 0 && *ms <= threshold))
+        });
+
+        if let Some(id) = best_chain_id {
+            return Ok(id.clone());
+        }
+
+        return Err("Все серверы цепочки приоритетов недоступны (в таймауте или карантине). Переключение заблокировано.".to_string());
+    }
+
+    // Резервный поиск среди всех остальных серверов (best-of-rest) — ТОЛЬКО если цепочка НЕ настроена
+    let candidate_ids: Vec<String> = all_servers
+        .iter()
+        .filter(|s| {
+            s.id != active_id
+                && !s.is_pool
+                && s.protocol != "URL-TEST"
+                && s.protocol != "FALLBACK"
+                && s.id != "DIRECT"
+                && s.id != "REJECT"
+                && s.id != "GLOBAL"
+                && !s.id.starts_with("AUTO-")
+        })
+        .take(20)
+        .map(|s| s.id.clone())
+        .collect();
+
+    if candidate_ids.is_empty() {
+        return Err("Нет резервных серверов для переключения".to_string());
+    }
+
+    let non_quarantined_cands: Vec<String> = candidate_ids
+        .iter()
+        .filter(|id| !is_quarantined_fn(id))
+        .cloned()
+        .collect();
+
+    let eval_cands = if !non_quarantined_cands.is_empty() {
+        &non_quarantined_cands
+    } else {
+        &candidate_ids
+    };
+
+    let mut valid: Vec<(String, i64)> = eval_cands
+        .iter()
+        .filter_map(|id| {
+            let ms = *pings.get(id)?;
+            if ms > 0 && ms <= threshold {
+                Some((id.clone(), ms))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if valid.is_empty() {
+        valid = eval_cands
+            .iter()
+            .filter_map(|id| {
+                let ms = *pings.get(id)?;
+                if ms > 0 {
+                    Some((id.clone(), ms))
+                } else {
+                    None
+                }
+            })
+            .collect();
+    }
+    valid.sort_by_key(|(_, ms)| *ms);
+
+    valid
+        .first()
+        .map(|(id, _)| id.clone())
+        .ok_or_else(|| "Все резервные серверы недоступны".to_string())
+}
+
 /// Одна итерация проверки. Возвращает текст решения (для ручного прогона).
 pub async fn run_check(state: &AppState) -> Result<String, String> {
     // DIAG-01: Изоляция от Speedtest — если выполняется замер скорости, пропускаем переключение failover
@@ -992,10 +1086,37 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             }
         }
 
-        // Резервный поиск среди всех остальных серверов (best-of-rest)
+        // 1.1. Строгая изоляция цепочки приоритетов (Strict Chain Boundary)
+        // Если цепочка настроена пользователем, но ни один узел не доступен — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО
+        // выходить за её пределы и самовольно переключаться на сторонние серверы или группы.
+        let has_priority_chain = !cfg.failover.priority_chain.is_empty() || !chain.is_empty();
+        if has_priority_chain {
+            let msg = "Все серверы цепочки приоритетов недоступны (в таймауте или карантине). Переключение заблокировано.".to_string();
+            state.failover_log.push(&msg, false).await;
+            crate::notifications::notify_failover(
+                &state.http,
+                Some(&cfg.mihomo_proxy_url()),
+                &cfg.notifications,
+                "all_down",
+                "Критический сбой: Все серверы цепочки приоритетов недоступны!",
+                &msg,
+            ).await;
+            return Err(msg);
+        }
+
+        // Резервный поиск среди всех остальных серверов (best-of-rest) — ТОЛЬКО если цепочка НЕ настроена
         let candidate_ids: Vec<String> = servers
             .iter()
-            .filter(|s| s.id != active.id && s.id != "Fastest" && s.id != "Fallback")
+            .filter(|s| {
+                s.id != active.id
+                    && !s.is_pool
+                    && s.protocol != "URL-TEST"
+                    && s.protocol != "FALLBACK"
+                    && s.id != "DIRECT"
+                    && s.id != "REJECT"
+                    && s.id != "GLOBAL"
+                    && !s.id.starts_with("AUTO-")
+            })
             .take(20)
             .map(|s| s.id.clone())
             .collect();
@@ -2070,9 +2191,9 @@ mod tests {
         let s3 = "node_3_active";
 
         let chain = vec![
-            Server { id: s1.into(), name: "Zombie Node".into(), ping_ms: 70, is_active: false, protocol: "Vless".into(), host: "1.1.1.1".into(), port: 443, is_priority: true, provider: None, provider_name: None, is_pool: false },
-            Server { id: s2.into(), name: "Healthy Node".into(), ping_ms: 80, is_active: false, protocol: "Vless".into(), host: "2.2.2.2".into(), port: 443, is_priority: false, provider: None, provider_name: None, is_pool: false },
-            Server { id: s3.into(), name: "Active Node".into(), ping_ms: 90, is_active: true, protocol: "Vless".into(), host: "3.3.3.3".into(), port: 443, is_priority: false, provider: None, provider_name: None, is_pool: false },
+            Server { id: s1.into(), name: "Zombie Node".into(), ping_ms: 70, is_active: false, protocol: "Vless".into(), host: "1.1.1.1".into(), port: 443, is_priority: true, provider: None, provider_name: None, is_pool: false, resolved_ip: None },
+            Server { id: s2.into(), name: "Healthy Node".into(), ping_ms: 80, is_active: false, protocol: "Vless".into(), host: "2.2.2.2".into(), port: 443, is_priority: false, provider: None, provider_name: None, is_pool: false, resolved_ip: None },
+            Server { id: s3.into(), name: "Active Node".into(), ping_ms: 90, is_active: true, protocol: "Vless".into(), host: "3.3.3.3".into(), port: 443, is_priority: false, provider: None, provider_name: None, is_pool: false, resolved_ip: None },
         ];
 
         let higher = get_higher_priority_candidates(&chain, s3);
@@ -2146,6 +2267,7 @@ mod tests {
             provider: None,
             provider_name: None,
             is_pool: false,
+            resolved_ip: None,
         };
         let mut cfg = crate::config::AppConfig::default();
         cfg.failover.enabled = true;
@@ -2164,4 +2286,122 @@ mod tests {
         clear_all_quarantine().await;
         reset_canary().await;
     }
+
+    #[test]
+    fn test_failover_strict_chain_does_not_leak_to_external_servers() {
+        let active_id = "chain_node_1";
+        let chain_candidates = vec!["chain_node_2".to_string()];
+        let all_servers = vec![
+            Server {
+                id: "chain_node_1".into(),
+                name: "Chain Node 1".into(),
+                ping_ms: -1,
+                is_active: true,
+                protocol: "VLESS".into(),
+                host: "1.1.1.1".into(),
+                port: 443,
+                is_priority: true,
+                provider: None,
+                provider_name: None,
+                is_pool: false,
+                resolved_ip: None,
+            },
+            Server {
+                id: "chain_node_2".into(),
+                name: "Chain Node 2".into(),
+                ping_ms: -1,
+                is_active: false,
+                protocol: "VLESS".into(),
+                host: "2.2.2.2".into(),
+                port: 443,
+                is_priority: true,
+                provider: None,
+                provider_name: None,
+                is_pool: false,
+                resolved_ip: None,
+            },
+            Server {
+                id: "srv_aeza_external".into(),
+                name: "AEZA External (Alive)".into(),
+                ping_ms: 25,
+                is_active: false,
+                protocol: "VLESS".into(),
+                host: "3.3.3.3".into(),
+                port: 443,
+                is_priority: false,
+                provider: Some("aeza_sub".into()),
+                provider_name: Some("AEZA".into()),
+                is_pool: false,
+                resolved_ip: None,
+            },
+            Server {
+                id: "YouTube".into(),
+                name: "📺 YouTube".into(),
+                ping_ms: 20,
+                is_active: false,
+                protocol: "SELECTOR".into(),
+                host: "Выбран: srv_aeza_external".into(),
+                port: 0,
+                is_priority: false,
+                provider: None,
+                provider_name: None,
+                is_pool: true,
+                resolved_ip: None,
+            },
+        ];
+
+        let mut pings = std::collections::HashMap::new();
+        pings.insert("chain_node_2".to_string(), -1); // chain_node_2 в таймауте
+        pings.insert("srv_aeza_external".to_string(), 25); // живой внешний узел
+        pings.insert("YouTube".to_string(), 20); // селекторная группа
+
+        // Сценарий 1: Цепочка настроена (has_chain = true).
+        // Все узлы цепочки лежат. Внешний узел AEZA жив.
+        // Результат: СТРОГАЯ ИЗОЛЯЦИЯ (Strict Chain Boundary). Failover ОБЯЗАН вернуть ошибку и НЕ трогать AEZA или YouTube!
+        let is_q = |_id: &str| false;
+        let res = select_failover_target(
+            true,
+            &chain_candidates,
+            &all_servers,
+            active_id,
+            is_q,
+            &pings,
+            300,
+        );
+        assert!(res.is_err(), "Failover обязан завершиться ошибкой при падении всех узлов цепочки!");
+        let err_msg = res.unwrap_err();
+        assert!(err_msg.contains("цепочки приоритетов недоступны"), "Сообщение об ошибке: {err_msg}");
+
+        // Сценарий 2: Все кандидаты цепочки в карантине (зомби)
+        pings.insert("chain_node_2".to_string(), 50); // пинг формально ок, но узел в карантине
+        let is_all_q = |_id: &str| true;
+        let res_all_q = select_failover_target(
+            true,
+            &chain_candidates,
+            &all_servers,
+            active_id,
+            is_all_q,
+            &pings,
+            300,
+        );
+        // Внешняя AEZA или YouTube ни в коем случае не должны быть выбраны:
+        if let Ok(chosen) = res_all_q {
+            assert_ne!(chosen, "srv_aeza_external");
+            assert_ne!(chosen, "YouTube");
+        }
+
+        // Сценарий 3: Цепочка НЕ настроена (has_chain = false, пустая цепочка).
+        // Должен работать best-of-rest, выбирая честный сервер srv_aeza_external и ИСКЛЮЧАЯ селекторную группу "YouTube" (is_pool: true)
+        let res_no_chain = select_failover_target(
+            false,
+            &[],
+            &all_servers,
+            active_id,
+            is_q,
+            &pings,
+            300,
+        );
+        assert_eq!(res_no_chain.expect("При пустой цепочке должен выбираться лучший внешний узел"), "srv_aeza_external");
+    }
 }
+

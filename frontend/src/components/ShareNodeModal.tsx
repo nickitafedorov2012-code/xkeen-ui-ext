@@ -89,9 +89,11 @@ export default function ShareNodeModal({
             <span className="share-node-name" title={server.name}>
               {server.name}
             </span>
-            <span className="muted small mono">
-              {server.host}:{server.port}
-            </span>
+            {server.host && server.host !== server.name && server.port > 0 && (
+              <span className="muted small mono">
+                {server.host}:{server.port}
+              </span>
+            )}
           </div>
 
           {isPlaceholder && (

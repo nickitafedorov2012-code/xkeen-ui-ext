@@ -1837,88 +1837,98 @@ export default function Zapret({ notify }: ZapretProps) {
         </div>
       </section>
 
-      {/* 3. ВСТРОЕННЫЙ АВТОПОДБОР СТРАТЕГИЙ (MINI-BLOCKCHECK) */}
-      <section
-        className="card"
-        style={{
-          padding: '22px 24px',
-          background: 'linear-gradient(135deg, rgba(56, 189, 248, 0.05) 0%, rgba(15, 23, 42, 0.6) 100%)',
-          border: '1px solid rgba(56, 189, 248, 0.3)',
-          borderRadius: 16,
-          boxShadow: '0 8px 24px rgba(56, 189, 248, 0.05)',
-        }}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 14, marginBottom: 16 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div
-              style={{
-                width: 40,
-                height: 40,
-                borderRadius: 10,
-                background: 'rgba(56, 189, 248, 0.15)',
-                border: '1px solid rgba(56, 189, 248, 0.35)',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontSize: 20,
-              }}
-            >
-              🎯
-            </div>
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>
-                  Автоподбор стратегий десинхронизации (Mini-Blockcheck)
-                </h3>
-                <span
-                  className="badge"
-                  data-testid="blockcheck-engine-badge"
-                  style={{
-                    background: activeEngine === 'v2' ? 'rgba(56, 189, 248, 0.15)' : 'rgba(234, 179, 8, 0.15)',
-                    color: activeEngine === 'v2' ? '#38bdf8' : '#facc15',
-                    border: `1px solid ${activeEngine === 'v2' ? 'rgba(56, 189, 248, 0.4)' : 'rgba(234, 179, 8, 0.4)'}`,
-                    fontSize: 11,
-                  }}
-                >
-                  ⚡ {activeEngine === 'v2' ? 'zapret2 engine' : 'zapret1 (legacy) engine'}
-                </span>
+      {/* 3 & 4. АВТОПОДБОР И SMART TV (2 КАРТОЧКИ В ОДНУ СТРОКУ) */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: 16, alignItems: 'stretch' }}>
+        {/* 3. ВСТРОЕННЫЙ АВТОПОДБОР СТРАТЕГИЙ (MINI-BLOCKCHECK) */}
+        <section
+          className="card"
+          style={{
+            margin: 0,
+            padding: '22px 24px',
+            background: 'linear-gradient(135deg, rgba(56, 189, 248, 0.05) 0%, rgba(15, 23, 42, 0.6) 100%)',
+            border: '1px solid rgba(56, 189, 248, 0.3)',
+            borderRadius: 16,
+            boxShadow: '0 8px 24px rgba(56, 189, 248, 0.05)',
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'space-between',
+            gridColumn: blockcheckResult ? '1 / -1' : undefined,
+          }}
+        >
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+              <div
+                style={{
+                  width: 40,
+                  height: 40,
+                  borderRadius: 10,
+                  background: 'rgba(56, 189, 248, 0.15)',
+                  border: '1px solid rgba(56, 189, 248, 0.35)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 20,
+                  flexShrink: 0,
+                }}
+              >
+                🎯
               </div>
-              <div className="muted small" style={{ marginTop: 3 }}>
-                Автоподбор временно недоступен: прежний алгоритм не измерял работу отдельных стратегий. Для достоверного результата требуется проверка клиентского трафика через Zapret; наличие процесса не подтверждает обход DPI.
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>
+                    Автоподбор стратегий десинхронизации (Mini-Blockcheck)
+                  </h3>
+                  <span
+                    className="badge"
+                    data-testid="blockcheck-engine-badge"
+                    style={{
+                      background: activeEngine === 'v2' ? 'rgba(56, 189, 248, 0.15)' : 'rgba(234, 179, 8, 0.15)',
+                      color: activeEngine === 'v2' ? '#38bdf8' : '#facc15',
+                      border: `1px solid ${activeEngine === 'v2' ? 'rgba(56, 189, 248, 0.4)' : 'rgba(234, 179, 8, 0.4)'}`,
+                      fontSize: 11,
+                    }}
+                  >
+                    ⚡ {activeEngine === 'v2' ? 'zapret2 engine' : 'zapret1 (legacy) engine'}
+                  </span>
+                </div>
+                <div className="muted small" style={{ marginTop: 6, lineHeight: 1.45 }}>
+                  Автоподбор временно недоступен: прежний алгоритм не измерял работу отдельных стратегий. Для достоверного результата требуется проверка клиентского трафика через Zapret; наличие процесса не подтверждает обход DPI.
+                </div>
               </div>
             </div>
           </div>
 
-          <button
-            type="button"
-            className="btn primary"
-            disabled={runningBlockcheck || busy || !isInstalled}
-            onClick={handleRunBlockcheck}
-            style={{
-              background: 'linear-gradient(135deg, #0ea5e9 0%, #2563eb 100%)',
-              border: 'none',
-              boxShadow: '0 2px 12px rgba(14, 165, 233, 0.35)',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '8px 18px',
-              fontSize: 13,
-              fontWeight: 600,
-            }}
-          >
-            {runningBlockcheck ? (
-              <>
-                <span className="spinner sm" />
-                <span>Тестирование стратегий…</span>
-              </>
-            ) : (
-              <>
-                <span>⚡</span>
-                <span>Запустить автоподбор стратегий</span>
-              </>
-            )}
-          </button>
-        </div>
+          <div style={{ marginTop: 16, display: 'flex', alignItems: 'center' }}>
+            <button
+              type="button"
+              className="btn primary"
+              disabled={runningBlockcheck || busy || !isInstalled}
+              onClick={handleRunBlockcheck}
+              style={{
+                background: 'linear-gradient(135deg, #0ea5e9 0%, #2563eb 100%)',
+                border: 'none',
+                boxShadow: '0 2px 12px rgba(14, 165, 233, 0.35)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '8px 18px',
+                fontSize: 13,
+                fontWeight: 600,
+              }}
+            >
+              {runningBlockcheck ? (
+                <>
+                  <span className="spinner sm" />
+                  <span>Тестирование стратегий…</span>
+                </>
+              ) : (
+                <>
+                  <span>⚡</span>
+                  <span>Запустить автоподбор стратегий</span>
+                </>
+              )}
+            </button>
+          </div>
 
         {/* РЕЗУЛЬТАТЫ СТРАТЕГИЙ */}
         {blockcheckResult && (
@@ -2110,6 +2120,7 @@ export default function Zapret({ notify }: ZapretProps) {
       <section
         className="card"
         style={{
+          margin: 0,
           padding: '22px 24px',
           background: features.smart_tv_mode
             ? 'linear-gradient(135deg, rgba(234, 179, 8, 0.08) 0%, rgba(15, 23, 42, 0.6) 100%)'
@@ -2118,10 +2129,13 @@ export default function Zapret({ notify }: ZapretProps) {
           borderRadius: 16,
           boxShadow: features.smart_tv_mode ? '0 8px 24px rgba(234, 179, 8, 0.08)' : 'none',
           transition: 'all 0.25s ease',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'space-between',
         }}
       >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: 14 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 14 }}>
             <div
               style={{
                 width: 44,
@@ -2133,11 +2147,12 @@ export default function Zapret({ notify }: ZapretProps) {
                 alignItems: 'center',
                 justifyContent: 'center',
                 fontSize: 22,
+                flexShrink: 0,
               }}
             >
               📺
             </div>
-            <div>
+            <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                 <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>
                   Профиль «Smart TV / Кинотеатр»
@@ -2167,13 +2182,15 @@ export default function Zapret({ notify }: ZapretProps) {
                   UDP 443 DROP (QUIC)
                 </span>
               </div>
-              <div className="muted small" style={{ marginTop: 4, lineHeight: 1.45 }}>
+              <div className="muted small" style={{ marginTop: 6, lineHeight: 1.45 }}>
                 Специальная оптимизация для телевизоров LG webOS, Samsung Tizen, Android TV, Apple TV и медиаплееров. Блокирует UDP 443 (QUIC / HTTP3) для перевода плееров на стабильный TCP HTTP/2 с аппаратным nfqws2 ускорением. Автоматически включает в hostlist кэш-серверы Google Video (<code>redirector.googlevideo.com</code>, <code>manifest.googlevideo.com</code>, <code>gvt1.com</code>, <code>play.google.com</code>) для устранения зависаний 4K и буферизации.
               </div>
             </div>
           </div>
+        </div>
 
-          {/* Свитч рубильник Smart TV */}
+        {/* Свитч рубильник Smart TV */}
+        <div style={{ marginTop: 16, display: 'flex', alignItems: 'center' }}>
           <button
             type="button"
             disabled={busy || !isInstalled || pendingKeys.has('smart_tv_mode')}
@@ -2217,6 +2234,7 @@ export default function Zapret({ notify }: ZapretProps) {
           </button>
         </div>
       </section>
+    </div>
 
       {/* 5. АВТООБНОВЛЕНИЕ СПИСКОВ (COMMUNITY HOSTLISTS) */}
       <section

@@ -26,6 +26,27 @@ pub struct Server {
     pub provider: Option<String>,
     pub provider_name: Option<String>,
     pub is_pool: bool,
+    pub resolved_ip: Option<String>,
+}
+
+/// Быстрое асинхронное разрешение IP-адреса хоста (с таймаутом 250 мс для защиты от зависаний)
+pub async fn resolve_host_ip(host: &str) -> Option<String> {
+    let clean = host.trim();
+    if clean.is_empty() || clean.starts_with("Авто:") || clean.starts_with("Выбран:") {
+        return None;
+    }
+    if clean.parse::<std::net::IpAddr>().is_ok() {
+        return Some(clean.to_string());
+    }
+    match tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        tokio::net::lookup_host(format!("{clean}:443")),
+    )
+    .await
+    {
+        Ok(Ok(mut addrs)) => addrs.next().map(|a| a.ip().to_string()),
+        _ => None,
+    }
 }
 
 impl AsRef<str> for Server {
@@ -229,6 +250,10 @@ pub struct ProviderInfo {
     pub url: Option<String>,
     pub hwid: Option<String>,
     pub enabled: bool,
+    pub upload_bytes: Option<u64>,
+    pub download_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+    pub expire_timestamp: Option<i64>,
 }
 
 /// Список всех подписок (proxy-providers) с метаданными и пользовательскими псевдонимами.
@@ -253,6 +278,21 @@ pub async fn get_providers_info(http: &reqwest::Client, cfg: &AppConfig) -> Resu
             let updated = prov.get("updatedAt").and_then(|u| u.as_str()).map(|s| s.to_string());
             let display_name = cfg.provider_aliases.get(pname).cloned().unwrap_or_else(|| pname.clone());
             let is_enabled = !cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(pname));
+
+            let sub_info = prov.get("subscriptionInfo").and_then(|s| s.as_object());
+            let upload_bytes = sub_info
+                .and_then(|s| s.get("Upload").or_else(|| s.get("upload")))
+                .and_then(|v| v.as_u64());
+            let download_bytes = sub_info
+                .and_then(|s| s.get("Download").or_else(|| s.get("download")))
+                .and_then(|v| v.as_u64());
+            let total_bytes = sub_info
+                .and_then(|s| s.get("Total").or_else(|| s.get("total")))
+                .and_then(|v| v.as_u64());
+            let expire_timestamp = sub_info
+                .and_then(|s| s.get("Expire").or_else(|| s.get("expire")))
+                .and_then(|v| v.as_i64());
+
             out.push(ProviderInfo {
                 id: pname.clone(),
                 name: display_name,
@@ -262,6 +302,10 @@ pub async fn get_providers_info(http: &reqwest::Client, cfg: &AppConfig) -> Resu
                 url: urls.get(pname).cloned(),
                 hwid: hwids.get(pname).cloned(),
                 enabled: is_enabled,
+                upload_bytes,
+                download_bytes,
+                total_bytes,
+                expire_timestamp,
             });
         }
     }
@@ -623,6 +667,7 @@ pub async fn get_servers(
                 provider: Some("__pool__".into()),
                 provider_name: Some("Группа / Пул".into()),
                 is_pool: true,
+                resolved_ip: None,
             });
         }
     }
@@ -660,6 +705,7 @@ pub async fn get_servers(
                 provider: Some("__pool__".into()),
                 provider_name: Some("Группа / Пул".into()),
                 is_pool: true,
+                resolved_ip: None,
             });
             continue;
         }
@@ -671,11 +717,13 @@ pub async fn get_servers(
             continue;
         }
         seen_names.insert(name.clone());
+        let host_str = p.get("server").and_then(|s| s.as_str()).unwrap_or(name).to_string();
+        let initial_ip = if host_str.parse::<std::net::IpAddr>().is_ok() { Some(host_str.clone()) } else { None };
         servers.push(Server {
             id: name.clone(),
             name: display_name(name),
             protocol: typ.to_uppercase(),
-            host: p.get("server").and_then(|s| s.as_str()).unwrap_or(name).to_string(),
+            host: host_str,
             port: p.get("port").and_then(|s| s.as_u64()).unwrap_or(0) as u16,
             is_active: *name == active,
             is_priority: priority_chain.iter().any(|p| p == name),
@@ -683,6 +731,7 @@ pub async fn get_servers(
             provider: None,
             provider_name: None,
             is_pool: false,
+            resolved_ip: initial_ip,
         });
     }
 
@@ -693,27 +742,57 @@ pub async fn get_servers(
             if SKIP_TYPES.contains(&typ.as_str()) {
                 continue;
             }
-            if seen_names.contains(name) {
-                continue;
-            }
-            seen_names.insert(name.clone());
             let provider_id = p.get("_provider").and_then(|pr| pr.as_str()).map(|pr| pr.to_string());
             let provider_name = provider_id.as_ref().map(|pid| {
                 cfg.provider_aliases.get(pid).cloned().unwrap_or_else(|| pid.clone())
             });
+            let real_host = p.get("server").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            let real_port = p.get("port").and_then(|s| s.as_u64()).unwrap_or(0) as u16;
+
+            if let Some(existing) = servers.iter_mut().find(|s| &s.id == name) {
+                if !real_host.is_empty() {
+                    existing.host = real_host.clone();
+                    if real_host.parse::<std::net::IpAddr>().is_ok() {
+                        existing.resolved_ip = Some(real_host);
+                    }
+                }
+                if real_port > 0 {
+                    existing.port = real_port;
+                }
+                if existing.provider.is_none() {
+                    existing.provider = provider_id;
+                    existing.provider_name = provider_name;
+                }
+                continue;
+            }
+
+            if seen_names.contains(name) {
+                continue;
+            }
+            seen_names.insert(name.clone());
+            let final_host = if !real_host.is_empty() { real_host } else { name.clone() };
+            let initial_ip = if final_host.parse::<std::net::IpAddr>().is_ok() { Some(final_host.clone()) } else { None };
             servers.push(Server {
                 id: name.clone(),
                 name: display_name(name),
                 protocol: typ.to_uppercase(),
-                host: p.get("server").and_then(|s| s.as_str()).unwrap_or(name).to_string(),
-                port: p.get("port").and_then(|s| s.as_u64()).unwrap_or(0) as u16,
+                host: final_host,
+                port: real_port,
                 is_active: *name == active,
                 is_priority: priority_chain.iter().any(|p| p == name),
                 ping_ms: last_delay(p),
                 provider: provider_id,
                 provider_name,
                 is_pool: false,
+                resolved_ip: initial_ip,
             });
+        }
+    }
+
+    // Разрешаем DNS для активного узла, если он задан доменным именем
+    for s in &mut servers {
+        if s.is_active && s.resolved_ip.is_none() && !s.is_pool {
+            s.resolved_ip = resolve_host_ip(&s.host).await;
         }
     }
 

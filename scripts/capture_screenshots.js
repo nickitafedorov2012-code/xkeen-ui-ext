@@ -14,7 +14,7 @@ if (!fs.existsSync(SCREENSHOT_DIR)) {
 
 // 1. Mock API Data
 const mockStatus = {
-  version: "v1.5.25",
+  version: "1.9.24",
   config_path: "/opt/etc/xkeen-route/config.json",
   router: {
     model: "Keenetic Peak (KN-4110) WBR3000UAX",
@@ -45,6 +45,7 @@ const mockStatus = {
   },
   mihomo: { host: "127.0.0.1", port: 9090 },
   rci: { host: "127.0.0.1", port: 79 },
+  router_ip: "192.168.1.1",
   failover: {
     enabled: true,
     ping_threshold_ms: 250,
@@ -52,14 +53,17 @@ const mockStatus = {
     priority_chain: ["de_vless", "nl_vless", "fi_trojan"],
     auto_restore_priority: true,
     interval_secs: 45,
-    device_failover_enabled: true
+    device_failover_enabled: true,
+    quarantine: [
+      { server_id: "fi_trojan", server_name: "🇫🇮 Финляндия Helsinki [Trojan]", fail_count: 3, remaining_secs: 720, reason: "3x таймаут (>250мс)" }
+    ]
   },
   refresh_interval_sec: 5,
   adblock_enabled: true
 };
 
 const mockServers = [
-  { id: "de_vless", name: "🇩🇪 Германия Frankfurt [VLESS-Reality]", protocol: "VLESS", host: "fra-node.vless.net", port: 443, is_active: true, is_priority: true, flow_status: "ok", ping_ms: 34, provider: "sub1", provider_name: "FastProxy VIP" },
+  { id: "de_vless", name: "🇩🇪 Германия Frankfurt [VLESS-Reality]", protocol: "VLESS", host: "fra-node.vless.net", port: 443, is_active: true, is_priority: true, flow_status: "ok", ping_ms: 34, provider: "sub1", provider_name: "FastProxy VIP", resolved_ip: "185.190.140.22" },
   { id: "nl_vless", name: "🇳🇱 Нидерланды Amsterdam [VLESS]", protocol: "VLESS", host: "ams-node.vless.net", port: 443, is_active: false, is_priority: false, flow_status: "ok", ping_ms: 38, provider: "sub1", provider_name: "FastProxy VIP" },
   { id: "fi_trojan", name: "🇫🇮 Финляндия Helsinki [Trojan]", protocol: "Trojan", host: "hel-node.trojan.net", port: 443, is_active: false, is_priority: false, flow_status: "blocked", ping_ms: 44, provider: "sub1", provider_name: "FastProxy VIP" },
   { id: "pl_vless", name: "🇵🇱 Польша Warsaw [Reality]", protocol: "VLESS", host: "waw-node.vless.net", port: 443, is_active: false, is_priority: false, flow_status: "ok", ping_ms: 49, provider: "sub1", provider_name: "FastProxy VIP" },
@@ -72,7 +76,7 @@ const mockServers = [
 ];
 
 const mockProviders = [
-  { id: "sub1", name: "FastProxy VIP", count: 6, vehicle_type: "HTTP", updated_at: "2026-09-24 04:00", url: "https://my-sub.net/token123" },
+  { id: "sub1", name: "FastProxy VIP", count: 6, vehicle_type: "HTTP", updated_at: "2026-09-24 04:00", url: "https://my-sub.net/token123", hwid: "keenetic-router-842", total_bytes: 107374182400, upload_bytes: 4294967296, download_bytes: 48318382080, expire_timestamp: 1814678400 },
   { id: "sub2", name: "Backup Stream", count: 4, vehicle_type: "HTTP", updated_at: "2026-09-24 04:00", url: "https://my-backup.net/token456" }
 ];
 
@@ -179,7 +183,8 @@ const mockAntigravity = {
     { time: "05:00:15", message: "Оптимизация DoH маршрутов выполнена (пинг снижен на 8 мс)", level: "info" }
   ],
   targets: ["gemini.google.com", "aistudio.google.com", "generativelanguage.googleapis.com"],
-  own_proxy: ""
+  own_proxy: "",
+  router_ip: "192.168.1.1"
 };
 
 const mockSettings = {
@@ -223,6 +228,47 @@ const mockZapret = {
   hosts: "# zapret-hosts.txt — Список доменов для универсального обхода DPI\nrutracker.org\nntc.party\nkinozal.tv\nflibusta.is\nhdrezka.ag\nnotion.so\nintel.com\nmedium.com\n"
 };
 
+const mockSystemDiagnostics = {
+  status: "healthy",
+  components: {
+    mihomo: { installed: true, running: true, version: "v1.19.31", tun_active: true, pid: 1420 },
+    zapret: { installed: true, running: true, version: "v1.0.5", engine: "nfqws", binaries_found: ["nfqws"], missing: [] },
+    adguard: { installed: true, running: true, dns_port: 5353, loop_detected: false, pid: 1530 }
+  },
+  iptables: {
+    redirect_active: true,
+    adguard_chain_active: true,
+    zapret_chain_active: true
+  },
+  storage: {
+    opt_mounted: true,
+    opt_rw: true,
+    free_space_mb: 3200,
+    total_space_mb: 8000
+  },
+  listening_ports: { "53": "dnsmasq", "5353": "AdGuardHome", "9090": "mihomo" },
+  system_summary: {
+    cpu_total_percent: 6,
+    ram_used_mb: 234,
+    ram_total_mb: 512,
+    uptime_seconds: 1881900
+  },
+  timestamp: "2026-09-24T05:15:00Z"
+};
+
+const mockZapretAnalytics = {
+  bytes_intercepted: 48520000000,
+  packets_intercepted: 35210000,
+  vps_saved_bytes: 46200000000,
+  period_bytes: 124000000,
+  tcp_packets: 32100000,
+  udp_packets: 3110000,
+  nfqws_cpu_pct: 0.8,
+  nfqws_mem_bytes: 14200000,
+  uptime_seconds: 1881900,
+  is_active: true
+};
+
 let pollCount = 0;
 
 const server = http.createServer((req, res) => {
@@ -239,7 +285,17 @@ const server = http.createServer((req, res) => {
     if (apiPath === 'status') return jsonOk(mockStatus);
     if (apiPath === 'system/metrics') return jsonOk(mockStatus.system);
     if (apiPath === 'auth/status') return jsonOk({ enabled: false, authenticated: true });
-    if (apiPath === 'update/check') return jsonOk({ current: "v1.5.25", latest: "v1.5.25", update_available: false, notes: [] });
+    if (apiPath === 'update/check') return jsonOk({
+      current: "1.9.24",
+      latest: "1.9.24",
+      update_available: false,
+      notes: [
+        "**⚡ Аппаратный учёт прямого трафика в ядре роутера**: Сетевой трафик мимо прокси теперь считается аппаратно через правила сетевого фильтра роутера. Полностью исключены ложные накрутки.",
+        "**🌐 Удобная сортировка активных соединений**: Добавлена сортировка по общему объёму данных: самые активные сессии сразу видны вверху списка. Кликабельные колонки и чистый интерфейс без стрелок.",
+        "**📊 Понятные карточки в сводке трафика**: Направления трафика получили простые и ясные названия: «Прямой трафик», «Обычные серверы» и «Туннель белых списков».",
+        "**🔀 Чистый список серверов без лишнего шума**: Прокси-пулы теперь аккуратно скрыты по умолчанию и открываются только при нажатии на кнопку «Пулы»."
+      ]
+    });
     if (apiPath === 'failover/events') return jsonOk({
       events: [
         { time: "05:14:22", message: "🇩🇪 Германия Frankfurt (34 мс) — в норме", switched: false },
@@ -277,6 +333,8 @@ const server = http.createServer((req, res) => {
       resolved_server: "🇩🇪 Германия Frankfurt [VLESS-Reality]",
       reason: "Совпадение по суффиксу домена youtube.com"
     });
+    if (apiPath === 'system/diagnostics') return jsonOk(mockSystemDiagnostics);
+    if (apiPath === 'zapret/analytics') return jsonOk(mockZapretAnalytics);
     if (apiPath === 'diagnostics/health') return jsonOk(mockHealth);
     if (apiPath === 'diagnostics/dns-test') return jsonOk({
       domain: "chatgpt.com",
@@ -317,6 +375,7 @@ const server = http.createServer((req, res) => {
       { id: "mihomo_yaml", name: "config.yaml (Mihomo)", path: "/opt/etc/mihomo/config.yaml", syntax: "yaml" },
       { id: "xkeen_route_json", name: "config.json (Панель)", path: "/opt/etc/xkeen-route/config.json", syntax: "json" }
     ]);
+    if (apiPath === 'config-files/read') return jsonOk({ content: "# Mihomo configuration\nport: 7890\n", syntax: "yaml", path: "/opt/etc/mihomo/config.yaml" });
     return jsonOk({});
   }
 
@@ -443,6 +502,7 @@ async function main() {
     const screens = [
       { tab: 'dashboard', filename: 'dashboard.png', waitMs: 1500 },
       { tab: 'servers', filename: 'servers.png', waitMs: 1500 },
+      { tab: 'servers', filename: 'providers_modal.png', waitMs: 1500, action: 'open_providers_modal' },
       { tab: 'devices', filename: 'devices.png', waitMs: 1500 },
       { tab: 'connections', filename: 'connections.png', waitMs: 1500 },
       { tab: 'rules', filename: 'rules.png', waitMs: 1500 },
@@ -451,6 +511,7 @@ async function main() {
       { tab: 'google-ai', filename: 'google_ai.png', waitMs: 1500 },
       { tab: 'zapret', filename: 'zapret.png', waitMs: 1500 },
       { tab: 'settings', filename: 'settings.png', waitMs: 1500 },
+      { tab: 'settings', filename: 'update_modal.png', waitMs: 1500, action: 'open_update_modal' },
       { tab: 'help', filename: 'help.png', waitMs: 1500 },
     ];
 
@@ -458,6 +519,23 @@ async function main() {
       console.log(`Capturing #${scr.tab} -> ${scr.filename}...`);
       await send('Page.navigate', { url: `http://localhost:${PORT}/#${scr.tab}` });
       await sleep(scr.waitMs);
+
+      if (scr.action === 'open_update_modal') {
+        await send('Runtime.evaluate', {
+          expression: `window.dispatchEvent(new CustomEvent('xr:open-update-modal'));`
+        });
+        await sleep(1200);
+      }
+
+      if (scr.action === 'open_providers_modal') {
+        await send('Runtime.evaluate', {
+          expression: `
+            const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent && b.textContent.includes('Подписки'));
+            if (btn) btn.click();
+          `
+        });
+        await sleep(1000);
+      }
 
       // If dashboard, populate smooth waveform SVG in traffic graph
       if (scr.tab === 'dashboard') {
@@ -529,7 +607,8 @@ async function main() {
         await sleep(600);
       }
 
-      const shot = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false });
+      const shouldCaptureBeyond = ['zapret', 'settings', 'google-ai'].includes(scr.tab);
+      const shot = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: shouldCaptureBeyond });
       const buf = Buffer.from(shot.data, 'base64');
       const outPath = path.join(SCREENSHOT_DIR, scr.filename);
       fs.writeFileSync(outPath, buf);

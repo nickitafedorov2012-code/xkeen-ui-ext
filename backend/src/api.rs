@@ -9,10 +9,11 @@ use crate::{config, failover, log_e, log_i, log_w, mihomo, rci, routing, transac
 pub async fn status(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
 
-    let (router_res, system_res, mihomo_ver) = tokio::join!(
+    let (router_res, system_res, mihomo_ver, router_lan_ip) = tokio::join!(
         rci::get_version(&state.http, &cfg),
         rci::get_system(&state.http, &cfg),
-        mihomo::get_version(&state.http, &cfg)
+        mihomo::get_version(&state.http, &cfg),
+        rci::get_router_lan_ip(&state.http, &cfg)
     );
     let router = router_res.ok();
     let system = system_res.ok();
@@ -80,6 +81,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
         "version": VERSION,
         "config_path": state.config_path.display().to_string(),
         "router": router,
+        "router_ip": router_lan_ip,
         "system": system,
         "mihomo_version": mihomo_ver,
         "service_running": service_running,
@@ -623,6 +625,7 @@ pub async fn get_servers(State(state): State<AppState>) -> Response {
                     json!({
                         "id": s.id, "name": s.name, "protocol": s.protocol,
                         "host": s.host, "port": s.port,
+                        "resolved_ip": s.resolved_ip,
                         "is_active": s.is_active, "is_priority": s.is_priority,
                         "is_google_ai": is_google_ai,
                         "flow_status": flow_status,
@@ -2773,14 +2776,50 @@ pub struct UpdateProviderReq {
 /// POST /api/providers/update — принудительное обновление подписки/подписок
 pub async fn update_provider(State(state): State<AppState>, Json(req): Json<UpdateProviderReq>) -> Response {
     let cfg = state.config.read().await.clone();
+
+    async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str) -> Result<usize, String> {
+        let ua = "v2rayNG/1.8.12";
+        let resp = state.http.get(url).header("User-Agent", ua).send().await.map_err(|e| format!("HTTP {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("HTTP статус {}", resp.status()));
+        }
+        let text = resp.text().await.map_err(|e| format!("Read text: {e}"))?;
+        let (conv_yaml, count) = crate::subscription_parser::convert_subscription_to_mihomo_yaml(&text)?;
+        let prov_dir = std::path::Path::new(&state.config.read().await.mihomo.config_path)
+            .parent()
+            .map(|p| p.join("providers"))
+            .unwrap_or_else(|| std::path::PathBuf::from("/opt/etc/mihomo/providers"));
+        let prov_path = prov_dir.join(format!("{id}.yaml"));
+        if let Some(parent) = prov_path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        tokio::fs::write(&prov_path, conv_yaml).await.map_err(|e| format!("Запись {}: {e}", prov_path.display()))?;
+        Ok(count)
+    }
+
     if let Some(pid) = req.provider_id.filter(|p| !p.trim().is_empty()) {
+        if let Some(mobile_url) = cfg.mobile_provider_urls.get(&pid) {
+            match refresh_mobile_sub(&state, &pid, mobile_url).await {
+                Ok(count) => {
+                    let _ = mihomo::force_update_provider(&state.http, &cfg, &pid).await;
+                    return api_ok(json!({ "updated": 1, "message": format!("Мобильная подписка '{pid}' обновлена ({count} серверов)") }));
+                }
+                Err(e) => return api_err(format!("Ошибка обновления мобильной подписки '{pid}': {e}")),
+            }
+        }
         match mihomo::force_update_provider(&state.http, &cfg, &pid).await {
             Ok(_) => api_ok(json!({ "updated": 1, "message": format!("Подписка '{pid}' обновлена") })),
             Err(e) => api_err(format!("Ошибка обновления подписки '{pid}': {e}")),
         }
     } else {
+        let mut mobile_count = 0;
+        for (pid, mobile_url) in &cfg.mobile_provider_urls {
+            if refresh_mobile_sub(&state, pid, mobile_url).await.is_ok() {
+                mobile_count += 1;
+            }
+        }
         let count = mihomo::force_update_all_providers(&state.http, &cfg).await;
-        api_ok(json!({ "updated": count, "message": format!("Обновлено подписок: {count}") }))
+        api_ok(json!({ "updated": count + mobile_count, "message": format!("Обновлено подписок: {}", count + mobile_count) }))
     }
 }
 
@@ -2817,6 +2856,32 @@ pub async fn add_provider(State(state): State<AppState>, Json(req): Json<AddProv
         }
     }
 
+    // Проверяем, является ли подписка мобильной V2Ray/Base64
+    let mut mobile_yaml_opt: Option<(String, usize)> = None;
+    let is_explicit_mobile_ua = req.user_agent.as_deref().map_or(false, |u| {
+        let l = u.to_lowercase();
+        l.contains("v2ray") || l.contains("happ") || l.contains("singbox") || l.contains("sing-box")
+    });
+
+    if is_explicit_mobile_ua || final_url.starts_with("http://") || final_url.starts_with("https://") {
+        let ua = req.user_agent.as_deref().unwrap_or("v2rayNG/1.8.12");
+        let mut req_builder = state.http.get(&final_url).header("User-Agent", ua);
+        if let Some(h) = hwid_trimmed {
+            req_builder = req_builder.header("x-hwid", h);
+        }
+        if let Ok(resp) = req_builder.send().await {
+            if resp.status().is_success() {
+                if let Ok(text) = resp.text().await {
+                    if crate::subscription_parser::is_v2ray_or_base64_subscription(&text) {
+                        if let Ok((conv_yaml, count)) = crate::subscription_parser::convert_subscription_to_mihomo_yaml(&text) {
+                            mobile_yaml_opt = Some((conv_yaml, count));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let mut tx = match ConfigTx::begin(&state).await {
         Ok(t) => t,
         Err(e) => return api_err(format!("Ошибка захвата транзакции: {e}")),
@@ -2827,17 +2892,41 @@ pub async fn add_provider(State(state): State<AppState>, Json(req): Json<AddProv
         Err(e) => return api_err(e),
     };
 
-    let new_yaml = match crate::routing::add_provider_to_yaml_full(
-        &yaml,
-        id,
-        &final_url,
-        Some(tx.config().health_check_url()),
-        Some(tx.config().mihomo.health_check_interval),
-        hwid_trimmed,
-        req.user_agent.as_deref(),
-    ) {
-        Ok(y) => y,
-        Err(e) => return api_err(e),
+    let (new_yaml, parsed_mobile_count) = if let Some((conv_yaml, count)) = mobile_yaml_opt {
+        let providers_dir = std::path::Path::new(&tx.config().mihomo.config_path)
+            .parent()
+            .map(|p| p.join("providers"))
+            .unwrap_or_else(|| std::path::PathBuf::from("/opt/etc/mihomo/providers"));
+        let prov_file = providers_dir.join(format!("{id}.yaml"));
+        if let Err(e) = tx.set_extra_file(&prov_file, conv_yaml, true).await {
+            return api_err(format!("Ошибка подготовки файла провайдера: {e}"));
+        }
+        let ny = match crate::routing::add_file_provider_to_yaml(
+            &yaml,
+            id,
+            &format!("./providers/{id}.yaml"),
+            Some(tx.config().health_check_url()),
+            Some(tx.config().mihomo.health_check_interval),
+        ) {
+            Ok(y) => y,
+            Err(e) => return api_err(e),
+        };
+        tx.config_mut().mobile_provider_urls.insert(id.to_string(), final_url.clone());
+        (ny, Some(count))
+    } else {
+        let ny = match crate::routing::add_provider_to_yaml_full(
+            &yaml,
+            id,
+            &final_url,
+            Some(tx.config().health_check_url()),
+            Some(tx.config().mihomo.health_check_interval),
+            hwid_trimmed,
+            req.user_agent.as_deref(),
+        ) {
+            Ok(y) => y,
+            Err(e) => return api_err(e),
+        };
+        (ny, None)
     };
 
     if let Err(e) = tx.set_yaml(new_yaml) {
@@ -2856,7 +2945,13 @@ pub async fn add_provider(State(state): State<AppState>, Json(req): Json<AddProv
     let cfg = state.config.read().await.clone();
     let _ = mihomo::force_update_provider(&state.http, &cfg, id).await;
 
-    api_ok(json!({ "added": true, "message": format!("Подписка '{id}' успешно добавлена") }))
+    let msg = if let Some(count) = parsed_mobile_count {
+        format!("Мобильная подписка '{id}' (V2Ray / Base64) успешно добавлена ({count} серверов с именами как на телефоне)")
+    } else {
+        format!("Подписка '{id}' успешно добавлена")
+    };
+
+    api_ok(json!({ "added": true, "message": msg }))
 }
 
 #[derive(Deserialize)]
@@ -2897,6 +2992,7 @@ pub async fn delete_provider(State(state): State<AppState>, Json(req): Json<Dele
     // Удаляем псевдоним и фильтры из AppConfig
     tx.config_mut().provider_aliases.remove(id);
     tx.config_mut().provider_filters.remove(id);
+    tx.config_mut().mobile_provider_urls.remove(id);
 
     if let Err(e) = tx.commit_and_reload().await {
         return api_err(format!("Ошибка сохранения config.yaml: {e}"));
@@ -2909,6 +3005,56 @@ pub async fn delete_provider(State(state): State<AppState>, Json(req): Json<Dele
     let _ = tokio::fs::remove_file(&prov_cache_json).await;
 
     api_ok(json!({ "deleted": true, "message": format!("Подписка '{id}' успешно удалена") }))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateProviderHwidReq {
+    pub id: String,
+    pub hwid: Option<String>,
+}
+
+/// POST /api/providers/hwid — обновление или удаление HWID подписки в config.yaml
+pub async fn update_provider_hwid(
+    State(state): State<AppState>,
+    Json(req): Json<UpdateProviderHwidReq>,
+) -> Response {
+    let id = req.id.trim();
+    if id.is_empty() {
+        return api_err("ID подписки не может быть пустым");
+    }
+
+    let mut tx = match ConfigTx::begin(&state).await {
+        Ok(t) => t,
+        Err(e) => return api_err(format!("Ошибка захвата транзакции: {e}")),
+    };
+
+    let yaml = match tx.read_yaml().await {
+        Ok(y) => y,
+        Err(e) => return api_err(e),
+    };
+
+    let new_yaml = match crate::routing::update_provider_hwid_in_yaml(&yaml, id, req.hwid.as_deref()) {
+        Ok(y) => y,
+        Err(e) => return api_err(e),
+    };
+
+    if let Err(e) = tx.set_yaml(new_yaml) {
+        return api_err(format!("Ошибка валидации YAML: {e}"));
+    }
+
+    if let Err(e) = tx.commit_and_reload().await {
+        return api_err(format!("Ошибка сохранения и применения HWID: {e}"));
+    }
+
+    let cfg = state.config.read().await.clone();
+    let _ = mihomo::force_update_provider(&state.http, &cfg, id).await;
+
+    let msg = match req.hwid.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+        Some(h) => format!("HWID для подписки '{id}' успешно обновлён на '{h}'"),
+        None => format!("HWID для подписки '{id}' успешно удалён"),
+    };
+
+    api_ok(json!({ "updated": true, "message": msg, "id": id, "hwid": req.hwid }))
 }
 
 /// GET /api/antigravity/status
@@ -11623,6 +11769,7 @@ mod tests {
                 provider: Some("__pool__".into()),
                 provider_name: Some("Группа / Пул".into()),
                 is_pool: true,
+                resolved_ip: None,
             },
             crate::mihomo::Server {
                 id: "US-Node".into(),
@@ -11636,6 +11783,7 @@ mod tests {
                 provider: Some("sub1".into()),
                 provider_name: Some("Sub 1".into()),
                 is_pool: false,
+                resolved_ip: None,
             },
         ];
 

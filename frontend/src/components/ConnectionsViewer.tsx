@@ -136,7 +136,7 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
   const [loading, setLoading] = useState(true)
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [search, setSearch] = useState('')
-  const [sortBy, setSortBy] = useState<'download' | 'upload' | 'time'>('download')
+  const [sortBy, setSortBy] = useState<'traffic' | 'download' | 'upload' | 'time'>('traffic')
   const [mainView, setMainView] = useState<'connections' | 'diagnostics'>('connections')
   const [filterTab, setFilterTab] = useState<'all' | 'active' | 'proxy' | 'direct' | 'closed'>('all')
   const [groupByApp, setGroupByApp] = useState(false)
@@ -480,6 +480,7 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
   const sorted = useMemo(() => {
     const copy = [...filtered]
     copy.sort((a, b) => {
+      if (sortBy === 'traffic') return (b.download + b.upload) - (a.download + a.upload)
       if (sortBy === 'download') return b.download - a.download
       if (sortBy === 'upload') return b.upload - a.upload
       const timeA = a.closedAt || new Date(a.start).getTime()
@@ -569,12 +570,12 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
         </div>
         <div className="stat-card">
           <div className="stat-label">Всего скачано (Down)</div>
-          <div className="stat-value down-color">↓ {formatBytes(downloadTotal)}</div>
+          <div className="stat-value down-color">{formatBytes(downloadTotal)}</div>
           <div className="muted small">Входящий трафик сессий</div>
         </div>
         <div className="stat-card">
           <div className="stat-label">Всего отдано (Up)</div>
-          <div className="stat-value up-color">↑ {formatBytes(uploadTotal)}</div>
+          <div className="stat-value up-color">{formatBytes(uploadTotal)}</div>
           <div className="muted small">Исходящий трафик сессий</div>
         </div>
         <div className="stat-card">
@@ -693,8 +694,9 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
               value={sortBy}
               onChange={(e: any) => setSortBy(e.target.value)}
             >
-              <option value="download">Сортировка: По скачиванию (↓)</option>
-              <option value="upload">Сортировка: По отдаче (↑)</option>
+              <option value="traffic">Сортировка: По объёму трафика (всего)</option>
+              <option value="download">Сортировка: По скачиванию</option>
+              <option value="upload">Сортировка: По отдаче</option>
               <option value="time">Сортировка: По времени</option>
             </select>
           </div>
@@ -748,8 +750,8 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#38bdf8' }}>↓ {formatBytes(download)}</span>
-                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#a855f7' }}>↑ {formatBytes(upload)}</span>
+                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#38bdf8' }}>{formatBytes(download)}</span>
+                  <span style={{ fontSize: 12, fontFamily: 'monospace', color: '#a855f7' }}>{formatBytes(upload)}</span>
                   <button
                     type="button"
                     className="btn btn-xs"
@@ -805,8 +807,8 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
                           <td style={{ width: 100 }}>
                             <span className="chain-badge">{c.chains?.[0] || 'DIRECT'}</span>
                           </td>
-                          <td className="traffic-cell down-color" style={{ width: 90 }}>↓ {formatBytes(c.download)}</td>
-                          <td className="traffic-cell up-color" style={{ width: 90 }}>↑ {formatBytes(c.upload)}</td>
+                          <td className="traffic-cell down-color" style={{ width: 90 }}>{formatBytes(c.download)}</td>
+                          <td className="traffic-cell up-color" style={{ width: 90 }}>{formatBytes(c.upload)}</td>
                           <td style={{ width: 130, textAlign: 'right' }}>
                             <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
                               {isProxy ? (
@@ -893,8 +895,20 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
                   <th>Клиент (IP)</th>
                   <th>Маршрут / Цепочка</th>
                   <th>Правило</th>
-                  <th>Скачано (↓)</th>
-                  <th>Отдано (↑)</th>
+                  <th
+                    style={{ cursor: 'pointer', userSelect: 'none' }}
+                    onClick={() => setSortBy((prev) => (prev === 'download' ? 'traffic' : 'download'))}
+                    title="Сортировка по объёму входящего трафика"
+                  >
+                    Скачано{sortBy === 'download' ? ' •' : ''}
+                  </th>
+                  <th
+                    style={{ cursor: 'pointer', userSelect: 'none' }}
+                    onClick={() => setSortBy((prev) => (prev === 'upload' ? 'traffic' : 'upload'))}
+                    title="Сортировка по объёму исходящего трафика"
+                  >
+                    Отдано{sortBy === 'upload' ? ' •' : ''}
+                  </th>
                   <th style={{ width: 160, textAlign: 'center' }}>Действие</th>
                 </tr>
               </thead>
@@ -940,8 +954,8 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
                           {c.rule}
                         </span>
                       </td>
-                      <td className="traffic-cell down-color">↓ {formatBytes(c.download)}</td>
-                      <td className="traffic-cell up-color">↑ {formatBytes(c.upload)}</td>
+                      <td className="traffic-cell down-color">{formatBytes(c.download)}</td>
+                      <td className="traffic-cell up-color">{formatBytes(c.upload)}</td>
                       <td style={{ textAlign: 'center' }}>
                         <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                           {isForced ? (
