@@ -2108,7 +2108,25 @@ pub fn apply_whitelist_rules(
             wl_rules.push(format!("  - SRC-IP-CIDR,{cidr},DIRECT"));
         }
 
-        // 2.2. Явно сконфигурированные устройства из whitelist.devices (если есть)
+        // 2.2. Защита отечественного сегмента (RU домены и IP) для всех устройств сети и мобилок:
+        // Гарантирует, что мобильные приложения (банки, маркетплейсы, госуслуги, CDN, push)
+        // не перехватываются туннелем в зарубежный IP и работают напрямую без предупреждений «Обнаружен VPN».
+        let has_ru_ruleset = with_group.contains("category-ru@domain");
+        let has_ip_ruleset = with_group.contains("category-ru@ipcidr");
+        if with_group.contains("category-ip-geo-detect@domain") {
+            wl_rules.push("  - RULE-SET,category-ip-geo-detect@domain,DIRECT".to_string());
+        }
+        if has_ru_ruleset {
+            if has_ip_ruleset {
+                wl_rules.push("  - OR,((RULE-SET,category-ru@domain),(RULE-SET,category-ru@ipcidr)),DIRECT".to_string());
+            } else {
+                wl_rules.push("  - RULE-SET,category-ru@domain,DIRECT".to_string());
+            }
+        } else if with_group.contains("geosite") || with_group.contains("GEOSITE") {
+            wl_rules.push("  - GEOSITE,category-ru,DIRECT".to_string());
+        }
+
+        // 2.3. Явно сконфигурированные устройства из whitelist.devices (если есть)
         for dev in &cfg.whitelist.devices {
             if dev.enabled && !dev.ip.trim().is_empty() && !excluded_ips.iter().any(|ex| ex == dev.ip.trim()) {
                 let ip_trim = dev.ip.trim();
@@ -2124,7 +2142,7 @@ pub fn apply_whitelist_rules(
             }
         }
 
-        // 2.3. Zero-Touch: Все клиенты локальных сетей роутера -> в туннель Белых списков
+        // 2.4. Zero-Touch: Все клиенты локальных сетей роутера -> в туннель Белых списков (для всего внешнего трафика)
         for subnet in &["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"] {
             wl_rules.push(format!("  - SRC-IP-CIDR,{subnet},{dev_target}"));
         }
@@ -4287,7 +4305,56 @@ rules:
         let resolved = resolve_excluded_whitelist_ips(&cfg);
         assert_eq!(resolved, vec!["192.168.1.150".to_string(), "192.168.1.151".to_string()]);
     }
+
+    #[test]
+    fn test_whitelist_strict_preserves_category_ru_above_subnet_tunnel() {
+        let base_yaml = r#"port: 7890
+rule-providers:
+  category-ru@domain: { type: http, url: "https://example.com/ru.mrs" }
+  category-ru@ipcidr: { type: http, url: "https://example.com/ru_ip.mrs" }
+  category-ip-geo-detect@domain: { type: http, url: "https://example.com/geo.mrs" }
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - Fastest
+rules:
+  - MATCH,PROXY
+"#;
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
+
+        let applied = apply_whitelist_rules(base_yaml, &cfg, None);
+        assert!(applied.contains(WHITELIST_BEGIN));
+        assert!(applied.contains(WHITELIST_END));
+
+        // 1. Проверяем наличие защитных отечественных правил
+        assert!(applied.contains("RULE-SET,category-ip-geo-detect@domain,DIRECT"));
+        assert!(applied.contains("OR,((RULE-SET,category-ru@domain),(RULE-SET,category-ru@ipcidr)),DIRECT"));
+
+        // 2. Проверяем наличие общего перехвата подсети
+        assert!(applied.contains("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist"));
+
+        // 3. АНТИ-РЕГРЕССИЯ: Правила RU-сегмента обязаны физически предшествовать перехвату подсети,
+        // чтобы мобильные приложения (банки, маркетплейсы, госуслуги, CDN) шли напрямую без триггера «Обнаружен VPN».
+        let ru_detect_pos = applied.find("RULE-SET,category-ip-geo-detect@domain,DIRECT").expect("ru_detect must be present");
+        let ru_pos = applied.find("OR,((RULE-SET,category-ru@domain),(RULE-SET,category-ru@ipcidr)),DIRECT").expect("ru must be present");
+        let subnet_pos = applied.find("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist").expect("subnet rule must be present");
+
+        assert!(
+            ru_detect_pos < subnet_pos,
+            "CRITICAL REGRESSION: category-ip-geo-detect ({}) must precede subnet tunnel ({})",
+            ru_detect_pos, subnet_pos
+        );
+        assert!(
+            ru_pos < subnet_pos,
+            "CRITICAL REGRESSION: category-ru rules ({}) must precede subnet tunnel ({}) to prevent mobile VPN false-positives",
+            ru_pos, subnet_pos
+        );
+    }
 }
+
 
 
 

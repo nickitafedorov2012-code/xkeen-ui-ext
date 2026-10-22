@@ -736,6 +736,30 @@ pub fn is_valid_ip_or_cidr(s: &str) -> bool {
     false
 }
 
+/// Проверяет, попадает ли IP-адрес в указанную CIDR-подсеть (например, "192.168.2.63" в "192.168.0.0/16").
+pub fn ip_matches_cidr(ip_str: &str, cidr_str: &str) -> bool {
+    let Ok(ip) = ip_str.trim().parse::<std::net::IpAddr>() else { return false; };
+    let clean = cidr_str.trim();
+    if let Ok(target_ip) = clean.parse::<std::net::IpAddr>() {
+        return ip == target_ip;
+    }
+    if let Some((addr_str, prefix_str)) = clean.split_once('/') {
+        if let (Ok(std::net::IpAddr::V4(net)), Ok(prefix), std::net::IpAddr::V4(ip_v4)) = (
+            addr_str.trim().parse::<std::net::IpAddr>(),
+            prefix_str.trim().parse::<u8>(),
+            ip,
+        ) {
+            if prefix <= 32 {
+                let mask = if prefix == 0 { 0u32 } else { !0u32 << (32 - prefix) };
+                let net_u32 = u32::from(net);
+                let ip_u32 = u32::from(ip_v4);
+                return (net_u32 & mask) == (ip_u32 & mask);
+            }
+        }
+    }
+    false
+}
+
 /// Проверяет, является ли строка корректным аппаратным MAC-адресом (например, "AA:BB:CC:DD:EE:FF" или "aa-bb-cc-dd-ee-ff").
 pub fn is_valid_mac(s: &str) -> bool {
     let clean = s.trim();
@@ -1416,5 +1440,18 @@ mod tests {
         }"#;
         let parsed2 = parse_config_content(json_with_providers, "test_prov.json");
         assert_eq!(parsed2.whitelist_providers, vec!["sub_alpha", "sub_beta"]);
+    }
+
+    #[test]
+    fn test_ip_matches_cidr() {
+        assert!(ip_matches_cidr("192.168.2.63", "192.168.0.0/16"));
+        assert!(ip_matches_cidr("192.168.2.1", "192.168.2.0/24"));
+        assert!(!ip_matches_cidr("192.168.3.1", "192.168.2.0/24"));
+        assert!(ip_matches_cidr("10.5.0.1", "10.0.0.0/8"));
+        assert!(!ip_matches_cidr("172.15.0.1", "172.16.0.0/12"));
+        assert!(ip_matches_cidr("172.20.1.1", "172.16.0.0/12"));
+        assert!(ip_matches_cidr("192.168.2.63", "192.168.2.63"));
+        assert!(ip_matches_cidr("192.168.2.63", "192.168.2.63/32"));
+        assert!(!ip_matches_cidr("invalid-ip", "192.168.0.0/16"));
     }
 }

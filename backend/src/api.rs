@@ -4942,7 +4942,7 @@ pub async fn test_rule_match(
                         domain == p || domain.ends_with(&format!(".{}", p))
                     }
                     "DOMAIN-KEYWORD" => domain.contains(&r_payload.to_lowercase()),
-                    "SRC-IP-CIDR" => !src_ip.is_empty() && (src_ip == r_payload.trim_end_matches("/32")),
+                    "SRC-IP-CIDR" => !src_ip.is_empty() && crate::config::ip_matches_cidr(src_ip, r_payload),
                     _ => false,
                 };
 
