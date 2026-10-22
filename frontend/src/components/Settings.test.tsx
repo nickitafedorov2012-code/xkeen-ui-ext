@@ -611,19 +611,19 @@ describe('Settings Component — Failover Zombie Servers and Canary Last Result'
   })
 
   describe('cleanServerDisplayName & formatActiveServerStatus', () => {
-    it('strips Russian and English country names and removes trailing separators', () => {
-      expect(cleanServerDisplayName('Обход [Platinum] - Германия')).toBe('Обход [Platinum]')
-      expect(cleanServerDisplayName('[DE] Platinum Server - Нидерланды')).toBe('Platinum Server')
-      expect(cleanServerDisplayName('ObsV-gb_real_dir')).toBe('ObsV-real_dir')
-      expect(cleanServerDisplayName('VLESS - США (New York)')).toBe('VLESS (New York)')
-      expect(cleanServerDisplayName('Финляндия Helsinki Fast')).toBe('Helsinki Fast')
-      expect(cleanServerDisplayName('Node - Germany')).toBe('Node')
+    it('preserves full original server names (countries, tags, symbols)', () => {
+      expect(cleanServerDisplayName('Обход [Platinum] - Германия')).toBe('Обход [Platinum] - Германия')
+      expect(cleanServerDisplayName('[DE] Platinum Server - Нидерланды')).toBe('[DE] Platinum Server - Нидерланды')
+      expect(cleanServerDisplayName('ObsV-gb_real_dir')).toBe('ObsV-gb_real_dir')
+      expect(cleanServerDisplayName('VLESS - США (New York)')).toBe('VLESS - США (New York)')
+      expect(cleanServerDisplayName('Финляндия Helsinki Fast')).toBe('Финляндия Helsinki Fast')
+      expect(cleanServerDisplayName('Node - Germany')).toBe('Node - Germany')
     })
 
-    it('isolates active server status and cleans country names', () => {
+    it('isolates active server status and preserves full node name', () => {
       const res = formatActiveServerStatus("Штатно: активен узел 'ObsV-gb_real_dir' (72 мс). В карантине 2 узлов")
       expect(res).not.toContain('В карантине')
-      expect(res).toBe("Штатно: активен узел 'ObsV-real_dir' (72 мс)")
+      expect(res).toBe("Штатно: активен узел 'ObsV-gb_real_dir' (72 мс)")
     })
   })
 })

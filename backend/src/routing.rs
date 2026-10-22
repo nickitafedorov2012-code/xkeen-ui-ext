@@ -2889,7 +2889,7 @@ pub fn apply_routing_with_filters(
     cfg: &crate::config::AppConfig,
     filters: &mut std::collections::BTreeMap<String, String>,
 ) -> Result<(String, usize), String> {
-    let mut current = yaml.to_string();
+    let mut current = sync_disabled_providers_in_yaml(yaml, &cfg.disabled_providers).unwrap_or_else(|_| yaml.to_string());
 
     let providers = if !cfg.mihomo.device_providers.is_empty() {
         cfg.mihomo.device_providers.clone()

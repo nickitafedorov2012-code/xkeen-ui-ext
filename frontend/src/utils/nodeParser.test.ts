@@ -311,4 +311,32 @@ trojan://pass2@node2.com:443#Node2
     expect(parsed).not.toBeNull()
     expect(parsed?.raw.password).toBe('Пароль!🚀123')
   })
+
+  it('anti-regression (URI-01): exportServerToLink sanitizes invalid/Cyrillic host with spaces and falls back to raw.server or resolved_ip', () => {
+    const exported = exportServerToLink({
+      name: 'PL 06 ход [Diamond] - Польша',
+      protocol: 'VLESS',
+      host: 'PL 06 ход [Diamond] - Польша',
+      port: 443,
+      resolved_ip: '198.51.100.5',
+      raw: {
+        type: 'vless',
+        server: 'pl-diamond.example.com',
+        uuid: '11111111-2222-3333-4444-555555555555',
+      },
+    })
+
+    expect(exported).toContain('@pl-diamond.example.com:443')
+    expect(exported).not.toContain('@PL 06 ход [Diamond] - Польша:443')
+
+    // Also test fallback when raw.server is missing but resolved_ip exists
+    const exported2 = exportServerToLink({
+      name: 'Fallback Node',
+      protocol: 'VLESS',
+      host: 'Некорректный Хост',
+      port: 8443,
+      resolved_ip: '203.0.113.10',
+    })
+    expect(exported2).toContain('@203.0.113.10:8443')
+  })
 })

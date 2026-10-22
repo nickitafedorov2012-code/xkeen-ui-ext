@@ -328,6 +328,9 @@ pub struct AppConfig {
     /// URL оригинальных мобильных V2Ray / Base64 подписок для автообновления
     #[serde(default)]
     pub mobile_provider_urls: std::collections::HashMap<String, String>,
+    /// HWID оригинальных мобильных подписок для передачи заголовка x-hwid
+    #[serde(default)]
+    pub mobile_provider_hwids: std::collections::HashMap<String, String>,
 }
 
 /// Платформы и сервисы для игрового режима.
@@ -974,6 +977,11 @@ impl Default for AppConfig {
             whitelist_providers: Vec::new(),
             whitelist: WhitelistConfig::default(),
             mobile_provider_urls: std::collections::HashMap::new(),
+            mobile_provider_hwids: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("geodema2".to_string(), "keenetic-router-229".to_string());
+                m
+            },
         }
     }
 }

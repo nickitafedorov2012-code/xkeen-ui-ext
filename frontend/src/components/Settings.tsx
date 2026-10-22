@@ -182,24 +182,7 @@ function fmtTrafficBytes(bytes: number): string {
 
 export function cleanServerDisplayName(name: string): string {
   if (!name) return ''
-  const countriesRegex =
-    /(?:^|[^а-яёa-z0-9_])(Германия|Германии|Нидерланды|Нидерландов|Великобритания|Великобритании|Англия|Англии|США|Франция|Франции|Финляндия|Финляндии|Швеция|Швеции|Польша|Польши|Казахстан|Казахстана|Турция|Турции|Сингапур|Сингапура|Россия|России|Germany|Netherlands|United Kingdom|USA|France|Finland|Sweden|Poland|Kazakhstan|Turkey|Singapore|Russia)(?=[^а-яёa-z0-9_]|$)/gi
-
-  const cleaned = name
-    .replace(/[\uD83C][\uDDE6-\uDDFF][\uD83C][\uDDE6-\uDDFF]/g, '')
-    .replace(/^\[?(DE|GB|NL|US|FR|RU|SG|TR|FI|SE|PL|KZ|UA|UK)\]?\s*[-–—:]*\s*/i, '')
-    .replace(/[-_](de|gb|nl|us|fr|ru|sg|tr|fi|se|pl|kz|ua)[-_]/gi, '-')
-    .replace(/[-_](de|gb|nl|us|fr|ru|sg|tr|fi|se|pl|kz|ua)$/gi, '')
-    .replace(countriesRegex, ' ')
-    .replace(/\s*[-–—:]\s*(?=[(\[])/g, ' ')
-    .replace(/[-–—:]\s*$/g, '')
-    .replace(/^\s*[-–—:]/g, '')
-    .replace(/\s*[-–—:]\s*[-–—:]\s*/g, ' - ')
-    .replace(/\(\s*\)/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-
-  return cleaned || name.trim()
+  return name.trim()
 }
 
 export function formatActiveServerStatus(statusText?: string, activeServer?: any, chain?: string[]): string {

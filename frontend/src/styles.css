@@ -4947,7 +4947,7 @@ table.devices-table td {
   display: grid;
   grid-template-columns: 210px 1fr;
   gap: 16px;
-  align-items: start;
+  align-items: stretch;
 }
 
 @media (max-width: 600px) {
@@ -5243,7 +5243,6 @@ table.devices-table td {
    ========================================================================== */
 .input:focus-visible,
 .devices-search-input:focus-visible,
-.device-select:focus-visible,
 .editor-textarea:focus-visible,
 .btn:focus-visible,
 .tab:focus-visible,
@@ -5251,6 +5250,20 @@ table.devices-table td {
 .header-action-btn:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+.btn-danger:focus-visible,
+.btn-outline-danger:focus-visible,
+.btn.danger:focus-visible,
+button.delete-btn:focus-visible {
+  outline: 2px solid rgba(239, 68, 68, 0.6) !important;
+  outline-offset: 2px !important;
+}
+
+.device-select:focus-visible {
+  outline: none !important;
+  border-color: #38bdf8 !important;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.25) !important;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -5573,14 +5586,20 @@ table.devices-table td {
 }
 .connections-controls {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 10px;
+  margin-top: 12px;
+}
+.connections-controls-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  flex-wrap: wrap;
 }
 .connections-search {
   flex: 1;
   min-width: 220px;
-  max-width: 320px;
   height: 32px;
 }
 .connections-actions-group {
@@ -5595,6 +5614,7 @@ table.devices-table td {
   gap: 12px;
   margin-left: auto;
   height: 32px;
+  flex-shrink: 0;
 }
 .controls-group .checkbox-label {
   display: inline-flex;

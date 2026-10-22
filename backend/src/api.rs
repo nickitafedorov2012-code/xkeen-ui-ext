@@ -2824,6 +2824,9 @@ pub async fn update_provider(State(state): State<AppState>, Json(req): Json<Upda
                         if let Ok(new_y) = crate::routing::convert_http_provider_to_file_in_yaml(&y, &pid, &format!("./providers/{pid}.yaml")) {
                             let _ = tx.set_yaml(new_y);
                             tx.config_mut().mobile_provider_urls.insert(pid.clone(), raw_url.clone());
+                            if let Some(h) = hwid {
+                                tx.config_mut().mobile_provider_hwids.insert(pid.clone(), h.to_string());
+                            }
                             let _ = tx.commit_and_reload().await;
                         }
                     }
@@ -2847,22 +2850,26 @@ pub async fn update_provider(State(state): State<AppState>, Json(req): Json<Upda
 /// Загрузка мобильной подписки (V2Ray/JSON/Base64) через прокси Mihomo и сохранение в ./providers/{id}.yaml
 pub async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str, hwid: Option<&str>) -> Result<usize, String> {
     let ua = "v2rayNG/1.8.12";
-    let proxy_url = {
+    let (proxy_url, resolved_hwid) = {
         let cfg = state.config.read().await;
-        cfg.mihomo_proxy_url()
+        let h = hwid
+            .filter(|h| !h.is_empty())
+            .map(|s| s.to_string())
+            .or_else(|| cfg.mobile_provider_hwids.get(id).cloned());
+        (cfg.mihomo_proxy_url(), h)
     };
     let proxied = crate::updater::proxied_client(&proxy_url);
     let client_ref = proxied.as_ref().unwrap_or(&state.http);
     let mut req_builder = client_ref.get(url).header("User-Agent", ua);
-    if let Some(h) = hwid.filter(|h| !h.is_empty()) {
-        req_builder = req_builder.header("x-hwid", h);
+    if let Some(ref h) = resolved_hwid {
+        req_builder = req_builder.header("x-hwid", h.as_str());
     }
     let resp = match req_builder.send().await {
         Ok(r) if r.status().is_success() => r,
         _ => {
             let mut direct_builder = state.http.get(url).header("User-Agent", ua);
-            if let Some(h) = hwid.filter(|h| !h.is_empty()) {
-                direct_builder = direct_builder.header("x-hwid", h);
+            if let Some(ref h) = resolved_hwid {
+                direct_builder = direct_builder.header("x-hwid", h.as_str());
             }
             direct_builder.send().await.map_err(|e| format!("HTTP {e}"))?
         }
@@ -2911,6 +2918,9 @@ pub async fn sync_all_mobile_providers(state: &AppState) -> usize {
                         if let Ok(new_y) = crate::routing::convert_http_provider_to_file_in_yaml(&y, pid, &format!("./providers/{pid}.yaml")) {
                             let _ = tx.set_yaml(new_y);
                             tx.config_mut().mobile_provider_urls.insert(pid.clone(), raw_url.clone());
+                            if let Some(h) = hwid {
+                                tx.config_mut().mobile_provider_hwids.insert(pid.clone(), h.to_string());
+                            }
                             let _ = tx.commit_and_reload().await;
                             let _ = mihomo::force_update_provider(&state.http, &cfg, pid).await;
                             log_i!("[MOBILE-SUB] ✓ Подписка '{pid}' автоматически мигрирована в мобильный формат ({count} серверов с чистыми именами)");
@@ -3029,6 +3039,9 @@ pub async fn add_provider(State(state): State<AppState>, Json(req): Json<AddProv
             Err(e) => return api_err(e),
         };
         tx.config_mut().mobile_provider_urls.insert(id.to_string(), final_url.clone());
+        if let Some(h) = hwid_trimmed {
+            tx.config_mut().mobile_provider_hwids.insert(id.to_string(), h.to_string());
+        }
         (ny, Some(count))
     } else {
         let ny = match crate::routing::add_provider_to_yaml_full(
@@ -3110,6 +3123,7 @@ pub async fn delete_provider(State(state): State<AppState>, Json(req): Json<Dele
     tx.config_mut().provider_aliases.remove(id);
     tx.config_mut().provider_filters.remove(id);
     tx.config_mut().mobile_provider_urls.remove(id);
+    tx.config_mut().mobile_provider_hwids.remove(id);
 
     if let Err(e) = tx.commit_and_reload().await {
         return api_err(format!("Ошибка сохранения config.yaml: {e}"));

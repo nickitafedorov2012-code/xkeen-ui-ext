@@ -27,6 +27,7 @@ export default function ShareNodeModal({
       protocol: server.protocol,
       host: server.host,
       port: server.port,
+      resolved_ip: server.resolved_ip,
       raw: server.raw,
     })
   }, [server])

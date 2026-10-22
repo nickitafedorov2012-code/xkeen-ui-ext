@@ -2531,5 +2531,16 @@ mod tests {
         );
         assert_eq!(res_no_chain.expect("При пустой цепочке должен выбираться лучший внешний узел"), "srv_aeza_external");
     }
+
+    #[tokio::test]
+    async fn test_anti_regression_hwid_persistence_in_app_config() {
+        let cfg = crate::config::AppConfig::default();
+        assert_eq!(cfg.mobile_provider_hwids.get("geodema2").map(|s| s.as_str()), Some("keenetic-router-229"));
+
+        // JSON serialization/deserialization roundtrip maintains mobile_provider_hwids
+        let json_str = serde_json::to_string(&cfg).expect("serialize");
+        let restored: crate::config::AppConfig = serde_json::from_str(&json_str).expect("deserialize");
+        assert_eq!(restored.mobile_provider_hwids.get("geodema2").map(|s| s.as_str()), Some("keenetic-router-229"));
+    }
 }
 

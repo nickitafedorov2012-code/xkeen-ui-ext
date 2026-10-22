@@ -235,7 +235,7 @@ export default function App() {
 
   useEffect(() => {
     refresh()
-    const intervalMs = Math.max(3, status?.refresh_interval_sec ?? 10) * 1000
+    const intervalMs = Math.max(3, status?.refresh_interval_sec ?? 3) * 1000
     const interval = setInterval(refresh, intervalMs)
     return () => clearInterval(interval)
   }, [refresh, status?.refresh_interval_sec])

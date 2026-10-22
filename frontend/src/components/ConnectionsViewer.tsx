@@ -628,14 +628,38 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
           </button>
         </div>
 
-        <div className="connections-controls" style={{ marginTop: 12 }}>
-          <input
-            type="text"
-            className="input-text connections-search"
-            placeholder="🔍 Поиск по хосту, клиенту (192.168...), назначению или правилу…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
+        <div className="connections-controls">
+          <div className="connections-controls-row">
+            <input
+              type="text"
+              className="input-text connections-search"
+              placeholder="🔍 Поиск по хосту, клиенту (192.168...), назначению или правилу…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+
+            <div className="controls-group">
+              <label className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={autoRefresh}
+                  onChange={(e) => setAutoRefresh(e.target.checked)}
+                />
+                <span>Автообновление (2.5с)</span>
+              </label>
+
+              <select
+                className="select editor-select"
+                value={sortBy}
+                onChange={(e: any) => setSortBy(e.target.value)}
+              >
+                <option value="traffic">Сортировка: По объёму трафика (всего)</option>
+                <option value="download">Сортировка: По скачиванию</option>
+                <option value="upload">Сортировка: По отдаче</option>
+                <option value="time">Сортировка: По времени</option>
+              </select>
+            </div>
+          </div>
 
           <div className="connections-actions-group">
             <button
@@ -699,28 +723,6 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
                 Очистить завершённые
               </button>
             )}
-          </div>
-
-          <div className="controls-group">
-            <label className="checkbox-label">
-              <input
-                type="checkbox"
-                checked={autoRefresh}
-                onChange={(e) => setAutoRefresh(e.target.checked)}
-              />
-              <span>Автообновление (2.5с)</span>
-            </label>
-
-            <select
-              className="select editor-select"
-              value={sortBy}
-              onChange={(e: any) => setSortBy(e.target.value)}
-            >
-              <option value="traffic">Сортировка: По объёму трафика (всего)</option>
-              <option value="download">Сортировка: По скачиванию</option>
-              <option value="upload">Сортировка: По отдаче</option>
-              <option value="time">Сортировка: По времени</option>
-            </select>
           </div>
         </div>
       </div>

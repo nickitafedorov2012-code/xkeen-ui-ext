@@ -282,7 +282,8 @@ export default function Servers({ notify, status, refresh }: Props) {
     pingAll()
     const onSync = () => load()
     window.addEventListener('xr:data-changed', onSync)
-    // Фоновое обновление статуса пулов и серверов каждые 8 секунд
+    window.addEventListener('xr:refresh-status', onSync)
+    // Фоновое обновление статуса пулов и серверов каждые 3 секунды для мгновенной реактивности без F5
     const bgTimer = setInterval(() => {
       apiGet<{ servers: ServerInfo[] }>('servers')
         .then((data) => {
@@ -293,6 +294,9 @@ export default function Servers({ notify, status, refresh }: Props) {
                 if (!fresh) return s
                 return {
                   ...s,
+                  name: fresh.name,
+                  host: fresh.host,
+                  resolved_ip: fresh.resolved_ip,
                   is_active: fresh.is_active,
                   now_node: fresh.now_node,
                   ping_ms: fresh.ping_ms > 0 ? fresh.ping_ms : s.ping_ms,
@@ -302,9 +306,10 @@ export default function Servers({ notify, status, refresh }: Props) {
           }
         })
         .catch(() => {})
-    }, 8000)
+    }, 3000)
     return () => {
       window.removeEventListener('xr:data-changed', onSync)
+      window.removeEventListener('xr:refresh-status', onSync)
       clearInterval(bgTimer)
     }
   }, [load, pingAll])

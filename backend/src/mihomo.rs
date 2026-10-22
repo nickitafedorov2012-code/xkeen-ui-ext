@@ -566,10 +566,15 @@ pub fn clean_display_name(name: &str) -> String {
     }
 }
 
-/// Имя для показа в панели: сначала ремонт mojibake, затем чистка эмодзи.
+/// Имя для показа в панели: ремонт mojibake с сохранением полного оригинального имени (флаги, эмодзи, теги).
 pub fn display_name(name: &str) -> String {
     let repaired = fix_mojibake_smart(name);
-    clean_display_name(&repaired)
+    let trimmed = repaired.trim();
+    if trimmed.is_empty() {
+        name.trim().to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Умный ремонт mojibake. Порядок важен:
@@ -583,9 +588,13 @@ pub fn fix_mojibake_smart(s: &str) -> String {
     }
     let stripped = clean_display_name(s);
     if let Some(fixed) = fix_mojibake(&stripped) {
+        let prefix: String = s.chars().take_while(|c| !c.is_alphanumeric() && *c != '[' && *c != '(').collect();
+        if !prefix.is_empty() {
+            return format!("{} {}", prefix.trim(), fixed.trim());
+        }
         return fixed;
     }
-    let words: Vec<String> = stripped
+    let words: Vec<String> = s
         .split(' ')
         .map(|w| fix_mojibake(w).unwrap_or_else(|| w.to_string()))
         .collect();
@@ -1204,9 +1213,45 @@ pub async fn ping_server_url_expected(
         }
     }
 
-    // Для серверов из proxy-providers одиночный /proxies/{id}/delay отдаёт 404.
-    // Если сервер сейчас выбран в селекторной группе (PROXY), проверяем через неё (быстро, 1 узел):
+    // Для групп/пулов (Fallback, Fastest, Selector) прямой /proxies/{id}/delay в ядре Mihomo отдаёт 404/ошибку.
+    // Разрешаем активный листовой сервер ("now") группы и проверяем его задержку, исключая ложный таймаут:
     if let Ok(proxies) = get_proxies(http, cfg).await {
+        if let Some(group_val) = proxies.get(server_id) {
+            let typ = group_val.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
+            if typ == "fallback" || typ == "urltest" || typ == "selector" {
+                if let Some(now_leaf) = group_val.get("now").and_then(|n| n.as_str()) {
+                    if !now_leaf.is_empty() && now_leaf != server_id {
+                        if let Some(leaf_val) = proxies.get(now_leaf) {
+                            let ld = last_delay(leaf_val);
+                            if ld > 0 {
+                                return ld;
+                            }
+                        }
+                        let leaf_enc = urlencoding_lite(now_leaf);
+                        let leaf_url = format!(
+                            "{}/proxies/{leaf_enc}/delay?timeout={timeout_ms}&url={check_url}{exp_param}",
+                            cfg.mihomo_url()
+                        );
+                        let mut leaf_req = http.get(&leaf_url).timeout(std::time::Duration::from_millis(std::cmp::max(timeout_ms + 2000, 5000)));
+                        if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
+                            leaf_req = leaf_req.header(k, v);
+                        }
+                        if let Ok(resp) = leaf_req.send().await {
+                            if resp.status().is_success() {
+                                if let Ok(v) = resp.json::<Value>().await {
+                                    if let Some(d) = v.get("delay").and_then(|d| d.as_i64()) {
+                                        if d > 0 {
+                                            return d;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(group) = find_primary_group(&proxies) {
             let is_now = proxies
                 .get(&group)
@@ -1991,7 +2036,7 @@ mod tests {
 \u{2568}\u{0434}\u{2568}\u{2555}\u{2568}\u{255C}\u{2568}\u{2557}\u{2564}\u{041F}\u{2568}\u{255C}\u{2568}\u{2524}\u{2568}\u{2555}\u{2564}\u{041F} \
 [\u{0442}\u{042A}\u{0431} \u{2568}\u{0431}\u{2564}\u{0412}\u{2568}\u{2591}\u{2568}\u{2592}\u{2568}\u{2555}\u{2568}\u{2557}\u{2564}\u{041C}\u{2568}\u{255C}\u{2564}\u{041B}\u{2568}\u{2563} ]";
         let dn = display_name(mojibake);
-        assert!(dn.starts_with("Финляндия"), "DN={dn}");
+        assert!(dn.contains("Финляндия"), "DN={dn}");
         assert!(dn.contains("Стабильный"), "DN={dn}");
     }
 
@@ -2020,9 +2065,9 @@ mod tests {
             })
             .collect();
         assert_eq!(display_name(&mojibake), "Финляндия");
-        // флаг-эмодзи перед mojibake: вся строка не декодируется — срезаем флаг, чиним остаток
+        // флаг-эмодзи перед mojibake: чиним mojibake, сохраняя флаг
         let with_flag = format!("\u{1F1EB}\u{1F1EE} {mojibake}");
-        assert_eq!(display_name(&with_flag), "Финляндия");
+        assert_eq!(display_name(&with_flag), "\u{1F1EB}\u{1F1EE} Финляндия");
         // NBSP (байт 0xA0 в mojibake) не должен рвать слова: "🇷🇺 Россия" с 0xA0 внутри
         let mut ru_bytes = "Россия".as_bytes().to_vec();
         let ru_mojibake: String = ru_bytes
@@ -2033,9 +2078,9 @@ mod tests {
             })
             .collect();
         let ru_with_flag = format!("\u{1F1F7}\u{1F1FA} {ru_mojibake}");
-        assert_eq!(display_name(&ru_with_flag), "Россия");
-        // нормальное имя с флагом не ломается
-        assert_eq!(display_name("🇩🇪 Германия"), "Германия");
+        assert_eq!(display_name(&ru_with_flag), "\u{1F1F7}\u{1F1FA} Россия");
+        // нормальное имя с флагом сохраняет флаг полностью
+        assert_eq!(display_name("🇩🇪 Германия"), "🇩🇪 Германия");
     }
 
     #[test]

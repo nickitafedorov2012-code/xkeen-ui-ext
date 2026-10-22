@@ -485,12 +485,26 @@ export function exportServerToLink(server: {
   protocol: string
   host: string
   port: number
+  resolved_ip?: string | null
   raw?: Record<string, any>
 }): string {
   const name = encodeURIComponent(server.name)
-  const rawHost = server.host || ''
+  let rawHost = (server.host || '').trim()
+  if (/[^\x21-\x7E]|\s/.test(rawHost)) {
+    if (server.raw?.server && !/[^\x21-\x7E]|\s/.test(String(server.raw.server).trim())) {
+      rawHost = String(server.raw.server).trim()
+    } else if (server.resolved_ip && !/[^\x21-\x7E]|\s/.test(server.resolved_ip.trim())) {
+      rawHost = server.resolved_ip.trim()
+    } else if (server.raw?.servername && !/[^\x21-\x7E]|\s/.test(String(server.raw.servername).trim())) {
+      rawHost = String(server.raw.servername).trim()
+    } else if (server.raw?.sni && !/[^\x21-\x7E]|\s/.test(String(server.raw.sni).trim())) {
+      rawHost = String(server.raw.sni).trim()
+    } else {
+      rawHost = '127.0.0.1'
+    }
+  }
   const host = rawHost.includes(':') && !rawHost.startsWith('[') ? `[${rawHost}]` : rawHost
-  const port = server.port || 443
+  const port = Number(server.port) > 0 ? Number(server.port) : (Number(server.raw?.port) || 443)
   const proto = (server.protocol || '').toLowerCase()
   const raw = server.raw || {}
 
