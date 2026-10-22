@@ -280,6 +280,33 @@ export default function Servers({ notify, status, refresh }: Props) {
   useEffect(() => {
     load()
     pingAll()
+    const onSync = () => load()
+    window.addEventListener('xr:data-changed', onSync)
+    // Фоновое обновление статуса пулов и серверов каждые 8 секунд
+    const bgTimer = setInterval(() => {
+      apiGet<{ servers: ServerInfo[] }>('servers')
+        .then((data) => {
+          if (data?.servers) {
+            setServers((prev) =>
+              prev.map((s) => {
+                const fresh = data.servers.find((f) => f.id === s.id)
+                if (!fresh) return s
+                return {
+                  ...s,
+                  is_active: fresh.is_active,
+                  now_node: fresh.now_node,
+                  ping_ms: fresh.ping_ms > 0 ? fresh.ping_ms : s.ping_ms,
+                }
+              })
+            )
+          }
+        })
+        .catch(() => {})
+    }, 8000)
+    return () => {
+      window.removeEventListener('xr:data-changed', onSync)
+      clearInterval(bgTimer)
+    }
   }, [load, pingAll])
 
   const runSpeedtest = async (s: ServerInfo) => {
@@ -562,6 +589,9 @@ export default function Servers({ notify, status, refresh }: Props) {
       const data = await apiPost<{ message: string }>('servers/switch', { server_id: s.id })
       notify(data.message || `Подключено: ${s.name}`)
       load()
+      refresh?.()
+      window.dispatchEvent(new CustomEvent('xr:refresh-status'))
+      window.dispatchEvent(new CustomEvent('xr:data-changed', { detail: { entity: 'server' } }))
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка переключения', true)
     }
@@ -2297,13 +2327,24 @@ export default function Servers({ notify, status, refresh }: Props) {
                         </button>
                         <button
                           type="button"
-                          className="btn sm ghost"
-                          style={{ color: '#ef4444', borderColor: isConfirming ? 'rgba(239,68,68,0.4)' : undefined }}
+                          className="btn sm"
+                          style={{
+                            color: '#f87171',
+                            background: isConfirming ? 'rgba(239,68,68,0.2)' : 'rgba(239, 68, 68, 0.08)',
+                            border: '1px solid rgba(239,68,68,0.3)',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 5,
+                          }}
                           title="Удалить подписку"
                           disabled={deletingSub}
                           onClick={() => handleDeleteSubscription(p.id, p.name)}
                         >
-                          🗑 Удалить
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                            <polyline points="3 6 5 6 21 6" />
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                          </svg>
+                          Удалить
                         </button>
                       </div>
                     </div>

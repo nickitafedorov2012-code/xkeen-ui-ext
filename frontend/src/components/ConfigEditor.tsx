@@ -193,18 +193,20 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
     }
   }
 
-  const handleSearchNext = (term: string) => {
+  const handleSearchNext = (term: string, shouldFocus: boolean = false) => {
     if (!term || !textareaRef.current) return
     const ta = textareaRef.current
     const lower = content.toLowerCase()
     const target = term.toLowerCase()
-    const startPos = ta.selectionEnd || 0
+    const startPos = shouldFocus ? (ta.selectionEnd || 0) : 0
     let idx = lower.indexOf(target, startPos)
     if (idx === -1) {
       idx = lower.indexOf(target, 0)
     }
     if (idx !== -1) {
-      ta.focus()
+      if (shouldFocus) {
+        ta.focus()
+      }
       ta.setSelectionRange(idx, idx + target.length)
       const linesBefore = content.substring(0, idx).split('\n').length
       const lineHeight = 20
@@ -302,12 +304,15 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
                   value={searchTerm}
                   onChange={(e) => {
                     setSearchTerm(e.target.value)
-                    handleSearchNext(e.target.value)
+                    handleSearchNext(e.target.value, false)
                   }}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
                       e.preventDefault()
-                      handleSearchNext(searchTerm)
+                      handleSearchNext(searchTerm, true)
+                    } else if (e.key === 'Escape') {
+                      setShowSearch(false)
+                      textareaRef.current?.focus()
                     }
                   }}
                   autoFocus

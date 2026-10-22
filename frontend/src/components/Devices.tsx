@@ -156,6 +156,13 @@ export default function Devices({ notify }: Props) {
 
   useEffect(() => {
     load()
+    const onSync = () => load()
+    window.addEventListener('xr:data-changed', onSync)
+    const devTimer = setInterval(load, 12000)
+    return () => {
+      window.removeEventListener('xr:data-changed', onSync)
+      clearInterval(devTimer)
+    }
   }, [load])
 
   const serverByIp = useMemo(() => {

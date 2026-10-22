@@ -655,15 +655,24 @@ pub async fn get_servers(
     for (id, label, icon) in [("Fastest", "URL-TEST", "⚡"), ("Fallback", "FALLBACK", "🛡️")] {
         if let Some(p) = proxies.get(id) {
             seen_names.insert(id.to_string());
+            let now_node = p.get("now").and_then(|n| n.as_str()).unwrap_or("");
+            let group_ping = last_delay(p);
+            let effective_ping = if group_ping > 0 {
+                group_ping
+            } else if !now_node.is_empty() {
+                proxies.get(now_node).map(last_delay).unwrap_or(0)
+            } else {
+                0
+            };
             servers.push(Server {
                 id: id.into(),
                 name: format!("{icon} {id} (Авто)"),
                 protocol: label.into(),
-                host: format!("Авто: {}", p.get("now").and_then(|n| n.as_str()).unwrap_or("—")),
+                host: format!("Авто: {}", if now_node.is_empty() { "—" } else { now_node }),
                 port: 0,
                 is_active: proxy_now == id,
                 is_priority: priority_chain.iter().any(|p| p == id),
-                ping_ms: last_delay(p),
+                ping_ms: effective_ping,
                 provider: Some("__pool__".into()),
                 provider_name: Some("Группа / Пул".into()),
                 is_pool: true,
@@ -693,6 +702,14 @@ pub async fn get_servers(
                 "Torrent" => "🧲",
                 _ => "🔀",
             };
+            let group_delay = last_delay(p);
+            let effective_delay = if group_delay > 0 {
+                group_delay
+            } else if !now_target.is_empty() && now_target != "—" {
+                proxies.get(now_target).map(last_delay).unwrap_or(0)
+            } else {
+                0
+            };
             servers.push(Server {
                 id: name.clone(),
                 name: format!("{icon} {name}"),
@@ -701,7 +718,7 @@ pub async fn get_servers(
                 port: 0,
                 is_active: *name == active || proxy_now == *name,
                 is_priority: priority_chain.iter().any(|p| p == name),
-                ping_ms: last_delay(p),
+                ping_ms: effective_delay,
                 provider: Some("__pool__".into()),
                 provider_name: Some("Группа / Пул".into()),
                 is_pool: true,
@@ -1407,10 +1424,8 @@ pub async fn ping_all_url(
         return out;
     }
 
-    // Если запрошен пинг небольшого списка серверов (failover, приоритеты, одиночные проверки),
-    // опрашиваем только их индивидуально через семафор, исключая шторм по всей группе.
-    // Запрос всей группы /group/{group}/delay допустим только если явно передан большой список (> 30).
-    let should_ping_group = ids.len() > 30;
+    // Если в списке 8+ серверов и есть основная группа, задействуем быстрый групповой тест Mihomo
+    let should_ping_group = ids.len() >= 8;
     let mut remaining = Vec::new();
 
     if should_ping_group {
@@ -1435,7 +1450,7 @@ pub async fn ping_all_url(
     }
 
     if !remaining.is_empty() {
-        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(2));
+        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
         let mut handles = Vec::new();
         let url_owned = test_url.map(|s| s.to_string());
         let shared_cfg = std::sync::Arc::new(cfg.clone());
@@ -1595,7 +1610,7 @@ pub struct GoogleGeoStatus {
 /// Определение региона сервера по названию
 pub fn detect_server_country(name: &str) -> String {
     let lower = name.to_lowercase();
-    let is_blocked = lower.contains("росси")
+    let is_ru = lower.contains("росси")
         || lower.contains("russia")
         || lower.contains(" ru ")
         || lower.contains("[ru]")
@@ -1608,24 +1623,37 @@ pub fn detect_server_country(name: &str) -> String {
         || lower.ends_with(" ru")
         || lower.ends_with("-ru")
         || lower.ends_with("_ru")
-        || lower.contains("мобильный")
-        || lower.contains("финлянд")
-        || lower.contains("finland")
-        || lower.contains(" fi ")
-        || lower.contains("[fi]")
-        || lower.contains("казахстан")
-        || lower.contains("kazakhstan")
-        || lower.contains(" kz ")
-        || lower.contains("[kz]")
-        || lower.contains("беларус")
+        || lower.contains("🇷🇺")
+        || lower.contains("москва")
+        || lower.contains("moscow")
+        || lower.contains("санкт-петербург")
+        || lower.contains("питер")
+        || lower.contains("спб");
+
+    let is_by = lower.contains("беларус")
         || lower.contains("belarus")
         || lower.contains(" by ")
         || lower.contains("[by]")
-        || lower.contains("таджикистан")
-        || lower.contains("узбекистан")
-        || lower.contains("азербайджан")
-        || lower.contains("армени")
-        || lower.contains("грузи");
+        || lower.contains("🇧🇾")
+        || lower.contains("минск")
+        || lower.contains("minsk");
+
+    let is_fi = lower.contains("финлянд")
+        || lower.contains("finland")
+        || lower.contains(" fi ")
+        || lower.contains("[fi]")
+        || lower.contains("(fi)")
+        || lower.contains("🇫🇮")
+        || lower.contains("хельсинки")
+        || lower.contains("helsinki");
+
+    let is_kz = lower.contains("казахстан")
+        || lower.contains("kazakhstan")
+        || lower.contains(" kz ")
+        || lower.contains("[kz]")
+        || lower.contains("🇰🇿")
+        || lower.contains("алматы")
+        || lower.contains("астана");
 
     let is_ca = lower.contains("канад")
         || lower.contains("canada")
@@ -1713,12 +1741,18 @@ pub fn detect_server_country(name: &str) -> String {
         "US".to_string()
     } else if is_ca {
         "CA".to_string()
-    } else if is_blocked {
+    } else if is_ru {
         "RU".to_string()
+    } else if is_by {
+        "BY".to_string()
     } else if is_de {
         "DE".to_string()
     } else if is_nl {
         "NL".to_string()
+    } else if is_fi {
+        "FI".to_string()
+    } else if is_kz {
+        "KZ".to_string()
     } else {
         "GLOBAL".to_string()
     }
@@ -1729,12 +1763,10 @@ pub fn eval_flow_status(raw_id: &str, display_name: &str) -> &'static str {
     let country_raw = detect_server_country(raw_id);
     let country_disp = detect_server_country(display_name);
 
-    if country_raw == "RU" || country_disp == "RU" {
+    if country_raw == "RU" || country_disp == "RU" || country_raw == "BY" || country_disp == "BY" {
         "blocked"
-    } else if country_raw == "US" || country_raw == "CA" || country_disp == "US" || country_disp == "CA" {
-        "ok"
     } else {
-        "unknown"
+        "ok"
     }
 }
 
@@ -1931,7 +1963,7 @@ mod tests {
         assert_eq!(eval_flow_status("🇺🇸 USA Denver", "USA Denver"), "ok");
         assert_eq!(eval_flow_status("🇨🇦 Canada Fast", "Canada Fast"), "ok");
         assert_eq!(eval_flow_status("🇷🇺 Россия", "Россия"), "blocked");
-        assert_eq!(eval_flow_status("🇩🇪 Germany", "Germany"), "unknown");
+        assert_eq!(eval_flow_status("🇩🇪 Germany", "Germany"), "ok");
     }
 
     #[test]
@@ -2104,7 +2136,55 @@ mod tests {
         });
         assert_eq!(last_delay(&no_hist_proxy), -1);
     }
+
+    #[test]
+    fn test_v1_9_30_eval_flow_status_allows_european_and_non_ru_nodes() {
+        assert_eq!(eval_flow_status("DE", "Germany"), "ok");
+        assert_eq!(eval_flow_status("NL", "Netherlands"), "ok");
+        assert_eq!(eval_flow_status("FI", "Finland"), "ok");
+        assert_eq!(eval_flow_status("GB", "UK"), "ok");
+        assert_eq!(eval_flow_status("US", "USA"), "ok");
+        assert_eq!(eval_flow_status("CA", "Canada"), "ok");
+        assert_eq!(eval_flow_status("RU", "Russia"), "blocked");
+        assert_eq!(eval_flow_status("BY", "Belarus"), "blocked");
+    }
+
+    #[test]
+    fn test_v1_9_30_failover_pool_delay_fallback_to_leaf_node() {
+        let mut proxies = std::collections::BTreeMap::new();
+        // Leaf node with valid delay
+        let leaf_node = serde_json::json!({
+            "name": "Finland-Fast",
+            "type": "vless",
+            "alive": true,
+            "history": [{ "time": "2026-10-22T21:00:00Z", "delay": 42 }]
+        });
+        proxies.insert("Finland-Fast".to_string(), leaf_node);
+
+        // Fallback pool with delay: 0 and now: "Finland-Fast"
+        let pool = serde_json::json!({
+            "name": "Fallback",
+            "type": "fallback",
+            "now": "Finland-Fast",
+            "alive": true,
+            "history": [{ "time": "2026-10-22T21:00:00Z", "delay": 0 }]
+        });
+        proxies.insert("Fallback".to_string(), pool);
+
+        let p = proxies.get("Fallback").unwrap();
+        let now_target = p.get("now").and_then(|n| n.as_str()).unwrap_or("");
+        let group_delay = last_delay(p);
+        let effective_delay = if group_delay > 0 {
+            group_delay
+        } else if !now_target.is_empty() && now_target != "—" {
+            proxies.get(now_target).map(last_delay).unwrap_or(0)
+        } else {
+            0
+        };
+        assert_eq!(effective_delay, 42, "Lazy pool delay must resolve to active leaf node delay");
+    }
 }
+
 
 
 

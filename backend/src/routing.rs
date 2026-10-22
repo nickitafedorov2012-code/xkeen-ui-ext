@@ -578,6 +578,82 @@ pub fn delete_provider_from_yaml(yaml: &str, id: &str) -> Result<String, String>
     Ok(out.join(eol))
 }
 
+/// Синхронизация списка отключенных подписок в секциях use: proxy-groups.
+/// Для отключенных подписок строки закомментируются (`# - sub_id`),
+/// для включенных — раскомментируются обратно (`- sub_id`), не нарушая порядок и отступы.
+pub fn sync_disabled_providers_in_yaml(yaml: &str, disabled_providers: &[String]) -> Result<String, String> {
+    let mut out = Vec::new();
+    let mut in_use_block = false;
+    let mut use_indent = 0;
+
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+
+        if is_top {
+            in_use_block = false;
+        }
+
+        // Inline use: [sub1, sub2]
+        if (trimmed.starts_with("use: [") || trimmed.starts_with("use:[")) && trimmed.ends_with(']') {
+            let raw_val = trimmed.trim_start_matches("use:").trim();
+            let inner = &raw_val[1..raw_val.len() - 1];
+            let items: Vec<&str> = inner.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+            let remaining: Vec<&str> = items
+                .into_iter()
+                .filter(|item| {
+                    let clean = item.trim_matches('\'').trim_matches('"').trim();
+                    !disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(clean))
+                })
+                .collect();
+            let indent_spaces = &line[..line.len() - line.trim_start().len()];
+            out.push(format!("{indent_spaces}use: [{}]", remaining.join(", ")));
+            continue;
+        }
+
+        if trimmed == "use:" {
+            in_use_block = true;
+            use_indent = line.len() - line.trim_start().len();
+            out.push(line.to_string());
+            continue;
+        }
+
+        if in_use_block {
+            let indent = line.len() - line.trim_start().len();
+            if indent > use_indent {
+                if trimmed.starts_with('-') {
+                    let prov_id = trimmed.trim_start_matches('-').trim().trim_matches('\'').trim_matches('"');
+                    let is_disabled = disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(prov_id));
+                    if is_disabled {
+                        let prefix = &line[..indent];
+                        out.push(format!("{prefix}# - {prov_id}"));
+                        continue;
+                    }
+                } else if trimmed.starts_with('#') {
+                    let comment_content = trimmed.trim_start_matches('#').trim();
+                    if comment_content.starts_with('-') {
+                        let prov_id = comment_content.trim_start_matches('-').trim().trim_matches('\'').trim_matches('"');
+                        let is_disabled = disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(prov_id));
+                        if !is_disabled {
+                            let prefix = &line[..indent];
+                            out.push(format!("{prefix}- {prov_id}"));
+                            continue;
+                        }
+                    }
+                }
+            } else if !trimmed.is_empty() {
+                in_use_block = false;
+            }
+        }
+
+        out.push(line.to_string());
+    }
+
+    let is_crlf = yaml.contains("\r\n");
+    let eol = if is_crlf { "\r\n" } else { "\n" };
+    Ok(out.join(eol))
+}
+
 fn replace_hwid_in_url_line(line: &str, new_hwid: &str) -> String {
     if let Some(pos) = line.find("hwid=") {
         let after = &line[pos + 5..];
@@ -2820,6 +2896,10 @@ pub fn apply_routing_with_filters(
     } else {
         parse_provider_names(&current)
     };
+    let providers: Vec<String> = providers
+        .into_iter()
+        .filter(|p| !cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(p)))
+        .collect();
 
     // 1. Per-device назначения (базовый маршрут уровня устройства: SRC-IP-CIDR)
     // Вставляется ПЕРВЫМ в rules, чтобы более специфичные правила (домены, AdBlock, Zapret, Flow, Gaming)
@@ -4078,8 +4158,8 @@ rules:
 
     #[test]
     fn test_domestic_catalog_invariants() {
-        assert_eq!(DOMESTIC_WHITELIST_DOMAINS.len(), 376, "Must contain exactly 376 base domains");
-        assert_eq!(DOMESTIC_CATALOG.len(), 376, "Catalog entries must equal 376");
+        assert_eq!(DOMESTIC_WHITELIST_DOMAINS.len(), 392, "Must contain exactly 392 base domains");
+        assert_eq!(DOMESTIC_CATALOG.len(), 392, "Catalog entries must equal 392");
 
         let mut seen = std::collections::HashSet::new();
         for &dom in DOMESTIC_WHITELIST_DOMAINS {
@@ -4236,7 +4316,7 @@ rules:
         ];
 
         let all = get_all_whitelist_domains(&wl_cfg);
-        assert_eq!(all.len(), 376 + 2, "Must add exactly 2 valid custom domains");
+        assert_eq!(all.len(), 392 + 2, "Must add exactly 2 valid custom domains");
         assert!(all.contains(&"my-internal-portal.ru".to_string()));
         assert!(all.contains(&"special-bank.ru".to_string()));
         assert!(!all.contains(&"invalid domain name with spaces".to_string()));
@@ -4353,7 +4433,108 @@ rules:
             ru_pos, subnet_pos
         );
     }
+
+    #[test]
+    fn test_ozon_and_domestic_cdns_in_whitelist_catalog() {
+        let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
+
+        let applied = apply_whitelist_rules(base_yaml, &cfg, None);
+
+        // Ключевые домены OZON и отечественных CDN/DDoS-фильтров обязаны присутствовать в правилах DIRECT:
+        let critical_domains = [
+            "ozon.ru",
+            "ozonusercontent.com",
+            "ozone.ru",
+            "ozonru.me",
+            "o3.ru",
+            "o3team.ru",
+            "ozon.tech",
+            "ozon.travel",
+            "ozon.app",
+            "ozonfresh.ru",
+            "ngenix.net",
+            "qrator.net",
+            "wbstatic.net",
+            "yastatic.net",
+        ];
+
+        for &cd in &critical_domains {
+            let rule = format!("DOMAIN-SUFFIX,{cd},DIRECT");
+            assert!(
+                applied.contains(&rule),
+                "CRITICAL REGRESSION: Domain {} must have direct rule in whitelist: '{}'",
+                cd, rule
+            );
+            assert!(
+                DOMESTIC_WHITELIST_DOMAINS.contains(&cd),
+                "CRITICAL REGRESSION: Domain {} must be present in DOMESTIC_WHITELIST_DOMAINS",
+                cd
+            );
+        }
+    }
+
+    #[test]
+    fn test_v1_9_30_sync_disabled_providers_in_yaml() {
+        let yaml = r#"proxy-groups:
+  - name: Fastest
+    type: url-test
+    use:
+      - sub1
+      - sub2
+  - name: Fallback
+    type: fallback
+    use: [sub1, sub2]
+"#;
+
+        // 1. Отключаем sub1 -> строка комментируется
+        let disabled = vec!["sub1".to_string()];
+        let synced = sync_disabled_providers_in_yaml(yaml, &disabled).expect("synced");
+        assert!(synced.contains("# - sub1"), "Disabled provider must be commented out: {synced}");
+        assert!(synced.contains("- sub2"), "Active provider must remain active: {synced}");
+        assert!(synced.contains("use: [sub2]"), "Inline use must retain only active providers: {synced}");
+
+        // 2. Включаем sub1 обратно -> строка раскомментируется
+        let none_disabled: Vec<String> = Vec::new();
+        let restored = sync_disabled_providers_in_yaml(&synced, &none_disabled).expect("restored");
+        assert!(restored.contains("- sub1"), "Restored provider must be uncommented: {restored}");
+        assert!(!restored.contains("# - sub1"), "No commented sub1 should remain: {restored}");
+        assert!(restored.contains("- sub2"));
+    }
+
+    #[test]
+    fn test_v1_9_30_apply_routing_filters_disabled_providers() {
+        let base_yaml = r#"proxy-providers:
+  active_sub:
+    type: http
+    url: "https://a.b/c"
+  disabled_sub:
+    type: http
+    url: "https://d.e/f"
+proxy-groups:
+  - name: PROXY
+    type: select
+rules:
+  - MATCH,DIRECT
+"#;
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.disabled_providers = vec!["disabled_sub".to_string()];
+        cfg.device_routing.insert("192.168.2.50".to_string(), crate::config::DeviceRouting {
+            servers: vec!["Fastest".to_string()],
+            ..Default::default()
+        });
+
+        let (applied, _) = apply_routing(base_yaml, &cfg).expect("applied");
+        // Проверяем, что в созданной группе устройства нет disabled_sub в секции use:
+        assert!(applied.contains("- active_sub"), "active_sub must be present in device group use");
+        assert!(!applied.contains("- disabled_sub"), "disabled_sub must NOT be present in device group use: {applied}");
+    }
 }
+
+
 
 
 

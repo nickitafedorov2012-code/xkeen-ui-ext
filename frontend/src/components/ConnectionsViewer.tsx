@@ -640,33 +640,51 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
           <div className="connections-actions-group">
             <button
               type="button"
-              className={`btn btn-sm ${groupByApp ? 'btn-primary' : 'btn-secondary'}`}
+              className={`btn btn-sm ${groupByApp ? 'btn-active-app' : 'btn-secondary'}`}
               onClick={() => setGroupByApp((prev) => !prev)}
               title="Инспектор потоков: группировать по приложениям"
             >
-              📦 {groupByApp ? 'Группировка: Вкл' : 'По приложениям'}
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                <rect x="3" y="3" width="7" height="7" />
+                <rect x="14" y="3" width="7" height="7" />
+                <rect x="14" y="14" width="7" height="7" />
+                <rect x="3" y="14" width="7" height="7" />
+              </svg>
+              {groupByApp ? 'Группировка: Вкл' : 'По приложениям'}
             </button>
             <button
-              className="btn btn-sm btn-primary"
+              className="btn btn-sm btn-subtle-proxy"
               onClick={() => openForceProxyModal()}
               title="Добавить любой домен принудительно в прокси вручную"
             >
-              ➕ В прокси по домену
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              В прокси по домену
             </button>
             <button
               className="btn btn-sm btn-secondary"
               onClick={() => loadData(true)}
               title="Обновить список соединений вручную"
             >
-              🔄 Обновить
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className={loading ? 'spin' : ''} style={{ flexShrink: 0 }}>
+                <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
+              </svg>
+              Обновить
             </button>
             <button
-              className="btn btn-sm btn-danger"
+              className="btn btn-sm btn-danger-soft"
               onClick={handleCloseAll}
               disabled={connections.length === 0}
               title="Закрыть все открытые соединения"
             >
-              💥 Закрыть все ({connections.length})
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                <circle cx="12" cy="12" r="10" />
+                <line x1="15" y1="9" x2="9" y2="15" />
+                <line x1="9" y1="9" x2="15" y2="15" />
+              </svg>
+              Закрыть все ({connections.length})
             </button>
             {closedConnections.length > 0 && (
               <button
@@ -674,7 +692,11 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
                 onClick={handleClearClosed}
                 title="Очистить историю завершённых сессий"
               >
-                🗑️ Очистить завершённые
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                  <polyline points="3 6 5 6 21 6" />
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                </svg>
+                Очистить завершённые
               </button>
             )}
           </div>
@@ -890,13 +912,13 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
             <table className="connections-table">
               <thead>
                 <tr>
-                  <th style={{ width: 70 }}>Сеть</th>
-                  <th>Хост / Назначение</th>
-                  <th>Клиент (IP)</th>
-                  <th>Маршрут / Цепочка</th>
-                  <th>Правило</th>
+                  <th style={{ width: 70, whiteSpace: 'nowrap' }}>Сеть</th>
+                  <th style={{ minWidth: 180 }}>Хост / Назначение</th>
+                  <th style={{ minWidth: 120, whiteSpace: 'nowrap' }}>Клиент (IP)</th>
+                  <th style={{ minWidth: 140, whiteSpace: 'nowrap' }}>Маршрут / Цепочка</th>
+                  <th style={{ minWidth: 110, whiteSpace: 'nowrap' }}>Правило</th>
                   <th
-                    style={{ cursor: 'pointer', userSelect: 'none' }}
+                    style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
                     onClick={() => setSortBy((prev) => (prev === 'download' ? 'traffic' : 'download'))}
                     title="Сортировка по объёму входящего трафика"
                   >

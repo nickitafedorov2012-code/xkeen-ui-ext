@@ -890,8 +890,8 @@ pub async fn ping_flow_servers(State(state): State<AppState>) -> Response {
     for (name, &ping) in &pings {
         if ping > 0 && ping < min_ping {
             let country = crate::mihomo::detect_server_country(name);
-            let is_us_ca = country == "US" || country == "CA";
-            if is_us_ca {
+            let is_blocked = country == "RU" || country == "BY";
+            if !is_blocked {
                 min_ping = ping;
                 best_server = Some(name.clone());
             }
@@ -994,8 +994,8 @@ pub async fn repair_flow(State(state): State<AppState>) -> Response {
     for (name, &ping) in &pings {
         if ping > 0 && ping < min_ping {
             let country = crate::mihomo::detect_server_country(name);
-            let is_us_ca = country == "US" || country == "CA";
-            if is_us_ca {
+            let is_blocked = country == "RU" || country == "BY";
+            if !is_blocked {
                 min_ping = ping;
                 best_server = Some(name.clone());
             }
@@ -1006,17 +1006,17 @@ pub async fn repair_flow(State(state): State<AppState>) -> Response {
     let target_server = match best_server.or_else(|| cfg.flow_server.clone()) {
         Some(s) if !s.trim().is_empty() => s,
         _ => {
-            // Ищем сервер США из mihomo::get_servers, либо первый доступный узел
+            // Ищем подходящий сервер не из РФ/РБ из mihomo::get_servers, либо первый доступный узел
             if let Ok(servers) = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
-                let us_cand = servers.iter().find(|s| {
-                    if s.id.is_empty() || s.id == "Fastest" || s.id == "Fallback" || s.is_pool || s.id == "PROXY" || s.id == "GLOBAL" {
+                let cand = servers.iter().find(|s| {
+                    if s.id.is_empty() || s.id == "Fastest" || s.id == "Fallback" || s.is_pool || s.id == "PROXY" || s.id == "GLOBAL" || s.id == "DIRECT" || s.id == "REJECT" {
                         return false;
                     }
                     let country = crate::mihomo::detect_server_country(&s.id);
-                    country == "US" || country == "CA"
+                    country != "RU" && country != "BY"
                 });
-                if let Some(us_srv) = us_cand {
-                    us_srv.id.clone()
+                if let Some(srv) = cand {
+                    srv.id.clone()
                 } else if let Some(first_valid) = servers.into_iter().find(|s| !s.id.is_empty() && s.id != "Fastest" && s.id != "Fallback" && !s.is_pool && s.id != "PROXY" && s.id != "GLOBAL" && s.id != "DIRECT" && s.id != "REJECT") {
                     first_valid.id
                 } else {
@@ -1103,8 +1103,8 @@ pub async fn auto_select_flow_server(
             }
             if ping > 0 && ping < min_ping {
                 let country = crate::mihomo::detect_server_country(name);
-                let is_us_ca = country == "US" || country == "CA";
-                if is_us_ca {
+                let is_blocked = country == "RU" || country == "BY";
+                if !is_blocked {
                     min_ping = ping;
                     best_server_id = Some(name.clone());
                 }
@@ -2735,23 +2735,45 @@ pub async fn toggle_provider(State(state): State<AppState>, Json(req): Json<Togg
     if pid.is_empty() {
         return api_err("ID подписки не может быть пустым");
     }
-    let _cfg_guard = state.config_lock.lock().await;
-    let mut new_cfg = (**state.config.read().await).clone();
 
-    let is_currently_disabled = new_cfg.disabled_providers.iter().any(|p| p.eq_ignore_ascii_case(&pid));
+    let mut tx = match ConfigTx::begin(&state).await {
+        Ok(t) => t,
+        Err(e) => return api_err(format!("Ошибка захвата транзакции: {e}")),
+    };
+
+    let is_currently_disabled = tx.config().disabled_providers.iter().any(|p| p.eq_ignore_ascii_case(&pid));
     let target_enabled = req.enabled.unwrap_or(is_currently_disabled);
 
     if target_enabled {
-        new_cfg.disabled_providers.retain(|p| !p.eq_ignore_ascii_case(&pid));
+        tx.config_mut().disabled_providers.retain(|p| !p.eq_ignore_ascii_case(&pid));
     } else if !is_currently_disabled {
-        new_cfg.disabled_providers.push(pid.clone());
+        tx.config_mut().disabled_providers.push(pid.clone());
     }
 
-    if let Err(e) = config::save(&state.config_path, &new_cfg).await {
-        return api_err(format!("Ошибка сохранения config.json: {e}"));
-    }
-    *state.config.write().await = std::sync::Arc::new(new_cfg.clone());
+    let yaml = match tx.read_yaml().await {
+        Ok(y) => y,
+        Err(e) => return api_err(e),
+    };
 
+    let synced_yaml = match crate::routing::sync_disabled_providers_in_yaml(&yaml, &tx.config().disabled_providers) {
+        Ok(y) => y,
+        Err(e) => return api_err(e),
+    };
+
+    let (routed_yaml, _) = match crate::routing::apply_routing(&synced_yaml, tx.config()) {
+        Ok(r) => r,
+        Err(e) => return api_err(e),
+    };
+
+    if let Err(e) = tx.set_yaml(routed_yaml) {
+        return api_err(format!("Ошибка валидации YAML: {e}"));
+    }
+
+    if let Err(e) = tx.commit_and_reload().await {
+        return api_err(format!("Ошибка сохранения и перезагрузки: {e}"));
+    }
+
+    let disabled_list = state.config.read().await.disabled_providers.clone();
     let label = if target_enabled {
         format!("Подписка '{pid}' включена")
     } else {
@@ -2762,7 +2784,7 @@ pub async fn toggle_provider(State(state): State<AppState>, Json(req): Json<Togg
         "message": label,
         "provider_id": pid,
         "enabled": target_enabled,
-        "disabled_providers": new_cfg.disabled_providers,
+        "disabled_providers": disabled_list,
     }))
 }
 
@@ -4935,14 +4957,14 @@ pub async fn test_rule_match(
                 let r_payload = r.get("payload").and_then(|p| p.as_str()).unwrap_or("");
                 let r_proxy = r.get("proxy").and_then(|p| p.as_str()).unwrap_or("");
 
-                let matched = match r_type {
+                let matched = match r_type.to_ascii_uppercase().as_str() {
                     "DOMAIN" => domain == r_payload.to_lowercase(),
-                    "DOMAIN-SUFFIX" => {
+                    "DOMAIN-SUFFIX" | "DOMAINSUFFIX" => {
                         let p = r_payload.to_lowercase();
                         domain == p || domain.ends_with(&format!(".{}", p))
                     }
-                    "DOMAIN-KEYWORD" => domain.contains(&r_payload.to_lowercase()),
-                    "SRC-IP-CIDR" => !src_ip.is_empty() && crate::config::ip_matches_cidr(src_ip, r_payload),
+                    "DOMAIN-KEYWORD" | "DOMAINKEYWORD" => domain.contains(&r_payload.to_lowercase()),
+                    "SRC-IP-CIDR" | "SRCIPCIDR" => !src_ip.is_empty() && crate::config::ip_matches_cidr(src_ip, r_payload),
                     _ => false,
                 };
 

@@ -175,7 +175,16 @@ const DeviceRow = memo(function DeviceRow({
         <div className="device-name-wrap">
           <span className={`device-dot ${d.online ? 'online' : 'offline'}`} />
           <b className="device-name-text" title={`${d.mac}${d.interface ? ` · ${d.interface}` : ''}`}>{cleanName || d.name}</b>
-          {d.is_current_device && <span className="badge-you">you</span>}
+          {d.is_current_device && (
+            <span className="badge-you" title="Текущее устройство (с которого открыта панель)">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                <line x1="8" y1="21" x2="16" y2="21" />
+                <line x1="12" y1="17" x2="12" y2="21" />
+              </svg>
+              Это устройство
+            </span>
+          )}
         </div>
       </td>
       <td>

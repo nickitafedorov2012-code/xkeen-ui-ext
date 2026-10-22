@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
 import { pingClass, type FailoverEventInfo, type StatusInfo, type AghStatus, type SwapStatus, type DomainCheckResult } from '../types'
 import TrafficGraph from './TrafficGraph'
-import SelfDiagnosticsCard from './SelfDiagnosticsCard'
 
 interface Props {
   status: StatusInfo | null
@@ -280,13 +279,30 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
   }
 
   const [devicesCount, setDevicesCount] = useState<number | null>(null)
+  const [devicesTotal, setDevicesTotal] = useState<number | null>(null)
 
   useEffect(() => {
-    apiGet<{ devices: any[] }>('devices')
-      .then((d) => {
-        if (d?.devices) setDevicesCount(d.devices.length)
-      })
-      .catch(() => {})
+    const loadDevices = () => {
+      apiGet<{ devices: any[] }>('devices')
+        .then((d) => {
+          if (d?.devices) {
+            const online = d.devices.filter((dev) => dev.online || dev.is_current_device).length
+            setDevicesCount(online)
+            setDevicesTotal(d.devices.length)
+          }
+        })
+        .catch(() => {})
+    }
+    loadDevices()
+    const timer = setInterval(loadDevices, 10000)
+    const onSync = () => loadDevices()
+    window.addEventListener('xr:data-changed', onSync)
+    window.addEventListener('xr:refresh-status', onSync)
+    return () => {
+      clearInterval(timer)
+      window.removeEventListener('xr:data-changed', onSync)
+      window.removeEventListener('xr:refresh-status', onSync)
+    }
   }, [])
 
   const loadEvents = useCallback(async () => {
@@ -378,9 +394,6 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
 
       {/* Умный баннер рекомендации Swap при нехватке ОЗУ */}
       <SwapRecommendationBanner status={swapStatus} onSwitchTab={onSwitchTab} />
-
-      {/* Карточка «Самодиагностика в один клик» (Zero-Touch аудит здоровья роутера) */}
-      <SelfDiagnosticsCard notify={notify} onSwitchTab={onSwitchTab} refresh={refresh} />
 
       {/* График трафика в реальном времени */}
       <TrafficGraph />
@@ -479,19 +492,19 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                   </li>
                   <li>
                     <span>Подключено устройств</span>
-                    <b>{devicesCount !== null ? `${devicesCount} в сети` : '—'}</b>
+                    <b>{devicesCount !== null ? (devicesTotal !== null ? `${devicesCount} онлайн из ${devicesTotal}` : `${devicesCount} онлайн`) : '—'}</b>
                   </li>
                 </ul>
 
-                {/* График стабильности задержки */}
-                {pingHistory.length >= 1 && (
+                {/* График стабильности задержки (отображается при наличии хотя бы 2 замеров) */}
+                {pingHistory.length >= 2 && (
                   <div className="active-server-sparkline-box">
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
                       <span className="muted small" style={{ fontSize: 11 }}>
-                        Стабильность пинга ({pingHistory.length} {pingHistory.length === 1 ? 'замер' : 'точек'}):
+                        Стабильность пинга ({pingHistory.length} точек):
                       </span>
                       <span className="muted small" style={{ fontSize: 11, fontFamily: 'monospace' }}>
-                        {pingHistory.length === 1 ? `${minPing} мс` : `мин: ${minPing} мс / макс: ${maxPing} мс`}
+                        мин: {minPing} мс / макс: {maxPing} мс
                       </span>
                     </div>
                     <PingSparkline data={pingHistory} />

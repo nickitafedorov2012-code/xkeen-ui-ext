@@ -2301,11 +2301,23 @@ table.devices-table td {
 .badge-you {
   font-size: 11px;
   font-weight: 600;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: #2563eb;
-  color: #ffffff;
-  text-transform: lowercase;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(56, 189, 248, 0.12);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  line-height: 1.2;
+  white-space: nowrap;
+  user-select: none;
+}
+
+[data-theme="light"] .badge-you {
+  background: rgba(14, 165, 233, 0.12);
+  color: #0284c7;
+  border-color: rgba(14, 165, 233, 0.3);
 }
 
 .device-ip-text {
@@ -2323,7 +2335,7 @@ table.devices-table td {
   border: 1px solid #232c3f;
   border-radius: 6px;
   color: #cbd5e1;
-  padding: 0 20px 0 8px;
+  padding: 0 28px 0 10px;
   font-size: 12.5px;
   outline: none;
   cursor: pointer;
@@ -2331,13 +2343,25 @@ table.devices-table td {
   text-overflow: ellipsis;
   overflow: hidden;
   white-space: nowrap;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
 }
 .device-select:hover {
   border-color: #334155;
   color: #fff;
+  background-color: #171e2c;
 }
 .device-select:focus {
-  border-color: #3b82f6;
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+}
+.device-select option {
+  background: #141923;
+  color: #f1f5f9;
+  padding: 8px 10px;
 }
 
 .device-reserve-hint {
@@ -5551,12 +5575,13 @@ table.devices-table td {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: 10px;
 }
 .connections-search {
   flex: 1;
-  min-width: 240px;
-  max-width: 380px;
+  min-width: 220px;
+  max-width: 320px;
+  height: 32px;
 }
 .connections-actions-group {
   display: flex;
@@ -5568,8 +5593,98 @@ table.devices-table td {
   display: flex;
   align-items: center;
   gap: 12px;
-  flex-wrap: wrap;
   margin-left: auto;
+  height: 32px;
+}
+.controls-group .checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted, #94a3b8);
+  user-select: none;
+  cursor: pointer;
+  white-space: nowrap;
+  height: 32px;
+}
+.controls-group .editor-select {
+  height: 32px;
+  font-size: 12px;
+  padding: 0 28px 0 10px;
+  border-radius: 6px;
+  background-color: #141923;
+  border: 1px solid #232c3f;
+  color: #cbd5e1;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  outline: none;
+  cursor: pointer;
+}
+.controls-group .editor-select:hover {
+  border-color: #334155;
+  color: #fff;
+}
+.btn-subtle-proxy {
+  background: rgba(56, 189, 248, 0.12);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.btn-subtle-proxy:hover {
+  background: rgba(56, 189, 248, 0.2);
+  border-color: #38bdf8;
+  color: #ffffff;
+}
+.btn-danger-soft {
+  background: rgba(239, 68, 68, 0.12);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.btn-danger-soft:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.22);
+  border-color: #ef4444;
+  color: #fff;
+}
+.btn-danger-soft:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn-active-app {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.4);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.table-responsive {
+  width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 .connections-table {
   width: 100%;

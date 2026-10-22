@@ -149,6 +149,7 @@ export interface ServerInfo {
   is_pool?: boolean
   custom_alias?: string
   is_whitelist?: boolean
+  now_node?: string
   raw?: Record<string, any>
 }
 
@@ -472,10 +473,8 @@ export const FLOW_OK_KEYWORDS: readonly string[] = [
 ]
 
 export const FLOW_BLOCKED_KEYWORDS: readonly string[] = [
-  'росси', 'russia', 'ru ', '[ru]', 'мобильный',
-  'финлянд', 'finland', 'fi ', '[fi]',
-  'казахстан', 'kazakhstan', 'kz ', '[kz]', 'беларус', 'belarus', 'by ', '[by]',
-  'таджикистан', 'узбекистан', 'азербайджан', 'армени', 'грузи',
+  'росси', 'russia', 'ru ', '[ru]', '🇷🇺',
+  'беларус', 'belarus', 'by ', '[by]', '🇧🇾',
 ]
 
 export function getFlowRegion(serverOrName: ServerInfo | string | undefined | null): 'us' | 'ca' | null {
@@ -532,10 +531,7 @@ export function getFlowStatus(serverOrName: ServerInfo | string | undefined | nu
   if (FLOW_BLOCKED_KEYWORDS.some((kw) => n.includes(kw))) {
     return 'blocked'
   }
-  if (FLOW_OK_KEYWORDS.some((kw) => n.includes(kw)) || n.includes('🇨🇦') || n.includes('🇺🇸')) {
-    return 'ok'
-  }
-  return 'unknown'
+  return 'ok'
 }
 
 export type ProcessCategory = 'xkeen' | 'zapret' | 'keenetic' | 'system'

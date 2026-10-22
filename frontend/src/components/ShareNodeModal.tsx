@@ -99,16 +99,16 @@ export default function ShareNodeModal({
           {isPlaceholder && (
             <div
               style={{
-                background: 'rgba(234, 179, 8, 0.1)',
-                border: '1px solid rgba(234, 179, 8, 0.3)',
+                background: 'rgba(234, 179, 8, 0.08)',
+                border: '1px solid rgba(234, 179, 8, 0.25)',
                 borderRadius: 8,
                 padding: '8px 12px',
-                fontSize: 12,
+                fontSize: 11.5,
                 color: '#eab308',
                 lineHeight: 1.4,
               }}
             >
-              ℹ️ <b>Безопасность ядра:</b> Mihomo скрывает секретные UUID/пароли серверов. Вы можете вставить свой реальный ключ в поле ссылки ниже — QR-код обновится автоматически.
+              ℹ️ <b>Безопасность ядра:</b> Mihomo скрывает секретные UUID серверов. Вы можете вставить рабочий ключ в поле ниже — QR-код обновится на лету.
             </div>
           )}
 
@@ -124,8 +124,8 @@ export default function ShareNodeModal({
                   height={200}
                 />
               </div>
-              <p className="muted small" style={{ textAlign: 'center', margin: '8px 0 0' }}>
-                Отсканируйте камерой телефона (v2rayNG / Streisand / Shadowrocket / Sing-box)
+              <p className="muted small" style={{ textAlign: 'center', margin: '8px 0 0', fontSize: 11 }}>
+                Сканируйте камерой телефона для быстрого импорта
               </p>
             </div>
 
@@ -166,11 +166,11 @@ export default function ShareNodeModal({
               </div>
 
               <div className="share-instructions">
-                <b>💡 Как использовать:</b>
+                <b>💡 Клиенты для подключения:</b>
                 <ul>
-                  <li><b>Android:</b> v2rayNG, NekoBox, Happ, Clash Meta (импорт из буфера/QR).</li>
+                  <li><b>Android:</b> v2rayNG, NekoBox, Hiddify, Happ.</li>
                   <li><b>iOS / macOS:</b> Streisand, Shadowrocket, Sing-box, V2Box.</li>
-                  <li><b>Windows / Linux:</b> Hiddify, Nekoray, v2rayN, Clash Verge.</li>
+                  <li><b>Windows:</b> Hiddify, Nekoray, v2rayN, Clash Verge.</li>
                 </ul>
               </div>
             </div>

@@ -49,10 +49,6 @@ describe('Google Flow keywords and region detection', () => {
     const blockedNodes = [
       '🇷🇺 Россия',
       '🇷🇺 Обход [Gold] - Россия',
-      '🇫🇮 Финляндия [⚡ Стабильный ]',
-      '🇰🇿 Казахстан',
-      '🇺🇿 Узбекистан',
-      'Мобильный #1 📶 [ ⚡ LTE / 5G ]',
       'Беларусь Минск',
     ]
 
@@ -62,17 +58,17 @@ describe('Google Flow keywords and region detection', () => {
     }
   })
 
-  it('returns unknown for neutral foreign regions', () => {
-    const neutralNodes = [
+  it('allows foreign and European nodes without discrimination', () => {
+    const allowedNodes = [
       '🇩🇪 Германия',
       '🇳🇱 Нидерланды',
       '🇬🇧 Великобритания',
       '🇯🇵 Япония',
+      '🇫🇮 Финляндия [⚡ Стабильный ]',
     ]
 
-    for (const node of neutralNodes) {
-      expect(getFlowStatus(node)).toBe('unknown')
-      expect(getFlowRegion(node)).toBeNull()
+    for (const node of allowedNodes) {
+      expect(getFlowStatus(node)).toBe('ok')
     }
   })
 

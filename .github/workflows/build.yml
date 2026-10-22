@@ -68,6 +68,8 @@ jobs:
         with:
           workspaces: backend
           key: ${{ matrix.target }}
+          shared-key: "xkeen-route-${{ matrix.target }}"
+          cache-all-targets: "true"
 
       - name: Install prebuilt cross
         uses: taiki-e/install-action@v2
@@ -119,6 +121,15 @@ jobs:
         with:
           name: xkeen-route-${{ matrix.name }}
           path: |
+            xkeen-route-${{ matrix.name }}
+            xkeen-route-${{ matrix.name }}.sha256
+
+      - name: Publish architecture asset to GitHub Release immediately
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/') || inputs.version != ''
+        with:
+          tag_name: ${{ inputs.version || github.ref_name }}
+          files: |
             xkeen-route-${{ matrix.name }}
             xkeen-route-${{ matrix.name }}.sha256
 
