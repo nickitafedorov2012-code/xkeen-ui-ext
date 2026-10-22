@@ -2860,14 +2860,14 @@ pub async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str, hwid: Opt
     };
     let proxied = crate::updater::proxied_client(&proxy_url);
     let client_ref = proxied.as_ref().unwrap_or(&state.http);
-    let mut req_builder = client_ref.get(url).header("User-Agent", ua);
+    let mut req_builder = client_ref.get(url).header("User-Agent", ua).timeout(std::time::Duration::from_secs(12));
     if let Some(ref h) = resolved_hwid {
         req_builder = req_builder.header("x-hwid", h.as_str());
     }
     let resp = match req_builder.send().await {
         Ok(r) if r.status().is_success() => r,
         _ => {
-            let mut direct_builder = state.http.get(url).header("User-Agent", ua);
+            let mut direct_builder = state.http.get(url).header("User-Agent", ua).timeout(std::time::Duration::from_secs(12));
             if let Some(ref h) = resolved_hwid {
                 direct_builder = direct_builder.header("x-hwid", h.as_str());
             }

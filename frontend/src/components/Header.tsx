@@ -361,6 +361,8 @@ export default function Header({
       setServiceFeedback({ text: '✓ Все службы перезапущены', type: 'success' })
       setTimeout(() => setServiceFeedback(null), 4000)
       await new Promise((r) => setTimeout(r, 1200))
+      window.dispatchEvent(new CustomEvent('xr:data-changed'))
+      window.dispatchEvent(new CustomEvent('xr:refresh-status'))
       await refresh()
     } catch (e) {
       const err = e instanceof Error ? e.message : 'Ошибка перезапуска сервисов'
@@ -394,6 +396,8 @@ export default function Header({
         type: 'success',
       })
       setTimeout(() => setServiceFeedback(null), 4000)
+      window.dispatchEvent(new CustomEvent('xr:data-changed'))
+      window.dispatchEvent(new CustomEvent('xr:refresh-status'))
       await refresh()
     } catch (e) {
       const err = e instanceof Error ? e.message : 'Ошибка переключения сервиса'

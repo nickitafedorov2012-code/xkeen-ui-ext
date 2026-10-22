@@ -4158,8 +4158,8 @@ rules:
 
     #[test]
     fn test_domestic_catalog_invariants() {
-        assert_eq!(DOMESTIC_WHITELIST_DOMAINS.len(), 392, "Must contain exactly 392 base domains");
-        assert_eq!(DOMESTIC_CATALOG.len(), 392, "Catalog entries must equal 392");
+        assert_eq!(DOMESTIC_WHITELIST_DOMAINS.len(), 402, "Must contain exactly 402 base domains");
+        assert_eq!(DOMESTIC_CATALOG.len(), 402, "Catalog entries must equal 402");
 
         let mut seen = std::collections::HashSet::new();
         for &dom in DOMESTIC_WHITELIST_DOMAINS {
@@ -4316,7 +4316,7 @@ rules:
         ];
 
         let all = get_all_whitelist_domains(&wl_cfg);
-        assert_eq!(all.len(), 392 + 2, "Must add exactly 2 valid custom domains");
+        assert_eq!(all.len(), DOMESTIC_WHITELIST_DOMAINS.len() + 2, "Must add exactly 2 valid custom domains");
         assert!(all.contains(&"my-internal-portal.ru".to_string()));
         assert!(all.contains(&"special-bank.ru".to_string()));
         assert!(!all.contains(&"invalid domain name with spaces".to_string()));

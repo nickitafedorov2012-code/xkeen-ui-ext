@@ -1469,51 +1469,29 @@ pub async fn ping_all_url(
         return out;
     }
 
-    // Если в списке 8+ серверов и есть основная группа, задействуем быстрый групповой тест Mihomo
-    let should_ping_group = ids.len() >= 8;
-    let mut remaining = Vec::new();
+    // Высокоскоростной параллельный пинг: 12 одновременных запросов с жестким таймаутом (до 2500 мс)
+    let effective_timeout = std::cmp::min(timeout_ms, 2500);
+    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(12));
+    let mut handles = Vec::new();
+    let url_owned = test_url.map(|s| s.to_string());
+    let shared_cfg = std::sync::Arc::new(cfg.clone());
 
-    if should_ping_group {
-        if let Ok(proxies) = get_proxies(http, cfg).await {
-            if let Some(group) = find_primary_group(&proxies) {
-                let group_pings = ping_group_url(http, cfg, &group, timeout_ms, test_url).await;
-                for id in ids {
-                    if let Some(&ms) = group_pings.get(id) {
-                        out.insert(id.clone(), ms);
-                    } else {
-                        remaining.push(id.clone());
-                    }
-                }
-            } else {
-                remaining.extend_from_slice(ids);
-            }
-        } else {
-            remaining.extend_from_slice(ids);
-        }
-    } else {
-        remaining.extend_from_slice(ids);
+    for id in ids {
+        let http = http.clone();
+        let cfg = shared_cfg.clone();
+        let url_opt = url_owned.clone();
+        let sem_clone = sem.clone();
+        let id_owned = id.clone();
+        handles.push(tokio::spawn(async move {
+            let _permit = sem_clone.acquire().await.ok();
+            let ms = ping_server_url(&http, &cfg, &id_owned, effective_timeout, url_opt.as_deref()).await;
+            (id_owned, ms)
+        }));
     }
 
-    if !remaining.is_empty() {
-        let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
-        let mut handles = Vec::new();
-        let url_owned = test_url.map(|s| s.to_string());
-        let shared_cfg = std::sync::Arc::new(cfg.clone());
-        for id in remaining {
-            let http = http.clone();
-            let cfg = shared_cfg.clone();
-            let url_opt = url_owned.clone();
-            let sem_clone = sem.clone();
-            handles.push(tokio::spawn(async move {
-                let _permit = sem_clone.acquire().await.ok();
-                let ms = ping_server_url(&http, &cfg, &id, timeout_ms, url_opt.as_deref()).await;
-                (id, ms)
-            }));
-        }
-        for h in handles {
-            if let Ok((id, ms)) = h.await {
-                out.insert(id, ms);
-            }
+    for h in handles {
+        if let Ok((id, ms)) = h.await {
+            out.insert(id, ms);
         }
     }
 

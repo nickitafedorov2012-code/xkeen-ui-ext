@@ -288,8 +288,11 @@ export default function Servers({ notify, status, refresh }: Props) {
       apiGet<{ servers: ServerInfo[] }>('servers')
         .then((data) => {
           if (data?.servers) {
-            setServers((prev) =>
-              prev.map((s) => {
+            setServers((prev) => {
+              if (prev.length !== data.servers.length) {
+                return data.servers
+              }
+              return prev.map((s) => {
                 const fresh = data.servers.find((f) => f.id === s.id)
                 if (!fresh) return s
                 return {
@@ -302,7 +305,7 @@ export default function Servers({ notify, status, refresh }: Props) {
                   ping_ms: fresh.ping_ms > 0 ? fresh.ping_ms : s.ping_ms,
                 }
               })
-            )
+            })
           }
         })
         .catch(() => {})

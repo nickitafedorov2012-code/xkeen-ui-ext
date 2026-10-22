@@ -206,8 +206,8 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
     if (idx !== -1) {
       if (shouldFocus) {
         ta.focus()
+        ta.setSelectionRange(idx, idx + target.length)
       }
-      ta.setSelectionRange(idx, idx + target.length)
       const linesBefore = content.substring(0, idx).split('\n').length
       const lineHeight = 20
       ta.scrollTop = Math.max(0, (linesBefore - 5) * lineHeight)

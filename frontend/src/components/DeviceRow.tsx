@@ -1,4 +1,4 @@
-import { memo, useEffect, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import {
   type DeviceInfo,
   type DeviceRoutingEntry,
@@ -6,6 +6,201 @@ import {
   type PolicyInfo,
   type ServerInfo,
 } from '../types'
+
+interface CustomSelectOption {
+  value: string
+  label: string
+}
+
+function CustomSelect({
+  value,
+  options,
+  disabled,
+  onChange,
+  className,
+}: {
+  value: string
+  options: CustomSelectOption[]
+  disabled?: boolean
+  onChange: (val: string) => void
+  className?: string
+}) {
+  const [open, setOpen] = useState(false)
+  const containerRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const handleClick = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('mousedown', handleClick)
+    document.addEventListener('keydown', handleKey)
+    return () => {
+      document.removeEventListener('mousedown', handleClick)
+      document.removeEventListener('keydown', handleKey)
+    }
+  }, [open])
+
+  const selectedOpt = options.find((o) => o.value === value) || options[0]
+
+  return (
+    <div ref={containerRef} className="custom-select-container" style={{ position: 'relative', width: '100%' }}>
+      {/* Скрытый нативный select для совместимости с тестами и формами */}
+      <select
+        className="device-select"
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value)}
+        style={{
+          position: 'absolute',
+          opacity: 0,
+          pointerEvents: 'none',
+          width: '100%',
+          height: '100%',
+          left: 0,
+          top: 0,
+          zIndex: -1,
+        }}
+        tabIndex={-1}
+        aria-hidden="true"
+      >
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+
+      {/* Стилизованная темная кнопка-триггер без системных всплывающих меню */}
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => !disabled && setOpen((prev) => !prev)}
+        className={`custom-select-trigger ${open ? 'open' : ''} ${className || ''}`}
+        style={{
+          width: '100%',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          height: 32,
+          padding: '0 10px',
+          background: open ? '#171e2c' : '#141923',
+          border: open ? '1px solid #38bdf8' : '1px solid #232c3f',
+          borderRadius: 6,
+          color: disabled ? 'var(--muted)' : '#cbd5e1',
+          fontSize: '12.5px',
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          outline: 'none',
+          boxShadow: open ? '0 0 0 2px rgba(56, 189, 248, 0.2)' : 'none',
+          transition: 'all 0.15s ease',
+          userSelect: 'none',
+        }}
+      >
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'left' }}>
+          {selectedOpt?.label || value}
+        </span>
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="#94a3b8"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{
+            flexShrink: 0,
+            marginLeft: 6,
+            transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+            transition: 'transform 0.15s ease',
+          }}
+        >
+          <polyline points="6 9 12 15 18 9" />
+        </svg>
+      </button>
+
+      {/* Выпадающее меню в стиле темного стекла */}
+      {open && (
+        <div
+          className="custom-select-menu"
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 4px)',
+            left: 0,
+            width: '100%',
+            minWidth: 180,
+            maxHeight: 220,
+            overflowY: 'auto',
+            background: 'rgba(20, 25, 35, 0.98)',
+            backdropFilter: 'blur(16px)',
+            border: '1px solid rgba(255, 255, 255, 0.12)',
+            borderRadius: 8,
+            boxShadow: '0 10px 30px rgba(0, 0, 0, 0.75)',
+            zIndex: 100,
+            padding: 4,
+          }}
+        >
+          {options.map((opt) => {
+            const isSelected = opt.value === value
+            return (
+              <div
+                key={opt.value}
+                onClick={() => {
+                  onChange(opt.value)
+                  setOpen(false)
+                }}
+                className={`custom-select-option ${isSelected ? 'selected' : ''}`}
+                style={{
+                  padding: '7px 10px',
+                  borderRadius: 6,
+                  fontSize: '12px',
+                  color: isSelected ? '#38bdf8' : '#e2e8f0',
+                  background: isSelected ? 'rgba(56, 189, 248, 0.12)' : 'transparent',
+                  fontWeight: isSelected ? 600 : 400,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  transition: 'background 0.12s ease',
+                }}
+                onMouseEnter={(e) => {
+                  if (!isSelected) (e.currentTarget as HTMLElement).style.background = 'rgba(255, 255, 255, 0.05)'
+                }}
+                onMouseLeave={(e) => {
+                  if (!isSelected) (e.currentTarget as HTMLElement).style.background = 'transparent'
+                }}
+              >
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {opt.label}
+                </span>
+                {isSelected && (
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="#38bdf8"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    style={{ flexShrink: 0, marginLeft: 6 }}
+                  >
+                    <polyline points="20 6 9 17 4 12" />
+                  </svg>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
 
 interface Props {
   d: DeviceInfo
@@ -191,21 +386,17 @@ const DeviceRow = memo(function DeviceRow({
         <span className="device-ip-text">{cleanIp}</span>
       </td>
       <td>
-        <select
-          className="device-select"
+        <CustomSelect
           value={d.policy}
           disabled={busy}
-          onChange={(e) => applyPolicy([d.mac], e.target.value)}
-        >
-          <option value={d.policy}>{d.policy_name}</option>
-          {policies
-            .filter((p) => p.id !== d.policy)
-            .map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-        </select>
+          onChange={(newVal) => applyPolicy([d.mac], newVal)}
+          options={[
+            { value: d.policy, label: d.policy_name },
+            ...policies
+              .filter((p) => p.id !== d.policy)
+              .map((p) => ({ value: p.id, label: p.name })),
+          ]}
+        />
       </td>
       <td>
         <SpeedCell
@@ -234,11 +425,30 @@ const DeviceRow = memo(function DeviceRow({
         )}
       </td>
       <td>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-          <select
-            className="device-select"
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', minWidth: 160 }}>
+          <CustomSelect
             value={assigned || 'default'}
             disabled={busy || isOfflineOrNoIp}
+            onChange={(newVal) => {
+              if (isOfflineOrNoIp) return
+              applyServer(d.ip, d.name, newVal)
+            }}
+            options={[
+              { value: 'default', label: '🌐 Общий активный узел' },
+              ...(assigned && assigned !== 'default' && assigned !== 'PROXY' && !servers.some((s) => s.id === assigned)
+                ? [{ value: assigned, label: serverLabel(assigned) }]
+                : []),
+              ...servers
+                .filter((s) => !s.is_pool && s.id !== 'PROXY' && s.id !== 'GLOBAL' && s.id !== 'Fastest' && s.id !== 'Fallback')
+                .map((s) => ({ value: s.id, label: serverLabel(s.id) })),
+            ]}
+          />
+          <select
+            className="device-select"
+            style={{ display: 'none' }}
+            tabIndex={-1}
+            aria-hidden="true"
+            value={assigned || 'default'}
             onChange={(e) => {
               if (isOfflineOrNoIp) return
               applyServer(d.ip, d.name, e.target.value)

@@ -313,6 +313,123 @@ pub fn parse_trojan_uri(uri: &str) -> Option<Value> {
     Some(Value::Object(map))
 }
 
+/// Парсинг ссылки Shadowsocks: `ss://BASE64@host:port#name` или `ss://BASE64#name`
+pub fn parse_ss_uri(uri: &str) -> Option<Value> {
+    let after_scheme = uri.strip_prefix("ss://")?;
+    let (main_part, fragment) = match after_scheme.split_once('#') {
+        Some((m, f)) => (m, percent_decode(f)),
+        None => (after_scheme, String::new()),
+    };
+
+    let (auth_host, _query_str) = match main_part.split_once('?') {
+        Some((ah, q)) => (ah, q),
+        None => (main_part, ""),
+    };
+
+    // 1) SIP002: ss://BASE64(method:password)@host:port
+    let (server, port, cipher, password) = if let Some((user_info, host_port)) = auth_host.split_once('@') {
+        let decoded = String::from_utf8(base64_decode(user_info).ok()?).ok()?;
+        let (cipher, pass) = decoded.split_once(':')?;
+        let (s, p) = parse_host_port(host_port);
+        (s, p, cipher.to_string(), pass.to_string())
+    } else {
+        // 2) Legacy: ss://BASE64(method:password@host:port)
+        let decoded = String::from_utf8(base64_decode(auth_host).ok()?).ok()?;
+        let (cipher_pass, host_port) = decoded.split_once('@')?;
+        let (cipher, pass) = cipher_pass.split_once(':')?;
+        let (s, p) = parse_host_port(host_port);
+        (s, p, cipher.to_string(), pass.to_string())
+    };
+
+    let server_name = if !fragment.is_empty() {
+        fragment
+    } else {
+        format!("Shadowsocks {server}:{port}")
+    };
+
+    let mut map = serde_json::Map::new();
+    map.insert("name".into(), Value::String(server_name));
+    map.insert("type".into(), Value::String("ss".into()));
+    map.insert("server".into(), Value::String(server));
+    map.insert("port".into(), json!(port));
+    map.insert("cipher".into(), Value::String(cipher));
+    map.insert("password".into(), Value::String(password));
+    map.insert("udp".into(), Value::Bool(true));
+
+    Some(Value::Object(map))
+}
+
+/// Парсинг ссылки VMess: `vmess://BASE64(JSON)`
+pub fn parse_vmess_uri(uri: &str) -> Option<Value> {
+    let b64 = uri.strip_prefix("vmess://")?;
+    let decoded_bytes = base64_decode(b64).ok()?;
+    let json_val: Value = serde_json::from_slice(&decoded_bytes).ok()?;
+
+    let name = json_val.get("ps").and_then(|v| v.as_str()).unwrap_or("VMess Server").trim().to_string();
+    let server = json_val.get("add").and_then(|v| v.as_str())?.trim().to_string();
+    let port_num = if let Some(p) = json_val.get("port") {
+        if let Some(n) = p.as_u64() {
+            n as u16
+        } else if let Some(s) = p.as_str() {
+            s.parse::<u16>().unwrap_or(443)
+        } else {
+            443
+        }
+    } else {
+        443
+    };
+    let uuid = json_val.get("id").and_then(|v| v.as_str())?.trim().to_string();
+    let alter_id = json_val.get("aid").and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))).unwrap_or(0);
+    let cipher = json_val.get("scy").and_then(|v| v.as_str()).unwrap_or("auto").to_string();
+    let net = json_val.get("net").and_then(|v| v.as_str()).unwrap_or("tcp");
+    let tls = json_val.get("tls").and_then(|v| v.as_str()).map(|s| s == "tls").unwrap_or(false);
+    let sni = json_val.get("sni").and_then(|v| v.as_str()).or_else(|| json_val.get("host").and_then(|v| v.as_str())).unwrap_or("");
+
+    let mut map = serde_json::Map::new();
+    map.insert("name".into(), Value::String(name));
+    map.insert("type".into(), Value::String("vmess".into()));
+    map.insert("server".into(), Value::String(server));
+    map.insert("port".into(), json!(port_num));
+    map.insert("uuid".into(), Value::String(uuid));
+    map.insert("alterId".into(), json!(alter_id));
+    map.insert("cipher".into(), Value::String(cipher));
+    map.insert("udp".into(), Value::Bool(true));
+
+    if tls {
+        map.insert("tls".into(), Value::Bool(true));
+        if !sni.is_empty() {
+            map.insert("servername".into(), Value::String(sni.to_string()));
+        }
+    }
+
+    if net == "ws" {
+        map.insert("network".into(), Value::String("ws".into()));
+        let mut ws_opts = serde_json::Map::new();
+        if let Some(path) = json_val.get("path").and_then(|v| v.as_str()) {
+            if !path.is_empty() {
+                ws_opts.insert("path".into(), Value::String(path.to_string()));
+            }
+        }
+        if let Some(host) = json_val.get("host").and_then(|v| v.as_str()) {
+            if !host.is_empty() {
+                let mut headers = serde_json::Map::new();
+                headers.insert("Host".into(), Value::String(host.to_string()));
+                ws_opts.insert("headers".into(), Value::Object(headers));
+            }
+        }
+        map.insert("ws-opts".into(), Value::Object(ws_opts));
+    } else if net == "grpc" {
+        map.insert("network".into(), Value::String("grpc".into()));
+        if let Some(path) = json_val.get("path").and_then(|v| v.as_str()) {
+            let mut grpc_opts = serde_json::Map::new();
+            grpc_opts.insert("grpc-service-name".into(), Value::String(path.to_string()));
+            map.insert("grpc-opts".into(), Value::Object(grpc_opts));
+        }
+    }
+
+    Some(Value::Object(map))
+}
+
 /// Парсинг отдельной URI-ссылки в объект узла Mihomo
 pub fn parse_v2ray_line(line: &str) -> Option<Value> {
     let trimmed = line.trim();
@@ -322,6 +439,10 @@ pub fn parse_v2ray_line(line: &str) -> Option<Value> {
         parse_hysteria2_uri(trimmed)
     } else if trimmed.starts_with("trojan://") {
         parse_trojan_uri(trimmed)
+    } else if trimmed.starts_with("ss://") {
+        parse_ss_uri(trimmed)
+    } else if trimmed.starts_with("vmess://") {
+        parse_vmess_uri(trimmed)
     } else {
         None
     }
@@ -786,5 +907,69 @@ mod tests {
             assert!(count > 0, "Real main geodema subscription must parse servers");
             assert!(yaml.contains("proxies:"));
         }
+    }
+
+    #[test]
+    fn test_parse_ss_sip002() {
+        // chacha20-ietf-poly1305:mypassword -> base64 = Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpteXBhc3N3b3Jk
+        let uri = "ss://Y2hhY2hhMjAtaWV0Zi1wb2x5MTMwNTpteXBhc3N3b3Jk@198.51.100.1:8388#%F0%9F%87%A9%F0%9F%87%AA%20Shadowsocks%20Node";
+        let val = parse_v2ray_line(uri).expect("Must parse SIP002 ss URI");
+        assert_eq!(val.get("type").and_then(|v| v.as_str()), Some("ss"));
+        assert_eq!(val.get("server").and_then(|v| v.as_str()), Some("198.51.100.1"));
+        assert_eq!(val.get("port").and_then(|v| v.as_u64()), Some(8388));
+        assert_eq!(val.get("cipher").and_then(|v| v.as_str()), Some("chacha20-ietf-poly1305"));
+        assert_eq!(val.get("password").and_then(|v| v.as_str()), Some("mypassword"));
+        assert_eq!(val.get("name").and_then(|v| v.as_str()), Some("🇩🇪 Shadowsocks Node"));
+    }
+
+    #[test]
+    fn test_parse_ss_legacy() {
+        // aes-256-gcm:pass123@1.2.3.4:9000 -> base64 = YWVzLTI1Ni1nY206cGFzczEyM0AxLjIuMy40OjkwMDA=
+        let uri = "ss://YWVzLTI1Ni1nY206cGFzczEyM0AxLjIuMy40OjkwMDA=#Legacy%20SS";
+        let val = parse_v2ray_line(uri).expect("Must parse legacy ss URI");
+        assert_eq!(val.get("type").and_then(|v| v.as_str()), Some("ss"));
+        assert_eq!(val.get("server").and_then(|v| v.as_str()), Some("1.2.3.4"));
+        assert_eq!(val.get("port").and_then(|v| v.as_u64()), Some(9000));
+        assert_eq!(val.get("cipher").and_then(|v| v.as_str()), Some("aes-256-gcm"));
+        assert_eq!(val.get("password").and_then(|v| v.as_str()), Some("pass123"));
+        assert_eq!(val.get("name").and_then(|v| v.as_str()), Some("Legacy SS"));
+    }
+
+    #[test]
+    fn test_parse_vmess_uri() {
+        let vmess_json = r#"{"v":"2","ps":"🇳🇱 Netherlands VMess","add":"nl.example.com","port":443,"id":"b831381d-6324-4d53-ad4f-8cda48b30811","aid":0,"scy":"auto","net":"ws","tls":"tls","sni":"nl.example.com","path":"/vmess-path","host":"nl.example.com"}"#;
+        // encode base64
+        let b64 = {
+            let mut buf = String::new();
+            let bytes = vmess_json.as_bytes();
+            for chunk in bytes.chunks(3) {
+                let b0 = chunk[0];
+                let b1 = if chunk.len() > 1 { chunk[1] } else { 0 };
+                let b2 = if chunk.len() > 2 { chunk[2] } else { 0 };
+                let lookup = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                buf.push(lookup[(b0 >> 2) as usize] as char);
+                buf.push(lookup[(((b0 & 3) << 4) | (b1 >> 4)) as usize] as char);
+                if chunk.len() > 1 {
+                    buf.push(lookup[(((b1 & 15) << 2) | (b2 >> 6)) as usize] as char);
+                } else {
+                    buf.push('=');
+                }
+                if chunk.len() > 2 {
+                    buf.push(lookup[(b2 & 63) as usize] as char);
+                } else {
+                    buf.push('=');
+                }
+            }
+            buf
+        };
+        let uri = format!("vmess://{b64}");
+        let val = parse_v2ray_line(&uri).expect("Must parse vmess URI");
+        assert_eq!(val.get("type").and_then(|v| v.as_str()), Some("vmess"));
+        assert_eq!(val.get("server").and_then(|v| v.as_str()), Some("nl.example.com"));
+        assert_eq!(val.get("port").and_then(|v| v.as_u64()), Some(443));
+        assert_eq!(val.get("uuid").and_then(|v| v.as_str()), Some("b831381d-6324-4d53-ad4f-8cda48b30811"));
+        assert_eq!(val.get("name").and_then(|v| v.as_str()), Some("🇳🇱 Netherlands VMess"));
+        assert_eq!(val.get("network").and_then(|v| v.as_str()), Some("ws"));
+        assert_eq!(val.get("tls").and_then(|v| v.as_bool()), Some(true));
     }
 }

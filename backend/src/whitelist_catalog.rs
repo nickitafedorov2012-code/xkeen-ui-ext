@@ -412,6 +412,17 @@ pub const DOMESTIC_WHITELIST_DOMAINS: &[&str] = &[
     "mephi.ru",
     "mipt.ru",
     "mgtu.ru",
+    // Category 9: Mobile Push Gateways, National CDNs & Infrastructure (10 domains)
+    "push.apple.com",
+    "courier.push.apple.com",
+    "fcm.googleapis.com",
+    "mtalk.google.com",
+    "xmpush.xiaomi.com",
+    "api.xmpush.xiaomi.com",
+    "push.hicloud.com",
+    "gcdn.co",
+    "cdnvideo.ru",
+    "sberdevices.ru",
 ];
 
 
@@ -808,5 +819,48 @@ pub const DOMESTIC_CATALOG: &[DomesticCatalogEntry] = &[
     DomesticCatalogEntry { domain: "mephi.ru", category: "Category 8: Housing, Utilities, Infrastructure, Cloud & Education (36 domains)", description: "НИЯУ МИФИ" },
     DomesticCatalogEntry { domain: "mipt.ru", category: "Category 8: Housing, Utilities, Infrastructure, Cloud & Education (36 domains)", description: "МФТИ" },
     DomesticCatalogEntry { domain: "mgtu.ru", category: "Category 8: Housing, Utilities, Infrastructure, Cloud & Education (36 domains)", description: "МГТУ им. Н.Э. Баумана" },
+    // Category 9: Mobile Push Gateways, National CDNs & Infrastructure (10 domains)
+    DomesticCatalogEntry { domain: "push.apple.com", category: "Category 9: Mobile Push Gateways, National CDNs & Infrastructure (10 domains)", description: "Apple Push Notification Service (APNs)" },
+    DomesticCatalogEntry { domain: "courier.push.apple.com", category: "Category 9: Mobile Push Gateways, National CDNs & Infrastructure (10 domains)", description: "Apple Push Notification Gateway" },
+    DomesticCatalogEntry { domain: "fcm.googleapis.com", category: "Category 9: Mobile Push Gateways, National CDNs & Infrastructure (10 domains)", description: "Google Firebase Cloud Messaging (FCM)" },
+    DomesticCatalogEntry { domain: "mtalk.google.com", category: "Category 9: Mobile Push Gateways, National CDNs & Infrastructure (10 domains)", description: "Google Push Notification Server" },
+    DomesticCatalogEntry { domain: "xmpush.xiaomi.com", category: "Category 9: Mobile Push Gateways, National CDNs & Infrastructure (10 domains)", description: "Xiaomi / HyperOS Push Service" },
+    DomesticCatalogEntry { domain: "api.xmpush.xiaomi.com", category: "Category 9: Mobile Push Gateways, National CDNs & Infrastructure (10 domains)", description: "Xiaomi Push API Service" },
+    DomesticCatalogEntry { domain: "push.hicloud.com", category: "Category 9: Mobile Push Gateways, National CDNs & Infrastructure (10 domains)", description: "Huawei Mobile Services Push Gateway" },
+    DomesticCatalogEntry { domain: "gcdn.co", category: "Category 9: Mobile Push Gateways, National CDNs & Infrastructure (10 domains)", description: "G-Core Labs Российский CDN" },
+    DomesticCatalogEntry { domain: "cdnvideo.ru", category: "Category 9: Mobile Push Gateways, National CDNs & Infrastructure (10 domains)", description: "CDNvideo Российская сеть доставки контента" },
+    DomesticCatalogEntry { domain: "sberdevices.ru", category: "Category 9: Mobile Push Gateways, National CDNs & Infrastructure (10 domains)", description: "SberDevices умные устройства и сервисы Сбера" },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_mobile_infrastructure_and_cdns_present() {
+        assert!(DOMESTIC_WHITELIST_DOMAINS.contains(&"push.apple.com"));
+        assert!(DOMESTIC_WHITELIST_DOMAINS.contains(&"fcm.googleapis.com"));
+        assert!(DOMESTIC_WHITELIST_DOMAINS.contains(&"xmpush.xiaomi.com"));
+        assert!(DOMESTIC_WHITELIST_DOMAINS.contains(&"push.hicloud.com"));
+        assert!(DOMESTIC_WHITELIST_DOMAINS.contains(&"ozone.ru"));
+        assert!(DOMESTIC_WHITELIST_DOMAINS.contains(&"ngenix.net"));
+        assert!(DOMESTIC_WHITELIST_DOMAINS.contains(&"qrator.net"));
+        assert!(DOMESTIC_WHITELIST_DOMAINS.contains(&"gcdn.co"));
+        assert!(DOMESTIC_WHITELIST_DOMAINS.contains(&"sberdevices.ru"));
+    }
+
+    #[test]
+    fn test_catalog_and_domains_in_sync() {
+        assert_eq!(
+            DOMESTIC_WHITELIST_DOMAINS.len(),
+            DOMESTIC_CATALOG.len(),
+            "Domains list and Catalog entries must have the exact same count"
+        );
+        for (dom, entry) in DOMESTIC_WHITELIST_DOMAINS.iter().zip(DOMESTIC_CATALOG.iter()) {
+            assert_eq!(*dom, entry.domain);
+            assert!(!entry.category.is_empty());
+            assert!(!entry.description.is_empty());
+        }
+    }
+}
 
