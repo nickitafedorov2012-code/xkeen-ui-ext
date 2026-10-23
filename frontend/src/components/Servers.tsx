@@ -592,7 +592,13 @@ export default function Servers({ notify, status, refresh }: Props) {
     }
   }
 
+  // FE-04: защита от двойного клика (двойной switch) и параллельных мутаций цепочки
+  const switchingRef = useRef(false)
+  const chainMutatingRef = useRef(false)
+
   const activate = async (s: ServerInfo) => {
+    if (switchingRef.current) return
+    switchingRef.current = true
     try {
       const data = await apiPost<{ message: string }>('servers/switch', { server_id: s.id })
       notify(data.message || `Подключено: ${s.name}`)
@@ -602,12 +608,24 @@ export default function Servers({ notify, status, refresh }: Props) {
       window.dispatchEvent(new CustomEvent('xr:data-changed', { detail: { entity: 'server' } }))
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка переключения', true)
+    } finally {
+      switchingRef.current = false
     }
   }
 
   const addToFailover = async (serverId: string, position: 'start' | 'end') => {
+    if (chainMutatingRef.current) return
+    chainMutatingRef.current = true
     try {
-      const currentChain = status?.failover?.priority_chain ?? (status?.failover?.priority_server ? [status.failover.priority_server] : [])
+      // FE-04: цепочку берём свежую с бэкенда — read-modify-write от stale-статуса
+      // терял быстрые последовательные изменения
+      let currentChain: string[] = []
+      try {
+        const st = await apiGet<StatusInfo>('status')
+        currentChain = st?.failover?.priority_chain ?? (st?.failover?.priority_server ? [st.failover.priority_server] : [])
+      } catch {
+        currentChain = status?.failover?.priority_chain ?? (status?.failover?.priority_server ? [status.failover.priority_server] : [])
+      }
       const filteredChain = currentChain.filter((id) => id !== serverId)
       const isAtStart = currentChain[0] === serverId
       const isAtEnd = currentChain[currentChain.length - 1] === serverId && currentChain.length > 1
@@ -625,6 +643,8 @@ export default function Servers({ notify, status, refresh }: Props) {
       if (refresh) refresh()
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка настройки Failover', true)
+    } finally {
+      chainMutatingRef.current = false
     }
   }
 

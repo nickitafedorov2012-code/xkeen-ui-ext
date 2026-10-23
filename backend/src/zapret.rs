@@ -83,30 +83,43 @@ impl ZapretLockGuard {
 
         let lock_dir = get_lock_dir_path();
         let lock_file = get_lock_file_path();
+        let pid_file = lock_dir.join("pid");
 
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(timeout_secs);
         let mut acquired = false;
 
         while start.elapsed() < timeout {
-            // Атомарное создание каталога блокировки
+            // Атомарное создание каталога блокировки (единый протокол с S51zapret: lockdir/pid)
             match std::fs::create_dir(&lock_dir) {
                 Ok(_) => {
                     acquired = true;
+                    let _ = std::fs::write(&pid_file, std::process::id().to_string());
                     let _ = std::fs::write(&lock_file, std::process::id().to_string());
                     break;
                 }
                 Err(_) => {
                     // Каталог уже существует — проверяем, жив ли держатель блокировки
-                    if let Ok(pid_str) = std::fs::read_to_string(&lock_file) {
-                        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-                            if !is_pid_alive(pid) {
-                                // Держатель блокировки погиб — сбрасываем устаревший lock
-                                let _ = std::fs::remove_file(&lock_file);
-                                let _ = std::fs::remove_dir(&lock_dir);
-                                continue;
-                            }
-                        }
+                    let holder_pid = std::fs::read_to_string(&pid_file)
+                        .ok()
+                        .or_else(|| std::fs::read_to_string(&lock_file).ok())
+                        .and_then(|s| s.trim().parse::<u32>().ok());
+                    // Z-14: lockdir БЕЗ читаемого pid-файла (краш между mkdir и write)
+                    // старше 60 секунд считаем мусором — раньше он блокировал операции
+                    // навсегда (до таймаута каждой попытки)
+                    let stale = match holder_pid {
+                        Some(pid) => !is_pid_alive(pid),
+                        None => std::fs::metadata(&lock_dir)
+                            .ok()
+                            .and_then(|m| m.modified().ok())
+                            .and_then(|m| std::time::SystemTime::now().duration_since(m).ok())
+                            .map(|age| age.as_secs() > 60)
+                            .unwrap_or(false),
+                    };
+                    if stale {
+                        let _ = std::fs::remove_dir_all(&lock_dir);
+                        let _ = std::fs::remove_file(&lock_file);
+                        continue;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                 }
@@ -133,11 +146,26 @@ impl ZapretLockGuard {
 impl Drop for ZapretLockGuard {
     fn drop(&mut self) {
         if self.acquired_fs {
+            let _ = std::fs::remove_dir_all(&self.lock_dir);
             let _ = std::fs::remove_file(&self.lock_file);
-            let _ = std::fs::remove_dir(&self.lock_dir);
         }
         set_current_operation_state(ZapretOperationState::Idle);
     }
+}
+
+/// Маркер «Zapret выключен пользователем»: создаётся при выключении службы и
+/// проверяется S51zapret при автозапуске Entware, чтобы выключенный Zapret
+/// не воскресал после перезагрузки роутера (Z-03).
+pub fn set_zapret_disabled_marker() {
+    let _ = std::fs::write(get_disabled_marker_path(), "disabled");
+}
+
+pub fn clear_zapret_disabled_marker() {
+    let _ = std::fs::remove_file(get_disabled_marker_path());
+}
+
+pub fn is_zapret_disabled_marker_set() -> bool {
+    get_disabled_marker_path().exists()
 }
 
 pub fn get_lock_file_path() -> PathBuf {
@@ -680,6 +708,18 @@ pub fn parse_zapret_conf(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_zapret_disabled_marker_roundtrip() {
+        // Z-03 anti-regression: маркер «выключено пользователем» обязан существовать
+        // и корректно ставиться/сниматься (он читается S51zapret при автозапуске)
+        clear_zapret_disabled_marker();
+        assert!(!is_zapret_disabled_marker_set());
+        set_zapret_disabled_marker();
+        assert!(is_zapret_disabled_marker_set());
+        clear_zapret_disabled_marker();
+        assert!(!is_zapret_disabled_marker_set());
+    }
 
     #[test]
     fn test_zapret_conf_symmetric_roundtrip() {

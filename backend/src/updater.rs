@@ -574,9 +574,30 @@ pub async fn install(State(state): State<AppState>) -> Response {
     }
     drop(file);
 
-    // Верификация контрольной суммы SHA-256 ДО исполнения/замены (SEC-01)
+    // Верификация контрольной суммы SHA-256 ДО исполнения/замены (SEC-01 / U-01).
+    // Источники ожидаемого хеша: 1) checksum-текст в описании релиза, 2) файл
+    // <asset>.sha256 из релиза (публикуется workflow). Совпадение — обязательное;
+    // при отсутствии обоих источников апдейт идёт с явным предупреждением в лог.
     let calculated_sha256 = hex::encode(sha2::Digest::finalize(hasher));
-    if let Some(exp) = extract_hash_from_checksum_text(&rel.body, chosen_asset) {
+    let mut expected_sha = extract_hash_from_checksum_text(&rel.body, chosen_asset);
+    if expected_sha.is_none() {
+        let sums_url = format!("{GITHUB_RELEASE}/{ver}/{chosen_asset}.sha256");
+        match http
+            .get(&sums_url)
+            .header("User-Agent", "xkeen-route")
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => {
+                if let Ok(text) = r.text().await {
+                    expected_sha = extract_hash_from_checksum_text(&text, chosen_asset);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(exp) = expected_sha {
         if !verify_sha256(&calculated_sha256, &exp) {
             let _ = tokio::fs::remove_file(&tmp).await;
             crate::log_e!("[UPDATE] Ошибка верификации SHA-256: ожидалось {exp}, получено {calculated_sha256}");
@@ -586,7 +607,11 @@ pub async fn install(State(state): State<AppState>) -> Response {
         }
         crate::log_i!("[UPDATE] SHA-256 бинарника обновления успешно верифицирован: {calculated_sha256}");
     } else {
-        crate::log_i!("[UPDATE] SHA-256 бинарника обновления: {calculated_sha256}");
+        // U-01: раньше пропуск верификации был молчаливым; теперь он виден в логе,
+        // а ELFO/arch-проверка и тестовый запуск остаются обязательными барьерами.
+        crate::log_w!(
+            "[UPDATE] ⚠️ Контрольная сумма не опубликована в релизе (ни в описании, ни как {chosen_asset}.sha256) — верификация SHA-256 пропущена. Рассчитанный хеш: {calculated_sha256}"
+        );
     }
 
     // Проверка целостности: размер (не менее 1 МБ) и ELF-заголовок

@@ -452,6 +452,8 @@ async fn main() {
         tokio::time::sleep(std::time::Duration::from_secs(6)).await;
         let cfg = zapret_sync_state.config.read().await;
         if cfg.zapret.enabled {
+            // Z-03: служба включена в конфигурации — маркер автозапуска должен отсутствовать
+            zapret::clear_zapret_disabled_marker();
             if let Err(e) = api::sync_zapret_files(&cfg.zapret).await {
                 log_w!("[STARTUP] Предупреждение: не удалось синхронизировать файлы Zapret: {}", e);
             }
@@ -491,7 +493,13 @@ async fn main() {
                 let _ = adguard::apply_adguard_iptables(active_port);
                 log_i!("[STARTUP] ✓ AdGuard Home DNS redirection to port {} applied", active_port);
                 if cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility {
-                    let _ = api::sync_gaming_full_tunnel(&cfg.gaming, 5000, 5001, active_port).await;
+                    // Z-09: порты парсим из config.yaml, а не хардкодим 5000/5001 —
+                    // при кастомном конфиге Mihomo правила уходили не на те порты
+                    if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+                        let redir_port = routing::parse_redir_port(&yaml).unwrap_or(5000);
+                        let tproxy_port = routing::parse_tproxy_port(&yaml).unwrap_or(5001);
+                        let _ = api::sync_gaming_full_tunnel(&cfg.gaming, redir_port, tproxy_port, active_port).await;
+                    }
                 }
             }
 
@@ -543,8 +551,22 @@ async fn main() {
             current_cfg.gaming.enabled = true;
             current_cfg.whitelist.gaming_suspended = false;
             if let Ok(_) = config::save(&wl_sync_state.config_path, &current_cfg).await {
-                *wl_sync_state.config.write().await = std::sync::Arc::new(current_cfg);
+                *wl_sync_state.config.write().await = std::sync::Arc::new(current_cfg.clone());
                 log_i!("[STARTUP] ✓ Игровой режим автоматически восстановлен после перезагрузки (активный узел не является [БС])");
+                // X-03: восстановление не только флага, но и реальных правил —
+                // стартовый 7-секундный синк уже прошёл с enabled=false, и без
+                // этого блока UI показывает «включено», а трафик не туннелируется.
+                if let Ok(raw_yaml) = tokio::fs::read_to_string(&current_cfg.mihomo.config_path).await {
+                    if let Ok((new_yaml, _)) = crate::routing::apply_routing(&raw_yaml, &current_cfg) {
+                        let _ = crate::api::atomic_write_file(&current_cfg.mihomo.config_path, &new_yaml).await;
+                        let _ = mihomo::reload_config(&wl_sync_state.http, &current_cfg).await;
+                        let redir_port = crate::routing::parse_redir_port(&new_yaml).unwrap_or(5000);
+                        let tproxy_port = crate::routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
+                        let dns_port = crate::api::resolve_active_dns_port(&current_cfg);
+                        let _ = crate::api::sync_gaming_full_tunnel(&current_cfg.gaming, redir_port, tproxy_port, dns_port).await;
+                        log_i!("[STARTUP] ✓ Правила игрового туннеля перемонтированы после восстановления");
+                    }
+                }
             }
         }
     });

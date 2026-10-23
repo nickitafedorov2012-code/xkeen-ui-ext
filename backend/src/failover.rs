@@ -10,6 +10,10 @@ static LAST_SWITCH: tokio::sync::Mutex<Option<Instant>> = tokio::sync::Mutex::co
 static LAST_WHITELIST_SYNC: tokio::sync::Mutex<Option<(String, Instant)>> =
     tokio::sync::Mutex::const_new(None);
 
+/// F-04: сериализация итераций проверки — фоновый цикл и ручной прогон
+/// (POST /api/failover/check) не должны выполняться параллельно (двойной switch).
+static CHECK_IN_PROGRESS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 pub const CANARY_DURATION_SECS: u64 = 180;
 pub const CANARY_PAYLOAD_URL: &str = "http://speed.cloudflare.com/__down?bytes=102400";
 pub const CANARY_PROBE_BYTES: u64 = 102400;
@@ -587,20 +591,34 @@ pub async fn run_canary_probe(
     }
 }
 
-pub const WAN_CHECK_URL: &str = "http://ya.ru";
+/// F-05: WAN-проба по трём независимым эндпоинтам — падение одного сайта, DPI-блок
+/// или временный сбой не должны замораживать failover при живом канале
+/// (раньше единственный URL ya.ru через mihomo был точкой отказа самой защиты).
+pub const WAN_CHECK_URLS: &[&str] = &[
+    "http://ya.ru",
+    "http://cp.cloudflare.com/generate_204",
+    "http://connectivitycheck.gstatic.com/generate_204",
+];
+
+pub const WAN_CHECK_URL: &str = WAN_CHECK_URLS[0];
 
 /// Проверка физической доступности провайдера (WAN) напрямую через DIRECT.
 /// Если шлюз провайдера или кабель упал, возвращает false.
 pub async fn is_wan_online(http: &reqwest::Client, cfg: &crate::config::AppConfig) -> bool {
-    let ms = mihomo::ping_server_url_expected(
-        http,
-        cfg,
-        "DIRECT",
-        1500,
-        Some(WAN_CHECK_URL),
-        Some(200),
-    ).await;
-    ms > 0
+    for url in WAN_CHECK_URLS {
+        let ms = mihomo::ping_server_url_expected(
+            http,
+            cfg,
+            "DIRECT",
+            1500,
+            Some(url),
+            Some(200),
+        ).await;
+        if ms > 0 {
+            return true;
+        }
+    }
+    false
 }
 
 /// Пассивный детектор "Чёрной дыры" (Zero-Download Anomaly):
@@ -655,6 +673,26 @@ pub async fn check_blackhole_anomaly(
     }
 }
 
+/// F-01: строгое сопоставление соединения с сервером (без fuzzy contains).
+/// Раньше `sl.contains(&active_lower)` зачислял трафик сервера «DE-10» узлу «DE-1»:
+/// критерий здоровья «есть живой трафик» получал чужие байты, упавший сервер
+/// считался живым и failover не переключал. Служебные группы (proxy/global/direct/reject)
+/// никогда не считаются трафиком конкретного узла.
+fn conn_chain_matches_server(chains: &[Value], active_lower: &str) -> bool {
+    chains.iter().any(|item| {
+        item.as_str()
+            .map(|s| {
+                let sl = s.to_lowercase();
+                if sl == "proxy" || sl == "global" || sl == "direct" || sl == "reject" {
+                    false
+                } else {
+                    sl == active_lower
+                }
+            })
+            .unwrap_or(false)
+    })
+}
+
 /// Проверка реального входящего клиентского трафика через активный узел в Mihomo.
 /// Возвращает (has_live_traffic, total_download_bytes).
 /// Если через сокеты узла клиенты успешно скачали > 1 КБ полезных данных — узел гарантированно живой.
@@ -679,20 +717,7 @@ pub async fn check_active_download_traffic(
     for c in conns {
         let in_chains = c.get("chains")
             .and_then(|ch| ch.as_array())
-            .map(|arr| {
-                arr.iter().any(|item| {
-                    item.as_str().map(|s| {
-                        let sl = s.to_lowercase();
-                        if sl == "proxy" || sl == "global" || sl == "direct" || sl == "reject" {
-                            false
-                        } else {
-                            sl == active_lower
-                                || (active_lower.len() >= 3 && sl.contains(&active_lower))
-                                || (sl.len() >= 3 && active_lower.contains(&sl))
-                        }
-                    }).unwrap_or(false)
-                })
-            })
+            .map(|arr| conn_chain_matches_server(arr, &active_lower))
             .unwrap_or(false);
 
         if in_chains {
@@ -851,6 +876,14 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         }
     };
 
+    // F-07: служба остановлена пользователем — failover не трогает маршруты и соединения
+    if crate::watchdog::is_service_stopped() {
+        return Ok("Failover пропущен: служба XKeen остановлена пользователем".to_string());
+    }
+
+    // F-04: ручной прогон ждёт завершения фоновой итерации (и наоборот)
+    let _check_guard = CHECK_IN_PROGRESS.lock().await;
+
     {
         let last = LAST_SWITCH.lock().await;
         if let Some(t) = *last {
@@ -937,6 +970,22 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                 act_name
             );
             return Ok(msg);
+        }
+
+        // F-06: в Best-Ping режиме действуют те же защитники, что в основном сценарии —
+        // детектор «чёрной дыры» и карантин зомби. Иначе режим обходил карантин и флаппил.
+        if !act_id.is_empty() && cfg.failover.quarantine_enabled {
+            let blackhole = check_blackhole_anomaly(&state.http, &cfg, act_id).await;
+            if blackhole {
+                let reason = "Зомби-сервер (DPI сброс трафика: upload > 5KB, download == 0)";
+                let q_secs = add_quarantine(act_id, act_name, reason).await;
+                let q_note = format!(
+                    "⚠️ Best-Ping: сервер '{}' объявлен зомби (чёрная дыра) → карантин на {} мин",
+                    act_name,
+                    q_secs / 60
+                );
+                state.failover_log.push(&q_note, false).await;
+            }
         }
 
         // Активный сервер сбоит (пинг <= 0 или пинг > threshold). Отбираем живых кандидатов без карантина.
@@ -1514,6 +1563,14 @@ pub async fn run_device_check(state: &AppState) -> Result<String, String> {
         }
     };
 
+    // F-07: служба остановлена пользователем — per-device failover не переключает группы
+    if crate::watchdog::is_service_stopped() {
+        return Ok("Per-device failover пропущен: служба XKeen остановлена пользователем".to_string());
+    }
+
+    // F-04: сериализация с run_check (общий CHECK_IN_PROGRESS)
+    let _check_guard = CHECK_IN_PROGRESS.lock().await;
+
     let cfg = state.config.read().await.clone();
     if cfg.device_routing.is_empty() {
         return Ok("Нет устройств с резервными цепочками".to_string());
@@ -1672,6 +1729,25 @@ pub fn spawn(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_conn_chain_matches_server_strict() {
+        // F-01 anti-regression: fuzzy-матчинг запрещён — трафик 'DE-10' не принадлежит 'DE-1'
+        let chains: Vec<Value> = vec![Value::String("DE-10".into()), Value::String("PROXY".into())];
+        assert!(!conn_chain_matches_server(&chains, "de-1"), "prefix-overlap servers must NOT match");
+        assert!(conn_chain_matches_server(&chains, "de-10"), "exact match must pass (case-insensitive)");
+
+        // Служебные группы никогда не считаются трафиком узла
+        let svc: Vec<Value> = vec![Value::String("proxy".into()), Value::String("direct".into()), Value::String("global".into()), Value::String("reject".into())];
+        for name in ["proxy", "global", "direct", "reject"] {
+            assert!(!conn_chain_matches_server(&svc, name), "service group '{name}' must never match a server");
+        }
+
+        // Точное совпадение через цепочку релея (узел в середине цепочки)
+        let relay: Vec<Value> = vec![Value::String("Entry".into()), Value::String("MyServer".into())];
+        assert!(conn_chain_matches_server(&relay, "myserver"));
+        assert!(!conn_chain_matches_server(&relay, "my"));
+    }
 
     #[test]
     fn test_calc_hysteresis() {

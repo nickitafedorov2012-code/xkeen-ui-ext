@@ -61,21 +61,26 @@ pub async fn restore_groups_snapshot(
     }
 }
 
-static SPEEDTEST_ABORT_SIGNAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// SPD-01: отмена привязана к «поколению» замера, а не к глобальному флагу.
+/// Раньше cancel → старт нового замера (reset флага) → старый замер терял признак
+/// отмены и восстанавливал snapshot групп, затирая ручной выбор пользователя.
+static SPEEDTEST_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Принудительная отмена активного замера скорости при ручном выборе сервера пользователем.
-/// Аннулирует снимок отката (restore), чтобы выбор пользователя остался активным.
+/// Аннулирует снимок отката (restore) у ВСЕХ замеров текущего и прошлых поколений.
 pub fn cancel_active_speedtest() {
-    SPEEDTEST_ABORT_SIGNAL.store(true, std::sync::atomic::Ordering::SeqCst);
+    SPEEDTEST_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     log_i!("Speedtest: получен сигнал прерывания ради ручного выбора сервера пользователем");
 }
 
-pub fn is_speedtest_aborted() -> bool {
-    SPEEDTEST_ABORT_SIGNAL.load(std::sync::atomic::Ordering::SeqCst)
+/// Текущее поколение замера (фиксируется при старте нового замера).
+pub fn speedtest_generation() -> u64 {
+    SPEEDTEST_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
 }
 
-pub fn reset_speedtest_abort() {
-    SPEEDTEST_ABORT_SIGNAL.store(false, std::sync::atomic::Ordering::SeqCst);
+/// Замер отменён, если после старта этого замера поколение изменилось (был cancel).
+pub fn is_speedtest_aborted(gen: u64) -> bool {
+    SPEEDTEST_GENERATION.load(std::sync::atomic::Ordering::SeqCst) != gen
 }
 
 /// RAII guard для гарантированного восстановления конфигурации групп Selector при любом выходе/отмене
@@ -84,6 +89,8 @@ pub struct NodeGroupGuard {
     cfg: AppConfig,
     snapshot: Option<HashMap<String, String>>,
     need_restore: bool,
+    /// SPD-01: поколение замера, к которому привязан guard
+    gen: u64,
 }
 
 impl NodeGroupGuard {
@@ -92,17 +99,19 @@ impl NodeGroupGuard {
         cfg: &AppConfig,
         snapshot: HashMap<String, String>,
         need_restore: bool,
+        gen: u64,
     ) -> Self {
         Self {
             http: http.clone(),
             cfg: cfg.clone(),
             snapshot: Some(snapshot),
             need_restore,
+            gen,
         }
     }
 
     pub async fn restore(&mut self) {
-        if is_speedtest_aborted() {
+        if is_speedtest_aborted(self.gen) {
             self.defuse();
             return;
         }
@@ -122,7 +131,7 @@ impl NodeGroupGuard {
 
 impl Drop for NodeGroupGuard {
     fn drop(&mut self) {
-        if is_speedtest_aborted() {
+        if is_speedtest_aborted(self.gen) {
             self.defuse();
             return;
         }
@@ -150,12 +159,13 @@ pub async fn run_speedtest(
     }
 
     log_i!("Запуск теста скорости для сервера '{}'", target_server);
-    reset_speedtest_abort();
+    // SPD-01: фиксируем поколение замера — отмена определяется изменением поколения
+    let my_gen = speedtest_generation();
 
     // 1. Создание снимка текущего выбора всех групп Selector ядра Mihomo
     let (group_snapshot, original_server) = take_groups_snapshot(_http, _cfg).await?;
 
-    if is_speedtest_aborted() {
+    if is_speedtest_aborted(my_gen) {
         return Err("Тест скорости прерван пользователем".to_string());
     }
 
@@ -169,9 +179,9 @@ pub async fn run_speedtest(
         false
     };
 
-    let mut guard = NodeGroupGuard::new(_http, _cfg, group_snapshot, need_restore);
+    let mut guard = NodeGroupGuard::new(_http, _cfg, group_snapshot, need_restore, my_gen);
 
-    if is_speedtest_aborted() {
+    if is_speedtest_aborted(my_gen) {
         guard.defuse();
         return Err("Тест скорости прерван пользователем".to_string());
     }
@@ -246,7 +256,7 @@ pub async fn run_speedtest(
     let mut success = false;
 
     for url in &test_urls {
-        if is_speedtest_aborted() {
+        if is_speedtest_aborted(my_gen) {
             log_i!("Speedtest: получен сигнал прерывания перед скачиванием чанка");
             guard.defuse();
             return Err("Тест скорости прерван пользователем".to_string());
@@ -264,7 +274,7 @@ pub async fn run_speedtest(
                 let transfer_start = Instant::now();
                 let mut chunk_bytes = 0u64;
                 while let Ok(Some(chunk)) = resp.chunk().await {
-                    if is_speedtest_aborted() {
+                    if is_speedtest_aborted(my_gen) {
                         log_i!("Speedtest: замер прерван пользователем во время потока, отменяем скачивание");
                         guard.defuse();
                         return Err("Тест скорости прерван пользователем".to_string());
@@ -289,7 +299,7 @@ pub async fn run_speedtest(
         }
     }
 
-    if is_speedtest_aborted() {
+    if is_speedtest_aborted(my_gen) {
         log_i!("Speedtest: прерван пользователем, откат групп отменён");
         guard.defuse();
         return Err("Тест скорости прерван пользователем".to_string());
@@ -361,7 +371,7 @@ mod tests {
         let mut snapshot = HashMap::new();
         snapshot.insert("PROXY".to_string(), "ServerA".to_string());
 
-        let mut guard = NodeGroupGuard::new(&http, &cfg, snapshot, true);
+        let mut guard = NodeGroupGuard::new(&http, &cfg, snapshot, true, speedtest_generation());
         assert!(guard.need_restore);
         assert!(guard.snapshot.is_some());
         guard.defuse();
@@ -376,20 +386,26 @@ mod tests {
         let mut snapshot = HashMap::new();
         snapshot.insert("PROXY".to_string(), "ServerOld".to_string());
 
-        reset_speedtest_abort();
-        assert!(!is_speedtest_aborted());
+        // SPD-01 anti-regression: отмена привязана к поколению — новый старт замера
+        // больше не «оживляет» старый отменённый замер (глобальный флаг убран)
+        let gen = speedtest_generation();
+        assert!(!is_speedtest_aborted(gen));
 
-        let mut guard = NodeGroupGuard::new(&http, &cfg, snapshot, true);
+        let mut guard = NodeGroupGuard::new(&http, &cfg, snapshot, true, gen);
         assert!(guard.need_restore);
 
         // Пользователь переключает сервер вручную:
         cancel_active_speedtest();
-        assert!(is_speedtest_aborted());
+        assert!(is_speedtest_aborted(gen));
 
         // Проверяем, что restore() при активном аборте сбрасывает флаг и не трогает группы
         guard.restore().await;
         assert!(!guard.need_restore);
         assert!(guard.snapshot.is_none());
-        reset_speedtest_abort();
+
+        // Новый замер получает новое поколение и НЕ считается отменённым
+        let new_gen = speedtest_generation();
+        assert_ne!(new_gen, gen, "cancel must bump the generation");
+        assert!(!is_speedtest_aborted(new_gen));
     }
 }

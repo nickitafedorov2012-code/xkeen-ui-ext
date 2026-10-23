@@ -96,30 +96,6 @@ async fn is_zapret_running() -> bool {
     false
 }
 
-/// Управление службой Zapret через init-скрипт
-async fn zapret_toggle_action(action: &str) -> Result<(), String> {
-    #[cfg(unix)]
-    {
-        let script = "/opt/etc/init.d/S51zapret";
-        let out = tokio::process::Command::new("sh")
-            .arg(script)
-            .arg(action)
-            .output()
-            .await
-            .map_err(|e| e.to_string())?;
-        if out.status.success() {
-            return Ok(());
-        } else {
-            return Err(String::from_utf8_lossy(&out.stderr).to_string());
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = action;
-        Ok(())
-    }
-}
-
 /// Основной цикл Long Polling
 async fn run_bot_loop(state: AppState) {
     let mut offset: i64 = 0;
@@ -572,13 +548,19 @@ async fn handle_callback(
     }
 
     if data == "cb:zapret_start" || data == "cb:zapret_stop" {
-        let action = if data == "cb:zapret_start" { "start" } else { "stop" };
+        let enable = data == "cb:zapret_start";
         let _ = answer_callback(http, token, cb_id, Some("Применение настроек Zapret...")).await;
-        let res = zapret_toggle_action(action).await;
-        if res.is_ok() {
-            send_zapret_menu(state, http, token, &chat_id, Some(msg_id)).await;
-        } else {
-            let _ = send_msg(http, token, &chat_id, &format!("❌ Ошибка Zapret: {:?}", res.err()), None).await;
+        // X-04: полное ядро переключения (конфиг + маркер автозапуска + S51zapret),
+        // а не прямой вызов скрипта — иначе watchdog откатывает действие бота.
+        let res = crate::api::zapret_set_enabled_core(state, enable).await;
+        match res {
+            Ok(msg) => {
+                let _ = answer_callback(http, token, cb_id, Some(&msg)).await;
+                send_zapret_menu(state, http, token, &chat_id, Some(msg_id)).await;
+            }
+            Err(e) => {
+                let _ = send_msg(http, token, &chat_id, &format!("❌ Ошибка Zapret: {e}"), None).await;
+            }
         }
         return;
     }

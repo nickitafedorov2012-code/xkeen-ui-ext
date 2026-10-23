@@ -51,42 +51,50 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
   if (!headers.has('X-Requested-With')) {
     headers.set('X-Requested-With', 'XMLHttpRequest')
   }
-  const res = await fetch(`/api/${cleanPath}`, {
-    ...options,
-    headers,
-  })
-  if (res.status === 401) {
-    window.dispatchEvent(new CustomEvent('xr:auth-required'))
-  }
-  if (res.status === 204) {
-    return {} as T
-  }
-  const ct = res.headers?.get?.('content-type') || ''
-  if (ct && !ct.includes('application/json') && !ct.includes('text/json')) {
-    if (res.ok) {
-      throw new Error(`Эндпоинт /api/${cleanPath} недоступен на текущей версии бэкенда`)
-    }
-    throw new Error(`HTTP ${res.status}: ${res.statusText || 'Ошибка сервера'}`)
-  }
-  let env: ApiEnvelope<T>
+  // FE-02: зависший бэкенд раньше означал вечный pending — добавляем таймаут 30с
+  const controller = new AbortController()
+  const abortTimer = setTimeout(() => controller.abort(), 30000)
   try {
-    env = await res.json()
-  } catch {
-    if (res.ok) {
-      throw new Error(`Эндпоинт /api/${cleanPath} вернул некорректный ответ`)
+    const res = await fetch(`/api/${cleanPath}`, {
+      ...options,
+      headers,
+      signal: controller.signal,
+    })
+    if (res.status === 401) {
+      window.dispatchEvent(new CustomEvent('xr:auth-required'))
     }
-    throw new Error(`HTTP ${res.status}: ${res.statusText || 'Ошибка сервера'}`)
-  }
-  const serverError = typeof env?.error === 'string' && env.error ? env.error : undefined
-  if (res.status < 200 || res.status >= 300) {
-    throw new Error(serverError || `HTTP ${res.status}: ${res.statusText || 'Ошибка сервера'}`)
-  }
-  if (!env || env.success !== true) throw new Error(serverError || 'Ошибка API')
+    if (res.status === 204) {
+      return {} as T
+    }
+    const ct = res.headers?.get?.('content-type') || ''
+    if (ct && !ct.includes('application/json') && !ct.includes('text/json')) {
+      if (res.ok) {
+        throw new Error(`Эндпоинт /api/${cleanPath} недоступен на текущей версии бэкенда`)
+      }
+      throw new Error(`HTTP ${res.status}: ${res.statusText || 'Ошибка сервера'}`)
+    }
+    let env: ApiEnvelope<T>
+    try {
+      env = await res.json()
+    } catch {
+      if (res.ok) {
+        throw new Error(`Эндпоинт /api/${cleanPath} вернул некорректный ответ`)
+      }
+      throw new Error(`HTTP ${res.status}: ${res.statusText || 'Ошибка сервера'}`)
+    }
+    const serverError = typeof env?.error === 'string' && env.error ? env.error : undefined
+    if (res.status < 200 || res.status >= 300) {
+      throw new Error(serverError || `HTTP ${res.status}: ${res.statusText || 'Ошибка сервера'}`)
+    }
+    if (!env || env.success !== true) throw new Error(serverError || 'Ошибка API')
 
-  // UI-08: Runtime validation полезной нагрузки критических ответов
-  validateEndpointData(cleanPath, env.data)
+    // UI-08: Runtime validation полезной нагрузки критических ответов
+    validateEndpointData(cleanPath, env.data)
 
-  return env.data as T
+    return env.data as T
+  } finally {
+    clearTimeout(abortTimer)
+  }
 }
 
 export async function apiGet<T>(path: string): Promise<T> {

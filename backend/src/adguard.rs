@@ -1313,10 +1313,12 @@ pub fn remove_adguard_iptables() -> Result<(), String> {
             }
         }
         // Возвращаем XKEEN_GAMING на порт 1053 (Mihomo)
+        // G-03: возвращаем ВСЕ правила с переписанными портами (без фильтра 'dport 53') —
+        // раньше правила на других dport оставались смотреть на порт AdGuard навсегда
         let _ = std::process::Command::new("sh")
             .arg("-c")
             .arg(format!(
-                "iptables -t nat -S XKEEN_GAMING 2>/dev/null | grep -E 'to-ports ({port}|5353|5354)' | grep 'dport 53' | while read -r line; do \
+                "iptables -t nat -S XKEEN_GAMING 2>/dev/null | grep -E 'to-ports ({port}|5353|5354)' | while read -r line; do \
                     del_cmd=$(echo \"$line\" | sed 's/^-A/-D/'); \
                     add_cmd=$(echo \"$line\" | sed -E 's/--to-ports [0-9]+/--to-ports 1053/'); \
                     iptables -t nat $del_cmd 2>/dev/null || true; \
@@ -1339,18 +1341,39 @@ pub fn remove_adguard_iptables() -> Result<(), String> {
     Ok(())
 }
 
-/// Проверка активности редиректа AdGuard в iptables
+/// Проверка активности редиректа AdGuard в iptables.
+/// G-01: активность = (1) PREROUTING реально прыгает в XKEEN_ADGUARD И (2) цепочка
+/// содержит рабочий REDIRECT --to-ports {dns_port}. Раньше совпадение имени цепочки
+/// где угодно (существование без jump) или «--dport 53 + to-ports N» в ЛЮБОЙ цепочке
+/// (например XKEEN_GAMING с 5353) давало ложный позитив: watchdog считал редирект
+/// активным и не восстанавливал его — «тумблер горит, а фильтр не работает».
 pub fn is_adguard_iptables_active(dns_port: u16) -> bool {
     #[cfg(target_os = "linux")]
     {
-        if let Ok(out) = std::process::Command::new("iptables")
-            .args(["-t", "nat", "-S"])
-            .output()
-        {
-            let text = String::from_utf8_lossy(&out.stdout);
-            let port_str = format!("--to-ports {}", dns_port);
-            return text.contains(AGH_IPTABLES_CHAIN) || (text.contains("--dport 53") && text.contains(&port_str));
+        let prerouting_out = std::process::Command::new("iptables")
+            .args(["-t", "nat", "-S", "PREROUTING"])
+            .output();
+        let jump_active = prerouting_out
+            .ok()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .any(|l| l.contains(&format!("-j {}", AGH_IPTABLES_CHAIN)))
+            })
+            .unwrap_or(false);
+        if !jump_active {
+            return false;
         }
+
+        let chain_out = std::process::Command::new("iptables")
+            .args(["-t", "nat", "-S", AGH_IPTABLES_CHAIN])
+            .output();
+        let rules = chain_out
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        let port_str = format!("--to-ports {}", dns_port);
+        return rules.contains("--dport 53") && rules.contains(&port_str);
     }
     let _ = dns_port;
     false

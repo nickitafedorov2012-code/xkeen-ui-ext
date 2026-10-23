@@ -67,11 +67,15 @@ pub async fn status(State(state): State<AppState>) -> Response {
     let stack_memory = crate::system::get_stack_memory_info();
     let active_id = active.as_ref().and_then(|a| a.get("id")).and_then(|v| v.as_str()).unwrap_or("");
     let active_prov = active.as_ref().and_then(|a| a.get("provider")).and_then(|v| v.as_str()).unwrap_or("");
-    let is_server_wl = !cfg.whitelist_servers.is_empty() && cfg.whitelist_servers.iter().any(|s| s == active_id);
-    let is_prov_wl = !cfg.whitelist_providers.is_empty() && cfg.whitelist_providers.iter().any(|p| p == active_prov);
-    let whitelist_mode_active = (!cfg.whitelist_servers.is_empty() || !cfg.whitelist_providers.is_empty()) && (is_server_wl || is_prov_wl);
-    crate::traffic::set_whitelist_active(whitelist_mode_active);
     let active_name = active.as_ref().and_then(|a| a.get("name")).and_then(|v| v.as_str()).unwrap_or("");
+    // X-01: единый с sync_whitelist_mode_tunnel критерий режима БС
+    let whitelist_mode_active = compute_whitelist_mode_active(
+        &cfg,
+        active_id,
+        active_name,
+        Some(active_prov).filter(|p| !p.is_empty()),
+    );
+    crate::traffic::set_whitelist_active(whitelist_mode_active);
     let active_ping = active.as_ref().and_then(|a| a.get("ping_ms")).and_then(|v| v.as_i64()).unwrap_or(-1);
     let current_failover_status = failover::current_live_status(active_id, active_name, active_ping, &cfg).await;
 
@@ -255,6 +259,7 @@ pub fn api_err_detailed(
 
 /// Атомарная запись файла на диск (tmp + rename)
 pub async fn atomic_write_file(path: impl AsRef<std::path::Path>, content: &str) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
     let p = path.as_ref();
     if let Some(parent) = p.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
@@ -264,9 +269,23 @@ pub async fn atomic_write_file(path: impl AsRef<std::path::Path>, content: &str)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let tmp = format!("{}.{}.{}.tmp", p.display(), std::process::id(), nonce);
-    if let Err(e) = tokio::fs::write(&tmp, content).await {
+    // Z-12: пишем через File с sync_all перед rename — на роутерах с внезапной потерей
+    // питания rename без fsync оставлял пустой/битый файл (config.json, zapret.conf, config.yaml)
+    let write_res: Result<(), String> = async {
+        let mut f = tokio::fs::File::create(&tmp)
+            .await
+            .map_err(|e| format!("Ошибка записи {tmp}: {e}"))?;
+        f.write_all(content.as_bytes())
+            .await
+            .map_err(|e| format!("Ошибка записи {tmp}: {e}"))?;
+        f.flush().await.map_err(|e| format!("Ошибка записи {tmp}: {e}"))?;
+        f.sync_all().await.map_err(|e| format!("Ошибка fsync {tmp}: {e}"))?;
+        Ok(())
+    }
+    .await;
+    if let Err(e) = write_res {
         let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(format!("Ошибка записи {tmp}: {e}"));
+        return Err(e);
     }
     if let Err(e) = tokio::fs::rename(&tmp, p).await {
         let _ = tokio::fs::remove_file(&tmp).await;
@@ -692,24 +711,42 @@ pub struct ServerWhitelistReq {
 /// Если включен режим следования за failover (follow_failover) и Whitelist включен,
 /// переключает селекторную группу '🛡️ Whitelist' в ядре Mihomo на актуальный узел без перезапуска даэмона.
 /// ПОЛНОСТЬЮ ОТВЯЗАНО ОТ GAMING MODE: не мутирует cfg.gaming и не затирает игровые устройства!
+/// X-01: Единый критерий активности режима белых списков.
+/// Раньше GET /api/status и sync_whitelist_mode_tunnel использовали РАЗНЫЕ критерии,
+/// из-за чего флаг WHITELIST_ACTIVE флаппировал и канал на графике прыгал БС↔VPS.
+pub fn compute_whitelist_mode_active(
+    cfg: &crate::config::AppConfig,
+    active_id: &str,
+    active_name: &str,
+    active_provider: Option<&str>,
+) -> bool {
+    if cfg.whitelist.enabled {
+        return true;
+    }
+    let is_server_wl = !active_id.is_empty() && cfg.whitelist_servers.iter().any(|s| s == active_id);
+    let is_prov_wl = active_provider
+        .filter(|p| !p.is_empty())
+        .map(|p| cfg.whitelist_providers.iter().any(|wp| wp == p))
+        .unwrap_or(false);
+    is_server_wl
+        || is_prov_wl
+        || crate::failover::is_whitelist_server_full(active_name, active_id, active_provider, cfg)
+}
+
 pub async fn sync_whitelist_mode_tunnel(state: &AppState, target_server_id: &str) -> Result<(), String> {
     let cfg = state.config.read().await.clone();
     let mut target_name = target_server_id.to_string();
-    let mut is_prov_wl = false;
+    let mut target_provider: Option<String> = None;
     if !target_server_id.is_empty() {
         if let Ok(servers) = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
             if let Some(s) = servers.iter().find(|srv| srv.id == target_server_id) {
                 target_name = s.name.clone();
-                if let Some(ref prov) = s.provider {
-                    if cfg.whitelist_providers.iter().any(|p| p == prov) {
-                        is_prov_wl = true;
-                    }
-                }
+                target_provider = s.provider.clone();
             }
         }
     }
-    let is_auto_detected = crate::failover::is_whitelist_server(&target_name, target_server_id, &cfg);
-    let is_whitelist = is_auto_detected || is_prov_wl || cfg.whitelist.enabled;
+    let prov_ref = target_provider.as_deref().filter(|p| !p.is_empty());
+    let is_whitelist = compute_whitelist_mode_active(&cfg, target_server_id, &target_name, prov_ref);
     crate::traffic::set_whitelist_active(is_whitelist);
 
     if cfg.whitelist.enabled {
@@ -5716,29 +5753,19 @@ iptables() {
 PIDFILE="/opt/var/run/zapret.pid"
 FAILSAFE_PID="/opt/var/run/zapret_failsafe.pid"
 CONF="/opt/etc/zapret/zapret.conf"
-LOCKFILE="/opt/var/run/xkeen-zapret.lock"
 LOCKDIR="/opt/var/run/xkeen-zapret.lock.d"
 DISABLED_MARKER="/opt/var/run/xkeen-zapret.disabled"
 
 acquire_zapret_lock() {
+  # Единый с Rust-панелью протокол блокировки: mkdir lockdir + pid-файл внутри (Z-01).
+  # flock на файл не используется — он не пересекался с mkdir-локом панели.
   local timeout=15
-  if command -v flock >/dev/null 2>&1; then
-    exec 9>"$LOCKFILE"
-    if ! flock -w "$timeout" 9 2>/dev/null; then
-      echo "Failed to acquire zapret flock" >&2
-      return 1
-    fi
-    echo $$ > "$LOCKFILE" 2>/dev/null
-    return 0
-  fi
   local waited=0
   while ! mkdir "$LOCKDIR" 2>/dev/null; do
-    if [ -f "$LOCKDIR/pid" ]; then
-      local holder=$(cat "$LOCKDIR/pid" 2>/dev/null)
-      if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
-        rm -rf "$LOCKDIR" 2>/dev/null
-        continue
-      fi
+    local holder=$(cat "$LOCKDIR/pid" 2>/dev/null)
+    if [ -n "$holder" ] && ! kill -0 "$holder" 2>/dev/null; then
+      rm -rf "$LOCKDIR" 2>/dev/null
+      continue
     fi
     if [ "$waited" -ge "$timeout" ]; then
       echo "Failed to acquire zapret lockdir after ${timeout}s" >&2
@@ -5752,10 +5779,6 @@ acquire_zapret_lock() {
 }
 
 release_zapret_lock() {
-  if command -v flock >/dev/null 2>&1; then
-    flock -u 9 2>/dev/null
-    exec 9>&- 2>/dev/null
-  fi
   rm -rf "$LOCKDIR" 2>/dev/null
 }
 
@@ -5779,7 +5802,13 @@ is_zapret_pid() {
 }
 
 check_dns_resolver_ready() {
-  if grep -q ':041D' /proc/net/udp 2>/dev/null || grep -q ':041D' /proc/net/tcp 2>/dev/null; then
+  # Z-06: порт слушателя ищем строго в колонке local_address ($2) — раньше grep ':041D'
+  # по всему файлу матчил и ЧУЖИЕ remote-порты 1053, что включало DNS-редирект
+  # без работающего резолвера (блэкаут LAN). Порт 1053 = 0x041D в конце local-адреса.
+  if awk '$2 ~ /:041D$/ { found=1 } END { exit !found }' /proc/net/udp /proc/net/udp6 2>/dev/null; then
+    return 0
+  fi
+  if awk '$2 ~ /:041D$/ { found=1 } END { exit !found }' /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
     return 0
   fi
   if command -v netstat >/dev/null 2>&1 && netstat -tuln 2>/dev/null | grep -q ':1053 '; then
@@ -6210,6 +6239,14 @@ del_fw() {
 case "$1" in
   start)
     acquire_zapret_lock || exit 1
+    # Z-03: маркер «выключено пользователем» запрещает автозапуск Entware после ребута
+    if [ -f "$DISABLED_MARKER" ]; then
+      echo "Zapret disabled by user (marker present); ensuring service is stopped"
+      stop_nfqws
+      remove_fw_rules
+      release_zapret_lock
+      exit 0
+    fi
     mkdir -p /opt/var/run /opt/etc/zapret
     if [ -f "$PIDFILE" ]; then
       PID=$(cat "$PIDFILE" 2>/dev/null)
@@ -6287,11 +6324,18 @@ case "$1" in
         $BIN --pidfile="$PIDFILE" $EFFECTIVE_ARGS
       fi
       set +f
-      sleep 1
+      # Z-20: ждём до 5 сек записи pidfile — на MIPS nfqws стартует дольше 1 сек,
+      # фиксированный sleep давал ложный «failed to start» и валил живую службу
       PID=""
-      if [ -f "$PIDFILE" ]; then
-        PID=$(cat "$PIDFILE" 2>/dev/null)
-      fi
+      for _wait_i in 1 2 3 4 5; do
+        if [ -f "$PIDFILE" ]; then
+          PID=$(cat "$PIDFILE" 2>/dev/null)
+        fi
+        if [ -n "$PID" ] && is_zapret_pid "$PID"; then
+          break
+        fi
+        sleep 1
+      done
       if [ -z "$PID" ] || ! is_zapret_pid "$PID"; then
         for p in $(pgrep -f nfqws2 2>/dev/null) $(pgrep -f nfqws 2>/dev/null); do
           if is_zapret_pid "$p"; then
@@ -6645,11 +6689,15 @@ pub async fn check_zapret_update_core(state: &AppState, force: bool) -> Result<s
     }
 
     let default_latest = if engine == "v2" { "v1.0.6".to_string() } else { "v72.13".to_string() };
-    let final_latest = fetched_latest.unwrap_or(default_latest);
+    // Z-07: при недоступности GitHub захардкоженный дефолт НЕ считается «последней
+    // версией» — иначе в офлайне появлялось фантомное update_available=true,
+    // которое ещё и персистилось в конфиг. Сохраняем предыдущее состояние флага.
+    let fetched_any = fetched_latest.is_some();
+    let final_latest = fetched_latest.unwrap_or_else(|| latest_ver.clone().unwrap_or(default_latest));
 
-    let has_newer_tag = crate::updater::is_newer(&final_latest, &cur_ver);
+    let has_newer_tag = fetched_any && crate::updater::is_newer(&final_latest, &cur_ver);
     let upgrade_available = engine == "v1" && !v2_inst;
-    let update_available = has_newer_tag;
+    let update_available = if fetched_any { has_newer_tag } else { update_avail };
 
     let now_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
     let display_latest = if upgrade_available && !has_newer_tag {
@@ -7191,7 +7239,24 @@ pub fn validate_zapret_conf(content: &str) -> Result<(), String> {
                 if clean_val != "v1" && clean_val != "v2" && clean_val != "legacy" && clean_val != "modern" {
                     return Err(format!("Недопустимое значение ZAPRET_ENGINE: '{clean_val}'. Разрешены только v1, v2"));
                 }
-            } else if k != "DISCORD_VOICE_ENABLED" && k != "BLOCK_QUIC" && k != "SMART_TV_MODE" && k != "EXCLUDED_IPS" && k != "EXCLUDED_MACS" && k != "ADGUARD_ENABLED" {
+            } else if k == "EXCLUDED_IPS" {
+                // Z-04: значения попадают в `iptables -s "$ex_ip"` внутри S51zapret —
+                // без валидации command substitution `$(cmd)` выполнялся бы как RCE.
+                let clean_val = val.trim().trim_matches('"').trim_matches('\'');
+                for ip in clean_val.split_whitespace() {
+                    if !crate::config::is_valid_ip_or_cidr(ip) {
+                        return Err(format!("Недопустимое значение в EXCLUDED_IPS: '{ip}'. Разрешены только IP-адреса или CIDR"));
+                    }
+                }
+            } else if k == "EXCLUDED_MACS" {
+                // Z-04: аналогичная защита для MAC-исключений
+                let clean_val = val.trim().trim_matches('"').trim_matches('\'');
+                for mac in clean_val.split_whitespace() {
+                    if !crate::config::is_valid_mac(mac) {
+                        return Err(format!("Недопустимое значение в EXCLUDED_MACS: '{mac}'. Разрешены только MAC-адреса формата 00:11:22:33:44:55"));
+                    }
+                }
+            } else if k != "DISCORD_VOICE_ENABLED" && k != "BLOCK_QUIC" && k != "SMART_TV_MODE" && k != "ADGUARD_ENABLED" {
                 return Err(format!("Неизвестный параметр в zapret.conf: '{k}'. Разрешены только ZAPRET_ENGINE, NFQWS_ARGS, DISCORD_VOICE_ENABLED, BLOCK_QUIC, SMART_TV_MODE, EXCLUDED_IPS, EXCLUDED_MACS, ADGUARD_ENABLED"));
             }
         } else {
@@ -7418,28 +7483,10 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
 
     let cfg = state.config.read().await.clone();
 
-    // Если служба выключена в конфигурации панели и сейчас не идёт операция запуска/переключения,
-    // принудительно очищаем осиротевший процесс nfqws и остаточные правила iptables
+    // Z-05: GET-эндпоинт стал строго read-only — убирать процессы здесь нельзя:
+    // поллинг каждые 10с и мутации в идемпотентном GET — источник гонок со стартом.
+    // Чисткой осиротевшего процесса при выключенной службе занимается watchdog.
     if !cfg.zapret.enabled {
-        if running || iptables_active {
-            if let Ok(_guard) = state.config_lock.try_lock() {
-                if !state.config.read().await.zapret.enabled {
-                    if running {
-                        let _ = tokio::process::Command::new("sh")
-                            .arg("-c")
-                            .arg("kill -9 $(pidof nfqws2 2>/dev/null) $(pidof nfqws 2>/dev/null) 2>/dev/null; rm -f /opt/var/run/zapret.pid /opt/var/run/zapret_failsafe.pid")
-                            .output()
-                            .await;
-                    }
-                    if iptables_active {
-                        let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret")
-                            .arg("stop-fw")
-                            .output()
-                            .await;
-                    }
-                }
-            }
-        }
         running = false;
         iptables_active = false;
         pid = None;
@@ -7666,7 +7713,9 @@ pub async fn apply_zapret_preset_action(
     }
 
     sync_zapret_files(&cfg.zapret).await.map_err(|e| format!("Ошибка синхронизации файлов Zapret: {e}"))?;
-    let _ = crate::rci::set_clean_dns_servers(&state.http, &cfg).await;
+    // X-07: set_clean_dns_servers (добавление Яндекс/Cloudflare DNS в KeeneticOS + save
+    // конфига роутера) убран из пресетов — это скрытая мутация настроек роутера из
+    // «косметического» действия. Чистые DNS применяются на старте/рестарте службы Zapret.
 
     // Обновляем правила в config.yaml ядра Mihomo через apply_routing
     if std::path::Path::new(&cfg.mihomo.config_path).exists() {
@@ -7707,6 +7756,48 @@ pub async fn apply_zapret_preset_action(
 }
 
 /// POST /api/zapret/action — запуск, остановка, переключение, пресеты и тест DPI
+/// X-04: Ядро переключения службы Zapret (вкл/выкл) для UI и Telegram-бота.
+/// В отличие от прямого вызова S51zapret синхронно обновляет cfg.zapret.enabled,
+/// файлы zapret.conf, маркер автозапуска (Z-03) и стабилизирует процесс —
+/// иначе watchdog откатывает действие бота через ≤12с, а GET /api/zapret/status убивает процесс.
+pub async fn zapret_set_enabled_core(state: &AppState, enabled: bool) -> Result<String, String> {
+    let init_script = "/opt/etc/init.d/S51zapret";
+    if !std::path::Path::new(init_script).exists() {
+        return Err("Служба Zapret (S51zapret) не установлена в /opt/etc/init.d/".to_string());
+    }
+
+    {
+        let _cfg_guard = state.config_lock.lock().await;
+        let mut cfg = (**state.config.read().await).clone();
+        cfg.zapret.enabled = enabled;
+        sync_zapret_files(&cfg.zapret).await?;
+        if let Err(e) = config::save(&state.config_path, &cfg).await {
+            return Err(format!("Настройки Zapret не сохранены в config.json: {e}"));
+        }
+        *state.config.write().await = std::sync::Arc::new(cfg);
+    }
+
+    if enabled {
+        crate::zapret::clear_zapret_disabled_marker();
+        let out = tokio::process::Command::new(init_script)
+            .arg("start")
+            .output()
+            .await
+            .map_err(|e| format!("Не удалось запустить S51zapret: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "Ошибка запуска Zapret:\n{}",
+                format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)).trim()
+            ));
+        }
+        Ok("🟢 Служба Zapret запущена".to_string())
+    } else {
+        crate::zapret::set_zapret_disabled_marker();
+        let _ = tokio::process::Command::new(init_script).arg("stop").output().await;
+        Ok("⚪ Служба Zapret остановлена".to_string())
+    }
+}
+
 pub async fn zapret_action(
     State(state): State<AppState>,
     axum::extract::Json(body): axum::extract::Json<ZapretActionReq>,
@@ -7737,6 +7828,16 @@ pub async fn zapret_action(
     // 0.05 1-клик обновление до Zapret 2 (nfqws2 + Lua библиотеки в /opt/zapret2) с сохранением резервной копии v1
     if act == "upgrade_zapret2" {
         let hw = detect_zapret_hardware(&state).await;
+        // Z-02: останавливаем службу ДО замены бинарника — иначе mv из /tmp (cross-device
+        // copy+unlink) получает ETXTBSY от запущенного nfqws2, апгрейд проходит «фантомно»:
+        // version.txt уже новой версии, а бинарник на диске — старый.
+        let zap_enabled_before_upgrade = state.config.read().await.zapret.enabled;
+        if zap_enabled_before_upgrade {
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret")
+                .arg("stop")
+                .output()
+                .await;
+        }
         let target_ver = {
             let requested = body.version.as_deref().unwrap_or("").trim();
             if !requested.is_empty() {
@@ -7834,8 +7935,24 @@ pub async fn zapret_action(
                     rm -rf "$STAGE_DIR"
                     exit 1
                   fi
-                  mv -f "$NEW_BIN" /opt/zapret2/nfqws2
-                  echo "Скопирован nfqws2"
+                  # Z-02: верификация реальной замены бинарника (защита от молчаливого ETXTBSY)
+                  EXPECTED_SIZE=$(wc -c < "$NEW_BIN" 2>/dev/null || echo 0)
+                  kill $(pidof nfqws2 2>/dev/null) 2>/dev/null || true
+                  sleep 1
+                  if mv -f "$NEW_BIN" /opt/zapret2/nfqws2 2>/dev/null; then
+                    chmod +x /opt/zapret2/nfqws2 2>/dev/null || true
+                    INSTALLED_SIZE=$(wc -c < /opt/zapret2/nfqws2 2>/dev/null || echo 0)
+                    if [ "$EXPECTED_SIZE" != "$INSTALLED_SIZE" ]; then
+                      echo "ERROR: nfqws2 size mismatch after install (expected $EXPECTED_SIZE, got $INSTALLED_SIZE)" >&2
+                      rm -rf "$STAGE_DIR"
+                      exit 1
+                    fi
+                    echo "Скопирован nfqws2"
+                  else
+                    echo "ERROR: не удалось заменить /opt/zapret2/nfqws2 (binary busy?)" >&2
+                    rm -rf "$STAGE_DIR"
+                    exit 1
+                  fi
                 fi
                 if [ -d "$Z2_DIR/files/lua" ]; then
                   cp -rf "$Z2_DIR/files/lua/"* /opt/zapret2/lua/ 2>/dev/null || true
@@ -8095,7 +8212,16 @@ pub async fn zapret_action(
                     let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
                     return api_err(format!("Ошибка применения стратегии Zapret:\n{}", err_msg.trim()));
                 }
-                Err(e) => return api_err(format!("Ошибка перезапуска S51zapret: {e}")),
+                Err(e) => {
+                    // Z-10: rollback симметричен ветке Ok(!success) — конфиг уже был
+                    // сохранён с новой стратегией, откатываем файлы и состояние
+                    cfg.zapret = prev_zapret;
+                    let _ = sync_zapret_files(&cfg.zapret).await;
+                    let _ = config::save(&state.config_path, &cfg).await;
+                    *state.config.write().await = std::sync::Arc::new(cfg);
+                    let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await;
+                    return api_err(format!("Ошибка перезапуска S51zapret: {e} (конфигурация откачена)"));
+                }
                 _ => {}
             }
         }
@@ -8144,13 +8270,16 @@ pub async fn zapret_action(
 
         let cfg = state.config.read().await.clone();
         let proxy_url = cfg.mihomo_proxy_url();
+        // Z-13: URL попадает в sh -c без экранирования — вырезаем кавычки/бэкслеши
+        // (ломали команду, метасимволы давали инъекцию) и оборачиваем в одинарные кавычки
+        let proxy_q = proxy_url.replace(['\'', '\\', '`', '$'], "");
 
         // Быстрая параллельная проверка доступности: прямой запрос и через прокси Mihomo (макс 2.5 сек)
         let test_cmd = format!(r#"
             d_yt=$(curl -4 -k -m 2.5 -s -o /dev/null -w "%{{http_code}}:%{{time_total}}" https://www.youtube.com/generate_204 2>/dev/null || echo "000:0.0") &
             d_dc=$(curl -4 -k -m 2.5 -s -o /dev/null -w "%{{http_code}}:%{{time_total}}" https://discord.com 2>/dev/null || echo "000:0.0") &
-            p_yt=$(curl -4 -k -m 2.5 -s -o /dev/null -w "%{{http_code}}:%{{time_total}}" -x {proxy_url} https://www.youtube.com/generate_204 2>/dev/null || echo "000:0.0") &
-            p_dc=$(curl -4 -k -m 2.5 -s -o /dev/null -w "%{{http_code}}:%{{time_total}}" -x {proxy_url} https://discord.com 2>/dev/null || echo "000:0.0") &
+            p_yt=$(curl -4 -k -m 2.5 -s -o /dev/null -w "%{{http_code}}:%{{time_total}}" -x '{proxy_q}' https://www.youtube.com/generate_204 2>/dev/null || echo "000:0.0") &
+            p_dc=$(curl -4 -k -m 2.5 -s -o /dev/null -w "%{{http_code}}:%{{time_total}}" -x '{proxy_q}' https://discord.com 2>/dev/null || echo "000:0.0") &
             wait
             echo "$d_yt#$d_dc#$p_yt#$p_dc"
         "#);
@@ -8297,6 +8426,14 @@ pub async fn zapret_action(
 
     // 4. Установка службы Zapret
     if act == "install" {
+        // Z-02: останавливаем запущенную службу до копирования бинарника (ETXTBSY)
+        let zap_enabled_before_install = state.config.read().await.zapret.enabled;
+        if zap_enabled_before_install {
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret")
+                .arg("stop")
+                .output()
+                .await;
+        }
         let target_ver = {
             let requested = body.version.as_deref().unwrap_or("").trim();
             if !requested.is_empty() {
@@ -8366,13 +8503,16 @@ pub async fn zapret_action(
                   cp -rf "$Z2_DIR/binaries/"* /opt/zapret2/binaries/ 2>/dev/null || true
                 fi
                 if [ -n "$Z2_ARCH" ] && [ -f "$Z2_DIR/binaries/$Z2_ARCH/nfqws2" ]; then
-                  cp -f "$Z2_DIR/binaries/$Z2_ARCH/nfqws2" /opt/zapret2/nfqws2
+                  kill $(pidof nfqws2 2>/dev/null) 2>/dev/null || true; sleep 1
+                  cp -f "$Z2_DIR/binaries/$Z2_ARCH/nfqws2" /opt/zapret2/nfqws2 || { echo "ERROR: не удалось заменить /opt/zapret2/nfqws2 (busy?)" >&2; exit 1; }
                   echo "Скопирован nfqws2 для $Z2_ARCH"
                 elif [ -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws2" ]; then
-                  cp -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws2" /opt/zapret2/nfqws2
+                  kill $(pidof nfqws2 2>/dev/null) 2>/dev/null || true; sleep 1
+                  cp -f "$Z2_DIR/binaries/$TARGET_ARCH/nfqws2" /opt/zapret2/nfqws2 || { echo "ERROR: не удалось заменить /opt/zapret2/nfqws2 (busy?)" >&2; exit 1; }
                   echo "Скопирован nfqws2 для $TARGET_ARCH"
                 elif [ -f "$Z2_DIR/nfqws2" ]; then
-                  cp -f "$Z2_DIR/nfqws2" /opt/zapret2/nfqws2
+                  kill $(pidof nfqws2 2>/dev/null) 2>/dev/null || true; sleep 1
+                  cp -f "$Z2_DIR/nfqws2" /opt/zapret2/nfqws2 || { echo "ERROR: не удалось заменить /opt/zapret2/nfqws2 (busy?)" >&2; exit 1; }
                   echo "Скопирован nfqws2"
                 else
                   echo "ОШИБКА: nfqws2 не найден в архиве Zapret 2 для $TARGET_ARCH" >&2
@@ -8498,6 +8638,13 @@ pub async fn zapret_action(
             .await
             .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
             .unwrap_or(false);
+
+        // Z-03: синхронизируем маркер автозапуска с желаемым состоянием службы
+        if cfg.zapret.enabled {
+            crate::zapret::clear_zapret_disabled_marker();
+        } else {
+            crate::zapret::set_zapret_disabled_marker();
+        }
 
         // Обновляем файлы zapret.conf и S51zapret
         if let Err(e) = sync_zapret_files(&cfg.zapret).await {
@@ -8792,7 +8939,15 @@ pub async fn zapret_action(
     }
 
     if act == "verify_failsafe" {
-        let rep = crate::zapret::verify_zapret_failsafe(&state.http, None).await;
+        // Z-08: передаём реальный адрес роутера — иначе router_alive всегда true
+        // («автономный режим») и проверка liveness недостижима из API.
+        let rci_host = state.config.read().await.rci.host.clone();
+        let router_url = if rci_host.contains("://") {
+            rci_host
+        } else {
+            format!("http://{}", rci_host)
+        };
+        let rep = crate::zapret::verify_zapret_failsafe(&state.http, Some(&router_url)).await;
         return api_ok(json!({
             "success": rep.overall_success,
             "report": rep
@@ -8833,6 +8988,8 @@ pub async fn zapret_action(
         let mut cfg = (**state.config.read().await).clone();
         if action_to_run == "start" || action_to_run == "restart" {
             cfg.zapret.enabled = true;
+            // Z-03: пользователь явно включает службу — снимаем маркер автозапуска
+            crate::zapret::clear_zapret_disabled_marker();
             *state.config.write().await = std::sync::Arc::new(cfg.clone());
         }
         let _ = sync_zapret_files(&cfg.zapret).await;
@@ -8843,6 +9000,8 @@ pub async fn zapret_action(
         let _cfg_guard = state.config_lock.lock().await;
         let mut cfg = (**state.config.read().await).clone();
         cfg.zapret.enabled = false;
+        // Z-03: маркер запрещает S51zapret start (автозапуск Entware) после перезагрузки роутера
+        crate::zapret::set_zapret_disabled_marker();
         let _ = config::save(&state.config_path, &cfg).await;
         *state.config.write().await = std::sync::Arc::new(cfg);
     }
@@ -11482,6 +11641,28 @@ mod tests {
 
         let invalid_engine_conf = "ZAPRET_ENGINE=\"v3\"\n";
         assert!(validate_zapret_conf(invalid_engine_conf).is_err());
+
+        // Z-01 anti-regression: S51zapret обязан использовать единый с панелью mkdir-протокол
+        // блокировки (lockdir/pid); flock на файл не пересекался с локом панели
+        assert!(S51ZAPRET_SCRIPT.contains("mkdir \"$LOCKDIR\""));
+        assert!(S51ZAPRET_SCRIPT.contains("cat \"$LOCKDIR/pid\""));
+        assert!(!S51ZAPRET_SCRIPT.contains("flock -w"), "flock protocol must stay removed (Z-01)");
+        // Z-03 anti-regression: автозапуск обязан уважать маркер «выключено пользователем»
+        assert!(S51ZAPRET_SCRIPT.contains("$DISABLED_MARKER\" ]; then"));
+
+        // Z-04 anti-regression: EXCLUDED_IPS/MACS строго валидируются — command injection
+        // через `$(...)`/backticks в значениях должен отклоняться до записи в zapret.conf
+        // (значения попадают в `iptables -s "$ex_ip"` внутри S51zapret).
+        let valid_exclusions = "EXCLUDED_IPS=\"192.168.1.50 10.0.0.0/24\"\nEXCLUDED_MACS=\"00:11:22:33:44:55\"\n";
+        assert!(validate_zapret_conf(valid_exclusions).is_ok());
+        let injected_ips = "EXCLUDED_IPS=\"192.168.1.1; rm -rf /\"\n";
+        assert!(validate_zapret_conf(injected_ips).is_err(), "EXCLUDED_IPS must reject non-IP tokens");
+        let injected_subst = "EXCLUDED_IPS=\"$(reboot)\"\n";
+        assert!(validate_zapret_conf(injected_subst).is_err(), "EXCLUDED_IPS must reject command substitution");
+        let injected_macs = "EXCLUDED_MACS=\"`id`\n";
+        assert!(validate_zapret_conf(injected_macs).is_err(), "EXCLUDED_MACS must reject command substitution");
+        let bad_mac = "EXCLUDED_MACS=\"zz:11:22:33:44:55\"\n";
+        assert!(validate_zapret_conf(bad_mac).is_err(), "EXCLUDED_MACS must reject non-hex MAC");
 
         // Anti-regression: S51ZAPRET_SCRIPT must verify lua-desync capability before passing --lua-init
         assert!(S51ZAPRET_SCRIPT.contains("\"$BIN\" --help 2>&1 | grep -q \"lua-desync\""));

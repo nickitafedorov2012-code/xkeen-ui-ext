@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, lazy, Suspense } from 'react'
+import { useCallback, useEffect, useRef, useState, lazy, Suspense } from 'react'
 import React from 'react'
 import Dashboard from './components/Dashboard'
 import Header from './components/Header'
@@ -240,7 +240,11 @@ export default function App() {
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 5000)
   }, [])
 
+  // FE-01: защита поллинга — не допускаем наложение запросов и опрос в фоновой вкладке
+  const refreshInFlight = useRef(false)
   const refresh = useCallback(async () => {
+    if (refreshInFlight.current || document.hidden) return
+    refreshInFlight.current = true
     try {
       const data = await apiGet<StatusInfo>('status')
       setStatus(data)
@@ -248,6 +252,8 @@ export default function App() {
     } catch {
       /* роутер недоступен — оставляем прошлые данные, но показываем плашку */
       setConnected(false)
+    } finally {
+      refreshInFlight.current = false
     }
   }, [])
 
@@ -359,10 +365,7 @@ export default function App() {
         ))}
       </nav>
 
-      {/* Универсальная плашка бета-версии (Apple-style Frosted Glass) */}
-      <div className="beta-notice-banner">
-        <span>🧪 Бета-версия XKeen Route: функционал находится в стадии активного тестирования.</span>
-      </div>
+      {/* FE-03: бета-баннер убран — вводил в заблуждение в релизных версиях */}
 
       {!connected && (
         <div

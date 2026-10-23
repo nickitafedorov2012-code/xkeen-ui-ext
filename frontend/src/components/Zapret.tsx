@@ -112,7 +112,12 @@ export default function Zapret({ notify }: ZapretProps) {
   const [addingCustom, setAddingCustom] = useState(false)
   const [boostingDomain, setBoostingDomain] = useState<string | null>(null)
 
+  // Z-19: защита поллинга — не опрашиваем фоновую вкладку и не допускаем наложение
+  // запросов (раньше наложение триггерило побочные эффекты GET /api/zapret/status)
+  const statusInFlightRef = useRef(false)
   const loadStatus = async () => {
+    if (document.hidden || statusInFlightRef.current) return
+    statusInFlightRef.current = true
     try {
       const res = await apiGet<ZapretStatus>('zapret/status')
       setStatus((prev) => {
@@ -177,6 +182,7 @@ export default function Zapret({ notify }: ZapretProps) {
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка загрузки статуса Zapret', true)
     } finally {
+      statusInFlightRef.current = false
       setLoading(false)
     }
   }

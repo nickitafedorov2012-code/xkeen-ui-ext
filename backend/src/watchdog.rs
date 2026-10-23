@@ -479,6 +479,37 @@ pub fn spawn_zapret_monitor(state: AppState) {
 
             if !zapret_enabled {
                 restart_failures = 0;
+                // Z-03/Z-05: служба выключена в конфигурации — гасим осиротевший процесс и
+                // остаточные правила здесь (watchdog), а не в GET /api/zapret/status.
+                // Маркер не трогаем: он означает «выключено пользователем» и ставится UI/ботом.
+                let orphan_running = tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null")
+                    .output()
+                    .await
+                    .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+                    .unwrap_or(false);
+                if orphan_running {
+                    log_w!("[WATCHDOG] ⚠️ Zapret выключен в настройках, но nfqws ещё запущен — остановка осиротевшего процесса...");
+                    let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret")
+                        .arg("stop")
+                        .output()
+                        .await;
+                } else {
+                    let iptables_left = tokio::process::Command::new("sh")
+                        .arg("-c")
+                        .arg("iptables -t mangle -S 2>/dev/null | grep -q zapret || iptables -t nat -S PREROUTING 2>/dev/null | grep -q 'to-ports 1053'")
+                        .output()
+                        .await
+                        .map(|o| o.status.success())
+                        .unwrap_or(false);
+                    if iptables_left {
+                        let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret")
+                            .arg("stop-fw")
+                            .output()
+                            .await;
+                    }
+                }
                 continue;
             }
 
@@ -590,6 +621,8 @@ pub fn spawn_zapret_monitor(state: AppState) {
                     cfg.zapret.enabled = false;
                     let _ = config::save(&state.config_path, &cfg).await;
                     *state.config.write().await = std::sync::Arc::new(cfg);
+                    // Z-03: маркер предотвращает перезапуск S51zapret (автозапуск Entware) до явного включения пользователем
+                    crate::zapret::set_zapret_disabled_marker();
                     let _ = tokio::process::Command::new(init_script)
                         .arg("stop-fw")
                         .output()
@@ -757,7 +790,13 @@ pub fn spawn_adguard_monitor(state: AppState) {
                 let _ = crate::adguard::heal_adguard_live_config(&state.http, &adguard_cfg, Some(&router_ip)).await;
             }
 
-            let iptables_active = crate::adguard::is_adguard_iptables_active(dns_port);
+            // G-02: десятки синхронных iptables-вызовов внутри is_adguard_iptables_active
+            // фризили async-цикл — выносим в блокирующий пул tokio
+            let iptables_active = tokio::task::spawn_blocking(move || {
+                crate::adguard::is_adguard_iptables_active(dns_port)
+            })
+            .await
+            .unwrap_or(false);
 
             if !enabled && !is_running_protected {
                 if iptables_active {
@@ -999,8 +1038,17 @@ pub fn spawn_smart_gaming_monitor(state: AppState) {
             if found_non_ignored {
                 last_active_instant = Some(std::time::Instant::now());
                 if !cfg.gaming.enabled || (cfg.gaming.mode != config::GamingMode::Compatibility && cfg.gaming.mode != config::GamingMode::BypassRu) {
+                    // X-02: пока failover приостановил игровой режим (активен узел [БС],
+                    // gaming_suspended=true) — авто-включение запрещено во избежание
+                    // воспроизведения конфликта сокетов БС↔gaming.
+                    if cfg.whitelist.gaming_suspended {
+                        log_i!(
+                            "[SMART-GAMING] ⏸️ Обнаружено игровое подключение ({}), но игровой режим приостановлен failover (активен узел [БС]) — авто-включение пропущено",
+                            trigger_target
+                        );
+                    }
                     // Включаем игровой режим только если выбрано игровое устройство с IP
-                    if !active_dev_ip.is_empty() {
+                    else if !active_dev_ip.is_empty() {
                         log_i!(
                             "[SMART-GAMING] 🎮 Обнаружено игровое подключение ({}) на {} — автоматическое включение Режима совместимости!",
                             trigger_target,

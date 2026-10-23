@@ -996,11 +996,22 @@ async fn switch_server_inner(http: &reqwest::Client, cfg: &AppConfig, server_id:
             if !prev_active.is_empty() && prev_active != target && !prev_active.eq_ignore_ascii_case("direct") {
                 let closed = close_server_connections(http, cfg, &prev_active).await;
                 if closed == 0 {
-                    let _ = close_all_connections(http, cfg).await;
+                    // F-02: НЕ выполняем общий сброс всех соединений — 0 закрытых означает,
+                    // что активных сессий старого узла нет (или Mihomo недоступен). Общий
+                    // сброс рвал DIRECT-соединения (банки, Госуслуги, SIP) и туннели
+                    // других устройств, что противоречит контракту селективного сброса.
+                    crate::log_i!(
+                        "Селективный сброс: 0 соединений для узла '{}' — общий сброс соединений не выполняется (DIRECT не затрагивается)",
+                        prev_active
+                    );
                 }
-            } else {
+            } else if !prev_active.is_empty() && prev_active.eq_ignore_ascii_case("direct") {
+                // Переход с DIRECT на прокси: сбрасываем сокеты, чтобы клиентские сессии
+                // переустановились уже через туннель.
                 let _ = close_all_connections(http, cfg).await;
             }
+            // prev_active пуст (не удалось определить) — ничего не рвём: сбой GET /connections
+            // раньше фолбэчился в close_all_connections и сносил ВСЕ соединения роутера.
         } else {
             crate::log_i!("Graceful Failback: группы переключены на '{target}', активные сокеты старого узла не сбрасываются");
         }

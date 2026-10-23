@@ -458,8 +458,10 @@ pub async fn change_password(
     let _guard = state.config_lock.lock().await;
     let mut cur = (**state.config.read().await).clone();
 
-    // Если пароль уже был включен, требуем подтверждение старого пароля
-    if cur.auth.enabled && !cur.auth.password_hash.is_empty() {
+    // A-02: текущий пароль требуется ВСЕГДА, когда хеш уже существует (даже при
+    // auth.enabled=false): иначе любой LAN-запрос мог перезаписать существующий
+    // пароль и захватить панель. Бутстрап (первый пароль при пустом хеше) разрешён.
+    if !cur.auth.password_hash.is_empty() {
         let curr = body.current_password.unwrap_or_default();
         if !verify_password(&curr, &cur.auth.salt, &cur.auth.password_hash) {
             return api_err("Текущий пароль указан неверно");
@@ -507,12 +509,16 @@ fn extract_host_only(host_part: &str) -> &str {
     }
 }
 
-/// Строгая проверка хоста Origin на принадлежность к доверенным адресам LAN, loopback или разрешенным локальным именам (SEC-02).
+/// Строгая проверка хоста Origin на принадлежность к доверенным адресам (SEC-02 / A-01).
+/// A-01: раньше ЛЮБОЙ приватный IPv4 (RFC1918) считался доверенным — CSRF был возможен
+/// с любого скомпрометированного устройства LAN. Теперь приватные адреса доверяются
+/// только через совпадение с заголовком Host (правило 1 в is_trusted_origin);
+/// безусловный доверенный набор — loopback и локальные имена роутера.
 pub fn is_valid_origin(origin_host_only: &str) -> bool {
     let unbracketed = origin_host_only.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = unbracketed.parse::<std::net::IpAddr>() {
         match ip {
-            std::net::IpAddr::V4(ipv4) => ipv4.is_private() || ipv4.is_loopback(),
+            std::net::IpAddr::V4(ipv4) => ipv4.is_loopback(),
             std::net::IpAddr::V6(ipv6) => ipv6.is_loopback(),
         }
     } else {
@@ -767,13 +773,18 @@ mod tests {
 
     #[test]
     fn test_csrf_origin_validation_regression() {
-        // 1. Доверенные локальные источники
+        // 1. Доверенные локальные источники (loopback имена безусловно)
         assert!(is_trusted_origin("http://127.0.0.1:1001", None));
         assert!(is_trusted_origin("http://localhost:1001", None));
-        assert!(is_trusted_origin("http://192.168.1.1:1001", None));
-        assert!(is_trusted_origin("https://10.0.0.1", None));
-        assert!(is_trusted_origin("http://172.16.0.1", None));
-        assert!(is_trusted_origin("http://172.31.255.254", None));
+        // A-01: приватные LAN-адреса доверяются ТОЛЬКО через совпадение с Host
+        assert!(is_trusted_origin("http://192.168.1.1:1001", Some("192.168.1.1:1001")));
+        assert!(!is_trusted_origin("http://192.168.1.1:1001", None), "private IP without Host match must be rejected (A-01)");
+        assert!(is_trusted_origin("https://10.0.0.1", Some("10.0.0.1")));
+        assert!(!is_trusted_origin("https://10.0.0.1", None));
+        assert!(is_trusted_origin("http://172.16.0.1", Some("172.16.0.1")));
+        assert!(!is_trusted_origin("http://172.16.0.1", None));
+        assert!(is_trusted_origin("http://172.31.255.254", Some("172.31.255.254")));
+        assert!(!is_trusted_origin("http://172.31.255.254", None));
         // 2. Источник совпадает с заголовком Host (включая KeenDNS)
         assert!(is_trusted_origin("https://myrouter.keenetic.pro:1001", Some("myrouter.keenetic.pro:1001")));
         assert!(is_trusted_origin("https://my.keenetic.net", Some("my.keenetic.net")));
@@ -803,18 +814,21 @@ mod tests {
 
     #[test]
     fn test_sec02_is_valid_origin_strict_parsing() {
-        // Доверенные приватные адреса, loopback и стандартные локальные имена
+        // Доверенные безусловно: loopback и локальные имена роутера
         assert!(is_valid_origin("127.0.0.1"));
         assert!(is_valid_origin("::1"));
         assert!(is_valid_origin("[::1]"));
-        assert!(is_valid_origin("192.168.1.1"));
-        assert!(is_valid_origin("192.168.2.1"));
-        assert!(is_valid_origin("10.0.0.1"));
-        assert!(is_valid_origin("172.16.0.1"));
-        assert!(is_valid_origin("172.31.255.254"));
         assert!(is_valid_origin("localhost"));
         assert!(is_valid_origin("my.keenetic.net"));
         assert!(is_valid_origin("router"));
+
+        // A-01: приватные IP больше не доверяются безусловно — только через Host-match
+        // (правило 1 is_trusted_origin); здесь все они должны отклоняться
+        assert!(!is_valid_origin("192.168.1.1"));
+        assert!(!is_valid_origin("192.168.2.1"));
+        assert!(!is_valid_origin("10.0.0.1"));
+        assert!(!is_valid_origin("172.16.0.1"));
+        assert!(!is_valid_origin("172.31.255.254"));
 
         // Вредоносные поддельные домены с префиксами IP и локальных имен
         assert!(!is_valid_origin("192.168.attacker.com"));
