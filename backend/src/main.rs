@@ -145,10 +145,10 @@ is_running() {{
 
 wait_for_opt() {{
     attempt=0
-    while [ "$attempt" -lt 30 ]; do
+    while [ "$attempt" -lt 120 ]; do
         [ -x "$BIN" ] && return 0
         attempt=$((attempt + 1))
-        sleep 2
+        sleep 0.5
     done
     echo "$NAME: $BIN is unavailable after waiting for /opt" >&2
     return 1
@@ -257,6 +257,8 @@ mod init_script_tests {
     fn init_script_waits_for_entware_and_recovers_mihomo() {
         let script = init_script_content(1001);
         assert!(script.contains("wait_for_opt()"));
+        assert!(script.contains("while [ \"$attempt\" -lt 120 ]; do"));
+        assert!(script.contains("sleep 0.5"));
         assert!(script.contains("ensure_xkeen()"));
         assert!(script.contains("sh \"$XKEEN_INIT\" start"));
         assert!(script.contains("Mihomo did not start in 60 seconds"));
@@ -302,11 +304,22 @@ mod init_script_tests {
 }
 
 
-/// Запрет кэширования ответов панели (иначе браузер показывает устаревшие данные).
+/// Управление заголовками кэширования ответов веб-сервера:
+/// - Хэшированные ассеты фронтенда (/assets/*) при успехе кэшируются на 1 год как неизменяемые (immutable).
+/// - index.html, API (/api/*) и динамические ответы получают no-cache, no-store, must-revalidate.
 async fn no_cache(req: Request, next: Next) -> Response {
+    let path = req.uri().path();
+    let is_asset = path.starts_with("/assets/");
     let mut res = next.run(req).await;
-    if let Ok(v) = axum::http::HeaderValue::from_str("no-store") {
-        res.headers_mut().insert("Cache-Control", v);
+
+    if is_asset && res.status().is_success() {
+        if let Ok(v) = axum::http::HeaderValue::from_str("public, max-age=31536000, immutable") {
+            res.headers_mut().insert(axum::http::header::CACHE_CONTROL, v);
+        }
+    } else if !res.headers().contains_key(axum::http::header::CACHE_CONTROL) {
+        if let Ok(v) = axum::http::HeaderValue::from_str("no-cache, no-store, must-revalidate") {
+            res.headers_mut().insert(axum::http::header::CACHE_CONTROL, v);
+        }
     }
     res
 }

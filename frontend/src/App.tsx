@@ -1,24 +1,29 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, lazy, Suspense } from 'react'
 import React from 'react'
 import Dashboard from './components/Dashboard'
-import Devices from './components/Devices'
-import Servers from './components/Servers'
-import Settings from './components/Settings'
 import Header from './components/Header'
-import Antigravity from './components/Antigravity'
 import LoginModal from './components/LoginModal'
-import ConfigEditor from './components/ConfigEditor'
-import ConnectionsViewer from './components/ConnectionsViewer'
-import RulesViewer from './components/RulesViewer'
-import Diagnostics from './components/Diagnostics'
-import UpdateModal from './components/UpdateModal'
-import MihomoCoreModal from './components/MihomoCoreModal'
-import ZapretCoreModal from './components/ZapretCoreModal'
-import Zapret from './components/Zapret'
-import Gaming from './components/Gaming'
-import Whitelist from './components/Whitelist'
-import AdGuard from './components/AdGuard'
-import Help from './components/Help'
+
+// 12 Secondary Tabs (Code Splitting via React.lazy)
+const Servers = lazy(() => import('./components/Servers'))
+const Devices = lazy(() => import('./components/Devices'))
+const Whitelist = lazy(() => import('./components/Whitelist'))
+const Zapret = lazy(() => import('./components/Zapret'))
+const Gaming = lazy(() => import('./components/Gaming'))
+const Antigravity = lazy(() => import('./components/Antigravity'))
+const ConnectionsViewer = lazy(() => import('./components/ConnectionsViewer'))
+const RulesViewer = lazy(() => import('./components/RulesViewer'))
+const Diagnostics = lazy(() => import('./components/Diagnostics'))
+const Settings = lazy(() => import('./components/Settings'))
+const AdGuard = lazy(() => import('./components/AdGuard'))
+const Help = lazy(() => import('./components/Help'))
+
+// 4 Heavy Modals (Code Splitting via React.lazy)
+const ConfigEditor = lazy(() => import('./components/ConfigEditor'))
+const UpdateModal = lazy(() => import('./components/UpdateModal'))
+const MihomoCoreModal = lazy(() => import('./components/MihomoCoreModal'))
+const ZapretCoreModal = lazy(() => import('./components/ZapretCoreModal'))
+
 import { apiGet, apiPost } from './api'
 import type { AuthStatus, StatusInfo } from './types'
 
@@ -81,6 +86,29 @@ class ErrorBoundary extends React.Component<
     }
     return this.props.children
   }
+}
+
+export function TabLoadingFallback() {
+  return (
+    <section
+      className="card"
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        minHeight: 340,
+        gap: 14,
+      }}
+    >
+      <span className="spin-icon" style={{ fontSize: 28, color: 'var(--primary, #38bdf8)' }}>
+        ⏳
+      </span>
+      <span className="muted" style={{ fontSize: 14, fontWeight: 500 }}>
+        Загрузка раздела…
+      </span>
+    </section>
+  )
 }
 
 export default function App() {
@@ -352,19 +380,21 @@ export default function App() {
 
       <main className="content">
         <ErrorBoundary key={tab}>
-          {tab === 'dashboard' && <Dashboard status={status} notify={notify} refresh={refresh} onSwitchTab={switchTab} />}
-          {tab === 'servers' && <Servers notify={notify} status={status} refresh={refresh} />}
-          {tab === 'devices' && <Devices notify={notify} />}
-          {tab === 'whitelist' && <Whitelist notify={notify} status={status} refresh={refresh} />}
-          {tab === 'zapret' && <Zapret notify={notify} />}
-          {(tab === 'gaming' || tab === 'xbox-dns') && <Gaming notify={notify} />}
-          {(tab === 'google-ai' || tab === 'antigravity') && <Antigravity notify={notify} />}
-          {tab === 'connections' && <ConnectionsViewer notify={notify} />}
-          {tab === 'rules' && <RulesViewer notify={notify} />}
-          {tab === 'diagnostics' && <Diagnostics notify={notify} />}
-          {tab === 'settings' && <Settings notify={notify} status={status} refresh={refresh} />}
-          {tab === 'adguard' && <AdGuard notify={notify} />}
-          {tab === 'help' && <Help status={status} />}
+          <Suspense fallback={<TabLoadingFallback />}>
+            {tab === 'dashboard' && <Dashboard status={status} notify={notify} refresh={refresh} onSwitchTab={switchTab} />}
+            {tab === 'servers' && <Servers notify={notify} status={status} refresh={refresh} />}
+            {tab === 'devices' && <Devices notify={notify} />}
+            {tab === 'whitelist' && <Whitelist notify={notify} status={status} refresh={refresh} />}
+            {tab === 'zapret' && <Zapret notify={notify} />}
+            {(tab === 'gaming' || tab === 'xbox-dns') && <Gaming notify={notify} />}
+            {(tab === 'google-ai' || tab === 'antigravity') && <Antigravity notify={notify} />}
+            {tab === 'connections' && <ConnectionsViewer notify={notify} />}
+            {tab === 'rules' && <RulesViewer notify={notify} />}
+            {tab === 'diagnostics' && <Diagnostics notify={notify} />}
+            {tab === 'settings' && <Settings notify={notify} status={status} refresh={refresh} />}
+            {tab === 'adguard' && <AdGuard notify={notify} />}
+            {tab === 'help' && <Help status={status} />}
+          </Suspense>
         </ErrorBoundary>
       </main>
 
@@ -388,37 +418,53 @@ export default function App() {
       />
 
       {/* Глобальное модальное окно редактора конфигов */}
-      <ConfigEditor
-        isOpen={globalEditorOpen}
-        onClose={() => setGlobalEditorOpen(false)}
-        notify={notify}
-      />
+      {globalEditorOpen && (
+        <Suspense fallback={null}>
+          <ConfigEditor
+            isOpen={globalEditorOpen}
+            onClose={() => setGlobalEditorOpen(false)}
+            notify={notify}
+          />
+        </Suspense>
+      )}
 
       {/* Модальное окно 1-клик обновления XKeen Route */}
-      <UpdateModal
-        isOpen={updateModalOpen}
-        onClose={() => setUpdateModalOpen(false)}
-        currentVersion={updateInfo?.current || status?.version || ''}
-        latestVersion={updateInfo?.latest || ''}
-        notes={updateInfo?.notes || []}
-        notify={notify}
-      />
+      {updateModalOpen && (
+        <Suspense fallback={null}>
+          <UpdateModal
+            isOpen={updateModalOpen}
+            onClose={() => setUpdateModalOpen(false)}
+            currentVersion={updateInfo?.current || status?.version || ''}
+            latestVersion={updateInfo?.latest || ''}
+            notes={updateInfo?.notes || []}
+            notify={notify}
+          />
+        </Suspense>
+      )}
 
       {/* Модальное окно управления и обновления ядра Mihomo */}
-      <MihomoCoreModal
-        isOpen={mihomoModalOpen}
-        onClose={() => setMihomoModalOpen(false)}
-        notify={notify}
-        onUpdated={refresh}
-      />
+      {mihomoModalOpen && (
+        <Suspense fallback={null}>
+          <MihomoCoreModal
+            isOpen={mihomoModalOpen}
+            onClose={() => setMihomoModalOpen(false)}
+            notify={notify}
+            onUpdated={refresh}
+          />
+        </Suspense>
+      )}
 
       {/* Модальное окно управления и выбора ядра Zapret (DPI) */}
-      <ZapretCoreModal
-        isOpen={zapretModalOpen}
-        onClose={() => setZapretModalOpen(false)}
-        notify={notify}
-        onUpdated={refresh}
-      />
+      {zapretModalOpen && (
+        <Suspense fallback={null}>
+          <ZapretCoreModal
+            isOpen={zapretModalOpen}
+            onClose={() => setZapretModalOpen(false)}
+            notify={notify}
+            onUpdated={refresh}
+          />
+        </Suspense>
+      )}
     </div>
   )
 }

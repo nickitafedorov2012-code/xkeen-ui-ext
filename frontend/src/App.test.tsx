@@ -47,6 +47,12 @@ vi.mock('./components/Help', () => ({
 vi.mock('./components/AdGuard', () => ({
   default: () => <div data-testid="adguard-view">AdGuard View</div>,
 }))
+vi.mock('./components/Whitelist', () => ({
+  default: () => <div data-testid="whitelist-view">Whitelist View</div>,
+}))
+vi.mock('./components/ZapretCoreModal', () => ({
+  default: ({ isOpen }: { isOpen: boolean }) => (isOpen ? <div data-testid="zapret-core-modal">Zapret Modal</div> : null),
+}))
 
 describe('App Component — Top Header Navigation & Settings Tab Relocation', () => {
   let container: HTMLDivElement | null = null
@@ -305,6 +311,58 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
     const intervals = setIntervalSpy.mock.calls.map((c) => c[1])
     expect(intervals.some((ms) => typeof ms === 'number' && ms >= 3000)).toBe(true)
     expect(intervals.some((ms) => typeof ms === 'number' && ms > 0 && ms < 3000)).toBe(false)
+  })
+
+  it('anti-regression (STARTUP-01): lazy-loads secondary tabs and heavy modals within Suspense boundary without crash', async () => {
+    await act(async () => {
+      root!.render(<App />)
+    })
+
+    // 1. Initial render displays static Dashboard view
+    expect(container?.querySelector('[data-testid="dashboard-view"]')).not.toBeNull()
+
+    // 2. Switch to a lazy-loaded tab: Servers
+    const serversTabBtn = Array.from(container?.querySelectorAll('nav.tabs button') || []).find((b) =>
+      b.textContent?.includes('Серверы')
+    ) as HTMLButtonElement | undefined
+    expect(serversTabBtn).toBeDefined()
+
+    await act(async () => {
+      serversTabBtn?.click()
+    })
+
+    // Lazy component must be rendered within Suspense boundary
+    expect(container?.querySelector('[data-testid="servers-view"]')).not.toBeNull()
+    expect(container?.querySelector('[data-testid="dashboard-view"]')).toBeNull()
+
+    // 3. Switch to another lazy-loaded tab: Whitelist
+    const whitelistTabBtn = Array.from(container?.querySelectorAll('nav.tabs button') || []).find((b) =>
+      b.textContent?.includes('Белые списки')
+    ) as HTMLButtonElement | undefined
+    expect(whitelistTabBtn).toBeDefined()
+
+    await act(async () => {
+      whitelistTabBtn?.click()
+    })
+
+    expect(container?.querySelector('[data-testid="whitelist-view"]')).not.toBeNull()
+
+    // 4. Verify custom event modal trigger loads heavy modal in Suspense
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent('xr:open-zapret-modal'))
+    })
+    expect(container?.querySelector('[data-testid="zapret-core-modal"]')).not.toBeNull()
+  })
+
+  it('anti-regression (STARTUP-02): TabLoadingFallback renders with 340px minimum height and zero CLS', async () => {
+    const { TabLoadingFallback } = await import('./App')
+    await act(async () => {
+      root!.render(<TabLoadingFallback />)
+    })
+    const card = container?.querySelector('section.card') as HTMLElement | null
+    expect(card).not.toBeNull()
+    expect(card?.textContent).toContain('Загрузка раздела…')
+    expect(card?.style.minHeight).toBe('340px')
   })
 })
 

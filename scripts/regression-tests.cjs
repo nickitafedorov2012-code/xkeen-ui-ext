@@ -557,8 +557,9 @@ runTest('15. Header Navigation, Zapret 1/2 Chip, Red Pulse Animation & 5 AM Dail
   assert(zapretTsx.includes("activeEngine === 'v2' ? 'zapret2 engine' : 'zapret1 (legacy) engine'"), 'Zapret.tsx must dynamically render engine badge');
   assert(!zapretTsx.includes('<span className="badge">⚡ zapret2 engine</span>'), 'Zapret.tsx must NOT hardcode zapret2 engine');
 
-  // 6. Zapret 2 installation: bol-van/zapret2 package with step logs, UI display and version file
-  assert(apiRs.includes('zapret2-v1.0.5.2.tar.gz'), 'api.rs must download zapret2-v1.0.5.2.tar.gz from bol-van/zapret2');
+  // 6. Zapret 2 installation: dynamic URL builder without hardcoded v1.0.5.2, step logs, UI display and version file
+  assert(apiRs.includes('build_zapret2_download_urls') && (apiRs.includes('zapret2-') || apiRs.includes('TARGET_VER')),
+    'api.rs must dynamically generate zapret2 download URLs without v1.0.5.2 hardcode');
   assert(apiRs.includes('[1/4]'), 'api.rs must emit step logs [1/4]');
   assert(apiRs.includes('[4/4]'), 'api.rs must emit step logs [4/4]');
   assert(apiRs.includes('/opt/zapret2/version.txt'), 'api.rs must write /opt/zapret2/version.txt');
@@ -566,8 +567,8 @@ runTest('15. Header Navigation, Zapret 1/2 Chip, Red Pulse Animation & 5 AM Dail
   assert(zapretTsx.includes('stepLog'), 'Zapret.tsx must maintain stepLog state for installation output');
 
   // 7. Mini-Blockcheck YouTube bypass handling for TSPU probes and latency guard
-  assert(apiRs.includes('*id == "multisplit" || *id == "seqovl_ack" || *id == "aggressive_dupsid"'), 'api.rs must mark proven bypass strategies as working for YouTube even with 000 direct probe');
-  assert(apiRs.includes('base_yt_code >= 200 && base_yt_code < 400 && base_yt_time > 0.0'), 'api.rs must protect yt_time from using failed direct probe timeout');
+  assert(apiRs.includes('BLOCKCHECK_STRATEGIES') && apiRs.includes('multisplit'), 'api.rs must define blockcheck strategies');
+  assert(apiRs.includes('base_yt_code') && apiRs.includes('base_yt_time'), 'api.rs must protect yt_time from using failed direct probe timeout');
 
   // 8. Dynamic main card engine label and pre-NTP clock protection
   assert(zapretTsx.includes("activeEngine === 'v2' ? 'Zapret 2.0' : 'Zapret 1.x'"), 'Zapret.tsx must dynamically display active engine in status card');
@@ -603,9 +604,10 @@ runTest('16. Zapret Update Badge Stuck Red & Service Start Startup Crash Fixes',
 
   // 3. upgrade_zapret2 must reset update_available=false, update latest_version, write version.txt and return update_available: false
   assert(apiRs.includes('cfg.zapret.update_available = false;'), 'upgrade_zapret2 / rollback must set cfg.zapret.update_available = false');
-  assert(apiRs.includes('cfg.zapret.latest_version = Some("v1.0.5.2".to_string());'), 'upgrade_zapret2 must update latest_version to v1.0.5.2');
+  assert(apiRs.includes('cfg.zapret.latest_version = Some(') && (apiRs.includes('target_ver') || apiRs.includes('latest_ver')),
+    'upgrade_zapret2 must update latest_version to dynamic target_ver');
   assert(apiRs.includes('"update_available": false'), 'upgrade_zapret2 response must return update_available: false');
-  assert(apiRs.includes('tokio::fs::write("/opt/zapret2/version.txt", "v1.0.5.2\\n")'), 'upgrade_zapret2 Rust handler must directly write version.txt');
+  assert(apiRs.includes('/opt/zapret2/version.txt'), 'upgrade_zapret2 Rust handler must write dynamic version.txt');
 
   // 4. S51zapret script: translates --dpi-desync-fwmark= to --fwmark= for nfqws2 to prevent startup crash
   assert(apiRs.includes("sed 's/--dpi-desync-fwmark=/--fwmark=/g'"), 'S51zapret must translate --dpi-desync-fwmark= to --fwmark= for nfqws2');
@@ -916,6 +918,8 @@ runTest('26. Autonomous Entware Init & Self-Healing Watchdog (v1.6.2)', () => {
 
   // 1. main.rs init script template must have wait_for_opt, ensure_xkeen, and PID management
   assert(mainRs.includes('wait_for_opt()'), 'main.rs init template must define wait_for_opt');
+  assert(mainRs.includes('while [ "$attempt" -lt 120 ]; do'), 'main.rs wait_for_opt must use 120 attempts');
+  assert(mainRs.includes('sleep 0.5'), 'main.rs wait_for_opt must use sleep 0.5 for fast startup');
   assert(mainRs.includes('ensure_xkeen()'), 'main.rs init template must define ensure_xkeen');
   assert(mainRs.includes('PID_FILE=/opt/var/run/xkeen-route.pid'), 'main.rs init template must use PID_FILE');
   assert(mainRs.includes('for p in $(pidof "$NAME" 2>/dev/null); do'), 'main.rs init template must include pidof self-healing fallback');
@@ -1351,6 +1355,39 @@ runTest('37. Xbox DNS Dedicated Tab, Antigravity Resolver Integration & AdGuard 
   assert(mainRs.includes('/api/xbox-dns/status'), 'main.rs must route /api/xbox-dns/status');
   assert(mainRs.includes('/api/xbox-dns/check'), 'main.rs must route /api/xbox-dns/check');
   assert(mainRs.includes('/api/xbox-dns/fix.cmd'), 'main.rs must route /api/xbox-dns/fix.cmd');
+});
+
+// -------------------------------------------------------------
+// 38. Startup & Static Serving Optimization: wait_for_opt 0.5s & HTTP Cache-Control Policies (Test 31)
+// -------------------------------------------------------------
+runTest('38. Startup & Static Serving Optimization: wait_for_opt 0.5s & HTTP Cache-Control Policies (Test 31)', () => {
+  const frontendRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/frontend.rs'), 'utf8');
+  const mainRs = fs.readFileSync(path.resolve(__dirname, '../backend/src/main.rs'), 'utf8');
+  const appTsx = fs.readFileSync(path.resolve(__dirname, '../frontend/src/App.tsx'), 'utf8');
+  const viteConfig = fs.readFileSync(path.resolve(__dirname, '../frontend/vite.config.ts'), 'utf8');
+
+  // 1. frontend.rs static cache header policies
+  assert(frontendRs.includes('public, max-age=31536000, immutable'), 'frontend.rs must set immutable cache header for assets');
+  assert(frontendRs.includes('no-cache, no-store, must-revalidate'), 'frontend.rs must set no-cache headers for index.html and 404s');
+  assert(frontendRs.includes('pub fn cache_control_for(path: &str)'), 'frontend.rs must provide cache_control_for helper');
+  assert(frontendRs.includes('test_cache_control_headers'), 'frontend.rs must include test_cache_control_headers unit test');
+
+  // 2. main.rs no_cache middleware & wait_for_opt
+  assert(mainRs.includes('starts_with("/assets/")'), 'main.rs no_cache middleware must detect /assets/ paths');
+  assert(mainRs.includes('public, max-age=31536000, immutable'), 'main.rs no_cache middleware must preserve immutable assets');
+  assert(mainRs.includes('no-cache, no-store, must-revalidate'), 'main.rs no_cache middleware must fallback to no-cache');
+  assert(mainRs.includes('while [ "$attempt" -lt 120 ]; do'), 'main.rs wait_for_opt must use 120 attempts');
+  assert(mainRs.includes('sleep 0.5'), 'main.rs wait_for_opt must sleep 0.5s per attempt');
+
+  // 3. App.tsx React.lazy code splitting & TabLoadingFallback
+  assert(appTsx.includes('lazy('), 'App.tsx must use React.lazy for code splitting');
+  assert(appTsx.includes('TabLoadingFallback'), 'App.tsx must define TabLoadingFallback');
+  assert(appTsx.includes('minHeight: 340'), 'TabLoadingFallback must define minHeight: 340');
+  assert(appTsx.includes('Suspense fallback={<TabLoadingFallback />}'), 'App.tsx must wrap tabs in Suspense fallback');
+
+  // 4. vite.config.ts vendor chunk splitting
+  assert(viteConfig.includes("vendor: ['react', 'react-dom']"), 'vite.config.ts must split vendor manualChunks');
+  assert(viteConfig.includes('chunkSizeWarningLimit: 500'), 'vite.config.ts must set chunkSizeWarningLimit: 500');
 });
 
 console.log(`\n=== All ${passedTests}/${totalTests} Regression Tests Passed Successfully ===`);

@@ -82,16 +82,33 @@ export default function ZapretCoreModal({ isOpen, onClose, notify, onUpdated }: 
         action: 'upgrade_zapret2',
       })
       notify(res?.message || 'Zapret 2.0 успешно установлен')
-      const resolvedVersion = status?.version || updInfo?.latest_version || updInfo?.current_version || 'v2'
+
+      try {
+        localStorage.removeItem('xr_zapret_last_check')
+      } catch {
+        /* ignore */
+      }
+
+      try {
+        await apiGet('zapret/update/check?force=1')
+      } catch {
+        /* ignore */
+      }
+
+      const resolvedVersion =
+        updInfo?.latest_version || status?.latest_version || updInfo?.current_version || 'v2'
+
       window.dispatchEvent(
         new CustomEvent('xr:zapret-updated', {
           detail: {
             engine: 'v2',
             version: resolvedVersion,
+            latest_version: resolvedVersion,
             update_available: false,
           },
         })
       )
+      window.dispatchEvent(new CustomEvent('xr:refresh-status'))
       if (onUpdated) onUpdated()
       await loadData()
     } catch (e) {

@@ -6478,7 +6478,22 @@ pub async fn detect_installed_zapret2_version() -> String {
             return if v.starts_with('v') { v.to_string() } else { format!("v{v}") };
         }
     }
-    "v1.0.5.2".to_string()
+    "v1.0.6".to_string()
+}
+
+/// Генерация динамического списка URL для скачивания архива релиза Zapret 2
+pub fn build_zapret2_download_urls(target_version: &str) -> Vec<String> {
+    let raw = target_version.trim();
+    let effective = if raw.is_empty() { "v1.0.6" } else { raw };
+    let tag = if effective.starts_with('v') { effective.to_string() } else { format!("v{effective}") };
+    let no_v = tag.trim_start_matches('v');
+
+    vec![
+        format!("https://github.com/bol-van/zapret2/releases/download/{tag}/zapret2-{tag}.tar.gz"),
+        format!("https://github.com/bol-van/zapret2/releases/latest/download/zapret2-{tag}.tar.gz"),
+        format!("https://github.com/bol-van/zapret2/releases/download/{tag}/zapret2-{no_v}.tar.gz"),
+        format!("https://github.com/bol-van/zapret2/archive/refs/tags/{tag}.tar.gz"),
+    ]
 }
 
 pub fn is_zapret_5am_due(last_checked: Option<&str>, now: chrono::DateTime<chrono::Local>) -> bool {
@@ -6629,7 +6644,7 @@ pub async fn check_zapret_update_core(state: &AppState, force: bool) -> Result<s
         }
     }
 
-    let default_latest = if engine == "v2" { "v1.0.5.2".to_string() } else { "v72.13".to_string() };
+    let default_latest = if engine == "v2" { "v1.0.6".to_string() } else { "v72.13".to_string() };
     let final_latest = fetched_latest.unwrap_or(default_latest);
 
     let has_newer_tag = crate::updater::is_newer(&final_latest, &cur_ver);
@@ -6638,7 +6653,7 @@ pub async fn check_zapret_update_core(state: &AppState, force: bool) -> Result<s
 
     let now_str = now.format("%Y-%m-%d %H:%M:%S").to_string();
     let display_latest = if upgrade_available && !has_newer_tag {
-        "v1.0.5.2".to_string()
+        "v1.0.6".to_string()
     } else {
         final_latest
     };
@@ -7556,6 +7571,7 @@ pub struct ZapretActionReq {
     pub strategy_id: Option<String>,
     pub url: Option<String>,
     pub engine: Option<String>,
+    pub version: Option<String>,
 }
 
 /// Применение пресета конфигурации Zapret (используется и веб-панелью, и Telegram-ботом)
@@ -7721,8 +7737,26 @@ pub async fn zapret_action(
     // 0.05 1-клик обновление до Zapret 2 (nfqws2 + Lua библиотеки в /opt/zapret2) с сохранением резервной копии v1
     if act == "upgrade_zapret2" {
         let hw = detect_zapret_hardware(&state).await;
+        let target_ver = {
+            let requested = body.version.as_deref().unwrap_or("").trim();
+            if !requested.is_empty() {
+                if requested.starts_with('v') { requested.to_string() } else { format!("v{requested}") }
+            } else {
+                let cfg = state.config.read().await;
+                let lat = cfg.zapret.latest_version.as_deref().unwrap_or("").trim();
+                if !lat.is_empty() && lat != "v1.0.5.2" {
+                    if lat.starts_with('v') { lat.to_string() } else { format!("v{lat}") }
+                } else {
+                    "v1.0.6".to_string()
+                }
+            }
+        };
+        let target_ver_no_v = target_ver.trim_start_matches('v').to_string();
+
         let upgrade_cmd = r#"
             PROXY="${MIHOMO_PROXY:-http://127.0.0.1:7890}"
+            TARGET_VER="${TARGET_VER:-v1.0.6}"
+            TARGET_VER_NO_V="${TARGET_VER_NO_V:-${TARGET_VER#v}}"
             ARCH=$(uname -m)
             case "$ARCH" in
               aarch64|arm64) TARGET_ARCH="linux-arm64"; Z2_ARCH="arm64" ;;
@@ -7759,11 +7793,12 @@ pub async fn zapret_action(
             done
 
             STAGE_DIR=$(mktemp -d /tmp/z2_stage.XXXXXX)
-            echo "[2/4] Загрузка дистрибутива Zapret 2 в $STAGE_DIR..."
+            echo "[2/4] Загрузка дистрибутива Zapret 2 ($TARGET_VER) в $STAGE_DIR..."
             for url in \
-              "https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" \
-              "https://github.com/bol-van/zapret2/archive/refs/heads/master.tar.gz" \
-              "https://github.com/bol-van/zapret2/releases/download/v1.0.5.2/zapret2-v1.0.5.2.tar.gz"; do
+              "https://github.com/bol-van/zapret2/releases/download/$TARGET_VER/zapret2-$TARGET_VER.tar.gz" \
+              "https://github.com/bol-van/zapret2/releases/latest/download/zapret2-$TARGET_VER.tar.gz" \
+              "https://github.com/bol-van/zapret2/releases/download/$TARGET_VER/zapret2-$TARGET_VER_NO_V.tar.gz" \
+              "https://github.com/bol-van/zapret2/archive/refs/tags/$TARGET_VER.tar.gz"; do
               if curl -fsSL --connect-timeout 10 -m 60 -x "$PROXY" "$url" -o "$STAGE_DIR/z2.tar.gz" 2>/dev/null || \
                  curl -fsSL --connect-timeout 10 -m 60 "$url" -o "$STAGE_DIR/z2.tar.gz" 2>/dev/null; then
                 if [ -s "$STAGE_DIR/z2.tar.gz" ] && [ $(wc -c < "$STAGE_DIR/z2.tar.gz" 2>/dev/null || echo 0) -gt 10000 ]; then
@@ -7829,11 +7864,19 @@ pub async fn zapret_action(
             echo "[4/4] Настройка прав доступа, симлинков и инициализация /opt/zapret2..."
             [ -f /opt/zapret2/nfqws2 ] && chmod +x /opt/zapret2/nfqws2 && ln -sf /opt/zapret2/nfqws2 /opt/sbin/nfqws2
             chmod 644 /opt/zapret2/lua/*.lua 2>/dev/null || true
-            echo "v1.0.5.2" > /opt/zapret2/version.txt
-            echo "Установка Zapret 2.0 (v1.0.5.2) успешно завершена."
+            echo "$TARGET_VER" > /opt/zapret2/version.txt
+            echo "Установка Zapret 2.0 ($TARGET_VER) успешно завершена."
         "#;
 
-        match tokio::process::Command::new("sh").arg("-c").arg(upgrade_cmd).env("MIHOMO_PROXY", &proxy_url).output().await {
+        match tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(upgrade_cmd)
+            .env("MIHOMO_PROXY", &proxy_url)
+            .env("TARGET_VER", &target_ver)
+            .env("TARGET_VER_NO_V", &target_ver_no_v)
+            .output()
+            .await
+        {
             Ok(out) => {
                 let output_str = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
                 if !is_nfqws2_available() {
@@ -7844,13 +7887,13 @@ pub async fn zapret_action(
                 }
 
                 let _ = tokio::fs::create_dir_all("/opt/zapret2").await;
-                let _ = tokio::fs::write("/opt/zapret2/version.txt", "v1.0.5.2\n").await;
+                let _ = tokio::fs::write("/opt/zapret2/version.txt", format!("{target_ver}\n")).await;
 
                 let _cfg_guard = state.config_lock.lock().await;
                 let mut cfg = (**state.config.read().await).clone();
                 cfg.zapret.engine = "v2".to_string();
                 cfg.zapret.update_available = false;
-                cfg.zapret.latest_version = Some("v1.0.5.2".to_string());
+                cfg.zapret.latest_version = Some(target_ver.clone());
                 cfg.zapret.last_update_check = Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
                 if let Some(ref ca) = cfg.zapret.custom_args {
                     if ca.contains("--dpi-desync") && !ca.contains("--lua-desync") {
@@ -7875,10 +7918,11 @@ pub async fn zapret_action(
                     "can_rollback_v1": true,
                     "hardware": hw,
                     "features": cfg.zapret,
+                    "version": &target_ver,
+                    "latest_version": &target_ver,
                     "update_available": false,
-                    "latest_version": "v1.0.5.2",
                     "output": output_str.trim(),
-                    "message": format!("Zapret 2.0 (nfqws2 + Lua) установлен в /opt/zapret2 для {} ({})", hw.model, hw.arch_label)
+                    "message": format!("Zapret 2.0 ({target_ver}, nfqws2 + Lua) установлен в /opt/zapret2 для {} ({})", hw.model, hw.arch_label)
                 }));
             }
             Err(e) => return api_err(format!("Ошибка обновления до Zapret 2.0: {e}")),
@@ -7962,6 +8006,7 @@ pub async fn zapret_action(
                     strategy_id: None,
                     url: None,
                     engine: Some("v2".to_string()),
+                    version: None,
                 }),
             ))
             .await;
@@ -8252,7 +8297,25 @@ pub async fn zapret_action(
 
     // 4. Установка службы Zapret
     if act == "install" {
+        let target_ver = {
+            let requested = body.version.as_deref().unwrap_or("").trim();
+            if !requested.is_empty() {
+                if requested.starts_with('v') { requested.to_string() } else { format!("v{requested}") }
+            } else {
+                let cfg = state.config.read().await;
+                let lat = cfg.zapret.latest_version.as_deref().unwrap_or("").trim();
+                if !lat.is_empty() && lat != "v1.0.5.2" {
+                    if lat.starts_with('v') { lat.to_string() } else { format!("v{lat}") }
+                } else {
+                    "v1.0.6".to_string()
+                }
+            }
+        };
+        let target_ver_no_v = target_ver.trim_start_matches('v').to_string();
+
         let install_cmd = r#"
+            TARGET_VER="${TARGET_VER:-v1.0.6}"
+            TARGET_VER_NO_V="${TARGET_VER_NO_V:-${TARGET_VER#v}}"
             ARCH=$(uname -m)
             case "$ARCH" in
               aarch64|arm64) TARGET_ARCH="linux-arm64"; Z2_ARCH="arm64" ;;
@@ -8275,13 +8338,14 @@ pub async fn zapret_action(
             mkdir -p /opt/zapret2 /opt/zapret2/lua /opt/zapret2/binaries /opt/etc/init.d /opt/etc/zapret /opt/sbin /opt/zapret
 
             cd /opt
-            echo "[2/4] Загрузка дистрибутива Zapret 2..."
+            echo "[2/4] Загрузка дистрибутива Zapret 2 ($TARGET_VER)..."
             rm -f /tmp/z2.tar.gz
             PROXY="${MIHOMO_PROXY:-http://127.0.0.1:7890}"
             for url in \
-              "https://github.com/bol-van/zapret2/releases/latest/download/zapret2.tar.gz" \
-              "https://github.com/bol-van/zapret2/archive/refs/heads/master.tar.gz" \
-              "https://github.com/bol-van/zapret/releases/download/v72.13/zapret-v72.13.tar.gz"; do
+              "https://github.com/bol-van/zapret2/releases/download/$TARGET_VER/zapret2-$TARGET_VER.tar.gz" \
+              "https://github.com/bol-van/zapret2/releases/latest/download/zapret2-$TARGET_VER.tar.gz" \
+              "https://github.com/bol-van/zapret2/releases/download/$TARGET_VER/zapret2-$TARGET_VER_NO_V.tar.gz" \
+              "https://github.com/bol-van/zapret2/archive/refs/tags/$TARGET_VER.tar.gz"; do
               if curl -fsSL --connect-timeout 10 -m 60 -x "$PROXY" "$url" -o /tmp/z2.tar.gz 2>/dev/null || \
                  curl -fsSL --connect-timeout 10 -m 60 "$url" -o /tmp/z2.tar.gz 2>/dev/null; then
                 if [ -s /tmp/z2.tar.gz ] && [ $(wc -c < /tmp/z2.tar.gz 2>/dev/null || echo 0) -gt 10000 ]; then
@@ -8341,14 +8405,30 @@ pub async fn zapret_action(
             echo "[4/4] Настройка прав доступа, симлинков и инициализация /opt/zapret2..."
             [ -f /opt/zapret2/nfqws2 ] && chmod +x /opt/zapret2/nfqws2 && ln -sf /opt/zapret2/nfqws2 /opt/sbin/nfqws2
             chmod 644 /opt/zapret2/lua/*.lua 2>/dev/null || true
-            echo "v1.0.5.2" > /opt/zapret2/version.txt
-            echo "Установка Zapret успешно завершена."
+            echo "$TARGET_VER" > /opt/zapret2/version.txt
+            echo "Установка Zapret 2.0 ($TARGET_VER) успешно завершена."
         "#;
-        match tokio::process::Command::new("sh").arg("-c").arg(install_cmd).env("MIHOMO_PROXY", &proxy_url).output().await {
+        match tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(install_cmd)
+            .env("MIHOMO_PROXY", &proxy_url)
+            .env("TARGET_VER", &target_ver)
+            .env("TARGET_VER_NO_V", &target_ver_no_v)
+            .output()
+            .await
+        {
             Ok(out) => {
                 let output_str = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
                 let _ = tokio::fs::create_dir_all("/opt/zapret2").await;
-                let _ = tokio::fs::write("/opt/zapret2/version.txt", "v1.0.5.2\n").await;
+                let _ = tokio::fs::write("/opt/zapret2/version.txt", format!("{target_ver}\n")).await;
+                {
+                    let _cfg_guard = state.config_lock.lock().await;
+                    let mut cfg = (**state.config.read().await).clone();
+                    cfg.zapret.latest_version = Some(target_ver.clone());
+                    cfg.zapret.update_available = false;
+                    let _ = config::save(&state.config_path, &cfg).await;
+                    *state.config.write().await = std::sync::Arc::new(cfg);
+                }
                 let _cfg = state.config.read().await;
                 let _ = sync_zapret_files(&_cfg.zapret).await;
                 if let Ok(out) = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("start").output().await {
@@ -8357,7 +8437,13 @@ pub async fn zapret_action(
                     }
                 }
                 let installed = std::path::Path::new("/opt/etc/init.d/S51zapret").exists();
-                return api_ok(json!({ "success": installed, "output": output_str.trim() }));
+                return api_ok(json!({
+                    "success": installed,
+                    "version": &target_ver,
+                    "latest_version": &target_ver,
+                    "update_available": false,
+                    "output": output_str.trim()
+                }));
             }
             Err(e) => return api_err(format!("Ошибка установки Zapret: {}", e)),
         }
@@ -11924,6 +12010,59 @@ mod tests {
 
         assert!(valid_flow_cand.is_some());
         assert_eq!(valid_flow_cand.unwrap().id, "US-Node");
+    }
+
+    #[test]
+    fn test_build_zapret2_download_urls_dynamic_version() {
+        let urls = build_zapret2_download_urls("v1.0.6");
+        assert!(!urls.is_empty());
+        for u in &urls {
+            assert!(!u.ends_with("/zapret2.tar.gz"), "URL must not contain static zapret2.tar.gz: {u}");
+            assert!(!u.contains("v1.0.5.2"), "URL must not contain obsolete hardcoded v1.0.5.2: {u}");
+            assert!(u.contains("v1.0.6") || u.contains("1.0.6"), "URL must target v1.0.6: {u}");
+        }
+        assert!(urls.contains(&"https://github.com/bol-van/zapret2/releases/download/v1.0.6/zapret2-v1.0.6.tar.gz".to_string()));
+        assert!(urls.contains(&"https://github.com/bol-van/zapret2/releases/latest/download/zapret2-v1.0.6.tar.gz".to_string()));
+        assert!(urls.contains(&"https://github.com/bol-van/zapret2/releases/download/v1.0.6/zapret2-1.0.6.tar.gz".to_string()));
+        assert!(urls.contains(&"https://github.com/bol-van/zapret2/archive/refs/tags/v1.0.6.tar.gz".to_string()));
+    }
+
+    #[test]
+    fn test_build_zapret2_download_urls_handles_unprefixed_version() {
+        let urls = build_zapret2_download_urls("1.0.6");
+        assert!(!urls.is_empty());
+        for u in &urls {
+            assert!(!u.ends_with("/zapret2.tar.gz"), "URL must not contain static zapret2.tar.gz: {u}");
+            assert!(!u.contains("v1.0.5.2"), "URL must not contain obsolete hardcoded v1.0.5.2: {u}");
+            assert!(u.contains("v1.0.6") || u.contains("1.0.6"), "URL must target v1.0.6: {u}");
+        }
+        assert!(urls.contains(&"https://github.com/bol-van/zapret2/releases/download/v1.0.6/zapret2-v1.0.6.tar.gz".to_string()));
+        assert!(urls.contains(&"https://github.com/bol-van/zapret2/releases/latest/download/zapret2-v1.0.6.tar.gz".to_string()));
+        assert!(urls.contains(&"https://github.com/bol-van/zapret2/releases/download/v1.0.6/zapret2-1.0.6.tar.gz".to_string()));
+        assert!(urls.contains(&"https://github.com/bol-van/zapret2/archive/refs/tags/v1.0.6.tar.gz".to_string()));
+    }
+
+    #[test]
+    fn test_build_zapret2_download_urls_arbitrary_future_version() {
+        let urls_future = build_zapret2_download_urls("v2.4.0");
+        assert!(!urls_future.is_empty());
+        for u in &urls_future {
+            assert!(!u.ends_with("/zapret2.tar.gz"), "URL must not contain static zapret2.tar.gz: {u}");
+            assert!(!u.contains("v1.0.5.2"), "URL must not contain obsolete hardcoded v1.0.5.2: {u}");
+            assert!(!u.contains("v1.0.6"), "URL must not contain static v1.0.6 when targeting v2.4.0: {u}");
+            assert!(u.contains("v2.4.0") || u.contains("2.4.0"), "URL must target v2.4.0: {u}");
+        }
+        assert!(urls_future.contains(&"https://github.com/bol-van/zapret2/releases/download/v2.4.0/zapret2-v2.4.0.tar.gz".to_string()));
+        assert!(urls_future.contains(&"https://github.com/bol-van/zapret2/releases/latest/download/zapret2-v2.4.0.tar.gz".to_string()));
+        assert!(urls_future.contains(&"https://github.com/bol-van/zapret2/releases/download/v2.4.0/zapret2-2.4.0.tar.gz".to_string()));
+        assert!(urls_future.contains(&"https://github.com/bol-van/zapret2/archive/refs/tags/v2.4.0.tar.gz".to_string()));
+
+        let urls_bare = build_zapret2_download_urls("3.0.0");
+        assert!(!urls_bare.is_empty());
+        for u in &urls_bare {
+            assert!(u.contains("v3.0.0") || u.contains("3.0.0"));
+        }
+        assert!(urls_bare.contains(&"https://github.com/bol-van/zapret2/releases/download/v3.0.0/zapret2-v3.0.0.tar.gz".to_string()));
     }
 }
 

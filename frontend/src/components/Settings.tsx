@@ -566,6 +566,9 @@ export default function Settings({ notify, status, refresh }: Props) {
       if (autoSaveTimerRef.current) {
         clearTimeout(autoSaveTimerRef.current)
       }
+      if (savedTimerRef.current) {
+        clearTimeout(savedTimerRef.current)
+      }
     }
   }, [failoverJson, refresh, notify])
 
