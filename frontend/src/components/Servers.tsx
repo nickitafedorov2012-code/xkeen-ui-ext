@@ -1199,7 +1199,8 @@ export default function Servers({ notify, status, refresh }: Props) {
               {/* Действия */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                 <span className="tag current-active-badge" style={{ fontSize: 11, padding: '2px 8px' }}>✓ ТРАФИК ИДЁТ СЮДА</span>
-                <div style={{ display: 'flex', gap: 6 }}>
+                {/* FE-MOBILE: перенос кнопок на новую строку вместо распирания карточки на мобильных */}
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   <button
                     type="button"
                     className={`btn sm ghost btn-speedtest ${speedtestingId === activeServer.id ? 'loading' : ''}`}

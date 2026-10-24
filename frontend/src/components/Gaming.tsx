@@ -145,6 +145,9 @@ function getDeviceIcon(name?: string): string {
 
 export default function Gaming({ notify }: GamingProps) {
   const [loading, setLoading] = useState(true)
+  // FE-MOBILE/UX: при сбое загрузки gaming/status раньше показывался ПУСТОЙ конфиг
+  // («Не выбраны» без устройств) — выглядело как будто устройства стёрты
+  const [loadFailed, setLoadFailed] = useState(false)
   const [saving, setSaving] = useState(false)
   const [toggling, setToggling] = useState(false)
   const [pinging, setPinging] = useState(false)
@@ -185,6 +188,7 @@ export default function Gaming({ notify }: GamingProps) {
   const [customText, setCustomText] = useState('')
 
   const loadData = useCallback(async () => {
+    let statusOk = false
     try {
       const [statusRes, serversRes, devicesRes] = await Promise.all([
         apiGet<GamingStatus>('gaming/status').catch(() => null),
@@ -193,6 +197,7 @@ export default function Gaming({ notify }: GamingProps) {
       ])
 
       if (statusRes) {
+        statusOk = true
         setStatus(statusRes)
         if (statusRes.config) {
           setCfg(statusRes.config)
@@ -212,6 +217,7 @@ export default function Gaming({ notify }: GamingProps) {
     } catch (e: any) {
       notify(e.message || 'Ошибка загрузки настроек игрового режима', true)
     } finally {
+      setLoadFailed(!statusOk)
       setLoading(false)
     }
   }, [notify])
@@ -478,6 +484,29 @@ export default function Gaming({ notify }: GamingProps) {
       <div className="card" style={{ textAlign: 'center', padding: '3rem 1rem' }}>
         <div className="spinner" style={{ margin: '0 auto 12px' }} />
         <p className="muted">Загрузка конфигурации игрового режима...</p>
+      </div>
+    )
+  }
+
+  if (loadFailed) {
+    return (
+      <div className="card" style={{ textAlign: 'center', padding: '2.5rem 1rem' }}>
+        <div style={{ fontSize: 30, marginBottom: 10 }}>📡</div>
+        <h2 style={{ marginBottom: 6 }}>Нет связи с панелью</h2>
+        <p className="muted" style={{ marginBottom: 14 }}>
+          Не удалось загрузить конфигурацию игрового режима. Ваши устройства и настройки в безопасности — повторите попытку.
+        </p>
+        <button
+          type="button"
+          className="btn primary"
+          onClick={() => {
+            setLoadFailed(false)
+            setLoading(true)
+            loadData()
+          }}
+        >
+          🔄 Повторить загрузку
+        </button>
       </div>
     )
   }
@@ -1172,8 +1201,10 @@ export default function Gaming({ notify }: GamingProps) {
                 </div>
 
                 {/* Персональный сервер для устройства */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 260, justifyContent: 'flex-end' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                {/* FE-MOBILE: класс вместо inline-стилей — на мобильном блок занимает
+                    отдельную строку, селект растягивается, подпись не обрезается */}
+                <div className="gaming-device-server-block">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                     <span className="muted small" style={{ fontSize: 11.5, whiteSpace: 'nowrap' }}>
                       Выходной узел:
                     </span>

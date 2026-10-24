@@ -6,7 +6,9 @@ export default defineConfig({
   server: {
     port: 5175,
     proxy: {
-      '/api': 'http://127.0.0.1:1001',
+      // XR_API_TARGET позволяет дев-серверу проксировать API на реальный роутер:
+      // XR_API_TARGET=http://192.168.2.1:1001 npm run dev
+      '/api': process.env.XR_API_TARGET || 'http://127.0.0.1:1001',
     },
   },
   build: {

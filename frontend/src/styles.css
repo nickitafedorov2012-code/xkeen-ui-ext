@@ -67,7 +67,10 @@ html, body {
   margin: 0;
   padding: 0;
   max-width: 100vw;
-  overflow-x: hidden;
+  /* FE-MOBILE: clip вместо hidden — hidden превращает body в scroll-контейнер
+     и ломает position: sticky у таб-навигации; clip так же запрещает
+     горизонтальный скролл, но sticky продолжает работать */
+  overflow-x: clip;
   background: var(--bg);
   color: var(--text);
   font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
@@ -7010,6 +7013,13 @@ button.delete-btn:focus-visible {
   gap: 14px;
 }
 
+/* FE-MOBILE: длинные nowrap-домены (agh-stat-domain) распирали 1fr-треки до ширины
+   текста (~770px) — карточки вылезали за экран; min-width:0 даёт трекам сжиматься,
+   а ellipsis у домена — обрезаться красиво */
+.agh-stats-grid > * {
+  min-width: 0;
+}
+
 @media (max-width: 1080px) {
   .agh-stats-grid {
     grid-template-columns: 1fr;
@@ -7447,6 +7457,13 @@ button.delete-btn:focus-visible {
   width: 100%;
 }
 
+/* FE-MOBILE: grid-треки 1fr по умолчанию не сжимаются ниже min-content — широкий ряд
+   (кнопки действий, длинное имя узла) распирал карточку до ~424px на экране 380px,
+   и контент обрезался через overflow-x: hidden родителя */
+.servers-top-deck > * {
+  min-width: 0;
+}
+
 .servers-active-deck-card {
   background: linear-gradient(135deg, rgba(34, 197, 94, 0.08) 0%, rgba(56, 189, 248, 0.04) 100%);
   border: 1px solid rgba(34, 197, 94, 0.35);
@@ -7639,3 +7656,80 @@ button.delete-btn:focus-visible {
 
 
 
+
+/* ============================================================
+   FE-MOBILE: мобильные исправления UX (экраны ≤ 820px / ≤ 480px)
+   ============================================================ */
+@media (max-width: 819.98px) {
+  /* Шапка перестаёт прилипать — на мобильном она занимает ~40% экрана
+     и sticky-шапка съедала пространство контента при скролле */
+  .header-bar,
+  .toolbar.header-bar {
+    position: static;
+    box-shadow: none;
+  }
+
+  /* Навигация вкладок наоборот становится sticky — всегда доступна одной долистыванием */
+  .tabs {
+    position: sticky;
+    top: 0;
+    z-index: 900;
+    background: var(--bg);
+    padding-top: 8px;
+    margin-top: -6px;
+    box-shadow: 0 6px 14px rgba(0, 0, 0, 0.25);
+  }
+
+  /* Компактнее отступы — больше полезной ширины контенту */
+  .app {
+    padding: 10px 12px 32px;
+  }
+  .card {
+    padding: 14px 14px;
+  }
+}
+
+@media (max-width: 480px) {
+  .header-status-group {
+    width: auto;
+    max-width: 100%;
+    min-width: 0;
+  }
+  .header-utility-actions {
+    width: auto;
+  }
+  .header-versions-group {
+    gap: 6px;
+  }
+  .header-service-actions {
+    width: auto;
+  }
+  /* Крупнее зоны касания для вкладок */
+  .tab {
+    padding: 8px 12px;
+    font-size: 12px;
+  }
+}
+
+/* FE-MOBILE: персональный узел игрового устройства — на мобильном отдельной строкой */
+.gaming-device-server-block {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 640px) {
+  .gaming-device-server-block {
+    flex-basis: 100%;
+  }
+  .gaming-device-server-block select {
+    flex: 1;
+    min-width: 0;
+    max-width: none;
+    width: 100%;
+  }
+}
