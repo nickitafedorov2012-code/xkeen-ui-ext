@@ -2573,9 +2573,33 @@ pub fn remove_blocks(yaml: &str) -> String {
     out
 }
 
+/// BS-PIN: IP устройств с закреплённой нодой режима БС (server непустой).
+/// Группа такого устройства защищена от удаления в apply_assignments —
+/// на неё ссылается правило whitelist-блока, и снос группы ломает конфиг.
+pub fn pinned_whitelist_ips(cfg: &crate::config::AppConfig) -> Vec<String> {
+    cfg.whitelist
+        .devices
+        .iter()
+        .filter(|d| {
+            d.enabled
+                && !d.ip.trim().is_empty()
+                && !d.server.as_deref().map(str::trim).unwrap_or("").is_empty()
+        })
+        .map(|d| d.ip.trim().to_string())
+        .collect()
+}
+
 /// Merge-семантика десктопа: существующие правила сохраняются, применяются только
 /// переданные назначения (server=None/"default" — снять). Возвращает новый YAML.
-pub fn apply_assignments(yaml: &str, assignments: &[Assignment], providers: &[String]) -> Result<String, String> {
+/// pinned_ips: устройства БС-закрепления — их группа не удаляется при снятии
+/// назначения (правило whitelist-блока продолжает ссылаться на неё), а их
+/// device-правило убирается как недостижимое (приоритет у whitelist-блока).
+pub fn apply_assignments(
+    yaml: &str,
+    assignments: &[Assignment],
+    providers: &[String],
+    pinned_ips: &[String],
+) -> Result<String, String> {
     let mut groups_by_ip = parse_groups(yaml);
     let mut rules_by_ip = parse_rules(yaml);
 
@@ -2589,13 +2613,35 @@ pub fn apply_assignments(yaml: &str, assignments: &[Assignment], providers: &[St
             Some(s) => s.trim().is_empty() || s.trim() == "default",
         };
         if remove {
-            groups_by_ip.remove(ip);
-            rules_by_ip.remove(ip);
+            if pinned_ips.iter().any(|p| p == ip) {
+                // BS-PIN: группу сохраняем как есть (на неё ссылается whitelist-правило
+                // с именем из whitelist.devices) — имя из assignment не используем,
+                // чтобы не переименовать группу и не сломать ссылку. Если группы
+                // ещё нет — создаём с именем из assignment.
+                if !groups_by_ip.contains_key(ip) {
+                    let gname = group_name_for(ip, &a.name);
+                    groups_by_ip.insert(ip.to_string(), group_yaml(&gname, providers));
+                }
+                // недостижимое device-правило убираем (приоритет у whitelist-блока)
+                rules_by_ip.remove(ip);
+            } else {
+                groups_by_ip.remove(ip);
+                rules_by_ip.remove(ip);
+            }
             continue;
         }
         let gname = group_name_for(ip, &a.name);
-        groups_by_ip.insert(ip.to_string(), group_yaml(&gname, providers));
-        rules_by_ip.insert(ip.to_string(), rule_line(ip, &gname));
+        if pinned_ips.iter().any(|p| p == ip) {
+            // BS-PIN активен: имя группы менять нельзя (ссылка из whitelist-правила),
+            // существующую группу сохраняем; device-правило не нужно — трафик
+            // перехватывает whitelist-блок выше
+            groups_by_ip.entry(ip.to_string())
+                .or_insert_with(|| group_yaml(&gname, providers));
+            rules_by_ip.remove(ip);
+        } else {
+            groups_by_ip.insert(ip.to_string(), group_yaml(&gname, providers));
+            rules_by_ip.insert(ip.to_string(), rule_line(ip, &gname));
+        }
     }
 
     let mut content = remove_blocks(yaml);
@@ -2953,7 +2999,8 @@ pub fn apply_routing_with_filters(
     }
 
     let count = assignments.len();
-    if let Ok(with_devices) = apply_assignments(&current, &assignments, &providers) {
+    let pinned = pinned_whitelist_ips(cfg);
+    if let Ok(with_devices) = apply_assignments(&current, &assignments, &providers, &pinned) {
         current = with_devices;
     }
 
@@ -3025,6 +3072,7 @@ mod tests {
             BASE_YAML,
             &[Assignment { ip: "192.168.2.118".into(), name: "Big PC".into(), server: Some("рџ‡©рџ‡Є DE".into()) }],
             &["geodema".to_string(), "geodema2".to_string()],
+            &[]
         )
         .unwrap();
         assert!(out.contains(GROUPS_BEGIN));
@@ -3048,12 +3096,14 @@ mod tests {
             BASE_YAML,
             &[Assignment { ip: "10.0.0.5".into(), name: "Phone".into(), server: Some("X".into()) }],
             &[],
+            &[],
         )
         .unwrap();
         // добавляем второе устройство — первое должно сохраниться
         let with_two = apply_assignments(
             &with_one,
             &[Assignment { ip: "10.0.0.6".into(), name: "TV".into(), server: Some("Y".into()) }],
+            &[],
             &[],
         )
         .unwrap();
@@ -3068,11 +3118,13 @@ mod tests {
             BASE_YAML,
             &[Assignment { ip: "10.0.0.5".into(), name: "Phone".into(), server: Some("X".into()) }],
             &[],
+            &[],
         )
         .unwrap();
         let removed = apply_assignments(
             &with_one,
             &[Assignment { ip: "10.0.0.5".into(), name: "Phone".into(), server: None }],
+            &[],
             &[],
         )
         .unwrap();
@@ -3087,11 +3139,13 @@ mod tests {
             BASE_YAML,
             &[Assignment { ip: "10.0.0.5".into(), name: "Phone".into(), server: Some("X".into()) }],
             &[],
+            &[],
         )
         .unwrap();
         let removed = apply_assignments(
             &with_one,
             &[Assignment { ip: "10.0.0.5".into(), name: "Phone".into(), server: Some("default".into()) }],
+            &[],
             &[],
         )
         .unwrap();
@@ -3254,7 +3308,7 @@ mod tests {
             name: "Тест".into(),
             server: Some("srv".into()),
         };
-        let out = apply_assignments(yaml, &[a], &[]).unwrap();
+        let out = apply_assignments(yaml, &[a], &[], &[]).unwrap();
         assert!(out.contains("\nproxy-groups:# --- AUTO-DEVICE-GROUPS-BEGIN ---") == false);
         assert!(out.contains("proxy-groups:\n# --- AUTO-DEVICE-GROUPS-BEGIN ---"));
         assert!(out.contains("rules:\n# --- AUTO-DEVICE-RULES-BEGIN ---"));
@@ -4217,6 +4271,91 @@ rules:
         assert!(!disabled.contains(WHITELIST_GROUP_END));
         assert!(!disabled.contains("SRC-IP-CIDR,192.168.1.105/32"));
         assert!(disabled.contains("GEOIP,RU,DIRECT"), "Original fallback rules must be preserved");
+    }
+
+    /// Анти-регрессия BS-PIN (сценарий бага v1.9.41): снятие узла устройства на
+    /// странице «Устройства» (assignment server=None) обязано сохранять группу
+    /// закреплённого БС-устройства — иначе whitelist-правило ссылается в пустоту
+    /// и ядро Mihomo отклоняет весь конфиг («proxy not found», откат настроек).
+    #[test]
+    fn test_apply_assignments_keeps_pinned_whitelist_group_on_remove() {
+        let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - GEOIP,RU,DIRECT\n  - MATCH,PROXY\n";
+        // Шаг 1: создаём группу телефона пином (как save_whitelist)
+        let create = apply_assignments(
+            base_yaml,
+            &[Assignment {
+                ip: "192.168.2.63".into(),
+                name: "Xiaomi 11T Pro".into(),
+                server: Some("Fastest".into()),
+            }],
+            &["geodema2".to_string()],
+            &["192.168.2.63".to_string()],
+        )
+        .unwrap();
+        assert!(create.contains("- name: 'Xiaomi 11T Pro 192_168_2_63'"));
+
+        // Шаг 2: пользователь на «Устройствах» выбирает «общий активный узел» (server=None)
+        let remove = apply_assignments(
+            &create,
+            &[Assignment {
+                ip: "192.168.2.63".into(),
+                name: String::new(),
+                server: None,
+            }],
+            &["geodema2".to_string()],
+            &["192.168.2.63".to_string()],
+        )
+        .unwrap();
+        // Группа закрепления СОХРАНЯЕТСЯ — на неё ссылается whitelist-правило
+        assert!(
+            remove.contains("- name: 'Xiaomi 11T Pro 192_168_2_63'"),
+            "BS-PIN: группа закреплённого устройства не должна удаляться при снятии узла"
+        );
+
+        // Шаг 3: без закрепления — прежнее поведение: группа удаляется
+        let remove_unpinned = apply_assignments(
+            &create,
+            &[Assignment {
+                ip: "192.168.2.63".into(),
+                name: String::new(),
+                server: None,
+            }],
+            &["geodema2".to_string()],
+            &[],
+        )
+        .unwrap();
+        assert!(
+            !remove_unpinned.contains("Xiaomi 11T Pro 192_168_2_63"),
+            "без закрепления группа устройства удаляется как раньше"
+        );
+    }
+
+    #[test]
+    fn test_pinned_whitelist_ips_extracts_only_pinned() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.devices.push(crate::config::WhitelistDevice {
+            mac: "AA:BB:CC:DD:EE:02".into(),
+            ip: "192.168.2.63".into(),
+            enabled: true,
+            name: None,
+            server: Some("🇳🇱 Нидерланды ADS".into()),
+        });
+        cfg.whitelist.devices.push(crate::config::WhitelistDevice {
+            mac: "AA:BB:CC:DD:EE:03".into(),
+            ip: "192.168.2.118".into(),
+            enabled: true,
+            name: None,
+            server: Some("   ".into()), // пробельное имя = не пин
+        });
+        cfg.whitelist.devices.push(crate::config::WhitelistDevice {
+            mac: "AA:BB:CC:DD:EE:04".into(),
+            ip: "192.168.2.45".into(),
+            enabled: false, // выключенное устройство = не пин
+            name: None,
+            server: Some("Fastest".into()),
+        });
+        let pinned = pinned_whitelist_ips(&cfg);
+        assert_eq!(pinned, vec!["192.168.2.63".to_string()]);
     }
 
     #[test]

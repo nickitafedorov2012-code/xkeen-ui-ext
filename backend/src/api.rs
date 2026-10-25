@@ -1682,7 +1682,8 @@ pub async fn set_device_routing(State(state): State<AppState>, Json(req): Json<D
         server: servers.first().cloned(),
     };
     let providers = device_providers_for(tx.config(), &yaml);
-    let new_yaml = match routing::apply_assignments(&yaml, &[assignment], &providers) {
+    let pinned = routing::pinned_whitelist_ips(tx.config());
+    let new_yaml = match routing::apply_assignments(&yaml, &[assignment], &providers, &pinned) {
         Ok(y) => y,
         Err(e) => return api_err(e),
     };
@@ -2685,7 +2686,7 @@ pub async fn apply_routing(State(state): State<AppState>, Json(req): Json<Routin
         }
     }
 
-    let mut new_yaml = match routing::apply_assignments(&yaml, &assignments, &device_providers_for(tx.config(), &yaml)) {
+    let mut new_yaml = match routing::apply_assignments(&yaml, &assignments, &device_providers_for(tx.config(), &yaml), &routing::pinned_whitelist_ips(tx.config())) {
         Ok(y) => y,
         Err(e) => return api_err(e),
     };
@@ -11455,7 +11456,8 @@ pub async fn save_whitelist(
             .collect();
         if !pin_assignments.is_empty() {
             let providers = device_providers_for(tx.config(), &raw_yaml);
-            match routing::apply_assignments(&raw_yaml, &pin_assignments, &providers) {
+            let pinned = routing::pinned_whitelist_ips(tx.config());
+            match routing::apply_assignments(&raw_yaml, &pin_assignments, &providers, &pinned) {
                 Ok(y) => raw_yaml = y,
                 Err(e) => return api_err(format!("Ошибка создания группы закрепления устройства: {e}")),
             }
