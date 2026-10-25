@@ -25,14 +25,19 @@ pub async fn status(State(state): State<AppState>) -> Response {
                 .find(|s| s.is_active && s.id != "Fastest" && s.id != "Fallback")
                 .or_else(|| servers.iter().find(|s| s.is_active))
                 .cloned()
-                .map(|s| json!({
-                    "id": s.id, "name": s.name, "ping_ms": s.ping_ms,
-                    "protocol": s.protocol, "host": s.host, "port": s.port,
-                    "provider": s.provider, "provider_name": s.provider_name,
-                }));
+                .map(|s| {
+                    // PING-AUTO: живой замер из кэша панели важнее протухшей истории mihomo
+                    let ping_ms = mihomo::cached_ping(&s.id).unwrap_or(s.ping_ms);
+                    json!({
+                        "id": s.id, "name": s.name, "ping_ms": ping_ms,
+                        "protocol": s.protocol, "host": s.host, "port": s.port,
+                        "provider": s.provider, "provider_name": s.provider_name,
+                    })
+                });
             let mut pings = std::collections::HashMap::new();
             for s in &servers {
-                pings.insert(s.id.clone(), s.ping_ms);
+                // PING-AUTO: и для карты пингов цепочки приоритетов тоже
+                pings.insert(s.id.clone(), mihomo::cached_ping(&s.id).unwrap_or(s.ping_ms));
             }
             // Анти-регрессия: НЕ подменять реальный пинг на -1 (Таймаут),
             // чтобы панель всегда отображала фактический живой пинг из Mihomo.
@@ -640,6 +645,9 @@ pub async fn get_servers(State(state): State<AppState>) -> Response {
                     let custom_alias = cfg.server_aliases.get(&s.id).cloned();
                     let is_whitelist = cfg.whitelist_servers.iter().any(|ws| ws == &s.id)
                         || s.provider.as_ref().map_or(false, |p| cfg.whitelist_providers.iter().any(|wp| wp == p));
+                    // PING-AUTO: живой замер из кэша панели важнее протухшей истории
+                    // healthcheck-а mihomo (обновляется лишь раз в ~5 минут)
+                    let ping_ms = mihomo::cached_ping(&s.id).unwrap_or(s.ping_ms);
                     json!({
                         "id": s.id, "name": s.name, "protocol": s.protocol,
                         "host": s.host, "port": s.port,
@@ -647,7 +655,7 @@ pub async fn get_servers(State(state): State<AppState>) -> Response {
                         "is_active": s.is_active, "is_priority": s.is_priority,
                         "is_google_ai": is_google_ai,
                         "flow_status": flow_status,
-                        "ping_ms": s.ping_ms,
+                        "ping_ms": ping_ms,
                         "provider": s.provider,
                         "provider_name": s.provider_name,
                         "is_pool": s.is_pool,

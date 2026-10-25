@@ -13,6 +13,46 @@ pub fn ip_from_group_name(gname: &str) -> Option<String> {
     ip_key_from_group(gname)
 }
 
+/// PING-AUTO: время жизни записи кэша пингов (3 цикла фонового обновления по 30 с).
+pub const PING_CACHE_TTL_SECS: u64 = 90;
+
+type PingCache = std::sync::RwLock<std::collections::HashMap<String, (i64, std::time::Instant)>>;
+static PING_CACHE: std::sync::OnceLock<PingCache> = std::sync::OnceLock::new();
+
+fn ping_cache() -> &'static PingCache {
+    PING_CACHE.get_or_init(|| std::sync::RwLock::new(std::collections::HashMap::new()))
+}
+
+/// Сохраняет свежие замеры пингов (delay > 0) в общий кэш панели.
+/// mihomo не записывает delay-тесты нод провайдеров в историю (она обновляется
+/// только его собственным healthcheck раз в ~5 минут), поэтому живые значения
+/// храним сами: их пишут фоновое автообновление, ручной замер и замер после
+/// переключения сервера, а GET /api/servers накладывает кэш поверх истории.
+pub fn store_ping_cache(pings: &BTreeMap<String, i64>) {
+    let mut cache = ping_cache().write().unwrap_or_else(|e| e.into_inner());
+    let now = std::time::Instant::now();
+    for (id, delay) in pings {
+        if *delay > 0 {
+            cache.insert(id.clone(), (*delay, now));
+        }
+    }
+    // Не даём кэшу расти бесконечно: выкидываем протухшие записи
+    if cache.len() > 512 {
+        cache.retain(|_, (_, at)| now.duration_since(*at).as_secs() < PING_CACHE_TTL_SECS);
+    }
+}
+
+/// Свежее (в пределах TTL) значение пинга из кэша панели, если есть.
+pub fn cached_ping(id: &str) -> Option<i64> {
+    let cache = ping_cache().read().unwrap_or_else(|e| e.into_inner());
+    let (delay, at) = cache.get(id)?;
+    if at.elapsed().as_secs() < PING_CACHE_TTL_SECS {
+        Some(*delay)
+    } else {
+        None
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Server {
     pub id: String,
@@ -1506,6 +1546,9 @@ pub async fn ping_all_url(
         }
     }
 
+    // PING-AUTO: все замеры (фоновые, ручные, после переключения) попадают в кэш панели
+    store_ping_cache(&out);
+
     out
 }
 
@@ -2167,6 +2210,43 @@ mod tests {
         // Анти-регрессия PING-AUTO: фоновый замер не должен раздуваться до всех нод
         assert_eq!(ids.len(), AUTO_PING_MAX_IDS);
         assert_eq!(ids[0], "node-0");
+    }
+
+    #[test]
+    fn test_ping_cache_store_and_read_fresh() {
+        // Анти-регрессия PING-AUTO: замеры обязаны попадать в кэш и читаться свежими,
+        // иначе GET /api/servers отдаёт протухшую 5-минутную историю healthcheck-а mihomo
+        let mut measured = BTreeMap::new();
+        measured.insert("🇩🇪 Обход [Cooper] - Германия".to_string(), 87);
+        measured.insert("dead-node".to_string(), -1);
+        measured.insert("zero-node".to_string(), 0);
+        store_ping_cache(&measured);
+
+        assert_eq!(cached_ping("🇩🇪 Обход [Cooper] - Германия"), Some(87));
+        // Провальные замеры (-1/0) кэш не затирают
+        assert_eq!(cached_ping("dead-node"), None);
+        assert_eq!(cached_ping("zero-node"), None);
+        assert_eq!(cached_ping("never-measured"), None);
+    }
+
+    #[test]
+    fn test_ping_cache_replaces_with_newer_measurement() {
+        let mut first = BTreeMap::new();
+        first.insert("node-x".to_string(), 300);
+        store_ping_cache(&first);
+        assert_eq!(cached_ping("node-x"), Some(300));
+
+        let mut second = BTreeMap::new();
+        second.insert("node-x".to_string(), 95);
+        store_ping_cache(&second);
+        // Свежий успешный замер перезаписывает старый
+        assert_eq!(cached_ping("node-x"), Some(95));
+
+        // Неудачный повтор не стирает последний живой замер
+        let mut failed = BTreeMap::new();
+        failed.insert("node-x".to_string(), 0);
+        store_ping_cache(&failed);
+        assert_eq!(cached_ping("node-x"), Some(95));
     }
 
     #[test]
