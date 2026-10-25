@@ -2204,8 +2204,10 @@ pub fn apply_whitelist_rules(
 
         // 2.3. Явно сконфигурированные устройства из whitelist.devices (если есть).
         // BS-PIN: устройство с закреплённой нодой получает СВОЁ правило (выше catch-all
-        // 2.4), поэтому его трафик идёт через фиксированный узел и не зависит от
-        // переключений Failover сервера БС (Failover управляет только группой Whitelist).
+        // 2.4), направленное на его per-device select-группу (group_name_for). Сама
+        // группа существует благодаря device_routing-зеркалу в save_whitelist, а её
+        // выбор ноды — runtime (mihomo::switch_group при закреплении). Failover
+        // управляет только группой Whitelist, поэтому pinned-ноду он не трогает.
         for dev in &cfg.whitelist.devices {
             if dev.enabled && !dev.ip.trim().is_empty() && !excluded_ips.iter().any(|ex| ex == dev.ip.trim()) {
                 let ip_trim = dev.ip.trim();
@@ -2215,7 +2217,10 @@ pub fn apply_whitelist_rules(
                     format!("{ip_trim}/32")
                 };
                 let pinned = dev.server.as_deref().map(str::trim).filter(|s| !s.is_empty());
-                let target = pinned.unwrap_or(dev_target);
+                let target = match pinned {
+                    Some(_) => group_name_for(ip_trim, dev.name.as_deref().unwrap_or("")),
+                    None => dev_target.to_string(),
+                };
                 let r = format!("  - SRC-IP-CIDR,{cidr},{target}");
                 if !wl_rules.contains(&r) {
                     wl_rules.push(r);
@@ -4272,11 +4277,13 @@ rules:
         let end = applied.find(WHITELIST_END).expect("must find end");
         let wl_block = &applied[start..end];
 
-        let pinned_rule = "SRC-IP-CIDR,192.168.2.63/32,🇳🇱 Нидерланды ADS";
+        // BS-PIN: правило указывает на per-device группу (селектор с use: providers),
+        // потому что провайдерные ноды недоступны правилам напрямую
+        let pinned_rule = "SRC-IP-CIDR,192.168.2.63/32,Xiaomi 11T Pro 192_168_2_63";
         let plain_rule = "SRC-IP-CIDR,192.168.2.118/32";
         let catchall = "SRC-IP-CIDR,192.168.0.0/16";
 
-        assert!(wl_block.contains(pinned_rule), "правило закрепления устройства должно появиться");
+        assert!(wl_block.contains(pinned_rule), "правило закрепления должно ссылаться на per-device группу, блок:\n{wl_block}");
         assert!(wl_block.contains(plain_rule), "устройство без закрепления идёт на dev_target");
         assert!(wl_block.contains(catchall), "catch-all подсети обязан остаться");
 

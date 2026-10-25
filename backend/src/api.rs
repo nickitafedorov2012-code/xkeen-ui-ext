@@ -11381,29 +11381,58 @@ pub async fn save_whitelist(
                 return api_err(format!("Некорректный MAC-адрес устройства: {mac}"));
             }
         }
-        // BS-PIN: закреплённые ноды должны существовать среди реальных прокси
-        // (иначе правило SRC-IP-CIDR → несуществующий узел молча роняет трафик устройства)
+        // BS-PIN: закреплённая нода недоступна правилам mihomo напрямую (нода живёт
+        // в proxy-providers), поэтому пин направляет устройство в его per-device
+        // select-группу. Зеркалим закрепление в device_routing — apply_routing
+        // создаст группу {name} {ip_underscored}, а ниже выбираем в ней ноду runtime.
+        // Валидация: имя ноды должно существовать среди прокси/провайдеров.
         let known: std::collections::HashSet<String> = match mihomo::get_servers(&state.http, tx.config(), &tx.config().failover.priority_chain).await {
-            Ok(servers) => servers
-                .iter()
-                .map(|s| s.id.clone())
-                .collect(),
-            Err(_) => {
-                let mut set = std::collections::HashSet::new();
-                for g in ["Fastest", "Fallback", "PROXY"] {
-                    set.insert(g.to_string());
-                }
-                set
-            }
+            Ok(servers) => servers.iter().map(|s| s.id.clone()).collect(),
+            Err(_) => std::collections::HashSet::new(),
         };
+        let mut known_providers: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Ok(provs) = mihomo::get_provider_proxies(&state.http, tx.config()).await {
+            for (name, _) in provs.iter() {
+                known_providers.insert(name.clone());
+            }
+        }
         for dev in &devices {
-            if let Some(srv) = dev.server.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                if !known.contains(srv) {
-                    return api_err(format!("Неизвестный узел для закрепления устройства: {srv}"));
+            let srv = dev.server.as_deref().map(str::trim).unwrap_or("");
+            if srv.is_empty() {
+                continue;
+            }
+            if !known.contains(srv) && !known_providers.contains(srv) {
+                return api_err(format!("Неизвестный узел для закрепления устройства: {srv}"));
+            }
+        }
+        let old_devices = tx.config().whitelist.devices.clone();
+        tx.config_mut().whitelist.devices = devices;
+
+        // Зеркало пинов в device_routing (создаёт per-device группу в config.yaml)
+        for dev in tx.config().whitelist.devices.clone() {
+            let ip = dev.ip.trim().to_string();
+            let srv = dev.server.as_deref().map(str::trim).unwrap_or("").to_string();
+            if ip.is_empty() {
+                continue;
+            }
+            if !srv.is_empty() {
+                let entry = tx.config_mut().device_routing.entry(ip).or_default();
+                entry.servers = vec![srv];
+            } else {
+                // Пин снят: убираем зеркальную запись, только если она была создана пином
+                let was_pinned = old_devices
+                    .iter()
+                    .any(|d| d.ip.trim() == ip && d.server.as_deref().map(str::trim).unwrap_or("").is_empty() == false);
+                if was_pinned && tx.config().device_routing.get(&ip).map(|d| d.servers.len()).unwrap_or(0) == 1 {
+                    let is_pin_mirror = old_devices
+                        .iter()
+                        .any(|d| d.ip.trim() == ip && d.server.as_deref().map(str::trim) == tx.config().device_routing.get(&ip).and_then(|d| d.servers.first()).map(String::as_str));
+                    if is_pin_mirror {
+                        tx.config_mut().device_routing.remove(&ip);
+                    }
                 }
             }
         }
-        tx.config_mut().whitelist.devices = devices;
     }
     if let Some(custom_domains) = body.custom_domains {
         let mut clean_domains = Vec::new();
@@ -11459,6 +11488,20 @@ pub async fn save_whitelist(
         let tproxy_port = routing::parse_tproxy_port(&yaml).unwrap_or(5001);
         let dns_port = resolve_active_dns_port(tx.config());
         let _ = sync_full_tunnel_modes(tx.config(), redir_port, tproxy_port, dns_port).await;
+    }
+
+    // BS-PIN: выбираем закреплённую ноду в per-device группе (runtime, вне Failover)
+    for dev in &tx.config().whitelist.devices {
+        let srv = dev.server.as_deref().map(str::trim).unwrap_or("");
+        let ip = dev.ip.trim();
+        if !srv.is_empty() && !ip.is_empty() {
+            let gname = routing::group_name_for(ip, dev.name.as_deref().unwrap_or(""));
+            if let Err(e) = mihomo::switch_group(&state.http, tx.config(), &gname, srv).await {
+                log_w!("[BS-PIN] Не удалось выбрать ноду '{}' в группе '{}': {}", srv, gname, e);
+            } else {
+                log_i!("[BS-PIN] Устройство {} ({}) закреплено за нодой '{}' (группа '{}')", dev.name.as_deref().unwrap_or("?"), ip, srv, gname);
+            }
+        }
     }
 
     log_i!("Настройки режима белых списков успешно сохранены и применены");
