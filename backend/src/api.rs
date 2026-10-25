@@ -11406,33 +11406,8 @@ pub async fn save_whitelist(
             }
         }
         let old_devices = tx.config().whitelist.devices.clone();
+        let _ = old_devices;
         tx.config_mut().whitelist.devices = devices;
-
-        // Зеркало пинов в device_routing (создаёт per-device группу в config.yaml)
-        for dev in tx.config().whitelist.devices.clone() {
-            let ip = dev.ip.trim().to_string();
-            let srv = dev.server.as_deref().map(str::trim).unwrap_or("").to_string();
-            if ip.is_empty() {
-                continue;
-            }
-            if !srv.is_empty() {
-                let entry = tx.config_mut().device_routing.entry(ip).or_default();
-                entry.servers = vec![srv];
-            } else {
-                // Пин снят: убираем зеркальную запись, только если она была создана пином
-                let was_pinned = old_devices
-                    .iter()
-                    .any(|d| d.ip.trim() == ip && d.server.as_deref().map(str::trim).unwrap_or("").is_empty() == false);
-                if was_pinned && tx.config().device_routing.get(&ip).map(|d| d.servers.len()).unwrap_or(0) == 1 {
-                    let is_pin_mirror = old_devices
-                        .iter()
-                        .any(|d| d.ip.trim() == ip && d.server.as_deref().map(str::trim) == tx.config().device_routing.get(&ip).and_then(|d| d.servers.first()).map(String::as_str));
-                    if is_pin_mirror {
-                        tx.config_mut().device_routing.remove(&ip);
-                    }
-                }
-            }
-        }
     }
     if let Some(custom_domains) = body.custom_domains {
         let mut clean_domains = Vec::new();
@@ -11451,10 +11426,41 @@ pub async fn save_whitelist(
         tx.config_mut().whitelist.custom_domains = clean_domains;
     }
 
-    let raw_yaml = match tx.read_yaml().await {
+    let mut raw_yaml = match tx.read_yaml().await {
         Ok(y) => y,
         Err(e) => return api_err(e),
     };
+
+    // BS-PIN: per-device select-группы для закреплённых устройств создаются ДО
+    // генерации правил БС — правило SRC-IP-CIDR ссылается на группу по имени
+    // (group_name_for), а провайдерные ноды правилам напрямую недоступны.
+    // server="Fastest" только гарантирует существование группы; выбор ноды в ней —
+    // runtime (switch_group ниже), Failover этот выбор не трогает.
+    {
+        let pin_assignments: Vec<routing::Assignment> = tx
+            .config()
+            .whitelist
+            .devices
+            .iter()
+            .filter(|d| {
+                d.enabled
+                    && !d.ip.trim().is_empty()
+                    && !d.server.as_deref().map(str::trim).unwrap_or("").is_empty()
+            })
+            .map(|d| routing::Assignment {
+                ip: d.ip.trim().to_string(),
+                name: d.name.clone().unwrap_or_default(),
+                server: Some("Fastest".to_string()),
+            })
+            .collect();
+        if !pin_assignments.is_empty() {
+            let providers = device_providers_for(tx.config(), &raw_yaml);
+            match routing::apply_assignments(&raw_yaml, &pin_assignments, &providers) {
+                Ok(y) => raw_yaml = y,
+                Err(e) => return api_err(format!("Ошибка создания группы закрепления устройства: {e}")),
+            }
+        }
+    }
 
     let (new_yaml, _) = match routing::apply_routing(&raw_yaml, tx.config()) {
         Ok(res) => res,
