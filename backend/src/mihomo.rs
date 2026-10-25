@@ -1509,6 +1509,35 @@ pub async fn ping_all_url(
     out
 }
 
+/// Ограничение набора id для фонового автообновления пингов (анти-регрессия PING-AUTO):
+/// не даём фоновой задаче раздуться до всех нод провайдеров.
+pub const AUTO_PING_MAX_IDS: usize = 24;
+
+/// Набор id для фонового автообновления пингов (чистая функция, тестируемая):
+/// приоритетная цепочка failover + основной узел + авто-группы Fastest/Fallback/PROXY,
+/// дедупликация с сохранением порядка, ограничение AUTO_PING_MAX_IDS.
+/// Замер этих id держит историю mihomo свежей — GET /api/servers и опрос UI
+/// отдают живые пинги без каких-либо действий пользователя в панели.
+pub fn collect_auto_ping_ids(cfg: &AppConfig) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut push = |ids: &mut Vec<String>, seen: &mut std::collections::HashSet<String>, v: &str| {
+        let v = v.trim();
+        if !v.is_empty() && seen.insert(v.to_string()) {
+            ids.push(v.to_string());
+        }
+    };
+    for id in &cfg.failover.priority_chain {
+        push(&mut ids, &mut seen, id);
+    }
+    push(&mut ids, &mut seen, &cfg.failover.priority_server);
+    for group in ["Fastest", "Fallback", "PROXY"] {
+        push(&mut ids, &mut seen, group);
+    }
+    ids.truncate(AUTO_PING_MAX_IDS);
+    ids
+}
+
 /// Пинг участников Google AI группы и всех серверов специально по Google Flow URL (https://flow.google.com).
 pub async fn ping_flow_servers(http: &reqwest::Client, cfg: &AppConfig, timeout_ms: u64) -> BTreeMap<String, i64> {
     let test_url = "https://flow.google.com";
@@ -2103,6 +2132,41 @@ mod tests {
         assert!(cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case("sub1")));
         assert!(cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case("OLD_PROVIDER")));
         assert!(!cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case("active_sub")));
+    }
+
+    #[test]
+    fn test_collect_auto_ping_ids_dedup_and_groups() {
+        let mut cfg = AppConfig::default();
+        cfg.failover.priority_chain = vec![
+            "🇩🇪 Обход [Silver] - Германия".to_string(),
+            "Fastest".to_string(),
+            "  ".to_string(),
+            String::new(),
+            "🇩🇪 Обход [Silver] - Германия".to_string(),
+        ];
+        cfg.failover.priority_server = "Fallback".to_string();
+
+        let ids = collect_auto_ping_ids(&cfg);
+        // Дедуп цепочки, пустые отброшены, порядок сохранён
+        assert_eq!(ids[0], "🇩🇪 Обход [Silver] - Германия");
+        assert_eq!(ids[1], "Fastest");
+        // priority_server добавлен, авто-группы добавлены, дублей нет
+        assert!(ids.contains(&"Fallback".to_string()));
+        assert!(ids.contains(&"PROXY".to_string()));
+        assert_eq!(ids.len(), ids.iter().collect::<std::collections::HashSet<_>>().len());
+        assert!(ids.len() <= AUTO_PING_MAX_IDS);
+    }
+
+    #[test]
+    fn test_collect_auto_ping_ids_caps_at_limit() {
+        let mut cfg = AppConfig::default();
+        cfg.failover.priority_chain = (0..50).map(|i| format!("node-{i}")).collect();
+        cfg.failover.priority_server = String::new();
+
+        let ids = collect_auto_ping_ids(&cfg);
+        // Анти-регрессия PING-AUTO: фоновый замер не должен раздуваться до всех нод
+        assert_eq!(ids.len(), AUTO_PING_MAX_IDS);
+        assert_eq!(ids[0], "node-0");
     }
 
     #[test]

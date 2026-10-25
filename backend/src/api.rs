@@ -887,6 +887,10 @@ pub async fn switch_server(State(state): State<AppState>, Json(req): Json<Switch
                     *state.config.write().await = std::sync::Arc::new(mut_cfg);
                 }
             }
+            // PING-AUTO: мгновенный фоновый замер — свежий пинг нового сервера
+            // виден в панели уже следующим опросом, без действий пользователя
+            let cfg_now = (**state.config.read().await).clone();
+            spawn_ping_refresh(state.http.clone(), cfg_now);
             api_ok(json!({ "message": msg }))
         }
         Err(e) => {
@@ -914,6 +918,20 @@ pub async fn ping_servers(State(state): State<AppState>, Json(req): Json<PingReq
     };
     let pings = mihomo::ping_all_url(&state.http, &cfg, &ids, 2500, req.url.as_deref()).await;
     api_ok(json!({ "pings": pings }))
+}
+
+/// Мгновенный фоновый замер пингов после изменения маршрутизации (fire-and-forget):
+/// замер через mihomo delay-тест обновляет историю нод, поэтому уже следующий
+/// опрос GET /api/servers (и 3-секундный опрос UI) отдаёт свежие значения
+/// без каких-либо действий пользователя в панели (анти-регрессия PING-AUTO).
+pub fn spawn_ping_refresh(http: reqwest::Client, cfg: config::AppConfig) {
+    let ids = mihomo::collect_auto_ping_ids(&cfg);
+    if ids.is_empty() {
+        return;
+    }
+    tokio::spawn(async move {
+        let _ = mihomo::ping_all_url(&http, &cfg, &ids, 2500, None).await;
+    });
 }
 
 /// POST /api/flow/ping — специализированный пинг серверов по Google Flow (https://flow.google.com).
@@ -1345,8 +1363,11 @@ pub async fn set_priority(State(state): State<AppState>, Json(req): Json<Priorit
     if let Err(e) = config::save(&state.config_path, &cfg).await {
         return api_err(format!("Ошибка сохранения: {e}"));
     }
-    *state.config.write().await = std::sync::Arc::new(cfg);
+    *state.config.write().await = std::sync::Arc::new(cfg.clone());
     failover::clear_all_quarantine().await;
+    // PING-AUTO: после правки цепочки приоритета пинги обновляются сразу,
+    // а не при следующем ручном действии в панели
+    spawn_ping_refresh(state.http.clone(), cfg);
     api_ok(json!({ "saved": true, "message": message }))
 }
 

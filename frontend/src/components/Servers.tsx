@@ -603,6 +603,9 @@ export default function Servers({ notify, status, refresh }: Props) {
       const data = await apiPost<{ message: string }>('servers/switch', { server_id: s.id })
       notify(data.message || `Подключено: ${s.name}`)
       load()
+      // PING-AUTO: сразу замеряем пинги — свежие значения видны сразу после переключения,
+      // а не после следующего ручного действия в панели
+      pingAll()
       refresh?.()
       window.dispatchEvent(new CustomEvent('xr:refresh-status'))
       window.dispatchEvent(new CustomEvent('xr:data-changed', { detail: { entity: 'server' } }))
@@ -640,6 +643,8 @@ export default function Servers({ notify, status, refresh }: Props) {
       const data = await apiPost<{ message?: string }>('settings/priority', { server_ids: nextChain })
       notify(data.message || (isRemoving ? 'Узел удалён из Failover' : position === 'start' ? 'Узел перемещён в начало Failover (#1)' : 'Узел добавлен в конец Failover'))
       load()
+      // PING-AUTO: обновляем пинги сразу после правки цепочки приоритета
+      pingAll()
       if (refresh) refresh()
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка настройки Failover', true)

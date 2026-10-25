@@ -475,6 +475,23 @@ async fn main() {
         }
     });
 
+    // PING-AUTO: фоновое автообновление пингов серверов (каждые 30 секунд замеряет
+    // ограниченный набор: цепочка failover + основной узел + Fastest/Fallback/PROXY).
+    // Замер через mihomo delay-тест обновляет историю нод, поэтому GET /api/servers
+    // и 3-секундный опрос UI отдают живые пинги без действий пользователя в панели.
+    let ping_auto_state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        loop {
+            let cfg = ping_auto_state.config.read().await.clone();
+            let ids = crate::mihomo::collect_auto_ping_ids(&cfg);
+            if !ids.is_empty() {
+                let _ = crate::mihomo::ping_all_url(&ping_auto_state.http, &cfg, &ids, 2500, None).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+    });
+
     // Синхронизация AdGuard Home DNS-редиректа при старте панели
     let adguard_sync_state = state.clone();
     tokio::spawn(async move {
