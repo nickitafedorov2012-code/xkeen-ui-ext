@@ -460,12 +460,15 @@ async fn main() {
         }
     });
 
-    // Синхронизация режима игровой совместимости (iptables full tunnel) при старте панели
+    // Синхронизация полного перехвата (iptables) при старте панели: игровой режим
+    // ИЛИ режим БС (StrictXKeen) — sync_full_tunnel_modes сам расставит мьютекс
     let gaming_sync_state = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(7)).await;
         let cfg = gaming_sync_state.config.read().await;
-        if cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility {
+        let gaming_active = cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility;
+        let bs_active = cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen;
+        if gaming_active || bs_active {
             if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
                 let redir_port = routing::parse_redir_port(&yaml).unwrap_or(5000);
                 let tproxy_port = routing::parse_tproxy_port(&yaml).unwrap_or(5001);
@@ -509,7 +512,9 @@ async fn main() {
             if listener_ok {
                 let _ = adguard::apply_adguard_iptables(active_port);
                 log_i!("[STARTUP] ✓ AdGuard Home DNS redirection to port {} applied", active_port);
-                if cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility {
+                if cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility
+                    || cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen
+                {
                     // Z-09: порты парсим из config.yaml, а не хардкодим 5000/5001 —
                     // при кастомном конфиге Mihomo правила уходили не на те порты
                     if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
@@ -558,6 +563,22 @@ async fn main() {
         };
         if !active_id.is_empty() {
             let _ = api::sync_whitelist_mode_tunnel(&wl_sync_state, &active_id).await;
+        }
+
+        // BS-FIX: страховочный повтор полного перехвата БС (8-я секунда) —
+        // гарантирует XKEEN_BS даже если 7-секундный общий синк отработал раньше,
+        // чем поднят firewall KeeneticOS (правила восстановит и NDM-хук)
+        if is_bs {
+            let cfg = wl_sync_state.config.read().await;
+            if cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen {
+                if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+                    let redir_port = routing::parse_redir_port(&yaml).unwrap_or(5000);
+                    let tproxy_port = routing::parse_tproxy_port(&yaml).unwrap_or(5001);
+                    let dns_port = api::resolve_active_dns_port(&cfg);
+                    let _ = api::sync_full_tunnel_modes(&cfg, redir_port, tproxy_port, dns_port).await;
+                    log_i!("[STARTUP] ✓ BS-FIX: полный перехват XKEEN_BS перемонтирован");
+                }
+            }
         }
 
         // Авто-восстановление игрового режима при перезагрузке роутера:
