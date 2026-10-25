@@ -2202,7 +2202,10 @@ pub fn apply_whitelist_rules(
             wl_rules.push("  - GEOSITE,category-ru,DIRECT".to_string());
         }
 
-        // 2.3. Явно сконфигурированные устройства из whitelist.devices (если есть)
+        // 2.3. Явно сконфигурированные устройства из whitelist.devices (если есть).
+        // BS-PIN: устройство с закреплённой нодой получает СВОЁ правило (выше catch-all
+        // 2.4), поэтому его трафик идёт через фиксированный узел и не зависит от
+        // переключений Failover сервера БС (Failover управляет только группой Whitelist).
         for dev in &cfg.whitelist.devices {
             if dev.enabled && !dev.ip.trim().is_empty() && !excluded_ips.iter().any(|ex| ex == dev.ip.trim()) {
                 let ip_trim = dev.ip.trim();
@@ -2211,7 +2214,9 @@ pub fn apply_whitelist_rules(
                 } else {
                     format!("{ip_trim}/32")
                 };
-                let r = format!("  - SRC-IP-CIDR,{cidr},{dev_target}");
+                let pinned = dev.server.as_deref().map(str::trim).filter(|s| !s.is_empty());
+                let target = pinned.unwrap_or(dev_target);
+                let r = format!("  - SRC-IP-CIDR,{cidr},{target}");
                 if !wl_rules.contains(&r) {
                     wl_rules.push(r);
                 }
@@ -4181,6 +4186,7 @@ rules:
             ip: "192.168.1.105".into(),
             enabled: true,
             name: Some("Work Laptop".into()),
+            server: None
         });
 
         // 1. Применение правил
@@ -4218,6 +4224,7 @@ rules:
             ip: "192.168.1.105".into(),
             enabled: true,
             name: Some("Work Laptop".into()),
+            server: None,
         });
 
         let applied = apply_whitelist_rules(base_yaml, &cfg, None);
@@ -4236,6 +4243,76 @@ rules:
         );
     }
 
+    /// Анти-регрессия BS-PIN: устройство с закреплённой нодой получает СВОЁ правило
+    /// SRC-IP-CIDR с этой нодой, и оно стоит ВЫШЕ подсетевого catch-all 2.4 →
+    /// Failover-переключения группы Whitelist не влияют на трафик устройства.
+    #[test]
+    fn test_whitelist_device_pinned_server_rule_precedes_catchall() {
+        let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - GEOIP,RU,DIRECT\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.devices.push(crate::config::WhitelistDevice {
+            mac: "AA:BB:CC:DD:EE:02".into(),
+            ip: "192.168.2.63".into(),
+            enabled: true,
+            name: Some("Xiaomi 11T Pro".into()),
+            server: Some("🇳🇱 Нидерланды ADS".into()),
+        });
+        // Второе устройство без закрепления — обычный dev_target
+        cfg.whitelist.devices.push(crate::config::WhitelistDevice {
+            mac: "AA:BB:CC:DD:EE:03".into(),
+            ip: "192.168.2.118".into(),
+            enabled: true,
+            name: Some("Big PC".into()),
+            server: None,
+        });
+
+        let applied = apply_whitelist_rules(base_yaml, &cfg, None);
+        let start = applied.find(WHITELIST_BEGIN).expect("must find begin");
+        let end = applied.find(WHITELIST_END).expect("must find end");
+        let wl_block = &applied[start..end];
+
+        let pinned_rule = "SRC-IP-CIDR,192.168.2.63/32,🇳🇱 Нидерланды ADS";
+        let plain_rule = "SRC-IP-CIDR,192.168.2.118/32";
+        let catchall = "SRC-IP-CIDR,192.168.0.0/16";
+
+        assert!(wl_block.contains(pinned_rule), "правило закрепления устройства должно появиться");
+        assert!(wl_block.contains(plain_rule), "устройство без закрепления идёт на dev_target");
+        assert!(wl_block.contains(catchall), "catch-all подсети обязан остаться");
+
+        // Закреплённое правило и правило обычного устройства стоят ВЫШЕ catch-all
+        let pos_pinned = wl_block.find(pinned_rule).unwrap();
+        let pos_plain = wl_block.find(plain_rule).unwrap();
+        let pos_catchall = wl_block.find(catchall).unwrap();
+        assert!(pos_pinned < pos_catchall, "BS-PIN правило должно стоять выше catch-all");
+        assert!(pos_plain < pos_catchall, "обычное правило устройства должно стоять выше catch-all");
+    }
+
+    /// BS-PIN: пустое имя ноды трактуется как «не закреплено» (dev_target), а не как битое правило.
+    #[test]
+    fn test_whitelist_device_empty_pinned_server_falls_back_to_target() {
+        let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.devices.push(crate::config::WhitelistDevice {
+            mac: "AA:BB:CC:DD:EE:04".into(),
+            ip: "192.168.2.63".into(),
+            enabled: true,
+            name: None,
+            server: Some("   ".into()),
+        });
+
+        let applied = apply_whitelist_rules(base_yaml, &cfg, None);
+        assert!(
+            applied.contains("SRC-IP-CIDR,192.168.2.63/32,🛡️ Whitelist"),
+            "пустое закрепление должно дать правило с группой Whitelist, а не пустым таргетом"
+        );
+        assert!(
+            !applied.contains("SRC-IP-CIDR,192.168.2.63/32, \n"),
+            "пробельное имя ноды не должно попасть в правило"
+        );
+    }
+
     #[test]
     fn test_whitelist_rule_hierarchy_precedes_device_assignments() {
         let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - GEOIP,RU,DIRECT\n  - MATCH,PROXY\n";
@@ -4250,6 +4327,7 @@ rules:
             ip: "192.168.1.105".into(),
             enabled: true,
             name: Some("Work Laptop".into()),
+            server: None
         });
 
         let (applied, _) = apply_routing(base_yaml, &cfg).expect("apply_routing must succeed");
@@ -4274,6 +4352,7 @@ rules:
             ip: "192.168.1.105".into(),
             enabled: true,
             name: Some("Phone".into()),
+            server: None
         });
 
         let applied = apply_whitelist_dns(base_yaml, &cfg, "127.0.0.1:53");
@@ -4376,6 +4455,7 @@ rules:
             ip: "192.168.1.150".into(),
             name: Some("Smart TV".into()),
             enabled: true,
+            server: None
         });
         cfg.whitelist.excluded_devices = vec![
             "AA:BB:CC:DD:EE:01".into(), // by MAC

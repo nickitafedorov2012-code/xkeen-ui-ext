@@ -50,11 +50,13 @@ export default function Whitelist({ notify, refresh }: Props) {
   const [activeServer, setActiveServer] = useState<string>('')
   const [isBsServer, setIsBsServer] = useState<boolean>(false)
   const [devicesList, setDevicesList] = useState<DeviceInfo[]>([])
-  const [, setServersList] = useState<ServerInfo[]>([])
+  const [, setServersListUnused] = useState<ServerInfo[]>([])
+  void setServersListUnused
   const [catalogItems, setCatalogItems] = useState<DomesticCatalogEntryView[]>([])
   const [catalogTotal, setCatalogTotal] = useState<number>(376)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
+  const [serversList, setServersList] = useState<ServerInfo[]>([])
 
   // Поиск устройств для исключений
   const [deviceSearch, setDeviceSearch] = useState('')
@@ -106,9 +108,7 @@ export default function Whitelist({ notify, refresh }: Props) {
             (s) => !s.is_pool && s.id !== 'PROXY' && s.id !== 'GLOBAL' && s.id !== 'Fastest' && s.id !== 'Fallback'
           )
         )
-      }
-
-      if (catRes) {
+      }      if (catRes) {
         setCatalogTotal(catRes.total || (catRes.domains ? catRes.domains.length : 376))
         if (catRes.items && catRes.items.length > 0) {
           setCatalogItems(
@@ -248,9 +248,47 @@ export default function Whitelist({ notify, refresh }: Props) {
     }
   }
 
+  // BS-PIN: закрепление устройства за конкретной нодой (вне Failover-качелей)
+  const handlePinServer = async (device: DeviceInfo, serverId: string) => {
+    setBusy(true)
+    const prevDevices = config.devices
+    const ip = device.ip || ''
+    const nextDevices = (() => {
+      const others = config.devices.filter((d) => d.ip !== ip && d.mac.toLowerCase() !== device.mac.toLowerCase())
+      if (!serverId) {
+        return others
+      }
+      return [
+        ...others,
+        {
+          mac: device.mac,
+          ip,
+          enabled: true,
+          name: device.name,
+          server: serverId,
+        },
+      ]
+    })()
+    setConfig((prev) => ({ ...prev, devices: nextDevices }))
+    try {
+      await apiPost('whitelist', { devices: nextDevices })
+      notify(
+        serverId
+          ? `📌 ${device.name || device.ip}: закреплён за узлом ${serverId} — Failover его не трогает`
+          : `📌 ${device.name || device.ip}: следует общему серверу БС (авто)`
+      )
+      window.dispatchEvent(new CustomEvent('xr:refresh-status'))
+    } catch (e) {
+      setConfig((prev) => ({ ...prev, devices: prevDevices }))
+      notify(e instanceof Error ? e.message : 'Ошибка закрепления узла', true)
+      await loadData()
+    } finally {
+      setBusy(false)
+    }
+  }
+
   // Добавление пользовательского домена
-  const handleAddCustomDomain = async (e: React.FormEvent) => {
-    e.preventDefault()
+  const handleAddCustomDomain = async (e: React.FormEvent) => {    e.preventDefault()
     let clean = newDomainInput.trim().toLowerCase()
     clean = clean.replace(/^https?:\/\//i, '').replace(/\/.*$/, '').replace(/:\d+$/, '')
 
@@ -608,18 +646,23 @@ export default function Whitelist({ notify, refresh }: Props) {
                 <th style={{ width: 130 }}>IP-адрес</th>
                 <th style={{ width: 150 }}>MAC-адрес</th>
                 <th style={{ width: 180, textAlign: 'center' }}>Маршрутизация в БС</th>
+                <th style={{ width: 200, textAlign: 'center' }}>📌 Фиксированный узел</th>
               </tr>
             </thead>
             <tbody>
               {filteredDevices.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="muted small" style={{ textAlign: 'center', padding: 20 }}>
+                  <td colSpan={6} className="muted small" style={{ textAlign: 'center', padding: 20 }}>
                     Устройства не найдены
                   </td>
                 </tr>
               ) : (
                 filteredDevices.map((d) => {
                   const excluded = isDeviceExcluded(d)
+                  const pinned = config.devices.find(
+                    (pd) => pd.enabled && (pd.ip === d.ip || pd.mac.toLowerCase() === d.mac.toLowerCase())
+                  )
+                  const pinnedServer = pinned?.server || ''
                   return (
                     <tr key={d.mac} className="device-row">
                       <td style={{ textAlign: 'center' }}>
@@ -661,6 +704,36 @@ export default function Whitelist({ notify, refresh }: Props) {
                           >
                             <span>🛡️ В БС (Защищено)</span>
                           </button>
+                        )}
+                      </td>
+                      <td style={{ textAlign: 'center' }}>
+                        {excluded ? (
+                          <span className="muted small">—</span>
+                        ) : (
+                          <select
+                            data-testid={`pin-server-${d.mac}`}
+                            value={pinnedServer}
+                            disabled={busy}
+                            onChange={(e) => handlePinServer(d, e.target.value)}
+                            title="Закрепить устройство за стабильным узлом: Failover не будет его переключать"
+                            style={{
+                              width: '100%',
+                              maxWidth: 190,
+                              fontSize: 11,
+                              padding: '4px 6px',
+                              borderRadius: 6,
+                              border: '1px solid rgba(148,163,184,0.35)',
+                              background: pinnedServer ? 'rgba(59,130,246,0.15)' : 'rgba(15,23,42,0.6)',
+                              color: '#e2e8f0',
+                            }}
+                          >
+                            <option value="">↔ Авто (сервер БС)</option>
+                            {serversList.map((s) => (
+                              <option key={s.id} value={s.id}>
+                                {s.name}
+                              </option>
+                            ))}
+                          </select>
                         )}
                       </td>
                     </tr>

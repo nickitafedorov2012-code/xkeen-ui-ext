@@ -944,6 +944,8 @@ export interface WhitelistDevice {
   ip: string
   name?: string
   enabled: boolean
+  /** BS-PIN: закреплённая выходная нода устройства (вне Failover-качелей) */
+  server?: string | null
 }
 
 export interface WhitelistConfig {

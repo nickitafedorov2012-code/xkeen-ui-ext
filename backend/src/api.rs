@@ -2710,7 +2710,7 @@ pub async fn apply_routing(State(state): State<AppState>, Json(req): Json<Routin
         let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
         let cfg_guard = state.config.read().await;
         let dns_port = resolve_active_dns_port(&cfg_guard);
-        let _ = sync_gaming_full_tunnel(&cfg_guard.gaming, redir_port, tproxy_port, dns_port).await;
+        let _ = sync_full_tunnel_modes(&cfg_guard, redir_port, tproxy_port, dns_port).await;
     }
 
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -4770,7 +4770,7 @@ pub async fn toggle_adblock(
         let redir_port = 5000;
         let tproxy_port = 5001;
         let dns_port = resolve_active_dns_port(&latest_cfg);
-        let _ = sync_gaming_full_tunnel(&latest_cfg.gaming, redir_port, tproxy_port, dns_port).await;
+        let _ = sync_full_tunnel_modes(&latest_cfg, redir_port, tproxy_port, dns_port).await;
     }
 
     api_ok(json!({ "enabled": target_enabled, "saved": true, "applied": true }))
@@ -9971,7 +9971,7 @@ async fn apply_and_verify_gaming(
     let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
     let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
     let dns_port = resolve_active_dns_port(tx.config());
-    let _ = sync_gaming_full_tunnel(&tx.config().gaming, redir_port, tproxy_port, dns_port).await;
+    let _ = sync_full_tunnel_modes(tx.config(), redir_port, tproxy_port, dns_port).await;
 
     Ok(())
 }
@@ -10238,6 +10238,192 @@ pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16
         let _ = (cfg, redir_port, tproxy_port, dns_port);
     }
     Ok(())
+}
+
+/// BS-FIX: генерация shell-команд полного перехвата для режима Белых списков (стратегия StrictXKeen).
+/// Захватывает ВЕСЬ трафик локальных подсетей (все TCP/UDP порты, а не только 80/443,
+/// которые берёт внешняя цепочка xkeen ядра) и направляет его в Mihomo, где правила БС
+/// решают судьбу каждого соединения (РФ-каталог -> DIRECT, остальное -> туннель).
+/// Исключённые устройства БС обходят перехват целиком (RETURN в начале цепочки).
+pub fn build_whitelist_full_tunnel_commands(
+    cfg: &config::AppConfig,
+    redir_port: u16,
+    tproxy_port: u16,
+    dns_port: u16,
+) -> (String, Vec<String>) {
+    let r_port = if redir_port > 0 { redir_port } else { 5000 };
+    let tp_port = if tproxy_port > 0 { tproxy_port } else { 5001 };
+    let d_port = if dns_port > 0 { dns_port } else { 1053 };
+
+    // Очистка не трогает ip rule/таблицу 115: ими управляет sync_gaming_full_tunnel
+    // (при взаимно исключающихся режимах порядок синков гарантирует согласованность).
+    let cleanup_cmd = "\
+while iptables -t nat -D PREROUTING -j XKEEN_BS 2>/dev/null; do :; done; \
+iptables -t nat -F XKEEN_BS 2>/dev/null || true; \
+iptables -t nat -X XKEEN_BS 2>/dev/null || true; \
+while iptables -t mangle -D PREROUTING -j XKEEN_BS 2>/dev/null; do :; done; \
+iptables -t mangle -F XKEEN_BS 2>/dev/null || true; \
+iptables -t mangle -X XKEEN_BS 2>/dev/null || true".to_string();
+
+    let mut setup_cmds = Vec::new();
+    if !(cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen) {
+        return (cleanup_cmd, setup_cmds);
+    }
+
+    // Ослабление rp_filter и policy routing для TPROXY (общие с игровым режимом,
+    // режимы взаимно исключаются в sync_full_tunnel_modes)
+    setup_cmds.push("sysctl -w net.ipv4.conf.all.rp_filter=2 2>/dev/null || true".to_string());
+    setup_cmds.push("sysctl -w net.ipv4.conf.default.rp_filter=2 2>/dev/null || true".to_string());
+    setup_cmds.push("ip route replace local default dev lo table 115 2>/dev/null || ip route add local 0.0.0.0/0 dev lo table 115 2>/dev/null || true".to_string());
+    setup_cmds.push("while ip rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; while ip rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; ip rule add fwmark 0x115 lookup 115 priority 100 2>/dev/null || ip rule add fwmark 0x115/0x115 lookup 115 priority 100 2>/dev/null || ip rule add fwmark 0x115 lookup 115 2>/dev/null || true".to_string());
+
+    // Изолированные цепочки XKEEN_BS
+    setup_cmds.push("iptables -t nat -N XKEEN_BS 2>/dev/null || true".to_string());
+    setup_cmds.push("iptables -t nat -I PREROUTING 1 -j XKEEN_BS".to_string());
+    setup_cmds.push("iptables -t mangle -N XKEEN_BS 2>/dev/null || true".to_string());
+    setup_cmds.push("iptables -t mangle -I PREROUTING 1 -j XKEEN_BS".to_string());
+
+    // Исключённые устройства БС: полный обход перехвата (и TCP, и UDP), до любых правил захвата
+    for ex_ip in resolve_excluded_whitelist_ips_pub(cfg) {
+        let ip_clean = ex_ip.split('/').next().unwrap_or(&ex_ip).trim();
+        if let Ok(v4) = ip_clean.parse::<std::net::Ipv4Addr>() {
+            let ip = v4.to_string();
+            setup_cmds.push(format!("iptables -t nat -A XKEEN_BS -s {ip} -j RETURN"));
+            setup_cmds.push(format!("iptables -t mangle -A XKEEN_BS -s {ip} -j RETURN"));
+        }
+    }
+
+    // Перехват по приватным подсетям (зеркалирует SRC-IP-CIDR правила БС в Mihomo)
+    for subnet in ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"] {
+        // NAT: DNS -> REDIRECT на активный DNS-порт (до байпаса локальных сетей)
+        setup_cmds.push(format!(
+            "iptables -t nat -A XKEEN_BS -s {subnet} -p udp --dport 53 -j REDIRECT --to-ports {d_port}"
+        ));
+        setup_cmds.push(format!(
+            "iptables -t nat -A XKEEN_BS -s {subnet} -p tcp --dport 53 -j REDIRECT --to-ports {d_port}"
+        ));
+        // NAT: байпас локальных подсетей (та же логика, что в игровом режиме)
+        for local_dst in ["127.0.0.0/8", "169.254.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] {
+            setup_cmds.push(format!("iptables -t nat -A XKEEN_BS -s {subnet} -d {local_dst} -j RETURN"));
+        }
+        // NAT: весь остальной TCP (ЛЮБЫЕ порты — включая игровые 9339) -> REDIRECT в Mihomo
+        setup_cmds.push(format!(
+            "iptables -t nat -A XKEEN_BS -s {subnet} -p tcp -j REDIRECT --to-ports {r_port}"
+        ));
+        // MANGLE: DNS пропускаем (его забирает NAT REDIRECT)
+        setup_cmds.push(format!(
+            "iptables -t mangle -A XKEEN_BS -s {subnet} -p udp --dport 53 -j RETURN"
+        ));
+        // MANGLE: байпас локальных и служебных подсетей
+        for local_dst in [
+            "127.0.0.0/8",
+            "169.254.0.0/16",
+            "10.0.0.0/8",
+            "172.16.0.0/12",
+            "192.168.0.0/16",
+            "224.0.0.0/4",
+            "255.255.255.255/32",
+        ] {
+            setup_cmds.push(format!("iptables -t mangle -A XKEEN_BS -s {subnet} -d {local_dst} -j RETURN"));
+        }
+        // MANGLE: весь остальной UDP (ЛЮБЫЕ порты) -> TPROXY в Mihomo
+        setup_cmds.push(format!(
+            "iptables -t mangle -A XKEEN_BS -s {subnet} -p udp -j TPROXY --tproxy-mark 0x115/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1"
+        ));
+    }
+
+    (cleanup_cmd, setup_cmds)
+}
+
+/// Публичная обёртка резолва исключённых IP БС для генератора команд (unit-тестируемость).
+pub fn resolve_excluded_whitelist_ips_pub(cfg: &config::AppConfig) -> Vec<String> {
+    crate::routing::resolve_excluded_whitelist_ips(cfg)
+}
+
+/// BS-FIX: применение/снятие полного перехвата режима БС + NDM-хук автовосстановления.
+pub async fn sync_whitelist_full_tunnel(cfg: &config::AppConfig, redir_port: u16, tproxy_port: u16, dns_port: u16) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let (cleanup_cmd, setup_cmds) = build_whitelist_full_tunnel_commands(cfg, redir_port, tproxy_port, dns_port);
+        let script = format!("{}\n{}", cleanup_cmd, setup_cmds.join("\n"));
+        let out = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .await;
+        match out {
+            Ok(o) => {
+                if !o.status.success() {
+                    let err = String::from_utf8_lossy(&o.stderr);
+                    if !err.trim().is_empty() {
+                        log_w!("[BS_TUNNEL] Предупреждение при настройке правил: {}", err.trim());
+                    }
+                }
+            }
+            Err(e) => {
+                log_w!("[BS_TUNNEL] Не удалось запустить sh для настройки правил: {}", e);
+            }
+        }
+
+        // NDM-хук: восстановление правил после перезагрузки фаервола KeeneticOS
+        let hook_path = std::path::Path::new("/opt/etc/ndm/netfilter.d/061-xkeen-bs.sh");
+        let active = cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen;
+        if active && !setup_cmds.is_empty() {
+            if let Some(parent) = hook_path.parent() {
+                let _ = tokio::fs::create_dir_all(parent).await;
+            }
+            let mut hook_content = String::from("#!/bin/sh\n[ \"$table\" != \"nat\" ] && [ \"$table\" != \"mangle\" ] && [ \"$table\" != \"filter\" ] && [ -n \"$table\" ] && exit 0\n");
+            hook_content.push_str(&cleanup_cmd);
+            hook_content.push('\n');
+            for cmd in &setup_cmds {
+                hook_content.push_str(cmd);
+                hook_content.push('\n');
+            }
+            if let Ok(()) = tokio::fs::write(hook_path, hook_content).await {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = tokio::fs::set_permissions(hook_path, std::fs::Permissions::from_mode(0o755)).await;
+                }
+            }
+        } else {
+            let _ = tokio::fs::remove_file(hook_path).await;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (cfg, redir_port, tproxy_port, dns_port);
+    }
+    Ok(())
+}
+
+/// BS-FIX: единая точка синхронизации полного перехвата. Режимы взаимоисключающие:
+/// активен режим БС (StrictXKeen) ИЛИ игровой Compatibility — второй всегда приводится
+/// к чистому состоянию. Порядок важен: gaming управляет ip rule/таблицей 115,
+/// поэтому его синк идёт первым, а БС при необходимости поднимает таблицу заново.
+pub async fn sync_full_tunnel_modes(cfg: &config::AppConfig, redir_port: u16, tproxy_port: u16, dns_port: u16) {
+    let bs_active = cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen;
+    let gaming_active = cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility;
+
+    // Игровой синк: при активном БС принудительно в режим очистки (мьютекс правил)
+    let gaming_cfg = if bs_active {
+        let mut g = cfg.gaming.clone();
+        g.enabled = false;
+        g
+    } else {
+        cfg.gaming.clone()
+    };
+    let _ = sync_gaming_full_tunnel(&gaming_cfg, redir_port, tproxy_port, dns_port).await;
+
+    // Синк БС: при активном игровом режиме принудительно в режим очистки
+    let wl_cfg = if gaming_active && !bs_active {
+        let mut w = cfg.clone();
+        w.whitelist.enabled = false;
+        w
+    } else {
+        cfg.clone()
+    };
+    let _ = sync_whitelist_full_tunnel(&wl_cfg, redir_port, tproxy_port, dns_port).await;
 }
 
 
@@ -10741,7 +10927,7 @@ pub async fn adguard_set_protection(
                 let redir_port = 5000;
                 let tproxy_port = 5001;
                 let dns_port = resolve_active_dns_port(&latest_cfg);
-                let _ = sync_gaming_full_tunnel(&latest_cfg.gaming, redir_port, tproxy_port, dns_port).await;
+                let _ = sync_full_tunnel_modes(&latest_cfg, redir_port, tproxy_port, dns_port).await;
             }
             api_ok(json!({ "enabled": now_enabled }))
         }
@@ -11053,6 +11239,15 @@ pub async fn set_whitelist_strategy(
         return api_err(format!("Ошибка сохранения config.json: {e}"));
     }
 
+    // BS-FIX: смена стратегии включает/выключает полный перехват XKEEN_BS немедленно
+    {
+        let yaml = tokio::fs::read_to_string(&tx.config().mihomo.config_path).await.unwrap_or_default();
+        let redir_port = routing::parse_redir_port(&yaml).unwrap_or(5000);
+        let tproxy_port = routing::parse_tproxy_port(&yaml).unwrap_or(5001);
+        let dns_port = resolve_active_dns_port(tx.config());
+        let _ = sync_full_tunnel_modes(tx.config(), redir_port, tproxy_port, dns_port).await;
+    }
+
     log_i!("Стратегия белых списков переключена на: {:?}", body.strategy);
     api_ok(json!({ "strategy": body.strategy }))
 }
@@ -11106,6 +11301,15 @@ pub async fn toggle_whitelist_exclude(
 
     if let Err(e) = tx.commit().await {
         return api_err(format!("Ошибка сохранения config.json: {e}"));
+    }
+
+    // BS-FIX: список исключений изменил состав перехвата — синхронизируем iptables сразу
+    {
+        let yaml = tokio::fs::read_to_string(&tx.config().mihomo.config_path).await.unwrap_or_default();
+        let redir_port = routing::parse_redir_port(&yaml).unwrap_or(5000);
+        let tproxy_port = routing::parse_tproxy_port(&yaml).unwrap_or(5001);
+        let dns_port = resolve_active_dns_port(tx.config());
+        let _ = sync_full_tunnel_modes(tx.config(), redir_port, tproxy_port, dns_port).await;
     }
 
     log_i!("Статус исключения устройства {} из белых списков: {}", id_clean, body.excluded);
@@ -11177,6 +11381,28 @@ pub async fn save_whitelist(
                 return api_err(format!("Некорректный MAC-адрес устройства: {mac}"));
             }
         }
+        // BS-PIN: закреплённые ноды должны существовать среди реальных прокси
+        // (иначе правило SRC-IP-CIDR → несуществующий узел молча роняет трафик устройства)
+        let known: std::collections::HashSet<String> = match mihomo::get_servers(&state.http, tx.config(), &tx.config().failover.priority_chain).await {
+            Ok(servers) => servers
+                .iter()
+                .map(|s| s.id.clone())
+                .collect(),
+            Err(_) => {
+                let mut set = std::collections::HashSet::new();
+                for g in ["Fastest", "Fallback", "PROXY"] {
+                    set.insert(g.to_string());
+                }
+                set
+            }
+        };
+        for dev in &devices {
+            if let Some(srv) = dev.server.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                if !known.contains(srv) {
+                    return api_err(format!("Неизвестный узел для закрепления устройства: {srv}"));
+                }
+            }
+        }
         tx.config_mut().whitelist.devices = devices;
     }
     if let Some(custom_domains) = body.custom_domains {
@@ -11223,6 +11449,16 @@ pub async fn save_whitelist(
         if !active_id.is_empty() {
             let _ = sync_whitelist_mode_tunnel(&state, &active_id).await;
         }
+    }
+
+    // BS-FIX: полный перехват всех портов (iptables XKEEN_BS) применяется/снимается
+    // сразу при сохранении настроек БС, а не только после перезапуска панели
+    {
+        let yaml = tokio::fs::read_to_string(&tx.config().mihomo.config_path).await.unwrap_or_default();
+        let redir_port = routing::parse_redir_port(&yaml).unwrap_or(5000);
+        let tproxy_port = routing::parse_tproxy_port(&yaml).unwrap_or(5001);
+        let dns_port = resolve_active_dns_port(tx.config());
+        let _ = sync_full_tunnel_modes(tx.config(), redir_port, tproxy_port, dns_port).await;
     }
 
     log_i!("Настройки режима белых списков успешно сохранены и применены");
@@ -11302,6 +11538,7 @@ pub async fn toggle_whitelist_device(
             ip: ip_str.clone(),
             enabled: true,
             name: name_opt.clone(),
+            server: None,
         });
     }
 
@@ -11362,6 +11599,103 @@ pub async fn get_whitelist_catalog() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Анти-регрессия BS-FIX: полный перехват БС обязан захватывать ВСЕ TCP/UDP порты
+    /// (без --dport ограничений) — иначе игровой трафик вроде 9339 вылетает из туннеля
+    /// в прямой канал провайдера, где ТСПУ дропает его SYN.
+    #[test]
+    fn test_build_whitelist_full_tunnel_captures_all_ports() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
+        cfg.whitelist.excluded_devices = vec!["192.168.2.99".to_string()];
+
+        let (cleanup, setup) = build_whitelist_full_tunnel_commands(&cfg, 5000, 5001, 1053);
+
+        // Цепочки XKEEN_BS создаются и цепляются в начало PREROUTING
+        assert!(setup.iter().any(|c| c.contains("iptables -t nat -N XKEEN_BS")));
+        assert!(setup.iter().any(|c| c.contains("iptables -t nat -I PREROUTING 1 -j XKEEN_BS")));
+        assert!(setup.iter().any(|c| c.contains("iptables -t mangle -N XKEEN_BS")));
+        assert!(setup.iter().any(|c| c.contains("iptables -t mangle -I PREROUTING 1 -j XKEEN_BS")));
+
+        // TCP захват БЕЗ ограничения портов (для всех трёх приватных подсетей)
+        for subnet in ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"] {
+            let tcp_rule = setup.iter().find(|c| c.contains(&format!("-s {subnet} -p tcp -j REDIRECT --to-ports 5000")));
+            assert!(tcp_rule.is_some(), "нет полного TCP-захвата для {subnet}");
+            assert!(!tcp_rule.unwrap().contains("--dport"), "TCP-захват {subnet} не должен ограничивать порты");
+            let udp_rule = setup.iter().find(|c| c.contains(&format!("-s {subnet} -p udp -j TPROXY --tproxy-mark 0x115/0xffffffff --on-port 5001")));
+            assert!(udp_rule.is_some(), "нет полного UDP-захвата (TPROXY) для {subnet}");
+        }
+
+        // DNS-редирект до байпаса локальных подсетей
+        assert!(setup.iter().any(|c| c.contains("-p udp --dport 53 -j REDIRECT --to-ports 1053")));
+        // Байпас локальных подсетей (RETURN) присутствует
+        assert!(setup.iter().any(|c| c.contains("-d 192.168.0.0/16 -j RETURN")));
+        // Исключённое устройство БС обходит перехват целиком (RETURN в nat и mangle)
+        assert!(setup.iter().any(|c| c.contains("-s 192.168.2.99 -j RETURN") && c.contains("-t nat")));
+        assert!(setup.iter().any(|c| c.contains("-s 192.168.2.99 -j RETURN") && c.contains("-t mangle")));
+        // Policy routing для TPROXY
+        assert!(setup.iter().any(|c| c.contains("ip rule add fwmark 0x115 lookup 115")));
+
+        // Cleanup удаляет и цепочки, и PREROUTING-джампы
+        assert!(cleanup.contains("iptables -t nat -D PREROUTING -j XKEEN_BS"));
+        assert!(cleanup.contains("iptables -t nat -X XKEEN_BS"));
+        assert!(cleanup.contains("iptables -t mangle -X XKEEN_BS"));
+
+        // Выключенный БС не генерирует правил
+        let mut cfg_off = crate::config::AppConfig::default();
+        cfg_off.whitelist.enabled = false;
+        let (_, setup_off) = build_whitelist_full_tunnel_commands(&cfg_off, 5000, 5001, 1053);
+        assert!(setup_off.is_empty(), "выключенный БС не должен генерировать правила перехвата");
+
+        // Standard-стратегия тоже не генерирует правил
+        let mut cfg_std = crate::config::AppConfig::default();
+        cfg_std.whitelist.enabled = true;
+        cfg_std.whitelist.strategy = crate::config::WhitelistStrategy::Standard;
+        let (_, setup_std) = build_whitelist_full_tunnel_commands(&cfg_std, 5000, 5001, 1053);
+        assert!(setup_std.is_empty(), "Standard-стратегия не должна включать полный перехват");
+    }
+
+    /// Анти-регрессия BS-FIX: мьютекс режимов. При активном БС игровой полный перехват
+    /// обязан сниматься (gaming.enabled принудительно false), и наоборот.
+    #[test]
+    fn test_sync_full_tunnel_modes_mutex_flags() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
+        cfg.gaming.enabled = true;
+        cfg.gaming.mode = crate::config::GamingMode::Compatibility;
+        // Генератору gaming нужна хотя бы одна активная ради устройства
+        cfg.gaming.devices.push(crate::config::GamingDevice {
+            mac: "AA:BB:CC:DD:EE:10".into(),
+            ip: "192.168.2.70".into(),
+            ipv6: vec![],
+            name: "Console".into(),
+            enabled: true,
+            server: None,
+        });
+
+        let bs_active = cfg.whitelist.enabled && cfg.whitelist.strategy == crate::config::WhitelistStrategy::StrictXKeen;
+        let gaming_active = cfg.gaming.enabled && cfg.gaming.mode == crate::config::GamingMode::Compatibility;
+        assert!(bs_active && gaming_active, "конфликтный сценарий должен быть подготовлен");
+
+        // sync_full_tunnel_modes глушит gaming-правила при активном БС:
+        // проверяем на чистой функции-конструкторе — gaming-cfg с enabled=false
+        // не генерирует перехват, а БС-конструктор его генерирует
+        let mut gaming_muted = cfg.gaming.clone();
+        gaming_muted.enabled = false;
+        let (_, gaming_setup, _ct) = build_gaming_full_tunnel_commands(&gaming_muted, 5000, 5001, 1053);
+        assert!(gaming_setup.is_empty(), "при активном БС gaming-перехват должен быть пуст");
+        let (_, bs_setup) = build_whitelist_full_tunnel_commands(&cfg, 5000, 5001, 1053);
+        assert!(!bs_setup.is_empty(), "при активном БС должен быть перехват XKEEN_BS");
+
+        let mut wl_muted = cfg.clone();
+        wl_muted.whitelist.enabled = false;
+        let (_, wl_setup) = build_whitelist_full_tunnel_commands(&wl_muted, 5000, 5001, 1053);
+        assert!(wl_setup.is_empty(), "при активном gaming БС-перехват должен быть пуст");
+        let (_, gaming_setup2, _ct2) = build_gaming_full_tunnel_commands(&cfg.gaming, 5000, 5001, 1053);
+        assert!(!gaming_setup2.is_empty(), "при активном gaming должен быть перехват XKEEN_GAMING");
+    }
 
     #[test]
     fn test_sync_zapret_hosts_content_dynamic_isolation() {

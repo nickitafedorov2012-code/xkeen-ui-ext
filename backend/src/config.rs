@@ -588,6 +588,11 @@ pub struct WhitelistDevice {
     pub enabled: bool,
     #[serde(default)]
     pub name: Option<String>,
+    /// Закреплённая выходная нода устройства (BS-PIN): трафик устройства идёт
+    /// через указанную ноду и не зависит от переключений Failover сервера БС.
+    /// None/пусто — следовать общему серверу режима БС.
+    #[serde(default)]
+    pub server: Option<String>,
 }
 
 impl Default for WhitelistDevice {
@@ -597,6 +602,7 @@ impl Default for WhitelistDevice {
             ip: String::new(),
             enabled: true,
             name: None,
+            server: None,
         }
     }
 }
