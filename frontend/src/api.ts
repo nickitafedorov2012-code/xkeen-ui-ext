@@ -92,6 +92,11 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
     validateEndpointData(cleanPath, env.data)
 
     return env.data as T
+  } catch (err) {
+    if (controller.signal.aborted) {
+      throw new Error('Превышено время ожидания ответа роутера (30 сек). Изменения НЕ применились на роутере!')
+    }
+    throw err
   } finally {
     clearTimeout(abortTimer)
   }

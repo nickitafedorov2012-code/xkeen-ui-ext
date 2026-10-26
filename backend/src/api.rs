@@ -1783,8 +1783,8 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
     tx.config_mut().direct_domains = direct_sanitized;
     tx.config_mut().force_domains = force_sanitized;
 
-    // Автоматическое обнаружение сопутствующих CDN (бандлы + поддомены + HTML-сканер)
-    let auto_cdns = crate::cdn_discovery::discover_all_cdns(&tx.config().force_domains, &tx.config().mihomo_proxy_url()).await;
+    // Мгновенное добавление сопутствующих CDN из офлайн-базы связок (без блокирующего сетевого опроса)
+    let auto_cdns = crate::cdn_discovery::expand_bundles(&tx.config().force_domains);
     let mut all_force = tx.config().force_domains.clone();
     for cdn in &auto_cdns {
         if !all_force.contains(cdn) {
@@ -1938,8 +1938,8 @@ pub async fn force_add_domain(
             tx.config_mut().force_domains.dedup();
         }
 
-        // Обнаружение сопутствующих CDN
-        let auto_cdns = crate::cdn_discovery::discover_all_cdns(&tx.config().force_domains, &tx.config().mihomo_proxy_url()).await;
+        // Мгновенное добавление сопутствующих CDN из связок
+        let auto_cdns = crate::cdn_discovery::expand_bundles(&tx.config().force_domains);
         let mut force_list = tx.config().force_domains.clone();
         for cdn in &auto_cdns {
             if !force_list.contains(cdn) {

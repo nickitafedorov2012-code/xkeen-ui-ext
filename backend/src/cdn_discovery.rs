@@ -337,4 +337,28 @@ mod tests {
         assert!(expanded.contains("oavito.ru"));
         assert!(!expanded.contains("avito.ru"));
     }
+
+    #[test]
+    fn test_expand_bundles_instantaneous_with_many_domains() {
+        // Анти-регрессия: обработка даже 100+ доменов (включая routerai.ru и 38 PROXY доменов)
+        // должна происходить строго мгновенно в памяти (< 20 мс) без блокирующих сетевых запросов.
+        let mut domains = Vec::new();
+        for i in 0..100 {
+            domains.push(format!("custom-site-{i}.org"));
+        }
+        domains.push("github.com".to_string());
+        domains.push("routerai.ru".to_string());
+        domains.push("tiktok.com".to_string());
+        domains.push("habr.com".to_string());
+
+        let start = std::time::Instant::now();
+        let expanded = expand_bundles(&domains);
+        let elapsed = start.elapsed();
+
+        assert!(elapsed < std::time::Duration::from_millis(50), "expand_bundles must be instantaneous (< 50ms), took {:?}", elapsed);
+        assert!(expanded.contains("githubassets.com"));
+        assert!(expanded.contains("habrastorage.org"));
+        assert!(!expanded.contains("routerai.ru"));
+    }
 }
+

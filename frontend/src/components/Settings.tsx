@@ -221,11 +221,17 @@ export default function Settings({ notify, status, refresh }: Props) {
   const [saving, setSaving] = useState(false)
   const [directDomains, setDirectDomains] = useState('')
   const [forceDomains, setForceDomains] = useState('')
+  const [savedDirectDomains, setSavedDirectDomains] = useState('')
+  const [savedForceDomains, setSavedForceDomains] = useState('')
   const [autoCdns, setAutoCdns] = useState<string[]>([])
   const [cdnsCollapsed, setCdnsCollapsed] = useState(true)
   const [savingDomains, setSavingDomains] = useState(false)
   const [scanningCdn, setScanningCdn] = useState(false)
   const [domainsRevision, setDomainsRevision] = useState<string | undefined>(undefined)
+
+  const hasUnsavedDirect = directDomains.trim() !== savedDirectDomains.trim()
+  const hasUnsavedForce = forceDomains.trim() !== savedForceDomains.trim()
+  const hasUnsavedDomains = hasUnsavedDirect || hasUnsavedForce
   const [failoverLastPolled, setFailoverLastPolled] = useState<string>(() => new Date().toLocaleTimeString())
 
   useEffect(() => {
@@ -470,8 +476,12 @@ export default function Settings({ notify, status, refresh }: Props) {
       .catch(() => {})
     apiGet<{ direct: string[]; force: string[]; auto_cdns?: string[]; revision?: string }>('domains')
       .then((d) => {
-        setDirectDomains(d.direct.join('\n'))
-        setForceDomains(d.force.join('\n'))
+        const dStr = d.direct.join('\n')
+        const fStr = d.force.join('\n')
+        setDirectDomains(dStr)
+        setForceDomains(fStr)
+        setSavedDirectDomains(dStr)
+        setSavedForceDomains(fStr)
         if (d.auto_cdns) setAutoCdns(d.auto_cdns)
         if (d.revision) setDomainsRevision(d.revision)
       })
@@ -723,11 +733,17 @@ export default function Settings({ notify, status, refresh }: Props) {
       })
       if (data.auto_cdns) setAutoCdns(data.auto_cdns)
       if (data.revision) setDomainsRevision(data.revision)
+      setSavedDirectDomains(directDomains)
+      setSavedForceDomains(forceDomains)
       const cdnMsg = data.auto_cdns && data.auto_cdns.length > 0 ? `, CDN: +${data.auto_cdns.length}` : ''
       const ipMsg = data.overridden_ips ? `, IP: ${data.overridden_ips}` : ''
-      notify(`Домены сохранены: напрямую ${data.direct}, через прокси ${data.force}${cdnMsg}${ipMsg}`)
+      notify(`✓ Домены успешно применены: напрямую ${data.direct}, через прокси ${data.force}${cdnMsg}${ipMsg}`)
     } catch (e) {
-      notify(e instanceof Error ? e.message : 'Ошибка сохранения доменов', true)
+      // Прямое указание пользователя: автоматически убирать домен с выводом ошибки
+      setDirectDomains(savedDirectDomains)
+      setForceDomains(savedForceDomains)
+      const rawMsg = e instanceof Error ? e.message : 'Ошибка сохранения доменов'
+      notify(`❌ ${rawMsg}. Несохранённые домены автоматически убраны из списка.`, true)
     } finally {
       setSavingDomains(false)
     }
@@ -2075,7 +2091,18 @@ export default function Settings({ notify, status, refresh }: Props) {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <b style={{ fontSize: 12.5, color: '#34d399' }}>⏭ Напрямую (DIRECT)</b>
-                  <span className="muted small">{directDomains.split('\n').filter(Boolean).length} шт.</span>
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    <span className="muted small">{directDomains.split('\n').filter(Boolean).length} шт.</span>
+                    {hasUnsavedDirect ? (
+                      <span style={{ fontSize: 10.5, background: 'rgba(245, 158, 11, 0.2)', color: '#f59e0b', padding: '1px 6px', borderRadius: 4, fontWeight: 600 }}>
+                        🟠 Не применено
+                      </span>
+                    ) : (
+                      <span style={{ fontSize: 10.5, background: 'rgba(16, 185, 129, 0.15)', color: '#10b981', padding: '1px 6px', borderRadius: 4 }}>
+                        ✅ Активно
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <textarea
                   className="input"
@@ -2091,7 +2118,18 @@ export default function Settings({ notify, status, refresh }: Props) {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <b style={{ fontSize: 12.5, color: '#38bdf8' }}>🔒 Через прокси (PROXY)</b>
-                  <span className="muted small">{forceDomains.split('\n').filter(Boolean).length} шт.</span>
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    <span className="muted small">{forceDomains.split('\n').filter(Boolean).length} шт.</span>
+                    {hasUnsavedForce ? (
+                      <span style={{ fontSize: 10.5, background: 'rgba(245, 158, 11, 0.2)', color: '#f59e0b', padding: '1px 6px', borderRadius: 4, fontWeight: 600 }}>
+                        🟠 Не применено
+                      </span>
+                    ) : (
+                      <span style={{ fontSize: 10.5, background: 'rgba(16, 185, 129, 0.15)', color: '#10b981', padding: '1px 6px', borderRadius: 4 }}>
+                        ✅ Активно
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <textarea
                   className="input"
@@ -2128,10 +2166,30 @@ export default function Settings({ notify, status, refresh }: Props) {
               </div>
             )}
 
-            <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
-              <button className="btn primary" onClick={saveDomains} disabled={savingDomains}>
-                {savingDomains ? 'Применение и поиск CDN…' : '🌐 Применить домены'}
+            <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap', alignItems: 'center' }}>
+              <button
+                className="btn primary"
+                onClick={saveDomains}
+                disabled={savingDomains}
+                style={hasUnsavedDomains ? { boxShadow: '0 0 10px rgba(56, 189, 248, 0.4)', borderColor: '#38bdf8' } : undefined}
+              >
+                {savingDomains ? 'Применение доменов…' : hasUnsavedDomains ? '💾 Применить изменения' : '🌐 Применить домены'}
               </button>
+              {hasUnsavedDomains && (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    setDirectDomains(savedDirectDomains)
+                    setForceDomains(savedForceDomains)
+                    notify('Введённые домены сброшены до сохранённых на роутере')
+                  }}
+                  title="Сбросить введённый черновик к тому, что сейчас сохранено на роутере"
+                  style={{ fontSize: 12 }}
+                >
+                  ↺ Сбросить к сохранённым
+                </button>
+              )}
               <button className="btn" onClick={scanCdnManual} disabled={scanningCdn || savingDomains}>
                 {scanningCdn ? '🔍 Поиск CDN…' : '🔍 Сканировать CDN сейчас'}
               </button>
