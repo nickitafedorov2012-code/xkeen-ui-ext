@@ -3016,31 +3016,35 @@ pub async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str, hwid: Opt
     } else {
         "curl"
     };
-    let curl_output = tokio::process::Command::new(curl_bin)
-        .arg("-s")
+    let mut cmd = tokio::process::Command::new(curl_bin);
+    cmd.arg("-s")
         .arg("-i")
         .arg("-x")
-        .arg("http://127.0.0.1:7890")
+        .arg(&proxy_url)
         .arg("-H")
-        .arg(format!("User-Agent: {ua}"))
-        .arg("-H")
-        .arg(format!("x-hwid: {}", resolved_hwid.as_deref().unwrap_or("")))
-        .arg("--max-time")
-        .arg("15")
-        .arg(url)
-        .output()
-        .await;
+        .arg(format!("User-Agent: {ua}"));
+    if let Some(ref h) = resolved_hwid {
+        cmd.arg("-H").arg(format!("x-hwid: {h}"));
+    }
+    cmd.arg("--max-time").arg("15").arg(url);
+    let curl_output = cmd.output().await;
 
     let (mut header_userinfo, text) = if let Ok(out) = curl_output {
         if out.status.success() && !out.stdout.is_empty() {
             let full_str = String::from_utf8_lossy(&out.stdout).to_string();
             // Разделяем заголовки и тело
-            if let Some(pos) = full_str.find("
+            let mut pos_opt = None;
+            for sep in ["
 \n
-\n").or_else(|| full_str.find("\n\n")) {
-                let sep_len = if full_str[pos..].starts_with("
-\n
-\n") { 4 } else { 2 };
+\n", "\n\n", "
+
+"] {
+                if let Some(p) = full_str.find(sep) {
+                    pos_opt = Some((p, sep.len()));
+                    break;
+                }
+            }
+            if let Some((pos, sep_len)) = pos_opt {
                 let header_part = &full_str[..pos];
                 let body_part = &full_str[pos + sep_len..];
                 let userinfo = header_part.lines()
