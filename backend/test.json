@@ -1,0 +1,201 @@
+{
+  "rci": {
+    "host": "127.0.0.1",
+    "port": 79,
+    "login": "admin",
+    "password": "",
+    "use_https": false,
+    "token": ""
+  },
+  "mihomo": {
+    "host": "127.0.0.1",
+    "port": 9090,
+    "mixed_port": 7890,
+    "secret": "",
+    "config_path": "/opt/etc/mihomo/config.yaml",
+    "log_path": "/opt/var/log/mihomo.log",
+    "process_name": "mihomo",
+    "device_providers": [],
+    "health_check_url": "http://www.gstatic.com/generate_204",
+    "health_check_interval": 300
+  },
+  "failover": {
+    "enabled": false,
+    "ping_threshold_ms": 300,
+    "priority_server": "",
+    "priority_chain": [],
+    "bs_priority_chain": [],
+    "whitelist_detector": {
+      "enabled": false,
+      "monitored_provider": "",
+      "exclude_ru_nodes": true,
+      "target_bs_provider": "",
+      "threshold_mode": "percent",
+      "trigger_offline_percent": 80,
+      "trigger_offline_count": 75,
+      "max_acceptable_ping_ms": 450,
+      "exit_offline_percent": 45,
+      "exit_offline_count": 48,
+      "check_interval_mins": 10,
+      "auto_restore_vps": true
+    },
+    "last_good_regular_vps": null,
+    "auto_restore_priority": true,
+    "interval_secs": 60,
+    "canary_duration_secs": 180,
+    "device_failover_enabled": false,
+    "presets": [],
+    "best_ping_enabled": false,
+    "best_ping_pool_size": 15,
+    "best_ping_hysteresis_ms": 40,
+    "quarantine_enabled": true,
+    "provider_chain": [],
+    "smart_failover_enabled": true,
+    "smart_failover_canary_duration_secs": 60
+  },
+  "refresh_interval_sec": 10,
+  "ignore_servers": [],
+  "provider_filters": {},
+  "device_routing": {},
+  "device_domain_rules": {},
+  "direct_domains": [],
+  "force_domains": [],
+  "system": {
+    "xkeen_init": "/opt/etc/init.d/S05xkeen",
+    "backup_dir": "backups",
+    "xkeen_route_bin": "/opt/sbin/xkeen-route",
+    "xkeen_route_init": "/opt/etc/init.d/S99xkeen-route",
+    "mihomo_bin": "/opt/sbin/mihomo",
+    "zapret_init": "/opt/etc/init.d/S51zapret"
+  },
+  "logs": {
+    "level": "info",
+    "remote_syslog": "",
+    "log_requests": true
+  },
+  "auth": {
+    "enabled": false,
+    "password_hash": "",
+    "salt": "",
+    "session_secret": ""
+  },
+  "notifications": {
+    "telegram_enabled": false,
+    "telegram_bot_token": "",
+    "telegram_chat_id": "",
+    "webhook_url": ""
+  },
+  "provider_aliases": {},
+  "antigravity": {
+    "enabled": false,
+    "mode": "auto",
+    "proxy_port": 53129,
+    "proxy_enabled": true,
+    "health_check_interval": 120,
+    "wan_interface": "apcli1",
+    "vpn_interface": "nwg0",
+    "own_proxy": "",
+    "targets": [
+      "cloudcode-pa.googleapis.com"
+    ]
+  },
+  "flow_server": null,
+  "disabled_providers": [],
+  "flow_auto_select": false,
+  "adblock_enabled": false,
+  "schedules": [],
+  "zapret": {
+    "enabled": true,
+    "hybrid_youtube": true,
+    "hybrid_discord": true,
+    "discord_voice_udp": true,
+    "youtube_turbo": true,
+    "general_bypass": true,
+    "aggressive_dpi": false,
+    "isolated_proxy": true,
+    "bypass_github": true,
+    "bypass_torrents": true,
+    "bypass_adult": true,
+    "custom_entries": [],
+    "custom_args": null,
+    "smart_tv_mode": false,
+    "community_hostlist_enabled": false,
+    "community_hostlist_url": "https://raw.githubusercontent.com/zapret-info/z-block/master/hosts.txt",
+    "community_hostlist_auto_update": false,
+    "community_hostlist_last_updated": null,
+    "community_hostlist_count": 0,
+    "excluded_devices": [],
+    "engine": "v2",
+    "last_update_check": null,
+    "update_available": false,
+    "latest_version": null,
+    "period_saved_bytes": 0
+  },
+  "gaming": {
+    "enabled": false,
+    "mode": "compatibility",
+    "target_server": "Fastest",
+    "devices": [],
+    "platforms": {
+      "discord": true,
+      "steam": true,
+      "playstation": true,
+      "xbox": true,
+      "battlenet": true,
+      "epicgames": true,
+      "ea": true,
+      "riot": true,
+      "supercell": true,
+      "nintendo": true,
+      "roblox": true,
+      "category_games": false
+    },
+    "custom_domains": [],
+    "force_redir_host_for_devices": false,
+    "exclude_fake_ip_for_game_domains": true,
+    "zapret": {
+      "managed": true,
+      "enabled": true,
+      "preset": "gaming_compat",
+      "restore_previous_state": true
+    },
+    "smart_split": true,
+    "fix_nat_fake_ip": true,
+    "smart_mode": false,
+    "smart_idle_timeout_mins": 60,
+    "ignored_game_conns": []
+  },
+  "adguard": {
+    "enabled": false,
+    "host": "127.0.0.1",
+    "http_port": 3000,
+    "dns_port": 5354,
+    "username": null,
+    "password": null,
+    "integration_mode": "managed",
+    "upstream_dns": [
+      "127.0.0.1:1053",
+      "77.88.8.8"
+    ],
+    "failsafe_rollback": true,
+    "config_path": "/opt/etc/AdGuardHome.yaml"
+  },
+  "server_aliases": {},
+  "whitelist_servers": [],
+  "whitelist_providers": [],
+  "whitelist": {
+    "enabled": true,
+    "auto_by_failover": true,
+    "strategy": "strict_x_keen",
+    "target_server": null,
+    "follow_failover": true,
+    "excluded_devices": [],
+    "devices": [],
+    "gaming_suspended": false,
+    "custom_domains": []
+  },
+  "mobile_provider_urls": {},
+  "mobile_provider_hwids": {
+    "geodema2": "keenetic-router-229"
+  }
+}

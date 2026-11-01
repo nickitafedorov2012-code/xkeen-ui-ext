@@ -347,10 +347,20 @@ async fn run_mihomo_stream(state: AppState) {
                                     if let Ok(msg) = serde_json::from_str::<MihomoTrafficChunk>(&line) {
                                         // Инверсия направления Mihomo -> клиент: данные, отдаваемые Mihomo клиенту, являются Загрузкой (DOWN)
                                         let bytes = msg.down + msg.up;
-                                        // Честный учет без подмены каналов: Mihomo поток всегда отражает реальный прокси-трафик
-                                        PROXY_DOWN.store(msg.up, Ordering::Relaxed);
-                                        PROXY_UP.store(msg.down, Ordering::Relaxed);
-                                        TOTAL_PROXY_BYTES.fetch_add(bytes, Ordering::Relaxed);
+                                        let is_wl_now = WHITELIST_ACTIVE.load(Ordering::Relaxed);
+                                        if is_wl_now {
+                                            WHITELIST_DOWN.store(msg.up, Ordering::Relaxed);
+                                            WHITELIST_UP.store(msg.down, Ordering::Relaxed);
+                                            PROXY_DOWN.store(0, Ordering::Relaxed);
+                                            PROXY_UP.store(0, Ordering::Relaxed);
+                                            TOTAL_WHITELIST_BYTES.fetch_add(bytes, Ordering::Relaxed);
+                                        } else {
+                                            PROXY_DOWN.store(msg.up, Ordering::Relaxed);
+                                            PROXY_UP.store(msg.down, Ordering::Relaxed);
+                                            WHITELIST_DOWN.store(0, Ordering::Relaxed);
+                                            WHITELIST_UP.store(0, Ordering::Relaxed);
+                                            TOTAL_PROXY_BYTES.fetch_add(bytes, Ordering::Relaxed);
+                                        }
                                         if let Some(act_prov) = get_active_provider_id() {
                                             add_provider_live_delta(&act_prov, bytes);
                                         }
@@ -703,10 +713,21 @@ mod tests {
         assert_eq!(PROXY_DOWN.load(Ordering::Relaxed), 4096);
         assert_eq!(PROXY_UP.load(Ordering::Relaxed), 1024);
 
-        // Even if whitelist active is toggled, PROXY stream must NOT be zeroed
+        // When whitelist is active, incoming stream chunk directs into WHITELIST counters
         set_whitelist_active(true);
-        assert_eq!(PROXY_DOWN.load(Ordering::Relaxed), 4096, "PROXY_DOWN must remain intact");
-        assert_eq!(PROXY_UP.load(Ordering::Relaxed), 1024, "PROXY_UP must remain intact");
+        let msg_down = 2048u64;
+        let msg_up = 512u64;
+        let bytes = msg_down + msg_up;
+        if WHITELIST_ACTIVE.load(Ordering::Relaxed) {
+            WHITELIST_DOWN.store(msg_up, Ordering::Relaxed);
+            WHITELIST_UP.store(msg_down, Ordering::Relaxed);
+            PROXY_DOWN.store(0, Ordering::Relaxed);
+            PROXY_UP.store(0, Ordering::Relaxed);
+            TOTAL_WHITELIST_BYTES.fetch_add(bytes, Ordering::Relaxed);
+        }
+        assert_eq!(WHITELIST_DOWN.load(Ordering::Relaxed), 512);
+        assert_eq!(WHITELIST_UP.load(Ordering::Relaxed), 2048);
+        assert_eq!(PROXY_DOWN.load(Ordering::Relaxed), 0);
 
         set_whitelist_active(false);
         PROXY_DOWN.store(0, Ordering::Relaxed);

@@ -130,9 +130,14 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
   const [providers, setProviders] = useState<ProviderInfo[]>([])
 
   useEffect(() => {
-    apiGet<{ providers: ProviderInfo[] }>('providers')
-      .then((d) => setProviders(d.providers || []))
-      .catch(() => {})
+    const fetchProviders = () => {
+      apiGet<{ providers: ProviderInfo[] }>('providers')
+        .then((d) => setProviders(d.providers || []))
+        .catch(() => {})
+    }
+    fetchProviders()
+    const interval = setInterval(fetchProviders, 15000)
+    return () => clearInterval(interval)
   }, [])
   // История пинга активного сервера (для sparkline): {значение, было ли измерение}
   const [pingHistory, setPingHistory] = useState<{ ms: number; ok: boolean }[]>([])

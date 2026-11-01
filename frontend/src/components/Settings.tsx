@@ -472,9 +472,13 @@ export default function Settings({ notify, status, refresh }: Props) {
     apiGet<{ servers: ServerInfo[] }>('servers')
       .then((d) => setServers(d.servers))
       .catch(() => {})
-    apiGet<{ providers: ProviderInfo[] }>('providers')
-      .then((d) => setProviders(d.providers || []))
-      .catch(() => {})
+    const fetchProviders = () => {
+      apiGet<{ providers: ProviderInfo[] }>('providers')
+        .then((d) => setProviders(d.providers || []))
+        .catch(() => {})
+    }
+    fetchProviders()
+    const provInterval = setInterval(fetchProviders, 15000)
     apiGet<{ direct: string[]; force: string[]; auto_cdns?: string[]; revision?: string }>('domains')
       .then((d) => {
         const dStr = d.direct.join('\n')
@@ -490,6 +494,7 @@ export default function Settings({ notify, status, refresh }: Props) {
     apiGet<DnsMode>('dns/mode')
       .then((d) => setDnsMode(d.enhanced_mode))
       .catch(() => {})
+    return () => clearInterval(provInterval)
   }, [notify])
 
   // Синхронизация актуальных пингов серверов с глобальным статусом панели (Failover Priority Chain & Dashboard)
