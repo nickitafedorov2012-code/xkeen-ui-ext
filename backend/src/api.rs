@@ -3029,8 +3029,12 @@ pub async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str, hwid: Opt
             .find(|(k, _)| k.as_str().eq_ignore_ascii_case("subscription-userinfo"))
             .and_then(|(_, v)| v.to_str().ok())
             .and_then(crate::mihomo::parse_subscription_userinfo_str);
-        let t = resp.text().await.map_err(|e| format!("Read text: {e}"))?;
-        (userinfo, t)
+        let bytes = match resp.bytes().await {
+            Ok(b) => b,
+            Err(e) => return Err(format!("Read bytes: {e}")),
+        };
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        (userinfo, text)
     };
 
     // Если основной запрос (например, с UA v2rayNG) не вернул заголовок Subscription-Userinfo,
