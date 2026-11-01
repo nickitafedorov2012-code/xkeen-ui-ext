@@ -3032,29 +3032,39 @@ pub async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str, hwid: Opt
     let (mut header_userinfo, text) = if let Ok(out) = curl_output {
         if out.status.success() && !out.stdout.is_empty() {
             let full_str = String::from_utf8_lossy(&out.stdout).to_string();
-            // Разделяем заголовки и тело
-            let mut pos_opt = None;
-            for sep in ["
-\n
-\n", "\n\n", "
+            let userinfo = full_str.lines()
+                .find(|l| l.to_ascii_lowercase().starts_with("subscription-userinfo:"))
+                .and_then(|l| l.split_once(:).map(|(_, v)| v.trim()))
+                .and_then(crate::mihomo::parse_subscription_userinfo_str);
+
+            let body_str = if let Some(bracket_pos) = full_str.find("
+[") {
+                &full_str[bracket_pos + 1..]
+            } else if let Some(brace_pos) = full_str.find("
+{") {
+                &full_str[brace_pos + 1..]
+            } else if let Some(proxies_pos) = full_str.find("
+proxies:") {
+                &full_str[proxies_pos + 1..]
+            } else {
+                let mut p_opt = None;
+                for sep in ["
+
+", "
 
 "] {
-                if let Some(p) = full_str.find(sep) {
-                    pos_opt = Some((p, sep.len()));
-                    break;
+                    if let Some(idx) = full_str.find(sep) {
+                        p_opt = Some(idx + sep.len());
+                        break;
+                    }
                 }
-            }
-            if let Some((pos, sep_len)) = pos_opt {
-                let header_part = &full_str[..pos];
-                let body_part = &full_str[pos + sep_len..];
-                let userinfo = header_part.lines()
-                    .find(|l| l.to_ascii_lowercase().starts_with("subscription-userinfo:"))
-                    .and_then(|l| l.split_once(':').map(|(_, v)| v.trim()))
-                    .and_then(crate::mihomo::parse_subscription_userinfo_str);
-                (userinfo, body_part.to_string())
-            } else {
-                (None, full_str)
-            }
+                if let Some(idx) = p_opt {
+                    &full_str[idx..]
+                } else {
+                    &full_str[..]
+                }
+            };
+            (userinfo, body_str.trim().to_string())
         } else {
             (None, String::new())
         }
