@@ -12,6 +12,7 @@ import {
   type SwapSizePresetMb,
 } from '../types'
 import NumberInput from './NumberInput'
+import { formatQuotaBytes } from './Servers'
 import ConfigEditor from './ConfigEditor'
 import PresetCatalogModal from './PresetCatalogModal'
 import LogsViewer from './LogsViewer'
@@ -1145,10 +1146,10 @@ export default function Settings({ notify, status, refresh }: Props) {
             <div style={{ background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border)', borderRadius: 10, padding: '10px 14px', fontSize: 11.5 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, flexWrap: 'wrap', gap: 6 }}>
                 <span style={{ color: '#c084fc', fontWeight: 600 }}>
-                  📊 Квота подписки ({activeWlProv.name || activeWlProv.id}): {fmtTrafficBytes(used)} / {fmtTrafficBytes(total)} ({percent}%)
+                  📊 Квота подписки ({activeWlProv.name || activeWlProv.id}): {formatQuotaBytes(used)} / {formatQuotaBytes(total)} ({percent}%)
                 </span>
                 <span style={{ color: remaining === 0 ? '#ef4444' : '#4ade80', fontWeight: 600 }}>
-                  Осталось: {fmtTrafficBytes(remaining)}
+                  Осталось: {formatQuotaBytes(remaining)}
                 </span>
               </div>
               <div style={{ width: '100%', height: 6, background: 'rgba(255,255,255,0.08)', borderRadius: 3, overflow: 'hidden' }}>

@@ -2812,21 +2812,15 @@ pub async fn get_providers(State(state): State<AppState>) -> Response {
                     let live_delta = crate::traffic::get_provider_live_delta(&p.id);
 
                     // Если есть квота (total_bytes), вычисляем actual used (baseline + live_delta) и accurate remaining
-                    let baseline_used = p.upload_bytes.unwrap_or(0).saturating_add(p.download_bytes.unwrap_or(0));
-                    let actual_used = baseline_used.saturating_add(live_delta);
-
-                    if live_delta > 0 {
-                        let cur_down = p.download_bytes.unwrap_or(0);
-                        p.download_bytes = Some(cur_down.saturating_add(live_delta));
-                    }
-
-                    let remaining_bytes = p.total_bytes.map(|tot| tot.saturating_sub(actual_used));
+                    // Строго официальный отчёт провайдера (Geodema) без двойного начисления локальной дельты
+                    let official_used = p.upload_bytes.unwrap_or(0).saturating_add(p.download_bytes.unwrap_or(0));
+                    let remaining_bytes = p.total_bytes.map(|tot| tot.saturating_sub(official_used));
 
                     let mut val = serde_json::to_value(&p).unwrap_or_default();
                     if let Some(obj) = val.as_object_mut() {
                         obj.insert("is_whitelist".to_string(), serde_json::Value::Bool(is_wl));
                         obj.insert("live_delta_bytes".to_string(), json!(live_delta));
-                        obj.insert("actual_used_bytes".to_string(), json!(actual_used));
+                        obj.insert("actual_used_bytes".to_string(), json!(official_used));
                         obj.insert("remaining_bytes".to_string(), json!(remaining_bytes));
                     }
                     val
@@ -11883,14 +11877,12 @@ mod tests {
         assert_eq!(crate::traffic::get_provider_live_delta("prov_alpha"), 5000);
 
         // Baseline used: 1000 up, 2000 down, total 10000
-        let baseline_used: u64 = 1000 + 2000;
-        let live_delta = crate::traffic::get_provider_live_delta("prov_alpha");
-        let actual_used = baseline_used + live_delta;
+        let official_used: u64 = 1000 + 2000;
         let total: u64 = 10000;
-        let remaining = total.saturating_sub(actual_used);
+        let remaining = total.saturating_sub(official_used);
 
-        assert_eq!(actual_used, 8000);
-        assert_eq!(remaining, 2000);
+        assert_eq!(official_used, 3000);
+        assert_eq!(remaining, 7000);
 
         // Fresh sync resets delta
         crate::traffic::reset_provider_live_delta("prov_alpha");
