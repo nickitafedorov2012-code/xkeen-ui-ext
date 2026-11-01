@@ -2519,6 +2519,97 @@ export default function Settings({ notify, status, refresh }: Props) {
                         }
                       />
                     </label>
+
+                    {/* Пул проверки зарубежных узлов (sample_size) */}
+                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                      <span style={{ fontSize: 12 }}>Пул проверки зарубежных узлов</span>
+                      <select
+                        className="input"
+                        value={
+                          det.sample_size === undefined || det.sample_size === 0
+                            ? '0'
+                            : det.sample_size === 24
+                            ? '24'
+                            : det.sample_size === 50
+                            ? '50'
+                            : 'custom'
+                        }
+                        onChange={(e) => {
+                          const val = e.target.value
+                          patch((s) => {
+                            const d = ensureDetector(s)
+                            if (val === '0') d.sample_size = 0
+                            else if (val === '24') d.sample_size = 24
+                            else if (val === '50') d.sample_size = 50
+                            else if (val === 'custom') {
+                              if (!d.sample_size || d.sample_size === 0 || d.sample_size === 24 || d.sample_size === 50) {
+                                d.sample_size = 30
+                              }
+                            }
+                          })
+                        }}
+                        data-testid="settings-detector-sample-size-select"
+                      >
+                        <option value="0">Все узлы подписки (100% охват, 93+ узлов)</option>
+                        <option value="24">Быстрый срез: 24 узла (2-3 сек)</option>
+                        <option value="50">Расширенный срез: 50 узлов</option>
+                        <option value="custom">Свой размер пула…</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  {/* Если выбран произвольный размер пула узлов */}
+                  {Boolean(
+                    det.sample_size !== undefined &&
+                    det.sample_size !== 0 &&
+                    det.sample_size !== 24 &&
+                    det.sample_size !== 50
+                  ) && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4, maxWidth: 220 }}>
+                        <span style={{ fontSize: 12 }}>Произвольное число узлов (шт.)</span>
+                        <NumberInput
+                          min={1}
+                          max={500}
+                          step={5}
+                          fallback={30}
+                          value={det.sample_size ?? 30}
+                          onChange={(val) =>
+                            patch((s) => {
+                              const d = ensureDetector(s)
+                              d.sample_size = val
+                            })
+                          }
+                          data-testid="settings-detector-sample-size-custom-input"
+                        />
+                      </label>
+                      <span className="muted small" style={{ fontSize: 11, marginTop: 18 }}>
+                        Проверяет первые N активных зарубежных серверов провайдера для ускорения детекции ТСПУ
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Подсказка/бейдж для размера пула */}
+                  <div
+                    style={{
+                      fontSize: 11.5,
+                      padding: '6px 10px',
+                      borderRadius: 6,
+                      background: 'rgba(168, 85, 247, 0.08)',
+                      border: '1px solid rgba(168, 85, 247, 0.2)',
+                      color: 'var(--text-bright)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 6,
+                    }}
+                    data-testid="settings-detector-sample-size-hint"
+                  >
+                    <span>💡</span>
+                    <span>
+                      {(det.sample_size === undefined || det.sample_size === 0)
+                        ? 'Режим 100% охвата: опрашивает все узлы провайдера. Точнее всего фиксирует ковровые блокировки ТСПУ.'
+                        : `Режим среза (${det.sample_size} узлов): проверяет репрезентативную выборку серверов, снижая нагрузку на роутер и давая вердикт за секунды.`}
+                    </span>
                   </div>
 
                   {/* Чекбоксы: Отсев RU нод и Автовозврат на VPS */}

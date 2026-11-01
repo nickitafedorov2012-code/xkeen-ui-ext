@@ -158,6 +158,10 @@ fn default_detector_check_interval_mins() -> u64 {
     10
 }
 
+fn default_detector_sample_size() -> usize {
+    0
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct WhitelistDetectorConfig {
@@ -182,6 +186,8 @@ pub struct WhitelistDetectorConfig {
     pub check_interval_mins: u64,
     #[serde(default = "default_true")]
     pub auto_restore_vps: bool,
+    #[serde(default = "default_detector_sample_size")]
+    pub sample_size: usize,
 }
 
 impl Default for WhitelistDetectorConfig {
@@ -199,6 +205,7 @@ impl Default for WhitelistDetectorConfig {
             exit_offline_count: default_detector_exit_offline_count(),
             check_interval_mins: default_detector_check_interval_mins(),
             auto_restore_vps: true,
+            sample_size: default_detector_sample_size(),
         }
     }
 }

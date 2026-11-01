@@ -37,7 +37,8 @@
       "exit_offline_percent": 45,
       "exit_offline_count": 48,
       "check_interval_mins": 10,
-      "auto_restore_vps": true
+      "auto_restore_vps": true,
+      "sample_size": 0
     },
     "last_good_regular_vps": null,
     "auto_restore_priority": true,

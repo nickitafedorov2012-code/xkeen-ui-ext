@@ -223,6 +223,26 @@ describe('Dashboard Component — Failover Card 10-Point Audit & Tier Modernizat
     const healthCard = container?.querySelector('[data-testid="card-foreign-servers-health"]')
     expect(healthCard?.textContent).toContain('45 из 50 онлайн (10% оффлайн')
 
+    // 4b. When monitored_total_nodes > total_nodes, verifies slice format
+    const detectorWithSlice: any = {
+      ...detectorStatus,
+      failover: {
+        ...detectorStatus.failover,
+        whitelist_detector_status: {
+          ...detectorStatus.failover.whitelist_detector_status,
+          total_nodes: 24,
+          monitored_total_nodes: 95,
+          online_nodes: 22,
+          offline_percent: 8,
+        },
+      },
+    }
+    await act(async () => {
+      root!.render(<Dashboard status={detectorWithSlice} notify={notifyMock} refresh={refreshMock} />)
+    })
+    const healthCardSlice = container?.querySelector('[data-testid="card-foreign-servers-health"]')
+    expect(healthCardSlice?.textContent).toContain('22 из 24 онлайн (срез из 95 узлов, 8% оффлайн)')
+
     // 5. Check now button triggers runWhitelistDetectorCheck
     const checkBtn = container?.querySelector('[data-testid="detector-check-now-btn"]') as HTMLButtonElement
     expect(checkBtn).toBeTruthy()

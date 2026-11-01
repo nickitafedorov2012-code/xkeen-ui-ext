@@ -518,6 +518,8 @@ pub struct WhitelistDetectorStatus {
     pub state: WhitelistDetectorState,
     pub monitored_provider: String,
     pub total_nodes: usize,
+    #[serde(default)]
+    pub monitored_total_nodes: usize,
     pub offline_nodes: usize,
     pub online_nodes: usize,
     pub offline_percent: u32,
@@ -546,6 +548,7 @@ pub async fn get_whitelist_detector_status() -> WhitelistDetectorStatus {
             state: get_detector_state().await,
             monitored_provider: String::new(),
             total_nodes: 0,
+            monitored_total_nodes: 0,
             offline_nodes: 0,
             online_nodes: 0,
             offline_percent: 0,
@@ -596,7 +599,7 @@ pub async fn check_whitelist_detector_nodes(
     http: &reqwest::Client,
     cfg: &crate::config::AppConfig,
     servers: &[Server],
-) -> Result<(usize, usize, usize, u32, std::collections::BTreeMap<String, i64>), String> {
+) -> Result<(usize, usize, usize, u32, std::collections::BTreeMap<String, i64>, usize), String> {
     let det_cfg = &cfg.failover.whitelist_detector;
 
     // Отбираем узлы контролируемого провайдера (или все обычные VPS, если monitored_provider пуст)
@@ -633,9 +636,10 @@ pub async fn check_whitelist_detector_nodes(
         return Err("Нет подходящих зарубежных узлов для мониторинга детектора белых списков".to_string());
     }
 
-    // Если узлов много (> 30), отбираем выборку до 24-30 репрезентативных узлов, равномерно распределённых по списку
-    let sampled_candidates: Vec<&Server> = if candidate_nodes.len() > 30 {
-        let target_samples = 24.min(candidate_nodes.len());
+    // Если det_cfg.sample_size == 0: проверяем все подходящие узлы без ограничений.
+    // Если det_cfg.sample_size > 0 и узлов больше чем sample_size, равномерно распределяем выборку.
+    let sampled_candidates: Vec<&Server> = if det_cfg.sample_size > 0 && candidate_nodes.len() > det_cfg.sample_size {
+        let target_samples = det_cfg.sample_size;
         let step = candidate_nodes.len() as f64 / target_samples as f64;
         let mut picked = Vec::with_capacity(target_samples);
         for i in 0..target_samples {
@@ -675,7 +679,7 @@ pub async fn check_whitelist_detector_nodes(
         0
     };
 
-    Ok((sample_total, offline, online, offline_pct, pings))
+    Ok((sample_total, offline, online, offline_pct, pings, total))
 }
 
 /// Выполняет единичную проверку детектора белых списков и, если порог превышен, переключает режим
@@ -697,7 +701,7 @@ pub async fn evaluate_and_apply_whitelist_detector(
 
     // Всегда опрашиваем узлы для актуализации метрик DETECTOR_LAST_STATUS
     let check_res = check_whitelist_detector_nodes(&state.http, cfg, servers).await;
-    let (total, offline, online, offline_pct, pings) = match check_res {
+    let (sample_total, offline, online, offline_pct, pings, total_candidates) = match check_res {
         Ok(res) => res,
         Err(e) => {
             let now_str = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -707,6 +711,7 @@ pub async fn evaluate_and_apply_whitelist_detector(
                 state: current_state,
                 monitored_provider: det_cfg.monitored_provider.clone(),
                 total_nodes: 0,
+                monitored_total_nodes: 0,
                 offline_nodes: 0,
                 online_nodes: 0,
                 offline_percent: 0,
@@ -718,7 +723,7 @@ pub async fn evaluate_and_apply_whitelist_detector(
         }
     };
 
-    if total == 0 && detector_warning.is_none() {
+    if sample_total == 0 && detector_warning.is_none() {
         detector_warning = Some("0 доступных узлов для мониторинга".to_string());
     }
 
@@ -730,7 +735,8 @@ pub async fn evaluate_and_apply_whitelist_detector(
         *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
             state: current_state,
             monitored_provider: det_cfg.monitored_provider.clone(),
-            total_nodes: total,
+            total_nodes: sample_total,
+            monitored_total_nodes: total_candidates,
             offline_nodes: offline,
             online_nodes: online,
             offline_percent: offline_pct,
@@ -885,7 +891,7 @@ pub async fn evaluate_and_apply_whitelist_detector(
 
                             format!(
                                 "🚨 Детектор Белых Списков: обнаружена блокировка ТСПУ ({}% оффлайн: {}/{} узлов). Аварийный переход на сервер [БС] '{}'",
-                                offline_pct, offline, total, target_name
+                                offline_pct, offline, sample_total, target_name
                             )
                         }
                         Err(e) => {
@@ -898,7 +904,7 @@ pub async fn evaluate_and_apply_whitelist_detector(
                 } else {
                     format!(
                         "🚨 Детектор Белых Списков: обнаружена блокировка ТСПУ ({}% оффлайн: {}/{} узлов), но подходящий сервер [БС] не найден",
-                        offline_pct, offline, total
+                        offline_pct, offline, sample_total
                     )
                 };
 
@@ -915,7 +921,8 @@ pub async fn evaluate_and_apply_whitelist_detector(
                 *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
                     state: WhitelistDetectorState::WhitelistDetected,
                     monitored_provider: det_cfg.monitored_provider.clone(),
-                    total_nodes: total,
+                    total_nodes: sample_total,
+                    monitored_total_nodes: total_candidates,
                     offline_nodes: offline,
                     online_nodes: online,
                     offline_percent: offline_pct,
@@ -929,7 +936,8 @@ pub async fn evaluate_and_apply_whitelist_detector(
                 *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
                     state: WhitelistDetectorState::Normal,
                     monitored_provider: det_cfg.monitored_provider.clone(),
-                    total_nodes: total,
+                    total_nodes: sample_total,
+                    monitored_total_nodes: total_candidates,
                     offline_nodes: offline,
                     online_nodes: online,
                     offline_percent: offline_pct,
@@ -1028,7 +1036,7 @@ pub async fn evaluate_and_apply_whitelist_detector(
 
                                 let msg = format!(
                                     "🟢 Детектор Белых Списков: блокировка ТСПУ снята (доступно {}/{} узлов, оффлайн {}%). Мягкий возврат на обычный VPS '{}'",
-                                    online, total, offline_pct, vps_name
+                                    online, sample_total, offline_pct, vps_name
                                 );
                                 state.failover_log.push(&msg, true).await;
                                 crate::notifications::notify_failover(
@@ -1056,14 +1064,15 @@ pub async fn evaluate_and_apply_whitelist_detector(
                 let final_msg = restored_msg.unwrap_or_else(|| {
                     format!(
                         "🟢 Детектор Белых Списков: блокировка снята (доступно {}/{} узлов, оффлайн {}%)",
-                        online, total, offline_pct
+                        online, sample_total, offline_pct
                     )
                 });
 
                 *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
                     state: WhitelistDetectorState::Normal,
                     monitored_provider: det_cfg.monitored_provider.clone(),
-                    total_nodes: total,
+                    total_nodes: sample_total,
+                    monitored_total_nodes: total_candidates,
                     offline_nodes: offline,
                     online_nodes: online,
                     offline_percent: offline_pct,
@@ -1077,7 +1086,8 @@ pub async fn evaluate_and_apply_whitelist_detector(
                 *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
                     state: WhitelistDetectorState::WhitelistDetected,
                     monitored_provider: det_cfg.monitored_provider.clone(),
-                    total_nodes: total,
+                    total_nodes: sample_total,
+                    monitored_total_nodes: total_candidates,
                     offline_nodes: offline,
                     online_nodes: online,
                     offline_percent: offline_pct,
@@ -7654,6 +7664,63 @@ proxies:
         let normal_classification = classify_server_whitelist_suitability(&normal_server, None, false);
         assert!(!normal_classification.is_suitable_bs, "Normal foreign VPS must NOT be suitable BS");
         assert_eq!(normal_classification.score, 0);
+    }
+
+    #[test]
+    fn test_whitelist_detector_sample_size_logic() {
+        let total_nodes = 93;
+        let servers: Vec<Server> = (0..total_nodes)
+            .map(|i| Server {
+                id: format!("node_{}", i),
+                name: format!("Foreign Node {}", i),
+                protocol: "vless".to_string(),
+                host: format!("{}.example.com", i),
+                port: 443,
+                is_active: false,
+                is_priority: false,
+                ping_ms: 50,
+                provider: Some("ProviderA".to_string()),
+                provider_name: Some("ProviderA".to_string()),
+                is_pool: false,
+                resolved_ip: None,
+            })
+            .collect();
+
+        // Helper logic matching check_whitelist_detector_nodes
+        let select_candidates = |candidate_nodes: &[Server], sample_size: usize| -> Vec<String> {
+            let sampled: Vec<&Server> = if sample_size > 0 && candidate_nodes.len() > sample_size {
+                let target_samples = sample_size;
+                let step = candidate_nodes.len() as f64 / target_samples as f64;
+                let mut picked = Vec::with_capacity(target_samples);
+                for i in 0..target_samples {
+                    let idx = (i as f64 * step) as usize;
+                    if idx < candidate_nodes.len() {
+                        picked.push(&candidate_nodes[idx]);
+                    }
+                }
+                picked
+            } else {
+                candidate_nodes.iter().collect()
+            };
+            sampled.iter().map(|s| s.id.clone()).collect()
+        };
+
+        // When sample_size = 0, all 93 nodes must be monitored
+        let sampled_all = select_candidates(&servers, 0);
+        assert_eq!(sampled_all.len(), 93);
+        assert_eq!(sampled_all[0], "node_0");
+        assert_eq!(sampled_all[92], "node_92");
+
+        // When sample_size = 24, exactly 24 nodes must be evenly sampled
+        let sampled_24 = select_candidates(&servers, 24);
+        assert_eq!(sampled_24.len(), 24);
+        assert_eq!(sampled_24[0], "node_0");
+        assert_eq!(sampled_24.last().unwrap(), "node_89");
+
+        // When candidate_nodes < sample_size, take all candidate nodes
+        let few_servers = &servers[..10];
+        let sampled_few = select_candidates(few_servers, 24);
+        assert_eq!(sampled_few.len(), 10);
     }
 }
 

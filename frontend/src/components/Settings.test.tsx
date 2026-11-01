@@ -779,6 +779,20 @@ describe('Settings Component — Failover Zombie Servers and Canary Last Result'
       const autoRestoreCheck = container?.querySelector('[data-testid=\"settings-detector-auto-restore\"]') as HTMLInputElement
       expect(autoRestoreCheck.checked).toBe(true)
 
+      // Pool size selector and hints
+      const poolSelect = container?.querySelector('[data-testid="settings-detector-sample-size-select"]') as HTMLSelectElement
+      expect(poolSelect).toBeTruthy()
+      expect(poolSelect.value).toBe('0')
+      const hint = container?.querySelector('[data-testid="settings-detector-sample-size-hint"]')
+      expect(hint?.textContent).toContain('100% охвата')
+
+      // Change pool size to 24 (Быстрый срез)
+      await act(async () => {
+        poolSelect.value = '24'
+        poolSelect.dispatchEvent(new Event('change', { bubbles: true }))
+      })
+      expect(container?.querySelector('[data-testid="settings-detector-sample-size-hint"]')?.textContent).toContain('24 узлов')
+
       // Open Classifier modal
       const classifyBtn = container?.querySelector('[data-testid=\"settings-detector-classify-btn\"]') as HTMLButtonElement
       expect(classifyBtn).toBeTruthy()

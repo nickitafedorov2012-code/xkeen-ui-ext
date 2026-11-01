@@ -348,6 +348,7 @@ export interface WhitelistDetectorConfig {
   exit_offline_count: number
   check_interval_mins: number
   auto_restore_vps: boolean
+  sample_size?: number
 }
 
 export interface WhitelistDetectorStatus {
@@ -356,6 +357,7 @@ export interface WhitelistDetectorStatus {
   monitored_provider: string
   target_bs_provider?: string
   total_nodes: number
+  monitored_total_nodes?: number
   offline_nodes: number
   online_nodes: number
   offline_percent: number

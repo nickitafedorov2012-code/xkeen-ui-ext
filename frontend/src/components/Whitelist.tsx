@@ -609,20 +609,25 @@ export default function Whitelist({ notify, status, refresh }: Props) {
 
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10, marginTop: 4 }}>
               <div style={{ background: 'rgba(255, 255, 255, 0.02)', padding: '8px 12px', borderRadius: 6, border: '1px solid var(--border)' }}>
-                <div className="muted small" style={{ fontSize: 11 }}>Контролируемые узлы</div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-bright)', marginTop: 2 }}>
-                  {detStatus?.total_nodes ? `${detStatus.online_nodes} из ${detStatus.total_nodes} онлайн (${detStatus.offline_percent}% оффлайн)` : 'Все узлы в строю'}
+                <div className="muted small" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>Контролируемые узлы</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-bright)', marginTop: 2, whiteSpace: 'nowrap' }}>
+                  {detStatus?.total_nodes
+                    ? (detStatus.monitored_total_nodes && detStatus.monitored_total_nodes > detStatus.total_nodes
+                        ? `${detStatus.online_nodes} из ${detStatus.total_nodes} онлайн (срез из ${detStatus.monitored_total_nodes} узлов, ${detStatus.offline_percent}% оффлайн)`
+                        : `${detStatus.online_nodes} из ${detStatus.total_nodes} онлайн (${detStatus.offline_percent}% оффлайн)`
+                      )
+                    : 'Все узлы в строю'}
                 </div>
               </div>
               <div style={{ background: 'rgba(255, 255, 255, 0.02)', padding: '8px 12px', borderRadius: 6, border: '1px solid var(--border)' }}>
-                <div className="muted small" style={{ fontSize: 11 }}>Последнее событие</div>
+                <div className="muted small" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>Последнее событие</div>
                 <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-bright)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {detStatus?.last_event || 'Штатная работа'}
                 </div>
               </div>
               <div style={{ background: 'rgba(255, 255, 255, 0.02)', padding: '8px 12px', borderRadius: 6, border: '1px solid var(--border)' }}>
-                <div className="muted small" style={{ fontSize: 11 }}>Интервал сканирования</div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-bright)', marginTop: 2 }}>
+                <div className="muted small" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>Интервал сканирования</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-bright)', marginTop: 2, whiteSpace: 'nowrap' }}>
                   каждые {detCfg?.check_interval_mins ?? detStatus?.check_interval_mins ?? 10} мин
                 </div>
               </div>

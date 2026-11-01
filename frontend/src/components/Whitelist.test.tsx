@@ -440,6 +440,26 @@ describe('Whitelist Component — Whitelist Tab (Overhaul & Anti-Regression)', (
     expect(syncCard?.textContent).toContain('Статус детектора белых списков')
     expect(syncCard?.textContent).toContain('23 из 25 онлайн (8% оффлайн)')
 
+    // Check with monitored_total_nodes > total_nodes (slice format)
+    const statusWithSlice: any = {
+      ...mockAppStatus,
+      failover: {
+        ...mockAppStatus.failover,
+        whitelist_detector_status: {
+          ...mockAppStatus.failover.whitelist_detector_status,
+          total_nodes: 24,
+          monitored_total_nodes: 100,
+          online_nodes: 22,
+          offline_percent: 8,
+        },
+      },
+    }
+    await act(async () => {
+      root!.render(<Whitelist notify={notifyMock} refresh={refreshMock} status={statusWithSlice} />)
+    })
+    const syncCardSlice = container?.querySelector('[data-testid="whitelist-detector-sync-card"]')
+    expect(syncCardSlice?.textContent).toContain('22 из 24 онлайн (срез из 100 узлов, 8% оффлайн)')
+
     // Click Check
     const checkBtn = container?.querySelector('[data-testid="whitelist-check-detector-btn"]') as HTMLButtonElement
     expect(checkBtn).toBeTruthy()

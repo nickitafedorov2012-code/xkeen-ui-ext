@@ -840,7 +840,6 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
         const monProv = detCfg?.monitored_provider || detStatus?.monitored_provider || 'Все зарубежные узлы'
         const totalNodes = detStatus?.total_nodes ?? 0
         const onlineNodes = detStatus?.online_nodes ?? 0
-        const offlineNodes = detStatus?.offline_nodes ?? 0
         const offlinePct = detStatus?.offline_percent ?? 0
         const triggerPct = detCfg?.trigger_offline_percent ?? 80
         const checkIntervalMins = detCfg?.check_interval_mins ?? detStatus?.check_interval_mins ?? 10
@@ -1026,13 +1025,16 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
 
               {/* Карточка 2: Здоровье зарубежных серверов */}
               <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px' }} data-testid="card-foreign-servers-health">
-                <div className="muted small" style={{ fontSize: 11, marginBottom: 4 }}>Здоровье зарубежных узлов</div>
-                <div style={{ fontSize: 13, fontWeight: 600, color: totalNodes > 0 ? (offlinePct >= triggerPct ? '#ef4444' : '#4ade80') : 'var(--muted)' }}>
+                <div className="muted small" style={{ fontSize: 11, marginBottom: 4, whiteSpace: 'nowrap' }}>Здоровье зарубежных узлов</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: totalNodes > 0 ? (offlinePct >= triggerPct ? '#ef4444' : '#4ade80') : 'var(--muted)', whiteSpace: 'nowrap' }}>
                   {totalNodes > 0
-                    ? `${onlineNodes} из ${totalNodes} онлайн (${offlinePct}% оффлайн, ${offlineNodes} недоступно)`
+                    ? (detStatus?.monitored_total_nodes && detStatus.monitored_total_nodes > totalNodes
+                        ? `${onlineNodes} из ${totalNodes} онлайн (срез из ${detStatus.monitored_total_nodes} узлов, ${offlinePct}% оффлайн)`
+                        : `${onlineNodes} из ${totalNodes} онлайн (${offlinePct}% оффлайн)`
+                      )
                     : 'Ожидание первой проверки'}
                 </div>
-                <div className="muted small" style={{ fontSize: 10, marginTop: 2 }}>
+                <div className="muted small" style={{ fontSize: 10, marginTop: 2, whiteSpace: 'nowrap' }}>
                   Порог срабатывания: <b style={{ color: '#f87171' }}>≥{triggerPct}%</b> {detStatus?.last_checked ? `• ${detStatus.last_checked}` : ''}
                 </div>
               </div>
