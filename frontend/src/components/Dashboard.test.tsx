@@ -165,4 +165,80 @@ describe('Dashboard Component — Failover Card 10-Point Audit & Tier Modernizat
     const wlTraffic = container?.querySelector('[data-testid="dashboard-whitelist-traffic"]')
     expect(wlTraffic).toBeNull()
   })
+
+  it('renders Whitelist Detector widget with honest cards, 1-click toggle, manual check and classifier modal', async () => {
+    const detectorStatus: any = {
+      ...baseStatus,
+      failover: {
+        ...baseStatus.failover!,
+        whitelist_detector: {
+          enabled: true,
+          monitored_provider: 'Geodema',
+          target_bs_provider: 'BS-Special',
+          threshold_mode: 'percent',
+          trigger_offline_percent: 80,
+          trigger_offline_count: 75,
+          max_acceptable_ping_ms: 450,
+          exit_offline_percent: 45,
+          exit_offline_count: 48,
+          check_interval_mins: 10,
+          auto_restore_vps: true,
+        },
+        whitelist_detector_status: {
+          state: 'Normal',
+          monitored_provider: 'Geodema',
+          total_nodes: 50,
+          offline_nodes: 5,
+          online_nodes: 45,
+          offline_percent: 10,
+          last_checked: '2026-11-01 23:00',
+          last_event: null,
+          check_interval_mins: 10,
+        },
+      },
+    }
+
+    const checkSpy = vi.spyOn(api, 'runWhitelistDetectorCheck').mockResolvedValue({
+      message: 'Детектор БС: статус Normal, оффлайн 10% (5/50 узлов)',
+    })
+
+    await act(async () => {
+      root!.render(<Dashboard status={detectorStatus} notify={notifyMock} refresh={refreshMock} />)
+    })
+
+    // 1. Widget is rendered
+    const widget = container?.querySelector('[data-testid="dashboard-whitelist-detector-widget"]')
+    expect(widget).toBeTruthy()
+
+    // 2. Toggle button in header
+    const toggleBtn = container?.querySelector('[data-testid="detector-toggle-btn"]')
+    expect(toggleBtn?.textContent).toContain('Авто: ВКЛ 🟢')
+
+    // 3. Honest interval card shows minutes (10 мин), not 15s
+    const intervalCard = container?.querySelector('[data-testid="card-detector-interval"]')
+    expect(intervalCard?.textContent).toContain('10 мин')
+    expect(intervalCard?.textContent).not.toContain('15 сек')
+
+    // 4. Foreign health card shows nodes and percent
+    const healthCard = container?.querySelector('[data-testid="card-foreign-servers-health"]')
+    expect(healthCard?.textContent).toContain('45 из 50 онлайн (10% оффлайн')
+
+    // 5. Check now button triggers runWhitelistDetectorCheck
+    const checkBtn = container?.querySelector('[data-testid="detector-check-now-btn"]') as HTMLButtonElement
+    expect(checkBtn).toBeTruthy()
+    await act(async () => {
+      checkBtn.click()
+    })
+    expect(checkSpy).toHaveBeenCalled()
+
+    // 6. Open Classifier modal
+    const classifyBtn = container?.querySelector('[data-testid="detector-classify-modal-btn"]') as HTMLButtonElement
+    expect(classifyBtn).toBeTruthy()
+    await act(async () => {
+      classifyBtn.click()
+    })
+    const modal = container?.querySelector('[data-testid="detector-classifier-modal"]')
+    expect(modal).toBeTruthy()
+    expect(modal?.textContent).toContain('Автоопределение серверов и подписок БС')
+  })
 })

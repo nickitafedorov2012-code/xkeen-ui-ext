@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { apiGet, apiPost, apiPut } from '../api'
+import { apiGet, apiPost, apiPut, detectWhitelistServers, applyDetectedWhitelistServers } from '../api'
 import {
   pingClass,
   type AppSettings,
@@ -301,6 +301,13 @@ export default function Settings({ notify, status, refresh }: Props) {
   // Модальные окна
   const [configEditorOpen, setConfigEditorOpen] = useState(false)
   const [presetCatalogOpen, setPresetCatalogOpen] = useState(false)
+  const [settingsDetectorModalOpen, setSettingsDetectorModalOpen] = useState(false)
+  const [settingsDetectedClassifier, setSettingsDetectedClassifier] = useState<{
+    detectedServerIds: string[]
+    detectedProviderIds: string[]
+    details: Array<{ id: string; name: string; reason: string; type: 'server' | 'provider' }>
+  } | null>(null)
+  const [settingsClassifierApplying, setSettingsClassifierApplying] = useState(false)
 
   // --- DNS режим ---
   const [dnsMode, setDnsMode] = useState<DnsEnhancedMode>('fake-ip')
@@ -2284,6 +2291,392 @@ export default function Settings({ notify, status, refresh }: Props) {
                 </label>
               </div>
             )}
+
+            {/* Whitelist Detector Card */}
+            {(() => {
+              const det = settings.failover.whitelist_detector || {
+                enabled: false,
+                monitored_provider: '',
+                exclude_ru_nodes: true,
+                target_bs_provider: '',
+                threshold_mode: 'percent',
+                trigger_offline_percent: 80,
+                trigger_offline_count: 75,
+                max_acceptable_ping_ms: 450,
+                exit_offline_percent: 45,
+                exit_offline_count: 48,
+                check_interval_mins: 10,
+                auto_restore_vps: true,
+              }
+
+              const ensureDetector = (s: AppSettings) => {
+                if (!s.failover.whitelist_detector) {
+                  s.failover.whitelist_detector = {
+                    enabled: false,
+                    monitored_provider: '',
+                    exclude_ru_nodes: true,
+                    target_bs_provider: '',
+                    threshold_mode: 'percent',
+                    trigger_offline_percent: 80,
+                    trigger_offline_count: 75,
+                    max_acceptable_ping_ms: 450,
+                    exit_offline_percent: 45,
+                    exit_offline_count: 48,
+                    check_interval_mins: 10,
+                    auto_restore_vps: true,
+                  }
+                }
+                return s.failover.whitelist_detector
+              }
+
+              const handleOpenSettingsClassifier = () => {
+                const detected = detectWhitelistServers(servers, providers)
+                setSettingsDetectedClassifier(detected)
+                setSettingsDetectorModalOpen(true)
+              }
+
+              const handleApplySettingsClassifier = async () => {
+                if (!settingsDetectedClassifier || settingsClassifierApplying) return
+                setSettingsClassifierApplying(true)
+                try {
+                  const res = await applyDetectedWhitelistServers(
+                    settingsDetectedClassifier.detectedServerIds,
+                    settingsDetectedClassifier.detectedProviderIds
+                  )
+                  notify(
+                    `Применено: серверов БС — ${res.whitelist_servers.length}, подписок БС — ${res.whitelist_providers.length}`
+                  )
+                  setSettingsDetectorModalOpen(false)
+                  refresh?.()
+                } catch (e: any) {
+                  notify(e?.message || 'Ошибка применения белых списков', true)
+                } finally {
+                  setSettingsClassifierApplying(false)
+                }
+              }
+
+              return (
+                <div
+                  style={{
+                    marginTop: 6,
+                    padding: 14,
+                    background: 'rgba(168, 85, 247, 0.04)',
+                    border: '1px solid rgba(168, 85, 247, 0.25)',
+                    borderRadius: 10,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 12,
+                  }}
+                  data-testid="settings-whitelist-detector-card"
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                    <div>
+                      <b style={{ display: 'block', fontSize: 13.5, color: '#c084fc' }}>
+                        🛡️ Автодетекция блокировок ТСПУ и режим [БС]
+                      </b>
+                      <span className="muted small">
+                        Постоянный контроль доступности зарубежных серверов и мгновенное переключение на [БС] при изоляции
+                      </span>
+                    </div>
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+                      <label className="switch" title="Включить детектор белых списков">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(det.enabled)}
+                          onChange={(e) =>
+                            patch((s) => {
+                              const d = ensureDetector(s)
+                              d.enabled = e.target.checked
+                            })
+                          }
+                          data-testid="settings-whitelist-detector-toggle"
+                        />
+                        <span className="slider" />
+                      </label>
+                      <span style={{ fontSize: 13, minWidth: 64, color: det.enabled ? '#c084fc' : 'var(--muted)', fontWeight: 600 }}>
+                        {det.enabled ? 'Включён' : 'Выключен'}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
+                    {/* Контролируемый провайдер */}
+                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                      <span style={{ fontSize: 12 }}>Контролируемый провайдер (зарубежный VPS)</span>
+                      <select
+                        className="input"
+                        value={det.monitored_provider || ''}
+                        onChange={(e) =>
+                          patch((s) => {
+                            const d = ensureDetector(s)
+                            d.monitored_provider = e.target.value
+                          })
+                        }
+                        data-testid="settings-detector-monitored-provider"
+                      >
+                        <option value="">Авто (все зарубежные VPS)</option>
+                        {providers.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name || p.id} ({p.count} узлов)
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    {/* Целевой провайдер БС */}
+                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                      <span style={{ fontSize: 12 }}>Целевой провайдер белых списков [БС]</span>
+                      <select
+                        className="input"
+                        value={det.target_bs_provider || ''}
+                        onChange={(e) =>
+                          patch((s) => {
+                            const d = ensureDetector(s)
+                            d.target_bs_provider = e.target.value
+                          })
+                        }
+                        data-testid="settings-detector-target-provider"
+                      >
+                        <option value="">Авто (любой доступный узел БС)</option>
+                        {providers.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name || p.id} {p.is_whitelist ? '⭐ [БС]' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
+                    {/* Порог срабатывания % */}
+                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                      <span style={{ fontSize: 12 }}>Порог изоляции (%)</span>
+                      <NumberInput
+                        min={10}
+                        max={100}
+                        step={5}
+                        fallback={80}
+                        value={det.trigger_offline_percent ?? 80}
+                        onChange={(val) =>
+                          patch((s) => {
+                            const d = ensureDetector(s)
+                            d.trigger_offline_percent = val
+                          })
+                        }
+                      />
+                    </label>
+
+                    {/* Порог выхода % */}
+                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                      <span style={{ fontSize: 12 }}>Порог снятия ТСПУ (%)</span>
+                      <NumberInput
+                        min={5}
+                        max={90}
+                        step={5}
+                        fallback={45}
+                        value={det.exit_offline_percent ?? 45}
+                        onChange={(val) =>
+                          patch((s) => {
+                            const d = ensureDetector(s)
+                            d.exit_offline_percent = val
+                          })
+                        }
+                      />
+                    </label>
+
+                    {/* Макс допустимый пинг */}
+                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                      <span style={{ fontSize: 12 }}>Макс. допустимый пинг (мс)</span>
+                      <NumberInput
+                        min={100}
+                        max={2000}
+                        step={50}
+                        fallback={450}
+                        value={det.max_acceptable_ping_ms ?? 450}
+                        onChange={(val) =>
+                          patch((s) => {
+                            const d = ensureDetector(s)
+                            d.max_acceptable_ping_ms = val
+                          })
+                        }
+                      />
+                    </label>
+
+                    {/* Интервал проверки в минутах */}
+                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                      <span style={{ fontSize: 12 }}>Интервал сканирования (мин)</span>
+                      <NumberInput
+                        min={1}
+                        max={1440}
+                        step={1}
+                        fallback={10}
+                        value={det.check_interval_mins ?? 10}
+                        onChange={(val) =>
+                          patch((s) => {
+                            const d = ensureDetector(s)
+                            d.check_interval_mins = val
+                          })
+                        }
+                      />
+                    </label>
+                  </div>
+
+                  {/* Чекбоксы: Отсев RU нод и Автовозврат на VPS */}
+                  <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5 }}>
+                      <input
+                        type="checkbox"
+                        checked={det.exclude_ru_nodes ?? true}
+                        onChange={(e) =>
+                          patch((s) => {
+                            const d = ensureDetector(s)
+                            d.exclude_ru_nodes = e.target.checked
+                          })
+                        }
+                        data-testid="settings-detector-exclude-ru"
+                      />
+                      <span>Исключать ноды РФ из контрольной группы зарубежных узлов</span>
+                    </label>
+
+                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5 }}>
+                      <input
+                        type="checkbox"
+                        checked={det.auto_restore_vps ?? true}
+                        onChange={(e) =>
+                          patch((s) => {
+                            const d = ensureDetector(s)
+                            d.auto_restore_vps = e.target.checked
+                          })
+                        }
+                        data-testid="settings-detector-auto-restore"
+                      />
+                      <span>Авто-возврат на обычный VPS при снятии блокировки ТСПУ</span>
+                    </label>
+                  </div>
+
+                  {/* Кнопка автоопределения БС узлов и подписок */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4, flexWrap: 'wrap', gap: 8 }}>
+                    <button
+                      type="button"
+                      className="btn sm"
+                      onClick={handleOpenSettingsClassifier}
+                      data-testid="settings-detector-classify-btn"
+                      title="Автоматически распознать все серверы и подписки с тегами БС"
+                    >
+                      ✨ Автоопределение серверов и подписок БС
+                    </button>
+                    <span className="muted small" style={{ fontSize: 11 }}>
+                      Автоматически пополняет белый список узлов и подписок без ручной правки
+                    </span>
+                  </div>
+
+                  {/* Модальное окно классификатора внутри настроек */}
+                  {settingsDetectorModalOpen && settingsDetectedClassifier && (
+                    <div
+                      className="modal-backdrop"
+                      style={{
+                        position: 'fixed',
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        background: 'rgba(0, 0, 0, 0.7)',
+                        backdropFilter: 'blur(3px)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        zIndex: 9999,
+                        padding: 16,
+                      }}
+                      onClick={() => setSettingsDetectorModalOpen(false)}
+                    >
+                      <div
+                        className="modal-content card"
+                        style={{
+                          maxWidth: 580,
+                          width: '100%',
+                          background: 'var(--card-bg, #1e293b)',
+                          border: '1px solid var(--border, rgba(255, 255, 255, 0.1))',
+                          borderRadius: 12,
+                          padding: 20,
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                        data-testid="settings-detector-classifier-modal"
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                          <h3 style={{ margin: 0, fontSize: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+                            <span>✨</span> Результаты классификации БС
+                          </h3>
+                          <button
+                            type="button"
+                            className="btn ghost sm"
+                            onClick={() => setSettingsDetectorModalOpen(false)}
+                          >
+                            ✕
+                          </button>
+                        </div>
+
+                        {settingsDetectedClassifier.details.length === 0 ? (
+                          <div style={{ padding: 16, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>
+                            ℹ️ Теги белых списков не обнаружены среди доступных узлов и подписок.
+                          </div>
+                        ) : (
+                          <div style={{ maxHeight: 280, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
+                            {settingsDetectedClassifier.details.map((d) => (
+                              <div
+                                key={`${d.type}-${d.id}`}
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  gap: 10,
+                                  padding: '8px 12px',
+                                  background: 'rgba(255, 255, 255, 0.03)',
+                                  border: '1px solid rgba(255, 255, 255, 0.08)',
+                                  borderRadius: 6,
+                                  fontSize: 12,
+                                }}
+                              >
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
+                                  <span className="badge" style={{ background: d.type === 'provider' ? 'rgba(56, 189, 248, 0.2)' : 'rgba(168, 85, 247, 0.2)', color: d.type === 'provider' ? '#38bdf8' : '#c084fc', fontSize: 10 }}>
+                                    {d.type === 'provider' ? 'Подписка' : 'Сервер'}
+                                  </span>
+                                  <b style={{ color: 'var(--text-bright)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                    {d.name || d.id}
+                                  </b>
+                                </div>
+                                <span className="muted small" style={{ fontSize: 10.5, whiteSpace: 'nowrap' }}>
+                                  {d.reason}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+                          <button
+                            type="button"
+                            className="btn ghost"
+                            onClick={() => setSettingsDetectorModalOpen(false)}
+                          >
+                            Отмена
+                          </button>
+                          <button
+                            type="button"
+                            className="btn primary"
+                            disabled={settingsDetectedClassifier.details.length === 0 || settingsClassifierApplying}
+                            onClick={handleApplySettingsClassifier}
+                            data-testid="settings-detector-apply-classifier-btn"
+                          >
+                            {settingsClassifierApplying ? 'Применение…' : `Применить в 1 клик (${settingsDetectedClassifier.details.length})`}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            })()}
 
             <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center', marginTop: 4, flexWrap: 'wrap' }}>
               <button className="btn" onClick={testCheck}>🔍 Тестовая проверка сейчас</button>

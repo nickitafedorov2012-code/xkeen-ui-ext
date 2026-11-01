@@ -698,6 +698,101 @@ describe('Settings Component — Failover Zombie Servers and Canary Last Result'
       expect(res).toBe("Штатно: активен узел 'ObsV-gb_real_dir' (72 мс)")
     })
   })
+
+  describe('Whitelist Detector Configuration in Settings', () => {
+    let container: HTMLDivElement | null = null
+    let root: ReturnType<typeof createRoot> | null = null
+    const notifyMock = vi.fn()
+    const refreshMock = vi.fn().mockResolvedValue(undefined)
+
+    beforeEach(() => {
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      root = createRoot(container)
+      vi.restoreAllMocks()
+      notifyMock.mockClear()
+      refreshMock.mockClear()
+
+      vi.spyOn(api, 'apiGet').mockImplementation(async (path: string) => {
+        if (path === 'settings') {
+          return {
+            ...mockSettings,
+            failover: {
+              ...mockSettings.failover,
+              whitelist_detector: {
+                enabled: false,
+                monitored_provider: '',
+                exclude_ru_nodes: true,
+                target_bs_provider: '',
+                threshold_mode: 'percent',
+                trigger_offline_percent: 80,
+                trigger_offline_count: 75,
+                max_acceptable_ping_ms: 450,
+                exit_offline_percent: 45,
+                exit_offline_count: 48,
+                check_interval_mins: 10,
+                auto_restore_vps: true,
+              },
+            },
+          }
+        }
+        if (path === 'servers') return { servers: [{ id: 'srv_wl_1', name: 'Резерв [БС] Москва' }] }
+        if (path === 'providers') return { providers: [{ id: 'prov_wl_1', name: 'Подписка [WL] 01', count: 10 }] }
+        if (path === 'system/swap') return mockSwapInactive
+        if (path === 'config-files') return []
+        if (path === 'failover/quarantine') return { quarantine: [] }
+        return {}
+      })
+    })
+
+    afterEach(() => {
+      if (root && container) {
+        act(() => {
+          root!.unmount()
+        })
+        container.remove()
+      }
+    })
+
+    it('renders Whitelist Detector card with inputs, selects and classifier button', async () => {
+      await act(async () => {
+        root!.render(<Settings notify={notifyMock} refresh={refreshMock} />)
+      })
+
+      const card = container?.querySelector('[data-testid=\"settings-whitelist-detector-card\"]')
+      expect(card).toBeTruthy()
+
+      // Toggle switch
+      const toggle = container?.querySelector('[data-testid=\"settings-whitelist-detector-toggle\"]') as HTMLInputElement
+      expect(toggle).toBeTruthy()
+      expect(toggle.checked).toBe(false)
+
+      // Provider selects
+      const monSelect = container?.querySelector('[data-testid=\"settings-detector-monitored-provider\"]')
+      expect(monSelect).toBeTruthy()
+      const targetSelect = container?.querySelector('[data-testid=\"settings-detector-target-provider\"]')
+      expect(targetSelect).toBeTruthy()
+
+      // Checkboxes
+      const ruCheck = container?.querySelector('[data-testid=\"settings-detector-exclude-ru\"]') as HTMLInputElement
+      expect(ruCheck.checked).toBe(true)
+      const autoRestoreCheck = container?.querySelector('[data-testid=\"settings-detector-auto-restore\"]') as HTMLInputElement
+      expect(autoRestoreCheck.checked).toBe(true)
+
+      // Open Classifier modal
+      const classifyBtn = container?.querySelector('[data-testid=\"settings-detector-classify-btn\"]') as HTMLButtonElement
+      expect(classifyBtn).toBeTruthy()
+      await act(async () => {
+        classifyBtn.click()
+      })
+
+      const modal = container?.querySelector('[data-testid=\"settings-detector-classifier-modal\"]')
+      expect(modal).toBeTruthy()
+      expect(modal?.textContent).toContain('Результаты классификации БС')
+      expect(modal?.textContent).toContain('Подписка [WL] 01')
+      expect(modal?.textContent).toContain('Резерв [БС] Москва')
+    })
+  })
 })
 
 

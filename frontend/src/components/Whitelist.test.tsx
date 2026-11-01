@@ -395,4 +395,67 @@ describe('Whitelist Component — Whitelist Tab (Overhaul & Anti-Regression)', (
     expect(notifyMock).toHaveBeenCalledWith('Доменное имя не должно содержать пробелов', true)
     expect(postSpy).not.toHaveBeenCalledWith('whitelist', expect.anything())
   })
+
+  it('renders synchronized Whitelist Detector card and handles classifier modal in Whitelist tab', async () => {
+    const mockAppStatus: any = {
+      whitelist_mode_active: false,
+      failover: {
+        whitelist_detector: {
+          enabled: true,
+          monitored_provider: 'Geodema',
+          target_bs_provider: '',
+          threshold_mode: 'percent',
+          trigger_offline_percent: 80,
+          trigger_offline_count: 75,
+          max_acceptable_ping_ms: 450,
+          exit_offline_percent: 45,
+          exit_offline_count: 48,
+          check_interval_mins: 10,
+          auto_restore_vps: true,
+        },
+        whitelist_detector_status: {
+          state: 'Normal',
+          monitored_provider: 'Geodema',
+          total_nodes: 25,
+          offline_nodes: 2,
+          online_nodes: 23,
+          offline_percent: 8,
+          last_checked: '2026-11-01 23:15',
+          last_event: 'Все узлы стабильны',
+          check_interval_mins: 10,
+        },
+      },
+    }
+
+    const checkSpy = vi.spyOn(api, 'runWhitelistDetectorCheck').mockResolvedValue({
+      message: 'Все зарубежные узлы в строю',
+    })
+
+    await act(async () => {
+      root!.render(<Whitelist notify={notifyMock} refresh={refreshMock} status={mockAppStatus} />)
+    })
+
+    const syncCard = container?.querySelector('[data-testid="whitelist-detector-sync-card"]')
+    expect(syncCard).toBeTruthy()
+    expect(syncCard?.textContent).toContain('Статус детектора белых списков')
+    expect(syncCard?.textContent).toContain('23 из 25 онлайн (8% оффлайн)')
+
+    // Click Check
+    const checkBtn = container?.querySelector('[data-testid="whitelist-check-detector-btn"]') as HTMLButtonElement
+    expect(checkBtn).toBeTruthy()
+    await act(async () => {
+      checkBtn.click()
+    })
+    expect(checkSpy).toHaveBeenCalled()
+
+    // Click Open Classifier
+    const classifierBtn = container?.querySelector('[data-testid="whitelist-open-classifier-btn"]') as HTMLButtonElement
+    expect(classifierBtn).toBeTruthy()
+    await act(async () => {
+      classifierBtn.click()
+    })
+    const modal = container?.querySelector('[data-testid="whitelist-classifier-modal"]')
+    expect(modal).toBeTruthy()
+    expect(modal?.textContent).toContain('Автоопределение узлов и подписок [БС]')
+  })
 })

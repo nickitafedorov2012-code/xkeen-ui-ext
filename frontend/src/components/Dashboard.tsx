@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { apiGet, apiPost, apiPut } from '../api'
-import { pingClass, type FailoverEventInfo, type StatusInfo, type AghStatus, type SwapStatus, type DomainCheckResult, type ProviderInfo } from '../types'
+import { apiGet, apiPost, apiPut, runWhitelistDetectorCheck, detectWhitelistServers, applyDetectedWhitelistServers } from '../api'
+import { pingClass, type FailoverEventInfo, type StatusInfo, type AghStatus, type SwapStatus, type DomainCheckResult, type ProviderInfo, type ServerInfo } from '../types'
 import { formatQuotaBytes } from './Servers'
 import TrafficGraph from './TrafficGraph'
 
@@ -127,12 +127,26 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
   const [checking, setChecking] = useState(false)
   const [togglingFailover, setTogglingFailover] = useState(false)
   const [togglingSmartFailover, setTogglingSmartFailover] = useState(false)
+  const [togglingDetector, setTogglingDetector] = useState(false)
+  const [checkingDetector, setCheckingDetector] = useState(false)
+  const [detectorCheckResult, setDetectorCheckResult] = useState<string | null>(null)
+  const [detectorModalOpen, setDetectorModalOpen] = useState(false)
+  const [detectedClassifier, setDetectedClassifier] = useState<{
+    detectedServerIds: string[]
+    detectedProviderIds: string[]
+    details: Array<{ id: string; name: string; reason: string; type: 'server' | 'provider' }>
+  } | null>(null)
+  const [classifierApplying, setClassifierApplying] = useState(false)
+  const [allServers, setAllServers] = useState<ServerInfo[]>([])
   const [providers, setProviders] = useState<ProviderInfo[]>([])
 
   useEffect(() => {
     const fetchProviders = () => {
       apiGet<{ providers: ProviderInfo[] }>('providers')
         .then((d) => setProviders(d.providers || []))
+        .catch(() => {})
+      apiGet<{ servers: ServerInfo[] }>('servers')
+        .then((d) => setAllServers(d.servers || []))
         .catch(() => {})
     }
     fetchProviders()
@@ -809,26 +823,110 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
 
       {/* ВИДЖЕТ «🛡️ Детектор белых списков» (Задача 4) */}
       {(() => {
+        const detCfg = f?.whitelist_detector
+        const detStatus = f?.whitelist_detector_status
+        const isDetectorEnabled = Boolean(detCfg?.enabled)
+
         const isBsActive = Boolean(
           status?.whitelist_mode_active ||
           f?.active_tier === 2 ||
+          detStatus?.state === 'WhitelistDetected' ||
           (status?.active_server && (
             status?.whitelist_servers?.includes(status.active_server.id) ||
             (status.active_server.provider && status?.whitelist_providers?.includes(status.active_server.provider))
           ))
         )
+
+        const monProv = detCfg?.monitored_provider || detStatus?.monitored_provider || 'Все зарубежные узлы'
+        const totalNodes = detStatus?.total_nodes ?? 0
+        const onlineNodes = detStatus?.online_nodes ?? 0
+        const offlineNodes = detStatus?.offline_nodes ?? 0
+        const offlinePct = detStatus?.offline_percent ?? 0
+        const triggerPct = detCfg?.trigger_offline_percent ?? 80
+        const checkIntervalMins = detCfg?.check_interval_mins ?? detStatus?.check_interval_mins ?? 10
+
         const activeWlProv = providers.find((p) => p.is_whitelist && (p.total_bytes ?? 0) > 0) || providers.find((p) => (p.total_bytes ?? 0) > 0)
         const total = activeWlProv?.total_bytes ?? 0
         const used = (activeWlProv?.upload_bytes ?? 0) + (activeWlProv?.download_bytes ?? 0)
         const remaining = total > 0 ? Math.max(0, total - used) : 0
 
+        const handleToggleDetector = async () => {
+          if (togglingDetector) return
+          setTogglingDetector(true)
+          try {
+            const newEnabled = !isDetectorEnabled
+            const curFailover = status?.failover || ({} as any)
+            const curDetector = curFailover.whitelist_detector || {}
+            await apiPut('settings', {
+              failover: {
+                ...curFailover,
+                whitelist_detector: {
+                  ...curDetector,
+                  enabled: newEnabled,
+                },
+              },
+            })
+            notify(`Авто-детектор белых списков: ${newEnabled ? 'ВКЛ 🟢' : 'ВЫКЛ ⚪'}`)
+            refresh?.()
+          } catch (e: any) {
+            notify(e?.message || 'Ошибка переключения детектора', true)
+          } finally {
+            setTogglingDetector(false)
+          }
+        }
+
+        const handleRunDetectorCheck = async () => {
+          if (checkingDetector) return
+          setCheckingDetector(true)
+          try {
+            notify('Запуск точной проверки зарубежных узлов детектора БС...')
+            const res = await runWhitelistDetectorCheck()
+            setDetectorCheckResult(res.message || 'Проверка выполнена')
+            notify(res.message || 'Проверка детектора завершена')
+            refresh?.()
+          } catch (e: any) {
+            notify(e?.message || 'Ошибка проверки детектора', true)
+          } finally {
+            setCheckingDetector(false)
+          }
+        }
+
+        const handleOpenClassifierModal = () => {
+          const detected = detectWhitelistServers(allServers, providers)
+          setDetectedClassifier(detected)
+          setDetectorModalOpen(true)
+        }
+
+        const handleApplyClassifier = async () => {
+          if (!detectedClassifier || classifierApplying) return
+          setClassifierApplying(true)
+          try {
+            const res = await applyDetectedWhitelistServers(
+              detectedClassifier.detectedServerIds,
+              detectedClassifier.detectedProviderIds
+            )
+            notify(
+              `Применено: серверов БС — ${res.whitelist_servers.length}, подписок БС — ${res.whitelist_providers.length}`
+            )
+            setDetectorModalOpen(false)
+            refresh?.()
+          } catch (e: any) {
+            notify(e?.message || 'Ошибка применения белых списков', true)
+          } finally {
+            setClassifierApplying(false)
+          }
+        }
+
         return (
           <section className="card" style={{ marginTop: 14 }} data-testid="dashboard-whitelist-detector-widget">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <h2 style={{ margin: 0, fontSize: 16 }}>🛡️ Детектор белых списков</h2>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexWrap: 'wrap', gap: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <h2 style={{ margin: 0, fontSize: 16, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span>🛡️</span> Детектор белых списков
+                </h2>
                 <span
                   className="badge"
+                  data-testid="detector-state-badge"
                   style={{
                     background: isBsActive ? 'rgba(168, 85, 247, 0.2)' : 'rgba(34, 197, 94, 0.15)',
                     color: isBsActive ? '#c084fc' : '#4ade80',
@@ -838,50 +936,248 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                 >
                   {isBsActive ? '🟣 Обнаружены БС (Туннель активен)' : '🟢 Штатный режим (VPS)'}
                 </span>
+                {detStatus?.warning && (
+                  <span className="badge" style={{ background: 'rgba(239, 68, 68, 0.15)', color: '#f87171', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+                    ⚠️ {detStatus.warning}
+                  </span>
+                )}
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                {/* 1-клик тумблер авто-детектора в шапке */}
+                <button
+                  type="button"
+                  className={`btn sm ${isDetectorEnabled ? 'primary' : 'ghost'}`}
+                  onClick={handleToggleDetector}
+                  disabled={togglingDetector}
+                  data-testid="detector-toggle-btn"
+                  title="Включение/выключение автодетектора белых списков"
+                  style={{ minWidth: 100 }}
+                >
+                  {togglingDetector ? 'Сохранение…' : isDetectorEnabled ? 'Авто: ВКЛ 🟢' : 'Авто: ВЫКЛ ⚪'}
+                </button>
+
+                {/* Проверить сейчас */}
                 <button
                   type="button"
                   className="btn sm"
-                  onClick={async () => {
-                    try {
-                      notify('Запуск проверки доступности белых списков...')
-                      const data = await apiPost<{ message: string }>('failover/check')
-                      notify(data.message || 'Проверка завершена')
-                      refresh?.()
-                    } catch (e: any) {
-                      notify(e?.message || 'Ошибка проверки', true)
-                    }
-                  }}
-                  title="Принудительно выполнить проверку доступности и переключения прямо сейчас"
+                  onClick={handleRunDetectorCheck}
+                  disabled={checkingDetector}
+                  data-testid="detector-check-now-btn"
+                  title="Принудительно опросить контролируемые зарубежные узлы прямо сейчас"
                 >
-                  🔍 Проверить сейчас
+                  {checkingDetector ? '⏳ Проверка…' : '🔍 Проверить сейчас'}
+                </button>
+
+                {/* Определить БС */}
+                <button
+                  type="button"
+                  className="btn sm"
+                  onClick={handleOpenClassifierModal}
+                  data-testid="detector-classify-modal-btn"
+                  title="Автоматически классифицировать серверы и подписки по тегам БС и применить в 1 клик"
+                >
+                  ✨ Определить БС
                 </button>
               </div>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginTop: 6 }}>
-              <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px' }}>
-                <div className="muted small" style={{ fontSize: 11, marginBottom: 4 }}>Статус сети и туннеля</div>
+            {detectorCheckResult && (
+              <div
+                style={{
+                  marginBottom: 12,
+                  padding: '8px 12px',
+                  borderRadius: 6,
+                  fontSize: 12,
+                  background: 'rgba(56, 189, 248, 0.08)',
+                  border: '1px solid rgba(56, 189, 248, 0.3)',
+                  color: '#38bdf8',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 8,
+                }}
+                data-testid="detector-check-result-banner"
+              >
+                <span>📊 {detectorCheckResult}</span>
+                <button
+                  type="button"
+                  className="btn ghost sm"
+                  style={{ padding: '0 6px', height: 20, fontSize: 11 }}
+                  onClick={() => setDetectorCheckResult(null)}
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
+            {/* Честные карточки метрик */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 12, marginTop: 4 }}>
+              {/* Карточка 1: Статус ТСПУ / Туннеля */}
+              <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px' }} data-testid="card-tspu-tunnel-status">
+                <div className="muted small" style={{ fontSize: 11, marginBottom: 4 }}>Статус ТСПУ / Туннеля</div>
                 <div style={{ fontSize: 13, fontWeight: 600, color: isBsActive ? '#c084fc' : '#4ade80' }}>
-                  {isBsActive ? '🟣 Трафик идёт через резервные БС' : '🟢 Все сервисы через зарубежный VPS'}
+                  {isBsActive ? '🟣 БС активны (ТСПУ блокирует)' : '🟢 Штатный режим (Normal VPS)'}
+                </div>
+                <div className="muted small" style={{ fontSize: 10, marginTop: 2 }}>
+                  Контроль: <b style={{ color: 'var(--text-bright)' }}>{monProv}</b>
                 </div>
               </div>
 
-              <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px' }}>
-                <div className="muted small" style={{ fontSize: 11, marginBottom: 4 }}>Интервал / След. проверка</div>
+              {/* Карточка 2: Здоровье зарубежных серверов */}
+              <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px' }} data-testid="card-foreign-servers-health">
+                <div className="muted small" style={{ fontSize: 11, marginBottom: 4 }}>Здоровье зарубежных узлов</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: totalNodes > 0 ? (offlinePct >= triggerPct ? '#ef4444' : '#4ade80') : 'var(--muted)' }}>
+                  {totalNodes > 0
+                    ? `${onlineNodes} из ${totalNodes} онлайн (${offlinePct}% оффлайн, ${offlineNodes} недоступно)`
+                    : 'Ожидание первой проверки'}
+                </div>
+                <div className="muted small" style={{ fontSize: 10, marginTop: 2 }}>
+                  Порог срабатывания: <b style={{ color: '#f87171' }}>≥{triggerPct}%</b> {detStatus?.last_checked ? `• ${detStatus.last_checked}` : ''}
+                </div>
+              </div>
+
+              {/* Карточка 3: Интервал проверки в минутах */}
+              <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px' }} data-testid="card-detector-interval">
+                <div className="muted small" style={{ fontSize: 11, marginBottom: 4 }}>Интервал сканирования</div>
                 <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-bright)' }}>
-                  каждые {f?.interval_secs ?? 60} сек
+                  каждые {checkIntervalMins} мин
+                </div>
+                <div className="muted small" style={{ fontSize: 10, marginTop: 2 }}>
+                  Фоновый опрос ТСПУ ({isDetectorEnabled ? 'активен' : 'на паузе'})
                 </div>
               </div>
 
-              <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px' }}>
+              {/* Карточка 4: Остаток трафика подписки БС */}
+              <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px' }} data-testid="card-bs-quota-remaining">
                 <div className="muted small" style={{ fontSize: 11, marginBottom: 4 }}>Остаток трафика подписки БС</div>
                 <div style={{ fontSize: 13, fontWeight: 600, color: total > 0 ? (remaining === 0 ? '#ef4444' : '#38bdf8') : 'var(--muted)' }}>
                   {total > 0 ? `${formatQuotaBytes(remaining)} (из ${formatQuotaBytes(total)})` : 'Не лимитирован / без квоты'}
                 </div>
+                <div className="muted small" style={{ fontSize: 10, marginTop: 2 }}>
+                  {activeWlProv ? `Подписка: ${activeWlProv.name || activeWlProv.id}` : 'Провайдер БС не привязан'}
+                </div>
               </div>
             </div>
+
+            {/* Модальное окно классификатора БС */}
+            {detectorModalOpen && detectedClassifier && (
+              <div
+                className="modal-backdrop"
+                style={{
+                  position: 'fixed',
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  background: 'rgba(0, 0, 0, 0.7)',
+                  backdropFilter: 'blur(3px)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  zIndex: 9999,
+                  padding: 16,
+                }}
+                onClick={() => setDetectorModalOpen(false)}
+              >
+                <div
+                  className="modal-content card"
+                  style={{
+                    maxWidth: 580,
+                    width: '100%',
+                    background: 'var(--card-bg, #1e293b)',
+                    border: '1px solid var(--border, rgba(255, 255, 255, 0.1))',
+                    borderRadius: 12,
+                    padding: 20,
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                  data-testid="detector-classifier-modal"
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                    <h3 style={{ margin: 0, fontSize: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span>✨</span> Автоопределение серверов и подписок БС
+                    </h3>
+                    <button
+                      type="button"
+                      className="btn ghost sm"
+                      onClick={() => setDetectorModalOpen(false)}
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  <p className="muted small" style={{ margin: '0 0 14px' }}>
+                    Система сканирует конфигурацию на наличие тегов <code>[БС]</code>, <code>[WL]</code>, <code>whitelist</code> в названиях серверов и подписок.
+                  </p>
+
+                  {detectedClassifier.details.length === 0 ? (
+                    <div
+                      style={{
+                        padding: 16,
+                        borderRadius: 8,
+                        background: 'rgba(255, 255, 255, 0.02)',
+                        border: '1px solid var(--border)',
+                        textAlign: 'center',
+                        color: 'var(--muted)',
+                        fontSize: 13,
+                      }}
+                    >
+                      ℹ️ Теги белых списков не обнаружены среди доступных узлов и подписок.
+                    </div>
+                  ) : (
+                    <div style={{ maxHeight: 280, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
+                      {detectedClassifier.details.map((d) => (
+                        <div
+                          key={`${d.type}-${d.id}`}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: 10,
+                            padding: '8px 12px',
+                            background: 'rgba(255, 255, 255, 0.03)',
+                            border: '1px solid rgba(255, 255, 255, 0.08)',
+                            borderRadius: 6,
+                            fontSize: 12,
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
+                            <span className="badge" style={{ background: d.type === 'provider' ? 'rgba(56, 189, 248, 0.2)' : 'rgba(168, 85, 247, 0.2)', color: d.type === 'provider' ? '#38bdf8' : '#c084fc', fontSize: 10 }}>
+                              {d.type === 'provider' ? 'Подписка' : 'Сервер' }
+                            </span>
+                            <b style={{ color: 'var(--text-bright)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {d.name || d.id}
+                            </b>
+                          </div>
+                          <span className="muted small" style={{ fontSize: 10.5, whiteSpace: 'nowrap' }}>
+                            {d.reason}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      onClick={() => setDetectorModalOpen(false)}
+                    >
+                      Отмена
+                    </button>
+                    <button
+                      type="button"
+                      className="btn primary"
+                      disabled={detectedClassifier.details.length === 0 || classifierApplying}
+                      onClick={handleApplyClassifier}
+                      data-testid="detector-apply-classifier-btn"
+                    >
+                      {classifierApplying ? 'Применение…' : `Применить в 1 клик (${detectedClassifier.details.length})`}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </section>
         )
       })()}

@@ -122,6 +122,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
             "priority_chain_pings": priority_chain_pings,
             "bs_priority_chain": cfg.failover.bs_priority_chain,
             "whitelist_detector": cfg.failover.whitelist_detector,
+            "whitelist_detector_status": failover::get_whitelist_detector_status().await,
             "last_good_regular_vps": cfg.failover.last_good_regular_vps,
             "auto_restore_priority": cfg.failover.auto_restore_priority,
             "interval_secs": cfg.failover.interval_secs,
@@ -1320,6 +1321,65 @@ pub async fn whitelist_detector_check(State(state): State<AppState>) -> Response
         Ok(msg) => api_ok(json!({ "message": msg })),
         Err(e) => api_err(e),
     }
+}
+
+#[derive(Default, Deserialize)]
+pub struct DetectServersReq {
+    #[serde(default)]
+    pub apply: Option<bool>,
+}
+
+/// POST /api/failover/whitelist-detector/detect-servers — поиск серверов и провайдеров БС с опциональным применением
+pub async fn whitelist_detector_detect_servers(
+    State(state): State<AppState>,
+    Json(req): Json<DetectServersReq>,
+) -> Response {
+    let detect_res = match failover::detect_whitelist_servers_and_providers(&state).await {
+        Ok(r) => r,
+        Err(e) => return api_err(format!("Ошибка анализа серверов белых списков: {e}")),
+    };
+
+    if req.apply.unwrap_or(false) {
+        let _cfg_guard = state.config_lock.lock().await;
+        let mut cfg = (**state.config.read().await).clone();
+
+        // 1. Добавляем обнаруженные BS провайдеры в whitelist_providers (дедупликация)
+        for wp in &detect_res.detected_bs_providers {
+            if !cfg.whitelist_providers.iter().any(|p| p.eq_ignore_ascii_case(wp)) {
+                cfg.whitelist_providers.push(wp.clone());
+            }
+        }
+
+        // 2. Добавляем обнаруженные узлы БС в whitelist_servers (дедупликация)
+        for ws in &detect_res.detected_bs_servers {
+            if !cfg.whitelist_servers.iter().any(|s| s == ws) {
+                cfg.whitelist_servers.push(ws.clone());
+            }
+        }
+
+        // 3. Если monitored_provider пуст, заполняем suggested_monitored_provider
+        if cfg.failover.whitelist_detector.monitored_provider.trim().is_empty() {
+            if let Some(ref sug) = detect_res.suggested_monitored_provider {
+                cfg.failover.whitelist_detector.monitored_provider = sug.clone();
+            }
+        }
+
+        // 4. Если target_bs_provider пуст, заполняем suggested_target_bs_provider
+        if cfg.failover.whitelist_detector.target_bs_provider.trim().is_empty() {
+            if let Some(ref sug) = detect_res.suggested_target_bs_provider {
+                cfg.failover.whitelist_detector.target_bs_provider = sug.clone();
+            }
+        }
+
+        if let Err(e) = config::save(&state.config_path, &cfg).await {
+            return api_err(format!("Ошибка сохранения конфигурации при автонастройке БС: {e}"));
+        }
+
+        *state.config.write().await = std::sync::Arc::new(cfg);
+        log_i!("[DETECTOR] Автоматически применены настройки обнаруженных БС узлов и провайдеров");
+    }
+
+    api_ok(json!(detect_res))
 }
 
 /// GET /api/failover/whitelist-detector/status — статус детектора белых списков.

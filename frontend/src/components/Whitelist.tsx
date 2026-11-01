@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { apiGet, apiPost } from '../api'
+import { apiGet, apiPost, detectWhitelistServers, applyDetectedWhitelistServers, runWhitelistDetectorCheck } from '../api'
 import {
   type DeviceInfo,
   type ServerInfo,
@@ -35,7 +35,7 @@ const CATEGORY_MAP: Record<string, { label: string; filterKey: string }> = {
   cloud: { label: '☁️ Облака (36)', filterKey: 'category 8' },
 }
 
-export default function Whitelist({ notify, refresh }: Props) {
+export default function Whitelist({ notify, status, refresh }: Props) {
   const [config, setConfig] = useState<WhitelistConfig>({
     enabled: false,
     auto_by_failover: true,
@@ -57,6 +57,15 @@ export default function Whitelist({ notify, refresh }: Props) {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [serversList, setServersList] = useState<ServerInfo[]>([])
+  const [providersList, setProvidersList] = useState<Array<{ id: string; name: string }>>([])
+  const [wlDetectorChecking, setWlDetectorChecking] = useState(false)
+  const [wlClassifierModalOpen, setWlClassifierModalOpen] = useState(false)
+  const [wlDetectedClassifier, setWlDetectedClassifier] = useState<{
+    detectedServerIds: string[]
+    detectedProviderIds: string[]
+    details: Array<{ id: string; name: string; reason: string; type: 'server' | 'provider' }>
+  } | null>(null)
+  const [wlClassifierApplying, setWlClassifierApplying] = useState(false)
 
   // Поиск устройств для исключений
   const [deviceSearch, setDeviceSearch] = useState('')
@@ -73,11 +82,12 @@ export default function Whitelist({ notify, refresh }: Props) {
 
   const loadData = useCallback(async () => {
     try {
-      const [wlStatus, devRes, srvRes, catRes] = await Promise.all([
+      const [wlStatus, devRes, srvRes, catRes, provRes] = await Promise.all([
         apiGet<WhitelistStatusResponse>('whitelist').catch(() => null),
         apiGet<{ devices: DeviceInfo[] }>('devices').catch(() => ({ devices: [] })),
         apiGet<{ servers: ServerInfo[] }>('servers').catch(() => ({ servers: [] })),
         apiGet<WhitelistCatalogResponse>('whitelist/catalog').catch(() => null),
+        apiGet<{ providers: Array<{ id: string; name: string }> }>('providers').catch(() => ({ providers: [] })),
       ])
 
       if (wlStatus) {
@@ -100,6 +110,10 @@ export default function Whitelist({ notify, refresh }: Props) {
 
       if (devRes?.devices) {
         setDevicesList(devRes.devices)
+      }
+
+      if (provRes?.providers) {
+        setProvidersList(provRes.providers)
       }
 
       if (srvRes?.servers) {
@@ -496,6 +510,231 @@ export default function Whitelist({ notify, refresh }: Props) {
           </div>
         </div>
       </div>
+
+      {/* Synchronized Whitelist Detector Status & Quick Access Card */}
+      {(() => {
+        const detStatus = status?.failover?.whitelist_detector_status
+        const detCfg = status?.failover?.whitelist_detector
+        const isDetectorOn = Boolean(detCfg?.enabled)
+        const isDetected = detStatus?.state === 'WhitelistDetected' || status?.whitelist_mode_active
+
+        const handleRunCheckFromWhitelist = async () => {
+          if (wlDetectorChecking) return
+          setWlDetectorChecking(true)
+          try {
+            notify('Проверка доступности зарубежных серверов...')
+            const res = await runWhitelistDetectorCheck()
+            notify(res.message || 'Проверка завершена')
+            refresh?.()
+            await loadData()
+          } catch (e: any) {
+            notify(e?.message || 'Ошибка проверки детектора', true)
+          } finally {
+            setWlDetectorChecking(false)
+          }
+        }
+
+        const handleOpenWlClassifier = () => {
+          const detected = detectWhitelistServers(serversList, providersList)
+          setWlDetectedClassifier(detected)
+          setWlClassifierModalOpen(true)
+        }
+
+        const handleApplyWlClassifier = async () => {
+          if (!wlDetectedClassifier || wlClassifierApplying) return
+          setWlClassifierApplying(true)
+          try {
+            const res = await applyDetectedWhitelistServers(
+              wlDetectedClassifier.detectedServerIds,
+              wlDetectedClassifier.detectedProviderIds
+            )
+            notify(
+              `Применено: серверов БС — ${res.whitelist_servers.length}, подписок БС — ${res.whitelist_providers.length}`
+            )
+            setWlClassifierModalOpen(false)
+            refresh?.()
+            await loadData()
+          } catch (e: any) {
+            notify(e?.message || 'Ошибка применения белых списков', true)
+          } finally {
+            setWlClassifierApplying(false)
+          }
+        }
+
+        return (
+          <div className="card" style={{ marginBottom: 20 }} data-testid="whitelist-detector-sync-card">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10, marginBottom: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <h3 style={{ margin: 0, fontSize: 16, display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span>🛡️</span> Статус детектора белых списков
+                </h3>
+                <span
+                  className="badge"
+                  style={{
+                    background: isDetected ? 'rgba(168, 85, 247, 0.2)' : 'rgba(34, 197, 94, 0.15)',
+                    color: isDetected ? '#c084fc' : '#4ade80',
+                    border: `1px solid ${isDetected ? 'rgba(168, 85, 247, 0.4)' : 'rgba(34, 197, 94, 0.3)'}`,
+                    fontWeight: 600,
+                  }}
+                >
+                  {isDetected ? '🟣 Режим БС активен (ТСПУ)' : '🟢 Штатный режим (VPS)'}
+                </span>
+                <span className="badge" style={{ background: isDetectorOn ? 'rgba(34, 197, 94, 0.15)' : 'rgba(255, 255, 255, 0.05)', color: isDetectorOn ? '#4ade80' : 'var(--muted)' }}>
+                  Автодетектор: {isDetectorOn ? 'ВКЛ' : 'ВЫКЛ'}
+                </span>
+              </div>
+
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn sm"
+                  onClick={handleRunCheckFromWhitelist}
+                  disabled={wlDetectorChecking}
+                  data-testid="whitelist-check-detector-btn"
+                  title="Опросить контролируемые узлы прямо сейчас"
+                >
+                  {wlDetectorChecking ? '⏳ Опрос…' : '🔍 Проверить доступность'}
+                </button>
+                <button
+                  type="button"
+                  className="btn sm"
+                  onClick={handleOpenWlClassifier}
+                  data-testid="whitelist-open-classifier-btn"
+                  title="Найти узлы и подписки с тегами БС и применить"
+                >
+                  ✨ Автоопределение БС
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10, marginTop: 4 }}>
+              <div style={{ background: 'rgba(255, 255, 255, 0.02)', padding: '8px 12px', borderRadius: 6, border: '1px solid var(--border)' }}>
+                <div className="muted small" style={{ fontSize: 11 }}>Контролируемые узлы</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-bright)', marginTop: 2 }}>
+                  {detStatus?.total_nodes ? `${detStatus.online_nodes} из ${detStatus.total_nodes} онлайн (${detStatus.offline_percent}% оффлайн)` : 'Все узлы в строю'}
+                </div>
+              </div>
+              <div style={{ background: 'rgba(255, 255, 255, 0.02)', padding: '8px 12px', borderRadius: 6, border: '1px solid var(--border)' }}>
+                <div className="muted small" style={{ fontSize: 11 }}>Последнее событие</div>
+                <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-bright)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {detStatus?.last_event || 'Штатная работа'}
+                </div>
+              </div>
+              <div style={{ background: 'rgba(255, 255, 255, 0.02)', padding: '8px 12px', borderRadius: 6, border: '1px solid var(--border)' }}>
+                <div className="muted small" style={{ fontSize: 11 }}>Интервал сканирования</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-bright)', marginTop: 2 }}>
+                  каждые {detCfg?.check_interval_mins ?? detStatus?.check_interval_mins ?? 10} мин
+                </div>
+              </div>
+            </div>
+
+            {/* Модалка классификатора */}
+            {wlClassifierModalOpen && wlDetectedClassifier && (
+              <div
+                className="modal-backdrop"
+                style={{
+                  position: 'fixed',
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  background: 'rgba(0, 0, 0, 0.7)',
+                  backdropFilter: 'blur(3px)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  zIndex: 9999,
+                  padding: 16,
+                }}
+                onClick={() => setWlClassifierModalOpen(false)}
+              >
+                <div
+                  className="modal-content card"
+                  style={{
+                    maxWidth: 580,
+                    width: '100%',
+                    background: 'var(--card-bg, #1e293b)',
+                    border: '1px solid var(--border, rgba(255, 255, 255, 0.1))',
+                    borderRadius: 12,
+                    padding: 20,
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                  data-testid="whitelist-classifier-modal"
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                    <h3 style={{ margin: 0, fontSize: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span>✨</span> Автоопределение узлов и подписок [БС]
+                    </h3>
+                    <button
+                      type="button"
+                      className="btn ghost sm"
+                      onClick={() => setWlClassifierModalOpen(false)}
+                    >
+                      ✕
+                    </button>
+                  </div>
+
+                  {wlDetectedClassifier.details.length === 0 ? (
+                    <div style={{ padding: 16, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>
+                      ℹ️ Теги белых списков не обнаружены среди серверов и подписок.
+                    </div>
+                  ) : (
+                    <div style={{ maxHeight: 280, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
+                      {wlDetectedClassifier.details.map((d) => (
+                        <div
+                          key={`${d.type}-${d.id}`}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: 10,
+                            padding: '8px 12px',
+                            background: 'rgba(255, 255, 255, 0.03)',
+                            border: '1px solid rgba(255, 255, 255, 0.08)',
+                            borderRadius: 6,
+                            fontSize: 12,
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
+                            <span className="badge" style={{ background: d.type === 'provider' ? 'rgba(56, 189, 248, 0.2)' : 'rgba(168, 85, 247, 0.2)', color: d.type === 'provider' ? '#38bdf8' : '#c084fc', fontSize: 10 }}>
+                              {d.type === 'provider' ? 'Подписка' : 'Сервер'}
+                            </span>
+                            <b style={{ color: 'var(--text-bright)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {d.name || d.id}
+                            </b>
+                          </div>
+                          <span className="muted small" style={{ fontSize: 10.5, whiteSpace: 'nowrap' }}>
+                            {d.reason}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
+                    <button
+                      type="button"
+                      className="btn ghost"
+                      onClick={() => setWlClassifierModalOpen(false)}
+                    >
+                      Отмена
+                    </button>
+                    <button
+                      type="button"
+                      className="btn primary"
+                      disabled={wlDetectedClassifier.details.length === 0 || wlClassifierApplying}
+                      onClick={handleApplyWlClassifier}
+                      data-testid="whitelist-apply-classifier-btn"
+                    >
+                      {wlClassifierApplying ? 'Применение…' : `Применить в 1 клик (${wlDetectedClassifier.details.length})`}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )
+      })()}
 
       {/* 2. Strategy Selector Card: XKeen Route vs Standard */}
       <div className="card" style={{ marginBottom: 20 }}>

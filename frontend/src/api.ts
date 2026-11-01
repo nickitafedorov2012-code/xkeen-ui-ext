@@ -129,3 +129,106 @@ export async function apiDelete<T>(path: string, body?: unknown): Promise<T> {
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
 }
+
+/**
+ * Ручной запуск проверки детектора белых списков
+ */
+export async function runWhitelistDetectorCheck(): Promise<{ message: string }> {
+  return apiPost<{ message: string }>('failover/whitelist-detector/check', {})
+}
+
+/**
+ * Локальное определение и классификация серверов и подписок белых списков
+ */
+export function detectWhitelistServers(
+  servers: Array<{ id: string; name: string; provider?: string }>,
+  providers: Array<{ id: string; name: string }>
+): {
+  detectedServerIds: string[]
+  detectedProviderIds: string[]
+  details: Array<{ id: string; name: string; reason: string; type: 'server' | 'provider' }>
+} {
+  const checkTag = (s: string) => {
+    const l = s.toLowerCase()
+    return (
+      l.includes('[бс]') ||
+      l.includes('(бс)') ||
+      l.includes('[бc]') ||
+      l.includes('(бc)') ||
+      l.includes('[бs]') ||
+      l.includes('(бs)') ||
+      l.includes('[bs]') ||
+      l.includes('(bs)') ||
+      l.includes('[wl]') ||
+      l.includes('(wl)') ||
+      l.includes('whitelist') ||
+      l.includes('белые списки') ||
+      l.includes('белый список')
+    )
+  }
+
+  const detectedServerIds: string[] = []
+  const detectedProviderIds: string[] = []
+  const details: Array<{ id: string; name: string; reason: string; type: 'server' | 'provider' }> = []
+
+  for (const prov of providers) {
+    if (checkTag(prov.name) || checkTag(prov.id)) {
+      if (!detectedProviderIds.includes(prov.id)) {
+        detectedProviderIds.push(prov.id)
+        details.push({
+          id: prov.id,
+          name: prov.name,
+          reason: 'Тег БС в названии подписки',
+          type: 'provider',
+        })
+      }
+    }
+  }
+
+  for (const srv of servers) {
+    if (checkTag(srv.name) || checkTag(srv.id)) {
+      if (!detectedServerIds.includes(srv.id)) {
+        detectedServerIds.push(srv.id)
+        details.push({
+          id: srv.id,
+          name: srv.name,
+          reason: 'Тег [БС] / [WL] в имени узла',
+          type: 'server',
+        })
+      }
+    }
+  }
+
+  return { detectedServerIds, detectedProviderIds, details }
+}
+
+/**
+ * Применение определенных БС узлов и подписок в 1 клик
+ */
+export async function applyDetectedWhitelistServers(
+  serverIds: string[],
+  providerIds: string[]
+): Promise<{ whitelist_servers: string[]; whitelist_providers: string[] }> {
+  let resServers: string[] = []
+  let resProviders: string[] = []
+
+  if (serverIds.length > 0) {
+    const srvRes = await apiPost<{ whitelist_servers: string[]; whitelist_providers: string[] }>(
+      'whitelist/servers',
+      { servers: serverIds }
+    )
+    resServers = srvRes.whitelist_servers || serverIds
+    if (srvRes.whitelist_providers) resProviders = srvRes.whitelist_providers
+  }
+
+  if (providerIds.length > 0) {
+    const provRes = await apiPost<{ whitelist_servers: string[]; whitelist_providers: string[] }>(
+      'whitelist/providers',
+      { providers: providerIds }
+    )
+    resProviders = provRes.whitelist_providers || providerIds
+    if (provRes.whitelist_servers) resServers = provRes.whitelist_servers
+  }
+
+  return { whitelist_servers: resServers, whitelist_providers: resProviders }
+}

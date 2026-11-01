@@ -48,6 +48,7 @@ export interface FailoverConfig {
   priority_chain_pings?: Record<string, number>
   presets?: FailoverPresetSlot[]
   whitelist_detector?: WhitelistDetectorConfig
+  whitelist_detector_status?: WhitelistDetectorStatus
   canary?: {
     active: boolean
     target_id: string
@@ -336,16 +337,33 @@ export interface FailoverPresetSlot {
 
 export interface WhitelistDetectorConfig {
   enabled: boolean
-  auto_restore: boolean
-  monitored_provider?: string
-  exclude_ru_nodes?: boolean
-  target_provider?: string
+  monitored_provider: string
+  exclude_ru_nodes: boolean
+  target_bs_provider: string
   threshold_mode: 'percent' | 'count'
-  threshold_percent: number
-  threshold_count: number
-  max_ping_ms: number
-  recovery_threshold_percent: number
-  check_interval_secs: number
+  trigger_offline_percent: number
+  trigger_offline_count: number
+  max_acceptable_ping_ms: number
+  exit_offline_percent: number
+  exit_offline_count: number
+  check_interval_mins: number
+  auto_restore_vps: boolean
+}
+
+export interface WhitelistDetectorStatus {
+  state: 'Normal' | 'WhitelistDetected' | string
+  enabled?: boolean
+  monitored_provider: string
+  target_bs_provider?: string
+  total_nodes: number
+  offline_nodes: number
+  online_nodes: number
+  offline_percent: number
+  last_checked: string | null
+  last_event: string | null
+  warning?: string | null
+  check_interval_mins?: number
+  auto_restore_vps?: boolean
 }
 
 export interface AppSettings {
