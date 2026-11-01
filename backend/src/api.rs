@@ -3034,7 +3034,7 @@ pub async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str, hwid: Opt
             let full_str = String::from_utf8_lossy(&out.stdout).to_string();
             let userinfo = full_str.lines()
                 .find(|l| l.to_ascii_lowercase().starts_with("subscription-userinfo:"))
-                .and_then(|l| l.split_once(:).map(|(_, v)| v.trim()))
+                .and_then(|l| l.split_once(':').map(|(_, v)| v.trim()))
                 .and_then(crate::mihomo::parse_subscription_userinfo_str);
 
             let body_str = if let Some(bracket_pos) = full_str.find("
@@ -3046,23 +3046,16 @@ pub async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str, hwid: Opt
             } else if let Some(proxies_pos) = full_str.find("
 proxies:") {
                 &full_str[proxies_pos + 1..]
-            } else {
-                let mut p_opt = None;
-                for sep in ["
-
-", "
+            } else if let Some(idx) = full_str.find("
 
-"] {
-                    if let Some(idx) = full_str.find(sep) {
-                        p_opt = Some(idx + sep.len());
-                        break;
-                    }
-                }
-                if let Some(idx) = p_opt {
-                    &full_str[idx..]
-                } else {
-                    &full_str[..]
-                }
+") {
+                &full_str[idx + 4..]
+            } else if let Some(idx) = full_str.find("
+
+") {
+                &full_str[idx + 2..]
+            } else {
+                &full_str[..]
             };
             (userinfo, body_str.trim().to_string())
         } else {
