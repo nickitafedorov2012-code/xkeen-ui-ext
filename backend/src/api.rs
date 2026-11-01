@@ -2986,6 +2986,61 @@ pub async fn update_provider(State(state): State<AppState>, Json(req): Json<Upda
     }
 }
 
+/// Разделение вывода curl -i на HTTP-заголовки (включая мультиблочные заголовки CONNECT-прокси) и тело
+pub fn split_curl_response(raw: &str) -> (Option<crate::mihomo::SubscriptionUserinfo>, String) {
+    let mut curr = raw;
+    let mut userinfo = None;
+
+    // Цикл пропускает все блоки HTTP-заголовков (включая HTTP/1.1 200 Connection established от прокси и редиректы)
+    while !curr.is_empty() {
+        let trimmed_leading = curr.trim_start_matches(|c| c == '\r' || c == '\n');
+        let lower = trimmed_leading.to_ascii_lowercase();
+        if !lower.starts_with("http/") {
+            break;
+        }
+
+        // Ищем конец текущего блока заголовков
+        let sep_info = ["\r\n\r\n", "\n\n", "\r\r"]
+            .iter()
+            .filter_map(|sep| trimmed_leading.find(sep).map(|pos| (pos, sep.len())))
+            .min_by_key(|&(pos, _)| pos);
+
+        if let Some((pos, sep_len)) = sep_info {
+            let header_block = &trimmed_leading[..pos];
+            if userinfo.is_none() {
+                userinfo = header_block
+                    .lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with("subscription-userinfo:"))
+                    .and_then(|l| l.split_once(':').map(|(_, v)| v.trim()))
+                    .and_then(crate::mihomo::parse_subscription_userinfo_str);
+            }
+            curr = &trimmed_leading[pos + sep_len..];
+        } else {
+            break;
+        }
+    }
+
+    // Если всё ещё остался префикс до структуры тела (например, в случае нестандартных прокси)
+    let body_str = if let Some(bracket_pos) = curr.find("\n[") {
+        &curr[bracket_pos + 1..]
+    } else if let Some(brace_pos) = curr.find("\n{") {
+        &curr[brace_pos + 1..]
+    } else if let Some(proxies_pos) = curr.find("\nproxies:") {
+        &curr[proxies_pos + 1..]
+    } else {
+        curr
+    };
+
+    if userinfo.is_none() {
+        userinfo = raw.lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("subscription-userinfo:"))
+            .and_then(|l| l.split_once(':').map(|(_, v)| v.trim()))
+            .and_then(crate::mihomo::parse_subscription_userinfo_str);
+    }
+
+    (userinfo, body_str.trim().to_string())
+}
+
 /// Загрузка мобильной подписки (V2Ray/JSON/Base64) через прокси Mihomo и сохранение в ./providers/{id}.yaml
 pub async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str, hwid: Option<&str>) -> Result<usize, String> {
     let ua = "v2rayNG/1.8.12";
@@ -3026,32 +3081,7 @@ pub async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str, hwid: Opt
     let (mut header_userinfo, text) = if let Ok(out) = curl_output {
         if out.status.success() && !out.stdout.is_empty() {
             let full_str = String::from_utf8_lossy(&out.stdout).to_string();
-            let userinfo = full_str.lines()
-                .find(|l| l.to_ascii_lowercase().starts_with("subscription-userinfo:"))
-                .and_then(|l| l.split_once(':').map(|(_, v)| v.trim()))
-                .and_then(crate::mihomo::parse_subscription_userinfo_str);
-
-            let body_str = if let Some(bracket_pos) = full_str.find("
-[") {
-                &full_str[bracket_pos + 1..]
-            } else if let Some(brace_pos) = full_str.find("
-{") {
-                &full_str[brace_pos + 1..]
-            } else if let Some(proxies_pos) = full_str.find("
-proxies:") {
-                &full_str[proxies_pos + 1..]
-            } else if let Some(idx) = full_str.find("
-
-") {
-                &full_str[idx + 4..]
-            } else if let Some(idx) = full_str.find("
-
-") {
-                &full_str[idx + 2..]
-            } else {
-                &full_str[..]
-            };
-            (userinfo, body_str.trim().to_string())
+            split_curl_response(&full_str)
         } else {
             (None, String::new())
         }
@@ -11887,6 +11917,43 @@ mod tests {
         // Fresh sync resets delta
         crate::traffic::reset_provider_live_delta("prov_alpha");
         assert_eq!(crate::traffic::get_provider_live_delta("prov_alpha"), 0);
+    }
+
+    #[test]
+    fn test_split_curl_response_multi_block_headers_and_payload() {
+        // Scenario 1: CONNECT proxy response + QRATOR HTTP/2 response + JSON array
+        let raw = concat!(
+            "HTTP/1.1 200 Connection established\r\n\r\n",
+            "HTTP/2 200 \r\n",
+            "server: QRATOR\r\n",
+            "date: Sun, 01 Nov 2026 20:00:00 GMT\r\n",
+            "content-type: application/json; charset=utf-8\r\n",
+            "subscription-userinfo: upload=100; download=200; total=1000; expire=1829858058\r\n\r\n",
+            "[{\"remarks\": \"Test Server\"}]"
+        );
+
+        let (userinfo, body) = split_curl_response(raw);
+        assert!(userinfo.is_some(), "Must parse userinfo from multi-block response");
+        let u = userinfo.unwrap();
+        assert_eq!(u.upload, 100);
+        assert_eq!(u.download, 200);
+        assert_eq!(u.total, 1000);
+        assert_eq!(body, "[{\"remarks\": \"Test Server\"}]");
+        assert!(!body.contains("HTTP/"), "Body must not contain HTTP status or headers");
+        assert!(!body.contains("QRATOR"), "Body must not contain server header");
+
+        // Scenario 2: CONNECT proxy response + Base64 subscription body
+        let raw_b64 = concat!(
+            "HTTP/1.1 200 Connection established\r\n\r\n",
+            "HTTP/1.1 200 OK\r\n",
+            "Subscription-Userinfo: upload=0; download=500; total=2000; expire=1800000000\r\n\r\n",
+            "dmxlc3M6Ly90ZXN0QDEuMi4zLjQ6NDQzI1Rlc3Q="
+        );
+        let (u2, body_b64) = split_curl_response(raw_b64);
+        assert!(u2.is_some());
+        assert_eq!(u2.unwrap().download, 500);
+        assert_eq!(body_b64, "dmxlc3M6Ly90ZXN0QDEuMi4zLjQ6NDQzI1Rlc3Q=");
+        assert!(!body_b64.contains("HTTP/"));
     }
 
     /// Анти-регрессия BS-FIX: полный перехват БС обязан захватывать ВСЕ TCP/UDP порты
