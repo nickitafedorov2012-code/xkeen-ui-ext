@@ -47,9 +47,7 @@ pub fn proxied_client(proxy_addr: &str) -> Option<reqwest::Client> {
     reqwest::Client::builder()
         .proxy(proxy)
         .connect_timeout(Duration::from_secs(8))
-        .no_gzip()
-        .no_brotli()
-        .no_deflate()
+        .http1_only()
         .build()
         .ok()
 }
