@@ -639,6 +639,49 @@ describe('Settings Component — Failover Zombie Servers and Canary Last Result'
     expect(toggle.checked).toBe(false)
   })
 
+  it('handles individual traffic resets for direct, vps and whitelist', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    vi.spyOn(api, 'apiGet').mockImplementation(async (path: string) => {
+      if (path === 'settings') return mockSettings
+      if (path === 'presets') return { presets: [] }
+      if (path === 'servers') return { servers: [] }
+      if (path === 'routes') return { routes: [] }
+      if (path === 'domains') return { direct: [], force: [] }
+      if (path === 'providers') return { providers: [] }
+      if (path === 'system/swap/status') return mockSwapInactive
+      if (path === 'traffic/poll') {
+        return {
+          direct_bytes: 1048576,
+          proxy_bytes: 2097152,
+          whitelist_bytes: 3145728,
+          whitelist_active: true,
+        }
+      }
+      return {}
+    })
+    const postSpy = vi.spyOn(api, 'apiPost').mockResolvedValue({
+      status: 'ok',
+      target: 'direct',
+      direct_bytes: 0,
+      proxy_bytes: 2097152,
+      whitelist_bytes: 3145728,
+    })
+
+    await act(async () => {
+      root!.render(<Settings notify={notifyMock} status={null} refresh={refreshMock} />)
+    })
+
+    const directResetBtn = container?.querySelector('button[aria-label="Сбросить счетчик прямого трафика"]') as HTMLButtonElement
+    expect(directResetBtn).toBeTruthy()
+
+    await act(async () => {
+      directResetBtn.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('traffic/reset?target=direct', {})
+    expect(notifyMock).toHaveBeenCalledWith('Счётчик прямого трафика успешно сброшен')
+  })
+
   describe('cleanServerDisplayName & formatActiveServerStatus', () => {
     it('preserves full original server names (countries, tags, symbols)', () => {
       expect(cleanServerDisplayName('Обход [Platinum] - Германия')).toBe('Обход [Platinum] - Германия')

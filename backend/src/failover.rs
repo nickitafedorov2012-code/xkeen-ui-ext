@@ -257,6 +257,420 @@ pub async fn set_canary_last_result(res: CanaryLastResult) {
     *LAST_CANARY_RESULT.lock().await = Some(res);
 }
 
+// ============================================================================
+// Детектор белых списков (Whitelist Detector)
+// ============================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WhitelistDetectorState {
+    Normal,
+    WhitelistDetected,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WhitelistDetectorStatus {
+    pub state: WhitelistDetectorState,
+    pub monitored_provider: String,
+    pub total_nodes: usize,
+    pub offline_nodes: usize,
+    pub online_nodes: usize,
+    pub offline_percent: u32,
+    pub last_checked: Option<String>,
+    pub last_event: Option<String>,
+}
+
+static DETECTOR_STATE: tokio::sync::Mutex<WhitelistDetectorState> = tokio::sync::Mutex::const_new(WhitelistDetectorState::Normal);
+static DETECTOR_LAST_STATUS: tokio::sync::Mutex<Option<WhitelistDetectorStatus>> = tokio::sync::Mutex::const_new(None);
+
+pub async fn get_detector_state() -> WhitelistDetectorState {
+    *DETECTOR_STATE.lock().await
+}
+
+pub async fn set_detector_state(state: WhitelistDetectorState) {
+    *DETECTOR_STATE.lock().await = state;
+}
+
+pub async fn get_whitelist_detector_status() -> WhitelistDetectorStatus {
+    if let Some(status) = DETECTOR_LAST_STATUS.lock().await.clone() {
+        status
+    } else {
+        WhitelistDetectorStatus {
+            state: get_detector_state().await,
+            monitored_provider: String::new(),
+            total_nodes: 0,
+            offline_nodes: 0,
+            online_nodes: 0,
+            offline_percent: 0,
+            last_checked: None,
+            last_event: None,
+        }
+    }
+}
+
+/// Проверка, является ли нода российской (для отсева RU нод из контролируемой группы зарубежных узлов)
+pub fn is_ru_node(node_name: &str, node_id: &str) -> bool {
+    let lower_name = node_name.to_lowercase();
+    let lower_id = node_id.to_lowercase();
+
+    let check = |s: &str| -> bool {
+        s.contains("росси")
+            || s.contains("russia")
+            || s.contains(" ru ")
+            || s.contains("[ru]")
+            || s.contains("(ru)")
+            || s.contains(" ru-")
+            || s.contains(" ru_")
+            || s.contains("-ru-")
+            || s.contains("-ru_")
+            || s.contains("_ru-")
+            || s.contains("_ru_")
+            || s.starts_with("ru ")
+            || s.starts_with("ru-")
+            || s.starts_with("ru_")
+            || s.ends_with(" ru")
+            || s.ends_with("-ru")
+            || s.ends_with("_ru")
+            || s.contains("🇷🇺")
+            || s.contains("москва")
+            || s.contains("moscow")
+            || s.contains("санкт-петербург")
+            || s.contains("питер")
+            || s.contains("спб")
+            || s.contains("spb")
+    };
+
+    check(&lower_name) || check(&lower_id)
+}
+
+/// Опрос контролируемых узлов детектора белых списков
+pub async fn check_whitelist_detector_nodes(
+    http: &reqwest::Client,
+    cfg: &crate::config::AppConfig,
+    servers: &[Server],
+) -> Result<(usize, usize, usize, u32, std::collections::BTreeMap<String, i64>), String> {
+    let det_cfg = &cfg.failover.whitelist_detector;
+
+    // Отбираем узлы контролируемого провайдера (или все обычные VPS, если monitored_provider пуст)
+    let candidate_nodes: Vec<&Server> = servers
+        .iter()
+        .filter(|s| {
+            if s.is_pool || s.id == "Fastest" || s.id == "Fallback" || s.id == "DIRECT" || s.id == "REJECT" || s.id == "GLOBAL" || s.id.starts_with("AUTO-") {
+                return false;
+            }
+            // Не должен быть сервером белых списков
+            if is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), cfg) {
+                return false;
+            }
+            // Если задан конкретный провайдер подписки, фильтруем по нему
+            if !det_cfg.monitored_provider.is_empty() {
+                if let Some(ref p) = s.provider {
+                    if !p.eq_ignore_ascii_case(&det_cfg.monitored_provider) {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+            }
+            // Отсев RU нод
+            if det_cfg.exclude_ru_nodes && is_ru_node(&s.name, &s.id) {
+                return false;
+            }
+            true
+        })
+        .collect();
+
+    let total = candidate_nodes.len();
+    if total == 0 {
+        return Err("Нет подходящих зарубежных узлов для мониторинга детектора белых списков".to_string());
+    }
+
+    let ids: Vec<String> = candidate_nodes.iter().map(|s| s.id.clone()).collect();
+    let max_ping = det_cfg.max_acceptable_ping_ms as i64;
+    let ping_timeout = max_ping.clamp(1000, 3000) as u64;
+
+    let pings = mihomo::ping_all(http, cfg, &ids, ping_timeout).await;
+
+    let mut offline = 0;
+    let mut online = 0;
+
+    for id in &ids {
+        let p = pings.get(id).copied().unwrap_or(-1);
+        if p <= 0 || p > max_ping {
+            offline += 1;
+        } else {
+            online += 1;
+        }
+    }
+
+    let offline_pct = if total > 0 {
+        ((offline as f64 / total as f64) * 100.0).round() as u32
+    } else {
+        0
+    };
+
+    Ok((total, offline, online, offline_pct, pings))
+}
+
+/// Выполняет единичную проверку детектора белых списков и, если порог превышен, переключает режим
+pub async fn evaluate_and_apply_whitelist_detector(
+    state: &AppState,
+    cfg: &crate::config::AppConfig,
+    servers: &[Server],
+    _trigger_reason: &str,
+) -> Result<Option<String>, String> {
+    let det_cfg = &cfg.failover.whitelist_detector;
+    if !det_cfg.enabled {
+        return Ok(None);
+    }
+
+    let (total, offline, online, offline_pct, _pings) =
+        check_whitelist_detector_nodes(&state.http, cfg, servers).await?;
+
+    let now_str = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let current_state = get_detector_state().await;
+
+    let is_trigger_hit = match det_cfg.threshold_mode.as_str() {
+        "count" => offline >= det_cfg.trigger_offline_count,
+        _ => offline_pct >= det_cfg.trigger_offline_percent,
+    };
+
+    let is_exit_hit = match det_cfg.threshold_mode.as_str() {
+        "count" => offline <= det_cfg.exit_offline_count,
+        _ => offline_pct <= det_cfg.exit_offline_percent,
+    };
+
+    match current_state {
+        WhitelistDetectorState::Normal => {
+            if is_trigger_hit {
+                // Порог пробит! Переключаем в режим WHITELIST_DETECTED
+                set_detector_state(WhitelistDetectorState::WhitelistDetected).await;
+
+                // Сохраняем активный сервер как last_good_regular_vps, если он обычный VPS
+                let active = servers.iter().find(|s| s.is_active && s.id != "Fastest" && s.id != "Fallback");
+                let mut last_good = cfg.failover.last_good_regular_vps.clone();
+                if let Some(act) = active {
+                    if !is_whitelist_server_full(&act.name, &act.id, act.provider.as_deref(), cfg) {
+                        last_good = Some(act.id.clone());
+                    }
+                }
+                if last_good.is_none() {
+                    last_good = cfg.failover.priority_chain.first().cloned();
+                }
+
+                // Ищем лучший узел [БС] из bs_priority_chain или target_bs_provider
+                let mut bs_target_id: Option<String> = None;
+                let mut bs_target_name: Option<String> = None;
+
+                // 1) Сначала проверяем bs_priority_chain
+                for bs_id in &cfg.failover.bs_priority_chain {
+                    if let Some(s) = servers.iter().find(|srv| &srv.id == bs_id) {
+                        bs_target_id = Some(s.id.clone());
+                        bs_target_name = Some(s.name.clone());
+                        break;
+                    }
+                }
+
+                // 2) Если в цепочке БС нет найденных, ищем среди серверов target_bs_provider или вообще БС
+                if bs_target_id.is_none() {
+                    let bs_cand = servers.iter().find(|s| {
+                        if !is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), cfg) {
+                            return false;
+                        }
+                        if !det_cfg.target_bs_provider.is_empty() {
+                            if let Some(ref p) = s.provider {
+                                return p.eq_ignore_ascii_case(&det_cfg.target_bs_provider);
+                            }
+                            return false;
+                        }
+                        true
+                    });
+                    if let Some(s) = bs_cand {
+                        bs_target_id = Some(s.id.clone());
+                        bs_target_name = Some(s.name.clone());
+                    }
+                }
+
+                let event_msg = if let (Some(target_id), Some(target_name)) = (bs_target_id, bs_target_name) {
+                    let switch_res = mihomo::switch_server(&state.http, cfg, &target_id).await;
+                    match switch_res {
+                        Ok(_) => {
+                            record_switch(&target_id).await;
+                            let s_prov = servers.iter().find(|s| s.id == target_id).and_then(|s| s.provider.as_deref());
+                            handle_whitelist_transition(state, &target_id, &target_name, s_prov).await;
+
+                            // Обновляем конфиг с last_good_regular_vps и bs_priority_chain
+                            {
+                                let _cfg_guard = state.config_lock.lock().await;
+                                let mut mut_cfg = (**state.config.read().await).clone();
+                                mut_cfg.failover.last_good_regular_vps = last_good.clone();
+                                if let Some(pos) = mut_cfg.failover.bs_priority_chain.iter().position(|s| s == &target_id) {
+                                    mut_cfg.failover.bs_priority_chain.remove(pos);
+                                }
+                                mut_cfg.failover.bs_priority_chain.insert(0, target_id.clone());
+                                if let Err(e) = crate::config::save(&state.config_path, &mut_cfg).await {
+                                    crate::log_e!("[DETECTOR] Ошибка сохранения конфига: {e}");
+                                } else {
+                                    *state.config.write().await = std::sync::Arc::new(mut_cfg);
+                                }
+                            }
+
+                            format!(
+                                "🚨 Детектор Белых Списков: обнаружена блокировка ТСПУ ({}% оффлайн: {}/{} узлов). Аварийный переход на сервер [БС] '{}'",
+                                offline_pct, offline, total, target_name
+                            )
+                        }
+                        Err(e) => {
+                            format!(
+                                "🚨 Детектор Белых Списков: обнаружена блокировка ({}% оффлайн), но ошибка переключения на '{}': {}",
+                                offline_pct, target_name, e
+                            )
+                        }
+                    }
+                } else {
+                    format!(
+                        "🚨 Детектор Белых Списков: обнаружена блокировка ТСПУ ({}% оффлайн: {}/{} узлов), но подходящий сервер [БС] не найден",
+                        offline_pct, offline, total
+                    )
+                };
+
+                state.failover_log.push(&event_msg, true).await;
+                crate::notifications::notify_failover(
+                    &state.http,
+                    Some(&cfg.mihomo_proxy_url()),
+                    &cfg.notifications,
+                    "whitelist_detected",
+                    "Детектор Белых Списков: Активация [БС]",
+                    &event_msg,
+                ).await;
+
+                *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
+                    state: WhitelistDetectorState::WhitelistDetected,
+                    monitored_provider: det_cfg.monitored_provider.clone(),
+                    total_nodes: total,
+                    offline_nodes: offline,
+                    online_nodes: online,
+                    offline_percent: offline_pct,
+                    last_checked: Some(now_str),
+                    last_event: Some(event_msg.clone()),
+                });
+
+                return Ok(Some(event_msg));
+            } else {
+                *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
+                    state: WhitelistDetectorState::Normal,
+                    monitored_provider: det_cfg.monitored_provider.clone(),
+                    total_nodes: total,
+                    offline_nodes: offline,
+                    online_nodes: online,
+                    offline_percent: offline_pct,
+                    last_checked: Some(now_str),
+                    last_event: None,
+                });
+            }
+        }
+        WhitelistDetectorState::WhitelistDetected => {
+            if is_exit_hit {
+                // Блокировка снята! Порог выхода достигнут
+                set_detector_state(WhitelistDetectorState::Normal).await;
+
+                let mut restored_msg: Option<String> = None;
+                if det_cfg.auto_restore_vps {
+                    // Возвращаемся на last_good_regular_vps или первый узел из priority_chain
+                    let target_vps_id = cfg.failover.last_good_regular_vps.clone()
+                        .or_else(|| cfg.failover.priority_chain.first().cloned());
+
+                    if let Some(vps_id) = target_vps_id {
+                        let target_server = servers.iter().find(|s| s.id == vps_id);
+                        let vps_name = target_server.map(|s| s.name.as_str()).unwrap_or(vps_id.as_str());
+
+                        // Мягкое переключение со сбросом сокетов при переходе с БС на обычный VPS
+                        let switch_res = mihomo::switch_server(&state.http, cfg, &vps_id).await;
+                        match switch_res {
+                            Ok(_) => {
+                                record_switch(&vps_id).await;
+                                let s_prov = target_server.and_then(|s| s.provider.as_deref());
+                                handle_whitelist_transition(state, &vps_id, vps_name, s_prov).await;
+
+                                let msg = format!(
+                                    "🟢 Детектор Белых Списков: блокировка ТСПУ снята (доступно {}/{} узлов, оффлайн {}%). Мягкий возврат на обычный VPS '{}'",
+                                    online, total, offline_pct, vps_name
+                                );
+                                state.failover_log.push(&msg, true).await;
+                                crate::notifications::notify_failover(
+                                    &state.http,
+                                    Some(&cfg.mihomo_proxy_url()),
+                                    &cfg.notifications,
+                                    "whitelist_restored",
+                                    "Детектор Белых Списков: Возврат на VPS",
+                                    &msg,
+                                ).await;
+                                restored_msg = Some(msg);
+                            }
+                            Err(e) => {
+                                let err_msg = format!(
+                                    "🟢 Детектор Белых Списков: блокировка снята, но сбой возврата на '{}': {}",
+                                    vps_name, e
+                                );
+                                state.failover_log.push(&err_msg, false).await;
+                                restored_msg = Some(err_msg);
+                            }
+                        }
+                    }
+                }
+
+                let final_msg = restored_msg.unwrap_or_else(|| {
+                    format!(
+                        "🟢 Детектор Белых Списков: блокировка снята (доступно {}/{} узлов, оффлайн {}%)",
+                        online, total, offline_pct
+                    )
+                });
+
+                *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
+                    state: WhitelistDetectorState::Normal,
+                    monitored_provider: det_cfg.monitored_provider.clone(),
+                    total_nodes: total,
+                    offline_nodes: offline,
+                    online_nodes: online,
+                    offline_percent: offline_pct,
+                    last_checked: Some(now_str),
+                    last_event: Some(final_msg.clone()),
+                });
+
+                return Ok(Some(final_msg));
+            } else {
+                *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
+                    state: WhitelistDetectorState::WhitelistDetected,
+                    monitored_provider: det_cfg.monitored_provider.clone(),
+                    total_nodes: total,
+                    offline_nodes: offline,
+                    online_nodes: online,
+                    offline_percent: offline_pct,
+                    last_checked: Some(now_str),
+                    last_event: None,
+                });
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+/// Ручной или таймерный запуск проверки детектора белых списков
+pub async fn run_whitelist_detector_check(state: &AppState, reason: &str) -> Result<String, String> {
+    let cfg = state.config.read().await.clone();
+    let servers = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await?;
+    match evaluate_and_apply_whitelist_detector(state, &cfg, &servers, reason).await? {
+        Some(msg) => Ok(msg),
+        None => {
+            let status = get_whitelist_detector_status().await;
+            Ok(format!(
+                "Детектор БС ({reason}): статус {:?}, оффлайн {}% ({}/{} узлов). Переключение не требуется.",
+                status.state, status.offline_percent, status.offline_nodes, status.total_nodes
+            ))
+        }
+    }
+}
+
 pub async fn current_live_status(
     active_id: &str,
     active_name: &str,
@@ -277,6 +691,11 @@ pub async fn current_live_status(
     }
     let act_label = if !active_name.is_empty() { active_name } else if !active_id.is_empty() { active_id } else { "не выбран" };
     let ping_str = if active_ping > 0 { format!("{active_ping} мс") } else { "—".to_string() };
+
+    let det_state = get_detector_state().await;
+    if det_state == WhitelistDetectorState::WhitelistDetected {
+        return format!("🛡️ Режим белых списков активен: '{act_label}' ({ping_str}, мониторинг снятия блокировки)");
+    }
 
     if !cfg.failover.priority_chain.is_empty() {
         if let Some(top_id) = cfg.failover.priority_chain.first() {
@@ -832,14 +1251,22 @@ pub async fn handle_whitelist_transition(
                     node_name,
                     gaming_log
                 );
+                let mut applied_yaml = String::new();
                 if let Ok(mut tx) = crate::transaction::ConfigTx::begin(state).await {
                     if let Ok(yaml) = tx.read_yaml().await {
                         if let Ok((new_yaml, _)) = crate::routing::apply_routing(&yaml, tx.config()) {
+                            applied_yaml = new_yaml.clone();
                             let _ = tx.set_yaml(new_yaml);
                             let _ = tx.commit_and_reload().await;
                         }
                     }
                 }
+                // Синхронизируем режимы фаервола и цепочку XKEEN_BS в iptables
+                let cur = state.config.read().await.clone();
+                let redir_port = crate::routing::parse_redir_port(&applied_yaml).unwrap_or(5000);
+                let tproxy_port = crate::routing::parse_tproxy_port(&applied_yaml).unwrap_or(5001);
+                let dns_port = crate::api::resolve_active_dns_port(&cur);
+                crate::api::sync_full_tunnel_modes(&cur, redir_port, tproxy_port, dns_port).await;
             }
 
             let _ = crate::mihomo::switch_group(&state.http, &cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await;
@@ -878,14 +1305,22 @@ pub async fn handle_whitelist_transition(
                     node_name,
                     gaming_log
                 );
+                let mut applied_yaml = String::new();
                 if let Ok(mut tx) = crate::transaction::ConfigTx::begin(state).await {
                     if let Ok(yaml) = tx.read_yaml().await {
                         if let Ok((new_yaml, _)) = crate::routing::apply_routing(&yaml, tx.config()) {
+                            applied_yaml = new_yaml.clone();
                             let _ = tx.set_yaml(new_yaml);
                             let _ = tx.commit_and_reload().await;
                         }
                     }
                 }
+                // Синхронизируем режимы фаервола и снимаем правила XKEEN_BS в iptables
+                let cur = state.config.read().await.clone();
+                let redir_port = crate::routing::parse_redir_port(&applied_yaml).unwrap_or(5000);
+                let tproxy_port = crate::routing::parse_tproxy_port(&applied_yaml).unwrap_or(5001);
+                let dns_port = crate::api::resolve_active_dns_port(&cur);
+                crate::api::sync_full_tunnel_modes(&cur, redir_port, tproxy_port, dns_port).await;
             }
         }
     } else if cfg.whitelist.enabled {
@@ -2051,6 +2486,21 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             state.failover_log.push(&q_note, false).await;
         }
 
+        // СЦЕНАРИЙ А: Детектор белых списков (если включен)
+        let det_cfg = &cfg.failover.whitelist_detector;
+        if det_cfg.enabled && get_detector_state().await == WhitelistDetectorState::Normal {
+            // Запускаем детекцию блокировок зарубежных узлов обычной подписки
+            match evaluate_and_apply_whitelist_detector(state, &cfg, &servers, "Падение активного VPS").await {
+                Ok(Some(detector_msg)) => {
+                    return Ok(detector_msg);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    crate::log_e!("[DETECTOR] Ошибка работы детектора БС: {e}");
+                }
+            }
+        }
+
         let pool_limit = cfg.failover.best_ping_pool_size.clamp(2, 30);
         let mut pool: Vec<String> = Vec::with_capacity(pool_limit);
 
@@ -2305,6 +2755,20 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                 "Карантин нестабильного сервера",
                 &q_note,
             ).await;
+        }
+
+        // Детектор белых списков (если включен) при падении активного VPS в режиме Normal
+        let det_cfg = &cfg.failover.whitelist_detector;
+        if det_cfg.enabled && get_detector_state().await == WhitelistDetectorState::Normal {
+            match evaluate_and_apply_whitelist_detector(state, &cfg, &servers, "Падение активного VPS").await {
+                Ok(Some(detector_msg)) => {
+                    return Ok(detector_msg);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    crate::log_e!("[DETECTOR] Ошибка работы детектора БС: {e}");
+                }
+            }
         }
 
         // Унифицированный отбор кандидата (4-уровневая иерархия без блэкаутов)
@@ -2693,18 +3157,26 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                             elapsed_secs,
                         }).await;
 
+                        let target_is_bs = is_whitelist_server_full(&pri.name, &pri.id, pri.provider.as_deref(), &cfg);
                         let is_main = !chain.is_empty() && pri.id == chain[0].id;
-                        let label = if is_main { "Основной" } else if is_active_bs && should_restore_smart { "Обычный VPS (Tier 1)" } else { "Более приоритетный" };
+                        let label = if is_main {
+                            "Основной"
+                        } else if !target_is_bs && is_active_bs && should_restore_smart {
+                            "Обычный VPS (Tier 1)"
+                        } else {
+                            "Более приоритетный"
+                        };
                         let msg = format!(
                             "{label} '{}' успешно прошёл {effective_canary_duration_secs}-секундный тест стабильности ({probes_count} проверок, {total_kb} КБ, 0 сбоев) — безопасный возврат с '{}'",
                             pri.name, active.name
                         );
                         let is_from_bs = is_whitelist_server_full(&active.name, &active.id, active.provider.as_deref(), &cfg);
-                        let switch_res = if is_from_bs {
-                            // С [БС] возврат строгий: переключаем группы и сбрасываем сокеты
+                        let switch_res = if is_from_bs && !target_is_bs {
+                            // Только при переходе с БС на обычный VPS переключаем со сбросом сокетов
                             mihomo::switch_server(&state.http, &cfg, &pri.id).await
                         } else {
-                            // С обычного резерва на основной узел — мягкий Graceful возврат (не рвём текущие сессии)
+                            // При переключении между обычными VPS, а также между серверами [БС] ↔ [БС]
+                            // используем мягкий Graceful переход без сброса сокетов клиентов
                             mihomo::switch_server_graceful(&state.http, &cfg, &pri.id).await
                         };
                         return match switch_res {
@@ -3003,6 +3475,7 @@ pub fn is_shutdown() -> bool {
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         let mut last_device_check = Instant::now() - Duration::from_secs(3600);
+        let mut last_detector_scan = Instant::now();
         loop {
             if SHUTDOWN.load(std::sync::atomic::Ordering::Relaxed) {
                 crate::log_i!("Failover: фоновый цикл остановлен");
@@ -3022,9 +3495,15 @@ pub fn spawn(state: AppState) {
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
 
-            let (enabled, dev_enabled, dev_interval) = {
+            let (enabled, dev_enabled, dev_interval, detector_enabled, detector_interval_secs) = {
                 let cfg = state.config.read().await;
-                (cfg.failover.enabled, cfg.failover.device_failover_enabled, cfg.failover.interval_secs.clamp(15, 3600) as u64)
+                (
+                    cfg.failover.enabled,
+                    cfg.failover.device_failover_enabled,
+                    cfg.failover.interval_secs.clamp(15, 3600) as u64,
+                    cfg.failover.whitelist_detector.enabled,
+                    cfg.failover.whitelist_detector.check_interval_mins.clamp(1, 1440) * 60,
+                )
             };
             if enabled {
                 let _ = run_check(&state).await;
@@ -3032,6 +3511,11 @@ pub fn spawn(state: AppState) {
             if dev_enabled && last_device_check.elapsed() >= Duration::from_secs(dev_interval) {
                 last_device_check = Instant::now();
                 let _ = run_device_check(&state).await;
+            }
+            // 10-минутный скан детектора белых списков
+            if detector_enabled && last_detector_scan.elapsed() >= Duration::from_secs(detector_interval_secs) {
+                last_detector_scan = Instant::now();
+                let _ = run_whitelist_detector_check(&state, "Периодический скан детектора БС").await;
             }
         }
     });
@@ -6633,6 +7117,55 @@ mod tests {
             q.clear();
         }
         let _ = tokio::fs::remove_file(&tmp).await;
+    }
+
+    #[test]
+    fn test_is_ru_node_detector_filter() {
+        assert!(is_ru_node("🇷🇺 Россия Москва 01", "ru_srv_1"));
+        assert!(is_ru_node("Russia Server Fast", "srv_2"));
+        assert!(is_ru_node("SPB-RU-Gateway", "srv_3"));
+        assert!(is_ru_node("Moscow Dedicated", "moscow_node"));
+        assert!(is_ru_node("Saint Petersburg Node", "питер_узел"));
+        assert!(is_ru_node("Regular Node", "ru-node-01"));
+
+        assert!(!is_ru_node("🇩🇪 Germany Frankfurt 01", "de_srv_1"));
+        assert!(!is_ru_node("🇳🇱 Netherlands Amsterdam", "nl_srv_2"));
+        assert!(!is_ru_node("🇫🇮 Finland Helsinki", "fi_srv_3"));
+        assert!(!is_ru_node("🇺🇸 USA Ashburn", "us_srv_4"));
+    }
+
+    #[tokio::test]
+    async fn test_whitelist_detector_state_and_threshold_logic() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.failover.whitelist_detector.enabled = true;
+        cfg.failover.whitelist_detector.threshold_mode = "percent".into();
+        cfg.failover.whitelist_detector.trigger_offline_percent = 80;
+        cfg.failover.whitelist_detector.exit_offline_percent = 45;
+        cfg.failover.whitelist_detector.max_acceptable_ping_ms = 450;
+        cfg.failover.bs_priority_chain = vec!["bs_node_1".into()];
+        cfg.failover.priority_chain = vec!["vps_nl_1".into()];
+
+        set_detector_state(WhitelistDetectorState::Normal).await;
+        assert_eq!(get_detector_state().await, WhitelistDetectorState::Normal);
+
+        // Проверяем порог процента (80%)
+        let total = 10;
+        let offline_8 = 8;
+        let pct_80 = ((offline_8 as f64 / total as f64) * 100.0).round() as u32;
+        assert!(pct_80 >= cfg.failover.whitelist_detector.trigger_offline_percent);
+
+        // Переход в WhitelistDetected
+        set_detector_state(WhitelistDetectorState::WhitelistDetected).await;
+        assert_eq!(get_detector_state().await, WhitelistDetectorState::WhitelistDetected);
+
+        // Проверяем порог выхода (45%)
+        let offline_4 = 4;
+        let pct_40 = ((offline_4 as f64 / total as f64) * 100.0).round() as u32;
+        assert!(pct_40 <= cfg.failover.whitelist_detector.exit_offline_percent);
+
+        // Возврат в Normal
+        set_detector_state(WhitelistDetectorState::Normal).await;
+        assert_eq!(get_detector_state().await, WhitelistDetectorState::Normal);
     }
 }
 

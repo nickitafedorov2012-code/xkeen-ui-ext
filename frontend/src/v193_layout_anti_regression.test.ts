@@ -61,6 +61,26 @@ describe('v1.9.3 Anti-Regression: Layout, Telemetry & Direction Bug Fixes', () =
     expect(graphContent).toContain('className="traffic-badge proxy"')
   })
 
+  it('ensures TrafficGraph and Settings feature individual traffic reset buttons with confirmation', () => {
+    const graphPath = path.resolve(__dirname, 'components/TrafficGraph.tsx')
+    const graphContent = fs.readFileSync(graphPath, 'utf8')
+
+    // TrafficGraph resets
+    expect(graphContent).toContain("handleResetTraffic('direct', 'Прямой трафик')")
+    expect(graphContent).toContain("handleResetTraffic('whitelist', 'Туннель БС')")
+    expect(graphContent).toContain("handleResetTraffic('vps', 'VPS трафик')")
+    expect(graphContent).toContain('traffic-reset-btn')
+
+    const settingsPath = path.resolve(__dirname, 'components/Settings.tsx')
+    const settingsContent = fs.readFileSync(settingsPath, 'utf8')
+
+    // Settings resets
+    expect(settingsContent).toContain("handleResetTraffic('direct', 'прямого трафика')")
+    expect(settingsContent).toContain("handleResetTraffic('vps', 'VPS трафика')")
+    expect(settingsContent).toContain("handleResetTraffic('whitelist', 'трафика белых списков')")
+    expect(settingsContent).toContain("handleResetTraffic('all', 'всего трафика')")
+  })
+
   it('ensures Settings priority chain rows use flexWrap nowrap to prevent button dropping to second line', () => {
     const settingsPath = path.resolve(__dirname, 'components/Settings.tsx')
     const settingsContent = fs.readFileSync(settingsPath, 'utf8')

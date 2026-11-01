@@ -5405,6 +5405,33 @@ button.delete-btn:focus-visible {
   color: #10b981;
   border: 1px solid rgba(16, 185, 129, 0.3);
 }
+.traffic-reset-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: inherit;
+  font-size: 11px;
+  line-height: 1;
+  width: 17px;
+  height: 17px;
+  padding: 0;
+  margin-left: 5px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+.traffic-reset-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.22);
+  border-color: rgba(255, 255, 255, 0.35);
+  transform: scale(1.08);
+}
+.traffic-reset-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
 .traffic-svg-wrapper {
   position: relative;
   width: 100%;

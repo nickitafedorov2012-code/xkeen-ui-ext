@@ -130,15 +130,97 @@ fn default_smart_failover_canary_duration_secs() -> u64 {
     60
 }
 
+fn default_detector_threshold_mode() -> String {
+    "percent".to_string()
+}
+
+fn default_detector_trigger_offline_percent() -> u32 {
+    80
+}
+
+fn default_detector_trigger_offline_count() -> usize {
+    75
+}
+
+fn default_detector_max_acceptable_ping_ms() -> u32 {
+    450
+}
+
+fn default_detector_exit_offline_percent() -> u32 {
+    45
+}
+
+fn default_detector_exit_offline_count() -> usize {
+    48
+}
+
+fn default_detector_check_interval_mins() -> u64 {
+    10
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct WhitelistDetectorConfig {
+    pub enabled: bool,
+    pub monitored_provider: String,
+    #[serde(default = "default_true")]
+    pub exclude_ru_nodes: bool,
+    pub target_bs_provider: String,
+    #[serde(default = "default_detector_threshold_mode")]
+    pub threshold_mode: String, // "percent" | "count"
+    #[serde(default = "default_detector_trigger_offline_percent")]
+    pub trigger_offline_percent: u32,
+    #[serde(default = "default_detector_trigger_offline_count")]
+    pub trigger_offline_count: usize,
+    #[serde(default = "default_detector_max_acceptable_ping_ms")]
+    pub max_acceptable_ping_ms: u32,
+    #[serde(default = "default_detector_exit_offline_percent")]
+    pub exit_offline_percent: u32,
+    #[serde(default = "default_detector_exit_offline_count")]
+    pub exit_offline_count: usize,
+    #[serde(default = "default_detector_check_interval_mins")]
+    pub check_interval_mins: u64,
+    #[serde(default = "default_true")]
+    pub auto_restore_vps: bool,
+}
+
+impl Default for WhitelistDetectorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            monitored_provider: String::new(),
+            exclude_ru_nodes: true,
+            target_bs_provider: String::new(),
+            threshold_mode: default_detector_threshold_mode(),
+            trigger_offline_percent: default_detector_trigger_offline_percent(),
+            trigger_offline_count: default_detector_trigger_offline_count(),
+            max_acceptable_ping_ms: default_detector_max_acceptable_ping_ms(),
+            exit_offline_percent: default_detector_exit_offline_percent(),
+            exit_offline_count: default_detector_exit_offline_count(),
+            check_interval_mins: default_detector_check_interval_mins(),
+            auto_restore_vps: true,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct FailoverConfig {
     pub enabled: bool,
     pub ping_threshold_ms: u32,
     pub priority_server: String,
-    /// Глобальная цепочка приоритетов: [основной, резерв1, ...].
+    /// Глобальная цепочка приоритетов обычных VPS (Tier 1): [основной, резерв1, ...].
     /// Миграция: если пуста, но задан priority_server — инициализируется из него.
     pub priority_chain: Vec<String>,
+    /// Цепочка серверов белых списков [БС] (Tier 2).
+    #[serde(default)]
+    pub bs_priority_chain: Vec<String>,
+    /// Детектор белых списков.
+    #[serde(default)]
+    pub whitelist_detector: WhitelistDetectorConfig,
+    /// Последний стабильный обычный VPS для автоматического возврата после снятия белых списков.
+    #[serde(default)]
+    pub last_good_regular_vps: Option<String>,
     pub auto_restore_priority: bool,
     pub interval_secs: u32,
     /// Длительность теста стабильности (Canary Soak Test) перед возвратом на приоритетный сервер (сек, по умолчанию 60)
@@ -178,6 +260,9 @@ impl Default for FailoverConfig {
             ping_threshold_ms: 300,
             priority_server: String::new(),
             priority_chain: Vec::new(),
+            bs_priority_chain: Vec::new(),
+            whitelist_detector: WhitelistDetectorConfig::default(),
+            last_good_regular_vps: None,
             auto_restore_priority: true,
             interval_secs: 60,
             canary_duration_secs: 180,
@@ -230,6 +315,28 @@ impl FailoverConfig {
         } else {
             self.priority_server.clear();
         }
+    }
+
+    /// Умная миграция: при загрузке старого конфига, если в priority_chain есть узлы БС,
+    /// переносит их в bs_priority_chain и оставляет в priority_chain только обычные VPS.
+    pub fn migrate_chains_with_full_whitelist(&mut self, is_bs_fn: impl Fn(&str) -> bool) {
+        self.migrate_priority();
+        let mut regular_vps = Vec::new();
+        let mut bs_nodes = self.bs_priority_chain.clone();
+
+        for s in &self.priority_chain {
+            if is_bs_fn(s) {
+                if !bs_nodes.contains(s) {
+                    bs_nodes.push(s.clone());
+                }
+            } else {
+                regular_vps.push(s.clone());
+            }
+        }
+
+        self.priority_chain = regular_vps;
+        self.bs_priority_chain = bs_nodes;
+        self.migrate_priority();
     }
 }
 
@@ -1098,6 +1205,27 @@ pub fn parse_config_strict(content: &str) -> Result<AppConfig, String> {
     let mut cfg: AppConfig = serde_json::from_value(base)
         .map_err(|e| format!("Некорректная структура конфигурации: {e}"))?;
     cfg.failover.migrate_priority();
+    // Умная миграция серверов БС из priority_chain в bs_priority_chain
+    let wl_servers = cfg.whitelist_servers.clone();
+    cfg.failover.migrate_chains_with_full_whitelist(|s| {
+        if wl_servers.iter().any(|ws| ws == s) {
+            return true;
+        }
+        let lower = s.to_lowercase();
+        lower.contains("[бс]")
+            || lower.contains("(бс)")
+            || lower.contains("[бc]")
+            || lower.contains("(бc)")
+            || lower.contains("[бs]")
+            || lower.contains("(бs)")
+            || lower.contains("[bs]")
+            || lower.contains("(bs)")
+            || lower.contains("[wl]")
+            || lower.contains("(wl)")
+            || lower.contains("whitelist")
+            || lower.contains("белые списки")
+            || lower.contains("белый список")
+    });
     cfg.provider_filters.clear();
     Ok(cfg)
 }
@@ -1551,5 +1679,36 @@ mod tests {
         crate::config::merge_value(&mut base, &patch);
         let updated: crate::config::AppConfig = serde_json::from_value(base).unwrap();
         assert!(!updated.failover.smart_failover_enabled, "Must be updated to false");
+    }
+
+    #[test]
+    fn test_failover_whitelist_migration_and_split_chains() {
+        let json_raw = r#"{
+            "failover": {
+                "priority_chain": [
+                    "nl_vps_1",
+                    "Russia [БС] Fast",
+                    "de_vps_2",
+                    "Special (WL) Node",
+                    "fi_vps_3"
+                ]
+            }
+        }"#;
+
+        let parsed: crate::config::AppConfig = parse_config_strict(json_raw).expect("Must parse");
+        // Обычные VPS остаются в priority_chain (Tier 1)
+        assert_eq!(parsed.failover.priority_chain, vec!["nl_vps_1", "de_vps_2", "fi_vps_3"]);
+        assert_eq!(parsed.failover.priority_server, "nl_vps_1");
+        // Серверы с [БС] и (WL) перенесены в bs_priority_chain (Tier 2)
+        assert_eq!(parsed.failover.bs_priority_chain, vec!["Russia [БС] Fast", "Special (WL) Node"]);
+        // Дефолты детектора белых списков
+        assert!(!parsed.failover.whitelist_detector.enabled);
+        assert_eq!(parsed.failover.whitelist_detector.trigger_offline_percent, 80);
+        assert_eq!(parsed.failover.whitelist_detector.trigger_offline_count, 75);
+        assert_eq!(parsed.failover.whitelist_detector.max_acceptable_ping_ms, 450);
+        assert_eq!(parsed.failover.whitelist_detector.exit_offline_percent, 45);
+        assert_eq!(parsed.failover.whitelist_detector.exit_offline_count, 48);
+        assert_eq!(parsed.failover.whitelist_detector.check_interval_mins, 10);
+        assert!(parsed.failover.whitelist_detector.auto_restore_vps);
     }
 }

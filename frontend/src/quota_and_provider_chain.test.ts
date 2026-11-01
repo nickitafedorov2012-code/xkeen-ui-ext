@@ -8,32 +8,30 @@ describe('Task 3.3: Decimal Quota Formatting (formatQuotaBytes)', () => {
     expect(formatQuotaBytes(-100)).toBe('0 Б')
   })
 
-  it('formats bytes under 1000 correctly as Б', () => {
+  it('formats bytes under 1024 correctly as Б', () => {
     expect(formatQuotaBytes(500)).toBe('500 Б')
-    expect(formatQuotaBytes(999)).toBe('999 Б')
+    expect(formatQuotaBytes(1023)).toBe('1023 Б')
   })
 
-  it('formats kilobytes using decimal 1000^1 bytes', () => {
-    expect(formatQuotaBytes(1000)).toBe('1.0 КБ')
-    expect(formatQuotaBytes(1500)).toBe('1.5 КБ')
-    expect(formatQuotaBytes(999000)).toBe('999.0 КБ')
+  it('formats kilobytes using binary 1024^1 bytes', () => {
+    expect(formatQuotaBytes(1024)).toBe('1.0 КБ')
+    expect(formatQuotaBytes(1536)).toBe('1.5 КБ')
   })
 
-  it('formats megabytes using decimal 1000^2 bytes', () => {
-    expect(formatQuotaBytes(1000000)).toBe('1.0 МБ')
-    expect(formatQuotaBytes(15000000)).toBe('15.0 МБ')
+  it('formats megabytes using binary 1024^2 bytes', () => {
+    expect(formatQuotaBytes(1024 * 1024)).toBe('1.0 МБ')
+    expect(formatQuotaBytes(15 * 1024 * 1024)).toBe('15.0 МБ')
   })
 
-  it('accurately matches provider billing for total quota (944.89 GB vs 880 GiB)', () => {
-    // 944,892,805,120 bytes -> 944.89 GB in decimal billing (1000^3)
+  it('accurately matches provider billing for total quota (880.00 ГБ binary)', () => {
+    // 944,892,805,120 bytes = 880 * 1024^3 bytes -> 880.00 ГБ
     const totalBytes = 944892805120
-    expect(formatQuotaBytes(totalBytes)).toBe('944.89 ГБ')
+    expect(formatQuotaBytes(totalBytes)).toBe('880.00 ГБ')
   })
 
-  it('accurately matches provider billing for remaining traffic (696.78 GB vs 648.93 GiB)', () => {
-    // 696,782,009,274 bytes -> 696.78 GB in decimal billing (1000^3)
+  it('accurately matches provider billing for remaining traffic (648.93 ГБ binary)', () => {
     const remainingBytes = 696782009274
-    expect(formatQuotaBytes(remainingBytes)).toBe('696.78 ГБ')
+    expect(formatQuotaBytes(remainingBytes)).toBe('648.93 ГБ')
   })
 
   it('calculates remaining bytes accurately as total - (upload + download)', () => {

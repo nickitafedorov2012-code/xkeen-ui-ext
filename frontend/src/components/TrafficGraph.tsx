@@ -1,5 +1,9 @@
 import { useEffect, useState, useRef } from 'react'
-import { apiGet } from '../api'
+import { apiGet, apiPost } from '../api'
+
+interface TrafficGraphProps {
+  notify?: (msg: string, error?: boolean) => void
+}
 
 interface SpeedPair {
   down: number
@@ -54,7 +58,7 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }
 
-export default function TrafficGraph() {
+export default function TrafficGraph({ notify }: TrafficGraphProps = {}) {
   const [history, setHistory] = useState<TrafficHistoryItem[]>(() =>
     Array(60).fill({ directDown: 0, directUp: 0, tunnelDown: 0, tunnelUp: 0 })
   )
@@ -69,6 +73,32 @@ export default function TrafficGraph() {
   const [peakDirect, setPeakDirect] = useState(0)
   const [peakTunnel, setPeakTunnel] = useState(0)
   const [isDirectEstimated, setIsDirectEstimated] = useState(false)
+  const [resettingTarget, setResettingTarget] = useState<string | null>(null)
+
+  const handleResetTraffic = async (target: 'direct' | 'vps' | 'whitelist', label: string) => {
+    if (!window.confirm(`Сбросить накопленный трафик (${label}) в 0?`)) {
+      return
+    }
+    setResettingTarget(target)
+    try {
+      const res = await apiPost<{ status: string; direct_bytes?: number; proxy_bytes?: number; whitelist_bytes?: number }>(
+        `traffic/reset?target=${target}`,
+        {}
+      )
+      if (target === 'direct') {
+        setDirectBytes(res.direct_bytes ?? 0)
+      } else if (target === 'vps') {
+        setProxyBytes(res.proxy_bytes ?? 0)
+      } else if (target === 'whitelist') {
+        setWhitelistBytes(res.whitelist_bytes ?? 0)
+      }
+      notify?.(`Счётчик трафика (${label}) сброшен`)
+    } catch (e: any) {
+      notify?.(`Ошибка сброса: ${e?.message || e}`, true)
+    } finally {
+      setResettingTarget(null)
+    }
+  }
 
   // Режим отображения: 'down' (входящий) | 'up' (исходящий) | 'both' (сумма)
   const [metricMode, setMetricMode] = useState<'down' | 'up' | 'both'>('down')
@@ -304,6 +334,19 @@ export default function TrafficGraph() {
               <span className="badge-val">{formatSpeed(currentDirect.down)}</span>
               <span className="badge-arrow">↑</span>
               <span className="badge-val">{formatSpeed(currentDirect.up)}</span>
+              <button
+                type="button"
+                className="traffic-reset-btn"
+                title={`Сбросить накопленный прямой трафик (${formatBytes(directBytes)})`}
+                aria-label="Сбросить накопленный прямой трафик"
+                disabled={resettingTarget === 'direct'}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  handleResetTraffic('direct', 'Прямой трафик')
+                }}
+              >
+                {resettingTarget === 'direct' ? '⏳' : '↺'}
+              </button>
             </div>
 
             {/* Канал 2: Проксированный туннель — динамически БС или VPS (никогда не оба сразу) */}
@@ -318,6 +361,19 @@ export default function TrafficGraph() {
                 <span className="badge-val">{formatSpeed(currentWhitelist.down)}</span>
                 <span className="badge-arrow" style={{ color: '#c084fc' }}>↑</span>
                 <span className="badge-val">{formatSpeed(currentWhitelist.up)}</span>
+                <button
+                  type="button"
+                  className="traffic-reset-btn"
+                  title={`Сбросить накопленный трафик БС (${formatBytes(whitelistBytes)})`}
+                  aria-label="Сбросить накопленный трафик БС"
+                  disabled={resettingTarget === 'whitelist'}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    handleResetTraffic('whitelist', 'Туннель БС')
+                  }}
+                >
+                  {resettingTarget === 'whitelist' ? '⏳' : '↺'}
+                </button>
               </div>
             ) : null}
 
@@ -331,6 +387,19 @@ export default function TrafficGraph() {
                 <span className="badge-val">{formatSpeed(currentProxy.down)}</span>
                 <span className="badge-arrow">↑</span>
                 <span className="badge-val">{formatSpeed(currentProxy.up)}</span>
+                <button
+                  type="button"
+                  className="traffic-reset-btn"
+                  title={`Сбросить накопленный трафик VPS (${formatBytes(proxyBytes)})`}
+                  aria-label="Сбросить накопленный трафик VPS"
+                  disabled={resettingTarget === 'vps'}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    handleResetTraffic('vps', 'VPS трафик')
+                  }}
+                >
+                  {resettingTarget === 'vps' ? '⏳' : '↺'}
+                </button>
               </div>
             )}
 

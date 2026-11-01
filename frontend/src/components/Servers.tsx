@@ -108,11 +108,23 @@ function formatBytes(bytes: number): string {
 
 export function formatQuotaBytes(bytes: number): string {
   if (!bytes || bytes <= 0) return '0 Б'
-  if (bytes < 1000) return `${bytes} Б`
-  if (bytes < 1000 * 1000) return `${(bytes / 1000).toFixed(1)} КБ`
-  if (bytes < 1000 * 1000 * 1000) return `${(bytes / (1000 * 1000)).toFixed(1)} МБ`
-  if (bytes < 1000 * 1000 * 1000 * 1000) return `${(bytes / (1000 * 1000 * 1000)).toFixed(2)} ГБ`
-  return `${(bytes / (1000 * 1000 * 1000 * 1000)).toFixed(2)} ТБ`
+  if (bytes < 1024) return `${bytes} Б`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`
+
+  // Поддержка как десятичных (1000^3/1000^4), так и двоичных (1024^3/1024^4) квот провайдеров
+  // Если число кратно или рассчитано в десятичных ГБ (например 700 * 1e9 или 2 * 1e12)
+  const isDecimalGb = bytes % 1000000000 === 0 && bytes % 1073741824 !== 0
+  const isDecimalTb = bytes % 1000000000000 === 0 && bytes % (1024 * 1024 * 1024 * 1024) !== 0
+  if (isDecimalTb) {
+    return `${(bytes / 1000000000000).toFixed(2)} ТБ`
+  }
+  if (isDecimalGb) {
+    return `${(bytes / 1000000000).toFixed(2)} ГБ`
+  }
+
+  if (bytes < 1024 * 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} ГБ`
+  return `${(bytes / (1024 * 1024 * 1024 * 1024)).toFixed(2)} ТБ`
 }
 
 export function isPoolServer(s: ServerInfo): boolean {

@@ -69,7 +69,7 @@ pub fn spawn(state: AppState) {
                 }
             }
 
-            let (config_path_str, force_domains, direct_domains, device_routing, ignore_servers, device_domains, adblock_enabled, flow_server, zapret_cfg, gaming_cfg, schedules) = {
+            let (config_path_str, force_domains, direct_domains, device_routing, ignore_servers, device_domains, adblock_enabled, flow_server, zapret_cfg, gaming_cfg, schedules, whitelist_cfg) = {
                 let cfg = state.config.read().await;
                 (
                     cfg.mihomo.config_path.clone(),
@@ -83,6 +83,7 @@ pub fn spawn(state: AppState) {
                     cfg.zapret.clone(),
                     cfg.gaming.clone(),
                     cfg.schedules.clone(),
+                    cfg.whitelist.clone(),
                 )
             };
 
@@ -142,6 +143,7 @@ pub fn spawn(state: AppState) {
                             || zapret_cfg.bypass_adult
                             || zapret_cfg.custom_entries.iter().any(|e| e.enabled));
                     let needs_gaming = gaming_cfg.enabled;
+                    let needs_whitelist = whitelist_cfg.enabled;
 
                     let missing_device = needs_device && !content.contains("AUTO-DEVICE");
                     let missing_dev_domains = needs_dev_domains && !content.contains("AUTO-DEVICE-DOMAINS");
@@ -151,8 +153,9 @@ pub fn spawn(state: AppState) {
                     let missing_flow = needs_flow && !content.contains("AUTO-GOOGLE-AI");
                     let missing_zapret = needs_zapret && !content.contains("AUTO-ZAPRET-HYBRID");
                     let missing_gaming = needs_gaming && !content.contains("AUTO-GAMING");
+                    let missing_whitelist = needs_whitelist && !content.contains("AUTO-WHITELIST");
 
-                    if missing_device || missing_dev_domains || missing_force || missing_ignore || missing_adblock || missing_flow || missing_zapret || missing_gaming {
+                    if missing_device || missing_dev_domains || missing_force || missing_ignore || missing_adblock || missing_flow || missing_zapret || missing_gaming || missing_whitelist {
                         log_w!("[WATCHDOG] Обнаружена перезапись config.yaml (рестарт XKeen)! Восстановление маршрутизации...");
 
                         // BUG-15: Строгий порядок блокировок (config_lock -> routing_lock)

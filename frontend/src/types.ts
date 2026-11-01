@@ -31,6 +31,7 @@ export interface FailoverConfig {
   ping_threshold_ms: number
   priority_server: string
   priority_chain?: string[]
+  bs_priority_chain?: string[]
   provider_chain?: string[]
   auto_restore_priority: boolean
   interval_secs: number
@@ -46,6 +47,7 @@ export interface FailoverConfig {
   whitelist_episode_bytes?: number
   priority_chain_pings?: Record<string, number>
   presets?: FailoverPresetSlot[]
+  whitelist_detector?: WhitelistDetectorConfig
   canary?: {
     active: boolean
     target_id: string
@@ -332,6 +334,20 @@ export interface FailoverPresetSlot {
   chain: string[]
 }
 
+export interface WhitelistDetectorConfig {
+  enabled: boolean
+  auto_restore: boolean
+  monitored_provider?: string
+  exclude_ru_nodes?: boolean
+  target_provider?: string
+  threshold_mode: 'percent' | 'count'
+  threshold_percent: number
+  threshold_count: number
+  max_ping_ms: number
+  recovery_threshold_percent: number
+  check_interval_secs: number
+}
+
 export interface AppSettings {
   rci: { host: string; port: number; login: string; password: string; use_https: boolean; token: string }
   mihomo: { host: string; port: number; secret: string; config_path: string; device_providers: string[] }
@@ -340,6 +356,7 @@ export interface AppSettings {
     ping_threshold_ms: number
     priority_server: string
     priority_chain?: string[]
+    bs_priority_chain?: string[]
     provider_chain?: string[]
     auto_restore_priority: boolean
     interval_secs: number
@@ -352,6 +369,7 @@ export interface AppSettings {
     smart_failover_enabled?: boolean
     smart_failover_canary_duration_secs?: number
     presets?: FailoverPresetSlot[]
+    whitelist_detector?: WhitelistDetectorConfig
   }
   refresh_interval_sec: number
   system: { xkeen_init: string; backup_dir: string }

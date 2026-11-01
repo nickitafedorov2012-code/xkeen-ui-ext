@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
 import { pingClass, type FailoverEventInfo, type StatusInfo, type AghStatus, type SwapStatus, type DomainCheckResult, type ProviderInfo } from '../types'
+import { formatQuotaBytes } from './Servers'
 import TrafficGraph from './TrafficGraph'
 
 interface Props {
@@ -425,7 +426,7 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
       <SwapRecommendationBanner status={swapStatus} onSwitchTab={onSwitchTab} />
 
       {/* График трафика в реальном времени */}
-      <TrafficGraph />
+      <TrafficGraph notify={notify} />
 
       {/* Оперативные виджеты */}
       <div className="grid2">
@@ -800,6 +801,85 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
           </div>
         </section>
       </div>
+
+      {/* ВИДЖЕТ «🛡️ Детектор белых списков» (Задача 4) */}
+      {(() => {
+        const isBsActive = Boolean(
+          status?.whitelist_mode_active ||
+          f?.active_tier === 2 ||
+          (status?.active_server && (
+            status?.whitelist_servers?.includes(status.active_server.id) ||
+            (status.active_server.provider && status?.whitelist_providers?.includes(status.active_server.provider))
+          ))
+        )
+        const activeWlProv = providers.find((p) => p.is_whitelist && (p.total_bytes ?? 0) > 0) || providers.find((p) => (p.total_bytes ?? 0) > 0)
+        const total = activeWlProv?.total_bytes ?? 0
+        const used = (activeWlProv?.upload_bytes ?? 0) + (activeWlProv?.download_bytes ?? 0)
+        const remaining = total > 0 ? Math.max(0, total - used) : 0
+
+        return (
+          <section className="card" style={{ marginTop: 14 }} data-testid="dashboard-whitelist-detector-widget">
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <h2 style={{ margin: 0, fontSize: 16 }}>🛡️ Детектор белых списков</h2>
+                <span
+                  className="badge"
+                  style={{
+                    background: isBsActive ? 'rgba(168, 85, 247, 0.2)' : 'rgba(34, 197, 94, 0.15)',
+                    color: isBsActive ? '#c084fc' : '#4ade80',
+                    border: `1px solid ${isBsActive ? 'rgba(168, 85, 247, 0.4)' : 'rgba(34, 197, 94, 0.3)'}`,
+                    fontWeight: 600,
+                  }}
+                >
+                  {isBsActive ? '🟣 Обнаружены БС (Туннель активен)' : '🟢 Штатный режим (VPS)'}
+                </span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <button
+                  type="button"
+                  className="btn sm"
+                  onClick={async () => {
+                    try {
+                      notify('Запуск проверки доступности белых списков...')
+                      const data = await apiPost<{ message: string }>('failover/check')
+                      notify(data.message || 'Проверка завершена')
+                      refresh?.()
+                    } catch (e: any) {
+                      notify(e?.message || 'Ошибка проверки', true)
+                    }
+                  }}
+                  title="Принудительно выполнить проверку доступности и переключения прямо сейчас"
+                >
+                  🔍 Проверить сейчас
+                </button>
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12, marginTop: 6 }}>
+              <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px' }}>
+                <div className="muted small" style={{ fontSize: 11, marginBottom: 4 }}>Статус сети и туннеля</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: isBsActive ? '#c084fc' : '#4ade80' }}>
+                  {isBsActive ? '🟣 Трафик идёт через резервные БС' : '🟢 Все сервисы через зарубежный VPS'}
+                </div>
+              </div>
+
+              <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px' }}>
+                <div className="muted small" style={{ fontSize: 11, marginBottom: 4 }}>Интервал / След. проверка</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-bright)' }}>
+                  каждые {f?.interval_secs ?? 60} сек
+                </div>
+              </div>
+
+              <div style={{ background: 'rgba(255, 255, 255, 0.02)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px' }}>
+                <div className="muted small" style={{ fontSize: 11, marginBottom: 4 }}>Остаток трафика подписки БС</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: total > 0 ? (remaining === 0 ? '#ef4444' : '#38bdf8') : 'var(--muted)' }}>
+                  {total > 0 ? `${formatQuotaBytes(remaining)} (из ${formatQuotaBytes(total)})` : 'Не лимитирован / без квоты'}
+                </div>
+              </div>
+            </div>
+          </section>
+        )
+      })()}
 
       {/* КАРТОЧКА: Быстрая проверка домена («Почему не открывается?») */}
       <section className="card" style={{ marginTop: 14 }}>

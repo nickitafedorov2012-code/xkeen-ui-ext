@@ -1196,10 +1196,22 @@ pub fn apply_flow_rules(yaml: &str, target: &str, group_name: Option<&str>) -> R
         .position(|l| l.trim_end() == "rules:")
         .ok_or("В config.yaml нет секции rules:")?;
 
+    // Если в конфиге присутствует секция AUTO-WHITELIST, вставляем правила Google AI ПОСЛЕ неё.
+    // Это гарантирует, что прямые push-правила (fcm.googleapis.com, mtalk.google.com -> DIRECT)
+    // стоят ВЫШЕ общих правил googleapis.com/google.com -> PROXY и не перехватываются!
+    let insert_pos = if let Some(wl_end_offset) = lines[rules_idx + 1..]
+        .iter()
+        .position(|l| l.trim() == WHITELIST_END)
+    {
+        rules_idx + 1 + wl_end_offset
+    } else {
+        rules_idx
+    };
+
     let mut out = Vec::with_capacity(lines.len() + FLOW_DOMAINS.len() + 4);
     for (i, line) in lines.iter().enumerate() {
         out.push(line.to_string());
-        if i == rules_idx {
+        if i == insert_pos {
             out.push(GOOGLE_AI_BEGIN.to_string());
             for d in FLOW_DOMAINS {
                 out.push(format!("  - DOMAIN-SUFFIX,{d},{target_dest}"));
@@ -4649,6 +4661,31 @@ rules:
             wl_pos < dev_pos,
             "CRITICAL REGRESSION: Whitelist rules ({}) must precede general device rules ({}) to avoid routing bypass",
             wl_pos, dev_pos
+        );
+    }
+
+    #[test]
+    fn test_whitelist_direct_push_rules_precede_google_ai() {
+        let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - GEOIP,RU,DIRECT\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.devices.push(crate::config::WhitelistDevice {
+            mac: "AA:BB:CC:DD:EE:01".into(),
+            ip: "192.168.1.105".into(),
+            enabled: true,
+            name: Some("Work Phone".into()),
+            server: None,
+        });
+
+        let (applied, _) = apply_routing(base_yaml, &cfg).expect("apply_routing must succeed");
+        let wl_pos = applied.find(WHITELIST_BEGIN).expect("WHITELIST_BEGIN must be present");
+        let ai_pos = applied.find(GOOGLE_AI_BEGIN).expect("GOOGLE_AI_BEGIN must be present");
+
+        // AUTO-WHITELIST (fcm.googleapis.com, mtalk.google.com -> DIRECT) ОБЯЗАН быть ВЫШЕ GOOGLE-AI
+        assert!(
+            wl_pos < ai_pos,
+            "CRITICAL REGRESSION: Push notification direct rules in whitelist ({}) must precede Google AI ({})",
+            wl_pos, ai_pos
         );
     }
 

@@ -738,6 +738,33 @@ mod tests {
     }
 
     #[test]
+    fn test_traffic_reset_does_not_affect_provider_quota_and_deltas() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_provider_live_delta("prov_quota_test");
+        add_provider_live_delta("prov_quota_test", 8192);
+        assert_eq!(get_provider_live_delta("prov_quota_test"), 8192);
+
+        // Сброс всех сетевых счетчиков
+        reset_traffic("all");
+        // Проверяем, что дельта провайдера подписки и его квота не затронуты
+        assert_eq!(
+            get_provider_live_delta("prov_quota_test"),
+            8192,
+            "Сброс счетчиков сетевого трафика (direct/vps/whitelist/all) не должен обнулять дельту квоты подписки"
+        );
+
+        // Индивидуальные сбросы
+        reset_traffic("direct");
+        reset_traffic("vps");
+        reset_traffic("whitelist");
+        assert_eq!(get_provider_live_delta("prov_quota_test"), 8192);
+
+        // Очистка тестового состояния
+        reset_provider_live_delta("prov_quota_test");
+        assert_eq!(get_provider_live_delta("prov_quota_test"), 0);
+    }
+
+    #[test]
     fn test_traffic_persistence_roundtrip() {
         let tmp_dir = std::env::temp_dir();
         let test_file = tmp_dir.join(format!("traffic_test_{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));

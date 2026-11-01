@@ -377,6 +377,7 @@ export default function Settings({ notify, status, refresh }: Props) {
   const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null)
   const [newPresetName, setNewPresetName] = useState('')
   const [showNewPresetInput, setShowNewPresetInput] = useState(false)
+  const [priorityTab, setPriorityTab] = useState<'vps' | 'bs' | 'providers'>('vps')
 
   // --- AdBlock ---
   const [adblockEnabled, setAdblockEnabled] = useState(false)
@@ -650,8 +651,22 @@ export default function Settings({ notify, status, refresh }: Props) {
     }
   }
 
-  // --- Глобальная цепочка приоритетов ---
+  // --- Глобальная цепочка приоритетов (VPS) ---
   const chain = settings?.failover.priority_chain ?? (settings?.failover.priority_server ? [settings.failover.priority_server] : [])
+
+  // --- Цепочка приоритетов серверов Белых списков (БС) ---
+  const bsChain = settings?.failover.bs_priority_chain ?? []
+
+  const bsChainMove = (idx: number, dir: -1 | 1) => {
+    const next = [...bsChain]
+    const j = idx + dir
+    if (j < 0 || j >= next.length) return
+    ;[next[idx], next[j]] = [next[j], next[idx]]
+    patch((s) => (s.failover.bs_priority_chain = next))
+  }
+  void priorityTab
+  void setPriorityTab
+  void bsChainMove
 
   const activePresets = settings?.failover?.presets && settings.failover.presets.length > 0
     ? settings.failover.presets
@@ -1037,6 +1052,16 @@ export default function Settings({ notify, status, refresh }: Props) {
                 <span>🟢</span>
                 <span>Прямой трафик</span>
               </div>
+              <button
+                type="button"
+                className="btn-icon-subtle"
+                title="Сбросить счетчик прямого трафика"
+                aria-label="Сбросить счетчик прямого трафика"
+                onClick={() => handleResetTraffic('direct', 'прямого трафика')}
+                style={{ fontSize: 13, padding: '2px 6px', background: 'rgba(255,255,255,0.04)', border: '1px solid var(--border)', borderRadius: 5, cursor: 'pointer', color: 'var(--text-muted)' }}
+              >
+                ↺
+              </button>
             </div>
             <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-bright)' }}>
               {fmtTrafficBytes(trafficSummary.direct_bytes)}
@@ -1053,6 +1078,16 @@ export default function Settings({ notify, status, refresh }: Props) {
                 <span>🔵</span>
                 <span>VPS трафик</span>
               </div>
+              <button
+                type="button"
+                className="btn-icon-subtle"
+                title="Сбросить счетчик VPS трафика"
+                aria-label="Сбросить счетчик VPS трафика"
+                onClick={() => handleResetTraffic('vps', 'VPS трафика')}
+                style={{ fontSize: 13, padding: '2px 6px', background: 'rgba(255,255,255,0.04)', border: '1px solid var(--border)', borderRadius: 5, cursor: 'pointer', color: 'var(--text-muted)' }}
+              >
+                ↺
+              </button>
             </div>
             <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-bright)' }}>
               {fmtTrafficBytes(trafficSummary.proxy_bytes)}
@@ -1069,6 +1104,16 @@ export default function Settings({ notify, status, refresh }: Props) {
                 <span>🟣</span>
                 <span>Туннель белых списков</span>
               </div>
+              <button
+                type="button"
+                className="btn-icon-subtle"
+                title="Сбросить счетчик трафика белых списков"
+                aria-label="Сбросить счетчик трафика белых списков"
+                onClick={() => handleResetTraffic('whitelist', 'трафика белых списков')}
+                style={{ fontSize: 13, padding: '2px 6px', background: 'rgba(255,255,255,0.04)', border: '1px solid var(--border)', borderRadius: 5, cursor: 'pointer', color: 'var(--text-muted)' }}
+              >
+                ↺
+              </button>
             </div>
             <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-bright)' }}>
               {fmtTrafficBytes(trafficSummary.whitelist_bytes)}

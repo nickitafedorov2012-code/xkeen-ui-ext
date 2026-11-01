@@ -120,6 +120,9 @@ pub async fn status(State(state): State<AppState>) -> Response {
             },
             "priority_chain": cfg.failover.priority_chain,
             "priority_chain_pings": priority_chain_pings,
+            "bs_priority_chain": cfg.failover.bs_priority_chain,
+            "whitelist_detector": cfg.failover.whitelist_detector,
+            "last_good_regular_vps": cfg.failover.last_good_regular_vps,
             "auto_restore_priority": cfg.failover.auto_restore_priority,
             "interval_secs": cfg.failover.interval_secs,
             "canary_duration_secs": cfg.failover.canary_duration_secs,
@@ -899,17 +902,29 @@ pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -
                 (server_id.to_string(), None)
             };
             failover::handle_whitelist_transition(state, server_id, &srv_name, srv_prov.as_deref()).await;
-            // Если переключен конкретный сервер, обновляем его как основной в цепочке приоритетов,
-            // чтобы фоновый failover не откатывал выбор пользователя обратно через 30-60 секунд.
+            // Если переключен конкретный сервер, обновляем его как основной в соответствующей цепочке:
+            // - Ручной выбор обычного VPS: обновляет priority_chain и сохраняет last_good_regular_vps
+            // - Ручной выбор сервера [БС]: обновляет только bs_priority_chain, никогда не затирая priority_chain обычных VPS
             if !server_id.is_empty() && server_id != "Fastest" && server_id != "Fallback" {
                 let _cfg_guard = state.config_lock.lock().await;
                 let mut mut_cfg = (**state.config.read().await).clone();
                 let id = server_id.to_string();
-                if let Some(pos) = mut_cfg.failover.priority_chain.iter().position(|s| s == &id) {
-                    mut_cfg.failover.priority_chain.remove(pos);
+                let is_bs = failover::is_whitelist_server_full(&srv_name, server_id, srv_prov.as_deref(), &mut_cfg);
+
+                if is_bs {
+                    if let Some(pos) = mut_cfg.failover.bs_priority_chain.iter().position(|s| s == &id) {
+                        mut_cfg.failover.bs_priority_chain.remove(pos);
+                    }
+                    mut_cfg.failover.bs_priority_chain.insert(0, id.clone());
+                } else {
+                    if let Some(pos) = mut_cfg.failover.priority_chain.iter().position(|s| s == &id) {
+                        mut_cfg.failover.priority_chain.remove(pos);
+                    }
+                    mut_cfg.failover.priority_chain.insert(0, id.clone());
+                    mut_cfg.failover.priority_server = id.clone();
+                    mut_cfg.failover.last_good_regular_vps = Some(id.clone());
                 }
-                mut_cfg.failover.priority_chain.insert(0, id.clone());
-                mut_cfg.failover.priority_server = id;
+
                 if let Err(e) = config::save(&state.config_path, &mut_cfg).await {
                     log_e!("Ошибка сохранения приоритета в config.json: {e}");
                 } else {
@@ -1297,6 +1312,20 @@ pub async fn failover_check(State(state): State<AppState>) -> Response {
         Ok(msg) => api_ok(json!({ "message": msg })),
         Err(e) => api_err(e),
     }
+}
+
+/// POST /api/failover/whitelist-detector/check — ручной запуск проверки детектора белых списков.
+pub async fn whitelist_detector_check(State(state): State<AppState>) -> Response {
+    match failover::run_whitelist_detector_check(&state, "Ручной запуск из API").await {
+        Ok(msg) => api_ok(json!({ "message": msg })),
+        Err(e) => api_err(e),
+    }
+}
+
+/// GET /api/failover/whitelist-detector/status — статус детектора белых списков.
+pub async fn whitelist_detector_status() -> Response {
+    let status = failover::get_whitelist_detector_status().await;
+    api_ok(json!(status))
 }
 
 /// GET /api/failover/events — лента событий.
@@ -2993,7 +3022,7 @@ pub async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str, hwid: Opt
     if !resp.status().is_success() {
         return Err(format!("HTTP статус {}", resp.status()));
     }
-    let (header_userinfo, text) = {
+    let (mut header_userinfo, text) = {
         let headers = resp.headers();
         let userinfo = headers
             .iter()
@@ -3003,6 +3032,26 @@ pub async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str, hwid: Opt
         let t = resp.text().await.map_err(|e| format!("Read text: {e}"))?;
         (userinfo, t)
     };
+
+    // Если основной запрос (например, с UA v2rayNG) не вернул заголовок Subscription-Userinfo,
+    // делаем лёгкий запрос (HEAD или GET с Range: bytes=0-0) с ClashMeta UA для гарантированного получения квоты
+    if header_userinfo.is_none() {
+        let clash_ua = "ClashMeta/1.19.24";
+        let mut meta_builder = client_ref.get(url).header("User-Agent", clash_ua).header("Range", "bytes=0-0").timeout(std::time::Duration::from_secs(6));
+        if let Some(ref h) = resolved_hwid {
+            meta_builder = meta_builder.header("x-hwid", h.as_str());
+        }
+        if let Ok(meta_resp) = meta_builder.send().await {
+            let u = meta_resp.headers()
+                .iter()
+                .find(|(k, _)| k.as_str().eq_ignore_ascii_case("subscription-userinfo"))
+                .and_then(|(_, v)| v.to_str().ok())
+                .and_then(crate::mihomo::parse_subscription_userinfo_str);
+            if u.is_some() {
+                header_userinfo = u;
+            }
+        }
+    }
     let (mut conv_yaml, count) = crate::subscription_parser::convert_subscription_to_mihomo_yaml(&text)?;
     let prov_dir = std::path::Path::new(&state.config.read().await.mihomo.config_path)
         .parent()

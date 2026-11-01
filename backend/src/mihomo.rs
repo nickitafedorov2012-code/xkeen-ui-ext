@@ -578,9 +578,12 @@ pub async fn get_providers_info(http: &reqwest::Client, cfg: &AppConfig) -> Resu
                 .and_then(|s| s.get("Expire").or_else(|| s.get("expire")))
                 .and_then(|v| v.as_i64());
 
-            // Если в ответе Mihomo нет subscriptionInfo (например, для локального type: file),
-            // считываем заголовочную строку # subscription-userinfo из файла ./providers/{id}.yaml
-            if total_bytes.is_none() {
+            // Для локальных файлов подписок (vehicle_type == "File") Mihomo может отдавать
+            // устаревший frozen subscriptionInfo из cache.db, либо не отдавать вовсе.
+            // Поэтому ВСЕГДА проверяем актуальную заголовочную строку # subscription-userinfo
+            // из файла ./providers/{id}.yaml и отдаем ей безусловный приоритет.
+            let is_file_vehicle = vtype.eq_ignore_ascii_case("File");
+            if total_bytes.is_none() || is_file_vehicle {
                 let prov_dir = std::path::Path::new(&cfg.mihomo.config_path)
                     .parent()
                     .map(|p| p.join("providers"))
@@ -1250,7 +1253,7 @@ async fn switch_server_inner(http: &reqwest::Client, cfg: &AppConfig, server_id:
         if typ != "selector" {
             continue;
         }
-        // исключаем авто-группы, специализированные AI/Flow группы, игровые группы (RT-01) и группы устройств
+        // исключаем авто-группы, специализированные AI/Flow группы, игровые группы (RT-01), группы устройств и тестовый Canary Probe
         let lower_g = name.to_lowercase();
         if name == "Fastest"
             || name == "Fallback"
@@ -1259,6 +1262,8 @@ async fn switch_server_inner(http: &reqwest::Client, cfg: &AppConfig, server_id:
             || lower_g.contains("gaming")
             || lower_g.contains("гейминг")
             || name.contains("🎮")
+            || lower_g.contains("canary probe")
+            || name.contains("🛡️ Canary Probe")
             || ip_from_group_name(name).is_some()
         {
             continue;

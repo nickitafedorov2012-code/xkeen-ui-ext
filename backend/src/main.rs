@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 mod api;
 mod config;
 mod failover;
@@ -623,14 +625,23 @@ async fn main() {
             log_i!("[STARTUP] ✓ Синхронизировано мобильных подписок: {migrated}");
         }
 
-        // Периодическое обновление каждые 12 часов
+        // Периодическое обновление остатка квот и подписок каждый час (3600 сек)
+        // с быстрым повтором при ошибке/недоступности сети.
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(43200)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
             if failover::is_shutdown() {
                 break;
             }
-            log_i!("[MOBILE-SUB] Плановое обновление мобильных подписок (12h)...");
-            let _ = api::sync_all_mobile_providers(&mobile_sub_state).await;
+            log_i!("[QUOTA-SYNC] Плановое обновление квот и подписок (1h)...");
+            let updated = api::sync_all_mobile_providers(&mobile_sub_state).await;
+            if updated == 0 {
+                // Если ни одна подписка не обновилась (сеть лежала или переключался туннель), ретрай через 2 минуты
+                tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                if !failover::is_shutdown() {
+                    log_i!("[QUOTA-SYNC] Повторная попытка обновления квот через 2 мин...");
+                    let _ = api::sync_all_mobile_providers(&mobile_sub_state).await;
+                }
+            }
         }
     });
 
@@ -777,6 +788,8 @@ async fn main() {
         .route("/api/ignore", get(api::get_ignore).post(api::set_ignore))
         // Failover и уведомления
         .route("/api/failover/check", post(api::failover_check))
+        .route("/api/failover/whitelist-detector/check", post(api::whitelist_detector_check))
+        .route("/api/failover/whitelist-detector/status", get(api::whitelist_detector_status))
         .route("/api/failover/toggle", post(api::failover_toggle).put(api::failover_toggle))
         .route("/api/failover/events", get(api::failover_events))
         .route("/api/failover/quarantine", get(api::failover_quarantine_list))
