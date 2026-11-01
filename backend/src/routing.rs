@@ -33,6 +33,16 @@ pub const WHITELIST_GROUP_BEGIN: &str = "# --- AUTO-WHITELIST-GROUP-BEGIN ---";
 pub const WHITELIST_GROUP_END: &str = "# --- AUTO-WHITELIST-GROUP-END ---";
 pub const WHITELIST_GROUP_NAME: &str = "🛡️ Whitelist";
 
+pub const CANARY_GROUP_BEGIN: &str = "# --- AUTO-CANARY-GROUP-BEGIN ---";
+pub const CANARY_GROUP_END: &str = "# --- AUTO-CANARY-GROUP-END ---";
+pub const CANARY_LISTENERS_BEGIN: &str = "# --- AUTO-CANARY-LISTENERS-BEGIN ---";
+pub const CANARY_LISTENERS_END: &str = "# --- AUTO-CANARY-LISTENERS-END ---";
+pub const CANARY_PROBE_GROUP_NAME: &str = "🛡️ Canary Probe";
+pub const CANARY_PROBE_PORT: u16 = 7894;
+pub const CANARY_PROBE_LISTEN: &str = "127.0.0.1";
+pub const CANARY_PROBE_INBOUND_NAME: &str = "canary-probe-in";
+
+
 
 pub fn validate_marker_pair(yaml: &str, begin: &str, end: &str) -> Result<(), String> {
     let mut opened = false;
@@ -2346,6 +2356,152 @@ pub fn apply_whitelist_dns(
     out.join("\n")
 }
 
+/// Удаление блоков Canary Probe (селектор-группы и слушателя listeners) из YAML.
+pub fn remove_canary_rules(yaml: &str) -> String {
+    let mut out = Vec::new();
+    let mut skip_group = false;
+    let mut skip_listeners = false;
+
+    for line in yaml.lines() {
+        let t = line.trim();
+        if t == CANARY_GROUP_BEGIN {
+            skip_group = true;
+            continue;
+        }
+        if t == CANARY_GROUP_END {
+            skip_group = false;
+            continue;
+        }
+        if t == CANARY_LISTENERS_BEGIN {
+            skip_listeners = true;
+            continue;
+        }
+        if t == CANARY_LISTENERS_END {
+            skip_listeners = false;
+            continue;
+        }
+        if !skip_group && !skip_listeners {
+            out.push(line);
+        }
+    }
+    let res = out.join("\n");
+    if yaml.ends_with('\n') && !res.is_empty() && !res.ends_with('\n') {
+        format!("{res}\n")
+    } else {
+        res
+    }
+}
+
+/// Вставка селектор-группы '🛡️ Canary Probe' и локального слушателя 127.0.0.1:7894 в config.yaml.
+/// Включает все статические прокси и подписки (use:), а также DIRECT и REJECT.
+pub fn apply_canary_rules(yaml: &str) -> String {
+    let providers = parse_provider_names(yaml);
+    apply_canary_rules_with_providers(yaml, &providers)
+}
+
+/// Вставка Canary Probe с явным списком провайдеров.
+pub fn apply_canary_rules_with_providers(yaml: &str, providers: &[String]) -> String {
+    let clean = remove_canary_rules(yaml);
+
+    let static_proxies = parse_static_proxy_names(&clean);
+    let parsed_providers = if providers.is_empty() {
+        parse_provider_names(&clean)
+    } else {
+        providers.to_vec()
+    };
+
+    let lines: Vec<&str> = clean.lines().collect();
+
+    // 1. Формирование блока listeners:
+    let has_existing_listeners = lines.iter().any(|l| l.trim_end() == "listeners:" && !l.starts_with(' '));
+    let mut listeners_block = Vec::new();
+    listeners_block.push(CANARY_LISTENERS_BEGIN.to_string());
+    if !has_existing_listeners {
+        listeners_block.push("listeners:".to_string());
+    }
+    listeners_block.push(format!("  - name: {CANARY_PROBE_INBOUND_NAME}"));
+    listeners_block.push("    type: mixed".to_string());
+    listeners_block.push(format!("    port: {CANARY_PROBE_PORT}"));
+    listeners_block.push(format!("    listen: {CANARY_PROBE_LISTEN}"));
+    listeners_block.push(format!("    proxy: '{CANARY_PROBE_GROUP_NAME}'"));
+    listeners_block.push(CANARY_LISTENERS_END.to_string());
+
+    // 2. Вставка listeners в YAML
+    let with_listeners = if let Some(l_idx) = lines.iter().position(|l| l.trim_end() == "listeners:" && !l.starts_with(' ')) {
+        let mut out = Vec::with_capacity(lines.len() + listeners_block.len());
+        for (i, line) in lines.iter().enumerate() {
+            out.push(line.to_string());
+            if i == l_idx {
+                out.extend(listeners_block.clone());
+            }
+        }
+        out.join("\n")
+    } else {
+        // Если секции listeners: нет, вставляем её перед proxy-groups:
+        let pg_idx = lines.iter().position(|l| l.trim_end() == "proxy-groups:" && !l.starts_with(' '))
+            .unwrap_or(0);
+        let mut out = Vec::with_capacity(lines.len() + listeners_block.len() + 1);
+        for (i, line) in lines.iter().enumerate() {
+            if i == pg_idx {
+                out.extend(listeners_block.clone());
+            }
+            out.push(line.to_string());
+        }
+        if pg_idx >= lines.len() {
+            out.extend(listeners_block.clone());
+        }
+        out.join("\n")
+    };
+
+    // 3. Формирование блока proxy-group '🛡️ Canary Probe'
+    let mut pg_block = Vec::new();
+    pg_block.push(CANARY_GROUP_BEGIN.to_string());
+    pg_block.push(format!("  - name: '{CANARY_PROBE_GROUP_NAME}'"));
+    pg_block.push("    type: select".to_string());
+    pg_block.push("    proxies:".to_string());
+    pg_block.push("      - DIRECT".to_string());
+    pg_block.push("      - REJECT".to_string());
+
+    for sp in &static_proxies {
+        if sp != "DIRECT" && sp != "REJECT" {
+            if sp.contains(':') || sp.contains('[') || sp.contains(']') || sp.contains('\'') || sp.contains('"') || sp.contains('#') {
+                pg_block.push(format!("      - '{}'", sp.replace('\'', "''")));
+            } else {
+                pg_block.push(format!("      - {sp}"));
+            }
+        }
+    }
+
+    let active_providers: Vec<&String> = parsed_providers.iter().filter(|p| !p.trim().is_empty()).collect();
+    if !active_providers.is_empty() {
+        pg_block.push("    use:".to_string());
+        for p in active_providers {
+            pg_block.push(format!("      - {p}"));
+        }
+    }
+    pg_block.push(CANARY_GROUP_END.to_string());
+
+    // 4. Вставка proxy-group в секцию proxy-groups:
+    let final_lines: Vec<&str> = with_listeners.lines().collect();
+    if let Some(pg_pos) = final_lines.iter().position(|l| l.trim_end() == "proxy-groups:" && !l.starts_with(' ')) {
+        let mut final_out = Vec::with_capacity(final_lines.len() + pg_block.len());
+        for (i, line) in final_lines.iter().enumerate() {
+            final_out.push(line.to_string());
+            if i == pg_pos {
+                final_out.extend(pg_block.clone());
+            }
+        }
+        let res = final_out.join("\n");
+        if yaml.ends_with('\n') && !res.ends_with('\n') {
+            format!("{res}\n")
+        } else {
+            res
+        }
+    } else {
+        with_listeners
+    }
+}
+
 /// Удаление доменных блоков (DIRECT/FORCE/DEVICE-DOMAINS) из YAML.
 pub fn remove_domain_blocks(yaml: &str) -> String {
     let has_direct_end = yaml.contains(DIRECT_END);
@@ -3012,6 +3168,14 @@ pub fn apply_routing_with_filters(
     };
     current = apply_whitelist_rules(&current, cfg, active_wl_tunnel);
     current = apply_whitelist_dns(&current, cfg, "127.0.0.1:53");
+
+    // 1.2. Canary Probe: селектор-группа '🛡️ Canary Probe' и локальный слушатель 127.0.0.1:7894
+    if cfg.failover.enabled {
+        current = apply_canary_rules_with_providers(&current, &providers);
+    } else {
+        current = remove_canary_rules(&current);
+    }
+
 
     // 2. Игнор-лист
     if let Ok(with_ig) = apply_ignore_to_groups(&current, &cfg.ignore_servers) {
@@ -4758,7 +4922,88 @@ rules:
         assert!(applied.contains("- active_sub"), "active_sub must be present in device group use");
         assert!(!applied.contains("- disabled_sub"), "disabled_sub must NOT be present in device group use: {applied}");
     }
+
+    #[test]
+    fn test_apply_canary_rules_lifecycle() {
+        let base_yaml = "port: 7890\nproxies:\n  - name: 'VPS-DE-01'\n    type: vless\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - GEOIP,RU,DIRECT\n  - MATCH,PROXY\n";
+        let applied = apply_canary_rules_with_providers(base_yaml, &["my_provider".to_string()]);
+
+        // Listeners verification
+        assert!(applied.contains(CANARY_LISTENERS_BEGIN));
+        assert!(applied.contains(CANARY_LISTENERS_END));
+        assert!(applied.contains("listeners:"));
+        assert!(applied.contains("name: canary-probe-in"));
+        assert!(applied.contains("type: mixed"));
+        assert!(applied.contains("port: 7894"));
+        assert!(applied.contains("listen: 127.0.0.1"));
+        assert!(applied.contains("proxy: '🛡️ Canary Probe'"));
+
+        // Proxy-groups verification
+        assert!(applied.contains(CANARY_GROUP_BEGIN));
+        assert!(applied.contains(CANARY_GROUP_END));
+        assert!(applied.contains("- name: '🛡️ Canary Probe'"));
+        assert!(applied.contains("type: select"));
+        assert!(applied.contains("- DIRECT"));
+        assert!(applied.contains("- REJECT"));
+        assert!(applied.contains("- 'VPS-DE-01'") || applied.contains("- VPS-DE-01"));
+        assert!(applied.contains("- my_provider"));
+
+        // Clean removal verification
+        let cleaned = remove_canary_rules(&applied);
+        assert!(!cleaned.contains(CANARY_LISTENERS_BEGIN));
+        assert!(!cleaned.contains(CANARY_GROUP_BEGIN));
+        assert!(!cleaned.contains("canary-probe-in"));
+        assert!(!cleaned.contains("🛡️ Canary Probe"));
+        assert!(cleaned.contains("proxy-groups:"));
+        assert!(cleaned.contains("MATCH,PROXY"));
+    }
+
+    #[test]
+    fn test_apply_canary_rules_idempotence() {
+        let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - MATCH,PROXY\n";
+        let first = apply_canary_rules(base_yaml);
+        let second = apply_canary_rules(&first);
+        assert_eq!(first, second, "Applying canary rules twice must be strictly idempotent");
+    }
+
+    #[test]
+    fn test_apply_canary_rules_preserves_existing_listeners() {
+        let yaml_with_existing = "listeners:\n  - name: my-custom-in\n    type: http\n    port: 8080\nproxy-groups:\n  - name: PROXY\n    type: select\n";
+        let applied = apply_canary_rules(yaml_with_existing);
+        assert!(applied.contains("my-custom-in"));
+        assert!(applied.contains("canary-probe-in"));
+
+        let cleaned = remove_canary_rules(&applied);
+        assert!(cleaned.contains("my-custom-in"));
+        assert!(!cleaned.contains("canary-probe-in"));
+        assert!(!cleaned.contains(CANARY_LISTENERS_BEGIN));
+    }
+
+    #[test]
+    fn test_apply_canary_rules_includes_static_proxies_and_escapes() {
+        let yaml_with_static = "proxies:\n  - name: 'VPS [DE] #1'\n    type: vless\n  - name: \"O'Reilly\"\n    type: trojan\nproxy-groups:\n  - name: PROXY\n    type: select\n";
+        let applied = apply_canary_rules(yaml_with_static);
+        assert!(applied.contains("- 'VPS [DE] #1'"));
+        assert!(applied.contains("- 'O''Reilly'"));
+    }
+
+    #[test]
+    fn test_apply_routing_with_failover_enabled_injects_canary_and_cleans_when_disabled() {
+        let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.failover.enabled = true;
+
+        let (applied, _) = apply_routing(base_yaml, &cfg).expect("apply_routing with failover.enabled=true");
+        assert!(applied.contains("canary-probe-in"));
+        assert!(applied.contains("🛡️ Canary Probe"));
+
+        cfg.failover.enabled = false;
+        let (cleaned, _) = apply_routing(&applied, &cfg).expect("apply_routing with failover.enabled=false");
+        assert!(!cleaned.contains("canary-probe-in"));
+        assert!(!cleaned.contains("🛡️ Canary Probe"));
+    }
 }
+
 
 
 

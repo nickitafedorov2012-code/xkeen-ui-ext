@@ -604,10 +604,39 @@ describe('Settings Component — Failover Zombie Servers and Canary Last Result'
     // Zombie server in chain shows 🧟 Зомби badge and action buttons
     const zombieCard = container?.querySelector('.priority-chain-card') as HTMLElement
     expect(zombieCard.textContent).toContain('Зомби')
-    expect(zombieCard.textContent).toContain('9 мин')
+    expect(zombieCard.textContent).toContain('ещё 9 мин')
+    expect(zombieCard.textContent).not.toContain('карантин 10 мин')
     expect(zombieCard.textContent).toContain('Снять карантин')
     expect(zombieCard.textContent).toContain('Включить')
     expect(zombieCard.style.borderLeft).toContain('4px solid #ef4444')
+  })
+
+  it('renders Smart Failover toggle switch and updates state when toggled', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation(async (path: string) => {
+      if (path === 'settings') return { ...mockSettings, failover: { ...mockSettings.failover, smart_failover_enabled: true } }
+      if (path === 'presets') return { presets: [] }
+      if (path === 'servers') return { servers: [] }
+      if (path === 'routes') return { routes: [] }
+      if (path === 'domains') return { direct: [], force: [] }
+      if (path === 'system/swap/status') return mockSwapInactive
+      return {}
+    })
+    vi.spyOn(api, 'apiPut').mockResolvedValue({ success: true })
+
+    await act(async () => {
+      root!.render(<Settings notify={notifyMock} status={null} refresh={refreshMock} />)
+    })
+
+    const toggle = container?.querySelector('[data-testid="settings-smart-failover-toggle"]') as HTMLInputElement
+    expect(toggle).toBeTruthy()
+    expect(toggle.checked).toBe(true)
+
+    // Toggle off
+    await act(async () => {
+      toggle.click()
+    })
+
+    expect(toggle.checked).toBe(false)
   })
 
   describe('cleanServerDisplayName & formatActiveServerStatus', () => {

@@ -1,96 +1,106 @@
-# Project: XKeen Route Comprehensive Bug Fixes
+# Project: XKeen Route Failover 2.0 & Smart Failover Modernization
 
 ## Architecture
-- **Backend (Rust / Axum / Tokio)**:
-  - `updater.rs`: Release updates, download management, SHA-256 verification, local proxy fallback.
-  - `auth.rs`: Session token management, origin validation, strict IP parsing.
-  - `notifications.rs`: Webhook dispatch, strict SSRF validation blocking private/loopback/link-local IP addresses.
-  - `adguard.rs`: AdGuard Home integration, init scripts, configuration YAML generation, single authoritative iptables redirection (`53 -> 5353` on `br+`/`Bridge+`).
-  - `speedtest.rs`: Network speed testing with RAII Drop guard ensuring node group restoration upon future cancellation.
-  - `system.rs`: System operations (non-blocking async swap creation with tokio::process::Command, process management with daemon whitelist).
-  - `watchdog.rs`: Periodic daemon health checks, DHCP lease synchronization, automatic AdGuard iptables enforcement and Zapret rule cleanup.
-  - `failover.rs` & `traffic.rs`: Multi-node health monitoring with 3-consecutive-failure hysteresis, accurate WAN interface discovery.
-  - `config.rs` & `bot.rs`: Configuration parsing, URL resolution without `0.0.0.0`, dynamic init script paths.
-  - `api.rs`: REST API endpoints, routing rules, Zapret installer verification.
+- **Backend (Rust / Axum / Tokio / Mihomo)**:
+  - `backend/src/failover.rs`:
+    - Core failover engine with connection delta tracking (`{id -> (upload, download)}`).
+    - Blackhole anomaly detector (>5 KB upload delta, 0 download delta across >=3 sockets).
+    - 4-tier fallback selection hierarchy (within threshold -> alive slow -> quarantine fast -> quarantine slow).
+    - Unified `select_failover_target` engine utilized across `run_check`, Best-Ping, and `run_device_check`.
+    - Server tier separation: Tier 1 (standard VPS) vs Tier 2 (whitelist servers identified by `is_whitelist_server_full`).
+    - Shortened 60s Canary Soak Test for returning from Tier 2 to Tier 1 with socket reset.
+    - Best-Ping engine: polling active node only during normal operation, runtime `best_ping_hysteresis_ms` enforcement, concurrency clamp expanded to 6 (default 4).
+    - Real Canary payload download via local listener `http://127.0.0.1:7894` without fake constants (`8 КБ`, `15 кбит/с`).
+    - Persistent quarantine stored atomically in `/opt/etc/xkeen-route/quarantine.json` (Unix timestamps).
+  - `backend/src/mihomo.rs`:
+    - Parallel L7 split probing (`tokio::select!` between Cloudflare & Google).
+    - Elimination of redundant PROXY group retries on single proxy delay timeout.
+    - Fast Retry capped at 1 retry after 1s.
+    - 3-second TTL cache for `get_proxies` to eliminate redundant JSON parsing per check cycle.
+  - `backend/src/routing.rs`:
+    - Inbound listener configuration: `listeners: [{port: 7894, listen: 127.0.0.1, proxy: '🛡️ Canary Probe'}]`.
+    - Proxy group generator: `'🛡️ Canary Probe'` isolated selector group for zero-touch canary testing.
+  - `backend/src/config.rs`:
+    - `smart_failover_enabled: bool` (default `true`) in `FailoverConfig`.
+  - `backend/src/traffic.rs`:
+    - Honest traffic accounting per channel (Direct, Proxy, Whitelist) without channel substitution.
+  - `backend/src/api.rs`:
+    - Status reporting for smart failover, active tier, honest BS traffic delta, and settings persistence.
 - **Frontend (React / TypeScript / Vite / TailwindCSS)**:
-  - `Gaming.tsx`: Device-specific gaming mode toggle preserving `device_mac`.
-  - `FlowRepairModal.tsx`: Explicit on-click repair without `useEffect` auto-triggering and mounted state protection.
-  - `qrCode.ts`: ISO/IEC 18004 compliant QR generator (LSB format bits, alignment pattern coordinates, preserved dark module).
-  - `AdGuard.tsx`: Single-point protection toggle without race-condition second calls.
-  - `App.tsx`: Polling interval lower bound (Math.max(3, ...)), accessible Diagnostics tab.
-  - `api.ts`, `nodeParser.ts`, `yamlValidator.ts`, `XboxDns.tsx`, `PoliciesMap.tsx`, `Help.tsx`: Resilient parsing, unicode base64, HTTP clipboard fallback, accurate API docs.
+  - `frontend/src/components/Dashboard.tsx`:
+    - Failover card modernized with 10-point audit compliance (Zero Fake Metrics):
+      - Purged <= 5 score elements (duplicate status badge, generic reserve count, fake `(10 мин)` string).
+      - Added «🧠 Умный фейловер» toggle.
+      - Added Tier 1 (VPS) / Tier 2 (БС) visual badges.
+      - Displayed real Whitelist episode traffic volume from `/connections` delta.
+  - `frontend/src/components/Settings.tsx`:
+    - «🧠 Умный фейловер» master switch with description, synchronized with `config.failover.smart_failover_enabled`.
+  - `frontend/src/types.ts`:
+    - TypeScript definitions for `smart_failover_enabled`, tier status, and traffic metrics.
 
 ## Feature Inventory
 | # | Feature | Description | Milestone | Source |
 |---|---------|-------------|-----------|--------|
-| 1 | SEC-01 | Remove ghproxy.net, direct GitHub with Mihomo proxy fallback, verify SHA-256 | M1 | Survey Spec Miner |
-| 2 | SEC-02 | Strict IP parsing in CSRF Origin validation (is_private, is_loopback) | M1 | Survey Spec Miner |
-| 3 | SEC-03 | SSRF prevention in notifications webhook URL validation | M1 | Survey Spec Miner |
-| 4 | DNS-01 | Eliminate hardcoded port 3053; use detected AdGuard DNS port (5353) | M2 | Survey Spec Miner |
-| 5 | DNS-02 | Unify all DNS iptables redirection in adguard.rs; remove duplicate api.rs rules | M2 | Survey Spec Miner |
-| 6 | DNS-03 | Avoid duplicate bind_hosts in AdGuardHome.yaml (bind strictly to 0.0.0.0) | M2 | Survey Spec Miner |
-| 7 | NET-01 | RAII Drop guard for speedtest node group switching snapshot restoration | M2 | Survey Spec Miner |
-| 8 | SYS-01 | Async dd swap allocation via tokio::process::Command to prevent Tokio blocking | M2 | Survey Spec Miner |
-| 9 | R3 | Zero-Touch AdGuard Home DNS Synchronization (iptables 53->5353, config.json sync, watchdog enforcement) | M2 | Survey Spec Miner |
-| 10 | INS-01 | Zapret 2 ELF magic header validation (7f454c46) | M3 | Survey Explorer 2 |
-| 11 | INS-02 | Reject unsupported nfqws fallback to nfqws2 | M3 | Survey Explorer 2 |
-| 12 | VER-01 | Dynamic Zapret release version resolution instead of hardcoded strings | M3 | Survey Explorer 2 |
-| 13 | INS-03 | Add full PATH export to S99adguardhome init script | M3 | Survey Explorer 2 |
-| 14 | SYS-02 | Allow killing background daemons with PPID 1 via process whitelist | M3 | Survey Explorer 2 |
-| 15 | WD-01 | Reapply Mihomo rules and cleanup DIRECT rules when Zapret halted by watchdog | M3 | Survey Explorer 2 |
-| 16 | WD-02 | Preserve force_domains and device routing during DHCP lease updates | M3 | Survey Explorer 2 |
-| 17 | NET-02 | Antigravity proxy bind configuration for LAN compatibility | M3 | Survey Explorer 2 |
-| 18 | BOT-01 | Telegram bot uses configured zapret_init path instead of hardcode | M3 | Survey Explorer 2 |
-| 19 | TR-01 | Dynamic WAN interface discovery in traffic.rs without apcli1 hardcode | M3 | Survey Explorer 2 |
-| 20 | FO-01 | Failover hysteresis with 3-consecutive-failure counter | M3 | Survey Explorer 2 |
-| 21 | FO-02 | Filter pseudo-nodes (DIRECT, REJECT, GLOBAL) from failover priority chain | M3 | Survey Explorer 2 |
-| 22 | CF-01 | URL resolution in config.rs replacing 0.0.0.0 with 127.0.0.1 | M3 | Survey Explorer 2 |
-| 23 | AG-01 | Symmetrical FORWARD chain cleanup and remove invalid ip6tables -t nat | M3 | Survey Explorer 2 |
-| 24 | GAMING-01 | Per-device gaming mode toggle preserving device_mac on disable | M4 | Survey Explorer 3 |
-| 25 | REPAIR-01 | Remove auto-execution from useEffect in FlowRepairModal (button only) | M4 | Survey Explorer 3 |
-| 26 | REPAIR-02 | Add isMounted guard in FlowRepairModal | M4 | Survey Explorer 3 |
-| 27 | QR-01 | ISO/IEC 18004 QR code generation compliance (alignment, format bits, dark module) | M4 | Survey Explorer 3 |
-| 28 | FE-ADBLOCK-01 | Remove duplicate apiPost('adblock/toggle') in AdGuard.tsx | M4 | Survey Explorer 3 |
-| 29 | DIAG-01 | Enable Diagnostics tab in TABS and remove hash redirect in App.tsx | M4 | Survey Explorer 3 |
-| 30 | POLL-01 | Clamp refresh_interval_sec with Math.max(3, ...) to prevent DoS | M4 | Survey Explorer 3 |
-| 31 | API-01 | Permit legitimate null data payloads in validateEndpointData | M4 | Survey Explorer 3 |
-| 32 | POLICIES-01 | Support both is_main and is_default badge rendering in PoliciesMap | M4 | Survey Explorer 3 |
-| 33 | HELP-01 | Correct API documentation endpoints in Help.tsx | M4 | Survey Explorer 3 |
-| 34 | HEADER-01 | Disable core toggle button in Header.tsx until status is loaded | M4 | Survey Explorer 3 |
-| 35 | ANTIGRAV-01 | Invalidate cached googleGeo on server switch | M4 | Survey Explorer 3 |
-| 36 | ZAPVER-01 | Dynamic version resolution for Zapret events | M4 | Survey Explorer 3 |
-| 37 | SS-01 | Unicode-safe base64 encoding in nodeParser.ts | M4 | Survey Explorer 3 |
-| 38 | CLIPBOARD-01 | HTTP fallback for clipboard operations in XboxDns.tsx | M4 | Survey Explorer 3 |
-| 39 | YAML-01 | Strip leading dashes before YAML key validation in yamlValidator.ts | M4 | Survey Explorer 3 |
-| 40 | R4 | Anti-Regression automated tests for 100% of bug fixes | M5 | User Rule & Testing Track |
+| 1 | FO-DELT-01 | Single `/connections` query per cycle with persistent snapshot `{id -> (upload, download)}` | M1 | Survey Explorer 1 |
+| 2 | FO-DELT-02 | Traffic delta download > 1 KB considered live; replaces cumulative counters in `check_active_download_traffic` | M1 | Survey Explorer 1 |
+| 3 | FO-HOLE-01 | Blackhole anomaly detection: upload delta > 5 KB with download delta == 0 on >= 3 active sockets | M1 | Survey Explorer 1 |
+| 4 | FO-FALL-01 | 4-tier fallback hierarchy: within threshold -> alive slow -> quarantine fast -> quarantine slow, preventing blackouts | M1 | Survey Explorer 1 |
+| 5 | FO-L7-01 | Concurrent L7 split probing in `ping_server_l7_split` (Cloudflare & Google in parallel, first successful wins) | M1 | Survey Explorer 1 |
+| 6 | FO-L7-02 | Eliminate redundant PROXY group re-tests in `ping_server_url_expected` | M1 | Survey Explorer 1 |
+| 7 | FO-L7-03 | Fast Retry capped at 1 retry after 1s; active check interval 10-15s vs pool interval 60s | M1 | Survey Explorer 1 |
+| 8 | FO-SWT-01 | Eliminate 30s `LAST_SWITCH` blind delay: post-switch verification at 5s, immediate quarantine if dead | M1 | Survey Explorer 1 |
+| 9 | FO-SEL-01 | Unified `select_failover_target` engine across `run_check`, Best-Ping, and `run_device_check` with quarantine bypass audit logging | M1 | Survey Explorer 1 |
+| 10 | FO-TIER-01 | Server classification into Tier 1 (VPS) vs Tier 2 (Whitelist via `is_whitelist_server_full`) | M2 | Survey Explorer 2 |
+| 11 | FO-TIER-02 | Tier subordination: switch to Tier 2 only if ALL Tier 1 nodes fail | M2 | Survey Explorer 2 |
+| 12 | FO-TIER-03 | Accelerated 60s Canary Soak Test for returning from Tier 2 to Tier 1 with clean socket reset | M2 | Survey Explorer 2 |
+| 13 | FO-PING-01 | Best-Ping optimization: poll ONLY active server when healthy, avoiding full pool ping storms | M2 | Survey Explorer 2 |
+| 14 | FO-PING-02 | Runtime enforcement of `best_ping_hysteresis_ms` in candidate comparison to eliminate flapping | M2 | Survey Explorer 2 |
+| 15 | FO-PING-03 | Expand `ping_servers_staggered` concurrency clamp from 2 to 6 (default 4) | M2 | Survey Explorer 2 |
+| 16 | FO-CFG-01 | Add `smart_failover_enabled: bool` (default true) to `FailoverConfig`, `/api/status`, and `PUT /api/settings` | M2 | Survey Explorer 2 |
+| 17 | FO-TRF-01 | Eliminate channel substitution in `traffic.rs`; track honest Whitelist episode traffic via `/connections` delta | M2 | Survey Explorer 2 |
+| 18 | FO-TRN-01 | Zero-touch coordination with `handle_whitelist_transition` and gaming mode suspension/resumption | M2 | Survey Explorer 2 |
+| 19 | FO-CNR-01 | Generate `'🛡️ Canary Probe'` group and listener `127.0.0.1:7894` in Mihomo configuration via `routing.rs` | M3 | Survey Explorer 3 |
+| 20 | FO-CNR-02 | Real 64 KB payload download via `http://127.0.0.1:7894` with status 200, length check, and throughput calculation | M3 | Survey Explorer 3 |
+| 21 | FO-CNR-03 | Eliminate all fake constants (`8 КБ`, `15 кбит/с`) from failover logs and UI | M3 | Survey Explorer 3 |
+| 22 | FO-MHO-01 | 3-second TTL cache for `get_proxies` in `backend/src/mihomo.rs` to prevent repeated JSON deserialization | M3 | Survey Explorer 3 |
+| 23 | FO-DEV-01 | Unify `run_device_check` with `select_failover_target` and delta download traffic verification | M4 | Survey Explorer 3 |
+| 24 | FO-QUR-01 | Atomic persistence of quarantine in `/opt/etc/xkeen-route/quarantine.json` with Unix timestamps | M4 | Survey Explorer 3 |
+| 25 | FO-UI-01 | Failover card 10-point audit: purge <= 5 score elements (duplicate badge, generic counter, fake `(10 мин)`) | M4 | Survey Explorer 3 |
+| 26 | FO-UI-02 | Add «🧠 Умный фейловер» toggle in Dashboard Failover card and Settings tab | M4 | Survey Explorer 3 |
+| 27 | FO-UI-03 | Add Tier 1 (VPS) / Tier 2 (БС) badges and honest BS traffic metric to Failover card | M4 | Survey Explorer 3 |
+| 28 | FO-TST-01 | Comprehensive anti-regression unit and integration tests for all 27 features | M5 | Testing & Audit Track |
 
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
 |---|------|-------|-------------|--------|
-| 1 | M1: Security Hardening | SEC-01, SEC-02, SEC-03 | None | PLANNED |
-| 2 | M2: DNS & Network Core | DNS-01, DNS-02, DNS-03, NET-01, SYS-01, R3 Zero-Touch | M1 | PLANNED |
-| 3 | M3: Installer & Runtime | INS-01, INS-02, VER-01, INS-03, SYS-02, WD-01, WD-02, NET-02, BOT-01, TR-01, FO-01, FO-02, CF-01, AG-01 | M2 | PLANNED |
-| 4 | M4: Frontend UX & Utils | GAMING-01, REPAIR-01/02, QR-01, FE-ADBLOCK-01, DIAG-01, POLL-01, API-01, POLICIES-01, HELP-01, HEADER-01, ANTIGRAV-01, ZAPVER-01, SS-01, CLIPBOARD-01, YAML-01 | M2, M3 | PLANNED |
-| 5 | M5: Anti-Regression Verification | 100% Cargo & NPM tests passing, Forensic Audit, Zero Regressions | M1..M4 | PLANNED |
+| 1 | M1: Traffic Delta & Core Failover | FO-DELT-01, FO-DELT-02, FO-HOLE-01, FO-FALL-01, FO-L7-01, FO-L7-02, FO-L7-03, FO-SWT-01, FO-SEL-01 | None | DONE |
+| 2 | M2: Smart Failover Tiers & Best-Ping | FO-TIER-01, FO-TIER-02, FO-TIER-03, FO-PING-01, FO-PING-02, FO-PING-03, FO-CFG-01, FO-TRF-01, FO-TRN-01 | M1 | DONE |
+| 3 | M3: Honest Canary Soak Test & Probe Listener | FO-CNR-01, FO-CNR-02, FO-CNR-03, FO-MHO-01 | M1, M2 | DONE |
+| 4 | M4: Per-Device & Persistent Quarantine & UI Audit | FO-DEV-01, FO-QUR-01, FO-UI-01, FO-UI-02, FO-UI-03 | M2, M3 | DONE |
+| 5 | M5: E2E Verification & Forensic Audit | FO-TST-01 (100% passing tests, zero fake metrics, screenshot & transcript audit) | M1..M4 | DONE |
 
 ## Interface Contracts
-### `updater.rs` ↔ `config.rs`
-- `download_file_verified(url, sha256_expected, proxy_fallback)`: downloads file, checks sha256 if provided, falls back to `cfg.mihomo_proxy_url()`.
-### `auth.rs`
-- `is_valid_origin(origin_host_only)`: parses via `std::net::IpAddr`. Returns true if private/loopback IPv4, loopback IPv6, or domain is `localhost`, `my.keenetic.net`, or `router`.
-### `notifications.rs`
-- `validate_webhook_url(url)`: rejects if parsed IP is loopback, link-local, or private.
-### `adguard.rs` ↔ `api.rs` / `watchdog.rs`
-- `apply_adguard_iptables(dns_port)`: configures `XKEEN_ADGUARD` chain redirecting port 53 to `dns_port` (default 5353) on `br+` and `Bridge+`.
-- `remove_adguard_iptables()`: flushes and removes `XKEEN_ADGUARD` chain from `PREROUTING`.
-- All DNS redirection logic is centralized in `adguard.rs`. `api.rs` calls `adguard::apply_adguard_iptables` / `adguard::remove_adguard_iptables` instead of injecting raw rules.
-### `speedtest.rs`
-- `NodeGroupGuard`: RAII guard holding cloned `original_snapshot` and Arc reference, on `Drop` executes `tokio::spawn(restore_groups_snapshot(...))`.
-### `Gaming.tsx` ↔ `api.rs`
-- Disable gaming mode payload: `{ enabled: false, device_mac: preferredMac, mode: currentMode }`.
+### `failover.rs` ↔ `mihomo.rs`
+- `fetch_connections_snapshot(http, cfg) -> Result<HashMap<String, (u64, u64)>>`: captures connection byte snapshot from single `/connections` call.
+- `calc_traffic_deltas(prev, current) -> (u64, u64)`: returns `(download_delta, upload_delta)`.
+- `ping_server_l7_split(http, cfg, server_id, timeout_ms)`: concurrently races Cloudflare & Google expected-204 probes; returns fastest response time or -1.
+- `select_failover_target(candidates, pings, is_quarantined_fn, threshold, active_id, hysteresis_ms)`: centralized pure selection engine returning `SelectedTarget { id, ping_ms, is_quarantined, is_alive_slow, tier }`.
+- `is_whitelist_server_full(node_name, node_id, provider, cfg)`: authoritative server tier classifier.
+
+### `failover.rs` ↔ `routing.rs`
+- `apply_canary_rules(config_yaml)`: injects `'🛡️ Canary Probe'` proxy group and listener `127.0.0.1:7894` targeting `'🛡️ Canary Probe'`.
+- `perform_canary_download(port, chunk_bytes)`: downloads chunk via `http://127.0.0.1:port` and validates status 200, length, and speed.
+
+### `failover.rs` ↔ Storage
+- `load_quarantine_from_file(path)`: loads Unix timestamp entries from `/opt/etc/xkeen-route/quarantine.json`.
+- `save_quarantine_to_file(path, entries)`: atomically writes quarantine records via temp file.
 
 ## Code Layout
-- `backend/src/`: Backend Rust codebase
-- `backend/tests/`: Integration and anti-regression tests
-- `frontend/src/`: Frontend React/TypeScript codebase
-- `frontend/src/tests/` and `frontend/src/utils/__tests__/`: Frontend unit and component tests
+- `backend/src/failover.rs`: Core failover engine, tier subordination, selection, canary test
+- `backend/src/mihomo.rs`: Mihomo REST client, L7 probing, TTL cache
+- `backend/src/routing.rs`: YAML rule and listener injection
+- `backend/src/config.rs`: `FailoverConfig` definitions
+- `backend/src/traffic.rs`: Real-time traffic measurement
+- `backend/src/api.rs`: REST API endpoints and settings
+- `frontend/src/components/Dashboard.tsx`: Failover card UI
+- `frontend/src/components/Settings.tsx`: Settings UI

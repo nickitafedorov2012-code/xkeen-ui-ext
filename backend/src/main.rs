@@ -441,6 +441,9 @@ async fn main() {
         antigravity: ag_mgr,
     };
 
+    // FO-QUR-01: Восстановление состояния карантина из /opt/etc/xkeen-route/quarantine.json
+    failover::init_quarantine_from_disk().await.ok();
+
     failover::spawn(state.clone());
     watchdog::spawn(state.clone());
     traffic::spawn(state.clone());

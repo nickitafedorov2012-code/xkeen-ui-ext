@@ -236,19 +236,114 @@ pub async fn close_server_connections(
     count
 }
 
+// =========================================================================
+// FO-MHO-01: 3-Second TTL Cache & Resilient Fallback for Mihomo Proxies
+// =========================================================================
+
+pub const PROXIES_CACHE_TTL_SECS: u64 = 3;
+pub const PROXIES_CACHE_MAX_STALE_SECS: u64 = 30;
+
+#[derive(Clone, Debug)]
+pub struct ProxiesCacheEntry {
+    pub cached_at: std::time::Instant,
+    pub data: BTreeMap<String, Value>,
+}
+
+static PROXIES_CACHE: std::sync::RwLock<Option<ProxiesCacheEntry>> = std::sync::RwLock::new(None);
+
+/// Инвалидация кэша прокси: вызывается при переключении узлов, групп или reload конфига.
+pub fn invalidate_proxies_cache() {
+    let mut guard = PROXIES_CACHE.write().unwrap_or_else(|e| e.into_inner());
+    *guard = None;
+}
+
+/// Тестовая блокировка для изоляции тестов кэша.
+pub static PROXIES_CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Тестовый хелпер для очистки кэша между изолированными тестами.
+#[cfg(test)]
+pub fn clear_proxies_cache_for_test() {
+    invalidate_proxies_cache();
+}
+
+/// Тестовый хелпер для внедрения данных в кэш без сетевых запросов к Mihomo.
+#[cfg(test)]
+pub fn set_proxies_cache_for_test(data: BTreeMap<String, Value>, cached_at: std::time::Instant) {
+    let mut guard = PROXIES_CACHE.write().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(ProxiesCacheEntry { cached_at, data });
+}
+
+/// Проверка наличия свежего кэша в пределах TTL (3 секунды).
+pub fn get_cached_proxies_if_fresh() -> Option<BTreeMap<String, Value>> {
+    let guard = PROXIES_CACHE.read().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref entry) = *guard {
+        if entry.cached_at.elapsed() < std::time::Duration::from_secs(PROXIES_CACHE_TTL_SECS) {
+            return Some(entry.data.clone());
+        }
+    }
+    None
+}
+
+/// Получение устаревшего кэша в пределах допустимого окна (до 30 секунд) при сбое сети.
+pub fn get_cached_proxies_if_recent() -> Option<(BTreeMap<String, Value>, std::time::Duration)> {
+    let guard = PROXIES_CACHE.read().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref entry) = *guard {
+        let age = entry.cached_at.elapsed();
+        if age < std::time::Duration::from_secs(PROXIES_CACHE_MAX_STALE_SECS) {
+            return Some((entry.data.clone(), age));
+        }
+    }
+    None
+}
+
 /// Mihomo отвечает на /proxies объектом {"proxies": {...}} — достаём карту.
+/// Оптимизировано 3-секундным TTL-кэшем с защитой от сбоев (stale-if-error).
 pub async fn get_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Result<BTreeMap<String, Value>, String> {
-    let v = m_get(http, cfg, "/proxies").await?;
+    // 1. Быстрый возврат из кэша (zero network I/O, zero JSON parsing)
+    if let Some(cached) = get_cached_proxies_if_fresh() {
+        return Ok(cached);
+    }
+
+    // 2. Сетевой запрос к Mihomo API
+    let v = match m_get(http, cfg, "/proxies").await {
+        Ok(val) => val,
+        Err(err) => {
+            // Resilient Fallback: если ядро временно перезагружается или занято,
+            // возвращаем недавний кэш (до 30 с), предотвращая ложный сбой failover
+            if let Some((stale_data, age)) = get_cached_proxies_if_recent() {
+                crate::log_w!(
+                    "Mihomo /proxies временно недоступен ({}), отдаём кэш возрастом {:.1} с",
+                    err,
+                    age.as_secs_f64()
+                );
+                return Ok(stale_data);
+            }
+            return Err(err);
+        }
+    };
+
+    // 3. Десериализация ответа
     let proxies_val = v
         .get("proxies")
         .ok_or_else(|| "Ответ Mihomo не содержит объект 'proxies' (ядро перезагружается)".to_string())?;
     let map = proxies_val
         .as_object()
         .ok_or_else(|| "Поле 'proxies' ответа Mihomo не является объектом".to_string())?;
+
     let mut out = BTreeMap::new();
     for (k, val) in map {
         out.insert(k.clone(), val.clone());
     }
+
+    // 4. Сохранение в кэш
+    {
+        let mut guard = PROXIES_CACHE.write().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(ProxiesCacheEntry {
+            cached_at: std::time::Instant::now(),
+            data: out.clone(),
+        });
+    }
+
     Ok(out)
 }
 /// Mihomo отвечает на /providers/proxies объектом {"providers": {...}} — разворачиваем в карту
@@ -1032,6 +1127,7 @@ async fn switch_server_inner(http: &reqwest::Client, cfg: &AppConfig, server_id:
         }
     }
     if switched > 0 {
+        invalidate_proxies_cache();
         if !graceful {
             if !prev_active.is_empty() && prev_active != target && !prev_active.eq_ignore_ascii_case("direct") {
                 let closed = close_server_connections(http, cfg, &prev_active).await;
@@ -1128,6 +1224,7 @@ pub async fn switch_flow_server(state: &AppState, server_id: &str) -> Result<Str
 
         if member == Some(true) {
             m_put(&state.http, &cfg, &format!("/proxies/{}", urlencoding_lite(g)), json!({ "name": target }), 3).await?;
+            invalidate_proxies_cache();
             let _ = close_all_connections(&state.http, &cfg).await;
             return Ok(format!("Выделенный маршрут Google Flow & AI переключен на '{target}'"));
         }
@@ -1144,6 +1241,7 @@ pub async fn switch_flow_server(state: &AppState, server_id: &str) -> Result<Str
 
     if let Some(ref g) = flow_group {
         let _ = m_put(&state.http, &cfg, &format!("/proxies/{}", urlencoding_lite(g)), json!({ "name": target }), 3).await;
+        invalidate_proxies_cache();
     }
 
     let _ = close_all_connections(&state.http, &cfg).await;
@@ -1152,6 +1250,7 @@ pub async fn switch_flow_server(state: &AppState, server_id: &str) -> Result<Str
 
 /// Пинг всех участников селекторной группы через /group/{group}/delay (мс по каждому серверу в группе).
 /// Возвращает карту: server_id -> delay_ms.
+#[allow(dead_code)]
 pub async fn ping_group(
     http: &reqwest::Client,
     cfg: &AppConfig,
@@ -1300,39 +1399,6 @@ pub async fn ping_server_url_expected(
                         }
                     }
                 }
-            }
-        }
-
-        if let Some(group) = find_primary_group(&proxies) {
-            let is_now = proxies
-                .get(&group)
-                .and_then(|p| p.get("now"))
-                .and_then(|n| n.as_str())
-                .map(|now| now == server_id)
-                .unwrap_or(false);
-
-            if is_now {
-                let g_enc = urlencoding_lite(&group);
-                let g_url = format!(
-                    "{}/proxies/{g_enc}/delay?timeout={timeout_ms}&url={check_url}{exp_param}",
-                    cfg.mihomo_url()
-                );
-                let g_req_timeout = std::cmp::max(timeout_ms + 2000, 5000);
-                let mut g_req = http.get(&g_url).timeout(std::time::Duration::from_millis(g_req_timeout));
-                if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
-                    g_req = g_req.header(k, v);
-                }
-                if let Ok(resp) = g_req.send().await {
-                    if resp.status().is_success() {
-                        if let Ok(v) = resp.json::<Value>().await {
-                            if let Some(d) = v.get("delay").and_then(|d| d.as_i64()) {
-                                return if d > 0 { d } else { -1 };
-                            }
-                        }
-                    }
-                }
-                // Активный сервер не ответил на проверку через селектор — он недоступен
-                return -1;
             }
         }
     }
@@ -1485,21 +1551,36 @@ pub async fn probe_server_l7(
 }
 
 /// L7 Split-Target Probing:
-/// 1. Сначала пробует основной легковесный URL (Cloudflare generate_204 с expected=204)
-/// 2. При сбое/таймауте мгновенно пробует вторичный URL (Google generate_204 с expected=204)
-/// Исключает ложные тревоги при локальных сбоях конкретного CDN.
+/// Параллельно опрашивает Cloudflare и Google эндпоинты через tokio::select!.
+/// Первый успешный ответ (expected=204) мгновенно выигрывает и возвращает задержку,
+/// исключая задержки ожидания таймаута сбойного CDN.
 pub async fn ping_server_l7_split(
     http: &reqwest::Client,
     cfg: &AppConfig,
     server_id: &str,
     timeout_ms: u64,
 ) -> i64 {
-    let ms1 = ping_server_url_expected(http, cfg, server_id, timeout_ms, Some(PRIMARY_L7_CHECK_URL), Some(204)).await;
-    if ms1 > 0 {
-        return ms1;
+    let f1 = ping_server_url_expected(http, cfg, server_id, timeout_ms, Some(PRIMARY_L7_CHECK_URL), Some(204));
+    let f2 = ping_server_url_expected(http, cfg, server_id, timeout_ms, Some(SECONDARY_L7_CHECK_URL), Some(204));
+    tokio::pin!(f1);
+    tokio::pin!(f2);
+
+    tokio::select! {
+        res1 = &mut f1 => {
+            if res1 > 0 {
+                res1
+            } else {
+                f2.await
+            }
+        }
+        res2 = &mut f2 => {
+            if res2 > 0 {
+                res2
+            } else {
+                f1.await
+            }
+        }
     }
-    let ms2 = ping_server_url_expected(http, cfg, server_id, timeout_ms, Some(SECONDARY_L7_CHECK_URL), Some(204)).await;
-    ms2
 }
 
 /// Параллельный пинг списка серверов
@@ -1564,7 +1645,7 @@ pub const AUTO_PING_MAX_IDS: usize = 24;
 pub fn collect_auto_ping_ids(cfg: &AppConfig) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut push = |ids: &mut Vec<String>, seen: &mut std::collections::HashSet<String>, v: &str| {
+    let push = |ids: &mut Vec<String>, seen: &mut std::collections::HashSet<String>, v: &str| {
         let v = v.trim();
         if !v.is_empty() && seen.insert(v.to_string()) {
             ids.push(v.to_string());
@@ -1677,6 +1758,7 @@ pub async fn auto_heal_proxy_selectors(http: &reqwest::Client, cfg: &AppConfig) 
 /// Reload конфига Mihomo (после правки config.yaml). Путь — из настроек.
 pub async fn reload_config(http: &reqwest::Client, cfg: &AppConfig) -> Result<(), String> {
     let res = m_put(http, cfg, "/configs?force=true", json!({ "path": cfg.mihomo.config_path }), 15).await;
+    invalidate_proxies_cache();
     auto_heal_proxy_selectors(http, cfg).await;
     res
 }
@@ -1685,9 +1767,34 @@ pub async fn reload_config(http: &reqwest::Client, cfg: &AppConfig) -> Result<()
 pub async fn switch_group(http: &reqwest::Client, cfg: &AppConfig, group: &str, server: &str) -> Result<(), String> {
     let enc = urlencoding_lite(group);
     m_put(http, cfg, &format!("/proxies/{enc}"), json!({ "name": server }), 5).await?;
+    invalidate_proxies_cache();
     let _ = close_all_connections(http, cfg).await;
     Ok(())
 }
+
+/// Переключение селектор-группы БЕЗ сброса клиентских соединений (для Canary Probe и фоновых тестов).
+/// В отличие от switch_group(), данный метод не разрывает активные сокеты клиентов.
+pub async fn switch_selector(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    group: &str,
+    server: &str,
+) -> Result<(), String> {
+    let enc = urlencoding_lite(group);
+    m_put(
+        http,
+        cfg,
+        &format!("/proxies/{enc}"),
+        json!({ "name": server }),
+        5,
+    )
+    .await?;
+
+    invalidate_proxies_cache();
+
+    Ok(())
+}
+
 
 /// Версия ядра Mihomo из GET /version.
 pub async fn get_version(http: &reqwest::Client, cfg: &AppConfig) -> Option<String> {
@@ -2360,6 +2467,195 @@ mod tests {
             0
         };
         assert_eq!(effective_delay, 42, "Lazy pool delay must resolve to active leaf node delay");
+    }
+
+    #[tokio::test]
+    async fn test_ping_server_l7_split_primary_timeout_secondary_fast() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 1024];
+                        let n = socket.read(&mut buf).await.unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        if req.contains("cloudflare") {
+                            // Primary endpoint times out / hangs
+                            tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+                            let resp = "HTTP/1.1 200 OK\r\nContent-Length: 14\r\nContent-Type: application/json\r\n\r\n{\"delay\": -1}";
+                            let _ = socket.write_all(resp.as_bytes()).await;
+                        } else {
+                            // Secondary endpoint responds fast
+                            tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+                            let resp = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nContent-Type: application/json\r\n\r\n{\"delay\": 75}";
+                            let _ = socket.write_all(resp.as_bytes()).await;
+                        }
+                    });
+                } else {
+                    break;
+                }
+            }
+        });
+
+        let mut cfg = AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".to_string();
+        cfg.mihomo.port = port;
+        let client = reqwest::Client::new();
+
+        let start = std::time::Instant::now();
+        let ping = ping_server_l7_split(&client, &cfg, "test_server", 1000).await;
+        let elapsed = start.elapsed();
+
+        assert_eq!(ping, 75, "Expected secondary response 75ms");
+        assert!(elapsed < tokio::time::Duration::from_millis(600), "Must return fast secondary response without waiting for primary timeout, elapsed: {:?}", elapsed);
+    }
+
+    #[tokio::test]
+    async fn test_ping_server_l7_split_secondary_fails_fast_primary_succeeds() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            loop {
+                if let Ok((mut socket, _)) = listener.accept().await {
+                    tokio::spawn(async move {
+                        let mut buf = [0u8; 1024];
+                        let n = socket.read(&mut buf).await.unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]);
+                        if req.contains("cloudflare") {
+                            // Primary succeeds in 60ms
+                            tokio::time::sleep(tokio::time::Duration::from_millis(60)).await;
+                            let resp = "HTTP/1.1 200 OK\r\nContent-Length: 13\r\nContent-Type: application/json\r\n\r\n{\"delay\": 85}";
+                            let _ = socket.write_all(resp.as_bytes()).await;
+                        } else {
+                            // Secondary fails fast in 10ms
+                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                            let resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+                            let _ = socket.write_all(resp.as_bytes()).await;
+                        }
+                    });
+                } else {
+                    break;
+                }
+            }
+        });
+
+        let mut cfg = AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".to_string();
+        cfg.mihomo.port = port;
+        let client = reqwest::Client::new();
+
+        let ping = ping_server_l7_split(&client, &cfg, "test_server", 1000).await;
+        assert_eq!(ping, 85, "Expected primary response 85ms when secondary failed fast");
+    }
+
+    fn sample_proxies() -> BTreeMap<String, Value> {
+        let mut m = BTreeMap::new();
+        m.insert("PROXY".to_string(), json!({ "type": "Selector", "now": "DE-01" }));
+        m.insert("DE-01".to_string(), json!({ "type": "Vless", "server": "1.2.3.4" }));
+        m
+    }
+
+    #[test]
+    fn test_proxies_cache_hit_within_ttl() {
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_proxies_cache_for_test();
+
+        let data = sample_proxies();
+        set_proxies_cache_for_test(data.clone(), std::time::Instant::now());
+
+        let cached = get_cached_proxies_if_fresh();
+        assert!(cached.is_some(), "Cache must be fresh within 3 seconds");
+        let cached_map = cached.unwrap();
+        assert_eq!(cached_map.len(), 2);
+        assert_eq!(cached_map.get("PROXY").unwrap().get("now").unwrap().as_str(), Some("DE-01"));
+
+        clear_proxies_cache_for_test();
+    }
+
+    #[test]
+    fn test_proxies_cache_expiry_after_ttl() {
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_proxies_cache_for_test();
+
+        let data = sample_proxies();
+        let expired_time = std::time::Instant::now() - std::time::Duration::from_secs(PROXIES_CACHE_TTL_SECS + 1);
+        set_proxies_cache_for_test(data, expired_time);
+
+        let cached = get_cached_proxies_if_fresh();
+        assert!(cached.is_none(), "Cache must expire after 3 seconds TTL");
+
+        clear_proxies_cache_for_test();
+    }
+
+    #[test]
+    fn test_proxies_cache_manual_invalidation() {
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_proxies_cache_for_test();
+
+        let data = sample_proxies();
+        set_proxies_cache_for_test(data, std::time::Instant::now());
+        assert!(get_cached_proxies_if_fresh().is_some());
+
+        invalidate_proxies_cache();
+        assert!(get_cached_proxies_if_fresh().is_none(), "Cache must be cleared after invalidation");
+
+        clear_proxies_cache_for_test();
+    }
+
+    #[test]
+    fn test_proxies_cache_stale_fallback_window() {
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_proxies_cache_for_test();
+
+        let data = sample_proxies();
+
+        // 1. Entry is 10 seconds old: expired for fresh read, but valid for resilient fallback (< 30s)
+        let stale_time = std::time::Instant::now() - std::time::Duration::from_secs(10);
+        set_proxies_cache_for_test(data.clone(), stale_time);
+
+        assert!(get_cached_proxies_if_fresh().is_none(), "10s old entry must not be returned as fresh");
+        let fallback = get_cached_proxies_if_recent();
+        assert!(fallback.is_some(), "10s old entry must be available for resilient fallback");
+        assert!(fallback.unwrap().1 >= std::time::Duration::from_secs(10));
+
+        // 2. Entry is 35 seconds old: exceeded MAX_STALE (30s)
+        let dead_time = std::time::Instant::now() - std::time::Duration::from_secs(PROXIES_CACHE_MAX_STALE_SECS + 5);
+        set_proxies_cache_for_test(data, dead_time);
+
+        assert!(get_cached_proxies_if_recent().is_none(), "35s old entry must exceed maximum stale window");
+
+        clear_proxies_cache_for_test();
+    }
+
+    #[test]
+    fn test_proxies_cache_concurrent_thread_safety() {
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_proxies_cache_for_test();
+
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                std::thread::spawn(move || {
+                    let mut m = BTreeMap::new();
+                    m.insert(format!("NODE_{i}"), json!({ "id": i }));
+                    set_proxies_cache_for_test(m, std::time::Instant::now());
+                    let _ = get_cached_proxies_if_fresh();
+                    if i % 2 == 0 {
+                        invalidate_proxies_cache();
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("Concurrent cache thread must not panic or deadlock");
+        }
+
+        clear_proxies_cache_for_test();
     }
 }
 

@@ -84,6 +84,15 @@ pub async fn status(State(state): State<AppState>) -> Response {
     let active_ping = active.as_ref().and_then(|a| a.get("ping_ms")).and_then(|v| v.as_i64()).unwrap_or(-1);
     let current_failover_status = failover::current_live_status(active_id, active_name, active_ping, &cfg).await;
 
+    let is_tier2 = !active_id.is_empty() && failover::is_whitelist_server_full(
+        active_name,
+        active_id,
+        Some(active_prov).filter(|p| !p.is_empty()),
+        &cfg,
+    );
+    let active_tier: u8 = if is_tier2 { 2 } else { 1 };
+    let wl_episode_bytes = failover::get_whitelist_episode_bytes();
+
     api_ok(json!({
         "version": VERSION,
         "config_path": state.config_path.display().to_string(),
@@ -118,6 +127,10 @@ pub async fn status(State(state): State<AppState>) -> Response {
             "best_ping_enabled": cfg.failover.best_ping_enabled,
             "best_ping_pool_size": cfg.failover.best_ping_pool_size,
             "best_ping_hysteresis_ms": cfg.failover.best_ping_hysteresis_ms,
+            "smart_failover_enabled": cfg.failover.smart_failover_enabled,
+            "smart_failover_canary_duration_secs": cfg.failover.smart_failover_canary_duration_secs,
+            "active_tier": active_tier,
+            "whitelist_episode_bytes": wl_episode_bytes,
             "canary": failover::canary_status().await,
             "last_test": failover::canary_last_result().await,
             "quarantine_enabled": cfg.failover.quarantine_enabled,
@@ -12658,6 +12671,53 @@ mod tests {
             assert!(u.contains("v3.0.0") || u.contains("3.0.0"));
         }
         assert!(urls_bare.contains(&"https://github.com/bol-van/zapret2/releases/download/v3.0.0/zapret2-v3.0.0.tar.gz".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_api_status_serialization_tiered_failover() {
+        let cfg = crate::config::AppConfig::default();
+        crate::failover::reset_whitelist_episode_bytes();
+        crate::failover::record_whitelist_episode_bytes(2048);
+
+        // Scenario A: Active is standard VPS (Tier 1)
+        let srv_vps = crate::mihomo::Server {
+            id: "vps_nl".into(),
+            name: "Netherlands VPS".into(),
+            protocol: "vless".into(),
+            host: "1.1.1.1".into(),
+            port: 443,
+            is_active: true,
+            is_priority: false,
+            ping_ms: 50,
+            provider: None,
+            provider_name: None,
+            is_pool: false,
+            resolved_ip: None,
+        };
+        let is_tier2_vps = crate::failover::is_whitelist_server_full(&srv_vps.name, &srv_vps.id, srv_vps.provider.as_deref(), &cfg);
+        let tier_vps: u8 = if is_tier2_vps { 2 } else { 1 };
+        assert_eq!(tier_vps, 1, "Standard VPS must be Tier 1");
+
+        // Scenario B: Active is Whitelist server (Tier 2)
+        let srv_bs = crate::mihomo::Server {
+            id: "bs_ru".into(),
+            name: "Moscow [БС] Reserve".into(),
+            protocol: "vless".into(),
+            host: "1.1.1.2".into(),
+            port: 443,
+            is_active: true,
+            is_priority: false,
+            ping_ms: 20,
+            provider: None,
+            provider_name: None,
+            is_pool: false,
+            resolved_ip: None,
+        };
+        let is_tier2_bs = crate::failover::is_whitelist_server_full(&srv_bs.name, &srv_bs.id, srv_bs.provider.as_deref(), &cfg);
+        let tier_bs: u8 = if is_tier2_bs { 2 } else { 1 };
+        assert_eq!(tier_bs, 2, "Whitelist server must be Tier 2");
+
+        assert_eq!(crate::failover::get_whitelist_episode_bytes(), 2048);
     }
 }
 

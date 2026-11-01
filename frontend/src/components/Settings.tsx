@@ -1710,9 +1710,9 @@ export default function Settings({ notify, status, refresh }: Props) {
                                 cursor: 'help',
                                 whiteSpace: 'nowrap',
                               }}
-                              title="Сервер отвечает на TCP-пинг, но блокирует реальный веб-трафик (L7-сбой передачи данных). Временно исключён из цепочки на 10 мин."
+                              title="Сервер отвечает на TCP-пинг, но блокирует реальный веб-трафик (L7-сбой передачи данных). Временно исключён из цепочки в карантине."
                             >
-                              🧟 Зомби (карантин {quarantineInfo ? Math.ceil(quarantineInfo.remaining_secs / 60) : 10} мин)
+                              🧟 Зомби {quarantineInfo ? `(ещё ${Math.ceil(quarantineInfo.remaining_secs / 60)} мин)` : '(в карантине)'}
                             </span>
                           ) : isQuarantined ? (
                             <span
@@ -1727,7 +1727,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                                 whiteSpace: 'nowrap',
                               }}
                             >
-                              🛡️ Карантин ({Math.ceil((quarantineInfo?.remaining_secs || 0) / 60)} мин)
+                              🛡️ Карантин ({quarantineInfo ? `ещё ${Math.ceil(quarantineInfo.remaining_secs / 60)} мин` : 'активен'})
                             </span>
                           ) : (
                             <span
@@ -1994,6 +1994,28 @@ export default function Settings({ notify, status, refresh }: Props) {
                 </label>
                 <span style={{ fontSize: 13, minWidth: 64, color: (settings.failover.quarantine_enabled ?? true) ? 'var(--green)' : 'var(--muted)' }}>
                   {(settings.failover.quarantine_enabled ?? true) ? 'Включён' : 'Выключен'}
+                </span>
+              </div>
+            </div>
+
+            {/* 🧠 Умный фейловер (приоритет VPS над белыми списками) */}
+            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <b style={{ display: 'block', fontSize: 13 }}>🧠 Умный фейловер (приоритет VPS над белыми списками)</b>
+                <span className="muted small">Автоматически возвращает трафик на VPS, когда они оживают, защищая лимитированные узлы [БС]</span>
+              </div>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+                <label className="switch" title="Включить или выключить умный фейловер">
+                  <input
+                    type="checkbox"
+                    checked={settings.failover.smart_failover_enabled ?? true}
+                    onChange={(e) => patch((s) => (s.failover.smart_failover_enabled = e.target.checked))}
+                    data-testid="settings-smart-failover-toggle"
+                  />
+                  <span className="slider" />
+                </label>
+                <span style={{ fontSize: 13, minWidth: 64, color: (settings.failover.smart_failover_enabled ?? true) ? 'var(--green)' : 'var(--muted)' }}>
+                  {(settings.failover.smart_failover_enabled ?? true) ? 'Включён' : 'Выключен'}
                 </span>
               </div>
             </div>

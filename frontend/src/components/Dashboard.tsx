@@ -113,10 +113,19 @@ function groupEvents(rawEvents: FailoverEventInfo[]): GroupedEvent[] {
   return grouped
 }
 
+function formatBytesRu(bytes: number): string {
+  if (!bytes || bytes <= 0) return '0 Б'
+  if (bytes < 1024) return `${bytes} Б`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} ГБ`
+}
+
 export default function Dashboard({ status, notify, refresh, onSwitchTab }: Props) {
   const [events, setEvents] = useState<FailoverEventInfo[]>([])
   const [checking, setChecking] = useState(false)
   const [togglingFailover, setTogglingFailover] = useState(false)
+  const [togglingSmartFailover, setTogglingSmartFailover] = useState(false)
   // История пинга активного сервера (для sparkline): {значение, было ли измерение}
   const [pingHistory, setPingHistory] = useState<{ ms: number; ok: boolean }[]>([])
   const lastActiveServerIdRef = useRef<string | undefined>(undefined)
@@ -347,6 +356,19 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
     }
   }
 
+  const toggleSmartFailover = async (enabled: boolean) => {
+    setTogglingSmartFailover(true)
+    try {
+      await apiPut('settings', { failover: { smart_failover_enabled: enabled } })
+      notify(enabled ? 'Умный фейловер включён' : 'Умный фейловер выключен')
+      refresh?.()
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка переключения умного фейловера', true)
+    } finally {
+      setTogglingSmartFailover(false)
+    }
+  }
+
   const f = status?.failover
   const groupedEvents = groupEvents(events)
 
@@ -547,9 +569,35 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
           <div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
               <h2 style={{ margin: 0 }}>⚡ Failover контроль</h2>
-              <span className={`badge ${f?.enabled ? 'badge-online' : ''}`} style={{ color: f?.enabled ? '#22c55e' : 'var(--muted)' }}>
-                {f?.enabled ? '🟢 включён' : '⚪ выключен'}
-              </span>
+              {f?.active_tier === 2 ? (
+                <span
+                  className="badge badge-warning"
+                  data-testid="failover-tier-badge"
+                  style={{
+                    background: 'rgba(234, 179, 8, 0.15)',
+                    color: '#eab308',
+                    border: '1px solid rgba(234, 179, 8, 0.3)',
+                    fontWeight: 600,
+                  }}
+                  title="Активен резервный узел белых списков (Tier 2)"
+                >
+                  🛡️ Tier 2 (БС)
+                </span>
+              ) : (
+                <span
+                  className="badge badge-info"
+                  data-testid="failover-tier-badge"
+                  style={{
+                    background: 'rgba(56, 189, 248, 0.15)',
+                    color: '#38bdf8',
+                    border: '1px solid rgba(56, 189, 248, 0.3)',
+                    fontWeight: 600,
+                  }}
+                  title="Активен основной VPS-сервер (Tier 1)"
+                >
+                  ⚡ Tier 1 (VPS)
+                </span>
+              )}
             </div>
           <ul className="kv">
             <li>
@@ -566,6 +614,24 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                 </label>
                 <b style={{ color: f?.enabled ? '#22c55e' : 'var(--muted)', fontSize: 13 }}>
                   {togglingFailover ? 'Сохранение…' : f?.enabled ? 'Включён' : 'Выключен'}
+                </b>
+              </div>
+            </li>
+            <li>
+              <span>🧠 Умный фейловер</span>
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+                <label className="switch" title="Приоритет VPS-серверов над белыми списками">
+                  <input
+                    type="checkbox"
+                    data-testid="dashboard-smart-failover-toggle"
+                    checked={f?.smart_failover_enabled ?? false}
+                    disabled={togglingSmartFailover}
+                    onChange={(e) => toggleSmartFailover(e.target.checked)}
+                  />
+                  <span className="slider" />
+                </label>
+                <b style={{ color: f?.smart_failover_enabled ? '#38bdf8' : 'var(--muted)', fontSize: 13 }}>
+                  {togglingSmartFailover ? 'Сохранение…' : f?.smart_failover_enabled ? 'Включён' : 'Выключен'}
                 </b>
               </div>
             </li>
@@ -600,9 +666,6 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                   </b>
                 </li>
               )}
-            {(f?.priority_chain?.length ?? 0) > 1 && (
-              <li><span>Резервы</span><b>{f!.priority_chain!.slice(1).length} сервер(ов)</b></li>
-            )}
             <li><span>Интервал проверки</span><b>{f ? `${f.interval_secs} с` : '—'}</b></li>
             {f?.canary?.active && (
               <li>
@@ -617,7 +680,7 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                 <span>Последний тест</span>
                 <b>
                   <span style={{ color: f.last_test.success ? '#4ade80' : '#f87171' }}>
-                    {f.last_test.success ? '✓' : '✗'} {f.last_test.target_name}
+                     {f.last_test.success ? '✓' : '✗'} {f.last_test.target_name}
                   </span>
                   <span className="muted small" style={{ marginLeft: 6, fontWeight: 'normal' }}>
                     ({typeof f.last_test.timestamp === 'string'
@@ -630,8 +693,16 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
             {f?.zombie_servers && f.zombie_servers.length > 0 && (
               <li>
                 <span>Зомби-серверы</span>
-                <b style={{ color: '#f87171' }}>
-                  🧟 {f.zombie_servers.length} в карантине (10 мин)
+                <b style={{ color: '#f87171' }} data-testid="dashboard-zombie-count">
+                  🧟 {f.zombie_servers.length} в карантине
+                </b>
+              </li>
+            )}
+            {(f?.active_tier === 2 || (f?.whitelist_episode_bytes ?? 0) > 0) && (
+              <li>
+                <span>🛡️ Трафик БС (эпизод)</span>
+                <b style={{ color: f?.active_tier === 2 ? '#eab308' : '#94a3b8' }} data-testid="dashboard-whitelist-traffic">
+                  {formatBytesRu(f?.whitelist_episode_bytes ?? 0)} за сессию
                 </b>
               </li>
             )}

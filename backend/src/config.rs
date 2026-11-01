@@ -126,6 +126,10 @@ fn default_canary_duration_secs() -> u64 {
     180
 }
 
+fn default_smart_failover_canary_duration_secs() -> u64 {
+    60
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct FailoverConfig {
@@ -156,6 +160,12 @@ pub struct FailoverConfig {
     /// Включение механизма карантина сбойных серверов (зомби). По умолчанию true.
     #[serde(default = "default_true")]
     pub quarantine_enabled: bool,
+    /// Умный фейловер: субординация уровней (Tier 1: обычные VPS -> Tier 2: серверы белых списков). По умолчанию true.
+    #[serde(default = "default_true")]
+    pub smart_failover_enabled: bool,
+    /// Укороченный Canary Soak Test для автовозврата с серверов белых списков на обычные серверы (сек, по умолчанию 60)
+    #[serde(default = "default_smart_failover_canary_duration_secs")]
+    pub smart_failover_canary_duration_secs: u64,
 }
 
 impl Default for FailoverConfig {
@@ -174,6 +184,8 @@ impl Default for FailoverConfig {
             best_ping_pool_size: 15,
             best_ping_hysteresis_ms: 40,
             quarantine_enabled: true,
+            smart_failover_enabled: true,
+            smart_failover_canary_duration_secs: 60,
         }
     }
 }
@@ -1467,5 +1479,33 @@ mod tests {
         assert!(ip_matches_cidr("192.168.2.63", "192.168.2.63"));
         assert!(ip_matches_cidr("192.168.2.63", "192.168.2.63/32"));
         assert!(!ip_matches_cidr("invalid-ip", "192.168.0.0/16"));
+    }
+
+    #[test]
+    fn test_smart_failover_config_deserialization_defaults() {
+        let json_raw = r#"{
+            "failover": {
+                "enabled": true,
+                "ping_threshold_ms": 300
+            }
+        }"#;
+        let cfg: crate::config::AppConfig = serde_json::from_str(json_raw).expect("Must deserialize valid json");
+        assert!(cfg.failover.smart_failover_enabled, "smart_failover_enabled must default to true");
+        assert_eq!(cfg.failover.smart_failover_canary_duration_secs, 60, "smart_failover_canary_duration_secs must default to 60");
+    }
+
+    #[test]
+    fn test_put_settings_smart_failover_toggle_persistence() {
+        let mut base = serde_json::to_value(crate::config::AppConfig::default()).unwrap();
+        assert_eq!(base["failover"]["smart_failover_enabled"], serde_json::json!(true));
+
+        let patch = serde_json::json!({
+            "failover": {
+                "smart_failover_enabled": false
+            }
+        });
+        crate::config::merge_value(&mut base, &patch);
+        let updated: crate::config::AppConfig = serde_json::from_value(base).unwrap();
+        assert!(!updated.failover.smart_failover_enabled, "Must be updated to false");
     }
 }

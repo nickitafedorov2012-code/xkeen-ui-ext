@@ -77,8 +77,8 @@ pub fn get_snapshot() -> TrafficSnapshot {
         whitelist_bytes: wl_bytes,
         direct_bytes: d_bytes,
         proxy_bytes: p_bytes,
-        down: if is_wl_active { wl_down } else { p_down },
-        up: if is_wl_active { wl_up } else { p_up },
+        down: if is_wl_active && wl_down > 0 { wl_down } else { p_down },
+        up: if is_wl_active && wl_up > 0 { wl_up } else { p_up },
     }
 }
 
@@ -128,8 +128,8 @@ pub fn get_snapshot_json() -> serde_json::Value {
         "direct_bytes": d_bytes,
         "proxy_bytes": p_bytes,
         "whitelist_active": is_wl_active,
-        "down": if is_wl_active { wl_down } else { p_down },
-        "up": if is_wl_active { wl_up } else { p_up },
+        "down": if is_wl_active && wl_down > 0 { wl_down } else { p_down },
+        "up": if is_wl_active && wl_up > 0 { wl_up } else { p_up },
         "history": history,
         "estimated": !is_hw,
     })
@@ -291,21 +291,10 @@ async fn run_mihomo_stream(state: AppState) {
                                     if let Ok(msg) = serde_json::from_str::<MihomoTrafficChunk>(&line) {
                                         // Инверсия направления Mihomo -> клиент: данные, отдаваемые Mihomo клиенту, являются Загрузкой (DOWN)
                                         let bytes = msg.down + msg.up;
-                                        if WHITELIST_ACTIVE.load(Ordering::Relaxed) {
-                                            // Активен сервер / туннель Белых списков (БС) с лимитированным трафиком
-                                            WHITELIST_DOWN.store(msg.up, Ordering::Relaxed);
-                                            WHITELIST_UP.store(msg.down, Ordering::Relaxed);
-                                            TOTAL_WHITELIST_BYTES.fetch_add(bytes, Ordering::Relaxed);
-                                            PROXY_DOWN.store(0, Ordering::Relaxed);
-                                            PROXY_UP.store(0, Ordering::Relaxed);
-                                        } else {
-                                            // Обычный VPS сервер (без метки БС) с безлимитным трафиком
-                                            PROXY_DOWN.store(msg.up, Ordering::Relaxed);
-                                            PROXY_UP.store(msg.down, Ordering::Relaxed);
-                                            TOTAL_PROXY_BYTES.fetch_add(bytes, Ordering::Relaxed);
-                                            WHITELIST_DOWN.store(0, Ordering::Relaxed);
-                                            WHITELIST_UP.store(0, Ordering::Relaxed);
-                                        }
+                                        // Честный учет без подмены каналов: Mihomo поток всегда отражает реальный прокси-трафик
+                                        PROXY_DOWN.store(msg.up, Ordering::Relaxed);
+                                        PROXY_UP.store(msg.down, Ordering::Relaxed);
+                                        TOTAL_PROXY_BYTES.fetch_add(bytes, Ordering::Relaxed);
                                     }
                                 }
                             }
@@ -473,8 +462,8 @@ async fn run_wan_polling() {
             "proxy": { "down": p_down, "up": p_up, "source": "Mihomo VPS" },
             "whitelist": { "down": wl_down, "up": wl_up, "active": is_wl_active },
             "total": { "down": wan_rx_speed, "up": wan_tx_speed, "source": "WAN" },
-            "down": if is_wl_active { wl_down } else { p_down },
-            "up": if is_wl_active { wl_up } else { p_up },
+            "down": if is_wl_active && wl_down > 0 { wl_down } else { p_down },
+            "up": if is_wl_active && wl_up > 0 { wl_up } else { p_up },
             "estimated": !is_hw,
         }));
     }
@@ -525,6 +514,8 @@ pub fn spawn(state: AppState) {
 mod tests {
     use super::*;
 
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_traffic_buffer_limit_without_newline() {
         let mut buffer = String::new();
@@ -552,6 +543,7 @@ mod tests {
 
     #[test]
     fn test_whitelist_traffic_active_and_counters() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_whitelist_active(false);
         assert!(!is_whitelist_active());
         set_whitelist_active(true);
@@ -571,13 +563,16 @@ mod tests {
         assert_eq!(json["whitelist"]["active"], true);
         assert!(json["whitelist_bytes"].as_u64().unwrap_or(0) >= 1536);
 
-        // Reset back to inactive
+        // Reset back to inactive and clear counters
+        WHITELIST_DOWN.store(0, Ordering::Relaxed);
+        WHITELIST_UP.store(0, Ordering::Relaxed);
         set_whitelist_active(false);
         assert!(!is_whitelist_active());
     }
 
     #[test]
     fn test_anti_regression_traffic_direction_mihomo_to_client_perspective() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Проверка: Mihomo chunk 'up' (данные, отдаваемые прокси клиенту) парсится
         // и направляется в Загрузку (DOWN), а chunk 'down' (от клиента к прокси) — в Отдачу (UP).
         let chunk_json = r#"{"up":15000000,"down":250000}"#;
@@ -590,10 +585,15 @@ mod tests {
         let snap = get_snapshot();
         assert_eq!(snap.proxy.down, 15000000, "Mihomo up must map to client download (DOWN)");
         assert_eq!(snap.proxy.up, 250000, "Mihomo down must map to client upload (UP)");
+
+        // Restore state to avoid polluting concurrent tests
+        PROXY_DOWN.store(0, Ordering::Relaxed);
+        PROXY_UP.store(0, Ordering::Relaxed);
     }
 
     #[test]
     fn test_anti_regression_traffic_split_between_vps_and_whitelist() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Сбросим для чистоты теста
         reset_traffic("all");
         set_whitelist_active(false);
@@ -625,10 +625,38 @@ mod tests {
         assert_eq!(TOTAL_WHITELIST_BYTES.load(Ordering::Relaxed), 5000);
 
         set_whitelist_active(false);
+        reset_traffic("all");
+    }
+
+    #[test]
+    fn test_traffic_honest_stream_no_channel_substitution() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        PROXY_DOWN.store(0, Ordering::Relaxed);
+        PROXY_UP.store(0, Ordering::Relaxed);
+
+        // Simulate incoming stream chunk
+        let down_bytes = 4096u64;
+        let up_bytes = 1024u64;
+
+        PROXY_DOWN.store(down_bytes, Ordering::Relaxed);
+        PROXY_UP.store(up_bytes, Ordering::Relaxed);
+
+        assert_eq!(PROXY_DOWN.load(Ordering::Relaxed), 4096);
+        assert_eq!(PROXY_UP.load(Ordering::Relaxed), 1024);
+
+        // Even if whitelist active is toggled, PROXY stream must NOT be zeroed
+        set_whitelist_active(true);
+        assert_eq!(PROXY_DOWN.load(Ordering::Relaxed), 4096, "PROXY_DOWN must remain intact");
+        assert_eq!(PROXY_UP.load(Ordering::Relaxed), 1024, "PROXY_UP must remain intact");
+
+        set_whitelist_active(false);
+        PROXY_DOWN.store(0, Ordering::Relaxed);
+        PROXY_UP.store(0, Ordering::Relaxed);
     }
 
     #[test]
     fn test_traffic_reset_individual_counters() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_traffic("all");
         TOTAL_DIRECT_BYTES.store(100, Ordering::Relaxed);
         TOTAL_PROXY_BYTES.store(200, Ordering::Relaxed);
@@ -670,5 +698,62 @@ mod tests {
         assert_eq!(loaded.whitelist_bytes, 54321);
 
         let _ = std::fs::remove_file(&test_file);
+    }
+
+    #[test]
+    fn test_get_snapshot_json_honest_stream_when_whitelist_active() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Anti-regression test for BUG-M2-01:
+        // Ensure get_snapshot_json() and record_history_point() do not blackout telemetry
+        // when whitelist is active but whitelist counters are 0 (honest proxy stream fallback).
+        set_whitelist_active(true);
+        PROXY_DOWN.store(1048576, Ordering::Relaxed);
+        PROXY_UP.store(524288, Ordering::Relaxed);
+        WHITELIST_DOWN.store(0, Ordering::Relaxed);
+        WHITELIST_UP.store(0, Ordering::Relaxed);
+
+        let snapshot = get_snapshot_json();
+        assert_eq!(snapshot["down"], 1048576, "get_snapshot_json down must fall back to proxy when wl_down is 0");
+        assert_eq!(snapshot["up"], 524288, "get_snapshot_json up must fall back to proxy when wl_up is 0");
+
+        // Verify get_snapshot() also agrees
+        let snap = get_snapshot();
+        assert_eq!(snap.down, 1048576);
+        assert_eq!(snap.up, 524288);
+
+        // When whitelist counters have actual positive data, whitelist values must be used
+        WHITELIST_DOWN.store(2048, Ordering::Relaxed);
+        WHITELIST_UP.store(1024, Ordering::Relaxed);
+        let snapshot_wl = get_snapshot_json();
+        assert_eq!(snapshot_wl["down"], 2048);
+        assert_eq!(snapshot_wl["up"], 1024);
+
+        // Test history point logic with wl_down == 0 and whitelist active
+        WHITELIST_DOWN.store(0, Ordering::Relaxed);
+        WHITELIST_UP.store(0, Ordering::Relaxed);
+        let is_wl_active = WHITELIST_ACTIVE.load(Ordering::Relaxed);
+        let wl_down = WHITELIST_DOWN.load(Ordering::Relaxed);
+        let wl_up = WHITELIST_UP.load(Ordering::Relaxed);
+        let p_down = PROXY_DOWN.load(Ordering::Relaxed);
+        let p_up = PROXY_UP.load(Ordering::Relaxed);
+
+        let hist_down = if is_wl_active && wl_down > 0 { wl_down } else { p_down };
+        let hist_up = if is_wl_active && wl_up > 0 { wl_up } else { p_up };
+        record_history_point(json!({
+            "down": hist_down,
+            "up": hist_up,
+        }));
+
+        let history = get_history_json();
+        let last_pt = history.as_array().and_then(|arr| arr.last()).expect("history point exists");
+        assert_eq!(last_pt["down"], 1048576);
+        assert_eq!(last_pt["up"], 524288);
+
+        // Clean up state
+        set_whitelist_active(false);
+        PROXY_DOWN.store(0, Ordering::Relaxed);
+        PROXY_UP.store(0, Ordering::Relaxed);
+        WHITELIST_DOWN.store(0, Ordering::Relaxed);
+        WHITELIST_UP.store(0, Ordering::Relaxed);
     }
 }
