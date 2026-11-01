@@ -427,6 +427,9 @@ async fn main() {
         config_path: Arc::new(config_path),
         http: match reqwest::Client::builder()
             .cookie_store(true)
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
             .build()
         {
             Ok(c) => c,
