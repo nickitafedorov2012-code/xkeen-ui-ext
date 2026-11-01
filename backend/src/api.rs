@@ -3009,32 +3009,79 @@ pub async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str, hwid: Opt
     if let Some(ref h) = resolved_hwid {
         req_builder = req_builder.header("x-hwid", h.as_str());
     }
-    let resp = match req_builder.send().await {
-        Ok(r) if r.status().is_success() => r,
-        _ => {
-            let mut direct_builder = state.http.get(url).header("User-Agent", ua).timeout(std::time::Duration::from_secs(12));
-            if let Some(ref h) = resolved_hwid {
-                direct_builder = direct_builder.header("x-hwid", h.as_str());
+    // 1. Сначала пробуем получить подписку через системный curl роутера, если он доступен
+    // (curl на роутере идеально согласует TLS/ALPN с прокси Mihomo и сервером QRATOR)
+    let curl_output = tokio::process::Command::new("curl")
+        .arg("-s")
+        .arg("-i")
+        .arg("-x")
+        .arg("http://127.0.0.1:7890")
+        .arg("-H")
+        .arg(format!("User-Agent: {ua}"))
+        .arg("-H")
+        .arg(format!("x-hwid: {}", resolved_hwid.as_deref().unwrap_or("")))
+        .arg("--max-time")
+        .arg("15")
+        .arg(url)
+        .output()
+        .await;
+
+    let (mut header_userinfo, text) = if let Ok(out) = curl_output {
+        if out.status.success() && !out.stdout.is_empty() {
+            let full_str = String::from_utf8_lossy(&out.stdout).to_string();
+            // Разделяем заголовки и тело
+            if let Some(pos) = full_str.find("
+\n
+\n").or_else(|| full_str.find("\n\n")) {
+                let sep_len = if full_str[pos..].starts_with("
+\n
+\n") { 4 } else { 2 };
+                let header_part = &full_str[..pos];
+                let body_part = &full_str[pos + sep_len..];
+                let userinfo = header_part.lines()
+                    .find(|l| l.to_ascii_lowercase().starts_with("subscription-userinfo:"))
+                    .and_then(|l| l.split_once(':').map(|(_, v)| v.trim()))
+                    .and_then(crate::mihomo::parse_subscription_userinfo_str);
+                (userinfo, body_part.to_string())
+            } else {
+                (None, full_str)
             }
-            direct_builder.send().await.map_err(|e| format!("HTTP {e}"))?
+        } else {
+            (None, String::new())
         }
+    } else {
+        (None, String::new())
     };
-    if !resp.status().is_success() {
-        return Err(format!("HTTP статус {}", resp.status()));
-    }
-    let (mut header_userinfo, text) = {
+
+    let text = if text.is_empty() {
+        let resp = match req_builder.send().await {
+            Ok(r) if r.status().is_success() => r,
+            _ => {
+                let mut direct_builder = state.http.get(url).header("User-Agent", ua).timeout(std::time::Duration::from_secs(12));
+                if let Some(ref h) = resolved_hwid {
+                    direct_builder = direct_builder.header("x-hwid", h.as_str());
+                }
+                direct_builder.send().await.map_err(|e| format!("HTTP {e}"))?
+            }
+        };
+        if !resp.status().is_success() {
+            return Err(format!("HTTP статус {}", resp.status()));
+        }
         let headers = resp.headers();
-        let userinfo = headers
-            .iter()
-            .find(|(k, _)| k.as_str().eq_ignore_ascii_case("subscription-userinfo"))
-            .and_then(|(_, v)| v.to_str().ok())
-            .and_then(crate::mihomo::parse_subscription_userinfo_str);
+        if header_userinfo.is_none() {
+            header_userinfo = headers
+                .iter()
+                .find(|(k, _)| k.as_str().eq_ignore_ascii_case("subscription-userinfo"))
+                .and_then(|(_, v)| v.to_str().ok())
+                .and_then(crate::mihomo::parse_subscription_userinfo_str);
+        }
         let bytes = match resp.bytes().await {
             Ok(b) => b,
             Err(e) => return Err(format!("Read bytes: {e}")),
         };
-        let text = String::from_utf8_lossy(&bytes).to_string();
-        (userinfo, text)
+        String::from_utf8_lossy(&bytes).to_string()
+    } else {
+        text
     };
 
     // Если основной запрос (например, с UA v2rayNG) не вернул заголовок Subscription-Userinfo,
