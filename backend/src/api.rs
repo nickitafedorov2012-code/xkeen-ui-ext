@@ -3009,9 +3009,14 @@ pub async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str, hwid: Opt
     if let Some(ref h) = resolved_hwid {
         req_builder = req_builder.header("x-hwid", h.as_str());
     }
-    // 1. Сначала пробуем получить подписку через системный curl роутера, если он доступен
+    // 1. Сначала пробуем получить подписку через системный curl роутера (/opt/bin/curl или curl)
     // (curl на роутере идеально согласует TLS/ALPN с прокси Mihomo и сервером QRATOR)
-    let curl_output = tokio::process::Command::new("curl")
+    let curl_bin = if std::path::Path::new("/opt/bin/curl").exists() {
+        "/opt/bin/curl"
+    } else {
+        "curl"
+    };
+    let curl_output = tokio::process::Command::new(curl_bin)
         .arg("-s")
         .arg("-i")
         .arg("-x")
