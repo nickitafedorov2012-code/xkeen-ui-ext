@@ -608,7 +608,7 @@ async function main() {
         await sleep(600);
       }
 
-      const shouldCaptureBeyond = ['zapret', 'settings', 'google-ai'].includes(scr.tab);
+      const shouldCaptureBeyond = ['dashboard', 'zapret', 'settings', 'google-ai'].includes(scr.tab);
       const shot = await send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: shouldCaptureBeyond });
       const buf = Buffer.from(shot.data, 'base64');
       const outPath = path.join(SCREENSHOT_DIR, scr.filename);
