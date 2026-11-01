@@ -129,6 +129,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
             "best_ping_hysteresis_ms": cfg.failover.best_ping_hysteresis_ms,
             "smart_failover_enabled": cfg.failover.smart_failover_enabled,
             "smart_failover_canary_duration_secs": cfg.failover.smart_failover_canary_duration_secs,
+            "provider_chain": cfg.failover.provider_chain,
             "active_tier": active_tier,
             "whitelist_episode_bytes": wl_episode_bytes,
             "canary": failover::canary_status().await,
@@ -875,28 +876,35 @@ pub struct SwitchReq {
     pub server_id: String,
 }
 
-/// POST /api/servers/switch
-pub async fn switch_server(State(state): State<AppState>, Json(req): Json<SwitchReq>) -> Response {
+/// Единый обработчик переключения сервера (из API веб-панели и Telegram-бота).
+/// Выполняет полный рабочий процесс:
+/// 1. Отмена активного замера скорости
+/// 2. Переключение сервера в ядре Mihomo (с инвалидацией кэша)
+/// 3. Регистрация ручного переключения для failover-иммунитета
+/// 4. Обработка перехода белых списков (handle_whitelist_transition)
+/// 5. Обновление и сохранение приоритета в config.json (чтобы фоновый failover не откатывал узел)
+/// 6. Запуск быстрого фонового замера пингов нового сервера
+pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -> Result<String, String> {
     // Ручной выбор пользователя имеет абсолютный приоритет:
     // Немедленно прерываем запущенный Speedtest и отменяем возврат старого узла
     crate::speedtest::cancel_active_speedtest();
     let cfg = state.config.read().await.clone();
-    match mihomo::switch_server(&state.http, &cfg, &req.server_id).await {
+    match mihomo::switch_server(&state.http, &cfg, server_id).await {
         Ok(msg) => {
-            log_i!("Смена сервера: {} — {}", req.server_id, msg);
-            failover::record_manual_switch(&req.server_id).await;
+            log_i!("Смена сервера: {} — {}", server_id, msg);
+            failover::record_manual_switch(server_id).await;
             let (srv_name, srv_prov) = if let Ok(servers) = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
-                servers.iter().find(|s| s.id == req.server_id).map(|s| (s.name.clone(), s.provider.clone())).unwrap_or_else(|| (req.server_id.clone(), None))
+                servers.iter().find(|s| s.id == server_id).map(|s| (s.name.clone(), s.provider.clone())).unwrap_or_else(|| (server_id.to_string(), None))
             } else {
-                (req.server_id.clone(), None)
+                (server_id.to_string(), None)
             };
-            failover::handle_whitelist_transition(&state, &req.server_id, &srv_name, srv_prov.as_deref()).await;
+            failover::handle_whitelist_transition(state, server_id, &srv_name, srv_prov.as_deref()).await;
             // Если переключен конкретный сервер, обновляем его как основной в цепочке приоритетов,
             // чтобы фоновый failover не откатывал выбор пользователя обратно через 30-60 секунд.
-            if !req.server_id.is_empty() && req.server_id != "Fastest" && req.server_id != "Fallback" {
+            if !server_id.is_empty() && server_id != "Fastest" && server_id != "Fallback" {
                 let _cfg_guard = state.config_lock.lock().await;
                 let mut mut_cfg = (**state.config.read().await).clone();
-                let id = req.server_id.clone();
+                let id = server_id.to_string();
                 if let Some(pos) = mut_cfg.failover.priority_chain.iter().position(|s| s == &id) {
                     mut_cfg.failover.priority_chain.remove(pos);
                 }
@@ -912,12 +920,20 @@ pub async fn switch_server(State(state): State<AppState>, Json(req): Json<Switch
             // виден в панели уже следующим опросом, без действий пользователя
             let cfg_now = (**state.config.read().await).clone();
             spawn_ping_refresh(state.http.clone(), cfg_now);
-            api_ok(json!({ "message": msg }))
+            Ok(msg)
         }
         Err(e) => {
-            log_e!("Ошибка смены сервера на {}: {}", req.server_id, e);
-            api_err(e)
+            log_e!("Ошибка смены сервера на {}: {}", server_id, e);
+            Err(e)
         }
+    }
+}
+
+/// POST /api/servers/switch
+pub async fn switch_server(State(state): State<AppState>, Json(req): Json<SwitchReq>) -> Response {
+    match execute_server_switch_workflow(&state, &req.server_id).await {
+        Ok(msg) => api_ok(json!({ "message": msg })),
+        Err(e) => api_err(e),
     }
 }
 
@@ -2754,15 +2770,35 @@ pub struct RenameProviderReq {
 /// GET /api/providers — список подписок с именами и метаданными
 pub async fn get_providers(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
+    // Актуализируем активного провайдера для фонового учета дельты
+    if let Ok(Some(act_srv)) = mihomo::get_active_server(&state.http, &cfg).await {
+        crate::traffic::set_active_provider_id(act_srv.provider);
+    }
     match mihomo::get_providers_info(&state.http, &cfg).await {
         Ok(providers) => {
             let list: Vec<serde_json::Value> = providers
                 .into_iter()
-                .map(|p| {
+                .map(|mut p| {
                     let is_wl = cfg.whitelist_providers.iter().any(|wp| wp == &p.id);
+                    let live_delta = crate::traffic::get_provider_live_delta(&p.id);
+
+                    // Если есть квота (total_bytes), вычисляем actual used (baseline + live_delta) и accurate remaining
+                    let baseline_used = p.upload_bytes.unwrap_or(0).saturating_add(p.download_bytes.unwrap_or(0));
+                    let actual_used = baseline_used.saturating_add(live_delta);
+
+                    if live_delta > 0 {
+                        let cur_down = p.download_bytes.unwrap_or(0);
+                        p.download_bytes = Some(cur_down.saturating_add(live_delta));
+                    }
+
+                    let remaining_bytes = p.total_bytes.map(|tot| tot.saturating_sub(actual_used));
+
                     let mut val = serde_json::to_value(&p).unwrap_or_default();
                     if let Some(obj) = val.as_object_mut() {
                         obj.insert("is_whitelist".to_string(), serde_json::Value::Bool(is_wl));
+                        obj.insert("live_delta_bytes".to_string(), json!(live_delta));
+                        obj.insert("actual_used_bytes".to_string(), json!(actual_used));
+                        obj.insert("remaining_bytes".to_string(), json!(remaining_bytes));
                     }
                     val
                 })
@@ -2957,8 +2993,17 @@ pub async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str, hwid: Opt
     if !resp.status().is_success() {
         return Err(format!("HTTP статус {}", resp.status()));
     }
-    let text = resp.text().await.map_err(|e| format!("Read text: {e}"))?;
-    let (conv_yaml, count) = crate::subscription_parser::convert_subscription_to_mihomo_yaml(&text)?;
+    let (header_userinfo, text) = {
+        let headers = resp.headers();
+        let userinfo = headers
+            .iter()
+            .find(|(k, _)| k.as_str().eq_ignore_ascii_case("subscription-userinfo"))
+            .and_then(|(_, v)| v.to_str().ok())
+            .and_then(crate::mihomo::parse_subscription_userinfo_str);
+        let t = resp.text().await.map_err(|e| format!("Read text: {e}"))?;
+        (userinfo, t)
+    };
+    let (mut conv_yaml, count) = crate::subscription_parser::convert_subscription_to_mihomo_yaml(&text)?;
     let prov_dir = std::path::Path::new(&state.config.read().await.mihomo.config_path)
         .parent()
         .map(|p| p.join("providers"))
@@ -2967,6 +3012,24 @@ pub async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str, hwid: Opt
     if let Some(parent) = prov_path.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
+
+    // Preservation and injection of Subscription-Userinfo
+    let final_userinfo = if let Some(u) = header_userinfo {
+        crate::traffic::reset_provider_live_delta(id);
+        Some(u)
+    } else if let Some(u) = crate::mihomo::extract_subscription_userinfo_from_body(&text) {
+        crate::traffic::reset_provider_live_delta(id);
+        Some(u)
+    } else if let Ok(existing_yaml) = tokio::fs::read_to_string(&prov_path).await {
+        crate::mihomo::extract_subscription_userinfo_from_body(&existing_yaml)
+    } else {
+        None
+    };
+
+    if let Some(ref u) = final_userinfo {
+        conv_yaml = crate::mihomo::inject_or_replace_userinfo_in_yaml(&conv_yaml, u);
+    }
+
     tokio::fs::write(&prov_path, conv_yaml).await.map_err(|e| format!("Запись {}: {e}", prov_path.display()))?;
     Ok(count)
 }
@@ -3078,9 +3141,19 @@ pub async fn add_provider(State(state): State<AppState>, Json(req): Json<AddProv
         };
         if let Ok(resp) = resp {
             if resp.status().is_success() {
+                let userinfo_hdr = resp
+                    .headers()
+                    .iter()
+                    .find(|(k, _)| k.as_str().eq_ignore_ascii_case("subscription-userinfo"))
+                    .and_then(|(_, v)| v.to_str().ok())
+                    .and_then(crate::mihomo::parse_subscription_userinfo_str);
                 if let Ok(text) = resp.text().await {
                     if crate::subscription_parser::is_v2ray_or_base64_subscription(&text) {
-                        if let Ok((conv_yaml, count)) = crate::subscription_parser::convert_subscription_to_mihomo_yaml(&text) {
+                        if let Ok((mut conv_yaml, count)) = crate::subscription_parser::convert_subscription_to_mihomo_yaml(&text) {
+                            let parsed_ui = userinfo_hdr.or_else(|| crate::mihomo::extract_subscription_userinfo_from_body(&text));
+                            if let Some(ref u) = parsed_ui {
+                                conv_yaml = crate::mihomo::inject_or_replace_userinfo_in_yaml(&conv_yaml, u);
+                            }
                             mobile_yaml_opt = Some((conv_yaml, count));
                         }
                     }
@@ -11663,6 +11736,54 @@ pub async fn get_whitelist_catalog() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_compute_whitelist_mode_active_consistency() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = false;
+        cfg.whitelist_servers = vec!["wl_srv".to_string()];
+        cfg.whitelist_providers = vec!["wl_prov".to_string()];
+
+        // 1. Whitelist config enabled
+        let mut cfg_enabled = cfg.clone();
+        cfg_enabled.whitelist.enabled = true;
+        assert!(compute_whitelist_mode_active(&cfg_enabled, "any", "Any", None));
+
+        // 2. Server in whitelist_servers
+        assert!(compute_whitelist_mode_active(&cfg, "wl_srv", "Regular Name", None));
+
+        // 3. Provider in whitelist_providers
+        assert!(compute_whitelist_mode_active(&cfg, "other_srv", "Regular Name", Some("wl_prov")));
+
+        // 4. Tag [БС] in name
+        assert!(compute_whitelist_mode_active(&cfg, "other_srv", "Server [БС] Moscow", None));
+
+        // 5. Standard VPS
+        assert!(!compute_whitelist_mode_active(&cfg, "vps_srv", "Germany VPS", Some("vps_prov")));
+    }
+
+    #[tokio::test]
+    async fn test_provider_quota_and_live_delta_calculation() {
+        crate::traffic::reset_provider_live_delta("prov_alpha");
+        assert_eq!(crate::traffic::get_provider_live_delta("prov_alpha"), 0);
+
+        crate::traffic::add_provider_live_delta("prov_alpha", 5000);
+        assert_eq!(crate::traffic::get_provider_live_delta("prov_alpha"), 5000);
+
+        // Baseline used: 1000 up, 2000 down, total 10000
+        let baseline_used: u64 = 1000 + 2000;
+        let live_delta = crate::traffic::get_provider_live_delta("prov_alpha");
+        let actual_used = baseline_used + live_delta;
+        let total: u64 = 10000;
+        let remaining = total.saturating_sub(actual_used);
+
+        assert_eq!(actual_used, 8000);
+        assert_eq!(remaining, 2000);
+
+        // Fresh sync resets delta
+        crate::traffic::reset_provider_live_delta("prov_alpha");
+        assert_eq!(crate::traffic::get_provider_live_delta("prov_alpha"), 0);
+    }
 
     /// Анти-регрессия BS-FIX: полный перехват БС обязан захватывать ВСЕ TCP/UDP порты
     /// (без --dport ограничений) — иначе игровой трафик вроде 9339 вылетает из туннеля

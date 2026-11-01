@@ -250,11 +250,14 @@ pub struct ProxiesCacheEntry {
 }
 
 static PROXIES_CACHE: std::sync::RwLock<Option<ProxiesCacheEntry>> = std::sync::RwLock::new(None);
+static PROVIDER_PROXIES_CACHE: std::sync::RwLock<Option<ProxiesCacheEntry>> = std::sync::RwLock::new(None);
 
-/// Инвалидация кэша прокси: вызывается при переключении узлов, групп или reload конфига.
+/// Инвалидация кэша прокси и провайдеров: вызывается при переключении узлов, групп или reload конфига.
 pub fn invalidate_proxies_cache() {
     let mut guard = PROXIES_CACHE.write().unwrap_or_else(|e| e.into_inner());
     *guard = None;
+    let mut p_guard = PROVIDER_PROXIES_CACHE.write().unwrap_or_else(|e| e.into_inner());
+    *p_guard = None;
 }
 
 /// Тестовая блокировка для изоляции тестов кэша.
@@ -273,6 +276,12 @@ pub fn set_proxies_cache_for_test(data: BTreeMap<String, Value>, cached_at: std:
     *guard = Some(ProxiesCacheEntry { cached_at, data });
 }
 
+#[cfg(test)]
+pub fn set_provider_proxies_cache_for_test(data: BTreeMap<String, Value>, cached_at: std::time::Instant) {
+    let mut guard = PROVIDER_PROXIES_CACHE.write().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(ProxiesCacheEntry { cached_at, data });
+}
+
 /// Проверка наличия свежего кэша в пределах TTL (3 секунды).
 pub fn get_cached_proxies_if_fresh() -> Option<BTreeMap<String, Value>> {
     let guard = PROXIES_CACHE.read().unwrap_or_else(|e| e.into_inner());
@@ -284,9 +293,30 @@ pub fn get_cached_proxies_if_fresh() -> Option<BTreeMap<String, Value>> {
     None
 }
 
+pub fn get_cached_provider_proxies_if_fresh() -> Option<BTreeMap<String, Value>> {
+    let guard = PROVIDER_PROXIES_CACHE.read().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref entry) = *guard {
+        if entry.cached_at.elapsed() < std::time::Duration::from_secs(PROXIES_CACHE_TTL_SECS) {
+            return Some(entry.data.clone());
+        }
+    }
+    None
+}
+
 /// Получение устаревшего кэша в пределах допустимого окна (до 30 секунд) при сбое сети.
 pub fn get_cached_proxies_if_recent() -> Option<(BTreeMap<String, Value>, std::time::Duration)> {
     let guard = PROXIES_CACHE.read().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref entry) = *guard {
+        let age = entry.cached_at.elapsed();
+        if age < std::time::Duration::from_secs(PROXIES_CACHE_MAX_STALE_SECS) {
+            return Some((entry.data.clone(), age));
+        }
+    }
+    None
+}
+
+pub fn get_cached_provider_proxies_if_recent() -> Option<(BTreeMap<String, Value>, std::time::Duration)> {
+    let guard = PROVIDER_PROXIES_CACHE.read().unwrap_or_else(|e| e.into_inner());
     if let Some(ref entry) = *guard {
         let age = entry.cached_at.elapsed();
         if age < std::time::Duration::from_secs(PROXIES_CACHE_MAX_STALE_SECS) {
@@ -348,8 +378,26 @@ pub async fn get_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Result<BTre
 }
 /// Mihomo отвечает на /providers/proxies объектом {"providers": {...}} — разворачиваем в карту
 /// «имя прокси → данные». Провайдеры с vehicleType "Compatible" (служебные DIRECT/REJECT) пропускаем.
+/// Оптимизировано 3-секундным TTL-кэшем с fallback-защитой при сетевых сбоях ядра.
 pub async fn get_provider_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Result<BTreeMap<String, Value>, String> {
-    let v = m_get(http, cfg, "/providers/proxies").await?;
+    if let Some(cached) = get_cached_provider_proxies_if_fresh() {
+        return Ok(cached);
+    }
+
+    let v = match m_get(http, cfg, "/providers/proxies").await {
+        Ok(val) => val,
+        Err(err) => {
+            if let Some((stale_data, age)) = get_cached_provider_proxies_if_recent() {
+                crate::log_w!(
+                    "Mihomo /providers/proxies временно недоступен ({}), отдаём кэш возрастом {:.1} с",
+                    err,
+                    age.as_secs_f64()
+                );
+                return Ok(stale_data);
+            }
+            return Err(err);
+        }
+    };
     let mut out = BTreeMap::new();
     if let Some(map) = v.get("providers").and_then(|p| p.as_object()) {
         for (pname, prov) in map {
@@ -372,7 +420,109 @@ pub async fn get_provider_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Re
             }
         }
     }
+    {
+        let mut guard = PROVIDER_PROXIES_CACHE.write().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(ProxiesCacheEntry {
+            cached_at: std::time::Instant::now(),
+            data: out.clone(),
+        });
+    }
     Ok(out)
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SubscriptionUserinfo {
+    pub upload: u64,
+    pub download: u64,
+    pub total: u64,
+    pub expire: i64,
+}
+
+pub fn parse_subscription_userinfo_str(val: &str) -> Option<SubscriptionUserinfo> {
+    let mut info = SubscriptionUserinfo::default();
+    let mut found = false;
+    for part in val.split(';') {
+        let p = part.trim();
+        if let Some((k, v)) = p.split_once('=') {
+            let key = k.trim().to_ascii_lowercase();
+            let v_str = v.trim();
+            match key.as_str() {
+                "upload" => {
+                    if let Ok(num) = v_str.parse::<u64>() {
+                        info.upload = num;
+                        found = true;
+                    }
+                }
+                "download" => {
+                    if let Ok(num) = v_str.parse::<u64>() {
+                        info.download = num;
+                        found = true;
+                    }
+                }
+                "total" => {
+                    if let Ok(num) = v_str.parse::<u64>() {
+                        info.total = num;
+                        found = true;
+                    }
+                }
+                "expire" => {
+                    if let Ok(num) = v_str.parse::<i64>() {
+                        info.expire = num;
+                        found = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if found {
+        Some(info)
+    } else {
+        None
+    }
+}
+
+pub fn extract_subscription_userinfo_from_body(body: &str) -> Option<SubscriptionUserinfo> {
+    for line in body.lines().take(50) {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("#") {
+            let rest_trimmed = rest.trim();
+            if let Some(val) = rest_trimmed.strip_prefix("subscription-userinfo:") {
+                if let Some(info) = parse_subscription_userinfo_str(val) {
+                    return Some(info);
+                }
+            } else if let Some(val) = rest_trimmed.strip_prefix("Subscription-Userinfo:") {
+                if let Some(info) = parse_subscription_userinfo_str(val) {
+                    return Some(info);
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn format_subscription_userinfo_line(info: &SubscriptionUserinfo) -> String {
+    format!(
+        "# subscription-userinfo: upload={}; download={}; total={}; expire={}\n",
+        info.upload, info.download, info.total, info.expire
+    )
+}
+
+pub fn inject_or_replace_userinfo_in_yaml(yaml: &str, info: &SubscriptionUserinfo) -> String {
+    let userinfo_line = format_subscription_userinfo_line(info);
+    let mut lines: Vec<&str> = yaml.lines().collect();
+    if !lines.is_empty() && lines[0].trim_start().starts_with("# subscription-userinfo:") {
+        lines.remove(0);
+    } else if !lines.is_empty() && lines[0].trim_start().to_ascii_lowercase().starts_with("# subscription-userinfo:") {
+        lines.remove(0);
+    }
+    let rest = lines.join("\n");
+    let mut out = userinfo_line;
+    out.push_str(&rest);
+    if yaml.ends_with('\n') && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -415,18 +565,36 @@ pub async fn get_providers_info(http: &reqwest::Client, cfg: &AppConfig) -> Resu
             let is_enabled = !cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(pname));
 
             let sub_info = prov.get("subscriptionInfo").and_then(|s| s.as_object());
-            let upload_bytes = sub_info
+            let mut upload_bytes = sub_info
                 .and_then(|s| s.get("Upload").or_else(|| s.get("upload")))
                 .and_then(|v| v.as_u64());
-            let download_bytes = sub_info
+            let mut download_bytes = sub_info
                 .and_then(|s| s.get("Download").or_else(|| s.get("download")))
                 .and_then(|v| v.as_u64());
-            let total_bytes = sub_info
+            let mut total_bytes = sub_info
                 .and_then(|s| s.get("Total").or_else(|| s.get("total")))
                 .and_then(|v| v.as_u64());
-            let expire_timestamp = sub_info
+            let mut expire_timestamp = sub_info
                 .and_then(|s| s.get("Expire").or_else(|| s.get("expire")))
                 .and_then(|v| v.as_i64());
+
+            // Если в ответе Mihomo нет subscriptionInfo (например, для локального type: file),
+            // считываем заголовочную строку # subscription-userinfo из файла ./providers/{id}.yaml
+            if total_bytes.is_none() {
+                let prov_dir = std::path::Path::new(&cfg.mihomo.config_path)
+                    .parent()
+                    .map(|p| p.join("providers"))
+                    .unwrap_or_else(|| std::path::PathBuf::from("/opt/etc/mihomo/providers"));
+                let prov_path = prov_dir.join(format!("{pname}.yaml"));
+                if let Ok(content) = tokio::fs::read_to_string(&prov_path).await {
+                    if let Some(userinfo) = extract_subscription_userinfo_from_body(&content) {
+                        upload_bytes = Some(userinfo.upload);
+                        download_bytes = Some(userinfo.download);
+                        total_bytes = Some(userinfo.total);
+                        expire_timestamp = Some(userinfo.expire);
+                    }
+                }
+            }
 
             out.push(ProviderInfo {
                 id: pname.clone(),
@@ -481,6 +649,7 @@ pub async fn force_update_provider(http: &reqwest::Client, cfg: &AppConfig, name
     if !resp.status().is_success() {
         return Err(format!("Mihomo update {name}: статус {}", resp.status()));
     }
+    invalidate_proxies_cache();
     Ok(())
 }
 
@@ -2656,6 +2825,65 @@ mod tests {
         }
 
         clear_proxies_cache_for_test();
+    }
+
+    #[test]
+    fn test_provider_proxies_cache_lifecycle() {
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_proxies_cache_for_test();
+
+        let mut data = BTreeMap::new();
+        data.insert("ProvServer1".to_string(), json!({ "name": "ProvServer1", "type": "vless" }));
+
+        // 1. Fresh hit within TTL
+        set_provider_proxies_cache_for_test(data.clone(), std::time::Instant::now());
+        let cached = get_cached_provider_proxies_if_fresh();
+        assert!(cached.is_some(), "Provider proxies cache must be fresh within 3s");
+        assert_eq!(cached.unwrap().len(), 1);
+
+        // 2. Invalidation
+        invalidate_proxies_cache();
+        assert!(get_cached_provider_proxies_if_fresh().is_none(), "Provider proxies cache must be invalidated");
+
+        // 3. Expiry after TTL
+        let expired_time = std::time::Instant::now() - std::time::Duration::from_secs(PROXIES_CACHE_TTL_SECS + 1);
+        set_provider_proxies_cache_for_test(data.clone(), expired_time);
+        assert!(get_cached_provider_proxies_if_fresh().is_none(), "Provider proxies cache must expire after TTL");
+
+        // 4. Stale fallback
+        let fallback = get_cached_provider_proxies_if_recent();
+        assert!(fallback.is_some(), "Provider proxies cache must have recent stale fallback");
+        assert_eq!(fallback.unwrap().0.len(), 1);
+
+        clear_proxies_cache_for_test();
+    }
+
+    #[test]
+    fn test_subscription_userinfo_parsing_and_injection() {
+        let raw_hdr = "upload=1024; download=2048; total=10737418240; expire=1735689600";
+        let parsed = parse_subscription_userinfo_str(raw_hdr).expect("Userinfo must parse");
+        assert_eq!(parsed.upload, 1024);
+        assert_eq!(parsed.download, 2048);
+        assert_eq!(parsed.total, 10737418240);
+        assert_eq!(parsed.expire, 1735689600);
+
+        let yaml = "proxies:\n  - name: test\n    type: vless\n";
+        let injected = inject_or_replace_userinfo_in_yaml(yaml, &parsed);
+        assert!(injected.starts_with("# subscription-userinfo: upload=1024; download=2048; total=10737418240; expire=1735689600\n"));
+        assert!(injected.contains("proxies:\n  - name: test"));
+
+        // Replacing existing userinfo line
+        let mut parsed2 = parsed.clone();
+        parsed2.download = 4096;
+        let replaced = inject_or_replace_userinfo_in_yaml(&injected, &parsed2);
+        assert!(replaced.starts_with("# subscription-userinfo: upload=1024; download=4096; total=10737418240; expire=1735689600\n"));
+        // Ensure not duplicated
+        let count = replaced.matches("subscription-userinfo").count();
+        assert_eq!(count, 1);
+
+        // Body extraction
+        let extracted = extract_subscription_userinfo_from_body(&replaced).expect("Must extract from body");
+        assert_eq!(extracted.download, 4096);
     }
 }
 

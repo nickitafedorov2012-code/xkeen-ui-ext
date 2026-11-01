@@ -717,6 +717,27 @@ export default function Settings({ notify, status, refresh }: Props) {
     patch((s) => (s.failover.priority_chain = next))
   }
 
+  // --- Цепочка приоритетов провайдеров (Tier 1 vs Tier 2) ---
+  const providerChain: string[] = settings?.failover?.provider_chain ?? (status?.failover?.provider_chain ?? [])
+
+  const moveProviderChain = (idx: number, dir: -1 | 1) => {
+    const next = [...providerChain]
+    const j = idx + dir
+    if (j < 0 || j >= next.length) return
+    ;[next[idx], next[j]] = [next[j], next[idx]]
+    patch((s) => {
+      s.failover.provider_chain = next
+    })
+  }
+
+  const toggleProviderInChain = (pId: string) => {
+    const exists = providerChain.includes(pId)
+    const next = exists ? providerChain.filter((id) => id !== pId) : [...providerChain, pId]
+    patch((s) => {
+      s.failover.provider_chain = next
+    })
+  }
+
   const saveDomains = async () => {
     setSavingDomains(true)
     try {
@@ -1957,6 +1978,150 @@ export default function Settings({ notify, status, refresh }: Props) {
                   </button>
                 )}
               </div>
+            </div>
+
+            {/* Приоритет провайдеров в Failover (Tier 1 vs Tier 2) */}
+            <div className="row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8, background: 'rgba(255, 255, 255, 0.02)', padding: '12px 14px', borderRadius: 8, border: '1px solid var(--border)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+                <div>
+                  <b style={{ display: 'block', fontSize: 13 }}>📡 Приоритет провайдеров подписок</b>
+                  <span className="muted small">
+                    Порядок переключения между поставщиками. Серверы Tier 1 (VPS) имеют преимущество над Tier 2 (белые списки).
+                  </span>
+                </div>
+                {providerChain.length > 0 && (
+                  <button
+                    type="button"
+                    className="btn sm ghost"
+                    style={{ color: 'var(--muted)', fontSize: 11 }}
+                    onClick={() => patch((s) => (s.failover.provider_chain = []))}
+                    title="Сбросить порядок провайдеров на стандартный"
+                  >
+                    Сбросить
+                  </button>
+                )}
+              </div>
+
+              {providers.length === 0 ? (
+                <span className="muted small">Провайдеры подписок не обнаружены.</span>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  {(() => {
+                    // Combine providers: explicitly ordered ones first, then remaining
+                    const ordered = [...providerChain]
+                      .map((id) => providers.find((p) => p.id === id))
+                      .filter((p): p is ProviderInfo => Boolean(p))
+                    const remaining = providers.filter((p) => !providerChain.includes(p.id))
+                    const allList = [...ordered, ...remaining]
+
+                    return allList.map((p) => {
+                      const inChain = providerChain.includes(p.id)
+                      const chainIdx = providerChain.indexOf(p.id)
+                      const isTier2 = Boolean(p.is_whitelist)
+
+                      return (
+                        <div
+                          key={p.id}
+                          className="provider-chain-row"
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: 10,
+                            padding: '6px 10px',
+                            background: inChain ? 'rgba(56, 189, 248, 0.04)' : 'rgba(255, 255, 255, 0.015)',
+                            borderRadius: 6,
+                            border: `1px solid ${inChain ? 'rgba(56, 189, 248, 0.25)' : 'rgba(255, 255, 255, 0.06)'}`,
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0, flex: 1 }}>
+                            <input
+                              type="checkbox"
+                              checked={inChain}
+                              onChange={() => toggleProviderInChain(p.id)}
+                              title={inChain ? 'Исключить из приоритетной цепочки' : 'Включить в приоритетную цепочку'}
+                              style={{ cursor: 'pointer', margin: 0 }}
+                            />
+                            {inChain && (
+                              <span
+                                style={{
+                                  fontSize: 10,
+                                  fontWeight: 700,
+                                  padding: '1px 5px',
+                                  borderRadius: 4,
+                                  background: chainIdx === 0 ? 'rgba(56, 189, 248, 0.25)' : 'rgba(255, 255, 255, 0.08)',
+                                  color: chainIdx === 0 ? '#38bdf8' : 'var(--muted)',
+                                }}
+                              >
+                                #{chainIdx + 1}
+                              </span>
+                            )}
+                            <span style={{ fontWeight: 600, fontSize: 12.5, color: inChain ? 'var(--text-bright)' : 'var(--muted)' }}>
+                              {p.name || p.id}
+                            </span>
+                            {/* Tier индикатор: Tier 1 (VPS) или Tier 2 (БС) */}
+                            {isTier2 ? (
+                              <span
+                                className="badge"
+                                style={{
+                                  fontSize: 9.5,
+                                  padding: '1px 6px',
+                                  background: 'rgba(234, 179, 8, 0.15)',
+                                  color: '#eab308',
+                                  border: '1px solid rgba(234, 179, 8, 0.3)',
+                                  fontWeight: 600,
+                                }}
+                              >
+                                🛡️ Tier 2 (БС)
+                              </span>
+                            ) : (
+                              <span
+                                className="badge"
+                                style={{
+                                  fontSize: 9.5,
+                                  padding: '1px 6px',
+                                  background: 'rgba(56, 189, 248, 0.15)',
+                                  color: '#38bdf8',
+                                  border: '1px solid rgba(56, 189, 248, 0.3)',
+                                  fontWeight: 600,
+                                }}
+                              >
+                                ⚡ Tier 1 (VPS)
+                              </span>
+                            )}
+                            <span className="muted" style={{ fontSize: 11 }}>({p.count} узлов)</span>
+                          </div>
+
+                          {inChain && (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
+                              <button
+                                type="button"
+                                className="btn sm ghost"
+                                style={{ height: 22, width: 22, padding: 0, fontSize: 10, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+                                disabled={chainIdx === 0}
+                                onClick={() => moveProviderChain(chainIdx, -1)}
+                                title="Повысить приоритет провайдера"
+                              >
+                                ▲
+                              </button>
+                              <button
+                                type="button"
+                                className="btn sm ghost"
+                                style={{ height: 22, width: 22, padding: 0, fontSize: 10, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+                                disabled={chainIdx === providerChain.length - 1}
+                                onClick={() => moveProviderChain(chainIdx, 1)}
+                                title="Понизить приоритет провайдера"
+                              >
+                                ▼
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })
+                  })()}
+                </div>
+              )}
             </div>
 
             <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>

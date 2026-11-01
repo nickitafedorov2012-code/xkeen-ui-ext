@@ -160,6 +160,9 @@ pub struct FailoverConfig {
     /// Включение механизма карантина сбойных серверов (зомби). По умолчанию true.
     #[serde(default = "default_true")]
     pub quarantine_enabled: bool,
+    /// Цепочка приоритета провайдеров/подписок. По умолчанию пустая (auto).
+    #[serde(default)]
+    pub provider_chain: Vec<String>,
     /// Умный фейловер: субординация уровней (Tier 1: обычные VPS -> Tier 2: серверы белых списков). По умолчанию true.
     #[serde(default = "default_true")]
     pub smart_failover_enabled: bool,
@@ -184,6 +187,7 @@ impl Default for FailoverConfig {
             best_ping_pool_size: 15,
             best_ping_hysteresis_ms: 40,
             quarantine_enabled: true,
+            provider_chain: Vec::new(),
             smart_failover_enabled: true,
             smart_failover_canary_duration_secs: 60,
         }
@@ -191,6 +195,30 @@ impl Default for FailoverConfig {
 }
 
 impl FailoverConfig {
+    /// Zero-Touch: авто-построение цепочки провайдеров (Tier 1 regular -> Tier 2 whitelist),
+    /// если provider_chain не задан явно.
+    pub fn auto_build_provider_chain(&self, all_providers: &[String], whitelist_providers: &[String]) -> Vec<String> {
+        if !self.provider_chain.is_empty() {
+            return self.provider_chain.clone();
+        }
+        let mut t1 = Vec::new();
+        let mut t2 = Vec::new();
+        for p in all_providers {
+            if p.is_empty() {
+                continue;
+            }
+            if whitelist_providers.iter().any(|wp| wp.eq_ignore_ascii_case(p)) {
+                if !t2.contains(p) {
+                    t2.push(p.clone());
+                }
+            } else if !t1.contains(p) {
+                t1.push(p.clone());
+            }
+        }
+        t1.extend(t2);
+        t1
+    }
+
     /// Обратная совместимость: пустая цепочка + заданный одиночный приоритет → цепочка из него.
     /// Также синхронизирует priority_server = первый элемент цепочки.
     pub fn migrate_priority(&mut self) {
@@ -1479,6 +1507,22 @@ mod tests {
         assert!(ip_matches_cidr("192.168.2.63", "192.168.2.63"));
         assert!(ip_matches_cidr("192.168.2.63", "192.168.2.63/32"));
         assert!(!ip_matches_cidr("invalid-ip", "192.168.0.0/16"));
+    }
+
+    #[test]
+    fn test_failover_provider_chain_auto_build() {
+        let mut cfg = FailoverConfig::default();
+        let all_provs = vec!["vps_nl".to_string(), "wl_backup".to_string(), "vps_de".to_string(), "wl_ru".to_string()];
+        let wl_provs = vec!["wl_backup".to_string(), "wl_ru".to_string()];
+
+        // When provider_chain is empty -> auto build: Tier 1 regular -> Tier 2 whitelist
+        let chain = cfg.auto_build_provider_chain(&all_provs, &wl_provs);
+        assert_eq!(chain, vec!["vps_nl", "vps_de", "wl_backup", "wl_ru"]);
+
+        // When provider_chain is explicitly configured -> returns explicit chain
+        cfg.provider_chain = vec!["custom_p1".to_string(), "custom_p2".to_string()];
+        let chain2 = cfg.auto_build_provider_chain(&all_provs, &wl_provs);
+        assert_eq!(chain2, vec!["custom_p1", "custom_p2"]);
     }
 
     #[test]

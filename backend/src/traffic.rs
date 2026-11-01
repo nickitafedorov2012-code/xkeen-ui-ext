@@ -147,6 +147,53 @@ pub struct StoredTrafficStats {
     pub whitelist_bytes: u64,
     #[serde(default)]
     pub updated_at: u64,
+    #[serde(default)]
+    pub provider_deltas: std::collections::HashMap<String, u64>,
+}
+
+static PROVIDER_TRAFFIC_DELTAS: std::sync::RwLock<Option<std::collections::HashMap<String, u64>>> = std::sync::RwLock::new(None);
+static ACTIVE_PROVIDER_ID: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+pub fn set_active_provider_id(provider_id: Option<String>) {
+    if let Ok(mut lock) = ACTIVE_PROVIDER_ID.write() {
+        *lock = provider_id;
+    }
+}
+
+pub fn get_active_provider_id() -> Option<String> {
+    if let Ok(lock) = ACTIVE_PROVIDER_ID.read() {
+        lock.clone()
+    } else {
+        None
+    }
+}
+
+pub fn add_provider_live_delta(provider_id: &str, delta_bytes: u64) {
+    if provider_id.is_empty() || delta_bytes == 0 {
+        return;
+    }
+    if let Ok(mut lock) = PROVIDER_TRAFFIC_DELTAS.write() {
+        let map = lock.get_or_insert_with(std::collections::HashMap::new);
+        let cur = map.entry(provider_id.to_string()).or_insert(0);
+        *cur = cur.saturating_add(delta_bytes);
+    }
+}
+
+pub fn get_provider_live_delta(provider_id: &str) -> u64 {
+    if let Ok(lock) = PROVIDER_TRAFFIC_DELTAS.read() {
+        if let Some(ref map) = *lock {
+            return map.get(provider_id).copied().unwrap_or(0);
+        }
+    }
+    0
+}
+
+pub fn reset_provider_live_delta(provider_id: &str) {
+    if let Ok(mut lock) = PROVIDER_TRAFFIC_DELTAS.write() {
+        if let Some(ref mut map) = *lock {
+            map.remove(provider_id);
+        }
+    }
 }
 
 pub fn set_stats_file(path: std::path::PathBuf) {
@@ -162,6 +209,9 @@ pub fn load_stats_from_disk(path: &std::path::Path) {
             TOTAL_DIRECT_BYTES.store(stored.direct_bytes, Ordering::Relaxed);
             TOTAL_PROXY_BYTES.store(stored.proxy_bytes, Ordering::Relaxed);
             TOTAL_WHITELIST_BYTES.store(stored.whitelist_bytes, Ordering::Relaxed);
+            if let Ok(mut lock) = PROVIDER_TRAFFIC_DELTAS.write() {
+                *lock = Some(stored.provider_deltas);
+            }
             crate::log_i!(
                 "Загружена статистика трафика из {}: direct={} B, vps={} B, whitelist={} B",
                 path.display(),
@@ -179,6 +229,11 @@ pub fn save_stats_to_disk() {
         lock.and_then(|guard| guard.clone())
     };
     let Some(path) = path_opt else { return; };
+    let deltas = if let Ok(lock) = PROVIDER_TRAFFIC_DELTAS.read() {
+        lock.as_ref().cloned().unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
     let stats = StoredTrafficStats {
         direct_bytes: TOTAL_DIRECT_BYTES.load(Ordering::Relaxed),
         proxy_bytes: TOTAL_PROXY_BYTES.load(Ordering::Relaxed),
@@ -187,6 +242,7 @@ pub fn save_stats_to_disk() {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
+        provider_deltas: deltas,
     };
     if let Ok(json_str) = serde_json::to_string_pretty(&stats) {
         let tmp = path.with_extension("tmp");
@@ -295,6 +351,9 @@ async fn run_mihomo_stream(state: AppState) {
                                         PROXY_DOWN.store(msg.up, Ordering::Relaxed);
                                         PROXY_UP.store(msg.down, Ordering::Relaxed);
                                         TOTAL_PROXY_BYTES.fetch_add(bytes, Ordering::Relaxed);
+                                        if let Some(act_prov) = get_active_provider_id() {
+                                            add_provider_live_delta(&act_prov, bytes);
+                                        }
                                     }
                                 }
                             }
@@ -688,6 +747,7 @@ mod tests {
             proxy_bytes: 67890,
             whitelist_bytes: 54321,
             updated_at: 1000,
+            provider_deltas: std::collections::HashMap::new(),
         };
         let json_str = serde_json::to_string_pretty(&stats).expect("json serialize");
         std::fs::write(&test_file, json_str).expect("write file");
@@ -755,5 +815,23 @@ mod tests {
         PROXY_UP.store(0, Ordering::Relaxed);
         WHITELIST_DOWN.store(0, Ordering::Relaxed);
         WHITELIST_UP.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn test_provider_live_delta_lifecycle() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_provider_live_delta("prov_test");
+        assert_eq!(get_provider_live_delta("prov_test"), 0);
+
+        set_active_provider_id(Some("prov_test".to_string()));
+        assert_eq!(get_active_provider_id(), Some("prov_test".to_string()));
+
+        add_provider_live_delta("prov_test", 1024);
+        add_provider_live_delta("prov_test", 2048);
+        assert_eq!(get_provider_live_delta("prov_test"), 3072);
+
+        reset_provider_live_delta("prov_test");
+        assert_eq!(get_provider_live_delta("prov_test"), 0);
+        set_active_provider_id(None);
     }
 }

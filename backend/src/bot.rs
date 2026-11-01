@@ -528,8 +528,7 @@ async fn handle_callback(
     }
 
     if let Some(srv_name) = data.strip_prefix("srv:") {
-        let cfg = state.config.read().await.clone();
-        match crate::mihomo::switch_server(&state.http, &cfg, srv_name).await {
+        match crate::api::execute_server_switch_workflow(state, srv_name).await {
             Ok(_) => {
                 let _ = answer_callback(http, token, cb_id, Some("✓ Сервер переключен")).await;
                 send_servers_menu(state, http, token, &chat_id, Some(msg_id)).await;

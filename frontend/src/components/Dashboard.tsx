@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiGet, apiPost, apiPut } from '../api'
-import { pingClass, type FailoverEventInfo, type StatusInfo, type AghStatus, type SwapStatus, type DomainCheckResult } from '../types'
+import { pingClass, type FailoverEventInfo, type StatusInfo, type AghStatus, type SwapStatus, type DomainCheckResult, type ProviderInfo } from '../types'
 import TrafficGraph from './TrafficGraph'
 
 interface Props {
@@ -126,6 +126,13 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
   const [checking, setChecking] = useState(false)
   const [togglingFailover, setTogglingFailover] = useState(false)
   const [togglingSmartFailover, setTogglingSmartFailover] = useState(false)
+  const [providers, setProviders] = useState<ProviderInfo[]>([])
+
+  useEffect(() => {
+    apiGet<{ providers: ProviderInfo[] }>('providers')
+      .then((d) => setProviders(d.providers || []))
+      .catch(() => {})
+  }, [])
   // История пинга активного сервера (для sparkline): {значение, было ли измерение}
   const [pingHistory, setPingHistory] = useState<{ ms: number; ok: boolean }[]>([])
   const lastActiveServerIdRef = useRef<string | undefined>(undefined)
@@ -712,6 +719,66 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                 <b style={{ color: '#00D3F2' }} data-testid="dashboard-best-ping-status">
                   🚀 Активен (пул {f.best_ping_pool_size ?? 15} узлов, ±{f.best_ping_hysteresis_ms ?? 40} мс)
                 </b>
+              </li>
+            )}
+            {/* Приоритет провайдеров (Tier 1 vs Tier 2) в дашборде */}
+            {providers.length > 0 && (
+              <li style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', alignItems: 'center' }}>
+                  <span>Приоритет провайдеров</span>
+                  {onSwitchTab && (
+                    <button
+                      type="button"
+                      className="btn sm ghost"
+                      style={{ padding: '0 4px', fontSize: 11, height: 18 }}
+                      onClick={() => onSwitchTab('settings')}
+                      title="Настроить приоритет провайдеров в настройках Failover"
+                    >
+                      изменить →
+                    </button>
+                  )}
+                </div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 2, width: '100%' }}>
+                  {(() => {
+                    const pChain = f?.provider_chain ?? []
+                    const ordered = pChain
+                      .map((id) => providers.find((p) => p.id === id))
+                      .filter((p): p is ProviderInfo => Boolean(p))
+                    const remaining = providers.filter((p) => !pChain.includes(p.id))
+                    const list = ordered.length > 0 ? ordered : remaining
+
+                    return list.slice(0, 4).map((p, idx) => {
+                      const isTier2 = Boolean(p.is_whitelist)
+                      return (
+                        <span
+                          key={p.id}
+                          className="badge"
+                          style={{
+                            fontSize: 10,
+                            padding: '1px 6px',
+                            background: isTier2 ? 'rgba(234, 179, 8, 0.12)' : 'rgba(56, 189, 248, 0.12)',
+                            color: isTier2 ? '#eab308' : '#38bdf8',
+                            border: `1px solid ${isTier2 ? 'rgba(234, 179, 8, 0.3)' : 'rgba(56, 189, 248, 0.3)'}`,
+                            fontWeight: 600,
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 3,
+                          }}
+                          title={`${p.name || p.id} (${isTier2 ? 'Tier 2 Whitelist' : 'Tier 1 VPS'}) — ${p.count} серверов`}
+                        >
+                          <span style={{ opacity: 0.7 }}>#{idx + 1}</span>
+                          <span>{p.name || p.id}</span>
+                          <span style={{ fontSize: 9 }}>{isTier2 ? '🛡️' : '⚡'}</span>
+                        </span>
+                      )
+                    })
+                  })()}
+                  {providers.length > 4 && (
+                    <span className="muted" style={{ fontSize: 10, alignSelf: 'center' }}>
+                      +{providers.length - 4}
+                    </span>
+                  )}
+                </div>
               </li>
             )}
           </ul>

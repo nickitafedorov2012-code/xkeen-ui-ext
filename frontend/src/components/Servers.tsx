@@ -106,6 +106,15 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} ГБ`
 }
 
+export function formatQuotaBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return '0 Б'
+  if (bytes < 1000) return `${bytes} Б`
+  if (bytes < 1000 * 1000) return `${(bytes / 1000).toFixed(1)} КБ`
+  if (bytes < 1000 * 1000 * 1000) return `${(bytes / (1000 * 1000)).toFixed(1)} МБ`
+  if (bytes < 1000 * 1000 * 1000 * 1000) return `${(bytes / (1000 * 1000 * 1000)).toFixed(2)} ГБ`
+  return `${(bytes / (1000 * 1000 * 1000 * 1000)).toFixed(2)} ТБ`
+}
+
 export function isPoolServer(s: ServerInfo): boolean {
   if (s.is_pool) return true
   const proto = (s.protocol || '').toUpperCase()
@@ -1128,11 +1137,11 @@ export default function Servers({ notify, status, refresh }: Props) {
                           border: '1px solid rgba(56, 189, 248, 0.25)',
                           borderRadius: 6,
                         }}
-                        title={`Лимит: ${formatBytes(used)} из ${formatBytes(total)} (${percent}%)${prov.expire_timestamp ? ` · До ${new Date(prov.expire_timestamp * 1000).toLocaleDateString()}` : ''}`}
+                        title={`Лимит: ${formatQuotaBytes(used)} из ${formatQuotaBytes(total)} (${percent}%)${prov.expire_timestamp ? ` · До ${new Date(prov.expire_timestamp * 1000).toLocaleDateString()}` : ''}`}
                       >
                         <span style={{ color: '#38bdf8', fontWeight: 600 }}>📊 Трафик подписки:</span>
                         <span style={{ color: remaining === 0 ? '#ef4444' : '#4ade80', fontWeight: 700 }}>
-                          {formatBytes(remaining)} ост.
+                          {formatQuotaBytes(remaining)} ост.
                         </span>
                         <span className="muted" style={{ fontSize: 10 }}>({percent}%)</span>
                       </div>
@@ -2447,11 +2456,11 @@ export default function Servers({ notify, status, refresh }: Props) {
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
                               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
                                 <span style={{ color: '#38bdf8', fontWeight: 600 }}>
-                                  📊 Лимит трафика: {formatBytes(used)} / {formatBytes(total)} ({percent}%)
+                                  📊 Лимит трафика: {formatQuotaBytes(used)} / {formatQuotaBytes(total)} ({percent}%)
                                 </span>
                                 <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                                   <span style={{ color: remaining === 0 ? '#ef4444' : remaining < total * 0.1 ? '#fbbf24' : '#4ade80', fontWeight: 600 }}>
-                                    Осталось: {formatBytes(remaining)}
+                                    Осталось: {formatQuotaBytes(remaining)}
                                   </span>
                                   {expireStr && (
                                     <span className="muted" style={{ fontSize: 10.5 }}>

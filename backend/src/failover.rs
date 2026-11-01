@@ -112,6 +112,77 @@ pub struct CanaryState {
 
 static CANARY_STAGE: tokio::sync::Mutex<Option<CanaryState>> = tokio::sync::Mutex::const_new(None);
 
+/// Время последнего цикла скаутинга Smart Restore (для интервала 60-90 сек).
+static LAST_SMART_RESTORE_SCOUT: tokio::sync::Mutex<Option<Instant>> = tokio::sync::Mutex::const_new(None);
+/// Текущее смещение sliding window ротации при скаутинге Tier 1.
+static SMART_RESTORE_SCOUT_OFFSET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Размер окна скаутинга (10-12 серверов).
+pub const SMART_RESTORE_WINDOW_SIZE: usize = 12;
+/// Интервал между запусками фонового скаутинга Smart Restore (60 сек).
+pub const SMART_RESTORE_SCOUT_INTERVAL_SECS: u64 = 60;
+
+/// Функция отбора окна скаутинга для Smart Restore.
+/// Первыми идут сервера с ранее успешным/низким пингом, затем round-robin скользящее окно.
+pub fn select_scouting_window(
+    servers: &[Server],
+    offset: usize,
+    window_size: usize,
+) -> (Vec<Server>, usize) {
+    if servers.is_empty() {
+        return (Vec::new(), 0);
+    }
+    if servers.len() <= window_size {
+        return (servers.to_vec(), 0);
+    }
+
+    // Разделяем на ранее успешные (ping > 0) и остальные
+    let mut successful: Vec<Server> = Vec::new();
+    let mut others: Vec<Server> = Vec::new();
+
+    for s in servers {
+        let p = crate::mihomo::cached_ping(&s.id).unwrap_or(s.ping_ms);
+        if p > 0 {
+            successful.push(s.clone());
+        } else {
+            others.push(s.clone());
+        }
+    }
+    successful.sort_by_key(|s| crate::mihomo::cached_ping(&s.id).unwrap_or(s.ping_ms));
+
+    let mut result = Vec::with_capacity(window_size);
+
+    // До половины окна (до window_size / 2) берем из ранее успешных нод
+    let max_success = (window_size / 2).min(successful.len());
+    for s in successful.iter().take(max_success) {
+        result.push(s.clone());
+    }
+
+    // Оставшиеся ноды: собираем список кандидатов для round-robin
+    let mut rr_candidates = Vec::new();
+    for s in successful.iter().skip(max_success) {
+        rr_candidates.push(s.clone());
+    }
+    for s in &others {
+        rr_candidates.push(s.clone());
+    }
+
+    let needed = window_size.saturating_sub(result.len());
+    let mut next_offset = offset;
+    if !rr_candidates.is_empty() && needed > 0 {
+        let start = offset % rr_candidates.len();
+        for i in 0..needed {
+            let idx = (start + i) % rr_candidates.len();
+            let cand = &rr_candidates[idx];
+            if !result.iter().any(|r| r.id == cand.id) {
+                result.push(cand.clone());
+            }
+        }
+        next_offset = (start + needed) % rr_candidates.len();
+    }
+
+    (result, next_offset)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CanaryStatus {
     pub active: bool,
@@ -820,6 +891,12 @@ pub async fn handle_whitelist_transition(
     } else if cfg.whitelist.enabled {
         let _ = crate::mihomo::switch_group(&state.http, &cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await;
     }
+
+    // FO-WL-03: Instant telemetry channel sync: актуализируем статус телеметрии сразу,
+    // чтобы график мгновенно переключил второй канал между фиолетовым БС и синим VPS без ожидания 15-секундного тика
+    let current_cfg_now = state.config.read().await.clone();
+    let is_wl_now = crate::api::compute_whitelist_mode_active(&current_cfg_now, node_id, node_name, provider);
+    crate::traffic::set_whitelist_active(is_wl_now);
 }
 
 /// Нагрузочный стресс-тест в 3 параллельных сокета через проверяемый узел.
@@ -1139,6 +1216,87 @@ pub fn should_best_ping_switch(
     best_ms + hysteresis < act_ping
 }
 
+/// Лимит одновременных L7-проверок для мгновенного фейловера.
+pub const PING_CONCURRENCY_LIMIT: usize = 12;
+
+/// Построение компактного шортлиста серверов для быстрого параллельного L7 пинга (~1.5-2с).
+/// Отбирает до 8-10 лучших из Tier 1 (обычные VPS) и до 4 из Tier 2 (белые списки),
+/// суммарно не более 12 (PING_CONCURRENCY_LIMIT), чтобы пинг выполнился за один параллельный залп.
+pub fn build_fast_failover_shortlist(
+    servers: &[Server],
+    active_id: &str,
+    cfg: &crate::config::AppConfig,
+) -> Vec<String> {
+    let eligible: Vec<&Server> = servers
+        .iter()
+        .filter(|s| {
+            s.id != active_id
+                && !s.is_pool
+                && s.protocol != "URL-TEST"
+                && s.protocol != "FALLBACK"
+                && s.id != "DIRECT"
+                && s.id != "REJECT"
+                && s.id != "GLOBAL"
+                && !s.id.starts_with("AUTO-")
+        })
+        .collect();
+
+    let is_bs = |s: &Server| is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), cfg);
+
+    let mut tier1: Vec<&Server> = eligible.iter().filter(|s| !is_bs(s)).copied().collect();
+    let mut tier2: Vec<&Server> = eligible.iter().filter(|s| is_bs(s)).copied().collect();
+
+    // Сортировка кандидатов по известному историческому/кэшированному пингу
+    let sort_fn = |list: &mut Vec<&Server>| {
+        list.sort_by_key(|s| {
+            let p = crate::mihomo::cached_ping(&s.id).unwrap_or(s.ping_ms);
+            if p > 0 { p } else { i64::MAX }
+        });
+    };
+    sort_fn(&mut tier1);
+    sort_fn(&mut tier2);
+
+    let mut shortlist = Vec::with_capacity(PING_CONCURRENCY_LIMIT);
+
+    // До 8-10 из Tier 1
+    let t1_target = if tier2.is_empty() {
+        PING_CONCURRENCY_LIMIT
+    } else {
+        8.min(PING_CONCURRENCY_LIMIT)
+    };
+    for s in tier1.iter().take(t1_target) {
+        shortlist.push(s.id.clone());
+    }
+
+    // До 4 из Tier 2
+    let remaining = PING_CONCURRENCY_LIMIT.saturating_sub(shortlist.len());
+    for s in tier2.iter().take(remaining.min(4)) {
+        shortlist.push(s.id.clone());
+    }
+
+    // Если остались слоты, добираем из Tier 1
+    if shortlist.len() < PING_CONCURRENCY_LIMIT {
+        let current_count = shortlist.len();
+        for s in tier1.iter().skip(t1_target).take(PING_CONCURRENCY_LIMIT - current_count) {
+            if !shortlist.contains(&s.id) {
+                shortlist.push(s.id.clone());
+            }
+        }
+    }
+
+    // Если все еще остались слоты, добираем из Tier 2
+    if shortlist.len() < PING_CONCURRENCY_LIMIT {
+        let current_count = shortlist.len();
+        for s in tier2.iter().skip(4).take(PING_CONCURRENCY_LIMIT - current_count) {
+            if !shortlist.contains(&s.id) {
+                shortlist.push(s.id.clone());
+            }
+        }
+    }
+
+    shortlist
+}
+
 /// Ступенчатый опрос списка серверов через семафор (по 4 потока) с интервалом между запусками,
 /// чтобы минимизировать нагрузку на CPU роутера Keenetic.
 pub async fn ping_servers_staggered(
@@ -1235,6 +1393,97 @@ impl PingMap for std::collections::BTreeMap<String, i64> {
     }
 }
 
+/// Отбор кандидата только по 1-му уровню иерархии (Быстрый и здоровый: 0 < ping <= threshold && !quarantined).
+pub fn select_fast_healthy_from_candidates(
+    candidates: &[String],
+    pings: &impl PingMap,
+    is_quarantined_fn: impl Fn(&str) -> bool,
+    threshold: i64,
+    preserve_order: bool,
+) -> Option<SelectedTarget> {
+    let mut list = Vec::new();
+    for id in candidates {
+        if let Some(ms) = pings.get_ping(id.as_str()) {
+            if ms <= 0 {
+                continue;
+            }
+            if !is_quarantined_fn(id.as_str()) && ms <= threshold {
+                list.push((id.clone(), ms));
+            }
+        }
+    }
+    if list.is_empty() {
+        return None;
+    }
+    if !preserve_order {
+        list.sort_by_key(|(_, ms)| *ms);
+    }
+    list.first().map(|(id, ms)| SelectedTarget {
+        id: id.clone(),
+        ping_ms: *ms,
+        is_quarantined: false,
+        is_alive_slow: false,
+        tier: 1,
+    })
+}
+
+/// Отбор аварийного медленного / карантинного кандидата (уровни 2, 3, 4: slow или quarantined).
+pub fn select_fallback_emergency_from_candidates(
+    candidates: &[String],
+    pings: &impl PingMap,
+    is_quarantined_fn: impl Fn(&str) -> bool,
+    threshold: i64,
+    preserve_order: bool,
+) -> Option<SelectedTarget> {
+    let mut tier2 = Vec::new();
+    let mut tier3 = Vec::new();
+    let mut tier4 = Vec::new();
+
+    for id in candidates {
+        if let Some(ms) = pings.get_ping(id.as_str()) {
+            if ms <= 0 {
+                continue;
+            }
+            let quarantined = is_quarantined_fn(id.as_str());
+            if !quarantined && ms > threshold {
+                tier2.push((id.clone(), ms));
+            } else if quarantined && ms <= threshold {
+                tier3.push((id.clone(), ms));
+            } else if quarantined && ms > threshold {
+                tier4.push((id.clone(), ms));
+            }
+        }
+    }
+
+    let pick = |mut list: Vec<(String, i64)>, tier: u8, is_q: bool, is_slow: bool| -> Option<SelectedTarget> {
+        if list.is_empty() {
+            return None;
+        }
+        if !preserve_order {
+            list.sort_by_key(|(_, ms)| *ms);
+        }
+        list.first().map(|(id, ms)| SelectedTarget {
+            id: id.clone(),
+            ping_ms: *ms,
+            is_quarantined: is_q,
+            is_alive_slow: is_slow,
+            tier,
+        })
+    };
+
+    if let Some(target) = pick(tier2, 2, false, true) {
+        return Some(target);
+    }
+    if let Some(target) = pick(tier3, 3, true, false) {
+        return Some(target);
+    }
+    if let Some(target) = pick(tier4, 4, true, true) {
+        return Some(target);
+    }
+
+    None
+}
+
 /// Чистая 4-уровневая иерархия отбора резервного сервера:
 /// 1. В пределах порога пинга вне карантина (0 < ping <= threshold)
 /// 2. Живой медленный вне карантина (ping > threshold)
@@ -1303,7 +1552,8 @@ pub fn select_from_candidates(
 }
 
 /// Логика отбора кандидата при аварийном переключении (Strict Chain Boundary vs Best-of-Rest)
-/// с поддержкой Умного фейловера (Tier 1: обычные VPS -> Tier 2: серверы белых списков).
+/// с поддержкой Умного фейловера (Tier 1: обычные VPS -> Tier 2: серверы белых списков),
+/// приоритетом цепочки провайдеров (provider_chain) и отсечкой медленных якорей (Anchor Cutoff).
 pub fn select_failover_target_tiered(
     has_chain: bool,
     chain_candidate_ids: &[String],
@@ -1312,6 +1562,33 @@ pub fn select_failover_target_tiered(
     is_quarantined_fn: impl Fn(&str) -> bool,
     is_whitelist_fn: impl Fn(&Server) -> bool,
     smart_failover_enabled: bool,
+    pings: &impl PingMap,
+    threshold: i64,
+) -> Result<SelectedTarget, String> {
+    select_failover_target_tiered_with_provider_chain(
+        has_chain,
+        chain_candidate_ids,
+        all_servers,
+        active_id,
+        is_quarantined_fn,
+        is_whitelist_fn,
+        smart_failover_enabled,
+        &[],
+        pings,
+        threshold,
+    )
+}
+
+/// Расширенная версия select_failover_target_tiered с поддержкой provider_chain.
+pub fn select_failover_target_tiered_with_provider_chain(
+    has_chain: bool,
+    chain_candidate_ids: &[String],
+    all_servers: &[Server],
+    active_id: &str,
+    is_quarantined_fn: impl Fn(&str) -> bool,
+    is_whitelist_fn: impl Fn(&Server) -> bool,
+    smart_failover_enabled: bool,
+    provider_chain: &[String],
     pings: &impl PingMap,
     threshold: i64,
 ) -> Result<SelectedTarget, String> {
@@ -1335,15 +1612,26 @@ pub fn select_failover_target_tiered(
                 .cloned()
                 .collect();
 
-            // 1. Сначала пробуем отобрать среди обычных серверов VPS (Tier 1) в порядке цепочки
+            // Bucket 1: Здоровые и быстрые (<= threshold) из Tier 1
             if !tier1_chain.is_empty() {
-                if let Some(target) = select_from_candidates(&tier1_chain, pings, &is_quarantined_fn, threshold, true) {
+                if let Some(target) = select_fast_healthy_from_candidates(&tier1_chain, pings, &is_quarantined_fn, threshold, true) {
                     return Ok(target);
                 }
             }
-            // 2. Только если все серверы Tier 1 в цепочке недоступны — переходим на серверы белых списков (Tier 2)
+            // Bucket 2: Здоровые и быстрые (<= threshold) из Tier 2
             if !tier2_chain.is_empty() {
-                if let Some(target) = select_from_candidates(&tier2_chain, pings, &is_quarantined_fn, threshold, true) {
+                if let Some(target) = select_fast_healthy_from_candidates(&tier2_chain, pings, &is_quarantined_fn, threshold, true) {
+                    return Ok(target);
+                }
+            }
+            // Bucket 3: Аварийный отбор (slow / quarantine: Tier 1 -> Tier 2)
+            if !tier1_chain.is_empty() {
+                if let Some(target) = select_fallback_emergency_from_candidates(&tier1_chain, pings, &is_quarantined_fn, threshold, true) {
+                    return Ok(target);
+                }
+            }
+            if !tier2_chain.is_empty() {
+                if let Some(target) = select_fallback_emergency_from_candidates(&tier2_chain, pings, &is_quarantined_fn, threshold, true) {
                     return Ok(target);
                 }
             }
@@ -1376,27 +1664,120 @@ pub fn select_failover_target_tiered(
 
     if smart_failover_enabled {
         // Разделяем на Tier 1 (обычные VPS) и Tier 2 (серверы белых списков)
-        let tier1_ids: Vec<String> = eligible_servers
+        let tier1_servers: Vec<&Server> = eligible_servers
             .iter()
             .filter(|s| !is_whitelist_fn(s))
-            .map(|s| s.id.clone())
+            .copied()
             .collect();
-        let tier2_ids: Vec<String> = eligible_servers
+        let tier2_servers: Vec<&Server> = eligible_servers
             .iter()
             .filter(|s| is_whitelist_fn(s))
-            .map(|s| s.id.clone())
+            .copied()
             .collect();
 
-        // Сначала пробуем отобрать среди обычных серверов VPS (Tier 1)
+        // Сортировка серверов по provider_chain, если она задана
+        let sort_by_prov = |servers: &[&Server]| -> Vec<String> {
+            if provider_chain.is_empty() {
+                return servers.iter().map(|s| s.id.clone()).collect();
+            }
+            let mut sorted: Vec<&Server> = servers.to_vec();
+            sorted.sort_by_key(|s| {
+                let prov = s.provider.as_deref().unwrap_or("");
+                provider_chain.iter().position(|p| p.eq_ignore_ascii_case(prov)).unwrap_or(usize::MAX)
+            });
+            sorted.iter().map(|s| s.id.clone()).collect()
+        };
+
+        let tier1_ids = sort_by_prov(&tier1_servers);
+        let tier2_ids = sort_by_prov(&tier2_servers);
+        let preserve_order = !provider_chain.is_empty();
+
+        // Bucket 1: Здоровые и быстрые (<= threshold) из Tier 1 (с учетом приоритета провайдеров)
         if !tier1_ids.is_empty() {
-            if let Some(target) = select_from_candidates(&tier1_ids, pings, &is_quarantined_fn, threshold, false) {
+            if !provider_chain.is_empty() {
+                // Группируем по провайдерам по цепочке
+                let mut chosen: Option<SelectedTarget> = None;
+                for prov in provider_chain {
+                    let group_ids: Vec<String> = tier1_servers
+                        .iter()
+                        .filter(|s| s.provider.as_deref().map_or(false, |p| p.eq_ignore_ascii_case(prov)))
+                        .map(|s| s.id.clone())
+                        .collect();
+                    if !group_ids.is_empty() {
+                        if let Some(target) = select_fast_healthy_from_candidates(&group_ids, pings, &is_quarantined_fn, threshold, false) {
+                            chosen = Some(target);
+                            break;
+                        }
+                    }
+                }
+                if let Some(target) = chosen {
+                    return Ok(target);
+                }
+                // Оставшиеся Tier 1 провайдеры вне цепочки
+                let rest_ids: Vec<String> = tier1_servers
+                    .iter()
+                    .filter(|s| {
+                        let prov = s.provider.as_deref().unwrap_or("");
+                        !provider_chain.iter().any(|p| p.eq_ignore_ascii_case(prov))
+                    })
+                    .map(|s| s.id.clone())
+                    .collect();
+                if !rest_ids.is_empty() {
+                    if let Some(target) = select_fast_healthy_from_candidates(&rest_ids, pings, &is_quarantined_fn, threshold, false) {
+                        return Ok(target);
+                    }
+                }
+            } else if let Some(target) = select_fast_healthy_from_candidates(&tier1_ids, pings, &is_quarantined_fn, threshold, false) {
                 return Ok(target);
             }
         }
 
-        // Если все обычные серверы недоступны — переходим на серверы белых списков (Tier 2)
+        // Bucket 2: Здоровые и быстрые (<= threshold) из Tier 2 (whitelist_providers)
         if !tier2_ids.is_empty() {
-            if let Some(target) = select_from_candidates(&tier2_ids, pings, &is_quarantined_fn, threshold, false) {
+            if !provider_chain.is_empty() {
+                let mut chosen: Option<SelectedTarget> = None;
+                for prov in provider_chain {
+                    let group_ids: Vec<String> = tier2_servers
+                        .iter()
+                        .filter(|s| s.provider.as_deref().map_or(false, |p| p.eq_ignore_ascii_case(prov)))
+                        .map(|s| s.id.clone())
+                        .collect();
+                    if !group_ids.is_empty() {
+                        if let Some(target) = select_fast_healthy_from_candidates(&group_ids, pings, &is_quarantined_fn, threshold, false) {
+                            chosen = Some(target);
+                            break;
+                        }
+                    }
+                }
+                if let Some(target) = chosen {
+                    return Ok(target);
+                }
+                let rest_ids: Vec<String> = tier2_servers
+                    .iter()
+                    .filter(|s| {
+                        let prov = s.provider.as_deref().unwrap_or("");
+                        !provider_chain.iter().any(|p| p.eq_ignore_ascii_case(prov))
+                    })
+                    .map(|s| s.id.clone())
+                    .collect();
+                if !rest_ids.is_empty() {
+                    if let Some(target) = select_fast_healthy_from_candidates(&rest_ids, pings, &is_quarantined_fn, threshold, false) {
+                        return Ok(target);
+                    }
+                }
+            } else if let Some(target) = select_fast_healthy_from_candidates(&tier2_ids, pings, &is_quarantined_fn, threshold, false) {
+                return Ok(target);
+            }
+        }
+
+        // Bucket 3: Аварийный fallback (slow / quarantine: Tier 1 -> Tier 2)
+        if !tier1_ids.is_empty() {
+            if let Some(target) = select_fallback_emergency_from_candidates(&tier1_ids, pings, &is_quarantined_fn, threshold, preserve_order) {
+                return Ok(target);
+            }
+        }
+        if !tier2_ids.is_empty() {
+            if let Some(target) = select_fallback_emergency_from_candidates(&tier2_ids, pings, &is_quarantined_fn, threshold, preserve_order) {
                 return Ok(target);
             }
         }
@@ -1943,7 +2324,8 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             if chain_candidates.is_empty() {
                 Err("Все серверы цепочки приоритетов недоступны (в таймауте или карантине). Переключение заблокировано.".to_string())
             } else {
-                let pings = mihomo::ping_all(&state.http, &cfg, &chain_candidates, ping_timeout).await;
+                let fast_timeout = ping_timeout.clamp(1200, 1500);
+                let pings = mihomo::ping_all(&state.http, &cfg, &chain_candidates, fast_timeout).await;
                 let mut q_ids = std::collections::HashSet::new();
                 if cfg.failover.quarantine_enabled {
                     for id in &chain_candidates {
@@ -1965,33 +2347,25 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                 )
             }
         } else {
-            let candidate_ids: Vec<String> = servers
-                .iter()
-                .filter(|s| {
-                    s.id != active.id
-                        && !s.is_pool
-                        && s.protocol != "URL-TEST"
-                        && s.protocol != "FALLBACK"
-                        && s.id != "DIRECT"
-                        && s.id != "REJECT"
-                        && s.id != "GLOBAL"
-                        && !s.id.starts_with("AUTO-")
-                })
-                .map(|s| s.id.clone())
-                .collect();
-            if candidate_ids.is_empty() {
+            let effective_providers = cfg.failover.auto_build_provider_chain(
+                &crate::routing::parse_provider_names(&tokio::fs::read_to_string(&cfg.mihomo.config_path).await.unwrap_or_default()),
+                &cfg.whitelist_providers,
+            );
+            let candidate_shortlist = build_fast_failover_shortlist(&servers, &active.id, &cfg);
+            if candidate_shortlist.is_empty() {
                 Err("Нет резервных серверов для переключения".to_string())
             } else {
-                let pings = mihomo::ping_all(&state.http, &cfg, &candidate_ids, ping_timeout).await;
+                let fast_timeout = ping_timeout.clamp(1200, 1500);
+                let pings = mihomo::ping_all(&state.http, &cfg, &candidate_shortlist, fast_timeout).await;
                 let mut q_ids = std::collections::HashSet::new();
                 if cfg.failover.quarantine_enabled {
-                    for id in &candidate_ids {
+                    for id in &candidate_shortlist {
                         if is_quarantined(id).await {
                             q_ids.insert(id.clone());
                         }
                     }
                 }
-                select_failover_target_tiered(
+                select_failover_target_tiered_with_provider_chain(
                     false,
                     &[],
                     &servers,
@@ -1999,6 +2373,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                     |id| q_ids.contains(id),
                     |s| is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), &cfg),
                     cfg.failover.smart_failover_enabled,
+                    &effective_providers,
                     &pings,
                     threshold,
                 )
@@ -2099,22 +2474,41 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             Vec::new()
         };
 
-        let higher = if higher.is_empty() && should_restore_smart {
-            // Умный фейловер: активен сервер белых списков, кандидаты на возврат — любые живые обычные VPS серверы (Tier 1)
-            servers.iter()
-                .filter(|s| {
-                    s.id != active.id
-                        && !s.is_pool
-                        && s.protocol != "URL-TEST"
-                        && s.protocol != "FALLBACK"
-                        && s.id != "DIRECT"
-                        && s.id != "REJECT"
-                        && s.id != "GLOBAL"
-                        && !s.id.starts_with("AUTO-")
-                        && !is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), &cfg)
-                })
-                .cloned()
-                .collect()
+        let is_smart_restore_mode = higher.is_empty() && should_restore_smart;
+        let higher = if is_smart_restore_mode {
+            // Умный фейловер: активен сервер белых списков, кандидаты на возврат — живые обычные VPS серверы (Tier 1).
+            // Защита от пинг-шторма: скаутинг запускается не чаще раза в 60 сек и проверяет компактное скользящее окно (12 узлов).
+            let mut last_scout_guard = LAST_SMART_RESTORE_SCOUT.lock().await;
+            let now = Instant::now();
+            let should_scout = match *last_scout_guard {
+                None => true,
+                Some(last) => now.duration_since(last).as_secs() >= SMART_RESTORE_SCOUT_INTERVAL_SECS,
+            };
+
+            if should_scout {
+                *last_scout_guard = Some(now);
+                let all_tier1: Vec<Server> = servers.iter()
+                    .filter(|s| {
+                        s.id != active.id
+                            && !s.is_pool
+                            && s.protocol != "URL-TEST"
+                            && s.protocol != "FALLBACK"
+                            && s.id != "DIRECT"
+                            && s.id != "REJECT"
+                            && s.id != "GLOBAL"
+                            && !s.id.starts_with("AUTO-")
+                            && !is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), &cfg)
+                    })
+                    .cloned()
+                    .collect();
+
+                let offset = SMART_RESTORE_SCOUT_OFFSET.load(std::sync::atomic::Ordering::Relaxed);
+                let (scout_window, next_offset) = select_scouting_window(&all_tier1, offset, SMART_RESTORE_WINDOW_SIZE);
+                SMART_RESTORE_SCOUT_OFFSET.store(next_offset, std::sync::atomic::Ordering::Relaxed);
+                scout_window
+            } else {
+                Vec::new()
+            }
         } else {
             higher
         };
@@ -4780,9 +5174,11 @@ mod tests {
             false, &[], &servers, "active_dead", |_| false, is_bs_fn, true, &pings, threshold,
         ).expect("Must select target");
 
-        assert_eq!(target.id, "vps_slow", "Alive slow Tier 1 must be chosen over fast Tier 2 to keep internet open");
-        assert!(target.is_alive_slow, "Target must be marked as alive slow");
-        assert_eq!(target.tier, 2, "Candidate level must be 2 (alive slow)");
+        // Anchor Cutoff: Tier 1 only has slow server (420ms > 300ms), Tier 2 has fast healthy server (20ms <= 300ms)
+        // Must cut off slow Tier 1 anchor and switch to fast Tier 2!
+        assert_eq!(target.id, "bs_fast", "Fast Tier 2 must be chosen when Tier 1 has only slow servers (> threshold)");
+        assert!(!target.is_alive_slow);
+        assert_eq!(target.tier, 1, "Candidate level must be 1 (fast healthy)");
     }
 
     #[tokio::test]
@@ -4833,8 +5229,11 @@ mod tests {
             false, &[], &servers, "active_dead", is_q_fn, is_bs_fn, true, &pings, threshold,
         ).expect("Must select target");
 
-        assert_eq!(target.id, "vps_q", "Quarantined Tier 1 must be bypassed before falling back to domestic Whitelist");
-        assert!(target.is_quarantined, "Target must be marked as quarantined");
+        // Anchor Cutoff: Tier 1 only has quarantined server, Tier 2 has fast healthy server (15ms <= 300ms)
+        // Must cut off quarantined Tier 1 and switch to healthy Tier 2!
+        assert_eq!(target.id, "bs_healthy", "Fast healthy Tier 2 must be chosen when Tier 1 only has quarantined servers");
+        assert!(!target.is_quarantined);
+        assert_eq!(target.tier, 1, "Candidate level must be 1 (fast healthy)");
     }
 
     #[tokio::test]
@@ -5367,6 +5766,7 @@ mod tests {
         // 2. Transition into Tier 2 (Whitelist server)
         handle_whitelist_transition(&state, "ru_bs_1", "Russia [БС] Fast", None).await;
         assert_eq!(get_whitelist_episode_bytes(), 0, "Entering Tier 2 must reset episode counter to 0");
+        assert!(crate::traffic::is_whitelist_active(), "Telemetry channel must instantly switch to whitelist mode on Tier 2 transition");
 
         // 3. Multi-cycle traffic accumulation
         record_whitelist_episode_bytes(4096);
@@ -5383,6 +5783,7 @@ mod tests {
             13312,
             "Episode bytes MUST be retained upon returning to Tier 1 to display episode summary"
         );
+        assert!(!crate::traffic::is_whitelist_active(), "Telemetry channel must instantly switch back to VPS mode on Tier 1 transition");
 
         // 5. Subsequent entry to Tier 2 in a new episode resets counter
         handle_whitelist_transition(&state, "ru_bs_2", "Russia [БС] Backup", None).await;

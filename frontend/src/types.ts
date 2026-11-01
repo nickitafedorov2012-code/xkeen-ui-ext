@@ -26,6 +26,49 @@ export interface StackMemoryInfo {
   processes: ProcessMemoryInfo[]
 }
 
+export interface FailoverConfig {
+  enabled: boolean
+  ping_threshold_ms: number
+  priority_server: string
+  priority_chain?: string[]
+  provider_chain?: string[]
+  auto_restore_priority: boolean
+  interval_secs: number
+  canary_duration_secs?: number
+  device_failover_enabled?: boolean
+  best_ping_enabled?: boolean
+  best_ping_pool_size?: number
+  best_ping_hysteresis_ms?: number
+  quarantine_enabled?: boolean
+  smart_failover_enabled?: boolean
+  smart_failover_canary_duration_secs?: number
+  active_tier?: number
+  whitelist_episode_bytes?: number
+  priority_chain_pings?: Record<string, number>
+  presets?: FailoverPresetSlot[]
+  canary?: {
+    active: boolean
+    target_id: string
+    target_name: string
+    from_name: string
+    elapsed_secs: number
+    duration_secs?: number
+    remaining_secs: number
+    probes_passed: number
+    total_bytes: number
+  } | null
+  quarantine?: Array<{
+    server_id: string
+    server_name: string
+    fail_count: number
+    remaining_secs: number
+    reason: string
+  }>
+  last_test?: CanaryLastResult | null
+  zombie_servers?: string[]
+  current_status?: string
+}
+
 export interface StatusInfo {
   version: string
   config_path: string
@@ -69,46 +112,7 @@ export interface StatusInfo {
   } | null
   mihomo: { host: string; port: number }
   rci: { host: string; port: number }
-  failover: {
-    enabled: boolean
-    ping_threshold_ms: number
-    priority_server: string
-    priority_chain?: string[]
-    auto_restore_priority: boolean
-    interval_secs: number
-    canary_duration_secs?: number
-    device_failover_enabled?: boolean
-    best_ping_enabled?: boolean
-    best_ping_pool_size?: number
-    best_ping_hysteresis_ms?: number
-    quarantine_enabled?: boolean
-    smart_failover_enabled?: boolean
-    smart_failover_canary_duration_secs?: number
-    active_tier?: number
-    whitelist_episode_bytes?: number
-    priority_chain_pings?: Record<string, number>
-    canary?: {
-      active: boolean
-      target_id: string
-      target_name: string
-      from_name: string
-      elapsed_secs: number
-      duration_secs?: number
-      remaining_secs: number
-      probes_passed: number
-      total_bytes: number
-    } | null
-    quarantine?: Array<{
-      server_id: string
-      server_name: string
-      fail_count: number
-      remaining_secs: number
-      reason: string
-    }>
-    last_test?: CanaryLastResult | null
-    zombie_servers?: string[]
-    current_status?: string
-  }
+  failover: FailoverConfig
   refresh_interval_sec: number
   adblock_enabled?: boolean
 }
@@ -336,6 +340,7 @@ export interface AppSettings {
     ping_threshold_ms: number
     priority_server: string
     priority_chain?: string[]
+    provider_chain?: string[]
     auto_restore_priority: boolean
     interval_secs: number
     canary_duration_secs?: number
