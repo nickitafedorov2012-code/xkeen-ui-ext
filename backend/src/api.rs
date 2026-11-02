@@ -10680,6 +10680,29 @@ pub async fn sync_whitelist_full_tunnel(cfg: &config::AppConfig, redir_port: u16
     Ok(())
 }
 
+/// Экстренная очистка цепочек полного перехвата XKEEN_BS и XKEEN_GAMING, а также удаление NDM-хуков
+pub async fn emergency_cleanup_full_tunnel_rules() {
+    #[cfg(target_os = "linux")]
+    {
+        // 1. Команды очистки XKEEN_BS и XKEEN_GAMING
+        let dummy_cfg = config::AppConfig::default();
+        let (wl_cleanup, _) = build_whitelist_full_tunnel_commands(&dummy_cfg, 5000, 5001, 1053);
+        let dummy_gaming = config::GamingConfig::default();
+        let (gaming_cleanup, _, _) = build_gaming_full_tunnel_commands(&dummy_gaming, 5000, 5001, 1053);
+
+        let cleanup_script = format!("{}\n{}", wl_cleanup, gaming_cleanup);
+        let _ = tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&cleanup_script)
+            .output()
+            .await;
+
+        // 2. Удаление NDM-хуков, чтобы netfilter.d не восстановил правила при падении
+        let _ = tokio::fs::remove_file("/opt/etc/ndm/netfilter.d/060-xkeen-gaming.sh").await;
+        let _ = tokio::fs::remove_file("/opt/etc/ndm/netfilter.d/061-xkeen-bs.sh").await;
+    }
+}
+
 /// BS-FIX: единая точка синхронизации полного перехвата. Режимы взаимоисключающие:
 /// активен режим БС (StrictXKeen) ИЛИ игровой Compatibility — второй всегда приводится
 /// к чистому состоянию. Порядок важен: gaming управляет ip rule/таблицей 115,

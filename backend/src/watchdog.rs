@@ -5,6 +5,15 @@ use crate::{config, log_i, log_w, mihomo, override_sync, rci, routing, AppState}
 
 pub static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub static SERVICE_MANUALLY_STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static MIHOMO_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn is_mihomo_down() -> bool {
+    MIHOMO_DOWN.load(std::sync::atomic::Ordering::Acquire)
+}
+
+pub fn set_mihomo_down(down: bool) {
+    MIHOMO_DOWN.store(down, std::sync::atomic::Ordering::Release);
+}
 
 pub fn shutdown() {
     SHUTDOWN.store(true, std::sync::atomic::Ordering::Release);
@@ -34,6 +43,7 @@ pub fn spawn(state: AppState) {
     spawn_zapret_update_checker(state.clone());
     spawn_smart_gaming_monitor(state.clone());
     spawn_adguard_monitor(state.clone());
+    spawn_mihomo_health_monitor(state.clone());
     tokio::spawn(async move {
         // Начальная пауза перед запуском монитора
         for _ in 0..10 {
@@ -758,6 +768,13 @@ pub fn spawn_adguard_monitor(state: AppState) {
                 continue;
             }
 
+            // Защита от каскадного сбоя: если Mihomo упал, не восстанавливать AdGuard iptables,
+            // пока Mihomo не поднимется (нет смысла слать DNS в AdGuard, если весь туннель лежит).
+            // Порядок восстановления: сначала Mihomo -> затем AdGuard.
+            if is_mihomo_down() {
+                continue;
+            }
+
             let (mut enabled, host, configured_port, adguard_cfg, router_ip) = {
                 let cfg = state.config.read().await;
                 (
@@ -833,11 +850,120 @@ pub fn spawn_adguard_monitor(state: AppState) {
                 }
             } else if (enabled || is_running_protected) && !iptables_active && !iptables_temporarily_suspended {
                 // Если служба запущена и отвечает, но правила слетели (например, сброс KeeneticOS iptables)
-                let listener_ok = crate::adguard::test_agh_dns_listener(&host, dns_port).await;
-                if listener_ok {
-                    let _ = crate::adguard::apply_adguard_iptables(dns_port);
-                    log_i!("[WATCHDOG] ✓ Восстановлен системный редирект XKEEN_ADGUARD iptables (порт 53 -> {})", dns_port);
+                // Защита от каскадного сбоя: не восстанавливаем AdGuard iptables, если Mihomo упал!
+                if !is_mihomo_down() {
+                    let listener_ok = crate::adguard::test_agh_dns_listener(&host, dns_port).await;
+                    if listener_ok {
+                        let _ = crate::adguard::apply_adguard_iptables(dns_port);
+                        log_i!("[WATCHDOG] ✓ Восстановлен системный редирект XKEEN_ADGUARD iptables (порт 53 -> {})", dns_port);
+                    }
                 }
+            }
+        }
+    });
+}
+
+/// Фоновый сторож Mihomo (spawn_mihomo_health_monitor):
+/// Предотвращение потери интернета при аварийном падении ядра Mihomo.
+/// Если Mihomo падает при активных цепочках XKEEN_BS или XKEEN_GAMING,
+/// весь TCP/UDP перенаправляется в мёртвые порты (5000/5001) -> блэкаут сети.
+/// Сторож проверяет 127.0.0.1:9090/version каждые 12 секунд.
+/// При 3 подряд сбоях (36 сек):
+/// - Экстренно снимает iptables-цепочки XKEEN_BS и XKEEN_GAMING.
+/// - Удаляет NDM-хуки (060-xkeen-gaming.sh, 061-xkeen-bs.sh).
+/// - Пытается перезапустить службу (/opt/etc/init.d/S05xkeen restart или /opt/sbin/xkeen -restart).
+/// - Устанавливает флаг MIHOMO_DOWN = true (блокируя также нежелательный подъем AdGuard).
+/// При восстановлении Mihomo:
+/// - Переприменяет правила перехвата через sync_full_tunnel_modes.
+/// - Сбрасывает флаг MIHOMO_DOWN = false.
+pub fn spawn_mihomo_health_monitor(state: AppState) {
+    tokio::spawn(async move {
+        // Начальная пауза для старта служб
+        for _ in 0..15 {
+            if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            sleep(Duration::from_secs(1)).await;
+        }
+
+        let mut consecutive_failures: u32 = 0;
+        let mut iptables_cleaned: bool = false;
+
+        loop {
+            for _ in 0..12 {
+                if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                sleep(Duration::from_secs(1)).await;
+            }
+
+            if is_service_stopped() {
+                consecutive_failures = 0;
+                continue;
+            }
+
+            let cfg = state.config.read().await.clone();
+            let is_healthy = crate::mihomo::get_version(&state.http, &cfg).await.is_some();
+            let (new_failures, should_cleanup, should_restore) =
+                evaluate_mihomo_health_step(consecutive_failures, is_healthy, iptables_cleaned);
+            consecutive_failures = new_failures;
+
+            if should_cleanup {
+                log_w!(
+                    "[WATCHDOG] ⚠️ Mihomo ({}) не отвечает! Экстренное снятие iptables-правил перехвата трафика...",
+                    cfg.mihomo_url()
+                );
+
+                // a & b) Экстренное снятие цепочек XKEEN_BS / XKEEN_GAMING
+                // c) Удаление NDM-хуков
+                crate::api::emergency_cleanup_full_tunnel_rules().await;
+
+                // d) Попытаться автоматически перезапустить Mihomo
+                #[cfg(target_os = "linux")]
+                {
+                    tokio::spawn(async {
+                        let _ = tokio::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(
+                                "if [ -x /opt/etc/init.d/S99mihomo ]; then \
+                                    /opt/etc/init.d/S99mihomo restart >/dev/null 2>&1; \
+                                 elif [ -x /opt/etc/init.d/S05xkeen ]; then \
+                                    /opt/etc/init.d/S05xkeen restart >/dev/null 2>&1; \
+                                 elif [ -x /opt/sbin/xkeen ]; then \
+                                    /opt/sbin/xkeen -restart >/dev/null 2>&1; \
+                                 fi"
+                            )
+                            .output()
+                            .await;
+                    });
+                }
+
+                // e) Установить флаг MIHOMO_DOWN = true
+                set_mihomo_down(true);
+                iptables_cleaned = true;
+            } else if should_restore || (is_healthy && is_mihomo_down()) {
+                log_i!("[WATCHDOG] ✓ Mihomo восстановил работу! Повторное применение iptables-правил.");
+
+                // Восстановление iptables и NDM-хуков через sync_full_tunnel_modes
+                let bs_active = cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen;
+                let gaming_active = cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility;
+
+                if bs_active || gaming_active {
+                    let (redir_port, tproxy_port) = if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+                        (
+                            routing::parse_redir_port(&yaml).unwrap_or(5000),
+                            routing::parse_tproxy_port(&yaml).unwrap_or(5001),
+                        )
+                    } else {
+                        (5000, 5001)
+                    };
+                    let dns_port = crate::api::resolve_active_dns_port(&cfg);
+                    crate::api::sync_full_tunnel_modes(&cfg, redir_port, tproxy_port, dns_port).await;
+                }
+
+                // Сброс флагов
+                set_mihomo_down(false);
+                iptables_cleaned = false;
             }
         }
     });
@@ -866,6 +992,30 @@ pub fn get_recent_gaming_conns(ignored_list: &[String]) -> Vec<RecentGamingConn>
         item.ignored = is_conn_target_ignored(&item.target, &item.destination, ignored_list);
     }
     list
+}
+
+/// Вспомогательная логика шага проверки состояния Mihomo для unit-тестов и основного цикла.
+/// Принимает текущее число сбоев, состояние Mihomo (healthy), и флаги.
+/// Возвращает (новое число сбоев, нужно ли вызвать аварийную очистку, нужно ли вызвать восстановление).
+pub fn evaluate_mihomo_health_step(
+    consecutive_failures: u32,
+    is_healthy: bool,
+    iptables_cleaned: bool,
+) -> (u32, bool, bool) {
+    if !is_healthy {
+        let new_failures = consecutive_failures + 1;
+        let should_cleanup = new_failures >= 3 && !iptables_cleaned;
+        (new_failures, should_cleanup, false)
+    } else {
+        let should_restore = iptables_cleaned;
+        (0, false, should_restore)
+    }
+}
+
+/// Проверка, разрешено ли восстанавливать AdGuard Home iptables с учетом статуса Mihomo.
+/// Защита от каскадного сбоя: если Mihomo упал, AdGuard iptables НЕ восстанавливаются.
+pub fn can_restore_adguard_iptables(mihomo_down: bool, adguard_listener_ok: bool) -> bool {
+    !mihomo_down && adguard_listener_ok
 }
 
 pub fn is_conn_target_ignored(target: &str, destination: &str, ignored_list: &[String]) -> bool {
@@ -1218,6 +1368,64 @@ mod tests {
             ignored: false,
         };
         assert_eq!(conn.host, conn.target);
+    }
+
+    #[test]
+    fn test_mihomo_health_check_failure_and_recovery_lifecycle() {
+        // Проверка жизненного цикла сторожа Mihomo:
+        // 1-2 неудачные проверки -> счетчик растет, очистка НЕ вызывается
+        let (f1, clean1, rest1) = evaluate_mihomo_health_step(0, false, false);
+        assert_eq!(f1, 1);
+        assert!(!clean1, "1 сбой не должен инициировать снятие правил");
+        assert!(!rest1);
+
+        let (f2, clean2, rest2) = evaluate_mihomo_health_step(1, false, false);
+        assert_eq!(f2, 2);
+        assert!(!clean2, "2 сбоя не должны инициировать снятие правил");
+        assert!(!rest2);
+
+        // 3-й сбой подряд (36 сек) -> экстренная очистка iptables!
+        let (f3, clean3, rest3) = evaluate_mihomo_health_step(2, false, false);
+        assert_eq!(f3, 3);
+        assert!(clean3, "3 подряд сбоя ДОЛЖНЫ инициировать экстренное снятие iptables!");
+        assert!(!rest3);
+
+        // Последующие сбои, если очистка уже проведена -> не спамим очистку повторно
+        let (f4, clean4, rest4) = evaluate_mihomo_health_step(3, false, true);
+        assert_eq!(f4, 4);
+        assert!(!clean4, "Не должно повторно инициировать очистку при уже снятых правилах");
+        assert!(!rest4);
+
+        // Восстановление Mihomo -> триггер восстановления sync_full_tunnel_modes
+        let (f_rec, clean_rec, rest_rec) = evaluate_mihomo_health_step(4, true, true);
+        assert_eq!(f_rec, 0, "Счетчик сбоев должен сброситься в 0");
+        assert!(!clean_rec);
+        assert!(rest_rec, "При оживлении Mihomo должно быть вызвано восстановление правил");
+    }
+
+    #[test]
+    fn test_cascade_failure_protection_adguard_and_mihomo() {
+        // Проверка защиты от каскадного сбоя:
+        // Если Mihomo упал (mihomo_down = true), AdGuard Home iptables НЕ должны восстанавливаться,
+        // даже если сам AdGuard listener отвечает OK.
+        assert!(
+            !can_restore_adguard_iptables(true, true),
+            "При падении Mihomo правила AdGuard НЕ должны восстанавливаться!"
+        );
+        assert!(
+            !can_restore_adguard_iptables(true, false),
+            "При падении обоих сервисов восстановление AdGuard запрещено"
+        );
+
+        // Только когда Mihomo поднялся (mihomo_down = false) и AdGuard здоров -> разрешено восстановление
+        assert!(
+            can_restore_adguard_iptables(false, true),
+            "При здоровом Mihomo и работающем AdGuard восстановление разрешено"
+        );
+        assert!(
+            !can_restore_adguard_iptables(false, false),
+            "Если AdGuard мертв, восстанавливать нельзя"
+        );
     }
 }
 
