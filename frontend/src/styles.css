@@ -5377,6 +5377,8 @@ button.delete-btn:focus-visible {
   font-size: 12px;
   font-weight: 600;
   user-select: none;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .traffic-badge .badge-label {
   font-size: 11px;
@@ -5390,6 +5392,10 @@ button.delete-btn:focus-visible {
 }
 .traffic-badge .badge-val {
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  min-width: 52px;
+  display: inline-block;
+  text-align: right;
 }
 .traffic-badge.direct {
   background: rgba(34, 197, 94, 0.12);
@@ -6462,6 +6468,12 @@ button.delete-btn:focus-visible {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 480px), 1fr));
   gap: 16px;
   align-items: start;
+}
+
+.settings-columns > .card {
+  margin: 0 !important;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 @media (max-width: 960px) {

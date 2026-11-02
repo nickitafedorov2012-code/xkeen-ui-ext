@@ -1180,10 +1180,8 @@ export default function Settings({ notify, status, refresh }: Props) {
       </section>
 
       <div className="settings-columns">
-        {/* ЛЕВАЯ КОЛОНКА */}
-        <div className="settings-col">
-          {/* FAILOVER КАРТОЧКА */}
-          <section className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {/* FAILOVER КАРТОЧКА */}
+        <section className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <h2 style={{ margin: 0, fontSize: 16 }}>⚡ Резервирование (Failover)</h2>
@@ -2794,8 +2792,6 @@ export default function Settings({ notify, status, refresh }: Props) {
           </section>
 
           {/* ДОМЕНЫ */}
-        </div>
-        <div className="settings-col">
           <section className="card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -3379,7 +3375,6 @@ export default function Settings({ notify, status, refresh }: Props) {
               </div>
             </div>
           </section>
-        </div>
       </div>
 
       {/* БЕЗОПАСНОСТЬ И ПАРОЛЬ (Сжатая Apple-карточка) */}

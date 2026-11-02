@@ -102,21 +102,34 @@ export default function Devices({ notify }: Props) {
 
   const load = useCallback(async () => {
     try {
-      const [d, p, s, r, dr, zDev, gamingRes, whitelistRes] = await Promise.all([
+      const [
+        devicesRes,
+        policiesRes,
+        serversRes,
+        routingRes,
+        drRes,
+        zapretDevRes,
+        gamingRes,
+        whitelistRes,
+      ] = await Promise.allSettled([
         apiGet<{ devices: DeviceInfo[] }>('devices'),
         apiGet<{ policies: PolicyInfo[] }>('policies'),
         apiGet<{ servers: ServerInfo[]; whitelist_providers?: string[] }>('servers'),
         apiGet<{ assignments: RoutingAssignmentInfo[] }>('routing'),
-        apiGet<{ routing: Record<string, DeviceRoutingEntry>; device_failover_enabled: boolean }>('device-routing').catch(() => ({
-          routing: {} as Record<string, DeviceRoutingEntry>,
-          device_failover_enabled: false,
-        })),
-        apiGet<{ excluded_devices?: string[] }>('devices/zapret').catch(() => ({
-          excluded_devices: [] as string[],
-        })),
-        apiGet<{ is_active?: boolean; enabled?: boolean; config?: { enabled?: boolean; devices?: Array<{ mac: string; enabled: boolean }> } }>('gaming/status').catch(() => null),
-        apiGet<WhitelistStatusResponse>('whitelist/status').catch(() => null),
+        apiGet<{ routing: Record<string, DeviceRoutingEntry>; device_failover_enabled: boolean }>('device-routing'),
+        apiGet<{ excluded_devices?: string[] }>('devices/zapret'),
+        apiGet<{ is_active?: boolean; enabled?: boolean; config?: { enabled?: boolean; devices?: Array<{ mac: string; enabled: boolean }> } }>('gaming/status'),
+        apiGet<WhitelistStatusResponse>('whitelist/status'),
       ])
+
+      const d = devicesRes.status === 'fulfilled' ? devicesRes.value : { devices: [] }
+      const p = policiesRes.status === 'fulfilled' ? policiesRes.value : { policies: [] }
+      const s = serversRes.status === 'fulfilled' ? serversRes.value : { servers: [] }
+      const r = routingRes.status === 'fulfilled' ? routingRes.value : { assignments: [] }
+      const dr = drRes.status === 'fulfilled' ? drRes.value : { routing: {} as Record<string, DeviceRoutingEntry>, device_failover_enabled: false }
+      const zDev = zapretDevRes.status === 'fulfilled' ? zapretDevRes.value : { excluded_devices: [] }
+      const gamingData = gamingRes.status === 'fulfilled' ? gamingRes.value : null
+      const whitelistData = whitelistRes.status === 'fulfilled' ? whitelistRes.value : null
       setDevices(d.devices)
       setPolicies(p.policies)
       setServers(s.servers)
@@ -125,19 +138,19 @@ export default function Devices({ notify }: Props) {
       setDrMap(dr.routing)
       setDevFailover(dr.device_failover_enabled)
       setExcludedZapretDevices(new Set(zDev.excluded_devices || []))
-      if (gamingRes) {
+      if (gamingData) {
         const macs = new Set<string>()
-        const isGamingActive = Boolean(gamingRes.is_active ?? gamingRes.config?.enabled ?? gamingRes.enabled)
-        if (isGamingActive && gamingRes.config?.devices) {
-          for (const gd of gamingRes.config.devices) {
+        const isGamingActive = Boolean(gamingData.is_active ?? gamingData.config?.enabled ?? gamingData.enabled)
+        if (isGamingActive && gamingData.config?.devices) {
+          for (const gd of gamingData.config.devices) {
             if (gd.enabled) macs.add(gd.mac.toLowerCase())
           }
         }
         setGamingDeviceMacs(macs)
       }
       const wlMacs = new Set<string>()
-      if (whitelistRes && whitelistRes.devices) {
-        for (const wd of whitelistRes.devices) {
+      if (whitelistData && whitelistData.devices) {
+        for (const wd of whitelistData.devices) {
           if (wd.enabled) wlMacs.add(wd.mac.toLowerCase())
         }
       }
