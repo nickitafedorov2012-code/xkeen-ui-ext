@@ -2184,11 +2184,11 @@ table.devices-table th:nth-child(3) { width: 115px; } /* IP */
 table.devices-table th:nth-child(4) { width: 115px; } /* policy */
 table.devices-table th:nth-child(5) { width: 75px; } /* speed */
 table.devices-table th:nth-child(6) { width: 80px; } /* traffic */
-table.devices-table th:nth-child(7) { width: 140px; } /* server */
-table.devices-table th:nth-child(8) { width: 112px; text-align: center; } /* zapret */
-table.devices-table th:nth-child(9) { width: 105px; text-align: center; } /* gaming */
-table.devices-table th:nth-child(10) { width: 72px; text-align: center; } /* whitelist (БС) */
-table.devices-table th:nth-child(11) { width: 72px; text-align: center; } /* gear */
+table.devices-table th:nth-child(7) { width: 180px; min-width: 170px; } /* server */
+table.devices-table th:nth-child(8) { width: 112px; min-width: 112px; text-align: center; } /* zapret */
+table.devices-table th:nth-child(9) { width: 105px; min-width: 105px; text-align: center; } /* gaming */
+table.devices-table th:nth-child(10) { width: 72px; min-width: 72px; text-align: center; } /* whitelist (БС) */
+table.devices-table th:nth-child(11) { width: 72px; min-width: 50px; text-align: center; } /* gear */
 
 /* Ввод ограничения скорости (Мбит/с) */
 .device-speed-input-wrap {
@@ -2407,6 +2407,9 @@ table.devices-table td {
   justify-content: center;
   gap: 4px;
   height: 26px;
+  width: 98px;
+  min-width: 98px;
+  max-width: 98px;
   padding: 0 6px;
   border-radius: 6px;
   font-size: 11px;
@@ -2485,6 +2488,9 @@ table.devices-table td {
   justify-content: center;
   gap: 4px;
   height: 26px;
+  width: 98px;
+  min-width: 98px;
+  max-width: 98px;
   padding: 0 6px;
   border-radius: 6px;
   font-size: 11px;
@@ -2563,6 +2569,9 @@ table.devices-table td {
   justify-content: center;
   gap: 4px;
   height: 26px;
+  width: 74px;
+  min-width: 74px;
+  max-width: 74px;
   padding: 0 6px;
   border-radius: 6px;
   font-size: 11px;
@@ -5292,6 +5301,8 @@ button.delete-btn:focus-visible {
   background: var(--card-bg, #161a23);
   border: 1px solid var(--border);
   border-radius: 12px;
+  min-height: 228px;
+  contain: layout;
 }
 .traffic-graph-header {
   display: flex;
@@ -5436,10 +5447,100 @@ button.delete-btn:focus-visible {
   position: relative;
   width: 100%;
   height: 130px;
+  min-height: 130px;
   background: rgba(0, 0, 0, 0.25);
   border-radius: 8px;
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.05);
+  touch-action: none;
+  cursor: crosshair;
+}
+
+/* KeeneticOS-style traffic tooltip */
+.traffic-hover-guide {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.4);
+  pointer-events: none;
+  z-index: 4;
+}
+
+[data-theme="light"] .traffic-hover-guide {
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.traffic-tooltip {
+  position: absolute;
+  top: 8px;
+  pointer-events: none;
+  z-index: 10;
+  background: rgba(15, 23, 42, 0.88);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  min-width: 130px;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+[data-theme="light"] .traffic-tooltip {
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+}
+
+.traffic-tooltip-time {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted, #94a3b8);
+  font-family: 'Cascadia Code', Consolas, monospace;
+  margin-bottom: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding-bottom: 3px;
+}
+
+[data-theme="light"] .traffic-tooltip-time {
+  border-bottom-color: rgba(0, 0, 0, 0.08);
+  color: #64748b;
+}
+
+.traffic-tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.traffic-tooltip-arrow-up {
+  color: #22c55e;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.traffic-tooltip-arrow-down {
+  color: #38bdf8;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.traffic-tooltip-val {
+  margin-left: auto;
+  font-family: 'Cascadia Code', Consolas, monospace;
+  font-weight: 700;
+  font-size: 11.5px;
+  color: var(--text, #f8fafc);
+}
+
+[data-theme="light"] .traffic-tooltip-val {
+  color: #0f172a;
 }
 .traffic-svg {
   width: 100%;
@@ -6358,7 +6459,7 @@ button.delete-btn:focus-visible {
 
 .settings-columns {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 480px), 1fr));
   gap: 16px;
   align-items: start;
 }

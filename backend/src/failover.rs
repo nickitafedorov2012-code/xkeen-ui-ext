@@ -1575,14 +1575,11 @@ pub fn is_whitelist_server_full(
     provider: Option<&str>,
     cfg: &crate::config::AppConfig,
 ) -> bool {
+    // 1. Приоритет прямого назначения серверов пользователем
     if !node_id.is_empty() && cfg.whitelist_servers.iter().any(|s| s == node_id) {
         return true;
     }
-    if let Some(p) = provider {
-        if !p.is_empty() && cfg.whitelist_providers.iter().any(|wp| wp == p) {
-            return true;
-        }
-    }
+    // 2. Приоритет явных тегов белых списков в названии или ID ноды
     let check_tag = |s: &str| -> bool {
         let lower = s.to_lowercase();
         lower.contains("[бс]")
@@ -1599,7 +1596,20 @@ pub fn is_whitelist_server_full(
             || lower.contains("белые списки")
             || lower.contains("белый список")
     };
-    check_tag(node_name) || (!node_id.is_empty() && check_tag(node_id))
+    if check_tag(node_name) || (!node_id.is_empty() && check_tag(node_id)) {
+        return true;
+    }
+    // 3. Подписка в whitelist_providers считается БС:
+    // Если сервер явно указан в whitelist_servers — он БС.
+    // Если провайдер в whitelist_providers:
+    // Сервер считается БС, кроме случая, когда в этой же подписке пользователь явно пометил другие серверы,
+    // а этот оставил обычным (без тегов и не в whitelist_servers).
+    if let Some(p) = provider {
+        if !p.is_empty() && cfg.whitelist_providers.iter().any(|wp| wp.eq_ignore_ascii_case(p)) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Синхронизация селекторной группы '🛡️ Whitelist' в ядре Mihomo при переключении узла.

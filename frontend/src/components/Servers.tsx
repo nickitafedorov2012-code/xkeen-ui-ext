@@ -1224,7 +1224,10 @@ export default function Servers({ notify, status, refresh }: Props) {
 
               {/* Действия */}
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <span className="tag current-active-badge" style={{ fontSize: 11, padding: '2px 8px' }}>✓ ТРАФИК ИДЁТ СЮДА</span>
+                <span className="tag current-active-badge" style={{ fontSize: 11, padding: '2px 8px' }}>
+                  <span className="dot on" style={{ width: 6, height: 6, marginRight: 4, display: 'inline-block' }} />
+                  Активен
+                </span>
                 {/* FE-MOBILE: перенос кнопок на новую строку вместо распирания карточки на мобильных */}
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   <button

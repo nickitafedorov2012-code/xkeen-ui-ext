@@ -177,20 +177,37 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
       } catch {}
 
       if (isValidPing) {
-        if (stored.length === 0 || stored[stored.length - 1].ms !== ping) {
+        if (stored.length === 0) {
+          // Pre-populate initial 20 points smoothly so sparkline doesn't render as a 1-2 point stub
+          stored = Array(20).fill({ ms: ping, ok: true })
+        } else if (stored.length < 20) {
+          // Pad existing history up to at least 20 points smoothly
+          const padCount = 20 - stored.length
+          const firstVal = stored[0]
+          stored = [...Array(padCount).fill(firstVal), ...stored]
+          if (stored[stored.length - 1].ms !== ping) {
+            stored = [...stored.slice(1), { ms: ping, ok: true }]
+          }
+        } else if (stored[stored.length - 1].ms !== ping) {
           stored = [...stored, { ms: ping, ok: true }].slice(-40)
-          try {
-            sessionStorage.setItem(`xr_dash_pings_${sId}`, JSON.stringify(stored))
-          } catch {}
         }
+        try {
+          sessionStorage.setItem(`xr_dash_pings_${sId}`, JSON.stringify(stored))
+        } catch {}
       }
       setPingHistory(stored)
     } else if (isValidPing) {
       setPingHistory((prev) => {
-        if (prev.length > 0 && prev[prev.length - 1].ms === ping) {
-          return prev
+        let currentList = prev
+        if (currentList.length < 20) {
+          const padCount = 20 - currentList.length
+          const padVal = currentList.length > 0 ? currentList[0] : { ms: ping, ok: true }
+          currentList = [...Array(padCount).fill(padVal), ...currentList]
         }
-        const next = [...prev, { ms: ping, ok: true }].slice(-40)
+        if (currentList.length > 0 && currentList[currentList.length - 1].ms === ping) {
+          return currentList
+        }
+        const next = [...currentList, { ms: ping, ok: true }].slice(-40)
         try {
           sessionStorage.setItem(`xr_dash_pings_${sId}`, JSON.stringify(next))
         } catch {}
@@ -399,10 +416,6 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
   const f = status?.failover
   const groupedEvents = groupEvents(events)
 
-  const okPings = pingHistory.filter((p) => p.ok).map((p) => p.ms)
-  const minPing = okPings.length > 0 ? okPings.reduce((a, b) => Math.min(a, b)) : 0
-  const maxPing = okPings.length > 0 ? okPings.reduce((a, b) => Math.max(a, b)) : 0
-
   return (
     <div>
       {/* 1.1 Компактная статусная полоска роутера и ядра вместо двух статичных карточек */}
@@ -545,15 +558,15 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                   </li>
                 </ul>
 
-                {/* График стабильности задержки (отображается при наличии хотя бы 2 замеров) */}
+                {/* График стабильности задержки */}
                 {pingHistory.length >= 2 && (
                   <div className="active-server-sparkline-box">
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
-                      <span className="muted small" style={{ fontSize: 11 }}>
-                        Стабильность пинга ({pingHistory.length} точек):
+                      <span className="muted small" style={{ fontSize: 11, fontWeight: 600 }}>
+                        Пинг
                       </span>
-                      <span className="muted small" style={{ fontSize: 11, fontFamily: 'monospace' }}>
-                        мин: {minPing} мс / макс: {maxPing} мс
+                      <span className={'mono ' + pingClass(status.active_server.ping_ms)} style={{ fontSize: 11, fontWeight: 700 }}>
+                        {status.active_server.ping_ms > 0 ? `${status.active_server.ping_ms} мс` : '—'}
                       </span>
                     </div>
                     <PingSparkline data={pingHistory} />

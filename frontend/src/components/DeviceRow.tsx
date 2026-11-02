@@ -425,24 +425,26 @@ const DeviceRow = memo(function DeviceRow({
         )}
       </td>
       <td>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', minWidth: 160 }}>
-          <CustomSelect
-            value={assigned || 'default'}
-            disabled={busy || isOfflineOrNoIp}
-            onChange={(newVal) => {
-              if (isOfflineOrNoIp) return
-              applyServer(d.ip, d.name, newVal)
-            }}
-            options={[
-              { value: 'default', label: '🌐 Общий активный узел' },
-              ...(assigned && assigned !== 'default' && assigned !== 'PROXY' && !servers.some((s) => s.id === assigned)
-                ? [{ value: assigned, label: serverLabel(assigned) }]
-                : []),
-              ...servers
-                .filter((s) => !s.is_pool && s.id !== 'PROXY' && s.id !== 'GLOBAL' && s.id !== 'Fastest' && s.id !== 'Fallback')
-                .map((s) => ({ value: s.id, label: serverLabel(s.id) })),
-            ]}
-          />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'nowrap', minWidth: 160, width: '100%' }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <CustomSelect
+              value={assigned || 'default'}
+              disabled={busy || isOfflineOrNoIp}
+              onChange={(newVal) => {
+                if (isOfflineOrNoIp) return
+                applyServer(d.ip, d.name, newVal)
+              }}
+              options={[
+                { value: 'default', label: '🌐 Общий активный узел' },
+                ...(assigned && assigned !== 'default' && assigned !== 'PROXY' && !servers.some((s) => s.id === assigned)
+                  ? [{ value: assigned, label: serverLabel(assigned) }]
+                  : []),
+                ...servers
+                  .filter((s) => !s.is_pool && s.id !== 'PROXY' && s.id !== 'GLOBAL' && s.id !== 'Fastest' && s.id !== 'Fallback')
+                  .map((s) => ({ value: s.id, label: serverLabel(s.id) })),
+              ]}
+            />
+          </div>
           <select
             className="device-select"
             style={{ display: 'none' }}

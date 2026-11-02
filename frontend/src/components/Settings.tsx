@@ -2399,10 +2399,10 @@ export default function Settings({ notify, status, refresh }: Props) {
                     </div>
                   </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
                     {/* Контролируемый провайдер */}
-                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
-                      <span style={{ fontSize: 12 }}>Контролируемый провайдер (зарубежный VPS)</span>
+                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4, width: '100%' }}>
+                      <span style={{ fontSize: 12, fontWeight: 500 }}>Контролируемый пул (зарубежный VPS)</span>
                       <select
                         className="input"
                         value={det.monitored_provider || ''}
@@ -2412,9 +2412,10 @@ export default function Settings({ notify, status, refresh }: Props) {
                             d.monitored_provider = e.target.value
                           })
                         }
+                        style={{ width: '100%', boxSizing: 'border-box' }}
                         data-testid="settings-detector-monitored-provider"
                       >
-                        <option value="">Авто (все зарубежные VPS)</option>
+                        <option value="">Авто (все зарубежные узлы Tier 1)</option>
                         {providers.map((p) => (
                           <option key={p.id} value={p.id}>
                             {p.name || p.id} ({p.count} узлов)
@@ -2423,9 +2424,9 @@ export default function Settings({ notify, status, refresh }: Props) {
                       </select>
                     </label>
 
-                    {/* Целевой провайдер БС */}
-                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
-                      <span style={{ fontSize: 12 }}>Целевой провайдер белых списков [БС]</span>
+                    {/* Целевой сервер / провайдер БС */}
+                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4, width: '100%' }}>
+                      <span style={{ fontSize: 12, fontWeight: 500 }}>Целевой шлюз белых списков [БС]</span>
                       <select
                         className="input"
                         value={det.target_bs_provider || ''}
@@ -2435,9 +2436,10 @@ export default function Settings({ notify, status, refresh }: Props) {
                             d.target_bs_provider = e.target.value
                           })
                         }
+                        style={{ width: '100%', boxSizing: 'border-box' }}
                         data-testid="settings-detector-target-provider"
                       >
-                        <option value="">Авто (любой доступный узел БС)</option>
+                        <option value="">Авто (серверы, помеченные [БС])</option>
                         {providers.map((p) => (
                           <option key={p.id} value={p.id}>
                             {p.name || p.id} {p.is_whitelist ? '⭐ [БС]' : ''}
@@ -2645,19 +2647,19 @@ export default function Settings({ notify, status, refresh }: Props) {
                     </label>
                   </div>
 
-                  {/* Кнопка автоопределения БС узлов и подписок */}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4, flexWrap: 'wrap', gap: 8 }}>
+                  {/* Кнопка автоопределения БС узлов */}
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6, flexWrap: 'wrap', gap: 8, padding: '8px 10px', background: 'rgba(255, 255, 255, 0.02)', borderRadius: 8, border: '1px solid var(--border)' }}>
                     <button
                       type="button"
                       className="btn sm"
                       onClick={handleOpenSettingsClassifier}
                       data-testid="settings-detector-classify-btn"
-                      title="Автоматически распознать все серверы и подписки с тегами БС"
+                      title="Автоматически распознать серверы с метками БС и добавить в список"
                     >
-                      ✨ Автоопределение серверов и подписок БС
+                      ✨ Автоопределение серверов БС
                     </button>
-                    <span className="muted small" style={{ fontSize: 11 }}>
-                      Автоматически пополняет белый список узлов и подписок без ручной правки
+                    <span className="muted small" style={{ fontSize: 11, flex: 1, minWidth: 200 }}>
+                      Находит конкретные узлы обхода (теги [БС], Whitelist) и помечает их как Tier 2
                     </span>
                   </div>
 
@@ -2792,6 +2794,8 @@ export default function Settings({ notify, status, refresh }: Props) {
           </section>
 
           {/* ДОМЕНЫ */}
+        </div>
+        <div className="settings-col">
           <section className="card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -2808,12 +2812,12 @@ export default function Settings({ notify, status, refresh }: Props) {
               По одному домену в строке. Вставляются в начало <code>rules:</code> (DOMAIN-SUFFIX). Сопутствующие CDN и медиа-серверы определяются автоматически.
             </p>
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, marginTop: 4 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 14, marginTop: 4 }}>
               {/* DIRECT */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <b style={{ fontSize: 12.5, color: '#34d399' }}>⏭ Напрямую (DIRECT)</b>
-                  <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', minHeight: 24 }}>
+                  <b style={{ fontSize: 13, color: '#34d399', whiteSpace: 'nowrap' }}>⏭ Напрямую (DIRECT)</b>
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', whiteSpace: 'nowrap' }}>
                     <span className="muted small">{directDomains.split('\n').filter(Boolean).length} шт.</span>
                     {hasUnsavedDirect ? (
                       <span style={{ fontSize: 10.5, background: 'rgba(245, 158, 11, 0.2)', color: '#f59e0b', padding: '1px 6px', borderRadius: 4, fontWeight: 600 }}>
@@ -2838,9 +2842,9 @@ export default function Settings({ notify, status, refresh }: Props) {
 
               {/* PROXY */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <b style={{ fontSize: 12.5, color: '#38bdf8' }}>🔒 Через прокси (PROXY)</b>
-                  <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', minHeight: 24 }}>
+                  <b style={{ fontSize: 13, color: '#38bdf8', whiteSpace: 'nowrap' }}>🔒 Через прокси (PROXY)</b>
+                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', whiteSpace: 'nowrap' }}>
                     <span className="muted small">{forceDomains.split('\n').filter(Boolean).length} шт.</span>
                     {hasUnsavedForce ? (
                       <span style={{ fontSize: 10.5, background: 'rgba(245, 158, 11, 0.2)', color: '#f59e0b', padding: '1px 6px', borderRadius: 4, fontWeight: 600 }}>
@@ -3144,10 +3148,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                 onChange={(e) => patch((s) => (s.system.xkeen_init = e.target.value))} />
             </label>
           </section>
-        </div>
 
-        {/* ПРАВАЯ КОЛОНКА */}
-        <div className="settings-col">
           {/* DNS РЕЖИМ (MIHOMO) */}
           <section className="card">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>

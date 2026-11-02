@@ -111,6 +111,7 @@ export default function Zapret({ notify }: ZapretProps) {
   const [customDomainInput, setCustomDomainInput] = useState('')
   const [addingCustom, setAddingCustom] = useState(false)
   const [boostingDomain, setBoostingDomain] = useState<string | null>(null)
+  const [expandedCdnDomains, setExpandedCdnDomains] = useState<Set<string>>(new Set())
 
   // Z-19: защита поллинга — не опрашиваем фоновую вкладку и не допускаем наложение
   // запросов (раньше наложение триггерило побочные эффекты GET /api/zapret/status)
@@ -2863,33 +2864,99 @@ export default function Zapret({ notify }: ZapretProps) {
                   </div>
 
                   {/* ПОДТЯНУТЫЕ CDN ДОМЕНЫ — ЦВЕТ 2 (ФИОЛЕТОВО-РОЗОВЫЙ /BOOST) */}
-                  {entry.cdns && entry.cdns.length > 0 ? (
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', paddingTop: 6, borderTop: '1px solid rgba(255, 255, 255, 0.04)' }}>
-                      <span style={{ fontSize: 11, color: isChecked ? '#c084fc' : 'var(--muted)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
-                        ⚡ /boost CDN:
-                      </span>
-                      {entry.cdns.map((cdn) => (
-                        <span
-                          key={cdn}
-                          className="badge"
-                          style={{
-                            fontSize: 10,
-                            fontFamily: 'Consolas, monospace',
-                            padding: '3px 8px',
-                            borderRadius: 6,
-                            background: isChecked
-                              ? 'linear-gradient(135deg, rgba(168, 85, 247, 0.18) 0%, rgba(217, 70, 239, 0.18) 100%)'
-                              : 'rgba(255, 255, 255, 0.03)',
-                            color: isChecked ? '#e879f9' : 'var(--muted)',
-                            border: isChecked ? '1px solid rgba(168, 85, 247, 0.45)' : '1px solid var(--border)',
-                            boxShadow: isChecked ? '0 1px 4px rgba(168, 85, 247, 0.1)' : 'none',
-                          }}
-                        >
-                          ⚡ {cdn}
-                        </span>
-                      ))}
-                    </div>
-                  ) : (
+                  {entry.cdns && entry.cdns.length > 0 ? (() => {
+                    const isExpanded = expandedCdnDomains.has(entry.domain)
+                    const totalCdns = entry.cdns.length
+                    const shouldCollapse = totalCdns > 2
+                    return (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingTop: 6, borderTop: '1px solid rgba(255, 255, 255, 0.04)' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 6 }}>
+                          <span style={{ fontSize: 11, color: isChecked ? '#c084fc' : 'var(--muted)', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
+                            ⚡ /boost CDN:
+                          </span>
+                          {shouldCollapse && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setExpandedCdnDomains((prev) => {
+                                  const next = new Set(prev)
+                                  if (next.has(entry.domain)) next.delete(entry.domain)
+                                  else next.add(entry.domain)
+                                  return next
+                                })
+                              }}
+                              style={{
+                                background: 'transparent',
+                                border: 'none',
+                                color: isChecked ? '#c084fc' : 'var(--muted)',
+                                fontSize: 11,
+                                cursor: 'pointer',
+                                padding: '2px 6px',
+                                borderRadius: 4,
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 4,
+                                fontWeight: 500,
+                              }}
+                              title={isExpanded ? 'Скрыть список CDN' : 'Показать все связанные CDN'}
+                            >
+                              ⚡ Связанные CDN ({totalCdns}) [{isExpanded ? 'Скрыть ▲' : 'Показать ▼'}]
+                            </button>
+                          )}
+                        </div>
+
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                          {entry.cdns.map((cdn, idx) => {
+                            const isHidden = shouldCollapse && !isExpanded && idx >= 2
+                            return (
+                              <span
+                                key={cdn}
+                                className="badge"
+                                style={{
+                                  display: isHidden ? 'none' : 'inline-flex',
+                                  fontSize: 10,
+                                  fontFamily: 'Consolas, monospace',
+                                  padding: '3px 8px',
+                                  borderRadius: 6,
+                                  background: isChecked
+                                    ? 'linear-gradient(135deg, rgba(168, 85, 247, 0.18) 0%, rgba(217, 70, 239, 0.18) 100%)'
+                                    : 'rgba(255, 255, 255, 0.03)',
+                                  color: isChecked ? '#e879f9' : 'var(--muted)',
+                                  border: isChecked ? '1px solid rgba(168, 85, 247, 0.45)' : '1px solid var(--border)',
+                                  boxShadow: isChecked ? '0 1px 4px rgba(168, 85, 247, 0.1)' : 'none',
+                                }}
+                              >
+                                ⚡ {cdn}
+                              </span>
+                            )
+                          })}
+                          {shouldCollapse && !isExpanded && (
+                            <span
+                              onClick={() => {
+                                setExpandedCdnDomains((prev) => {
+                                  const next = new Set(prev)
+                                  next.add(entry.domain)
+                                  return next
+                                })
+                              }}
+                              style={{
+                                fontSize: 10.5,
+                                color: isChecked ? '#c084fc' : 'var(--muted)',
+                                cursor: 'pointer',
+                                padding: '2px 6px',
+                                background: 'rgba(168, 85, 247, 0.08)',
+                                borderRadius: 4,
+                                border: '1px dashed rgba(168, 85, 247, 0.3)',
+                              }}
+                              title="Нажмите, чтобы показать все CDN"
+                            >
+                              +{totalCdns - 2} еще...
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    )
+                  })() : (
                     <div style={{ fontSize: 11, color: 'var(--muted)', display: 'flex', alignItems: 'center', gap: 6, paddingTop: 4 }}>
                       <span>Связанные CDN пока не обнаружены (трафик идёт на основной домен). Нажмите <b>«⚡ Boost»</b> для поиска.</span>
                     </div>

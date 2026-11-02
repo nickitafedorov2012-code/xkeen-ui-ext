@@ -33,7 +33,28 @@ pub async fn serve(uri: Uri) -> Response {
             .into_response();
     }
 
-    // 1. Прямой поиск в Assets бинарника (приоритет у актуальной встроенной сборки)
+    // 1. Приоритет прямого поиска на диске (чтобы можно было обновлять UI без пересборки бинарника)
+    let disk_dist = Path::new("/opt/share/xkeen-route/dist");
+    if disk_dist.is_dir() {
+        let candidate = disk_dist.join(path);
+        if let (Ok(canon_candidate), Ok(canon_dist)) = (candidate.canonicalize(), disk_dist.canonicalize()) {
+            if canon_candidate.starts_with(&canon_dist) && canon_candidate.is_file() {
+                if let Ok(data) = tokio::fs::read(&canon_candidate).await {
+                    let mime = mime_guess::from_path(&canon_candidate).first_or_octet_stream();
+                    return (
+                        [
+                            (header::CONTENT_TYPE, mime.as_ref()),
+                            (header::CACHE_CONTROL, cache_control_for(path)),
+                        ],
+                        data,
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
+    // 2. Поиск в Assets бинарника (fallback)
     if let Some(content) = Assets::get(path) {
         let mime = mime_guess::from_path(path).first_or_octet_stream();
         return (
@@ -108,6 +129,19 @@ pub async fn serve(uri: Uri) -> Response {
     }
 
     // 5. Fallback на index.html для SPA клиентского роутинга
+    let idx = disk_dist.join("index.html");
+    if idx.is_file() {
+        if let Ok(data) = tokio::fs::read(&idx).await {
+            return (
+                [
+                    (header::CONTENT_TYPE, "text/html"),
+                    (header::CACHE_CONTROL, CACHE_NO_CACHE),
+                ],
+                data,
+            )
+                .into_response();
+        }
+    }
     match Assets::get("index.html") {
         Some(content) => (
             [

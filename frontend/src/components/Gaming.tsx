@@ -513,12 +513,6 @@ export default function Gaming({ notify }: GamingProps) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <div className="beta-banner">
-        <span style={{ fontSize: 16 }}>🧪</span>
-        <div>
-          <strong>Бета-функция:</strong> Сетевые службы (Zapret, Игровой режим, AdGuard Home) работают с изоляцией netfilter/iptables.
-        </div>
-      </div>
       {/* 1. Главная карточка статуса, узла и действия */}
       <div
         className="card"
@@ -647,21 +641,22 @@ export default function Gaming({ notify }: GamingProps) {
           </div>
         )}
 
-        {/* Статус в UI: Устройства, активный туннель, TCP/UDP, IPv6 */}
+        {/* Статус в UI: Устройства, активный туннель, TCP/UDP, IPv6, NAT */}
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
             gap: 10,
             marginTop: 16,
             padding: '12px 14px',
-            background: 'rgba(0, 0, 0, 0.25)',
+            background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.75) 0%, rgba(30, 41, 59, 0.6) 100%)',
             borderRadius: 8,
-            border: '1px solid rgba(255, 255, 255, 0.05)',
+            border: '1px solid rgba(56, 189, 248, 0.15)',
+            boxShadow: 'inset 0 1px 0 rgba(255, 255, 255, 0.05)',
           }}
         >
           <div>
-            <div className="muted small">📱 Игровые устройства</div>
+            <div className="muted small" style={{ fontSize: 11, letterSpacing: '0.3px', textTransform: 'uppercase' }}>📱 Устройства</div>
             <div style={{ fontWeight: 600, fontSize: 13, marginTop: 2 }}>
               {activeDevices.length > 0 ? `${activeDevices.length} активных` : 'Не выбраны'}
             </div>
@@ -673,7 +668,7 @@ export default function Gaming({ notify }: GamingProps) {
           </div>
 
           <div>
-            <div className="muted small">🎯 Основной туннель</div>
+            <div className="muted small" style={{ fontSize: 11, letterSpacing: '0.3px', textTransform: 'uppercase' }}>🎯 Основной туннель</div>
             <div style={{ fontWeight: 600, fontSize: 13, marginTop: 2, color: '#38bdf8' }}>
               {activeServer || cfg.target_server || 'Fastest'}
             </div>
@@ -689,7 +684,7 @@ export default function Gaming({ notify }: GamingProps) {
           </div>
 
           <div>
-            <div className="muted small">🔌 Перехват TCP / UDP</div>
+            <div className="muted small" style={{ fontSize: 11, letterSpacing: '0.3px', textTransform: 'uppercase' }}>🔌 Перехват TCP / UDP</div>
             <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
               <span
                 className="badge"
@@ -697,6 +692,7 @@ export default function Gaming({ notify }: GamingProps) {
                   background: status?.tcp_interception ? 'rgba(34, 197, 94, 0.2)' : 'rgba(239, 68, 68, 0.2)',
                   color: status?.tcp_interception ? '#4ade80' : '#f87171',
                   fontSize: 10.5,
+                  border: status?.tcp_interception ? '1px solid rgba(34, 197, 94, 0.4)' : '1px solid rgba(239, 68, 68, 0.4)',
                 }}
               >
                 TCP: {status?.tcp_interception ? '✓ OK' : 'Сбой'}
@@ -707,6 +703,7 @@ export default function Gaming({ notify }: GamingProps) {
                   background: status?.udp_interception ? 'rgba(34, 197, 94, 0.2)' : 'rgba(239, 68, 68, 0.2)',
                   color: status?.udp_interception ? '#4ade80' : '#f87171',
                   fontSize: 10.5,
+                  border: status?.udp_interception ? '1px solid rgba(34, 197, 94, 0.4)' : '1px solid rgba(239, 68, 68, 0.4)',
                 }}
               >
                 UDP: {status?.udp_interception ? '✓ OK' : 'Сбой'}
@@ -715,7 +712,19 @@ export default function Gaming({ notify }: GamingProps) {
           </div>
 
           <div>
-            <div className="muted small">🌐 IPv6 маршрут</div>
+            <div className="muted small" style={{ fontSize: 11, letterSpacing: '0.3px', textTransform: 'uppercase' }}>⚡ TProxy / Full-Cone</div>
+            <div style={{ fontWeight: 600, fontSize: 13, marginTop: 3, display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span className="badge" style={{ background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', fontSize: 10.5, border: '1px solid rgba(56, 189, 248, 0.35)' }}>
+                TProxy + Full-Cone NAT
+              </span>
+            </div>
+            <div className="muted small" style={{ fontSize: 11 }}>
+              Type 1 / Open NAT
+            </div>
+          </div>
+
+          <div>
+            <div className="muted small" style={{ fontSize: 11, letterSpacing: '0.3px', textTransform: 'uppercase' }}>🌐 IPv6 маршрут</div>
             <div style={{ fontWeight: 600, fontSize: 13, marginTop: 2 }}>
               {status?.ipv6_status?.active ? (
                 <span style={{ color: '#4ade80' }}>🟢 Активен</span>
@@ -1552,10 +1561,13 @@ export default function Gaming({ notify }: GamingProps) {
 
       {/* 5. Сетка платформ и сервисов */}
       <div className="card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
           <div>
-            <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700 }}>🎯 Целевые игровые платформы</h3>
-            <span className="muted small">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 18 }}>🎮</span>
+              <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, letterSpacing: '-0.2px' }}>🎯 Целевые игровые платформы</h3>
+            </div>
+            <span className="muted small" style={{ fontSize: 11.5 }}>
               Выбрано: {enabledCount} из {PLATFORMS.length} платформ
             </span>
           </div>
@@ -1578,12 +1590,15 @@ export default function Gaming({ notify }: GamingProps) {
                 onClick={() => handlePlatformToggle(p.key)}
                 style={{
                   padding: '12px 14px',
-                  borderRadius: 8,
+                  borderRadius: 10,
                   cursor: 'pointer',
                   userSelect: 'none',
-                  transition: 'all 0.15s ease',
-                  background: isChecked ? 'rgba(56, 189, 248, 0.08)' : 'rgba(255, 255, 255, 0.02)',
-                  border: isChecked ? '1px solid rgba(56, 189, 248, 0.35)' : '1px solid rgba(255, 255, 255, 0.06)',
+                  transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)',
+                  background: isChecked
+                    ? 'linear-gradient(135deg, rgba(56, 189, 248, 0.12) 0%, rgba(14, 165, 233, 0.05) 100%)'
+                    : 'rgba(255, 255, 255, 0.02)',
+                  border: isChecked ? '1px solid rgba(56, 189, 248, 0.45)' : '1px solid rgba(255, 255, 255, 0.06)',
+                  boxShadow: isChecked ? '0 0 16px rgba(56, 189, 248, 0.18), inset 0 0 10px rgba(56, 189, 248, 0.08)' : 'none',
                   display: 'flex',
                   alignItems: 'flex-start',
                   gap: 12,
@@ -1593,12 +1608,12 @@ export default function Gaming({ notify }: GamingProps) {
                   type="checkbox"
                   checked={isChecked}
                   onChange={() => {}}
-                  style={{ marginTop: 3, cursor: 'pointer' }}
+                  style={{ marginTop: 3, cursor: 'pointer', accentColor: '#38bdf8' }}
                 />
                 <div style={{ flex: 1 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ fontSize: 16 }}>{p.icon}</span>
-                    <span style={{ fontWeight: 600, fontSize: 13.5 }}>{p.name}</span>
+                    <span style={{ fontSize: 18, filter: isChecked ? 'drop-shadow(0 0 6px rgba(56, 189, 248, 0.6))' : 'none' }}>{p.icon}</span>
+                    <span style={{ fontWeight: 600, fontSize: 13.5, color: isChecked ? '#38bdf8' : '#e2e8f0' }}>{p.name}</span>
                     {p.badge && (
                       <span
                         className="badge"
@@ -1607,6 +1622,7 @@ export default function Gaming({ notify }: GamingProps) {
                           color: '#fb7185',
                           fontSize: 10,
                           padding: '1px 5px',
+                          border: '1px solid rgba(244, 63, 94, 0.3)',
                         }}
                       >
                         {p.badge}

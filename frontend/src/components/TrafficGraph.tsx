@@ -37,6 +37,7 @@ interface TrafficPayload {
 }
 
 interface TrafficHistoryItem {
+  timestamp: number
   directDown: number
   directUp: number
   tunnelDown: number
@@ -50,6 +51,24 @@ function formatSpeed(bytesPerSec: number): string {
   return `${(bytesPerSec / (1024 * 1024 * 1024)).toFixed(2)} GB/s`
 }
 
+function formatSpeedMbps(bytesPerSec: number): string {
+  if (!bytesPerSec || bytesPerSec <= 0) return '0.00 Mbit/s'
+  const bitsPerSec = bytesPerSec * 8
+  const mbps = bitsPerSec / 1000000
+  if (mbps < 0.01) {
+    const kbps = bitsPerSec / 1000
+    if (kbps < 1) return `${bitsPerSec.toFixed(0)} bit/s`
+    return `${kbps.toFixed(1)} kbit/s`
+  }
+  return `${mbps.toFixed(2)} Mbit/s`
+}
+
+function formatTimestamp(ts: number): string {
+  const d = new Date(ts)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
 function formatBytes(bytes: number): string {
   if (!bytes || bytes <= 0) return '0 B'
   if (bytes < 1024) return `${bytes} B`
@@ -59,9 +78,16 @@ function formatBytes(bytes: number): string {
 }
 
 export default function TrafficGraph({ notify }: TrafficGraphProps = {}) {
-  const [history, setHistory] = useState<TrafficHistoryItem[]>(() =>
-    Array(60).fill({ directDown: 0, directUp: 0, tunnelDown: 0, tunnelUp: 0 })
-  )
+  const [history, setHistory] = useState<TrafficHistoryItem[]>(() => {
+    const now = Date.now()
+    return Array.from({ length: 60 }, (_, i) => ({
+      timestamp: now - (59 - i) * 1000,
+      directDown: 0,
+      directUp: 0,
+      tunnelDown: 0,
+      tunnelUp: 0,
+    }))
+  })
 
   const [currentDirect, setCurrentDirect] = useState<SpeedPair>({ down: 0, up: 0 })
   const [currentProxy, setCurrentProxy] = useState<SpeedPair>({ down: 0, up: 0 })
@@ -145,12 +171,16 @@ export default function TrafficGraph({ notify }: TrafficGraphProps = {}) {
         setPeakDirect((prev) => Math.max(prev, dDown + dUp))
         setPeakTunnel((prev) => Math.max(prev, activeTunnelDown + activeTunnelUp))
 
+        const now = Date.now()
+
         if (!initialHistoryLoaded.current && Array.isArray(data.history) && data.history.length > 0) {
-          const mapped: TrafficHistoryItem[] = data.history.map((h) => {
+          const histLen = data.history.length
+          const mapped: TrafficHistoryItem[] = data.history.map((h, idx) => {
             const hWl = Boolean(data.whitelist_active ?? h.whitelist?.active)
             const tDown = hWl ? (h.whitelist?.down ?? h.down ?? 0) : (h.proxy?.down ?? h.down ?? 0)
             const tUp = hWl ? (h.whitelist?.up ?? h.up ?? 0) : (h.proxy?.up ?? h.up ?? 0)
             return {
+              timestamp: now - (histLen - 1 - idx) * 1000,
               directDown: h.direct?.down ?? 0,
               directUp: h.direct?.up ?? 0,
               tunnelDown: tDown,
@@ -167,15 +197,21 @@ export default function TrafficGraph({ notify }: TrafficGraphProps = {}) {
           setPeakDirect((prev) => Math.max(prev, maxD))
           setPeakTunnel((prev) => Math.max(prev, maxT))
 
-          const padded = Array(Math.max(0, 60 - mapped.length))
-            .fill({ directDown: 0, directUp: 0, tunnelDown: 0, tunnelUp: 0 })
-            .concat(mapped)
+          const padLen = Math.max(0, 60 - mapped.length)
+          const padded: TrafficHistoryItem[] = Array.from({ length: padLen }, (_, i) => ({
+            timestamp: now - (59 - i) * 1000,
+            directDown: 0,
+            directUp: 0,
+            tunnelDown: 0,
+            tunnelUp: 0,
+          })).concat(mapped)
           setHistory(padded.slice(-60))
           initialHistoryLoaded.current = true
         } else {
           setHistory((prev) => [
             ...prev.slice(1),
             {
+              timestamp: now,
               directDown: dDown,
               directUp: dUp,
               tunnelDown: activeTunnelDown,
@@ -268,6 +304,40 @@ export default function TrafficGraph({ notify }: TrafficGraphProps = {}) {
   const activeTunnelDown = isWhitelistActive ? currentWhitelist.down : currentProxy.down
   const activeTunnelUp = isWhitelistActive ? currentWhitelist.up : currentProxy.up
   const totalSpeed = currentDirect.down + currentDirect.up + activeTunnelDown + activeTunnelUp
+
+  // Hover Tooltip состояние в стиле KeeneticOS
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null)
+  const [hoverPos, setHoverPos] = useState<{ x: number; clientX: number } | null>(null)
+  const svgWrapperRef = useRef<HTMLDivElement>(null)
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!svgWrapperRef.current) return
+    const rect = svgWrapperRef.current.getBoundingClientRect()
+    const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left))
+    const ratio = rect.width > 0 ? x / rect.width : 0
+    const idx = Math.min(history.length - 1, Math.max(0, Math.round(ratio * (history.length - 1))))
+    setHoverIndex(idx)
+    setHoverPos({ x, clientX: e.clientX })
+  }
+
+  const handlePointerLeave = () => {
+    setHoverIndex(null)
+    setHoverPos(null)
+  }
+
+  const hoveredItem = hoverIndex !== null ? history[hoverIndex] : null
+  const hoveredDirectUp = hoveredItem ? hoveredItem.directUp : 0
+  const hoveredDirectDown = hoveredItem ? hoveredItem.directDown : 0
+  const hoveredTunnelUp = hoveredItem ? hoveredItem.tunnelUp : 0
+  const hoveredTunnelDown = hoveredItem ? hoveredItem.tunnelDown : 0
+
+  const hoveredTotalUp = hoveredDirectUp + hoveredTunnelUp
+  const hoveredTotalDown = hoveredDirectDown + hoveredTunnelDown
+
+  // Вычисление позиции всплывающей карточки с учетом краев контейнера
+  const tooltipLeft = hoverPos
+    ? Math.max(75, Math.min(svgWrapperRef.current ? svgWrapperRef.current.clientWidth - 75 : hoverPos.x, hoverPos.x))
+    : 0
 
   return (
     <div className="traffic-graph-card card">
@@ -412,7 +482,17 @@ export default function TrafficGraph({ notify }: TrafficGraphProps = {}) {
         </div>
       </div>
 
-      <div className="traffic-svg-wrapper">
+      <div
+        className="traffic-svg-wrapper"
+        data-testid="traffic-svg-wrapper"
+        ref={svgWrapperRef}
+        onPointerMove={handlePointerMove}
+        onPointerLeave={handlePointerLeave}
+        onPointerOut={handlePointerLeave}
+        onMouseMove={(e) => handlePointerMove(e as any)}
+        onMouseLeave={handlePointerLeave}
+        onMouseOut={handlePointerLeave}
+      >
         <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className="traffic-svg">
           <defs>
             {/* Зелёный градиент прямого трафика (Канал 1) */}
@@ -455,15 +535,75 @@ export default function TrafficGraph({ notify }: TrafficGraphProps = {}) {
             strokeLinecap="round"
             strokeLinejoin="round"
           />
+
+          {/* Индикатор точки на графике при наведении */}
+          {hoverIndex !== null && hoverIndex >= 0 && hoverIndex < history.length && (
+            <g>
+              <circle
+                cx={directPoints[hoverIndex].x}
+                cy={directPoints[hoverIndex].y}
+                r="3.5"
+                fill="#22c55e"
+                stroke="white"
+                strokeWidth="1.5"
+              />
+              <circle
+                cx={tunnelPoints[hoverIndex].x}
+                cy={tunnelPoints[hoverIndex].y}
+                r="3.5"
+                fill={isWhitelistActive ? "#a855f7" : "#38bdf8"}
+                stroke="white"
+                strokeWidth="1.5"
+              />
+            </g>
+          )}
         </svg>
 
+        {/* Вертикальная направляющая линия */}
+        {hoverPos && (
+          <div
+            className="traffic-hover-guide"
+            style={{ left: hoverPos.x }}
+          />
+        )}
+
+        {/* Интерактивный тултип в стиле KeeneticOS */}
+        {hoverPos && hoveredItem && (
+          <div
+            className="traffic-tooltip"
+            style={{ left: tooltipLeft }}
+          >
+            <div className="traffic-tooltip-time">
+              {formatTimestamp(hoveredItem.timestamp)}
+            </div>
+            <div className="traffic-tooltip-row">
+              <span className="traffic-tooltip-arrow-up">↑</span>
+              <span>Передача:</span>
+              <span className="traffic-tooltip-val">
+                {formatSpeedMbps(hoveredTotalUp)}
+              </span>
+            </div>
+            <div className="traffic-tooltip-row">
+              <span className="traffic-tooltip-arrow-down">↓</span>
+              <span>Приём:</span>
+              <span className="traffic-tooltip-val">
+                {formatSpeedMbps(hoveredTotalDown)}
+              </span>
+            </div>
+          </div>
+        )}
+
         {/* Бейджи шкалы скорости (HTML оверлей — без горизонтального растяжения) */}
-        <div className="traffic-scale-badge top">
-          <span className="traffic-scale-text">{formatSpeed(maxVal)}</span>
-        </div>
-        <div className="traffic-scale-badge mid">
-          <span className="traffic-scale-text-dim">{formatSpeed(maxVal * 0.5)}</span>
-        </div>
+        {!hoverPos && (
+          <>
+            <div className="traffic-scale-badge top">
+              <span className="traffic-scale-text">{formatSpeed(maxVal)}</span>
+            </div>
+            <div className="traffic-scale-badge mid">
+              <span className="traffic-scale-text-dim">{formatSpeed(maxVal * 0.5)}</span>
+            </div>
+          </>
+        )}
       </div>
     </div>
   )

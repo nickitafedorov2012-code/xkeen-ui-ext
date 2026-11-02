@@ -162,4 +162,63 @@ describe('TrafficGraph Component — Individual traffic resets & strictly 2 chan
     expect(postSpy).not.toHaveBeenCalled()
     expect(notifyMock).not.toHaveBeenCalled()
   })
+
+  it('renders KeeneticOS style hover tooltip and vertical guide line on mouse move', async () => {
+    vi.spyOn(api, 'apiGet').mockResolvedValue({
+      direct: { down: 1420000, up: 500000 },
+      proxy: { down: 8410000, up: 1000000 },
+      whitelist_active: false,
+    })
+
+    await act(async () => {
+      root!.render(<TrafficGraph notify={notifyMock} />)
+    })
+
+    const svgWrapper = container?.querySelector('.traffic-svg-wrapper') as HTMLDivElement
+    expect(svgWrapper).toBeTruthy()
+
+    // Initially no hover guide or tooltip
+    expect(container?.querySelector('.traffic-hover-guide')).toBeNull()
+    expect(container?.querySelector('.traffic-tooltip')).toBeNull()
+
+    // Mock getBoundingClientRect
+    vi.spyOn(svgWrapper, 'getBoundingClientRect').mockReturnValue({
+      left: 100,
+      top: 100,
+      width: 640,
+      height: 130,
+      right: 740,
+      bottom: 230,
+      x: 100,
+      y: 100,
+      toJSON: () => {},
+    })
+
+    // Dispatch pointer move
+    await act(async () => {
+      svgWrapper.dispatchEvent(
+        new PointerEvent('pointermove', {
+          clientX: 200,
+          clientY: 150,
+          bubbles: true,
+        })
+      )
+    })
+
+    const guide = container?.querySelector('.traffic-hover-guide')
+    const tooltip = container?.querySelector('.traffic-tooltip')
+
+    expect(guide).toBeTruthy()
+    expect(tooltip).toBeTruthy()
+    expect(tooltip?.textContent).toContain('Передача:')
+    expect(tooltip?.textContent).toContain('Приём:')
+
+    // Dispatch pointer leave / mouse out
+    await act(async () => {
+      svgWrapper.dispatchEvent(new MouseEvent('mouseout', { bubbles: true }))
+    })
+
+    expect(container?.querySelector('.traffic-hover-guide')).toBeNull()
+    expect(container?.querySelector('.traffic-tooltip')).toBeNull()
+  })
 })
