@@ -511,9 +511,7 @@ pub fn format_subscription_userinfo_line(info: &SubscriptionUserinfo) -> String 
 pub fn inject_or_replace_userinfo_in_yaml(yaml: &str, info: &SubscriptionUserinfo) -> String {
     let userinfo_line = format_subscription_userinfo_line(info);
     let mut lines: Vec<&str> = yaml.lines().collect();
-    if !lines.is_empty() && lines[0].trim_start().starts_with("# subscription-userinfo:") {
-        lines.remove(0);
-    } else if !lines.is_empty() && lines[0].trim_start().to_ascii_lowercase().starts_with("# subscription-userinfo:") {
+    if !lines.is_empty() && lines[0].trim_start().to_ascii_lowercase().starts_with("# subscription-userinfo:") {
         lines.remove(0);
     }
     let rest = lines.join("\n");
@@ -1943,6 +1941,16 @@ pub async fn switch_group(http: &reqwest::Client, cfg: &AppConfig, group: &str, 
     m_put(http, cfg, &format!("/proxies/{enc}"), json!({ "name": server }), 5).await?;
     invalidate_proxies_cache();
     let _ = close_all_connections(http, cfg).await;
+    Ok(())
+}
+
+/// Переключение группы с точечным сбросом сокетов ТОЛЬКО этой группы
+/// (per-device failover, расписания устройств). В отличие от switch_group(),
+/// не рвёт соединения остальных устройств LAN и DIRECT-сессии (контракт F-02):
+/// раньше failover одного устройства обрывал игры/звонки всем остальным.
+pub async fn switch_group_scoped(http: &reqwest::Client, cfg: &AppConfig, group: &str, server: &str) -> Result<(), String> {
+    switch_selector(http, cfg, group, server).await?;
+    let _ = close_server_connections(http, cfg, group).await;
     Ok(())
 }
 

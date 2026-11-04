@@ -594,7 +594,7 @@ async fn main() {
             let mut current_cfg = (**wl_sync_state.config.read().await).clone();
             current_cfg.gaming.enabled = true;
             current_cfg.whitelist.gaming_suspended = false;
-            if let Ok(_) = config::save(&wl_sync_state.config_path, &current_cfg).await {
+            if config::save(&wl_sync_state.config_path, &current_cfg).await.is_ok() {
                 *wl_sync_state.config.write().await = std::sync::Arc::new(current_cfg.clone());
                 log_i!("[STARTUP] ✓ Игровой режим автоматически восстановлен после перезагрузки (активный узел не является [БС])");
                 // X-03: восстановление не только флага, но и реальных правил —

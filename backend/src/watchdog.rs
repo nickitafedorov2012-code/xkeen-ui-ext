@@ -285,7 +285,7 @@ pub fn spawn_schedules_monitor(state: AppState) {
             for key in removed_keys {
                 if let Some(entry) = active_schedules.get(&key) {
                     log_i!("[SCHEDULE] ⏰ Расписание '{}' удалено/снято для {}: возврат к исходному узлу '{}'", entry.schedule_id, entry.device_ip, entry.original_node);
-                    if mihomo::switch_group(&state.http, &cfg, &entry.group_name, &entry.original_node).await.is_ok() {
+                    if mihomo::switch_group_scoped(&state.http, &cfg, &entry.group_name, &entry.original_node).await.is_ok() {
                         active_schedules.remove(&key);
                     }
                 }
@@ -333,7 +333,7 @@ pub fn spawn_schedules_monitor(state: AppState) {
 
                         let switch_ok = if current_node != target_node {
                             log_i!("[SCHEDULE] ⏰ Активация расписания '{}' ({}) для {}: {} -> {}", s.id, s.action, s.ip, current_node, target_node);
-                            mihomo::switch_group(&state.http, &cfg, &group_name, target_node).await.is_ok()
+                            mihomo::switch_group_scoped(&state.http, &cfg, &group_name, target_node).await.is_ok()
                         } else {
                             true
                         };
@@ -349,13 +349,21 @@ pub fn spawn_schedules_monitor(state: AppState) {
                     }
                 } else if let Some(entry) = active_schedules.get(&key) {
                     log_i!("[SCHEDULE] ⏰ Окончание действия расписания '{}' для {}: возврат к исходному узлу '{}'", entry.schedule_id, entry.device_ip, entry.original_node);
-                    if mihomo::switch_group(&state.http, &cfg, &entry.group_name, &entry.original_node).await.is_ok() {
+                    if mihomo::switch_group_scoped(&state.http, &cfg, &entry.group_name, &entry.original_node).await.is_ok() {
                         active_schedules.remove(&key);
                     }
                 }
             }
         }
     });
+}
+
+/// Пересборка config.yaml после смены DHCP-адреса игрового устройства.
+/// Полный apply_routing, а не только apply_gaming_rules(.., &[]): раньше пустой список
+/// провайдеров выбрасывал серверы подписок из группы 🎮 Gaming, а SRC-IP правило
+/// выделенного сервера устройства (AUTO-DEVICE) оставалось со старым IP.
+pub fn rebuild_routing_after_dhcp_change(raw_yaml: &str, cfg: &config::AppConfig) -> Result<String, String> {
+    routing::apply_routing(raw_yaml, cfg).map(|(yaml, _)| yaml)
 }
 
 /// Фоновый монитор изменений DHCP IP-адресов устройств игрового режима по их постоянному MAC.
@@ -432,7 +440,7 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
                         let path = Path::new(&new_cfg.mihomo.config_path);
                         if path.exists() {
                             if let Ok(raw_yaml) = tokio::fs::read_to_string(path).await {
-                                if let Ok(new_yaml) = routing::apply_gaming_rules(&raw_yaml, &new_cfg.gaming, &[]) {
+                                if let Ok(new_yaml) = rebuild_routing_after_dhcp_change(&raw_yaml, &new_cfg) {
                                     if crate::api::atomic_write_file(path, &new_yaml).await.is_ok()
                                         && mihomo::reload_config(&state.http, &new_cfg).await.is_ok() {
                                             log_i!("[DHCP-WATCHDOG] ✓ Маршрут игрового режима успешно переприменен для нового IP");
@@ -768,12 +776,11 @@ pub fn spawn_adguard_monitor(state: AppState) {
                 continue;
             }
 
-            // Защита от каскадного сбоя: если Mihomo упал, не восстанавливать AdGuard iptables,
-            // пока Mihomo не поднимется (нет смысла слать DNS в AdGuard, если весь туннель лежит).
-            // Порядок восстановления: сначала Mihomo -> затем AdGuard.
-            if is_mihomo_down() {
-                continue;
-            }
+            // Защита от каскадного сбоя: пока Mihomo упал, AdGuard iptables НЕ восстанавливаются
+            // (порядок восстановления: сначала Mihomo -> затем AdGuard). Но защитное СНЯТИЕ
+            // редиректа при мёртвом AdGuard выполняется всегда — раньше сторож целиком
+            // пропускал тик при MIHOMO_DOWN и оставлял LAN без DNS, если падали оба сервиса.
+            let mihomo_down = is_mihomo_down();
 
             let (mut enabled, host, configured_port, adguard_cfg, router_ip) = {
                 let cfg = state.config.read().await;
@@ -792,8 +799,12 @@ pub fn spawn_adguard_monitor(state: AppState) {
             let is_running_protected = agh_status.running && agh_status.protection_enabled;
 
             // Если AdGuard запущен и активен, но в конфигурации был выключен — автоматически синхронизируем
-            if is_running_protected && !enabled {
+            let needs_cfg_sync = is_running_protected && !enabled;
+            if needs_cfg_sync {
                 enabled = true;
+            }
+            if needs_cfg_sync && !mihomo_down {
+                // Транзакция завершается reload Mihomo — при упавшем ядре она бессмысленна
                 if let Ok(mut tx) = crate::transaction::ConfigTx::begin(&state).await {
                     tx.config_mut().adguard.enabled = true;
                     tx.config_mut().adblock_enabled = true;
@@ -838,8 +849,8 @@ pub fn spawn_adguard_monitor(state: AppState) {
                     );
                     let _ = crate::adguard::remove_adguard_iptables();
                     iptables_temporarily_suspended = true;
-                } else if listener_ok && iptables_temporarily_suspended {
-                    // AdGuard Home восстановился
+                } else if iptables_temporarily_suspended && can_restore_adguard_iptables(mihomo_down, listener_ok) {
+                    // AdGuard Home восстановился (и Mihomo жив — каскадная защита)
                     log_i!(
                         "[WATCHDOG] ✓ AdGuard Home DNS-listener на {}:{} восстановил работу! Повторное включение XKEEN_ADGUARD iptables.",
                         host,
@@ -851,9 +862,9 @@ pub fn spawn_adguard_monitor(state: AppState) {
             } else if (enabled || is_running_protected) && !iptables_active && !iptables_temporarily_suspended {
                 // Если служба запущена и отвечает, но правила слетели (например, сброс KeeneticOS iptables)
                 // Защита от каскадного сбоя: не восстанавливаем AdGuard iptables, если Mihomo упал!
-                if !is_mihomo_down() {
+                if !mihomo_down {
                     let listener_ok = crate::adguard::test_agh_dns_listener(&host, dns_port).await;
-                    if listener_ok {
+                    if can_restore_adguard_iptables(mihomo_down, listener_ok) {
                         let _ = crate::adguard::apply_adguard_iptables(dns_port);
                         log_i!("[WATCHDOG] ✓ Восстановлен системный редирект XKEEN_ADGUARD iptables (порт 53 -> {})", dns_port);
                     }
@@ -944,6 +955,11 @@ pub fn spawn_mihomo_health_monitor(state: AppState) {
             } else if should_restore || (is_healthy && is_mihomo_down()) {
                 log_i!("[WATCHDOG] ✓ Mihomo восстановил работу! Повторное применение iptables-правил.");
 
+                // Флаг снимаем ДО синка: sync_full_tunnel_modes не ставит перехват,
+                // пока MIHOMO_DOWN=true, иначе восстановление было бы пустой операцией.
+                set_mihomo_down(false);
+                iptables_cleaned = false;
+
                 // Восстановление iptables и NDM-хуков через sync_full_tunnel_modes
                 let bs_active = cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen;
                 let gaming_active = cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility;
@@ -960,10 +976,6 @@ pub fn spawn_mihomo_health_monitor(state: AppState) {
                     let dns_port = crate::api::resolve_active_dns_port(&cfg);
                     crate::api::sync_full_tunnel_modes(&cfg, redir_port, tproxy_port, dns_port).await;
                 }
-
-                // Сброс флагов
-                set_mihomo_down(false);
-                iptables_cleaned = false;
             }
         }
     });
@@ -1401,6 +1413,65 @@ mod tests {
         assert_eq!(f_rec, 0, "Счетчик сбоев должен сброситься в 0");
         assert!(!clean_rec);
         assert!(rest_rec, "При оживлении Mihomo должно быть вызвано восстановление правил");
+    }
+
+    /// Продакшн-часть исходника (без модуля тестов) для проверок порядка вызовов.
+    fn production_source() -> &'static str {
+        let src = include_str!("watchdog.rs");
+        let cut = src.find("#[cfg(test)]\nmod tests").or_else(|| src.find("#[cfg(test)]\r\nmod tests")).unwrap_or(src.len());
+        &src[..cut]
+    }
+
+    #[test]
+    fn test_mihomo_restore_clears_down_flag_before_tunnel_sync() {
+        // REG: sync_full_tunnel_modes не ставит перехват при MIHOMO_DOWN=true,
+        // поэтому флаг обязан сниматься ДО синка — иначе восстановление пустое.
+        let src = production_source();
+        let restore = src.find("Mihomo восстановил работу").expect("restore branch");
+        let tail = &src[restore..];
+        let clear = tail.find("set_mihomo_down(false)").expect("flag reset in restore branch");
+        let sync = tail.find("sync_full_tunnel_modes(").expect("tunnel sync in restore branch");
+        assert!(clear < sync, "MIHOMO_DOWN должен сниматься до sync_full_tunnel_modes");
+    }
+
+    #[test]
+    fn test_schedules_do_not_drop_whole_lan_connections() {
+        // REG: расписание одного устройства вызывало switch_group → DELETE /connections
+        // для ВСЕХ устройств LAN. Допустим только точечный switch_group_scoped.
+        let src = production_source();
+        let start = src.find("pub fn spawn_schedules_monitor").expect("schedules monitor");
+        let end = src[start..].find("pub fn spawn_dhcp_device_monitor").map(|e| start + e).unwrap_or(src.len());
+        let body = &src[start..end];
+        assert!(!body.contains("mihomo::switch_group("), "расписания не должны рвать соединения всей LAN");
+        assert!(body.contains("mihomo::switch_group_scoped("));
+    }
+
+    #[test]
+    fn test_dhcp_rebuild_keeps_provider_nodes_and_updates_device_ip() {
+        // REG: DHCP-монитор пересобирал только игровой блок с providers = &[] —
+        // группа 🎮 Gaming теряла `use:` подписки, а выделенный сервер устройства
+        // оставался привязан к старому IP. Пересборка обязана быть полной.
+        let yaml = "port: 7890\nproxy-providers:\n  myprov:\n    type: http\n    url: \"https://example.invalid/sub\"\n    path: ./providers/myprov.yaml\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\n  - name: Fastest\n    type: url-test\n    use:\n      - myprov\nrules:\n  - GEOIP,RU,DIRECT\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.gaming.enabled = true;
+        cfg.gaming.mode = crate::config::GamingMode::Compatibility;
+        cfg.gaming.devices.push(crate::config::GamingDevice {
+            mac: "00:11:22:33:44:55".into(),
+            ip: "192.168.2.200".into(),
+            ipv6: vec![],
+            name: "Console".into(),
+            enabled: true,
+            server: Some("Fastest".into()),
+        });
+
+        let out = rebuild_routing_after_dhcp_change(yaml, &cfg).expect("rebuild must succeed");
+
+        let begin = out.find(routing::GAMING_GROUP_BEGIN).expect("gaming group block");
+        let end = out.find(routing::GAMING_GROUP_END).expect("gaming group end");
+        let group_block = &out[begin..end];
+        assert!(group_block.contains("use:"), "🎮 Gaming обязана сохранить серверы подписок: {group_block}");
+        assert!(group_block.contains("- myprov"), "🎮 Gaming обязана ссылаться на провайдера myprov: {group_block}");
+        assert!(out.contains("192.168.2.200"), "новый DHCP-адрес устройства должен попасть в правила");
     }
 
     #[test]

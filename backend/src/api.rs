@@ -10707,9 +10707,32 @@ pub async fn emergency_cleanup_full_tunnel_rules() {
 /// активен режим БС (StrictXKeen) ИЛИ игровой Compatibility — второй всегда приводится
 /// к чистому состоянию. Порядок важен: gaming управляет ip rule/таблицей 115,
 /// поэтому его синк идёт первым, а БС при необходимости поднимает таблицу заново.
+/// Эффективные флаги полного перехвата (bs, gaming) с учётом состояния ядра Mihomo.
+/// Пока сторож считает Mihomo упавшим, перехват НЕ ставится ни для одного режима:
+/// REDIRECT/TPROXY в мёртвые порты 5000/5001 = блэкаут всей LAN. Раньше любой вызов
+/// синка (failover, DHCP-монитор, smart-gaming, API) возвращал правила, снятые сторожем.
+pub fn effective_full_tunnel_flags(bs_active: bool, gaming_active: bool, mihomo_down: bool) -> (bool, bool) {
+    if mihomo_down {
+        (false, false)
+    } else {
+        (bs_active, gaming_active)
+    }
+}
+
 pub async fn sync_full_tunnel_modes(cfg: &config::AppConfig, redir_port: u16, tproxy_port: u16, dns_port: u16) {
-    let bs_active = cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen;
-    let gaming_active = cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility;
+    let want_bs = cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen;
+    let want_gaming = cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility;
+    let mihomo_down = crate::watchdog::is_mihomo_down();
+    let (bs_active, gaming_active) = effective_full_tunnel_flags(want_bs, want_gaming, mihomo_down);
+    if mihomo_down && (want_bs || want_gaming) {
+        log_w!("[TUNNEL] Mihomo недоступен — полный перехват не устанавливается до восстановления ядра (защита от блэкаута)");
+        let mut off = cfg.clone();
+        off.whitelist.enabled = false;
+        off.gaming.enabled = false;
+        let _ = sync_gaming_full_tunnel(&off.gaming, redir_port, tproxy_port, dns_port).await;
+        let _ = sync_whitelist_full_tunnel(&off, redir_port, tproxy_port, dns_port).await;
+        return;
+    }
 
     // Игровой синк: при активном БС принудительно в режим очистки (мьютекс правил)
     let gaming_cfg = if bs_active {
@@ -10732,6 +10755,27 @@ pub async fn sync_full_tunnel_modes(cfg: &config::AppConfig, redir_port: u16, tp
     let _ = sync_whitelist_full_tunnel(&wl_cfg, redir_port, tproxy_port, dns_port).await;
 }
 
+
+#[cfg(test)]
+mod full_tunnel_guard_tests {
+    use super::effective_full_tunnel_flags;
+
+    #[test]
+    fn test_no_interception_while_mihomo_down() {
+        // REG: при упавшем Mihomo любой синк заново ставил REDIRECT/TPROXY в мёртвые
+        // порты, отменяя аварийную очистку сторожа → блэкаут всей LAN.
+        assert_eq!(effective_full_tunnel_flags(true, false, true), (false, false));
+        assert_eq!(effective_full_tunnel_flags(false, true, true), (false, false));
+        assert_eq!(effective_full_tunnel_flags(true, true, true), (false, false));
+    }
+
+    #[test]
+    fn test_interception_passthrough_when_mihomo_alive() {
+        assert_eq!(effective_full_tunnel_flags(true, false, false), (true, false));
+        assert_eq!(effective_full_tunnel_flags(false, true, false), (false, true));
+        assert_eq!(effective_full_tunnel_flags(false, false, false), (false, false));
+    }
+}
 
 /// GET /api/gaming/status — статус, конфиг, активный узел, туннель, перехват и реальные соединения
 pub async fn get_gaming_status(State(state): State<AppState>) -> Response {

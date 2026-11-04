@@ -183,6 +183,21 @@ pub fn select_scouting_window(
     (result, next_offset)
 }
 
+/// Сервер, Canary-тест которого нужно продолжить на текущем тике умного возврата.
+/// `canary` — (target_id, from_id) активного теста. Тест продолжается, только если он
+/// запущен с текущего активного узла и целевой сервер всё ещё существует.
+pub fn canary_continuation_candidate(
+    canary: Option<(&str, &str)>,
+    active_id: &str,
+    servers: &[Server],
+) -> Option<Server> {
+    let (target_id, from_id) = canary?;
+    if from_id != active_id || target_id == active_id {
+        return None;
+    }
+    servers.iter().find(|s| s.id == target_id).cloned()
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CanaryStatus {
     pub active: bool,
@@ -208,6 +223,23 @@ pub fn reset_whitelist_episode_bytes() {
 
 pub fn record_whitelist_episode_bytes(bytes: u64) {
     WHITELIST_EPISODE_BYTES.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Суммарная дельта трафика за цикл (без переполнения).
+pub fn whitelist_cycle_delta(dl_bytes: u64, up_bytes: u64) -> u64 {
+    dl_bytes.saturating_add(up_bytes)
+}
+
+/// Учёт дельты трафика активного узла [БС] за цикл failover.
+/// Пополняет ТОЛЬКО счётчик эпизода БС. Накопительный TOTAL_WHITELIST_BYTES ведёт
+/// исключительно поток /traffic в traffic.rs — раньше failover добавлял туда ту же
+/// дельту /connections повторно, и объём БС на дашборде завышался примерно вдвое.
+pub fn account_whitelist_cycle_delta(dl_bytes: u64, up_bytes: u64) -> u64 {
+    let delta = whitelist_cycle_delta(dl_bytes, up_bytes);
+    if delta > 0 {
+        record_whitelist_episode_bytes(delta);
+    }
+    delta
 }
 
 pub async fn is_canary_active() -> bool {
@@ -1640,7 +1672,9 @@ pub async fn sync_whitelist_on_switch(
     }
 
     if should_follow && !node_id.is_empty() {
-        let _ = crate::mihomo::switch_group(http, cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await;
+        // Только селектор: сброс сокетов уже решил основной switch_server/_graceful.
+        // switch_group здесь рвал ВСЕ соединения LAN и ломал мягкое переключение.
+        let _ = crate::mihomo::switch_selector(http, cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await;
     }
 
     crate::log_i!(
@@ -1726,7 +1760,7 @@ pub async fn handle_whitelist_transition(
                 crate::api::sync_full_tunnel_modes(&cur, redir_port, tproxy_port, dns_port).await;
             }
 
-            let _ = crate::mihomo::switch_group(&state.http, &cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await;
+            let _ = crate::mihomo::switch_selector(&state.http, &cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await;
         } else {
             let mut cfg_changed = false;
             let mut gaming_log = String::new();
@@ -1781,7 +1815,8 @@ pub async fn handle_whitelist_transition(
             }
         }
     } else if cfg.whitelist.enabled {
-        let _ = crate::mihomo::switch_group(&state.http, &cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await;
+        // Селектор без сброса сокетов: решение о сбросе принимает вызывающий switch_server(_graceful)
+        let _ = crate::mihomo::switch_selector(&state.http, &cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await;
     }
 
     // FO-WL-03: Instant telemetry channel sync: актуализируем статус телеметрии сразу,
@@ -2908,11 +2943,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         // Честный учёт трафика БС за эпизод по дельте /connections (без подмены каналов)
         let is_active_bs = is_whitelist_server_full(act_name, act_id, active.as_ref().and_then(|s| s.provider.as_deref()), &cfg);
         if is_active_bs {
-            let delta_bytes = dl_bytes + up_bytes;
-            if delta_bytes > 0 {
-                record_whitelist_episode_bytes(delta_bytes);
-                crate::traffic::TOTAL_WHITELIST_BYTES.fetch_add(delta_bytes, std::sync::atomic::Ordering::Relaxed);
-            }
+            account_whitelist_cycle_delta(dl_bytes, up_bytes);
         }
 
         let is_active_healthy = is_active_server_healthy(act_ping, threshold, has_live_traffic, is_blackhole);
@@ -3139,11 +3170,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
     // Честный учёт трафика БС за эпизод по дельте /connections (без подмены каналов)
     let is_active_bs = is_whitelist_server_full(&active.name, &active.id, active.provider.as_deref(), &cfg);
     if is_active_bs {
-        let delta_bytes = dl_bytes + up_bytes;
-        if delta_bytes > 0 {
-            record_whitelist_episode_bytes(delta_bytes);
-            crate::traffic::TOTAL_WHITELIST_BYTES.fetch_add(delta_bytes, std::sync::atomic::Ordering::Relaxed);
-        }
+        account_whitelist_cycle_delta(dl_bytes, up_bytes);
     }
 
     // ПРИОРИТЕТ РЕАЛЬНОГО ТРАФИКА:
@@ -3396,7 +3423,23 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         };
 
         let is_smart_restore_mode = higher.is_empty() && should_restore_smart;
-        let higher = if is_smart_restore_mode {
+        let canary_snapshot = CANARY_STAGE
+            .lock()
+            .await
+            .as_ref()
+            .map(|c| (c.target_id.clone(), c.from_id.clone()));
+        let canary_continuation = canary_continuation_candidate(
+            canary_snapshot.as_ref().map(|(t, f)| (t.as_str(), f.as_str())),
+            &active.id,
+            &servers,
+        );
+        let higher = if is_smart_restore_mode && canary_continuation.is_some() {
+            // Идёт Canary-тест возврата с БС: продолжаем именно его на каждом тике.
+            // Раньше на тиках без скаутинга (60 с) кандидатов не было — тест стоял, а на
+            // следующем скаутинге окно сдвигалось, и тест перезапускался на другом узле:
+            // при пуле > 12 VPS возврат с [БС] на обычный VPS не завершался никогда.
+            canary_continuation.into_iter().collect()
+        } else if is_smart_restore_mode {
             // Умный фейловер: активен сервер белых списков, кандидаты на возврат — живые обычные VPS серверы (Tier 1).
             // Защита от пинг-шторма: скаутинг запускается не чаще раза в 60 сек и проверяет компактное скользящее окно (12 узлов).
             let mut last_scout_guard = LAST_SMART_RESTORE_SCOUT.lock().await;
@@ -3843,7 +3886,7 @@ pub async fn run_device_check(state: &AppState) -> Result<String, String> {
             DeviceFailoverDecision::AutoRestore { target, ping_ms, is_main } => {
                 let hyst = calc_hysteresis(threshold);
                 let label = if is_main { "основной" } else { "приоритетный" };
-                match mihomo::switch_group(&state.http, &cfg, group, &target).await {
+                match mihomo::switch_group_scoped(&state.http, &cfg, group, &target).await {
                     Ok(_) => actions.push((
                         format!(
                             "[{ip}] {label} '{target}' восстановился ({ping_ms} мс, порог {hyst} мс) — возврат с резерва '{cur}'"
@@ -3878,7 +3921,7 @@ pub async fn run_device_check(state: &AppState) -> Result<String, String> {
                 } else {
                     ""
                 };
-                match mihomo::switch_group(&state.http, &cfg, group, best).await {
+                match mihomo::switch_group_scoped(&state.http, &cfg, group, best).await {
                     Ok(_) => actions.push((
                         format!("[{ip}] '{cur}' ({reason}) → резерв '{best}' ({ms} мс{qual})"),
                         true,
@@ -3981,6 +4024,89 @@ pub fn spawn(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Продакшн-часть исходника (без модуля тестов) для анти-регрессионных проверок вызовов.
+    fn production_source() -> &'static str {
+        let src = include_str!("failover.rs");
+        let cut = src.find("#[cfg(test)]\nmod tests").or_else(|| src.find("#[cfg(test)]\r\nmod tests")).unwrap_or(src.len());
+        &src[..cut]
+    }
+
+    fn fn_body<'a>(src: &'a str, signature: &str) -> &'a str {
+        let start = src.find(signature).unwrap_or_else(|| panic!("нет функции {signature}"));
+        let rest = &src[start + signature.len()..];
+        let end = rest.find("\npub async fn ").or_else(|| rest.find("\npub fn ")).unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    fn test_server(id: &str) -> Server {
+        Server {
+            id: id.into(),
+            name: id.into(),
+            protocol: "VLESS".into(),
+            host: "1.2.3.4".into(),
+            port: 443,
+            is_active: false,
+            is_priority: false,
+            ping_ms: 50,
+            provider: None,
+            provider_name: None,
+            is_pool: false,
+            resolved_ip: None,
+        }
+    }
+
+    #[test]
+    fn test_whitelist_traffic_not_double_counted() {
+        // REG: failover добавлял дельту /connections в TOTAL_WHITELIST_BYTES, который
+        // уже накапливает поток /traffic — объём БС на дашборде завышался ~вдвое.
+        assert!(
+            !production_source().contains("TOTAL_WHITELIST_BYTES.fetch_add"),
+            "накопительный счётчик БС ведёт только traffic.rs"
+        );
+        // Чистая часть (глобальный счётчик эпизода не трогаем — тесты идут параллельно)
+        assert_eq!(whitelist_cycle_delta(0, 0), 0);
+        assert_eq!(whitelist_cycle_delta(3000, 500), 3500);
+        assert_eq!(whitelist_cycle_delta(u64::MAX, 5), u64::MAX, "без переполнения");
+    }
+
+    #[test]
+    fn test_whitelist_group_sync_keeps_lan_connections() {
+        // REG: синхронизация группы 🛡️ Whitelist через switch_group рвала ВСЕ соединения
+        // (DIRECT: банки, SIP) сразу после мягкого switch_server_graceful (нарушение F-02).
+        let src = production_source();
+        for sig in ["pub async fn sync_whitelist_on_switch", "pub async fn handle_whitelist_transition"] {
+            let body = fn_body(src, sig);
+            assert!(!body.contains("mihomo::switch_group("), "{sig}: запрещён switch_group (close_all)");
+        }
+    }
+
+    #[test]
+    fn test_device_failover_switch_is_scoped_to_device_group() {
+        // REG: failover одного устройства закрывал соединения всех устройств LAN.
+        let body = fn_body(production_source(), "pub async fn run_device_check");
+        assert!(!body.contains("mihomo::switch_group("), "per-device failover не должен рвать всю LAN");
+        assert!(body.contains("mihomo::switch_group_scoped("));
+    }
+
+    #[test]
+    fn test_canary_continuation_candidate() {
+        // REG: Canary-тест умного возврата с БС не продолжался на тиках без скаутинга
+        // и перезапускался при сдвиге окна — при пуле > 12 VPS возврат не завершался.
+        let servers = vec![test_server("BS-1"), test_server("VPS-7"), test_server("VPS-8")];
+
+        let cont = canary_continuation_candidate(Some(("VPS-7", "BS-1")), "BS-1", &servers);
+        assert_eq!(cont.map(|s| s.id), Some("VPS-7".to_string()));
+
+        // Тест запущен с другого узла — не продолжаем
+        assert!(canary_continuation_candidate(Some(("VPS-7", "BS-2")), "BS-1", &servers).is_none());
+        // Цель исчезла из подписки — не продолжаем
+        assert!(canary_continuation_candidate(Some(("VPS-99", "BS-1")), "BS-1", &servers).is_none());
+        // Цель уже активна — не продолжаем
+        assert!(canary_continuation_candidate(Some(("BS-1", "BS-1")), "BS-1", &servers).is_none());
+        // Теста нет
+        assert!(canary_continuation_candidate(None, "BS-1", &servers).is_none());
+    }
 
     #[test]
     fn test_conn_chain_matches_server_strict() {
