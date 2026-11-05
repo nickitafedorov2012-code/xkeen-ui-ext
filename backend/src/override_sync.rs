@@ -242,6 +242,42 @@ pub async fn sync_geo_override(domains: &[String]) -> Result<usize, String> {
     Ok(total_ips)
 }
 
+/// Баг 13: Единый сбор всех доменов для geo_override из полного конфига.
+/// Объединяет force_domains, статические CDN-бандлы, обнаруженные auto_cdns и активные игровые домены.
+pub fn collect_override_domains(cfg: &crate::config::AppConfig, extra_cdns: &[String]) -> Vec<String> {
+    let mut all = cfg.force_domains.clone();
+    if !cfg.force_domains.is_empty() {
+        let static_cdns = crate::cdn_discovery::expand_bundles(&cfg.force_domains);
+        for cdn in static_cdns {
+            if !all.contains(&cdn) {
+                all.push(cdn);
+            }
+        }
+    }
+    for cdn in extra_cdns {
+        if !all.contains(cdn) {
+            all.push(cdn.clone());
+        }
+    }
+    if cfg.gaming.enabled {
+        let exclude_discord = cfg.zapret.enabled && cfg.zapret.hybrid_discord;
+        let game_domains = crate::routing::get_gaming_domains_filtered(&cfg.gaming, exclude_discord);
+        for g in game_domains {
+            if !all.contains(&g) {
+                all.push(g);
+            }
+        }
+    }
+    all
+}
+
+/// Баг 13: Единая точка синхронизации geo_override из AppConfig.
+/// Никакие внешние модули не должны напрямую передавать неполные срезы доменов.
+pub async fn sync_from_config(cfg: &crate::config::AppConfig, extra_cdns: &[String]) -> Result<usize, String> {
+    let all = collect_override_domains(cfg, extra_cdns);
+    sync_geo_override(&all).await
+}
+
 async fn write_override_file_streaming(
     src_path: &str,
     dst_path: &str,
@@ -387,6 +423,22 @@ async fn sync_ipset_family(set_name: &str, family: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regression_bug_13_geo_override_has_single_source_of_truth() {
+        // Баг 13: geo_override перезаписывали шесть мест, каждое своим набором доменов: сохранение доменов
+        // стирало игровые домены и найденные CDN, тумблер игрового режима — CDN, старт без force-доменов
+        // не синхронизировал вовсе.
+        for (name, src) in [
+            ("api.rs", include_str!("api.rs")),
+            ("bot.rs", include_str!("bot.rs")),
+            ("main.rs", include_str!("main.rs")),
+            ("watchdog.rs", include_str!("watchdog.rs")),
+        ] {
+            assert!(!src.contains("sync_geo_override(&"), "{name}: geo_override собирается одной функцией из полного конфига");
+        }
+    }
+
 
     #[test]
     fn test_update_override_content() {

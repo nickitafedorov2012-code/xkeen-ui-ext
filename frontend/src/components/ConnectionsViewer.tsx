@@ -331,40 +331,13 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
 
     setModal((prev) => ({ ...prev, submitting: true }))
     try {
-      // 1. Пробуем атомарный эндпоинт POST /api/domains/force-add
-      try {
-        await apiPost('domains/force-add', {
-          domain,
-          client_ip: modal.scope === 'device' ? modal.clientIp : undefined,
-          close_connection_id: modal.closeCurrent ? modal.connectionId : undefined,
-        })
-      } catch (err: any) {
-        // Fallback на раздельные API, если force-add не ответил
-        if (modal.scope === 'device' && modal.clientIp) {
-          const res = await apiGet<{ rules?: Record<string, Array<{ domain: string; target: string }>> } | Record<string, Array<{ domain: string; target: string }>>>('devices/domain-rules')
-          const rulesMap = (res as any)?.rules ?? (res as any) ?? {}
-          const curRules: Array<{ domain: string; target: string }> = rulesMap[modal.clientIp] || []
-          if (!curRules.some((r: { domain: string; target: string }) => r.domain === domain)) {
-            const nextRules = [...curRules, { domain, target: 'PROXY' }]
-            await apiPost('devices/domain-rules', {
-              ip: modal.clientIp,
-              rules: nextRules,
-            })
-          }
-        } else {
-          const domRes = await apiGet<{ direct: string[]; force: string[] }>('domains')
-          const curForce = domRes.force || []
-          if (!curForce.some((d) => d.toLowerCase() === domain)) {
-            await apiPost('domains', {
-              direct: domRes.direct || [],
-              force: [...curForce, domain],
-            })
-          }
-        }
-        if (modal.closeCurrent && modal.connectionId) {
-          await apiDelete(`connections/${modal.connectionId}`).catch(() => {})
-        }
-      }
+      // Баг 136: только атомарный эндпоинт — без запасного read-modify-write `domains` и правил
+      // с жёсткой целью. Повтор безопасен: force-add не дублирует уже добавленный домен.
+      await apiPost('domains/force-add', {
+        domain,
+        client_ip: modal.scope === 'device' ? modal.clientIp : undefined,
+        close_connection_id: modal.closeCurrent ? modal.connectionId : undefined,
+      })
 
       notify(
         `✓ Домен «${domain}» успешно отправлен жестко в прокси ${
@@ -379,6 +352,8 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
     } catch (e: any) {
       notify('Ошибка отправки в прокси: ' + e.message, true)
       setModal((prev) => ({ ...prev, submitting: false }))
+      // Ответ мог потеряться после применения на сервере — показываем фактические списки
+      loadAuxData()
     }
   }
 

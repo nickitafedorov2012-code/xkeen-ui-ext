@@ -436,6 +436,22 @@ pub struct FailsafeVerificationReport {
 
 /// Строгая достоверная проверка Failsafe (Z-05, NET-03)
 /// Не считает неизвестное состояние за успех (fail-closed).
+pub fn is_failsafe_http_status_valid(status: u16) -> bool {
+    status == 204
+}
+
+pub fn has_lan_bridge_interface(net_dev_content: &str) -> bool {
+    for line in net_dev_content.lines() {
+        if let Some((iface, _)) = line.split_once(':') {
+            let name = iface.trim();
+            if name.starts_with("br") || name.starts_with("Bridge") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub async fn verify_zapret_failsafe(
     http_client: &reqwest::Client,
     router_check_url: Option<&str>,
@@ -484,13 +500,13 @@ pub async fn verify_zapret_failsafe(
         .await
         {
             Ok(Ok(res)) => {
-                let status = res.status();
-                if status.as_u16() == 204 || (status.as_u16() >= 200 && status.as_u16() < 400) {
+                let status = res.status().as_u16();
+                if is_failsafe_http_status_valid(status) {
                     internet_reachable = true;
-                    details.push(format!("Интернет доступен через {ep} (HTTP {})", status.as_u16()));
+                    details.push(format!("Интернет доступен через {ep} (HTTP {status})"));
                     break;
                 } else {
-                    details.push(format!("Непредвиденный статус {ep}: HTTP {}", status.as_u16()));
+                    details.push(format!("Непредвиденный статус {ep}: HTTP {status}"));
                 }
             }
             Ok(Err(e)) => {
@@ -506,7 +522,7 @@ pub async fn verify_zapret_failsafe(
     #[cfg(target_os = "linux")]
     {
         if let Ok(interfaces) = std::fs::read_to_string("/proc/net/dev") {
-            if interfaces.contains("br") || interfaces.contains("Bridge") {
+            if has_lan_bridge_interface(&interfaces) {
                 lan_bridge_valid = true;
                 details.push("Мостовой интерфейс LAN (br+/Bridge+) обнаружен".into());
             } else {
@@ -820,6 +836,35 @@ mod tests {
         assert_eq!(get_current_operation_state(), ZapretOperationState::Stopping);
     }
 
+    #[test]
+    fn regression_bug_37_failsafe_rejects_3xx_redirects_and_strict_bridge_check() {
+        // Баг 37: Ответ 3xx (captive portal) засчитывался как «интернет есть»,
+        // а проверка LAN contains("br") проходила всегда из-за подстроки "bytes" в заголовке /proc/net/dev.
+
+        // 1. Проверяем валидатор HTTP статуса: 3xx (редиректы, captive portal) не должны считаться успехом
+        assert!(!is_failsafe_http_status_valid(302), "HTTP 302 captive portal must NOT be valid internet");
+        assert!(!is_failsafe_http_status_valid(307), "HTTP 307 redirect must NOT be valid internet");
+        assert!(!is_failsafe_http_status_valid(301), "HTTP 301 must NOT be valid internet");
+        assert!(!is_failsafe_http_status_valid(200), "HTTP 200 must NOT be valid for generate_204");
+        assert!(is_failsafe_http_status_valid(204), "HTTP 204 No Content is valid");
+
+        // 2. Проверяем парсер /proc/net/dev: не должен срабатывать на заголовок "Receive bytes..."
+        let fake_dev_no_bridge = "Inter-|   Receive                                                |  Transmit\n\
+                                  face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n\
+                                  eth0: 1234567       0    0    0    0     0          0         0  1234567       0    0    0    0     0       0          0\n";
+        assert!(
+            !has_lan_bridge_interface(fake_dev_no_bridge),
+            "dev content with only eth0 must NOT match bridge just because header has 'bytes'"
+        );
+
+        let fake_dev_with_bridge = "Inter-|   Receive\n\
+                                    face |bytes\n\
+                                    br0: 1234567 0 0 0 0 0 0 0 1234567 0 0 0 0 0 0 0\n";
+        assert!(
+            has_lan_bridge_interface(fake_dev_with_bridge),
+            "br0: interface must be detected as LAN bridge"
+        );
+    }
     #[test]
     fn test_detect_dns_loop_risk() {
         let safe_servers = vec![

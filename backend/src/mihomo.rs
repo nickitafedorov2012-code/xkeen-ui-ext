@@ -236,6 +236,54 @@ pub async fn close_server_connections(
     count
 }
 
+/// Баг 8: id соединений, открытых указанными LAN-адресами (metadata.sourceIP).
+pub fn connection_ids_from_sources(val: &Value, ips: &[String]) -> Vec<String> {
+    let Some(conns) = val.get("connections").and_then(|c| c.as_array()) else {
+        return Vec::new();
+    };
+    conns
+        .iter()
+        .filter(|c| {
+            let src = c.get("metadata").and_then(|m| m.get("sourceIP")).and_then(|s| s.as_str()).unwrap_or("");
+            !src.is_empty() && ips.iter().any(|ip| ip == src)
+        })
+        .filter_map(|c| c.get("id").and_then(|i| i.as_str()).map(String::from))
+        .collect()
+}
+
+/// IP игровых устройств для точечного сброса сокетов: включённые, иначе все известные.
+pub fn gaming_device_ips(gaming: &crate::config::GamingConfig) -> Vec<String> {
+    let with_ip = |enabled_only: bool| -> Vec<String> {
+        gaming
+            .devices
+            .iter()
+            .filter(|d| !enabled_only || d.enabled)
+            .map(|d| d.ip.trim().to_string())
+            .filter(|ip| !ip.is_empty())
+            .collect()
+    };
+    let enabled = with_ip(true);
+    if enabled.is_empty() { with_ip(false) } else { enabled }
+}
+
+/// Переключение группы 🎮 Gaming (баг 8): сбрасываются только соединения игровых устройств, чтобы они
+/// пошли по новым правилам; остальная LAN (звонки, загрузки, DIRECT) не затрагивается.
+pub async fn switch_gaming_group(http: &reqwest::Client, cfg: &AppConfig, server: &str) -> Result<(), String> {
+    switch_selector(http, cfg, crate::routing::GAMING_GROUP_NAME, server).await?;
+    let ips = gaming_device_ips(&cfg.gaming);
+    if ips.is_empty() {
+        let _ = close_server_connections(http, cfg, crate::routing::GAMING_GROUP_NAME).await;
+        return Ok(());
+    }
+    let Ok(val) = m_get(http, cfg, "/connections").await else {
+        return Ok(());
+    };
+    for cid in connection_ids_from_sources(&val, &ips) {
+        let _ = m_delete(http, cfg, &format!("/connections/{cid}"), 2).await;
+    }
+    Ok(())
+}
+
 // =========================================================================
 // FO-MHO-01: 3-Second TTL Cache & Resilient Fallback for Mihomo Proxies
 // =========================================================================
@@ -2299,6 +2347,26 @@ pub fn urlencoding_lite(s: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn regression_bug_8_gaming_switch_closes_only_gaming_device_sockets() {
+        let val = json!({ "connections": [
+            { "id": "a", "metadata": { "sourceIP": "192.168.1.50" } },
+            { "id": "b", "metadata": { "sourceIP": "192.168.1.60" } },
+            { "id": "c", "metadata": { "sourceIP": "" } },
+            { "id": "d", "metadata": { "sourceIP": "192.168.1.50" } }
+        ]});
+        assert_eq!(connection_ids_from_sources(&val, &["192.168.1.50".to_string()]), vec!["a", "d"]);
+        assert!(connection_ids_from_sources(&val, &[]).is_empty(), "без устройств ничего не закрываем по IP");
+
+        let mut g = crate::config::GamingConfig::default();
+        let dev = |ip: &str, enabled: bool| crate::config::GamingDevice { mac: format!("m{ip}"), ip: ip.into(), enabled, ..Default::default() };
+        g.devices = vec![dev("192.168.1.50", true), dev("192.168.1.60", false), dev("", true)];
+        assert_eq!(gaming_device_ips(&g), vec!["192.168.1.50"], "только включённые с IP");
+        g.devices = vec![dev("192.168.1.60", false)];
+        assert_eq!(gaming_device_ips(&g), vec!["192.168.1.60"], "нет включённых — единственное известное");
+    }
+
 
     fn map(entries: Vec<(&str, Value)>) -> BTreeMap<String, Value> {
         entries.into_iter().map(|(k, v)| (k.to_string(), v)).collect()

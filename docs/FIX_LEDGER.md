@@ -1,5 +1,7 @@
 # Журнал исправлений
 
+> ⚠️ **СНАЧАЛА ПРОЧИТАЙ `docs/REWORK_FIRST.md`** (ревизия 2026-11-05). Пункты со статусом `REOPENED` и `RECHECK` исправлены не до конца или не проверены; их переделывают ПЕРВЫМИ, до неначатых пунктов и до поиска новых багов. Статус `FIXED` в этой таблице для пунктов из шага 2 того файла ещё не перепроверен по коду.
+
 Журнал вместе с кодом и проверенными логами отражает прогресс; сам по себе он не доказывает исправление.
 После новой сессии или сжатия контекста прочитай его и вернись к незавершённым и разблокированным пунктам.
 
@@ -8,6 +10,8 @@
 - `NOT_REPRODUCED` — сценарий проверен, с конкретными доказательствами отсутствия заявленной проблемы.
 - `NEEDS_ROUTER` — требуется проверка на роутере, независимо от пометки в аудите; указать, что проверено локально.
 - `BLOCKED` — конкретное препятствие, недостающая проверка, решение или зависимость и следующий шаг.
+- `REOPENED` — раньше стоял `FIXED`, но ревизия по коду нашла неисправленный подпункт или сломанный тест; что именно — в `docs/REWORK_FIRST.md`. Делается в первую очередь.
+- `RECHECK` — проверка исправления не закончена; сначала проверить, затем `FIXED` или `REOPENED`.
 
 Для неприменимых полей записывай причину, не придумывай результат. Подпункты учитывай отдельно, но счётчик номеров 1–141 не увеличивай.
 
@@ -16,7 +20,7 @@
 | № | Фаза | Статус | Тест (spec для шлюза) | Файлы | red_kind |
 |---|---|---|---|---|---|
 | 125 | A | FIXED | be:regression_bug_125 | backend/src/api.rs, backend/src/updater.rs | assert |
-| 91 | A | FIXED | be:regression_bug_91 | backend/src/auth.rs | assert |
+| 91 | A | REOPENED | be:regression_bug_91 | backend/src/auth.rs | assert |
 | 90 | A | FIXED | be:regression_bug_90 | backend/src/main.rs, backend/src/auth.rs | assert |
 | 141 | A | FIXED | be:regression_bug_141 | backend/src/api.rs | assert |
 | 61 | A | FIXED | be:regression_bug_61 | backend/src/bot.rs | assert |
@@ -27,10 +31,10 @@
 | 93 | A | FIXED | be:regression_bug_93 | backend/src/auth.rs, backend/src/main.rs | assert |
 | 68 | A | FIXED | be:regression_bug_68 | backend/src/updater.rs | assert |
 | 69 | A | BLOCKED | - | backend/src/updater.rs | - |
-| 1 | B | FIXED | be:regression_bug_1_adguard | backend/src/adguard.rs, backend/src/api.rs | assert |
+| 1 | B | REOPENED | be:regression_bug_1_adguard | backend/src/adguard.rs, backend/src/api.rs | assert |
 | 2 | B | FIXED | be:regression_bug_2_resolve_excluded | backend/src/routing.rs, backend/src/api.rs | assert |
 | 3 | B | FIXED | be:regression_bug_3_whitelist_strict | backend/src/routing.rs | assert |
-| 70 | B | FIXED | be:regression_bug_70 | backend/src/api.rs, backend/src/adguard.rs, backend/src/direct_traffic.rs | assert |
+| 70 | B | REOPENED | be:regression_bug_70 | backend/src/api.rs, backend/src/adguard.rs, backend/src/direct_traffic.rs | assert |
 | 71 | B | FIXED | be:regression_bug_71 | backend/src/direct_traffic.rs | assert |
 | 72 | B | FIXED | be:regression_bug_72 | backend/src/traffic.rs | assert |
 | 88 | B | FIXED | be:regression_bug_88 | backend/src/notifications.rs | assert |
@@ -38,7 +42,7 @@
 | 73 | F | FIXED | be:regression_bug_73 | backend/src/traffic.rs | compile |
 | 102 | B | FIXED | be:regression_bug_102 | backend/src/failover.rs, backend/src/mihomo.rs | assert |
 | 103 | B | FIXED | be:regression_bug_103 | backend/src/failover.rs | compile |
-| 114 | B | FIXED | be:regression_bug_114 | backend/src/adguard.rs | assert |
+| 114 | B | RECHECK | be:regression_bug_114 | backend/src/adguard.rs | assert |
 | 116 | B | FIXED | be:regression_bug_116 | backend/src/watchdog.rs, backend/src/config.rs, backend/src/api.rs, backend/src/bot.rs | compile |
 | 133 | B | FIXED | fe:src/components/AdGuard.test.tsx::bug 133: / be:regression_bug_133 | frontend/src/components/AdGuard.tsx, frontend/src/components/AdGuard.test.tsx, backend/src/api.rs | 133a:assert, 133b:compile |
 | 28 | B | FIXED | be:regression_bug_28 | backend/src/watchdog.rs | compile |
@@ -65,6 +69,46 @@
 | 64 | C | FIXED | be:regression_bug_64 | backend/src/api.rs | compile |
 | 41 | B | FIXED | be:regression_bug_41 | backend/src/api.rs | assert |
 | 45 | B | BLOCKED | be:regression_bug_45a | backend/src/api.rs, backend/src/routing.rs | - |
+| 95 | C | FIXED | be:regression_bug_95_ | backend/src/watchdog.rs (тест) | already |
+| 96 | C | FIXED | be:regression_bug_96_ | backend/src/watchdog.rs (тест) | already |
+| 83 | C | FIXED | be:regression_bug_83_ | backend/src/watchdog.rs (тест) | already |
+| 85 | C | FIXED | be:regression_bug_85_ | backend/src/watchdog.rs (тест) | already |
+| 86 | C | FIXED | be:regression_bug_86_ | backend/src/watchdog.rs (тест) | already |
+| 9 | C | FIXED | be:regression_bug_9_ | backend/src/watchdog.rs, backend/src/api.rs | assert |
+| 58 | C | FIXED | be:regression_bug_58_ | backend/src/api.rs | assert |
+| 110 | C | FIXED | be:regression_bug_110_ | backend/src/api.rs | assert |
+| 29 | C | FIXED | be:regression_bug_29_ | backend/src/api.rs | assert |
+| 111 | C | FIXED | be:regression_bug_111_ | backend/src/api.rs | assert |
+| 26 | C | FIXED | be:regression_bug_26_ | backend/src/api.rs | assert |
+| 6 | C | FIXED | be:regression_bug_6_ | backend/src/api.rs | assert |
+| 67 | C | FIXED | be:regression_bug_67_ | backend/src/api.rs | assert |
+| 98 | C | FIXED | fe:src/api.test.ts::apply detected whitelist adds to user marks instead of replacing lists | frontend/src/api.ts, frontend/src/api.test.ts, backend/src/api.rs | assert |
+| 108 | C | FIXED | be:regression_bug_108_ | backend/src/failover.rs | assert |
+| 131 | C | FIXED | be:regression_bug_131_ | backend/src/transaction.rs, backend/src/main.rs | assert |
+| 82 | C | FIXED | be:regression_bug_82_ | backend/src/api.rs | assert |
+| 81 | C | FIXED | be:regression_bug_81_ | backend/src/api.rs | assert |
+| 120 | C | FIXED | be:regression_bug_120_ | backend/src/routing.rs | assert |
+| 119 | C | FIXED | be:regression_bug_119_ | backend/src/routing.rs | assert |
+| 115 | C | BLOCKED | be:regression_bug_115a_ | backend/src/adguard.rs | - |
+| 134 | C | FIXED | fe:src/components/AdGuard.test.tsx::bug 134 | frontend/src/components/AdGuard.tsx, frontend/src/components/AdGuard.test.tsx | assert |
+| 136 | C | FIXED | fe:src/components/ConnectionsViewer.test.tsx::bug 136 | frontend/src/components/ConnectionsViewer.tsx, frontend/src/components/ConnectionsViewer.test.tsx (новый) | assert |
+| 4 | D | FIXED | be:regression_bug_4_ | backend/src/main.rs, backend/src/failover.rs | assert |
+| 5 | D | FIXED | be:regression_bug_5_ | backend/src/api.rs, backend/src/watchdog.rs, backend/src/failover.rs | assert |
+| 7 | D | FIXED | be:regression_bug_7_ | backend/src/watchdog.rs | assert |
+| 8 | D | FIXED | be:regression_bug_8_ | backend/src/mihomo.rs, backend/src/api.rs, backend/src/watchdog.rs | assert |
+| 10 | D | FIXED | be:regression_bug_10_ | backend/src/watchdog.rs | assert |
+| 11 | D | BLOCKED | be:regression_bug_11a_ / be:regression_bug_11c_ | backend/src/watchdog.rs | - |
+| 13 | D | REOPENED | be:regression_bug_13_geo_override_has_single_source_of_truth | backend/src/override_sync.rs, backend/src/api.rs, backend/src/bot.rs, backend/src/main.rs, backend/src/watchdog.rs | assert |
+| 14 | D | FIXED | be:regression_bug_14_gaming_rules_order_and_compatibility_scope | backend/src/routing.rs | assert |
+| 15 | D | FIXED | be:regression_bug_15_discord_zapret_hybrid_vs_gaming_priority | backend/src/routing.rs, backend/src/override_sync.rs | assert |
+| 17 | D | FIXED | be:regression_bug_17_single_disabled_gaming_device_must_stay_inactive | backend/src/routing.rs, backend/src/api.rs, backend/src/watchdog.rs | assert |
+| 24 | D | FIXED | be:regression_bug_24_whitelist_dns_applies_in_zero_touch_mode_without_explicit_devices | backend/src/routing.rs | assert |
+| 25 | D | FIXED | be:regression_bug_25_sync_tunnel_dns_ports_preserves_rule_order_and_updates_ndm_hooks | backend/src/adguard.rs | assert |
+| 30 | D | FIXED | be:regression_bug_30_save_zapret_conf_rebuilds_mihomo_rules | backend/src/api.rs | assert |
+| 32 | D | FIXED | be:regression_bug_32_zapret_excluded_devices_bypass_mihomo_direct_and_resolve_mac | backend/src/routing.rs | assert |
+| 33 | D | FIXED | be:regression_bug_33_discord_voice_excludes_gaming_devices_from_udp_queue | backend/src/api.rs | assert |
+| 36 | D | REOPENED | be:regression_bug_36_zapret_watchdog_fixes | backend/src/watchdog.rs | assert |
+| 37 | D | REOPENED | be:regression_bug_37_ (тест есть, рабочих функций нет — cargo test не собирается) | backend/src/zapret.rs | - |
 
 ## Записи
 
@@ -1307,6 +1351,754 @@
 - Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): БС и гейминг редиректят DNS на реальный порт Mihomo.
 - GREEN: не запускался — BLOCKED
 - Статус: BLOCKED (Не продуктовый вопрос, а объём: оставшиеся ~100 мест (шаблоны shell-скриптов NDM/AdGuard/Zapret) требуют параметризации шаблонов и проверки на роутере; S51zapret зависит от решения по багу 31. Следующий шаг: передать порт в build_sync_tunnel_dns_ports_script/build_adguard_ndm_hook_content и zapret.conf (DNS_PORT).)
+
+### Баг 95 — Авто-отключение Zapret в watchdog пишет config без config_lock
+- Правила перечитаны: 2026-11-05 10:25:34 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/watchdog.rs:743` — `spawn_zapret_monitor` (ветка restart_failures == 5)
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+                      let mut cfg = (**state.config.read().await).clone();
+                      cfg.zapret.enabled = false;
+                      let _ = config::save(&state.config_path, &cfg).await;
+                      *state.config.write().await = std::sync::Arc::new(cfg);
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадало: чтение-изменение-запись без config_lock параллельно с ConfigTx из UI → потерянное обновление. Закрыто фиксом бага 28 (релиз 1.10.1, коммит dced24d). Ограничение: гонку тест не воспроизводит, проверяется только путь записи.
+- Первопричина одним предложением: Сторож Zapret писал config.json напрямую, минуя транзакцию с config_lock.
+- Тест: `watchdog.rs::already_fixed_structural_tests::regression_bug_95_zapret_watchdog_writes_via_configtx`; spec: `be:regression_bug_95_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Тело рабочего spawn_zapret_monitor вызывает disable_zapret_after_failed_starts (→ persist_zapret_enabled_with_routing → ConfigTx) и не содержит config::save(. Поведение самой транзакции покрыто тестами бага 28.
+- RED: ALREADY (`docs/fix_logs/bug-95-already.log`): RED невозможен — исправление уже в коммите dced24d. Hunk `git diff 61a76cb dced24d -- backend/src/watchdog.rs`:
+  ```diff
+  -                    let mut cfg = (**state.config.read().await).clone();
+  -                    cfg.zapret.enabled = false;
+  -                    let _ = config::save(&state.config_path, &cfg).await;
+  -                    *state.config.write().await = std::sync::Arc::new(cfg);
+  +                    if let Err(e) = disable_zapret_after_failed_starts(&state).await {
+  +                        log_w!("[WATCHDOG] Не удалось выключить Zapret и пересобрать правила: {e}");
+  +                    }
+  ```
+- Исправление (что и почему, 1–3 предложения): Кода не менялось; добавлен структурный тест против возврата прямой записи.
+- Какие инварианты затрагивает и почему не нарушены: INV-3 (запись конфига только транзакцией) соблюдён.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Только Zapret; правила Mihomo пересобираются той же транзакцией (баг 28).
+- GREEN: `docs/fix_logs/bug-95-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 95 | diff 3ccb8cc6fb82 | лог docs/fix_logs/bug-95-green.log ===`
+- Статус: FIXED
+
+### Баг 96 — DHCP-watchdog пишет config.yaml мимо ConfigTx
+- Правила перечитаны: 2026-11-05 10:25:34 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/watchdog.rs:479` — `spawn_dhcp_device_monitor`
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+                                  if let Ok(new_yaml) = rebuild_routing_after_dhcp_change(&raw_yaml, &new_cfg) {
+                                      if crate::api::atomic_write_file(path, &new_yaml).await.is_ok()
+                                          && mihomo::reload_config(&state.http, &new_cfg).await.is_ok() {
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадало: запись config.yaml без валидации и без отката при неудачном reload. Закрыто переписыванием монитора в баге 118 (коммит dced24d). Ограничение: откат при сбое reload проверяется тестами ConfigTx, а не этим тестом.
+- Первопричина одним предложением: Монитор писал YAML напрямую через atomic_write_file вместо ConfigTx.
+- Тест: `watchdog.rs::already_fixed_structural_tests::regression_bug_96_dhcp_watchdog_writes_via_configtx`; spec: `be:regression_bug_96_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Тело рабочего spawn_dhcp_device_monitor содержит ConfigTx::begin и не содержит atomic_write_file и config::save(.
+- RED: ALREADY (`docs/fix_logs/bug-96-already.log`): исправление уже в коммите dced24d. Hunk `git diff 61a76cb dced24d -- backend/src/watchdog.rs`:
+  ```diff
+  +            // Баг 96: запись только через ConfigTx (config_lock → routing_lock, откат при сбое)
+  +            let Ok(mut tx) = crate::transaction::ConfigTx::begin(&state).await else {
+  +                continue;
+  +            };
+  +            let mut changed = migrate_ip_keyed_config(tx.config_mut(), &ip_changes);
+  -                                    if crate::api::atomic_write_file(path, &new_yaml).await.is_ok()
+  ```
+- Исправление (что и почему, 1–3 предложения): Кода не менялось; добавлен структурный тест.
+- Какие инварианты затрагивает и почему не нарушены: INV-3 соблюдён: валидация и откат через ConfigTx.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Гейминг, БС-исключения, device_routing переносятся по новому IP одной транзакцией (баг 118).
+- GREEN: `docs/fix_logs/bug-96-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 96 | diff 3ccb8cc6fb82 | лог docs/fix_logs/bug-96-green.log ===`
+- Статус: FIXED
+
+### Баг 83 — Миграция провайдеров: N коммитов и N reload Mihomo подряд
+- Правила перечитаны: 2026-11-05 10:25:34 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/api.rs` — `sync_all_mobile_providers`
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+      for (pid, raw_url) in &provider_urls {
+          if !cfg.mobile_provider_urls.contains_key(pid) {
+              ...
+                  if let Ok(mut tx) = ConfigTx::begin(state).await {
+                      ...
+                              let _ = tx.commit_and_reload().await;
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадало: на каждый http-провайдер — свой ConfigTx и reload. Пункт снят вместе с самой автомиграцией (баг 80, коммит dced24d): цикла больше нет. Ограничение: тест структурный.
+- Первопричина одним предложением: Транзакция и reload Mihomo открывались внутри цикла по провайдерам.
+- Тест: `watchdog.rs::already_fixed_structural_tests::regression_bug_83_no_commit_per_provider_in_background_sync`; spec: `be:regression_bug_83_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Тело рабочего sync_all_mobile_providers не содержит ConfigTx::begin и commit_and_reload.
+- RED: ALREADY (`docs/fix_logs/bug-83-already.log`): исправление уже в коммите dced24d. Hunk `git diff 61a76cb dced24d -- backend/src/api.rs`:
+  ```diff
+  -    for (pid, raw_url) in &provider_urls {
+  -        if !cfg.mobile_provider_urls.contains_key(pid) {
+  -                if let Ok(mut tx) = ConfigTx::begin(state).await {
+  -                            let _ = tx.commit_and_reload().await;
+  ```
+- Исправление (что и почему, 1–3 предложения): Кода не менялось; добавлен структурный тест.
+- Какие инварианты затрагивает и почему не нарушены: INV-7: фоновые reload'ы больше не рвут соединения LAN каждый час.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Мобильные подписки обновляются через force_update_provider без reload.
+- GREEN: `docs/fix_logs/bug-83-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 83 | diff 3ccb8cc6fb82 | лог docs/fix_logs/bug-83-green.log ===`
+- Статус: FIXED
+
+### Баг 85 — Speedtest восстанавливает ВСЕ selector-группы из снимка
+- Правила перечитаны: 2026-11-05 10:25:34 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/speedtest.rs:178` — `run_speedtest`
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+      // 1. Создание снимка текущего выбора всех групп Selector ядра Mihomo
+      let (group_snapshot, original_server) = take_groups_snapshot(_http, _cfg).await?;
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадало: откат всех групп из снимка затирал изменения failover/пользователя за время замера. Закрыто фиксом 84 (коммит dced24d): снимок и откат только Canary Probe. Ограничение: тест структурный; содержимое снимка проверяет тест бага 84.
+- Первопричина одним предложением: Снимок брался по всем selector-группам вместо изолированной.
+- Тест: `watchdog.rs::already_fixed_structural_tests::regression_bug_85_speedtest_restores_only_its_group`; spec: `be:regression_bug_85_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Тело рабочего run_speedtest не вызывает take_groups_snapshot( и вызывает isolated_speedtest_snapshot( (её состав — только Canary Probe — проверяет regression_bug_84).
+- RED: ALREADY (`docs/fix_logs/bug-85-already.log`): исправление уже в коммите dced24d. Hunk `git diff 61a76cb dced24d -- backend/src/speedtest.rs`:
+  ```diff
+  -    let (group_snapshot, original_server) = take_groups_snapshot(_http, _cfg).await?;
+  +    let group_snapshot = isolated_speedtest_snapshot(&proxies_now)?;
+  ```
+- Исправление (что и почему, 1–3 предложения): Кода не менялось; добавлен структурный тест.
+- Какие инварианты затрагивает и почему не нарушены: INV-1/INV-7: группы LAN не откатываются и не переключаются.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Failover и БС во время замера не теряют выбор.
+- GREEN: `docs/fix_logs/bug-85-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 85 | diff 3ccb8cc6fb82 | лог docs/fix_logs/bug-85-green.log ===`
+- Статус: FIXED
+
+### Баг 86 — Speedtest качает через mixed-port по правилам, группы захардкожены
+- Правила перечитаны: 2026-11-05 10:25:34 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/speedtest.rs:247` — `run_speedtest`
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+          ["PROXY", "GLOBAL", "Proxy", "auto"].iter().any(|&grp_name| {
+      ...
+      let proxy_url = _cfg.mihomo_proxy_url();
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадало: скачивание шло через mixed-port по правилам (домены теста могли уйти в DIRECT), подтверждение выбора — по захардкоженным группам. Закрыто фиксом 84 (коммит dced24d). Ограничение: на роутере не измерялось.
+- Первопричина одним предложением: Замер использовал общий прокси-порт с правилами вместо слушателя выбранного узла.
+- Тест: `watchdog.rs::already_fixed_structural_tests::regression_bug_86_speedtest_measures_selected_node`; spec: `be:regression_bug_86_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Тело рабочего run_speedtest не содержит mihomo_proxy_url() и литерала "auto", использует CANARY_PROBE_PORT.
+- RED: ALREADY (`docs/fix_logs/bug-86-already.log`): исправление уже в коммите dced24d. Hunk `git diff 61a76cb dced24d -- backend/src/speedtest.rs`:
+  ```diff
+  -        ["PROXY", "GLOBAL", "Proxy", "auto"].iter().any(|&grp_name| {
+  -    let proxy_url = _cfg.mihomo_proxy_url();
+  +    let proxy_url = format!("http://127.0.0.1:{}", crate::routing::CANARY_PROBE_PORT);
+  ```
+- Исправление (что и почему, 1–3 предложения): Кода не менялось; добавлен структурный тест.
+- Какие инварианты затрагивает и почему не нарушены: INV-1: замер не меняет канал LAN.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Без влияния на остальные режимы.
+- GREEN: `docs/fix_logs/bug-86-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 86 | diff 3ccb8cc6fb82 | лог docs/fix_logs/bug-86-green.log ===`
+- Статус: FIXED
+
+### Баг 9 — Умный режим пишет config.yaml без транзакции
+- Правила перечитаны: 2026-11-05 10:38:55 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/watchdog.rs:1214` — `spawn_smart_gaming_monitor` (ветки авто-включения и авто-выключения по простою)
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+                                  if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &new_cfg) {
+                                      let _ = crate::api::atomic_write_file(path, &new_yaml).await;
+                                      let _ = mihomo::reload_config(&state.http, &new_cfg).await;
+      ...
+                          if config::save(&state.config_path, &new_cfg).await.is_ok() {
+                              *state.config.write().await = std::sync::Arc::new(new_cfg);
+                          }
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает: ошибки записи и reload игнорировались (`let _ =`), config.json и память обновлялись в любом случае — UI показывал игровой режим, а ядро работало со старым конфигом (или отклонило новый без отката). Ограничение: проверено на тестовом состоянии с недоступным ядром (порт 1), не на роутере. Подмена режима KnownServices/SmartSplit на Compatibility (баг 7) и слежение только за первым устройством (баг 10) этим пунктом не меняются.
+- Первопричина одним предложением: Монитор сам писал файлы и сохранял конфиг вместо транзакции ConfigTx с откатом.
+- Тест: `watchdog.rs::structural_regression_tests::regression_bug_9_smart_gaming_writes_via_configtx` и `watchdog.rs::tests::regression_bug_9_smart_gaming_failed_reload_changes_nothing`; spec: `be:regression_bug_9_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): 1) Тело рабочего spawn_smart_gaming_monitor не содержит atomic_write_file и config::save( и вызывает apply_smart_gaming_toggle. 2) Рабочая apply_smart_gaming_toggle(state, true) при недоступном ядре возвращает Err, config.json побайтно прежний, config.yaml откатан, в памяти gaming.enabled=false.
+- RED: `docs/fix_logs/bug-9-red.log`, red_kind=assert: структурный тест упал на старом коде (`assertion failed: без прямой записи config.yaml`, watchdog.rs:1804). Поведенческий тест добавлен вместе с исправлением (вызывает новую функцию, на старом коде не компилируется) — RED для него не заявляется.
+- Исправление (что и почему, 1–3 предложения): Добавлены `api::commit_config_with_routing` (ConfigTx: изменение конфига → apply_routing → валидация → commit_and_reload, при отказе — откат) и `watchdog::apply_smart_gaming_toggle`; обе ветки монитора вызывают её. Переключение группы и синхронизация iptables выполняются только после успешного коммита.
+- Какие инварианты затрагивает и почему не нарушены: INV-3: запись только транзакцией. INV-1: при отказе ядра канал не меняется — iptables и конфиг остаются согласованными.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Гейминг: включение/выключение умным режимом как прежде, при успехе. БС: приостановка gaming_suspended по-прежнему проверяется до вызова. Остальные режимы не затронуты.
+- GREEN: `docs/fix_logs/bug-9-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 9 | diff b0819094e726 | лог docs/fix_logs/bug-9-green.log ===`
+- Статус: FIXED
+
+### Баг 58 — Старт и стоп Zapret из UI пишут config.yaml без транзакции
+- Правила перечитаны: 2026-11-05 10:38:55 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/api.rs` — `zapret_action`, секция «6. Toggle» (start/stop/restart/reload-fw и аварийный stop)
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+              if std::path::Path::new(&cfg.mihomo.config_path).exists() {
+                  if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
+                      ...
+                      let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
+                      let _ = mihomo::reload_config(&state.http, &cfg).await;
+                  }
+              }
+              let _ = config::save(&state.config_path, &cfg).await;
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает: файлы писались напрямую, ошибка reload терялась, config.json сохранялся всегда — при отказе ядра правила Zapret и флаг enabled расходились. Ограничение: проверено структурно и через общий путь persist_zapret_enabled_with_routing (его поведение покрыто тестами 28/57), запуск S51zapret на роутере не проверялся.
+- Первопричина одним предложением: Секция старта/стопа повторяла собственную запись файлов вместо общей транзакции Zapret.
+- Тест: `api.rs::settings_and_service_regression_tests::regression_bug_58_zapret_start_stop_write_via_configtx`; spec: `be:regression_bug_58_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Секция «6. Toggle» рабочего zapret_action не содержит atomic_write_file( и config::save( и вызывает persist_zapret_enabled_with_routing (ConfigTx + apply_routing; поведение при отказе ядра проверяют regression_bug_28/57).
+- RED: `docs/fix_logs/bug-58-red.log`, red_kind=assert: на старом коде упало `без прямой записи config.yaml` (api.rs:11361).
+- Исправление (что и почему, 1–3 предложения): Все пять мест секции (выключение перед stop, откат после неудачного старта, падение службы сразу после старта, итоговая запись, аварийный stop) переведены на persist_zapret_enabled_with_routing. Выключение сохраняется транзакцией до запуска stop, как и раньше, чтобы сторож не перезапустил nfqws; при неудаче итоговой транзакции UI получает ошибку вместо «успеха».
+- Какие инварианты затрагивает и почему не нарушены: INV-3: запись через ConfigTx. Правила Mihomo и zapret.enabled всегда согласованы.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Zapret: поведение кнопок прежнее. При недоступном ядре persist сохраняет файлы без reload (семантика бага 57), чтобы следующий старт Mihomo не вернул YouTube/Discord в DIRECT. Остальные режимы не затронуты.
+- GREEN: `docs/fix_logs/bug-58-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 58 | diff 7e7911acee0f | лог docs/fix_logs/bug-58-green.log ===`
+- Статус: FIXED
+
+### Баг 110 — «Старт/рестарт XKeen» переписывает config.yaml без блокировок и транзакции
+- Правила перечитаны: 2026-11-05 10:38:55 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/api.rs:2347` — `xkeen_service`, ветка start/restart/restart_all
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+                  if path.exists() {
+                      if let Ok(raw_yaml) = tokio::fs::read_to_string(path).await {
+                          if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &cfg) {
+                              let _ = atomic_write_file(path, &new_yaml).await;
+                              let _ = mihomo::reload_config(&state.http, &cfg).await;
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает: без config_lock/routing_lock параллельная ConfigTx (сохранение из другой вкладки) теряла изменения — запись шла из снимка cfg, взятого до запуска скрипта; ошибки reload терялись. Ограничение: гонка не воспроизводится тестом, проверен путь записи.
+- Первопричина одним предложением: Ветка старта писала config.yaml напрямую из старого снимка конфигурации.
+- Тест: `api.rs::settings_and_service_regression_tests::regression_bug_110_xkeen_start_rewrites_yaml_via_configtx`; spec: `be:regression_bug_110_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Тело рабочего xkeen_service не содержит atomic_write_file( и вызывает commit_config_with_routing (поведение транзакции при отказе ядра проверяет regression_bug_9_smart_gaming_failed_reload_changes_nothing).
+- RED: `docs/fix_logs/bug-110-red.log`, red_kind=assert: на старом коде упало `без прямой записи config.yaml` (api.rs:11370).
+- Исправление (что и почему, 1–3 предложения): Пересборка правил идёт через commit_config_with_routing (ConfigTx берёт свежую конфигурацию под блокировками, валидирует и откатывает при отказе); iptables БС/гейминга синхронизируются по конфигу из транзакции; ошибка пишется в журнал.
+- Какие инварианты затрагивает и почему не нарушены: INV-3 соблюдён. INV-1: перехват БС/гейминга восстанавливается после старта, как раньше (тест test_service_stop_cleans_bs_chains_and_start_resyncs зелёный).
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): БС, гейминг: sync_full_tunnel_modes после старта сохранён. Zapret: перезапуск после старта не менялся. Режим паники бота (баг 59) идёт через этот же обработчик.
+- GREEN: `docs/fix_logs/bug-110-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 110 | diff 7e7911acee0f | лог docs/fix_logs/bug-110-green.log ===`
+- Статус: FIXED
+
+### Баг 29 — set_features сохраняет весь снимок из UI; «Сбросить» выключает Zapret и удаляет исключения
+- Правила перечитаны: 2026-11-05 10:49:18 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/api.rs` — `zapret_action`, ветка toggle_feature / set_features / reset_features
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+          if act == "reset_features" {
+              cfg.zapret = crate::config::ZapretConfig::default();
+          } else if let Some(mut new_features) = body.features {
+              ...
+              cfg.zapret = new_features;
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает: присваивание целиком стирало excluded_devices, custom_entries, engine, статистику community-списка, сведения об обновлениях; сброс ставил enabled по умолчанию и очищал исключения. Текущий UI set_features не вызывает (только reset_features), но API принимает его. Попутно эта же ветка переведена на ConfigTx (запись config.yaml напрямую с игнором ошибки reload — та же проблема, что 111).
+- Первопричина одним предложением: Обработчик заменял всю секцию zapret присланным объектом или значениями по умолчанию.
+- Тест: `api.rs::settings_and_service_regression_tests::regression_bug_29_set_features_does_not_replace_whole_zapret_config` и `regression_bug_29_merge_and_reset_keep_server_fields`; spec: `be:regression_bug_29_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): 1) Тело рабочего zapret_action не содержит присваиваний cfg.zapret целиком. 2) Рабочие merge_zapret_features/reset_zapret_features: переключатель из UI применяется; excluded_devices, engine, community_hostlist_count, period_saved_bytes, custom_entries сохраняются; сброс не меняет enabled ни в одну сторону.
+- RED: `docs/fix_logs/bug-29-red.log`, red_kind=assert: на старом коде упало `снимок из UI не заменяет конфиг целиком` (api.rs:11353). Поведенческий тест добавлен вместе с исправлением (новые функции) — RED для него не заявляется.
+- Исправление (что и почему, 1–3 предложения): Добавлены merge_zapret_features (переносит только пользовательские переключатели) и reset_zapret_features (переключатели к стандартным, служебные поля и состояние службы сохраняются). Ветка выполняется в ConfigTx: config.json + config.yaml + reload до перезапуска S51zapret; при отказе ядра файлы службы возвращаются к прежним настройкам и UI получает ошибку.
+- Какие инварианты затрагивает и почему не нарушены: INV-3: запись транзакцией. Исключения устройств из Zapret (страница «Устройства») не теряются.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Zapret: кнопки функций и сброс. Остальные режимы не затронуты. Порядок «конфиг сохранён до старта nfqws» сохранён (GET /api/zapret/status не убивает процесс).
+- GREEN: `docs/fix_logs/bug-29-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 29 | diff 014270e07b9f | лог docs/fix_logs/bug-29-green.log ===`
+- Статус: FIXED
+
+### Баг 111 — Пресеты Zapret и reset_features пишут config.yaml/config.json мимо транзакции; пресет перезаписывает выбор сайтов
+- Правила перечитаны: 2026-11-05 10:49:18 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/api.rs:8080` — `apply_zapret_preset_action` (UI и бот)
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+      let _cfg_guard = state.config_lock.lock().await;
+      let _routing_guard = state.routing_lock.lock().await;
+      ...
+              cfg.zapret.bypass_github = false;
+              cfg.zapret.bypass_torrents = false;
+              cfg.zapret.bypass_adult = false;
+      ...
+                  let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
+                  let _ = mihomo::reload_config(&state.http, &cfg).await;
+      ...
+      let _ = config::save(&state.config_path, &cfg).await;
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Частично совпадает. Без config_lock/routing_lock — НЕ воспроизводится: в текущем коде пресет и reset_features уже берут обе блокировки. Совпадает: пресет менял bypass_github/torrents/adult (выбор сайтов пользователя), файлы писались напрямую, ошибки reload и сохранения игнорировались. reset_features переведён на ConfigTx в рамках бага 29.
+- Первопричина одним предложением: Пресет был собран как полный набор флагов, включая выбор сайтов, и сам писал файлы без валидации и отката.
+- Тест: `api.rs::settings_and_service_regression_tests::regression_bug_111_zapret_preset_keeps_site_lists_and_uses_configtx` и `regression_bug_111_preset_keeps_user_site_choices`; spec: `be:regression_bug_111_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): 1) Тело рабочего apply_zapret_preset_action не содержит bypass_torrents, config::save(, atomic_write_file(. 2) Рабочая apply_zapret_preset_to для всех пресетов сохраняет bypass_github/torrents/adult и excluded_devices, а стратегию (aggressive_dpi) применяет.
+- RED: `docs/fix_logs/bug-111-red.log`, red_kind=assert: на старом коде упало `пресет не трогает списки сайтов пользователя` (api.rs:11362). Поведенческий тест добавлен вместе с исправлением.
+- Исправление (что и почему, 1–3 предложения): Выбор стратегии вынесен в apply_zapret_preset_to без строк bypass_*; apply_zapret_preset_action работает через ConfigTx (config.json + config.yaml + reload), при отказе файлы службы возвращаются к прежним настройкам и возвращается ошибка; перезапуск S51zapret — после коммита.
+- Какие инварианты затрагивает и почему не нарушены: INV-3: запись транзакцией. Выбор пользователя не перезаписывается фоновым действием.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Zapret: пресеты UI и бота (bot.rs:596 вызывает ту же функцию). Пресеты больше не включают/выключают списки GitHub/торрентов/18+ — это изменение поведения, отражено в заметках выпуска. Остальные режимы не затронуты.
+- GREEN: `docs/fix_logs/bug-111-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 111 | diff 014270e07b9f | лог docs/fix_logs/bug-111-green.log ===`
+- Статус: FIXED
+
+### Баг 26 — Community hostlist дублируется при каждом сохранении
+- Правила перечитаны: 2026-11-05 10:57:42 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/api.rs:7553` — `sync_zapret_hosts_content`; `sync_zapret_files` (добавление блока community)
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+      for line in existing.lines() {
+          let trimmed = line.trim();
+          if trimmed == ZAPRET_HOSTS_MANAGED_BEGIN {
+              in_managed_block = true;
+              continue;
+          }
+          if trimmed == ZAPRET_HOSTS_MANAGED_END {
+              in_managed_block = false;
+              continue;
+          }
+          if !in_managed_block {
+              manual_lines.push(line.to_string());
+          }
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает: тест на старом коде показал, что блок `START COMMUNITY HOSTLIST` с доменами переходит в «ручную» часть, а sync_zapret_files дописывает новый — файл растёт на размер списка при каждом сохранении, после выключения функции копии остаются. Ограничение: проверено на строках, не на реальном zapret-hosts.txt роутера (уже накопленные копии вычистятся при первой синхронизации, т.к. каждый блок имеет маркеры).
+- Первопричина одним предложением: Разбор файла знал только маркеры авто-блока доменов и не считал блок community управляемым.
+- Тест: `api.rs::settings_and_service_regression_tests::regression_bug_26_community_hostlist_not_duplicated`; spec: `be:regression_bug_26_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Рабочий sync_zapret_hosts_content: ручная строка сохраняется, блок community и его домены вырезаются, повторный вызов даёт тот же результат.
+- RED: `docs/fix_logs/bug-26-red.log`, red_kind=assert: `старый блок community вырезается` (api.rs:11450), в выводе остался блок.
+- Исправление (что и почему, 1–3 предложения): Маркеры community вынесены в константы ZAPRET_COMMUNITY_BEGIN/END и обрабатываются как управляемый блок при разборе; sync_zapret_files пишет их через те же константы.
+- Какие инварианты затрагивает и почему не нарушены: Ручные строки пользователя в zapret-hosts.txt не трогаются. Файл больше не растёт без ограничений.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Только Zapret (community-список). При выключенной функции блок больше не появляется.
+- GREEN: `docs/fix_logs/bug-26-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 26 | diff 8a5b0f151149 | лог docs/fix_logs/bug-26-green.log ===`
+- Статус: FIXED
+
+### Баг 6 — Страница «Игровой режим» сохраняет весь снимок конфига
+- Правила перечитаны: 2026-11-05 10:57:42 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/api.rs` — `save_gaming_config` (POST /api/gaming/save); отправитель — `frontend/src/components/Gaming.tsx:416, 463`
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+      let mut tx = match ConfigTx::begin(&state).await {
+          Ok(tx) => tx,
+          Err(e) => return api_err(e),
+      };
+      tx.config_mut().gaming = body.gaming;
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает: Gaming.tsx шлёт `{...cfg}` из состояния страницы. «Не реагировать» меняет только status (ignored_game_conns в cfg страницы старый) → игнор-лист стирался; умный режим и failover (приостановка на время БС) меняют gaming.enabled в фоне → устаревший снимок возвращал прежнее значение, в т.ч. включал игровой режим поверх БС. Ограничение: исправлено на бэкенде, поля IP устройств (обновляемые DHCP-сторожем) в этом пункте не сливаются.
+- Первопричина одним предложением: Обработчик заменял игровую секцию целиком, включая поля, которыми владеют другие механизмы.
+- Тест: `api.rs::settings_and_service_regression_tests::regression_bug_6_gaming_page_save_does_not_apply_stale_snapshot` и `regression_bug_6_merge_keeps_enabled_and_ignore_list`; spec: `be:regression_bug_6_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): 1) Тело рабочего save_gaming_config не присваивает body.gaming целиком и вызывает merge_gaming_page_save. 2) merge_gaming_page_save: enabled и ignored_game_conns берутся из текущего конфига, правки страницы (custom_domains, таймаут) применяются.
+- RED: `docs/fix_logs/bug-6-red.log`, red_kind=assert: `снимок со страницы не заменяет игровой конфиг целиком` (api.rs:11468). Поведенческий тест добавлен с исправлением.
+- Исправление (что и почему, 1–3 предложения): Добавлена merge_gaming_page_save: включение/выключение остаётся за /api/gaming/toggle, умным режимом и failover, игнор-лист — за /api/gaming/ignore-conn. На странице включатель уже идёт через gaming/toggle, так что видимое поведение кнопок не меняется.
+- Какие инварианты затрагивает и почему не нарушены: INV-1/«строго два канала»: устаревшая страница больше не включает игровой режим поверх БС.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Гейминг: сохранение настроек, умный режим. БС/failover: приостановка gaming_suspended не снимается. Остальные режимы не затронуты.
+- GREEN: `docs/fix_logs/bug-6-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 6 | diff 47a4260666b5 | лог docs/fix_logs/bug-6-green.log ===`
+- Статус: FIXED
+
+### Баг 67 — Закрепление узла отправляет весь массив устройств из UI
+- Правила перечитаны: 2026-11-05 11:05:41 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/api.rs` — `save_whitelist` (POST /api/whitelist, поле devices); отправитель — `frontend/src/components/Whitelist.tsx:288`
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+          let old_devices = tx.config().whitelist.devices.clone();
+          let _ = old_devices;
+          tx.config_mut().whitelist.devices = devices;
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает: Whitelist.tsx собирает nextDevices из config.devices, загруженного при открытии страницы; DHCP-монитор (migrate_ip_keyed_config, баг 118) меняет whitelist.devices[].ip в фоне — сохранение пина возвращало старые IP всем остальным устройствам. Ограничение: правило слияния эвристическое — устройство считается неизменённым, если совпадают MAC, узел и флаг enabled.
+- Первопричина одним предложением: Обработчик заменял список устройств целиком снимком страницы.
+- Тест: `api.rs::settings_and_service_regression_tests::regression_bug_67_pin_does_not_overwrite_dhcp_updated_ips` и `regression_bug_67_merge_keeps_server_ip_for_untouched_devices`; spec: `be:regression_bug_67_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): 1) Тело рабочего save_whitelist не присваивает devices целиком и вызывает merge_whitelist_devices. 2) merge_whitelist_devices: неизменённое устройство сохраняет серверный IP (192.168.1.77, а не 192.168.1.10 со страницы), закрепляемое берёт IP из запроса, устройство без MAC — как прислано.
+- RED: `docs/fix_logs/bug-67-red.log`, red_kind=assert: `массив из UI не заменяет устройства целиком` (api.rs:11495). Поведенческий тест добавлен с исправлением.
+- Исправление (что и почему, 1–3 предложения): Добавлена merge_whitelist_devices: для устройств с тем же MAC, узлом и флагом остаётся IP из конфига (его ведёт DHCP-монитор), изменённое устройство получает IP из запроса. Удаление и добавление устройств по-прежнему задаётся массивом.
+- Какие инварианты затрагивает и почему не нарушены: INV-1: правила БС для закреплённых устройств строятся по актуальным IP.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): БС: закрепление узлов и исключения. Гейминг/Zapret не затронуты.
+- GREEN: `docs/fix_logs/bug-67-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 67 | diff eda120aa9521 | лог docs/fix_logs/bug-67-green.log ===`
+- Статус: FIXED
+
+### Баг 98 — «Применить найденные БС в 1 клик» заменяет списки целиком
+- Правила перечитаны: 2026-11-05 11:05:41 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `frontend/src/api.ts:208` — `applyDetectedWhitelistServers`; `backend/src/api.rs` — `set_server_whitelist`, `set_provider_whitelist`
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```ts
+      const srvRes = await apiPost<{ whitelist_servers: string[]; whitelist_providers: string[] }>(
+        'servers/whitelist',
+        { servers: serverIds }
+      )
+      ...
+        'whitelist/providers',
+        { providers: providerIds }
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает: UI отправлял только найденные id в поле servers/providers, бэкенд присваивал список целиком — ручные пометки [БС] пропадали. Вызывается из Dashboard, Settings и Whitelist.
+- Первопричина одним предложением: Для «добавить найденные» использовался запрос полной замены списка.
+- Тест: `frontend/src/api.test.ts::regression bug 98 > apply detected whitelist adds to user marks instead of replacing lists`; бэкенд — `api.rs::settings_and_service_regression_tests::regression_bug_98_union_keeps_manual_whitelist_marks`; spec: `fe:src/api.test.ts::apply detected whitelist adds to user marks instead of replacing lists`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Рабочая applyDetectedWhitelistServers шлёт `{add_servers}` и `{add_providers}`, не шлёт servers/providers. Бэкенд: union_ids дополняет список без дублей и пустых id, оба обработчика его вызывают.
+- RED: `docs/fix_logs/bug-98-red.log`, red_kind=assert: `expected { servers: [ 'found' ] } to deeply equal { add_servers: [ 'found' ] }`. Первая попытка RED была ложной (мок fetch без Content-Type → клиент бросил «Эндпоинт недоступен», а не упал на проверке) — лог сохранён как `bug-98-red-invalid.log`, мок исправлен, фронтенд-часть исправления временно откатывалась, RED повторён на старом коде; первая неудачная попытка GREEN — `bug-98-green-fail1.log`.
+- Исправление (что и почему, 1–3 предложения): Бэкенд принимает add_servers/add_providers (объединение с текущим списком, union_ids); полная замена через servers/providers сохранена для совместимости. «Применить в 1 клик» использует добавление.
+- Какие инварианты затрагивает и почему не нарушены: Выбор пользователя (ручные пометки БС) не перезаписывается автоматическим действием.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): БС: детектор и списки узлов/подписок. Failover использует whitelist_servers — набор только расширяется.
+- GREEN: `docs/fix_logs/bug-98-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 98 | diff e6ca3389072f | лог docs/fix_logs/bug-98-green.log ===`
+- Статус: FIXED
+
+### Баг 108 — handle_whitelist_transition: config.json, затем отдельная ConfigTx с игнором ошибок, iptables в любом случае
+- Правила перечитаны: 2026-11-05 11:21:40 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/failover.rs:1695` — `handle_whitelist_transition` (обе ветки auto_by_failover)
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+                  if cfg_changed {
+                      if let Err(e) = crate::config::save(&state.config_path, &current_cfg).await {
+                      ...
+                  if let Ok(mut tx) = crate::transaction::ConfigTx::begin(state).await {
+                      if let Ok(yaml) = tx.read_yaml().await {
+                          if let Ok((new_yaml, _)) = crate::routing::apply_routing(&yaml, tx.config()) {
+                              applied_yaml = new_yaml.clone();
+                              let _ = tx.set_yaml(new_yaml);
+                              let _ = tx.commit_and_reload().await;
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает и воспроизведено: поведенческий тест на старом коде (ядро недоступно) — config.json и память говорят «БС включён», config.yaml откатан транзакцией, после этого вызывалась синхронизация iptables по флагу БС. Ограничение: проверено на временном каталоге без iptables (Windows), на роутере не проверялось. После исправления при отказе ядра режим БС не включается до следующего успешного перехода; переключение группы 🛡️ Whitelist на узел выполняется как раньше.
+- Первопричина одним предложением: Флаги сохранялись отдельно от правил Mihomo, и результат второй транзакции не проверялся.
+- Тест: `failover.rs::tests::regression_bug_108_whitelist_transition_is_atomic`; spec: `be:regression_bug_108_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Рабочая handle_whitelist_transition(state, "bs-node", ...) с auto_by_failover и недоступным ядром: config.yaml побайтно прежний, config.json и память — whitelist.enabled=false.
+- RED: `docs/fix_logs/bug-108-red.log`, red_kind=assert: `config.json не должен говорить «БС включён», раз правил в ядре нет` (failover.rs:4161).
+- Исправление (что и почему, 1–3 предложения): Изменение флагов вынесено в apply_whitelist_transition_flags; при изменениях — одна транзакция commit_config_with_routing (флаги + apply_routing + reload). iptables синхронизируются только после успешного коммита, при ошибке — запись в журнал.
+- Какие инварианты затрагивает и почему не нарушены: INV-3: одна транзакция. «Строго два канала»: config.json, правила Mihomo и iptables согласованы.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): БС (авто по failover), гейминг (приостановка/восстановление gaming_suspended — та же логика в отдельной функции). Ручной режим БС без auto_by_failover не менялся.
+- GREEN: `docs/fix_logs/bug-108-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 108 | diff 28c00cba743c | лог docs/fix_logs/bug-108-green.log ===`
+- Статус: FIXED
+
+### Баг 131 — Автооткат commit-confirmed стирает чужие изменения, не пересинхронизирует iptables и не переживает перезапуск
+- Правила перечитаны: 2026-11-05 11:21:40 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/transaction.rs:853` — `apply_with_confirmation` (фоновый таймер), `rollback_pending_commit`
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+                  if let Some(ref y) = yaml_backup {
+                      let _ = crate::api::atomic_write_file(&initial_cfg.mihomo.config_path, y).await;
+                  }
+                  if let Some(ref j) = json_backup {
+                      let _ = crate::api::atomic_write_file(&*state_clone.config_path, j).await;
+                  }
+                  *state_clone.config.write().await = Arc::new(initial_cfg.clone());
+                  let _ = crate::mihomo::reload_config(&state_clone.http, &initial_cfg).await;
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает по всем трём подпунктам. 1) Воспроизведено тестом с моком Mihomo: изменение движка Zapret другим писателем (ConfigTx) за окно 1 с стиралось автооткатом. 2) После отката iptables (БС/гейминг) не пересинхронизировались. 3) Ожидание жило только в памяти. Ограничение: слияние config.json трёхстороннее по ключам JSON; config.yaml восстанавливается из снимка с пересборкой авто-блоков под итоговую конфигурацию — ручные правки YAML другими писателями за окно (кроме авто-блоков) не сохраняются. После перезапуска панели неподтверждённое изменение откатывается сразу, без ожидания остатка окна.
+- Первопричина одним предложением: Откат записывал снимки целиком, без учёта изменений после транзакции, и не имел постоянного состояния.
+- Тест: `transaction.rs::tests::regression_bug_131_auto_rollback_keeps_changes_made_by_others`, `regression_bug_131_pending_commit_survives_restart`, `regression_bug_131_three_way_merge_rules`; spec: `be:regression_bug_131_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): 1) Рабочий apply_with_confirmation (окно 1 с, мок ядра отвечает 204) + запись другого писателя → после таймаута таймаут умного режима возвращён к 60, engine=v1 сохранён на диске и в памяти. 2) Файл ожидания создаётся, recover_pending_commit_after_restart откатывает изменение и удаляет файл. 3) Правила слияния на вложенных объектах.
+- RED: `docs/fix_logs/bug-131-red.log`, red_kind=assert: `изменение другого писателя за окно не стёрто`, `left: "v2"` (transaction.rs:1163). Тесты перезапуска и правил слияния добавлены с исправлением.
+- Исправление (что и почему, 1–3 предложения): Добавлены three_way_merge_json, perform_commit_rollback (слияние config.json, пересборка авто-блоков YAML, reload, sync_full_tunnel_modes) и файл ожидания config.json.pending-commit; при подтверждении он удаляется, при старте панели (main.rs, до запуска сторожей) неподтверждённое изменение откатывается. Таймер и ручной откат используют одну функцию. Тесты commit-confirmed сериализованы COMMIT_TEST_LOCK (общее глобальное хранилище).
+- Какие инварианты затрагивает и почему не нарушены: INV-3: откат под config_lock → routing_lock. INV-1: iptables после отката соответствуют конфигурации.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Все режимы: откат больше не возвращает чужие переключения (failover, сторож, другие вкладки). Сам механизм подтверждения в UI не менялся.
+- GREEN: `docs/fix_logs/bug-131-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 131 | diff 60545eb8e753 | лог docs/fix_logs/bug-131-green.log ===`
+- Статус: FIXED
+
+### Баг 82 — refresh_mobile_sub пишет файл провайдера напрямую и не атомарно; curl без -f/-L; HWID виден в ps
+- Правила перечитаны: 2026-11-05 11:41:55 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/api.rs:3257` — `refresh_mobile_sub`
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+      let mut cmd = tokio::process::Command::new(curl_bin);
+      cmd.arg("-s")
+          .arg("-i")
+          .arg("-x")
+          .arg(&proxy_url)
+          .arg("-H")
+          .arg(format!("User-Agent: {ua}"));
+      if let Some(ref h) = resolved_hwid {
+          cmd.arg("-H").arg(format!("x-hwid: {h}"));
+      }
+      ...
+      tokio::fs::write(&prov_path, conv_yaml).await
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает: tokio::fs::write (обрыв → обрезанный провайдер), curl без -f (страница ошибки 4xx/5xx шла в конвертер) и без -L (на редирект — тело 30x), HWID и URL подписки в аргументах процесса. Подпункт «до транзакции» не менялся: файл провайдера по-прежнему пишется до ConfigTx вызывающего (add_provider/обновление) — теперь хотя бы атомарно. Ограничение: поддержка `-K -` проверена по документации curl, на роутере запуск не проверялся.
+- Первопричина одним предложением: Загрузка подписки собирала команду curl с секретами в аргументах и писала результат без атомарной замены.
+- Тест: `api.rs::settings_and_service_regression_tests::regression_bug_82_mobile_sub_download_is_safe` и `regression_bug_82_curl_args_and_stdin_config`; spec: `be:regression_bug_82_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): 1) Тело рабочего refresh_mobile_sub не пишет provider через tokio::fs::write, не передаёт x-hwid аргументом, собирает аргументы через mobile_sub_curl_args. 2) mobile_sub_curl_args содержит -f, -L, `-K -` и не содержит секретов; mobile_sub_curl_stdin экранирует кавычки и удаляет переводы строк (попытка внедрить вторую опцию `url = ...` через HWID не даёт новой строки).
+- RED: `docs/fix_logs/bug-82-red.log`, red_kind=assert: `запись провайдера — атомарная` (api.rs:11557). Тест аргументов добавлен с исправлением.
+- Исправление (что и почему, 1–3 предложения): curl запускается с `-s -f -L --max-redirs 5 -i -x <proxy> --max-time 15 -K -`, URL и заголовки передаются конфигом через stdin; файл провайдера пишется atomic_write_file.
+- Какие инварианты затрагивает и почему не нарушены: Секреты подписки не утекают в список процессов. Провайдер в Mihomo не бывает наполовину записанным.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Мобильные подписки (фоновое обновление и добавление). Остальные режимы не затронуты.
+- GREEN: `docs/fix_logs/bug-82-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 82 | diff 86c307f186d5 | лог docs/fix_logs/bug-82-green.log ===`
+- Статус: FIXED
+
+### Баг 81 — add_provider всегда идёт через конвертер (условие с http всегда истинно, UA v2rayNG)
+- Правила перечитаны: 2026-11-05 11:41:55 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/api.rs:3447` — `add_provider`
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+      let is_explicit_mobile_ua = req.user_agent.as_deref().map_or(false, |u| {
+          let l = u.to_lowercase();
+          l.contains("v2ray") || l.contains("happ") || l.contains("singbox") || l.contains("sing-box")
+      });
+  
+      if is_explicit_mobile_ua || final_url.starts_with("http://") || final_url.starts_with("https://") {
+          let ua = req.user_agent.as_deref().unwrap_or("v2rayNG/1.8.12");
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает: условие истинно для любого URL подписки, запрос шёл с UA v2rayNG (панели отдают на него base64), и подписка превращалась в файловый провайдер конвертера. UI (Servers.tsx) user_agent не передаёт, то есть затронуты все добавления из панели. Изменение поведения: новые подписки из UI добавляются как обычные http-провайдеры Mihomo (он сам разбирает Clash YAML, base64 и URI); конвертер — только при явно выбранном мобильном UA (API). Ограничение: совместимость конкретных панелей подписок с нативным парсером на роутере не проверялась.
+- Первопричина одним предложением: Логическая ошибка в условии выбора пути добавления подписки.
+- Тест: `api.rs::settings_and_service_regression_tests::regression_bug_81_add_provider_uses_native_parser_by_default` и `regression_bug_81_ua_decision`; spec: `be:regression_bug_81_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): 1) Тело рабочего add_provider не содержит `|| final_url.starts_with("http://")` и использует is_mobile_subscription_ua. 2) is_mobile_subscription_ua: None/ClashMeta/mihomo → false; v2rayNG/Happ/sing-box → true.
+- RED: `docs/fix_logs/bug-81-red.log`, red_kind=assert: `конвертер — только по явному выбору мобильного UA` (api.rs:11606).
+- Исправление (что и почему, 1–3 предложения): Выбор UA вынесен в is_mobile_subscription_ua; ветка конвертера выполняется только для явно выбранного мобильного UA.
+- Какие инварианты затрагивает и почему не нарушены: Согласуется с решением по багу 80: обычные http-провайдеры остаются нативными, Mihomo обновляет их сам.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Подписки/провайдеры, failover (список узлов из провайдера). Существующие провайдеры не меняются.
+- GREEN: `docs/fix_logs/bug-81-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 81 | diff 1b4ac82f4942 | лог docs/fix_logs/bug-81-green.log ===`
+- Статус: FIXED
+
+### Баг 120 — sanitize_domains (direct/force) не проверяет синтаксис домена
+- Правила перечитаны: 2026-11-05 11:50:05 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/routing.rs:837` — `sanitize_domains` (вызывается из apply_routing и /api/domains)
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+  pub fn sanitize_domains(list: &[String]) -> Vec<String> {
+      let mut out: Vec<String> = list
+          .iter()
+          .map(|d| crate::config::normalize_domain(d))
+          .filter(|d| !d.is_empty() && d.contains('.') && !d.contains('/') && !d.contains(' '))
+          .collect();
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает и воспроизведено: `evil.com,direct`, `a(b).example`, `x.example)` проходили фильтр (вывод RED). В правиле `DOMAIN-SUFFIX,evil.com,direct,...` запятая меняет поля, скобка ломает AND-правила. Решение: свой синтаксический валидатор, а не config::is_valid_domain — тот отклоняет .lan/.local и `_`, что удалило бы законные записи пользователей из «Напрямую».
+- Первопричина одним предложением: Фильтр проверял только точку, слэш и пробел.
+- Тест: `routing.rs::tests::regression_bug_120_sanitize_domains_rejects_rule_breaking_chars`; spec: `be:regression_bug_120_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Рабочий sanitize_domains отбрасывает домены с `,`, `(`, `)`; сохраняет ok.example, nas.lan, _srv.example.
+- RED: `docs/fix_logs/bug-120-red.log`, red_kind=assert: `left: ["_srv.example", "a(b).example", "evil.com,direct", "nas.lan", "ok.example", "x.example)"]`.
+- Исправление (что и почему, 1–3 предложения): Добавлен is_valid_rule_domain (метки [A-Za-z0-9_-], 1–63 символа, общая длина ≤253, есть точка); sanitize_domains использует его.
+- Какие инварианты затрагивает и почему не нарушены: INV-4: в rules попадают только синтаксически корректные цели. Существующий тест sanitize_domains_normalizes зелёный.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Direct/force-домены, БС и гейминг (общая секция rules). Записи с недопустимыми символами молча отбрасываются при сборке, как и раньше отбрасывались домены без точки.
+- GREEN: `docs/fix_logs/bug-120-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 120 | diff 8e8decf8be85 | лог docs/fix_logs/bug-120-green.log ===`
+- Статус: FIXED
+
+### Баг 119 — Цели доменных правил устройств не сверяются с группами (INV-4); `)` ломает AND-правило
+- Правила перечитаны: 2026-11-05 11:50:05 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/routing.rs:2648` — `apply_domain_rules` (блок AUTO-DEVICE-DOMAINS)
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+                          let dom = r.domain.trim().to_lowercase();
+                          let target = r.target.trim();
+                          if !dom.is_empty() && !target.is_empty() {
+                              out.push(format!(
+                                  "  - AND,((SRC-IP-CIDR,{cidr}),(DOMAIN-SUFFIX,{dom})),{target},no-resolve"
+                              ));
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Подпункт «цель не сверяется с группами» уже закрыт в 1.10.1 (sanitize_rule_targets, INV-4, исправления 12/39/51): RED-вывод показывает, что DeletedGroup на старом коде уже заменялась на PROXY. Совпадает и воспроизведено: `bad.example)` давал `...(DOMAIN-SUFFIX,bad.example))),DIRECT`, цель `PROXY),(DST-PORT,443` — `...)),PROXY),PROXY,443,...` (после замены санитайзером) — оба правила Mihomo отклоняет.
+- Первопричина одним предложением: Домен и цель правила подставлялись в шаблон AND-правила без проверки синтаксиса.
+- Тест: `routing.rs::tests::regression_bug_119_device_domain_rules_are_safe_and_targets_exist`; spec: `be:regression_bug_119_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Рабочие apply_domain_rules + sanitize_rule_targets (как в конце apply_routing): из трёх правил остаётся одно — с целью, заменённой на PROXY; правила со скобками в домене или цели не создаются.
+- RED: `docs/fix_logs/bug-119-red.log`, red_kind=assert: в `left` два сломанных AND-правила (`bad.example)))`, `PROXY),PROXY,443`).
+- Исправление (что и почему, 1–3 предложения): Правило создаётся только если домен проходит is_valid_rule_domain (баг 120), а цель — is_safe_rule_target (без `,()'"#` и переводов строк). Несуществующую цель по-прежнему заменяет sanitize_rule_targets.
+- Какие инварианты затрагивает и почему не нарушены: INV-4: цели правил существуют и синтаксически корректны.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Персональные доменные правила устройств. Остальные блоки не затронуты.
+- GREEN: `docs/fix_logs/bug-119-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 119 | diff cf8395e17c3d | лог docs/fix_logs/bug-119-green.log ===`
+- Статус: FIXED
+
+### Баг 115 — AdGuardHome.yaml переписывается неатомарно; принудительный http_proxy на 127.0.0.1:7890; bootstrap 127.0.0.1 удаляется
+- Правила перечитаны: 2026-11-05 11:56:00 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/adguard.rs:408` — `heal_all_adguard_yaml_configs`; `:1898` — `sanitize_and_heal_adguard_yaml` (п.3 http_proxy); `:2104` — `ensure_default_adguard_config`; `:2394` — переключение порта при конфликте; `:373` — `clean_adguard_bootstrap_dns`
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+                  let (healed, changed) = sanitize_and_heal_adguard_yaml(&content, dns_port);
+                  if changed {
+                      let _ = tokio::fs::write(p, healed).await;
+      ...
+      if !has_http_proxy {
+          lines.insert(0, "http_proxy: \"http://127.0.0.1:7890\"".to_string());
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Подпункты: 115a — неатомарная запись (tokio::fs::write / std::fs::write в трёх местах) — FIXED (`=== GATE OK bug 115a | diff 79368ba4e2bf | лог docs/fix_logs/bug-115a-green.log ===`, red_kind=assert: `лечение конфигов — атомарная запись`). 115b — http_proxy всегда ставится на 127.0.0.1:7890: порт mixed-port Mihomo зашит, а функции AdGuard получают только AdGuardConfig (порта Mihomo там нет) — нужно протаскивать порт через ~6 вызовов. 115c — при падении Mihomo AdGuard через этот прокси теряет DoH-апстримы и обновление фильтров; 115d — удаление bootstrap 127.0.0.1 (защита от петли) — НЕ исправлены. Запись при работающем AGH: AGH читает конфиг при старте, живые изменения идут через REST API (heal_adguard_live_config), поэтому запись на диск лишь вступает в силу при следующем старте; не менялось.
+- Первопричина одним предложением: Лечение конфига AdGuard писало файлы напрямую и жёстко задавало прокси для всех HTTP-запросов AGH.
+- Тест: `adguard.rs::regression_bug_115_tests::regression_bug_115a_adguard_yaml_written_atomically` (только 115a); spec: `be:regression_bug_115a_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Продакшн-часть adguard.rs не содержит трёх прямых записей AdGuardHome.yaml (лечение, смена порта, самоисцеление).
+- RED: 115a: `docs/fix_logs/bug-115a-red.log`, red_kind=assert. 115b–115d: не запускались.
+- Исправление (что и почему, 1–3 предложения): 115a: atomic_write_file в асинхронных путях, sync_atomic_write_or_remove в синхронном ensure_default_adguard_config.
+- Какие инварианты затрагивает и почему не нарушены: Конфиг AdGuard не бывает обрезанным. Для 115b–d инварианты не восстановлены.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): AdGuard. Тумблер AdGuard ⇔ iptables 53→AGH не затронут.
+- GREEN: не запускался — BLOCKED
+- Статус: BLOCKED (Вопрос пользователю: оставлять ли AdGuard Home принудительный http_proxy через Mihomo (фильтры с GitHub/CDN доходят при блокировках, но при падении Mihomo AGH теряет DoH-апстримы и обновления)? Варианты: (1) оставить, но брать порт из настроек Mihomo; (2) не навязывать http_proxy, если пользователь его очистил; (3) убрать прокси для DNS-апстримов, оставить только для фильтров (в AGH это одна настройка, поэтому нужен отдельный способ). Bootstrap 127.0.0.1 удаляется намеренно (защита от петли), менять без решения не буду.)
+
+### Баг 134 — Быстрая блокировка домена в AdGuard сохраняет весь текст редактора правил
+- Правила перечитаны: 2026-11-05 16:50:13 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `frontend/src/components/AdGuard.tsx:285` — `handleQuickBlockDomain` (кнопка «Заблокировать» во вкладке «Журнал запросов»)
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+      const updated = userRulesText ? `${userRulesText}\n${rule}` : rule
+      setUserRulesText(updated)
+      try {
+        const rules = updated.split('\n').map((s) => s.trim()).filter((s) => s.length > 0)
+        await apiPost('/adguard/filtering/rules', { rules })
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает и воспроизведено: в редакторе несохранённая строка `||draft.example^`, в веб-UI AGH добавлено `||fromweb.example^`; клик «Заблокировать» отправлял `[badsite, goodsite, draft.example, ok.example]` — черновик сохранён без ведома пользователя, правило из веб-UI стёрто (вывод RED). При ошибке POST поле редактора уже содержало новую строку.
+- Первопричина одним предложением: Список для сохранения строился из локального текста редактора, а не из актуальных правил на сервере.
+- Тест: `AdGuard.test.tsx::bug 134: quick block posts fresh server rules plus the new rule, never the unsaved editor text`; spec: `fe:src/components/AdGuard.test.tsx::bug 134`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Рабочий компонент: POST содержит ровно свежие правила сервера плюс новое; при отклонённом POST текст редактора не меняется.
+- RED: `docs/fix_logs/bug-134-red.log`, red_kind=assert: `- "||fromweb.example^"` / `+ "||draft.example^"`.
+- Исправление (что и почему, 1–3 предложения): handleQuickBlockDomain читает `/adguard/filtering`, проверяет дубликат по серверному списку, отправляет `[...current, rule]`; редактор обновляется только после успеха добавлением строки (правки пользователя сохраняются).
+- Какие инварианты затрагивает и почему не нарушены: Быстрая блокировка не теряет правила сервера и не сохраняет несохранённый черновик.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): AdGuard (UI). Тумблер AdGuard ⇔ iptables 53→AGH не затронут.
+- GREEN: `docs/fix_logs/bug-134-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 134 | diff bb080cf8d6f1 | лог docs/fix_logs/bug-134-green.log ===`
+- Статус: FIXED
+
+### Баг 136 — «В прокси» из монитора соединений: при любой ошибке force-add идёт запасной read-modify-write с жёсткой целью PROXY
+- Правила перечитаны: 2026-11-05 16:50:13 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `frontend/src/components/ConnectionsViewer.tsx:324` — `handleForceProxySubmit`
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+        } catch (err: any) {
+          // Fallback на раздельные API, если force-add не ответил
+          if (modal.scope === 'device' && modal.clientIp) {
+            ...
+              const nextRules = [...curRules, { domain, target: 'PROXY' }]
+          } else {
+            const domRes = await apiGet<{ direct: string[]; force: string[] }>('domains')
+            ...
+              await apiPost('domains', {
+                direct: domRes.direct || [],
+                force: [...curForce, domain],
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает и воспроизведено: force-add отклонён сервером («Некорректный домен») → UI сделал GET+POST `domains` (вывод RED: `+ "domains"` в списке POST) и показал «✓ успешно». Запасной путь обходил валидацию сервера, гонялся с другими вкладками (read-modify-write полного списка direct/force) и при таймауте повторно применял уже применённое.
+- Первопричина одним предложением: Запасной путь на раздельные API запускался при любой ошибке атомарного эндпоинта, хотя force-add есть в бэкенде всегда.
+- Тест: `ConnectionsViewer.test.tsx::bug 136: force-add failure reports the error and never falls back to read-modify-write of domains`; spec: `fe:src/components/ConnectionsViewer.test.tsx::bug 136`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Рабочий компонент: при отказе force-add единственный POST — `domains/force-add`, `devices/domain-rules` не читается, показывается ошибка с текстом сервера, сообщения об успехе нет.
+- RED: `docs/fix_logs/bug-136-red.log`, red_kind=assert: `expected [ 'domains/force-add', 'domains' ] to deeply equal [ 'domains/force-add' ]`.
+- Исправление (что и почему, 1–3 предложения): Запасной путь удалён: только POST `domains/force-add` (идемпотентен на сервере); при ошибке — сообщение и перечитывание списков (loadAuxData), чтобы UI показал фактическое состояние, если ответ потерялся после применения.
+- Какие инварианты затрагивает и почему не нарушены: INV-4: цель правила устройства выбирает сервер (sanitize_rule_targets в apply_routing). Списки доменов меняются только атомарно на сервере.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Монитор соединений, force/device-domain правила. Остальные режимы не затронуты.
+- GREEN: `docs/fix_logs/bug-136-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 136 | diff 464371871aa1 | лог docs/fix_logs/bug-136-green.log ===`
+- Статус: FIXED
+
+### Баг 4 — После перезагрузки игровой режим включается на узле БС
+- Правила перечитаны: 2026-11-05 16:50:13 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/main.rs:567` — стартовая задача «Синхронизация режима обхода белых списков» (tokio::spawn, 8-я секунда)
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+              let active_srv = mihomo::get_active_server(&wl_sync_state.http, &cfg).await.ok().flatten();
+              let active_id = active_srv.as_ref().map(|s| s.id.clone()).unwrap_or_default();
+              let is_bs = active_srv.as_ref().map(|s| failover::is_whitelist_server(&s.name, &s.id, &cfg)).unwrap_or(false);
+      ...
+          if gaming_suspended && !is_bs {
+              ...
+              current_cfg.gaming.enabled = true;
+              current_cfg.whitelist.gaming_suspended = false;
+              if config::save(&wl_sync_state.config_path, &current_cfg).await.is_ok() {
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает: is_whitelist_server не получает provider, поэтому узел из подписки в whitelist_providers без тега в имени считался «не БС»; ошибка get_active_server (`.ok().flatten()` → None) тоже давала is_bs=false. В обоих случаях gaming.enabled=true при активном БС. Дополнительно: флаги сохранялись config::save отдельно от YAML (при ошибке reload — UI «включено», правил нет).
+- Первопричина одним предложением: Решение «не БС» принималось по неполным данным: без подписки и при неответившем Mihomo.
+- Тест: `main.rs::regression_bug_4_tests::regression_bug_4_gaming_not_restored_on_unknown_or_bs_node_after_boot` (структура) + `failover.rs::tests::regression_bug_4_startup_gaming_restore_decision` (поведение); spec: `be:regression_bug_4_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Стартовый блок не использует is_whitelist_server без подписки и `.ok().flatten()`, решает через startup_gaming_restore_allowed, не пишет config::save напрямую. Функция: обычный узел — да; узел из подписки БС, неответивший Mihomo, неизвестный узел, нет приостановки — нет.
+- RED: `docs/fix_logs/bug-4-red.log`, red_kind=assert: `БС определяется с учётом подписки`.
+- Исправление (что и почему, 1–3 предложения): До 7 попыток опроса Mihomo с паузой 5 с; решение через failover::startup_gaming_restore_allowed (is_whitelist_server_full с provider); восстановление — api::commit_config_with_routing (флаги и правила вместе, откат при ошибке reload), затем sync_full_tunnel_modes.
+- Какие инварианты затрагивает и почему не нарушены: INV «строго два канала»: игровой режим и БС не активны одновременно после перезагрузки.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): БС, игровой режим (старт). Если Mihomo так и не ответил, игровой режим остаётся приостановленным до перехода с БС (handle_whitelist_transition).
+- GREEN: `docs/fix_logs/bug-4-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 4 | diff 8fe461e58f1d | лог docs/fix_logs/bug-4-green.log ===`
+- Статус: FIXED
+
+### Баг 5 — Ручное включение игрового режима при активном БС ничем не блокируется
+- Правила перечитаны: 2026-11-05 16:50:13 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/api.rs:12103` — `toggle_gaming`; `backend/src/watchdog.rs:1364` — `apply_smart_gaming_toggle` (вызов из умного режима после проверки только `gaming_suspended`)
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+      } else {
+          tx.config_mut().gaming.enabled = body.enabled;
+      }
+  
+      if let Err(e) = apply_and_verify_gaming(&mut tx).await {
+          return api_err(e);
+      }
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает: toggle_gaming не смотрит на активный узел; умный режим (watchdog.rs:1325) блокирует только по `gaming_suspended`, который ставит failover — при вручную выбранном узле БС флага нет, и игровой режим включался вместе с БС. save_gaming_config после исправления 6 не меняет `enabled`, поэтому включить через него нельзя — не трогал.
+- Первопричина одним предложением: Запрет «игровой режим + БС» опирался только на флаг failover, а не на фактический активный узел.
+- Тест: `api.rs::regression_bug_5_manual_gaming_toggle_checks_active_bs`, `watchdog.rs::structural_regression_tests::regression_bug_5_smart_gaming_checks_active_bs_not_only_flag` (структура) + `failover.rs::tests::regression_bug_5_gaming_enable_blocked_by_bs` (поведение); spec: `be:regression_bug_5_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): toggle_gaming и apply_smart_gaming_toggle вызывают gaming_enable_blocked_by_bs. Функция: тег БС, подписка БС — запрет; обычный узел — разрешено даже при устаревшем флаге; узел неизвестен — по флагу.
+- RED: `docs/fix_logs/bug-5-red.log`, red_kind=assert: `включение проверяет активный узел БС`, `проверка фактического активного узла`.
+- Исправление (что и почему, 1–3 предложения): failover::gaming_enable_blocked_by_bs + сообщение GAMING_BLOCKED_BY_BS. toggle_gaming при включении спрашивает активный узел у Mihomo и отказывает на БС; на подтверждённо обычном узле снимает устаревший gaming_suspended. apply_smart_gaming_toggle при enable проверяет узел (Mihomo не ответил — ошибка, без изменений).
+- Какие инварианты затрагивает и почему не нарушены: Строго два канала: игровой режим не включается поверх БС ни вручную, ни умным режимом.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Игровой режим (ручной и умный), БС. Выключение игрового режима не проверяется — всегда разрешено.
+- GREEN: `docs/fix_logs/bug-5-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 5 | diff edd70fdf2393 | лог docs/fix_logs/bug-5-green.log ===`
+- Статус: FIXED
+
+### Баг 7 — Умный режим подменяет игровой режим пользователя на Compatibility
+- Правила перечитаны: 2026-11-05 16:50:13 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/watchdog.rs:1320` — `spawn_smart_gaming_monitor` (условие включения); `:1364` — `apply_smart_gaming_toggle`
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+                  if !cfg.gaming.enabled || (cfg.gaming.mode != config::GamingMode::Compatibility && cfg.gaming.mode != config::GamingMode::BypassRu) {
+      ...
+          c.gaming.enabled = enable;
+          if enable && c.gaming.mode != config::GamingMode::BypassRu {
+              c.gaming.mode = config::GamingMode::Compatibility;
+          }
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает: при выбранном KnownServices/SmartSplit первое игровое соединение (даже при уже включённом режиме) переключало mode на Compatibility и сохраняло — выбор пользователя терялся навсегда. Описание умного режима в UI (Gaming.tsx) обещает только включать/выключать игровой туннель.
+- Первопричина одним предложением: Умный режим был написан под Compatibility и навязывал его.
+- Тест: `watchdog.rs::structural_regression_tests::regression_bug_7_smart_gaming_keeps_user_mode` (структура) + `watchdog.rs::tests::regression_bug_7_smart_flags_preserve_mode` (поведение); spec: `be:regression_bug_7_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Нет присваивания mode = Compatibility в apply_smart_gaming_toggle и проверки режима в условии монитора; apply_smart_gaming_flags для всех четырёх режимов меняет только enabled.
+- RED: `docs/fix_logs/bug-7-red.log`, red_kind=assert: `режим пользователя не подменяется`.
+- Исправление (что и почему, 1–3 предложения): Новая apply_smart_gaming_flags (только enabled), условие включения — `!cfg.gaming.enabled`; тексты логов «Режима совместимости» → «игрового режима».
+- Какие инварианты затрагивает и почему не нарушены: Пользовательские настройки не переписываются фоновой логикой.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Умный игровой режим. Фактическое поведение KnownServices/SmartSplit при авто-включении теперь такое же, как при ручном.
+- GREEN: `docs/fix_logs/bug-7-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 7 | diff c3612d64371e | лог docs/fix_logs/bug-7-green.log ===`
+- Статус: FIXED
+
+### Баг 8 — Умный режим и тумблер игрового режима рвут соединения всей сети
+- Правила перечитаны: 2026-11-05 16:50:13 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/api.rs:10475` — `apply_and_verify_gaming`; `backend/src/watchdog.rs:1387` — `apply_smart_gaming_toggle`; `backend/src/mihomo.rs:1975` — `switch_group` (close_all_connections)
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+  pub async fn switch_group(http: &reqwest::Client, cfg: &AppConfig, group: &str, server: &str) -> Result<(), String> {
+      let enc = urlencoding_lite(group);
+      m_put(http, cfg, &format!("/proxies/{enc}"), json!({ "name": server }), 5).await?;
+      invalidate_proxies_cache();
+      let _ = close_all_connections(http, cfg).await;
+      ...
+          let _ = mihomo::switch_group(&tx.state.http, tx.config(), routing::GAMING_GROUP_NAME, target_srv).await;
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает: каждое включение игрового режима (ручное, умное, сохранение страницы с enabled) делало DELETE /connections — рвались звонки, загрузки и DIRECT-сессии всех устройств. Остальные вызовы switch_group (api.rs:897, 1943, 12954 — БС и прочие группы) не относятся к игровому режиму и не менялись.
+- Первопричина одним предложением: Для игровой группы использовался общий switch_group с полным сбросом соединений.
+- Тест: `api.rs::regression_bug_8_gaming_toggle_does_not_drop_whole_lan`, `watchdog.rs::structural_regression_tests::regression_bug_8_smart_gaming_does_not_drop_whole_lan` (структура) + `mihomo.rs::tests::regression_bug_8_gaming_switch_closes_only_gaming_device_sockets` (поведение); spec: `be:regression_bug_8_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Игровые пути не вызывают switch_group; connection_ids_from_sources выбирает только соединения с sourceIP игровых устройств; gaming_device_ips — включённые с IP, иначе все известные.
+- RED: `docs/fix_logs/bug-8-red.log`, red_kind=assert: `без полного сброса соединений LAN` (оба теста).
+- Исправление (что и почему, 1–3 предложения): Новая mihomo::switch_gaming_group: switch_selector + закрытие соединений только игровых устройств (по sourceIP), без устройств — только соединений группы 🎮 Gaming. Используется в apply_and_verify_gaming и apply_smart_gaming_toggle.
+- Какие инварианты затрагивает и почему не нарушены: F-02: переключение одной группы не рвёт соединения остальных устройств LAN.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Игровой режим (ручной, умный). БС, failover, расписания не затронуты.
+- GREEN: `docs/fix_logs/bug-8-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 8 | diff 95f37a007686 | лог docs/fix_logs/bug-8-green.log ===`
+- Статус: FIXED
+
+### Баг 10 — Умный режим следит только за первым игровым устройством
+- Правила перечитаны: 2026-11-05 16:50:13 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/watchdog.rs:1246` — `spawn_smart_gaming_monitor` (выбор отслеживаемого устройства)
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+              let has_explicit_enabled = cfg.gaming.devices.iter().any(|d| d.enabled);
+              let active_dev_ip = cfg
+                  .gaming
+                  .devices
+                  .iter()
+                  .find(|d| if has_explicit_enabled { d.enabled } else { cfg.gaming.devices.len() == 1 })
+                  .map(|d| d.ip.trim().to_string())
+                  .unwrap_or_default();
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Совпадает: при двух включённых устройствах соединения второго отбрасывались фильтром `src_ip != active_dev_ip`; если играло только второе, last_active_instant не обновлялся и по таймауту простоя игровой режим выключался у всех.
+- Первопричина одним предложением: `find` возвращал одно устройство вместо списка.
+- Тест: `watchdog.rs::structural_regression_tests::regression_bug_10_smart_gaming_watches_all_enabled_devices` (структура) + `watchdog.rs::tests::regression_bug_10_smart_watch_ips_cover_every_enabled_device` (поведение); spec: `be:regression_bug_10_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Монитор не использует `find` по устройствам и берёт smart_gaming_watch_ips; функция возвращает все включённые с IP, единственное устройство при отсутствии включённых, пусто при нескольких невыбранных.
+- RED: `docs/fix_logs/bug-10-red.log`, red_kind=assert: `не только первое устройство`.
+- Исправление (что и почему, 1–3 предложения): Новая smart_gaming_watch_ips; фильтр соединений — по вхождению sourceIP в список, включение — при непустом списке.
+- Какие инварианты затрагивает и почему не нарушены: Игровой режим не выключается, пока играет любое из выбранных устройств.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Умный игровой режим. Правило для единственного устройства без флага enabled сохранено.
+- GREEN: `docs/fix_logs/bug-10-green.log`; строка `=== GATE OK bug N | diff ... ===` скопирована из вывода:
+  `=== GATE OK bug 10 | diff 48f57d261ff5 | лог docs/fix_logs/bug-10-green.log ===`
+- Статус: FIXED
+
+### Баг 11 — Распознавание игр умным режимом неточное
+- Правила перечитаны: 2026-11-05 16:50:13 | хеш bc29a182fac8
+- Где код (найдено grep по имени функции): `backend/src/watchdog.rs:1165` — `is_gaming_connection_match`; `:1286` — чтение поля `rule` в `spawn_smart_gaming_monitor`
+- Цитата старого кода (3–15 строк, скопировано из вывода sed, не по памяти):
+  ```rust
+      let rule_low = rule.to_lowercase();
+      if rule_low.contains("category-games") || rule_low.contains("gaming") {
+          return true;
+      }
+      ...
+              if !matches!(port_num, 53 | 80 | 123 | 443 | 853 | 1900 | 3478..=3481 | 5060 | 5061 | 5349 | 5353 | 5354 | 19302..=19309) && port_num >= 1024 {
+                  return true;
+  ```
+- Сценарий и подпункты аудита; доказательства совпадения или несовпадения, ограничения проверки: Подпункты: 11a — UDP ≥1024 = игра (WireGuard 51820, Zoom 8801+, торрент) — FIXED (`=== GATE OK bug 11a | diff 618640718d3e | лог docs/fix_logs/bug-11a-green.log ===`, red_kind=assert: `UDP 51820 — не игра`). 11c — проверка категории по типу правила — FIXED (`=== GATE OK bug 11c | diff bdc76d4b2521 | лог docs/fix_logs/bug-11c-green.log ===`, red_kind=assert: `категория правила берётся из rulePayload`). 11b — включение от фонового Discord / просмотра магазина Steam — НЕ исправлен: существующий тест `test_smart_gaming_connection_match_and_ignore` прямо требует, чтобы `api.steamcommunity.com:443` считался игрой; правило 4 запрещает ослаблять тест без решения пользователя.
+- Первопричина одним предложением: Эвристика не различала VPN/видеозвонки/P2P и игровой UDP; категория правила читалась не из того поля Mihomo.
+- Тест: `watchdog.rs::tests::regression_bug_11a_non_game_udp_ports_are_not_games`, `regression_bug_11a_p2p_sources_detected`, `structural_regression_tests::regression_bug_11a_torrent_like_udp_does_not_keep_gaming_alive`, `structural_regression_tests::regression_bug_11c_detection_reads_rule_payload_not_rule_type`; spec: `be:regression_bug_11a_ / be:regression_bug_11c_`
+- Что тест проверяет (какую строку РАБОЧЕГО кода вызывает и какое поведение ждёт): Порты VPN/Zoom/BitTorrent — не игра, Valve 27015 — игра; источник с 20 разными UDP-пирами — P2P, с двумя игровыми серверами — нет; монитор читает rulePayload. Существующие test_smart_gaming_connection_match_and_ignore и test_gaming_watchdog_port_exclusions зелёные без изменений.
+- RED: 11a: `docs/fix_logs/bug-11a-red.log`; 11c: `docs/fix_logs/bug-11c-red.log`, оба red_kind=assert. 11b: не запускался.
+- Исправление (что и почему, 1–3 предложения): 11a: is_gaming_udp_heuristic с исключениями 1194, 4500, 6881–6889, 8801–8810, 51820; p2p_udp_sources (>12 разных UDP-адресов у источника) — для такого источника UDP-эвристика не применяется, доменные совпадения остаются. 11c: монитор берёт `rulePayload`.
+- Какие инварианты затрагивает и почему не нарушены: Таймаут простоя наступает, когда игр нет, даже при торренте/VPN/Zoom на устройстве.
+- Не задеты ли соседние режимы (БС / гейминг / Zapret / AdGuard / failover / Google AI): Умный игровой режим (только распознавание). Маршрутизация игровых доменов не менялась.
+- GREEN: не запускался — BLOCKED
+- Статус: BLOCKED (Вопрос пользователю (11b): должен ли умный режим включаться от магазина/сообщества Steam (steamcommunity.com, steampowered.com) и фонового Discord? Сейчас — да (и это закреплено тестом). Вариант: для распознавания использовать только игровые серверы (steamserver.net, valve UDP, Riot/Supercell и т.п.), а магазин/чат — только для маршрутизации. Нужно ваше решение, менять ли тест.)
 
 <!-- Шаблон. Копировать целиком для каждого бага, заполнять ВСЕ поля.
 

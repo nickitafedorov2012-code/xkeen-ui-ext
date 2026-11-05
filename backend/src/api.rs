@@ -627,6 +627,25 @@ pub fn mask_settings_for_api(cfg: &config::AppConfig) -> serde_json::Value {
             }
         }
     }
+    if let Some(vkturn) = val.get_mut("vkturn") {
+        if let Some(pw) = vkturn.get_mut("password") {
+            if !pw.as_str().unwrap_or("").is_empty() {
+                *pw = serde_json::Value::String("******".into());
+            }
+        }
+        if let Some(wg) = vkturn.get_mut("wg") {
+            if let Some(pk) = wg.get_mut("private_key") {
+                if !pk.as_str().unwrap_or("").is_empty() {
+                    *pk = serde_json::Value::String("******".into());
+                }
+            }
+            if let Some(psk) = wg.get_mut("preshared_key") {
+                if psk.as_str().map_or(false, |s| !s.is_empty()) {
+                    *psk = serde_json::Value::String("******".into());
+                }
+            }
+        }
+    }
 
     val
 }
@@ -694,6 +713,15 @@ pub fn merge_settings_update(current: &config::AppConfig, body: &serde_json::Val
     }
     if new_cfg.adguard.password.as_deref() == Some("******") {
         new_cfg.adguard.password = current.adguard.password.clone();
+    }
+    if new_cfg.vkturn.password == "******" {
+        new_cfg.vkturn.password = current.vkturn.password.clone();
+    }
+    if new_cfg.vkturn.wg.private_key == "******" {
+        new_cfg.vkturn.wg.private_key = current.vkturn.wg.private_key.clone();
+    }
+    if new_cfg.vkturn.wg.preshared_key.as_deref() == Some("******") {
+        new_cfg.vkturn.wg.preshared_key = current.vkturn.wg.preshared_key.clone();
     }
 
     // Защита от инъекций и подмены путей в system (баг 125)
@@ -2031,17 +2059,17 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
         return api_err(e);
     }
 
+    let (n_direct, n_force) = (tx.config().direct_domains.len(), tx.config().force_domains.len());
+    let auto_cdns_list: Vec<String> = auto_cdns.into_iter().collect();
+
     // Автоматическая синхронизация IP-адресов принудительно проксируемых доменов и их CDN с geo_override
-    let overridden = match crate::override_sync::sync_geo_override(&all_force).await {
+    let overridden = match crate::override_sync::sync_from_config(tx.config(), &auto_cdns_list).await {
         Ok(count) => count,
         Err(e) => {
             crate::log_w!("[OVERRIDE] Ошибка синхронизации geo_override: {e}");
             0
         }
     };
-
-    let (n_direct, n_force) = (tx.config().direct_domains.len(), tx.config().force_domains.len());
-    let auto_cdns_list: Vec<String> = auto_cdns.into_iter().collect();
     let new_rev = calc_domains_revision(&tx.config().direct_domains, &tx.config().force_domains);
 
     api_ok(json!({
@@ -2074,7 +2102,8 @@ pub async fn scan_cdn_manual(State(state): State<AppState>) -> Response {
         }
     }
 
-    let overridden = match crate::override_sync::sync_geo_override(&all_domains).await {
+    let auto_cdns_list: Vec<String> = auto_cdns.into_iter().collect();
+    let overridden = match crate::override_sync::sync_from_config(&cfg, &auto_cdns_list).await {
         Ok(count) => count,
         Err(e) => {
             crate::log_w!("[MANUAL] Ошибка синхронизации geo_override: {e}");
@@ -2082,8 +2111,7 @@ pub async fn scan_cdn_manual(State(state): State<AppState>) -> Response {
         }
     };
 
-    crate::log_i!("[MANUAL] ✓ Ручное сканирование CDN завершено. Найдено CDN: {}, IP: {}", auto_cdns.len(), overridden);
-    let auto_cdns_list: Vec<String> = auto_cdns.into_iter().collect();
+    crate::log_i!("[MANUAL] ✓ Ручное сканирование CDN завершено. Найдено CDN: {}, IP: {}", auto_cdns_list.len(), overridden);
     api_ok(json!({
         "auto_cdns": auto_cdns_list,
         "overridden_ips": overridden
@@ -2191,7 +2219,7 @@ pub async fn force_add_domain(
     }
 
     if !all_force.is_empty() {
-        let _ = crate::override_sync::sync_geo_override(&all_force).await;
+        let _ = crate::override_sync::sync_from_config(tx.config(), &[]).await;
     }
 
     // Если передан ID конкретного соединения — закрываем его немедленно
@@ -4297,7 +4325,7 @@ pub async fn save_config_file(
     }
 
     if body.file == "override" {
-        let _ = crate::override_sync::sync_geo_override(&tx.config().force_domains).await;
+        let _ = crate::override_sync::sync_from_config(tx.config(), &[]).await;
     }
 
     log_i!("Файл {} успешно сохранён через веб-редактор", path.display());
@@ -7883,6 +7911,257 @@ pub fn format_nfqws_proc_cmdline(raw: &[u8]) -> String {
     c
 }
 
+// ============================================================================
+// VK-туннель (ядро WDTT)
+// ============================================================================
+
+/// Ссылка для показа в панели без полного хеша звонка (по нему любой может зайти в звонок).
+fn mask_call_link(link: &str) -> String {
+    match crate::vkturn::parse_call_link(link) {
+        Ok(h) => format!("https://vk.com/call/join/{}…", h.chars().take(4).collect::<String>()),
+        Err(_) => "—".into(),
+    }
+}
+
+/// GET /api/vkturn/status
+pub async fn get_vkturn_status(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let rt = state.vkturn.rt.read().await.clone();
+    let installed = crate::vkturn::VkTurnManager::core_installed();
+    let v = &cfg.vkturn;
+
+    let status_phase = if !installed {
+        crate::vkturn::VkTurnPhase::NotInstalled
+    } else if !v.enabled {
+        crate::vkturn::VkTurnPhase::Disabled
+    } else {
+        rt.phase
+    };
+
+    api_ok(json!({
+        "installed": installed,
+        "core_version": crate::vkturn::CORE_TAG,
+        "phase": status_phase,
+        "pid": rt.pid,
+        "connected_streams": rt.connected_streams,
+        "target_streams": crate::vkturn::effective_workers(v),
+        "bytes_up": rt.bytes_up,
+        "bytes_down": rt.bytes_down,
+        "links_count": v.links.len(),
+        "links": v.links.iter().map(|l| mask_call_link(l)).collect::<Vec<_>>(),
+        "max_links": crate::vkturn::MAX_LINKS,
+        "restarts": rt.restarts,
+        "last_error": rt.last_error,
+        "enabled": v.enabled,
+        "peer": v.peer,
+        "has_password": !v.password.is_empty(),
+        "device_id": v.device_id,
+        "wg_ready": crate::vkturn::wg_ready(v),
+        "wg": {
+            "address": v.wg.address,
+            "mtu": v.wg.mtu,
+            "dns": v.wg.dns,
+        }
+    }))
+}
+
+/// GET /api/vkturn/logs
+pub async fn get_vkturn_logs(State(state): State<AppState>) -> Response {
+    let rt = state.vkturn.rt.read().await;
+    let lines: Vec<String> = rt.log_tail.iter().cloned().collect();
+    api_ok(json!({ "lines": lines }))
+}
+
+#[derive(Deserialize, Default)]
+pub struct SaveVkTurnConfigReq {
+    pub enabled: Option<bool>,
+    /// Адрес сервера WDTT: "host" или "host:port"
+    pub peer: Option<String>,
+    /// Пароль подключения; пустая строка или "******" — оставить прежний
+    pub password: Option<String>,
+    /// Ссылки на звонки ВК по приоритету (полная замена списка)
+    pub links: Option<Vec<String>>,
+    /// Новая основная ссылка: встаёт первой, остальные (запасные) сохраняются без дублей
+    pub primary_link: Option<String>,
+    pub streams: Option<u8>,
+    pub listen_port: Option<u16>,
+}
+
+/// POST /api/vkturn/config
+///
+/// Блокировки `config_lock`/`routing_lock` захватывает только `ConfigTx::begin` (внутри commit_vkturn).
+/// Захват их здесь вручную приводил к вечной взаимной блокировке (мьютексы tokio не реентерабельны).
+/// WireGuard-конфиг сюда не передаётся: его выдаёт сервер WDTT, и надзор сохраняет его сам.
+pub async fn save_vkturn_config(
+    State(state): State<AppState>,
+    Json(body): Json<SaveVkTurnConfigReq>,
+) -> Response {
+    let mut new_cfg = state.config.read().await.vkturn.clone();
+
+    if let Some(en) = body.enabled {
+        new_cfg.enabled = en;
+    }
+    if let Some(ref p) = body.peer {
+        match crate::vkturn::normalize_peer(p) {
+            Ok(n) => new_cfg.peer = n,
+            Err(e) => return api_err(format!("Некорректный адрес сервера VPS: {e}")),
+        }
+    }
+    if let Some(ref pw) = body.password {
+        let pw = pw.trim();
+        if !pw.is_empty() && pw != "******" {
+            new_cfg.password = pw.to_string();
+        }
+    }
+    if let Some(links) = body.links {
+        let mut out: Vec<String> = Vec::new();
+        for (idx, l) in links.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).enumerate() {
+            match crate::vkturn::normalize_call_link(l) {
+                Ok(n) => {
+                    if !out.contains(&n) {
+                        out.push(n)
+                    }
+                }
+                Err(e) => return api_err(format!("Ссылка №{} некорректна: {e}", idx + 1)),
+            }
+        }
+        new_cfg.links = out;
+    }
+    if let Some(ref primary) = body.primary_link {
+        match crate::vkturn::with_primary_link(&new_cfg.links, primary) {
+            Ok(l) => new_cfg.links = l,
+            Err(e) => return api_err(e),
+        }
+    }
+    if let Some(s) = body.streams {
+        new_cfg.streams = s;
+    }
+    if let Some(lp) = body.listen_port {
+        new_cfg.listen_port = lp;
+    }
+
+    if let Err(e) = crate::vkturn::validate_listen_port(new_cfg.listen_port) {
+        return api_err(e);
+    }
+    if new_cfg.links.len() > crate::vkturn::MAX_LINKS {
+        return api_err(format!("Можно указать не больше {} ссылок на звонки", crate::vkturn::MAX_LINKS));
+    }
+    if !new_cfg.device_id.is_empty() && !crate::vkturn::is_valid_device_id(&new_cfg.device_id) {
+        return api_err("Повреждён идентификатор роутера для VK-туннеля");
+    }
+    if !new_cfg.password.is_empty() {
+        if let Err(e) = crate::vkturn::validate_password(&new_cfg.password) {
+            return api_err(e);
+        }
+    }
+    if new_cfg.enabled {
+        if new_cfg.peer.is_empty() {
+            return api_err("Укажите адрес сервера VPS (IP или домен)");
+        }
+        if let Err(e) = crate::vkturn::validate_password(&new_cfg.password) {
+            return api_err(e);
+        }
+        if crate::vkturn::call_hashes(&new_cfg).is_empty() {
+            return api_err("Укажите хотя бы одну ссылку на звонок ВКонтакте");
+        }
+    }
+
+    // Wg-конфиг и device-id берутся из транзакции: сервер мог прислать конфиг, пока мы проверяли запрос.
+    let cfg_for_tx = new_cfg.clone();
+    let saved = match crate::vkturn::commit_vkturn(&state, move |v| {
+        let wg = std::mem::take(&mut v.wg);
+        let device_id = std::mem::take(&mut v.device_id);
+        *v = cfg_for_tx;
+        v.wg = wg;
+        if !device_id.is_empty() {
+            v.device_id = device_id;
+        }
+        Ok(())
+    })
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => return api_err(e),
+    };
+
+    state.vkturn.restart(saved, state.clone()).await;
+
+    api_ok(json!({
+        "success": true,
+        "message": "Конфигурация VK-туннеля успешно сохранена"
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct VkTurnActionReq {
+    pub action: String,
+}
+
+/// POST /api/vkturn/action
+pub async fn vkturn_action(
+    State(state): State<AppState>,
+    Json(body): Json<VkTurnActionReq>,
+) -> Response {
+    let act = body.action.trim();
+    match act {
+        "enable" | "disable" => {
+            let req = SaveVkTurnConfigReq {
+                enabled: Some(act == "enable"),
+                ..Default::default()
+            };
+            save_vkturn_config(State(state), Json(req)).await
+        }
+        "restart" => {
+            let cfg = state.config.read().await.vkturn.clone();
+            state.vkturn.restart(cfg, state.clone()).await;
+            api_ok(json!({
+                "success": true,
+                "message": "VK-туннель перезапущен"
+            }))
+        }
+        "install_core" => match crate::vkturn::install_core(&state).await {
+            Ok(msg) => {
+                // Если туннель уже включён и ждал ядро — запускаем его сразу.
+                let cfg = state.config.read().await.vkturn.clone();
+                if cfg.enabled {
+                    state.vkturn.restart(cfg, state.clone()).await;
+                }
+                api_ok(json!({
+                    "success": true,
+                    "message": msg
+                }))
+            }
+            Err(e) => api_err(e),
+        },
+        "test" => {
+            let cfg = state.config.read().await.clone();
+            if !crate::vkturn::wg_ready(&cfg.vkturn) {
+                return api_err("Сервер WDTT ещё не выдал WireGuard-конфиг — проверка будет доступна после первого подключения");
+            }
+            let delay = crate::mihomo::ping_server_url_expected_range(
+                &state.http,
+                &cfg,
+                crate::vkturn::PROXY_NAME,
+                5000,
+                Some(cfg.health_check_url()),
+                None,
+            )
+            .await;
+            if delay > 0 {
+                api_ok(json!({
+                    "success": true,
+                    "ok": true,
+                    "delay_ms": delay,
+                    "message": format!("Задержка VK-туннеля: {delay} мс")
+                }))
+            } else {
+                api_err("Узел VK-туннеля недоступен или не отвечает на проверку")
+            }
+        }
+        _ => api_err(format!("Неизвестное действие: {act}")),
+    }
+}
+
 /// GET /api/zapret/status — статус nfqws/nfqws2, iptables и S51zapret
 pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
     let init_script = std::path::Path::new("/opt/etc/init.d/S51zapret");
@@ -8258,6 +8537,25 @@ pub async fn zapret_set_enabled_core(state: &AppState, enabled: bool) -> Result<
 /// Сохранение zapret.enabled вместе с пересборкой правил Mihomo в одной транзакции (баги 28, 57, 95).
 /// Общая для бота, UI-ядра и сторожа. Если ядро не приняло reload, файлы всё равно приводятся
 /// в согласованное состояние без reload — следующий старт Mihomo подхватит верные правила.
+/// Атомарное обновление флагов AppConfig с одновременным переприменением правил routing::apply_routing
+/// и reload ядра Mihomo. Возвращает (новый AppConfig, примененный config.yaml).
+pub async fn commit_config_with_routing<F>(
+    state: &AppState,
+    mutate: F,
+) -> Result<(config::AppConfig, String), String>
+where
+    F: FnOnce(&mut config::AppConfig),
+{
+    let mut tx = crate::transaction::ConfigTx::begin(state).await?;
+    mutate(tx.config_mut());
+    let new_cfg = tx.config().clone();
+    let yaml = tx.read_yaml().await?;
+    let (new_yaml, _) = crate::routing::apply_routing(&yaml, &new_cfg)?;
+    tx.set_yaml(new_yaml.clone())?;
+    tx.commit_and_reload().await?;
+    Ok((new_cfg, new_yaml))
+}
+
 pub async fn persist_zapret_enabled_with_routing(state: &AppState, enabled: bool) -> Result<(), String> {
     async fn attempt(state: &AppState, enabled: bool, reload: bool) -> Result<(), String> {
         let mut tx = crate::transaction::ConfigTx::begin(state).await?;
@@ -11355,6 +11653,8 @@ rules:
         current.notifications.telegram_bot_token = "123456789:ABCdefGHIjklMNOpqrs".into();
         current.rci.password = "rci_secret_password".into();
         current.mihomo.secret = "mihomo_secret_token".into();
+        current.vkturn.wg.private_key = "a".repeat(43) + "=";
+        current.vkturn.wg.preshared_key = Some("b".repeat(43) + "=");
 
         // 1. Проверяем маскирование при отдаче настроек
         let masked = mask_settings_for_api(&current);
@@ -11362,6 +11662,16 @@ rules:
             masked["notifications"]["telegram_bot_token"].as_str(),
             Some("******"),
             "Токен Telegram-бота должен маскироваться '******' при отдаче в UI"
+        );
+        assert_eq!(
+            masked["vkturn"]["wg"]["private_key"].as_str(),
+            Some("******"),
+            "private_key VK-туннеля должен маскироваться '******' при отдаче в UI"
+        );
+        assert_eq!(
+            masked["vkturn"]["wg"]["preshared_key"].as_str(),
+            Some("******"),
+            "preshared_key VK-туннеля должен маскироваться '******' при отдаче в UI"
         );
 
         // 2. Проверяем, что merge_settings_update не затирает секреты плейсхолдером "******"
@@ -11375,10 +11685,26 @@ rules:
             },
             "mihomo": {
                 "secret": "******"
+            },
+            "vkturn": {
+                "wg": {
+                    "private_key": "******",
+                    "preshared_key": "******"
+                }
             }
         });
 
         let merged = merge_settings_update(&current, &update_body).expect("merge_settings_update");
+        assert_eq!(
+            merged.vkturn.wg.private_key,
+            current.vkturn.wg.private_key,
+            "merge_settings_update не должен затирать private_key VK-туннеля"
+        );
+        assert_eq!(
+            merged.vkturn.wg.preshared_key,
+            current.vkturn.wg.preshared_key,
+            "merge_settings_update не должен затирать preshared_key VK-туннеля"
+        );
         assert_eq!(
             merged.notifications.telegram_bot_token,
             "123456789:ABCdefGHIjklMNOpqrs",
@@ -11725,12 +12051,7 @@ pub async fn save_gaming_config(
     }
 
     // Синхронизируем ipset geo_override ядра Keenetic: очищаем от старых доменов при выключении/переключении
-    let mut all_domains = tx.config().force_domains.clone();
-    if tx.config().gaming.enabled && tx.config().gaming.mode == config::GamingMode::KnownServices {
-        let game_domains = routing::get_gaming_domains(&tx.config().gaming);
-        all_domains.extend(game_domains);
-    }
-    let _ = crate::override_sync::sync_geo_override(&all_domains).await;
+    let _ = crate::override_sync::sync_from_config(tx.config(), &[]).await;
 
     if let Err(e) = tx.commit().await {
         return api_err(format!("Ошибка сохранения config.json: {e}"));
@@ -11855,12 +12176,7 @@ pub async fn toggle_gaming(
     }
 
     // Синхронизируем ipset geo_override ядра Keenetic: очищаем от старых доменов при выключении/переключении
-    let mut all_domains = tx.config().force_domains.clone();
-    if tx.config().gaming.enabled && tx.config().gaming.mode == config::GamingMode::KnownServices {
-        let game_domains = routing::get_gaming_domains(&tx.config().gaming);
-        all_domains.extend(game_domains);
-    }
-    let _ = crate::override_sync::sync_geo_override(&all_domains).await;
+    let _ = crate::override_sync::sync_from_config(tx.config(), &[]).await;
 
     if let Err(e) = tx.commit().await {
         return api_err(format!("Ошибка сохранения config.json: {e}"));

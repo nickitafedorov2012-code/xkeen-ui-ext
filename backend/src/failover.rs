@@ -1644,6 +1644,35 @@ pub fn is_whitelist_server_full(
     false
 }
 
+/// Баг 4: можно ли после перезагрузки вернуть игровой режим, приостановленный ради БС.
+/// Только если Mihomo ответил, активный узел известен и он не БС (с учётом подписок).
+pub fn startup_gaming_restore_allowed(
+    mihomo_answered: bool,
+    active: Option<&crate::mihomo::Server>,
+    cfg: &crate::config::AppConfig,
+) -> bool {
+    if !cfg.whitelist.gaming_suspended || !mihomo_answered {
+        return false;
+    }
+    match active {
+        Some(s) => !is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), cfg),
+        None => false,
+    }
+}
+
+/// Сообщение при попытке включить игровой режим на узле БС (баг 5).
+pub const GAMING_BLOCKED_BY_BS: &str =
+    "Сейчас активен сервер белых списков (БС) — игровой режим работает только на обычном сервере";
+
+/// Баг 5: включение игрового режима запрещено, пока активен узел БС («строго два канала»).
+/// Известен активный узел — решаем по нему (с учётом подписок); неизвестен — по флагу приостановки.
+pub fn gaming_enable_blocked_by_bs(cfg: &crate::config::AppConfig, active: Option<&crate::mihomo::Server>) -> bool {
+    match active {
+        Some(s) => is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), cfg),
+        None => cfg.whitelist.gaming_suspended,
+    }
+}
+
 /// Синхронизация селекторной группы '🛡️ Whitelist' в ядре Mihomo при переключении узла.
 pub async fn sync_whitelist_on_switch(
     http: &reqwest::Client,
@@ -1684,6 +1713,37 @@ pub async fn sync_whitelist_on_switch(
     );
 }
 
+/// Изменение флагов при переходе failover на узел [БС] или обратно (Zero-Touch, баг 108).
+/// Возвращает (что-то изменилось, пояснение для журнала).
+pub fn apply_whitelist_transition_flags(cfg: &mut crate::config::AppConfig, is_bs: bool) -> (bool, String) {
+    let mut changed = false;
+    let mut gaming_log = String::new();
+    if is_bs {
+        if !cfg.whitelist.enabled {
+            cfg.whitelist.enabled = true;
+            changed = true;
+        }
+        if cfg.gaming.enabled {
+            cfg.gaming.enabled = false;
+            cfg.whitelist.gaming_suspended = true;
+            changed = true;
+            gaming_log = " (Игровой режим приостановлен во избежание конфликтов сокетов)".to_string();
+        }
+    } else {
+        if cfg.whitelist.enabled {
+            cfg.whitelist.enabled = false;
+            changed = true;
+        }
+        if cfg.whitelist.gaming_suspended {
+            cfg.gaming.enabled = true;
+            cfg.whitelist.gaming_suspended = false;
+            changed = true;
+            gaming_log = " (Игровой режим автоматически восстановлен)".to_string();
+        }
+    }
+    (changed, gaming_log)
+}
+
 /// Комплексная обработка перехода на сервер с учетом режима Белых списков (Zero-Touch):
 /// 1. Если включен auto_by_failover:
 ///    - Если узел помечен как [БС]: автоматически активирует whitelist.enabled,
@@ -1707,112 +1767,44 @@ pub async fn handle_whitelist_transition(
     }
 
     if cfg.whitelist.auto_by_failover {
+        // Баг 108: флаги БС/гейминга, config.yaml и reload — одна транзакция. Если ядро не приняло конфиг,
+        // ничего не сохраняется и iptables не трогаются: config.json, правила и фаервол не расходятся.
+        let mut probe = (**state.config.read().await).clone();
+        let (cfg_changed, gaming_log) = apply_whitelist_transition_flags(&mut probe, is_bs);
+        if cfg_changed {
+            match crate::api::commit_config_with_routing(state, |c| {
+                let _ = apply_whitelist_transition_flags(c, is_bs);
+            })
+            .await
+            {
+                Ok((cur, applied_yaml)) => {
+                    if is_bs {
+                        crate::log_i!(
+                            "[FAILOVER] 🛡️ Авто-активация режима Белых списков (узел '{}' помечен как [БС]){}",
+                            node_name,
+                            gaming_log
+                        );
+                    } else {
+                        crate::log_i!(
+                            "[FAILOVER] ⚪ Деактивация режима Белых списков (переход на обычный узел '{}'){}",
+                            node_name,
+                            gaming_log
+                        );
+                    }
+                    // Синхронизируем режимы фаервола и цепочку XKEEN_BS в iptables
+                    let redir_port = crate::routing::parse_redir_port(&applied_yaml).unwrap_or(5000);
+                    let tproxy_port = crate::routing::parse_tproxy_port(&applied_yaml).unwrap_or(5001);
+                    let dns_port = crate::api::resolve_active_dns_port(&cur);
+                    crate::api::sync_full_tunnel_modes(&cur, redir_port, tproxy_port, dns_port).await;
+                }
+                Err(e) => {
+                    crate::log_e!("[FAILOVER] Режим Белых списков не переключён — ядро не приняло конфигурацию: {e}");
+                }
+            }
+        }
+
         if is_bs {
-            let mut cfg_changed = false;
-            let mut gaming_log = String::new();
-
-            {
-                let _cfg_guard = state.config_lock.lock().await;
-                let mut current_cfg = (**state.config.read().await).clone();
-
-                if !current_cfg.whitelist.enabled {
-                    current_cfg.whitelist.enabled = true;
-                    cfg_changed = true;
-                }
-
-                if current_cfg.gaming.enabled {
-                    current_cfg.gaming.enabled = false;
-                    current_cfg.whitelist.gaming_suspended = true;
-                    cfg_changed = true;
-                    gaming_log = " (Игровой режим приостановлен во избежание конфликтов сокетов)".to_string();
-                }
-
-                if cfg_changed {
-                    if let Err(e) = crate::config::save(&state.config_path, &current_cfg).await {
-                        crate::log_e!("[FAILOVER] Ошибка сохранения config.json при авто-активации БС: {e}");
-                    } else {
-                        *state.config.write().await = std::sync::Arc::new(current_cfg);
-                    }
-                }
-            }
-
-            if cfg_changed {
-                crate::log_i!(
-                    "[FAILOVER] 🛡️ Авто-активация режима Белых списков (узел '{}' помечен как [БС]){}",
-                    node_name,
-                    gaming_log
-                );
-                let mut applied_yaml = String::new();
-                if let Ok(mut tx) = crate::transaction::ConfigTx::begin(state).await {
-                    if let Ok(yaml) = tx.read_yaml().await {
-                        if let Ok((new_yaml, _)) = crate::routing::apply_routing(&yaml, tx.config()) {
-                            applied_yaml = new_yaml.clone();
-                            let _ = tx.set_yaml(new_yaml);
-                            let _ = tx.commit_and_reload().await;
-                        }
-                    }
-                }
-                // Синхронизируем режимы фаервола и цепочку XKEEN_BS в iptables
-                let cur = state.config.read().await.clone();
-                let redir_port = crate::routing::parse_redir_port(&applied_yaml).unwrap_or(5000);
-                let tproxy_port = crate::routing::parse_tproxy_port(&applied_yaml).unwrap_or(5001);
-                let dns_port = crate::api::resolve_active_dns_port(&cur);
-                crate::api::sync_full_tunnel_modes(&cur, redir_port, tproxy_port, dns_port).await;
-            }
-
             let _ = crate::mihomo::switch_selector(&state.http, &cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await;
-        } else {
-            let mut cfg_changed = false;
-            let mut gaming_log = String::new();
-
-            {
-                let _cfg_guard = state.config_lock.lock().await;
-                let mut current_cfg = (**state.config.read().await).clone();
-
-                if current_cfg.whitelist.enabled {
-                    current_cfg.whitelist.enabled = false;
-                    cfg_changed = true;
-                }
-
-                if current_cfg.whitelist.gaming_suspended {
-                    current_cfg.gaming.enabled = true;
-                    current_cfg.whitelist.gaming_suspended = false;
-                    cfg_changed = true;
-                    gaming_log = " (Игровой режим автоматически восстановлен)".to_string();
-                }
-
-                if cfg_changed {
-                    if let Err(e) = crate::config::save(&state.config_path, &current_cfg).await {
-                        crate::log_e!("[FAILOVER] Ошибка сохранения config.json при деактивации БС: {e}");
-                    } else {
-                        *state.config.write().await = std::sync::Arc::new(current_cfg);
-                    }
-                }
-            }
-
-            if cfg_changed {
-                crate::log_i!(
-                    "[FAILOVER] ⚪ Деактивация режима Белых списков (переход на обычный узел '{}'){}",
-                    node_name,
-                    gaming_log
-                );
-                let mut applied_yaml = String::new();
-                if let Ok(mut tx) = crate::transaction::ConfigTx::begin(state).await {
-                    if let Ok(yaml) = tx.read_yaml().await {
-                        if let Ok((new_yaml, _)) = crate::routing::apply_routing(&yaml, tx.config()) {
-                            applied_yaml = new_yaml.clone();
-                            let _ = tx.set_yaml(new_yaml);
-                            let _ = tx.commit_and_reload().await;
-                        }
-                    }
-                }
-                // Синхронизируем режимы фаервола и снимаем правила XKEEN_BS в iptables
-                let cur = state.config.read().await.clone();
-                let redir_port = crate::routing::parse_redir_port(&applied_yaml).unwrap_or(5000);
-                let tproxy_port = crate::routing::parse_tproxy_port(&applied_yaml).unwrap_or(5001);
-                let dns_port = crate::api::resolve_active_dns_port(&cur);
-                crate::api::sync_full_tunnel_modes(&cur, redir_port, tproxy_port, dns_port).await;
-            }
         }
     } else if cfg.whitelist.enabled {
         // Селектор без сброса сокетов: решение о сбросе принимает вызывающий switch_server(_graceful)
@@ -4119,6 +4111,87 @@ mod tests {
         assert_eq!(whitelist_cycle_delta(0, 0), 0);
         assert_eq!(whitelist_cycle_delta(3000, 500), 3500);
         assert_eq!(whitelist_cycle_delta(u64::MAX, 5), u64::MAX, "без переполнения");
+    }
+
+    #[test]
+    fn regression_bug_5_gaming_enable_blocked_by_bs() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist_providers = vec!["bs-sub".into()];
+        let srv = |name: &str, prov: Option<&str>| crate::mihomo::Server {
+            id: name.into(), name: name.into(), protocol: "vless".into(), host: "h".into(), port: 443,
+            is_active: true, is_priority: false, ping_ms: 0, provider: prov.map(String::from),
+            provider_name: None, is_pool: false, resolved_ip: None,
+        };
+        assert!(gaming_enable_blocked_by_bs(&cfg, Some(&srv("RU [БС]", None))), "тег БС в имени");
+        assert!(gaming_enable_blocked_by_bs(&cfg, Some(&srv("Node 1", Some("bs-sub")))), "узел из подписки БС");
+        assert!(!gaming_enable_blocked_by_bs(&cfg, Some(&srv("Germany", None))), "обычный узел");
+        assert!(!gaming_enable_blocked_by_bs(&cfg, None), "узел неизвестен, приостановки нет");
+        cfg.whitelist.gaming_suspended = true;
+        assert!(gaming_enable_blocked_by_bs(&cfg, None), "узел неизвестен, failover приостановил игровой");
+        assert!(!gaming_enable_blocked_by_bs(&cfg, Some(&srv("Germany", None))), "фактический обычный узел важнее устаревшего флага");
+    }
+
+    #[test]
+    fn regression_bug_4_startup_gaming_restore_decision() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.gaming_suspended = true;
+        cfg.whitelist_providers = vec!["bs-sub".into()];
+        let srv = |name: &str, prov: Option<&str>| crate::mihomo::Server {
+            id: name.into(), name: name.into(), protocol: "vless".into(), host: "h".into(), port: 443,
+            is_active: true, is_priority: false, ping_ms: 0, provider: prov.map(String::from),
+            provider_name: None, is_pool: false, resolved_ip: None,
+        };
+        let plain = srv("Germany", None);
+        let bs_by_sub = srv("Node 1", Some("bs-sub"));
+        assert!(startup_gaming_restore_allowed(true, Some(&plain), &cfg), "обычный узел — восстанавливаем");
+        assert!(!startup_gaming_restore_allowed(true, Some(&bs_by_sub), &cfg), "узел из подписки БС — нет");
+        assert!(!startup_gaming_restore_allowed(false, None, &cfg), "Mihomo не ответил — не решаем");
+        assert!(!startup_gaming_restore_allowed(true, None, &cfg), "активный узел неизвестен — нет");
+        cfg.whitelist.gaming_suspended = false;
+        assert!(!startup_gaming_restore_allowed(true, Some(&plain), &cfg), "нечего восстанавливать");
+    }
+
+    #[tokio::test]
+    async fn regression_bug_108_whitelist_transition_is_atomic() {
+        // Баг 108: при авто-БС config.json сохранялся отдельно, а правила Mihomo — второй транзакцией с игнором
+        // ошибок. Если ядро не приняло конфиг, config.json говорил «БС включён», а config.yaml — нет.
+        let root = std::env::temp_dir().join(format!("xkeen-bug108-{}", crate::auth::random_hex(8)));
+        std::fs::create_dir_all(&root).unwrap();
+        let yaml_path = root.join("config.yaml");
+        let json_path = root.join("config.json");
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.config_path = yaml_path.display().to_string();
+        cfg.mihomo.port = 1; // ядра нет: reload гарантированно не удастся
+        cfg.whitelist.auto_by_failover = true;
+        cfg.whitelist.enabled = false;
+        cfg.whitelist_servers = vec!["bs-node".to_string()];
+        let base = "mode: rule\nproxies: []\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules:\n  - MATCH,PROXY\n";
+        std::fs::write(&yaml_path, base).unwrap();
+        crate::config::save(&json_path, &cfg).await.unwrap();
+        let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(cfg)));
+        let ag = std::sync::Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = AppState {
+            config: config_arc,
+            config_path: std::sync::Arc::new(json_path.clone()),
+            http: reqwest::Client::new(),
+            failover_log: std::sync::Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        handle_whitelist_transition(&state, "bs-node", "bs-node", None).await;
+
+        let json_after: crate::config::AppConfig =
+            serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        let yaml_after = std::fs::read_to_string(&yaml_path).unwrap();
+        assert_eq!(yaml_after, base, "ядро не приняло конфиг — config.yaml откатан");
+        assert!(!json_after.whitelist.enabled, "config.json не должен говорить «БС включён», раз правил в ядре нет");
+        assert!(!state.config.read().await.whitelist.enabled, "и в памяти тоже");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -6758,6 +6831,7 @@ mod tests {
             speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: std::sync::Arc::new(crate::antigravity::AntigravityManager::new(cfg_arc)),
+            vkturn: crate::vkturn::VkTurnManager::new(),
         };
 
         let res = run_check(&state).await;
@@ -6875,6 +6949,7 @@ mod tests {
             speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: std::sync::Arc::new(crate::antigravity::AntigravityManager::new(cfg_arc)),
+            vkturn: crate::vkturn::VkTurnManager::new(),
         };
 
         // 1. Initial State

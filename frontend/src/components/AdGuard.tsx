@@ -284,15 +284,22 @@ export default function AdGuard({ notify }: AdGuardProps) {
   // Быстрое добавление домена в пользовательские правила (Заблокировать)
   const handleQuickBlockDomain = async (domain: string) => {
     const rule = `||${domain}^`
-    if (userRulesText.includes(rule)) {
-      notify(`Правило для ${domain} уже присутствует в списке`, true)
-      return
-    }
-    const updated = userRulesText ? `${userRulesText}\n${rule}` : rule
-    setUserRulesText(updated)
     try {
-      const rules = updated.split('\n').map((s) => s.trim()).filter((s) => s.length > 0)
-      await apiPost('/adguard/filtering/rules', { rules })
+      // Баг 134: берём свежий список с сервера — несохранённый текст редактора и устаревшая копия
+      // не уходят, правила из веб-UI AdGuard Home не стираются
+      const res = await apiGet<{ user_rules?: string[] }>('/adguard/filtering')
+      const current = (res?.user_rules ?? []).map((s) => s.trim()).filter((s) => s.length > 0)
+      if (current.includes(rule)) {
+        notify(`Правило для ${domain} уже присутствует в списке`, true)
+        return
+      }
+      await apiPost('/adguard/filtering/rules', { rules: [...current, rule] })
+      // Редактор меняем только после успеха; правки пользователя в нём сохраняются
+      setUserRulesText((prev) => {
+        const lines = prev.split('\n').map((s) => s.trim())
+        if (lines.includes(rule)) return prev
+        return prev.trim() ? `${prev}\n${rule}` : rule
+      })
       notify(`Домен ${domain} заблокирован пользовательским правилом`)
     } catch (e: any) {
       notify(`Ошибка блокировки: ${e.message || e}`, true)

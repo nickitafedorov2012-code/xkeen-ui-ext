@@ -233,18 +233,7 @@ pub fn spawn(state: AppState) {
                         }
 
                         // Синхронизация ipset geo_override (быстрые статические бандлы без сетевой нагрузки)
-                        let mut all_domains = cfg.force_domains.clone();
-                        if !cfg.force_domains.is_empty() {
-                            let auto_cdns = crate::cdn_discovery::expand_bundles(&cfg.force_domains);
-                            all_domains.extend(auto_cdns);
-                        }
-                        if cfg.gaming.enabled {
-                            let game_domains = routing::get_gaming_domains(&cfg.gaming);
-                            all_domains.extend(game_domains);
-                        }
-                        if !all_domains.is_empty() {
-                            let _ = override_sync::sync_geo_override(&all_domains).await;
-                        }
+                        let _ = override_sync::sync_from_config(&cfg, &[]).await;
 
                         // RT-04: Обновляем зафиксированные метаданные только если reload успешен
                         if !reload_pending {
@@ -624,7 +613,7 @@ pub fn spawn_zapret_monitor(state: AppState) {
                 } else {
                     let iptables_left = tokio::process::Command::new("sh")
                         .arg("-c")
-                        .arg("iptables -t mangle -S 2>/dev/null | grep -q zapret || iptables -t nat -S PREROUTING 2>/dev/null | grep -q 'to-ports 1053'")
+                        .arg("iptables -t mangle -S 2>/dev/null | grep -q zapret || iptables -t nat -S PREROUTING 2>/dev/null | grep 'xkeen-route-zapret' | grep 'to-ports 1053' | grep -q .")
                         .output()
                         .await
                         .map(|o| o.status.success())
@@ -645,9 +634,6 @@ pub fn spawn_zapret_monitor(state: AppState) {
                 continue;
             }
             let Ok(_zapret_guard) = state.zapret_lock.try_lock() else {
-                continue;
-            };
-            let Ok(_cfg_guard) = state.config_lock.try_lock() else {
                 continue;
             };
             if !state.config.read().await.zapret.enabled {
@@ -715,7 +701,7 @@ pub fn spawn_zapret_monitor(state: AppState) {
                 // NET-01: Контроль здоровья DNS-редиректа на порт 1053 во избежание блэкаута LAN
                 let dns_redirect_active = tokio::process::Command::new("sh")
                     .arg("-c")
-                    .arg("iptables -t nat -S PREROUTING 2>/dev/null | grep -q 'to-ports 1053'")
+                    .arg("iptables -t nat -S PREROUTING 2>/dev/null | grep 'xkeen-route-zapret' | grep 'to-ports 1053' | grep -q .")
                     .output()
                     .await
                     .map(|o| o.status.success())
@@ -1183,15 +1169,45 @@ pub fn is_gaming_connection_match(
             }
         }
     }
-    // Для UDP соединений с игрового устройства: высокие игровые порты (не DNS/QUIC/NTP/SSDP/mDNS и не STUN/WebRTC/VoIP)
-    if network.eq_ignore_ascii_case("udp") && !dest_ip.is_empty() {
-        if let Ok(port_num) = dest_port.parse::<u16>() {
-            if !matches!(port_num, 53 | 80 | 123 | 443 | 853 | 1900 | 3478..=3481 | 5060 | 5061 | 5349 | 5353 | 5354 | 19302..=19309) && port_num >= 1024 {
-                return true;
-            }
+    is_gaming_udp_heuristic(dest_ip, dest_port, network)
+}
+
+/// UDP-эвристика игрового трафика: высокие порты, кроме DNS/QUIC/NTP/SSDP/mDNS, STUN/WebRTC/VoIP
+/// и (баг 11a) VPN (WireGuard 51820, OpenVPN 1194, IPsec 500/4500), Zoom 8801–8810, BitTorrent 6881–6889.
+pub fn is_gaming_udp_heuristic(dest_ip: &str, dest_port: &str, network: &str) -> bool {
+    if !network.eq_ignore_ascii_case("udp") || dest_ip.is_empty() {
+        return false;
+    }
+    let Ok(port_num) = dest_port.parse::<u16>() else {
+        return false;
+    };
+    port_num >= 1024
+        && !matches!(
+            port_num,
+            1194 | 1900 | 3478..=3481 | 4500 | 5060 | 5061 | 5349 | 5353 | 5354 | 6881..=6889 | 8801..=8810 | 19302..=19309 | 51820
+        )
+}
+
+/// Порог P2P (баг 11a): игра держит связь с 1–3 серверами, торрент/DHT — с десятками пиров.
+pub const P2P_UDP_PEER_THRESHOLD: usize = 12;
+
+/// Источники, у которых UDP-эвристике соответствует больше P2P_UDP_PEER_THRESHOLD разных адресов —
+/// это P2P (торрент), и UDP-эвристика для них не продлевает игровую активность.
+pub fn p2p_udp_sources(conns: &[serde_json::Value]) -> std::collections::HashSet<String> {
+    let mut peers: std::collections::HashMap<String, std::collections::HashSet<String>> = std::collections::HashMap::new();
+    for c in conns {
+        let Some(meta) = c.get("metadata") else { continue };
+        let s = |k: &str| meta.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let port = meta
+            .get("destinationPort")
+            .map(|p| p.as_str().map(String::from).or_else(|| p.as_u64().map(|n| n.to_string())).unwrap_or_default())
+            .unwrap_or_default();
+        let (src, dst, net) = (s("sourceIP"), s("destinationIP"), s("network"));
+        if !src.is_empty() && is_gaming_udp_heuristic(&dst, &port, &net) {
+            peers.entry(src).or_default().insert(dst);
         }
     }
-    false
+    peers.into_iter().filter(|(_, d)| d.len() > P2P_UDP_PEER_THRESHOLD).map(|(s, _)| s).collect()
 }
 
 pub fn record_recent_gaming_conn(conn: RecentGamingConn) {
@@ -1209,6 +1225,19 @@ pub fn record_recent_gaming_conn(conn: RecentGamingConn) {
             }
         }
     }
+}
+
+/// Баг 10: IP устройств, за которыми следит умный режим: все включённые с IP; если включённых нет,
+/// а устройство одно — оно (прежнее поведение для единственного устройства).
+pub fn smart_gaming_watch_ips(gaming: &config::GamingConfig) -> Vec<String> {
+    let has_enabled = gaming.devices.iter().any(|d| d.enabled);
+    gaming
+        .devices
+        .iter()
+        .filter(|d| d.enabled)
+        .map(|d| d.ip.trim().to_string())
+        .filter(|ip| !ip.is_empty())
+        .collect()
 }
 
 pub fn spawn_smart_gaming_monitor(state: AppState) {
@@ -1244,14 +1273,8 @@ pub fn spawn_smart_gaming_monitor(state: AppState) {
             probe_gaming.enabled = true;
             let gaming_domains = routing::get_gaming_domains(&probe_gaming);
 
-            let has_explicit_enabled = cfg.gaming.devices.iter().any(|d| d.enabled);
-            let active_dev_ip = cfg
-                .gaming
-                .devices
-                .iter()
-                .find(|d| if has_explicit_enabled { d.enabled } else { cfg.gaming.devices.len() == 1 })
-                .map(|d| d.ip.trim().to_string())
-                .unwrap_or_default();
+            // Баг 10: следим за всеми выбранными игровыми устройствами, а не только за первым
+            let watch_ips = smart_gaming_watch_ips(&cfg.gaming);
 
             let Ok(val) = mihomo::m_get(&state.http, &cfg, "/connections").await else {
                 continue;
@@ -1262,10 +1285,12 @@ pub fn spawn_smart_gaming_monitor(state: AppState) {
             let now_str = chrono::Local::now().format("%H:%M:%S").to_string();
 
             if let Some(conns) = val.get("connections").and_then(|c| c.as_array()) {
+                // Баг 11a: у источника P2P-трафика (торрент) UDP-эвристика не считается игрой
+                let p2p_sources = p2p_udp_sources(conns);
                 for c in conns {
                     let Some(meta) = c.get("metadata") else { continue };
                     let src_ip = meta.get("sourceIP").and_then(|s| s.as_str()).unwrap_or("");
-                    if !active_dev_ip.is_empty() && src_ip != active_dev_ip {
+                    if !watch_ips.is_empty() && !watch_ips.iter().any(|ip| ip == src_ip) {
                         continue;
                     }
                     let host = meta.get("host").and_then(|h| h.as_str()).unwrap_or("");
@@ -1283,9 +1308,15 @@ pub fn spawn_smart_gaming_monitor(state: AppState) {
                         })
                         .unwrap_or_default();
                     let net = meta.get("network").and_then(|n| n.as_str()).unwrap_or("tcp");
-                    let rule = c.get("rule").and_then(|r| r.as_str()).unwrap_or("");
+                    // Баг 11c: `rule` — тип правила (DomainSuffix, GeoSite…), категория/имя набора — в `rulePayload`
+                    let rule = c.get("rulePayload").and_then(|r| r.as_str()).unwrap_or("");
 
-                    if is_gaming_connection_match(host, dest_ip, &dest_port, net, rule, &gaming_domains) {
+                    let is_game = if p2p_sources.contains(src_ip) {
+                        is_gaming_connection_match(host, "", "", "", rule, &gaming_domains)
+                    } else {
+                        is_gaming_connection_match(host, dest_ip, &dest_port, net, rule, &gaming_domains)
+                    };
+                    if is_game {
                         let destination = format!("{dest_ip}:{dest_port}");
                         let target = if !host.trim().is_empty() {
                             host.trim().to_lowercase()
@@ -1318,7 +1349,8 @@ pub fn spawn_smart_gaming_monitor(state: AppState) {
 
             if found_non_ignored {
                 last_active_instant = Some(std::time::Instant::now());
-                if !cfg.gaming.enabled || (cfg.gaming.mode != config::GamingMode::Compatibility && cfg.gaming.mode != config::GamingMode::BypassRu) {
+                // Баг 7: умный режим только включает игровой туннель, выбранный режим не трогает
+                if !cfg.gaming.enabled {
                     // X-02: пока failover приостановил игровой режим (активен узел [БС],
                     // gaming_suspended=true) — авто-включение запрещено во избежание
                     // воспроизведения конфликта сокетов БС↔gaming.
@@ -1329,40 +1361,14 @@ pub fn spawn_smart_gaming_monitor(state: AppState) {
                         );
                     }
                     // Включаем игровой режим только если выбрано игровое устройство с IP
-                    else if !active_dev_ip.is_empty() {
+                    else if !watch_ips.is_empty() {
                         log_i!(
-                            "[SMART-GAMING] 🎮 Обнаружено игровое подключение ({}) на {} — автоматическое включение Режима совместимости!",
+                            "[SMART-GAMING] 🎮 Обнаружено игровое подключение ({}) на {} — автоматическое включение игрового режима",
                             trigger_target,
-                            active_dev_ip
+                            watch_ips.join(", ")
                         );
-                        let _cfg_guard = state.config_lock.lock().await;
-                        let _routing_guard = state.routing_lock.lock().await;
-                        let mut new_cfg = (**state.config.read().await).clone();
-                        new_cfg.gaming.enabled = true;
-                        if new_cfg.gaming.mode != config::GamingMode::BypassRu {
-                            new_cfg.gaming.mode = config::GamingMode::Compatibility;
-                        }
-                        let path = Path::new(&new_cfg.mihomo.config_path);
-                        if path.exists() {
-                            if let Ok(raw_yaml) = tokio::fs::read_to_string(path).await {
-                                if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &new_cfg) {
-                                    let _ = crate::api::atomic_write_file(path, &new_yaml).await;
-                                    let _ = mihomo::reload_config(&state.http, &new_cfg).await;
-                                    let target_srv = if new_cfg.gaming.target_server.trim().is_empty() {
-                                        "Fastest"
-                                    } else {
-                                        new_cfg.gaming.target_server.trim()
-                                    };
-                                    let _ = mihomo::switch_group(&state.http, &new_cfg, routing::GAMING_GROUP_NAME, target_srv).await;
-                                    let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
-                                    let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
-                                    let dns_port = crate::api::resolve_active_dns_port(&new_cfg);
-                                    let _ = crate::api::sync_full_tunnel_modes(&new_cfg, redir_port, tproxy_port, dns_port).await;
-                                }
-                            }
-                        }
-                        if config::save(&state.config_path, &new_cfg).await.is_ok() {
-                            *state.config.write().await = std::sync::Arc::new(new_cfg);
+                        if let Err(e) = apply_smart_gaming_toggle(&state, true).await {
+                            log_w!("[SMART-GAMING] Не удалось включить игровой режим, настройки не изменены: {e}");
                         }
                     }
                 }
@@ -1372,34 +1378,51 @@ pub fn spawn_smart_gaming_monitor(state: AppState) {
                 let ref_instant = *last_active_instant.get_or_insert_with(std::time::Instant::now);
                 if ref_instant.elapsed() >= idle_dur {
                     log_i!(
-                        "[SMART-GAMING] 💤 Нет активных игровых подключений более {} мин — автоматическое отключение Режима совместимости.",
+                        "[SMART-GAMING] 💤 Нет активных игровых подключений более {} мин — автоматическое отключение игрового режима",
                         idle_mins
                     );
                     last_active_instant = None;
-                    let _cfg_guard = state.config_lock.lock().await;
-                    let _routing_guard = state.routing_lock.lock().await;
-                    let mut new_cfg = (**state.config.read().await).clone();
-                    new_cfg.gaming.enabled = false;
-                    let path = Path::new(&new_cfg.mihomo.config_path);
-                    if path.exists() {
-                        if let Ok(raw_yaml) = tokio::fs::read_to_string(path).await {
-                            if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &new_cfg) {
-                                let _ = crate::api::atomic_write_file(path, &new_yaml).await;
-                                let _ = mihomo::reload_config(&state.http, &new_cfg).await;
-                                let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
-                                let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
-                                let dns_port = crate::api::resolve_active_dns_port(&new_cfg);
-                                let _ = crate::api::sync_full_tunnel_modes(&new_cfg, redir_port, tproxy_port, dns_port).await;
-                            }
-                        }
-                    }
-                    if config::save(&state.config_path, &new_cfg).await.is_ok() {
-                        *state.config.write().await = std::sync::Arc::new(new_cfg);
+                    if let Err(e) = apply_smart_gaming_toggle(&state, false).await {
+                        log_w!("[SMART-GAMING] Не удалось выключить игровой режим, настройки не изменены: {e}");
                     }
                 }
             }
         }
     });
+}
+
+/// Изменения конфига при авто-переключении умным режимом: только флаг включения (баг 7 — режим
+/// пользователя KnownServices/SmartSplit/BypassRu/Compatibility сохраняется).
+pub fn apply_smart_gaming_flags(c: &mut config::AppConfig, enable: bool) {
+    c.gaming.enabled = enable;
+}
+
+/// Включение/выключение игрового режима умным режимом (баг 9): config.json, config.yaml и reload Mihomo —
+/// одна транзакция. Если ядро не приняло конфиг, ничего не сохраняется и iptables не трогаются.
+pub async fn apply_smart_gaming_toggle(state: &AppState, enable: bool) -> Result<config::AppConfig, String> {
+    if enable {
+        // Баг 5: проверяем фактический активный узел, а не только флаг приостановки
+        let cfg = state.config.read().await.clone();
+        let active = mihomo::get_active_server(&state.http, &cfg).await?;
+        if crate::failover::gaming_enable_blocked_by_bs(&cfg, active.as_ref()) {
+            return Err(crate::failover::GAMING_BLOCKED_BY_BS.to_string());
+        }
+    }
+    let (new_cfg, new_yaml) = crate::api::commit_config_with_routing(state, |c| apply_smart_gaming_flags(c, enable)).await?;
+    if enable {
+        let target_srv = if new_cfg.gaming.target_server.trim().is_empty() {
+            "Fastest"
+        } else {
+            new_cfg.gaming.target_server.trim()
+        };
+        // Баг 8: сбрасываем только сокеты игровых устройств, а не всей LAN
+        let _ = mihomo::switch_gaming_group(&state.http, &new_cfg, target_srv).await;
+    }
+    let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
+    let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
+    let dns_port = crate::api::resolve_active_dns_port(&new_cfg);
+    let _ = crate::api::sync_full_tunnel_modes(&new_cfg, redir_port, tproxy_port, dns_port).await;
+    Ok(new_cfg)
 }
 
 /// Можно ли сторожу самому включить интеграцию AdGuard (баг 116): только для работающего с защитой AGH,
@@ -1639,6 +1662,99 @@ mod tests {
         assert!(!cfg.integration_choice_locked, "по умолчанию выбор пользователя не зафиксирован");
     }
 
+    #[test]
+    fn regression_bug_10_smart_watch_ips_cover_every_enabled_device() {
+        let dev = |ip: &str, enabled: bool| config::GamingDevice { mac: format!("m{ip}"), ip: ip.into(), enabled, ..Default::default() };
+        let mut g = config::GamingConfig::default();
+        g.devices = vec![dev("192.168.1.50", true), dev("192.168.1.60", true), dev("192.168.1.70", false), dev("", true)];
+        assert_eq!(smart_gaming_watch_ips(&g), vec!["192.168.1.50", "192.168.1.60"], "все включённые с IP");
+        // Баг 17: Единственное выключенное игровое устройство НЕ считается активным
+        g.devices = vec![dev("192.168.1.70", false)];
+        assert!(smart_gaming_watch_ips(&g).is_empty(), "единственное выключенное устройство не активно (баг 17)");
+        g.devices = vec![dev("192.168.1.70", false), dev("192.168.1.80", false)];
+        assert!(smart_gaming_watch_ips(&g).is_empty(), "не выбрано ни одно из нескольких — не включаем");
+    }
+
+    #[test]
+    fn regression_bug_11a_non_game_udp_ports_are_not_games() {
+        // Баг 11a: WireGuard, OpenVPN, IPsec NAT-T, Zoom, BitTorrent считались игрой.
+        let domains: Vec<String> = Vec::new();
+        for port in ["51820", "1194", "4500", "500", "8801", "8810", "6881", "6889"] {
+            assert!(!is_gaming_connection_match("", "1.2.3.4", port, "udp", "", &domains), "UDP {port} — не игра");
+        }
+        assert!(is_gaming_connection_match("", "155.133.248.34", "27015", "udp", "", &domains), "игровой сервер Valve");
+    }
+
+    #[test]
+    fn regression_bug_11a_p2p_sources_detected() {
+        let conn = |src: &str, dst: &str, port: u64| serde_json::json!({ "metadata": {
+            "sourceIP": src, "destinationIP": dst, "destinationPort": port, "network": "udp" } });
+        let mut conns: Vec<serde_json::Value> = (0..20).map(|i| conn("192.168.1.50", &format!("5.6.7.{i}"), 40000 + i)).collect();
+        conns.push(conn("192.168.1.60", "155.133.248.34", 27015));
+        conns.push(conn("192.168.1.60", "155.133.248.35", 27016));
+        let p2p = p2p_udp_sources(&conns);
+        assert!(p2p.contains("192.168.1.50"), "20 разных пиров — P2P");
+        assert!(!p2p.contains("192.168.1.60"), "два игровых сервера — игра");
+    }
+
+    #[test]
+    fn regression_bug_7_smart_flags_preserve_mode() {
+        for mode in [
+            config::GamingMode::KnownServices,
+            config::GamingMode::SmartSplit,
+            config::GamingMode::BypassRu,
+            config::GamingMode::Compatibility,
+        ] {
+            let mut c = config::AppConfig::default();
+            c.gaming.mode = mode.clone();
+            apply_smart_gaming_flags(&mut c, true);
+            assert!(c.gaming.enabled);
+            assert_eq!(c.gaming.mode, mode, "режим пользователя сохранён");
+            apply_smart_gaming_flags(&mut c, false);
+            assert!(!c.gaming.enabled);
+            assert_eq!(c.gaming.mode, mode);
+        }
+    }
+
+    #[tokio::test]
+    async fn regression_bug_9_smart_gaming_failed_reload_changes_nothing() {
+        // Баг 9: при отказе ядра умный режим всё равно сохранял config.json — UI показывал игровой режим,
+        // а правил в ядре не было.
+        let root = std::env::temp_dir().join(format!("xkeen-bug9-{}", crate::auth::random_hex(8)));
+        std::fs::create_dir_all(&root).unwrap();
+        let yaml_path = root.join("config.yaml");
+        let json_path = root.join("config.json");
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.config_path = yaml_path.display().to_string();
+        cfg.mihomo.port = 1; // ядра нет: reload гарантированно не удастся
+        cfg.gaming.smart_mode = true;
+        cfg.gaming.enabled = false;
+        let base = "mode: rule\nproxies: []\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules:\n  - MATCH,PROXY\n";
+        std::fs::write(&yaml_path, base).unwrap();
+        crate::config::save(&json_path, &cfg).await.unwrap();
+        let json_before = std::fs::read_to_string(&json_path).unwrap();
+        let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(cfg)));
+        let ag = std::sync::Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = AppState {
+            config: config_arc,
+            config_path: std::sync::Arc::new(json_path.clone()),
+            http: reqwest::Client::new(),
+            failover_log: std::sync::Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        assert!(apply_smart_gaming_toggle(&state, true).await.is_err(), "отказ ядра — ошибка, а не тихий успех");
+        assert_eq!(std::fs::read_to_string(&json_path).unwrap(), json_before, "config.json не изменён");
+        assert_eq!(std::fs::read_to_string(&yaml_path).unwrap(), base, "config.yaml откатан");
+        assert!(!state.config.read().await.gaming.enabled, "в памяти игровой режим не включён");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn regression_bug_28_zapret_give_up_rebuilds_mihomo_rules() {
         // Баг 28: после 5 неудачных стартов сторож ставил zapret.enabled=false, но не пересобирал
@@ -1669,6 +1785,7 @@ mod tests {
             speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
         };
 
         disable_zapret_after_failed_starts(&state).await.unwrap();
@@ -1712,6 +1829,7 @@ mod tests {
             speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
         };
 
         crate::api::persist_zapret_enabled_with_routing(&state, true).await.unwrap();
@@ -1740,8 +1858,28 @@ mod tests {
     }
 
     #[test]
+    fn regression_bug_36_zapret_watchdog_fixes() {
+        // Баг 36:
+        // 1. При выключенном Zapret любое чужое правило на 1053 запускало stop-fw каждые 12 секунд.
+        // 2. Сторож держал config_lock на всё время выполнения команд S51zapret.
+        let wd_src = include_str!("watchdog.rs");
+        let start = wd_src.find("pub fn spawn_zapret_monitor(").expect("spawn_zapret_monitor exists");
+        let b = &wd_src[start..start + 3000];
+
+        // Проверка 1: при проверке iptables_left не должно быть слепого grep 'to-ports 1053' без привязки к xkeen-route-zapret
+        assert!(
+            !b.contains("grep -q 'to-ports 1053'"),
+            "Watchdog must not blindly match any foreign 1053 rule without xkeen-route-zapret comment"
+        );
+
+        // Проверка 2: config_lock не должен удерживаться во время вызова start-fw / S51zapret
+        assert!(
+            !b.contains("let Ok(_cfg_guard) = state.config_lock.try_lock()"),
+            "Watchdog must not hold config_lock across long shell command execution"
+        );
+    }
+    #[test]
     fn regression_bug_118_ip_keyed_settings_follow_device_after_dhcp_change() {
-        // Баг 118: device_routing, доменные правила, БС по устройствам, исключения Zapret и расписания хранятся
         // по IP; DHCP-слежение было только для гейминга в Compatibility — после смены IP правила доставались
         // тому, кто получил старый адрес.
         let mut prev = std::collections::HashMap::new();
@@ -1776,3 +1914,125 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod structural_regression_tests {
+    /// Тело функции в исходнике (до следующей функции верхнего уровня), без тестовых модулей.
+    fn body(src: &'static str, sig: &str) -> &'static str {
+        let cut = src.find("#[cfg(test)]").unwrap_or(src.len());
+        let prod = &src[..cut];
+        let start = prod.find(sig).unwrap_or_else(|| panic!("нет {sig}"));
+        let rest = &prod[start..];
+        let end = rest[1..]
+            .find("\npub fn ")
+            .into_iter()
+            .chain(rest[1..].find("\npub async fn "))
+            .chain(rest[1..].find("\nfn "))
+            .chain(rest[1..].find("\nasync fn "))
+            .min()
+            .map(|e| e + 1)
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    #[test]
+    fn regression_bug_5_smart_gaming_checks_active_bs_not_only_flag() {
+        // Баг 5: умный режим проверял только gaming_suspended — при вручную выбранном БС включал игровой.
+        let b = body(include_str!("watchdog.rs"), "pub async fn apply_smart_gaming_toggle(");
+        assert!(b.contains("gaming_enable_blocked_by_bs("), "проверка фактического активного узла");
+    }
+
+    #[test]
+    fn regression_bug_7_smart_gaming_keeps_user_mode() {
+        // Баг 7: умный режим при первом игровом соединении менял выбранный пользователем режим
+        // (KnownServices, SmartSplit) на Compatibility.
+        let src = include_str!("watchdog.rs");
+        let toggle = body(src, "pub async fn apply_smart_gaming_toggle(");
+        assert!(!toggle.contains("c.gaming.mode = config::GamingMode::Compatibility"), "режим пользователя не подменяется");
+        let mon = body(src, "pub fn spawn_smart_gaming_monitor(");
+        assert!(!mon.contains("cfg.gaming.mode != config::GamingMode::Compatibility"), "включённый режим любого типа не «перевключается»");
+    }
+
+    #[test]
+    fn regression_bug_8_smart_gaming_does_not_drop_whole_lan() {
+        // Баг 8: умный режим вызывал switch_group (close_all) — рвались звонки и загрузки всей сети.
+        let b = body(include_str!("watchdog.rs"), "pub async fn apply_smart_gaming_toggle(");
+        assert!(!b.contains("mihomo::switch_group("), "без полного сброса соединений LAN");
+    }
+
+    #[test]
+    fn regression_bug_10_smart_gaming_watches_all_enabled_devices() {
+        // Баг 10: умный режим брал только первое включённое устройство (`find`) — игра на втором
+        // не продлевала активность, и по таймауту игровой режим выключался у всех.
+        let b = body(include_str!("watchdog.rs"), "pub fn spawn_smart_gaming_monitor(");
+        assert!(!b.contains(".find(|d| if has_explicit_enabled"), "не только первое устройство");
+        assert!(b.contains("smart_gaming_watch_ips("), "список всех отслеживаемых устройств");
+    }
+
+    #[test]
+    fn regression_bug_11a_torrent_like_udp_does_not_keep_gaming_alive() {
+        // Баг 11a: любой UDP на порт ≥1024 считался игрой — торрент (десятки пиров) не давал наступить таймауту.
+        let b = body(include_str!("watchdog.rs"), "pub fn spawn_smart_gaming_monitor(");
+        assert!(b.contains("p2p_udp_sources("), "источники P2P-трафика исключаются из UDP-эвристики");
+    }
+
+    #[test]
+    fn regression_bug_11c_detection_reads_rule_payload_not_rule_type() {
+        // Баг 11c: в поле `rule` Mihomo — тип правила (DomainSuffix, GeoSite, Match); проверка
+        // `contains("category-games")` по нему никогда не срабатывала. Категория — в `rulePayload`.
+        let b = body(include_str!("watchdog.rs"), "pub fn spawn_smart_gaming_monitor(");
+        assert!(b.contains("c.get(\"rulePayload\")"), "категория правила берётся из rulePayload");
+        assert!(!b.contains("c.get(\"rule\")"), "тип правила не используется как категория");
+    }
+
+    #[test]
+    fn regression_bug_9_smart_gaming_writes_via_configtx() {
+        // Баг 9: умный режим писал config.yaml напрямую, игнорировал ошибку reload и сохранял config.json
+        // в любом случае — конфиг расходился с ядром.
+        let b = body(include_str!("watchdog.rs"), "pub fn spawn_smart_gaming_monitor(");
+        assert!(!b.contains("atomic_write_file"), "без прямой записи config.yaml");
+        assert!(!b.contains("config::save("), "без прямой записи config.json");
+        assert!(b.contains("apply_smart_gaming_toggle("), "переключение через общую транзакцию");
+    }
+
+    #[test]
+    fn regression_bug_95_zapret_watchdog_writes_via_configtx() {
+        // Баг 95: авто-отключение Zapret писало config.json без config_lock (мимо ConfigTx).
+        let b = body(include_str!("watchdog.rs"), "pub fn spawn_zapret_monitor(");
+        assert!(b.contains("disable_zapret_after_failed_starts"), "выключение — через общую транзакцию");
+        assert!(!b.contains("config::save("), "без прямой записи config.json");
+    }
+
+    #[test]
+    fn regression_bug_96_dhcp_watchdog_writes_via_configtx() {
+        // Баг 96: DHCP-сторож писал config.yaml мимо ConfigTx (без валидации и отката).
+        let b = body(include_str!("watchdog.rs"), "pub fn spawn_dhcp_device_monitor(");
+        assert!(b.contains("ConfigTx::begin"), "запись через ConfigTx");
+        assert!(!b.contains("atomic_write_file"), "без прямой записи config.yaml");
+        assert!(!b.contains("config::save("), "без прямой записи config.json");
+    }
+
+    #[test]
+    fn regression_bug_83_no_commit_per_provider_in_background_sync() {
+        // Баг 83: миграция провайдеров делала N коммитов и N reload Mihomo подряд.
+        let b = body(include_str!("api.rs"), "pub async fn sync_all_mobile_providers(");
+        assert!(!b.contains("ConfigTx::begin"), "фоновая синхронизация не открывает транзакцию на каждый провайдер");
+        assert!(!b.contains("commit_and_reload"), "и не перезагружает Mihomo в цикле");
+    }
+
+    #[test]
+    fn regression_bug_85_speedtest_restores_only_its_group() {
+        // Баг 85: speedtest восстанавливал ВСЕ selector-группы из снимка, откатывая чужие изменения за время теста.
+        let b = body(include_str!("speedtest.rs"), "pub async fn run_speedtest(");
+        assert!(!b.contains("take_groups_snapshot("), "без снимка всех групп");
+        assert!(b.contains("isolated_speedtest_snapshot("), "снимок только изолированной группы");
+    }
+
+    #[test]
+    fn regression_bug_86_speedtest_measures_selected_node() {
+        // Баг 86: замер шёл через mixed-port по правилам (мог уйти в DIRECT/Flow), группы PROXY/GLOBAL/Proxy/auto захардкожены.
+        let b = body(include_str!("speedtest.rs"), "pub async fn run_speedtest(");
+        assert!(!b.contains("mihomo_proxy_url()"), "не через общий mixed-port");
+        assert!(b.contains("CANARY_PROBE_PORT"), "через слушатель изолированной группы выбранного узла");
+        assert!(!b.contains("\"auto\""), "без захардкоженного списка групп");
+    }
+}

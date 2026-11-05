@@ -834,11 +834,26 @@ pub fn update_provider_hwid_in_yaml(yaml: &str, provider_id: &str, new_hwid: Opt
 }
 
 /// Домены: очистка и нормализация (нижний регистр, без портов/протоколов/путей/userinfo).
+/// Синтаксис домена для правил DOMAIN-SUFFIX (баг 120): метки из букв, цифр, `-` и `_`, без пустых меток.
+/// Запятая, скобки, кавычки и пробелы недопустимы — они ломают правило и всю секцию rules.
+/// Локальные зоны (.lan/.local) разрешены: их добавляют в «Напрямую» для устройств домашней сети.
+pub fn is_valid_rule_domain(d: &str) -> bool {
+    !d.is_empty()
+        && d.len() <= 253
+        && d.contains('.')
+        && d.split('.').all(|l| !l.is_empty() && l.len() <= 63 && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+}
+
+/// Цель правила без символов, ломающих разбор правил Mihomo (баг 119).
+pub fn is_safe_rule_target(t: &str) -> bool {
+    !t.is_empty() && !t.chars().any(|c| matches!(c, ',' | '(' | ')' | '\'' | '"' | '\n' | '\r' | '#'))
+}
+
 pub fn sanitize_domains(list: &[String]) -> Vec<String> {
     let mut out: Vec<String> = list
         .iter()
         .map(|d| crate::config::normalize_domain(d))
-        .filter(|d| !d.is_empty() && d.contains('.') && !d.contains('/') && !d.contains(' '))
+        .filter(|d| is_valid_rule_domain(d))
         .collect();
     out.sort();
     out.dedup();
@@ -1433,6 +1448,18 @@ pub fn apply_zapret_hybrid_rules_with_force(
     zapret_cfg: &crate::config::ZapretConfig,
     force_domains: &[String],
 ) -> Result<String, String> {
+    apply_zapret_hybrid_rules_with_force_internal(yaml, zapret_cfg, force_domains, None)
+}
+
+/// Баг 32: Применение правил Zapret Hybrid с учетом исключённых устройств.
+/// Для исключённых устройств трафик гибридных доменов не уходит в DIRECT (где Zapret в OUTPUT перехватывает его),
+/// а направляется в PROXY-группу.
+pub fn apply_zapret_hybrid_rules_with_force_internal(
+    yaml: &str,
+    zapret_cfg: &crate::config::ZapretConfig,
+    force_domains: &[String],
+    arp_content: Option<&str>,
+) -> Result<String, String> {
     crate::routing::validate_marker_pair(yaml, ZAPRET_HYBRID_BEGIN, ZAPRET_HYBRID_END)?;
     let content = remove_zapret_hybrid_rules(yaml);
     if !zapret_cfg.enabled {
@@ -1452,6 +1479,9 @@ pub fn apply_zapret_hybrid_rules_with_force(
 
     let proxy_target = find_proxy_target_group(yaml);
     let mut rules_to_add: Vec<String> = Vec::new();
+
+    // Разрешаем IP-адреса устройств, исключённых из Zapret (баг 32)
+    let excluded_ips = resolve_excluded_zapret_ips_internal(zapret_cfg, arp_content);
 
     // 0. Safeguard для Google AI / Antigravity (гарантированный PROXY перед любыми DIRECT правилами)
     let has_active_custom = zapret_cfg.custom_entries.iter().any(|e| e.enabled);
@@ -1483,95 +1513,77 @@ pub fn apply_zapret_hybrid_rules_with_force(
     }
 
     // 2. YouTube -> DIRECT (максимальная скорость с локальных кэшей GGC)
+    let mut hybrid_targets = Vec::new();
     if zapret_cfg.hybrid_youtube {
         for d in YOUTUBE_HYBRID_DOMAINS {
-            if !is_forced(d) {
-                let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
-                if !rules_to_add.contains(&rule) {
-                    rules_to_add.push(rule);
-                }
-            }
+            hybrid_targets.push(*d);
         }
     }
 
     // 2.1 Smart TV профиль -> DIRECT (оптимизация всех CDN/GGC кэшей)
     if zapret_cfg.smart_tv_mode {
         for d in SMART_TV_GGC_DOMAINS {
-            if !is_forced(d) {
-                let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
-                if !rules_to_add.contains(&rule) {
-                    rules_to_add.push(rule);
-                }
-            }
+            hybrid_targets.push(*d);
         }
     }
 
     // 3. Discord -> DIRECT (минимальный пинг, прямые шлюзы)
     if zapret_cfg.hybrid_discord {
         for d in DISCORD_HYBRID_DOMAINS {
-            if !is_forced(d) {
-                let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
-                if !rules_to_add.contains(&rule) {
-                    rules_to_add.push(rule);
-                }
-            }
+            hybrid_targets.push(*d);
         }
     }
 
     // 4. GitHub -> DIRECT (высокая скорость git clone и релизов без расхода VPS)
     if zapret_cfg.bypass_github {
         for d in GITHUB_DOMAINS {
-            if !is_forced(d) {
-                let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
-                if !rules_to_add.contains(&rule) {
-                    rules_to_add.push(rule);
-                }
-            }
+            hybrid_targets.push(*d);
         }
     }
 
     // 5. Торренты & Трекеры -> DIRECT
     if zapret_cfg.bypass_torrents {
         for d in TORRENT_DOMAINS {
-            if !is_forced(d) {
-                let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
-                if !rules_to_add.contains(&rule) {
-                    rules_to_add.push(rule);
-                }
-            }
+            hybrid_targets.push(*d);
         }
     }
 
     // 6. 18+ Контент -> DIRECT
     if zapret_cfg.bypass_adult {
         for d in ADULT_DOMAINS {
-            if !is_forced(d) {
-                let rule = format!("  - DOMAIN-SUFFIX,{d},DIRECT");
-                if !rules_to_add.contains(&rule) {
-                    rules_to_add.push(rule);
+            hybrid_targets.push(*d);
+        }
+    }
+
+    // 7. Пользовательские сайты и их связанные CDN (/boost) -> DIRECT
+    let mut custom_strings = Vec::new();
+    for entry in &zapret_cfg.custom_entries {
+        if entry.enabled {
+            let clean = crate::config::normalize_domain(&entry.domain);
+            if !clean.is_empty() && !FLOW_DOMAINS.contains(&clean.as_str()) {
+                custom_strings.push(clean);
+            }
+            for cdn in &entry.cdns {
+                let clean_cdn = crate::config::normalize_domain(cdn);
+                if !clean_cdn.is_empty() && !FLOW_DOMAINS.contains(&clean_cdn.as_str()) {
+                    custom_strings.push(clean_cdn);
                 }
             }
         }
     }
 
-    // 7. Пользовательские сайты и их связанные CDN (/boost) -> DIRECT
-    for entry in &zapret_cfg.custom_entries {
-        if entry.enabled {
-            let clean = crate::config::normalize_domain(&entry.domain);
-            if !clean.is_empty() && !FLOW_DOMAINS.contains(&clean.as_str()) && !is_forced(&clean) {
-                let rule = format!("  - DOMAIN-SUFFIX,{clean},DIRECT");
-                if !rules_to_add.contains(&rule) {
-                    rules_to_add.push(rule);
+    for dom in hybrid_targets.iter().map(|s| s.to_string()).chain(custom_strings) {
+        if !is_forced(&dom) {
+            for ex_ip in &excluded_ips {
+                let cidr = if ex_ip.contains('/') { ex_ip.clone() } else { format!("{ex_ip}/32") };
+                let ex_rule = format!("  - AND,((SRC-IP-CIDR,{cidr}),(DOMAIN-SUFFIX,{dom})),{proxy_target}");
+                if !rules_to_add.contains(&ex_rule) {
+                    rules_to_add.push(ex_rule);
                 }
             }
-            for cdn in &entry.cdns {
-                let clean_cdn = crate::config::normalize_domain(cdn);
-                if !clean_cdn.is_empty() && !FLOW_DOMAINS.contains(&clean_cdn.as_str()) && !is_forced(&clean_cdn) {
-                    let rule = format!("  - DOMAIN-SUFFIX,{clean_cdn},DIRECT");
-                    if !rules_to_add.contains(&rule) {
-                        rules_to_add.push(rule);
-                    }
-                }
+            let rule = format!("  - DOMAIN-SUFFIX,{dom},DIRECT");
+            if !rules_to_add.contains(&rule) {
+                rules_to_add.push(rule);
             }
         }
     }
@@ -1648,12 +1660,20 @@ pub fn apply_zapret_hybrid_rules_with_force(
 
 /// Сбор всех активных доменов игрового режима из GamingConfig.
 pub fn get_gaming_domains(cfg: &crate::config::GamingConfig) -> Vec<String> {
+    get_gaming_domains_filtered(cfg, false)
+}
+
+/// Сбор всех активных доменов игрового режима с учетом исключения Discord (баг 15),
+/// если Discord обслуживается локальным Zapret hybrid_discord (DIRECT).
+pub fn get_gaming_domains_filtered(cfg: &crate::config::GamingConfig, exclude_discord: bool) -> Vec<String> {
     if !cfg.enabled {
         return Vec::new();
     }
     let mut domains = Vec::new();
     let p = &cfg.platforms;
-    if p.discord { domains.extend(GAMING_DISCORD_DOMAINS.iter().map(|&s| s.to_string())); }
+    if p.discord && !exclude_discord {
+        domains.extend(GAMING_DISCORD_DOMAINS.iter().map(|&s| s.to_string()));
+    }
     if p.steam { domains.extend(GAMING_STEAM_DOMAINS.iter().map(|&s| s.to_string())); }
     if p.playstation { domains.extend(GAMING_PSN_DOMAINS.iter().map(|&s| s.to_string())); }
     if p.xbox { domains.extend(GAMING_XBOX_DOMAINS.iter().map(|&s| s.to_string())); }
@@ -1761,6 +1781,16 @@ pub fn apply_gaming_rules(
     cfg: &crate::config::GamingConfig,
     providers: &[String],
 ) -> Result<String, String> {
+    apply_gaming_rules_with_zapret(yaml, cfg, providers, false)
+}
+
+/// Применение выделенного маршрута игрового режима с учетом Zapret hybrid_discord (баг 15).
+pub fn apply_gaming_rules_with_zapret(
+    yaml: &str,
+    cfg: &crate::config::GamingConfig,
+    providers: &[String],
+    exclude_discord: bool,
+) -> Result<String, String> {
     crate::routing::validate_marker_pair(yaml, GAMING_BEGIN, GAMING_END)?;
     crate::routing::validate_marker_pair(yaml, GAMING_GROUP_BEGIN, GAMING_GROUP_END)?;
     let content = remove_gaming_rules(yaml);
@@ -1851,13 +1881,8 @@ pub fn apply_gaming_rules(
         crate::config::GamingMode::Compatibility => {
             // Режим совместимости (100% Все в прокси): направляет весь интернет-трафик устройства через игровой туннель
             let mut routed_any = false;
-            let has_explicit_enabled = cfg.devices.iter().any(|d| d.enabled);
             for dev in &cfg.devices {
-                let is_active = if has_explicit_enabled {
-                    dev.enabled
-                } else {
-                    cfg.devices.len() == 1
-                };
+                let is_active = dev.enabled;
                 if !is_active {
                     continue;
                 }
@@ -1883,15 +1908,16 @@ pub fn apply_gaming_rules(
                     }
                 }
             }
-            for c in &cfg.custom_domains {
-                let t = c.trim().to_lowercase();
-                if !t.is_empty() {
-                    gaming_rules.push(format!("  - DOMAIN-SUFFIX,{t},{GAMING_GROUP_NAME}"));
-                }
-            }
-            // Если устройства ещё не настроены, добавляем домены как fallback
+            // Баг 14: В режиме Compatibility custom_domains применяются только к игровым устройствам, а не глобально ко всей сети.
+            // Если устройства не настроены, домены добавляются как fallback.
             if !routed_any {
-                let domains = get_gaming_domains(cfg);
+                for c in &cfg.custom_domains {
+                    let t = c.trim().to_lowercase();
+                    if !t.is_empty() {
+                        gaming_rules.push(format!("  - DOMAIN-SUFFIX,{t},{GAMING_GROUP_NAME}"));
+                    }
+                }
+                let domains = get_gaming_domains_filtered(cfg, exclude_discord);
                 for d in &domains {
                     gaming_rules.push(format!("  - DOMAIN-SUFFIX,{d},{GAMING_GROUP_NAME}"));
                 }
@@ -1902,15 +1928,10 @@ pub fn apply_gaming_rules(
             // Для каждого активного устройства исключаем российские домены и GeoIP,
             // а весь остальной трафик направляем в туннель/сервер
             let mut routed_any = false;
-            let has_explicit_enabled = cfg.devices.iter().any(|d| d.enabled);
             let has_ru_ruleset = content.contains("category-ru@domain");
             let has_ip_ruleset = content.contains("category-ru@ipcidr");
             for dev in &cfg.devices {
-                let is_active = if has_explicit_enabled {
-                    dev.enabled
-                } else {
-                    cfg.devices.len() == 1
-                };
+                let is_active = dev.enabled;
                 if !is_active {
                     continue;
                 }
@@ -1961,7 +1982,7 @@ pub fn apply_gaming_rules(
                 }
             }
             if !routed_any {
-                let domains = get_gaming_domains(cfg);
+                let domains = get_gaming_domains_filtered(cfg, exclude_discord);
                 for d in &domains {
                     gaming_rules.push(format!("  - DOMAIN-SUFFIX,{d},{GAMING_GROUP_NAME}"));
                 }
@@ -1969,7 +1990,7 @@ pub fn apply_gaming_rules(
         }
         crate::config::GamingMode::KnownServices | crate::config::GamingMode::SmartSplit => {
             // Режим «Все напрямую кроме игр» на базе category-games и правил платформ
-            let domains = get_gaming_domains(cfg);
+            let domains = get_gaming_domains_filtered(cfg, exclude_discord);
             for d in &domains {
                 gaming_rules.push(format!("  - DOMAIN-SUFFIX,{d},{GAMING_GROUP_NAME}"));
             }
@@ -2146,6 +2167,45 @@ pub fn resolve_excluded_whitelist_ips_internal(cfg: &crate::config::AppConfig, a
     }
     ips.sort();
     ips.dedup();
+    ips
+}
+
+/// Баг 32: Разрешение IP-адресов устройств, исключённых из Zapret (по IP или MAC).
+pub fn resolve_excluded_zapret_ips(zapret_cfg: &crate::config::ZapretConfig) -> Vec<String> {
+    resolve_excluded_zapret_ips_internal(zapret_cfg, None)
+}
+
+pub fn resolve_excluded_zapret_ips_internal(
+    zapret_cfg: &crate::config::ZapretConfig,
+    arp_content: Option<&str>,
+) -> Vec<String> {
+    let mut ips = Vec::new();
+    let system_arp = if arp_content.is_none() {
+        std::fs::read_to_string("/proc/net/arp").ok()
+    } else {
+        None
+    };
+    let effective_arp = arp_content.or(system_arp.as_deref());
+
+    for item in &zapret_cfg.excluded_devices {
+        let clean = item.trim();
+        if clean.is_empty() {
+            continue;
+        }
+        if crate::config::is_valid_ip_or_cidr(clean) {
+            if !ips.contains(&clean.to_string()) {
+                ips.push(clean.to_string());
+            }
+        } else if crate::config::is_valid_mac(clean) {
+            if let Some(arp) = effective_arp {
+                if let Some(ip) = find_ip_for_mac_in_arp(clean, arp) {
+                    if !ips.contains(&ip) {
+                        ips.push(ip);
+                    }
+                }
+            }
+        }
+    }
     ips
 }
 
@@ -2377,14 +2437,16 @@ pub fn apply_whitelist_dns(
     local_dns_endpoint: &str,
 ) -> String {
     let clean = remove_whitelist_dns(content);
-    let active_devices: Vec<&crate::config::WhitelistDevice> = cfg
+    let has_devices_configured = !cfg.whitelist.devices.is_empty();
+    let has_active_devices = cfg
         .whitelist
         .devices
         .iter()
-        .filter(|d| d.enabled && !d.ip.trim().is_empty())
-        .collect();
+        .any(|d| d.enabled && !d.ip.trim().is_empty());
 
-    if !cfg.whitelist.enabled || active_devices.is_empty() {
+    // Если устройства настроены, но ни одно не активно — не инжектим.
+    // Если устройств в списке нет вовсе — режим Zero-Touch на всю сеть: обязательно инжектим.
+    if !cfg.whitelist.enabled || (has_devices_configured && !has_active_devices) {
         return clean;
     }
 
@@ -2674,7 +2736,9 @@ pub fn apply_domain_rules(
                     for r in rules {
                         let dom = r.domain.trim().to_lowercase();
                         let target = r.target.trim();
-                        if !dom.is_empty() && !target.is_empty() {
+                        // Баг 119: домен и цель не должны ломать AND-правило; несуществующую цель
+                        // заменяет sanitize_rule_targets в конце apply_routing (INV-4)
+                        if is_valid_rule_domain(&dom) && is_safe_rule_target(target) {
                             out.push(format!(
                                 "  - AND,((SRC-IP-CIDR,{cidr}),(DOMAIN-SUFFIX,{dom})),{target},no-resolve"
                             ));
@@ -3227,7 +3291,7 @@ pub fn apply_routing_with_filters(
     // Включаем игровые устройства с выделенным сервером
     let has_explicit_gaming = cfg.gaming.devices.iter().any(|d| d.enabled);
     for d in &cfg.gaming.devices {
-        let is_active = if has_explicit_gaming { d.enabled } else { cfg.gaming.devices.len() == 1 };
+        let is_active = d.enabled;
         if is_active {
             if let Some(ref srv) = d.server {
                 if !srv.trim().is_empty() && !assignments.iter().any(|a| a.ip == d.ip) {
@@ -3253,19 +3317,22 @@ pub fn apply_routing_with_filters(
     }
     current = apply_ignore_to_providers(&current, &cfg.ignore_servers, filters);
 
-    // 3. Доменные правила (DIRECT / FORCE / PER-DEVICE DOMAINS)
-    // Вставляются поверх правил устройств
-    let direct = &cfg.direct_domains;
+    // 3. Игровой режим (приоритетный маршрут устройства и селектор-группа 🎮 Gaming)
+    // Баг 15: если Zapret hybrid_discord активен, Discord направляется в DIRECT и исключается из игровых правил
+    let exclude_discord = cfg.zapret.enabled && cfg.zapret.hybrid_discord;
+    current = apply_gaming_rules_with_zapret(&current, &cfg.gaming, &providers, exclude_discord)?;
+
     let active_force = &cfg.force_domains;
-    let device_domains = &cfg.device_domain_rules;
-    current = apply_domain_rules(&current, direct, active_force, device_domains)?;
 
     // 4. Умные гибридные правила Zapret (YouTube / Discord / GitHub / Torrents / Adult -> DIRECT, AI -> PROXY)
     // Пользовательские force_domains имеют абсолютный приоритет над DIRECT-правилами Zapret
     current = apply_zapret_hybrid_rules_with_force(&current, &cfg.zapret, active_force)?;
 
-    // 5. Игровой режим (приоритетный маршрут устройства и селектор-группа 🎮 Gaming)
-    current = apply_gaming_rules(&current, &cfg.gaming, &providers)?;
+    // 5. Доменные правила (DIRECT / FORCE / PER-DEVICE DOMAINS)
+    // Баг 14: Вставляются поверх правил игрового режима и устройств (персональные доменные правила и DIRECT имеют высший приоритет)
+    let direct = &cfg.direct_domains;
+    let device_domains = &cfg.device_domain_rules;
+    current = apply_domain_rules(&current, direct, active_force, device_domains)?;
 
     // 5.1. Режим белых списков (376 отечественных сервисов напрямую, прокси-туннель для устройств)
     // В режиме StrictXKeen правила белых списков размещаются ВЫШЕ доменных, игровых и zapret-правил (баг 3)
@@ -3297,6 +3364,11 @@ pub fn apply_routing_with_filters(
     let flow_group = find_flow_group_name(&current);
     if let Ok(with_flow) = apply_flow_rules(&current, flow_target.trim(), flow_group.as_deref()) {
         current = with_flow;
+    }
+
+    // 7. Правила прямого обхода VK-туннеля (TURN ВК / Телемост и VPS peer) в самый верх rules:
+    if let Ok(with_vkturn) = crate::vkturn::apply_rules(&current, &cfg.vkturn) {
+        current = with_vkturn;
     }
 
     // INV-4 (баги 12, 39, 51): страховка — цель правила обязана быть группой, статическим прокси или
@@ -3505,6 +3577,39 @@ mod tests {
     fn parse_provider_names_finds_top_level() {
         let yaml = "port: 7890\nproxy-providers:\n  alpha:\n    type: http\n    url: x\n  beta:\n    type: file\nrules:\n  - MATCH,PROXY\n";
         assert_eq!(parse_provider_names(yaml), vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    #[test]
+    fn regression_bug_120_sanitize_domains_rejects_rule_breaking_chars() {
+        // Баг 120: домен с `,` или `(` от невалидирующего писателя (бот, импорт, ручная правка config.json)
+        // попадал в правило DOMAIN-SUFFIX и ломал всю секцию rules.
+        let out = sanitize_domains(&[
+            "evil.com,DIRECT".to_string(),
+            "a(b).example".to_string(),
+            "x.example)".to_string(),
+            "ok.example".to_string(),
+            "nas.lan".to_string(),
+            "_srv.example".to_string(),
+        ]);
+        assert_eq!(out, vec!["_srv.example".to_string(), "nas.lan".to_string(), "ok.example".to_string()]);
+    }
+
+    #[test]
+    fn regression_bug_119_device_domain_rules_are_safe_and_targets_exist() {
+        // Баг 119: цели доменных правил устройств не сверялись с группами (удалённая группа или имя ноды
+        // провайдера → Mihomo отклоняет каждую следующую сборку), `)` в домене или цели ломал AND-правило.
+        let yaml = "proxies: []\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules:\n  - MATCH,PROXY\n";
+        let mut dd = std::collections::BTreeMap::new();
+        dd.insert("192.168.1.10".to_string(), vec![
+            crate::config::DeviceDomainRule { domain: "ok.example".into(), target: "DeletedGroup".into() },
+            crate::config::DeviceDomainRule { domain: "bad.example)".into(), target: "DIRECT".into() },
+            crate::config::DeviceDomainRule { domain: "t.example".into(), target: "PROXY),(DST-PORT,443".into() },
+        ]);
+        let out = apply_domain_rules(yaml, &[], &[], &dd).unwrap();
+        let (out, _) = sanitize_rule_targets(&out);
+        let rules: Vec<&str> = out.lines().filter(|l| l.contains("SRC-IP-CIDR")).collect();
+        assert_eq!(rules, vec!["  - AND,((SRC-IP-CIDR,192.168.1.10/32),(DOMAIN-SUFFIX,ok.example)),PROXY,no-resolve"],
+            "несуществующая цель заменена на основную группу, правила со скобками в домене/цели не созданы:\n{out}");
     }
 
     #[test]
@@ -4192,6 +4297,118 @@ rules:
     }
 
     #[test]
+    fn regression_bug_14_gaming_rules_order_and_compatibility_scope() {
+        // Баг 14:
+        // 1. Игровые правила не должны стоять выше AdBlock, DIRECT и персональных доменных правил (DEV_DOMAINS).
+        // 2. В режиме Compatibility custom_domains не должны применяться ко всем устройствам сети без привязки к игровым IP.
+        let yaml = "port: 7890\nproxy-groups:\nrules:\n  - MATCH,DIRECT\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.adblock_enabled = true;
+        cfg.direct_domains = vec!["direct-test.com".into()];
+        cfg.device_domain_rules.insert(
+            "192.168.2.100".into(),
+            vec![crate::config::DeviceDomainRule {
+                domain: "console-override.com".into(),
+                target: "DIRECT".into(),
+            }],
+        );
+        cfg.gaming.enabled = true;
+        cfg.gaming.mode = crate::config::GamingMode::Compatibility;
+        cfg.gaming.custom_domains = vec!["custom-game.com".into()];
+        cfg.gaming.devices = vec![crate::config::GamingDevice {
+            mac: "AA:BB:CC:DD:EE:FF".into(),
+            ip: "192.168.2.100".into(),
+            ipv6: vec![],
+            name: "PlayStation".into(),
+            enabled: true,
+            server: None,
+        }];
+
+        let (applied, _) = apply_routing(yaml, &cfg).expect("apply_routing should succeed");
+
+        let pos_adblock = applied.find(ADBLOCK_BEGIN).expect("ADBLOCK_BEGIN present");
+        let pos_dev_domains = applied.find(DEV_DOMAINS_BEGIN).expect("DEV_DOMAINS_BEGIN present");
+        let pos_direct = applied.find(DIRECT_BEGIN).expect("DIRECT_BEGIN present");
+        let pos_gaming = applied.find(GAMING_BEGIN).expect("GAMING_BEGIN present");
+
+        assert!(pos_adblock < pos_gaming, "AdBlock ({pos_adblock}) must be above Gaming ({pos_gaming})");
+        assert!(pos_dev_domains < pos_gaming, "DEV_DOMAINS ({pos_dev_domains}) must be above Gaming ({pos_gaming})");
+        assert!(pos_direct < pos_gaming, "DIRECT ({pos_direct}) must be above Gaming ({pos_gaming})");
+
+        // custom_domains in compatibility mode must not be global rule without SRC-IP-CIDR
+        assert!(
+            !applied.contains("  - DOMAIN-SUFFIX,custom-game.com,🎮 Gaming"),
+            "custom_domains in compatibility mode must not apply globally to all devices in the network"
+        );
+        assert!(
+            applied.contains("192.168.2.100"),
+            "gaming device IP must be present in rules"
+        );
+    }
+
+    #[test]
+    fn regression_bug_15_discord_zapret_hybrid_vs_gaming_priority() {
+        // Баг 15: Discord нужен двум функциям сразу. Игровой режим вел его в 🎮 Gaming и добавлял
+        // в geo_override, а Zapret hybrid_discord — в DIRECT. Молча побеждал игровой режим.
+        // Когда включен Zapret hybrid_discord (обход DPI на роутере напрямую), Discord должен идти в DIRECT,
+        // а не перехватываться игровым прокси-туннелем и не попадать в geo_override.
+        let yaml = "port: 7890\nproxy-groups:\nrules:\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.zapret.enabled = true;
+        cfg.zapret.hybrid_discord = true;
+
+        cfg.gaming.enabled = true;
+        cfg.gaming.mode = crate::config::GamingMode::KnownServices;
+        cfg.gaming.platforms.discord = true;
+
+        let (applied, _) = apply_routing(yaml, &cfg).expect("routing should succeed");
+
+        // Discord must be routed to DIRECT by Zapret hybrid rules
+        assert!(
+            applied.contains("  - DOMAIN-SUFFIX,discord.com,DIRECT"),
+            "Discord must have DIRECT rule from Zapret hybrid"
+        );
+        // Discord must NOT be routed to 🎮 Gaming when Zapret hybrid_discord is active
+        assert!(
+            !applied.contains("  - DOMAIN-SUFFIX,discord.com,🎮 Gaming"),
+            "Discord must not be captured by 🎮 Gaming proxy when Zapret hybrid_discord is handling it"
+        );
+
+        // Также в geo_override discord не должен затягиваться, если zapret hybrid_discord активен
+        let override_domains = crate::override_sync::collect_override_domains(&cfg, &[]);
+        assert!(
+            !override_domains.iter().any(|d| d.contains("discord")),
+            "Discord domains must not be put into geo_override when Zapret hybrid_discord is handling it"
+        );
+    }
+
+    #[test]
+    fn regression_bug_17_single_disabled_gaming_device_must_stay_inactive() {
+        // Баг 17: Единственное выключенное игровое устройство считалось активным из-за
+        // запасного правила `len == 1`.
+        let mut cfg = crate::config::GamingConfig::default();
+        cfg.enabled = true;
+        cfg.mode = crate::config::GamingMode::Compatibility;
+        cfg.devices.push(crate::config::GamingDevice {
+            mac: "11:22:33:44:55:66".into(),
+            ip: "192.168.2.50".into(),
+            ipv6: vec![],
+            name: "PC".into(),
+            enabled: false, // явно выключено!
+            server: None,
+        });
+
+        let yaml = "port: 7890\nproxy-groups:\nrules:\n  - MATCH,PROXY\n";
+        let applied = apply_gaming_rules(yaml, &cfg, &[]).expect("applied");
+
+        // Выключенное устройство НЕ должно генерировать правило маршрутизации в Gaming
+        assert!(
+            !applied.contains("192.168.2.50"),
+            "Disabled gaming device must not be routed to Gaming even if it is the only device"
+        );
+    }
+
+    #[test]
     fn test_apply_gaming_target_server_order_in_proxies() {
         let yaml = "port: 7890\nproxy-groups:\nrules:\n  - MATCH,PROXY\n";
         let mut cfg = crate::config::GamingConfig::default();
@@ -4849,6 +5066,65 @@ rules:
             wl_pos < ai_pos,
             "CRITICAL REGRESSION: Push notification direct rules in whitelist ({}) must precede Google AI ({})",
             wl_pos, ai_pos
+        );
+    }
+
+    #[test]
+    fn regression_bug_32_zapret_excluded_devices_bypass_mihomo_direct_and_resolve_mac() {
+        // Баг 32: Исключение устройства из Zapret работало только для LAN-трафика напрямую.
+        // Hybrid-трафик через Mihomo DIRECT выходил из роутера через OUTPUT с адресом роутера и попадал в Zapret.
+        // Исключение по MAC переводилось в IP через ARP только при старте.
+        let mut zapret_cfg = crate::config::ZapretConfig::default();
+        zapret_cfg.enabled = true;
+        zapret_cfg.hybrid_youtube = true;
+        // Устройство исключено по IP и по MAC:
+        zapret_cfg.excluded_devices = vec!["192.168.1.50".into(), "00:11:22:33:44:55".into()];
+
+        let mock_arp = "IP address       HW type     Flags       HW address            Mask     Device\n\
+                        192.168.1.60     0x1         0x2         00:11:22:33:44:55     *        br0\n";
+
+        let excluded_ips = resolve_excluded_zapret_ips_internal(&zapret_cfg, Some(mock_arp));
+        assert!(excluded_ips.contains(&"192.168.1.50".to_string()), "IP must be resolved");
+        assert!(excluded_ips.contains(&"192.168.1.60".to_string()), "MAC must be dynamically resolved from ARP");
+
+        let yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - MATCH,DIRECT\n";
+        let out = apply_zapret_hybrid_rules_with_force_internal(yaml, &zapret_cfg, &[], Some(mock_arp)).expect("applied");
+
+        // Для исключённых устройств hybrid-домены НЕ должны уходить в DIRECT (где Zapret в OUTPUT их перехватывает)
+        // Они должны направляться в PROXY для этого устройства:
+        assert!(
+            out.contains("SRC-IP-CIDR,192.168.1.50/32"),
+            "Excluded IP must have explicit rule diverting away from Zapret DIRECT"
+        );
+        assert!(
+            out.contains("SRC-IP-CIDR,192.168.1.60/32"),
+            "Excluded MAC resolved IP must have explicit rule diverting away from Zapret DIRECT"
+        );
+    }
+
+    #[test]
+    fn regression_bug_24_whitelist_dns_applies_in_zero_touch_mode_without_explicit_devices() {
+        // Баг 24: DNS-политика БС (российские домены -> DNS роутера 127.0.0.1:53) применялась
+        // только при явно заданных устройствах. В режиме Zero-Touch (когда список устройств пуст,
+        // но whitelist включен на всю сеть) DNS-политика отсутствовала.
+        let yaml = "port: 7890\ndns:\n  enable: true\nproxy-groups:\nrules:\n  - MATCH,DIRECT\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.devices.clear(); // Режим Zero-Touch без явных устройств!
+
+        let applied = apply_whitelist_dns(yaml, &cfg, "127.0.0.1:53");
+
+        assert!(
+            applied.contains("nameserver-policy:"),
+            "nameserver-policy must be generated in Zero-Touch whitelist mode"
+        );
+        assert!(
+            applied.contains(WHITELIST_DNS_BEGIN),
+            "WHITELIST_DNS_BEGIN must be present"
+        );
+        assert!(
+            applied.contains("127.0.0.1:53"),
+            "DNS policy must point to router DNS 127.0.0.1:53"
         );
     }
 

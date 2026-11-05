@@ -1376,6 +1376,23 @@ pub fn sanitize_config_for_backup(raw_json: &[u8]) -> Result<Vec<u8>, String> {
         }
     }
 
+    // Маскируем vkturn wireguard секреты
+    if let Some(vkturn) = val.get_mut("vkturn") {
+        if let Some(pw) = vkturn.get_mut("password") {
+            *pw = serde_json::Value::String("******".into());
+        }
+        if let Some(wg) = vkturn.get_mut("wg") {
+            if let Some(pk) = wg.get_mut("private_key") {
+                *pk = serde_json::Value::String("******".into());
+            }
+            if let Some(psk) = wg.get_mut("preshared_key") {
+                if !psk.is_null() {
+                    *psk = serde_json::Value::String("******".into());
+                }
+            }
+        }
+    }
+
     serde_json::to_vec_pretty(&val).map_err(|e| format!("Ошибка сериализации санитизированного конфига: {e}"))
 }
 
@@ -1447,8 +1464,7 @@ async fn bot_add_force_domain(state: &AppState, domain: &str) -> Result<(), Stri
         .map_err(|e| format!("Ошибка роутинга: {e}"))?;
     tx.set_yaml(new_yaml)?;
     tx.commit_and_reload().await?;
-    let all_force = tx.config().force_domains.clone();
-    let _ = crate::override_sync::sync_geo_override(&all_force).await;
+    let _ = crate::override_sync::sync_from_config(tx.config(), &[]).await;
     Ok(())
 }
 
@@ -1463,8 +1479,7 @@ async fn bot_add_direct_domain(state: &AppState, domain: &str) -> Result<(), Str
         .map_err(|e| format!("Ошибка роутинга: {e}"))?;
     tx.set_yaml(new_yaml)?;
     tx.commit_and_reload().await?;
-    let all_force = tx.config().force_domains.clone();
-    let _ = crate::override_sync::sync_geo_override(&all_force).await;
+    let _ = crate::override_sync::sync_from_config(tx.config(), &[]).await;
     Ok(())
 }
 
@@ -1477,8 +1492,7 @@ async fn bot_remove_domain_rules(state: &AppState, domain: &str) -> Result<(), S
         .map_err(|e| format!("Ошибка роутинга: {e}"))?;
     tx.set_yaml(new_yaml)?;
     tx.commit_and_reload().await?;
-    let all_force = tx.config().force_domains.clone();
-    let _ = crate::override_sync::sync_geo_override(&all_force).await;
+    let _ = crate::override_sync::sync_from_config(tx.config(), &[]).await;
     Ok(())
 }
 
@@ -1789,6 +1803,13 @@ mod tests {
             },
             "mobile_provider_urls": {
                 "sub1": "https://my-proxy-provider.org/api/v1/client/subscribe?token=secret_sub_token_999"
+            },
+            "vkturn": {
+                "password": "secret_vkturn_wdtt_password",
+                "wg": {
+                    "private_key": "secret_vkturn_private_key_base64",
+                    "preshared_key": "secret_vkturn_preshared_key_base64"
+                }
             }
         });
 
@@ -1802,6 +1823,9 @@ mod tests {
         assert!(!sanitized_str.contains("8959891087:AAHWkeSw_WL6b8k3J9tONrms-7F2NgE2Yfo"), "токен бота не должен присутствовать в бэкапе");
         assert!(!sanitized_str.contains("rci_router_secret_pass"), "пароль RCI не должен присутствовать в бэкапе");
         assert!(!sanitized_str.contains("secret_sub_token_999"), "URL/токен подписок не должен присутствовать в бэкапе");
+        assert!(!sanitized_str.contains("secret_vkturn_private_key_base64"), "private_key VK-туннеля не должен присутствовать в бэкапе");
+        assert!(!sanitized_str.contains("secret_vkturn_preshared_key_base64"), "preshared_key VK-туннеля не должен присутствовать в бэкапе");
+        assert!(!sanitized_str.contains("secret_vkturn_wdtt_password"), "пароль сервера WDTT не должен присутствовать в бэкапе");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { apiGet, apiPost, apiPut, apiDelete, getWsUrl } from './api'
+import { apiGet, apiPost, apiPut, apiDelete, getWsUrl, applyDetectedWhitelistServers } from './api'
 
 describe('api client', () => {
   beforeEach(() => {
@@ -243,5 +243,76 @@ describe('api client', () => {
     } as any)
 
     await expect(apiGet<any>('some-endpoint')).rejects.toThrow('отсутствует поле data')
+  })
+})
+
+describe('regression bug 98', () => {
+  it('apply detected whitelist adds to user marks instead of replacing lists', async () => {
+    // Баг 98: «Применить найденные БС в 1 клик» отправляло полный список — ручные пометки стирались.
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(JSON.stringify({ success: true, data: { whitelist_servers: ['manual', 'found'], whitelist_providers: ['p-manual', 'p-found'] } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    )
+    const res = await applyDetectedWhitelistServers(['found'], ['p-found'])
+    const bodies = fetchSpy.mock.calls.map((c) => JSON.parse(String(c[1]?.body ?? '{}')))
+    expect(bodies[0]).toEqual({ add_servers: ['found'] })
+    expect(bodies[1]).toEqual({ add_providers: ['p-found'] })
+    expect(bodies.some((b) => 'servers' in b || 'providers' in b)).toBe(false)
+    expect(res.whitelist_servers).toEqual(['manual', 'found'])
+    fetchSpy.mockRestore()
+  })
+})
+
+describe('VK-turn API endpoints', () => {
+  it('calls getVkTurnStatus, getVkTurnLogs, saveVkTurnConfig and vkTurnAction correctly', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url: any) => {
+      const u = String(url)
+      if (u.includes('/api/vkturn/status')) {
+        return new Response(JSON.stringify({ success: true, data: { installed: true, phase: 'connected' } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (u.includes('/api/vkturn/logs')) {
+        return new Response(JSON.stringify({ success: true, data: { lines: ['log line 1'] } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (u.includes('/api/vkturn/config')) {
+        return new Response(JSON.stringify({ success: true, data: { success: true } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (u.includes('/api/vkturn/action')) {
+        return new Response(JSON.stringify({ success: true, data: { delay_ms: 35 } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      return new Response(JSON.stringify({ success: false }), { status: 404 })
+    })
+
+    const api = await import('./api')
+    const { getVkTurnStatus, getVkTurnLogs, saveVkTurnConfig, vkTurnAction } = api
+    // WDTT: wg-конфиг выдаёт сервер, разбор вставленного конфига больше не нужен
+    expect('parseVkTurnWg' in api).toBe(false)
+    
+    const status = await getVkTurnStatus()
+    expect(status.phase).toBe('connected')
+
+    const logs = await getVkTurnLogs()
+    expect(logs.lines).toEqual(['log line 1'])
+
+    const saved = await saveVkTurnConfig({ enabled: true, peer: '203.0.113.10', password: 'pw' })
+    expect(saved.success).toBe(true)
+
+    const action = await vkTurnAction('test')
+    expect(action.delay_ms).toBe(35)
+
+    fetchSpy.mockRestore()
   })
 })

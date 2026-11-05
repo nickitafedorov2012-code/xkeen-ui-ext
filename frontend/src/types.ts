@@ -1039,3 +1039,72 @@ export interface WhitelistCatalogResponse {
   categories: Record<string, string[]>
   items?: WhitelistCatalogItem[]
 }
+
+// ============================================================================
+// VK-туннель (VK-turn)
+// ============================================================================
+
+export type VkTurnPhase =
+  | 'disabled'
+  | 'not_installed'
+  | 'starting'
+  | 'authorizing'
+  | 'solving_captcha'
+  | 'connected'
+  | 'degraded'
+  | 'captcha_required'
+  | 'link_invalid'
+  | 'auth_failed'
+  | 'server_unreachable'
+  | 'crashed'
+  | 'backoff'
+
+export interface VkTurnStatus {
+  installed: boolean
+  core_version: string
+  phase: VkTurnPhase
+  pid?: number | null
+  connected_streams: number
+  target_streams: number
+  bytes_up: number
+  bytes_down: number
+  links_count: number
+  /** Ссылки для показа: хеш звонка обрезан */
+  links: string[]
+  max_links: number
+  restarts: number
+  last_error?: string | null
+  enabled: boolean
+  peer: string
+  has_password: boolean
+  device_id: string
+  /** Сервер WDTT уже выдал WireGuard-конфиг, узел подключён к Mihomo */
+  wg_ready: boolean
+  wg: {
+    address: string
+    mtu: number
+    dns: string[]
+  }
+}
+
+export interface VkTurnConfigPayload {
+  enabled?: boolean
+  /** IP или домен сервера WDTT, можно с портом (по умолчанию 56000) */
+  peer?: string
+  /** Пароль подключения; пустая строка — оставить прежний */
+  password?: string
+  links?: string[]
+  streams?: number
+  listen_port?: number
+  /** Новая основная ссылка: встаёт первой, запасные сохраняются */
+  primary_link?: string
+}
+
+export interface VkTurnActionResponse {
+  output?: string
+  message?: string
+  success?: boolean
+  delay_ms?: number
+  [key: string]: unknown
+}
+

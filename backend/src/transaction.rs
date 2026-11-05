@@ -819,6 +819,129 @@ pub struct PendingCommit {
     pub json_snapshot: Option<String>,
     pub initial_config: config::AppConfig,
     pub cancel_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    /// Баг 131: что записала эта транзакция (для трёхстороннего слияния при откате)
+    pub applied_yaml: Option<String>,
+    pub applied_json: Option<String>,
+    /// Баг 131: файл ожидания на диске — откат переживает перезапуск панели
+    pub persist_path: Option<PathBuf>,
+}
+
+/// Ожидающее подтверждение на диске (баг 131): после перезапуска панели неподтверждённое изменение откатывается.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PersistedPendingCommit {
+    pub tx_id: String,
+    pub yaml_path: String,
+    pub yaml_snapshot: Option<String>,
+    pub json_snapshot: Option<String>,
+    pub applied_yaml: Option<String>,
+    pub applied_json: Option<String>,
+}
+
+/// Путь файла ожидания рядом с config.json.
+pub fn pending_commit_file(config_path: &Path) -> PathBuf {
+    config_path.with_extension("json.pending-commit")
+}
+
+/// Трёхстороннее слияние JSON при откате (баг 131): ключ, который после транзакции никто не трогал
+/// (current == applied), возвращается к исходному; ключ, изменённый другим писателем, сохраняется.
+pub fn three_way_merge_json(original: &serde_json::Value, applied: &serde_json::Value, current: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    if current == applied {
+        return original.clone();
+    }
+    match (original, applied, current) {
+        (Value::Object(o), Value::Object(a), Value::Object(c)) => {
+            let mut keys: Vec<&String> = o.keys().chain(a.keys()).chain(c.keys()).collect();
+            keys.sort();
+            keys.dedup();
+            let mut out = serde_json::Map::new();
+            for k in keys {
+                match (o.get(k), a.get(k), c.get(k)) {
+                    (ov, av, cv) if cv == av => {
+                        if let Some(v) = ov {
+                            out.insert(k.clone(), v.clone());
+                        }
+                    }
+                    (Some(ov), Some(av), Some(cv)) => {
+                        out.insert(k.clone(), three_way_merge_json(ov, av, cv));
+                    }
+                    (_, _, Some(cv)) => {
+                        out.insert(k.clone(), cv.clone());
+                    }
+                    _ => {}
+                }
+            }
+            Value::Object(out)
+        }
+        _ => current.clone(),
+    }
+}
+
+/// Откат неподтверждённой транзакции (баг 131): слияние config.json с изменениями других писателей,
+/// пересборка авто-блоков config.yaml под итоговую конфигурацию, reload и пересинхронизация iptables.
+pub async fn perform_commit_rollback(state: &AppState, p: &PersistedPendingCommit) -> Result<(), String> {
+    let _cfg_guard = state.config_lock.lock().await;
+    let _routing_guard = state.routing_lock.lock().await;
+    let json_path = (*state.config_path).clone();
+
+    let mut final_cfg = (**state.config.read().await).clone();
+    if let Some(ref orig_raw) = p.json_snapshot {
+        let original: serde_json::Value = serde_json::from_str(orig_raw).map_err(|e| format!("Снимок config.json повреждён: {e}"))?;
+        let merged = match (p.applied_json.as_deref(), tokio::fs::read_to_string(&json_path).await) {
+            (Some(applied_raw), Ok(current_raw)) => {
+                match (serde_json::from_str::<serde_json::Value>(applied_raw), serde_json::from_str::<serde_json::Value>(&current_raw)) {
+                    (Ok(applied), Ok(current)) => three_way_merge_json(&original, &applied, &current),
+                    _ => original.clone(),
+                }
+            }
+            _ => original.clone(),
+        };
+        final_cfg = match serde_json::from_value::<config::AppConfig>(merged) {
+            Ok(c) => c,
+            Err(_) => serde_json::from_value(original).map_err(|e| format!("Снимок config.json не читается: {e}"))?,
+        };
+        config::save(&json_path, &final_cfg).await?;
+    }
+
+    let mut final_yaml = None;
+    if let Some(ref orig_yaml) = p.yaml_snapshot {
+        // Авто-блоки пересобираются под итоговую конфигурацию (с изменениями других писателей)
+        let rebuilt = match crate::routing::apply_routing(orig_yaml, &final_cfg) {
+            Ok((y, _)) if validate_yaml_syntax(&y).is_ok() => y,
+            _ => orig_yaml.clone(),
+        };
+        crate::api::atomic_write_file(&p.yaml_path, &rebuilt).await?;
+        final_yaml = Some(rebuilt);
+    }
+    *state.config.write().await = Arc::new(final_cfg.clone());
+    let _ = crate::mihomo::reload_config(&state.http, &final_cfg).await;
+    let yaml_now = match final_yaml {
+        Some(y) => y,
+        None => tokio::fs::read_to_string(&p.yaml_path).await.unwrap_or_default(),
+    };
+    let redir_port = crate::routing::parse_redir_port(&yaml_now).unwrap_or(5000);
+    let tproxy_port = crate::routing::parse_tproxy_port(&yaml_now).unwrap_or(5001);
+    let dns_port = crate::api::resolve_active_dns_port(&final_cfg);
+    crate::api::sync_full_tunnel_modes(&final_cfg, redir_port, tproxy_port, dns_port).await;
+    let _ = tokio::fs::remove_file(pending_commit_file(&json_path)).await;
+    Ok(())
+}
+
+/// Запуск панели (баг 131): неподтверждённое изменение, пережившее перезапуск, откатывается сразу —
+/// таймер подтверждения жил только в памяти.
+pub async fn recover_pending_commit_after_restart(state: &AppState) {
+    let path = pending_commit_file(&state.config_path);
+    let Ok(raw) = tokio::fs::read_to_string(&path).await else { return };
+    match serde_json::from_str::<PersistedPendingCommit>(&raw) {
+        Ok(p) => {
+            log_w!("[COMMIT-CONFIRMED] Найдено неподтверждённое изменение tx_id={} после перезапуска — откат", p.tx_id);
+            if let Err(e) = perform_commit_rollback(state, &p).await {
+                log_e!("[COMMIT-CONFIRMED] Откат после перезапуска не удался: {e}");
+            }
+        }
+        Err(e) => log_e!("[COMMIT-CONFIRMED] Файл ожидания подтверждения повреждён ({e}) — пропуск"),
+    }
+    let _ = tokio::fs::remove_file(&path).await;
 }
 
 static PENDING_COMMIT: OnceLock<StdMutex<Option<PendingCommit>>> = OnceLock::new();
@@ -885,10 +1008,30 @@ pub async fn apply_with_confirmation(
 
     // Применяем файлы и перезагружаем ядро
     tx.commit_and_reload().await?;
+    let yaml_path = tx.yaml_path.clone();
+    let json_path = tx.json_path.clone();
+    drop(tx);
 
     if rollback_seconds == 0 {
         // Немедленная постоянная фиксация без отката
         return Ok(tx_id);
+    }
+
+    // Баг 131: что именно записала транзакция — для слияния с чужими изменениями при откате
+    let applied_yaml = tokio::fs::read_to_string(&yaml_path).await.ok();
+    let applied_json = tokio::fs::read_to_string(&json_path).await.ok();
+    let persisted = PersistedPendingCommit {
+        tx_id: tx_id.clone(),
+        yaml_path: yaml_path.display().to_string(),
+        yaml_snapshot: original_yaml.clone(),
+        json_snapshot: original_json.clone(),
+        applied_yaml: applied_yaml.clone(),
+        applied_json: applied_json.clone(),
+    };
+    let persist_path = pending_commit_file(&json_path);
+    if let Ok(raw) = serde_json::to_string(&persisted) {
+        let p = persist_path.clone();
+        let _ = tokio::task::spawn_blocking(move || sync_atomic_write_or_remove(&p, Some(&raw))).await;
     }
 
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
@@ -913,33 +1056,26 @@ pub async fn apply_with_confirmation(
             json_snapshot: original_json.clone(),
             initial_config: initial_config.clone(),
             cancel_tx: Some(cancel_tx),
+            applied_yaml,
+            applied_json,
+            persist_path: Some(persist_path.clone()),
         });
     }
 
     // Фоновый таймер отката
     let state_clone = state.clone();
     let tx_id_clone = tx_id.clone();
-    let yaml_backup = original_yaml;
-    let json_backup = original_json;
-    let initial_cfg = initial_config;
+    let _ = initial_config;
 
     tokio::spawn(async move {
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(rollback_seconds)) => {
                 log_w!("[COMMIT-CONFIRMED] Время ожидания подтверждения истекло для tx_id={} ({} сек). Запуск автоотката...", tx_id_clone, rollback_seconds);
-                // Тот же порядок блокировок, что у ConfigTx: откат не должен гоняться с
-                // параллельными транзакциями, watchdog и failover, пишущими эти же файлы
-                let _cfg_guard = state_clone.config_lock.lock().await;
-                let _routing_guard = state_clone.routing_lock.lock().await;
-                if let Some(ref y) = yaml_backup {
-                    let _ = crate::api::atomic_write_file(&initial_cfg.mihomo.config_path, y).await;
+                // Блокировки берёт perform_commit_rollback (тот же порядок, что у ConfigTx)
+                match perform_commit_rollback(&state_clone, &persisted).await {
+                    Ok(()) => log_i!("[COMMIT-CONFIRMED] Конфигурация откатана после таймаута tx_id={} (изменения других писателей сохранены)", tx_id_clone),
+                    Err(e) => log_e!("[COMMIT-CONFIRMED] Автооткат tx_id={} не удался: {e}", tx_id_clone),
                 }
-                if let Some(ref j) = json_backup {
-                    let _ = crate::api::atomic_write_file(&*state_clone.config_path, j).await;
-                }
-                *state_clone.config.write().await = Arc::new(initial_cfg.clone());
-                let _ = crate::mihomo::reload_config(&state_clone.http, &initial_cfg).await;
-                log_i!("[COMMIT-CONFIRMED] Конфигурация успешно откатана к исходному состоянию после таймаута tx_id={}", tx_id_clone);
 
                 if let Ok(mut g) = pending_commit_store().lock() {
                     if let Some(ref cur) = *g {
@@ -966,6 +1102,9 @@ pub fn confirm_commit(tx_id: &str) -> Result<(), String> {
         if pending.tx_id == tx_id {
             if let Some(tx) = pending.cancel_tx.take() {
                 let _ = tx.send(());
+            }
+            if let Some(ref p) = pending.persist_path {
+                let _ = std::fs::remove_file(p);
             }
             Ok(())
         } else {
@@ -997,17 +1136,15 @@ pub async fn rollback_pending_commit(state: &AppState, tx_id: &str) -> Result<()
         }
     };
 
-    let _cfg_guard = state.config_lock.lock().await;
-    let _routing_guard = state.routing_lock.lock().await;
-    if let Some(ref y) = pending.yaml_snapshot {
-        crate::api::atomic_write_file(&pending.initial_config.mihomo.config_path, y).await?;
-    }
-    if let Some(ref j) = pending.json_snapshot {
-        crate::api::atomic_write_file(&*state.config_path, j).await?;
-    }
-    *state.config.write().await = Arc::new(pending.initial_config.clone());
-    let _ = crate::mihomo::reload_config(&state.http, &pending.initial_config).await;
-    Ok(())
+    let persisted = PersistedPendingCommit {
+        tx_id: pending.tx_id.clone(),
+        yaml_path: pending.initial_config.mihomo.config_path.clone(),
+        yaml_snapshot: pending.yaml_snapshot.clone(),
+        json_snapshot: pending.json_snapshot.clone(),
+        applied_yaml: pending.applied_yaml.clone(),
+        applied_json: pending.applied_json.clone(),
+    };
+    perform_commit_rollback(state, &persisted).await
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1100,8 +1237,112 @@ mod tests {
             speedtest_lock: Arc::new(tokio::sync::Mutex::new(())),
             zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
             antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
         };
         (state, yaml_path, json_path)
+    }
+
+    /// Общее глобальное хранилище ожидающего подтверждения — тесты commit-confirmed идут по одному.
+    static COMMIT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Мок Mihomo: на любой запрос отвечает 204 (reload «принят»).
+    async fn spawn_mock_mihomo_204() -> u16 {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 16384];
+                    let _ = sock.read(&mut buf).await;
+                    let _ = sock.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n").await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn regression_bug_131_auto_rollback_keeps_changes_made_by_others() {
+        // Баг 131: автооткат commit-confirmed восстанавливал снимок config.json целиком и стирал всё,
+        // что за окно изменили другие (failover, watchdog, другие вкладки).
+        let _commit_lock = COMMIT_TEST_LOCK.lock().await;
+        let root = std::env::temp_dir().join(format!("xkeen-bug131-{}", crate::auth::random_hex(8)));
+        std::fs::create_dir_all(&root).unwrap();
+        let (state, yaml_path, json_path) = create_test_state(&root);
+        let port = spawn_mock_mihomo_204().await;
+        let mut cfg = (**state.config.read().await).clone();
+        cfg.mihomo.port = port;
+        cfg.gaming.smart_idle_timeout_mins = 60;
+        cfg.zapret.engine = "v2".into();
+        let base_yaml = "mode: rule\nproxies: []\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules:\n  - MATCH,PROXY\n";
+        std::fs::write(&yaml_path, base_yaml).unwrap();
+        config::save(&json_path, &cfg).await.unwrap();
+        *state.config.write().await = Arc::new(cfg.clone());
+
+        // Транзакция с подтверждением меняет таймаут умного режима
+        let mut changed = cfg.clone();
+        changed.gaming.smart_idle_timeout_mins = 5;
+        apply_with_confirmation(&state, 1, None, Some(changed)).await.unwrap();
+
+        // За время окна другой писатель (через ConfigTx) меняет движок Zapret
+        {
+            let mut tx = ConfigTx::begin(&state).await.unwrap();
+            tx.config_mut().zapret.engine = "v1".into();
+            tx.commit_without_reload().await.unwrap();
+        }
+
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+
+        let after: config::AppConfig = serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        assert_eq!(after.gaming.smart_idle_timeout_mins, 60, "изменение неподтверждённой транзакции откатано");
+        assert_eq!(after.zapret.engine, "v1", "изменение другого писателя за окно не стёрто");
+        assert_eq!(state.config.read().await.zapret.engine, "v1", "и в памяти тоже");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn regression_bug_131_pending_commit_survives_restart() {
+        // Баг 131: ожидание подтверждения жило только в памяти — перезапуск в окне = отката нет.
+        let _commit_lock = COMMIT_TEST_LOCK.lock().await;
+        let root = std::env::temp_dir().join(format!("xkeen-bug131r-{}", crate::auth::random_hex(8)));
+        std::fs::create_dir_all(&root).unwrap();
+        let (state, yaml_path, json_path) = create_test_state(&root);
+        let port = spawn_mock_mihomo_204().await;
+        let mut cfg = (**state.config.read().await).clone();
+        cfg.mihomo.port = port;
+        cfg.gaming.smart_idle_timeout_mins = 60;
+        let base_yaml = "mode: rule\nproxies: []\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules:\n  - MATCH,PROXY\n";
+        std::fs::write(&yaml_path, base_yaml).unwrap();
+        config::save(&json_path, &cfg).await.unwrap();
+        *state.config.write().await = Arc::new(cfg.clone());
+        let mut changed = cfg.clone();
+        changed.gaming.smart_idle_timeout_mins = 7;
+        apply_with_confirmation(&state, 600, None, Some(changed)).await.unwrap();
+        let pending = pending_commit_file(&json_path);
+        assert!(pending.exists(), "ожидание подтверждения записано на диск");
+        // «Перезапуск»: таймер в памяти потерян, при старте панель находит файл и откатывает
+        if let Ok(mut g) = pending_commit_store().lock() {
+            if let Some(mut p) = g.take() {
+                let _ = p.cancel_tx.take();
+            }
+        }
+        recover_pending_commit_after_restart(&state).await;
+        let after: config::AppConfig = serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        assert_eq!(after.gaming.smart_idle_timeout_mins, 60, "неподтверждённое изменение откатано после перезапуска");
+        assert!(!pending.exists(), "файл ожидания удалён");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn regression_bug_131_three_way_merge_rules() {
+        let o = serde_json::json!({"a": 1, "nested": {"x": 1, "y": 1}, "gone": true});
+        let a = serde_json::json!({"a": 2, "nested": {"x": 2, "y": 1}, "gone": true});
+        let c = serde_json::json!({"a": 2, "nested": {"x": 2, "y": 9}, "gone": true, "new": "other"});
+        let m = three_way_merge_json(&o, &a, &c);
+        assert_eq!(m, serde_json::json!({"a": 1, "nested": {"x": 1, "y": 9}, "gone": true, "new": "other"}));
     }
 
     #[test]

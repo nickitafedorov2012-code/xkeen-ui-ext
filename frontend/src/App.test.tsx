@@ -32,6 +32,9 @@ vi.mock('./components/Antigravity', () => ({
 vi.mock('./components/Zapret', () => ({
   default: () => <div data-testid="zapret-view">Zapret View</div>,
 }))
+vi.mock('./components/VkTurn', () => ({
+  default: () => <div data-testid="vkturn-view">VkTurn View</div>,
+}))
 vi.mock('./components/Gaming', () => ({
   default: () => <div data-testid="gaming-view">Gaming View</div>,
 }))
@@ -228,6 +231,26 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
     })
 
     expect(container?.querySelector('[data-testid="adguard-view"]')).not.toBeNull()
+  })
+
+  it('renders VK-turn tab button directly after zapret and switches to VkTurn view when clicked', async () => {
+    await act(async () => {
+      root!.render(<App />)
+    })
+
+    const buttons = Array.from(container?.querySelectorAll('nav.tabs button') || [])
+    const zapretIndex = buttons.findIndex((b) => b.textContent?.includes('Zapret'))
+    const vkturnIndex = buttons.findIndex((b) => b.textContent?.includes('VK-туннель'))
+
+    expect(zapretIndex).toBeGreaterThanOrEqual(0)
+    expect(vkturnIndex).toBe(zapretIndex + 1)
+
+    const vkturnTabBtn = buttons[vkturnIndex] as HTMLButtonElement
+    await act(async () => {
+      vkturnTabBtn.click()
+    })
+
+    expect(container?.querySelector('[data-testid="vkturn-view"]')).not.toBeNull()
   })
 
   it('renders #help hash as help view without duplicating adguard', async () => {

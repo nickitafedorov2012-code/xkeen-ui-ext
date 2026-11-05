@@ -9,6 +9,7 @@ const Servers = lazy(() => import('./components/Servers'))
 const Devices = lazy(() => import('./components/Devices'))
 const Whitelist = lazy(() => import('./components/Whitelist'))
 const Zapret = lazy(() => import('./components/Zapret'))
+const VkTurn = lazy(() => import('./components/VkTurn'))
 const Gaming = lazy(() => import('./components/Gaming'))
 const Antigravity = lazy(() => import('./components/Antigravity'))
 const ConnectionsViewer = lazy(() => import('./components/ConnectionsViewer'))
@@ -33,6 +34,7 @@ type TabId =
   | 'devices'
   | 'whitelist'
   | 'zapret'
+  | 'vkturn'
   | 'gaming'
   | 'xbox-dns'
   | 'google-ai'
@@ -50,6 +52,7 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'devices', label: '📱 Устройства' },
   { id: 'whitelist', label: '🛡️ Белые списки' },
   { id: 'zapret', label: '⚡ Zapret' },
+  { id: 'vkturn', label: '📞 VK-туннель' },
   { id: 'gaming', label: '🎮 Игры' },
   { id: 'google-ai', label: '🤖 Google AI' },
   { id: 'adguard', label: '🛡️ AdGuard' },
@@ -389,6 +392,7 @@ export default function App() {
             {tab === 'devices' && <Devices notify={notify} />}
             {tab === 'whitelist' && <Whitelist notify={notify} status={status} refresh={refresh} />}
             {tab === 'zapret' && <Zapret notify={notify} />}
+            {tab === 'vkturn' && <VkTurn notify={notify} />}
             {(tab === 'gaming' || tab === 'xbox-dns') && <Gaming notify={notify} />}
             {(tab === 'google-ai' || tab === 'antigravity') && <Antigravity notify={notify} />}
             {tab === 'connections' && <ConnectionsViewer notify={notify} />}

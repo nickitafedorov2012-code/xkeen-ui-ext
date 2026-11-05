@@ -216,7 +216,8 @@ export async function applyDetectedWhitelistServers(
     // Маршрут бэкенда — /api/servers/whitelist (раньше слали в несуществующий whitelist/servers)
     const srvRes = await apiPost<{ whitelist_servers: string[]; whitelist_providers: string[] }>(
       'servers/whitelist',
-      { servers: serverIds }
+      // Баг 98: найденные узлы добавляются к ручным пометкам, а не заменяют их
+      { add_servers: serverIds }
     )
     resServers = srvRes.whitelist_servers || serverIds
     if (srvRes.whitelist_providers) resProviders = srvRes.whitelist_providers
@@ -225,7 +226,7 @@ export async function applyDetectedWhitelistServers(
   if (providerIds.length > 0) {
     const provRes = await apiPost<{ whitelist_servers: string[]; whitelist_providers: string[] }>(
       'whitelist/providers',
-      { providers: providerIds }
+      { add_providers: providerIds }
     )
     resProviders = provRes.whitelist_providers || providerIds
     if (provRes.whitelist_servers) resServers = provRes.whitelist_servers
@@ -233,3 +234,28 @@ export async function applyDetectedWhitelistServers(
 
   return { whitelist_servers: resServers, whitelist_providers: resProviders }
 }
+
+// ============================================================================
+// VK-туннель (VK-turn) API
+// ============================================================================
+
+export async function getVkTurnStatus(): Promise<import('./types').VkTurnStatus> {
+  return apiGet<import('./types').VkTurnStatus>('vkturn/status')
+}
+
+export async function getVkTurnLogs(): Promise<{ lines: string[] }> {
+  return apiGet<{ lines: string[] }>('vkturn/logs')
+}
+
+export async function saveVkTurnConfig(
+  payload: import('./types').VkTurnConfigPayload
+): Promise<{ success: boolean; message?: string }> {
+  return apiPost<{ success: boolean; message?: string }>('vkturn/config', payload)
+}
+
+export async function vkTurnAction(
+  action: string
+): Promise<import('./types').VkTurnActionResponse> {
+  return apiPost<import('./types').VkTurnActionResponse>('vkturn/action', { action })
+}
+

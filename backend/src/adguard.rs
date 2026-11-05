@@ -418,7 +418,8 @@ pub async fn heal_all_adguard_yaml_configs(dns_port: u16) {
             if let Ok(content) = tokio::fs::read_to_string(p).await {
                 let (healed, changed) = sanitize_and_heal_adguard_yaml(&content, dns_port);
                 if changed {
-                    let _ = tokio::fs::write(p, healed).await;
+                    // Баг 115a: атомарная замена — без обрезанного конфига при обрыве
+                    let _ = crate::api::atomic_write_file(p, &healed).await;
                     crate::log_i!("[ADGUARD] ✓ Конфигурационный файл {} очищен и обновлен на диске", path_str);
                 }
             }
@@ -1158,13 +1159,18 @@ pub const DEFAULT_ADGUARD_DNS_FALLBACK_PORT: u16 = 5354;
 
 pub fn build_sync_tunnel_dns_ports_script(from_ports: &str, to_port: u16) -> String {
     format!(
-        "for chain in XKEEN_GAMING XKEEN_BS; do \
-            iptables -w 2 -t nat -S $chain 2>/dev/null | grep -E 'to-ports ({from_ports})' | while read -r line; do \
-                del_cmd=$(echo \"$line\" | sed 's/^-A/-D/'); \
-                add_cmd=$(echo \"$line\" | sed -E 's/--to-ports [0-9]+/--to-ports {to_port}/'); \
-                iptables -w 2 -t nat $del_cmd 2>/dev/null || true; \
-                iptables -w 2 -t nat $add_cmd 2>/dev/null || true; \
-            done; \
+        "for chain in XKEEN_GAMING XKEEN_BS; do \\\n\
+            iptables -w 2 -t nat -S $chain 2>/dev/null | grep -E 'to-ports ({from_ports})' | while read -r line; do \\\n\
+                del_cmd=$(echo \"$line\" | sed 's/^-A/-D/'); \\\n\
+                add_cmd=$(echo \"$line\" | sed -E 's/--to-ports [0-9]+/--to-ports {to_port}/' | sed 's/^-A/-I 1/'); \\\n\
+                iptables -w 2 -t nat $del_cmd 2>/dev/null || true; \\\n\
+                iptables -w 2 -t nat $add_cmd 2>/dev/null || true; \\\n\
+            done; \\\n\
+        done; \\\n\
+        for hook in /opt/etc/ndm/netfilter.d/060-xkeen-gaming.sh /opt/etc/ndm/netfilter.d/061-xkeen-bs.sh; do \\\n\
+            if [ -f \"$hook\" ]; then \\\n\
+                sed -i -E 's/--to-ports ({from_ports})/--to-ports {to_port}/g' \"$hook\" 2>/dev/null || true; \\\n\
+            fi; \\\n\
         done",
         from_ports = from_ports,
         to_port = to_port
@@ -2112,7 +2118,7 @@ pub fn ensure_default_adguard_config(dns_port: u16, http_port: u16) -> PathBuf {
     } else if let Ok(existing) = std::fs::read_to_string(&conf_path) {
         let (healed, changed) = sanitize_and_heal_adguard_yaml(&existing, dns_port);
         if changed {
-            let _ = std::fs::write(&conf_path, healed);
+            let _ = crate::transaction::sync_atomic_write_or_remove(&conf_path, Some(&healed));
             crate::log_i!("Конфигурация AdGuard Home автоматически оптимизирована и самоисцелена: {:?}", conf_path);
         }
     }
@@ -2392,7 +2398,7 @@ pub async fn service_action(action: &str) -> Result<String, String> {
                     if let Some(conf_path) = find_adguard_config() {
                         if let Ok(conf_str) = tokio::fs::read_to_string(&conf_path).await {
                             let (patched, _) = sanitize_and_heal_adguard_yaml(&conf_str, DEFAULT_ADGUARD_DNS_FALLBACK_PORT);
-                            let _ = tokio::fs::write(&conf_path, patched).await;
+                            let _ = crate::api::atomic_write_file(&conf_path, &patched).await;
                             let cmd_retry = format!("exec '{script}' '{act}' </dev/null >'{log_file}' 2>&1");
                             let _ = tokio::process::Command::new("sh").arg("-c").arg(&cmd_retry).status().await;
                             tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -2582,6 +2588,29 @@ pub async fn unblock_domain_adguard(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regression_bug_25_sync_tunnel_dns_ports_preserves_rule_order_and_updates_ndm_hooks() {
+        // Баг 25: Перезапись DNS-порта переставляла правила в XKEEN_GAMING в конец (-A)
+        // за общий TCP REDIRECT, а NDM-хуки 060 и 061 хранили старый порт.
+        let script = build_sync_tunnel_dns_ports_script("1053|5353|5354", 5354);
+
+        // 1. Правила должны вставляться в начало (-I), а не в конец (-A), чтобы быть выше общего TCP REDIRECT
+        assert!(
+            script.contains("sed 's/^-A/-I 1/'") || script.contains("-I $chain 1") || script.contains("sed -E 's/^-A/-I/'") || script.contains("s/^-A/-I/"),
+            "Sync script must insert DNS redirect rules with -I at the top, not append with -A"
+        );
+
+        // 2. Скрипт обязан обновлять порты в NDM-хуках 060-xkeen-gaming.sh и 061-xkeen-bs.sh
+        assert!(
+            script.contains("060-xkeen-gaming.sh"),
+            "Sync script must update NDM hook 060-xkeen-gaming.sh"
+        );
+        assert!(
+            script.contains("061-xkeen-bs.sh"),
+            "Sync script must update NDM hook 061-xkeen-bs.sh"
+        );
+    }
 
     #[test]
     fn test_adguard_auth_header_format() {
@@ -2960,3 +2989,16 @@ http:
     }
 }
 
+#[cfg(test)]
+mod regression_bug_115_tests {
+    #[test]
+    fn regression_bug_115a_adguard_yaml_written_atomically() {
+        // Баг 115a: AdGuardHome.yaml переписывался обычной записью — обрыв питания или одновременное чтение
+        // AdGuard Home давали обрезанный конфиг, и AGH не запускался.
+        let src = include_str!("adguard.rs");
+        let prod = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        assert!(!prod.contains("tokio::fs::write(p, healed)"), "лечение конфигов — атомарная запись");
+        assert!(!prod.contains("tokio::fs::write(&conf_path, patched)"), "смена порта — атомарная запись");
+        assert!(!prod.contains("std::fs::write(&conf_path, healed)"), "самоисцеление — атомарная запись");
+    }
+}

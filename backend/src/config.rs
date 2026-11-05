@@ -485,6 +485,74 @@ pub struct AppConfig {
     /// HWID оригинальных мобильных подписок для передачи заголовка x-hwid
     #[serde(default)]
     pub mobile_provider_hwids: std::collections::HashMap<String, String>,
+    /// Настройки VK-туннеля (обход белых списков через TURN-серверы ВК-звонков, ядро WDTT)
+    #[serde(default)]
+    pub vkturn: VkTurnConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct VkTurnWireGuard {
+    /// [Interface] PrivateKey клиента (base64, 44 символа). СЕКРЕТ.
+    pub private_key: String,
+    /// [Peer] PublicKey сервера WireGuard на VPS
+    pub public_key: String,
+    /// [Peer] PresharedKey (опционально). СЕКРЕТ.
+    pub preshared_key: Option<String>,
+    /// [Interface] Address клиента, только IPv4 без маски, например "10.66.66.2"
+    pub address: String,
+    /// MTU туннеля. Upstream рекомендует 1280.
+    pub mtu: u16,
+    /// DNS внутри туннеля
+    pub dns: Vec<String>,
+}
+
+impl Default for VkTurnWireGuard {
+    fn default() -> Self {
+        Self {
+            private_key: String::new(),
+            public_key: String::new(),
+            preshared_key: None,
+            address: String::new(),
+            mtu: 1280,
+            dns: vec!["1.1.1.1".into(), "8.8.8.8".into()],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct VkTurnConfig {
+    pub enabled: bool,
+    /// Сервер WDTT на VPS: "host:port" (порт по умолчанию 56000)
+    pub peer: String,
+    /// Пароль подключения к серверу WDTT. СЕКРЕТ.
+    pub password: String,
+    /// Ссылки на звонки ВК по приоритету. Клиент WDTT использует их одновременно (по группе воркеров на ссылку).
+    pub links: Vec<String>,
+    /// Число воркеров клиента: 0 = по умолчанию (18); округляется до кратного 9, максимум 108
+    pub streams: u8,
+    /// Локальный порт клиента на 127.0.0.1
+    pub listen_port: u16,
+    /// Постоянный идентификатор роутера для сервера WDTT (генерируется один раз)
+    pub device_id: String,
+    /// WireGuard-конфиг, выданный сервером WDTT
+    pub wg: VkTurnWireGuard,
+}
+
+impl Default for VkTurnConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            peer: String::new(),
+            password: String::new(),
+            links: Vec::new(),
+            streams: 0,
+            listen_port: 9000,
+            device_id: String::new(),
+            wg: VkTurnWireGuard::default(),
+        }
+    }
 }
 
 /// Платформы и сервисы для игрового режима.
@@ -1147,6 +1215,7 @@ impl Default for AppConfig {
                 m.insert("geodema2".to_string(), "keenetic-router-229".to_string());
                 m
             },
+            vkturn: VkTurnConfig::default(),
         }
     }
 }
@@ -1838,5 +1907,33 @@ mod tests {
         assert_eq!(again.refresh_interval_sec, 9);
         assert_eq!(parse_config_strict(&std::fs::read_to_string(dir.join("config.json.bak")).unwrap()).unwrap().refresh_interval_sec, 9);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_vkturn_config_deserialization_defaults() {
+        let old_json = r#"{
+            "refresh_interval_sec": 15,
+            "failover": { "enabled": true }
+        }"#;
+        let cfg: crate::config::AppConfig = serde_json::from_str(old_json).expect("Old config must deserialize cleanly");
+        assert!(!cfg.vkturn.enabled);
+        assert_eq!(cfg.vkturn.listen_port, 9000);
+        assert_eq!(cfg.vkturn.wg.mtu, 1280);
+        assert_eq!(cfg.vkturn.wg.dns, vec!["1.1.1.1", "8.8.8.8"]);
+        assert!(cfg.vkturn.links.is_empty());
+        assert!(cfg.vkturn.peer.is_empty());
+        assert!(cfg.vkturn.password.is_empty());
+        assert!(cfg.vkturn.device_id.is_empty());
+    }
+
+    /// Переход на ядро WDTT: config.json от прежнего ядра (use_udp, ссылки Телемоста) читается без ошибок.
+    #[test]
+    fn vkturn_config_from_previous_core_still_loads() {
+        let old_json = r#"{ "vkturn": { "enabled": true, "peer": "1.2.3.4:56000", "use_udp": true, "streams": 10,
+            "links": ["https://telemost.yandex.ru/j/12345678"], "listen_port": 9001 } }"#;
+        let cfg: crate::config::AppConfig = serde_json::from_str(old_json).expect("old vkturn config must load");
+        assert!(cfg.vkturn.enabled);
+        assert_eq!(cfg.vkturn.listen_port, 9001);
+        assert!(cfg.vkturn.password.is_empty(), "без пароля надзор клиент не запустит");
     }
 }

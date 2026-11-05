@@ -323,4 +323,58 @@ describe('AdGuard Component — Dashboard, Query Log, Filtering & Rewrites', () 
     expect(calls).toHaveLength(1)
     expect(calls[0][1]).toEqual({ host: '10.0.0.5' })
   })
+  it('bug 134: quick block posts fresh server rules plus the new rule, never the unsaved editor text', async () => {
+    // Баг 134: «Заблокировать» в журнале отправлял весь текст редактора — несохранённые правки и устаревший
+    // список; правила, добавленные в веб-UI AdGuard Home после загрузки, стирались; при ошибке поле не откатывалось.
+    let serverRules = ['||badsite.com^', '@@||goodsite.com^']
+    const baseGet = vi.mocked(api.apiGet).getMockImplementation()!
+    vi.mocked(api.apiGet).mockImplementation((path: string) => {
+      if (path.includes('/adguard/query-log')) {
+        return Promise.resolve({
+          data: [
+            { timestamp: '2026-09-29T20:00:00Z', client_ip: '192.168.1.100', question_name: 'ok.example', question_type: 'A', status: 'NotFilteredNotFound', elapsed_ms: 1 },
+            { timestamp: '2026-09-29T20:00:01Z', client_ip: '192.168.1.100', question_name: 'fail.example', question_type: 'A', status: 'NotFilteredNotFound', elapsed_ms: 1 },
+          ],
+        })
+      }
+      if (path.includes('/adguard/filtering')) return Promise.resolve({ filters: [], user_rules: serverRules })
+      return baseGet(path)
+    })
+    await act(async () => {
+      root!.render(<AdGuard notify={notifyMock} />)
+    })
+    await act(async () => {
+      ;(container?.querySelector('[data-testid="subtab-filtering"]') as HTMLButtonElement).click()
+    })
+    const editor = container?.querySelector('textarea.agh-rules-editor') as HTMLTextAreaElement
+    expect(editor.value).toBe('||badsite.com^\n@@||goodsite.com^')
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
+    await act(async () => {
+      setter.call(editor, '||badsite.com^\n@@||goodsite.com^\n||draft.example^')
+      editor.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    // Пока пользователь редактировал, в веб-UI AGH добавили правило
+    serverRules = ['||badsite.com^', '@@||goodsite.com^', '||fromweb.example^']
+    await act(async () => {
+      ;(container?.querySelector('[data-testid="subtab-querylog"]') as HTMLButtonElement).click()
+    })
+    const blockBtns = () =>
+      Array.from(container?.querySelectorAll('button') || []).filter((b) => b.textContent?.trim() === 'Заблокировать')
+    expect(blockBtns()).toHaveLength(2)
+    await act(async () => {
+      blockBtns()[0].click()
+    })
+    const calls = vi.mocked(api.apiPost).mock.calls.filter((c) => c[0] === '/adguard/filtering/rules')
+    expect(calls).toHaveLength(1)
+    expect(calls[0][1]).toEqual({ rules: ['||badsite.com^', '@@||goodsite.com^', '||fromweb.example^', '||ok.example^'] })
+    // Ошибка сохранения не меняет редактор
+    serverRules = ['||badsite.com^', '@@||goodsite.com^', '||fromweb.example^', '||ok.example^']
+    vi.mocked(api.apiPost).mockRejectedValueOnce(new Error('boom'))
+    const editorBefore = editor.value
+    await act(async () => {
+      blockBtns()[1].click()
+    })
+    expect(editor.value).toBe(editorBefore)
+    expect(editor.value).not.toContain('fail.example')
+  })
 })

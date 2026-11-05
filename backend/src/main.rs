@@ -14,6 +14,7 @@ mod updater;
 mod override_sync;
 mod cdn_discovery;
 mod antigravity;
+pub mod vkturn;
 mod auth;
 mod watchdog;
 mod speedtest;
@@ -109,6 +110,8 @@ pub struct AppState {
     pub zapret_lock: Arc<tokio::sync::Mutex<()>>,
     /// Менеджер обхода блокировок Google Antigravity.
     pub antigravity: Arc<antigravity::AntigravityManager>,
+    /// Менеджер VK-туннеля (Tier 2 Whitelist Turn proxy).
+    pub vkturn: Arc<vkturn::VkTurnManager>,
 }
 
 fn init_script_content(port: u16) -> String {
@@ -249,6 +252,28 @@ fn create_init(port: u16) -> std::io::Result<()> {
     }
     println!("[OK] Init-скрипт создан: {}", INIT_SCRIPT);
     Ok(())
+}
+
+#[cfg(test)]
+mod regression_bug_4_tests {
+    /// Стартовый блок синхронизации БС (продакшн-часть; тесты стоят выше по файлу, поэтому rfind).
+    fn startup_wl_block() -> &'static str {
+        let src = include_str!("main.rs");
+        let start = src.rfind("// Синхронизация режима обхода белых списков (100% full tunnel)").expect("начало блока");
+        let end = start + src[start..].find("// Авто-миграция и плановое").expect("конец блока");
+        &src[start..end]
+    }
+
+    #[test]
+    fn regression_bug_4_gaming_not_restored_on_unknown_or_bs_node_after_boot() {
+        // Баг 4: после перезагрузки «узел БС» определялся без учёта подписки, а если Mihomo на 8-й секунде
+        // ещё не отвечал — результат «не БС», и игровой режим включался вместе с БС.
+        let b = startup_wl_block();
+        assert!(!b.contains("failover::is_whitelist_server(&s.name, &s.id, &cfg)"), "БС определяется с учётом подписки");
+        assert!(!b.contains(".await.ok().flatten()"), "недоступный Mihomo не считается «не БС»");
+        assert!(b.contains("failover::startup_gaming_restore_allowed("), "решение о восстановлении — через проверяемую функцию");
+        assert!(!b.contains("config::save(&wl_sync_state.config_path"), "восстановление атомарно вместе с правилами");
+    }
 }
 
 #[cfg(test)]
@@ -413,6 +438,7 @@ async fn main() {
     let port = cli.port;
     let config = Arc::new(RwLock::new(Arc::new(cfg)));
     let ag_mgr = Arc::new(antigravity::AntigravityManager::new(Arc::clone(&config)));
+    let vkturn_mgr = vkturn::VkTurnManager::new();
 
     {
         let c = config.read().await;
@@ -442,14 +468,25 @@ async fn main() {
         speedtest_lock: Arc::new(tokio::sync::Mutex::new(())),
         zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
         antigravity: ag_mgr,
+        vkturn: vkturn_mgr,
     };
 
     // FO-QUR-01: Восстановление состояния карантина из /opt/etc/xkeen-route/quarantine.json
     failover::init_quarantine_from_disk().await.ok();
 
+    {
+        let c = state.config.read().await;
+        if c.vkturn.enabled {
+            state.vkturn.restart(c.vkturn.clone(), state.clone()).await;
+        }
+    }
+
     // Инициализация постоянного хранилища отозванных токенов (баг 93)
     let revoked_storage_path = state.config_path.parent().unwrap_or(std::path::Path::new(".")).join("revoked_tokens.json");
     auth::init_revoked_tokens_storage(&revoked_storage_path);
+
+    // Баг 131: неподтверждённое изменение (commit-confirmed), пережившее перезапуск, откатывается до старта сторожей
+    transaction::recover_pending_commit_after_restart(&state).await;
 
     failover::spawn(state.clone());
     // Во временном каталоге (tmpfs): переживает рестарт панели, но не перезагрузку роутера —
@@ -566,13 +603,30 @@ async fn main() {
     let wl_sync_state = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-        let (active_id, _active_srv, is_bs, gaming_suspended) = {
+        // Баг 4: ждём ответа Mihomo (до ~30 с дополнительно); «не ответил» ≠ «не БС»
+        let mut mihomo_answered = false;
+        let mut active_srv: Option<mihomo::Server> = None;
+        for attempt in 0..7 {
+            let cfg = wl_sync_state.config.read().await.clone();
+            match mihomo::get_active_server(&wl_sync_state.http, &cfg).await {
+                Ok(s) => {
+                    mihomo_answered = true;
+                    active_srv = s;
+                    break;
+                }
+                Err(_) if attempt < 6 => tokio::time::sleep(std::time::Duration::from_secs(5)).await,
+                Err(e) => log_w!("[STARTUP] Mihomo не ответил, авто-восстановление игрового режима отложено: {}", e),
+            }
+        }
+        let (active_id, is_bs, restore_gaming) = {
             let cfg = wl_sync_state.config.read().await;
-            let active_srv = mihomo::get_active_server(&wl_sync_state.http, &cfg).await.ok().flatten();
             let active_id = active_srv.as_ref().map(|s| s.id.clone()).unwrap_or_default();
-            let is_bs = active_srv.as_ref().map(|s| failover::is_whitelist_server(&s.name, &s.id, &cfg)).unwrap_or(false);
-            let gaming_suspended = cfg.whitelist.gaming_suspended;
-            (active_id, active_srv, is_bs, gaming_suspended)
+            let is_bs = active_srv
+                .as_ref()
+                .map(|s| failover::is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), &cfg))
+                .unwrap_or(false);
+            let restore = failover::startup_gaming_restore_allowed(mihomo_answered, active_srv.as_ref(), &cfg);
+            (active_id, is_bs, restore)
         };
         if !active_id.is_empty() {
             let _ = api::sync_whitelist_mode_tunnel(&wl_sync_state, &active_id).await;
@@ -595,29 +649,24 @@ async fn main() {
         }
 
         // Авто-восстановление игрового режима при перезагрузке роутера:
-        // Если флаг gaming_suspended == true, а текущий активный сервер не является [БС]
-        if gaming_suspended && !is_bs {
-            let _cfg_guard = wl_sync_state.config_lock.lock().await;
-            let mut current_cfg = (**wl_sync_state.config.read().await).clone();
-            current_cfg.gaming.enabled = true;
-            current_cfg.whitelist.gaming_suspended = false;
-            if config::save(&wl_sync_state.config_path, &current_cfg).await.is_ok() {
-                *wl_sync_state.config.write().await = std::sync::Arc::new(current_cfg.clone());
-                log_i!("[STARTUP] ✓ Игровой режим автоматически восстановлен после перезагрузки (активный узел не является [БС])");
-                // X-03: восстановление не только флага, но и реальных правил —
-                // стартовый 7-секундный синк уже прошёл с enabled=false, и без
-                // этого блока UI показывает «включено», а трафик не туннелируется.
-                if let Ok(raw_yaml) = tokio::fs::read_to_string(&current_cfg.mihomo.config_path).await {
-                    if let Ok((new_yaml, _)) = crate::routing::apply_routing(&raw_yaml, &current_cfg) {
-                        let _ = crate::api::atomic_write_file(&current_cfg.mihomo.config_path, &new_yaml).await;
-                        let _ = mihomo::reload_config(&wl_sync_state.http, &current_cfg).await;
-                        let redir_port = crate::routing::parse_redir_port(&new_yaml).unwrap_or(5000);
-                        let tproxy_port = crate::routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
-                        let dns_port = crate::api::resolve_active_dns_port(&current_cfg);
-                        let _ = crate::api::sync_full_tunnel_modes(&current_cfg, redir_port, tproxy_port, dns_port).await;
-                        log_i!("[STARTUP] ✓ Правила игрового туннеля перемонтированы после восстановления");
-                    }
+        // только если Mihomo ответил и активный узел точно не БС (с учётом подписок)
+        if restore_gaming {
+            // Атомарно: флаги и правила Mihomo применяются вместе, при ошибке reload — откат
+            match api::commit_config_with_routing(&wl_sync_state, |c| {
+                c.gaming.enabled = true;
+                c.whitelist.gaming_suspended = false;
+            })
+            .await
+            {
+                Ok((current_cfg, new_yaml)) => {
+                    log_i!("[STARTUP] ✓ Игровой режим автоматически восстановлен после перезагрузки (активный узел не является [БС])");
+                    let redir_port = crate::routing::parse_redir_port(&new_yaml).unwrap_or(5000);
+                    let tproxy_port = crate::routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
+                    let dns_port = crate::api::resolve_active_dns_port(&current_cfg);
+                    let _ = crate::api::sync_full_tunnel_modes(&current_cfg, redir_port, tproxy_port, dns_port).await;
+                    log_i!("[STARTUP] ✓ Правила игрового туннеля перемонтированы после восстановления");
                 }
+                Err(e) => log_w!("[STARTUP] Не удалось восстановить игровой режим: {}", e),
             }
         }
     });
@@ -661,16 +710,11 @@ async fn main() {
         wait_for_router_ready(&sync_state).await;
 
         let cfg = sync_state.config.read().await;
-        if !cfg.force_domains.is_empty() {
-            log_i!("[STARTUP] Быстрая синхронизация известных CDN бандлов с geo_override (без сетевого сканирования)...");
-            let static_cdns = cdn_discovery::expand_bundles(&cfg.force_domains);
-            let mut all_domains = cfg.force_domains.clone();
-            all_domains.extend(static_cdns);
-            if let Err(e) = override_sync::sync_geo_override(&all_domains).await {
-                log_w!("[STARTUP] Ошибка быстрой синхронизации geo_override: {}", e);
-            } else {
-                log_i!("[STARTUP] ✓ Быстрая синхронизация geo_override завершена");
-            }
+        log_i!("[STARTUP] Быстрая синхронизация известных CDN бандлов и игровых доменов с geo_override...");
+        if let Err(e) = override_sync::sync_from_config(&cfg, &[]).await {
+            log_w!("[STARTUP] Ошибка быстрой синхронизации geo_override: {}", e);
+        } else {
+            log_i!("[STARTUP] ✓ Быстрая синхронизация geo_override завершена");
         }
     });
 
@@ -699,13 +743,8 @@ async fn main() {
             if !cfg.force_domains.is_empty() {
                 log_i!("[CDN-SCHEDULE] ⏰ Запуск планового еженедельного сканирования CDN (понедельник 05:00)...");
                 let auto_cdns = cdn_discovery::discover_all_cdns(&cfg.force_domains, &cfg.mihomo_proxy_url()).await;
-                let mut all_domains = cfg.force_domains.clone();
-                for cdn in &auto_cdns {
-                    if !all_domains.contains(cdn) {
-                        all_domains.push(cdn.clone());
-                    }
-                }
-                if let Err(e) = override_sync::sync_geo_override(&all_domains).await {
+                let auto_cdns_vec: Vec<String> = auto_cdns.into_iter().collect();
+                if let Err(e) = override_sync::sync_from_config(&cfg, &auto_cdns_vec).await {
                     log_w!("[CDN-SCHEDULE] Ошибка плановой синхронизации geo_override: {}", e);
                 } else {
                     log_i!("[CDN-SCHEDULE] ✓ Плановое еженедельное сканирование CDN успешно завершено");
@@ -867,6 +906,11 @@ async fn main() {
         .route("/api/zapret/blockcheck", post(api::run_mini_blockcheck))
         .route("/api/zapret/community-hostlist/sync", post(api::sync_community_hostlist))
         .route("/api/zapret/update/check", get(api::check_zapret_update_route))
+        // VK-туннель (VK-turn)
+        .route("/api/vkturn/status", get(api::get_vkturn_status))
+        .route("/api/vkturn/logs", get(api::get_vkturn_logs))
+        .route("/api/vkturn/config", post(api::save_vkturn_config))
+        .route("/api/vkturn/action", post(api::vkturn_action))
         // Расписания устройств
         .route("/api/schedules", get(api::get_schedules).post(api::save_schedules))
         // Игровой режим (Gaming Mode)
@@ -944,6 +988,7 @@ async fn main() {
         log_e!("Ошибка работы HTTP сервера: {}", e);
     }
     log_i!("Остановка: новые соединения закрыты, завершаю фоновые задачи…");
+    state.vkturn.stop().await;
     antigravity::shutdown();
     failover::shutdown();
     watchdog::shutdown();
