@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { apiGet, apiPost, apiPut, detectWhitelistServers, applyDetectedWhitelistServers } from '../api'
+import { diffSettings } from '../utils/settingsDiff'
 import {
   pingClass,
   type AppSettings,
@@ -378,6 +379,8 @@ export default function Settings({ notify, status, refresh }: Props) {
   // --- Автосохранение failover ---
   const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
   const initialFailoverRef = useRef<string | null>(null)
+  // Снимок настроек, с которым синхронизирован бэкенд: на сохранение уходит только дифф
+  const loadedSettingsRef = useRef<AppSettings | null>(null)
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -461,6 +464,7 @@ export default function Settings({ notify, status, refresh }: Props) {
   useEffect(() => {
     loadQuickWins()
     apiGet<AppSettings>('settings').then((s) => {
+      loadedSettingsRef.current = JSON.parse(JSON.stringify(s))
       setSettings(s)
       setAuthEnabled(s.auth?.enabled ?? false)
       setTelegramEnabled(s.notifications?.telegram_enabled ?? false)
@@ -570,10 +574,13 @@ export default function Settings({ notify, status, refresh }: Props) {
     autoSaveTimerRef.current = setTimeout(async () => {
       try {
         const currentFailover = JSON.parse(failoverJson)
-        await apiPut('settings', {
-          failover: currentFailover,
-        })
+        const savedFailover = initialFailoverRef.current ? JSON.parse(initialFailoverRef.current) : {}
+        const changed = diffSettings(savedFailover, currentFailover)
+        if (changed !== undefined) {
+          await apiPut('settings', { failover: changed })
+        }
         initialFailoverRef.current = failoverJson
+        if (loadedSettingsRef.current) loadedSettingsRef.current.failover = currentFailover
         setAutoSaveStatus('saved')
         if (savedTimerRef.current) clearTimeout(savedTimerRef.current)
         savedTimerRef.current = setTimeout(() => {
@@ -612,11 +619,10 @@ export default function Settings({ notify, status, refresh }: Props) {
     if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current)
     setAutoSaveStatus('saving')
     try {
-      await apiPost('settings/priority', {
-        server_ids: copy.failover.priority_chain ?? [],
-        enabled,
-      })
-      await apiPut('settings', { failover: copy.failover })
+      // Только флаг: раньше сюда уходили устаревшие priority_chain (через settings/priority)
+      // и весь объект failover, откатывая свежие изменения цепочек
+      await apiPut('settings', { failover: { enabled } })
+      if (loadedSettingsRef.current) loadedSettingsRef.current.failover.enabled = enabled
       setAutoSaveStatus('saved')
       notify(enabled ? 'Failover включён' : 'Failover выключен')
       if (savedTimerRef.current) clearTimeout(savedTimerRef.current)
@@ -642,8 +648,15 @@ export default function Settings({ notify, status, refresh }: Props) {
           webhook_url: webhookUrl,
         }
       } : settings
-      await apiPut('settings', updatedSettings)
-      if (updatedSettings) setSettings(updatedSettings)
+      // Только изменённые пользователем поля: полный снимок затирал фоновые изменения
+      const changed = updatedSettings ? diffSettings(loadedSettingsRef.current ?? {}, updatedSettings) : undefined
+      if (changed !== undefined) {
+        await apiPut('settings', changed)
+      }
+      if (updatedSettings) {
+        loadedSettingsRef.current = JSON.parse(JSON.stringify(updatedSettings))
+        setSettings(updatedSettings)
+      }
       notify('Настройки сохранены')
       refresh?.()
     } catch (e) {

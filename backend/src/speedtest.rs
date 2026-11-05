@@ -61,6 +61,22 @@ pub async fn restore_groups_snapshot(
     }
 }
 
+/// Снимок для изолированного замера (баг 84): только группа Canary Probe с её текущим выбором.
+/// Без этой группы замер не выполняется — переключать всю LAN ради теста недопустимо.
+pub fn isolated_speedtest_snapshot(
+    proxies: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Result<HashMap<String, String>, String> {
+    let group = proxies.get(crate::mihomo::CANARY_PROBE_GROUP_NAME).ok_or_else(|| {
+        "Изолированный тест скорости недоступен: в ядре Mihomo нет группы Canary Probe. \
+         Сохраните настройки маршрутизации (или перезапустите Mihomo) и повторите"
+            .to_string()
+    })?;
+    let now = group.get("now").and_then(|n| n.as_str()).unwrap_or("DIRECT").to_string();
+    let mut snap = HashMap::new();
+    snap.insert(crate::mihomo::CANARY_PROBE_GROUP_NAME.to_string(), now);
+    Ok(snap)
+}
+
 /// SPD-01: отмена привязана к «поколению» замера, а не к глобальному флагу.
 /// Раньше cancel → старт нового замера (reset флага) → старый замер терял признак
 /// отмены и восстанавливал snapshot групп, затирая ручной выбор пользователя.
@@ -162,18 +178,26 @@ pub async fn run_speedtest(
     // SPD-01: фиксируем поколение замера — отмена определяется изменением поколения
     let my_gen = speedtest_generation();
 
-    // 1. Создание снимка текущего выбора всех групп Selector ядра Mihomo
-    let (group_snapshot, original_server) = take_groups_snapshot(_http, _cfg).await?;
+    // 1. Баг 84: замер изолирован — переключается только группа Canary Probe (слушатель 127.0.0.1:7894),
+    // трафик LAN, группа БС и остальные selector-группы не трогаются.
+    let proxies_now = crate::mihomo::get_proxies(_http, _cfg)
+        .await
+        .map_err(|e| format!("Ошибка получения списка прокси ядра Mihomo: {}", e))?;
+    let group_snapshot = isolated_speedtest_snapshot(&proxies_now)?;
+    let original_server = group_snapshot
+        .get(crate::mihomo::CANARY_PROBE_GROUP_NAME)
+        .cloned()
+        .unwrap_or_default();
 
     if is_speedtest_aborted(my_gen) {
         return Err("Тест скорости прерван пользователем".to_string());
     }
 
-    // 2. Переключение активного маршрута на запрошенный сервер (DIAG-01)
+    // 2. Переключение изолированной группы на запрошенный сервер (без сброса соединений LAN)
     let need_restore = if original_server != target_server {
-        match crate::mihomo::switch_server(_http, _cfg, target_server).await {
+        match crate::mihomo::switch_selector(_http, _cfg, crate::mihomo::CANARY_PROBE_GROUP_NAME, target_server).await {
             Ok(_) => true,
-            Err(e) => return Err(format!("Не удалось переключить маршрут на запрошенный сервер '{}': {}", target_server, e)),
+            Err(e) => return Err(format!("Не удалось направить тестовую группу на сервер '{}': {}", target_server, e)),
         }
     } else {
         false
@@ -193,18 +217,13 @@ pub async fn run_speedtest(
             return Err(format!("Ошибка проверки прокси ядра Mihomo: {}", e));
         }
     };
-    let current_leaf = crate::mihomo::resolve_active_leaf(&current_proxies);
-    let is_confirmed = if current_leaf == target_server {
-        true
-    } else {
-        // Проверяем только основные группы (PROXY, GLOBAL, Proxy, auto), исключая изолированные группы устройств
-        ["PROXY", "GLOBAL", "Proxy", "auto"].iter().any(|&grp_name| {
-            current_proxies.get(grp_name)
-                .and_then(|g| g.get("now"))
-                .and_then(|n| n.as_str())
-                == Some(target_server)
-        })
-    };
+    let current_leaf = current_proxies
+        .get(crate::mihomo::CANARY_PROBE_GROUP_NAME)
+        .and_then(|g| g.get("now"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .to_string();
+    let is_confirmed = current_leaf == target_server;
 
     if !is_confirmed {
         return Err(format!(
@@ -228,8 +247,8 @@ pub async fn run_speedtest(
         "https://proof.ovh.net/files/1Mb.dat",
     ];
 
-    // Настраиваем HTTP клиент через локальный HTTP/SOCKS5 прокси Mihomo
-    let proxy_url = _cfg.mihomo_proxy_url();
+    // Скачивание через изолированный слушатель Canary Probe — ровно через выбранный узел, а не по правилам
+    let proxy_url = format!("http://127.0.0.1:{}", crate::routing::CANARY_PROBE_PORT);
     let proxy = match reqwest::Proxy::all(&proxy_url) {
         Ok(p) => p,
         Err(e) => {
@@ -407,5 +426,25 @@ mod tests {
         let new_gen = speedtest_generation();
         assert_ne!(new_gen, gen, "cancel must bump the generation");
         assert!(!is_speedtest_aborted(new_gen));
+    }
+
+    #[test]
+    fn regression_bug_84_speedtest_switches_only_isolated_probe_group() {
+        // Баг 84: speedtest вызывал switch_server — вся LAN (включая 🛡️ Whitelist в режиме БС) уходила
+        // на тестовый сервер. Теперь переключается только изолированная группа Canary Probe.
+        let mut proxies = std::collections::BTreeMap::new();
+        proxies.insert("PROXY".to_string(), serde_json::json!({"type": "Selector", "now": "node-a"}));
+        proxies.insert("🛡️ Whitelist".to_string(), serde_json::json!({"type": "Selector", "now": "bs-1"}));
+        proxies.insert(
+            crate::mihomo::CANARY_PROBE_GROUP_NAME.to_string(),
+            serde_json::json!({"type": "Selector", "now": "node-a", "all": ["node-a", "node-b"]}),
+        );
+        let snap = isolated_speedtest_snapshot(&proxies).unwrap();
+        assert_eq!(snap.len(), 1, "в снимке/откате только группа Canary Probe, остальные группы не трогаются");
+        assert_eq!(snap.get(crate::mihomo::CANARY_PROBE_GROUP_NAME).map(String::as_str), Some("node-a"));
+
+        proxies.remove(crate::mihomo::CANARY_PROBE_GROUP_NAME);
+        let err = isolated_speedtest_snapshot(&proxies).unwrap_err();
+        assert!(err.contains("Canary"), "без изолированной группы — отказ, а не переключение всей LAN: {err}");
     }
 }

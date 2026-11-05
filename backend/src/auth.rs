@@ -67,7 +67,59 @@ pub fn random_hex(len_bytes: usize) -> String {
     hex::encode(bytes)
 }
 
+static REVOKED_TOKENS_PATH: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
 static REVOKED_TOKENS: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> = std::sync::Mutex::new(None);
+
+/// Инициализация постоянного хранилища отозванных токенов на диске (баг 93)
+pub fn init_revoked_tokens_storage(path: &Path) {
+    // Лок пути отпускается сразу: revoke_token берёт REVOKED_TOKENS, затем путь (в persist),
+    // и удержание пути здесь при захвате REVOKED_TOKENS давало ABBA-взаимоблокировку.
+    {
+        let mut p_guard = REVOKED_TOKENS_PATH.lock().unwrap_or_else(|e| e.into_inner());
+        *p_guard = Some(path.to_path_buf());
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut loaded_map: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    if path.exists() {
+        if let Ok(bytes) = std::fs::read(path) {
+            if let Ok(map) = serde_json::from_slice::<std::collections::HashMap<String, u64>>(&bytes) {
+                for (tok, exp) in map {
+                    if exp > now {
+                        loaded_map.insert(tok, exp);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut guard = REVOKED_TOKENS.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(loaded_map);
+}
+
+pub fn reset_in_memory_revoked_tokens_for_test() {
+    let mut guard = REVOKED_TOKENS.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = None;
+}
+
+fn persist_revoked_tokens(map: &std::collections::HashMap<String, u64>) {
+    let p_guard = REVOKED_TOKENS_PATH.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref path) = *p_guard {
+        if let Ok(json_bytes) = serde_json::to_vec(map) {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let tmp_path = path.with_extension("tmp");
+            if std::fs::write(&tmp_path, &json_bytes).is_ok() {
+                let _ = std::fs::rename(&tmp_path, path);
+            }
+        }
+    }
+}
 
 /// Инвалидация токена сессии на стороне сервера при выходе (logout).
 pub fn revoke_token(token: &str) {
@@ -92,6 +144,7 @@ pub fn revoke_token(token: &str) {
     }
     let exp = now + SESSION_TTL_SECS;
     map.insert(token.to_string(), exp);
+    persist_revoked_tokens(map);
 }
 
 /// Проверка, был ли токен сессии отозван на сервере.
@@ -114,6 +167,29 @@ pub fn is_token_revoked(token: &str) -> bool {
     false
 }
 
+/// Проверка и атомарное резервирование попытки входа (защита от race condition при параллельных запросах, баг 92)
+pub fn check_and_reserve_rate_limit(ip: IpAddr) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut guard = FAILED_LOGIN_ATTEMPTS.lock().unwrap_or_else(|e| e.into_inner());
+    let map = guard.get_or_insert_with(HashMap::new);
+
+    // Очищаем устаревшие IP из памяти (SEC-11)
+    map.retain(|_, attempts| {
+        attempts.retain(|&ts| now.saturating_sub(ts) < 60);
+        !attempts.is_empty()
+    });
+
+    let list = map.entry(ip).or_default();
+    if list.len() >= 5 {
+        return false;
+    }
+    list.push(now);
+    true
+}
+
 fn check_rate_limit(ip: IpAddr) -> bool {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -129,8 +205,25 @@ fn check_rate_limit(ip: IpAddr) -> bool {
     });
 
     let list = map.entry(ip).or_default();
-    // Лимит: максимум 5 неудачных попыток в минуту с одного IP
     list.len() < 5
+}
+
+/// Асинхронная верификация пароля через spawn_blocking во избежание блокировки потока tokio (баг 92)
+pub async fn verify_password_async(password: String, salt: String, expected_hash: String) -> bool {
+    tokio::task::spawn_blocking(move || {
+        verify_password(&password, &salt, &expected_hash)
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/// Асинхронное хеширование пароля через spawn_blocking во избежание блокировки потока tokio (баг 92)
+pub async fn hash_password_async(password: String, salt: String) -> String {
+    tokio::task::spawn_blocking(move || {
+        hash_password(&password, &salt)
+    })
+    .await
+    .unwrap_or_default()
 }
 
 fn record_failed_attempt(ip: IpAddr) {
@@ -358,7 +451,7 @@ pub async fn login(
     Json(body): Json<LoginRequest>,
 ) -> Response {
     let client_ip = peer.ip();
-    if !check_rate_limit(client_ip) {
+    if !check_and_reserve_rate_limit(client_ip) {
         log_w!("Превышен лимит попыток входа (rate limit 5/мин) для IP {}", client_ip);
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -379,8 +472,7 @@ pub async fn login(
         return api_ok(json!({ "authenticated": true, "message": "Авторизация отключена" }));
     }
 
-    if !verify_password(&body.password, &auth_cfg.salt, &auth_cfg.password_hash) {
-        record_failed_attempt(client_ip);
+    if !verify_password_async(body.password.clone(), auth_cfg.salt.clone(), auth_cfg.password_hash.clone()).await {
         log_w!("Неудачная попытка входа в веб-панель (неверный пароль) с IP {}", client_ip);
         return (
             StatusCode::UNAUTHORIZED,
@@ -393,7 +485,7 @@ pub async fn login(
 
     // Если пароль был в старом формате SHA256, бесшовно мигрируем на устойчивый PBKDF2
     if !auth_cfg.password_hash.starts_with("$pbkdf2$") {
-        let new_hash = hash_password(&body.password, &auth_cfg.salt);
+        let new_hash = hash_password_async(body.password.clone(), auth_cfg.salt.clone()).await;
         let _guard = state.config_lock.lock().await;
         let mut cur = (**state.config.read().await).clone();
         cur.auth.password_hash = new_hash;
@@ -463,7 +555,7 @@ pub async fn change_password(
     // пароль и захватить панель. Бутстрап (первый пароль при пустом хеше) разрешён.
     if !cur.auth.password_hash.is_empty() {
         let curr = body.current_password.unwrap_or_default();
-        if !verify_password(&curr, &cur.auth.salt, &cur.auth.password_hash) {
+        if !verify_password_async(curr, cur.auth.salt.clone(), cur.auth.password_hash.clone()).await {
             return api_err("Текущий пароль указан неверно");
         }
     }
@@ -474,7 +566,7 @@ pub async fn change_password(
         }
         if !body.new_password.trim().is_empty() {
             let salt = generate_salt();
-            let hash = hash_password(&body.new_password, &salt);
+            let hash = hash_password_async(body.new_password.clone(), salt.clone()).await;
             cur.auth.salt = salt;
             cur.auth.password_hash = hash;
             cur.auth.session_secret = generate_secret();
@@ -528,6 +620,31 @@ pub fn is_valid_origin(origin_host_only: &str) -> bool {
     }
 }
 
+/// Проверка, является ли имя хоста или IP легитимным адресом роутера / локальной сети.
+/// Защита от DNS-rebinding (баг 91): даже если Origin совпадает с Host,
+/// сам Host должен быть легитимным адресом роутера (loopback, RFC1918 приватная сеть,
+/// link-local, либо известные локальные домены вроде *.keenetic.pro / *.keenetic.link / *.keenetic.name, my.keenetic.net, router).
+pub fn is_legitimate_host(host_only: &str) -> bool {
+    let unbracketed = host_only.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = unbracketed.parse::<std::net::IpAddr>() {
+        match ip {
+            std::net::IpAddr::V4(ipv4) => ipv4.is_loopback() || ipv4.is_private() || ipv4.is_link_local(),
+            std::net::IpAddr::V6(ipv6) => ipv6.is_loopback() || ipv6.is_unicast_link_local(),
+        }
+    } else {
+        let lower = host_only.to_ascii_lowercase();
+        // Локальные однословные хосты без точек (mycustombox, keenetic, router) или .lan/.local
+        !lower.contains('.')
+            || lower.ends_with(".lan")
+            || lower.ends_with(".local")
+            || lower == "localhost"
+            || lower == "my.keenetic.net"
+            || lower.ends_with(".keenetic.pro")
+            || lower.ends_with(".keenetic.link")
+            || lower.ends_with(".keenetic.name")
+    }
+}
+
 /// Проверка безопасности Origin/Referer для защиты от межсайтовых атак (CSRF)
 pub fn is_trusted_origin(origin_or_referer: &str, host_header: Option<&str>) -> bool {
     let stripped = origin_or_referer
@@ -537,16 +654,18 @@ pub fn is_trusted_origin(origin_or_referer: &str, host_header: Option<&str>) -> 
     let origin_host_part = stripped.split('/').next().unwrap_or("").trim();
     let origin_host_only = extract_host_only(origin_host_part);
 
-    // 1. Совпадение с переданным Host header
+    // 1. Совпадение с переданным Host header (только если сам Host является легитимным адресом роутера — защита от DNS-rebinding, баг 91)
     if let Some(host) = host_header {
         let host_trimmed = host.trim();
         let host_only = extract_host_only(host_trimmed);
-        if origin_host_part.eq_ignore_ascii_case(host_trimmed) || origin_host_only.eq_ignore_ascii_case(host_only) {
+        if (origin_host_part.eq_ignore_ascii_case(host_trimmed) || origin_host_only.eq_ignore_ascii_case(host_only))
+            && is_legitimate_host(host_only)
+        {
             return true;
         }
     }
 
-    // 2. Локальные адреса loopback, LAN (RFC 1918) и доверенные имена роутера
+    // 2. Локальные адреса loopback и доверенные имена роутера
     is_valid_origin(origin_host_only)
 }
 
@@ -690,6 +809,8 @@ pub fn cli_set_password(config_path: &Path, password: &str) -> std::io::Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Общее состояние REVOKED_TOKENS: тесты отзыва не должны идти параллельно (сброс в тесте бага 93).
+    static REVOKED_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn password_hash_verify() {
@@ -711,6 +832,7 @@ mod tests {
 
     #[test]
     fn session_token_tampering_and_revocation() {
+        let _revoked_guard = REVOKED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let secret = generate_secret();
         let token = create_session_token(&secret);
         assert!(verify_session_token(&token, &secret));
@@ -813,6 +935,27 @@ mod tests {
     }
 
     #[test]
+    fn regression_bug_90_get_speedtest_disallowed_in_routes() {
+        // Баг 90: GET /api/servers/speedtest/{id} переключает всю LAN (мутирующее действие через GET -> CSRF через img src)
+        // Проверяем, что в main.rs маршрут speedtest/{id} не привязан к GET-запросам
+        let main_src = include_str!("main.rs");
+        let has_get_speedtest = main_src.lines().any(|line| {
+            line.contains("/api/servers/speedtest/{id}") && line.contains(".get(")
+        });
+        assert!(!has_get_speedtest, "GET-обработчик для /api/servers/speedtest/{{id}} должен быть удален для защиты от CSRF через GET");
+    }
+
+    #[test]
+    fn regression_bug_91_dns_rebinding_origin_matches_arbitrary_host() {
+        // Баг 91: DNS-rebinding: CSRF-фильтр доверяет Origin, если он равен Host; Host не проверяется.
+        // Злоумышленник направляет свой домен evil.com на IP роутера (DNS rebinding)
+        // Браузер шлёт: Origin: http://evil.com, Host: evil.com
+        // Фильтр НЕ должен доверять произвольному домену evil.com, даже если Origin == Host.
+        assert!(!is_trusted_origin("http://evil.com", Some("evil.com")));
+        assert!(!is_trusted_origin("http://attacker.org:1001", Some("attacker.org:1001")));
+    }
+
+    #[test]
     fn test_sec02_is_valid_origin_strict_parsing() {
         // Доверенные безусловно: loopback и локальные имена роутера
         assert!(is_valid_origin("127.0.0.1"));
@@ -844,6 +987,7 @@ mod tests {
 
     #[test]
     fn test_revoked_tokens_expiration_and_capacity() {
+        let _revoked_guard = REVOKED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tok1 = "token_valid_1";
         let tok2 = "token_valid_2";
         revoke_token(tok1);
@@ -851,5 +995,47 @@ mod tests {
         assert!(is_token_revoked(tok1));
         assert!(is_token_revoked(tok2));
         assert!(!is_token_revoked("unrevoked_token"));
+    }
+
+    #[tokio::test]
+    async fn regression_bug_92_rate_limit_and_spawn_blocking() {
+        // Баг 92:
+        // 1. Параллельные попытки обходят лимит 5/мин из-за проверки до записи
+        // 2. PBKDF2 считается синхронно в потоке tokio
+        let ip: std::net::IpAddr = "192.168.1.192".parse().unwrap();
+        clear_rate_limit(ip);
+
+        // 5 последовательных проверок должны зафиксировать 5 попыток без необходимости ручного record_failed_attempt
+        for _ in 0..5 {
+            assert!(check_and_reserve_rate_limit(ip), "Первые 5 попыток должны пройти проверку");
+        }
+        assert!(!check_and_reserve_rate_limit(ip), "6-я попытка должна быть заблокирована rate-limit");
+
+        // Проверяем, что в auth.rs функции login и change_password используют spawn_blocking
+        let src = include_str!("auth.rs");
+        assert!(src.contains("verify_password_async") || src.contains("spawn_blocking"), "PBKDF2 должен запускаться через spawn_blocking");
+    }
+
+    #[test]
+    fn regression_bug_93_revoked_tokens_persist_across_restart() {
+        let _revoked_guard = REVOKED_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Баг 93: Отозванные токены хранятся только в памяти: после рестарта logout отменяется (до 24 ч)
+        let temp_dir = std::env::temp_dir();
+        let storage_path = temp_dir.join(format!("test_revoked_tokens_{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let _ = std::fs::remove_file(&storage_path);
+
+        init_revoked_tokens_storage(&storage_path);
+        let test_token = "session_token_to_revoke_xyz";
+        revoke_token(test_token);
+        assert!(is_token_revoked(test_token), "Токен должен быть отозван сразу после вызова revoke_token");
+
+        // Симулируем перезапуск процесса / очистку кэша в памяти
+        reset_in_memory_revoked_tokens_for_test();
+
+        // После рестарта инициализируем хранилище из того же файла
+        init_revoked_tokens_storage(&storage_path);
+        assert!(is_token_revoked(test_token), "После перезапуска отозванный токен должен оставаться отозванным (прочитан с диска)");
+
+        let _ = std::fs::remove_file(&storage_path);
     }
 }

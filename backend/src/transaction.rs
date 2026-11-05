@@ -860,9 +860,21 @@ pub async fn apply_with_confirmation(
 
     // 1. Создаем транзакцию для безопасного применения файлов
     let mut tx = ConfigTx::begin(state).await?;
-    let original_yaml = tx.original_yaml.clone();
-    let original_json = tx.original_json.clone();
-    let initial_config = tx.initial_config.clone();
+    let mut original_yaml = tx.original_yaml.clone();
+    let mut original_json = tx.original_json.clone();
+    let mut initial_config = tx.initial_config.clone();
+    // Повторное применение до подтверждения предыдущего: откатываться нужно к ИСХОДНОМУ
+    // подтверждённому состоянию, а не к промежуточному неподтверждённому (иначе первая,
+    // возможно сломавшая доступ правка становилась постоянной без подтверждения).
+    if rollback_seconds > 0 {
+        if let Ok(g) = pending_commit_store().lock() {
+            if let Some(prev) = g.as_ref() {
+                original_yaml = prev.yaml_snapshot.clone();
+                original_json = prev.json_snapshot.clone();
+                initial_config = prev.initial_config.clone();
+            }
+        }
+    }
 
     if let Some(y) = new_yaml {
         tx.set_yaml(y)?;
@@ -915,6 +927,10 @@ pub async fn apply_with_confirmation(
         tokio::select! {
             _ = tokio::time::sleep(Duration::from_secs(rollback_seconds)) => {
                 log_w!("[COMMIT-CONFIRMED] Время ожидания подтверждения истекло для tx_id={} ({} сек). Запуск автоотката...", tx_id_clone, rollback_seconds);
+                // Тот же порядок блокировок, что у ConfigTx: откат не должен гоняться с
+                // параллельными транзакциями, watchdog и failover, пишущими эти же файлы
+                let _cfg_guard = state_clone.config_lock.lock().await;
+                let _routing_guard = state_clone.routing_lock.lock().await;
                 if let Some(ref y) = yaml_backup {
                     let _ = crate::api::atomic_write_file(&initial_cfg.mihomo.config_path, y).await;
                 }
@@ -981,6 +997,8 @@ pub async fn rollback_pending_commit(state: &AppState, tx_id: &str) -> Result<()
         }
     };
 
+    let _cfg_guard = state.config_lock.lock().await;
+    let _routing_guard = state.routing_lock.lock().await;
     if let Some(ref y) = pending.yaml_snapshot {
         crate::api::atomic_write_file(&pending.initial_config.mihomo.config_path, y).await?;
     }

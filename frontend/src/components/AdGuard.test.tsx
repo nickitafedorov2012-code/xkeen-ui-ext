@@ -300,4 +300,27 @@ describe('AdGuard Component — Dashboard, Query Log, Filtering & Rewrites', () 
 
     expect(api.apiPost).toHaveBeenCalledWith('/adguard/install')
   })
+  it('bug 133: saving integration settings sends only changed fields, never enabled/dns_port snapshot', async () => {
+    await act(async () => {
+      root!.render(<AdGuard notify={notifyMock} />)
+    })
+    const settingsTab = container?.querySelector('[data-testid="subtab-settings"]') as HTMLButtonElement
+    await act(async () => {
+      settingsTab.click()
+    })
+    const form = container?.querySelector('form') as HTMLFormElement
+    const hostInput = form.querySelector('input[type="text"]') as HTMLInputElement
+    expect(hostInput.value).toBe('127.0.0.1')
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+    await act(async () => {
+      setter.call(hostInput, '10.0.0.5')
+      hostInput.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => {
+      form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    })
+    const calls = vi.mocked(api.apiPost).mock.calls.filter((c) => c[0] === '/adguard/config')
+    expect(calls).toHaveLength(1)
+    expect(calls[0][1]).toEqual({ host: '10.0.0.5' })
+  })
 })

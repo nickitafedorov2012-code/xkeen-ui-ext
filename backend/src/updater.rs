@@ -62,9 +62,23 @@ pub fn compute_sha256(bytes: &[u8]) -> String {
 
 /// Проверяет совпадение вычисленного SHA-256 хеша с ожидаемым (case-insensitive)
 pub fn verify_sha256(actual_hex: &str, expected_hex: &str) -> bool {
-    let a = actual_hex.trim().to_ascii_lowercase();
-    let e = expected_hex.trim().to_ascii_lowercase();
-    !a.is_empty() && !e.is_empty() && a == e
+    let actual = actual_hex.trim().to_lowercase();
+    let expected = expected_hex.trim().to_lowercase();
+    !actual.is_empty() && actual == expected
+}
+
+/// Строгая верификация контрольной суммы релиза (баг 68)
+pub fn verify_release_checksum(
+    calculated_sha256: &str,
+    expected_sha256: Option<&str>,
+) -> Result<(), String> {
+    let Some(exp) = expected_sha256.filter(|s| !s.trim().is_empty()) else {
+        return Err("Контрольная сумма SHA-256 не опубликована в релизе — установка отменена в целях безопасности".to_string());
+    };
+    if !verify_sha256(calculated_sha256, exp) {
+        return Err(format!("Ошибка верификации SHA-256: ожидалось {exp}, получено {calculated_sha256}"));
+    }
+    Ok(())
 }
 
 /// Извлекает ожидаемый SHA-256 хеш из текста чексуммы (GNU format, BSD format или plain hash)
@@ -598,22 +612,12 @@ pub async fn install(State(state): State<AppState>) -> Response {
             _ => {}
         }
     }
-    if let Some(exp) = expected_sha {
-        if !verify_sha256(&calculated_sha256, &exp) {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            crate::log_e!("[UPDATE] Ошибка верификации SHA-256: ожидалось {exp}, получено {calculated_sha256}");
-            return api_err(format!(
-                "Ошибка верификации SHA-256 обновления панели: ожидалось {exp}, получено {calculated_sha256}"
-            ));
-        }
-        crate::log_i!("[UPDATE] SHA-256 бинарника обновления успешно верифицирован: {calculated_sha256}");
-    } else {
-        // U-01: раньше пропуск верификации был молчаливым; теперь он виден в логе,
-        // а ELFO/arch-проверка и тестовый запуск остаются обязательными барьерами.
-        crate::log_w!(
-            "[UPDATE] ⚠️ Контрольная сумма не опубликована в релизе (ни в описании, ни как {chosen_asset}.sha256) — верификация SHA-256 пропущена. Рассчитанный хеш: {calculated_sha256}"
-        );
+    if let Err(e) = verify_release_checksum(&calculated_sha256, expected_sha.as_deref()) {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        crate::log_e!("[UPDATE] Ошибка верификации обновления панели: {e}");
+        return api_err(format!("Ошибка верификации обновления панели: {e}"));
     }
+    crate::log_i!("[UPDATE] SHA-256 бинарника обновления успешно верифицирован: {calculated_sha256}");
 
     // Проверка целостности: размер (не менее 1 МБ) и ELF-заголовок
     if total_bytes < 1024 * 1024 {
@@ -741,6 +745,11 @@ pub async fn install(State(state): State<AppState>) -> Response {
     }
 
     crate::log_i!("[UPDATE] Установлена {ver} ({chosen_asset}), запуск перезапуска сервиса");
+
+    if !crate::config::is_valid_init_script_path(init_script_str) {
+        crate::log_e!("[UPDATE] Недопустимый путь к init-скрипту '{init_script_str}', перезапуск отменён");
+        return api_err(format!("Недопустимый путь к init-скрипту '{init_script_str}'"));
+    }
 
     if Path::new(init_script_str).exists() {
         #[cfg(unix)]
@@ -1532,5 +1541,32 @@ mod tests {
         // Plain hash format
         let plain_checksum = hash.clone();
         assert_eq!(extract_hash_from_checksum_text(&plain_checksum, "anything"), Some(hash));
+    }
+
+    #[test]
+    fn regression_bug_68_mandatory_sha256_verification() {
+        // Баг 68: Проверка SHA-256 подписана как обязательная, но пропускается, если контрольная сумма не опубликована
+        let fake_calc_hash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+        // 1. При отсутствии опубликованной контрольной суммы (None) установка ДОЛЖНА отклоняться
+        let res_none = verify_release_checksum(fake_calc_hash, None);
+        assert!(res_none.is_err(), "Отсутствие опубликованной контрольной суммы должно прерывать установку бинарника");
+
+        // 2. При несовпадении контрольной суммы установка должна отклоняться
+        let res_mismatch = verify_release_checksum(fake_calc_hash, Some("1111111111111111111111111111111111111111111111111111111111111111"));
+        assert!(res_mismatch.is_err());
+
+        // 3. При совпадении установка разрешается
+        let res_ok = verify_release_checksum(fake_calc_hash, Some(fake_calc_hash));
+        assert!(res_ok.is_ok());
+    }
+
+    #[test]
+    fn release_1_10_1_notes_and_version_order() {
+        // Релиз 1.10.1: «Что нового» находится в встроенном DEVELOPMENT.md, а 1.10.x новее 1.9.x (числовое сравнение)
+        let notes = extract_notes_from_markdown(EMBEDDED_DEV_MD, &format!("v{VERSION}"));
+        assert!(!notes.trim().is_empty(), "для текущей версии {VERSION} должна быть секция в DEVELOPMENT.md");
+        assert!(is_newer("v1.10.1", "1.9.63"));
+        assert!(!is_newer("v1.9.63", "1.10.1"));
     }
 }

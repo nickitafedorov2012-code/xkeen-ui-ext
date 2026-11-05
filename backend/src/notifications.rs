@@ -180,7 +180,33 @@ pub fn escape_html(input: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// Валидация webhook URL для защиты от SSRF во внутреннюю сеть роутера (SEC-14).
+/// Проверка, относится ли IP адрес к небезопасным (локальным, приватным, loopback, multicast) для SSRF
+pub fn is_unsafe_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast()
+        }
+        std::net::IpAddr::V6(v6) => {
+            if v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xffc0 == 0xfe80)
+                || (v6.segments()[0] & 0xfe00 == 0xfc00)
+            {
+                true
+            } else if let Some(mapped_v4) = v6.to_ipv4_mapped().or_else(|| v6.to_ipv4()) {
+                mapped_v4.is_loopback()
+                    || mapped_v4.is_private()
+                    || mapped_v4.is_link_local()
+                    || mapped_v4.is_unspecified()
+                    || mapped_v4.is_broadcast()
+            } else {
+                false
+            }
+        }
+    }
+}
+
+/// Валидация webhook URL для защиты от SSRF во внутреннюю сеть роутера (SEC-14 / баг 89).
 pub fn validate_webhook_url(url_str: &str) -> Result<(), String> {
     let trimmed = url_str.trim();
     if trimmed.is_empty() {
@@ -191,38 +217,48 @@ pub fn validate_webhook_url(url_str: &str) -> Result<(), String> {
         return Err("Поддерживаются только http и https URL для Webhook".to_string());
     }
     let host = parsed.host_str().ok_or_else(|| "В URL вебхука отсутствует хост".to_string())?;
-    if host.eq_ignore_ascii_case("localhost")
-        || host.eq_ignore_ascii_case("router")
-        || host.eq_ignore_ascii_case("my.keenetic.net")
+    let lower_host = host.to_ascii_lowercase();
+    if lower_host == "localhost"
+        || lower_host == "router"
+        || lower_host == "my.keenetic.net"
+        || lower_host.ends_with(".lan")
+        || lower_host.ends_with(".local")
+        || lower_host.ends_with(".internal")
+        || lower_host.ends_with(".home.arpa")
+        || lower_host.ends_with(".localhost")
     {
         return Err("Запрещен вызов локальных адресов роутера через Webhook".to_string());
     }
     let host_unbracketed = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = host_unbracketed.parse::<std::net::IpAddr>() {
-        let is_unsafe = match ip {
-            std::net::IpAddr::V4(v4) => {
-                v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast()
-            }
-            std::net::IpAddr::V6(v6) => {
-                if v6.is_loopback()
-                    || v6.is_unspecified()
-                    || (v6.segments()[0] & 0xffc0 == 0xfe80)
-                    || (v6.segments()[0] & 0xfe00 == 0xfc00)
-                {
-                    true
-                } else if let Some(mapped_v4) = v6.to_ipv4_mapped().or_else(|| v6.to_ipv4()) {
-                    mapped_v4.is_loopback()
-                        || mapped_v4.is_private()
-                        || mapped_v4.is_link_local()
-                        || mapped_v4.is_unspecified()
-                        || mapped_v4.is_broadcast()
-                } else {
-                    false
-                }
-            }
-        };
-        if is_unsafe {
+        if is_unsafe_ip(&ip) {
             return Err("Запрещен вызов внутренних/локальных (private, loopback, link-local) адресов через Webhook".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Асинхронный DNS-резолвинг хоста и проверка полученных IP адресов на SSRF (баг 89)
+pub async fn resolve_and_validate_webhook_host(url_str: &str) -> Result<(), String> {
+    validate_webhook_url(url_str)?;
+    let parsed = reqwest::Url::parse(url_str.trim()).map_err(|e| format!("Некорректный URL вебхука: {e}"))?;
+    let host = parsed.host_str().ok_or_else(|| "В URL вебхука отсутствует хост".to_string())?;
+    let port = parsed.port_or_known_default().unwrap_or(80);
+
+    // Если хост — уже IP адрес, он проверен в validate_webhook_url
+    let host_unbracketed = host.trim_start_matches('[').trim_end_matches(']');
+    if host_unbracketed.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(());
+    }
+
+    // Резолвим DNS имя хоста
+    let addr_str = format!("{}:{}", host, port);
+    if let Ok(addrs) = tokio::net::lookup_host(&addr_str).await {
+        for socket_addr in addrs {
+            let ip = socket_addr.ip();
+            if is_unsafe_ip(&ip) {
+                return Err(format!("Домен {host} резолвится в локальный IP {ip}, запрещено политикой SSRF"));
+            }
         }
     }
     Ok(())
@@ -239,7 +275,8 @@ pub async fn send_webhook(
     if webhook_url.trim().is_empty() {
         return Ok(());
     }
-    validate_webhook_url(webhook_url)?;
+    // Проверяем URL и DNS-резолвинг на SSRF (баг 89)
+    resolve_and_validate_webhook_host(webhook_url).await?;
 
     let payload = json!({
         "source": "xkeen-route",
@@ -249,10 +286,16 @@ pub async fn send_webhook(
         "timestamp": chrono::Local::now().to_rfc3339()
     });
 
-    let res = http
+    // Создаем клиент без следования редиректам (баг 89: защита от open redirect SSRF)
+    let webhook_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| http.clone());
+
+    let res = webhook_client
         .post(webhook_url.trim())
         .json(&payload)
-        .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
         .map_err(|e| format!("Ошибка отправки Webhook: {}", e))?;
@@ -264,12 +307,36 @@ pub async fn send_webhook(
     }
 }
 
-/// Комплексная отправка уведомления о событии Failover.
+/// Уведомление о событии Failover. Не блокирует вызывающего (баг 88): доставка идёт фоновой задачей,
+/// иначе failover ждал бы до 30 с сетевых таймаутов, пока LAN сидит на мёртвом сервере.
 pub async fn notify_failover(
     http: &reqwest::Client,
     proxy_url: Option<&str>,
     cfg: &NotificationsConfig,
     event_type: &str, // "switch" | "down" | "restore" | "all_down"
+    title: &str,
+    details: &str,
+) {
+    let telegram = cfg.telegram_enabled && !cfg.telegram_bot_token.is_empty() && !cfg.telegram_chat_id.is_empty();
+    if !telegram && cfg.webhook_url.is_empty() {
+        return;
+    }
+    let http = http.clone();
+    let proxy_url = proxy_url.map(|p| p.to_string());
+    let cfg = cfg.clone();
+    let event_type = event_type.to_string();
+    let title = title.to_string();
+    let details = details.to_string();
+    tokio::spawn(async move {
+        deliver_failover_notification(&http, proxy_url.as_deref(), &cfg, &event_type, &title, &details).await;
+    });
+}
+
+async fn deliver_failover_notification(
+    http: &reqwest::Client,
+    proxy_url: Option<&str>,
+    cfg: &NotificationsConfig,
+    event_type: &str,
     title: &str,
     details: &str,
 ) {
@@ -339,6 +406,27 @@ mod tests {
         assert!(validate_webhook_url("http://[::ffff:192.168.1.1]/hook").is_err());
         assert!(validate_webhook_url("http://router/hook").is_err());
         assert!(validate_webhook_url("http://my.keenetic.net/hook").is_err());
+    }
+
+    #[test]
+    fn regression_bug_89_ssrf_dns_and_redirects_prevention() {
+        // Баг 89: SSRF-фильтр вебхука проверяет только литералы IP:
+        // DNS-имена на локальные суффиксы (.lan, .local, .internal) и редиректы reqwest его обходят.
+        assert!(validate_webhook_url("http://router.lan/api").is_err(), "Домены .lan должны блокироваться SSRF-фильтром");
+        assert!(validate_webhook_url("http://device.local:8080/hook").is_err(), "Домены .local должны блокироваться SSRF-фильтром");
+        assert!(validate_webhook_url("http://corp.internal/hook").is_err(), "Домены .internal должны блокироваться SSRF-фильтром");
+        assert!(validate_webhook_url("http://box.home.arpa/webhook").is_err(), "Домены .home.arpa должны блокироваться SSRF-фильтром");
+
+        // Проверка функции is_unsafe_ip для защиты от DNS-rebinding / резолвинга в локальные адреса
+        assert!(is_unsafe_ip(&"127.0.0.1".parse().unwrap()));
+        assert!(is_unsafe_ip(&"192.168.1.1".parse().unwrap()));
+        assert!(is_unsafe_ip(&"10.0.0.1".parse().unwrap()));
+        assert!(is_unsafe_ip(&"172.16.0.1".parse().unwrap()));
+        assert!(is_unsafe_ip(&"169.254.1.1".parse().unwrap()));
+        assert!(is_unsafe_ip(&"::1".parse().unwrap()));
+        assert!(is_unsafe_ip(&"fe80::1".parse().unwrap()));
+        assert!(!is_unsafe_ip(&"8.8.8.8".parse().unwrap()));
+        assert!(!is_unsafe_ip(&"1.1.1.1".parse().unwrap()));
     }
 
     #[test]
@@ -429,5 +517,41 @@ mod tests {
             _ => saved_token.to_string(),
         };
         assert_eq!(resolved_custom, "123456789:ABC_DEF_GHI");
+    }
+
+    #[tokio::test]
+    async fn regression_bug_88_notify_failover_does_not_block_caller() {
+        // Баг 88: failover ждал доставку уведомлений (Telegram через прокси 10 с → напрямую 10 с → webhook 10 с),
+        // и LAN всё это время сидела на мёртвом сервере. Прокси, который принимает TCP и молчит, — худший случай.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hold = std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for s in listener.incoming().take(4) {
+                if let Ok(s) = s { held.push(s); }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            drop(held);
+        });
+        let cfg = NotificationsConfig {
+            telegram_enabled: true,
+            telegram_bot_token: "123456789:TEST_TOKEN_FOR_REGRESSION_88".to_string(),
+            telegram_chat_id: "555".to_string(),
+            ..Default::default()
+        };
+        let http = reqwest::Client::new();
+        let proxy = format!("http://{}", addr);
+        let started = std::time::Instant::now();
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            notify_failover(&http, Some(&proxy), &cfg, "quarantine", "t", "d"),
+        )
+        .await;
+        assert!(
+            res.is_ok(),
+            "notify_failover не должен блокировать failover на время доставки (ждали {:?})",
+            started.elapsed()
+        );
+        drop(hold);
     }
 }

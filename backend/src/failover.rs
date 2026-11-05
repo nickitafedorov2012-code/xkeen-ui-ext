@@ -1864,19 +1864,29 @@ pub const WAN_CHECK_URL: &str = WAN_CHECK_URLS[0];
 /// Если шлюз провайдера или кабель упал, возвращает false.
 pub async fn is_wan_online(http: &reqwest::Client, cfg: &crate::config::AppConfig) -> bool {
     for url in WAN_CHECK_URLS {
-        let ms = mihomo::ping_server_url_expected(
+        let ms = mihomo::ping_server_url_expected_range(
             http,
             cfg,
             "DIRECT",
             1500,
             Some(url),
-            Some(200),
+            Some(wan_check_expected_status(url)),
         ).await;
         if ms > 0 {
             return true;
         }
     }
     false
+}
+
+/// Ожидаемый HTTP-статус для WAN-пробы (баг 102): generate_204 отвечает 204, а http://ya.ru —
+/// 200 или редиректом на https. Раньше всем трём слали expected=200, и 204-пробы падали всегда.
+pub fn wan_check_expected_status(url: &str) -> &'static str {
+    if url.contains("generate_204") {
+        "204"
+    } else {
+        "200-399"
+    }
 }
 
 /// F-01: строгое сопоставление соединения с сервером (без fuzzy contains).
@@ -2478,6 +2488,25 @@ pub fn select_from_candidates(
     None
 }
 
+/// Нужно ли после Best-Ping (активный узел здоров) идти дальше к автовозврату «Сценария Б» (баг 62).
+pub fn best_ping_should_continue_to_restore(
+    auto_restore_priority: bool,
+    chain_has_servers: bool,
+    smart_failover_enabled: bool,
+    active_is_bs: bool,
+) -> bool {
+    (auto_restore_priority && chain_has_servers) || (smart_failover_enabled && active_is_bs)
+}
+
+/// Кандидаты цепочки приоритетов в её порядке: только существующие сейчас серверы, кроме активного (баг 103).
+pub fn priority_chain_candidates(chain_ids: &[String], servers: &[Server], active_id: &str) -> Vec<String> {
+    chain_ids
+        .iter()
+        .filter(|id| id.as_str() != active_id && servers.iter().any(|s| &s.id == *id))
+        .cloned()
+        .collect()
+}
+
 /// Логика отбора кандидата при аварийном переключении (Strict Chain Boundary vs Best-of-Rest)
 /// с поддержкой Умного фейловера (Tier 1: обычные VPS -> Tier 2: серверы белых списков),
 /// приоритетом цепочки провайдеров (provider_chain) и отсечкой медленных якорей (Anchor Cutoff).
@@ -2910,7 +2939,13 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         .or_else(|| servers.iter().find(|s| s.is_active))
         .cloned();
 
+    // Баг 62: замеры здорового активного узла из Best-Ping передаются в общий путь, чтобы дойти
+    // до «Сценария Б» (автовозврат) без повторного пинга и двойного учёта трафика БС.
+    let mut best_ping_measured: Option<(i64, bool, u64, u64, bool)> = None;
+    let chain_has_servers = cfg.failover.priority_chain.iter().any(|id| servers.iter().any(|s| &s.id == id));
+
     // 0. Режим Best-Ping Failover (строго внутри Failover: выбор лучшего по пингу только при сбое активного узла)
+    'best_ping: {
     if cfg.failover.best_ping_enabled {
         let act_id = active.as_ref().map(|s| s.id.as_str()).unwrap_or("");
         let act_name = active.as_ref().map(|s| s.name.as_str()).unwrap_or("Неизвестный");
@@ -2954,6 +2989,15 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                     "Best-Ping Failover: контрольный L7-пробник узла '{}' не ответил (пинг {} мс), но через узел активно течёт реальный клиентский трафик ({} КБ) — узел исправен",
                     act_name, act_ping, dl_bytes / 1024
                 );
+            }
+            if best_ping_should_continue_to_restore(
+                cfg.failover.auto_restore_priority,
+                chain_has_servers,
+                cfg.failover.smart_failover_enabled,
+                is_active_bs,
+            ) {
+                best_ping_measured = Some((act_ping, has_live_traffic, dl_bytes, up_bytes, is_blackhole));
+                break 'best_ping;
             }
             let msg = format!(
                 "Best-Ping Failover: активный '{}' работает штатно (пинг {act_ping} мс <= порога {threshold} мс), переключение не требуется",
@@ -3131,6 +3175,8 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         }
     }
 
+    }
+
     // Цепочка приоритетов: только существующие сейчас серверы, по порядку.
     let chain: Vec<Server> = cfg
         .failover
@@ -3150,26 +3196,32 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         return Err(msg);
     };
 
-    let mut current = mihomo::ping_server_l7_split(&state.http, &cfg, &active.id, ping_timeout).await;
-    // Fast Retry: 1 быстрый повтор через 1 сек для фильтрации случайных скачков
-    if current <= 0 || current > threshold {
-        tokio::time::sleep(Duration::from_millis(1000)).await;
-        let retry_ping = mihomo::ping_server_l7_split(&state.http, &cfg, &active.id, ping_timeout).await;
-        if retry_ping > 0 && retry_ping <= threshold {
-            current = retry_ping;
+    let (current, has_live_traffic, dl_bytes, up_bytes, is_blackhole) = if let Some(m) = best_ping_measured {
+        m
+    } else {
+        let mut current = mihomo::ping_server_l7_split(&state.http, &cfg, &active.id, ping_timeout).await;
+        // Fast Retry: 1 быстрый повтор через 1 сек для фильтрации случайных скачков
+        if current <= 0 || current > threshold {
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            let retry_ping = mihomo::ping_server_l7_split(&state.http, &cfg, &active.id, ping_timeout).await;
+            if retry_ping > 0 && retry_ping <= threshold {
+                current = retry_ping;
+            }
         }
-    }
 
-    // Единый опрос /connections за цикл: расчёт дельт трафика и детекция черной дыры
-    let conns_val = mihomo::m_get(&state.http, &cfg, "/connections").await.ok();
-    let conns_slice = conns_val.as_ref().and_then(|v| v.get("connections")).and_then(|c| c.as_array()).map(|a| a.as_slice());
+        // Единый опрос /connections за цикл: расчёт дельт трафика и детекция черной дыры
+        let conns_val = mihomo::m_get(&state.http, &cfg, "/connections").await.ok();
+        let conns_slice = conns_val.as_ref().and_then(|v| v.get("connections")).and_then(|c| c.as_array()).map(|a| a.as_slice());
 
-    let (has_live_traffic, dl_bytes, up_bytes, _sockets, is_blackhole) =
-        check_active_traffic_and_blackhole(&state.http, &cfg, &active.id, conns_slice).await;
+        let (has_live_traffic, dl_bytes, up_bytes, _sockets, is_blackhole) =
+            check_active_traffic_and_blackhole(&state.http, &cfg, &active.id, conns_slice).await;
+        (current, has_live_traffic, dl_bytes, up_bytes, is_blackhole)
+    };
 
-    // Честный учёт трафика БС за эпизод по дельте /connections (без подмены каналов)
+    // Честный учёт трафика БС за эпизод по дельте /connections (без подмены каналов);
+    // в ветке Best-Ping он уже выполнен.
     let is_active_bs = is_whitelist_server_full(&active.name, &active.id, active.provider.as_deref(), &cfg);
-    if is_active_bs {
+    if is_active_bs && best_ping_measured.is_none() {
         account_whitelist_cycle_delta(dl_bytes, up_bytes);
     }
 
@@ -3256,17 +3308,16 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         }
 
         // Унифицированный отбор кандидата (4-уровневая иерархия без блэкаутов)
-        let has_priority_chain = !cfg.failover.priority_chain.is_empty() || !chain.is_empty();
-
-        let chain_candidates: Vec<String> = if has_priority_chain {
-            chain
-                .iter()
-                .filter(|s| s.id != active.id)
-                .map(|s| s.id.clone())
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // Баг 103: цепочка «настроена», только если в ней есть живые сейчас серверы кроме активного.
+        // Устаревшие после обновления подписки ID больше не блокируют переключение — работает best-of-rest.
+        let chain_candidates: Vec<String> = priority_chain_candidates(&cfg.failover.priority_chain, &servers, &active.id);
+        let has_priority_chain = !chain_candidates.is_empty();
+        if !has_priority_chain && !cfg.failover.priority_chain.is_empty() {
+            state
+                .failover_log
+                .push("Цепочка приоритетов не содержит доступных сейчас серверов (ID устарели?) — выбираю из остальных", false)
+                .await;
+        }
 
         let target_res = if has_priority_chain {
             if chain_candidates.is_empty() {
@@ -7857,6 +7908,82 @@ proxies:
         let few_servers = &servers[..10];
         let sampled_few = select_candidates(few_servers, 24);
         assert_eq!(sampled_few.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn regression_bug_102_wan_check_accepts_204_endpoints() {
+        // Баг 102: is_wan_online слал expected=200 на generate_204 — 2 из 3 проб всегда «падали»,
+        // и при недоступном ya.ru failover замораживался как «WAN Down» при живом интернете.
+        let _lock = FAILOVER_TEST_LOCK.lock().await;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let first = req.lines().next().unwrap_or("").to_string();
+                    // Как ядро Mihomo: 204-эндпоинт «жив», только если expected допускает 204; ya.ru лежит.
+                    let ok = first.contains("/proxies/DIRECT/delay")
+                        && first.contains("generate_204")
+                        && first.contains("expected=204");
+                    let (status, body) = if ok {
+                        ("200 OK", r#"{"delay":35}"#.to_string())
+                    } else if first.contains("/delay") {
+                        ("503 Service Unavailable", r#"{"message":"An error occurred in the delay test"}"#.to_string())
+                    } else {
+                        ("200 OK", r#"{"proxies":{}}"#.to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".to_string();
+        cfg.mihomo.port = port;
+        let http = reqwest::Client::new();
+        assert!(
+            is_wan_online(&http, &cfg).await,
+            "WAN жив: generate_204 отвечает 204, проверка не должна требовать 200"
+        );
+        server.abort();
+    }
+
+    #[test]
+    fn regression_bug_103_stale_priority_chain_does_not_block_failover() {
+        // Баг 103: после обновления подписки ID в priority_chain устаревают; chain пуст, но
+        // has_priority_chain = true → «Переключение заблокировано», остальные серверы не рассматриваются.
+        let servers = vec![test_server("new_a"), test_server("new_b"), test_server("active")];
+        let stale = vec!["old_x".to_string(), "old_y".to_string()];
+        assert!(
+            priority_chain_candidates(&stale, &servers, "active").is_empty(),
+            "устаревшие ID не дают кандидатов цепочки → режим best-of-rest"
+        );
+        let only_active = vec!["active".to_string(), "old_x".to_string()];
+        assert!(priority_chain_candidates(&only_active, &servers, "active").is_empty());
+        let live = vec!["old_x".to_string(), "new_b".to_string(), "active".to_string(), "new_a".to_string()];
+        assert_eq!(
+            priority_chain_candidates(&live, &servers, "active"),
+            vec!["new_b".to_string(), "new_a".to_string()],
+            "порядок цепочки сохраняется, активный и несуществующие исключены"
+        );
+    }
+
+    #[test]
+    fn regression_bug_62_best_ping_continues_to_auto_restore() {
+        // Баг 62: в Best-Ping здоровый активный узел завершал run_check до «Сценария Б» —
+        // узел [БС] оставался активным, auto_restore_priority игнорировался.
+        assert!(best_ping_should_continue_to_restore(false, false, true, true), "умный failover на БС → проверить возврат на VPS");
+        assert!(best_ping_should_continue_to_restore(true, true, false, false), "автовозврат по цепочке приоритетов");
+        assert!(!best_ping_should_continue_to_restore(true, false, false, false), "цепочка пуста/устарела — возвращаться некуда");
+        assert!(!best_ping_should_continue_to_restore(false, false, true, false), "на обычном VPS умному возврату нечего делать");
     }
 }
 

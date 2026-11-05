@@ -503,9 +503,13 @@ export default function Devices({ notify }: Props) {
     })
     setBusy(true)
     try {
+      // Баг 135: бэкенду нужен IP — правила Mihomo/iptables игрового режима строятся по нему
+      const dev = devices.find((d) => d.mac.toLowerCase() === macLower)
       await apiPost('gaming/toggle', {
         enabled,
         device_mac: mac,
+        device_ip: ip || dev?.ip || undefined,
+        device_name: dev?.name || undefined,
       })
       notify(enabled ? `🎮 Игровой режим включен для ${ip || mac}` : `⚪ Игровой режим выключен для ${ip || mac}`)
       window.dispatchEvent(new CustomEvent('xr:refresh-status'))

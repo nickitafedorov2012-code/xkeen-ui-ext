@@ -1222,6 +1222,58 @@ pub async fn switch_server_graceful(http: &reqwest::Client, cfg: &AppConfig, ser
     switch_server_inner(http, cfg, server_id, true).await
 }
 
+/// Какие selector-группы переключать при смене основного сервера (баг 122).
+/// Всегда пропускаются авто-группы, AI/Flow, гейминг, группы устройств, Canary и 🛡️ Whitelist
+/// (её переключает failover отдельно). Если есть основная группа (PROXY/GLOBAL/Proxy), остальные группы
+/// переключаются только когда «следуют» за ней — стоят на том же узле (prev_active) или на том же выборе.
+pub fn select_groups_to_switch(proxies: &BTreeMap<String, Value>, prev_active: &str) -> Vec<String> {
+    let mut groups: Vec<String> = Vec::new();
+    for (name, p) in proxies {
+        let typ = p.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
+        if typ != "selector" {
+            continue;
+        }
+        let lower_g = name.to_lowercase();
+        if name == "Fastest"
+            || name == "Fallback"
+            || lower_g.contains("google ai")
+            || lower_g.contains("flow")
+            || lower_g.contains("gaming")
+            || lower_g.contains("гейминг")
+            || name.contains("🎮")
+            || lower_g.contains("canary probe")
+            || name.contains("🛡️ Canary Probe")
+            || name == crate::routing::WHITELIST_GROUP_NAME
+            || lower_g.contains("whitelist")
+            || lower_g.contains("белые списки")
+            || ip_from_group_name(name).is_some()
+        {
+            continue;
+        }
+        groups.push(name.clone());
+    }
+    // Известные общие имена — в начало (если существуют).
+    for pref in ["Proxy", "GLOBAL", "PROXY"] {
+        if let Some(pos) = groups.iter().position(|g| g == pref) {
+            let g = groups.remove(pos);
+            groups.insert(0, g);
+        }
+    }
+    let primary_now: Option<String> = ["PROXY", "GLOBAL", "Proxy"]
+        .iter()
+        .find_map(|g| proxies.get(*g).and_then(|p| p.get("now")).and_then(|n| n.as_str()).map(str::to_string));
+    if let Some(primary_now) = primary_now {
+        groups.retain(|g| {
+            if matches!(g.as_str(), "PROXY" | "GLOBAL" | "Proxy") {
+                return true;
+            }
+            let now = proxies.get(g).and_then(|p| p.get("now")).and_then(|n| n.as_str()).unwrap_or("");
+            now == primary_now || (!prev_active.is_empty() && now == prev_active)
+        });
+    }
+    groups
+}
+
 async fn switch_server_inner(http: &reqwest::Client, cfg: &AppConfig, server_id: &str, graceful: bool) -> Result<String, String> {
     let target = match server_id.to_lowercase().as_str() {
         "fastest" => "Fastest".to_string(),
@@ -1245,36 +1297,7 @@ async fn switch_server_inner(http: &reqwest::Client, cfg: &AppConfig, server_id:
     }
     let proxies = get_proxies(http, cfg).await?;
     let prev_active = resolve_active_leaf(&proxies);
-    let mut groups: Vec<String> = Vec::new();
-    for (name, p) in &proxies {
-        let typ = p.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
-        if typ != "selector" {
-            continue;
-        }
-        // исключаем авто-группы, специализированные AI/Flow группы, игровые группы (RT-01), группы устройств и тестовый Canary Probe
-        let lower_g = name.to_lowercase();
-        if name == "Fastest"
-            || name == "Fallback"
-            || lower_g.contains("google ai")
-            || lower_g.contains("flow")
-            || lower_g.contains("gaming")
-            || lower_g.contains("гейминг")
-            || name.contains("🎮")
-            || lower_g.contains("canary probe")
-            || name.contains("🛡️ Canary Probe")
-            || ip_from_group_name(name).is_some()
-        {
-            continue;
-        }
-        groups.push(name.clone());
-    }
-    // Известные общие имена — в начало (если существуют).
-    for pref in ["PROXY", "GLOBAL", "Proxy"] {
-        if let Some(pos) = groups.iter().position(|g| g == pref) {
-            let g = groups.remove(pos);
-            groups.insert(0, g);
-        }
-    }
+    let groups = select_groups_to_switch(&proxies, &prev_active);
     if groups.is_empty() {
         return Err("Не найдено ни одной select-группы для переключения".into());
     }
@@ -1506,13 +1529,26 @@ pub async fn ping_server_url_expected(
     test_url: Option<&str>,
     expected_status: Option<u16>,
 ) -> i64 {
+    let exp = expected_status.map(|c| c.to_string());
+    ping_server_url_expected_range(http, cfg, server_id, timeout_ms, test_url, exp.as_deref()).await
+}
+
+/// То же, что `ping_server_url_expected`, но `expected` в формате Mihomo: "204", "200-399", "200/204".
+pub async fn ping_server_url_expected_range(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    server_id: &str,
+    timeout_ms: u64,
+    test_url: Option<&str>,
+    expected_status: Option<&str>,
+) -> i64 {
     let enc = urlencoding_lite(server_id);
     let check_url = match test_url {
         Some(u) => urlencoding_lite(u),
         None => cfg.health_check_url_encoded(),
     };
     let exp_param = match expected_status {
-        Some(code) => format!("&expected={code}"),
+        Some(code) => format!("&expected={}", urlencoding_lite(code)),
         None => String::new(),
     };
     let url = format!(
@@ -2897,6 +2933,21 @@ mod tests {
         // Body extraction
         let extracted = extract_subscription_userinfo_from_body(&replaced).expect("Must extract from body");
         assert_eq!(extracted.download, 4096);
+    }
+
+    #[test]
+    fn regression_bug_122_switch_server_keeps_whitelist_and_user_groups() {
+        // Баг 122: switch_server переключал на цель ВСЕ selector-группы, включая 🛡️ Whitelist и
+        // пользовательские группы (YouTube/Netflix), намеренно стоящие на других нодах.
+        let mut proxies = std::collections::BTreeMap::new();
+        let sel = |now: &str| serde_json::json!({"type": "Selector", "now": now, "all": ["node-a", "node-b", "node-c"]});
+        proxies.insert("PROXY".to_string(), sel("node-a"));
+        proxies.insert("Telegram".to_string(), sel("node-a")); // следует за основной группой
+        proxies.insert("YouTube".to_string(), sel("node-c")); // намеренно на другой ноде
+        proxies.insert("🛡️ Whitelist".to_string(), sel("node-b"));
+        proxies.insert("🎮 Gaming".to_string(), sel("node-a"));
+        let groups = select_groups_to_switch(&proxies, "node-a");
+        assert_eq!(groups, vec!["PROXY".to_string(), "Telegram".to_string()]);
     }
 }
 

@@ -323,7 +323,11 @@ pub async fn get_health(
     }
 }
 
-/// Очистка списка upstream_dns AdGuard Home от локальных петель и гарантирование надежных публичных резолверов
+/// Запасные резолверы на случай, когда после удаления петель список пуст (баг 114).
+/// Только Яндекс: доступен и в режиме белых списков, в отличие от 1.1.1.1 / 8.8.8.8.
+pub const FALLBACK_UPSTREAMS: &[&str] = &["77.88.8.8", "77.88.8.1"];
+
+/// Очистка списка upstream_dns AdGuard Home от локальных петель; запасные резолверы — только если список опустел
 pub fn clean_adguard_upstreams(upstreams: &[String], router_ip: Option<&str>) -> (Vec<String>, bool) {
     let r_ip = router_ip.map(str::trim).filter(|s| !s.is_empty());
     let mut modified = false;
@@ -356,18 +360,11 @@ pub fn clean_adguard_upstreams(upstreams: &[String], router_ip: Option<&str>) ->
         })
         .collect();
 
-    let fast_defaults = [
-        "77.88.8.8",
-        "77.88.8.1",
-        "1.1.1.1",
-        "8.8.8.8",
-        "https://dns.google/dns-query",
-    ];
-    for def in &fast_defaults {
-        if !cleaned.iter().any(|u| u == *def) {
-            cleaned.push(def.to_string());
-            modified = true;
-        }
+    // Баг 114: публичные резолверы добавляются ТОЛЬКО если после удаления петель не осталось ни одного
+    // upstream. Раньше они дописывались к рабочему списку пользователя на каждом тике watchdog.
+    if cleaned.is_empty() {
+        cleaned.extend(FALLBACK_UPSTREAMS.iter().map(|s| s.to_string()));
+        modified = true;
     }
 
     (cleaned, modified)
@@ -399,12 +396,9 @@ pub fn clean_adguard_bootstrap_dns(bootstrap: &[String], router_ip: Option<&str>
         })
         .collect();
 
-    let bootstrap_defaults = ["77.88.8.8", "1.1.1.1"];
-    for def in &bootstrap_defaults {
-        if !cleaned.iter().any(|u| u == *def) {
-            cleaned.push(def.to_string());
-            modified = true;
-        }
+    if cleaned.is_empty() {
+        cleaned.extend(FALLBACK_UPSTREAMS.iter().map(|s| s.to_string()));
+        modified = true;
     }
 
     (cleaned, modified)
@@ -1159,8 +1153,48 @@ pub struct AghDiagnostics {
 }
 
 pub const AGH_IPTABLES_CHAIN: &str = "XKEEN_ADGUARD";
-pub const AGH_LAN_INTERFACES: &[&str] = &["br+", "Bridge+", "ra+", "apcli+"];
+pub const AGH_LAN_INTERFACES: &[&str] = &["br+", "Bridge+", "ra+"];
 pub const DEFAULT_ADGUARD_DNS_FALLBACK_PORT: u16 = 5354;
+
+pub fn build_sync_tunnel_dns_ports_script(from_ports: &str, to_port: u16) -> String {
+    format!(
+        "for chain in XKEEN_GAMING XKEEN_BS; do \
+            iptables -w 2 -t nat -S $chain 2>/dev/null | grep -E 'to-ports ({from_ports})' | while read -r line; do \
+                del_cmd=$(echo \"$line\" | sed 's/^-A/-D/'); \
+                add_cmd=$(echo \"$line\" | sed -E 's/--to-ports [0-9]+/--to-ports {to_port}/'); \
+                iptables -w 2 -t nat $del_cmd 2>/dev/null || true; \
+                iptables -w 2 -t nat $add_cmd 2>/dev/null || true; \
+            done; \
+        done",
+        from_ports = from_ports,
+        to_port = to_port
+    )
+}
+
+pub fn build_adguard_ndm_hook_content(dns_port: u16) -> String {
+    let port_str = dns_port.to_string();
+    let sync_script = build_sync_tunnel_dns_ports_script("1053|5353|5354", dns_port);
+    format!(
+        "#!/bin/sh\n[ \"$table\" != \"nat\" ] && [ \"$table\" != \"filter\" ] && [ -n \"$table\" ] && exit 0\n\
+        iptables -w 2 -t nat -N {chain} 2>/dev/null || true\n\
+        iptables -w 2 -t nat -F {chain} 2>/dev/null || true\n\
+        iptables -w 2 -t nat -A {chain} -d 127.0.0.1 -j RETURN 2>/dev/null || true\n\
+        iptables -w 2 -t nat -A {chain} -p udp --dport 53 -j REDIRECT --to-ports {port} 2>/dev/null || true\n\
+        iptables -w 2 -t nat -A {chain} -p tcp --dport 53 -j REDIRECT --to-ports {port} 2>/dev/null || true\n\
+        for iface in br+ Bridge+ ra+; do\n\
+            iptables -w 2 -t nat -C PREROUTING -i \"$iface\" -p udp --dport 53 -j {chain} 2>/dev/null || iptables -w 2 -t nat -I PREROUTING 1 -i \"$iface\" -p udp --dport 53 -j {chain} 2>/dev/null || true\n\
+            iptables -w 2 -t nat -C PREROUTING -i \"$iface\" -p tcp --dport 53 -j {chain} 2>/dev/null || iptables -w 2 -t nat -I PREROUTING 1 -i \"$iface\" -p tcp --dport 53 -j {chain} 2>/dev/null || true\n\
+            iptables -w 2 -t filter -C INPUT -i \"$iface\" -p udp --dport {port} -j ACCEPT 2>/dev/null || iptables -w 2 -t filter -I INPUT 1 -i \"$iface\" -p udp --dport {port} -j ACCEPT 2>/dev/null || true\n\
+            iptables -w 2 -t filter -C INPUT -i \"$iface\" -p tcp --dport {port} -j ACCEPT 2>/dev/null || iptables -w 2 -t filter -I INPUT 1 -i \"$iface\" -p tcp --dport {port} -j ACCEPT 2>/dev/null || true\n\
+        done\n\
+        iptables -w 2 -t filter -C INPUT -i lo -p udp --dport {port} -j ACCEPT 2>/dev/null || iptables -w 2 -t filter -I INPUT 1 -i lo -p udp --dport {port} -j ACCEPT 2>/dev/null || true\n\
+        iptables -w 2 -t filter -C INPUT -i lo -p tcp --dport {port} -j ACCEPT 2>/dev/null || iptables -w 2 -t filter -I INPUT 1 -i lo -p tcp --dport {port} -j ACCEPT 2>/dev/null || true\n\
+        {sync_script}\n",
+        chain = AGH_IPTABLES_CHAIN,
+        port = port_str,
+        sync_script = sync_script
+    )
+}
 
 /// Применение изолированной цепочки XKEEN_ADGUARD в iptables -t nat для перехвата портов 53 UDP/TCP
 pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
@@ -1168,71 +1202,68 @@ pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
     {
         // 1. Создаем цепочку XKEEN_ADGUARD, если она не создана, и очищаем ее
         let _ = std::process::Command::new("iptables")
-            .args(["-t", "nat", "-N", AGH_IPTABLES_CHAIN])
+            .args(["-w", "2", "-t", "nat", "-N", AGH_IPTABLES_CHAIN])
             .output();
         let _ = std::process::Command::new("iptables")
-            .args(["-t", "nat", "-F", AGH_IPTABLES_CHAIN])
+            .args(["-w", "2", "-t", "nat", "-F", AGH_IPTABLES_CHAIN])
             .output();
 
         // 2. Исключаем трафик loopback
         let _ = std::process::Command::new("iptables")
-            .args(["-t", "nat", "-A", AGH_IPTABLES_CHAIN, "-d", "127.0.0.1", "-j", "RETURN"])
+            .args(["-w", "2", "-t", "nat", "-A", AGH_IPTABLES_CHAIN, "-d", "127.0.0.1", "-j", "RETURN"])
             .output();
 
         // 3. Редирект входящих DNS-запросов (порт 53) на порт AdGuard Home
         let port_str = dns_port.to_string();
         let _ = std::process::Command::new("iptables")
-            .args(["-t", "nat", "-A", AGH_IPTABLES_CHAIN, "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", &port_str])
+            .args(["-w", "2", "-t", "nat", "-A", AGH_IPTABLES_CHAIN, "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", &port_str])
             .output();
         let _ = std::process::Command::new("iptables")
-            .args(["-t", "nat", "-A", AGH_IPTABLES_CHAIN, "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", &port_str])
+            .args(["-w", "2", "-t", "nat", "-A", AGH_IPTABLES_CHAIN, "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", &port_str])
             .output();
 
-        // 4. Встраиваем переход в XKEEN_ADGUARD в PREROUTING для LAN мостов и Wi-Fi интерфейсов (br+, Bridge+, ra+, apcli+)
+        // 4. Встраиваем переход в XKEEN_ADGUARD в PREROUTING для LAN мостов и Wi-Fi интерфейсов (br+, Bridge+, ra+)
         for iface in AGH_LAN_INTERFACES {
             let check_udp = std::process::Command::new("iptables")
-                .args(["-t", "nat", "-C", "PREROUTING", "-i", iface, "-p", "udp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
+                .args(["-w", "2", "-t", "nat", "-C", "PREROUTING", "-i", iface, "-p", "udp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
                 .output();
             if !check_udp.map(|o| o.status.success()).unwrap_or(false) {
                 let _ = std::process::Command::new("iptables")
-                    .args(["-t", "nat", "-I", "PREROUTING", "1", "-i", iface, "-p", "udp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
+                    .args(["-w", "2", "-t", "nat", "-I", "PREROUTING", "1", "-i", iface, "-p", "udp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
                     .output();
             }
 
             let check_tcp = std::process::Command::new("iptables")
-                .args(["-t", "nat", "-C", "PREROUTING", "-i", iface, "-p", "tcp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
+                .args(["-w", "2", "-t", "nat", "-C", "PREROUTING", "-i", iface, "-p", "tcp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
                 .output();
             if !check_tcp.map(|o| o.status.success()).unwrap_or(false) {
                 let _ = std::process::Command::new("iptables")
-                    .args(["-t", "nat", "-I", "PREROUTING", "1", "-i", iface, "-p", "tcp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
+                    .args(["-w", "2", "-t", "nat", "-I", "PREROUTING", "1", "-i", iface, "-p", "tcp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
                     .output();
             }
         }
 
-        // 5. Разрешаем входящий трафик на порт AdGuard в цепочке INPUT таблицы filter (устраняет DROP перенаправленного DNS роутером)
-        for proto in &["udp", "tcp"] {
-            let check_input = std::process::Command::new("iptables")
-                .args(["-t", "filter", "-C", "INPUT", "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
-                .output();
-            if !check_input.map(|o| o.status.success()).unwrap_or(false) {
-                let _ = std::process::Command::new("iptables")
-                    .args(["-t", "filter", "-I", "INPUT", "1", "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
+        // 5. Разрешаем входящий трафик на порт AdGuard в цепочке INPUT таблицы filter ТОЛЬКО для LAN-интерфейсов и lo (защита от WAN-доступа, баг 44)
+        let mut allowed_input_ifaces = AGH_LAN_INTERFACES.to_vec();
+        allowed_input_ifaces.push("lo");
+        for iface in allowed_input_ifaces {
+            for proto in &["udp", "tcp"] {
+                let check_input = std::process::Command::new("iptables")
+                    .args(["-w", "2", "-t", "filter", "-C", "INPUT", "-i", iface, "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
                     .output();
+                if !check_input.map(|o| o.status.success()).unwrap_or(false) {
+                    let _ = std::process::Command::new("iptables")
+                        .args(["-w", "2", "-t", "filter", "-I", "INPUT", "1", "-i", iface, "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
+                        .output();
+                }
             }
         }
 
-        // 6. Синхронизируем XKEEN_GAMING, если цепочка активна (устраняет конфликт перехвата DNS игровым режимом на 1053)
+        // 6. Синхронизируем XKEEN_GAMING и XKEEN_BS, если цепочки активны (перехват DNS туннелями на порт AdGuard, баг 1)
+        let sync_cmd = build_sync_tunnel_dns_ports_script("1053|5353|5354", dns_port);
         let _ = std::process::Command::new("sh")
             .arg("-c")
-            .arg(format!(
-                "iptables -t nat -S XKEEN_GAMING 2>/dev/null | grep -E 'to-ports (1053|5353|5354)' | while read -r line; do \
-                    del_cmd=$(echo \"$line\" | sed 's/^-A/-D/'); \
-                    add_cmd=$(echo \"$line\" | sed -E 's/--to-ports [0-9]+/--to-ports {port}/'); \
-                    iptables -t nat $del_cmd 2>/dev/null || true; \
-                    iptables -t nat $add_cmd 2>/dev/null || true; \
-                done",
-                port = port_str
-            ))
+            .arg(&sync_cmd)
             .output();
 
         // 7. Устанавливаем NDM hook для защиты от сброса правил фаервола системой KeeneticOS
@@ -1240,28 +1271,7 @@ pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
         if let Some(parent) = hook_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let hook_content = format!(
-            "#!/bin/sh\n[ \"$table\" != \"nat\" ] && [ \"$table\" != \"filter\" ] && [ -n \"$table\" ] && exit 0\n\
-            iptables -t nat -N {chain} 2>/dev/null || true\n\
-            iptables -t nat -F {chain} 2>/dev/null || true\n\
-            iptables -t nat -A {chain} -d 127.0.0.1 -j RETURN 2>/dev/null || true\n\
-            iptables -t nat -A {chain} -p udp --dport 53 -j REDIRECT --to-ports {port} 2>/dev/null || true\n\
-            iptables -t nat -A {chain} -p tcp --dport 53 -j REDIRECT --to-ports {port} 2>/dev/null || true\n\
-            for iface in br+ Bridge+ ra+ apcli+; do\n\
-                iptables -t nat -C PREROUTING -i \"$iface\" -p udp --dport 53 -j {chain} 2>/dev/null || iptables -t nat -I PREROUTING 1 -i \"$iface\" -p udp --dport 53 -j {chain} 2>/dev/null || true\n\
-                iptables -t nat -C PREROUTING -i \"$iface\" -p tcp --dport 53 -j {chain} 2>/dev/null || iptables -t nat -I PREROUTING 1 -i \"$iface\" -p tcp --dport 53 -j {chain} 2>/dev/null || true\n\
-            done\n\
-            iptables -t filter -C INPUT -p udp --dport {port} -j ACCEPT 2>/dev/null || iptables -t filter -I INPUT 1 -p udp --dport {port} -j ACCEPT 2>/dev/null || true\n\
-            iptables -t filter -C INPUT -p tcp --dport {port} -j ACCEPT 2>/dev/null || iptables -t filter -I INPUT 1 -p tcp --dport {port} -j ACCEPT 2>/dev/null || true\n\
-            iptables -t nat -S XKEEN_GAMING 2>/dev/null | grep -E 'to-ports (1053|5353|5354)' | while read -r line; do \
-                del_cmd=$(echo \"$line\" | sed 's/^-A/-D/'); \
-                add_cmd=$(echo \"$line\" | sed -E 's/--to-ports [0-9]+/--to-ports {port}/'); \
-                iptables -t nat $del_cmd 2>/dev/null || true; \
-                iptables -t nat $add_cmd 2>/dev/null || true; \
-            done\n",
-            chain = AGH_IPTABLES_CHAIN,
-            port = port_str
-        );
+        let hook_content = build_adguard_ndm_hook_content(dns_port);
         if let Ok(()) = std::fs::write(hook_path, hook_content) {
             #[cfg(unix)]
             {
@@ -1285,7 +1295,29 @@ pub fn remove_adguard_iptables() -> Result<(), String> {
             for proto in &["udp", "tcp"] {
                 for _ in 0..20 {
                     let out = std::process::Command::new("iptables")
-                        .args(["-t", "nat", "-D", "PREROUTING", "-i", iface, "-p", proto, "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
+                        .args(["-w", "2", "-t", "nat", "-D", "PREROUTING", "-i", iface, "-p", proto, "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
+                        .output();
+                    if !out.map(|o| o.status.success()).unwrap_or(false) {
+                        break;
+                    }
+                }
+            }
+        }
+        let mut allowed_input_ifaces = AGH_LAN_INTERFACES.to_vec();
+        allowed_input_ifaces.push("lo");
+        for iface in allowed_input_ifaces {
+            for proto in &["udp", "tcp"] {
+                for _ in 0..20 {
+                    let out = std::process::Command::new("iptables")
+                        .args(["-w", "2", "-t", "filter", "-D", "INPUT", "-i", iface, "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
+                        .output();
+                    if !out.map(|o| o.status.success()).unwrap_or(false) {
+                        break;
+                    }
+                }
+                for _ in 0..20 {
+                    let out = std::process::Command::new("iptables")
+                        .args(["-w", "2", "-t", "filter", "-D", "INPUT", "-i", iface, "-p", proto, "--dport", "5353", "-j", "ACCEPT"])
                         .output();
                     if !out.map(|o| o.status.success()).unwrap_or(false) {
                         break;
@@ -1296,7 +1328,7 @@ pub fn remove_adguard_iptables() -> Result<(), String> {
         for proto in &["udp", "tcp"] {
             for _ in 0..20 {
                 let out = std::process::Command::new("iptables")
-                    .args(["-t", "filter", "-D", "INPUT", "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
+                    .args(["-w", "2", "-t", "filter", "-D", "INPUT", "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
                     .output();
                 if !out.map(|o| o.status.success()).unwrap_or(false) {
                     break;
@@ -1305,34 +1337,25 @@ pub fn remove_adguard_iptables() -> Result<(), String> {
             // Также подчищаем старый порт 5353, если он был прописан в filter INPUT
             for _ in 0..20 {
                 let out = std::process::Command::new("iptables")
-                    .args(["-t", "filter", "-D", "INPUT", "-p", proto, "--dport", "5353", "-j", "ACCEPT"])
+                    .args(["-w", "2", "-t", "filter", "-D", "INPUT", "-p", proto, "--dport", "5353", "-j", "ACCEPT"])
                     .output();
                 if !out.map(|o| o.status.success()).unwrap_or(false) {
                     break;
                 }
             }
         }
-        // Возвращаем XKEEN_GAMING на порт 1053 (Mihomo)
-        // G-03: возвращаем ВСЕ правила с переписанными портами (без фильтра 'dport 53') —
-        // раньше правила на других dport оставались смотреть на порт AdGuard навсегда
+        // Возвращаем XKEEN_GAMING и XKEEN_BS на порт 1053 (Mihomo) при остановке/падении AdGuard (баг 1)
+        let restore_cmd = build_sync_tunnel_dns_ports_script(&format!("{port_str}|5353|5354"), 1053);
         let _ = std::process::Command::new("sh")
             .arg("-c")
-            .arg(format!(
-                "iptables -t nat -S XKEEN_GAMING 2>/dev/null | grep -E 'to-ports ({port}|5353|5354)' | while read -r line; do \
-                    del_cmd=$(echo \"$line\" | sed 's/^-A/-D/'); \
-                    add_cmd=$(echo \"$line\" | sed -E 's/--to-ports [0-9]+/--to-ports 1053/'); \
-                    iptables -t nat $del_cmd 2>/dev/null || true; \
-                    iptables -t nat $add_cmd 2>/dev/null || true; \
-                done",
-                port = port_str
-            ))
+            .arg(&restore_cmd)
             .output();
 
         let _ = std::process::Command::new("iptables")
-            .args(["-t", "nat", "-F", AGH_IPTABLES_CHAIN])
+            .args(["-w", "2", "-t", "nat", "-F", AGH_IPTABLES_CHAIN])
             .output();
         let _ = std::process::Command::new("iptables")
-            .args(["-t", "nat", "-X", AGH_IPTABLES_CHAIN])
+            .args(["-w", "2", "-t", "nat", "-X", AGH_IPTABLES_CHAIN])
             .output();
 
         let hook_path = std::path::Path::new("/opt/etc/ndm/netfilter.d/040-adguard.sh");
@@ -1351,7 +1374,7 @@ pub fn is_adguard_iptables_active(dns_port: u16) -> bool {
     #[cfg(target_os = "linux")]
     {
         let prerouting_out = std::process::Command::new("iptables")
-            .args(["-t", "nat", "-S", "PREROUTING"])
+            .args(["-w", "2", "-t", "nat", "-S", "PREROUTING"])
             .output();
         let jump_active = prerouting_out
             .ok()
@@ -1366,7 +1389,7 @@ pub fn is_adguard_iptables_active(dns_port: u16) -> bool {
         }
 
         let chain_out = std::process::Command::new("iptables")
-            .args(["-t", "nat", "-S", AGH_IPTABLES_CHAIN])
+            .args(["-w", "2", "-t", "nat", "-S", AGH_IPTABLES_CHAIN])
             .output();
         let rules = chain_out
             .ok()
@@ -1960,24 +1983,18 @@ pub fn sanitize_and_heal_adguard_yaml(content: &str, target_port: u16) -> (Strin
         }
     });
 
-    let content_joined = lines.join("\n");
-    if !content_joined.contains("77.88.8.8") {
-        let mut new_lines = Vec::with_capacity(lines.len() + 4);
-        let mut added_upstream = false;
-        for line in lines {
-            let trimmed = line.trim();
-            new_lines.push(line.clone());
-            if trimmed == "upstream_dns:" && !added_upstream {
-                new_lines.push("    - 77.88.8.8".to_string());
-                new_lines.push("    - 77.88.8.1".to_string());
-                new_lines.push("    - 1.1.1.1".to_string());
-                new_lines.push("    - 8.8.8.8".to_string());
-                new_lines.push("    - https://dns.google/dns-query".to_string());
-                added_upstream = true;
-                changed = true;
+    // Баг 114: запасные резолверы вставляются, только если блок upstream_dns остался пустым.
+    if let Some(pos) = lines.iter().position(|l| l.trim() == "upstream_dns:") {
+        let has_entries = lines[pos + 1..]
+            .iter()
+            .take_while(|l| l.trim().is_empty() || l.trim().starts_with("- ") || l.trim().starts_with('#'))
+            .any(|l| l.trim().starts_with("- "));
+        if !has_entries {
+            for (i, up) in FALLBACK_UPSTREAMS.iter().enumerate() {
+                lines.insert(pos + 1 + i, format!("    - {up}"));
             }
+            changed = true;
         }
-        lines = new_lines;
     }
 
     // 5. Добавляем probe.test в rewrites если его нет
@@ -2796,7 +2813,9 @@ user_rules: []
         assert!(!healed.contains("- 127.0.0.1\n    - 0.0.0.0"));
         assert!(healed.contains("- 0.0.0.0"));
         assert!(!healed.contains("127.0.0.1:1053"), "Circular loop upstream must be removed");
-        assert!(healed.contains("77.88.8.8"));
+        // Баг 114: после удаления петли остался 8.8.8.8 пользователя — запасные резолверы не нужны
+        assert!(healed.contains("- 8.8.8.8"));
+        assert!(!healed.contains("77.88.8.8"));
         assert!(healed.contains("probe.test"));
         assert!(healed.contains("http_proxy: \"http://127.0.0.1:7890\""));
         assert!(healed.contains("chrome.cloudflare-dns.com"));
@@ -2883,9 +2902,8 @@ http:
         assert!(!cleaned.contains(&"localhost:1053".to_string()));
         assert!(!cleaned.contains(&"127.0.0.1:53".to_string()));
         assert!(cleaned.contains(&"tls://dns.quad9.net".to_string()));
-        assert!(cleaned.contains(&"77.88.8.8".to_string()));
-        assert!(cleaned.contains(&"1.1.1.1".to_string()));
-        assert!(cleaned.contains(&"8.8.8.8".to_string()));
+        // Баг 114: к оставшемуся рабочему upstream публичные резолверы не дописываются
+        assert_eq!(cleaned, vec!["tls://dns.quad9.net".to_string()]);
     }
 
     #[test]
@@ -2900,8 +2918,45 @@ http:
         assert!(!cleaned.contains(&"127.0.0.1".to_string()));
         assert!(!cleaned.contains(&"192.168.2.1".to_string()));
         assert!(cleaned.contains(&"9.9.9.9".to_string()));
-        assert!(cleaned.contains(&"77.88.8.8".to_string()));
-        assert!(cleaned.contains(&"1.1.1.1".to_string()));
+        // Баг 114: запасные bootstrap только для пустого списка
+        assert_eq!(cleaned, vec!["9.9.9.9".to_string()]);
+    }
+
+    #[test]
+    fn regression_bug_44_adguard_not_exposed_to_wan() {
+        // Баг 44: AdGuard открыт в WAN.
+        // 1. AGH_LAN_INTERFACES включает apcli+, а это WISP-WAN (DNS из WAN перехватывается в AdGuard).
+        // 2. Правило INPUT ACCEPT на порт AdGuard не ограничено LAN-интерфейсами.
+        assert!(!AGH_LAN_INTERFACES.contains(&"apcli+"), "apcli+ является WAN/WISP интерфейсом и не должен присутствовать в AGH_LAN_INTERFACES");
+
+        let hook = build_adguard_ndm_hook_content(5353);
+        assert!(!hook.contains("apcli+"), "Хук NDM для AdGuard не должен перехватывать apcli+");
+        // INPUT правила в хуке должны быть привязаны к LAN/lo интерфейсам, а не открывать порт всему миру
+        assert!(!hook.contains("iptables -t filter -I INPUT 1 -p udp --dport 5353 -j ACCEPT"), "INPUT не должен быть открыт для всех интерфейсов (WAN)");
+        assert!(!hook.contains("iptables -t filter -I INPUT 1 -p tcp --dport 5353 -j ACCEPT"), "INPUT не должен быть открыт для всех интерфейсов (WAN)");
+    }
+
+    #[test]
+    fn regression_bug_114_user_upstreams_are_not_extended_with_public_dns() {
+        // Баг 114: «лечение» на каждом тике дописывало 77.88.8.8, 77.88.8.1, 1.1.1.1, 8.8.8.8 и dns.google
+        // к upstream пользователя (DoH-only конфиг получал открытые запросы, 1.1.1.1/8.8.8.8 при БС недоступны).
+        let user = vec!["https://doh.example.net/dns-query".to_string()];
+        let (cleaned, modified) = clean_adguard_upstreams(&user, Some("192.168.2.1"));
+        assert_eq!(cleaned, user, "рабочий список пользователя не дополняется");
+        assert!(!modified, "без петель изменений нет — Live API не дёргается");
+
+        let (cleaned, modified) = clean_adguard_upstreams(&["127.0.0.1:1053".to_string()], None);
+        assert!(modified);
+        assert!(!cleaned.is_empty(), "если после удаления петли не осталось ничего — нужен запасной резолвер");
+
+        let (boot, bmod) = clean_adguard_bootstrap_dns(&["9.9.9.9".to_string()], None);
+        assert_eq!(boot, vec!["9.9.9.9".to_string()]);
+        assert!(!bmod);
+
+        let yaml = "dns:\n  upstream_dns:\n    - https://doh.example.net/dns-query\n  bootstrap_dns:\n    - 9.9.9.9\n";
+        let (healed, _) = sanitize_and_heal_adguard_yaml(yaml, 5354);
+        assert!(!healed.contains("77.88.8.8"), "в YAML пользователя не дописываются публичные DNS:\n{healed}");
+        assert!(!healed.contains("    - 8.8.8.8"));
     }
 }
 

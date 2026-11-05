@@ -1373,6 +1373,27 @@ pub fn remove_zapret_hybrid_rules(yaml: &str) -> String {
 }
 
 /// Поиск имени основной прокси-группы в YAML (PROXY, Proxy, Fastest, Auto, Fallback и т.д.).
+/// Порт DNS Mihomo по умолчанию (XKeen) — используется, только если в config.yaml нет dns.listen.
+pub const DEFAULT_MIHOMO_DNS_PORT: u16 = 1053;
+
+/// Порт из `dns: listen: host:port` config.yaml Mihomo (баг 45).
+pub fn parse_mihomo_dns_listen_port(yaml: &str) -> Option<u16> {
+    let mut in_dns = false;
+    for line in yaml.lines() {
+        if !line.starts_with(' ') && !line.trim().is_empty() && !line.trim_start().starts_with('#') {
+            in_dns = line.trim_end() == "dns:";
+            continue;
+        }
+        if in_dns {
+            if let Some(rest) = line.trim().strip_prefix("listen:") {
+                let v = rest.trim().trim_matches('"').trim_matches('\'');
+                return v.rsplit(':').next().and_then(|p| p.trim().parse::<u16>().ok()).filter(|p| *p > 0);
+            }
+        }
+    }
+    None
+}
+
 pub fn find_proxy_target_group(yaml: &str) -> String {
     for gname in ["PROXY", "Proxy", "proxy", "Google AI", "Google-AI", "GoogleFlow", "Flow", "AI", "Fastest", "Auto", "Fallback"] {
         let pattern_unquoted = format!("- name: {gname}");
@@ -2050,9 +2071,41 @@ pub fn remove_whitelist_dns(yaml: &str) -> String {
 /// 2. Вставка блока # --- AUTO-WHITELIST-BEGIN --- в rules:
 ///    - Отечественные домены (376 базовых + custom) -> DIRECT (строго без GEOIP-RU)
 ///    - Трафик назначенных устройств -> 🛡️ Whitelist (или выбранный target_server)
+/// Поиск IP адреса по MAC в содержимом ARP таблицы (/proc/net/arp)
+pub fn find_ip_for_mac_in_arp(mac: &str, arp_data: &str) -> Option<String> {
+    let clean_mac = mac.trim().to_ascii_lowercase();
+    if clean_mac.is_empty() {
+        return None;
+    }
+    for line in arp_data.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 4 {
+            let ip = parts[0];
+            let hw_addr = parts[3].to_ascii_lowercase();
+            if hw_addr == clean_mac && crate::config::is_valid_ip_or_cidr(ip) {
+                return Some(ip.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Разрешение IP-адресов исключенных из белых списков устройств (по IP или MAC).
 pub fn resolve_excluded_whitelist_ips(cfg: &crate::config::AppConfig) -> Vec<String> {
+    resolve_excluded_whitelist_ips_internal(cfg, None)
+}
+
+pub fn resolve_excluded_whitelist_ips_internal(cfg: &crate::config::AppConfig, arp_content: Option<&str>) -> Vec<String> {
     let mut ips = Vec::new();
+
+    // Читаем системную ARP-таблицу если содержимое не передано явно
+    let system_arp = if arp_content.is_none() {
+        std::fs::read_to_string("/proc/net/arp").ok()
+    } else {
+        None
+    };
+    let effective_arp = arp_content.or(system_arp.as_deref());
+
     for item in &cfg.whitelist.excluded_devices {
         let clean = item.trim();
         if clean.is_empty() {
@@ -2061,18 +2114,33 @@ pub fn resolve_excluded_whitelist_ips(cfg: &crate::config::AppConfig) -> Vec<Str
         if crate::config::is_valid_ip_or_cidr(clean) {
             ips.push(clean.to_string());
         } else {
+            let mut found = false;
             if let Some(dev) = cfg.gaming.devices.iter().find(|d| d.mac.eq_ignore_ascii_case(clean)) {
                 if !dev.ip.trim().is_empty() {
                     ips.push(dev.ip.trim().to_string());
+                    found = true;
                 }
             }
-            if let Some(dev) = cfg.whitelist.devices.iter().find(|d| d.mac.eq_ignore_ascii_case(clean)) {
-                if !dev.ip.trim().is_empty() {
-                    ips.push(dev.ip.trim().to_string());
+            if !found {
+                if let Some(dev) = cfg.whitelist.devices.iter().find(|d| d.mac.eq_ignore_ascii_case(clean)) {
+                    if !dev.ip.trim().is_empty() {
+                        ips.push(dev.ip.trim().to_string());
+                        found = true;
+                    }
                 }
             }
-            if let Some((ip, _)) = cfg.device_routing.iter().find(|(k, _)| k.eq_ignore_ascii_case(clean)) {
-                ips.push(ip.clone());
+            if !found {
+                if let Some(arp_data) = effective_arp {
+                    if let Some(ip) = find_ip_for_mac_in_arp(clean, arp_data) {
+                        ips.push(ip);
+                        found = true;
+                    }
+                }
+            }
+            if !found {
+                if let Some((ip, _)) = cfg.device_routing.iter().find(|(k, _)| k.eq_ignore_ascii_case(clean)) {
+                    ips.push(ip.clone());
+                }
             }
         }
     }
@@ -2190,10 +2258,9 @@ pub fn apply_whitelist_rules(
 
     // При стратегии StrictXKeen маршрутизируем всех клиентов сети в защищенный туннель (Zero-Touch)
     if cfg.whitelist.strategy == crate::config::WhitelistStrategy::StrictXKeen {
-        let dev_target = match cfg.whitelist.target_server.as_deref() {
-            Some(s) if !s.trim().is_empty() && s.trim() != "follow_failover" => s.trim(),
-            _ => WHITELIST_GROUP_NAME,
-        };
+        // Баг 39: правила БС всегда указывают на группу 🛡️ Whitelist; выбранный target_server ставится
+        // в эту группу в рантайме (switch_group в sync_whitelist_mode_tunnel) — ноды подписок в rules недопустимы.
+        let dev_target = WHITELIST_GROUP_NAME;
 
         // 2.1. Исключенные устройства -> DIRECT
         let excluded_ips = resolve_excluded_whitelist_ips(cfg);
@@ -2265,7 +2332,15 @@ pub fn apply_whitelist_rules(
         None => return with_group,
     };
 
-    let target_insert_idx = if let Some(dev_rules_idx) = lines[rules_pos + 1..].iter().position(|l| l.trim() == RULES_BEGIN) {
+    let target_insert_idx = if cfg.whitelist.strategy == crate::config::WhitelistStrategy::StrictXKeen {
+        // В режиме StrictXKeen правила белых списков обязаны быть в самом верху секции rules:
+        // (сразу под AdBlock, если он есть, или сразу после 'rules:'), строго ВЫШЕ domain_rules, zapret и gaming (баг 3)
+        if let Some(adblock_end_idx) = lines[rules_pos + 1..].iter().position(|l| l.trim() == ADBLOCK_END) {
+            rules_pos + 1 + adblock_end_idx + 1
+        } else {
+            rules_pos + 1
+        }
+    } else if let Some(dev_rules_idx) = lines[rules_pos + 1..].iter().position(|l| l.trim() == RULES_BEGIN) {
         rules_pos + 1 + dev_rules_idx
     } else if let Some(fallback_idx) = lines[rules_pos + 1..].iter().position(|l| {
         let t = l.trim();
@@ -3172,23 +3247,6 @@ pub fn apply_routing_with_filters(
         current = with_devices;
     }
 
-    // 1.1. Режим белых списков (376 отечественных сервисов напрямую, прокси-туннель для устройств)
-    // Размещается непосредственно над AUTO-DEVICE-RULES и под AdBlock
-    let active_wl_tunnel = match cfg.whitelist.target_server.as_deref() {
-        Some(s) if !s.trim().is_empty() && s.trim() != "follow_failover" => Some(s.trim()),
-        _ => None,
-    };
-    current = apply_whitelist_rules(&current, cfg, active_wl_tunnel);
-    current = apply_whitelist_dns(&current, cfg, "127.0.0.1:53");
-
-    // 1.2. Canary Probe: селектор-группа '🛡️ Canary Probe' и локальный слушатель 127.0.0.1:7894
-    if cfg.failover.enabled {
-        current = apply_canary_rules_with_providers(&current, &providers);
-    } else {
-        current = remove_canary_rules(&current);
-    }
-
-
     // 2. Игнор-лист
     if let Ok(with_ig) = apply_ignore_to_groups(&current, &cfg.ignore_servers) {
         current = with_ig;
@@ -3206,29 +3264,134 @@ pub fn apply_routing_with_filters(
     // Пользовательские force_domains имеют абсолютный приоритет над DIRECT-правилами Zapret
     current = apply_zapret_hybrid_rules_with_force(&current, &cfg.zapret, active_force)?;
 
-    // 5. Блокировка рекламы на роутере (AdBlock) — применяется ко всем устройствам
+    // 5. Игровой режим (приоритетный маршрут устройства и селектор-группа 🎮 Gaming)
+    current = apply_gaming_rules(&current, &cfg.gaming, &providers)?;
+
+    // 5.1. Режим белых списков (376 отечественных сервисов напрямую, прокси-туннель для устройств)
+    // В режиме StrictXKeen правила белых списков размещаются ВЫШЕ доменных, игровых и zapret-правил (баг 3)
+    let active_wl_tunnel = match cfg.whitelist.target_server.as_deref() {
+        Some(s) if !s.trim().is_empty() && s.trim() != "follow_failover" => Some(s.trim()),
+        _ => None,
+    };
+    current = apply_whitelist_rules(&current, cfg, active_wl_tunnel);
+    current = apply_whitelist_dns(&current, cfg, "127.0.0.1:53");
+
+    // 5.2. Canary Probe: селектор-группа '🛡️ Canary Probe' и локальный слушатель 127.0.0.1:7894.
+    // Нужна и failover (Canary-тест), и изолированному speedtest (баг 84), поэтому есть всегда.
+    current = apply_canary_rules_with_providers(&current, &providers);
+
+    // 5.3. Блокировка рекламы на роутере (AdBlock) — применяется ко всем устройствам
     if let Ok(with_adblock) = apply_adblock_rules(&current, cfg.adblock_enabled) {
         current = with_adblock;
     }
 
-    // 5.1. Интеграция AdGuard Home DNS под прокси (Mihomo nameserver -> 127.0.0.1:5353)
+    // 5.4. Интеграция AdGuard Home DNS под прокси (Mihomo nameserver -> 127.0.0.1:5353)
     let agh_enabled = cfg.adguard.enabled || cfg.adblock_enabled;
     let agh_port = if cfg.adguard.dns_port > 0 { cfg.adguard.dns_port } else { 5354 };
     if let Ok(with_agh_dns) = apply_adguard_dns_upstream(&current, agh_port, agh_enabled) {
         current = with_agh_dns;
     }
 
-    // 6. Игровой режим (приоритетный маршрут устройства и селектор-группа 🎮 Gaming)
-    current = apply_gaming_rules(&current, &cfg.gaming, &providers)?;
-
-    // 7. Выделенный маршрут Google Flow & AI (высший приоритет — на самом верху секции rules)
+    // 6. Выделенный маршрут Google Flow & AI (высший приоритет — на самом верху секции rules)
     let flow_target = cfg.flow_server.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or("PROXY");
     let flow_group = find_flow_group_name(&current);
     if let Ok(with_flow) = apply_flow_rules(&current, flow_target.trim(), flow_group.as_deref()) {
         current = with_flow;
     }
 
+    // INV-4 (баги 12, 39, 51): страховка — цель правила обязана быть группой, статическим прокси или
+    // встроенной целью. Иначе Mihomo отвергает весь конфиг. Неизвестная цель заменяется группой блока.
+    let (sanitized, replaced) = sanitize_rule_targets(&current);
+    for r in &replaced {
+        crate::log_w!("[ROUTING] Цель правила '{r}' не является группой или прокси — заменена (INV-4)");
+    }
+    current = sanitized;
+
     Ok((current, count))
+}
+
+/// Цель правила Mihomo из строки `- TYPE,PAYLOAD,TARGET[,опции]` (MATCH — второй элемент,
+/// логические AND/OR/NOT — после закрывающей скобки).
+pub fn rule_target_of(line: &str) -> Option<String> {
+    let body = line.strip_prefix("- ")?.trim();
+    if body.starts_with('#') || body.is_empty() {
+        return None;
+    }
+    let upper = body.to_ascii_uppercase();
+    if upper.starts_with("SUB-RULE,") {
+        return None;
+    }
+    if upper.starts_with("AND,") || upper.starts_with("OR,") || upper.starts_with("NOT,") {
+        let close = body.rfind("),")?;
+        return body[close + 2..].split(',').next().map(|t| t.trim().to_string());
+    }
+    let parts: Vec<&str> = body.split(',').collect();
+    if upper.starts_with("MATCH,") {
+        return parts.get(1).map(|t| t.trim().to_string());
+    }
+    parts.get(2).map(|t| t.trim().to_string())
+}
+
+/// Замена недопустимых целей правил (баги 12, 39, 51). В блоке БС — на 🛡️ Whitelist (не допускаем
+/// третий канал), в блоке гейминга — на 🎮 Gaming, иначе — на основную прокси-группу.
+pub fn sanitize_rule_targets(yaml: &str) -> (String, Vec<String>) {
+    let groups = parse_existing_group_names(yaml);
+    let statics = parse_static_proxy_names(yaml);
+    let builtin = ["DIRECT", "REJECT", "REJECT-DROP", "PASS", "COMPATIBLE", "GLOBAL"];
+    let is_valid = |t: &str| {
+        let tq = t.trim_matches('\'').trim_matches('"');
+        builtin.contains(&tq) || groups.iter().any(|g| g == tq) || statics.iter().any(|g| g == tq)
+    };
+    let main_fallback = find_proxy_target_group(yaml);
+    let has_group = |g: &str| groups.iter().any(|x| x == g);
+    let mut replaced = Vec::new();
+    let mut out = Vec::new();
+    let mut in_rules = false;
+    let mut block: Option<&str> = None;
+    let mut in_auto = false;
+    for line in yaml.lines() {
+        if !line.starts_with(' ') && !line.trim().is_empty() && !line.trim_start().starts_with('#') {
+            in_rules = line.trim_end() == "rules:";
+        }
+        let t = line.trim();
+        if t.starts_with("# --- AUTO-") && t.ends_with("-BEGIN ---") {
+            in_auto = true;
+        } else if t.starts_with("# --- AUTO-") && t.ends_with("-END ---") {
+            in_auto = false;
+        }
+        if t == WHITELIST_BEGIN {
+            block = Some("wl");
+        } else if t == GAMING_BEGIN {
+            block = Some("gaming");
+        } else if t == WHITELIST_END || t.starts_with("# --- AUTO-GAMING-RULES-END") {
+            block = None;
+        }
+        // Правила пользователя вне AUTO-блоков не трогаем (например DOMAIN-REGEX с запятыми в шаблоне)
+        if in_rules && in_auto {
+            if let Some(target) = rule_target_of(t) {
+                if !is_valid(&target) {
+                    let fallback = match block {
+                        Some("wl") if has_group(WHITELIST_GROUP_NAME) => WHITELIST_GROUP_NAME.to_string(),
+                        Some("gaming") if has_group(GAMING_GROUP_NAME) => GAMING_GROUP_NAME.to_string(),
+                        _ => main_fallback.clone(),
+                    };
+                    if is_valid(&fallback) {
+                        let idx = line.rfind(&target).unwrap_or(0);
+                        let new_line = format!("{}{}{}", &line[..idx], fallback, &line[idx + target.len()..]);
+                        replaced.push(target);
+                        out.push(new_line);
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(line.to_string());
+    }
+    let mut joined = out.join("\n");
+    if yaml.ends_with('\n') {
+        joined.push('\n');
+    }
+    (joined, replaced)
 }
 
 pub fn apply_routing(yaml: &str, cfg: &crate::config::AppConfig) -> Result<(String, usize), String> {
@@ -4814,6 +4977,57 @@ rules:
     }
 
     #[test]
+    fn regression_bug_2_resolve_excluded_whitelist_ips_for_regular_devices() {
+        // Баг 2: Исключение устройства из БС не работает для обычных устройств.
+        // UI отправляет MAC обычного устройства сети, которого нет в gaming.devices или whitelist.devices.
+        let mut cfg = crate::config::AppConfig::default();
+        let regular_mac = "22:33:44:55:66:77";
+        cfg.whitelist.excluded_devices = vec![regular_mac.to_string()];
+
+        let arp_sample = "\
+IP address       HW type     Flags       HW address            Mask     Device\n\
+192.168.2.145    0x1         0x2         22:33:44:55:66:77     *        br0\n\
+192.168.2.1      0x1         0x2         00:04:9f:ef:01:02     *        br0\n";
+
+        // Проверяем извлечение IP по MAC из ARP таблицы
+        assert_eq!(
+            find_ip_for_mac_in_arp(regular_mac, arp_sample),
+            Some("192.168.2.145".to_string()),
+            "find_ip_for_mac_in_arp обязан находить IP по MAC в таблице ARP"
+        );
+
+        // Проверяем, что resolve_excluded_whitelist_ips_internal находит IP обычного устройства
+        let resolved = resolve_excluded_whitelist_ips_internal(&cfg, Some(arp_sample));
+        assert!(
+            resolved.contains(&"192.168.2.145".to_string()),
+            "resolve_excluded_whitelist_ips обязан находить IP обычного устройства по его MAC из ARP"
+        );
+    }
+
+    #[test]
+    fn regression_bug_3_whitelist_strict_mode_rule_hierarchy() {
+        // Баг 3: В режиме БС (StrictXKeen) правила, стоящие выше catch-all блока БС, обходят его
+        // (доменные правила force_domains, zapret-hybrid, gaming направляют трафик в PROXY/VPS в обход БС).
+        let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - GEOIP,RU,DIRECT\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
+        cfg.force_domains = vec!["force-site.com".into()];
+        cfg.direct_domains = vec!["direct-site.com".into()];
+
+        let (applied, _) = apply_routing(base_yaml, &cfg).expect("apply_routing must succeed");
+        let wl_pos = applied.find(WHITELIST_BEGIN).expect("WHITELIST_BEGIN must be present");
+        let force_pos = applied.find(FORCE_BEGIN).expect("FORCE_BEGIN must be present");
+
+        // При StrictXKeen правила белых списков должны предшествовать force-доменам в PROXY
+        assert!(
+            wl_pos < force_pos,
+            "В режиме StrictXKeen правила белых списков (pos {}) обязаны быть ВЫШЕ force_domains (pos {}), чтобы исключить утечку в третий канал PROXY",
+            wl_pos, force_pos
+        );
+    }
+
+    #[test]
     fn test_whitelist_strict_preserves_category_ru_above_subnet_tunnel() {
         let base_yaml = r#"port: 7890
 rule-providers:
@@ -5034,10 +5248,56 @@ rules:
         assert!(applied.contains("canary-probe-in"));
         assert!(applied.contains("🛡️ Canary Probe"));
 
+        // Баг 84: изолированный speedtest использует тот же слушатель Canary Probe, поэтому группа
+        // остаётся и при выключенном failover (и не дублируется при повторной пересборке).
         cfg.failover.enabled = false;
-        let (cleaned, _) = apply_routing(&applied, &cfg).expect("apply_routing with failover.enabled=false");
-        assert!(!cleaned.contains("canary-probe-in"));
-        assert!(!cleaned.contains("🛡️ Canary Probe"));
+        let (kept, _) = apply_routing(&applied, &cfg).expect("apply_routing with failover.enabled=false");
+        assert!(kept.contains("canary-probe-in"));
+        assert_eq!(kept.matches("name: canary-probe-in").count(), applied.matches("name: canary-probe-in").count());
+        assert!(kept.contains("🛡️ Canary Probe"));
+    }
+
+    #[test]
+    fn regression_bug_39_whitelist_target_node_does_not_break_config() {
+        // Баг 39: целевой узел БС из подписки подставлялся сырым именем в catch-all — Mihomo отвергал конфиг.
+        let base = "mode: rule\nproxies:\n  - name: Static-1\n    type: ss\n    server: 1.1.1.1\n    port: 1\nproxy-providers:\n  sub1:\n    type: http\n    url: http://x\n    path: ./providers/sub1.yaml\nproxy-groups:\n  - name: PROXY\n    type: select\n    use: [sub1]\nrules:\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.target_server = Some("RU Node From Subscription".to_string());
+        let (yaml, _) = apply_routing(base, &cfg).unwrap();
+        assert!(
+            !yaml.lines().any(|l| l.contains(",RU Node From Subscription")),
+            "правила не ссылаются на ноду подписки напрямую:\n{yaml}"
+        );
+        let user = "proxy-groups:\n  - name: PROXY\n    type: select\nrules:\n  - DOMAIN-REGEX,^a{1,3}\\.com$,PROXY\n  - MATCH,PROXY\n";
+        let (kept, replaced) = sanitize_rule_targets(user);
+        assert_eq!(kept, user, "пользовательские правила вне AUTO-блоков не меняются");
+        assert!(replaced.is_empty());
+    }
+
+    #[test]
+    fn regression_bug_12_gaming_exit_node_does_not_break_config() {
+        // Баг 12: «Выходной узел» игрового устройства подставлялся сырым именем ноды подписки в правило.
+        let base = "mode: rule\nproxies:\n  - name: Static-1\n    type: ss\n    server: 1.1.1.1\n    port: 1\nproxy-providers:\n  sub1:\n    type: http\n    url: http://x\n    path: ./providers/sub1.yaml\nproxy-groups:\n  - name: PROXY\n    type: select\n    use: [sub1]\nrules:\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.gaming.enabled = true;
+        cfg.gaming.mode = crate::config::GamingMode::Compatibility;
+        cfg.gaming.devices.push(crate::config::GamingDevice {
+            mac: "aa:bb:cc:dd:ee:01".into(), ip: "192.168.1.50".into(), ipv6: vec![], name: "PS5".into(),
+            enabled: true, server: Some("DE Game Node".to_string()),
+        });
+        let (yaml, _) = apply_routing(base, &cfg).unwrap();
+        assert!(!yaml.lines().any(|l| l.trim_start().starts_with("- ") && l.ends_with(",DE Game Node")), "правило не ссылается на ноду подписки:\n{yaml}");
+    }
+
+    #[test]
+    fn regression_bug_51_flow_server_node_does_not_break_config() {
+        // Баг 51: без группы «Google AI» правила Flow указывали на сырое имя ноды — каждое сохранение ломало конфиг.
+        let base = "mode: rule\nproxies:\n  - name: Static-1\n    type: ss\n    server: 1.1.1.1\n    port: 1\nproxy-providers:\n  sub1:\n    type: http\n    url: http://x\n    path: ./providers/sub1.yaml\nproxy-groups:\n  - name: PROXY\n    type: select\n    use: [sub1]\nrules:\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.flow_server = Some("US AI Node".to_string());
+        let (yaml, _) = apply_routing(base, &cfg).unwrap();
+        assert!(!yaml.lines().any(|l| l.trim_start().starts_with("- ") && l.ends_with(",US AI Node")), "правила Flow не ссылаются на ноду подписки:\n{yaml}");
     }
 }
 

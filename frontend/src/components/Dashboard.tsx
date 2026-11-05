@@ -867,13 +867,12 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
           setTogglingDetector(true)
           try {
             const newEnabled = !isDetectorEnabled
-            const curFailover = status?.failover || ({} as any)
-            const curDetector = curFailover.whitelist_detector || {}
+            // Бэкенд мержит настройки глубоко — отправляем ТОЛЬКО изменённое поле.
+            // Раньше в PUT уходил весь снимок status.failover (устаревшие priority_chain,
+            // bs_priority_chain и др.), и он затирал свежие изменения failover.
             await apiPut('settings', {
               failover: {
-                ...curFailover,
                 whitelist_detector: {
-                  ...curDetector,
                   enabled: newEnabled,
                 },
               },

@@ -714,6 +714,10 @@ pub struct AdGuardConfig {
     /// Путь к файлу конфигурации AdGuardHome.yaml (для managed-режима и бэкапов)
     #[serde(default = "default_agh_config_path")]
     pub config_path: String,
+    /// Пользователь явно включал/выключал интеграцию (или сторож один раз подхватил работающий AGH):
+    /// после этого watchdog больше не включает интеграцию сам (баг 116).
+    #[serde(default)]
+    pub integration_choice_locked: bool,
 }
 
 impl Default for AdGuardConfig {
@@ -729,6 +733,7 @@ impl Default for AdGuardConfig {
             upstream_dns: default_agh_upstream(),
             failsafe_rollback: true,
             config_path: default_agh_config_path(),
+            integration_choice_locked: false,
         }
     }
 }
@@ -1302,6 +1307,51 @@ pub(crate) fn parse_config_content(content: &str, path_display: &str) -> AppConf
     }
 }
 
+/// Путь резервной копии последнего рабочего конфига: config.json → config.json.bak (баг 130).
+pub fn backup_path(path: &Path) -> std::path::PathBuf {
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "config.json".into());
+    path.with_file_name(format!("{name}.bak"))
+}
+
+fn load_backup(path: &Path) -> Option<AppConfig> {
+    let content = std::fs::read_to_string(backup_path(path)).ok()?;
+    match parse_config_strict(&content) {
+        Ok(c) => {
+            eprintln!("[WARN] Конфиг {} повреждён — восстановлена последняя рабочая копия {}", path.display(), backup_path(path).display());
+            Some(c)
+        }
+        Err(_) => None,
+    }
+}
+
+fn write_file_synced(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_file_name(format!(
+        "{}.{}.tmp",
+        path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+        std::process::id()
+    ));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
+}
+
+/// Загрузка при старте панели (баг 130): если config.json разобрался без ошибок — обновляем резервную
+/// копию config.json.bak, чтобы при следующем повреждении было что восстановить.
+pub fn load_and_refresh_backup(path: &Path) -> AppConfig {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        if parse_config_strict(&content).is_ok() {
+            if let Err(e) = write_file_synced(&backup_path(path), &content) {
+                eprintln!("[WARN] Не удалось обновить резервную копию конфига: {e}");
+            }
+        }
+    }
+    load(path)
+}
+
 /// Синхронная загрузка конфига с deep-merge поверх дефолтов (для инициализации CLI/main).
 pub fn load(path: &Path) -> AppConfig {
     if !path.exists() {
@@ -1320,15 +1370,18 @@ pub fn load(path: &Path) -> AppConfig {
                     let backup_path = path.with_extension(format!("corrupted.{ts}.bak"));
                     let _ = std::fs::copy(path, &backup_path);
                     eprintln!("[INFO] Создан бэкап поврежденного конфига: {}", backup_path.display());
-                    parse_config_content(&content, &path.display().to_string())
+                    // Баг 130: сначала последняя рабочая копия, дефолты — только если её нет
+                    load_backup(path).unwrap_or_else(|| parse_config_content(&content, &path.display().to_string()))
                 }
             }
         }
         Err(e) => {
             eprintln!("[ERROR] Не удалось прочитать существующий конфиг {}: {e}", path.display());
-            let mut cfg = AppConfig::default();
-            cfg.auth.enabled = true;
-            cfg
+            load_backup(path).unwrap_or_else(|| {
+                let mut cfg = AppConfig::default();
+                cfg.auth.enabled = true;
+                cfg
+            })
         }
     }
 }
@@ -1383,13 +1436,28 @@ pub async fn save(path: &Path, cfg: &AppConfig) -> Result<(), String> {
     let tmp_name = format!("config.{}.{}.tmp", std::process::id(), nonce);
     let tmp = parent.join(tmp_name);
 
-    if let Err(e) = tokio::fs::write(&tmp, serialized).await {
+    // Баг 94: данные сбрасываются на диск (fsync) до rename, затем fsync каталога —
+    // иначе при потере питания на роутере оставался пустой config.json.
+    let write_res: Result<(), String> = async {
+        use tokio::io::AsyncWriteExt;
+        let mut f = tokio::fs::File::create(&tmp).await.map_err(|e| e.to_string())?;
+        f.write_all(serialized.as_bytes()).await.map_err(|e| e.to_string())?;
+        f.flush().await.map_err(|e| e.to_string())?;
+        f.sync_all().await.map_err(|e| e.to_string())?;
+        Ok(())
+    }
+    .await;
+    if let Err(e) = write_res {
         let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(e.to_string());
+        return Err(e);
     }
     if let Err(e) = tokio::fs::rename(&tmp, path).await {
         let _ = tokio::fs::remove_file(&tmp).await;
         return Err(e.to_string());
+    }
+    #[cfg(unix)]
+    if let Ok(dir) = std::fs::File::open(parent) {
+        let _ = dir.sync_all();
     }
     Ok(())
 }
@@ -1717,5 +1785,58 @@ mod tests {
         assert_eq!(parsed.failover.whitelist_detector.exit_offline_count, 48);
         assert_eq!(parsed.failover.whitelist_detector.check_interval_mins, 10);
         assert!(parsed.failover.whitelist_detector.auto_restore_vps);
+    }
+
+    #[test]
+    fn regression_bug_130a_corrupted_config_restores_last_good_backup() {
+        // Баг 130: повреждённый/пустой config.json → ВСЕ настройки заменялись дефолтами
+        // (а пустой файл после потери питания терял и auth).
+        let dir = std::env::temp_dir().join(format!("xkeen-bug130-{}", crate::auth::random_hex(8)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let mut good = AppConfig::default();
+        good.refresh_interval_sec = 7;
+        good.force_domains = vec!["example.org".to_string()];
+        let good_json = serde_json::to_string_pretty(&good).unwrap();
+        std::fs::write(dir.join("config.json.bak"), &good_json).unwrap();
+        std::fs::write(&path, "").unwrap(); // потеря питания во время записи
+        let loaded = load(&path);
+        assert_eq!(loaded.refresh_interval_sec, 7, "из последней рабочей копии, а не дефолты");
+        assert_eq!(loaded.force_domains, vec!["example.org".to_string()]);
+        std::fs::write(&path, "{\"refresh_interval_sec\": 7, \"force_domains\": [").unwrap();
+        assert_eq!(load(&path).force_domains, vec!["example.org".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn regression_bug_94_config_save_fsyncs_before_rename() {
+        // Баг 94: config::save писал через tokio::fs::write + rename без fsync — при потере питания
+        // оставался пустой config.json.
+        let src = include_str!("config.rs");
+        let start = src.find("pub async fn save(").expect("save");
+        let body = &src[start..start + src[start..].find("\n}\n").unwrap()];
+        assert!(body.contains("sync_all"), "данные файла должны быть сброшены на диск до rename");
+        assert!(!body.contains("tokio::fs::write(&tmp"), "без записи без fsync");
+    }
+
+    #[test]
+    fn regression_bug_130b_startup_refreshes_backup_of_good_config() {
+        // Баг 130: без резервной копии последнего рабочего конфига восстанавливать было не из чего.
+        let dir = std::env::temp_dir().join(format!("xkeen-bug130b-{}", crate::auth::random_hex(8)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        let mut good = AppConfig::default();
+        good.refresh_interval_sec = 9;
+        std::fs::write(&path, serde_json::to_string_pretty(&good).unwrap()).unwrap();
+        let loaded = load_and_refresh_backup(&path);
+        assert_eq!(loaded.refresh_interval_sec, 9);
+        let bak = std::fs::read_to_string(dir.join("config.json.bak")).expect("резервная копия создана");
+        assert_eq!(parse_config_strict(&bak).unwrap().refresh_interval_sec, 9);
+        // Повреждённый файл не затирает хорошую копию
+        std::fs::write(&path, "{broken").unwrap();
+        let again = load_and_refresh_backup(&path);
+        assert_eq!(again.refresh_interval_sec, 9);
+        assert_eq!(parse_config_strict(&std::fs::read_to_string(dir.join("config.json.bak")).unwrap()).unwrap().refresh_interval_sec, 9);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

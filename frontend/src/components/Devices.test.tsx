@@ -155,9 +155,12 @@ describe('Devices Component — Per-Device Zapret DPI (Feature 3)', () => {
       gamingButtons[0].click()
     })
 
+    // Баг 135: вместе с MAC отправляются IP и имя — без IP игровой режим ничего не перехватывает
     expect(postSpy).toHaveBeenCalledWith('gaming/toggle', {
       enabled: true,
       device_mac: 'AA:BB:CC:DD:EE:01',
+      device_ip: '192.168.1.100',
+      device_name: 'Smart TV Samsung',
     })
   })
 
@@ -434,5 +437,31 @@ describe('Devices Component — Per-Device Zapret DPI (Feature 3)', () => {
     // Button MUST immediately switch to inactive (БС OFF), NOT staying locked in active state
     expect(tvWlBtn.className).toContain('inactive')
     expect(tvWlBtn.textContent).toContain('БС OFF')
+  })
+  it('bug 135: enabling gaming from Devices tab sends device IP and name, not only MAC', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'devices') return Promise.resolve({ devices: mockDevices })
+      if (path === 'policies') return Promise.resolve({ policies: [{ id: 'default', name: 'Основная', is_default: true }] })
+      if (path === 'servers') return Promise.resolve({ servers: [] })
+      if (path === 'routing') return Promise.resolve({ assignments: [] })
+      if (path === 'device-routing') return Promise.resolve({ routing: {}, device_failover_enabled: false })
+      if (path === 'devices/zapret') return Promise.resolve({ excluded_devices: [] })
+      if (path === 'devices/traffic') return Promise.resolve({ download_total: 0, upload_total: 0, devices: {} })
+      return Promise.resolve({})
+    })
+    const postSpy = vi.spyOn(api, 'apiPost').mockResolvedValue({ success: true })
+    await act(async () => {
+      root!.render(<Devices notify={notifyMock} />)
+    })
+    const gamingButtons = Array.from(container?.querySelectorAll('button.device-gaming-btn') || []) as HTMLButtonElement[]
+    await act(async () => {
+      gamingButtons[0].click()
+    })
+    expect(postSpy).toHaveBeenCalledWith('gaming/toggle', {
+      enabled: true,
+      device_mac: 'AA:BB:CC:DD:EE:01',
+      device_ip: '192.168.1.100',
+      device_name: 'Smart TV Samsung',
+    })
   })
 })

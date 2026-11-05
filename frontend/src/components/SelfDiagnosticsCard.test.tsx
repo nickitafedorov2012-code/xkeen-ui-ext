@@ -171,7 +171,8 @@ describe('SelfDiagnosticsCard Component', () => {
       startBtn.click()
     })
 
-    expect(postSpy).toHaveBeenCalledWith('service/start')
+    // REG: маршрута service/start на бэкенде нет — запуск идёт через xkeen/service
+    expect(postSpy).toHaveBeenCalledWith('xkeen/service', { action: 'start' })
     expect(notifyMock).toHaveBeenCalledWith('Команда запуска ядра Mihomo отправлена')
   })
 

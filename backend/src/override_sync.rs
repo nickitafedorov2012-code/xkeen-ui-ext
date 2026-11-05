@@ -13,11 +13,45 @@ pub const SYSTEM_CRONTAB_FILE: &str = "/opt/etc/crontab";
 pub const MARKER_BEGIN: &str = "# --- XKEEN-ROUTE-OVERRIDE-BEGIN ---";
 pub const MARKER_END: &str = "# --- XKEEN-ROUTE-OVERRIDE-END ---";
 
+/// Можно ли класть IPv4 в geo_override: только публичные адреса (баг 97).
+/// Fake-ip Mihomo (198.18.0.0/15), частные, CGNAT, link-local и служебные диапазоны отбрасываются.
+pub fn is_override_eligible_v4(ip: &Ipv4Addr) -> bool {
+    let o = ip.octets();
+    !(ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || ip.is_documentation()
+        || o[0] == 0
+        || o[0] >= 240
+        || (o[0] == 198 && (o[1] == 18 || o[1] == 19))
+        || (o[0] == 100 && (64..=127).contains(&o[1])))
+}
+
+/// Можно ли класть IPv6 в geo_override: только глобальные unicast-адреса (баг 97).
+pub fn is_override_eligible_v6(ip: &Ipv6Addr) -> bool {
+    let seg0 = ip.segments()[0];
+    !(ip.is_loopback()
+        || ip.is_unspecified()
+        || ip.is_multicast()
+        || (seg0 & 0xfe00) == 0xfc00 // ULA fc00::/7
+        || (seg0 & 0xffc0) == 0xfe80 // link-local fe80::/10
+        || ip.to_ipv4_mapped().is_some())
+}
+
 /// Асинхронно резолвит список доменов во все уникальные IPv4 и IPv6 адреса параллельно.
 pub async fn resolve_domains(domains: &[String]) -> (BTreeSet<Ipv4Addr>, BTreeSet<Ipv6Addr>) {
+    let (v4, v6, _) = resolve_domains_counted(domains).await;
+    (v4, v6)
+}
+
+/// То же, что `resolve_domains`, плюс число доменов, для которых получен хотя бы один пригодный адрес.
+pub async fn resolve_domains_counted(domains: &[String]) -> (BTreeSet<Ipv4Addr>, BTreeSet<Ipv6Addr>, usize) {
     let mut set = tokio::task::JoinSet::new();
 
-    for d in domains {
+    for (idx, d) in domains.iter().enumerate() {
         let clean = d.trim().trim_start_matches("www.").to_string();
         if clean.is_empty() {
             continue;
@@ -32,34 +66,73 @@ pub async fn resolve_domains(domains: &[String]) -> (BTreeSet<Ipv4Addr>, BTreeSe
                     for sa in iter {
                         match sa.ip() {
                             IpAddr::V4(ip) => {
-                                if !ip.is_loopback() && !ip.is_unspecified() {
+                                if is_override_eligible_v4(&ip) {
                                     v4_res.push(ip);
                                 }
                             }
                             IpAddr::V6(ip) => {
-                                if !ip.is_loopback() && !ip.is_unspecified() {
+                                if is_override_eligible_v6(&ip) {
                                     v6_res.push(ip);
                                 }
                             }
                         }
                     }
                 }
-                (v4_res, v6_res)
+                (idx, v4_res, v6_res)
             });
         }
     }
 
     let mut v4 = BTreeSet::new();
     let mut v6 = BTreeSet::new();
+    let mut resolved = std::collections::HashSet::new();
 
     while let Some(res) = set.join_next().await {
-        if let Ok((v4_list, v6_list)) = res {
+        if let Ok((idx, v4_list, v6_list)) = res {
+            if !v4_list.is_empty() || !v6_list.is_empty() {
+                resolved.insert(idx);
+            }
             v4.extend(v4_list);
             v6.extend(v6_list);
         }
     }
 
-    (v4, v6)
+    (v4, v6, resolved.len())
+}
+
+/// Сбой DNS во время синхронизации (баг 97): если разрешилось меньше половины доменов,
+/// старый блок geo_override сохраняется, иначе force-домены молча уходят в DIRECT.
+pub fn keep_previous_override(requested: usize, resolved: usize) -> bool {
+    requested > 0 && resolved * 2 < requested
+}
+
+/// Скрипт для `ipset restore` (баг 97): весь набор заполняется одним процессом вместо процесса на каждый IP.
+/// Строки, не являющиеся IP/CIDR нужного семейства, пропускаются: одна битая строка сорвала бы весь restore.
+pub fn build_ipset_restore_script(tmp: &str, family: &str, entries: &[String]) -> String {
+    let mut out = format!("create {tmp} hash:net family {family} -exist\nflush {tmp}\n");
+    for e in entries {
+        let t = e.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        let (addr, prefix) = match t.split_once('/') {
+            Some((a, p)) => (a, Some(p)),
+            None => (t, None),
+        };
+        let Ok(ip) = addr.parse::<IpAddr>() else { continue };
+        let max = if ip.is_ipv4() { 32 } else { 128 };
+        if let Some(p) = prefix {
+            match p.parse::<u8>() {
+                Ok(n) if n <= max => {}
+                _ => continue,
+            }
+        }
+        if (family == "inet") != ip.is_ipv4() {
+            continue;
+        }
+        out.push_str(&format!("add {tmp} {t} -exist\n"));
+    }
+    out
 }
 
 /// Обновляет блок в файле ru_exclude_override.lst, сохраняя любые ручные записи пользователя.
@@ -132,8 +205,18 @@ pub async fn sync_geo_override(domains: &[String]) -> Result<usize, String> {
 
     let _lock = IPSET_SYNC_LOCK.lock().await;
 
-    let (v4, v6) = resolve_domains(domains).await;
+    let requested = domains.iter().filter(|d| !d.trim().is_empty()).count();
+    let (v4, v6, resolved) = resolve_domains_counted(domains).await;
     let total_ips = v4.len() + v6.len();
+    if keep_previous_override(requested, resolved) {
+        crate::log_w!(
+            "[OVERRIDE] Разрешилось {resolved} из {requested} доменов — похоже на сбой DNS, geo_override не трогаем"
+        );
+        return Err(format!(
+            "DNS не ответил для {} из {requested} доменов: geo_override сохранён без изменений",
+            requested - resolved
+        ));
+    }
 
     // 1. Потоково обновляем файл ru_exclude_override.lst без буферизации всего содержимого в RAM
     let nonce = std::time::SystemTime::now()
@@ -251,41 +334,41 @@ async fn run_ipset(args: &[&str]) -> Result<(), String> {
     }
 }
 
+async fn run_ipset_restore(script: &str) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new("ipset")
+        .args(["restore", "-exist"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Ошибка вызова ipset restore: {e}"))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(script.as_bytes()).await.map_err(|e| format!("ipset restore stdin: {e}"))?;
+    }
+    let out = child.wait_with_output().await.map_err(|e| format!("ipset restore: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!("ipset restore статус {:?}: {}", out.status.code(), String::from_utf8_lossy(&out.stderr).trim()))
+    }
+}
+
 async fn sync_ipset_family(set_name: &str, family: &str) -> Result<(), String> {
     let tmp = format!("{set_name}_{}_tmp", std::process::id());
 
     // Уничтожаем возможный старый временный ipset от прерванного swap (ошибка ожидаема, если не существовал)
     let _ = run_ipset(&["destroy", &tmp]).await;
 
-    run_ipset(&["create", &tmp, "hash:net", "family", family, "-exist"]).await
-        .map_err(|e| format!("Ошибка создания staging ipset {tmp}: {e}"))?;
-
-    run_ipset(&["flush", &tmp]).await
-        .map_err(|e| format!("Ошибка очистки staging ipset {tmp}: {e}"))?;
-
-    match tokio::fs::File::open(OVERRIDE_FILE).await {
-        Ok(file) => {
-            use tokio::io::AsyncBufReadExt;
-            let reader = tokio::io::BufReader::new(file);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let t = line.trim();
-                if t.is_empty() || t.starts_with('#') {
-                    continue;
-                }
-                let is_v6 = t.contains(':');
-                if (family == "inet" && !is_v6) || (family == "inet6" && is_v6) {
-                    let _ = run_ipset(&["add", &tmp, t, "-exist"]).await;
-                }
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Файл отсутствует — пустой набор допустим
-        }
-        Err(e) => {
-            let _ = run_ipset(&["destroy", &tmp]).await;
-            return Err(format!("Не удалось прочитать {OVERRIDE_FILE}: {e}"));
-        }
+    let entries: Vec<String> = match tokio::fs::read_to_string(OVERRIDE_FILE).await {
+        Ok(text) => text.lines().map(|l| l.to_string()).collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(format!("Не удалось прочитать {OVERRIDE_FILE}: {e}")),
+    };
+    let script = build_ipset_restore_script(&tmp, family, &entries);
+    if let Err(e) = run_ipset_restore(&script).await {
+        let _ = run_ipset(&["destroy", &tmp]).await;
+        return Err(format!("Ошибка заполнения staging ipset {tmp}: {e}"));
     }
 
     run_ipset(&["create", set_name, "hash:net", "family", family, "-exist"]).await
@@ -361,5 +444,53 @@ mod tests {
 
         let _ = tokio::fs::remove_file(&temp_src).await;
         let _ = tokio::fs::remove_file(&temp_dst).await;
+    }
+
+    #[tokio::test]
+    async fn regression_bug_97b_fake_ip_and_private_addresses_not_added() {
+        // Баг 97: fake-ip Mihomo (198.18.0.0/15) и частные адреса попадали в geo_override.
+        let input: Vec<String> = [
+            "198.18.0.5", "198.19.255.1", "10.1.2.3", "192.168.1.10", "172.16.5.5",
+            "100.64.0.1", "169.254.1.1", "8.8.8.8", "fc00::1", "fe80::1", "2001:4860:4860::8888",
+        ].iter().map(|s| s.to_string()).collect();
+        let (v4, v6) = resolve_domains(&input).await;
+        let v4: Vec<String> = v4.iter().map(|i| i.to_string()).collect();
+        let v6: Vec<String> = v6.iter().map(|i| i.to_string()).collect();
+        assert_eq!(v4, vec!["8.8.8.8".to_string()], "в geo_override допустимы только публичные IPv4");
+        assert_eq!(v6, vec!["2001:4860:4860::8888".to_string()], "в geo_override допустимы только публичные IPv6");
+    }
+
+    #[test]
+    fn regression_bug_97a_dns_outage_keeps_previous_override() {
+        // Баг 97: DNS не ответил → пустой блок → swap на пустой ipset → force-домены уходят в DIRECT.
+        assert!(keep_previous_override(10, 0), "ни один домен не разрешился — блок нельзя стирать");
+        assert!(keep_previous_override(10, 4), "разрешилось меньше половины — похоже на сбой DNS");
+        assert!(!keep_previous_override(10, 5));
+        assert!(!keep_previous_override(10, 10));
+        assert!(!keep_previous_override(0, 0), "пользователь удалил все домены — блок очищается");
+    }
+
+    #[test]
+    fn regression_bug_97c_ipset_filled_by_single_restore_batch() {
+        // Баг 97: каждый IP добавлялся отдельным процессом `ipset add`.
+        let entries: Vec<String> = ["1.2.3.4", "5.6.0.0/16", "2001:db8::1", "мусор; reboot", "", "# comment", "9.9.9.9/33"]
+            .iter().map(|s| s.to_string()).collect();
+        let v4 = build_ipset_restore_script("geo_override_tmp", "inet", &entries);
+        assert_eq!(
+            v4,
+            "create geo_override_tmp hash:net family inet -exist
+flush geo_override_tmp
+add geo_override_tmp 1.2.3.4 -exist
+add geo_override_tmp 5.6.0.0/16 -exist
+"
+        );
+        let v6 = build_ipset_restore_script("geo_override6_tmp", "inet6", &entries);
+        assert_eq!(
+            v6,
+            "create geo_override6_tmp hash:net family inet6 -exist
+flush geo_override6_tmp
+add geo_override6_tmp 2001:db8::1 -exist
+"
+        );
     }
 }

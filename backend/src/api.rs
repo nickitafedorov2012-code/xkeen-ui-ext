@@ -573,12 +573,10 @@ pub async fn validate_config(
     api_ok(serde_json::to_value(result).unwrap_or_default()).into_response()
 }
 
-/// GET /api/settings — получение настроек панели с маскированием конфиденциальных данных
-pub async fn get_settings(State(state): State<AppState>) -> impl IntoResponse {
-    let cfg = state.config.read().await.clone();
-    let mut val = serde_json::to_value(&*cfg).unwrap_or_default();
+/// Маскирование секретных полей конфигурации при отдаче в UI
+pub fn mask_settings_for_api(cfg: &config::AppConfig) -> serde_json::Value {
+    let mut val = serde_json::to_value(cfg).unwrap_or_default();
 
-    // Маскируем секретные поля при отдаче в UI
     if let Some(auth) = val.get_mut("auth") {
         if let Some(pw) = auth.get_mut("password_hash") {
             if !pw.as_str().unwrap_or("").is_empty() {
@@ -622,7 +620,21 @@ pub async fn get_settings(State(state): State<AppState>) -> impl IntoResponse {
             }
         }
     }
+    if let Some(notifications) = val.get_mut("notifications") {
+        if let Some(tok) = notifications.get_mut("telegram_bot_token") {
+            if !tok.as_str().unwrap_or("").is_empty() {
+                *tok = serde_json::Value::String("******".into());
+            }
+        }
+    }
 
+    val
+}
+
+/// GET /api/settings — получение настроек панели с маскированием конфиденциальных данных
+pub async fn get_settings(State(state): State<AppState>) -> impl IntoResponse {
+    let cfg = state.config.read().await.clone();
+    let val = mask_settings_for_api(&cfg);
     api_ok(val)
 }
 
@@ -631,20 +643,104 @@ pub async fn put_settings(
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
     let _cfg_guard = state.config_lock.lock().await;
-    let mut merged = serde_json::to_value(&**state.config.read().await).unwrap_or_default();
-    crate::config::merge_value(&mut merged, &body);
-    let mut new_cfg: config::AppConfig = match serde_json::from_value(merged) {
+    let current = (**state.config.read().await).clone();
+    let new_cfg = match merge_settings_update(&current, &body) {
         Ok(c) => c,
-        Err(e) => return api_err(format!("Некорректные настройки: {}", e)),
+        Err(e) => return api_err(e),
     };
-    new_cfg.failover.migrate_priority();
+    let failover_toggled = new_cfg.failover.enabled != current.failover.enabled;
     if let Err(e) = config::save(&state.config_path, &new_cfg).await {
         return api_err(format!("Ошибка сохранения конфига: {}", e));
     }
     *state.config.write().await = std::sync::Arc::new(new_cfg);
     crate::logger::set_level(&state.config.read().await.logs.level);
     log_i!("Настройки сохранены");
+    drop(_cfg_guard);
+    if failover_toggled {
+        reapply_canary_routing(&state).await;
+    }
     api_ok(json!({ "saved": true, "applied": true }))
+}
+
+/// Мерж частичного обновления настроек поверх текущей конфигурации.
+/// Раздел `auth` (хеш пароля, соль, секрет сессий, флаг включения) через общие
+/// настройки менять НЕЛЬЗЯ: раньше любой запрос PUT /api/settings мог подменить
+/// хеш и session_secret в обход проверки текущего пароля (A-02) и захватить панель.
+/// Менять пароль/авторизацию можно только через /api/auth/change-password.
+pub fn merge_settings_update(current: &config::AppConfig, body: &serde_json::Value) -> Result<config::AppConfig, String> {
+    let mut merged = serde_json::to_value(current).unwrap_or_default();
+    let mut patch = body.clone();
+    if let Some(obj) = patch.as_object_mut() {
+        obj.remove("auth");
+    }
+    crate::config::merge_value(&mut merged, &patch);
+    let mut new_cfg: config::AppConfig =
+        serde_json::from_value(merged).map_err(|e| format!("Некорректные настройки: {}", e))?;
+    new_cfg.auth = current.auth.clone();
+    new_cfg.failover.migrate_priority();
+
+    // Восстановление замаскированных секретов (баг 141)
+    if new_cfg.notifications.telegram_bot_token == "******" {
+        new_cfg.notifications.telegram_bot_token = current.notifications.telegram_bot_token.clone();
+    }
+    if new_cfg.rci.password == "******" {
+        new_cfg.rci.password = current.rci.password.clone();
+    }
+    if new_cfg.rci.token == "******" {
+        new_cfg.rci.token = current.rci.token.clone();
+    }
+    if new_cfg.mihomo.secret == "******" {
+        new_cfg.mihomo.secret = current.mihomo.secret.clone();
+    }
+    if new_cfg.adguard.password.as_deref() == Some("******") {
+        new_cfg.adguard.password = current.adguard.password.clone();
+    }
+
+    // Защита от инъекций и подмены путей в system (баг 125)
+    let s = &new_cfg.system;
+    for (name, path) in [
+        ("xkeen_init", &s.xkeen_init),
+        ("xkeen_route_init", &s.xkeen_route_init),
+        ("zapret_init", &s.zapret_init),
+    ] {
+        if !path.is_empty() && !crate::config::is_valid_init_script_path(path) {
+            return Err(format!("Недопустимый путь к init-скрипту {name}: '{path}'"));
+        }
+    }
+    for (name, path) in [
+        ("xkeen_route_bin", &s.xkeen_route_bin),
+        ("mihomo_bin", &s.mihomo_bin),
+    ] {
+        if !path.is_empty() && !crate::config::is_valid_init_script_path(path) {
+            return Err(format!("Недопустимый путь к исполняемому файлу {name}: '{path}'"));
+        }
+    }
+
+    Ok(new_cfg)
+}
+
+/// Переприменение маршрутизации после включения/выключения failover:
+/// селектор '🛡️ Canary Probe' и слушатель 127.0.0.1:7894 генерируются только при
+/// failover.enabled. Раньше тумблер лишь сохранял флаг — Canary-загрузка через 7894
+/// падала до следующей пересборки config.yaml.
+pub async fn reapply_canary_routing(state: &AppState) {
+    match crate::transaction::ConfigTx::begin(state).await {
+        Ok(mut tx) => {
+            let Ok(yaml) = tx.read_yaml().await else { return };
+            match routing::apply_routing(&yaml, tx.config()) {
+                Ok((new_yaml, _)) if new_yaml != yaml => {
+                    if tx.set_yaml(new_yaml).is_ok() {
+                        if let Err(e) = tx.commit_and_reload().await {
+                            log_w!("Не удалось применить Canary-маршрутизацию после переключения failover: {e}");
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => log_w!("Ошибка пересборки маршрутизации после переключения failover: {e}"),
+            }
+        }
+        Err(e) => log_w!("Не удалось начать транзакцию конфигурации: {e}"),
+    }
 }
 
 /// GET /api/servers — карточки серверов.
@@ -1435,6 +1531,8 @@ pub async fn failover_toggle(State(state): State<AppState>, Json(req): Json<Fail
     }
     *state.config.write().await = std::sync::Arc::new(cfg);
     log_i!("Failover переключён: enabled={}", req.enabled);
+    drop(_cfg_guard);
+    reapply_canary_routing(&state).await;
     api_ok(json!({ "enabled": req.enabled }))
 }
 
@@ -2193,6 +2291,10 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
             std::time::Duration::from_secs(15),
             tokio::process::Command::new("sh").arg("-c").arg(&stop_cmd).output(),
         ).await;
+        // Скрипт выше снимает только XKEEN_GAMING. Цепочки XKEEN_BS (режим БС StrictXKeen)
+        // и NDM-хук 061-xkeen-bs.sh оставались: весь трафик LAN уходил в мёртвые порты
+        // остановленного Mihomo, а сторож при остановленной службе молчит → блэкаут сети.
+        emergency_cleanup_full_tunnel_rules().await;
         log_i!("Сервисы остановлены пользователем (прямой выход в интернет активирован)");
         let (code, stdout, stderr) = match out {
             Ok(Ok(o)) => (
@@ -2250,6 +2352,12 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
                         if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &cfg) {
                             let _ = atomic_write_file(path, &new_yaml).await;
                             let _ = mihomo::reload_config(&state.http, &cfg).await;
+                            // stop снял цепочки XKEEN_GAMING/XKEEN_BS и NDM-хуки — без повторного
+                            // синка UI показывал «игровой режим/БС включён», а трафик не перехватывался
+                            let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
+                            let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
+                            let dns_port = resolve_active_dns_port(&cfg);
+                            sync_full_tunnel_modes(&cfg, redir_port, tproxy_port, dns_port).await;
                         }
                     }
                 }
@@ -2757,6 +2865,25 @@ pub struct RoutingReq {
     pub assignments: Vec<RoutingAssignment>,
 }
 
+/// Перенос пакетных назначений в device_routing (баг 64): сервер становится первым в цепочке устройства,
+/// остальные сохраняются; пустой/«default» снимает назначение.
+pub fn merge_assignments_into_device_routing(
+    map: &mut std::collections::BTreeMap<String, config::DeviceRouting>,
+    assignments: &[routing::Assignment],
+) {
+    for a in assignments {
+        let ip = a.ip.trim().to_string();
+        let srv = a.server.as_deref().map(str::trim).unwrap_or("");
+        if srv.is_empty() || srv == "default" {
+            map.remove(&ip);
+            continue;
+        }
+        let entry = map.entry(ip).or_default();
+        entry.servers.retain(|s| s != srv);
+        entry.servers.insert(0, srv.to_string());
+    }
+}
+
 /// POST /api/routing — применить назначения (merge), reload Mihomo, перевыбор серверов.
 pub async fn apply_routing(State(state): State<AppState>, Json(req): Json<RoutingReq>) -> Response {
     // Валидация всех IP устройств в назначениях (RT-02)
@@ -2781,6 +2908,9 @@ pub async fn apply_routing(State(state): State<AppState>, Json(req): Json<Routin
         .into_iter()
         .map(|a| routing::Assignment { ip: a.ip, name: a.name, server: a.server })
         .collect();
+
+    // Баг 64: назначения сохраняются в device_routing — переживают рестарт Mihomo и видны в UI
+    merge_assignments_into_device_routing(&mut tx.config_mut().device_routing, &assignments);
 
     // Синхронизация выбора сервера для игровых устройств в режиме 100% Compatibility:
     let mut updated_gaming = false;
@@ -2841,7 +2971,8 @@ pub async fn apply_routing(State(state): State<AppState>, Json(req): Json<Routin
                 continue;
             }
             let gname = routing::group_name_for(&a.ip, &a.name);
-            if mihomo::switch_group(&state.http, &cfg, &gname, server).await.is_ok() {
+            // Без полного сброса соединений всей LAN на каждое устройство (INV-7)
+            if mihomo::switch_selector(&state.http, &cfg, &gname, server).await.is_ok() {
                 reselected += 1;
             }
         }
@@ -3233,41 +3364,23 @@ pub async fn refresh_mobile_sub(state: &AppState, id: &str, url: &str, hwid: Opt
 /// Фоновое автообновление и автомиграция всех мобильных подписок:
 /// Проверяет зарегистрированные mobile_provider_urls, а также автоматически мигрирует
 /// любые HTTP-провайдеры, отдающие V2Ray/JSON подписки, в локальный type: file.
+/// Фоновое обновление мобильных подписок (баг 80): только те, что пользователь сам перевёл в мобильный
+/// формат (mobile_provider_urls). Обычные http-провайдеры Mihomo обновляет сам, их тип не меняется.
 pub async fn sync_all_mobile_providers(state: &AppState) -> usize {
     let cfg = state.config.read().await.clone();
     let yaml_content = tokio::fs::read_to_string(&cfg.mihomo.config_path).await.unwrap_or_default();
-    let provider_urls = crate::routing::parse_provider_urls(&yaml_content);
     let provider_hwids = crate::routing::parse_provider_hwids(&yaml_content);
 
     let mut mobile_count = 0;
     for (pid, mobile_url) in &cfg.mobile_provider_urls {
-        let hwid = provider_hwids.get(pid).map(|s| s.as_str());
+        let hwid = provider_hwids
+            .get(pid)
+            .map(|s| s.as_str())
+            .or_else(|| cfg.mobile_provider_hwids.get(pid).map(|s| s.as_str()));
         if let Ok(count) = refresh_mobile_sub(state, pid, mobile_url, hwid).await {
             let _ = mihomo::force_update_provider(&state.http, &cfg, pid).await;
             log_i!("[MOBILE-SUB] ✓ Мобильная подписка '{pid}' обновлена ({count} серверов)");
             mobile_count += 1;
-        }
-    }
-    for (pid, raw_url) in &provider_urls {
-        if !cfg.mobile_provider_urls.contains_key(pid) {
-            let hwid = provider_hwids.get(pid).map(|s| s.as_str());
-            if let Ok(count) = refresh_mobile_sub(state, pid, raw_url, hwid).await {
-                if let Ok(mut tx) = ConfigTx::begin(state).await {
-                    if let Ok(y) = tx.read_yaml().await {
-                        if let Ok(new_y) = crate::routing::convert_http_provider_to_file_in_yaml(&y, pid, &format!("./providers/{pid}.yaml")) {
-                            let _ = tx.set_yaml(new_y);
-                            tx.config_mut().mobile_provider_urls.insert(pid.clone(), raw_url.clone());
-                            if let Some(h) = hwid {
-                                tx.config_mut().mobile_provider_hwids.insert(pid.clone(), h.to_string());
-                            }
-                            let _ = tx.commit_and_reload().await;
-                            let _ = mihomo::force_update_provider(&state.http, &cfg, pid).await;
-                            log_i!("[MOBILE-SUB] ✓ Подписка '{pid}' автоматически мигрирована в мобильный формат ({count} серверов с чистыми именами)");
-                            mobile_count += 1;
-                        }
-                    }
-                }
-            }
         }
     }
     mobile_count
@@ -5020,15 +5133,7 @@ pub async fn toggle_adblock(
     };
     tx.config_mut().adblock_enabled = target_enabled;
     tx.config_mut().adguard.enabled = target_enabled;
-
-    // Синхронизируем состояние защиты с AdGuard Home (если служба доступна)
-    let _ = crate::adguard::set_protection(&state.http, &tx.config().adguard, target_enabled).await;
-    if target_enabled {
-        let active_port = crate::adguard::detect_adguard_dns_port().unwrap_or(tx.config().adguard.dns_port);
-        let _ = crate::adguard::apply_adguard_iptables(active_port);
-    } else {
-        let _ = crate::adguard::remove_adguard_iptables();
-    }
+    tx.config_mut().adguard.integration_choice_locked = true;
 
     let raw_yaml = match tx.read_yaml().await {
         Ok(c) => c,
@@ -5044,17 +5149,24 @@ pub async fn toggle_adblock(
         return api_err(e);
     }
 
+    let agh_cfg = tx.config().adguard.clone();
     if let Err(e) = tx.commit_and_reload().await {
         return api_err(e);
     }
 
-    let latest_cfg = state.config.read().await.clone();
-    if latest_cfg.gaming.enabled && latest_cfg.gaming.mode == config::GamingMode::Compatibility {
-        let redir_port = 5000;
-        let tproxy_port = 5001;
-        let dns_port = resolve_active_dns_port(&latest_cfg);
-        let _ = sync_full_tunnel_modes(&latest_cfg, redir_port, tproxy_port, dns_port).await;
+    // Защита AdGuard и системный редирект 53 -> порт AdGuard — только после успешной
+    // фиксации конфигурации: раньше при сбое reload iptables уже были изменены, а
+    // config откатывался → тумблер и реальный DNS-перехват расходились.
+    let _ = crate::adguard::set_protection(&state.http, &agh_cfg, target_enabled).await;
+    if target_enabled {
+        let active_port = crate::adguard::detect_adguard_dns_port().unwrap_or(agh_cfg.dns_port);
+        let _ = crate::adguard::apply_adguard_iptables(active_port);
+    } else {
+        let _ = crate::adguard::remove_adguard_iptables();
     }
+
+    let latest_cfg = state.config.read().await.clone();
+    resync_full_tunnel_from_disk(&latest_cfg).await;
 
     api_ok(json!({ "enabled": target_enabled, "saved": true, "applied": true }))
 }
@@ -6431,14 +6543,20 @@ add_fw() {
   # CRITICAL: If AdGuard Home is active, DO NOT redirect DNS port 53 to 1053.
   # AdGuard Home must receive client queries on port 53 for local DNS filtering and ad blocking.
   if ! check_adguard_active && check_dns_resolver_ready; then
+    iptables -t nat -A PREROUTING -i br+ -d 127.0.0.1 -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
     iptables -t nat -A PREROUTING -i br+ -d 127.0.0.1 -j RETURN 2>/dev/null || true
+    iptables -t nat -A PREROUTING -i Bridge+ -d 127.0.0.1 -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
     iptables -t nat -A PREROUTING -i Bridge+ -d 127.0.0.1 -j RETURN 2>/dev/null || true
     if [ -n "$EXCLUDED_IPS" ]; then
       for ex_ip in $EXCLUDED_IPS; do
         [ -n "$ex_ip" ] || continue
+        iptables -t nat -A PREROUTING -i br+ -s "$ex_ip" -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
         iptables -t nat -A PREROUTING -i br+ -s "$ex_ip" -p udp --dport 53 -j RETURN 2>/dev/null || true
+        iptables -t nat -A PREROUTING -i br+ -s "$ex_ip" -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
         iptables -t nat -A PREROUTING -i br+ -s "$ex_ip" -p tcp --dport 53 -j RETURN 2>/dev/null || true
+        iptables -t nat -A PREROUTING -i Bridge+ -s "$ex_ip" -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
         iptables -t nat -A PREROUTING -i Bridge+ -s "$ex_ip" -p udp --dport 53 -j RETURN 2>/dev/null || true
+        iptables -t nat -A PREROUTING -i Bridge+ -s "$ex_ip" -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j RETURN 2>/dev/null || \
         iptables -t nat -A PREROUTING -i Bridge+ -s "$ex_ip" -p tcp --dport 53 -j RETURN 2>/dev/null || true
       done
     fi
@@ -6502,6 +6620,20 @@ remove_fw_rules() {
     kill -9 $(cat "$FAILSAFE_PID") 2>/dev/null
     rm -f "$FAILSAFE_PID"
   fi
+
+  # Bug 27: RETURN-правила DNS-защиты (свои — по комментарию, старые — без него)
+  iptables -t nat -S PREROUTING 2>/dev/null | grep 'xkeen-route-zapret' | grep -- '-j RETURN' | sed 's/^-A /-D /' | while read -r rule; do
+    eval "iptables -t nat $rule" 2>/dev/null || true
+  done
+  while iptables -t nat -D PREROUTING -i br+ -d 127.0.0.1 -j RETURN 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i Bridge+ -d 127.0.0.1 -j RETURN 2>/dev/null; do :; done
+  for ex_ip in $EXCLUDED_IPS; do
+    [ -n "$ex_ip" ] || continue
+    for iface in br+ Bridge+; do
+      while iptables -t nat -D PREROUTING -i "$iface" -s "$ex_ip" -p udp --dport 53 -j RETURN 2>/dev/null; do :; done
+      while iptables -t nat -D PREROUTING -i "$iface" -s "$ex_ip" -p tcp --dport 53 -j RETURN 2>/dev/null; do :; done
+    done
+  done
 
   # Remove DNS redirects with or without comment
   while iptables -t nat -D PREROUTING -i br+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
@@ -7578,6 +7710,12 @@ pub fn validate_zapret_conf(content: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Флаг ADGUARD_ENABLED для zapret.conf (баг 31): AdGuard «активен», только если интеграция включена
+/// в конфиге или процесс AdGuardHome реально работает. Одно наличие init-скрипта ничего не значит.
+pub fn zapret_conf_adguard_flag(integration_enabled: bool, process_running: bool, _installed: bool) -> bool {
+    integration_enabled || process_running
+}
+
 pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), String> {
     tokio::fs::create_dir_all("/opt/etc/zapret")
         .await
@@ -7696,12 +7834,18 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
         .join(" ");
     let block_quic_str = if cfg.smart_tv_mode { "1" } else { "0" };
     let smart_tv_str = if cfg.smart_tv_mode { "1" } else { "0" };
-    let adguard_enabled = std::path::Path::new("/opt/etc/xkeen-route/config.json")
+    let cfg_adguard = std::path::Path::new("/opt/etc/xkeen-route/config.json")
         .exists()
-        .then(|| crate::config::load(std::path::Path::new("/opt/etc/xkeen-route/config.json")).adguard.enabled)
-        .unwrap_or(false)
-        || std::path::Path::new("/opt/etc/init.d/S99adguardhome").exists()
-        || crate::system::is_process_running("AdGuardHome");
+        .then(|| {
+            let c = crate::config::load(std::path::Path::new("/opt/etc/xkeen-route/config.json"));
+            c.adguard.enabled || c.adblock_enabled
+        })
+        .unwrap_or(false);
+    let adguard_enabled = zapret_conf_adguard_flag(
+        cfg_adguard,
+        crate::system::is_process_running("AdGuardHome"),
+        std::path::Path::new("/opt/etc/init.d/S99adguardhome").exists(),
+    );
     let adguard_str = if adguard_enabled { "1" } else { "0" };
 
     let conf_data = format!(
@@ -8027,7 +8171,7 @@ pub async fn apply_zapret_preset_action(
     sync_zapret_files(&cfg.zapret).await.map_err(|e| format!("Ошибка синхронизации файлов Zapret: {e}"))?;
     // X-07: set_clean_dns_servers (добавление Яндекс/Cloudflare DNS в KeeneticOS + save
     // конфига роутера) убран из пресетов — это скрытая мутация настроек роутера из
-    // «косметического» действия. Чистые DNS применяются на старте/рестарте службы Zapret.
+    // «косметического» действия. Чистые DNS применяются только явной кнопкой (/api/dns/clean-servers, баг 56).
 
     // Обновляем правила в config.yaml ядра Mihomo через apply_routing
     if std::path::Path::new(&cfg.mihomo.config_path).exists() {
@@ -8079,14 +8223,10 @@ pub async fn zapret_set_enabled_core(state: &AppState, enabled: bool) -> Result<
     }
 
     {
-        let _cfg_guard = state.config_lock.lock().await;
-        let mut cfg = (**state.config.read().await).clone();
-        cfg.zapret.enabled = enabled;
-        sync_zapret_files(&cfg.zapret).await?;
-        if let Err(e) = config::save(&state.config_path, &cfg).await {
-            return Err(format!("Настройки Zapret не сохранены в config.json: {e}"));
-        }
-        *state.config.write().await = std::sync::Arc::new(cfg);
+        // Файлы службы пишутся с целевым флагом, но в config.json он попадает только после успешного старта
+        let mut zcfg = state.config.read().await.zapret.clone();
+        zcfg.enabled = enabled;
+        sync_zapret_files(&zcfg).await?;
     }
 
     if enabled {
@@ -8097,17 +8237,60 @@ pub async fn zapret_set_enabled_core(state: &AppState, enabled: bool) -> Result<
             .await
             .map_err(|e| format!("Не удалось запустить S51zapret: {e}"))?;
         if !out.status.success() {
+            // Баг 57: неудачный старт не оставляет enabled=true в конфиге
+            crate::zapret::set_zapret_disabled_marker();
             return Err(format!(
                 "Ошибка запуска Zapret:\n{}",
                 format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)).trim()
             ));
         }
+        persist_zapret_enabled_with_routing(state, true).await?;
         Ok("🟢 Служба Zapret запущена".to_string())
     } else {
         crate::zapret::set_zapret_disabled_marker();
+        // Сначала убираем DIRECT-правила YouTube/Discord из Mihomo, затем гасим nfqws
+        persist_zapret_enabled_with_routing(state, false).await?;
         let _ = tokio::process::Command::new(init_script).arg("stop").output().await;
         Ok("⚪ Служба Zapret остановлена".to_string())
     }
+}
+
+/// Сохранение zapret.enabled вместе с пересборкой правил Mihomo в одной транзакции (баги 28, 57, 95).
+/// Общая для бота, UI-ядра и сторожа. Если ядро не приняло reload, файлы всё равно приводятся
+/// в согласованное состояние без reload — следующий старт Mihomo подхватит верные правила.
+pub async fn persist_zapret_enabled_with_routing(state: &AppState, enabled: bool) -> Result<(), String> {
+    async fn attempt(state: &AppState, enabled: bool, reload: bool) -> Result<(), String> {
+        let mut tx = crate::transaction::ConfigTx::begin(state).await?;
+        tx.config_mut().zapret.enabled = enabled;
+        let raw = tx.read_yaml().await?;
+        let (new_yaml, _) = routing::apply_routing(&raw, tx.config())?;
+        tx.set_yaml(new_yaml)?;
+        if reload {
+            tx.commit_and_reload().await
+        } else {
+            tx.commit_without_reload().await
+        }
+    }
+    if let Err(e) = attempt(state, enabled, true).await {
+        log_w!("[ZAPRET] Reload Mihomo не удался ({e}) — сохраняю конфигурацию без reload");
+        attempt(state, enabled, false).await?;
+    }
+    Ok(())
+}
+
+/// Shell-скрипт параллельной проверки YouTube/Discord напрямую и через прокси Mihomo (кнопка «Проверка DPI»).
+pub fn build_dpi_test_script(proxy_q: &str) -> String {
+    format!(r#"
+            t=$(mktemp -d 2>/dev/null || echo /tmp/xkr-dpi-$$); mkdir -p "$t"
+            probe() {{ out=$(curl -4 -k -m 2.5 -s -o /dev/null -w "%{{http_code}}:%{{time_total}}" "$@" 2>/dev/null) || out="000:0.0"; [ -n "$out" ] || out="000:0.0"; echo "$out"; }}
+            probe https://www.youtube.com/generate_204 > "$t/d_yt" &
+            probe https://discord.com > "$t/d_dc" &
+            probe -x '{proxy_q}' https://www.youtube.com/generate_204 > "$t/p_yt" &
+            probe -x '{proxy_q}' https://discord.com > "$t/p_dc" &
+            wait
+            echo "$(cat "$t/d_yt")#$(cat "$t/d_dc")#$(cat "$t/p_yt")#$(cat "$t/p_dc")"
+            rm -rf "$t"
+        "#)
 }
 
 pub async fn zapret_action(
@@ -8587,14 +8770,7 @@ pub async fn zapret_action(
         let proxy_q = proxy_url.replace(['\'', '\\', '`', '$'], "");
 
         // Быстрая параллельная проверка доступности: прямой запрос и через прокси Mihomo (макс 2.5 сек)
-        let test_cmd = format!(r#"
-            d_yt=$(curl -4 -k -m 2.5 -s -o /dev/null -w "%{{http_code}}:%{{time_total}}" https://www.youtube.com/generate_204 2>/dev/null || echo "000:0.0") &
-            d_dc=$(curl -4 -k -m 2.5 -s -o /dev/null -w "%{{http_code}}:%{{time_total}}" https://discord.com 2>/dev/null || echo "000:0.0") &
-            p_yt=$(curl -4 -k -m 2.5 -s -o /dev/null -w "%{{http_code}}:%{{time_total}}" -x '{proxy_q}' https://www.youtube.com/generate_204 2>/dev/null || echo "000:0.0") &
-            p_dc=$(curl -4 -k -m 2.5 -s -o /dev/null -w "%{{http_code}}:%{{time_total}}" -x '{proxy_q}' https://discord.com 2>/dev/null || echo "000:0.0") &
-            wait
-            echo "$d_yt#$d_dc#$p_yt#$p_dc"
-        "#);
+        let test_cmd = build_dpi_test_script(&proxy_q);
         let out = tokio::process::Command::new("sh").arg("-c").arg(&test_cmd).output().await;
         let line = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
         let parts: Vec<&str> = line.split('#').collect();
@@ -9305,7 +9481,8 @@ pub async fn zapret_action(
             *state.config.write().await = std::sync::Arc::new(cfg.clone());
         }
         let _ = sync_zapret_files(&cfg.zapret).await;
-        let _ = crate::rci::set_clean_dns_servers(&state.http, &cfg).await;
+        // Баг 56: системные DNS KeeneticOS здесь больше не меняются (запись во флеш, перебивала DoH
+        // пользователя, 1.1.1.1 недоступен при БС). Для этого есть явная кнопка POST /api/dns/clean-servers.
     } else if action_to_run == "stop" {
         // Заранее фиксируем выключение службы в конфигурации ДО остановки,
         // чтобы фоновый watchdog не успел перезапустить nfqws при обнаружении пропажи процесса
@@ -10259,12 +10436,20 @@ async fn apply_and_verify_gaming(
     Ok(())
 }
 
-/// Определение активного DNS-порта для перехвата (AdGuard 5353 или Mihomo 1053)
+/// Определение активного DNS-порта для перехвата (AdGuard 5353 или Mihomo 1053) с учётом доступности AdGuard (баг 1)
 pub fn resolve_active_dns_port(app_cfg: &config::AppConfig) -> u16 {
-    if app_cfg.adguard.enabled || app_cfg.adblock_enabled {
+    resolve_active_dns_port_with_health(app_cfg, true)
+}
+
+pub fn resolve_active_dns_port_with_health(app_cfg: &config::AppConfig, adguard_is_alive: bool) -> u16 {
+    if (app_cfg.adguard.enabled || app_cfg.adblock_enabled) && adguard_is_alive {
         crate::adguard::detect_adguard_dns_port().unwrap_or(if app_cfg.adguard.dns_port > 0 { app_cfg.adguard.dns_port } else { crate::adguard::DEFAULT_ADGUARD_DNS_FALLBACK_PORT })
     } else {
-        1053
+        // Баг 45: порт DNS Mihomo — из dns.listen его config.yaml, а не зашитый 1053
+        std::fs::read_to_string(&app_cfg.mihomo.config_path)
+            .ok()
+            .and_then(|y| crate::routing::parse_mihomo_dns_listen_port(&y))
+            .unwrap_or(crate::routing::DEFAULT_MIHOMO_DNS_PORT)
     }
 }
 
@@ -10281,15 +10466,15 @@ pub fn build_gaming_full_tunnel_commands(
     let d_port = if dns_port > 0 { dns_port } else { 1053 };
 
     let cleanup_cmd = "\
-while iptables -t nat -D PREROUTING -j XKEEN_GAMING 2>/dev/null; do :; done; \
-iptables -t nat -F XKEEN_GAMING 2>/dev/null || true; \
-iptables -t nat -X XKEEN_GAMING 2>/dev/null || true; \
-while iptables -t mangle -D PREROUTING -j XKEEN_GAMING 2>/dev/null; do :; done; \
-iptables -t mangle -F XKEEN_GAMING 2>/dev/null || true; \
-iptables -t mangle -X XKEEN_GAMING 2>/dev/null || true; \
-while ip6tables -D FORWARD -j XKEEN_GAMING 2>/dev/null; do :; done; \
-ip6tables -F XKEEN_GAMING 2>/dev/null || true; \
-ip6tables -X XKEEN_GAMING 2>/dev/null || true; \
+while iptables -t nat -D PREROUTING -j XKEEN_GAMING -w 2 2>/dev/null; do :; done; \
+iptables -t nat -F XKEEN_GAMING -w 2 2>/dev/null || true; \
+iptables -t nat -X XKEEN_GAMING -w 2 2>/dev/null || true; \
+while iptables -t mangle -D PREROUTING -j XKEEN_GAMING -w 2 2>/dev/null; do :; done; \
+iptables -t mangle -F XKEEN_GAMING -w 2 2>/dev/null || true; \
+iptables -t mangle -X XKEEN_GAMING -w 2 2>/dev/null || true; \
+while ip6tables -D FORWARD -j XKEEN_GAMING -w 2 2>/dev/null; do :; done; \
+ip6tables -F XKEEN_GAMING -w 2 2>/dev/null || true; \
+ip6tables -X XKEEN_GAMING -w 2 2>/dev/null || true; \
 while ip rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; \
 while ip rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; \
 while ip -6 rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; \
@@ -10320,12 +10505,12 @@ ip -6 route flush table 115 2>/dev/null || true".to_string();
             setup_cmds.push("while ip -6 rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; while ip -6 rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; ip -6 rule add fwmark 0x115 lookup 115 priority 100 2>/dev/null || ip -6 rule add fwmark 0x115/0x115 lookup 115 priority 100 2>/dev/null || ip -6 rule add fwmark 0x115 lookup 115 2>/dev/null || true".to_string());
 
             // Изолированные цепочки XKEEN_GAMING
-            setup_cmds.push("iptables -t nat -N XKEEN_GAMING 2>/dev/null || true".to_string());
-            setup_cmds.push("iptables -t nat -I PREROUTING 1 -j XKEEN_GAMING".to_string());
-            setup_cmds.push("iptables -t mangle -N XKEEN_GAMING 2>/dev/null || true".to_string());
-            setup_cmds.push("iptables -t mangle -I PREROUTING 1 -j XKEEN_GAMING".to_string());
-            setup_cmds.push("ip6tables -N XKEEN_GAMING 2>/dev/null || true".to_string());
-            setup_cmds.push("ip6tables -I FORWARD 1 -j XKEEN_GAMING 2>/dev/null || true".to_string());
+            setup_cmds.push("iptables -t nat -N XKEEN_GAMING -w 2 2>/dev/null || true".to_string());
+            setup_cmds.push("iptables -t nat -I PREROUTING 1 -j XKEEN_GAMING -w 2".to_string());
+            setup_cmds.push("iptables -t mangle -N XKEEN_GAMING -w 2 2>/dev/null || true".to_string());
+            setup_cmds.push("iptables -t mangle -I PREROUTING 1 -j XKEEN_GAMING -w 2".to_string());
+            setup_cmds.push("ip6tables -N XKEEN_GAMING -w 2 2>/dev/null || true".to_string());
+            setup_cmds.push("ip6tables -I FORWARD 1 -j XKEEN_GAMING -w 2 2>/dev/null || true".to_string());
 
             let mut seen_ips = std::collections::HashSet::new();
 
@@ -10352,7 +10537,7 @@ ip -6 route flush table 115 2>/dev/null || true".to_string();
                     && mac.split(':').all(|p| p.len() == 2 && u8::from_str_radix(p, 16).is_ok());
                 if is_valid_mac {
                     setup_cmds.push(format!(
-                        "ip6tables -A XKEEN_GAMING -m mac --mac-source {mac} -j REJECT 2>/dev/null || true"
+                        "ip6tables -A XKEEN_GAMING -m mac --mac-source {mac} -j REJECT -w 2 2>/dev/null || true"
                     ));
                 }
                 for v6_raw in &dev.ipv6 {
@@ -10360,7 +10545,7 @@ ip -6 route flush table 115 2>/dev/null || true".to_string();
                     if let Ok(v6) = v6_clean.parse::<std::net::Ipv6Addr>() {
                         if !v6.is_unspecified() && !v6.is_loopback() && !v6.is_multicast() && (v6.segments()[0] & 0xffc0 != 0xfe80) {
                             setup_cmds.push(format!(
-                                "ip6tables -A XKEEN_GAMING -s {v6} -j REJECT 2>/dev/null || true"
+                                "ip6tables -A XKEEN_GAMING -s {v6} -j REJECT -w 2 2>/dev/null || true"
                             ));
                         }
                     }
@@ -10369,62 +10554,62 @@ ip -6 route flush table 115 2>/dev/null || true".to_string();
                 // NAT: прямой порядок правил (-A) в цепочке XKEEN_GAMING
                 // 1. Перехват DNS (UDP/TCP 53) -> REDIRECT --to-ports {d_port} (до локальных подсетей)
                 setup_cmds.push(format!(
-                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p udp --dport 53 -j REDIRECT --to-ports {d_port}"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p udp --dport 53 -j REDIRECT --to-ports {d_port} -w 2"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p tcp --dport 53 -j REDIRECT --to-ports {d_port}"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p tcp --dport 53 -j REDIRECT --to-ports {d_port} -w 2"
                 ));
                 // 2. Байпас локальных сетей через -j RETURN: 127.0.0.0/8, 169.254.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
                 setup_cmds.push(format!(
-                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 127.0.0.0/8 -j RETURN"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 127.0.0.0/8 -j RETURN -w 2"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 169.254.0.0/16 -j RETURN"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 169.254.0.0/16 -j RETURN -w 2"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 10.0.0.0/8 -j RETURN"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 10.0.0.0/8 -j RETURN -w 2"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 172.16.0.0/12 -j RETURN"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 172.16.0.0/12 -j RETURN -w 2"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 192.168.0.0/16 -j RETURN"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 192.168.0.0/16 -j RETURN -w 2"
                 ));
                 // 3. Весь остальной TCP -> REDIRECT --to-ports {r_port}
                 setup_cmds.push(format!(
-                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p tcp -j REDIRECT --to-ports {r_port}"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p tcp -j REDIRECT --to-ports {r_port} -w 2"
                 ));
 
                 // MANGLE: прямой порядок правил (-A) в цепочке XKEEN_GAMING
                 // 1. Пропуск DNS: -p udp --dport 53 -j RETURN (чтобы уходил в NAT REDIRECT)
                 setup_cmds.push(format!(
-                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -p udp --dport 53 -j RETURN"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -p udp --dport 53 -j RETURN -w 2"
                 ));
                 // 2. Байпас локальных сетей через -j RETURN: 127.0.0.0/8, 169.254.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32
                 setup_cmds.push(format!(
-                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 127.0.0.0/8 -j RETURN"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 127.0.0.0/8 -j RETURN -w 2"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 169.254.0.0/16 -j RETURN"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 169.254.0.0/16 -j RETURN -w 2"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 10.0.0.0/8 -j RETURN"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 10.0.0.0/8 -j RETURN -w 2"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 172.16.0.0/12 -j RETURN"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 172.16.0.0/12 -j RETURN -w 2"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 192.168.0.0/16 -j RETURN"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 192.168.0.0/16 -j RETURN -w 2"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 224.0.0.0/4 -j RETURN"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 224.0.0.0/4 -j RETURN -w 2"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 255.255.255.255/32 -j RETURN"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 255.255.255.255/32 -j RETURN -w 2"
                 ));
                 // 3. Весь остальной UDP -> TPROXY --tproxy-mark 0x115/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1
                 setup_cmds.push(format!(
-                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -p udp -j TPROXY --tproxy-mark 0x115/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -p udp -j TPROXY --tproxy-mark 0x115/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1 -w 2"
                 ));
             }
         }
@@ -10541,12 +10726,16 @@ pub fn build_whitelist_full_tunnel_commands(
     // Очистка не трогает ip rule/таблицу 115: ими управляет sync_gaming_full_tunnel
     // (при взаимно исключающихся режимах порядок синков гарантирует согласованность).
     let cleanup_cmd = "\
-while iptables -t nat -D PREROUTING -j XKEEN_BS 2>/dev/null; do :; done; \
-iptables -t nat -F XKEEN_BS 2>/dev/null || true; \
-iptables -t nat -X XKEEN_BS 2>/dev/null || true; \
-while iptables -t mangle -D PREROUTING -j XKEEN_BS 2>/dev/null; do :; done; \
-iptables -t mangle -F XKEEN_BS 2>/dev/null || true; \
-iptables -t mangle -X XKEEN_BS 2>/dev/null || true".to_string();
+while iptables -t nat -D PREROUTING -j XKEEN_BS -w 2 2>/dev/null; do :; done; \
+iptables -t nat -F XKEEN_BS -w 2 2>/dev/null || true; \
+iptables -t nat -X XKEEN_BS -w 2 2>/dev/null || true; \
+while iptables -t mangle -D PREROUTING -j XKEEN_BS -w 2 2>/dev/null; do :; done; \
+iptables -t mangle -F XKEEN_BS -w 2 2>/dev/null || true; \
+iptables -t mangle -X XKEEN_BS -w 2 2>/dev/null || true; \
+while ip6tables -w 2 -D FORWARD -i br+ -j XKEEN_BS6 2>/dev/null; do :; done; \
+while ip6tables -w 2 -D FORWARD -i Bridge+ -j XKEEN_BS6 2>/dev/null; do :; done; \
+ip6tables -w 2 -F XKEEN_BS6 2>/dev/null || true; \
+ip6tables -w 2 -X XKEEN_BS6 2>/dev/null || true".to_string();
 
     let mut setup_cmds = Vec::new();
     if !(cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen) {
@@ -10561,18 +10750,18 @@ iptables -t mangle -X XKEEN_BS 2>/dev/null || true".to_string();
     setup_cmds.push("while ip rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; while ip rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; ip rule add fwmark 0x115 lookup 115 priority 100 2>/dev/null || ip rule add fwmark 0x115/0x115 lookup 115 priority 100 2>/dev/null || ip rule add fwmark 0x115 lookup 115 2>/dev/null || true".to_string());
 
     // Изолированные цепочки XKEEN_BS
-    setup_cmds.push("iptables -t nat -N XKEEN_BS 2>/dev/null || true".to_string());
-    setup_cmds.push("iptables -t nat -I PREROUTING 1 -j XKEEN_BS".to_string());
-    setup_cmds.push("iptables -t mangle -N XKEEN_BS 2>/dev/null || true".to_string());
-    setup_cmds.push("iptables -t mangle -I PREROUTING 1 -j XKEEN_BS".to_string());
+    setup_cmds.push("iptables -t nat -N XKEEN_BS -w 2 2>/dev/null || true".to_string());
+    setup_cmds.push("iptables -t nat -I PREROUTING 1 -j XKEEN_BS -w 2".to_string());
+    setup_cmds.push("iptables -t mangle -N XKEEN_BS -w 2 2>/dev/null || true".to_string());
+    setup_cmds.push("iptables -t mangle -I PREROUTING 1 -j XKEEN_BS -w 2".to_string());
 
     // Исключённые устройства БС: полный обход перехвата (и TCP, и UDP), до любых правил захвата
     for ex_ip in resolve_excluded_whitelist_ips_pub(cfg) {
         let ip_clean = ex_ip.split('/').next().unwrap_or(&ex_ip).trim();
         if let Ok(v4) = ip_clean.parse::<std::net::Ipv4Addr>() {
             let ip = v4.to_string();
-            setup_cmds.push(format!("iptables -t nat -A XKEEN_BS -s {ip} -j RETURN"));
-            setup_cmds.push(format!("iptables -t mangle -A XKEEN_BS -s {ip} -j RETURN"));
+            setup_cmds.push(format!("iptables -t nat -A XKEEN_BS -s {ip} -j RETURN -w 2"));
+            setup_cmds.push(format!("iptables -t mangle -A XKEEN_BS -s {ip} -j RETURN -w 2"));
         }
     }
 
@@ -10580,22 +10769,22 @@ iptables -t mangle -X XKEEN_BS 2>/dev/null || true".to_string();
     for subnet in ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"] {
         // NAT: DNS -> REDIRECT на активный DNS-порт (до байпаса локальных сетей)
         setup_cmds.push(format!(
-            "iptables -t nat -A XKEEN_BS -s {subnet} -p udp --dport 53 -j REDIRECT --to-ports {d_port}"
+            "iptables -t nat -A XKEEN_BS -s {subnet} -p udp --dport 53 -j REDIRECT --to-ports {d_port} -w 2"
         ));
         setup_cmds.push(format!(
-            "iptables -t nat -A XKEEN_BS -s {subnet} -p tcp --dport 53 -j REDIRECT --to-ports {d_port}"
+            "iptables -t nat -A XKEEN_BS -s {subnet} -p tcp --dport 53 -j REDIRECT --to-ports {d_port} -w 2"
         ));
         // NAT: байпас локальных подсетей (та же логика, что в игровом режиме)
         for local_dst in ["127.0.0.0/8", "169.254.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] {
-            setup_cmds.push(format!("iptables -t nat -A XKEEN_BS -s {subnet} -d {local_dst} -j RETURN"));
+            setup_cmds.push(format!("iptables -t nat -A XKEEN_BS -s {subnet} -d {local_dst} -j RETURN -w 2"));
         }
         // NAT: весь остальной TCP (ЛЮБЫЕ порты — включая игровые 9339) -> REDIRECT в Mihomo
         setup_cmds.push(format!(
-            "iptables -t nat -A XKEEN_BS -s {subnet} -p tcp -j REDIRECT --to-ports {r_port}"
+            "iptables -t nat -A XKEEN_BS -s {subnet} -p tcp -j REDIRECT --to-ports {r_port} -w 2"
         ));
         // MANGLE: DNS пропускаем (его забирает NAT REDIRECT)
         setup_cmds.push(format!(
-            "iptables -t mangle -A XKEEN_BS -s {subnet} -p udp --dport 53 -j RETURN"
+            "iptables -t mangle -A XKEEN_BS -s {subnet} -p udp --dport 53 -j RETURN -w 2"
         ));
         // MANGLE: байпас локальных и служебных подсетей
         for local_dst in [
@@ -10607,13 +10796,31 @@ iptables -t mangle -X XKEEN_BS 2>/dev/null || true".to_string();
             "224.0.0.0/4",
             "255.255.255.255/32",
         ] {
-            setup_cmds.push(format!("iptables -t mangle -A XKEEN_BS -s {subnet} -d {local_dst} -j RETURN"));
+            setup_cmds.push(format!("iptables -t mangle -A XKEEN_BS -s {subnet} -d {local_dst} -j RETURN -w 2"));
         }
         // MANGLE: весь остальной UDP (ЛЮБЫЕ порты) -> TPROXY в Mihomo
         setup_cmds.push(format!(
-            "iptables -t mangle -A XKEEN_BS -s {subnet} -p udp -j TPROXY --tproxy-mark 0x115/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1"
+            "iptables -t mangle -A XKEEN_BS -s {subnet} -p udp -j TPROXY --tproxy-mark 0x115/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1 -w 2"
         ));
     }
+
+    // Баг 41: IPv6 не проходит через Mihomo и обходил БС. Пересылаемый из LAN внешний IPv6 отклоняется
+    // (локальный, ULA и multicast — нет), клиенты по Happy Eyeballs уходят на IPv4, который идёт через БС.
+    setup_cmds.push("ip6tables -w 2 -N XKEEN_BS6 2>/dev/null || true".to_string());
+    setup_cmds.push("ip6tables -w 2 -F XKEEN_BS6 2>/dev/null || true".to_string());
+    for v6_local in ["fe80::/10", "fc00::/7", "ff00::/8", "::1/128"] {
+        setup_cmds.push(format!("ip6tables -w 2 -A XKEEN_BS6 -d {v6_local} -j RETURN"));
+    }
+    for ex in &cfg.whitelist.excluded_devices {
+        let mac = ex.trim();
+        if config::is_valid_mac(mac) {
+            setup_cmds.push(format!("ip6tables -w 2 -A XKEEN_BS6 -m mac --mac-source {mac} -j RETURN"));
+        }
+    }
+    setup_cmds.push("ip6tables -w 2 -A XKEEN_BS6 -p tcp -j REJECT --reject-with tcp-reset".to_string());
+    setup_cmds.push("ip6tables -w 2 -A XKEEN_BS6 -j REJECT".to_string());
+    setup_cmds.push("ip6tables -w 2 -I FORWARD 1 -i br+ -j XKEEN_BS6".to_string());
+    setup_cmds.push("ip6tables -w 2 -I FORWARD 1 -i Bridge+ -j XKEEN_BS6 2>/dev/null || true".to_string());
 
     (cleanup_cmd, setup_cmds)
 }
@@ -10719,10 +10926,56 @@ pub fn effective_full_tunnel_flags(bs_active: bool, gaming_active: bool, mihomo_
     }
 }
 
+/// Нужна ли пересинхронизация полного перехвата (активен игровой Compatibility ИЛИ БС StrictXKeen).
+/// Раньше после переключения AdGuard синк шёл только для игрового режима — в режиме БС
+/// DNS-редирект XKEEN_BS оставался на старом порту (1053 ↔ порт AdGuard).
+pub fn full_tunnel_resync_needed(cfg: &config::AppConfig) -> bool {
+    (cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility)
+        || (cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen)
+}
+
+/// Пересинхронизация полного перехвата с портами из текущего config.yaml (Z-09: без хардкода 5000/5001).
+pub async fn resync_full_tunnel_from_disk(cfg: &config::AppConfig) {
+    if !full_tunnel_resync_needed(cfg) {
+        return;
+    }
+    let yaml = tokio::fs::read_to_string(&cfg.mihomo.config_path).await.unwrap_or_default();
+    let redir_port = routing::parse_redir_port(&yaml).unwrap_or(5000);
+    let tproxy_port = routing::parse_tproxy_port(&yaml).unwrap_or(5001);
+    let dns_port = resolve_active_dns_port(cfg);
+    sync_full_tunnel_modes(cfg, redir_port, tproxy_port, dns_port).await;
+}
+
+/// POST /api/adguard/sync-firewall — переприменение DNS-редиректа AdGuard (53 -> порт AdGuard)
+/// и полного перехвата по фактическому состоянию службы. Используется кнопкой
+/// «Восстановить DNS» в самодиагностике (раньше маршрута не существовало — кнопка всегда падала).
+pub async fn adguard_sync_firewall(State(state): State<AppState>) -> Response {
+    let cfg = state.config.read().await.clone();
+    let enabled = cfg.adguard.enabled || cfg.adblock_enabled;
+    let port = crate::adguard::detect_adguard_dns_port().unwrap_or(cfg.adguard.dns_port);
+    let message = if !enabled {
+        let _ = crate::adguard::remove_adguard_iptables();
+        "AdGuard выключен — системный DNS-редирект снят".to_string()
+    } else if crate::adguard::test_agh_dns_listener(&cfg.adguard.host, port).await {
+        if let Err(e) = crate::adguard::apply_adguard_iptables(port) {
+            return api_err(format!("Не удалось применить DNS-редирект AdGuard: {e}"));
+        }
+        format!("DNS-редирект 53 -> {port} переприменён")
+    } else {
+        // AdGuard не отвечает: держим DNS LAN живым, редирект не ставим
+        let _ = crate::adguard::remove_adguard_iptables();
+        return api_err(format!("AdGuard Home не отвечает на порту {port} — редирект снят, чтобы сеть не осталась без DNS"));
+    };
+    resync_full_tunnel_from_disk(&cfg).await;
+    api_ok(json!({ "message": message, "dns_port": port }))
+}
+
 pub async fn sync_full_tunnel_modes(cfg: &config::AppConfig, redir_port: u16, tproxy_port: u16, dns_port: u16) {
     let want_bs = cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen;
     let want_gaming = cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility;
-    let mihomo_down = crate::watchdog::is_mihomo_down();
+    // Ядро недоступно и при аварии (сторож), и при штатной остановке служб пользователем:
+    // DHCP-монитор и другие фоновые задачи не должны ставить перехват в остановленный Mihomo.
+    let mihomo_down = crate::watchdog::is_mihomo_down() || crate::watchdog::is_service_stopped();
     let (bs_active, gaming_active) = effective_full_tunnel_flags(want_bs, want_gaming, mihomo_down);
     if mihomo_down && (want_bs || want_gaming) {
         log_w!("[TUNNEL] Mihomo недоступен — полный перехват не устанавливается до восстановления ядра (защита от блэкаута)");
@@ -10755,6 +11008,439 @@ pub async fn sync_full_tunnel_modes(cfg: &config::AppConfig, redir_port: u16, tp
     let _ = sync_whitelist_full_tunnel(&wl_cfg, redir_port, tproxy_port, dns_port).await;
 }
 
+
+#[cfg(test)]
+mod settings_and_service_regression_tests {
+    use super::{
+        build_gaming_full_tunnel_commands, build_whitelist_full_tunnel_commands, full_tunnel_resync_needed,
+        mask_settings_for_api, merge_adguard_config_patch, merge_settings_update, resolve_active_dns_port_with_health,
+    };
+    use crate::config;
+
+    /// Весь исходник: тестовые модули api.rs разбросаны по файлу, поэтому функции
+    /// ищутся по сигнатуре с открывающей скобкой (в тестовых литералах её нет).
+    fn production_source() -> &'static str {
+        include_str!("api.rs")
+    }
+
+    fn fn_body<'a>(src: &'a str, signature: &str) -> &'a str {
+        let needle = format!("{signature}(");
+        let start = src.find(&needle).unwrap_or_else(|| panic!("нет функции {signature}"));
+        let rest = &src[start + needle.len()..];
+        let end = rest.find("\npub async fn ").or_else(|| rest.find("\npub fn ")).unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    #[test]
+    fn test_put_settings_cannot_overwrite_auth() {
+        // REG: PUT /api/settings подменял хеш пароля и session_secret в обход
+        // проверки текущего пароля (A-02) → захват панели из LAN.
+        let mut current = config::AppConfig::default();
+        current.auth.enabled = false;
+        current.auth.password_hash = "$pbkdf2$100000$salt$ownerhash".into();
+        current.auth.salt = "salt".into();
+        current.auth.session_secret = "owner-secret".into();
+        let body = serde_json::json!({
+            "auth": { "enabled": true, "password_hash": "$pbkdf2$1$x$attacker", "salt": "x", "session_secret": "known" },
+            "refresh_interval_sec": 7
+        });
+        let merged = merge_settings_update(&current, &body).expect("merge");
+        assert_eq!(merged.auth.password_hash, current.auth.password_hash);
+        assert_eq!(merged.auth.session_secret, "owner-secret");
+        assert!(!merged.auth.enabled);
+        assert_eq!(merged.refresh_interval_sec, 7, "остальные поля применяются как раньше");
+    }
+
+    #[test]
+    fn regression_bug_1_adguard_failover_bs_mode_dns() {
+        // Баг 1: При падении AdGuard в режиме БС вся сеть теряет DNS:
+        // 1. Хук AdGuard и синхронизация iptables переключали DNS только в XKEEN_GAMING, игнорируя XKEEN_BS
+        let hook = crate::adguard::build_adguard_ndm_hook_content(5353);
+        assert!(hook.contains("XKEEN_BS"), "NDM-хук AdGuard обязан переключать DNS и в цепочке XKEEN_BS при падении/восстановлении AdGuard");
+
+        let sync_script = crate::adguard::build_sync_tunnel_dns_ports_script("5353|5354", 1053);
+        assert!(sync_script.contains("XKEEN_BS"), "Скрипт синхронизации портов обязан переключать XKEEN_BS");
+        assert!(sync_script.contains("XKEEN_GAMING"), "Скрипт синхронизации портов обязан переключать XKEEN_GAMING");
+
+        // 2. resolve_active_dns_port_with_health при неработающем AdGuard не должен слать DNS на мёртвый порт
+        let mut cfg = config::AppConfig::default();
+        cfg.adguard.enabled = true;
+        cfg.adguard.dns_port = 5353;
+        assert_eq!(resolve_active_dns_port_with_health(&cfg, false), 1053, "При упавшем AdGuard порт обязан переключаться на 1053 (Mihomo)");
+    }
+
+    #[test]
+    fn regression_bug_70_all_iptables_commands_use_wait_lock() {
+        // Баг 70: Ни один iptables-вызов из Rust не использует -w.
+        // Проверяем все сборщики команд iptables: каждая команда iptables обязана содержать флаг -w (или -w 2).
+        let mut gaming_cfg = config::GamingConfig::default();
+        gaming_cfg.enabled = true;
+        gaming_cfg.mode = config::GamingMode::Compatibility;
+        gaming_cfg.devices.push(config::GamingDevice {
+            mac: "AA:BB:CC:DD:EE:01".into(),
+            ip: "192.168.1.50".into(),
+            ipv6: Vec::new(),
+            name: "PC".into(),
+            enabled: true,
+            server: None,
+        });
+
+        let (g_cleanup, g_setup, _) = build_gaming_full_tunnel_commands(&gaming_cfg, 5000, 5001, 1053);
+        for cmd in g_cleanup.split(';') {
+            let t = cmd.trim();
+            if t.contains("iptables ") || t.contains("ip6tables ") {
+                assert!(t.contains(" -w"), "Команда очистки Gaming должна содержать -w: '{t}'");
+            }
+        }
+        for cmd in &g_setup {
+            if cmd.contains("iptables ") || cmd.contains("ip6tables ") {
+                assert!(cmd.contains(" -w"), "Команда настройки Gaming должна содержать -w: '{cmd}'");
+            }
+        }
+
+        let mut wl_cfg = config::AppConfig::default();
+        wl_cfg.whitelist.enabled = true;
+        wl_cfg.whitelist.strategy = config::WhitelistStrategy::StrictXKeen;
+        let (wl_cleanup, wl_setup) = build_whitelist_full_tunnel_commands(&wl_cfg, 5000, 5001, 1053);
+        for cmd in wl_cleanup.split(';') {
+            let t = cmd.trim();
+            if t.contains("iptables ") {
+                assert!(t.contains(" -w"), "Команда очистки Whitelist должна содержать -w: '{t}'");
+            }
+        }
+        for cmd in &wl_setup {
+            if cmd.contains("iptables ") {
+                assert!(cmd.contains(" -w"), "Команда настройки Whitelist должна содержать -w: '{cmd}'");
+            }
+        }
+
+        let hook = crate::adguard::build_adguard_ndm_hook_content(5353);
+        for line in hook.lines() {
+            let t = line.trim();
+            if t.contains("iptables ") {
+                assert!(t.contains(" -w"), "NDM-хук AdGuard должен содержать -w во всех iptables вызовах: '{t}'");
+            }
+        }
+
+        let sync_script = crate::adguard::build_sync_tunnel_dns_ports_script("1053|5353", 5353);
+        for cmd in sync_script.split(';') {
+            let t = cmd.trim();
+            if t.contains("iptables ") {
+                assert!(t.contains(" -w"), "Скрипт синхронизации портов должен содержать -w: '{t}'");
+            }
+        }
+    }
+
+    #[test]
+    fn regression_bug_133_adguard_config_patch_keeps_background_state() {
+        // Баг 133: POST /api/adguard/config целиком заменял config.adguard снимком со страницы:
+        // сохранение «хоста» откатывало найденный сторожем порт и включение.
+        let mut current = crate::config::AdGuardConfig::default();
+        current.enabled = true;
+        current.dns_port = 5354;
+        current.integration_choice_locked = true;
+        current.password = Some("secret".to_string());
+        let patch = serde_json::json!({ "host": "10.0.0.5", "enabled": false, "password": "******" });
+        let merged = merge_adguard_config_patch(&current, &patch).unwrap();
+        assert_eq!(merged.host, "10.0.0.5");
+        assert!(merged.enabled, "включение меняется только переключателем, не формой настроек");
+        assert_eq!(merged.dns_port, 5354, "поле, которого нет в патче, не трогается");
+        assert!(merged.integration_choice_locked);
+        assert_eq!(merged.password.as_deref(), Some("secret"), "маска ****** не затирает пароль");
+        let full = serde_json::json!({ "dns_port": 53 });
+        assert_eq!(merge_adguard_config_patch(&current, &full).unwrap().dns_port, 53, "явная смена порта работает");
+        assert!(merge_adguard_config_patch(&current, &serde_json::json!("x")).is_err());
+    }
+
+    #[test]
+    fn regression_bug_31a_zapret_adguard_flag_ignores_mere_installation() {
+        // Баг 31: ADGUARD_ENABLED=1 ставился, если AdGuard просто установлен (есть S99adguardhome),
+        // даже выключенный — Zapret считал, что DNS LAN обслуживает AdGuard.
+        assert!(!super::zapret_conf_adguard_flag(false, false, true), "установлен, но выключен и не запущен — 0");
+        assert!(super::zapret_conf_adguard_flag(true, false, true), "интеграция включена — 1");
+        assert!(super::zapret_conf_adguard_flag(false, true, false), "процесс AdGuardHome работает — 1");
+    }
+
+    #[test]
+    fn regression_bug_56_zapret_actions_do_not_touch_router_dns() {
+        // Баг 56: start/restart/start-fw/reload-fw Zapret из UI вызывали rci::set_clean_dns_servers —
+        // в KeeneticOS дописывались 77.88.8.8/77.88.8.1/1.1.1.1 и делался `system configuration save`.
+        let body = fn_body(production_source(), "pub async fn zapret_action");
+        assert!(
+            !body.contains("set_clean_dns_servers"),
+            "запуск Zapret не должен менять системные DNS роутера"
+        );
+        let explicit = fn_body(production_source(), "pub async fn apply_clean_dns");
+        assert!(explicit.contains("set_clean_dns_servers"), "явная кнопка «чистые DNS» остаётся");
+    }
+
+    #[test]
+    fn regression_bug_27_zapret_return_rules_are_cleaned_up() {
+        // Баг 27: add_fw добавлял в nat PREROUTING `-d 127.0.0.1 -j RETURN` и DNS-RETURN исключённых IP,
+        // remove_fw_rules их не удалял — цепочка росла с каждым restart/reload-fw/NDM-хуком.
+        let script = super::S51ZAPRET_SCRIPT;
+        let section = |name: &str| {
+            let start = script.find(&format!("\n{name}() {{")).unwrap_or_else(|| panic!("нет {name}"));
+            let rest = &script[start + 1..];
+            let end = rest.find("\n}\n").unwrap_or(rest.len());
+            rest[..end].to_string()
+        };
+        let remove = section("remove_fw_rules");
+        assert!(remove.contains("-D PREROUTING -i br+ -d 127.0.0.1 -j RETURN"), "старые RETURN без комментария удаляются");
+        assert!(remove.contains("-D PREROUTING -i Bridge+ -d 127.0.0.1 -j RETURN"));
+        assert!(remove.contains("xkeen-route-zapret") && remove.contains("-j RETURN"), "все свои RETURN по комментарию удаляются");
+        let add = section("add_fw");
+        let lines: Vec<&str> = add.lines().collect();
+        let mut checked = 0;
+        for (i, line) in lines.iter().enumerate() {
+            if !(line.contains("-t nat") && line.contains("-j RETURN")) {
+                continue;
+            }
+            checked += 1;
+            let commented = line.contains("xkeen-route-zapret");
+            let fallback = i > 0 && lines[i - 1].contains("xkeen-route-zapret") && lines[i - 1].trim_end().ends_with("|| \\");
+            assert!(commented || fallback, "RETURN-правило nat без комментария допустимо только как запасное: {line}");
+        }
+        assert!(checked >= 2, "в add_fw есть RETURN-правила nat");
+    }
+
+    #[test]
+    fn regression_bug_38b_whitelist_device_toggle_syncs_iptables() {
+        // Баг 38: toggle_whitelist_device включал БС в конфиге и Mihomo, но не синхронизировал
+        // iptables XKEEN_BS и туннель БС (в отличие от save_whitelist) — UI «БС включён», перехвата нет.
+        let body = fn_body(production_source(), "pub async fn toggle_whitelist_device");
+        assert!(
+            body.contains("sync_whitelist_runtime_after_commit"),
+            "после коммита переключения устройства нужна та же синхронизация, что и в save_whitelist"
+        );
+        let save = fn_body(production_source(), "pub async fn save_whitelist");
+        assert!(save.contains("sync_whitelist_runtime_after_commit"), "одна общая реализация");
+    }
+
+    #[test]
+    fn regression_bug_109_dpi_test_script_keeps_background_results() {
+        // Баг 109: `var=$(curl …) &` присваивал результат в фоновом подшелле — после wait переменные пусты,
+        // и «Проверка DPI» всегда показывала YouTube/Discord недоступными.
+        let script = super::build_dpi_test_script("http://127.0.0.1:7890");
+        let fake = format!("curl() {{ case \"$*\" in *youtube*) echo '204:0.10';; *) echo '200:0.20';; esac; }}\n{script}");
+        let out = std::process::Command::new("sh").arg("-c").arg(&fake).output().expect("sh доступен");
+        let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(line, "204:0.10#200:0.20#204:0.10#200:0.20", "результаты фоновых проверок должны дойти до вывода");
+    }
+
+    #[test]
+    fn regression_bug_135_gaming_device_requires_ip() {
+        // Баг 135: игровой режим с вкладки «Устройства» создавал устройство с ip: "" — правила Mihomo и
+        // iptables строятся по IP, режим «включён», а трафик не перехватывается.
+        let mut devs: Vec<config::GamingDevice> = Vec::new();
+        let err = super::upsert_gaming_device(&mut devs, "aa:bb:cc:dd:ee:01", None, None, true).unwrap_err();
+        assert!(err.contains("IP"), "без IP устройство не создаётся: {err}");
+        assert!(devs.is_empty());
+        super::upsert_gaming_device(&mut devs, "AA:BB:CC:DD:EE:01", Some("192.168.1.100"), Some("TV"), true).unwrap();
+        assert_eq!(devs.len(), 1);
+        assert_eq!(devs[0].ip, "192.168.1.100");
+        assert_eq!(devs[0].mac, "aa:bb:cc:dd:ee:01");
+        assert_eq!(devs[0].name, "TV");
+        // IP обновляется (DHCP), выключение работает и без IP
+        super::upsert_gaming_device(&mut devs, "aa:bb:cc:dd:ee:01", Some("192.168.1.150"), None, true).unwrap();
+        assert_eq!(devs[0].ip, "192.168.1.150");
+        super::upsert_gaming_device(&mut devs, "aa:bb:cc:dd:ee:01", None, None, false).unwrap();
+        assert!(!devs[0].enabled);
+        assert!(super::upsert_gaming_device(&mut devs, "aa:bb:cc:dd:ee:02", Some("1.2.3.4; reboot"), None, true).is_err());
+    }
+
+    #[test]
+    fn regression_bug_80_background_sync_never_migrates_http_providers() {
+        // Баг 80: фоновая задача раз в час переводила ВСЕ http-провайдеры в формат конвертера
+        // (lossy-парсер, type: file) — рабочая Clash-подписка ломалась без участия пользователя.
+        let body = fn_body(production_source(), "pub async fn sync_all_mobile_providers");
+        assert!(
+            !body.contains("convert_http_provider_to_file_in_yaml"),
+            "фоновая синхронизация не меняет тип провайдеров в config.yaml"
+        );
+        assert!(!body.contains("parse_provider_urls"), "обновляются только явно мобильные подписки пользователя");
+    }
+
+    #[test]
+    fn regression_bug_64_batch_routing_persists_to_device_routing() {
+        // Баг 64: пакетное «Сервер для N устройств» жило только в runtime — терялось после рестарта Mihomo,
+        // UI его не видел; на каждое устройство вызывался switch_group (полный сброс соединений).
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("192.168.1.20".to_string(), config::DeviceRouting {
+            servers: vec!["old".into(), "backup".into()], ping_threshold_ms: 300, auto_restore: true, follow_whitelist: true,
+        });
+        map.insert("192.168.1.30".to_string(), config::DeviceRouting::default());
+        let a = vec![
+            crate::routing::Assignment { ip: "192.168.1.10".into(), name: "TV".into(), server: Some("node-a".into()) },
+            crate::routing::Assignment { ip: "192.168.1.20".into(), name: "".into(), server: Some("backup".into()) },
+            crate::routing::Assignment { ip: "192.168.1.30".into(), name: "".into(), server: Some("default".into()) },
+        ];
+        super::merge_assignments_into_device_routing(&mut map, &a);
+        assert_eq!(map.get("192.168.1.10").map(|d| d.servers.clone()), Some(vec!["node-a".to_string()]));
+        let d20 = map.get("192.168.1.20").unwrap();
+        assert_eq!(d20.servers, vec!["backup".to_string(), "old".to_string()], "новый сервер первым, остальная цепочка сохранена");
+        assert_eq!(d20.ping_threshold_ms, 300);
+        assert!(!map.contains_key("192.168.1.30"), "«default» снимает назначение");
+        let body = fn_body(production_source(), "pub async fn apply_routing");
+        assert!(!body.contains("switch_group("), "без полного сброса соединений LAN на каждое устройство");
+    }
+
+    #[test]
+    fn regression_bug_41_whitelist_strict_blocks_ipv6_bypass() {
+        // Баг 41: в режиме БС (StrictXKeen) IPv6 не перехватывался — трафик шёл напрямую в обход БС.
+        let mut cfg = config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.strategy = config::WhitelistStrategy::StrictXKeen;
+        cfg.whitelist.excluded_devices = vec!["aa:bb:cc:dd:ee:ff".to_string()];
+        let (cleanup, setup) = build_whitelist_full_tunnel_commands(&cfg, 5000, 5001, 1053);
+        let joined = setup.join("\n");
+        assert!(joined.contains("ip6tables -w 2 -I FORWARD 1 -i br+ -j XKEEN_BS6"), "IPv6 из LAN перехватывается цепочкой БС:\n{joined}");
+        assert!(joined.contains("-A XKEEN_BS6 -d fe80::/10 -j RETURN"), "локальный IPv6 не трогается");
+        assert!(joined.contains("-A XKEEN_BS6 -m mac --mac-source aa:bb:cc:dd:ee:ff -j RETURN"), "исключённые устройства сохраняют IPv6");
+        assert!(joined.contains("-A XKEEN_BS6 -j REJECT"), "внешний IPv6 отклоняется — клиенты уходят на IPv4 через БС");
+        assert!(cleanup.contains("ip6tables -w 2 -D FORWARD -i br+ -j XKEEN_BS6"), "парная очистка IPv6");
+        assert!(cleanup.contains("ip6tables -w 2 -X XKEEN_BS6"));
+        cfg.whitelist.enabled = false;
+        let (_, off) = build_whitelist_full_tunnel_commands(&cfg, 5000, 5001, 1053);
+        assert!(!off.join("\n").contains("XKEEN_BS6"), "без БС IPv6 не ограничивается");
+    }
+
+    #[test]
+    fn regression_bug_45a_mihomo_dns_port_read_from_dns_listen() {
+        // Баг 45: DNS-порт Mihomo 1053 был зашит; при другом dns.listen DNS-редирект БС/гейминга
+        // уходил на мёртвый порт и вся сеть теряла DNS.
+        let dir = std::env::temp_dir().join(format!("xkeen-bug45-{}", crate::auth::random_hex(8)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let yaml_path = dir.join("config.yaml");
+        std::fs::write(&yaml_path, "mixed-port: 7890
+dns:
+  enable: true
+  listen: 0.0.0.0:7853
+  enhanced-mode: fake-ip
+rules:
+  - MATCH,DIRECT
+").unwrap();
+        let mut cfg = config::AppConfig::default();
+        cfg.mihomo.config_path = yaml_path.display().to_string();
+        cfg.adguard.enabled = false;
+        cfg.adblock_enabled = false;
+        assert_eq!(resolve_active_dns_port_with_health(&cfg, true), 7853, "порт берётся из dns.listen Mihomo");
+        std::fs::write(&yaml_path, "dns:
+  enable: true
+").unwrap();
+        assert_eq!(resolve_active_dns_port_with_health(&cfg, true), 1053, "без listen — стандартный 1053");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn regression_bug_125_command_injection_in_settings() {
+        // Баг 125: PUT /api/settings позволяет передать произвольные пути/команды в system.xkeen_route_init и xkeen_route_bin
+        let current = config::AppConfig::default();
+        let body = serde_json::json!({
+            "system": {
+                "xkeen_route_init": "/opt/etc/init.d/S99xkeen-route; reboot",
+                "xkeen_route_bin": "/opt/sbin/xkeen-route | sh"
+            }
+        });
+        let res = merge_settings_update(&current, &body);
+        assert!(res.is_err(), "Опасные пути в system должны отклоняться при валидации");
+    }
+
+    #[test]
+    fn regression_bug_141_mask_telegram_token_and_preserve_placeholders() {
+        // Баг 141:
+        // 1. Токен Telegram-бота отдается открытым текстом в GET /api/settings (должен маскироваться "******")
+        // 2. merge_settings_update затирает секрет литералом "******", если клиент вернул замаскированное значение
+        let mut current = config::AppConfig::default();
+        current.notifications.telegram_bot_token = "123456789:ABCdefGHIjklMNOpqrs".into();
+        current.rci.password = "rci_secret_password".into();
+        current.mihomo.secret = "mihomo_secret_token".into();
+
+        // 1. Проверяем маскирование при отдаче настроек
+        let masked = mask_settings_for_api(&current);
+        assert_eq!(
+            masked["notifications"]["telegram_bot_token"].as_str(),
+            Some("******"),
+            "Токен Telegram-бота должен маскироваться '******' при отдаче в UI"
+        );
+
+        // 2. Проверяем, что merge_settings_update не затирает секреты плейсхолдером "******"
+        let update_body = serde_json::json!({
+            "notifications": {
+                "telegram_bot_token": "******",
+                "telegram_chat_id": "123456789"
+            },
+            "rci": {
+                "password": "******"
+            },
+            "mihomo": {
+                "secret": "******"
+            }
+        });
+
+        let merged = merge_settings_update(&current, &update_body).expect("merge_settings_update");
+        assert_eq!(
+            merged.notifications.telegram_bot_token,
+            "123456789:ABCdefGHIjklMNOpqrs",
+            "merge_settings_update не должен затирать реальный токен Telegram строкой '******'"
+        );
+        assert_eq!(
+            merged.rci.password,
+            "rci_secret_password",
+            "merge_settings_update не должен затирать пароль RCI строкой '******'"
+        );
+        assert_eq!(
+            merged.mihomo.secret,
+            "mihomo_secret_token",
+            "merge_settings_update не должен затирать секрет Mihomo строкой '******'"
+        );
+    }
+
+    #[test]
+    fn test_full_tunnel_resync_covers_whitelist_mode() {
+        // REG: после переключения AdGuard синк перехвата шёл только для игрового режима
+        let mut cfg = config::AppConfig::default();
+        assert!(!full_tunnel_resync_needed(&cfg));
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.strategy = config::WhitelistStrategy::StrictXKeen;
+        assert!(full_tunnel_resync_needed(&cfg));
+        cfg.whitelist.enabled = false;
+        cfg.gaming.enabled = true;
+        cfg.gaming.mode = config::GamingMode::Compatibility;
+        assert!(full_tunnel_resync_needed(&cfg));
+    }
+
+    #[test]
+    fn test_adguard_toggles_do_not_hardcode_tunnel_ports() {
+        // REG (Z-09): toggle_adblock / adguard_set_protection синкали перехват на 5000/5001
+        let src = production_source();
+        for sig in ["pub async fn toggle_adblock", "pub async fn adguard_set_protection"] {
+            let body = fn_body(src, sig);
+            assert!(!body.contains("redir_port = 5000;"), "{sig}: хардкод порта");
+            assert!(body.contains("resync_full_tunnel_from_disk("), "{sig}: нет пересинхронизации");
+        }
+    }
+
+    #[test]
+    fn test_service_stop_cleans_bs_chains_and_start_resyncs() {
+        // REG: «Остановить» оставлял XKEEN_BS и хук 061 → весь трафик LAN в мёртвый Mihomo;
+        // «Запустить» не возвращал перехват игрового режима/БС.
+        let body = fn_body(production_source(), "pub async fn xkeen_service");
+        let stop = body.find("if action == \"stop\"").expect("stop branch");
+        let start = body.find("if action == \"start\" || action == \"restart\" || action == \"restart_all\" {\n                // Восстанавливаем")
+            .or_else(|| body.rfind("// Восстанавливаем правила маршрутизации"))
+            .expect("start branch");
+        assert!(body[stop..start].contains("emergency_cleanup_full_tunnel_rules().await"));
+        assert!(body[start..].contains("sync_full_tunnel_modes("));
+    }
+
+    #[test]
+    fn test_adguard_sync_firewall_route_registered() {
+        // REG: кнопка «Восстановить DNS» вызывала несуществующий маршрут
+        let main_src = include_str!("main.rs");
+        assert!(main_src.contains("\"/api/adguard/sync-firewall\""));
+    }
+}
 
 #[cfg(test)]
 mod full_tunnel_guard_tests {
@@ -11062,7 +11748,53 @@ pub struct ToggleGamingReq {
     #[serde(default)]
     pub device_mac: Option<String>,
     #[serde(default)]
+    pub device_ip: Option<String>,
+    #[serde(default)]
+    pub device_name: Option<String>,
+    #[serde(default)]
     pub target_server: Option<String>,
+}
+
+/// Добавление/обновление игрового устройства по MAC (баг 135): новое включённое устройство обязано иметь
+/// валидный IP — без него правила Mihomo и iptables игрового режима ничего не перехватывают.
+pub fn upsert_gaming_device(
+    devices: &mut Vec<config::GamingDevice>,
+    mac: &str,
+    ip: Option<&str>,
+    name: Option<&str>,
+    enabled: bool,
+) -> Result<(), String> {
+    let mac = mac.trim().to_lowercase();
+    let ip = ip.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(ip) = ip {
+        if !config::is_valid_ip_or_cidr(ip) {
+            return Err(format!("Некорректный IP-адрес устройства: {ip}"));
+        }
+    }
+    let mut found = false;
+    for d in devices.iter_mut() {
+        if d.mac.eq_ignore_ascii_case(&mac) {
+            d.enabled = enabled;
+            if let Some(ip) = ip {
+                d.ip = ip.to_string();
+            }
+            found = true;
+        }
+    }
+    if !found && enabled {
+        let Some(ip) = ip else {
+            return Err("Не удалось определить IP устройства — игровой режим по MAC без IP не работает. Подключите устройство к сети и повторите".to_string());
+        };
+        devices.push(config::GamingDevice {
+            mac,
+            ip: ip.to_string(),
+            ipv6: Vec::new(),
+            name: name.map(str::trim).filter(|n| !n.is_empty()).unwrap_or("Игровое устройство").to_string(),
+            enabled: true,
+            server: None,
+        });
+    }
+    Ok(())
 }
 
 /// POST /api/gaming/toggle — быстрое включение/отключение игрового режима с выбором устройства
@@ -11085,22 +11817,31 @@ pub async fn toggle_gaming(
     if let Some(mac) = body.device_mac {
         let mac_trimmed = mac.trim().to_lowercase();
         if !mac_trimmed.is_empty() {
-            let mut found = false;
-            for d in &mut tx.config_mut().gaming.devices {
-                if d.mac.eq_ignore_ascii_case(&mac_trimmed) {
-                    d.enabled = body.enabled;
-                    found = true;
+            // Если UI не прислал IP — ищем его по MAC в списке устройств роутера
+            let mut ip = body.device_ip.clone().filter(|s| !s.trim().is_empty());
+            let mut name = body.device_name.clone();
+            if ip.is_none() && body.enabled {
+                let cfg_snap = tx.config().clone();
+                let policies = rci::get_policies(&state.http, &cfg_snap).await.unwrap_or_default();
+                if let Ok(devs) = rci::get_devices(&state.http, &cfg_snap, &policies, "").await {
+                    if let Some(found) = devs.iter().find(|d| d.mac.eq_ignore_ascii_case(&mac_trimmed)) {
+                        if !found.ip.trim().is_empty() {
+                            ip = Some(found.ip.clone());
+                        }
+                        if name.is_none() {
+                            name = Some(found.name.clone());
+                        }
+                    }
                 }
             }
-            if !found && body.enabled {
-                tx.config_mut().gaming.devices.push(config::GamingDevice {
-                    mac: mac_trimmed,
-                    ip: String::new(),
-                    ipv6: Vec::new(),
-                    name: "Игровое устройство".into(),
-                    enabled: true,
-                    server: None,
-                });
+            if let Err(e) = upsert_gaming_device(
+                &mut tx.config_mut().gaming.devices,
+                &mac_trimmed,
+                ip.as_deref(),
+                name.as_deref(),
+                body.enabled,
+            ) {
+                return api_err(e);
             }
             let has_active = tx.config().gaming.devices.iter().any(|d| d.enabled);
             tx.config_mut().gaming.enabled = has_active;
@@ -11252,6 +11993,7 @@ pub async fn adguard_set_protection(
             if let Ok(mut tx) = ConfigTx::begin(&state).await {
                 tx.config_mut().adblock_enabled = now_enabled;
                 tx.config_mut().adguard.enabled = now_enabled;
+                tx.config_mut().adguard.integration_choice_locked = true;
                 let active_port = crate::adguard::detect_adguard_dns_port().unwrap_or(cfg.adguard.dns_port);
                 if now_enabled && active_port > 0 {
                     tx.config_mut().adguard.dns_port = active_port;
@@ -11273,12 +12015,7 @@ pub async fn adguard_set_protection(
                 let _ = crate::adguard::remove_adguard_iptables();
             }
             let latest_cfg = state.config.read().await.clone();
-            if latest_cfg.gaming.enabled && latest_cfg.gaming.mode == config::GamingMode::Compatibility {
-                let redir_port = 5000;
-                let tproxy_port = 5001;
-                let dns_port = resolve_active_dns_port(&latest_cfg);
-                let _ = sync_full_tunnel_modes(&latest_cfg, redir_port, tproxy_port, dns_port).await;
-            }
+            resync_full_tunnel_from_disk(&latest_cfg).await;
             api_ok(json!({ "enabled": now_enabled }))
         }
         Err(e) => api_err(e),
@@ -11425,9 +12162,31 @@ pub async fn adguard_get_config(State(state): State<AppState>) -> Response {
 }
 
 /// POST /api/adguard/config
+/// Частичное обновление настроек интеграции AdGuard (баг 133): применяются только присланные поля.
+/// `enabled` и `integration_choice_locked` этой формой не меняются (для них есть переключатели),
+/// маска пароля `******` сохраняет текущий пароль.
+pub fn merge_adguard_config_patch(
+    current: &crate::config::AdGuardConfig,
+    patch: &serde_json::Value,
+) -> Result<crate::config::AdGuardConfig, String> {
+    let patch_obj = patch.as_object().ok_or("Ожидается JSON-объект настроек AdGuard")?;
+    let mut base = serde_json::to_value(current).map_err(|e| e.to_string())?;
+    let base_obj = base.as_object_mut().ok_or("internal")?;
+    for (k, v) in patch_obj {
+        if k == "enabled" || k == "integration_choice_locked" {
+            continue;
+        }
+        if k == "password" && v.as_str() == Some("******") {
+            continue;
+        }
+        base_obj.insert(k.clone(), v.clone());
+    }
+    serde_json::from_value(base).map_err(|e| format!("Некорректные настройки AdGuard: {e}"))
+}
+
 pub async fn adguard_set_config(
     State(state): State<AppState>,
-    Json(mut new_adguard): Json<crate::config::AdGuardConfig>,
+    Json(patch): Json<serde_json::Value>,
 ) -> Response {
     let tx_res = crate::transaction::ConfigTx::begin(&state).await;
     let mut tx = match tx_res {
@@ -11436,11 +12195,10 @@ pub async fn adguard_set_config(
     };
 
     let mut current = tx.config().clone();
-    if let Some(ref pw) = new_adguard.password {
-        if pw == "******" {
-            new_adguard.password = current.adguard.password.clone();
-        }
-    }
+    let new_adguard = match merge_adguard_config_patch(&current.adguard, &patch) {
+        Ok(a) => a,
+        Err(e) => return api_err(e),
+    };
     let adguard_enabled_changed = current.adguard.enabled != new_adguard.enabled;
     let port_changed = current.adguard.dns_port != new_adguard.dns_port;
     let new_enabled = new_adguard.enabled;
@@ -11605,6 +12363,8 @@ pub async fn set_whitelist_strategy(
 #[derive(Deserialize)]
 pub struct WhitelistExcludeReq {
     pub id: String, // IP or MAC
+    #[serde(default)]
+    pub ip: Option<String>,
     pub excluded: bool,
 }
 
@@ -11617,6 +12377,7 @@ pub async fn toggle_whitelist_exclude(
     if id_clean.is_empty() {
         return api_err("Не указан идентификатор устройства (IP или MAC)");
     }
+    let ip_clean = body.ip.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty() && *s != id_clean);
 
     let mut tx = match ConfigTx::begin(&state).await {
         Ok(tx) => tx,
@@ -11627,8 +12388,16 @@ pub async fn toggle_whitelist_exclude(
         if !tx.config().whitelist.excluded_devices.iter().any(|d| d.eq_ignore_ascii_case(&id_clean)) {
             tx.config_mut().whitelist.excluded_devices.push(id_clean.clone());
         }
+        if let Some(ip) = ip_clean {
+            if !tx.config().whitelist.excluded_devices.iter().any(|d| d.eq_ignore_ascii_case(ip)) {
+                tx.config_mut().whitelist.excluded_devices.push(ip.to_string());
+            }
+        }
     } else {
         tx.config_mut().whitelist.excluded_devices.retain(|d| !d.eq_ignore_ascii_case(&id_clean));
+        if let Some(ip) = ip_clean {
+            tx.config_mut().whitelist.excluded_devices.retain(|d| !d.eq_ignore_ascii_case(ip));
+        }
     }
 
     let raw_yaml = match tx.read_yaml().await {
@@ -11830,22 +12599,7 @@ pub async fn save_whitelist(
         return api_err(format!("Ошибка сохранения config.json: {e}"));
     }
 
-    if tx.config().whitelist.enabled {
-        let active_id = mihomo::get_active_server(&state.http, tx.config()).await.ok().flatten().map(|s| s.id).unwrap_or_default();
-        if !active_id.is_empty() {
-            let _ = sync_whitelist_mode_tunnel(&state, &active_id).await;
-        }
-    }
-
-    // BS-FIX: полный перехват всех портов (iptables XKEEN_BS) применяется/снимается
-    // сразу при сохранении настроек БС, а не только после перезапуска панели
-    {
-        let yaml = tokio::fs::read_to_string(&tx.config().mihomo.config_path).await.unwrap_or_default();
-        let redir_port = routing::parse_redir_port(&yaml).unwrap_or(5000);
-        let tproxy_port = routing::parse_tproxy_port(&yaml).unwrap_or(5001);
-        let dns_port = resolve_active_dns_port(tx.config());
-        let _ = sync_full_tunnel_modes(tx.config(), redir_port, tproxy_port, dns_port).await;
-    }
+    sync_whitelist_runtime_after_commit(&state, tx.config()).await;
 
     // BS-PIN: выбираем закреплённую ноду в per-device группе (runtime, вне Failover)
     for dev in &tx.config().whitelist.devices {
@@ -11875,6 +12629,24 @@ pub struct WhitelistDeviceToggleReq {
 }
 
 /// POST /api/whitelist/device/toggle — быстрое переключение устройства в режиме белых списков
+/// Синхронизация рантайма БС после коммита конфигурации (баг 38): туннель БС для активного сервера
+/// и полный перехват iptables XKEEN_BS. Общая для save_whitelist и toggle_whitelist_device.
+pub async fn sync_whitelist_runtime_after_commit(state: &AppState, cfg: &config::AppConfig) {
+    if cfg.whitelist.enabled {
+        let active_id = mihomo::get_active_server(&state.http, cfg).await.ok().flatten().map(|s| s.id).unwrap_or_default();
+        if !active_id.is_empty() {
+            let _ = sync_whitelist_mode_tunnel(state, &active_id).await;
+        }
+    }
+    // BS-FIX: полный перехват всех портов (iptables XKEEN_BS) применяется/снимается сразу,
+    // а не только после перезапуска панели
+    let yaml = tokio::fs::read_to_string(&cfg.mihomo.config_path).await.unwrap_or_default();
+    let redir_port = routing::parse_redir_port(&yaml).unwrap_or(5000);
+    let tproxy_port = routing::parse_tproxy_port(&yaml).unwrap_or(5001);
+    let dns_port = resolve_active_dns_port(cfg);
+    sync_full_tunnel_modes(cfg, redir_port, tproxy_port, dns_port).await;
+}
+
 pub async fn toggle_whitelist_device(
     State(state): State<AppState>,
     Json(body): Json<WhitelistDeviceToggleReq>,
@@ -11967,6 +12739,9 @@ pub async fn toggle_whitelist_device(
     if let Err(e) = tx.commit().await {
         return api_err(format!("Ошибка сохранения config.json: {e}"));
     }
+
+    // Баг 38: та же синхронизация туннеля БС и iptables XKEEN_BS, что и при сохранении настроек БС
+    sync_whitelist_runtime_after_commit(&state, tx.config()).await;
 
     log_i!(
         "Режим белых списков переключен для устройства ip='{}', mac='{}' -> enabled={}",

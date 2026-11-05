@@ -402,7 +402,7 @@ async fn main() {
         None => {}
     }
 
-    let cfg = config::load(&config_path);
+    let cfg = config::load_and_refresh_backup(&config_path);
     logger::init(&config_path, &cfg.logs.remote_syslog);
     logger::set_level(&cfg.logs.level);
     log_i!("{} {} запущен, конфиг: {}", APP_NAME, VERSION, config_path.display());
@@ -447,7 +447,14 @@ async fn main() {
     // FO-QUR-01: Восстановление состояния карантина из /opt/etc/xkeen-route/quarantine.json
     failover::init_quarantine_from_disk().await.ok();
 
+    // Инициализация постоянного хранилища отозванных токенов (баг 93)
+    let revoked_storage_path = state.config_path.parent().unwrap_or(std::path::Path::new(".")).join("revoked_tokens.json");
+    auth::init_revoked_tokens_storage(&revoked_storage_path);
+
     failover::spawn(state.clone());
+    // Во временном каталоге (tmpfs): переживает рестарт панели, но не перезагрузку роутера —
+    // после неё XKeen стартует сам, и флаг «остановлено» не должен держать failover на паузе.
+    watchdog::init_service_stopped_flag(std::env::temp_dir().join("xkeen-route-service-stopped.flag"));
     watchdog::spawn(state.clone());
     traffic::spawn(state.clone());
     bot::spawn(state.clone());
@@ -755,7 +762,7 @@ async fn main() {
         .route("/api/flow/repair", post(api::repair_flow))
         .route("/api/flow/extension.zip", get(api::get_flow_extension))
         .route("/api/servers/speedtest", post(api::speedtest_server))
-        .route("/api/servers/speedtest/{id}", post(api::speedtest_server_by_id).get(api::speedtest_server_by_id))
+        .route("/api/servers/speedtest/{id}", post(api::speedtest_server_by_id))
         .route("/api/servers/import-node", post(api::import_node))
         // Устройства и маршрутизация
         .route("/api/devices", get(api::get_devices))
@@ -884,6 +891,7 @@ async fn main() {
         .route("/api/adguard/clients", get(api::adguard_get_clients))
         .route("/api/adguard/diagnostics", get(api::adguard_diagnostics))
         .route("/api/adguard/service", post(api::adguard_service))
+        .route("/api/adguard/sync-firewall", post(api::adguard_sync_firewall))
         .route("/api/adguard/install", post(api::adguard_install))
         .route("/api/adguard/config", get(api::adguard_get_config).post(api::adguard_set_config))
         // 404 JSON для несуществующих маршрутов API (вместо отдачи HTML через SPA fallback)

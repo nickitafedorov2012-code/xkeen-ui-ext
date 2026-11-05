@@ -602,6 +602,84 @@ pub fn parse_xray_json_profile(profile: &Value) -> Option<Value> {
 }
 
 /// Преобразование сырого контента подписки (Base64, Xray JSON или список URI) в YAML провайдера для Mihomo
+/// YAML-скаляр в двойных кавычках с экранированием (баг 77): `\`, `"`, переводы строк и управляющие символы.
+pub fn yaml_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Простые безопасные значения (vless, aes-256-gcm, h2) выводятся без кавычек, остальные — через yaml_quote.
+fn yaml_scalar(s: &str) -> String {
+    let lower = s.to_ascii_lowercase();
+    let reserved = matches!(lower.as_str(), "true" | "false" | "yes" | "no" | "on" | "off" | "null" | "~" | "y" | "n");
+    let plain = !s.is_empty()
+        && !reserved
+        && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+    if plain { s.to_string() } else { yaml_quote(s) }
+}
+
+fn yaml_key(k: &str) -> String {
+    if !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.') {
+        k.to_string()
+    } else {
+        yaml_quote(k)
+    }
+}
+
+fn emit_yaml_entry(out: &mut String, indent: usize, key: &str, v: &Value) {
+    let pad = " ".repeat(indent);
+    let k = yaml_key(key);
+    match v {
+        Value::Null => {}
+        Value::Bool(b) => out.push_str(&format!("{pad}{k}: {b}\n")),
+        Value::Number(n) => out.push_str(&format!("{pad}{k}: {n}\n")),
+        // Перечисления (type/network/cipher) — без кавычек, как в прежнем выводе; прочие строки — в кавычках
+        Value::String(s) if matches!(key, "type" | "network" | "cipher") => {
+            out.push_str(&format!("{pad}{k}: {}\n", yaml_scalar(s)))
+        }
+        Value::String(s) => out.push_str(&format!("{pad}{k}: {}\n", yaml_quote(s))),
+        Value::Array(arr) => {
+            if arr.is_empty() {
+                out.push_str(&format!("{pad}{k}: []\n"));
+                return;
+            }
+            out.push_str(&format!("{pad}{k}:\n"));
+            for item in arr {
+                match item {
+                    Value::String(s) => out.push_str(&format!("{pad}  - {}\n", yaml_scalar(s))),
+                    Value::Number(n) => out.push_str(&format!("{pad}  - {n}\n")),
+                    Value::Bool(b) => out.push_str(&format!("{pad}  - {b}\n")),
+                    other => out.push_str(&format!("{pad}  - {}\n", yaml_quote(&other.to_string()))),
+                }
+            }
+        }
+        Value::Object(map) => {
+            if map.is_empty() {
+                out.push_str(&format!("{pad}{k}: {{}}\n"));
+                return;
+            }
+            out.push_str(&format!("{pad}{k}:\n"));
+            for (ck, cv) in map {
+                emit_yaml_entry(out, indent + 2, ck, cv);
+            }
+        }
+    }
+}
+
 pub fn convert_subscription_to_mihomo_yaml(raw_content: &str) -> Result<(String, usize), String> {
     let decoded_text = if let Ok(bytes) = base64_decode(raw_content.trim()) {
         if let Ok(text) = String::from_utf8(bytes) {
@@ -650,103 +728,26 @@ pub fn convert_subscription_to_mihomo_yaml(raw_content: &str) -> Result<(String,
     }
 
     let count = proxies.len();
+    // Баги 76, 77, 79: узел выводится целиком (cipher, alterId, транспорты и прочие поля парсера),
+    // а каждая строка — экранированным YAML-скаляром.
     let mut yaml = String::from("proxies:\n");
     for p in proxies {
         let obj = p.as_object().ok_or("Некорректный узел")?;
         let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("Server");
-        let ptype = obj.get("type").and_then(|v| v.as_str()).unwrap_or("vless");
-        let server = obj.get("server").and_then(|v| v.as_str()).unwrap_or("");
-        let port = obj.get("port").and_then(|v| v.as_u64()).unwrap_or(443);
-
-        yaml.push_str(&format!("  - name: \"{}\"\n", name.replace('"', "\\\"")));
-        yaml.push_str(&format!("    type: {ptype}\n"));
-        yaml.push_str(&format!("    server: \"{server}\"\n"));
-        yaml.push_str(&format!("    port: {port}\n"));
-
-        if let Some(uuid) = obj.get("uuid").and_then(|v| v.as_str()) {
-            yaml.push_str(&format!("    uuid: \"{uuid}\"\n"));
+        yaml.push_str(&format!("  - name: {}\n", yaml_quote(name)));
+        let mut keys: Vec<&String> = obj.keys().filter(|k| k.as_str() != "name").collect();
+        let rank = |k: &str| match k {
+            "type" => 0,
+            "server" => 1,
+            "port" => 2,
+            _ => 3,
+        };
+        keys.sort_by(|x, y| rank(x).cmp(&rank(y)).then_with(|| x.cmp(y)));
+        for k in keys {
+            emit_yaml_entry(&mut yaml, 4, k, &obj[k.as_str()]);
         }
-        if let Some(password) = obj.get("password").and_then(|v| v.as_str()) {
-            yaml.push_str(&format!("    password: \"{password}\"\n"));
-        }
-        yaml.push_str("    udp: true\n");
-
-        if let Some(tls) = obj.get("tls").and_then(|v| v.as_bool()) {
-            yaml.push_str(&format!("    tls: {tls}\n"));
-        }
-        if let Some(sni) = obj.get("servername").or_else(|| obj.get("sni")).and_then(|v| v.as_str()) {
-            if ptype == "hysteria2" {
-                yaml.push_str(&format!("    sni: \"{sni}\"\n"));
-            } else {
-                yaml.push_str(&format!("    servername: \"{sni}\"\n"));
-            }
-        }
-        if let Some(fp) = obj.get("client-fingerprint").and_then(|v| v.as_str()) {
-            yaml.push_str(&format!("    client-fingerprint: \"{fp}\"\n"));
-        }
-        if let Some(flow) = obj.get("flow").and_then(|v| v.as_str()) {
-            yaml.push_str(&format!("    flow: \"{flow}\"\n"));
-        }
-        if let Some(skip) = obj.get("skip-cert-verify").and_then(|v| v.as_bool()) {
-            yaml.push_str(&format!("    skip-cert-verify: {skip}\n"));
-        }
-        if let Some(alpn) = obj.get("alpn").and_then(|v| v.as_array()) {
-            yaml.push_str("    alpn:\n");
-            for a in alpn {
-                if let Some(s) = a.as_str() {
-                    yaml.push_str(&format!("      - {s}\n"));
-                }
-            }
-        }
-
-        if let Some(reality) = obj.get("reality-opts").and_then(|v| v.as_object()) {
-            yaml.push_str("    reality-opts:\n");
-            if let Some(pbk) = reality.get("public-key").and_then(|v| v.as_str()) {
-                yaml.push_str(&format!("      public-key: \"{pbk}\"\n"));
-            }
-            if let Some(sid) = reality.get("short-id").and_then(|v| v.as_str()) {
-                yaml.push_str(&format!("      short-id: \"{sid}\"\n"));
-            }
-        }
-
-        if let Some(network) = obj.get("network").and_then(|v| v.as_str()) {
-            yaml.push_str(&format!("    network: {network}\n"));
-            if network == "ws" {
-                if let Some(ws) = obj.get("ws-opts").and_then(|v| v.as_object()) {
-                    yaml.push_str("    ws-opts:\n");
-                    if let Some(path) = ws.get("path").and_then(|v| v.as_str()) {
-                        yaml.push_str(&format!("      path: \"{path}\"\n"));
-                    }
-                    if let Some(headers) = ws.get("headers").and_then(|v| v.as_object()) {
-                        yaml.push_str("      headers:\n");
-                        for (k, v) in headers {
-                            if let Some(val) = v.as_str() {
-                                yaml.push_str(&format!("        {k}: \"{val}\"\n"));
-                            }
-                        }
-                    }
-                }
-            } else if network == "grpc" {
-                if let Some(grpc) = obj.get("grpc-opts").and_then(|g| g.as_object()) {
-                    yaml.push_str("    grpc-opts:\n");
-                    if let Some(sn) = grpc.get("grpc-service-name").and_then(|v| v.as_str()) {
-                        yaml.push_str(&format!("      grpc-service-name: \"{sn}\"\n"));
-                    }
-                }
-            } else if network == "xhttp" {
-                if let Some(xh) = obj.get("xhttp-opts").and_then(|x| x.as_object()) {
-                    yaml.push_str("    xhttp-opts:\n");
-                    if let Some(mode) = xh.get("mode").and_then(|m| m.as_str()) {
-                        yaml.push_str(&format!("      mode: \"{mode}\"\n"));
-                    }
-                    if let Some(path) = xh.get("path").and_then(|p| p.as_str()) {
-                        yaml.push_str(&format!("      path: \"{path}\"\n"));
-                    }
-                    if let Some(host) = xh.get("host").and_then(|h| h.as_str()) {
-                        yaml.push_str(&format!("      host: \"{host}\"\n"));
-                    }
-                }
-            }
+        if !obj.contains_key("udp") {
+            yaml.push_str("    udp: true\n");
         }
     }
 
@@ -971,5 +972,36 @@ mod tests {
         assert_eq!(val.get("name").and_then(|v| v.as_str()), Some("🇳🇱 Netherlands VMess"));
         assert_eq!(val.get("network").and_then(|v| v.as_str()), Some("ws"));
         assert_eq!(val.get("tls").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn regression_bug_76_ss_and_vmess_keep_cipher_and_alter_id() {
+        // Баг 76: cipher (SS) и cipher/alterId (VMess) парсились, но не попадали в YAML — узлы нерабочие.
+        let ss = format!("ss://{}@1.2.3.4:8388#SS-1", crate::adguard::base64_encode(b"aes-256-gcm:secret"));
+        let vm_json = r#"{"v":"2","ps":"VM-1","add":"5.6.7.8","port":"443","id":"11111111-2222-3333-4444-555555555555","aid":"2","scy":"chacha20-poly1305","net":"tcp"}"#;
+        let vm = format!("vmess://{}", crate::adguard::base64_encode(vm_json.as_bytes()));
+        let raw = crate::adguard::base64_encode(format!("{ss}\n{vm}\n").as_bytes());
+        let (yaml, count) = convert_subscription_to_mihomo_yaml(&raw).unwrap();
+        assert_eq!(count, 2);
+        assert!(yaml.contains("    cipher: aes-256-gcm\n"), "SS cipher:\n{yaml}");
+        assert!(yaml.contains("    cipher: chacha20-poly1305\n"), "VMess cipher:\n{yaml}");
+        assert!(yaml.contains("    alterId: 2\n"), "VMess alterId:\n{yaml}");
+    }
+
+    #[test]
+    fn regression_bug_77_provider_yaml_scalars_are_escaped() {
+        // Баг 77: YAML провайдера собирался format! без экранирования — пароль с `\` или `"` ломал провайдер,
+        // имя с `\"` позволяло выйти из строки и внедрить ключи из чужой подписки.
+        let ss = format!(
+            "ss://{}@1.2.3.4:8388#{}",
+            crate::adguard::base64_encode(b"aes-256-gcm:pa\"ss\\word"),
+            "evil%5C%22%0A%20%20%20%20type%3A%20direct"
+        );
+        let raw = crate::adguard::base64_encode(format!("{ss}\n").as_bytes());
+        let (yaml, _) = convert_subscription_to_mihomo_yaml(&raw).unwrap();
+        assert!(yaml.contains(r#"    password: "pa\"ss\\word""#), "пароль экранирован:\n{yaml}");
+        let type_lines = yaml.lines().filter(|l| l.trim_start().starts_with("type:")).count();
+        assert_eq!(type_lines, 1, "имя из подписки не может добавить ключ type:\n{yaml}");
+        assert!(yaml.contains(r#"  - name: "evil\\\"\n    type: direct""#), "переводы строк и кавычки в имени экранированы:\n{yaml}");
     }
 }

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import { apiGet, apiPost } from '../api'
+import { diffSettings } from '../utils/settingsDiff'
 import type {
   AdGuardConfig,
   AghStatus,
@@ -302,7 +303,15 @@ export default function AdGuard({ notify }: AdGuardProps) {
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault()
     try {
-      await apiPost('/adguard/config', settingsForm)
+      // Баг 133: только изменённые поля — иначе снимок с момента открытия откатывает порт и включение,
+      // которые за это время поменял сторож. Включение меняется переключателем, не этой формой.
+      const patch = diffSettings(config ?? {}, settingsForm) as Partial<AdGuardConfig> | undefined
+      if (patch) delete patch.enabled
+      if (!patch || Object.keys(patch).length === 0) {
+        notify('Изменений нет')
+        return
+      }
+      await apiPost('/adguard/config', patch)
       notify('Настройки интеграции AdGuard Home успешно сохранены')
       await loadData()
     } catch (e: any) {

@@ -23,8 +23,36 @@ pub fn is_shutdown() -> bool {
     SHUTDOWN.load(std::sync::atomic::Ordering::Acquire)
 }
 
+static SERVICE_STOPPED_FLAG_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Флаг «службы остановлены пользователем / режим паники» на диске (баг 59): после рестарта панели
+/// failover и сторожа не должны молча поднимать проксирование обратно.
+pub fn init_service_stopped_flag(path: std::path::PathBuf) {
+    let stopped = read_service_stopped_flag(&path);
+    let _ = SERVICE_STOPPED_FLAG_PATH.set(path);
+    SERVICE_MANUALLY_STOPPED.store(stopped, std::sync::atomic::Ordering::Release);
+    if stopped {
+        log_w!("[WATCHDOG] Службы были остановлены пользователем до перезапуска панели — режим DIRECT сохранён");
+    }
+}
+
+pub fn read_service_stopped_flag(path: &std::path::Path) -> bool {
+    path.exists()
+}
+
+pub fn persist_service_stopped_flag(path: &std::path::Path, stopped: bool) {
+    if stopped {
+        let _ = std::fs::write(path, b"stopped\n");
+    } else {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 pub fn set_service_stopped(stopped: bool) {
     SERVICE_MANUALLY_STOPPED.store(stopped, std::sync::atomic::Ordering::Release);
+    if let Some(p) = SERVICE_STOPPED_FLAG_PATH.get() {
+        persist_service_stopped_flag(p, stopped);
+    }
 }
 
 pub fn is_service_stopped() -> bool {
@@ -367,6 +395,72 @@ pub fn rebuild_routing_after_dhcp_change(raw_yaml: &str, cfg: &config::AppConfig
 }
 
 /// Фоновый монитор изменений DHCP IP-адресов устройств игрового режима по их постоянному MAC.
+/// Смена IP устройств по DHCP (баг 118): пары (старый IP → новый IP) для MAC, у которых IP изменился.
+pub fn detect_dhcp_ip_changes(
+    prev_ip_by_mac: &std::collections::HashMap<String, String>,
+    current: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (mac, ip) in current {
+        let mac_l = mac.trim().to_lowercase();
+        let ip = ip.trim();
+        if ip.is_empty() {
+            continue;
+        }
+        if let Some(old) = prev_ip_by_mac.get(&mac_l) {
+            if old != ip && !old.is_empty() {
+                out.push((old.clone(), ip.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Перенос всех настроек, привязанных к IP, на новый адрес устройства (баг 118).
+pub fn migrate_ip_keyed_config(cfg: &mut config::AppConfig, changes: &[(String, String)]) -> bool {
+    let mut changed = false;
+    for (old, new) in changes {
+        if old == new {
+            continue;
+        }
+        if let Some(v) = cfg.device_routing.remove(old) {
+            cfg.device_routing.insert(new.clone(), v);
+            changed = true;
+        }
+        if let Some(v) = cfg.device_domain_rules.remove(old) {
+            cfg.device_domain_rules.insert(new.clone(), v);
+            changed = true;
+        }
+        for list in [&mut cfg.zapret.excluded_devices, &mut cfg.whitelist.excluded_devices] {
+            for e in list.iter_mut() {
+                if e.trim() == old {
+                    *e = new.clone();
+                    changed = true;
+                }
+            }
+        }
+        for sch in &mut cfg.schedules {
+            if sch.ip.trim() == old {
+                sch.ip = new.clone();
+                changed = true;
+            }
+        }
+        for d in &mut cfg.whitelist.devices {
+            if d.ip.trim() == old {
+                d.ip = new.clone();
+                changed = true;
+            }
+        }
+        for d in &mut cfg.gaming.devices {
+            if d.ip.trim() == old {
+                d.ip = new.clone();
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 pub fn spawn_dhcp_device_monitor(state: AppState) {
     tokio::spawn(async move {
         for _ in 0..12 {
@@ -376,6 +470,7 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
             sleep(Duration::from_secs(1)).await;
         }
 
+        let mut last_ip_by_mac: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         loop {
             for _ in 0..15 {
                 if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
@@ -384,80 +479,90 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
                 sleep(Duration::from_secs(1)).await;
             }
 
-            let (gaming_enabled, is_compat, has_devices) = {
-                let cfg = state.config.read().await;
-                (
-                    cfg.gaming.enabled,
-                    cfg.gaming.mode == config::GamingMode::Compatibility || cfg.gaming.mode == config::GamingMode::BypassRu,
-                    !cfg.gaming.devices.is_empty(),
-                )
+            let cfg = state.config.read().await.clone();
+            let policies = rci::get_policies(&state.http, &cfg).await.unwrap_or_default();
+            let Ok(current_devs) = rci::get_devices(&state.http, &cfg, &policies, "").await else {
+                continue;
             };
+            let current_pairs: Vec<(String, String)> =
+                current_devs.iter().map(|d| (d.mac.clone(), d.ip.clone())).collect();
+            // Баг 118: общий перенос IP-привязанных настроек для ВСЕХ устройств, а не только гейминга
+            let ip_changes = detect_dhcp_ip_changes(&last_ip_by_mac, &current_pairs);
+            for (mac, ip) in &current_pairs {
+                if !ip.trim().is_empty() {
+                    last_ip_by_mac.insert(mac.trim().to_lowercase(), ip.trim().to_string());
+                }
+            }
 
-            if gaming_enabled && is_compat && has_devices {
-                let cfg = state.config.read().await.clone();
-                let policies = rci::get_policies(&state.http, &cfg).await.unwrap_or_default();
-                if let Ok(current_devs) = rci::get_devices(&state.http, &cfg, &policies, "").await {
-                    let _cfg_guard = state.config_lock.lock().await;
-                    let _routing_guard = state.routing_lock.lock().await;
-                    let mut new_cfg = (**state.config.read().await).clone();
+            let gaming_tracked = cfg.gaming.enabled
+                && (cfg.gaming.mode == config::GamingMode::Compatibility || cfg.gaming.mode == config::GamingMode::BypassRu)
+                && !cfg.gaming.devices.is_empty();
+            if ip_changes.is_empty() && !gaming_tracked {
+                continue;
+            }
 
-                    let mut ip_changed = false;
-                    let has_explicit_enabled = new_cfg.gaming.devices.iter().any(|d| d.enabled);
-                    let devices_len = new_cfg.gaming.devices.len();
-                    for dev in &mut new_cfg.gaming.devices {
-                        let is_active = if has_explicit_enabled {
-                            dev.enabled
-                        } else {
-                            devices_len == 1
-                        };
-                        if !is_active {
-                            continue;
-                        }
-                        if let Some(rci_dev) = current_devs.iter().find(|d| d.mac.eq_ignore_ascii_case(&dev.mac)) {
-                            let ip_diff = !rci_dev.ip.is_empty() && rci_dev.ip != dev.ip;
-                            let filtered_v6: Vec<String> = rci_dev.ipv6.iter().filter(|v6| {
-                                let l = v6.trim().to_lowercase();
-                                !l.is_empty() && !l.starts_with("fe80:") && !l.starts_with("::1")
-                            }).cloned().collect();
-                            let v6_diff = !filtered_v6.is_empty() && filtered_v6 != dev.ipv6;
+            // Баг 96: запись только через ConfigTx (config_lock → routing_lock, откат при сбое)
+            let Ok(mut tx) = crate::transaction::ConfigTx::begin(&state).await else {
+                continue;
+            };
+            let mut changed = migrate_ip_keyed_config(tx.config_mut(), &ip_changes);
+            for (old, new) in &ip_changes {
+                log_i!("[DHCP-WATCHDOG] 🔄 Устройство сменило IP {old} → {new}: настройки устройства перенесены");
+            }
 
-                            if ip_diff || v6_diff {
-                                log_i!(
-                                    "[DHCP-WATCHDOG] 🔄 Изменение IP адреса по DHCP для устройства '{}' (MAC {}): IPv4: {} -> {}, IPv6: {:?} -> {:?}. Автообновление маршрута...",
-                                    dev.name, dev.mac, dev.ip, rci_dev.ip, dev.ipv6, filtered_v6
-                                );
-                                if !rci_dev.ip.is_empty() {
-                                    dev.ip = rci_dev.ip.clone();
-                                }
-                                dev.ipv6 = filtered_v6;
-                                dev.name = rci_dev.name.clone();
-                                ip_changed = true;
-                            }
-                        }
+            if gaming_tracked {
+                let new_cfg = tx.config_mut();
+                let has_explicit_enabled = new_cfg.gaming.devices.iter().any(|d| d.enabled);
+                let devices_len = new_cfg.gaming.devices.len();
+                for dev in &mut new_cfg.gaming.devices {
+                    let is_active = if has_explicit_enabled { dev.enabled } else { devices_len == 1 };
+                    if !is_active {
+                        continue;
                     }
-
-                    if ip_changed {
-                        let path = Path::new(&new_cfg.mihomo.config_path);
-                        if path.exists() {
-                            if let Ok(raw_yaml) = tokio::fs::read_to_string(path).await {
-                                if let Ok(new_yaml) = rebuild_routing_after_dhcp_change(&raw_yaml, &new_cfg) {
-                                    if crate::api::atomic_write_file(path, &new_yaml).await.is_ok()
-                                        && mihomo::reload_config(&state.http, &new_cfg).await.is_ok() {
-                                            log_i!("[DHCP-WATCHDOG] ✓ Маршрут игрового режима успешно переприменен для нового IP");
-                                        }
-                                    let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
-                                    let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
-                                    let dns_port = crate::api::resolve_active_dns_port(&new_cfg);
-                                    let _ = crate::api::sync_full_tunnel_modes(&new_cfg, redir_port, tproxy_port, dns_port).await;
-                                }
+                    if let Some(rci_dev) = current_devs.iter().find(|d| d.mac.eq_ignore_ascii_case(&dev.mac)) {
+                        let ip_diff = !rci_dev.ip.is_empty() && rci_dev.ip != dev.ip;
+                        let filtered_v6: Vec<String> = rci_dev.ipv6.iter().filter(|v6| {
+                            let l = v6.trim().to_lowercase();
+                            !l.is_empty() && !l.starts_with("fe80:") && !l.starts_with("::1")
+                        }).cloned().collect();
+                        let v6_diff = !filtered_v6.is_empty() && filtered_v6 != dev.ipv6;
+                        if ip_diff || v6_diff {
+                            log_i!(
+                                "[DHCP-WATCHDOG] 🔄 Изменение IP адреса по DHCP для устройства '{}' (MAC {}): IPv4: {} -> {}, IPv6: {:?} -> {:?}. Автообновление маршрута...",
+                                dev.name, dev.mac, dev.ip, rci_dev.ip, dev.ipv6, filtered_v6
+                            );
+                            if !rci_dev.ip.is_empty() {
+                                dev.ip = rci_dev.ip.clone();
                             }
-                        }
-
-                        if config::save(&state.config_path, &new_cfg).await.is_ok() {
-                            *state.config.write().await = std::sync::Arc::new(new_cfg);
+                            dev.ipv6 = filtered_v6;
+                            dev.name = rci_dev.name.clone();
+                            changed = true;
                         }
                     }
                 }
+            }
+
+            if !changed {
+                continue;
+            }
+            let Ok(raw_yaml) = tx.read_yaml().await else { continue };
+            let Ok(new_yaml) = rebuild_routing_after_dhcp_change(&raw_yaml, tx.config()) else { continue };
+            if tx.set_yaml(new_yaml.clone()).is_err() {
+                continue;
+            }
+            match tx.commit_and_reload().await {
+                Ok(()) => {
+                    log_i!("[DHCP-WATCHDOG] ✓ Маршруты устройств переприменены для новых IP");
+                    let cfg_now = (**state.config.read().await).clone();
+                    let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
+                    let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
+                    let dns_port = crate::api::resolve_active_dns_port(&cfg_now);
+                    crate::api::sync_full_tunnel_modes(&cfg_now, redir_port, tproxy_port, dns_port).await;
+                    if !cfg_now.zapret.excluded_devices.is_empty() {
+                        let _ = crate::api::sync_zapret_files(&cfg_now.zapret).await;
+                    }
+                }
+                Err(e) => log_w!("[DHCP-WATCHDOG] Не удалось применить новые IP устройств: {e}"),
             }
         }
     });
@@ -638,10 +743,11 @@ pub fn spawn_zapret_monitor(state: AppState) {
                     restart_failures += 1;
                 } else if restart_failures == 5 {
                     log_w!("[WATCHDOG] ❌ Не удалось запустить службу Zapret после 5 попыток. Приостановка автозапуска.");
-                    let mut cfg = (**state.config.read().await).clone();
-                    cfg.zapret.enabled = false;
-                    let _ = config::save(&state.config_path, &cfg).await;
-                    *state.config.write().await = std::sync::Arc::new(cfg);
+                    // Баг 28: выключение — транзакцией с пересборкой правил Mihomo, иначе YouTube/Discord
+                    // остаются в DIRECT без DPI-обхода. Баг 95: запись идёт под config_lock (через ConfigTx).
+                    if let Err(e) = disable_zapret_after_failed_starts(&state).await {
+                        log_w!("[WATCHDOG] Не удалось выключить Zapret и пересобрать правила: {e}");
+                    }
                     // Z-03: маркер предотвращает перезапуск S51zapret (автозапуск Entware) до явного включения пользователем
                     crate::zapret::set_zapret_disabled_marker();
                     let _ = tokio::process::Command::new(init_script)
@@ -653,6 +759,13 @@ pub fn spawn_zapret_monitor(state: AppState) {
             }
         }
     });
+}
+
+/// Выключение Zapret после неудачных автозапусков (баги 28, 95): zapret.enabled=false и пересборка правил
+/// Mihomo в одной транзакции. Если ядро не принимает reload, файлы всё равно приводятся в согласованное
+/// состояние (без DPI-правил), чтобы следующий старт Mihomo не вернул YouTube/Discord в DIRECT.
+pub async fn disable_zapret_after_failed_starts(state: &AppState) -> Result<(), String> {
+    crate::api::persist_zapret_enabled_with_routing(state, false).await
 }
 
 /// Фоновое автообновление списков доменов Community Hostlists (каждые 24 часа).
@@ -799,7 +912,8 @@ pub fn spawn_adguard_monitor(state: AppState) {
             let is_running_protected = agh_status.running && agh_status.protection_enabled;
 
             // Если AdGuard запущен и активен, но в конфигурации был выключен — автоматически синхронизируем
-            let needs_cfg_sync = is_running_protected && !enabled;
+            let needs_cfg_sync =
+                should_auto_integrate_adguard(is_running_protected, enabled, adguard_cfg.integration_choice_locked);
             if needs_cfg_sync {
                 enabled = true;
             }
@@ -808,6 +922,8 @@ pub fn spawn_adguard_monitor(state: AppState) {
                 if let Ok(mut tx) = crate::transaction::ConfigTx::begin(&state).await {
                     tx.config_mut().adguard.enabled = true;
                     tx.config_mut().adblock_enabled = true;
+                    // Автоподхват — один раз: дальше решает только пользователь (баг 116)
+                    tx.config_mut().adguard.integration_choice_locked = true;
                     if dns_port > 0 {
                         tx.config_mut().adguard.dns_port = dns_port;
                     }
@@ -1286,6 +1402,12 @@ pub fn spawn_smart_gaming_monitor(state: AppState) {
     });
 }
 
+/// Можно ли сторожу самому включить интеграцию AdGuard (баг 116): только для работающего с защитой AGH,
+/// пока интеграция выключена и пользователь ещё ни разу не делал выбор (Zero-Touch для внешнего AGH).
+pub fn should_auto_integrate_adguard(running_protected: bool, integration_enabled: bool, choice_locked: bool) -> bool {
+    running_protected && !integration_enabled && !choice_locked
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1497,6 +1619,160 @@ mod tests {
             !can_restore_adguard_iptables(false, false),
             "Если AdGuard мертв, восстанавливать нельзя"
         );
+    }
+
+    #[test]
+    fn regression_bug_116_watchdog_respects_user_adguard_choice() {
+        // Баг 116: сторож включал adguard.enabled и adblock_enabled на каждом тике, если AGH работает
+        // с защитой, — выключить интеграцию в панели, оставив AGH, было невозможно.
+        assert!(
+            should_auto_integrate_adguard(true, false, false),
+            "Zero-Touch: впервые найденный работающий AGH подхватывается автоматически"
+        );
+        assert!(
+            !should_auto_integrate_adguard(true, false, true),
+            "пользователь выключил интеграцию (или автоподхват уже был) — сторож не включает её снова"
+        );
+        assert!(!should_auto_integrate_adguard(true, true, false), "уже включено — делать нечего");
+        assert!(!should_auto_integrate_adguard(false, false, false), "AGH не работает с защитой — не трогаем");
+        let cfg = crate::config::AdGuardConfig::default();
+        assert!(!cfg.integration_choice_locked, "по умолчанию выбор пользователя не зафиксирован");
+    }
+
+    #[tokio::test]
+    async fn regression_bug_28_zapret_give_up_rebuilds_mihomo_rules() {
+        // Баг 28: после 5 неудачных стартов сторож ставил zapret.enabled=false, но не пересобирал
+        // правила Mihomo — YouTube/Discord оставались в DIRECT уже без DPI-обхода.
+        let root = std::env::temp_dir().join(format!("xkeen-bug28-{}", crate::auth::random_hex(8)));
+        std::fs::create_dir_all(&root).unwrap();
+        let yaml_path = root.join("config.yaml");
+        let json_path = root.join("config.json");
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.config_path = yaml_path.display().to_string();
+        cfg.mihomo.port = 1; // ядра нет: reload гарантированно не удастся
+        cfg.zapret.enabled = true;
+        cfg.zapret.hybrid_youtube = true;
+        let base = "mode: rule\nproxies: []\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules:\n  - MATCH,PROXY\n";
+        let (with_zapret, _) = crate::routing::apply_routing(base, &cfg).unwrap();
+        assert!(with_zapret.contains(crate::routing::ZAPRET_HYBRID_BEGIN), "предпосылка: блок Zapret есть");
+        std::fs::write(&yaml_path, &with_zapret).unwrap();
+        crate::config::save(&json_path, &cfg).await.unwrap();
+        let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(cfg)));
+        let ag = std::sync::Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = AppState {
+            config: config_arc,
+            config_path: std::sync::Arc::new(json_path.clone()),
+            http: reqwest::Client::new(),
+            failover_log: std::sync::Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+        };
+
+        disable_zapret_after_failed_starts(&state).await.unwrap();
+
+        let yaml_after = std::fs::read_to_string(&yaml_path).unwrap();
+        assert!(
+            !yaml_after.contains(crate::routing::ZAPRET_HYBRID_BEGIN),
+            "правила Zapret-hybrid должны быть убраны из config.yaml:\n{yaml_after}"
+        );
+        let json_after: crate::config::AppConfig =
+            serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        assert!(!json_after.zapret.enabled);
+        assert!(!state.config.read().await.zapret.enabled);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn regression_bug_57_zapret_toggle_rebuilds_rules_both_ways() {
+        // Баг 57: вкл/выкл Zapret из бота меняло только config.json — правила Mihomo не пересобирались.
+        let root = std::env::temp_dir().join(format!("xkeen-bug57-{}", crate::auth::random_hex(8)));
+        std::fs::create_dir_all(&root).unwrap();
+        let yaml_path = root.join("config.yaml");
+        let json_path = root.join("config.json");
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.config_path = yaml_path.display().to_string();
+        cfg.mihomo.port = 1;
+        cfg.zapret.enabled = false;
+        cfg.zapret.hybrid_youtube = true;
+        let base = "mode: rule\nproxies: []\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules:\n  - MATCH,PROXY\n";
+        std::fs::write(&yaml_path, base).unwrap();
+        crate::config::save(&json_path, &cfg).await.unwrap();
+        let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(cfg)));
+        let ag = std::sync::Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = AppState {
+            config: config_arc,
+            config_path: std::sync::Arc::new(json_path.clone()),
+            http: reqwest::Client::new(),
+            failover_log: std::sync::Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+        };
+
+        crate::api::persist_zapret_enabled_with_routing(&state, true).await.unwrap();
+        let on = std::fs::read_to_string(&yaml_path).unwrap();
+        assert!(on.contains(crate::routing::ZAPRET_HYBRID_BEGIN), "включение добавляет правила Zapret:\n{on}");
+        assert!(state.config.read().await.zapret.enabled);
+
+        crate::api::persist_zapret_enabled_with_routing(&state, false).await.unwrap();
+        let off = std::fs::read_to_string(&yaml_path).unwrap();
+        assert!(!off.contains(crate::routing::ZAPRET_HYBRID_BEGIN), "выключение убирает правила Zapret");
+        let j: crate::config::AppConfig = serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        assert!(!j.zapret.enabled);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn regression_bug_59c_service_stopped_flag_survives_panel_restart() {
+        // Баг 59: состояние «службы остановлены/паника» жило только в памяти и терялось при рестарте панели.
+        let path = std::env::temp_dir().join(format!("xkeen-stopped-{}.flag", crate::auth::random_hex(8)));
+        assert!(!read_service_stopped_flag(&path));
+        persist_service_stopped_flag(&path, true);
+        assert!(read_service_stopped_flag(&path), "флаг читается после «перезапуска»");
+        persist_service_stopped_flag(&path, false);
+        assert!(!read_service_stopped_flag(&path));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn regression_bug_118_ip_keyed_settings_follow_device_after_dhcp_change() {
+        // Баг 118: device_routing, доменные правила, БС по устройствам, исключения Zapret и расписания хранятся
+        // по IP; DHCP-слежение было только для гейминга в Compatibility — после смены IP правила доставались
+        // тому, кто получил старый адрес.
+        let mut prev = std::collections::HashMap::new();
+        prev.insert("aa:aa:aa:aa:aa:01".to_string(), "192.168.1.10".to_string());
+        prev.insert("aa:aa:aa:aa:aa:02".to_string(), "192.168.1.20".to_string());
+        let now = vec![
+            ("AA:AA:AA:AA:AA:01".to_string(), "192.168.1.30".to_string()),
+            ("aa:aa:aa:aa:aa:02".to_string(), "192.168.1.20".to_string()),
+            ("aa:aa:aa:aa:aa:03".to_string(), "192.168.1.10".to_string()),
+        ];
+        let changes = detect_dhcp_ip_changes(&prev, &now);
+        assert_eq!(changes, vec![("192.168.1.10".to_string(), "192.168.1.30".to_string())]);
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.device_routing.insert("192.168.1.10".to_string(), crate::config::DeviceRouting::default());
+        cfg.device_domain_rules.insert("192.168.1.10".to_string(), vec![]);
+        cfg.zapret.excluded_devices = vec!["192.168.1.10".to_string(), "aa:aa:aa:aa:aa:09".to_string()];
+        cfg.whitelist.excluded_devices = vec!["192.168.1.10".to_string()];
+        cfg.schedules.push(crate::config::DeviceSchedule { id: "s1".into(), ip: "192.168.1.10".into(), ..Default::default() });
+        cfg.whitelist.devices.push(crate::config::WhitelistDevice {
+            mac: "aa:aa:aa:aa:aa:01".into(), ip: "192.168.1.10".into(), enabled: true, name: None, server: None,
+        });
+
+        assert!(migrate_ip_keyed_config(&mut cfg, &changes));
+        assert!(cfg.device_routing.contains_key("192.168.1.30") && !cfg.device_routing.contains_key("192.168.1.10"));
+        assert!(cfg.device_domain_rules.contains_key("192.168.1.30"));
+        assert_eq!(cfg.zapret.excluded_devices, vec!["192.168.1.30".to_string(), "aa:aa:aa:aa:aa:09".to_string()]);
+        assert_eq!(cfg.whitelist.excluded_devices, vec!["192.168.1.30".to_string()]);
+        assert_eq!(cfg.schedules[0].ip, "192.168.1.30");
+        assert_eq!(cfg.whitelist.devices[0].ip, "192.168.1.30");
+        assert!(!migrate_ip_keyed_config(&mut cfg, &[]), "нет изменений — нет записи");
     }
 }
 

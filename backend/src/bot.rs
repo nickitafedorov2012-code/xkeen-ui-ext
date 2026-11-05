@@ -12,8 +12,11 @@ use tokio::time::sleep;
 
 use crate::{log_i, log_w, AppState};
 
-/// Хранение предыдущего активного сервера перед активацией аварийного режима (Panic Button)
-static PRE_EMERGENCY_SERVER: tokio::sync::Mutex<Option<String>> = tokio::sync::Mutex::const_new(None);
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct TelegramUser {
+    pub id: i64,
+}
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct TelegramUpdate {
@@ -25,6 +28,7 @@ pub struct TelegramUpdate {
 #[derive(Deserialize, Debug, Clone)]
 pub struct TelegramMessage {
     pub message_id: i64,
+    pub from: Option<TelegramUser>,
     pub chat: TelegramChat,
     pub text: Option<String>,
 }
@@ -37,6 +41,7 @@ pub struct TelegramChat {
 #[derive(Deserialize, Debug, Clone)]
 pub struct TelegramCallbackQuery {
     pub id: String,
+    pub from: Option<TelegramUser>,
     pub message: Option<TelegramMessage>,
     pub data: Option<String>,
 }
@@ -228,13 +233,14 @@ async fn handle_update(
 ) {
     // 1. Обработка Callback Query (клики по кнопкам под сообщениями)
     if let Some(cb) = update.callback_query {
-        let chat_id_str = cb
+        let chat_id = cb
             .message
             .as_ref()
-            .map(|m| m.chat.id.to_string())
-            .unwrap_or_default();
+            .map(|m| m.chat.id)
+            .unwrap_or(0);
+        let from_id = cb.from.as_ref().map(|u| u.id);
 
-        if !is_authorized(&chat_id_str, target_chat_id) {
+        if !is_authorized_sender(from_id, chat_id, target_chat_id) {
             let _ = answer_callback(http, token, &cb.id, Some("⛔ Доступ запрещён")).await;
             return;
         }
@@ -247,13 +253,14 @@ async fn handle_update(
 
     // 2. Обработка входящего текстового сообщения
     if let Some(msg) = update.message {
-        let chat_id_str = msg.chat.id.to_string();
-        if !is_authorized(&chat_id_str, target_chat_id) {
-            log_w!("[BOT] Попытка неавторизованного доступа от Chat ID: {}", chat_id_str);
+        let chat_id = msg.chat.id;
+        let from_id = msg.from.as_ref().map(|u| u.id);
+        if !is_authorized_sender(from_id, chat_id, target_chat_id) {
+            log_w!("[BOT] Попытка неавторизованного доступа: sender {:?} в chat {}", from_id, chat_id);
             let _ = send_msg(
                 http,
                 token,
-                &chat_id_str,
+                &chat_id.to_string(),
                 "⛔ <b>Доступ запрещён</b>\nЭтот бот привязан к персональному роутеру Keenetic. Управление разрешено только владельцу.",
                 None,
             ).await;
@@ -261,9 +268,29 @@ async fn handle_update(
         }
 
         if let Some(text) = msg.text {
-            handle_text_command(state, http, token, &chat_id_str, text.trim()).await;
+            handle_text_command(state, http, token, &chat_id.to_string(), text.trim()).await;
         }
     }
+}
+
+/// Проверка авторизации отправителя (баг 128):
+/// Авторизация должна производиться по личному ID пользователя (from.id), а не по ID группы (chat.id).
+pub fn is_authorized_sender(from_id: Option<i64>, chat_id: i64, target_id_str: &str) -> bool {
+    let target = target_id_str.trim();
+    if target.is_empty() {
+        return false;
+    }
+    if let Ok(target_num) = target.parse::<i64>() {
+        if target_num > 0 {
+            // Личный чат: авторизован только сам владелец
+            return from_id == Some(target_num);
+        } else {
+            // Если целевой чат — группа (отрицательный ID), произвольные участники группы
+            // не имеют права управлять роутером
+            return false;
+        }
+    }
+    false
 }
 
 /// Проверка совпадения Chat ID с доверенным
@@ -1083,7 +1110,9 @@ async fn send_zapret_menu(
     }
 }
 
-/// Экстренный режим паники (Panic Button): переключение на 100% Direct
+/// Экстренный режим паники (Panic Button): 100% DIRECT (баг 59).
+/// Использует ту же полную остановку служб, что и кнопка панели: снимаются XKEEN_BS/гейминг/DNS-редиректы,
+/// failover и сторожа приостанавливаются флагом «службы остановлены» (он переживает рестарт панели).
 async fn handle_emergency_toggle(
     state: &AppState,
     http: &reqwest::Client,
@@ -1091,17 +1120,15 @@ async fn handle_emergency_toggle(
     chat_id: &str,
     edit_id: Option<i64>,
 ) {
-    let cfg = state.config.read().await.clone();
-    let servers = crate::mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await.ok().unwrap_or_default();
-    let active_node = servers.into_iter().find(|s| s.is_active).map(|s| s.name).unwrap_or_else(|| "Fastest".to_string());
-
-    *PRE_EMERGENCY_SERVER.lock().await = Some(active_node);
-    let _ = crate::mihomo::switch_server(&state.http, &cfg, "DIRECT").await;
-    let _ = crate::mihomo::close_all_connections(&state.http, &cfg).await;
+    let _ = crate::api::xkeen_service(
+        axum::extract::State(state.clone()),
+        axum::Json(crate::api::ServiceReq { action: "stop".to_string() }),
+    )
+    .await;
 
     let text = "🚨 <b>РЕЖИМ ПАНИКИ АКТИВИРОВАН!</b>\n\n\
-        ⚠️ Все прокси-тоннели временно отключены.\n\
-        Весь трафик роутера идёт <b>напрямую через провайдера (100% DIRECT)</b>.\n\
+        ⚠️ Службы XKeen, Mihomo и Zapret остановлены, перехват трафика снят.\n\
+        Весь трафик идёт <b>напрямую через провайдера (100% DIRECT)</b>. Failover приостановлен.\n\
         Ваши настройки, подписки и списки правил сохранены.\n\n\
         <i>Нажмите кнопку ниже для немедленного возобновления обхода:</i>";
 
@@ -1123,7 +1150,7 @@ async fn handle_emergency_toggle(
     }
 }
 
-/// Возобновление обхода блокировок после режима паники
+/// Возобновление обхода блокировок после режима паники: штатный запуск служб (как в панели)
 async fn handle_emergency_resume(
     state: &AppState,
     http: &reqwest::Client,
@@ -1131,17 +1158,20 @@ async fn handle_emergency_resume(
     chat_id: &str,
     edit_id: Option<i64>,
 ) {
-    let cfg = state.config.read().await.clone();
-    let target = PRE_EMERGENCY_SERVER.lock().await.take().unwrap_or_else(|| "Fastest".to_string());
-    let _ = crate::mihomo::switch_server(&state.http, &cfg, &target).await;
-    let _ = crate::mihomo::close_all_connections(&state.http, &cfg).await;
+    let resp = crate::api::xkeen_service(
+        axum::extract::State(state.clone()),
+        axum::Json(crate::api::ServiceReq { action: "start".to_string() }),
+    )
+    .await;
+    let ok = resp.status().is_success();
 
-    let text = format!(
+    let text = if ok {
         "✅ <b>Обход блокировок возобновлен!</b>\n\n\
-        Активный маршрут переключен на: <code>{}</code>\n\
-        Все соединения снова защищены и проксируются согласно правилам.",
-        target
-    );
+        Службы запущены, правила маршрутизации и режимы (БС, гейминг, Zapret) восстановлены."
+            .to_string()
+    } else {
+        "❌ <b>Не удалось запустить службы.</b> Проверьте журнал панели и попробуйте ещё раз.".to_string()
+    };
 
     let kb = InlineKeyboardMarkup {
         inline_keyboard: vec![
@@ -1287,6 +1317,68 @@ async fn handle_domain_analysis(
     let _ = send_msg(http, token, chat_id, &text, Some(json!(kb))).await;
 }
 
+/// Очистка чувствительных данных и секретов из конфигурации перед отправкой бэкапа в Telegram (баг 61)
+pub fn sanitize_config_for_backup(raw_json: &[u8]) -> Result<Vec<u8>, String> {
+    let mut val: serde_json::Value = serde_json::from_slice(raw_json)
+        .map_err(|e| format!("Некорректный JSON конфигурации: {e}"))?;
+
+    // Маскируем auth
+    if let Some(auth) = val.get_mut("auth") {
+        if let Some(h) = auth.get_mut("password_hash") {
+            *h = serde_json::Value::String("******".into());
+        }
+        if let Some(s) = auth.get_mut("salt") {
+            *s = serde_json::Value::String("******".into());
+        }
+        if let Some(sec) = auth.get_mut("session_secret") {
+            *sec = serde_json::Value::String("******".into());
+        }
+    }
+
+    // Маскируем notifications (токен Telegram бота и webhook url)
+    if let Some(notifications) = val.get_mut("notifications") {
+        if let Some(tok) = notifications.get_mut("telegram_bot_token") {
+            *tok = serde_json::Value::String("******".into());
+        }
+        if let Some(wh) = notifications.get_mut("webhook_url") {
+            *wh = serde_json::Value::String("******".into());
+        }
+    }
+
+    // Маскируем rci
+    if let Some(rci) = val.get_mut("rci") {
+        if let Some(p) = rci.get_mut("password") {
+            *p = serde_json::Value::String("******".into());
+        }
+        if let Some(t) = rci.get_mut("token") {
+            *t = serde_json::Value::String("******".into());
+        }
+    }
+
+    // Маскируем mihomo secret
+    if let Some(mihomo) = val.get_mut("mihomo") {
+        if let Some(s) = mihomo.get_mut("secret") {
+            *s = serde_json::Value::String("******".into());
+        }
+    }
+
+    // Маскируем adguard password
+    if let Some(adguard) = val.get_mut("adguard") {
+        if let Some(p) = adguard.get_mut("password") {
+            *p = serde_json::Value::String("******".into());
+        }
+    }
+
+    // Маскируем mobile_provider_urls (URL подписок могут содержать секретные токены)
+    if let Some(mpu) = val.get_mut("mobile_provider_urls").and_then(|v| v.as_object_mut()) {
+        for (_, url_val) in mpu.iter_mut() {
+            *url_val = serde_json::Value::String("******".into());
+        }
+    }
+
+    serde_json::to_vec_pretty(&val).map_err(|e| format!("Ошибка сериализации санитизированного конфига: {e}"))
+}
+
 /// Отправка резервной копии config.json в виде файла в Telegram
 async fn handle_backup_request(
     state: &AppState,
@@ -1298,6 +1390,13 @@ async fn handle_backup_request(
 
     match tokio::fs::read(&*state.config_path).await {
         Ok(bytes) => {
+            let sanitized_bytes = match sanitize_config_for_backup(&bytes) {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = send_msg(http, token, chat_id, &format!("❌ Ошибка санитизации бэкапа: {e}"), None).await;
+                    return;
+                }
+            };
             let filename = format!("xkeen-route-config-{}.json", chrono::Local::now().format("%Y%m%d-%H%M"));
             let caption = format!(
                 "💾 <b>Резервная копия XKeen Route</b>\n\n\
@@ -1305,10 +1404,10 @@ async fn handle_backup_request(
                 📦 Размер: {} байт\n\
                 ⏰ Создано: {}",
                 filename,
-                bytes.len(),
+                sanitized_bytes.len(),
                 chrono::Local::now().format("%d.%m.%Y %H:%M:%S")
             );
-            if let Err(e) = send_doc(http, token, chat_id, &filename, bytes, &caption).await {
+            if let Err(e) = send_doc(http, token, chat_id, &filename, sanitized_bytes, &caption).await {
                 let _ = send_msg(http, token, chat_id, &format!("❌ Не удалось отправить документ: {e}"), None).await;
             }
         }
@@ -1324,6 +1423,7 @@ async fn bot_toggle_adblock(state: &AppState) -> Result<bool, String> {
     let mut tx = crate::transaction::ConfigTx::begin(state).await?;
     let new_val = !tx.config().adblock_enabled;
     tx.config_mut().adblock_enabled = new_val;
+    tx.config_mut().adguard.integration_choice_locked = true;
 
     let _ = crate::adguard::set_protection(&state.http, &tx.config().adguard, new_val).await;
 
@@ -1665,5 +1765,82 @@ mod tests {
         assert!(report.contains("Успешная проверка узла"));
         assert!(report.contains("15:31:00"));
         assert!(report.contains("⚠️"));
+    }
+
+    #[test]
+    fn regression_bug_61_sanitize_config_backup_for_telegram() {
+        // Баг 61: Бэкап через бота отправляет секреты в Telegram в открытом виде (хеш пароля, session_secret, токен бота, URL подписок)
+        let raw_config = serde_json::json!({
+            "auth": {
+                "password_hash": "$pbkdf2$100000$saltsalt$supersecretpasswordhash",
+                "salt": "secret_salt_123",
+                "session_secret": "session_secret_top_secret_xyz"
+            },
+            "notifications": {
+                "telegram_bot_token": "8959891087:AAHWkeSw_WL6b8k3J9tONrms-7F2NgE2Yfo",
+                "webhook_url": "https://hooks.slack.com/services/T00/B00/secret_token_123"
+            },
+            "rci": {
+                "password": "rci_router_secret_pass",
+                "token": "rci_super_token"
+            },
+            "mihomo": {
+                "secret": "mihomo_clash_secret"
+            },
+            "mobile_provider_urls": {
+                "sub1": "https://my-proxy-provider.org/api/v1/client/subscribe?token=secret_sub_token_999"
+            }
+        });
+
+        let raw_bytes = serde_json::to_vec(&raw_config).expect("serialize test config");
+        let sanitized_bytes = sanitize_config_for_backup(&raw_bytes).expect("sanitize backup");
+        let sanitized_str = String::from_utf8(sanitized_bytes).expect("utf8");
+
+        assert!(!sanitized_str.contains("$pbkdf2$100000$saltsalt$supersecretpasswordhash"), "хеш пароля не должен присутствовать в бэкапе");
+        assert!(!sanitized_str.contains("secret_salt_123"), "соль пароля не должна присутствовать в бэкапе");
+        assert!(!sanitized_str.contains("session_secret_top_secret_xyz"), "секрет сессии не должен присутствовать в бэкапе");
+        assert!(!sanitized_str.contains("8959891087:AAHWkeSw_WL6b8k3J9tONrms-7F2NgE2Yfo"), "токен бота не должен присутствовать в бэкапе");
+        assert!(!sanitized_str.contains("rci_router_secret_pass"), "пароль RCI не должен присутствовать в бэкапе");
+        assert!(!sanitized_str.contains("secret_sub_token_999"), "URL/токен подписок не должен присутствовать в бэкапе");
+    }
+
+    #[test]
+    fn regression_bug_128_bot_authorizes_by_from_id_not_chat_id() {
+        // Баг 128: Бот авторизует по chat.id, а не from.id: если целевой чат — группа (отрицательный ID),
+        // любой участник группы получает доступ к управлению роутером.
+        let group_chat_id: i64 = -1001234567890;
+        let owner_user_id: i64 = 555111222;
+        let random_member_id: i64 = 999888777;
+
+        // 1. Случай личного чата с владельцем:
+        assert!(is_authorized_sender(Some(owner_user_id), owner_user_id, "555111222"));
+        assert!(!is_authorized_sender(Some(random_member_id), random_member_id, "555111222"));
+
+        // 2. Случай группы: целевой чат настроен на группу для уведомлений (-1001234567890).
+        // Произвольный участник группы шлёт сообщение / жмёт кнопку:
+        // chat.id совпадает с ID группы, но from.id — это чужой пользователь!
+        let is_authed_random = is_authorized_sender(Some(random_member_id), group_chat_id, "-1001234567890");
+        assert!(!is_authed_random, "Произвольный участник группы не должен авторизоваться только из-за совпадения chat.id с ID группы");
+    }
+
+    #[test]
+    fn regression_bug_59a_panic_mode_uses_full_service_stop() {
+        // Баг 59: «паника» лишь переключала селектор на DIRECT — failover за минуты возвращал VPS,
+        // БС/гейминг/Google AI/XKEEN_BS не трогались, «Возобновить» искал сервер по имени.
+        let src = include_str!("bot.rs");
+        let cut = src.find("#[cfg(test)]\nmod tests").unwrap_or(src.len());
+        let prod = &src[..cut];
+        let body = |sig: &str| {
+            let start = prod.find(sig).unwrap_or_else(|| panic!("нет {sig}"));
+            let rest = &prod[start..];
+            let end = rest[1..].find("\nasync fn ").map(|e| e + 1).unwrap_or(rest.len());
+            rest[..end].to_string()
+        };
+        let toggle = body("async fn handle_emergency_toggle(");
+        assert!(toggle.contains("crate::api::xkeen_service"), "паника = та же полная остановка служб, что и в панели");
+        assert!(!toggle.contains("switch_server("), "переключение одного селектора не даёт 100% DIRECT");
+        let resume = body("async fn handle_emergency_resume(");
+        assert!(resume.contains("crate::api::xkeen_service"), "возобновление = штатный запуск служб");
+        assert!(!resume.contains("PRE_EMERGENCY_SERVER"), "без поиска сервера по сохранённому имени");
     }
 }

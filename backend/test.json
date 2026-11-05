@@ -179,7 +179,8 @@
       "77.88.8.8"
     ],
     "failsafe_rollback": true,
-    "config_path": "/opt/etc/AdGuardHome.yaml"
+    "config_path": "/opt/etc/AdGuardHome.yaml",
+    "integration_choice_locked": false
   },
   "server_aliases": {},
   "whitelist_servers": [],

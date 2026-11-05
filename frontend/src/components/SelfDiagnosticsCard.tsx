@@ -48,7 +48,8 @@ export default function SelfDiagnosticsCard({ notify, onSwitchTab, refresh }: Pr
   const handleStartMihomo = async () => {
     setHealing(true)
     try {
-      await apiPost('service/start')
+      // Маршрут бэкенда — /api/xkeen/service (несуществующий service/start всегда падал)
+      await apiPost('xkeen/service', { action: 'start' })
       notify('Команда запуска ядра Mihomo отправлена')
       setTimeout(runDiagnostics, 2000)
       refresh?.()

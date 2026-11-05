@@ -213,8 +213,9 @@ export async function applyDetectedWhitelistServers(
   let resProviders: string[] = []
 
   if (serverIds.length > 0) {
+    // Маршрут бэкенда — /api/servers/whitelist (раньше слали в несуществующий whitelist/servers)
     const srvRes = await apiPost<{ whitelist_servers: string[]; whitelist_providers: string[] }>(
-      'whitelist/servers',
+      'servers/whitelist',
       { servers: serverIds }
     )
     resServers = srvRes.whitelist_servers || serverIds
