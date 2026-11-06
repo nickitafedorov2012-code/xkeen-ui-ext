@@ -1,20 +1,22 @@
-//! VK-туннель: обход белых списков через TURN-серверы ВК-звонков на ядре WDTT
-//! (клиент из amurcanov/proxy-turn-vk-android, GPL-3.0; сборка — `scripts/build-wdtt-core.sh`).
-//! Панель сама скачивает клиент, запускает его, следит за ним и подключает к Mihomo
-//! как WireGuard-сервер второго уровня (Tier 2, «БС»).
+//! VK-туннель: обход белых списков через TURN-серверы ВК-звонков на ядре csqtt
+//! (клиент из Afteroid/csqttr «CSQTT-Rebirth», PolyForm Noncommercial 1.0.0, © amurcanov;
+//! сборка для роутера — `scripts/build-csqtt-core.sh`).
+//! Панель сама скачивает клиент, создаёт для него TUN-интерфейс, запускает и стережёт процесс
+//! и подключает туннель к Mihomo как сервер второго уровня (Tier 2, «БС»).
 //!
-//! Что проверено по исходникам WDTT (коммит CORE_UPSTREAM_COMMIT, 20.10.2026):
-//! - флаги клиента: `-peer host:port -vk <хеши через запятую> -n <воркеры, кратно 9> -listen 127.0.0.1:<порт>
-//!   -device-id <id> -password <пароль> -captcha-mode auto`; `-password` обязателен (из него выводится ключ WRAP);
-//! - при `WDTT_EVENTS=1` клиент печатает в stdout машинные события `__WDTT_EVENT__|<ТИП>|<json>`:
-//!   READY (воркер поднял DTLS), STATS (каждые 3 с: active, bytes_up, bytes_down), CONFIG (wg-конфиг от сервера);
-//! - WireGuard-конфиг выдаёт сам сервер WDTT на VPS (ответ на GETCONF), пароль привязывается к device-id —
-//!   поэтому device-id роутера генерируется один раз и хранится в config.json;
+//! Что проверено по исходникам csqttr (коммит CORE_UPSTREAM_COMMIT, 05.11.2026):
+//! - флаги клиента: `-peer host:port -vk <хеши через запятую> -n <потоки, кратно 10> -listen 127.0.0.1:0
+//!   -tun-uds <имя> -captcha-mode auto`; пароль — только в переменной окружения `CSQTT_PASSWORD`
+//!   (в списке процессов его не видно);
+//! - при `CSQTT_EVENTS=1` клиент печатает в stdout машинные события `__CSQTT_EVENT__|<ТИП>|<json>`:
+//!   READY, STATS (active, bytes_up, bytes_down), CONFIG (`TUNCONF:<ip>:<dns>:…` — адрес туннеля от сервера),
+//!   ERROR (code, message, fatal), TUN_LOST;
+//! - трафик идёт через TUN: клиент слушает абстрактный unix-сокет `-tun-uds` и ждёт по нему дескриптор TUN
+//!   (SCM_RIGHTS, байт 1 в ответ). На Android его создаёт VpnService, на роутере — панель (интерфейс `csq0`);
+//! - Mihomo выводит в туннель трафик сервера «📞 VK-туннель [БС]» (`type: direct`, `interface-name: csq0`);
 //! - ручная капча: клиент печатает `CAPTCHA_SOLVE|<mode>|<redirect_uri>|<session_token>` и ждёт
 //!   `CAPTCHA_RESULT|<token>` в stdin. На роутере WebView нет — панель сразу отвечает ошибкой,
-//!   и клиент продолжает встроенное автоматическое решение (PoW + слайдер) без ожидания таймаутов;
-//! - если у всех групп воркеров не получилось получить TURN-креды (капча, мёртвая ссылка, отказ сервера),
-//!   клиент завершается сам — надзор перезапускает его с паузой.
+//!   и клиент продолжает встроенное автоматическое решение без ожидания таймаутов; `STOP` — мягкая остановка.
 
 use std::collections::{BTreeSet, VecDeque};
 use std::net::Ipv4Addr;
@@ -26,62 +28,62 @@ use serde::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, watch, Mutex, RwLock};
 
-use crate::config::{VkTurnConfig, VkTurnWireGuard};
+use crate::config::VkTurnConfig;
 
-/// Тег релиза xkeen-ui-ext, в котором опубликованы бинарники ядра (см. scripts/build-wdtt-core.sh).
-pub const CORE_TAG: &str = "wdtt-core-7355598";
-/// Коммит amurcanov/proxy-turn-vk-android, из которого собрано ядро.
-pub const CORE_UPSTREAM_COMMIT: &str = "7355598eae4a359d6874409f3437768f3548565b";
+/// Тег релиза xkeen-ui-ext, в котором опубликованы бинарники ядра (см. scripts/build-csqtt-core.sh).
+pub const CORE_TAG: &str = "csqtt-core-0e90df2";
+/// Репозиторий и коммит, из которых собрано ядро.
+pub const CORE_UPSTREAM: &str = "Afteroid/csqttr";
+pub const CORE_UPSTREAM_COMMIT: &str = "0e90df237583738741b50e86e4f51f87e96c94da";
 pub const CORE_RELEASES: &str = "https://github.com/nickitafedorov2012-code/xkeen-ui-ext/releases/download";
-pub const CORE_PATH: &str = "/opt/sbin/wdtt-client";
-/// Рабочий каталог клиента: WDTT сохраняет туда полученный wg-конфиг (wg-turn.conf, права 0600).
-pub const WORK_DIR: &str = "/opt/var/lib/wdtt";
-pub const PID_FILE: &str = "/opt/var/run/wdtt-client.pid";
+pub const CORE_PATH: &str = "/opt/sbin/csqtt-client";
+/// Ядро прошлой версии (WDTT): удаляется при установке нового, чтобы не занимать место.
+pub const LEGACY_CORE_PATH: &str = "/opt/sbin/wdtt-client";
+pub const WORK_DIR: &str = "/opt/var/lib/csqtt";
+pub const PID_FILE: &str = "/opt/var/run/csqtt-client.pid";
 pub const PROVIDER_ID: &str = "vkturn";
 pub const PROXY_NAME: &str = "📞 VK-туннель [БС]";
-/// Порт DTLS сервера WDTT на VPS по умолчанию (`linux-server -listen 0.0.0.0:56000`).
-pub const DEFAULT_SERVER_PORT: u16 = 56000;
+/// PEER-порт сервера csqtt на VPS по умолчанию (deploy.sh: `CSQTT_PEER_PORT`, 46000).
+pub const DEFAULT_SERVER_PORT: u16 = 46000;
+/// TUN-интерфейс, через который Mihomo отправляет трафик в туннель.
+pub const TUN_IFACE: &str = "csq0";
+/// Имя абстрактного unix-сокета, по которому клиент ждёт дескриптор TUN.
+pub const TUN_UDS_NAME: &str = "xkeen_route_csqtt_tun";
+/// MTU как у Android-клиента csqtt (CsqttConstants.Vpn.DEFAULT_MTU).
+pub const TUN_MTU: u16 = 1500;
+/// Отдельная таблица маршрутизации для сокетов, привязанных к csq0 (правило `oif csq0`).
+pub const ROUTE_TABLE: u32 = 7300;
 /// Подсеть TURN-серверов ВК-звонков. Трафик клиента туда идёт строго напрямую.
 /// Конкретные адреса TURN, которые ВК выдал клиенту, панель дополнительно берёт из его лога.
 pub const VK_TURN_CIDRS: &[&str] = &["155.212.192.0/20"];
 pub const RULES_BEGIN: &str = "# BEGIN xkeen-route vkturn";
 pub const RULES_END: &str = "# END xkeen-route vkturn";
 const LOG_TAIL: usize = 300;
-/// WDTT делит воркеров на группы по 9 (`workersPerGroup` в worker_group.go), каждая группа берёт свой хеш звонка.
-pub const WORKERS_PER_GROUP: u32 = 9;
-pub const MAX_WORKERS: u32 = 108;
-pub const DEFAULT_WORKERS: u32 = 18;
-/// Максимум ссылок: все используются одновременно (по группе воркеров на ссылку), как в приложении WDTT.
-pub const MAX_LINKS: usize = 3;
+/// csqtt делит потоки на группы по 10 (`WORKERS_PER_GROUP` в worker.rs), каждая группа берёт свой хеш звонка.
+pub const WORKERS_PER_GROUP: u32 = 10;
+/// `MAX_WORKERS` в main.rs клиента.
+pub const MAX_WORKERS: u32 = 100;
+pub const DEFAULT_WORKERS: u32 = 20;
+/// Максимум ссылок: все используются одновременно (`MAX_VK_HASHES` в main.rs клиента).
+pub const MAX_LINKS: usize = 6;
 /// Сколько адресов TURN запоминаем для исключений (защита от разрастания правил).
 const MAX_TURN_IPS: usize = 32;
-const EVENT_PREFIX: &str = "__WDTT_EVENT__|";
+const EVENT_PREFIX: &str = "__CSQTT_EVENT__|";
 const CAPTCHA_SOLVE_PREFIX: &str = "CAPTCHA_SOLVE|";
 /// Ответ клиенту на запрос WebView-капчи: на роутере WebView нет.
 pub const CAPTCHA_NO_WEBVIEW_REPLY: &str = "CAPTCHA_RESULT|error:webview unavailable on router\n";
 
-/// SHA-256 бинарников CORE_TAG (вывод scripts/build-wdtt-core.sh, go1.27.3).
+/// SHA-256 бинарников CORE_TAG (вывод scripts/build-csqtt-core.sh).
 pub const CORE_SHA256: &[(&str, &str)] = &[
-    ("wdtt-client-linux-arm64", "9c0593b9efb8ac70adae8ac8eb4b1ef55211662d5629ab5a3970a2a6e7af5089"),
-    ("wdtt-client-linux-mipsle", "da75eb994042c00ff203414ccbaea52dee0fa24e4c91ccd0d7b61dc89c1c55b1"),
-    ("wdtt-client-linux-mips", "eba0b64d8134a5f1ec535c6be776d23ac24c8c736709d9646a1af98103f1e1a4"),
-    ("wdtt-client-linux-armv7", "f49f51510d89a4a060aedc30375bc065890499d5c135be1b2325fbf17e22d119"),
-    ("wdtt-client-linux-amd64", "18fa03369230f2d4e8dc7d6c430de6f9454f26511eead1803c11b2bfc0a35676"),
+    ("csqtt-client-linux-arm64", "448dfcbd7053be7ff01e1da3e0f1ce278b4acf42c7d6944fc61682565d15d82f"),
 ];
 
-/// Сопоставление с архитектурами от updater::detect_mihomo_arch()
+/// Сопоставление с архитектурами от updater::detect_mihomo_arch().
+/// Клиент csqtt написан на Rust; для MIPS-роутеров у Rust нет стабильной сборки с musl.
 pub fn core_asset_for_arch(arch: &str) -> Option<&'static str> {
     let a = arch.to_ascii_lowercase();
     if a.contains("arm64") || a.contains("aarch64") {
-        Some("wdtt-client-linux-arm64")
-    } else if a.starts_with("mipsle") || a.starts_with("mipsel") {
-        Some("wdtt-client-linux-mipsle")
-    } else if a.starts_with("mips") {
-        Some("wdtt-client-linux-mips")
-    } else if a.starts_with("arm") {
-        Some("wdtt-client-linux-armv7")
-    } else if a.contains("amd64") || a.contains("x86_64") {
-        Some("wdtt-client-linux-amd64")
+        Some("csqtt-client-linux-arm64")
     } else {
         None
     }
@@ -95,7 +97,7 @@ pub fn parse_call_link(raw: &str) -> Result<String, String> {
     let s = raw.trim();
     let hash_re = regex_lite::Regex::new(r"^[A-Za-z0-9_\-]{8,128}$").unwrap();
     if s.to_ascii_lowercase().contains("telemost.yandex") {
-        return Err("Ядро WDTT работает только со звонками ВКонтакте — ссылка Телемоста не подойдёт".into());
+        return Err("Ядро csqtt работает только со звонками ВКонтакте — ссылка Телемоста не подойдёт".into());
     }
     let link_re = regex_lite::Regex::new(r"^https://(?:m\.)?vk\.(?:com|ru)/call/join/([^?#/\s]+)/?(?:[?#][^\s]*)?$").unwrap();
     let hash = if let Some(c) = link_re.captures(s) {
@@ -143,7 +145,7 @@ pub fn validate_peer(peer: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Пользователь может ввести только IP/домен — порт сервера WDTT по умолчанию подставляется сам.
+/// Пользователь может ввести только IP/домен — PEER-порт сервера csqtt по умолчанию подставляется сам.
 pub fn normalize_peer(raw: &str) -> Result<String, String> {
     let s = raw.trim();
     if s.is_empty() {
@@ -154,64 +156,22 @@ pub fn normalize_peer(raw: &str) -> Result<String, String> {
     Ok(with_port)
 }
 
-/// Пароль подключения уходит на сервер строкой `GETCONF:<порт>|<device-id>|<пароль>`,
-/// поэтому `|` и управляющие символы недопустимы.
+/// Пароль передаётся клиенту переменной окружения, из него выводится ключ шифрования туннеля.
 pub fn validate_password(pw: &str) -> Result<(), String> {
     if pw.is_empty() {
-        return Err("Укажите пароль подключения к серверу WDTT".into());
+        return Err("Укажите пароль подключения к серверу csqtt".into());
     }
     if pw.chars().count() > 128 {
         return Err("Пароль подключения слишком длинный (больше 128 символов)".into());
     }
-    if pw.contains('|') || pw.chars().any(|c| c.is_control()) {
-        return Err("Пароль подключения не должен содержать символ «|» и переводы строк".into());
+    if pw.chars().any(|c| c.is_control()) {
+        return Err("Пароль подключения не должен содержать переводы строк и управляющие символы".into());
     }
     Ok(())
 }
 
-/// Постоянный идентификатор роутера для сервера WDTT (пароль привязывается к нему при первом входе).
-pub fn generate_device_id() -> String {
-    format!("xkeen-route-{}", crate::auth::random_hex(8))
-}
-
-pub fn is_valid_device_id(id: &str) -> bool {
-    let re = regex_lite::Regex::new(r"^[A-Za-z0-9_\-]{6,64}$").unwrap();
-    re.is_match(id)
-}
-
-/// Локальный порт клиента: только непривилегированные порты (клиент слушает 127.0.0.1).
-pub fn validate_listen_port(port: u16) -> Result<(), String> {
-    if port < 1024 {
-        return Err(format!("Локальный порт VK-туннеля {port} недопустим: нужен порт 1024–65535"));
-    }
-    Ok(())
-}
-
-/// Порт клиента не должен совпадать с портами Mihomo (входы config.yaml, DNS, API панели Mihomo).
-pub fn listen_port_conflict(port: u16, yaml: &str, mihomo_api_port: u16) -> Option<String> {
-    let mut busy: Vec<(u16, &str)> = vec![(mihomo_api_port, "API Mihomo")];
-    for line in yaml.lines() {
-        if line.starts_with(' ') || line.starts_with('\t') {
-            continue;
-        }
-        for key in ["port", "socks-port", "mixed-port", "redir-port", "tproxy-port"] {
-            if let Some(rest) = line.strip_prefix(key).and_then(|r| r.strip_prefix(':')) {
-                if let Ok(p) = rest.trim().trim_matches(['"', '\'']).parse::<u16>() {
-                    busy.push((p, key));
-                }
-            }
-        }
-    }
-    if let Some(p) = crate::routing::parse_mihomo_dns_listen_port(yaml) {
-        busy.push((p, "DNS Mihomo"));
-    }
-    busy.iter()
-        .find(|(p, _)| *p == port)
-        .map(|(_, what)| format!("Локальный порт VK-туннеля {port} уже занят ({what}). Выберите другой."))
-}
-
-/// Число воркеров для `-n`: кратно 9, в пределах 9–108, и не меньше одной группы на каждую ссылку —
-/// иначе клиент просто не возьмёт запасные хеши (группа g берёт хеш g % len).
+/// Число потоков для `-n`: кратно 10, в пределах 10–100, и не меньше одной группы на каждую ссылку —
+/// иначе клиент не возьмёт запасные хеши (группа g берёт хеш g % len).
 pub fn effective_workers(cfg: &VkTurnConfig) -> u32 {
     let wanted = if cfg.streams == 0 { DEFAULT_WORKERS } else { cfg.streams as u32 };
     let per_links = WORKERS_PER_GROUP * cfg.links.len().clamp(1, MAX_LINKS) as u32;
@@ -233,7 +193,8 @@ pub fn call_hashes(cfg: &VkTurnConfig) -> Vec<String> {
     out
 }
 
-/// Аргументы передаются МАССИВОМ, без shell — никакой подстановки команд.
+/// Аргументы передаются МАССИВОМ, без shell — никакой подстановки команд. Пароля здесь нет:
+/// он уходит в `CSQTT_PASSWORD` (см. client_env).
 pub fn build_client_args(cfg: &VkTurnConfig) -> Vec<String> {
     vec![
         "-peer".into(),
@@ -243,14 +204,17 @@ pub fn build_client_args(cfg: &VkTurnConfig) -> Vec<String> {
         "-n".into(),
         effective_workers(cfg).to_string(),
         "-listen".into(),
-        format!("127.0.0.1:{}", cfg.listen_port),
-        "-device-id".into(),
-        cfg.device_id.clone(),
-        "-password".into(),
-        cfg.password.clone(),
+        "127.0.0.1:0".into(),
+        "-tun-uds".into(),
+        TUN_UDS_NAME.into(),
         "-captcha-mode".into(),
         "auto".into(),
     ]
+}
+
+/// Переменные окружения клиента.
+pub fn client_env(cfg: &VkTurnConfig) -> Vec<(&'static str, String)> {
+    vec![("CSQTT_EVENTS", "1".into()), ("CSQTT_PASSWORD", cfg.password.clone())]
 }
 
 // ---------- Разбор вывода клиента и состояние ----------
@@ -268,9 +232,9 @@ pub enum VkTurnPhase {
     Degraded,
     CaptchaRequired,
     LinkInvalid,
-    /// сервер WDTT отклонил пароль (неверный, истёк, привязан к другому устройству)
+    /// сервер csqtt отклонил пароль (неверный, истёк, деактивирован)
     AuthFailed,
-    /// DTLS до сервера на VPS не устанавливается
+    /// рукопожатие с сервером на VPS не проходит
     ServerUnreachable,
     Crashed,
     Backoff,
@@ -285,6 +249,12 @@ pub struct VkTurnRuntime {
     pub bytes_down: u64,
     pub restarts: u32,
     pub last_error: Option<String>,
+    /// Адрес туннеля, выданный сервером (TUNCONF).
+    pub tunnel_ip: Option<Ipv4Addr>,
+    /// DNS, который сервер предлагает внутри туннеля.
+    pub tunnel_dns: Option<String>,
+    /// Дескриптор TUN передан текущему процессу клиента.
+    pub tun_attached: bool,
     /// Адреса TURN, которые ВК выдал клиенту — для исключений в iptables.
     #[serde(skip)]
     pub turn_ips: BTreeSet<Ipv4Addr>,
@@ -305,11 +275,21 @@ impl Default for VkTurnRuntime {
             bytes_down: 0,
             restarts: 0,
             last_error: None,
+            tunnel_ip: None,
+            tunnel_dns: None,
+            tun_attached: false,
             turn_ips: BTreeSet::new(),
             started_at: None,
             zero_streams_since: None,
             log_tail: VecDeque::with_capacity(LOG_TAIL),
         }
+    }
+}
+
+impl VkTurnRuntime {
+    /// Туннель готов принимать трафик Mihomo: сервер выдал адрес и TUN передан клиенту.
+    pub fn tunnel_ready(&self) -> bool {
+        self.tunnel_ip.is_some() && self.tun_attached
     }
 }
 
@@ -319,8 +299,8 @@ pub enum LineEffect {
     None,
     /// Клиент ждёт ответ на запрос WebView-капчи в stdin.
     CaptchaSolve,
-    /// Сервер выдал WireGuard-конфиг (текст .conf, содержит приватный ключ — не логировать).
-    WgConfig(String),
+    /// Сервер выдал адрес туннеля: настроить csq0 и передать клиенту дескриптор TUN.
+    TunConfig { ip: Ipv4Addr, dns: Option<String> },
 }
 
 /// Состояния, которые объясняют паузу пользователю: перебор client_id не должен прятать их за «Подключаюсь…».
@@ -344,19 +324,26 @@ fn set_connected(rt: &mut VkTurnRuntime) {
     rt.last_error = None;
 }
 
-/// Чистая функция — покрыта тестами на строках из исходников WDTT.
+/// `TUNCONF:<ip>:<dns>:<…>` → адрес и DNS туннеля (protocol.rs сервера: `TUNCONF:{ip}:{dns}:0:stream-v1`).
+pub fn parse_tunconf(config: &str) -> Option<(Ipv4Addr, Option<String>)> {
+    let rest = config.trim().strip_prefix("TUNCONF:")?;
+    let mut fields = rest.splitn(3, ':');
+    let ip: Ipv4Addr = fields.next()?.trim().parse().ok()?;
+    if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
+        return None;
+    }
+    let dns = fields
+        .next()
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty() && d.split(',').all(|x| x.trim().parse::<Ipv4Addr>().is_ok()));
+    Some((ip, dns))
+}
+
+/// Чистая функция — покрыта тестами на строках из исходников csqtt.
 pub fn apply_log_line(rt: &mut VkTurnRuntime, line: &str, now: Instant) -> LineEffect {
     let line = line.trim_end_matches('\r');
     let t = line.trim();
     if t.is_empty() {
-        return LineEffect::None;
-    }
-    // Рамка с wg-конфигом в stdout (`╔══ WireGuard Конфиг ══╗`, `║ PrivateKey = … ║`) — в лог не пускаем.
-    if t.starts_with('║') || t.starts_with('╚') {
-        return LineEffect::None;
-    }
-    if t.starts_with('╔') {
-        push_log(rt, "[КОНФИГ] Сервер выдал WireGuard-конфиг (ключи скрыты)".into());
         return LineEffect::None;
     }
 
@@ -385,7 +372,9 @@ pub fn apply_log_line(rt: &mut VkTurnRuntime, line: &str, now: Instant) -> LineE
     } else if line.contains("WRAP_AUTH_TIMEOUT") {
         if no_streams && rt.phase != VkTurnPhase::AuthFailed {
             rt.phase = VkTurnPhase::ServerUnreachable;
-            rt.last_error = Some("Сервер WDTT на VPS не отвечает: проверьте адрес, порт и пароль подключения".into());
+            rt.last_error = Some(
+                "Сервер csqtt на VPS не отвечает: проверьте адрес, порт и пароль подключения (при неверном пароле сервер молчит)".into(),
+            );
         }
     } else if is_call_unavailable_line(line) {
         if no_streams {
@@ -397,23 +386,20 @@ pub fn apply_log_line(rt: &mut VkTurnRuntime, line: &str, now: Instant) -> LineE
             rt.phase = VkTurnPhase::CaptchaRequired;
         }
         rt.last_error = Some("ВК требует подтвердить «я не робот», автоматически пройти проверку не удалось".into());
-    } else if line.contains("[КАПЧА]") || line.contains("[Captcha]") || line.contains("captcha gate appeared") {
+    } else if line.contains("[КАПЧА]") || line.contains("[Captcha]") {
         if no_streams && !is_sticky(rt.phase) {
             rt.phase = VkTurnPhase::SolvingCaptcha;
         }
-    } else if line.contains("Запрос кредов")
-        || line.contains("[VK Auth] Trying credentials")
-        || line.contains("[VKCalls] Identity")
-        || line.contains("[DTLS] Рукопожатие")
+    } else if line.contains("[VKCalls]")
+        || line.contains("[VK Auth]")
+        || line.contains("Запрос кредов")
+        || line.contains("[DTLS]")
+        || line.contains("[HANDSHAKE]")
     {
         if no_streams && !is_sticky(rt.phase) && rt.phase != VkTurnPhase::SolvingCaptcha {
             rt.phase = VkTurnPhase::Authorizing;
         }
-    } else if line.contains("Rate limit detected") {
-        rt.last_error = Some("ВК ограничил частоту запросов, клиент пробует другие учётные данные".into());
-    } else if line.contains("Сервер ещё не выдал WireGuard-конфиг") {
-        rt.last_error = Some("Сервер на VPS пока не выдал WireGuard-конфиг, клиент повторит запрос".into());
-    } else if line.contains("[ФАТАЛ]") || line.contains("[КЛИЕНТ] Нужн") || line.contains("Ошибка разбора пира") || line.contains("Нет хешей VK") {
+    } else if line.contains("[ФАТАЛ]") || line.contains("Нужен пароль") || line.contains("Нет хешей VK") {
         rt.phase = VkTurnPhase::Crashed;
         rt.last_error = Some(redact_line(line));
     }
@@ -427,9 +413,13 @@ fn apply_event(rt: &mut VkTurnRuntime, kind: &str, json: &serde_json::Value, now
             set_connected(rt);
         }
         "STATS" => {
-            let active = json.get("active").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-            rt.bytes_up = json.get("bytes_up").and_then(|v| v.as_u64()).unwrap_or(rt.bytes_up);
-            rt.bytes_down = json.get("bytes_down").and_then(|v| v.as_u64()).unwrap_or(rt.bytes_down);
+            let active = json.get("active").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u32;
+            if let Some(up) = json.get("bytes_up").and_then(|v| v.as_i64()) {
+                rt.bytes_up = up.max(0) as u64;
+            }
+            if let Some(down) = json.get("bytes_down").and_then(|v| v.as_i64()) {
+                rt.bytes_down = down.max(0) as u64;
+            }
             rt.connected_streams = active;
             if active > 0 {
                 set_connected(rt);
@@ -442,16 +432,31 @@ fn apply_event(rt: &mut VkTurnRuntime, kind: &str, json: &serde_json::Value, now
         }
         "CONFIG" => {
             if let Some(conf) = json.get("config").and_then(|v| v.as_str()) {
-                return LineEffect::WgConfig(conf.to_string());
+                if let Some((ip, dns)) = parse_tunconf(conf) {
+                    if rt.tunnel_ip != Some(ip) {
+                        push_log(rt, format!("[ТУННЕЛЬ] Сервер выдал адрес {ip}"));
+                    }
+                    return LineEffect::TunConfig { ip, dns };
+                }
             }
+        }
+        "TUN_LOST" => {
+            rt.tun_attached = false;
+            push_log(rt, "[ТУННЕЛЬ] Клиент потерял TUN-интерфейс — передам заново после перезапуска".into());
         }
         "ERROR" => {
             let msg = json.get("message").and_then(|v| v.as_str()).unwrap_or("ошибка клиента");
+            let code = json.get("code").and_then(|v| v.as_str()).unwrap_or("");
             let fatal = json.get("fatal").and_then(|v| v.as_bool()).unwrap_or(false);
             push_log(rt, redact_line(&format!("[ОШИБКА] {msg}")));
-            rt.last_error = Some(redact_line(msg));
-            if fatal {
-                rt.phase = VkTurnPhase::Crashed;
+            if code.contains("auth") || msg.contains("FATAL_AUTH") {
+                rt.phase = VkTurnPhase::AuthFailed;
+                rt.last_error = Some(auth_error_text(msg).into());
+            } else {
+                rt.last_error = Some(redact_line(msg));
+                if fatal {
+                    rt.phase = VkTurnPhase::Crashed;
+                }
             }
         }
         _ => {}
@@ -459,27 +464,30 @@ fn apply_event(rt: &mut VkTurnRuntime, kind: &str, json: &serde_json::Value, now
     LineEffect::None
 }
 
+/// Тексты отказов сервера csqtt (protocol.rs клиента: wrong_password / expired / deactivated).
 fn auth_error_text(line: &str) -> &'static str {
-    if line.contains("неверный пароль") {
-        "Сервер WDTT отклонил пароль подключения: пароль неверный"
-    } else if line.contains("истёк") {
+    let l = line.to_lowercase();
+    if l.contains("неверный пароль") || l.contains("invalid password") || l.contains("wrong_password") {
+        "Сервер csqtt отклонил пароль подключения: пароль неверный"
+    } else if l.contains("истёк") || l.contains("expired") {
         "Срок действия пароля подключения истёк — получите новый у владельца сервера"
-    } else if line.contains("другому устройству") {
-        "Пароль уже привязан к другому устройству — нужен отдельный пароль для роутера"
+    } else if l.contains("деактивирован") || l.contains("deactivated") {
+        "Пароль подключения отключён на сервере csqtt"
     } else {
-        "Сервер WDTT отказал в доступе"
+        "Сервер csqtt отказал в доступе"
     }
 }
 
-/// Ошибки ВК «звонок недоступен» (error_code 951/954/9xxx — `CallUnavailableError` в vk_auth.go).
+/// Ошибки ВК «звонок недоступен».
 fn is_call_unavailable_line(line: &str) -> bool {
     line.contains("VK returns error:")
         || line.contains("VK call is unavailable")
         || line.contains("non-retryable call error")
         || line.contains("хеш мёртв")
+        || line.contains("Call not found")
 }
 
-/// Автоматическое решение капчи окончательно не удалось (vk_auth.go: lockout + CAPTCHA_WAIT_REQUIRED).
+/// Автоматическое решение капчи окончательно не удалось.
 fn is_captcha_failed_line(line: &str) -> bool {
     line.contains("CAPTCHA_WAIT_REQUIRED")
         || line.contains("FATAL_CAPTCHA")
@@ -487,15 +495,17 @@ fn is_captcha_failed_line(line: &str) -> bool {
         || line.contains("[Captcha] Max attempts reached")
 }
 
-/// Адреса TURN из строк `turn_server.urls[0]=turn:155.212.200.1:3478?transport=udp` и списка `TURN urls`.
+/// Адреса TURN из строк лога клиента: `turn_server.urls[0]=95.163.34.143:19302`, `[TURN] Подключение к …`,
+/// `TURN: [95.163.34.143:19302 …]`, `Relay: 95.163.34.131:62836`.
 fn learn_turn_ips(rt: &mut VkTurnRuntime, line: &str) {
-    if !line.contains("turn:") && !line.contains("turns:") {
+    if !line.contains("TURN") && !line.contains("turn") && !line.contains("Relay") {
         return;
     }
-    let re = regex_lite::Regex::new(r"turns?:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})").unwrap();
+    let re = regex_lite::Regex::new(r"(?:^|[^0-9.])(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):\d{2,5}").unwrap();
     for c in re.captures_iter(line) {
         if let Ok(ip) = c[1].parse::<Ipv4Addr>() {
-            if !ip.is_loopback() && !ip.is_private() && !ip.is_unspecified() && rt.turn_ips.len() < MAX_TURN_IPS {
+            let usable = !ip.is_loopback() && !ip.is_private() && !ip.is_unspecified() && !ip.is_link_local();
+            if usable && rt.turn_ips.len() < MAX_TURN_IPS {
                 rt.turn_ips.insert(ip);
             }
         }
@@ -507,10 +517,10 @@ fn learn_turn_ips(rt: &mut VkTurnRuntime, line: &str) {
 pub fn redact_line(line: &str) -> String {
     let links = regex_lite::Regex::new(r"(call/join/)([A-Za-z0-9_\-]{4})[A-Za-z0-9_\-]*").unwrap();
     let tokens = regex_lite::Regex::new(r#"((?:session_token|access_token|success_token|token)=)[^&\s\]"']+"#).unwrap();
-    let keys = regex_lite::Regex::new(r"(?i)((?:PrivateKey|PresharedKey)\s*=\s*)\S+").unwrap();
+    let hashes = regex_lite::Regex::new(r"((?:хеш|hash)[^:\n]{0,12}:\s*)([A-Za-z0-9_\-]{4})[A-Za-z0-9_\-]{4,}").unwrap();
     let out = links.replace_all(line, "$1$2…");
     let out = tokens.replace_all(&out, "${1}…");
-    keys.replace_all(&out, "${1}…").to_string()
+    hashes.replace_all(&out, "$1$2…").to_string()
 }
 
 /// Сколько ждать без единого активного соединения, прежде чем перезапустить клиент.
@@ -519,7 +529,6 @@ pub fn stall_limit(phase: VkTurnPhase) -> Duration {
         VkTurnPhase::AuthFailed => Duration::from_secs(15),
         VkTurnPhase::LinkInvalid => Duration::from_secs(20),
         VkTurnPhase::CaptchaRequired => Duration::from_secs(45),
-        // Солвер WDTT: PoW + до нескольких попыток слайдера — даём время, но не бесконечно.
         VkTurnPhase::SolvingCaptcha => Duration::from_secs(300),
         _ => Duration::from_secs(120),
     }
@@ -527,66 +536,17 @@ pub fn stall_limit(phase: VkTurnPhase) -> Duration {
 
 // ---------- YAML для Mihomo ----------
 
-fn is_wg_key(k: &str) -> bool {
-    let re = regex_lite::Regex::new(r"^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$").unwrap();
-    re.is_match(k.trim())
-}
-
 fn is_ipv4(s: &str) -> bool {
     s.parse::<Ipv4Addr>().is_ok()
 }
 
-/// WireGuard-конфиг от сервера уже получен и годится для Mihomo.
-pub fn wg_ready(cfg: &VkTurnConfig) -> bool {
-    render_provider_yaml(cfg).is_ok()
+/// Содержимое file-провайдера `vkturn`: трафик узла уходит в TUN-интерфейс клиента csqtt.
+/// Значений пользователя в нём нет — YAML-инъекция невозможна.
+pub fn render_provider_yaml() -> String {
+    format!("proxies:\n  - name: \"{PROXY_NAME}\"\n    type: direct\n    interface-name: {TUN_IFACE}\n    udp: true\n")
 }
 
-/// Содержимое file-провайдера `vkturn`. Все значения проверяются заранее — защита от YAML-инъекций.
-pub fn render_provider_yaml(cfg: &VkTurnConfig) -> Result<String, String> {
-    let wg = &cfg.wg;
-    if !is_wg_key(&wg.private_key) {
-        return Err("Неверный PrivateKey WireGuard".into());
-    }
-    if !is_wg_key(&wg.public_key) {
-        return Err("Неверный PublicKey сервера WireGuard".into());
-    }
-    if let Some(psk) = &wg.preshared_key {
-        if !is_wg_key(psk) {
-            return Err("Неверный PresharedKey".into());
-        }
-    }
-    if !is_ipv4(&wg.address) {
-        return Err("Address клиента должен быть IPv4, например 10.66.66.2".into());
-    }
-    if !(1200..=1420).contains(&wg.mtu) {
-        return Err("MTU должен быть в диапазоне 1200–1420".into());
-    }
-    let dns: Vec<&String> = wg.dns.iter().filter(|d| is_ipv4(d)).collect();
-    let dns_line = if dns.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "    dns: [{}]\n",
-            dns.iter().map(|d| d.as_str()).collect::<Vec<_>>().join(", ")
-        )
-    };
-    let psk_line = wg
-        .preshared_key
-        .as_ref()
-        .map(|p| format!("    pre-shared-key: \"{p}\"\n"))
-        .unwrap_or_default();
-
-    Ok(format!(
-        "proxies:\n  - name: \"{PROXY_NAME}\"\n    type: wireguard\n    server: 127.0.0.1\n    port: {port}\n    ip: {ip}\n    private-key: \"{pk}\"\n    public-key: \"{pubk}\"\n{psk_line}    allowed-ips: ['0.0.0.0/0']\n    mtu: {mtu}\n    udp: true\n    remote-dns-resolve: true\n{dns_line}",
-        port = cfg.listen_port,
-        ip = wg.address,
-        pk = wg.private_key.trim(),
-        pubk = wg.public_key.trim(),
-        mtu = wg.mtu,
-    ))
-}
-
-/// Правила DIRECT в начало `rules:`, чтобы трафик самого клиента никогда не ушёл в туннель или петлю.
+/// Правила DIRECT в начало `rules:`, чтобы трафик к TURN и к VPS никогда не ушёл в туннель или петлю.
 pub fn rules_block(cfg: &VkTurnConfig) -> String {
     let mut lines = vec![format!("  {RULES_BEGIN}")];
     for c in VK_TURN_CIDRS {
@@ -742,65 +702,170 @@ pub async fn remove_exemptions() {
     run_sh(&iptables_remove_script()).await;
 }
 
-// ---------- Разбор wg-конфига от сервера ----------
+// ---------- TUN-интерфейс csq0 ----------
 
-pub struct ParsedWg {
-    pub wg: VkTurnWireGuard,
-    pub endpoint_host: Option<String>,
+/// Адрес туннеля на csq0 и маршрутизация сокетов, привязанных к интерфейсу (Mihomo `interface-name`).
+/// В скрипт попадают только константы и разобранный Ipv4Addr.
+pub fn tun_configure_script(ip: Ipv4Addr) -> String {
+    format!(
+        "ip addr flush dev {TUN_IFACE} 2>/dev/null
+ip addr add {ip}/32 dev {TUN_IFACE}
+ip link set dev {TUN_IFACE} mtu {TUN_MTU} up
+ip route replace default dev {TUN_IFACE} table {ROUTE_TABLE}
+ip rule del pref {ROUTE_TABLE} 2>/dev/null
+ip rule add oif {TUN_IFACE} lookup {ROUTE_TABLE} pref {ROUTE_TABLE}
+echo 2 > /proc/sys/net/ipv4/conf/{TUN_IFACE}/rp_filter 2>/dev/null
+true"
+    )
 }
 
-pub fn parse_wg_conf(text: &str) -> Result<ParsedWg, String> {
-    let mut wg = VkTurnWireGuard::default();
-    let mut endpoint_host = None;
-    let mut section = "";
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
+/// Снимает маршрутизацию туннеля (сам интерфейс исчезает, когда панель закрывает дескриптор TUN).
+pub fn tun_teardown_script() -> String {
+    format!(
+        "ip rule del pref {ROUTE_TABLE} 2>/dev/null
+ip route flush table {ROUTE_TABLE} 2>/dev/null
+true"
+    )
+}
+
+#[cfg(target_os = "linux")]
+mod tun_sys {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+
+    #[cfg(any(target_arch = "mips", target_arch = "mips64", target_arch = "powerpc", target_arch = "powerpc64"))]
+    const TUNSETIFF: u64 = 0x800454ca;
+    #[cfg(not(any(target_arch = "mips", target_arch = "mips64", target_arch = "powerpc", target_arch = "powerpc64")))]
+    const TUNSETIFF: u64 = 0x400454ca;
+    const IFF_TUN: i16 = 0x0001;
+    const IFF_NO_PI: i16 = 0x1000;
+
+    #[repr(C)]
+    struct IfReq {
+        name: [u8; 16],
+        flags: i16,
+        _pad: [u8; 22],
+    }
+
+    /// Создаёт TUN-интерфейс (без заголовка PI — как VpnService на Android).
+    pub fn create(name: &str) -> std::io::Result<OwnedFd> {
+        let path = c"/dev/net/tun";
+        let fd = unsafe { libc::open(path.as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
         }
-        if line.eq_ignore_ascii_case("[Interface]") {
-            section = "i";
-            continue;
+        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut req = IfReq { name: [0; 16], flags: IFF_TUN | IFF_NO_PI, _pad: [0; 22] };
+        let bytes = name.as_bytes();
+        if bytes.len() >= req.name.len() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "слишком длинное имя интерфейса"));
         }
-        if line.eq_ignore_ascii_case("[Peer]") {
-            section = "p";
-            continue;
+        req.name[..bytes.len()].copy_from_slice(bytes);
+        let rc = unsafe { libc::ioctl(fd.as_raw_fd(), TUNSETIFF as _, &mut req as *mut IfReq) };
+        if rc < 0 {
+            return Err(std::io::Error::last_os_error());
         }
-        let Some((k, v)) = line.split_once('=') else { continue };
-        let (k, v) = (k.trim().to_ascii_lowercase(), v.trim());
-        match (section, k.as_str()) {
-            ("i", "privatekey") => wg.private_key = v.to_string(),
-            ("i", "address") => {
-                wg.address = v
-                    .split(',')
-                    .map(str::trim)
-                    .find(|a| a.contains('.'))
-                    .unwrap_or("")
-                    .split('/')
-                    .next()
-                    .unwrap_or("")
-                    .to_string()
+        Ok(fd)
+    }
+
+    /// Передаёт дескриптор TUN клиенту csqtt по абстрактному unix-сокету (SCM_RIGHTS) и ждёт подтверждения «1».
+    pub fn send_fd(uds_name: &str, tun: RawFd) -> std::io::Result<()> {
+        use std::io::Read;
+        use std::os::linux::net::SocketAddrExt;
+        let addr = std::os::unix::net::SocketAddr::from_abstract_name(uds_name.as_bytes())?;
+        let mut stream = std::os::unix::net::UnixStream::connect_addr(&addr)?;
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
+
+        let mut payload = [1u8];
+        let mut iov = libc::iovec { iov_base: payload.as_mut_ptr().cast(), iov_len: 1 };
+        let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
+        let mut control = vec![0u8; space];
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_iov = &mut iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control.as_mut_ptr().cast();
+        msg.msg_controllen = space as _;
+        unsafe {
+            let cmsg = libc::CMSG_FIRSTHDR(&msg);
+            (*cmsg).cmsg_level = libc::SOL_SOCKET;
+            (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+            (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as _;
+            std::ptr::copy_nonoverlapping(
+                &tun as *const RawFd as *const u8,
+                libc::CMSG_DATA(cmsg),
+                std::mem::size_of::<RawFd>(),
+            );
+        }
+        let sent = unsafe { libc::sendmsg(stream.as_raw_fd(), &msg, libc::MSG_NOSIGNAL) };
+        if sent < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut ack = [0u8; 1];
+        stream.read_exact(&mut ack)?;
+        if ack[0] != 1 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "клиент не подтвердил TUN"));
+        }
+        Ok(())
+    }
+}
+
+/// Дескриптор TUN, которым владеет надзор. На других ОС (тесты на Windows) — пустышка.
+struct TunHandle {
+    #[cfg(target_os = "linux")]
+    fd: std::os::fd::OwnedFd,
+}
+
+impl TunHandle {
+    fn create() -> Result<Self, String> {
+        #[cfg(target_os = "linux")]
+        {
+            tun_sys::create(TUN_IFACE)
+                .map(|fd| Self { fd })
+                .map_err(|e| format!("Не удалось создать TUN-интерфейс {TUN_IFACE}: {e}"))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(Self {})
+        }
+    }
+
+    /// Копия дескриптора для фоновой передачи клиенту (надзор может закрыть свой раньше).
+    fn duplicate(&self) -> Result<TunHandle, String> {
+        #[cfg(target_os = "linux")]
+        {
+            self.fd.try_clone().map(|fd| TunHandle { fd }).map_err(|e| format!("dup TUN: {e}"))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(TunHandle {})
+        }
+    }
+
+    /// Блокирующая передача: клиент поднимает сокет не сразу после старта — до 60 попыток раз в 0,5 с.
+    fn send_to_client_blocking(&self) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd;
+            let mut last = String::new();
+            for _ in 0..60 {
+                match tun_sys::send_fd(TUN_UDS_NAME, self.fd.as_raw_fd()) {
+                    Ok(()) => return Ok(()),
+                    Err(e) => last = e.to_string(),
+                }
+                std::thread::sleep(Duration::from_millis(500));
             }
-            ("i", "dns") => wg.dns = v.split(',').map(|d| d.trim().to_string()).filter(|d| is_ipv4(d)).collect(),
-            ("i", "mtu") => wg.mtu = v.parse().unwrap_or(1280).min(1280),
-            ("p", "publickey") => wg.public_key = v.to_string(),
-            ("p", "presharedkey") => wg.preshared_key = Some(v.to_string()),
-            ("p", "endpoint") => endpoint_host = v.rsplit_once(':').map(|(h, _)| h.trim_matches(['[', ']']).to_string()),
-            _ => {}
+            Err(format!("Клиент не принял TUN-интерфейс: {last}"))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err("TUN поддерживается только на Linux".into())
         }
     }
-    if wg.private_key.is_empty() || wg.public_key.is_empty() || wg.address.is_empty() {
-        return Err("В конфиге не найдены PrivateKey, PublicKey или Address".into());
-    }
-    Ok(ParsedWg { wg, endpoint_host })
 }
 
 // ---------- Запись в config.json / config.yaml (одна транзакция) ----------
 
 /// Применяет изменение настроек VK-туннеля: config.json, файл провайдера, провайдер и правила в config.yaml,
 /// перезагрузка Mihomo. Всё в одной транзакции ConfigTx (блокировки берёт только она).
-/// Провайдер добавляется в YAML, только когда wg-конфиг уже получен — file-провайдер на несуществующий
-/// файл Mihomo не загрузит.
 pub async fn commit_vkturn<F>(state: &crate::AppState, mutate: F) -> Result<VkTurnConfig, String>
 where
     F: FnOnce(&mut VkTurnConfig) -> Result<(), String>,
@@ -811,9 +876,6 @@ where
 
     let mut new_cfg = tx.config().vkturn.clone();
     mutate(&mut new_cfg)?;
-    if new_cfg.device_id.is_empty() {
-        new_cfg.device_id = generate_device_id();
-    }
     tx.config_mut().vkturn = new_cfg.clone();
     if !tx.config().whitelist_providers.iter().any(|p| p == PROVIDER_ID) {
         tx.config_mut().whitelist_providers.push(PROVIDER_ID.to_string());
@@ -824,20 +886,13 @@ where
         .map(|p| p.join("providers"))
         .unwrap_or_else(|| std::path::PathBuf::from("/opt/etc/mihomo/providers"));
     let prov_file = providers_dir.join(format!("{PROVIDER_ID}.yaml"));
-    let prov_yaml = render_provider_yaml(&new_cfg).ok();
-    if let Some(ref y) = prov_yaml {
-        tx.set_extra_file(&prov_file, y.clone(), true)
-            .await
-            .map_err(|e| format!("Ошибка записи файла провайдера VK-туннеля: {e}"))?;
-    }
+    tx.set_extra_file(&prov_file, render_provider_yaml(), true)
+        .await
+        .map_err(|e| format!("Ошибка записи файла провайдера VK-туннеля: {e}"))?;
 
     let yaml = tx.read_yaml().await.map_err(|e| format!("Ошибка чтения config.yaml: {e}"))?;
-    if let Some(conflict) = listen_port_conflict(new_cfg.listen_port, &yaml, tx.config().mihomo.port) {
-        return Err(conflict);
-    }
-
     let has_prov = crate::routing::parse_provider_names(&yaml).iter().any(|p| p == PROVIDER_ID);
-    let yaml_with_prov = if prov_yaml.is_some() && !has_prov {
+    let yaml_with_prov = if new_cfg.enabled && !has_prov {
         crate::routing::add_file_provider_to_yaml(
             &yaml,
             PROVIDER_ID,
@@ -858,25 +913,6 @@ where
     Ok(new_cfg)
 }
 
-/// WireGuard-конфиг, который выдал сервер: если он новый — сохраняем и подключаем к Mihomo.
-/// Возвращает true, если конфиг изменился.
-pub async fn apply_server_wg(state: &crate::AppState, conf_text: &str) -> Result<bool, String> {
-    let parsed = parse_wg_conf(conf_text)?;
-    let mut candidate = state.config.read().await.vkturn.clone();
-    if candidate.wg == parsed.wg {
-        return Ok(false);
-    }
-    candidate.wg = parsed.wg.clone();
-    render_provider_yaml(&candidate).map_err(|e| format!("Сервер выдал непригодный WireGuard-конфиг: {e}"))?;
-    let wg = parsed.wg;
-    commit_vkturn(state, move |v| {
-        v.wg = wg;
-        Ok(())
-    })
-    .await?;
-    Ok(true)
-}
-
 // ---------- Менеджер процесса ----------
 
 /// Запущенный надзор: канал остановки и задача, завершения которой ждём при остановке.
@@ -888,7 +924,7 @@ struct Supervisor {
 pub struct VkTurnManager {
     pub rt: RwLock<VkTurnRuntime>,
     /// Сериализует restart/stop целиком: два одновременных перезапуска не могут оставить
-    /// «осиротевший» надзор и второй клиент на том же порту.
+    /// «осиротевший» надзор и второй клиент.
     op_lock: Mutex<Option<Supervisor>>,
     /// Путь к бинарнику клиента (в тестах подменяется).
     core_path: std::path::PathBuf,
@@ -1022,7 +1058,7 @@ impl VkTurnManager {
         remove_exemptions().await;
     }
 
-    /// Останавливает надзор и ЖДЁТ его завершения (процесс клиента убит до выхода из функции).
+    /// Останавливает надзор и ЖДЁТ его завершения (процесс клиента убит, TUN закрыт до выхода из функции).
     async fn stop_locked(&self, slot: &mut Option<Supervisor>) {
         if let Some(sup) = slot.take() {
             let _ = sup.stop_tx.send(true);
@@ -1031,11 +1067,14 @@ impl VkTurnManager {
                 task.abort();
                 crate::log_w!("[VK-туннель] Надзор не завершился за 5 с — прерван принудительно");
             }
+            run_sh(&tun_teardown_script()).await;
         }
         let _ = tokio::fs::remove_file(PID_FILE).await;
         let mut rt = self.rt.write().await;
         rt.pid = None;
         rt.connected_streams = 0;
+        rt.tunnel_ip = None;
+        rt.tun_attached = false;
         rt.phase = VkTurnPhase::Disabled;
     }
 
@@ -1043,6 +1082,22 @@ impl VkTurnManager {
         let mut backoff = Duration::from_secs(5);
         let mut last_notice: Option<VkTurnPhase> = None;
         let _ = tokio::fs::create_dir_all(WORK_DIR).await;
+
+        // TUN живёт, пока жив надзор: перезапуски клиента получают тот же интерфейс.
+        let tun = loop {
+            match TunHandle::create() {
+                Ok(t) => break t,
+                Err(e) => {
+                    self.set_error(VkTurnPhase::Crashed, e).await;
+                    if !sleep_or_stop(&mut stop_rx, backoff).await {
+                        return;
+                    }
+                    backoff = (backoff * 2).min(Duration::from_secs(120));
+                }
+            }
+        };
+        let tun = Arc::new(tun);
+
         loop {
             if *stop_rx.borrow() {
                 break;
@@ -1053,11 +1108,13 @@ impl VkTurnManager {
 
             let mut cmd = tokio::process::Command::new(&self.core_path);
             cmd.args(build_client_args(&cfg))
-                .env("WDTT_EVENTS", "1")
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
+            for (k, v) in client_env(&cfg) {
+                cmd.env(k, v);
+            }
             if std::path::Path::new(WORK_DIR).is_dir() {
                 cmd.current_dir(WORK_DIR);
             }
@@ -1081,17 +1138,18 @@ impl VkTurnManager {
                 rt.phase = VkTurnPhase::Starting;
                 rt.pid = pid;
                 rt.connected_streams = 0;
+                rt.tun_attached = false;
                 rt.started_at = Some(Instant::now());
                 rt.zero_streams_since = Some(Instant::now());
             }
             crate::log_i!(
-                "[VK-туннель] Клиент WDTT запущен (pid {:?}, ссылок {}, воркеров {})",
+                "[VK-туннель] Клиент csqtt запущен (pid {:?}, ссылок {}, потоков {})",
                 pid,
                 call_hashes(&cfg).len(),
                 effective_workers(&cfg)
             );
 
-            // stdout (события, CAPTCHA_SOLVE) и stderr (лог Go) → разбор; действия — в канал надзора.
+            // stdout (события, CAPTCHA_SOLVE) и stderr (лог) → разбор; действия — в канал надзора.
             let (eff_tx, mut eff_rx) = mpsc::unbounded_channel::<LineEffect>();
             for stream in [
                 child.stderr.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
@@ -1114,6 +1172,7 @@ impl VkTurnManager {
             }
             drop(eff_tx);
             let mut stdin = child.stdin.take();
+            let mut fd_sending = false;
 
             // ждём: выход процесса / команду стоп / «висим без соединений» дольше допустимого
             let started = Instant::now();
@@ -1124,7 +1183,7 @@ impl VkTurnManager {
                 tokio::select! {
                     st = child.wait() => break format!("клиент завершился: {:?}", st.ok()),
                     _ = stop_rx.changed() => {
-                        // Мягкая остановка: клиент закрывает DTLS-сессии, сервер сразу освобождает слоты.
+                        // Мягкая остановка: клиент закрывает сессии, сервер сразу освобождает слоты.
                         if let Some(mut si) = stdin.take() {
                             let _ = si.write_all(b"STOP\n").await;
                             let _ = si.flush().await;
@@ -1141,21 +1200,21 @@ impl VkTurnManager {
                                 let _ = si.flush().await;
                             }
                         }
-                        LineEffect::WgConfig(conf) => {
-                            // Отдельной задачей: надзор не должен ждать блокировки конфига
-                            // (иначе restart() из обработчика сохранения ждал бы его до таймаута).
-                            let st = state.clone();
-                            let me = self.clone();
-                            tokio::spawn(async move {
-                                match apply_server_wg(&st, &conf).await {
-                                    Ok(true) => crate::log_i!("[VK-туннель] Получен WireGuard-конфиг от сервера — узел подключён к Mihomo"),
-                                    Ok(false) => {}
-                                    Err(e) => {
-                                        crate::log_w!("[VK-туннель] WireGuard-конфиг от сервера не применён: {e}");
-                                        me.rt.write().await.last_error = Some(e);
-                                    }
-                                }
-                            });
+                        LineEffect::TunConfig { ip, dns } => {
+                            let changed = {
+                                let mut rt = self.rt.write().await;
+                                let changed = rt.tunnel_ip != Some(ip);
+                                rt.tunnel_ip = Some(ip);
+                                rt.tunnel_dns = dns;
+                                changed
+                            };
+                            if changed {
+                                run_sh(&tun_configure_script(ip)).await;
+                            }
+                            if !fd_sending {
+                                fd_sending = true;
+                                self.spawn_fd_handoff(&tun);
+                            }
                         }
                         LineEffect::None => {}
                     },
@@ -1184,6 +1243,7 @@ impl VkTurnManager {
                 rt.restarts += 1;
                 rt.pid = None;
                 rt.connected_streams = 0;
+                rt.tun_attached = false;
                 rt.phase
             };
             crate::log_w!("[VK-туннель] Перезапуск: {exit_reason}, состояние {phase:?}");
@@ -1204,6 +1264,34 @@ impl VkTurnManager {
         }
     }
 
+    /// Передаёт клиенту копию дескриптора TUN в фоне: надзор продолжает читать вывод клиента.
+    fn spawn_fd_handoff(self: &Arc<Self>, tun: &Arc<TunHandle>) {
+        let copy = match tun.duplicate() {
+            Ok(c) => c,
+            Err(e) => {
+                crate::log_w!("[VK-туннель] {e}");
+                return;
+            }
+        };
+        let me = self.clone();
+        tokio::spawn(async move {
+            let res = tokio::task::spawn_blocking(move || copy.send_to_client_blocking())
+                .await
+                .unwrap_or_else(|e| Err(format!("задача передачи TUN: {e}")));
+            let mut rt = me.rt.write().await;
+            match res {
+                Ok(()) => {
+                    rt.tun_attached = true;
+                    push_log(&mut rt, format!("[ТУННЕЛЬ] Интерфейс {TUN_IFACE} передан клиенту"));
+                }
+                Err(e) => {
+                    rt.last_error = Some(e.clone());
+                    push_log(&mut rt, format!("[ОШИБКА] {e}"));
+                }
+            }
+        });
+    }
+
     async fn set_error(&self, phase: VkTurnPhase, msg: String) {
         let mut rt = self.rt.write().await;
         rt.phase = phase;
@@ -1222,7 +1310,7 @@ async fn kill_stale_from_pidfile() {
     let Ok(s) = tokio::fs::read_to_string(PID_FILE).await else { return };
     let Ok(pid) = s.trim().parse::<u32>() else { return };
     if let Ok(cmd) = tokio::fs::read(format!("/proc/{pid}/cmdline")).await {
-        if String::from_utf8_lossy(&cmd).contains("wdtt-client") {
+        if String::from_utf8_lossy(&cmd).contains("csqtt-client") {
             let _ = tokio::process::Command::new("kill").arg(pid.to_string()).status().await;
         }
     }
@@ -1276,7 +1364,9 @@ pub fn elf_target_for_arch(arch: &str) -> &'static str {
 
 pub async fn install_core(state: &crate::AppState) -> Result<String, String> {
     let arch = crate::updater::detect_mihomo_arch().await;
-    let asset = core_asset_for_arch(arch).ok_or(format!("Архитектура {arch} не поддерживается VK-туннелем"))?;
+    let asset = core_asset_for_arch(arch).ok_or(format!(
+        "VK-туннель на ядре csqtt пока работает только на роутерах с процессором ARM64 (у этого роутера: {arch})"
+    ))?;
     let expected = CORE_SHA256
         .iter()
         .find(|(a, _)| *a == asset)
@@ -1318,18 +1408,22 @@ pub async fn install_core(state: &crate::AppState) -> Result<String, String> {
             let _ = tokio::fs::set_permissions(&tmp, perms).await;
         }
 
-        // Пробный запуск `tmp -h` с таймаутом 5 с (Go-флаги: -h печатает справку и выходит).
+        // Пробный запуск без пароля: клиент сразу выходит с ошибкой «нужен пароль». Важно лишь,
+        // что процесс запустился на этом процессоре (не убит сигналом).
         let test_run = tokio::time::timeout(
             Duration::from_secs(5),
-            tokio::process::Command::new(&tmp).arg("-h").stdin(Stdio::null()).output(),
+            tokio::process::Command::new(&tmp)
+                .env_remove("CSQTT_PASSWORD")
+                .stdin(Stdio::null())
+                .output(),
         )
         .await;
 
         match test_run {
             Ok(Ok(out)) => {
-                if !out.status.success() && out.status.code().is_none() {
+                if out.status.code().is_none() {
                     let _ = tokio::fs::remove_file(&tmp).await;
-                    return Err("Ядро не запускается на этом процессоре (завершено сигналом, возможно нужна softfloat-сборка)".into());
+                    return Err("Ядро не запускается на этом процессоре (завершено сигналом)".into());
                 }
             }
             Ok(Err(e)) => {
@@ -1347,8 +1441,11 @@ pub async fn install_core(state: &crate::AppState) -> Result<String, String> {
         let _ = tokio::fs::remove_file(&tmp).await;
         return Err(format!("Ошибка перемещения бинарника в {CORE_PATH}: {e}"));
     }
+    // Ядро прошлой версии панели больше не используется.
+    let _ = tokio::fs::remove_file(LEGACY_CORE_PATH).await;
+    let _ = tokio::fs::remove_dir_all("/opt/var/lib/wdtt").await;
 
-    Ok(format!("Ядро VK-туннеля WDTT ({asset}) успешно установлено"))
+    Ok(format!("Ядро VK-туннеля csqtt ({asset}) успешно установлено"))
 }
 
 // ---------- Тесты ----------
@@ -1360,9 +1457,8 @@ mod tests {
     fn cfg_with(links: &[&str]) -> VkTurnConfig {
         let mut cfg = VkTurnConfig::default();
         cfg.enabled = true;
-        cfg.peer = "1.2.3.4:56000".into();
+        cfg.peer = "1.2.3.4:46000".into();
         cfg.password = "s3cret-pass".into();
-        cfg.device_id = "xkeen-route-0011223344556677".into();
         cfg.links = links.iter().map(|s| s.to_string()).collect();
         cfg
     }
@@ -1376,12 +1472,15 @@ mod tests {
         );
         assert_eq!(parse_call_link("https://vk.ru/call/join/abc12345?from=app").unwrap(), "abc12345");
         assert_eq!(parse_call_link("abcDEF_12-34").unwrap(), "abcDEF_12-34", "голый хеш тоже принимается");
+        // Реальная ссылка пользователя (vk.ru, хеш с _ и -)
+        assert_eq!(
+            parse_call_link("https://vk.ru/call/join/dVi6izW61Ty9UuE1hEkU_uSdoNuihCgPQnILjgk4AdI").unwrap(),
+            "dVi6izW61Ty9UuE1hEkU_uSdoNuihCgPQnILjgk4AdI"
+        );
 
-        // Телемост ядро WDTT не поддерживает — понятная ошибка
         let e = parse_call_link("https://telemost.yandex.ru/j/12345678").unwrap_err();
         assert!(e.contains("Телемост"));
 
-        // Отказ для http, чужих доменов, инъекций, пробелов
         assert!(parse_call_link("http://vk.com/call/join/abc12345").is_err());
         assert!(parse_call_link("https://vk.com.evil.ru/call/join/abc12345").is_err());
         assert!(parse_call_link("https://other.domain.com/call/join/abc12345").is_err());
@@ -1395,15 +1494,15 @@ mod tests {
 
     #[test]
     fn test_validate_and_normalize_peer() {
-        assert!(validate_peer("1.2.3.4:56000").is_ok());
-        assert!(validate_peer("vps.example.com:56000").is_ok());
-        assert!(validate_peer(":56000").is_err());
+        assert!(validate_peer("1.2.3.4:46000").is_ok());
+        assert!(validate_peer("vps.example.com:46000").is_ok());
+        assert!(validate_peer(":46000").is_err());
         assert!(validate_peer("1.2.3.4:0").is_err());
         assert!(validate_peer("1.2.3.4:70000").is_err());
         assert!(validate_peer("a b:1").is_err());
         assert!(validate_peer("1.2.3.4").is_err());
 
-        assert_eq!(normalize_peer("203.0.113.7").unwrap(), "203.0.113.7:56000", "порт по умолчанию — 56000");
+        assert_eq!(normalize_peer("203.0.113.7").unwrap(), "203.0.113.7:46000", "PEER-порт csqtt по умолчанию — 46000");
         assert_eq!(normalize_peer(" vps.example.com:443 ").unwrap(), "vps.example.com:443");
         assert_eq!(normalize_peer("").unwrap(), "");
         assert!(normalize_peer("1.2.3.4;reboot").is_err());
@@ -1412,58 +1511,51 @@ mod tests {
     #[test]
     fn test_validate_password() {
         assert!(validate_password("abc").is_ok());
+        assert!(validate_password("a|b").is_ok(), "пароль идёт в переменную окружения — | допустим");
         assert!(validate_password("").is_err());
-        assert!(validate_password("a|b").is_err(), "| — разделитель в GETCONF");
         assert!(validate_password("a\nb").is_err());
         assert!(validate_password(&"x".repeat(129)).is_err());
     }
 
     #[test]
-    fn test_device_id() {
-        let id = generate_device_id();
-        assert!(id.starts_with("xkeen-route-"));
-        assert!(is_valid_device_id(&id));
-        assert_ne!(id, generate_device_id(), "каждый роутер получает свой id");
-        assert!(!is_valid_device_id("bad id"));
-        assert!(!is_valid_device_id("a|b|c|d"));
-    }
-
-    #[test]
     fn test_effective_workers() {
         let mut cfg = cfg_with(&["https://vk.com/call/join/abc12345"]);
-        assert_eq!(effective_workers(&cfg), 18);
-        cfg.streams = 30;
-        assert_eq!(effective_workers(&cfg), 27, "кратно 9");
+        assert_eq!(effective_workers(&cfg), 20);
+        cfg.streams = 35;
+        assert_eq!(effective_workers(&cfg), 30, "кратно 10");
         cfg.streams = 200;
-        assert_eq!(effective_workers(&cfg), 108);
+        assert_eq!(effective_workers(&cfg), 100);
         cfg.streams = 1;
-        assert_eq!(effective_workers(&cfg), 9);
-        // Три ссылки при 9 воркерах — клиент взял бы только первую: поднимаем до 27
+        assert_eq!(effective_workers(&cfg), 10);
+        // Три ссылки при 10 потоках — клиент взял бы только первую: поднимаем до 30
         cfg.links = vec![
             "https://vk.com/call/join/aaaa1111".into(),
             "https://vk.com/call/join/bbbb2222".into(),
             "https://vk.com/call/join/cccc3333".into(),
         ];
-        assert_eq!(effective_workers(&cfg), 27);
+        assert_eq!(effective_workers(&cfg), 30);
     }
 
+    /// Пароль не должен попадать в аргументы процесса (их видно в `ps` любому пользователю роутера).
     #[test]
-    fn test_build_client_args() {
+    fn test_build_client_args_and_env() {
         let cfg = cfg_with(&["https://vk.com/call/join/abc12345", "https://vk.com/call/join/def67890"]);
         let args = build_client_args(&cfg);
         assert_eq!(
             args,
             vec![
-                "-peer", "1.2.3.4:56000",
+                "-peer", "1.2.3.4:46000",
                 "-vk", "abc12345,def67890",
-                "-n", "18",
-                "-listen", "127.0.0.1:9000",
-                "-device-id", "xkeen-route-0011223344556677",
-                "-password", "s3cret-pass",
+                "-n", "20",
+                "-listen", "127.0.0.1:0",
+                "-tun-uds", TUN_UDS_NAME,
                 "-captcha-mode", "auto",
             ]
         );
-        // Дубли ссылок не дублируют хеши
+        assert!(!args.iter().any(|a| a.contains("s3cret-pass")), "пароль в аргументах процесса");
+        let env = client_env(&cfg);
+        assert!(env.contains(&("CSQTT_PASSWORD", "s3cret-pass".to_string())));
+        assert!(env.contains(&("CSQTT_EVENTS", "1".to_string())));
         let dup = cfg_with(&["https://vk.com/call/join/abc12345", "abc12345"]);
         assert_eq!(call_hashes(&dup), vec!["abc12345"]);
     }
@@ -1480,29 +1572,28 @@ mod tests {
             "https://vk.com/call/join/oldmain1234".to_string(),
             "https://vk.com/call/join/backup5678".to_string(),
         ]);
-        // Повтор существующей ссылки — без дублей, она поднимается наверх
         let out2 = with_primary_link(&out, "backup5678").unwrap();
         assert_eq!(out2.len(), 3);
         assert_eq!(out2[0], "https://vk.com/call/join/backup5678");
-        // Не больше MAX_LINKS
         let many: Vec<String> = (0..10).map(|i| format!("https://vk.com/call/join/link{i:06}")).collect();
         assert_eq!(with_primary_link(&many, "https://vk.com/call/join/newlink000").unwrap().len(), MAX_LINKS);
         assert!(with_primary_link(&links, "https://telemost.yandex.ru/j/12345678").is_err());
     }
 
-    // Строки ниже взяты из исходников клиента WDTT (main.go, session.go, protocol.go, vk_auth.go, worker_group.go).
-    const EV_READY: &str = "__WDTT_EVENT__|READY|";
-    const EV_STATS_3: &str = r#"__WDTT_EVENT__|STATS|{"active":3,"bytes_down":2048,"bytes_up":1024}"#;
-    const EV_STATS_0: &str = r#"__WDTT_EVENT__|STATS|{"active":0,"bytes_down":2048,"bytes_up":1024}"#;
-    const L_CREDS: &str = "2026/11/06 10:00:00.000001 [ГРУППА #1] Запрос кредов (хеш: abcd1234...)";
-    const L_TRYING: &str = "2026/11/06 10:00:01.000001 [STREAM 100] [VK Auth] Trying credentials: client_id=6287487 (attempt 1/2)";
-    const L_CAPTCHA_START: &str = "2026/11/06 10:00:02.000001 [STREAM 100] [КАПЧА] AUTO: старт цепочки (captcha attempt 1)";
-    const L_CAPTCHA_FAIL: &str = "2026/11/06 10:00:30.000001 [ГРУППА #1] Ошибка кредов: all VK credentials failed: CAPTCHA_WAIT_REQUIRED";
-    const L_AUTH_WRONG: &str = "2026/11/06 10:00:05.000001 [ВОРКЕР #1] Фатальная ошибка: FATAL_AUTH: неверный пароль подключения";
-    const L_AUTH_DEVICE: &str = "2026/11/06 10:00:05.000001 [ВОРКЕР #1] Фатальная ошибка: FATAL_AUTH: пароль привязан к другому устройству";
-    const L_WRAP_TIMEOUT: &str = "2026/11/06 10:00:25.000001 [ВОРКЕР #2] Ошибка (попытка 1): WRAP_AUTH_TIMEOUT: DTLS timeout, пароль/WRAP не подтверждён";
-    const L_CALL_DEAD: &str = "2026/11/06 10:00:03.000001 [ГРУППА #1] Ошибка кредов: VK returns error: Call not found (error_code=9000)";
-    const L_TURN_URL: &str = "2026/11/06 10:00:04.000001 [VKCalls] turn_server.urls[0]=turn:203.0.113.50:3478?transport=udp";
+    // Строки ниже — формат событий и сообщений из исходников клиента csqtt (events.rs, worker.rs, protocol.rs).
+    const EV_READY: &str = r#"__CSQTT_EVENT__|READY|{"worker":1}"#;
+    const EV_STATS_3: &str = r#"__CSQTT_EVENT__|STATS|{"active":3,"bytes_down":2048,"bytes_up":1024}"#;
+    const EV_STATS_0: &str = r#"__CSQTT_EVENT__|STATS|{"active":0,"bytes_down":2048,"bytes_up":1024}"#;
+    const EV_AUTH: &str = r#"__CSQTT_EVENT__|ERROR|{"code":"authentication_rejected","fatal":true,"message":"FATAL_AUTH: invalid password"}"#;
+    const L_CREDS: &str = "[ГРУППА #1] Запрос кредов (хеш: dVi6izW6...)";
+    const L_VKCALLS: &str = "[STREAM 100] [VKCalls] step1 OK, anonymous_token (290 chars)";
+    const L_CAPTCHA_START: &str = "[STREAM 100] [КАПЧА] AUTO: старт цепочки (captcha attempt 1)";
+    const L_CAPTCHA_FAIL: &str = "[ГРУППА #1] Ошибка кредов: all VK credentials failed: CAPTCHA_WAIT_REQUIRED";
+    const L_AUTH_WRONG: &str = "[ВОРКЕР #1] Фатальная ошибка: FATAL_AUTH: неверный пароль подключения";
+    const L_AUTH_EXPIRED: &str = "[ВОРКЕР #1] Фатальная ошибка: FATAL_AUTH: срок действия пароля истёк";
+    const L_WRAP_TIMEOUT: &str = "[ВОРКЕР #2] [HANDSHAKE][RETRY] WRAP_AUTH_TIMEOUT, 3 попыток восстановления";
+    const L_CALL_DEAD: &str = "[ГРУППА #1] Ошибка кредов: VK returns error: Call not found (error_code=9000)";
+    const L_TURN_URL: &str = "[VKCalls] turn_server.urls[0]=95.163.34.143:19302";
 
     #[test]
     fn events_drive_streams_and_traffic() {
@@ -1516,31 +1607,47 @@ mod tests {
         apply_log_line(&mut rt, EV_STATS_3, now);
         assert_eq!(rt.connected_streams, 3);
         assert_eq!((rt.bytes_up, rt.bytes_down), (1024, 2048));
-        // Все соединения упали — «Переподключаюсь», таймер простоя запущен
         apply_log_line(&mut rt, EV_STATS_0, now);
         assert_eq!(rt.connected_streams, 0);
         assert_eq!(rt.phase, VkTurnPhase::Degraded);
         assert!(rt.zero_streams_since.is_some());
-        // Машинные события не засоряют лог для пользователя
-        assert!(rt.log_tail.iter().all(|l| !l.contains("__WDTT_EVENT__")));
+        assert!(rt.log_tail.iter().all(|l| !l.contains("__CSQTT_EVENT__")), "машинные события не засоряют лог");
+    }
+
+    /// Адрес туннеля от сервера (protocol.rs: `TUNCONF:{ip}:{dns}:0:stream-v1`, бывает с хвостом pad=…).
+    #[test]
+    fn tunconf_event_returns_tunnel_address() {
+        let mut rt = VkTurnRuntime::default();
+        let ev = r#"__CSQTT_EVENT__|CONFIG|{"config":"TUNCONF:10.66.67.3:1.1.1.1:0:stream-v1"}"#;
+        assert_eq!(
+            apply_log_line(&mut rt, ev, Instant::now()),
+            LineEffect::TunConfig { ip: "10.66.67.3".parse().unwrap(), dns: Some("1.1.1.1".into()) }
+        );
+        assert_eq!(
+            parse_tunconf("TUNCONF:10.66.67.9:8.8.8.8,1.1.1.1:0:stream-v1:pad=xxxx"),
+            Some(("10.66.67.9".parse().unwrap(), Some("8.8.8.8,1.1.1.1".into())))
+        );
+        assert_eq!(parse_tunconf("TUNCONF:10.66.67.9:;reboot:0"), Some(("10.66.67.9".parse().unwrap(), None)), "мусор в DNS отбрасывается");
+        assert_eq!(parse_tunconf("TUNCONF:0.0.0.0:1.1.1.1"), None);
+        assert_eq!(parse_tunconf("TUNCONF:10.66.67.3;id:1.1.1.1"), None, "инъекция в адрес невозможна");
+        assert_eq!(parse_tunconf("GARBAGE"), None);
+        // Туннель «готов» только когда и адрес получен, и TUN передан клиенту
+        rt.tunnel_ip = Some("10.66.67.3".parse().unwrap());
+        assert!(!rt.tunnel_ready());
+        rt.tun_attached = true;
+        assert!(rt.tunnel_ready());
     }
 
     #[test]
-    fn config_event_is_returned_and_never_logged() {
-        let mut rt = VkTurnRuntime::default();
-        let now = Instant::now();
-        let conf = "[Interface]\nPrivateKey = SECRETPRIVATEKEYaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\nAddress = 10.66.66.2/32\n";
-        let ev = format!("__WDTT_EVENT__|CONFIG|{}", serde_json::json!({ "config": conf }));
-        assert_eq!(apply_log_line(&mut rt, &ev, now), LineEffect::WgConfig(conf.to_string()));
-        // Рамка с конфигом в stdout (main.go) тоже не должна попасть в лог панели
-        apply_log_line(&mut rt, "╔══════════════ WireGuard Конфиг ══════════════╗", now);
-        apply_log_line(&mut rt, "║ PrivateKey = SECRETPRIVATEKEYaaaaaaaaaaaaaaaaaaaaaaaaaaaa= ║", now);
-        apply_log_line(&mut rt, "╚══════════════════════════════════════════════╝", now);
-        let all = rt.log_tail.iter().cloned().collect::<Vec<_>>().join("\n");
-        assert!(!all.contains("SECRETPRIVATEKEY"), "приватный ключ попал в лог: {all}");
-        assert!(all.contains("ключи скрыты"));
-        // И на всякий случай redact_line глушит ключи в любой строке
-        assert!(!redact_line("PrivateKey = abc123").contains("abc123"));
+    fn tun_scripts_only_use_constants_and_parsed_ip() {
+        let s = tun_configure_script("10.66.67.3".parse().unwrap());
+        assert!(s.contains("ip addr add 10.66.67.3/32 dev csq0"));
+        assert!(s.contains("ip link set dev csq0 mtu 1500 up"));
+        assert!(s.contains("ip route replace default dev csq0 table 7300"));
+        assert!(s.contains("ip rule add oif csq0 lookup 7300 pref 7300"));
+        assert!(s.contains("ip rule del pref 7300"), "правило не дублируется при повторной настройке");
+        let t = tun_teardown_script();
+        assert!(t.contains("ip rule del pref 7300") && t.contains("ip route flush table 7300"));
     }
 
     #[test]
@@ -1559,17 +1666,15 @@ mod tests {
     fn captcha_failure_is_sticky_until_connected() {
         let mut rt = VkTurnRuntime::default();
         let now = Instant::now();
-        apply_log_line(&mut rt, L_TRYING, now);
+        apply_log_line(&mut rt, L_VKCALLS, now);
         apply_log_line(&mut rt, L_CAPTCHA_START, now);
         assert_eq!(rt.phase, VkTurnPhase::SolvingCaptcha);
         apply_log_line(&mut rt, L_CAPTCHA_FAIL, now);
         assert_eq!(rt.phase, VkTurnPhase::CaptchaRequired);
         assert!(rt.last_error.as_deref().unwrap().contains("не робот"));
-        // Следующий перебор не прячет капчу за «Подключаюсь…»
         apply_log_line(&mut rt, L_CREDS, now);
         apply_log_line(&mut rt, L_CAPTCHA_START, now);
         assert_eq!(rt.phase, VkTurnPhase::CaptchaRequired);
-        // Как только поднялось соединение — капча пройдена
         apply_log_line(&mut rt, EV_READY, now);
         assert_eq!(rt.phase, VkTurnPhase::Connected);
         assert!(rt.last_error.is_none());
@@ -1577,32 +1682,36 @@ mod tests {
 
     #[test]
     fn server_auth_errors_are_recognized() {
-        let mut rt = VkTurnRuntime::default();
         let now = Instant::now();
+        let mut rt = VkTurnRuntime::default();
         apply_log_line(&mut rt, L_AUTH_WRONG, now);
         assert_eq!(rt.phase, VkTurnPhase::AuthFailed);
         assert!(rt.last_error.as_deref().unwrap().contains("неверный"));
-        // Таймаут DTLS после отказа в пароле не меняет понятную причину
         apply_log_line(&mut rt, L_WRAP_TIMEOUT, now);
-        assert_eq!(rt.phase, VkTurnPhase::AuthFailed);
+        assert_eq!(rt.phase, VkTurnPhase::AuthFailed, "таймаут после отказа не меняет понятную причину");
 
         let mut rt2 = VkTurnRuntime::default();
-        apply_log_line(&mut rt2, L_AUTH_DEVICE, now);
-        assert!(rt2.last_error.as_deref().unwrap().contains("другому устройству"));
+        apply_log_line(&mut rt2, L_AUTH_EXPIRED, now);
+        assert!(rt2.last_error.as_deref().unwrap().contains("истёк"));
 
         let mut rt3 = VkTurnRuntime::default();
         apply_log_line(&mut rt3, L_WRAP_TIMEOUT, now);
         assert_eq!(rt3.phase, VkTurnPhase::ServerUnreachable);
+        assert!(rt3.last_error.as_deref().unwrap().contains("пароль"), "при неверном пароле сервер молчит — подсказываем");
+
+        let mut rt4 = VkTurnRuntime::default();
+        apply_log_line(&mut rt4, EV_AUTH, now);
+        assert_eq!(rt4.phase, VkTurnPhase::AuthFailed, "машинное событие ERROR authentication_rejected");
+        assert!(rt4.last_error.as_deref().unwrap().contains("неверный"));
     }
 
     #[test]
     fn dead_call_link_is_recognized_but_does_not_hide_working_streams() {
-        let mut rt = VkTurnRuntime::default();
         let now = Instant::now();
+        let mut rt = VkTurnRuntime::default();
         apply_log_line(&mut rt, L_CALL_DEAD, now);
         assert_eq!(rt.phase, VkTurnPhase::LinkInvalid);
 
-        // Одна из нескольких ссылок умерла, остальные работают — статус «Работает», но с предупреждением
         let mut rt2 = VkTurnRuntime::default();
         apply_log_line(&mut rt2, EV_STATS_3, now);
         apply_log_line(&mut rt2, L_CALL_DEAD, now);
@@ -1610,15 +1719,23 @@ mod tests {
         assert!(rt2.last_error.is_some());
     }
 
+    /// Регрессия WDTT: адреса TURN ВК в реальном логе идут без префикса `turn:` (95.163.34.143:19302) —
+    /// старый разбор их не видел, и исключения в iptables ставились только на подсеть 155.212.192.0/20.
     #[test]
     fn turn_addresses_are_learned_for_exemptions() {
         let mut rt = VkTurnRuntime::default();
-        apply_log_line(&mut rt, L_TURN_URL, Instant::now());
-        apply_log_line(&mut rt, "[VKCalls] turn_server.urls[1]=turn:127.0.0.1:3478", Instant::now());
-        apply_log_line(&mut rt, "[VKCalls] turn_server.urls[2]=turn:10.0.0.1:3478", Instant::now());
-        assert_eq!(rt.turn_ips.iter().cloned().collect::<Vec<_>>(), vec!["203.0.113.50".parse::<Ipv4Addr>().unwrap()]);
+        let now = Instant::now();
+        apply_log_line(&mut rt, L_TURN_URL, now);
+        apply_log_line(&mut rt, "[ГРУППА #1] Креды OK, TURN: [95.163.34.143:19302 95.163.34.131:19302], 10 воркеров", now);
+        apply_log_line(&mut rt, "[СЕССИЯ #1] Relay: 95.163.34.131:62836", now);
+        apply_log_line(&mut rt, "[TURN] Подключение к 127.0.0.1:3478", now);
+        apply_log_line(&mut rt, "[TURN] Подключение к 10.0.0.1:3478", now);
+        assert_eq!(
+            rt.turn_ips.iter().map(|i| i.to_string()).collect::<Vec<_>>(),
+            vec!["95.163.34.131", "95.163.34.143"]
+        );
         for i in 0..100u8 {
-            apply_log_line(&mut rt, &format!("turn:198.51.{i}.1:3478"), Instant::now());
+            apply_log_line(&mut rt, &format!("[TURN] Подключение к 198.51.{i}.1:3478"), now);
         }
         assert!(rt.turn_ips.len() <= MAX_TURN_IPS, "список адресов TURN ограничен");
     }
@@ -1637,6 +1754,8 @@ mod tests {
         let r = redact_line("x?session_token=abc123def456&variant=popup token=zzz999yyy888");
         assert!(!r.contains("abc123def456") && !r.contains("zzz999yyy888"));
         assert!(r.contains("&variant=popup"));
+        let r = redact_line("[КЛИЕНТ] Запрос кредов (хеш: dVi6izW61Ty9UuE1hEkU)");
+        assert!(!r.contains("dVi6izW61Ty9UuE1hEkU"), "хеш звонка скрыт: {r}");
     }
 
     #[test]
@@ -1644,49 +1763,18 @@ mod tests {
         assert_eq!(stall_limit(VkTurnPhase::AuthFailed), Duration::from_secs(15));
         assert_eq!(stall_limit(VkTurnPhase::LinkInvalid), Duration::from_secs(20));
         assert_eq!(stall_limit(VkTurnPhase::CaptchaRequired), Duration::from_secs(45));
-        assert_eq!(stall_limit(VkTurnPhase::SolvingCaptcha), Duration::from_secs(300), "решение капчи не бесконечно");
+        assert_eq!(stall_limit(VkTurnPhase::SolvingCaptcha), Duration::from_secs(300));
         assert_eq!(stall_limit(VkTurnPhase::Authorizing), Duration::from_secs(120));
     }
 
     #[test]
     fn test_render_provider_yaml() {
-        let mut cfg = VkTurnConfig::default();
-        cfg.listen_port = 9000;
-        cfg.wg.private_key = "a".repeat(42) + "A=";
-        cfg.wg.public_key = "b".repeat(42) + "A=";
-        cfg.wg.address = "10.66.66.2".into();
-        cfg.wg.mtu = 1280;
-
-        let yaml = render_provider_yaml(&cfg).expect("render valid yaml");
+        let yaml = render_provider_yaml();
         assert!(yaml.contains(PROXY_NAME));
         assert!(yaml.contains("[БС]"));
-        assert!(yaml.contains("type: wireguard"));
-        assert!(yaml.contains("port: 9000"));
-        assert!(yaml.contains("ip: 10.66.66.2"));
-        assert!(wg_ready(&cfg));
-        assert!(!wg_ready(&VkTurnConfig::default()), "без конфига от сервера узла в Mihomo нет");
-
-        let mut bad_key = cfg.clone();
-        bad_key.wg.private_key = "bad\nkey: 123".into();
-        assert!(render_provider_yaml(&bad_key).is_err());
-        let mut bad_ip = cfg.clone();
-        bad_ip.wg.address = "2001:db8::1".into();
-        assert!(render_provider_yaml(&bad_ip).is_err());
-        let mut bad_mtu = cfg.clone();
-        bad_mtu.wg.mtu = 1500;
-        assert!(render_provider_yaml(&bad_mtu).is_err());
-    }
-
-    /// Формат конфига, который выдаёт сервер WDTT (linux-server/net.go, buildClientConfig).
-    #[test]
-    fn test_parse_server_wg_conf() {
-        let sample = "[Interface]\nMTU = 1280\nPrivateKey = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=\nAddress = 10.66.66.5/32\nDNS = 1.1.1.1, 8.8.8.8\n\n[Peer]\nPublicKey = bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb=\nAllowedIPs = 0.0.0.0/0\nEndpoint = 127.0.0.1:9000\nPersistentKeepalive = 25\n";
-        let parsed = parse_wg_conf(sample).expect("parse server conf");
-        assert_eq!(parsed.wg.address, "10.66.66.5");
-        assert_eq!(parsed.wg.mtu, 1280);
-        assert_eq!(parsed.wg.dns, vec!["1.1.1.1", "8.8.8.8"]);
-        assert_eq!(parsed.endpoint_host.as_deref(), Some("127.0.0.1"));
-        assert!(parse_wg_conf("[Interface]\nAddress = 10.0.0.2\n").is_err());
+        assert!(yaml.contains("type: direct"));
+        assert!(yaml.contains("interface-name: csq0"), "трафик узла уходит в TUN клиента csqtt");
+        assert!(yaml.contains("udp: true"));
     }
 
     #[test]
@@ -1698,7 +1786,6 @@ mod tests {
         assert!(applied.contains(RULES_BEGIN));
         assert!(applied.contains("IP-CIDR,155.212.192.0/20,DIRECT,no-resolve"));
         assert!(applied.contains("IP-CIDR,1.2.3.4/32,DIRECT,no-resolve"));
-        assert!(!applied.contains("5.255.211.241"), "TURN Телемоста больше не нужен");
         assert_eq!(applied, apply_rules(&applied, &cfg).unwrap(), "идемпотентно");
 
         cfg.enabled = false;
@@ -1713,16 +1800,11 @@ mod tests {
 
     #[test]
     fn test_core_asset_for_arch() {
-        assert_eq!(core_asset_for_arch("arm64"), Some("wdtt-client-linux-arm64"));
-        assert_eq!(core_asset_for_arch("aarch64"), Some("wdtt-client-linux-arm64"));
-        assert_eq!(core_asset_for_arch("mipsle-softfloat"), Some("wdtt-client-linux-mipsle"));
-        assert_eq!(core_asset_for_arch("mipsle"), Some("wdtt-client-linux-mipsle"));
-        assert_eq!(core_asset_for_arch("mips-softfloat"), Some("wdtt-client-linux-mips"));
-        assert_eq!(core_asset_for_arch("armv7"), Some("wdtt-client-linux-armv7"));
-        assert_eq!(core_asset_for_arch("amd64"), Some("wdtt-client-linux-amd64"));
+        assert_eq!(core_asset_for_arch("arm64"), Some("csqtt-client-linux-arm64"));
+        assert_eq!(core_asset_for_arch("aarch64"), Some("csqtt-client-linux-arm64"));
+        assert_eq!(core_asset_for_arch("mipsle-softfloat"), None, "для MIPS сборки csqtt нет — понятная ошибка");
         assert_eq!(core_asset_for_arch("unknown_arch"), None);
         assert_eq!(elf_target_for_arch("mipsle-softfloat"), "mipsel");
-        assert_eq!(elf_target_for_arch("mips-softfloat"), "mips");
         assert_eq!(elf_target_for_arch("arm64"), "aarch64");
         assert_eq!(elf_target_for_arch("armv7"), "arm");
     }
@@ -1730,7 +1812,7 @@ mod tests {
     /// Каждой архитектуре из сборки соответствует проверенный SHA-256 (64 hex), без заглушек.
     #[test]
     fn every_core_asset_has_a_real_hash() {
-        for arch in ["arm64", "mipsle-softfloat", "mips-softfloat", "armv7", "amd64"] {
+        for arch in ["arm64"] {
             let asset = core_asset_for_arch(arch).unwrap();
             let hash = CORE_SHA256.iter().find(|(a, _)| *a == asset).map(|(_, h)| *h);
             let hash = hash.unwrap_or_else(|| panic!("нет хеша для {asset}"));
@@ -1740,9 +1822,9 @@ mod tests {
         assert!(CORE_TAG.ends_with(&CORE_UPSTREAM_COMMIT[..7]), "тег релиза ядра соответствует коммиту сборки");
     }
 
-    /// Пароль сервера WDTT — секрет: в API настроек он скрыт, а «******» при сохранении не затирает настоящий.
+    /// Пароль сервера csqtt — секрет: в API настроек он скрыт, а «******» при сохранении не затирает настоящий.
     #[test]
-    fn settings_api_masks_and_preserves_wdtt_password() {
+    fn settings_api_masks_and_preserves_tunnel_password() {
         let mut cfg = crate::config::AppConfig::default();
         cfg.vkturn.password = "top-secret-pw".into();
         let masked = crate::api::mask_settings_for_api(&cfg);
@@ -1808,7 +1890,6 @@ mod tests {
     }
 
     const BASE_YAML: &str = "mode: rule\nproxies: []\nproxy-providers:\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules:\n  - MATCH,PROXY\n";
-    const SERVER_CONF: &str = "[Interface]\nMTU = 1280\nPrivateKey = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaA=\nAddress = 10.66.66.5/32\nDNS = 1.1.1.1\n\n[Peer]\nPublicKey = bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbA=\nAllowedIPs = 0.0.0.0/0\nEndpoint = 127.0.0.1:9000\n";
 
     async fn setup_saved_state(tag: &str) -> (std::path::PathBuf, crate::AppState) {
         let root = std::env::temp_dir().join(format!("xkeen-vkturn-{tag}-{}", crate::auth::random_hex(8)));
@@ -1833,10 +1914,9 @@ mod tests {
 
     /// Ревью: обработчик сам захватывал routing_lock/config_lock, а затем ConfigTx::begin
     /// захватывал их повторно — вечная взаимная блокировка.
-    /// WDTT: до получения wg-конфига от сервера провайдер в YAML не добавляется (Mihomo не загрузил бы
-    /// file-провайдер на несуществующий файл), а device-id генерируется один раз.
+    /// csqtt: провайдер (direct через csq0) добавляется сразу при включении и попадает в серверы БС.
     #[tokio::test]
-    async fn regression_save_config_without_wg_yet_does_not_deadlock() {
+    async fn regression_save_config_does_not_deadlock_and_adds_provider() {
         let (root, state) = setup_saved_state("save").await;
         let resp = tokio::time::timeout(
             Duration::from_secs(15),
@@ -1850,27 +1930,28 @@ mod tests {
         assert!(state.config_lock.try_lock().is_ok(), "config_lock остался занятым");
 
         let saved = state.config.read().await.vkturn.clone();
-        assert_eq!(saved.peer, "1.2.3.4:56000", "порт сервера по умолчанию подставлен");
+        assert_eq!(saved.peer, "1.2.3.4:46000", "PEER-порт по умолчанию подставлен");
         assert_eq!(saved.links, vec!["https://vk.com/call/join/abcdEFGH1234"]);
-        assert!(is_valid_device_id(&saved.device_id));
-        let first_id = saved.device_id.clone();
 
         let yaml = std::fs::read_to_string(root.join("config.yaml")).unwrap();
         assert!(yaml.contains(RULES_BEGIN), "правила DIRECT для TURN/VPS ставятся сразу");
-        assert!(!yaml.contains("  vkturn:"), "провайдер без wg-конфига ломал бы загрузку Mihomo: {yaml}");
+        assert!(yaml.contains("  vkturn:"), "провайдер VK-туннеля добавлен: {yaml}");
+        let prov = std::fs::read_to_string(root.join("providers").join("vkturn.yaml")).unwrap();
+        assert!(prov.contains("interface-name: csq0"));
+        assert!(state.config.read().await.whitelist_providers.iter().any(|p| p == PROVIDER_ID));
 
-        // Повторное сохранение не меняет device-id (иначе сервер ответил бы device_mismatch)
+        // Повторное сохранение не теряет пароль
         let v = response_json(
             crate::api::save_vkturn_config(
                 axum::extract::State(state.clone()),
-                axum::Json(crate::api::SaveVkTurnConfigReq { streams: Some(27), ..Default::default() }),
+                axum::Json(crate::api::SaveVkTurnConfigReq { streams: Some(30), ..Default::default() }),
             )
             .await,
         )
         .await;
         assert_eq!(v["success"], true, "ответ: {v}");
-        assert_eq!(state.config.read().await.vkturn.device_id, first_id);
         assert_eq!(state.config.read().await.vkturn.password, "s3cret-pass", "пароль сохраняется");
+        assert_eq!(state.config.read().await.vkturn.streams, 30);
 
         // Выключение через тот же обработчик тоже не зависает и снимает правила
         let resp = tokio::time::timeout(
@@ -1884,31 +1965,6 @@ mod tests {
         .expect("выключение VK-туннеля зависло");
         assert_eq!(response_json(resp).await["success"], true);
         assert!(!std::fs::read_to_string(root.join("config.yaml")).unwrap().contains(RULES_BEGIN));
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Конфиг от сервера WDTT сохраняется, подключает узел к Mihomo, повтор того же конфига — без перезаписи.
-    #[tokio::test]
-    async fn server_wg_config_is_applied_once() {
-        let (root, state) = setup_saved_state("wg").await;
-        let v = response_json(
-            crate::api::save_vkturn_config(axum::extract::State(state.clone()), axum::Json(enable_req())).await,
-        )
-        .await;
-        assert_eq!(v["success"], true, "ответ: {v}");
-
-        assert!(apply_server_wg(&state, SERVER_CONF).await.unwrap(), "новый конфиг применён");
-        let saved = state.config.read().await.vkturn.clone();
-        assert_eq!(saved.wg.address, "10.66.66.5");
-        assert!(saved.enabled && saved.password == "s3cret-pass", "остальные настройки не затёрты");
-        let yaml = std::fs::read_to_string(root.join("config.yaml")).unwrap();
-        assert!(yaml.contains("  vkturn:"), "провайдер добавлен после получения конфига: {yaml}");
-        let prov = std::fs::read_to_string(root.join("providers").join("vkturn.yaml")).unwrap();
-        assert!(prov.contains(PROXY_NAME) && prov.contains("ip: 10.66.66.5"));
-        assert!(state.config.read().await.whitelist_providers.iter().any(|p| p == PROVIDER_ID));
-
-        assert!(!apply_server_wg(&state, SERVER_CONF).await.unwrap(), "тот же конфиг повторно не пишется");
-        assert!(apply_server_wg(&state, "мусор").await.is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1926,7 +1982,7 @@ mod tests {
                 },
                 "со ссылкой Телемоста",
             ),
-            (crate::api::SaveVkTurnConfigReq { password: Some("a|b".into()), ..enable_req() }, "с | в пароле"),
+            (crate::api::SaveVkTurnConfigReq { password: Some("a\nb".into()), ..enable_req() }, "с переводом строки в пароле"),
         ] {
             let v = response_json(crate::api::save_vkturn_config(axum::extract::State(state.clone()), axum::Json(req)).await).await;
             assert_eq!(v["success"], false, "включение {what} должно отклоняться: {v}");
@@ -1936,7 +1992,7 @@ mod tests {
     }
 
     /// Ревью: два одновременных restart() перезаписывали канал остановки — первый надзор «осиротевал»,
-    /// и на одном порту оказывались два клиента.
+    /// и оказывались два клиента.
     #[tokio::test]
     async fn regression_concurrent_restarts_leave_single_supervisor() {
         let root = std::env::temp_dir().join(format!("xkeen-vkturn-race-{}", crate::auth::random_hex(8)));
@@ -1960,7 +2016,7 @@ mod tests {
         assert_eq!(mgr.active_supervisors(), 0, "stop() обязан дождаться завершения надзора");
         assert_eq!(mgr.rt.read().await.phase, VkTurnPhase::Disabled);
 
-        // Без пароля клиент не запускается вовсе (WDTT упал бы с log.Fatal)
+        // Без пароля клиент не запускается вовсе (csqtt сразу вышел бы с ошибкой)
         let mut no_pw = cfg.clone();
         no_pw.password.clear();
         mgr.restart(no_pw, state.clone()).await;
@@ -2030,21 +2086,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_peer_ipv4_accepts_literal_and_rejects_garbage() {
-        assert_eq!(resolve_peer_ipv4("1.2.3.4:56000").await, Some("1.2.3.4".parse().unwrap()));
+        assert_eq!(resolve_peer_ipv4("1.2.3.4:46000").await, Some("1.2.3.4".parse().unwrap()));
         assert_eq!(resolve_peer_ipv4("no-port").await, None);
-    }
-
-    #[test]
-    fn listen_port_validation_and_conflicts() {
-        assert!(validate_listen_port(9000).is_ok());
-        assert!(validate_listen_port(0).is_err());
-        assert!(validate_listen_port(80).is_err());
-
-        let yaml = "mixed-port: 7890\nredir-port: 7892\ntproxy-port: 7893\nexternal-controller: 0.0.0.0:9090\nproxies: []\n";
-        assert!(listen_port_conflict(9000, yaml, 9090).is_none());
-        assert!(listen_port_conflict(7890, yaml, 9090).unwrap().contains("mixed-port"));
-        assert!(listen_port_conflict(7893, yaml, 9090).is_some());
-        assert!(listen_port_conflict(9090, yaml, 9090).unwrap().contains("API Mihomo"));
-        assert!(listen_port_conflict(443, "proxies:\n  - name: a\n    port: 443\n", 9090).is_none());
     }
 }

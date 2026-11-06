@@ -492,52 +492,16 @@ pub struct AppConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
-pub struct VkTurnWireGuard {
-    /// [Interface] PrivateKey клиента (base64, 44 символа). СЕКРЕТ.
-    pub private_key: String,
-    /// [Peer] PublicKey сервера WireGuard на VPS
-    pub public_key: String,
-    /// [Peer] PresharedKey (опционально). СЕКРЕТ.
-    pub preshared_key: Option<String>,
-    /// [Interface] Address клиента, только IPv4 без маски, например "10.66.66.2"
-    pub address: String,
-    /// MTU туннеля. Upstream рекомендует 1280.
-    pub mtu: u16,
-    /// DNS внутри туннеля
-    pub dns: Vec<String>,
-}
-
-impl Default for VkTurnWireGuard {
-    fn default() -> Self {
-        Self {
-            private_key: String::new(),
-            public_key: String::new(),
-            preshared_key: None,
-            address: String::new(),
-            mtu: 1280,
-            dns: vec!["1.1.1.1".into(), "8.8.8.8".into()],
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
 pub struct VkTurnConfig {
     pub enabled: bool,
-    /// Сервер WDTT на VPS: "host:port" (порт по умолчанию 56000)
+    /// Сервер csqtt на VPS: "host:port" (PEER-порт, по умолчанию 46000)
     pub peer: String,
-    /// Пароль подключения к серверу WDTT. СЕКРЕТ.
+    /// Пароль подключения к серверу csqtt. СЕКРЕТ.
     pub password: String,
-    /// Ссылки на звонки ВК по приоритету. Клиент WDTT использует их одновременно (по группе воркеров на ссылку).
+    /// Ссылки на звонки ВК по приоритету. Клиент csqtt использует их одновременно (по группе потоков на ссылку).
     pub links: Vec<String>,
-    /// Число воркеров клиента: 0 = по умолчанию (18); округляется до кратного 9, максимум 108
+    /// Число потоков клиента: 0 = по умолчанию (20); округляется до кратного 10, максимум 100
     pub streams: u8,
-    /// Локальный порт клиента на 127.0.0.1
-    pub listen_port: u16,
-    /// Постоянный идентификатор роутера для сервера WDTT (генерируется один раз)
-    pub device_id: String,
-    /// WireGuard-конфиг, выданный сервером WDTT
-    pub wg: VkTurnWireGuard,
 }
 
 impl Default for VkTurnConfig {
@@ -548,9 +512,6 @@ impl Default for VkTurnConfig {
             password: String::new(),
             links: Vec::new(),
             streams: 0,
-            listen_port: 9000,
-            device_id: String::new(),
-            wg: VkTurnWireGuard::default(),
         }
     }
 }
@@ -1917,23 +1878,30 @@ mod tests {
         }"#;
         let cfg: crate::config::AppConfig = serde_json::from_str(old_json).expect("Old config must deserialize cleanly");
         assert!(!cfg.vkturn.enabled);
-        assert_eq!(cfg.vkturn.listen_port, 9000);
-        assert_eq!(cfg.vkturn.wg.mtu, 1280);
-        assert_eq!(cfg.vkturn.wg.dns, vec!["1.1.1.1", "8.8.8.8"]);
+        assert_eq!(cfg.vkturn.streams, 0);
         assert!(cfg.vkturn.links.is_empty());
         assert!(cfg.vkturn.peer.is_empty());
         assert!(cfg.vkturn.password.is_empty());
-        assert!(cfg.vkturn.device_id.is_empty());
     }
 
-    /// Переход на ядро WDTT: config.json от прежнего ядра (use_udp, ссылки Телемоста) читается без ошибок.
+    /// Переход на ядро csqtt: config.json от прежних ядер (vk-turn-proxy: use_udp, Телемост;
+    /// WDTT: listen_port, device_id, wg) читается без ошибок, лишние поля молча отбрасываются.
     #[test]
     fn vkturn_config_from_previous_core_still_loads() {
         let old_json = r#"{ "vkturn": { "enabled": true, "peer": "1.2.3.4:56000", "use_udp": true, "streams": 10,
             "links": ["https://telemost.yandex.ru/j/12345678"], "listen_port": 9001 } }"#;
         let cfg: crate::config::AppConfig = serde_json::from_str(old_json).expect("old vkturn config must load");
         assert!(cfg.vkturn.enabled);
-        assert_eq!(cfg.vkturn.listen_port, 9001);
+        assert_eq!(cfg.vkturn.streams, 10);
         assert!(cfg.vkturn.password.is_empty(), "без пароля надзор клиент не запустит");
+
+        let wdtt_json = r#"{ "vkturn": { "enabled": true, "peer": "1.2.3.4:56000", "password": "pw", "streams": 18,
+            "links": ["https://vk.com/call/join/abcdEFGH1234"], "listen_port": 9000, "device_id": "xkeen-route-0011",
+            "wg": { "private_key": "SECRET_WG_KEY", "public_key": "x", "address": "10.66.66.2", "mtu": 1280, "dns": [] } } }"#;
+        let cfg: crate::config::AppConfig = serde_json::from_str(wdtt_json).expect("WDTT vkturn config must load");
+        assert_eq!(cfg.vkturn.password, "pw");
+        assert_eq!(cfg.vkturn.links, vec!["https://vk.com/call/join/abcdEFGH1234"]);
+        let back = serde_json::to_string(&cfg.vkturn).unwrap();
+        assert!(!back.contains("SECRET_WG_KEY"), "ключ WireGuard от WDTT не переносится в новый конфиг");
     }
 }

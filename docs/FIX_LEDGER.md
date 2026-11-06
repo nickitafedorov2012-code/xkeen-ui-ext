@@ -20,7 +20,7 @@
 | № | Фаза | Статус | Тест (spec для шлюза) | Файлы | red_kind |
 |---|---|---|---|---|---|
 | 125 | A | FIXED | be:regression_bug_125 | backend/src/api.rs, backend/src/updater.rs | assert |
-| 91 | A | REOPENED | be:regression_bug_91 | backend/src/auth.rs | assert |
+| 91 | A | FIXED | be:regression_bug_91 | backend/src/auth.rs | assert |
 | 90 | A | FIXED | be:regression_bug_90 | backend/src/main.rs, backend/src/auth.rs | assert |
 | 141 | A | FIXED | be:regression_bug_141 | backend/src/api.rs | assert |
 | 61 | A | FIXED | be:regression_bug_61 | backend/src/bot.rs | assert |
@@ -31,10 +31,10 @@
 | 93 | A | FIXED | be:regression_bug_93 | backend/src/auth.rs, backend/src/main.rs | assert |
 | 68 | A | FIXED | be:regression_bug_68 | backend/src/updater.rs | assert |
 | 69 | A | BLOCKED | - | backend/src/updater.rs | - |
-| 1 | B | REOPENED | be:regression_bug_1_adguard | backend/src/adguard.rs, backend/src/api.rs | assert |
+| 1 | B | FIXED | be:regression_bug_1_adguard | backend/src/adguard.rs, backend/src/api.rs, backend/src/watchdog.rs | assert |
 | 2 | B | FIXED | be:regression_bug_2_resolve_excluded | backend/src/routing.rs, backend/src/api.rs | assert |
 | 3 | B | FIXED | be:regression_bug_3_whitelist_strict | backend/src/routing.rs | assert |
-| 70 | B | REOPENED | be:regression_bug_70 | backend/src/api.rs, backend/src/adguard.rs, backend/src/direct_traffic.rs | assert |
+| 70 | B | FIXED | be:regression_bug_70 | backend/src/api.rs, backend/src/adguard.rs, backend/src/direct_traffic.rs, backend/src/watchdog.rs | assert |
 | 71 | B | FIXED | be:regression_bug_71 | backend/src/direct_traffic.rs | assert |
 | 72 | B | FIXED | be:regression_bug_72 | backend/src/traffic.rs | assert |
 | 88 | B | FIXED | be:regression_bug_88 | backend/src/notifications.rs | assert |
@@ -42,7 +42,7 @@
 | 73 | F | FIXED | be:regression_bug_73 | backend/src/traffic.rs | compile |
 | 102 | B | FIXED | be:regression_bug_102 | backend/src/failover.rs, backend/src/mihomo.rs | assert |
 | 103 | B | FIXED | be:regression_bug_103 | backend/src/failover.rs | compile |
-| 114 | B | RECHECK | be:regression_bug_114 | backend/src/adguard.rs | assert |
+| 114 | B | FIXED | be:regression_bug_114 | backend/src/adguard.rs | assert |
 | 116 | B | FIXED | be:regression_bug_116 | backend/src/watchdog.rs, backend/src/config.rs, backend/src/api.rs, backend/src/bot.rs | compile |
 | 133 | B | FIXED | fe:src/components/AdGuard.test.tsx::bug 133: / be:regression_bug_133 | frontend/src/components/AdGuard.tsx, frontend/src/components/AdGuard.test.tsx, backend/src/api.rs | 133a:assert, 133b:compile |
 | 28 | B | FIXED | be:regression_bug_28 | backend/src/watchdog.rs | compile |
@@ -98,17 +98,22 @@
 | 8 | D | FIXED | be:regression_bug_8_ | backend/src/mihomo.rs, backend/src/api.rs, backend/src/watchdog.rs | assert |
 | 10 | D | FIXED | be:regression_bug_10_ | backend/src/watchdog.rs | assert |
 | 11 | D | BLOCKED | be:regression_bug_11a_ / be:regression_bug_11c_ | backend/src/watchdog.rs | - |
-| 13 | D | REOPENED | be:regression_bug_13_geo_override_has_single_source_of_truth | backend/src/override_sync.rs, backend/src/api.rs, backend/src/bot.rs, backend/src/main.rs, backend/src/watchdog.rs | assert |
+| 13 | D | FIXED | be:regression_bug_13_cached_cdns_and_zapret_direct_filtered | backend/src/override_sync.rs, backend/src/api.rs, backend/src/bot.rs, backend/src/main.rs, backend/src/watchdog.rs | assert |
 | 14 | D | FIXED | be:regression_bug_14_gaming_rules_order_and_compatibility_scope | backend/src/routing.rs | assert |
-| 15 | D | FIXED | be:regression_bug_15_discord_zapret_hybrid_vs_gaming_priority | backend/src/routing.rs, backend/src/override_sync.rs | assert |
-| 17 | D | FIXED | be:regression_bug_17_single_disabled_gaming_device_must_stay_inactive | backend/src/routing.rs, backend/src/api.rs, backend/src/watchdog.rs | assert |
+| 15 | B | FIXED | be:regression_bug_15_discord_zapret_hybrid_vs_gaming_priority | backend/src/routing.rs | assert |
+| 16 | B | BLOCKED | - | backend/src/config.rs | - |
+| 17 | B | FIXED | be:regression_bug_17_single_disabled_gaming_device_must_stay_inactive | backend/src/routing.rs | assert |
+| 18 | B | FIXED | be:regression_bug_18_antigravity_proxy_binds_to_all_interfaces_for_lan_access | backend/src/antigravity.rs | assert |
 | 24 | D | FIXED | be:regression_bug_24_whitelist_dns_applies_in_zero_touch_mode_without_explicit_devices | backend/src/routing.rs | assert |
 | 25 | D | FIXED | be:regression_bug_25_sync_tunnel_dns_ports_preserves_rule_order_and_updates_ndm_hooks | backend/src/adguard.rs | assert |
 | 30 | D | FIXED | be:regression_bug_30_save_zapret_conf_rebuilds_mihomo_rules | backend/src/api.rs | assert |
 | 32 | D | FIXED | be:regression_bug_32_zapret_excluded_devices_bypass_mihomo_direct_and_resolve_mac | backend/src/routing.rs | assert |
 | 33 | D | FIXED | be:regression_bug_33_discord_voice_excludes_gaming_devices_from_udp_queue | backend/src/api.rs | assert |
-| 36 | D | REOPENED | be:regression_bug_36_zapret_watchdog_fixes | backend/src/watchdog.rs | assert |
-| 37 | D | REOPENED | be:regression_bug_37_ (тест есть, рабочих функций нет — cargo test не собирается) | backend/src/zapret.rs | - |
+| 36 | D | FIXED | be:regression_bug_36_zapret_watchdog_fixes | backend/src/watchdog.rs | assert |
+| 37 | D | FIXED | be:regression_bug_37_failsafe_rejects_3xx_redirects_and_strict_bridge_check | backend/src/zapret.rs | assert |
+| 40 | D | FIXED | be:regression_bug_40_save_whitelist_pinned_devices_uses_scoped_switch | backend/src/api.rs | assert |
+| 42 | D | BLOCKED | - | backend/src/failover.rs, backend/src/config.rs | - |
+| 43 | D | FIXED | be:regression_bug_43_toggle_whitelist_device_does_not_corrupt_mac_on_ip_reuse | backend/src/api.rs | assert |
 
 ## Записи
 

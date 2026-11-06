@@ -17,53 +17,57 @@ async function typeInto(el: HTMLInputElement, value: string) {
   })
 }
 
-describe('VkTurn Component (ядро WDTT)', () => {
+describe('VkTurn Component (ядро csqtt)', () => {
   let container: HTMLDivElement | null = null
   let root: ReturnType<typeof createRoot> | null = null
   const notifyMock = vi.fn()
 
   const defaultUnconfiguredStatus: VkTurnStatus = {
     installed: true,
-    core_version: 'wdtt-core-7355598',
+    core_version: 'csqtt-core-0e90df2',
     phase: 'disabled',
     pid: null,
     connected_streams: 0,
-    target_streams: 18,
+    target_streams: 20,
     bytes_up: 0,
     bytes_down: 0,
     links_count: 0,
     links: [],
-    max_links: 3,
+    max_links: 6,
     restarts: 0,
     last_error: null,
     enabled: false,
     peer: '',
     has_password: false,
-    device_id: '',
-    wg_ready: false,
-    wg: { address: '', mtu: 1280, dns: [] },
+    tunnel_ready: false,
+    tunnel_ip: null,
+    tunnel_dns: null,
+    interface: 'csq0',
+    default_port: 46000,
   }
 
   const defaultConnectedStatus: VkTurnStatus = {
     installed: true,
-    core_version: 'wdtt-core-7355598',
+    core_version: 'csqtt-core-0e90df2',
     phase: 'connected',
     pid: 12345,
     connected_streams: 3,
-    target_streams: 18,
+    target_streams: 20,
     bytes_up: 1536,
     bytes_down: 3 * 1024 * 1024,
     links_count: 2,
     links: ['https://vk.com/call/join/abcd…', 'https://vk.com/call/join/efgh…'],
-    max_links: 3,
+    max_links: 6,
     restarts: 1,
     last_error: null,
     enabled: true,
-    peer: '1.2.3.4:56000',
+    peer: '1.2.3.4:46000',
     has_password: true,
-    device_id: 'xkeen-route-0011223344556677',
-    wg_ready: true,
-    wg: { address: '10.66.66.5', mtu: 1280, dns: ['1.1.1.1'] },
+    tunnel_ready: true,
+    tunnel_ip: '10.66.67.3',
+    tunnel_dns: '1.1.1.1',
+    interface: 'csq0',
+    default_port: 46000,
   }
 
   const findButton = (text: string) =>
@@ -109,10 +113,10 @@ describe('VkTurn Component (ядро WDTT)', () => {
     })
 
     expect(container?.textContent).toContain('Мастер настройки VK-туннеля')
-    expect(container?.textContent).toContain('Сервер WDTT на VPS')
+    expect(container?.textContent).toContain('Сервер csqtt на VPS')
     expect(container?.textContent).toContain('Пароль подключения')
     expect(container?.textContent).toContain('Установить на мой VPS автоматически')
-    // WDTT: wg-конфиг выдаёт сервер — поля для вставки .conf больше нет
+    // csqtt: адрес туннеля выдаёт сервер — вставлять конфиги не нужно
     expect(container?.querySelector('textarea')).toBeNull()
     expect(container?.textContent).not.toContain('Телемост')
 
@@ -123,11 +127,11 @@ describe('VkTurn Component (ядро WDTT)', () => {
       enableBtn.click()
     })
 
-    // Одно сохранение, без отдельного вызова enable; порт по умолчанию 56000
+    // Одно сохранение, без отдельного вызова enable; PEER-порт по умолчанию 46000
     expect(saveConfigSpy).toHaveBeenCalledTimes(1)
     expect(saveConfigSpy).toHaveBeenCalledWith({
       enabled: true,
-      peer: '198.51.100.1:56000',
+      peer: '198.51.100.1:46000',
       password: 'router-pass',
       links: ['https://vk.com/call/join/abcdef123'],
     })
@@ -154,7 +158,7 @@ describe('VkTurn Component (ядро WDTT)', () => {
     await act(async () => {
       enableBtn.click()
     })
-    expect(notifyMock).toHaveBeenCalledWith('Укажите пароль подключения к серверу WDTT', true)
+    expect(notifyMock).toHaveBeenCalledWith('Укажите пароль подключения к серверу csqtt', true)
 
     await fillWizard({ password: 'pw', link: '' })
     await act(async () => {
@@ -164,7 +168,7 @@ describe('VkTurn Component (ядро WDTT)', () => {
     expect(saveConfigSpy).not.toHaveBeenCalled()
 
     // Свой порт сервера сохраняется как есть
-    const portInput = container?.querySelector('input[aria-label="Порт сервера WDTT"]') as HTMLInputElement
+    const portInput = container?.querySelector('input[aria-label="Порт сервера csqtt"]') as HTMLInputElement
     await typeInto(portInput, '443')
     await fillWizard({ link: 'https://vk.com/call/join/abcdef123' })
     await act(async () => {
@@ -178,12 +182,12 @@ describe('VkTurn Component (ядро WDTT)', () => {
     await act(async () => {
       root!.render(<VkTurn notify={notifyMock} />)
     })
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 5; i++) {
       await act(async () => {
         findButton('Добавить запасную ссылку')!.click()
       })
     }
-    expect(container?.querySelectorAll('input[placeholder*="ссылка"]').length).toBe(3)
+    expect(container?.querySelectorAll('input[placeholder*="ссылка"]').length).toBe(6)
     expect(findButton('Добавить запасную ссылку')).toBeUndefined()
   })
 
@@ -219,10 +223,10 @@ describe('VkTurn Component (ядро WDTT)', () => {
 
     const badge = container?.querySelector('[data-testid="status-badge"]')
     expect(badge?.textContent).toContain('🟢 Работает · соединений: 3')
-    expect(container?.textContent).toContain('сервер WDTT: 1.2.3.4:56000')
-    expect(container?.textContent).toContain('Ядро WDTT')
+    expect(container?.textContent).toContain('сервер csqtt: 1.2.3.4:46000')
+    expect(container?.textContent).toContain('Ядро csqtt')
     expect(container?.querySelector('[data-testid="traffic-line"]')?.textContent).toContain('↑ 1.5 КБ ↓ 3.0 МБ')
-    expect(container?.querySelector('[data-testid="waiting-wg"]')).toBeNull()
+    expect(container?.querySelector('[data-testid="waiting-tunnel"]')).toBeNull()
 
     const toggleInput = container?.querySelector('input[type="checkbox"][aria-label*="VK-туннель"]') as HTMLInputElement
     expect(toggleInput.checked).toBe(true)
@@ -250,24 +254,47 @@ describe('VkTurn Component (ядро WDTT)', () => {
     })
     expect(logsSpy).toHaveBeenCalled()
     expect(container?.textContent).toContain('Число перезапусков')
-    expect(container?.textContent).toContain('xkeen-route-0011223344556677')
-    expect(container?.textContent).toContain('10.66.66.5')
-    expect(container?.textContent).toContain('2 из 3')
+    expect(container?.querySelector('[data-testid="tunnel-ip"]')?.textContent).toBe('10.66.67.3 · csq0')
+    expect(container?.textContent).toContain('2 из 6')
     expect(container?.querySelector('[data-testid="links-list"]')?.textContent).toContain('abcd… (основная)')
     expect(container?.textContent).toContain('Туннель готов к работе')
   })
 
-  it('shows waiting banner and disables check while server has not sent WireGuard config', async () => {
+  it('shows waiting banner and disables check while the tunnel is not attached yet', async () => {
     vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({
       ...defaultConnectedStatus,
-      wg_ready: false,
-      wg: { address: '', mtu: 1280, dns: [] },
+      tunnel_ready: false,
+      tunnel_ip: null,
     })
     await act(async () => {
       root!.render(<VkTurn notify={notifyMock} />)
     })
-    expect(container?.querySelector('[data-testid="waiting-wg"]')?.textContent).toContain('жду от него WireGuard-конфиг')
+    expect(container?.querySelector('[data-testid="waiting-tunnel"]')?.textContent).toContain('подключаю туннель')
     expect(findButton('Проверить')!.disabled).toBe(true)
+  })
+
+  // Сервер csqtt при неверном пароле молчит так же, как выключенный: поле нового пароля нужно и здесь
+  it('server_unreachable phase explains silent wrong password and lets user re-enter it', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({
+      ...defaultConnectedStatus,
+      phase: 'server_unreachable',
+      connected_streams: 0,
+      tunnel_ready: false,
+      last_error: 'Сервер csqtt на VPS не отвечает',
+    })
+    const saveConfigSpy = vi.spyOn(api, 'saveVkTurnConfig').mockResolvedValue({ success: true })
+    await act(async () => {
+      root!.render(<VkTurn notify={notifyMock} />)
+    })
+    expect(container?.querySelector('[data-testid="status-badge"]')?.textContent).toContain('🔴 Сервер на VPS не отвечает')
+    expect(container?.querySelector('[data-testid="password-fix"]')?.textContent).toContain('При неверном пароле сервер тоже молчит')
+    expect(container?.querySelector('[data-testid="last-error"]')).toBeNull()
+    const pw = container?.querySelector('input[placeholder="Новый пароль подключения"]') as HTMLInputElement
+    await typeInto(pw, 'fixed-pass')
+    await act(async () => {
+      findButton('Сохранить пароль')!.click()
+    })
+    expect(saveConfigSpy).toHaveBeenCalledWith({ password: 'fixed-pass' })
   })
 
   it('renders captcha_required phase banner with auto-retry hint', async () => {
@@ -284,14 +311,14 @@ describe('VkTurn Component (ядро WDTT)', () => {
     vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({
       ...defaultConnectedStatus,
       phase: 'auth_failed',
-      last_error: 'Пароль уже привязан к другому устройству — нужен отдельный пароль для роутера',
+      last_error: 'Срок действия пароля подключения истёк — получите новый у владельца сервера',
     })
     const saveConfigSpy = vi.spyOn(api, 'saveVkTurnConfig').mockResolvedValue({ success: true })
     await act(async () => {
       root!.render(<VkTurn notify={notifyMock} />)
     })
     expect(container?.querySelector('[data-testid="status-badge"]')?.textContent).toContain('🔴 Сервер отклонил пароль')
-    expect(container?.textContent).toContain('привязан к другому устройству')
+    expect(container?.textContent).toContain('Срок действия пароля')
     // Причина показана один раз, без дубля в строке ошибки
     expect(container?.querySelector('[data-testid="last-error"]')).toBeNull()
 
@@ -409,9 +436,9 @@ describe('VkTurn Component (ядро WDTT)', () => {
   })
 
   it('hostFromPeer and formatTraffic helpers', () => {
-    expect(hostFromPeer('198.51.100.1:56000')).toBe('198.51.100.1')
-    expect(hostFromPeer('vps.example.com:56000')).toBe('vps.example.com')
-    expect(hostFromPeer('[2001:db8::1]:56000')).toBe('2001:db8::1')
+    expect(hostFromPeer('198.51.100.1:46000')).toBe('198.51.100.1')
+    expect(hostFromPeer('vps.example.com:46000')).toBe('vps.example.com')
+    expect(hostFromPeer('[2001:db8::1]:46000')).toBe('2001:db8::1')
     expect(hostFromPeer(undefined)).toBe('')
     expect(formatTraffic(0)).toBe('0 Б')
     expect(formatTraffic(2048)).toBe('2.0 КБ')

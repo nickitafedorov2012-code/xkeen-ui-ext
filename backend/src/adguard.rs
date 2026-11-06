@@ -1803,13 +1803,10 @@ dns:
   upstream_dns:
     - 77.88.8.8
     - 77.88.8.1
-    - 1.1.1.1
-    - 8.8.8.8
-    - https://dns.google/dns-query
   upstream_dns_file: ""
   bootstrap_dns:
     - 77.88.8.8
-    - 1.1.1.1
+    - 77.88.8.1
   fallback_dns:
     - 77.88.8.8
   all_servers: false
@@ -2986,6 +2983,12 @@ http:
         let (healed, _) = sanitize_and_heal_adguard_yaml(yaml, 5354);
         assert!(!healed.contains("77.88.8.8"), "в YAML пользователя не дописываются публичные DNS:\n{healed}");
         assert!(!healed.contains("    - 8.8.8.8"));
+
+        // Проверяем, что в сгенерированном по умолчанию шаблоне нет 1.1.1.1, 8.8.8.8, dns.google
+        let default_yaml = generate_default_adguard_yaml(5353, 3000);
+        assert!(!default_yaml.contains("1.1.1.1"), "default template must not contain 1.1.1.1");
+        assert!(!default_yaml.contains("8.8.8.8"), "default template must not contain 8.8.8.8");
+        assert!(!default_yaml.contains("dns.google/dns-query"), "default template must not contain dns.google");
     }
 }
 

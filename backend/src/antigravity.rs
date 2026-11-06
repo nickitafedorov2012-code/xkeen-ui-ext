@@ -611,10 +611,10 @@ impl AntigravityManager {
         }
     }
 
-    /// Запуск легковесного HTTP CONNECT прокси (привязка к 127.0.0.1 для безопасности от WAN)
+    /// Запуск легковесного HTTP CONNECT прокси (привязка к 0.0.0.0 для доступности из LAN-клиентов)
     pub fn start_proxy(self: Arc<Self>, port: u16) {
         tokio::spawn(async move {
-            let addr = format!("127.0.0.1:{port}");
+            let addr = format!("0.0.0.0:{port}");
             let listener = match TcpListener::bind(&addr).await {
                 Ok(l) => {
                     let mut st = self.state.write().await;
@@ -871,6 +871,25 @@ async fn handle_proxy_conn(mut client: TcpStream, mgr: Arc<AntigravityManager>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn regression_bug_18_antigravity_proxy_binds_to_all_interfaces_for_lan_access() {
+        // Баг 18: Прокси Antigravity был привязан к 127.0.0.1, из-за чего клиенты с LAN (ПК)
+        // получая команду AG_LS_PROXY=http://<IP роутера>:53129, не могли подключиться к прокси.
+        // Прокси должен слушать на 0.0.0.0 (или LAN-интерфейсе), чтобы быть доступным для устройств в сети роутера.
+        let ag_src = include_str!("antigravity.rs");
+        let start = ag_src.find("pub fn start_proxy(").expect("start_proxy exists");
+        let body = &ag_src[start..start + 500];
+
+        assert!(
+            !body.contains("127.0.0.1:{port}"),
+            "Antigravity proxy must NOT bind exclusively to localhost (127.0.0.1), preventing LAN PC access"
+        );
+        assert!(
+            body.contains("0.0.0.0:{port}"),
+            "Antigravity proxy must bind to 0.0.0.0 to allow LAN PCs to connect"
+        );
+    }
 
     #[test]
     fn test_is_google_ip() {

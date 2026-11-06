@@ -1805,7 +1805,7 @@ mod tests {
                 "sub1": "https://my-proxy-provider.org/api/v1/client/subscribe?token=secret_sub_token_999"
             },
             "vkturn": {
-                "password": "secret_vkturn_wdtt_password",
+                "password": "secret_vkturn_csqtt_password",
                 "wg": {
                     "private_key": "secret_vkturn_private_key_base64",
                     "preshared_key": "secret_vkturn_preshared_key_base64"
@@ -1825,7 +1825,7 @@ mod tests {
         assert!(!sanitized_str.contains("secret_sub_token_999"), "URL/токен подписок не должен присутствовать в бэкапе");
         assert!(!sanitized_str.contains("secret_vkturn_private_key_base64"), "private_key VK-туннеля не должен присутствовать в бэкапе");
         assert!(!sanitized_str.contains("secret_vkturn_preshared_key_base64"), "preshared_key VK-туннеля не должен присутствовать в бэкапе");
-        assert!(!sanitized_str.contains("secret_vkturn_wdtt_password"), "пароль сервера WDTT не должен присутствовать в бэкапе");
+        assert!(!sanitized_str.contains("secret_vkturn_csqtt_password"), "пароль сервера csqtt не должен присутствовать в бэкапе");
     }
 
     #[test]

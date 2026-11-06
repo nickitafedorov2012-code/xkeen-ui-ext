@@ -689,6 +689,24 @@ pub async fn auth_middleware(
         return next.run(req).await;
     }
 
+    // Защита от DNS-rebinding для всех защищенных эндпоинтов (/api/ и /clash/):
+    // Любой запрос (включая GET при выключенной авторизации) обязан иметь легитимный заголовок Host (баг 91)
+    let host_header = req.headers().get("host").and_then(|h| h.to_str().ok());
+    if let Some(host) = host_header {
+        let host_only = extract_host_only(host);
+        if !is_legitimate_host(host_only) {
+            log_w!("[AUTH] ⚠️ Отклонен запрос с нелегитимным Host (DNS-rebinding): {} к {}", host, path);
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "success": false,
+                    "error": "forbidden",
+                    "message": "Отклонено политикой безопасности: недопустимый заголовок Host"
+                })),
+            ).into_response();
+        }
+    }
+
     // CSRF Guard для всех мутирующих запросов (POST, PUT, DELETE, PATCH)
     let method = req.method();
     if method == axum::http::Method::POST
@@ -696,7 +714,6 @@ pub async fn auth_middleware(
         || method == axum::http::Method::DELETE
         || method == axum::http::Method::PATCH
     {
-        let host_header = req.headers().get("host").and_then(|h| h.to_str().ok());
         let origin_header = req.headers().get("origin")
             .or_else(|| req.headers().get("referer"))
             .and_then(|h| h.to_str().ok());
@@ -953,6 +970,31 @@ mod tests {
         // Фильтр НЕ должен доверять произвольному домену evil.com, даже если Origin == Host.
         assert!(!is_trusted_origin("http://evil.com", Some("evil.com")));
         assert!(!is_trusted_origin("http://attacker.org:1001", Some("attacker.org:1001")));
+
+        // Ревизия: GET-запросы к /api/* и /clash/* при выключенной авторизации также должны
+        // проверять Host (is_legitimate_host) и отклонять нелегитимный Host: evil.com
+        assert!(!is_legitimate_host("evil.com"));
+        assert!(!is_legitimate_host("attacker.org"));
+        assert!(!is_legitimate_host("192.168.attacker.com"));
+        assert!(is_legitimate_host("192.168.1.1"));
+        assert!(is_legitimate_host("192.168.2.1"));
+        assert!(is_legitimate_host("localhost"));
+        assert!(is_legitimate_host("my.keenetic.net"));
+
+        // Проверяем, что в auth_middleware проверка is_legitimate_host выполняется до разделения на методы GET/POST
+        let auth_src = include_str!("auth.rs");
+        let start = auth_src.find("pub async fn auth_middleware(").expect("auth_middleware exists");
+        let body = &auth_src[start..start + 2000];
+        assert!(
+            body.contains("is_legitimate_host"),
+            "auth_middleware must validate Host header against is_legitimate_host for all protected requests"
+        );
+        let pos_host_check = body.find("is_legitimate_host").expect("Host check in middleware");
+        let pos_method_check = body.find("method == axum::http::Method::POST").expect("POST check in middleware");
+        assert!(
+            pos_host_check < pos_method_check,
+            "Host header validation must happen BEFORE method filtering so GET requests cannot be abused via DNS rebinding"
+        );
     }
 
     #[test]

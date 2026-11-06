@@ -196,6 +196,23 @@ pub fn update_override_file_content(
 }
 
 static IPSET_SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static CACHED_AUTO_CDNS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// Обновление глобального кэша найденных CDN доменов (баг 13)
+pub fn sync_cached_auto_cdns(cdns: &[String]) {
+    if let Ok(mut cache) = CACHED_AUTO_CDNS.write() {
+        for c in cdns {
+            let clean = c.trim().to_lowercase();
+            if !clean.is_empty() && !cache.contains(&clean) {
+                cache.push(clean);
+            }
+        }
+    }
+}
+
+pub fn get_cached_auto_cdns() -> Vec<String> {
+    CACHED_AUTO_CDNS.read().map(|c| c.clone()).unwrap_or_default()
+}
 
 /// Синхронизирует IP-адреса force_domains с ru_exclude_override.lst и живыми ipset ядра.
 pub async fn sync_geo_override(domains: &[String]) -> Result<usize, String> {
@@ -245,6 +262,11 @@ pub async fn sync_geo_override(domains: &[String]) -> Result<usize, String> {
 /// Баг 13: Единый сбор всех доменов для geo_override из полного конфига.
 /// Объединяет force_domains, статические CDN-бандлы, обнаруженные auto_cdns и активные игровые домены.
 pub fn collect_override_domains(cfg: &crate::config::AppConfig, extra_cdns: &[String]) -> Vec<String> {
+    if !extra_cdns.is_empty() {
+        sync_cached_auto_cdns(extra_cdns);
+    }
+    let cached = get_cached_auto_cdns();
+
     let mut all = cfg.force_domains.clone();
     if !cfg.force_domains.is_empty() {
         let static_cdns = crate::cdn_discovery::expand_bundles(&cfg.force_domains);
@@ -252,6 +274,11 @@ pub fn collect_override_domains(cfg: &crate::config::AppConfig, extra_cdns: &[St
             if !all.contains(&cdn) {
                 all.push(cdn);
             }
+        }
+    }
+    for cdn in cached {
+        if !all.contains(&cdn) {
+            all.push(cdn);
         }
     }
     for cdn in extra_cdns {
@@ -268,6 +295,12 @@ pub fn collect_override_domains(cfg: &crate::config::AppConfig, extra_cdns: &[St
             }
         }
     }
+
+    // Исключаем домены, которые Zapret ведет в DIRECT (баг 13 ревизия)
+    if cfg.zapret.enabled {
+        all.retain(|d| !crate::routing::is_zapret_direct_domain(d, &cfg.zapret));
+    }
+
     all
 }
 
@@ -425,8 +458,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn regression_bug_13_cached_cdns_and_zapret_direct_filtered() {
+        // Баг 13:
+        // 1. Найденные сканированием CDN должны сохраняться в кэше и не стираться
+        //    при последующем вызове sync_from_config(cfg, &[]).
+        // 2. Домены, которые Zapret ведет в DIRECT, не должны попадать в geo_override.
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.force_domains = vec!["instagram.com".into()];
+        cfg.zapret.enabled = true;
+        cfg.zapret.hybrid_youtube = true;
+
+        // Эмулируем, что сканирование обнаружило CDN
+        let scanned_cdn = vec!["cdn.instagram.com".into()];
+        sync_cached_auto_cdns(&scanned_cdn);
+
+        // Последующий вызов с пустым списком (&[]) НЕ должен потерять найденный CDN!
+        let domains = collect_override_domains(&cfg, &[]);
+        assert!(
+            domains.contains(&"cdn.instagram.com".to_string()),
+            "Найденные сканированием CDN обязаны сохраняться и входить в geo_override"
+        );
+
+        // Проверяем исключение доменов Zapret DIRECT (например, googlevideo.com)
+        cfg.force_domains.push("googlevideo.com".into());
+        let domains_with_zapret = collect_override_domains(&cfg, &[]);
+        assert!(
+            !domains_with_zapret.contains(&"googlevideo.com".to_string()),
+            "Zapret DIRECT домены не должны попадать в geo_override"
+        );
+    }
+
+    #[test]
     fn regression_bug_13_geo_override_has_single_source_of_truth() {
-        // Баг 13: geo_override перезаписывали шесть мест, каждое своим набором доменов: сохранение доменов
         // стирало игровые домены и найденные CDN, тумблер игрового режима — CDN, старт без force-доменов
         // не синхронизировал вовсе.
         for (name, src) in [

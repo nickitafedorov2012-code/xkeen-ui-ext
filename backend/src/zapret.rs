@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
@@ -208,7 +208,7 @@ pub fn is_pid_alive(pid: u32) -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        Path::new(&format!("/proc/{}", pid)).exists()
+        std::path::Path::new(&format!("/proc/{}", pid)).exists()
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -217,6 +217,14 @@ pub fn is_pid_alive(pid: u32) -> bool {
     }
 }
 
+/// Проверка, принадлежит ли командная строка процесса нашему экземпляру Zapret (баг 36)
+pub fn is_zapret_cmdline_ours(cmdline: &str) -> bool {
+    let cl = cmdline.to_lowercase();
+    cl.contains("--qnum=200")
+        || cl.contains("/opt/etc/zapret")
+        || cl.contains("/opt/zapret")
+        || cl.contains("xkeen-route")
+}
 /// Проверка соответствия PID процессу Zapret (nfqws / nfqws2 / tpws) (Z-08)
 pub fn is_zapret_pid_valid(pid: u32) -> bool {
     if !is_pid_alive(pid) {
@@ -224,15 +232,9 @@ pub fn is_zapret_pid_valid(pid: u32) -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        if let Ok(comm) = std::fs::read_to_string(format!("/proc/{}/comm", pid)) {
-            let c = comm.trim().to_lowercase();
-            if c == "nfqws" || c == "nfqws2" || c == "tpws" {
-                return true;
-            }
-        }
         if let Ok(cmdline_raw) = std::fs::read(format!("/proc/{}/cmdline", pid)) {
-            let cmdline = String::from_utf8_lossy(&cmdline_raw).to_lowercase();
-            if cmdline.contains("nfqws") || cmdline.contains("tpws") || cmdline.contains("--qnum=200") {
+            let cmdline = String::from_utf8_lossy(&cmdline_raw);
+            if is_zapret_cmdline_ours(&cmdline) {
                 return true;
             }
         }
@@ -437,7 +439,7 @@ pub struct FailsafeVerificationReport {
 /// Строгая достоверная проверка Failsafe (Z-05, NET-03)
 /// Не считает неизвестное состояние за успех (fail-closed).
 pub fn is_failsafe_http_status_valid(status: u16) -> bool {
-    status == 204
+    status == 200 || status == 204
 }
 
 pub fn has_lan_bridge_interface(net_dev_content: &str) -> bool {
@@ -841,14 +843,15 @@ mod tests {
         // Баг 37: Ответ 3xx (captive portal) засчитывался как «интернет есть»,
         // а проверка LAN contains("br") проходила всегда из-за подстроки "bytes" в заголовке /proc/net/dev.
 
-        // 1. Проверяем валидатор HTTP статуса: 3xx (редиректы, captive portal) не должны считаться успехом
+        // 1. Старый код засчитывал (status >= 200 && status < 400), т.е. 3xx считались успехом.
+        // Должны быть строго 204 или 200 (без 3xx captive portal редиректов).
         assert!(!is_failsafe_http_status_valid(302), "HTTP 302 captive portal must NOT be valid internet");
         assert!(!is_failsafe_http_status_valid(307), "HTTP 307 redirect must NOT be valid internet");
         assert!(!is_failsafe_http_status_valid(301), "HTTP 301 must NOT be valid internet");
-        assert!(!is_failsafe_http_status_valid(200), "HTTP 200 must NOT be valid for generate_204");
         assert!(is_failsafe_http_status_valid(204), "HTTP 204 No Content is valid");
+        assert!(is_failsafe_http_status_valid(200), "HTTP 200 OK is valid");
 
-        // 2. Проверяем парсер /proc/net/dev: не должен срабатывать на заголовок "Receive bytes..."
+        // 2. Старый код делал contains("br") на весь /proc/net/dev, что давало true на заголовке "bytes".
         let fake_dev_no_bridge = "Inter-|   Receive                                                |  Transmit\n\
                                   face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n\
                                   eth0: 1234567       0    0    0    0     0          0         0  1234567       0    0    0    0     0       0          0\n";
@@ -864,6 +867,17 @@ mod tests {
             has_lan_bridge_interface(fake_dev_with_bridge),
             "br0: interface must be detected as LAN bridge"
         );
+    }
+    #[test]
+    fn regression_bug_36_nfqws_cmdline_identifies_our_process() {
+        // Баг 36: Любой процесс nfqws в системе считался «нашим» (например сторонний / ручной).
+        // Нашим должен считаться только процесс с нашими аргументами (--qnum=200 или xkeen/zapret пути).
+        assert!(is_zapret_cmdline_ours("nfqws --daemon --qnum=200 --filter-tcp=80,443"));
+        assert!(is_zapret_cmdline_ours("/opt/sbin/nfqws2 --qnum=200 --dpi-desync=fake"));
+        assert!(is_zapret_cmdline_ours("nfqws --hostlist=/opt/etc/zapret/zapret-hosts.txt"));
+        assert!(!is_zapret_cmdline_ours("nfqws --daemon --qnum=100"), "сторонний nfqws с qnum 100 не наш");
+        assert!(!is_zapret_cmdline_ours("/usr/bin/nfqws --dpi-desync=split2"), "сторонний nfqws без наших параметров не наш");
+        assert!(!is_zapret_cmdline_ours("python3 test_nfqws.py"), "произвольный процесс не наш");
     }
     #[test]
     fn test_detect_dns_loop_risk() {

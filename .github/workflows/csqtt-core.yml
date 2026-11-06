@@ -1,0 +1,64 @@
+name: Build csqtt core
+
+# Ядро VK-туннеля (клиент csqtt из Afteroid/csqttr) для роутеров ARM64.
+# Тег csqtt-core-<короткий коммит> должен совпадать с CORE_TAG в backend/src/vkturn.rs.
+# Релиз ядра не помечается «последним», чтобы автообновление панели его не подхватило.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'csqtt-core-*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zig and cargo-zigbuild
+        run: |
+          python3 -m pip install --user ziglang==0.14.1
+          ZIG_DIR="$(python3 -c 'import ziglang, os; print(os.path.dirname(ziglang.__file__))')"
+          mkdir -p "$HOME/.local/bin"
+          printf '#!/bin/sh\nexec python3 -m ziglang "$@"\n' > "$HOME/.local/bin/zig"
+          chmod +x "$HOME/.local/bin/zig"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cargo install --locked cargo-zigbuild
+
+      - name: Build
+        run: |
+          chmod +x scripts/build-csqtt-core.sh
+          scripts/build-csqtt-core.sh "$RUNNER_TEMP/csqtt"
+          cp "$RUNNER_TEMP/csqtt/out/"* .
+          ls -la csqtt-client-linux-arm64 SHA256SUMS LICENSE-csqttr.md
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: csqtt-core
+          path: |
+            csqtt-client-linux-arm64
+            SHA256SUMS
+            LICENSE-csqttr.md
+
+      - name: Publish core release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Ядро VK-туннеля ${{ github.ref_name }}
+          make_latest: "false"
+          body: |
+            Клиент csqtt из https://github.com/Afteroid/csqttr (CSQTT-Rebirth, © amurcanov),
+            собранный для роутеров Keenetic с процессором ARM64. Лицензия PolyForm Noncommercial 1.0.0
+            (файл LICENSE-csqttr.md). Изменение исходников: Lua-движок Gooby заменён заглушкой
+            (scripts/csqtt-router-patch), сборка — scripts/build-csqtt-core.sh.
+          files: |
+            csqtt-client-linux-arm64
+            SHA256SUMS
+            LICENSE-csqttr.md

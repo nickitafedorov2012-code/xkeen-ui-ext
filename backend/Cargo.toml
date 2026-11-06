@@ -41,6 +41,10 @@ mime_guess = "2"
 clap = { version = "4", features = ["derive"] }
 chrono = "0.4"
 
+[target.'cfg(unix)'.dependencies]
+# TUN-интерфейс VK-туннеля (ioctl TUNSETIFF) и передача его дескриптора клиенту csqtt (SCM_RIGHTS)
+libc = "0.2"
+
 [profile.release]
 opt-level = 3
 lto = true

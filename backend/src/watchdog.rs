@@ -6,6 +6,7 @@ use crate::{config, log_i, log_w, mihomo, override_sync, rci, routing, AppState}
 pub static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub static SERVICE_MANUALLY_STOPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 pub static MIHOMO_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static ADGUARD_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub fn is_mihomo_down() -> bool {
     MIHOMO_DOWN.load(std::sync::atomic::Ordering::Acquire)
@@ -13,6 +14,14 @@ pub fn is_mihomo_down() -> bool {
 
 pub fn set_mihomo_down(down: bool) {
     MIHOMO_DOWN.store(down, std::sync::atomic::Ordering::Release);
+}
+
+pub fn is_adguard_down() -> bool {
+    ADGUARD_DOWN.load(std::sync::atomic::Ordering::Acquire)
+}
+
+pub fn set_adguard_down(down: bool) {
+    ADGUARD_DOWN.store(down, std::sync::atomic::Ordering::Release);
 }
 
 pub fn shutdown() {
@@ -613,7 +622,7 @@ pub fn spawn_zapret_monitor(state: AppState) {
                 } else {
                     let iptables_left = tokio::process::Command::new("sh")
                         .arg("-c")
-                        .arg("iptables -t mangle -S 2>/dev/null | grep -q zapret || iptables -t nat -S PREROUTING 2>/dev/null | grep 'xkeen-route-zapret' | grep 'to-ports 1053' | grep -q .")
+                        .arg("iptables -w 2 -t mangle -S 2>/dev/null | grep -q zapret || iptables -w 2 -t nat -S PREROUTING 2>/dev/null | grep 'xkeen-route-zapret' | grep 'to-ports 1053' | grep -q .")
                         .output()
                         .await
                         .map(|o| o.status.success())
@@ -665,7 +674,7 @@ pub fn spawn_zapret_monitor(state: AppState) {
                 // перехват активным и никогда не восстанавливал вызов zapret из POSTROUTING).
                 let iptables_active = tokio::process::Command::new("sh")
                     .arg("-c")
-                    .arg("(iptables -t mangle -S POSTROUTING 2>/dev/null | grep -q zapret || iptables -t mangle -S PREROUTING 2>/dev/null | grep -q zapret) && iptables -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE")
+                    .arg("(iptables -w 2 -t mangle -S POSTROUTING 2>/dev/null | grep -q zapret || iptables -w 2 -t mangle -S PREROUTING 2>/dev/null | grep -q zapret) && iptables -w 2 -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE")
                     .output()
                     .await
                     .map(|o| o.status.success())
@@ -701,7 +710,7 @@ pub fn spawn_zapret_monitor(state: AppState) {
                 // NET-01: Контроль здоровья DNS-редиректа на порт 1053 во избежание блэкаута LAN
                 let dns_redirect_active = tokio::process::Command::new("sh")
                     .arg("-c")
-                    .arg("iptables -t nat -S PREROUTING 2>/dev/null | grep 'xkeen-route-zapret' | grep 'to-ports 1053' | grep -q .")
+                    .arg("iptables -w 2 -t nat -S PREROUTING 2>/dev/null | grep 'xkeen-route-zapret' | grep 'to-ports 1053' | grep -q .")
                     .output()
                     .await
                     .map(|o| o.status.success())
@@ -941,6 +950,7 @@ pub fn spawn_adguard_monitor(state: AppState) {
 
             if iptables_active || iptables_temporarily_suspended {
                 let listener_ok = crate::adguard::test_agh_dns_listener(&host, dns_port).await;
+                set_adguard_down(!listener_ok);
 
                 if !listener_ok && iptables_active {
                     // AdGuard Home упал или завис при активных правилах перенаправления!
@@ -1227,10 +1237,8 @@ pub fn record_recent_gaming_conn(conn: RecentGamingConn) {
     }
 }
 
-/// Баг 10: IP устройств, за которыми следит умный режим: все включённые с IP; если включённых нет,
-/// а устройство одно — оно (прежнее поведение для единственного устройства).
+/// Баг 10 & 17: IP устройств, за которыми следит умный режим: только включённые устройства с IP.
 pub fn smart_gaming_watch_ips(gaming: &config::GamingConfig) -> Vec<String> {
-    let has_enabled = gaming.devices.iter().any(|d| d.enabled);
     gaming
         .devices
         .iter()

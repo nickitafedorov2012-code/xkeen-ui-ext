@@ -298,7 +298,7 @@ describe('VK-turn API endpoints', () => {
 
     const api = await import('./api')
     const { getVkTurnStatus, getVkTurnLogs, saveVkTurnConfig, vkTurnAction } = api
-    // WDTT: wg-конфиг выдаёт сервер, разбор вставленного конфига больше не нужен
+    // Конфиг туннеля выдаёт сервер, разбор вставленного конфига не нужен
     expect('parseVkTurnWg' in api).toBe(false)
     
     const status = await getVkTurnStatus()

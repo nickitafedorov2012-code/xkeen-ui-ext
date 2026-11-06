@@ -11,10 +11,10 @@ interface VkTurnProps {
   notify: (msg: string, error?: boolean) => void
 }
 
-/** Порт сервера WDTT на VPS по умолчанию */
-export const DEFAULT_WDTT_PORT = 56000
-/** Клиент WDTT использует до трёх ссылок одновременно */
-const MAX_LINKS_FALLBACK = 3
+/** PEER-порт сервера csqtt на VPS по умолчанию */
+export const DEFAULT_CSQTT_PORT = 46000
+/** Клиент csqtt использует до шести ссылок одновременно */
+const MAX_LINKS_FALLBACK = 6
 
 /** Хост из "host:port" / "[v6]:port" для подстановки в поле адреса сервера. */
 export function hostFromPeer(peer?: string | null): string {
@@ -46,7 +46,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
 
   // Мастер
   const [peerHost, setPeerHost] = useState('')
-  const [serverPort, setServerPort] = useState<number>(DEFAULT_WDTT_PORT)
+  const [serverPort, setServerPort] = useState<number>(DEFAULT_CSQTT_PORT)
   const [password, setPassword] = useState('')
   const [callLinks, setCallLinks] = useState<string[]>([''])
 
@@ -111,7 +111,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
       return
     }
     if (!password.trim()) {
-      notify('Укажите пароль подключения к серверу WDTT', true)
+      notify('Укажите пароль подключения к серверу csqtt', true)
       return
     }
     const links = callLinks.map((l) => l.trim()).filter(Boolean)
@@ -131,7 +131,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
       // Одно сохранение с enabled: true уже запускает клиент — отдельный вызов «enable» не нужен
       await saveVkTurnConfig({
         enabled: true,
-        peer: `${host}:${serverPort || DEFAULT_WDTT_PORT}`,
+        peer: `${host}:${serverPort || DEFAULT_CSQTT_PORT}`,
         password: password.trim(),
         links,
       })
@@ -351,7 +351,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
                 <span className="badge badge-warning" style={{ fontSize: 12 }}>Первоначальная настройка</span>
               </div>
               <p className="muted" style={{ margin: 0, fontSize: 14 }}>
-                Трафик идёт через серверы звонков ВКонтакте до вашего сервера WDTT на VPS — работает даже при белых списках.
+                Трафик идёт через серверы звонков ВКонтакте до вашего сервера csqtt на VPS — работает даже при белых списках.
               </p>
             </div>
             <button
@@ -373,7 +373,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
         </section>
 
         <section className="card" style={{ padding: '24px 26px' }}>
-          <h3 style={{ margin: '0 0 16px 0', fontSize: 16 }}>1️⃣ Сервер WDTT на VPS</h3>
+          <h3 style={{ margin: '0 0 16px 0', fontSize: 16 }}>1️⃣ Сервер csqtt на VPS</h3>
           <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 16 }}>
             <div style={{ flex: '1 1 260px', maxWidth: 420 }}>
               <label style={{ display: 'block', fontSize: 13, marginBottom: 6, fontWeight: 600 }}>
@@ -395,9 +395,9 @@ export default function VkTurn({ notify }: VkTurnProps) {
               <input
                 type="number"
                 className="input"
-                aria-label="Порт сервера WDTT"
+                aria-label="Порт сервера csqtt"
                 value={serverPort}
-                onChange={(e) => setServerPort(Number(e.target.value) || DEFAULT_WDTT_PORT)}
+                onChange={(e) => setServerPort(Number(e.target.value) || DEFAULT_CSQTT_PORT)}
                 style={{ width: '100%' }}
               />
             </div>
@@ -409,15 +409,15 @@ export default function VkTurn({ notify }: VkTurnProps) {
               type="password"
               className="input"
               autoComplete="new-password"
-              placeholder="Пароль от сервера WDTT"
+              placeholder="Пароль от сервера csqtt"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               style={{ width: '100%' }}
             />
           </div>
           <p className="muted" style={{ fontSize: 13, marginTop: 0, marginBottom: 0 }}>
-            🔑 Пароль выдаёт владелец сервера. Выданный пароль привязывается к одному устройству — для роутера
-            нужен отдельный, не тот, что уже стоит в телефоне. WireGuard-конфиг сервер пришлёт сам.
+            🔑 Это пароль туннеля, заданный при установке сервера csqtt (или выданный владельцем сервера).
+            Адрес внутри туннеля сервер выдаст сам.
           </p>
 
           <h3 style={{ margin: '24px 0 16px 0', fontSize: 16 }}>3️⃣ Ссылки на звонки ВКонтакте</h3>
@@ -482,7 +482,8 @@ export default function VkTurn({ notify }: VkTurnProps) {
   // ---------------------------------------------------------
   const phase = status?.phase || 'disabled'
   const isRunning = phase === 'connected'
-  const waitingWg = Boolean(status?.enabled && !status?.wg_ready && phase !== 'not_installed')
+  const waitingTunnel = Boolean(status?.enabled && !status?.tunnel_ready && phase !== 'not_installed')
+  const showPasswordFix = phase === 'auth_failed' || phase === 'server_unreachable'
   const showLastError = Boolean(
     status?.enabled && status?.last_error && !['captcha_required', 'disabled', 'not_installed'].includes(phase)
   )
@@ -520,7 +521,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
               <div>
                 <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>VK-туннель</h2>
                 <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
-                  Ядро WDTT {status?.core_version ? `· ${status.core_version}` : ''} {status?.pid ? `(PID: ${status.pid})` : ''}
+                  Ядро csqtt {status?.core_version ? `· ${status.core_version}` : ''} {status?.pid ? `(PID: ${status.pid})` : ''}
                 </div>
               </div>
               <div style={{ marginLeft: 8 }}>
@@ -528,7 +529,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
               </div>
             </div>
             <div style={{ fontSize: 13, color: 'var(--muted)' }}>
-              Звонки ВКонтакте → сервер WDTT: <b>{status?.peer || 'не указан'}</b>
+              Звонки ВКонтакте → сервер csqtt: <b>{status?.peer || 'не указан'}</b>
               {isRunning && (
                 <span data-testid="traffic-line">
                   {' '}• ↑ {formatTraffic(status?.bytes_up)} ↓ {formatTraffic(status?.bytes_down)}
@@ -565,9 +566,9 @@ export default function VkTurn({ notify }: VkTurnProps) {
           </div>
         )}
 
-        {waitingWg && isRunning && (
-          <div style={bannerStyle(false)} data-testid="waiting-wg">
-            ⏳ Соединение с сервером есть, жду от него WireGuard-конфиг — узел появится в списке серверов автоматически.
+        {waitingTunnel && isRunning && (
+          <div style={bannerStyle(false)} data-testid="waiting-tunnel">
+            ⏳ Соединение с сервером есть, подключаю туннель к роутеру — узел заработает в списке серверов автоматически.
           </div>
         )}
 
@@ -578,10 +579,13 @@ export default function VkTurn({ notify }: VkTurnProps) {
           </div>
         )}
 
-        {phase === 'auth_failed' && (
-          <div style={bannerStyle(true)}>
+        {showPasswordFix && (
+          <div style={bannerStyle(true)} data-testid="password-fix">
             <div style={{ marginBottom: 8, fontWeight: 600, color: 'var(--danger-fg, #ef4444)' }}>
-              {status?.last_error || 'Сервер WDTT отклонил пароль подключения.'}
+              {phase === 'auth_failed'
+                ? status?.last_error || 'Сервер csqtt отклонил пароль подключения.'
+                : 'Сервер на VPS не отвечает. Проверьте, что сервер csqtt запущен и открыт его UDP-порт. ' +
+                  'При неверном пароле сервер тоже молчит — если пароль мог измениться, введите его заново.'}
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <input
@@ -631,7 +635,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
           </div>
         )}
 
-        {showLastError && phase !== 'auth_failed' && (
+        {showLastError && !showPasswordFix && (
           <div className="muted" data-testid="last-error" style={{ marginTop: 12, fontSize: 13 }}>
             ⚠️ {status?.last_error}
           </div>
@@ -640,9 +644,9 @@ export default function VkTurn({ notify }: VkTurnProps) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 20, flexWrap: 'wrap' }}>
           <button
             className="btn btn-secondary"
-            disabled={testingPing || actionPending || !status?.enabled || !status?.wg_ready}
+            disabled={testingPing || actionPending || !status?.enabled || !status?.tunnel_ready}
             onClick={handleTest}
-            title={status?.wg_ready ? '' : 'Станет доступно, когда сервер выдаст WireGuard-конфиг'}
+            title={status?.tunnel_ready ? '' : 'Станет доступно, когда туннель подключится к серверу'}
             style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
           >
             <span>{testingPing ? '⏳' : '⚡'}</span>
@@ -712,7 +716,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
               }}
             >
               <div className="stat-card" style={{ padding: 12, background: 'rgba(255,255,255,0.03)', borderRadius: 8 }}>
-                <div className="muted" style={{ fontSize: 12 }}>Соединений (сейчас / воркеров)</div>
+                <div className="muted" style={{ fontSize: 12 }}>Соединений (сейчас / потоков)</div>
                 <div style={{ fontSize: 18, fontWeight: 700, marginTop: 4 }}>
                   {status?.connected_streams ?? 0} / {status?.target_streams ?? 0}
                 </div>
@@ -728,15 +732,9 @@ export default function VkTurn({ notify }: VkTurnProps) {
                 <div style={{ fontSize: 18, fontWeight: 700, marginTop: 4 }}>{status?.restarts ?? 0}</div>
               </div>
               <div className="stat-card" style={{ padding: 12, background: 'rgba(255,255,255,0.03)', borderRadius: 8 }}>
-                <div className="muted" style={{ fontSize: 12 }}>Клиентский IP WireGuard</div>
-                <div style={{ fontSize: 16, fontWeight: 600, marginTop: 4, fontFamily: 'monospace' }}>
-                  {status?.wg_ready ? status?.wg?.address || '—' : 'ждёт конфиг от сервера'}
-                </div>
-              </div>
-              <div className="stat-card" style={{ padding: 12, background: 'rgba(255,255,255,0.03)', borderRadius: 8, gridColumn: 'span 2' }}>
-                <div className="muted" style={{ fontSize: 12 }}>ID роутера для сервера</div>
-                <div style={{ fontSize: 13, fontWeight: 600, marginTop: 6, fontFamily: 'monospace', wordBreak: 'break-all' }}>
-                  {status?.device_id || '—'}
+                <div className="muted" style={{ fontSize: 12 }}>Адрес роутера в туннеле</div>
+                <div style={{ fontSize: 16, fontWeight: 600, marginTop: 4, fontFamily: 'monospace' }} data-testid="tunnel-ip">
+                  {status?.tunnel_ip ? `${status.tunnel_ip} · ${status.interface}` : 'выдаст сервер при подключении'}
                 </div>
               </div>
             </div>

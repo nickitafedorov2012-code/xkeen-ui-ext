@@ -633,18 +633,6 @@ pub fn mask_settings_for_api(cfg: &config::AppConfig) -> serde_json::Value {
                 *pw = serde_json::Value::String("******".into());
             }
         }
-        if let Some(wg) = vkturn.get_mut("wg") {
-            if let Some(pk) = wg.get_mut("private_key") {
-                if !pk.as_str().unwrap_or("").is_empty() {
-                    *pk = serde_json::Value::String("******".into());
-                }
-            }
-            if let Some(psk) = wg.get_mut("preshared_key") {
-                if psk.as_str().map_or(false, |s| !s.is_empty()) {
-                    *psk = serde_json::Value::String("******".into());
-                }
-            }
-        }
     }
 
     val
@@ -716,12 +704,6 @@ pub fn merge_settings_update(current: &config::AppConfig, body: &serde_json::Val
     }
     if new_cfg.vkturn.password == "******" {
         new_cfg.vkturn.password = current.vkturn.password.clone();
-    }
-    if new_cfg.vkturn.wg.private_key == "******" {
-        new_cfg.vkturn.wg.private_key = current.vkturn.wg.private_key.clone();
-    }
-    if new_cfg.vkturn.wg.preshared_key.as_deref() == Some("******") {
-        new_cfg.vkturn.wg.preshared_key = current.vkturn.wg.preshared_key.clone();
     }
 
     // Защита от инъекций и подмены путей в system (баг 125)
@@ -2271,7 +2253,7 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
             killall -15 mihomo xray nfqws nfqws2 2>/dev/null || true
             sleep 1
             killall -9 mihomo xray nfqws nfqws2 2>/dev/null || true
-            for ipt in iptables ip6tables; do
+            for ipt in "iptables -w 2" "ip6tables -w 2"; do
               for tbl in nat mangle; do
                 while $ipt -t $tbl -D PREROUTING -j xkeen 2>/dev/null; do :; done
                 while $ipt -t $tbl -D OUTPUT -j xkeen_mask 2>/dev/null; do :; done
@@ -2285,9 +2267,9 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
                 $ipt -t $tbl -F XKEEN_GAMING 2>/dev/null || true
                 $ipt -t $tbl -X XKEEN_GAMING 2>/dev/null || true
               done
-              while ip6tables -D FORWARD -j XKEEN_GAMING 2>/dev/null; do :; done
-              ip6tables -F XKEEN_GAMING 2>/dev/null || true
-              ip6tables -X XKEEN_GAMING 2>/dev/null || true
+              while ip6tables -w 2 -D FORWARD -j XKEEN_GAMING 2>/dev/null; do :; done
+              ip6tables -w 2 -F XKEEN_GAMING 2>/dev/null || true
+              ip6tables -w 2 -X XKEEN_GAMING 2>/dev/null || true
               $ipt -t nat -S PREROUTING 2>/dev/null | grep 'to-ports 1053' | while read -r rule; do
                 del_cmd=$(echo "$rule" | sed 's/^-A/-D/')
                 $ipt -t nat $del_cmd 2>/dev/null || true
@@ -7912,7 +7894,7 @@ pub fn format_nfqws_proc_cmdline(raw: &[u8]) -> String {
 }
 
 // ============================================================================
-// VK-туннель (ядро WDTT)
+// VK-туннель (ядро csqtt)
 // ============================================================================
 
 /// Ссылка для показа в панели без полного хеша звонка (по нему любой может зайти в звонок).
@@ -7955,13 +7937,11 @@ pub async fn get_vkturn_status(State(state): State<AppState>) -> Response {
         "enabled": v.enabled,
         "peer": v.peer,
         "has_password": !v.password.is_empty(),
-        "device_id": v.device_id,
-        "wg_ready": crate::vkturn::wg_ready(v),
-        "wg": {
-            "address": v.wg.address,
-            "mtu": v.wg.mtu,
-            "dns": v.wg.dns,
-        }
+        "tunnel_ready": installed && v.enabled && rt.tunnel_ready(),
+        "tunnel_ip": rt.tunnel_ip.map(|ip| ip.to_string()),
+        "tunnel_dns": rt.tunnel_dns,
+        "interface": crate::vkturn::TUN_IFACE,
+        "default_port": crate::vkturn::DEFAULT_SERVER_PORT,
     }))
 }
 
@@ -7975,7 +7955,7 @@ pub async fn get_vkturn_logs(State(state): State<AppState>) -> Response {
 #[derive(Deserialize, Default)]
 pub struct SaveVkTurnConfigReq {
     pub enabled: Option<bool>,
-    /// Адрес сервера WDTT: "host" или "host:port"
+    /// Адрес сервера csqtt: "host" или "host:port" (PEER-порт, по умолчанию 46000)
     pub peer: Option<String>,
     /// Пароль подключения; пустая строка или "******" — оставить прежний
     pub password: Option<String>,
@@ -7984,14 +7964,13 @@ pub struct SaveVkTurnConfigReq {
     /// Новая основная ссылка: встаёт первой, остальные (запасные) сохраняются без дублей
     pub primary_link: Option<String>,
     pub streams: Option<u8>,
-    pub listen_port: Option<u16>,
 }
 
 /// POST /api/vkturn/config
 ///
 /// Блокировки `config_lock`/`routing_lock` захватывает только `ConfigTx::begin` (внутри commit_vkturn).
 /// Захват их здесь вручную приводил к вечной взаимной блокировке (мьютексы tokio не реентерабельны).
-/// WireGuard-конфиг сюда не передаётся: его выдаёт сервер WDTT, и надзор сохраняет его сам.
+/// Адрес туннеля сюда не передаётся: его выдаёт сервер csqtt при подключении.
 pub async fn save_vkturn_config(
     State(state): State<AppState>,
     Json(body): Json<SaveVkTurnConfigReq>,
@@ -8036,18 +8015,8 @@ pub async fn save_vkturn_config(
     if let Some(s) = body.streams {
         new_cfg.streams = s;
     }
-    if let Some(lp) = body.listen_port {
-        new_cfg.listen_port = lp;
-    }
-
-    if let Err(e) = crate::vkturn::validate_listen_port(new_cfg.listen_port) {
-        return api_err(e);
-    }
     if new_cfg.links.len() > crate::vkturn::MAX_LINKS {
         return api_err(format!("Можно указать не больше {} ссылок на звонки", crate::vkturn::MAX_LINKS));
-    }
-    if !new_cfg.device_id.is_empty() && !crate::vkturn::is_valid_device_id(&new_cfg.device_id) {
-        return api_err("Повреждён идентификатор роутера для VK-туннеля");
     }
     if !new_cfg.password.is_empty() {
         if let Err(e) = crate::vkturn::validate_password(&new_cfg.password) {
@@ -8066,16 +8035,9 @@ pub async fn save_vkturn_config(
         }
     }
 
-    // Wg-конфиг и device-id берутся из транзакции: сервер мог прислать конфиг, пока мы проверяли запрос.
     let cfg_for_tx = new_cfg.clone();
     let saved = match crate::vkturn::commit_vkturn(&state, move |v| {
-        let wg = std::mem::take(&mut v.wg);
-        let device_id = std::mem::take(&mut v.device_id);
         *v = cfg_for_tx;
-        v.wg = wg;
-        if !device_id.is_empty() {
-            v.device_id = device_id;
-        }
         Ok(())
     })
     .await
@@ -8135,8 +8097,8 @@ pub async fn vkturn_action(
         },
         "test" => {
             let cfg = state.config.read().await.clone();
-            if !crate::vkturn::wg_ready(&cfg.vkturn) {
-                return api_err("Сервер WDTT ещё не выдал WireGuard-конфиг — проверка будет доступна после первого подключения");
+            if !state.vkturn.rt.read().await.tunnel_ready() {
+                return api_err("Туннель ещё не подключился к серверу csqtt — проверка будет доступна после подключения");
             }
             let delay = crate::mihomo::ping_server_url_expected_range(
                 &state.http,
@@ -8207,7 +8169,7 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
 
     let mut iptables_active = tokio::process::Command::new("sh")
         .arg("-c")
-        .arg("(iptables -t mangle -S POSTROUTING 2>/dev/null | grep -q zapret || iptables -t mangle -S PREROUTING 2>/dev/null | grep -q zapret) && iptables -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE")
+        .arg("(iptables -w 2 -t mangle -S POSTROUTING 2>/dev/null | grep -q zapret || iptables -w 2 -t mangle -S PREROUTING 2>/dev/null | grep -q zapret) && iptables -w 2 -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE")
         .output()
         .await
         .map(|o| o.status.success())
@@ -8304,7 +8266,7 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
     let dns_resolver_ready = crate::zapret::check_dns_resolver_ready(1053).await;
     let dns_redirect_active = tokio::process::Command::new("sh")
         .arg("-c")
-        .arg("iptables -t nat -S PREROUTING 2>/dev/null | grep -q '1053'")
+        .arg("iptables -w 2 -t nat -S PREROUTING 2>/dev/null | grep -q '1053'")
         .output()
         .await
         .map(|o| o.status.success())
@@ -9055,7 +9017,7 @@ pub async fn zapret_action(
 
         let ipt_ok = tokio::process::Command::new("sh")
             .arg("-c")
-            .arg("(iptables -t mangle -S PREROUTING 2>/dev/null | grep -q zapret || iptables -t mangle -S POSTROUTING 2>/dev/null | grep -q zapret) && iptables -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE")
+            .arg("(iptables -w 2 -t mangle -S PREROUTING 2>/dev/null | grep -q zapret || iptables -w 2 -t mangle -S POSTROUTING 2>/dev/null | grep -q zapret) && iptables -w 2 -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE")
             .status()
             .await
             .map(|s| s.success())
@@ -9899,7 +9861,7 @@ static ZAPRET_LAST_IPT_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::
 
 /// GET /api/zapret/analytics — Live-монитор и счётчик спасённого трафика (DPI Analytics)
 pub async fn get_zapret_analytics(State(state): State<AppState>) -> Response {
-    let ipt_cmd = "iptables -t mangle -L zapret -v -n -x 2>/dev/null";
+    let ipt_cmd = "iptables -w 2 -t mangle -L zapret -v -n -x 2>/dev/null";
     let out = tokio::process::Command::new("sh").arg("-c").arg(ipt_cmd).output().await;
 
     let mut total_bytes: u64 = 0;
@@ -10559,7 +10521,7 @@ async fn check_gaming_interception(cfg: &config::AppConfig) -> (bool, bool, bool
         // 1. Проверка перехвата TCP (PREROUTING nat -> xkeen или REDIRECT / TPROXY)
         let tcp_check = tokio::process::Command::new("sh")
             .arg("-c")
-            .arg("iptables -t nat -C PREROUTING -j xkeen 2>/dev/null || iptables -t nat -L xkeen -n 2>/dev/null || iptables -t nat -L PREROUTING -n 2>/dev/null | grep -qE 'REDIRECT|TPROXY'")
+            .arg("iptables -w 2 -t nat -C PREROUTING -j xkeen 2>/dev/null || iptables -w 2 -t nat -L xkeen -n 2>/dev/null || iptables -w 2 -t nat -L PREROUTING -n 2>/dev/null | grep -qE 'REDIRECT|TPROXY'")
             .status()
             .await
             .map(|s| s.success())
@@ -10568,7 +10530,7 @@ async fn check_gaming_interception(cfg: &config::AppConfig) -> (bool, bool, bool
         // 2. Проверка перехвата UDP (PREROUTING mangle -> xkeen или TPROXY / NFQUEUE)
         let udp_check = tokio::process::Command::new("sh")
             .arg("-c")
-            .arg("iptables -t mangle -C PREROUTING -j xkeen 2>/dev/null || iptables -t mangle -L xkeen -n 2>/dev/null || iptables -t mangle -L PREROUTING -n 2>/dev/null | grep -qE 'TPROXY|NFQUEUE'")
+            .arg("iptables -w 2 -t mangle -C PREROUTING -j xkeen 2>/dev/null || iptables -w 2 -t mangle -L xkeen -n 2>/dev/null || iptables -w 2 -t mangle -L PREROUTING -n 2>/dev/null | grep -qE 'TPROXY|NFQUEUE'")
             .status()
             .await
             .map(|s| s.success())
@@ -10577,7 +10539,7 @@ async fn check_gaming_interception(cfg: &config::AppConfig) -> (bool, bool, bool
         // 3. Честная проверка перехвата IPv6 (TPROXY/REDIRECT/xkeen в ip6tables mangle/nat)
         let ip6_iptables_check = tokio::process::Command::new("sh")
             .arg("-c")
-            .arg("ip6tables -t mangle -C PREROUTING -j xkeen 2>/dev/null || ip6tables -t mangle -L xkeen -n 2>/dev/null || ip6tables -t nat -L xkeen -n 2>/dev/null || ip6tables -t mangle -L PREROUTING -n 2>/dev/null | grep -qE 'TPROXY|REDIRECT|xkeen'")
+            .arg("ip6tables -w 2 -t mangle -C PREROUTING -j xkeen 2>/dev/null || ip6tables -w 2 -t mangle -L xkeen -n 2>/dev/null || ip6tables -w 2 -t nat -L xkeen -n 2>/dev/null || ip6tables -w 2 -t mangle -L PREROUTING -n 2>/dev/null | grep -qE 'TPROXY|REDIRECT|xkeen'")
             .status()
             .await
             .map(|s| s.success())
@@ -10736,7 +10698,7 @@ async fn apply_and_verify_gaming(
 
 /// Определение активного DNS-порта для перехвата (AdGuard 5353 или Mihomo 1053) с учётом доступности AdGuard (баг 1)
 pub fn resolve_active_dns_port(app_cfg: &config::AppConfig) -> u16 {
-    resolve_active_dns_port_with_health(app_cfg, true)
+    resolve_active_dns_port_with_health(app_cfg, !crate::watchdog::is_adguard_down())
 }
 
 pub fn resolve_active_dns_port_with_health(app_cfg: &config::AppConfig, adguard_is_alive: bool) -> u16 {
@@ -11311,7 +11273,7 @@ pub async fn sync_full_tunnel_modes(cfg: &config::AppConfig, redir_port: u16, tp
 mod settings_and_service_regression_tests {
     use super::{
         build_gaming_full_tunnel_commands, build_whitelist_full_tunnel_commands, full_tunnel_resync_needed,
-        mask_settings_for_api, merge_adguard_config_patch, merge_settings_update, resolve_active_dns_port_with_health,
+        mask_settings_for_api, merge_adguard_config_patch, merge_settings_update, resolve_active_dns_port, resolve_active_dns_port_with_health,
     };
     use crate::config;
 
@@ -11360,17 +11322,33 @@ mod settings_and_service_regression_tests {
         assert!(sync_script.contains("XKEEN_BS"), "Скрипт синхронизации портов обязан переключать XKEEN_BS");
         assert!(sync_script.contains("XKEEN_GAMING"), "Скрипт синхронизации портов обязан переключать XKEEN_GAMING");
 
-        // 2. resolve_active_dns_port_with_health при неработающем AdGuard не должен слать DNS на мёртвый порт
+        // 2. resolve_active_dns_port при неработающем AdGuard (флаг ADGUARD_DOWN) обязан возвращать порт Mihomo
         let mut cfg = config::AppConfig::default();
         cfg.adguard.enabled = true;
         cfg.adguard.dns_port = 5353;
         assert_eq!(resolve_active_dns_port_with_health(&cfg, false), 1053, "При упавшем AdGuard порт обязан переключаться на 1053 (Mihomo)");
+
+        crate::watchdog::set_adguard_down(true);
+        assert_eq!(resolve_active_dns_port(&cfg), 1053, "Рабочая resolve_active_dns_port при ADGUARD_DOWN=true обязана возвращать порт Mihomo");
+        crate::watchdog::set_adguard_down(false);
     }
 
     #[test]
     fn regression_bug_70_all_iptables_commands_use_wait_lock() {
         // Баг 70: Ни один iptables-вызов из Rust не использует -w.
         // Проверяем все сборщики команд iptables: каждая команда iptables обязана содержать флаг -w (или -w 2).
+        let api_src = include_str!("api.rs");
+        let wd_src = include_str!("watchdog.rs");
+
+        // В рабочих shell-командах (не комментарии) iptables/ip6tables обязаны содержать -w
+        let api_prod = &api_src[..api_src.find("#[cfg(test)]").unwrap_or(api_src.len())];
+        let wd_prod = &wd_src[..wd_src.find("#[cfg(test)]").unwrap_or(wd_src.len())];
+
+        assert!(!api_prod.contains("for ipt in iptables ip6tables; do"), "api.rs stop loop must use -w 2");
+        assert!(!api_prod.contains("iptables -t nat -C PREROUTING -j xkeen"), "api.rs checks must use -w 2");
+        assert!(!api_prod.contains("iptables -t mangle -C PREROUTING -j xkeen"), "api.rs checks must use -w 2");
+        assert!(!wd_prod.contains("iptables -t mangle -S 2>/dev/null"), "watchdog must use -w 2 for status checks");
+
         let mut gaming_cfg = config::GamingConfig::default();
         gaming_cfg.enabled = true;
         gaming_cfg.mode = config::GamingMode::Compatibility;
@@ -11500,6 +11478,36 @@ mod settings_and_service_regression_tests {
             assert!(commented || fallback, "RETURN-правило nat без комментария допустимо только как запасное: {line}");
         }
         assert!(checked >= 2, "в add_fw есть RETURN-правила nat");
+    }
+
+    #[test]
+    fn regression_bug_43_toggle_whitelist_device_does_not_corrupt_mac_on_ip_reuse() {
+        // Баг 43: toggle_whitelist_device искал устройство по (match_mac || match_ip).
+        // Если DHCP выдал старый IP другому устройству, у старой записи перезаписывался MAC!
+        let body = fn_body(production_source(), "pub async fn toggle_whitelist_device");
+
+        assert!(
+            !body.contains("match_mac || match_ip"),
+            "toggle_whitelist_device must NOT use loose 'match_mac || match_ip' which corrupts MAC on DHCP reuse"
+        );
+        assert!(
+            body.contains("is_target = if !mac_str.is_empty()"),
+            "toggle_whitelist_device must strictly prioritize MAC matching"
+        );
+    }
+    #[test]
+    fn regression_bug_40_save_whitelist_pinned_devices_uses_scoped_switch() {
+        // сколько закреплено устройств (в цикле вызывался `switch_group`, сбрасывающий ВСЕ соединения сети).
+        // Должен использоваться `switch_group_scoped`.
+        let save = fn_body(production_source(), "pub async fn save_whitelist");
+        assert!(
+            !save.contains("mihomo::switch_group("),
+            "save_whitelist must NOT call global switch_group in loop, breaking all network connections"
+        );
+        assert!(
+            save.contains("switch_group_scoped("),
+            "save_whitelist must use switch_group_scoped"
+        );
     }
 
     #[test]
@@ -11653,8 +11661,7 @@ rules:
         current.notifications.telegram_bot_token = "123456789:ABCdefGHIjklMNOpqrs".into();
         current.rci.password = "rci_secret_password".into();
         current.mihomo.secret = "mihomo_secret_token".into();
-        current.vkturn.wg.private_key = "a".repeat(43) + "=";
-        current.vkturn.wg.preshared_key = Some("b".repeat(43) + "=");
+        current.vkturn.password = "csqtt_tunnel_secret".into();
 
         // 1. Проверяем маскирование при отдаче настроек
         let masked = mask_settings_for_api(&current);
@@ -11664,14 +11671,9 @@ rules:
             "Токен Telegram-бота должен маскироваться '******' при отдаче в UI"
         );
         assert_eq!(
-            masked["vkturn"]["wg"]["private_key"].as_str(),
+            masked["vkturn"]["password"].as_str(),
             Some("******"),
-            "private_key VK-туннеля должен маскироваться '******' при отдаче в UI"
-        );
-        assert_eq!(
-            masked["vkturn"]["wg"]["preshared_key"].as_str(),
-            Some("******"),
-            "preshared_key VK-туннеля должен маскироваться '******' при отдаче в UI"
+            "пароль VK-туннеля должен маскироваться '******' при отдаче в UI"
         );
 
         // 2. Проверяем, что merge_settings_update не затирает секреты плейсхолдером "******"
@@ -11687,23 +11689,14 @@ rules:
                 "secret": "******"
             },
             "vkturn": {
-                "wg": {
-                    "private_key": "******",
-                    "preshared_key": "******"
-                }
+                "password": "******"
             }
         });
 
         let merged = merge_settings_update(&current, &update_body).expect("merge_settings_update");
         assert_eq!(
-            merged.vkturn.wg.private_key,
-            current.vkturn.wg.private_key,
-            "merge_settings_update не должен затирать private_key VK-туннеля"
-        );
-        assert_eq!(
-            merged.vkturn.wg.preshared_key,
-            current.vkturn.wg.preshared_key,
-            "merge_settings_update не должен затирать preshared_key VK-туннеля"
+            merged.vkturn.password, "csqtt_tunnel_secret",
+            "merge_settings_update не должен затирать пароль VK-туннеля"
         );
         assert_eq!(
             merged.notifications.telegram_bot_token,
@@ -12918,12 +12911,13 @@ pub async fn save_whitelist(
     sync_whitelist_runtime_after_commit(&state, tx.config()).await;
 
     // BS-PIN: выбираем закреплённую ноду в per-device группе (runtime, вне Failover)
+    // Баг 40: используем switch_group_scoped, чтобы не рвать соединения всей сети
     for dev in &tx.config().whitelist.devices {
         let srv = dev.server.as_deref().map(str::trim).unwrap_or("");
         let ip = dev.ip.trim();
         if !srv.is_empty() && !ip.is_empty() {
             let gname = routing::group_name_for(ip, dev.name.as_deref().unwrap_or(""));
-            if let Err(e) = mihomo::switch_group(&state.http, tx.config(), &gname, srv).await {
+            if let Err(e) = mihomo::switch_group_scoped(&state.http, tx.config(), &gname, srv).await {
                 log_w!("[BS-PIN] Не удалось выбрать ноду '{}' в группе '{}': {}", srv, gname, e);
             } else {
                 log_i!("[BS-PIN] Устройство {} ({}) закреплено за нодой '{}' (группа '{}')", dev.name.as_deref().unwrap_or("?"), ip, srv, gname);
@@ -13004,14 +12998,23 @@ pub async fn toggle_whitelist_device(
         Err(e) => return api_err(e),
     };
 
+    // Баг 43: устройство идентифицируется строго по MAC-адресу, если он передан.
+    // Если MAC передан, ищем ТОЛЬКО по MAC, обновляя IP. Если MAC не передан, ищем по IP,
+    // но никогда не перезаписываем чужой MAC при DHCP-смене адресов.
     let mut matched = false;
     for dev in &mut tx.config_mut().whitelist.devices {
-        let match_mac = !mac_str.is_empty() && dev.mac.eq_ignore_ascii_case(&mac_str);
-        let match_ip = !ip_str.is_empty() && dev.ip == ip_str;
-        if match_mac || match_ip {
+        let is_target = if !mac_str.is_empty() {
+            dev.mac.eq_ignore_ascii_case(&mac_str)
+        } else if !ip_str.is_empty() {
+            dev.ip == ip_str
+        } else {
+            false
+        };
+
+        if is_target {
             dev.enabled = body.enabled;
             if !ip_str.is_empty() { dev.ip = ip_str.clone(); }
-            if !mac_str.is_empty() { dev.mac = mac_str.clone(); }
+            if dev.mac.is_empty() && !mac_str.is_empty() { dev.mac = mac_str.clone(); }
             if let Some(ref n) = name_opt {
                 if !n.trim().is_empty() { dev.name = Some(n.clone()); }
             }

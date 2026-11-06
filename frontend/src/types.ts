@@ -1077,25 +1077,25 @@ export interface VkTurnStatus {
   enabled: boolean
   peer: string
   has_password: boolean
-  device_id: string
-  /** Сервер WDTT уже выдал WireGuard-конфиг, узел подключён к Mihomo */
-  wg_ready: boolean
-  wg: {
-    address: string
-    mtu: number
-    dns: string[]
-  }
+  /** Сервер csqtt выдал адрес туннеля и интерфейс передан клиенту — трафик Mihomo идёт в туннель */
+  tunnel_ready: boolean
+  /** Адрес роутера внутри туннеля (выдаёт сервер csqtt) */
+  tunnel_ip?: string | null
+  tunnel_dns?: string | null
+  /** TUN-интерфейс туннеля на роутере */
+  interface: string
+  /** PEER-порт сервера csqtt по умолчанию */
+  default_port: number
 }
 
 export interface VkTurnConfigPayload {
   enabled?: boolean
-  /** IP или домен сервера WDTT, можно с портом (по умолчанию 56000) */
+  /** IP или домен сервера csqtt, можно с портом (по умолчанию 46000) */
   peer?: string
   /** Пароль подключения; пустая строка — оставить прежний */
   password?: string
   links?: string[]
   streams?: number
-  listen_port?: number
   /** Новая основная ссылка: встаёт первой, запасные сохраняются */
   primary_link?: string
 }
