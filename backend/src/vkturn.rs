@@ -75,7 +75,7 @@ pub const CAPTCHA_NO_WEBVIEW_REPLY: &str = "CAPTCHA_RESULT|error:webview unavail
 
 /// SHA-256 бинарников CORE_TAG (вывод scripts/build-csqtt-core.sh).
 pub const CORE_SHA256: &[(&str, &str)] = &[
-    ("csqtt-client-linux-arm64", "448dfcbd7053be7ff01e1da3e0f1ce278b4acf42c7d6944fc61682565d15d82f"),
+    ("csqtt-client-linux-arm64", "27cbeab0783758820c3973c7eda81b7ca83bcaed84b5579be5c0521509f9053b"),
 ];
 
 /// Сопоставление с архитектурами от updater::detect_mihomo_arch().
