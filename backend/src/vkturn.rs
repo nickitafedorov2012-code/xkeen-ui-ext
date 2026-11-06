@@ -930,6 +930,17 @@ pub struct VkTurnManager {
     core_path: std::path::PathBuf,
     /// Число живых задач надзора — для диагностики и анти-регрессионного теста гонки перезапусков.
     active_supervisors: Arc<std::sync::atomic::AtomicUsize>,
+    /// Фоновая установка ядра: скачивание идёт дольше таймаута запроса веб-панели (30 с).
+    pub install: Arc<std::sync::Mutex<CoreInstall>>,
+}
+
+/// Состояние фоновой установки ядра для статуса VK-туннеля.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct CoreInstall {
+    pub running: bool,
+    pub downloaded: u64,
+    pub total: Option<u64>,
+    pub error: Option<String>,
 }
 
 /// Учитывает живую задачу надзора: +1 при создании, −1 при любом выходе (в том числе при abort,
@@ -1016,7 +1027,29 @@ impl VkTurnManager {
             op_lock: Mutex::new(None),
             core_path: path.into(),
             active_supervisors: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            install: Arc::new(std::sync::Mutex::new(CoreInstall::default())),
         })
+    }
+
+    pub fn install_state(&self) -> CoreInstall {
+        self.install.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+
+    /// Помечает начало установки. `false` — установка уже идёт (повторное нажатие не запускает вторую).
+    pub fn begin_install(&self) -> bool {
+        let Ok(mut g) = self.install.lock() else { return false };
+        if g.running {
+            return false;
+        }
+        *g = CoreInstall { running: true, ..Default::default() };
+        true
+    }
+
+    pub fn finish_install(&self, result: &Result<String, String>) {
+        if let Ok(mut g) = self.install.lock() {
+            g.running = false;
+            g.error = result.as_ref().err().cloned();
+        }
     }
 
     pub fn active_supervisors(&self) -> usize {
@@ -1377,11 +1410,20 @@ pub async fn install_core(state: &crate::AppState) -> Result<String, String> {
 
     let cfg = state.config.read().await.clone();
     let proxy_url = cfg.mihomo_proxy_url();
-    let bytes = crate::updater::download_file_verified_with_client(
+    let install = state.vkturn.install.clone();
+    let progress = move |done: u64, total: Option<u64>| {
+        if let Ok(mut g) = install.lock() {
+            g.downloaded = done;
+            g.total = total;
+        }
+    };
+    let bytes = crate::updater::download_file_verified_with_progress(
         &state.http,
         &url,
         Some(expected),
         &proxy_url,
+        crate::updater::DownloadLimits::default(),
+        &progress,
     )
     .await?;
 
@@ -1461,6 +1503,27 @@ mod tests {
         cfg.password = "s3cret-pass".into();
         cfg.links = links.iter().map(|s| s.to_string()).collect();
         cfg
+    }
+
+    // Регрессия: установка ядра шла внутри запроса и обрывалась таймаутом веб-панели (30 с).
+    // Теперь она фоновая: повторное нажатие не запускает вторую, итог виден в статусе.
+    #[test]
+    fn core_install_runs_once_and_reports_result() {
+        let mgr = VkTurnManager::with_core_path("/nonexistent/csqtt-client");
+        assert_eq!(mgr.install_state(), CoreInstall::default());
+        assert!(mgr.begin_install());
+        assert!(!mgr.begin_install(), "вторая установка не должна стартовать, пока идёт первая");
+        mgr.install.lock().unwrap().downloaded = 4096;
+        assert!(mgr.install_state().running);
+        mgr.finish_install(&Err("данные перестали приходить".into()));
+        let st = mgr.install_state();
+        assert!(!st.running);
+        assert_eq!(st.error.as_deref(), Some("данные перестали приходить"));
+        // Новая попытка сбрасывает прошлую ошибку и прогресс
+        assert!(mgr.begin_install());
+        assert_eq!(mgr.install_state(), CoreInstall { running: true, ..Default::default() });
+        mgr.finish_install(&Ok("ok".into()));
+        assert_eq!(mgr.install_state().error, None);
     }
 
     #[test]

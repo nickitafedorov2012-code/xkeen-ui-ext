@@ -129,11 +129,113 @@ pub async fn download_file_verified(
     download_file_verified_with_client(&direct, url, expected_sha256, proxy_fallback).await
 }
 
+/// Лимиты скачивания. Общий таймаут на весь файл обрывал медленную, но живую загрузку:
+/// 10 МБ при 150 КБ/с не успевали за 60 с ни через прокси, ни напрямую. Теперь загрузка
+/// обрывается, только если данные перестали приходить (`stall`), а `total` — страховка от вечной.
+#[derive(Clone, Copy, Debug)]
+pub struct DownloadLimits {
+    /// Ожидание ответа сервера (заголовков).
+    pub response: Duration,
+    /// Сколько можно ждать очередной порции данных.
+    pub stall: Duration,
+    /// Предел на весь файл.
+    pub total: Duration,
+}
+
+impl Default for DownloadLimits {
+    fn default() -> Self {
+        Self {
+            response: Duration::from_secs(30),
+            stall: Duration::from_secs(30),
+            total: Duration::from_secs(15 * 60),
+        }
+    }
+}
+
+/// Прогресс скачивания: (скачано байт, размер файла, если сервер его сообщил).
+pub type DownloadProgress<'a> = &'a (dyn Fn(u64, Option<u64>) + Send + Sync);
+
+/// Скачивает тело ответа порциями с контролем «зависания» вместо общего таймаута.
+pub async fn fetch_body(
+    client: &reqwest::Client,
+    url: &str,
+    limits: DownloadLimits,
+    progress: DownloadProgress<'_>,
+) -> Result<Vec<u8>, String> {
+    let started = std::time::Instant::now();
+    let mut res = tokio::time::timeout(
+        limits.response,
+        client.get(url).header("User-Agent", "xkeen-route").send(),
+    )
+    .await
+    .map_err(|_| format!("сервер не ответил за {} с", limits.response.as_secs()))?
+    .map_err(|e| format!("сетевая ошибка: {e}"))?;
+    if !res.status().is_success() {
+        return Err(format!("HTTP статус {}", res.status()));
+    }
+    let total = res.content_length();
+    let mut body: Vec<u8> = Vec::with_capacity(total.unwrap_or(0).min(64 << 20) as usize);
+    let over_total = |got: usize| {
+        format!(
+            "загрузка не уложилась в {} с (скачано {got} из {} байт)",
+            limits.total.as_secs(),
+            total.map(|t| t.to_string()).unwrap_or_else(|| "?".into())
+        )
+    };
+    progress(0, total);
+    loop {
+        let left = limits.total.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            return Err(over_total(body.len()));
+        }
+        match tokio::time::timeout(limits.stall.min(left), res.chunk()).await {
+            Err(_) if started.elapsed() >= limits.total => return Err(over_total(body.len())),
+            Err(_) => {
+                return Err(format!(
+                    "данные перестали приходить (скачано {} байт)",
+                    body.len()
+                ))
+            }
+            Ok(Err(e)) => return Err(format!("ошибка чтения данных: {e}")),
+            Ok(Ok(None)) => break,
+            Ok(Ok(Some(chunk))) => {
+                body.extend_from_slice(&chunk);
+                progress(body.len() as u64, total);
+            }
+        }
+    }
+    if let Some(t) = total {
+        if body.len() as u64 != t {
+            return Err(format!("файл скачан не полностью ({} из {t} байт)", body.len()));
+        }
+    }
+    Ok(body)
+}
+
 pub async fn download_file_verified_with_client(
     direct: &reqwest::Client,
     url: &str,
     expected_sha256: Option<&str>,
     proxy_fallback: &str,
+) -> Result<Vec<u8>, String> {
+    download_file_verified_with_progress(
+        direct,
+        url,
+        expected_sha256,
+        proxy_fallback,
+        DownloadLimits::default(),
+        &|_, _| {},
+    )
+    .await
+}
+
+pub async fn download_file_verified_with_progress(
+    direct: &reqwest::Client,
+    url: &str,
+    expected_sha256: Option<&str>,
+    proxy_fallback: &str,
+    limits: DownloadLimits,
+    progress: DownloadProgress<'_>,
 ) -> Result<Vec<u8>, String> {
     let proxied = proxied_client(proxy_fallback);
     let mut clients: Vec<(&str, &reqwest::Client)> = Vec::new();
@@ -147,29 +249,14 @@ pub async fn download_file_verified_with_client(
 
     for (mode_name, client) in &clients {
         crate::log_i!("[download_file_verified] Попытка загрузки ({mode_name}): {url}");
-        match client
-            .get(url)
-            .header("User-Agent", "xkeen-route")
-            .timeout(Duration::from_secs(60))
-            .send()
-            .await
-        {
-            Ok(res) if res.status().is_success() => {
-                match res.bytes().await {
-                    Ok(bytes) => {
-                        downloaded_bytes = Some(bytes.to_vec());
-                        break;
-                    }
-                    Err(e) => {
-                        last_err = format!("Ошибка чтения данных ({mode_name}): {e}");
-                    }
-                }
-            }
-            Ok(res) => {
-                last_err = format!("HTTP статус {} ({mode_name})", res.status());
+        match fetch_body(client, url, limits, progress).await {
+            Ok(bytes) => {
+                downloaded_bytes = Some(bytes);
+                break;
             }
             Err(e) => {
-                last_err = format!("Сетевая ошибка ({mode_name}): {e}");
+                crate::log_w!("[download_file_verified] Загрузка ({mode_name}) не удалась: {e}");
+                last_err = format!("Не удалось скачать ({mode_name}): {e}");
             }
         }
     }
@@ -1366,6 +1453,105 @@ pub async fn mihomo_install(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// HTTP-сервер, отдающий `chunks` порций по `chunk_len` байт с паузой `gap` между ними;
+    /// после `stall_after` порций замолкает на `stall` (имитация оборвавшейся связи).
+    async fn slow_server(
+        chunks: usize,
+        chunk_len: usize,
+        gap: Duration,
+        stall_after: Option<(usize, Duration)>,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let mut req = Vec::new();
+            while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = sock.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    return;
+                }
+                req.extend_from_slice(&buf[..n]);
+            }
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                chunks * chunk_len
+            );
+            if sock.write_all(head.as_bytes()).await.is_err() {
+                return;
+            }
+            for i in 0..chunks {
+                if let Some((after, pause)) = stall_after {
+                    if i == after {
+                        tokio::time::sleep(pause).await;
+                    }
+                }
+                if sock.write_all(&vec![b'x'; chunk_len]).await.is_err() {
+                    return;
+                }
+                let _ = sock.flush().await;
+                tokio::time::sleep(gap).await;
+            }
+        });
+        format!("http://{addr}/core")
+    }
+
+    fn plain_client() -> reqwest::Client {
+        reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
+    // Регрессия: ядро VK-туннеля (10 МБ) на медленном канале не успевало скачаться за общий
+    // таймаут 60 с. Медленная, но живая загрузка дольше `stall` должна завершаться целиком.
+    #[tokio::test]
+    async fn slow_but_alive_download_completes_with_progress() {
+        let url = slow_server(15, 1024, Duration::from_millis(100), None).await;
+        let limits = DownloadLimits {
+            response: Duration::from_secs(5),
+            stall: Duration::from_millis(700),
+            total: Duration::from_secs(30),
+        };
+        let seen = std::sync::Mutex::new(Vec::new());
+        let started = std::time::Instant::now();
+        let body = fetch_body(&plain_client(), &url, limits, &|done, total| {
+            seen.lock().unwrap().push((done, total));
+        })
+        .await
+        .expect("медленная живая загрузка должна завершиться");
+        assert!(started.elapsed() > limits.stall, "загрузка шла дольше stall-таймаута");
+        assert_eq!(body.len(), 15 * 1024);
+        let seen = seen.into_inner().unwrap();
+        assert_eq!(seen.first(), Some(&(0, Some(15 * 1024))));
+        assert_eq!(seen.last(), Some(&(15 * 1024, Some(15 * 1024))));
+    }
+
+    #[tokio::test]
+    async fn stalled_download_is_aborted() {
+        let url = slow_server(6, 1024, Duration::from_millis(20), Some((3, Duration::from_secs(5)))).await;
+        let limits = DownloadLimits {
+            response: Duration::from_secs(5),
+            stall: Duration::from_millis(400),
+            total: Duration::from_secs(30),
+        };
+        let started = std::time::Instant::now();
+        let err = fetch_body(&plain_client(), &url, limits, &|_, _| {}).await.unwrap_err();
+        assert!(err.contains("перестали приходить"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn download_respects_total_limit() {
+        let url = slow_server(40, 512, Duration::from_millis(100), None).await;
+        let limits = DownloadLimits {
+            response: Duration::from_secs(5),
+            stall: Duration::from_secs(2),
+            total: Duration::from_millis(600),
+        };
+        let err = fetch_body(&plain_client(), &url, limits, &|_, _| {}).await.unwrap_err();
+        assert!(err.contains("не уложилась"), "{err}");
+    }
 
     #[test]
     fn test_is_newer_versions() {

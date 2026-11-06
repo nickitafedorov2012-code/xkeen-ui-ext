@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import VkTurn, { hostFromPeer, formatTraffic } from './VkTurn'
+import VkTurn, { hostFromPeer, formatTraffic, installProgressText, waitForCoreInstall, vkTurnTiming } from './VkTurn'
 import * as api from '../api'
 import type { VkTurnStatus, VkTurnPhase } from '../types'
 
@@ -191,8 +191,18 @@ describe('VkTurn Component (ядро csqtt)', () => {
     expect(findButton('Добавить запасную ссылку')).toBeUndefined()
   })
 
-  it('in wizard mode triggers install_core first if component not installed', async () => {
-    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({ ...defaultUnconfiguredStatus, installed: false })
+  // Регрессия: скачивание компонента шло одним запросом и обрывалось таймаутом панели (30 с).
+  // Теперь компонент качается в фоне, мастер ждёт окончания по статусу и только потом сохраняет.
+  it('in wizard mode installs the component in background and saves after it is installed', async () => {
+    vkTurnTiming.installPollMs = 0
+    vi.spyOn(api, 'getVkTurnStatus')
+      .mockResolvedValueOnce({ ...defaultUnconfiguredStatus, installed: false })
+      .mockResolvedValueOnce({
+        ...defaultUnconfiguredStatus,
+        installed: false,
+        install: { running: true, downloaded: 3 * 1024 * 1024, total: 10 * 1024 * 1024, error: null },
+      })
+      .mockResolvedValue({ ...defaultUnconfiguredStatus, installed: true, install: { running: false, downloaded: 1, total: 1, error: null } })
     const actionSpy = vi.spyOn(api, 'vkTurnAction').mockResolvedValue({ success: true })
     const saveConfigSpy = vi.spyOn(api, 'saveVkTurnConfig').mockResolvedValue({ success: true })
 
@@ -203,10 +213,94 @@ describe('VkTurn Component (ядро csqtt)', () => {
     await act(async () => {
       findButton('Включить')!.click()
     })
+    await act(async () => {
+      await vi.waitFor(() => expect(saveConfigSpy).toHaveBeenCalled())
+    })
 
     expect(actionSpy).toHaveBeenCalledWith('install_core')
-    expect(saveConfigSpy).toHaveBeenCalled()
     expect(actionSpy.mock.invocationCallOrder[0]).toBeLessThan(saveConfigSpy.mock.invocationCallOrder[0])
+    expect(notifyMock).not.toHaveBeenCalledWith(expect.anything(), true)
+  })
+
+  it('in wizard mode reports a failed background download and does not save', async () => {
+    vkTurnTiming.installPollMs = 0
+    vi.spyOn(api, 'getVkTurnStatus')
+      .mockResolvedValueOnce({ ...defaultUnconfiguredStatus, installed: false })
+      .mockResolvedValue({
+        ...defaultUnconfiguredStatus,
+        installed: false,
+        install: { running: false, downloaded: 4096, total: 10_000_000, error: 'Не удалось скачать (direct): данные перестали приходить' },
+      })
+    vi.spyOn(api, 'vkTurnAction').mockResolvedValue({ success: true })
+    const saveConfigSpy = vi.spyOn(api, 'saveVkTurnConfig').mockResolvedValue({ success: true })
+
+    await act(async () => {
+      root!.render(<VkTurn notify={notifyMock} />)
+    })
+    await fillWizard({ host: '198.51.100.7', password: 'pw', link: 'https://vk.com/call/join/link12345' })
+    await act(async () => {
+      findButton('Включить')!.click()
+    })
+    await act(async () => {
+      await vi.waitFor(() =>
+        expect(notifyMock).toHaveBeenCalledWith(
+          'Не удалось скачать компонент: Не удалось скачать (direct): данные перестали приходить',
+          true,
+        ),
+      )
+    })
+    expect(saveConfigSpy).not.toHaveBeenCalled()
+  })
+
+  it('shows download progress while the component is being installed', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({
+      ...defaultConnectedStatus,
+      phase: 'not_installed',
+      installed: false,
+      install: { running: true, downloaded: 3 * 1024 * 1024, total: 10 * 1024 * 1024, error: null },
+    })
+    await act(async () => {
+      root!.render(<VkTurn notify={notifyMock} />)
+    })
+    expect(container?.querySelector('[data-testid="install-progress"]')?.textContent).toContain('3.0 МБ из 10.0 МБ (30%)')
+    expect(findButton('Установить компонент')).toBeUndefined()
+  })
+
+  it('installProgressText and waitForCoreInstall', async () => {
+    expect(installProgressText({ running: true, downloaded: 0, total: null })).toBe('подключаюсь к серверу загрузки')
+    expect(installProgressText({ running: true, downloaded: 2048, total: null })).toBe('2.0 КБ')
+    expect(installProgressText({ running: true, downloaded: 512, total: 1024 })).toBe('512 Б из 1.0 КБ (50%)')
+
+    const seen: VkTurnStatus[] = []
+    const seq: VkTurnStatus[] = [
+      { ...defaultUnconfiguredStatus, installed: false, install: { running: true, downloaded: 1, total: 2 } },
+      { ...defaultUnconfiguredStatus, installed: true, install: { running: false, downloaded: 2, total: 2 } },
+    ]
+    let i = 0
+    await waitForCoreInstall(async () => seq[Math.min(i++, seq.length - 1)], (s) => seen.push(s), 0)
+    expect(seen.length).toBe(2)
+
+    // Роутер на мгновение не ответил — ждём дальше, а не падаем
+    let calls = 0
+    await waitForCoreInstall(
+      async () => {
+        calls++
+        if (calls === 1) throw new Error('network')
+        return { ...defaultUnconfiguredStatus, installed: true, install: { running: false, downloaded: 2, total: 2 } }
+      },
+      () => {},
+      0,
+    )
+    expect(calls).toBe(2)
+
+    await expect(
+      waitForCoreInstall(
+        async () => ({ ...defaultUnconfiguredStatus, installed: false, install: { running: true, downloaded: 1 } }),
+        () => {},
+        5,
+        30,
+      ),
+    ).rejects.toThrow('слишком долго')
   })
 
   it('renders monitoring card for connected phase and handles toggle actions', async () => {
@@ -362,6 +456,7 @@ describe('VkTurn Component (ядро csqtt)', () => {
   it('renders not_installed phase with installation button', async () => {
     vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({ ...defaultConnectedStatus, phase: 'not_installed', installed: false })
     const actionSpy = vi.spyOn(api, 'vkTurnAction').mockResolvedValue({ success: true })
+    vkTurnTiming.installPollMs = 0
     await act(async () => {
       root!.render(<VkTurn notify={notifyMock} />)
     })
@@ -370,6 +465,10 @@ describe('VkTurn Component (ядро csqtt)', () => {
       findButton('Установить компонент')!.click()
     })
     expect(actionSpy).toHaveBeenCalledWith('install_core')
+    // Статус так и не показал установленный компонент — пользователь видит понятную ошибку
+    await act(async () => {
+      await vi.waitFor(() => expect(notifyMock).toHaveBeenCalledWith('Компонент не установился — попробуйте ещё раз', true))
+    })
   })
 
   it('renders all phases correctly', async () => {

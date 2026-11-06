@@ -7942,6 +7942,7 @@ pub async fn get_vkturn_status(State(state): State<AppState>) -> Response {
         "tunnel_dns": rt.tunnel_dns,
         "interface": crate::vkturn::TUN_IFACE,
         "default_port": crate::vkturn::DEFAULT_SERVER_PORT,
+        "install": state.vkturn.install_state(),
     }))
 }
 
@@ -8081,20 +8082,33 @@ pub async fn vkturn_action(
                 "message": "VK-туннель перезапущен"
             }))
         }
-        "install_core" => match crate::vkturn::install_core(&state).await {
-            Ok(msg) => {
-                // Если туннель уже включён и ждал ядро — запускаем его сразу.
-                let cfg = state.config.read().await.vkturn.clone();
-                if cfg.enabled {
-                    state.vkturn.restart(cfg, state.clone()).await;
-                }
-                api_ok(json!({
-                    "success": true,
-                    "message": msg
-                }))
+        "install_core" => {
+            // Скачивание ядра (~11 МБ) на медленном канале идёт минутами — дольше таймаута запроса
+            // веб-панели, поэтому установка идёт в фоне, а ход виден в статусе (поле install).
+            if state.vkturn.begin_install() {
+                let st = state.clone();
+                tokio::spawn(async move {
+                    let result = crate::vkturn::install_core(&st).await;
+                    match &result {
+                        Ok(msg) => crate::log_i!("[VK-туннель] {msg}"),
+                        Err(e) => crate::log_w!("[VK-туннель] Установка ядра не удалась: {e}"),
+                    }
+                    if result.is_ok() {
+                        // Если туннель уже включён и ждал ядро — запускаем его сразу.
+                        let cfg = st.config.read().await.vkturn.clone();
+                        if cfg.enabled {
+                            st.vkturn.restart(cfg, st.clone()).await;
+                        }
+                    }
+                    st.vkturn.finish_install(&result);
+                });
             }
-            Err(e) => api_err(e),
-        },
+            api_ok(json!({
+                "success": true,
+                "started": true,
+                "message": "Скачиваю компонент VK-туннеля"
+            }))
+        }
         "test" => {
             let cfg = state.config.read().await.clone();
             if !state.vkturn.rt.read().await.tunnel_ready() {

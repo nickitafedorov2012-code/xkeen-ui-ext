@@ -5,7 +5,7 @@ import {
   saveVkTurnConfig,
   vkTurnAction,
 } from '../api'
-import type { VkTurnStatus, VkTurnPhase } from '../types'
+import type { VkTurnStatus, VkTurnPhase, VkTurnCoreInstall } from '../types'
 
 interface VkTurnProps {
   notify: (msg: string, error?: boolean) => void
@@ -31,6 +31,48 @@ export function formatTraffic(bytes?: number | null): string {
   if (b < 1024 ** 3) return `${(b / 1024 ** 2).toFixed(1)} МБ`
   return `${(b / 1024 ** 3).toFixed(2)} ГБ`
 }
+
+/** Сколько скачано из компонента: «3.2 МБ из 10.3 МБ (31%)» */
+export function installProgressText(install?: VkTurnCoreInstall | null): string {
+  const done = Number(install?.downloaded) || 0
+  const total = Number(install?.total) || 0
+  if (total > 0) {
+    const pct = Math.min(100, Math.floor((done / total) * 100))
+    return `${formatTraffic(done)} из ${formatTraffic(total)} (${pct}%)`
+  }
+  return done > 0 ? formatTraffic(done) : 'подключаюсь к серверу загрузки'
+}
+
+/**
+ * Компонент скачивается на роутере в фоне — на медленном канале это минуты, дольше таймаута
+ * одного запроса панели. Ждём окончания по статусу.
+ */
+export async function waitForCoreInstall(
+  fetchStatus: () => Promise<VkTurnStatus>,
+  onStatus: (s: VkTurnStatus) => void,
+  pollMs = 1500,
+  maxWaitMs = 16 * 60 * 1000,
+): Promise<void> {
+  const deadline = Date.now() + maxWaitMs
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, pollMs))
+    let st: VkTurnStatus
+    try {
+      st = await fetchStatus()
+    } catch {
+      continue // роутер мог на секунду не ответить — продолжаем ждать
+    }
+    onStatus(st)
+    if (st.install?.running) continue
+    if (st.install?.error) throw new Error(`Не удалось скачать компонент: ${st.install.error}`)
+    if (st.installed) return
+    throw new Error('Компонент не установился — попробуйте ещё раз')
+  }
+  throw new Error('Компонент скачивается слишком долго — проверьте интернет на роутере и попробуйте ещё раз')
+}
+
+/** Интервал опроса статуса во время установки компонента (в тестах уменьшается). */
+export const vkTurnTiming = { installPollMs: 1500 }
 
 const badgeStyle = { fontSize: 13, padding: '4px 10px' }
 
@@ -95,6 +137,11 @@ export default function VkTurn({ notify }: VkTurnProps) {
 
   const maxLinks = status?.max_links || MAX_LINKS_FALLBACK
 
+  const installCore = async () => {
+    await vkTurnAction('install_core')
+    await waitForCoreInstall(getVkTurnStatus, setStatus, vkTurnTiming.installPollMs)
+  }
+
   const handleCallLinkChange = (index: number, val: string) => {
     setCallLinks((prev) => {
       const copy = [...prev]
@@ -123,8 +170,8 @@ export default function VkTurn({ notify }: VkTurnProps) {
     setActionPending(true)
     try {
       if (status && !status.installed) {
-        notify('Скачиваю компонент…')
-        await vkTurnAction('install_core')
+        notify('Скачиваю компонент VK-туннеля (около 11 МБ) — на медленном интернете это займёт несколько минут…')
+        await installCore()
       }
 
       notify('Сохранение конфигурации и запуск...')
@@ -191,8 +238,8 @@ export default function VkTurn({ notify }: VkTurnProps) {
   const handleInstallCore = async () => {
     setActionPending(true)
     try {
-      notify('Установка компонента VK-туннеля...')
-      await vkTurnAction('install_core')
+      notify('Скачиваю компонент VK-туннеля (около 11 МБ) — на медленном интернете это займёт несколько минут…')
+      await installCore()
       notify('Компонент успешно установлен')
       await loadStatus(true)
     } catch (err: any) {
@@ -250,6 +297,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
     )
   }
 
+  const installing = Boolean(status?.install?.running)
   const isConfigured = Boolean(status?.peer && status?.has_password && (status?.links_count ?? 0) > 0)
 
   const renderPhaseBadge = (phase: VkTurnPhase = 'disabled', connected = 0) => {
@@ -469,8 +517,13 @@ export default function VkTurn({ notify }: VkTurnProps) {
               onClick={handleWizardEnable}
               style={{ padding: '10px 24px', fontSize: 14, fontWeight: 600 }}
             >
-              {actionPending ? '⏳ Активация…' : 'Включить'}
+              {actionPending ? (installing ? '⏳ Скачиваю компонент…' : '⏳ Активация…') : 'Включить'}
             </button>
+            {installing && (
+              <div className="muted" style={{ marginTop: 10, fontSize: 13 }} data-testid="install-progress">
+                ⏳ Скачиваю компонент VK-туннеля: {installProgressText(status?.install)}
+              </div>
+            )}
           </div>
         </section>
       </div>
@@ -552,7 +605,13 @@ export default function VkTurn({ notify }: VkTurnProps) {
           </div>
         </div>
 
-        {phase === 'not_installed' && (
+        {installing && (
+          <div style={bannerStyle(false)} data-testid="install-progress">
+            ⏳ Скачиваю компонент VK-туннеля: {installProgressText(status?.install)}
+          </div>
+        )}
+
+        {phase === 'not_installed' && !installing && (
           <div style={{ ...bannerStyle(false), display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
             <div>Компонент ядра VK-туннеля не установлен на роутере.</div>
             <button

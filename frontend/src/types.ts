@@ -1086,6 +1086,15 @@ export interface VkTurnStatus {
   interface: string
   /** PEER-порт сервера csqtt по умолчанию */
   default_port: number
+  /** Фоновая установка компонента (ядра) */
+  install?: VkTurnCoreInstall
+}
+
+export interface VkTurnCoreInstall {
+  running: boolean
+  downloaded: number
+  total?: number | null
+  error?: string | null
 }
 
 export interface VkTurnConfigPayload {
