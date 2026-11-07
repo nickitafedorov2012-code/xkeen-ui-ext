@@ -345,6 +345,11 @@ describe('VkTurn Component (ядро csqtt)', () => {
       inputSetter.call(input, '40')
       input.dispatchEvent(new Event('change', { bubbles: true }))
     })
+    const saveBtn = container?.querySelector('[data-testid="save-streams-btn"]') as HTMLButtonElement
+    expect(saveBtn).toBeTruthy()
+    await act(async () => {
+      saveBtn.click()
+    })
     expect(saveConfigSpy).toHaveBeenCalledWith({ streams: 40 })
     expect(notifyMock).toHaveBeenCalledWith('Число потоков изменено на 40; туннель переподключается')
   })

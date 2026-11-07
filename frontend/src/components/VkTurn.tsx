@@ -290,17 +290,17 @@ export default function VkTurn({ notify }: VkTurnProps) {
     }
   }
 
-  const [localStreams, setLocalStreams] = useState<string>('')
+  const [draftStreams, setDraftStreams] = useState<number | null>(null)
   const [streamsUpdating, setStreamsUpdating] = useState(false)
 
-  const handleUpdateStreams = async (raw: string) => {
-    setLocalStreams(raw)
-    const streams = Number(raw)
+  const handleSaveStreams = async () => {
+    const streams = draftStreams ?? status?.target_streams ?? 100
     if (!Number.isInteger(streams) || streams < 3 || streams > 100) return
     setStreamsUpdating(true)
     try {
       await saveVkTurnConfig({ streams })
       notify(`Число потоков изменено на ${streams}; туннель переподключается`)
+      setDraftStreams(null)
       await loadStatus(true)
     } catch (err: any) {
       notify(err?.message || 'Не удалось изменить число потоков', true)
@@ -799,10 +799,23 @@ export default function VkTurn({ notify }: VkTurnProps) {
         {accordionOpen && (
           <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
             <div style={{ marginBottom: 20, maxWidth: 640 }} data-testid="stream-controls">
-              <label htmlFor="vkturn-stream-count" style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
-                Потоки звонков (Workers / Streams)
+              <label htmlFor="vkturn-stream-range" style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
+                Потоки звонков (Workers / Streams): <span style={{ color: 'var(--accent, #3b82f6)', fontWeight: 700, fontSize: 16 }}>{draftStreams ?? status?.target_streams ?? 100}</span>
               </label>
-              <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+              <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+                <input
+                  id="vkturn-stream-range"
+                  type="range"
+                  min={3}
+                  max={100}
+                  step={1}
+                  className="input"
+                  data-testid="stream-range"
+                  value={draftStreams ?? status?.target_streams ?? 100}
+                  disabled={streamsUpdating || !status?.enabled}
+                  onChange={(e) => setDraftStreams(Number(e.target.value))}
+                  style={{ flex: '1 1 200px', maxWidth: 300, cursor: 'pointer' }}
+                />
                 <input
                   id="vkturn-stream-count"
                   type="number"
@@ -810,19 +823,25 @@ export default function VkTurn({ notify }: VkTurnProps) {
                   max={100}
                   className="input"
                   data-testid="stream-count"
-                  value={localStreams !== '' ? localStreams : (status?.target_streams || 100)}
+                  value={draftStreams ?? status?.target_streams ?? 100}
                   disabled={streamsUpdating || !status?.enabled}
-                  onChange={(e) => handleUpdateStreams(e.target.value)}
-                  style={{ width: 140, fontWeight: 600 }}
+                  onChange={(e) => setDraftStreams(Math.max(3, Math.min(100, Number(e.target.value) || 3)))}
+                  style={{ width: 85, fontWeight: 600 }}
                 />
-                <span className="muted" style={{ fontSize: 13 }}>
-                  активно: {status?.connected_streams ?? 0} из {status?.target_streams ?? 100}
-                  {streamsUpdating && ' (применение…)'}
-                </span>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  data-testid="save-streams-btn"
+                  disabled={streamsUpdating || !status?.enabled || (draftStreams === null || draftStreams === status?.target_streams)}
+                  onClick={() => handleSaveStreams()}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                >
+                  <span>💾 Сохранить</span>
+                </button>
               </div>
-              <div className="muted" style={{ fontSize: 12, marginTop: 6, lineHeight: 1.4 }}>
-                Каждый поток создаёт независимый шифрованный DTLS-канал к медиа-серверам звонков ВКонтакте.
-                Для слабых роутеров (Keenetic) рекомендуется 10–20 потоков, для мощных ПК/серверов — 30–50.
+              <div className="muted" style={{ fontSize: 12, marginTop: 8, lineHeight: 1.4 }}>
+                Установите ползунком нужное число потоков и нажмите «Сохранить». Потоки применяются однократно без промежуточных перезапусков.
+                Активно прямо сейчас: <strong style={{ color: 'var(--foreground)' }}>{status?.connected_streams ?? 0}</strong> из {status?.target_streams ?? 100}.
               </div>
             </div>
             <div
