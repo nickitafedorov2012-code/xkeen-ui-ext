@@ -10982,7 +10982,7 @@ pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16
     Ok(())
 }
 
-/// BS-FIX: генерация shell-команд полного перехвата для режима Белых списков (стратегия StrictXKeen).
+/// Генерация полного перехвата для обеих стратегий режима белых списков.
 /// Захватывает ВЕСЬ трафик локальных подсетей (все TCP/UDP порты, а не только 80/443,
 /// которые берёт внешняя цепочка xkeen ядра) и направляет его в Mihomo, где правила БС
 /// решают судьбу каждого соединения (РФ-каталог -> DIRECT, остальное -> туннель).
@@ -11000,19 +11000,19 @@ pub fn build_whitelist_full_tunnel_commands(
     // Очистка не трогает ip rule/таблицу 115: ими управляет sync_gaming_full_tunnel
     // (при взаимно исключающихся режимах порядок синков гарантирует согласованность).
     let cleanup_cmd = "\
-while iptables -t nat -D PREROUTING -j XKEEN_BS -w 2 2>/dev/null; do :; done; \
-iptables -t nat -F XKEEN_BS -w 2 2>/dev/null || true; \
-iptables -t nat -X XKEEN_BS -w 2 2>/dev/null || true; \
-while iptables -t mangle -D PREROUTING -j XKEEN_BS -w 2 2>/dev/null; do :; done; \
-iptables -t mangle -F XKEEN_BS -w 2 2>/dev/null || true; \
-iptables -t mangle -X XKEEN_BS -w 2 2>/dev/null || true; \
-while ip6tables -w 2 -D FORWARD -i br+ -j XKEEN_BS6 2>/dev/null; do :; done; \
-while ip6tables -w 2 -D FORWARD -i Bridge+ -j XKEEN_BS6 2>/dev/null; do :; done; \
-ip6tables -w 2 -F XKEEN_BS6 2>/dev/null || true; \
-ip6tables -w 2 -X XKEEN_BS6 2>/dev/null || true".to_string();
+while iptables -t nat -D PREROUTING -j XKEEN_BS -w 2>/dev/null; do :; done; \
+iptables -t nat -F XKEEN_BS -w 2>/dev/null || true; \
+iptables -t nat -X XKEEN_BS -w 2>/dev/null || true; \
+while iptables -t mangle -D PREROUTING -j XKEEN_BS -w 2>/dev/null; do :; done; \
+iptables -t mangle -F XKEEN_BS -w 2>/dev/null || true; \
+iptables -t mangle -X XKEEN_BS -w 2>/dev/null || true; \
+while ip6tables -w -D FORWARD -i br+ -j XKEEN_BS6 2>/dev/null; do :; done; \
+while ip6tables -w -D FORWARD -i Bridge+ -j XKEEN_BS6 2>/dev/null; do :; done; \
+ip6tables -w -F XKEEN_BS6 2>/dev/null || true; \
+ip6tables -w -X XKEEN_BS6 2>/dev/null || true".to_string();
 
     let mut setup_cmds = Vec::new();
-    if !(cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen) {
+    if !cfg.whitelist.enabled {
         return (cleanup_cmd, setup_cmds);
     }
 
@@ -11024,18 +11024,18 @@ ip6tables -w 2 -X XKEEN_BS6 2>/dev/null || true".to_string();
     setup_cmds.push("while ip rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; while ip rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; ip rule add fwmark 0x115 lookup 115 priority 100 2>/dev/null || ip rule add fwmark 0x115/0x115 lookup 115 priority 100 2>/dev/null || ip rule add fwmark 0x115 lookup 115 2>/dev/null || true".to_string());
 
     // Изолированные цепочки XKEEN_BS
-    setup_cmds.push("iptables -t nat -N XKEEN_BS -w 2 2>/dev/null || true".to_string());
-    setup_cmds.push("iptables -t nat -I PREROUTING 1 -j XKEEN_BS -w 2".to_string());
-    setup_cmds.push("iptables -t mangle -N XKEEN_BS -w 2 2>/dev/null || true".to_string());
-    setup_cmds.push("iptables -t mangle -I PREROUTING 1 -j XKEEN_BS -w 2".to_string());
+    setup_cmds.push("iptables -t nat -N XKEEN_BS -w 2>/dev/null || true".to_string());
+    setup_cmds.push("iptables -t nat -I PREROUTING 1 -j XKEEN_BS -w".to_string());
+    setup_cmds.push("iptables -t mangle -N XKEEN_BS -w 2>/dev/null || true".to_string());
+    setup_cmds.push("iptables -t mangle -I PREROUTING 1 -j XKEEN_BS -w".to_string());
 
     // Исключённые устройства БС: полный обход перехвата (и TCP, и UDP), до любых правил захвата
     for ex_ip in resolve_excluded_whitelist_ips_pub(cfg) {
         let ip_clean = ex_ip.split('/').next().unwrap_or(&ex_ip).trim();
         if let Ok(v4) = ip_clean.parse::<std::net::Ipv4Addr>() {
             let ip = v4.to_string();
-            setup_cmds.push(format!("iptables -t nat -A XKEEN_BS -s {ip} -j RETURN -w 2"));
-            setup_cmds.push(format!("iptables -t mangle -A XKEEN_BS -s {ip} -j RETURN -w 2"));
+            setup_cmds.push(format!("iptables -t nat -A XKEEN_BS -s {ip} -j RETURN -w"));
+            setup_cmds.push(format!("iptables -t mangle -A XKEEN_BS -s {ip} -j RETURN -w"));
         }
     }
 
@@ -11043,22 +11043,22 @@ ip6tables -w 2 -X XKEEN_BS6 2>/dev/null || true".to_string();
     for subnet in ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"] {
         // NAT: DNS -> REDIRECT на активный DNS-порт (до байпаса локальных сетей)
         setup_cmds.push(format!(
-            "iptables -t nat -A XKEEN_BS -s {subnet} -p udp --dport 53 -j REDIRECT --to-ports {d_port} -w 2"
+            "iptables -t nat -A XKEEN_BS -s {subnet} -p udp --dport 53 -j REDIRECT --to-ports {d_port} -w"
         ));
         setup_cmds.push(format!(
-            "iptables -t nat -A XKEEN_BS -s {subnet} -p tcp --dport 53 -j REDIRECT --to-ports {d_port} -w 2"
+            "iptables -t nat -A XKEEN_BS -s {subnet} -p tcp --dport 53 -j REDIRECT --to-ports {d_port} -w"
         ));
         // NAT: байпас локальных подсетей (та же логика, что в игровом режиме)
         for local_dst in ["127.0.0.0/8", "169.254.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] {
-            setup_cmds.push(format!("iptables -t nat -A XKEEN_BS -s {subnet} -d {local_dst} -j RETURN -w 2"));
+            setup_cmds.push(format!("iptables -t nat -A XKEEN_BS -s {subnet} -d {local_dst} -j RETURN -w"));
         }
         // NAT: весь остальной TCP (ЛЮБЫЕ порты — включая игровые 9339) -> REDIRECT в Mihomo
         setup_cmds.push(format!(
-            "iptables -t nat -A XKEEN_BS -s {subnet} -p tcp -j REDIRECT --to-ports {r_port} -w 2"
+            "iptables -t nat -A XKEEN_BS -s {subnet} -p tcp -j REDIRECT --to-ports {r_port} -w"
         ));
         // MANGLE: DNS пропускаем (его забирает NAT REDIRECT)
         setup_cmds.push(format!(
-            "iptables -t mangle -A XKEEN_BS -s {subnet} -p udp --dport 53 -j RETURN -w 2"
+            "iptables -t mangle -A XKEEN_BS -s {subnet} -p udp --dport 53 -j RETURN -w"
         ));
         // MANGLE: байпас локальных и служебных подсетей
         for local_dst in [
@@ -11070,31 +11070,31 @@ ip6tables -w 2 -X XKEEN_BS6 2>/dev/null || true".to_string();
             "224.0.0.0/4",
             "255.255.255.255/32",
         ] {
-            setup_cmds.push(format!("iptables -t mangle -A XKEEN_BS -s {subnet} -d {local_dst} -j RETURN -w 2"));
+            setup_cmds.push(format!("iptables -t mangle -A XKEEN_BS -s {subnet} -d {local_dst} -j RETURN -w"));
         }
         // MANGLE: весь остальной UDP (ЛЮБЫЕ порты) -> TPROXY в Mihomo
         setup_cmds.push(format!(
-            "iptables -t mangle -A XKEEN_BS -s {subnet} -p udp -j TPROXY --tproxy-mark 0x115/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1 -w 2"
+            "iptables -t mangle -A XKEEN_BS -s {subnet} -p udp -j TPROXY --tproxy-mark 0x115/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1 -w"
         ));
     }
 
     // Баг 41: IPv6 не проходит через Mihomo и обходил БС. Пересылаемый из LAN внешний IPv6 отклоняется
     // (локальный, ULA и multicast — нет), клиенты по Happy Eyeballs уходят на IPv4, который идёт через БС.
-    setup_cmds.push("ip6tables -w 2 -N XKEEN_BS6 2>/dev/null || true".to_string());
-    setup_cmds.push("ip6tables -w 2 -F XKEEN_BS6 2>/dev/null || true".to_string());
+    setup_cmds.push("ip6tables -w -N XKEEN_BS6 2>/dev/null || true".to_string());
+    setup_cmds.push("ip6tables -w -F XKEEN_BS6 2>/dev/null || true".to_string());
     for v6_local in ["fe80::/10", "fc00::/7", "ff00::/8", "::1/128"] {
-        setup_cmds.push(format!("ip6tables -w 2 -A XKEEN_BS6 -d {v6_local} -j RETURN"));
+        setup_cmds.push(format!("ip6tables -w -A XKEEN_BS6 -d {v6_local} -j RETURN"));
     }
     for ex in &cfg.whitelist.excluded_devices {
         let mac = ex.trim();
         if config::is_valid_mac(mac) {
-            setup_cmds.push(format!("ip6tables -w 2 -A XKEEN_BS6 -m mac --mac-source {mac} -j RETURN"));
+            setup_cmds.push(format!("ip6tables -w -A XKEEN_BS6 -m mac --mac-source {mac} -j RETURN"));
         }
     }
-    setup_cmds.push("ip6tables -w 2 -A XKEEN_BS6 -p tcp -j REJECT --reject-with tcp-reset".to_string());
-    setup_cmds.push("ip6tables -w 2 -A XKEEN_BS6 -j REJECT".to_string());
-    setup_cmds.push("ip6tables -w 2 -I FORWARD 1 -i br+ -j XKEEN_BS6".to_string());
-    setup_cmds.push("ip6tables -w 2 -I FORWARD 1 -i Bridge+ -j XKEEN_BS6 2>/dev/null || true".to_string());
+    setup_cmds.push("ip6tables -w -A XKEEN_BS6 -p tcp -j REJECT --reject-with tcp-reset".to_string());
+    setup_cmds.push("ip6tables -w -A XKEEN_BS6 -j REJECT".to_string());
+    setup_cmds.push("ip6tables -w -I FORWARD 1 -i br+ -j XKEEN_BS6".to_string());
+    setup_cmds.push("ip6tables -w -I FORWARD 1 -i Bridge+ -j XKEEN_BS6 2>/dev/null || true".to_string());
 
     (cleanup_cmd, setup_cmds)
 }
@@ -11131,7 +11131,7 @@ pub async fn sync_whitelist_full_tunnel(cfg: &config::AppConfig, redir_port: u16
 
         // NDM-хук: восстановление правил после перезагрузки фаервола KeeneticOS
         let hook_path = std::path::Path::new("/opt/etc/ndm/netfilter.d/061-xkeen-bs.sh");
-        let active = cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen;
+        let active = cfg.whitelist.enabled;
         if active && !setup_cmds.is_empty() {
             if let Some(parent) = hook_path.parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
@@ -11200,12 +11200,12 @@ pub fn effective_full_tunnel_flags(bs_active: bool, gaming_active: bool, mihomo_
     }
 }
 
-/// Нужна ли пересинхронизация полного перехвата (активен игровой Compatibility ИЛИ БС StrictXKeen).
+/// Нужна ли пересинхронизация полного перехвата (игровой Compatibility или активный режим БС).
 /// Раньше после переключения AdGuard синк шёл только для игрового режима — в режиме БС
 /// DNS-редирект XKEEN_BS оставался на старом порту (1053 ↔ порт AdGuard).
 pub fn full_tunnel_resync_needed(cfg: &config::AppConfig) -> bool {
     (cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility)
-        || (cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen)
+        || cfg.whitelist.enabled
 }
 
 /// Пересинхронизация полного перехвата с портами из текущего config.yaml (Z-09: без хардкода 5000/5001).
@@ -11245,7 +11245,7 @@ pub async fn adguard_sync_firewall(State(state): State<AppState>) -> Response {
 }
 
 pub async fn sync_full_tunnel_modes(cfg: &config::AppConfig, redir_port: u16, tproxy_port: u16, dns_port: u16) {
-    let want_bs = cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen;
+    let want_bs = cfg.whitelist.enabled;
     let want_gaming = cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility;
     // Ядро недоступно и при аварии (сторож), и при штатной остановке служб пользователем:
     // DHCP-монитор и другие фоновые задачи не должны ставить перехват в остановленный Mihomo.
@@ -11614,12 +11614,12 @@ mod settings_and_service_regression_tests {
         cfg.whitelist.excluded_devices = vec!["aa:bb:cc:dd:ee:ff".to_string()];
         let (cleanup, setup) = build_whitelist_full_tunnel_commands(&cfg, 5000, 5001, 1053);
         let joined = setup.join("\n");
-        assert!(joined.contains("ip6tables -w 2 -I FORWARD 1 -i br+ -j XKEEN_BS6"), "IPv6 из LAN перехватывается цепочкой БС:\n{joined}");
+        assert!(joined.contains("ip6tables -w -I FORWARD 1 -i br+ -j XKEEN_BS6"), "IPv6 из LAN перехватывается цепочкой БС:\n{joined}");
         assert!(joined.contains("-A XKEEN_BS6 -d fe80::/10 -j RETURN"), "локальный IPv6 не трогается");
         assert!(joined.contains("-A XKEEN_BS6 -m mac --mac-source aa:bb:cc:dd:ee:ff -j RETURN"), "исключённые устройства сохраняют IPv6");
         assert!(joined.contains("-A XKEEN_BS6 -j REJECT"), "внешний IPv6 отклоняется — клиенты уходят на IPv4 через БС");
-        assert!(cleanup.contains("ip6tables -w 2 -D FORWARD -i br+ -j XKEEN_BS6"), "парная очистка IPv6");
-        assert!(cleanup.contains("ip6tables -w 2 -X XKEEN_BS6"));
+        assert!(cleanup.contains("ip6tables -w -D FORWARD -i br+ -j XKEEN_BS6"), "парная очистка IPv6");
+        assert!(cleanup.contains("ip6tables -w -X XKEEN_BS6"));
         cfg.whitelist.enabled = false;
         let (_, off) = build_whitelist_full_tunnel_commands(&cfg, 5000, 5001, 1053);
         assert!(!off.join("\n").contains("XKEEN_BS6"), "без БС IPv6 не ограничивается");
@@ -13191,6 +13191,38 @@ mod tests {
         assert!(!body_b64.contains("HTTP/"));
     }
 
+    #[test]
+    fn whitelist_iptables_wait_is_compatible_with_legacy_keenetic() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
+        let (cleanup, setup) = build_whitelist_full_tunnel_commands(&cfg, 5000, 5001, 1053);
+        for command in std::iter::once(cleanup.as_str()).chain(setup.iter().map(String::as_str)) {
+            assert!(!command.contains("-w 2 ") && !command.ends_with("-w 2"), "legacy iptables rejects a numeric wait timeout: {command}");
+        }
+        assert!(setup.iter().any(|cmd| cmd.contains("-t nat -I PREROUTING 1 -j XKEEN_BS -w")));
+        assert!(setup.iter().any(|cmd| cmd.contains("-t mangle -I PREROUTING 1 -j XKEEN_BS -w")));
+    }
+
+    #[test]
+    fn whitelist_both_strategies_restore_interception_and_disabled_cleans_up() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.gaming.enabled = false;
+        for strategy in [crate::config::WhitelistStrategy::StrictXKeen, crate::config::WhitelistStrategy::Standard] {
+            cfg.whitelist.strategy = strategy;
+            cfg.whitelist.enabled = true;
+            assert!(full_tunnel_resync_needed(&cfg));
+            let (_, setup) = build_whitelist_full_tunnel_commands(&cfg, 5000, 5001, 1053);
+            assert!(setup.iter().any(|cmd| cmd.contains("-t nat -I PREROUTING 1 -j XKEEN_BS")));
+            assert!(setup.iter().any(|cmd| cmd.contains("-t mangle -I PREROUTING 1 -j XKEEN_BS")));
+            cfg.whitelist.enabled = false;
+            assert!(!full_tunnel_resync_needed(&cfg));
+            let (cleanup, setup) = build_whitelist_full_tunnel_commands(&cfg, 5000, 5001, 1053);
+            assert!(setup.is_empty());
+            assert!(cleanup.contains("-D PREROUTING -j XKEEN_BS"));
+        }
+    }
+
     /// Анти-регрессия BS-FIX: полный перехват БС обязан захватывать ВСЕ TCP/UDP порты
     /// (без --dport ограничений) — иначе игровой трафик вроде 9339 вылетает из туннеля
     /// в прямой канал провайдера, где ТСПУ дропает его SYN.
@@ -13239,12 +13271,12 @@ mod tests {
         let (_, setup_off) = build_whitelist_full_tunnel_commands(&cfg_off, 5000, 5001, 1053);
         assert!(setup_off.is_empty(), "выключенный БС не должен генерировать правила перехвата");
 
-        // Standard-стратегия тоже не генерирует правил
+        // Standard использует обычные правила Mihomo, но тоже должна обходить geo_exclude
         let mut cfg_std = crate::config::AppConfig::default();
         cfg_std.whitelist.enabled = true;
         cfg_std.whitelist.strategy = crate::config::WhitelistStrategy::Standard;
         let (_, setup_std) = build_whitelist_full_tunnel_commands(&cfg_std, 5000, 5001, 1053);
-        assert!(setup_std.is_empty(), "Standard-стратегия не должна включать полный перехват");
+        assert!(!setup_std.is_empty(), "Standard-стратегия должна доставлять трафик до правил Mihomo");
     }
 
     /// Анти-регрессия BS-FIX: мьютекс режимов. При активном БС игровой полный перехват

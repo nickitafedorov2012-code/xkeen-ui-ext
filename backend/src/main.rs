@@ -511,13 +511,13 @@ async fn main() {
     });
 
     // Синхронизация полного перехвата (iptables) при старте панели: игровой режим
-    // ИЛИ режим БС (StrictXKeen) — sync_full_tunnel_modes сам расставит мьютекс
+    // ИЛИ режим БС — sync_full_tunnel_modes сам расставит мьютекс
     let gaming_sync_state = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(7)).await;
         let cfg = gaming_sync_state.config.read().await;
         let gaming_active = cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility;
-        let bs_active = cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen;
+        let bs_active = cfg.whitelist.enabled;
         if gaming_active || bs_active {
             if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
                 let redir_port = routing::parse_redir_port(&yaml).unwrap_or(5000);
@@ -563,7 +563,7 @@ async fn main() {
                 let _ = adguard::apply_adguard_iptables(active_port);
                 log_i!("[STARTUP] ✓ AdGuard Home DNS redirection to port {} applied", active_port);
                 if cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility
-                    || cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen
+                    || cfg.whitelist.enabled
                 {
                     // Z-09: порты парсим из config.yaml, а не хардкодим 5000/5001 —
                     // при кастомном конфиге Mihomo правила уходили не на те порты
@@ -637,7 +637,7 @@ async fn main() {
         // чем поднят firewall KeeneticOS (правила восстановит и NDM-хук)
         if is_bs {
             let cfg = wl_sync_state.config.read().await;
-            if cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen {
+            if cfg.whitelist.enabled {
                 if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
                     let redir_port = routing::parse_redir_port(&yaml).unwrap_or(5000);
                     let tproxy_port = routing::parse_tproxy_port(&yaml).unwrap_or(5001);

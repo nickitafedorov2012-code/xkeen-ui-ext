@@ -1073,7 +1073,7 @@ pub fn spawn_mihomo_health_monitor(state: AppState) {
                 iptables_cleaned = false;
 
                 // Восстановление iptables и NDM-хуков через sync_full_tunnel_modes
-                let bs_active = cfg.whitelist.enabled && cfg.whitelist.strategy == config::WhitelistStrategy::StrictXKeen;
+                let bs_active = cfg.whitelist.enabled;
                 let gaming_active = cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility;
 
                 if bs_active || gaming_active {
