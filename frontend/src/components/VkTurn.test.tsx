@@ -731,4 +731,30 @@ describe('VkTurn Component (ядро csqtt)', () => {
     expect(logoutSpy).toHaveBeenCalled()
     expect(notifyMock).toHaveBeenCalledWith('Вы вышли из учетной записи VK')
   })
+
+  it('automatically parses csqtt:// link pasted into host input and populates host, port, password', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue(defaultUnconfiguredStatus)
+
+    await act(async () => {
+      root!.render(<VkTurn notify={notifyMock} />)
+    })
+
+    const hostInput = container?.querySelector('input[placeholder*="203.0.113.10"]') as HTMLInputElement
+    expect(hostInput).not.toBeNull()
+
+    await act(async () => {
+      // Имитируем react onChange
+      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
+      nativeInputValueSetter?.call(hostInput, 'csqtt://connect?v=2&host=203.0.113.99&peer=46100&password=my_secret_token&hashes=hash123')
+      hostInput.dispatchEvent(new Event('input', { bubbles: true }))
+      hostInput.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+
+    expect(hostInput.value).toBe('203.0.113.99')
+    const portInput = container?.querySelector('input[aria-label="Порт сервера csqtt"]') as HTMLInputElement
+    expect(portInput.value).toBe('46100')
+    const passwordInput = container?.querySelector('input[placeholder="Пароль от сервера csqtt"]') as HTMLInputElement
+    expect(passwordInput.value).toBe('my_secret_token')
+    expect(notifyMock).toHaveBeenCalledWith(expect.stringContaining('Настройки сервера, порт и пароль успешно извлечены'))
+  })
 })

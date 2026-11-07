@@ -8,6 +8,7 @@ import {
   logoutVkTurnAuth,
 } from '../api'
 import type { VkTurnStatus, VkTurnPhase, VkTurnCoreInstall } from '../types'
+import { parseCsqttLink } from '../utils/csqttLink'
 
 interface VkTurnProps {
   notify: (msg: string, error?: boolean) => void
@@ -235,6 +236,44 @@ export default function VkTurn({ notify }: VkTurnProps) {
       notify(err?.message || 'Ошибка настройки VK-туннеля', true)
     } finally {
       setActionPending(false)
+    }
+  }
+
+  // Автоматический разбор ссылки csqtt:// при вводе или вставке
+  const handleHostChange = (val: string) => {
+    const trimmed = val.trim()
+    const parsed = parseCsqttLink(trimmed)
+    if (parsed) {
+      setPeerHost(parsed.host)
+      setServerPort(parsed.port)
+      setPassword(parsed.password)
+      if (parsed.hashes && parsed.hashes.length > 0) {
+        setCallLinks(parsed.hashes.map((h) => `https://vk.com/call/join/${h}`))
+      }
+      notify('Настройки сервера, порт и пароль успешно извлечены из ссылки csqtt://')
+      return
+    }
+    setPeerHost(val)
+  }
+
+  // Быстрая вставка ссылки csqtt:// из буфера обмена (как в focsq / ImportService)
+  const handleImportFromClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText()
+      const parsed = parseCsqttLink(text)
+      if (parsed) {
+        setPeerHost(parsed.host)
+        setServerPort(parsed.port)
+        setPassword(parsed.password)
+        if (parsed.hashes && parsed.hashes.length > 0) {
+          setCallLinks(parsed.hashes.map((h) => `https://vk.com/call/join/${h}`))
+        }
+        notify('Профиль csqtt:// успешно вставлен из буфера обмена!')
+      } else {
+        notify('В буфере обмена нет ссылки csqtt:// (ожидается csqtt://connect?v=2... или csqtt://password@host:port)', true)
+      }
+    } catch {
+      notify('Не удалось прочитать буфер обмена. Вставьте ссылку вручную в поле адреса', true)
     }
   }
 
@@ -915,18 +954,29 @@ export default function VkTurn({ notify }: VkTurnProps) {
         </section>
 
         <section className="card" style={{ padding: '24px 26px' }}>
-          <h3 style={{ margin: '0 0 16px 0', fontSize: 16 }}>1️⃣ Сервер csqtt на VPS</h3>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
+            <h3 style={{ margin: 0, fontSize: 16 }}>1️⃣ Сервер csqtt на VPS</h3>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={handleImportFromClipboard}
+              style={{ fontSize: 12, padding: '5px 12px', display: 'flex', alignItems: 'center', gap: 6 }}
+              title="Импортировать ссылку csqtt:// из буфера обмена"
+            >
+              📋 Вставить ссылку csqtt://
+            </button>
+          </div>
           <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 16 }}>
             <div style={{ flex: '1 1 260px', maxWidth: 420 }}>
               <label style={{ display: 'block', fontSize: 13, marginBottom: 6, fontWeight: 600 }}>
-                Адрес сервера (IP или домен):
+                Адрес сервера (IP, домен или ссылка csqtt://):
               </label>
               <input
                 type="text"
                 className="input"
-                placeholder="Например, 203.0.113.10"
+                placeholder="203.0.113.10 или csqtt://connect?..."
                 value={peerHost}
-                onChange={(e) => setPeerHost(e.target.value)}
+                onChange={(e) => handleHostChange(e.target.value)}
                 style={{ width: '100%' }}
               />
             </div>

@@ -40,7 +40,7 @@ use tokio::sync::RwLock;
 
 pub const VERSION: &str = match option_env!("XKEEN_ROUTE_VERSION") {
     Some(v) => v,
-    None => concat!("v", "1.16.1.0"),
+    None => concat!("v", "1.16.2.0"),
 };
 pub const APP_NAME: &str = "XKeen Route";
 
