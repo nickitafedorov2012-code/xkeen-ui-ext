@@ -8041,8 +8041,8 @@ pub async fn save_vkturn_config(
         }
     }
     if let Some(s) = body.streams {
-        if s != 0 && (!(10..=100).contains(&s) || s % 10 != 0) {
-            return api_err("Число потоков должно быть кратно 10 и находиться в диапазоне 10–100");
+        if s != 0 && !(3..=100).contains(&s) {
+            return api_err("Число потоков должно находиться в диапазоне 3–100 (или 0 для автовыбора)");
         }
         new_cfg.streams = s;
     }

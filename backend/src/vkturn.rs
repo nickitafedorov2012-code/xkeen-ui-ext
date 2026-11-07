@@ -176,13 +176,31 @@ pub fn validate_password(pw: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Число потоков для `-n`: кратно 10, в пределах 10–100, и не меньше одной группы на каждую ссылку —
-/// иначе клиент не возьмёт запасные хеши (группа g берёт хеш g % len).
+/// Чтение счетчиков (rx_bytes, tx_bytes) виртуального интерфейса туннеля (csq0).
+/// Читается напрямую из системного /proc/net/dev (пассивно, 0% CPU).
+pub fn read_tun_interface_bytes(iface_name: &str) -> (u64, u64) {
+    #[cfg(target_os = "linux")]
+    if let Ok(content) = std::fs::read_to_string("/proc/net/dev") {
+        for line in content.lines().skip(2) {
+            if let Some((iface_part, stats_part)) = line.split_once(':') {
+                if iface_part.trim() == iface_name {
+                    let mut iter = stats_part.split_whitespace();
+                    let rx_val = iter.next().and_then(|s| s.parse::<u64>().ok());
+                    let tx_val = iter.nth(7).and_then(|s| s.parse::<u64>().ok());
+                    return (rx_val.unwrap_or(0), tx_val.unwrap_or(0));
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = iface_name;
+    (0, 0)
+}
+
+/// Число потоков для `-n`: поддерживает точные потоки (3-100) или дефолтные 20.
 pub fn effective_workers(cfg: &VkTurnConfig) -> u32 {
     let wanted = if cfg.streams == 0 { DEFAULT_WORKERS } else { cfg.streams as u32 };
-    let per_links = WORKERS_PER_GROUP * cfg.links.len().clamp(1, MAX_LINKS) as u32;
-    let n = wanted.max(per_links).clamp(WORKERS_PER_GROUP, MAX_WORKERS);
-    (n / WORKERS_PER_GROUP) * WORKERS_PER_GROUP
+    wanted.clamp(3, MAX_WORKERS)
 }
 
 /// Хеши звонков для `-vk` (без дублей, в порядке приоритета).
@@ -209,6 +227,7 @@ pub fn build_client_args(cfg: &VkTurnConfig) -> Vec<String> {
         call_hashes(cfg).join(","),
         "-n".into(),
         effective_workers(cfg).to_string(),
+        "--exact-workers".into(),
         "-listen".into(),
         "127.0.0.1:0".into(),
         "-tun-uds".into(),
@@ -1264,6 +1283,9 @@ impl VkTurnManager {
             let started = Instant::now();
             let mut tick = tokio::time::interval(Duration::from_secs(10));
             let mut ticks: u32 = 0;
+            let mut last_tun_rx = 0u64;
+            let mut last_tun_tx = 0u64;
+            let mut blackhole_ticks: u32 = 0;
             let mut exempted_turn = known_turn;
             let exit_reason = loop {
                 tokio::select! {
@@ -1308,14 +1330,45 @@ impl VkTurnManager {
                         ticks = ticks.wrapping_add(1);
                         let rt = self.rt.read().await;
                         let turn_now = rt.turn_ips.clone();
+                        let is_connected = rt.phase == VkTurnPhase::Connected && rt.tun_attached;
                         let stalled = rt.connected_streams == 0
                             && rt.zero_streams_since.map(|t| t.elapsed() > stall_limit(rt.phase)).unwrap_or(false);
                         drop(rt);
+
                         // раз в минуту (или при новых адресах TURN) восстанавливаем исключения
                         if ticks % 6 == 0 || turn_now != exempted_turn {
                             apply_exemptions(&cfg.peer, &turn_now).await;
                             exempted_turn = turn_now;
                         }
+
+                        // Zero-CPU Blackhole Detector:
+                        // Каждые 30 секунд (3 тика) пассивно проверяем дельту счетчиков csq0 из /proc/net/dev.
+                        // Если клиенты шлют трафик (TX delta > 30 КБ), а ответа нет вообще (RX delta == 0)
+                        // в течение 60 секунд подряд (2 замера) — сессия TURN заблокирована/сброшена:
+                        // производим мягкий перезапуск для восстановления связи.
+                        if is_connected && ticks % 3 == 0 {
+                            let (cur_rx, cur_tx) = read_tun_interface_bytes(TUN_IFACE);
+                            if last_tun_rx > 0 || last_tun_tx > 0 {
+                                let tx_delta = cur_tx.saturating_sub(last_tun_tx);
+                                let rx_delta = cur_rx.saturating_sub(last_tun_rx);
+                                if tx_delta > 30_000 && rx_delta == 0 {
+                                    blackhole_ticks += 1;
+                                    if blackhole_ticks >= 2 {
+                                        crate::log_w!(
+                                            "[VK-туннель] Blackhole Detector: TX delta {} байт, RX delta 0 байт за 60 сек — сессия сброшена, мягкий перезапуск",
+                                            tx_delta
+                                        );
+                                        let _ = child.kill().await;
+                                        break "сессия TURN заблокирована (нет входящих пакетов при активном TX)".to_string();
+                                    }
+                                } else {
+                                    blackhole_ticks = 0;
+                                }
+                            }
+                            last_tun_rx = cur_rx;
+                            last_tun_tx = cur_tx;
+                        }
+
                         if stalled {
                             let _ = child.kill().await;
                             break "нет ни одного соединения дольше допустимого".to_string();
@@ -1638,18 +1691,11 @@ mod tests {
         let mut cfg = cfg_with(&["https://vk.com/call/join/abc12345"]);
         assert_eq!(effective_workers(&cfg), 20);
         cfg.streams = 35;
-        assert_eq!(effective_workers(&cfg), 30, "кратно 10");
+        assert_eq!(effective_workers(&cfg), 35, "точное число воркеров");
         cfg.streams = 200;
         assert_eq!(effective_workers(&cfg), 100);
         cfg.streams = 1;
-        assert_eq!(effective_workers(&cfg), 10);
-        // Три ссылки при 10 потоках — клиент взял бы только первую: поднимаем до 30
-        cfg.links = vec![
-            "https://vk.com/call/join/aaaa1111".into(),
-            "https://vk.com/call/join/bbbb2222".into(),
-            "https://vk.com/call/join/cccc3333".into(),
-        ];
-        assert_eq!(effective_workers(&cfg), 30);
+        assert_eq!(effective_workers(&cfg), 3);
     }
 
     /// Пароль не должен попадать в аргументы процесса (их видно в `ps` любому пользователю роутера).
@@ -1663,8 +1709,9 @@ mod tests {
                 "-peer", "1.2.3.4:46000",
                 "-vk", "abc12345,def67890",
                 "-n", "20",
+                "--exact-workers",
                 "-listen", "127.0.0.1:0",
-                "-tun-uds", TUN_UDS_NAME,
+                "-tun-uds", "xkeen_route_csqtt_tun",
                 "-captcha-mode", "auto",
             ]
         );

@@ -292,7 +292,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
 
   const handleUpdateStreams = async (raw: string) => {
     const streams = Number(raw)
-    if (!Number.isInteger(streams) || streams < 10 || streams > 100 || streams % 10 !== 0) return
+    if (!Number.isInteger(streams) || streams < 3 || streams > 100) return
     setActionPending(true)
     try {
       await saveVkTurnConfig({ streams })
@@ -796,23 +796,28 @@ export default function VkTurn({ notify }: VkTurnProps) {
           <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
             <div style={{ marginBottom: 20, maxWidth: 640 }} data-testid="stream-controls">
               <label htmlFor="vkturn-stream-count" style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
-                Потоки звонков
+                Потоки звонков (Workers / Streams)
               </label>
-              <select
-                id="vkturn-stream-count"
-                className="input"
-                data-testid="stream-count"
-                value={Math.max(10, Math.min(100, status?.target_streams || 20))}
-                disabled={actionPending || !status?.enabled}
-                onChange={(e) => handleUpdateStreams(e.target.value)}
-                style={{ width: '100%', maxWidth: 240 }}
-              >
-                {Array.from({ length: 10 }, (_, i) => (i + 1) * 10).map((n) => (
-                  <option key={n} value={n}>{n} потоков</option>
-                ))}
-              </select>
-              <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
-                Изменение перезапустит звонки. Для каждой ссылки автоматически выделяется минимум 10 потоков.
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                <input
+                  id="vkturn-stream-count"
+                  type="number"
+                  min={3}
+                  max={100}
+                  className="input"
+                  data-testid="stream-count"
+                  value={status?.target_streams || 20}
+                  disabled={actionPending || !status?.enabled}
+                  onChange={(e) => handleUpdateStreams(e.target.value)}
+                  style={{ width: 140, fontWeight: 600 }}
+                />
+                <span className="muted" style={{ fontSize: 13 }}>
+                  активно: {status?.connected_streams ?? 0} из {status?.target_streams ?? 0}
+                </span>
+              </div>
+              <div className="muted" style={{ fontSize: 12, marginTop: 6, lineHeight: 1.4 }}>
+                Каждый поток создаёт независимый шифрованный DTLS-канал к медиа-серверам звонков ВКонтакте.
+                Для слабых роутеров (Keenetic) рекомендуется 10–20 потоков, для мощных ПК/серверов — 30–50.
               </div>
             </div>
             <div

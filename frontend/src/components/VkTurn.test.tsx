@@ -8,8 +8,7 @@ import type { VkTurnStatus, VkTurnPhase } from '../types'
 // @ts-ignore
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
-const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
-const selectSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!
+const inputSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set!
 
 async function typeInto(el: HTMLInputElement, value: string) {
   await act(async () => {
@@ -339,13 +338,12 @@ describe('VkTurn Component (ядро csqtt)', () => {
     ) as HTMLElement
     await act(async () => accordionToggle.click())
 
-    const select = container?.querySelector('[data-testid="stream-count"]') as HTMLSelectElement
-    expect(select).toBeTruthy()
-    expect(select.value).toBe('20')
-    expect(select.options).toHaveLength(10)
+    const input = container?.querySelector('[data-testid="stream-count"]') as HTMLInputElement
+    expect(input).toBeTruthy()
+    expect(input.value).toBe('20')
     await act(async () => {
-      selectSetter.call(select, '40')
-      select.dispatchEvent(new Event('change', { bubbles: true }))
+      inputSetter.call(input, '40')
+      input.dispatchEvent(new Event('change', { bubbles: true }))
     })
     expect(saveConfigSpy).toHaveBeenCalledWith({ streams: 40 })
     expect(notifyMock).toHaveBeenCalledWith('Число потоков изменено на 40; туннель переподключается')
