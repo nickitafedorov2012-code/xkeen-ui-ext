@@ -2127,6 +2127,24 @@ pub fn resolve_excluded_whitelist_ips_internal(cfg: &crate::config::AppConfig, a
     };
     let effective_arp = arp_content.or(system_arp.as_deref());
 
+    // Системное исключение устройств с «Политикой по умолчанию» или выключенным БС (enabled: false):
+    // Устройства, у которых в белом списке явно стоит enabled == false, обязаны идти напрямую.
+    for dev in &cfg.whitelist.devices {
+        if !dev.enabled {
+            let mut resolved_ip = dev.ip.trim().to_string();
+            if !dev.mac.trim().is_empty() {
+                if let Some(arp_data) = effective_arp {
+                    if let Some(ip) = find_ip_for_mac_in_arp(&dev.mac, arp_data) {
+                        resolved_ip = ip;
+                    }
+                }
+            }
+            if !resolved_ip.is_empty() && crate::config::is_valid_ip_or_cidr(&resolved_ip) {
+                ips.push(resolved_ip);
+            }
+        }
+    }
+
     for item in &cfg.whitelist.excluded_devices {
         let clean = item.trim();
         if clean.is_empty() {
@@ -5546,6 +5564,24 @@ rules:
         assert!(applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
         // В стандартном режиме blanket subnet перехват не должен добавляться
         assert!(!applied.contains("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist"));
+    }
+
+    #[test]
+    fn test_resolve_excluded_whitelist_ips_for_disabled_devices_with_dynamic_arp() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.devices.push(crate::config::WhitelistDevice {
+            mac: "ea:0c:ab:1a:9f:06".into(),
+            ip: "192.168.2.48".into(),
+            name: Some("Xiaomi 11T Pro".into()),
+            enabled: false,
+            server: None,
+        });
+
+        let arp_sample = "IP address       HW type     Flags       HW address            Mask     Device\n192.168.2.63     0x1         0x2         ea:0c:ab:1a:9f:06     *        br0\n192.168.2.1      0x1         0x2         00:04:9f:ef:01:02     *        br0\n";
+
+        let resolved = resolve_excluded_whitelist_ips_internal(&cfg, Some(arp_sample));
+        assert!(resolved.contains(&"192.168.2.63".to_string()));
+        assert!(!resolved.contains(&"192.168.2.48".to_string()));
     }
 
     #[test]

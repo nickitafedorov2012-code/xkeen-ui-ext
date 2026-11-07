@@ -11122,6 +11122,14 @@ ip6tables -w -X XKEEN_BS6 2>/dev/null || true".to_string();
             setup_cmds.push(format!("ip6tables -w -A XKEEN_BS6 -m mac --mac-source {mac} -j RETURN"));
         }
     }
+    for dev in &cfg.whitelist.devices {
+        if !dev.enabled {
+            let mac = dev.mac.trim();
+            if config::is_valid_mac(mac) {
+                setup_cmds.push(format!("ip6tables -w -A XKEEN_BS6 -m mac --mac-source {mac} -j RETURN"));
+            }
+        }
+    }
     setup_cmds.push("ip6tables -w -A XKEEN_BS6 -p tcp -j REJECT --reject-with tcp-reset".to_string());
     setup_cmds.push("ip6tables -w -A XKEEN_BS6 -j REJECT".to_string());
     setup_cmds.push("ip6tables -w -I FORWARD 1 -i br+ -j XKEEN_BS6".to_string());
