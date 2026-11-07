@@ -439,7 +439,7 @@ pub struct FailsafeVerificationReport {
 /// Строгая достоверная проверка Failsafe (Z-05, NET-03)
 /// Не считает неизвестное состояние за успех (fail-closed).
 pub fn is_failsafe_http_status_valid(status: u16) -> bool {
-    status == 200 || status == 204
+    status == 204
 }
 
 pub fn has_lan_bridge_interface(net_dev_content: &str) -> bool {
@@ -839,17 +839,24 @@ mod tests {
     }
 
     #[test]
+    fn regression_bug_37_captive_portal_200_is_not_internet() {
+        assert!(!is_failsafe_http_status_valid(200), "HTTP 200 can be a captive portal");
+        assert!(is_failsafe_http_status_valid(204));
+        assert!(!has_lan_bridge_interface(" eth0: 1 2 br 3\n"));
+    }
+
+    #[test]
     fn regression_bug_37_failsafe_rejects_3xx_redirects_and_strict_bridge_check() {
         // Баг 37: Ответ 3xx (captive portal) засчитывался как «интернет есть»,
         // а проверка LAN contains("br") проходила всегда из-за подстроки "bytes" в заголовке /proc/net/dev.
 
         // 1. Старый код засчитывал (status >= 200 && status < 400), т.е. 3xx считались успехом.
-        // Должны быть строго 204 или 200 (без 3xx captive portal редиректов).
+        // Только 204 подтверждает ответ generate_204; 200 может быть captive portal.
         assert!(!is_failsafe_http_status_valid(302), "HTTP 302 captive portal must NOT be valid internet");
         assert!(!is_failsafe_http_status_valid(307), "HTTP 307 redirect must NOT be valid internet");
         assert!(!is_failsafe_http_status_valid(301), "HTTP 301 must NOT be valid internet");
         assert!(is_failsafe_http_status_valid(204), "HTTP 204 No Content is valid");
-        assert!(is_failsafe_http_status_valid(200), "HTTP 200 OK is valid");
+        assert!(!is_failsafe_http_status_valid(200), "HTTP 200 may be a captive portal");
 
         // 2. Старый код делал contains("br") на весь /proc/net/dev, что давало true на заголовке "bytes".
         let fake_dev_no_bridge = "Inter-|   Receive                                                |  Transmit\n\

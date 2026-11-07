@@ -259,3 +259,20 @@ export async function vkTurnAction(
   return apiPost<import('./types').VkTurnActionResponse>('vkturn/action', { action })
 }
 
+export async function saveVkTurnAuth(payload: {
+  token?: string
+  access_token?: string
+  url?: string
+  user_id?: number
+  auth_mode?: string
+}): Promise<{ success: boolean; user_id?: number; user_name?: string; message?: string }> {
+  return apiPost<{ success: boolean; user_id?: number; user_name?: string; message?: string }>(
+    'vkturn/auth/save',
+    payload
+  )
+}
+
+export async function logoutVkTurnAuth(): Promise<{ success: boolean; message?: string }> {
+  return apiPost<{ success: boolean; message?: string }>('vkturn/auth/logout', {})
+}
+

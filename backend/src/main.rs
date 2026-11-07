@@ -40,7 +40,7 @@ use tokio::sync::RwLock;
 
 pub const VERSION: &str = match option_env!("XKEEN_ROUTE_VERSION") {
     Some(v) => v,
-    None => concat!("v", "1.15.0.0"),
+    None => concat!("v", "1.16.0.0"),
 };
 pub const APP_NAME: &str = "XKeen Route";
 
@@ -911,6 +911,8 @@ async fn main() {
         .route("/api/vkturn/logs", get(api::get_vkturn_logs))
         .route("/api/vkturn/config", post(api::save_vkturn_config))
         .route("/api/vkturn/action", post(api::vkturn_action))
+        .route("/api/vkturn/auth/save", post(api::save_vkturn_auth))
+        .route("/api/vkturn/auth/logout", post(api::logout_vkturn_auth))
         // Расписания устройств
         .route("/api/schedules", get(api::get_schedules).post(api::save_schedules))
         // Игровой режим (Gaming Mode)

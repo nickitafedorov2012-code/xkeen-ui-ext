@@ -2148,6 +2148,72 @@
 - `backend/src/notifications.rs` (тест `validate_telegram_bot_token`) содержит строку, похожую на настоящий токен бота `8959891087:AAH…`. Если токен реальный — его нужно отозвать у @BotFather и заменить в тесте на фиктивный.
 - `backend/src/failover.rs` — `test_adversarial_quarantine_12h_amnesty_boundary_oracle` нестабилен по времени: берёт `now`, а функция загрузки сравнивает с собственным `now`; при переходе секунды граничная запись (ровно 43200 с) становится 43201 с и удаляется. Упал один раз в GREEN бага 77 (повторный прогон зелёный). Исправить можно, передав время в функцию загрузки явно — отдельной задачей.
 
+## Баг 37 — повторная проверка failsafe (2026-11-06)
+
+- Причина: `is_failsafe_http_status_valid` принимала HTTP 200, который может возвращать captive portal вместо ответа generate_204.
+- RED: `docs/fix_logs/bug-37-rework-red.log`, тест `regression_bug_37_captive_portal_200_is_not_internet` упал на HTTP 200.
+- Изменение: засчитывается только HTTP 204; прежнее противоречащее требованию утверждение теста исправлено. Разбор имён мостов сохранён и проверен дополнительным отрицательным примером.
+- Полный прогон: 571 backend-тест, frontend-тесты и TypeScript прошли.
+- `=== GATE OK bug 37-rework | diff 6edb899420e5 | лог docs/fix_logs/bug-37-rework-green.log ===`
+- Статус: локально исправлено; работа на роутере не проверялась.
+
+## VK Call — тайм-аут GETCONF (2026-11-06)
+
+- Причина: три тайм-аута GETCONF объявлялись подтверждённой ошибкой пароля, хотя отсутствие ответа не выявляет конкретную причину.
+- RED: `docs/fix_logs/bug-vk-timeout-diagnosis-red.log`, рабочий обработчик событий возвращал `AuthFailed`.
+- Изменение: тайм-ауты дают `ServerUnreachable` с предложением проверить связь и пароль; настоящий отказ авторизации сохраняется; ошибка связи удерживается до успешного подключения.
+- Проверка: 573 backend-теста, 320 frontend-тестов и TypeScript прошли.
+- `=== GATE OK bug vk-timeout-diagnosis | diff e96f897593fa | лог docs/fix_logs/bug-vk-timeout-diagnosis-green.log ===`
+
+## VK Call — проверка file-provider (2026-11-07)
+
+- Причина: после успешного подключения VK Call встроенная проверка обращалась к `/proxies/<узел>/delay`. Для узла из file-provider Mihomo отвечает там `404`, хотя реальный трафик проходит через selector.
+- RED: `docs/fix_logs/bug-vk-provider-delay-red.log`; `regression_vk_call_delay_uses_active_selector_for_file_provider` получал `-1` после прямого `404`.
+- Изменение: для активного file-provider проверка находит selector, в котором он выбран, и читает задержку через `/group/<selector>/delay`.
+- Проверка: 575 backend-тестов, 320 frontend-тестов и TypeScript прошли.
+- `=== GATE OK bug vk-provider-delay | diff d0de33d99464 | лог docs/fix_logs/bug-vk-provider-delay-green.log ===`
+
+## VK Call — защита переключения (2026-11-06)
+
+- Причина: обработчик ручного выбора вызывал Mihomo, даже если у VK-туннеля не был подключён TUN.
+- RED: `docs/fix_logs/bug-vk-switch-ready-red.log`; тест вызывает реальный обработчик и получает ошибку Mihomo вместо ошибки неготового туннеля.
+- Изменение: выбор VK-узла отклоняется до переключения, если `tunnel_ready()` равно false. Прочие узлы используют прежний путь.
+- Проверка: 572 backend-теста, 320 frontend-тестов и TypeScript прошли.
+- `=== GATE OK bug vk-switch-ready | diff 077829f28622 | лог docs/fix_logs/bug-vk-switch-ready-green.log ===`
+- Ограничение: реальное состояние роутера и прохождение трафика не проверялись.
+
+### Уточнение: TUN без активных потоков
+
+- Даже при готовом TUN отсутствие активных потоков означало, что узел не готов переносить трафик.
+- RED: `docs/fix_logs/bug-vk-switch-streams-red.log`, обработчик пытался связаться с Mihomo при нуле потоков.
+- Защита дополнена проверкой `connected_streams > 0` до начала переключения. Проверка: 574 backend-теста, 320 frontend-тестов, TypeScript.
+- `=== GATE OK bug vk-switch-streams | diff 8a6353afa0f8 | лог docs/fix_logs/bug-vk-switch-streams-green.log ===`
+
+## VK Call — каталог серверов (2026-11-06, отдельный запрос пользователя)
+
+- Запрос: «Давай исправим чтобы появилось» — показать работающий VK-туннель в разделе серверов. Изменение не входит в аудит 141 пункта и не меняет его счётчик.
+- Правила перечитаны: `2026-11-06 20:50:46`, хеш `bc29a182fac8`.
+- Где код: `backend/src/mihomo.rs:1118` — загрузка провайдеров в `get_servers`; `:1176` — построение карточки VK Call.
+- Цитата исходного незакоммиченного кода перед дополнением:
+  ```rust
+  if cfg.vkturn.enabled {
+      if let Some(proxy) = proxies.get(crate::vkturn::PROXY_NAME) {
+          let active_id = resolve_active_leaf(&proxies);
+  ```
+- Первопричина: служебный тип `Direct` исключается из обычного каталога, а существовавшая локальная правка возвращала VK-узел только из `/proxies`, пропуская узел, доступный исключительно через файловый провайдер `/providers/proxies`.
+- Регрессионные тесты: `backend/src/mihomo.rs::tests::test_vk_call_server_catalog_includes_file_provider_node` и `test_vk_call_server_catalog_deduplicates_and_hides_disabled_tunnel`; spec `be:test_vk_call_server_catalog`. Вызывают рабочую `get_servers` с кэшем ответов Mihomo; проверяют наличие ровно одной карточки, ID/протокол/провайдера/пинг/активность/приоритет, скрытие выключенного туннеля и остальных служебных Direct-узлов.
+- RED: `docs/fix_logs/bug-vk-call-catalog-red.log`, `red_kind=assert`: `VK file-provider node must appear once in the server catalog`, `left: 0`, `right: 1`.
+- Изменение: VK-узел ищется в обоих ответах Mihomo, сохраняет исходный ID для переключения и не дублируется; описательный текст туннеля не отправляется на DNS-разрешение.
+- Интерфейс: `frontend/src/components/Servers.vk-call.test.tsx` проверяет настоящую карточку и POST переключения с оригинальным ID. Сборка `npm run build` успешна. Локальный просмотр собранного интерфейса выполнен на тестовых данных с версией `1.12.2-beta-vk-catalog-local`; карточка видима и выбирается активной. Скриншот: `.agents/vk-call-catalog-preview.png`. Это не снимок работающего роутера.
+- Соседние режимы: production-код маршрутизации, конфиги, службы и переключение активного узла на роутере не изменялись. Существовавшие незакоммиченные изменения сохранены.
+- Дополнительное препятствие проверки: первый общий прогон дал 569/570 из-за уже изменённого теста `regression_bug_88_notify_failover_does_not_block_caller` (`notifications.rs`). Отдельный запуск подтвердил то же падение: тест использовал невалидный фиктивный токен и останавливал прокси до выполнения фоновой доставки. Исправлены только тестовые данные и ограниченное ожидание подтверждения подключения; production-доставка уведомлений не менялась. Повторный общий прогон: 570/570 backend, 320/320 frontend, TypeScript без ошибок.
+- GREEN: `docs/fix_logs/bug-vk-call-catalog-green.log`.
+  ```text
+  === GATE OK bug vk-call-catalog | diff f8e5b3cf35e0 | лог docs/fix_logs/bug-vk-call-catalog-green.log ===
+  ```
+- Установка на `192.168.2.1`: собраны и проверены ARM64-musl бинарники. Установленная финальная контрольная сумма `d32a1345fa6a7771b6192e840e6537a3e60b65358bb7e5aad3cc409d060a69ab`; сервис запущен. VK Call включён и имеет 20 потоков; карточка `📞 Сервер звонков ВК` видна в `/api/servers` и активна. `PROXY` и `🛡️ Whitelist` указывают на `📞 VK-туннель [БС]`; в `/connections` есть живые цепочки через него. Встроенная проверка вернула 91 мс после исправления file-provider delay.
+- Для отката на роутере сохранены: `/opt/sbin/xkeen-route.pre-vk-catalog-6405cc4eab3a.bak` (версия до установки) и `/opt/sbin/xkeen-route.pre-vk-delay-c0a810424817.bak` (первая рабочая установка). Временные staging-файлы удалены. Git-коммит/пуш не выполнялись.
+
 ## Итог сессии 2026-11-05 (релиз v1.10.1)
 
 - **FIXED: 46** — 1, 2, 3, 12, 27, 28, 39, 41, 44, 51, 56, 57, 59, 61, 62, 64, 68, 70, 71, 72, 73, 76, 77, 80, 84, 88, 89, 90, 91, 92, 93, 94, 97, 102, 103, 109, 114, 116, 118, 122, 125, 128, 130, 133, 135, 141.

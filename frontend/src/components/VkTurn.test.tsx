@@ -1,7 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
-import VkTurn, { hostFromPeer, formatTraffic, installProgressText, waitForCoreInstall, vkTurnTiming } from './VkTurn'
+import VkTurn, {
+  hostFromPeer,
+  formatTraffic,
+  installProgressText,
+  waitForCoreInstall,
+  vkTurnTiming,
+  parseVkRedirectFragment,
+} from './VkTurn'
 import * as api from '../api'
 import type { VkTurnStatus, VkTurnPhase } from '../types'
 
@@ -194,7 +201,7 @@ describe('VkTurn Component (ядро csqtt)', () => {
     await act(async () => {
       enableBtn.click()
     })
-    expect(notifyMock).toHaveBeenCalledWith('Укажите хотя бы одну ссылку на звонок ВКонтакте', true)
+    expect(notifyMock).toHaveBeenCalledWith('Укажите хотя бы одну ссылку на звонок или выполните вход через VK ID', true)
     expect(saveConfigSpy).not.toHaveBeenCalled()
 
     // Свой порт сервера сохраняется как есть
@@ -631,5 +638,97 @@ describe('VkTurn Component (ядро csqtt)', () => {
     expect(formatTraffic(2048)).toBe('2.0 КБ')
     expect(formatTraffic(5 * 1024 ** 3)).toBe('5.00 ГБ')
     expect(formatTraffic(undefined)).toBe('0 Б')
+  })
+
+  it('parses VK redirect URL fragments correctly', () => {
+    const full = 'https://oauth.vk.ru/blank.html#access_token=vk1.a.TestTokenSecret&user_id=12345678&expires_in=0'
+    const parsed = parseVkRedirectFragment(full)
+    expect(parsed?.token).toBe('vk1.a.TestTokenSecret')
+    expect(parsed?.userId).toBe(12345678)
+
+    const fragOnly = '#access_token=vk1.a.Short&user_id=999'
+    expect(parseVkRedirectFragment(fragOnly)).toEqual({ token: 'vk1.a.Short', userId: 999 })
+
+    const raw = 'vk1.a.DirectPastedToken12345'
+    expect(parseVkRedirectFragment(raw)).toEqual({ token: 'vk1.a.DirectPastedToken12345' })
+
+    expect(parseVkRedirectFragment('')).toBeNull()
+    expect(parseVkRedirectFragment('#error=access_denied')).toBeNull()
+  })
+
+  it('renders VK auth card when not authorized and saves manual token', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue(defaultConnectedStatus)
+    const saveAuthSpy = vi.spyOn(api, 'saveVkTurnAuth').mockResolvedValue({
+      success: true,
+      user_id: 555666,
+      user_name: 'Иван Иванов',
+      message: 'Учетная запись подключена',
+    })
+
+    await act(async () => {
+      root!.render(<VkTurn notify={notifyMock} />)
+    })
+
+    // Карточка входа видна
+    expect(container?.querySelector('[data-testid=\"vk-auth-card\"]')).not.toBeNull()
+    expect(container?.querySelector('[data-testid=\"vk-login-btn\"]')).not.toBeNull()
+
+    // Раскрытие ручного поля ввода
+    const toggleBtn = container?.querySelector('[data-testid=\"toggle-manual-token\"]') as HTMLButtonElement
+    expect(toggleBtn).not.toBeNull()
+    await act(async () => {
+      toggleBtn.click()
+    })
+
+    const tokenInput = container?.querySelector('[data-testid=\"manual-token-input\"]') as HTMLInputElement
+    expect(tokenInput).not.toBeNull()
+    await typeInto(tokenInput, 'https://oauth.vk.ru/blank.html#access_token=vk1.a.MyToken&user_id=555666')
+
+    const saveBtn = container?.querySelector('[data-testid=\"save-manual-token-btn\"]') as HTMLButtonElement
+    await act(async () => {
+      saveBtn.click()
+    })
+
+    expect(saveAuthSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        token: 'vk1.a.MyToken',
+        user_id: 555666,
+      })
+    )
+    expect(notifyMock).toHaveBeenCalledWith('Учетная запись подключена')
+  })
+
+  it('renders authorized VK profile badge and allows logging out', async () => {
+    const authorizedStatus: VkTurnStatus = {
+      ...defaultConnectedStatus,
+      has_token: true,
+      vk_user_id: 777888,
+      vk_user_name: 'Алексей Смирнов',
+      vk_token: 'vk1.a.***',
+    }
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue(authorizedStatus)
+    const logoutSpy = vi.spyOn(api, 'logoutVkTurnAuth').mockResolvedValue({
+      success: true,
+      message: 'Вы успешно вышли из учетной записи VK',
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    await act(async () => {
+      root!.render(<VkTurn notify={notifyMock} />)
+    })
+
+    expect(container?.querySelector('[data-testid=\"vk-account-card\"]')).not.toBeNull()
+    expect(container?.textContent).toContain('Алексей Смирнов')
+    expect(container?.textContent).toContain('ID: 777888')
+    expect(container?.textContent).toContain('✓ Учетная запись подключена')
+
+    const logoutBtn = findButton('Выйти из аккаунта')!
+    expect(logoutBtn).not.toBeNull()
+    await act(async () => {
+      logoutBtn.click()
+    })
+
+    expect(logoutSpy).toHaveBeenCalled()
+    expect(notifyMock).toHaveBeenCalledWith('Вы вышли из учетной записи VK')
   })
 })

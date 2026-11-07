@@ -502,6 +502,14 @@ pub struct VkTurnConfig {
     pub links: Vec<String>,
     /// Число потоков клиента: 0 = по умолчанию (20); округляется до кратного 10, максимум 100
     pub streams: u8,
+    /// Режим авторизации: "oauth" | "manual" | "token". По умолчанию "oauth".
+    pub auth_mode: String,
+    /// Сохранённый VK access_token
+    pub vk_token: Option<String>,
+    /// ID пользователя VK
+    pub vk_user_id: Option<u64>,
+    /// Имя и фамилия пользователя VK для профиля
+    pub vk_user_name: Option<String>,
 }
 
 impl Default for VkTurnConfig {
@@ -512,6 +520,10 @@ impl Default for VkTurnConfig {
             password: String::new(),
             links: Vec::new(),
             streams: 0,
+            auth_mode: "oauth".to_string(),
+            vk_token: None,
+            vk_user_id: None,
+            vk_user_name: None,
         }
     }
 }

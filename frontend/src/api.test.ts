@@ -293,11 +293,23 @@ describe('VK-turn API endpoints', () => {
           headers: { 'Content-Type': 'application/json' },
         })
       }
+      if (u.includes('/api/vkturn/auth/save')) {
+        return new Response(JSON.stringify({ success: true, data: { success: true, user_id: 12345 } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+      if (u.includes('/api/vkturn/auth/logout')) {
+        return new Response(JSON.stringify({ success: true, data: { success: true } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
       return new Response(JSON.stringify({ success: false }), { status: 404 })
     })
 
     const api = await import('./api')
-    const { getVkTurnStatus, getVkTurnLogs, saveVkTurnConfig, vkTurnAction } = api
+    const { getVkTurnStatus, getVkTurnLogs, saveVkTurnConfig, vkTurnAction, saveVkTurnAuth, logoutVkTurnAuth } = api
     // Конфиг туннеля выдаёт сервер, разбор вставленного конфига не нужен
     expect('parseVkTurnWg' in api).toBe(false)
     
@@ -312,6 +324,12 @@ describe('VK-turn API endpoints', () => {
 
     const action = await vkTurnAction('test')
     expect(action.delay_ms).toBe(35)
+
+    const authSaved = await saveVkTurnAuth({ token: 'vk1.a.TestToken', user_id: 12345 })
+    expect(authSaved.user_id).toBe(12345)
+
+    const logout = await logoutVkTurnAuth()
+    expect(logout.success).toBe(true)
 
     fetchSpy.mockRestore()
   })

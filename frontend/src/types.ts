@@ -1077,6 +1077,16 @@ export interface VkTurnStatus {
   enabled: boolean
   peer: string
   has_password: boolean
+  /** Режим авторизации: "oauth" | "manual" | "token" */
+  auth_mode?: string
+  /** Флаг наличия сохранённого токена VK */
+  has_token?: boolean
+  /** Маскированный токен VK (vk1.a.***) */
+  vk_token?: string | null
+  /** ID авторизованного пользователя VK */
+  vk_user_id?: number | null
+  /** Отображаемое имя пользователя VK */
+  vk_user_name?: string | null
   /** Сервер csqtt выдал адрес туннеля и интерфейс передан клиенту — трафик Mihomo идёт в туннель */
   tunnel_ready: boolean
   /** Адрес роутера внутри туннеля (выдаёт сервер csqtt) */
@@ -1107,6 +1117,10 @@ export interface VkTurnConfigPayload {
   streams?: number
   /** Новая основная ссылка: встаёт первой, запасные сохраняются */
   primary_link?: string
+  auth_mode?: string
+  vk_token?: string
+  vk_user_id?: number
+  vk_user_name?: string
 }
 
 export interface VkTurnActionResponse {

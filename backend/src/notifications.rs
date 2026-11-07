@@ -524,18 +524,39 @@ mod tests {
         // Баг 88: failover ждал доставку уведомлений (Telegram через прокси 10 с → напрямую 10 с → webhook 10 с),
         // и LAN всё это время сидела на мёртвом сервере. Прокси, который принимает TCP и молчит, — худший случай.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
+        let stop_server = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_server_thread = stop_server.clone();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
         let hold = std::thread::spawn(move || {
             let mut held = Vec::new();
-            for s in listener.incoming().take(4) {
-                if let Ok(s) = s { held.push(s); }
+            let mut accepted_tx = Some(accepted_tx);
+            // Сохраняем соединения открытыми, чтобы имитировать молчащий прокси.
+            // Короткий ограниченный опрос позволяет закрыть поток сразу по команде теста.
+            for _ in 0..400 {
+                if stop_server_thread.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                for _ in 0..8 {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            held.push(stream);
+                            if let Some(tx) = accepted_tx.take() {
+                                let _ = tx.send(());
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(_) => break,
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            std::thread::sleep(std::time::Duration::from_secs(30));
-            drop(held);
+            held
         });
         let cfg = NotificationsConfig {
             telegram_enabled: true,
-            telegram_bot_token: "123456789:TEST_TOKEN_FOR_REGRESSION_88".to_string(),
+            telegram_bot_token: "000000000:REGRESSION_88_FAKE_TOKEN_NOT_A_REAL_BOT".to_string(),
             telegram_chat_id: "555".to_string(),
             ..Default::default()
         };
@@ -552,6 +573,11 @@ mod tests {
             "notify_failover не должен блокировать failover на время доставки (ждали {:?})",
             started.elapsed()
         );
-        drop(hold);
+        // Даём фоновой доставке дойти до тестового прокси до завершения сервера.
+        let accepted = tokio::time::timeout(std::time::Duration::from_secs(2), accepted_rx).await;
+        stop_server.store(true, std::sync::atomic::Ordering::Release);
+        let held = hold.join().expect("тестовый прокси завершился");
+        assert!(matches!(accepted, Ok(Ok(()))), "фоновая доставка должна подключиться к тестовому прокси");
+        assert!(!held.is_empty(), "тестовый прокси должен принять хотя бы одно соединение");
     }
 }

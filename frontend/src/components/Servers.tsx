@@ -1680,7 +1680,14 @@ export default function Servers({ notify, status, refresh }: Props) {
                   {/* 1. Верхняя строка: метаданные слева, метрики справа */}
                   <div className="server-card-top">
                     <div className="server-card-badges">
-                      <span className="badge protocol-badge">{s.protocol}</span>
+                      <span
+                        className="badge protocol-badge"
+                        style={s.protocol === 'VK-CALL' ? {
+                          background: 'rgba(34, 197, 94, 0.16)',
+                          border: '1px solid rgba(34, 197, 94, 0.42)',
+                          color: '#4ade80',
+                        } : undefined}
+                      >{s.protocol}</span>
                       {s.provider && (
                         <span
                           className="tag-provider"

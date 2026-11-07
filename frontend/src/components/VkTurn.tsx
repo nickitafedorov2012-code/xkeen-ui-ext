@@ -4,11 +4,48 @@ import {
   getVkTurnLogs,
   saveVkTurnConfig,
   vkTurnAction,
+  saveVkTurnAuth,
+  logoutVkTurnAuth,
 } from '../api'
 import type { VkTurnStatus, VkTurnPhase, VkTurnCoreInstall } from '../types'
 
 interface VkTurnProps {
   notify: (msg: string, error?: boolean) => void
+}
+
+/** Параметры официального приложения VK для звонков (CSQTT) */
+export const VK_APP_ID = '7793118'
+export const VK_OAUTH_SCOPE = '1073737727'
+export const VK_REDIRECT_URI = 'https://oauth.vk.ru/blank.html'
+export const VK_AUTH_URL =
+  'https://oauth.vk.ru/authorize?client_id=7793118&scope=1073737727&redirect_uri=https%3A%2F%2Foauth.vk.ru%2Fblank.html&display=page&response_type=token&revoke=1&v=5.199'
+
+/** Разбор redirect_uri fragment (#access_token=...&user_id=...) */
+export function parseVkRedirectFragment(urlOrFragment: string): { token: string; userId?: number } | null {
+  const input = urlOrFragment.trim()
+  if (!input) return null
+  const frag = input.includes('#') ? input.split('#')[1] : input
+  let token = ''
+  let userId: number | undefined
+
+  for (const part of frag.split('&')) {
+    const [k, v] = part.split('=')
+    if (!k || !v) continue
+    const key = k.trim().toLowerCase()
+    const val = v.trim()
+    if (key === 'access_token') {
+      token = val
+    } else if (key === 'user_id') {
+      const parsed = parseInt(val, 10)
+      if (!isNaN(parsed)) userId = parsed
+    }
+  }
+
+  if (token) return { token, userId }
+  if (input.startsWith('vk1.a.') || (!input.includes('=') && input.length > 20)) {
+    return { token: input }
+  }
+  return null
 }
 
 /** PEER-порт сервера csqtt на VPS по умолчанию */
@@ -99,6 +136,12 @@ export default function VkTurn({ notify }: VkTurnProps) {
   const [newPassword, setNewPassword] = useState('')
   const [updatingPassword, setUpdatingPassword] = useState(false)
 
+  // VK OAuth модальное окно и ручной токен
+  const [authModalOpen, setAuthModalOpen] = useState(false)
+  const [manualTokenInput, setManualTokenInput] = useState('')
+  const [authSubmitting, setAuthSubmitting] = useState(false)
+  const [showManualTokenField, setShowManualTokenField] = useState(false)
+
   const pollingRef = useRef<boolean>(false)
 
   const loadStatus = useCallback(async (isInitial = false) => {
@@ -164,8 +207,8 @@ export default function VkTurn({ notify }: VkTurnProps) {
       return
     }
     const links = callLinks.map((l) => l.trim()).filter(Boolean)
-    if (links.length === 0) {
-      notify('Укажите хотя бы одну ссылку на звонок ВКонтакте', true)
+    if (links.length === 0 && !status?.has_token) {
+      notify('Укажите хотя бы одну ссылку на звонок или выполните вход через VK ID', true)
       return
     }
 
@@ -185,10 +228,99 @@ export default function VkTurn({ notify }: VkTurnProps) {
         links,
       })
       setPassword('')
-      notify('VK-туннель настроен. WireGuard-конфиг придёт от сервера автоматически.')
+      notify('VK-туннель настроен. Соединение устанавливается автоматически.')
       await loadStatus(true)
     } catch (err: any) {
       notify(err?.message || 'Ошибка настройки VK-туннеля', true)
+    } finally {
+      setActionPending(false)
+    }
+  }
+
+  // Запуск OAuth авторизации VK в popup
+  const handleStartVkOAuth = () => {
+    const width = 640
+    const height = 660
+    const left = Math.max(0, Math.floor(window.screenX + (window.outerWidth - width) / 2))
+    const top = Math.max(0, Math.floor(window.screenY + (window.outerHeight - height) / 2))
+    const popup = window.open(
+      VK_AUTH_URL,
+      'vk_oauth_popup',
+      `width=${width},height=${height},left=${left},top=${top},status=no,toolbar=no,menubar=no`
+    )
+
+    if (!popup) {
+      setAuthModalOpen(true)
+      notify('Всплывающее окно заблокировано браузером. Вставьте адрес авторизации вручную', true)
+      return
+    }
+
+    const timer = setInterval(async () => {
+      try {
+        if (!popup || popup.closed) {
+          clearInterval(timer)
+          return
+        }
+        const href = popup.location?.href
+        if (href && (href.includes('access_token=') || href.includes('oauth.vk.ru/blank.html'))) {
+          clearInterval(timer)
+          popup.close()
+          await handleSaveAuthString(href)
+        }
+      } catch {
+        // Cross-origin restriction
+      }
+    }, 500)
+
+    setTimeout(() => {
+      if (popup && !popup.closed) {
+        setAuthModalOpen(true)
+      }
+    }, 6000)
+  }
+
+  const handleSaveAuthString = async (str: string) => {
+    const trimmed = str.trim()
+    if (!trimmed) {
+      notify('Введите ссылку авторизации или access_token', true)
+      return
+    }
+    setAuthSubmitting(true)
+    try {
+      const parsed = parseVkRedirectFragment(trimmed)
+      const token = parsed?.token || trimmed
+      const res = await saveVkTurnAuth({
+        token,
+        user_id: parsed?.userId,
+        url: trimmed,
+      })
+      if (res.success) {
+        notify(res.message || `✓ Учетная запись ${res.user_name || ''} успешно подключена!`)
+        setAuthModalOpen(false)
+        setManualTokenInput('')
+        setShowManualTokenField(false)
+        await loadStatus(true)
+      } else {
+        notify('Ошибка сохранения данных авторизации VK', true)
+      }
+    } catch (err: any) {
+      notify(err?.message || 'Ошибка авторизации VK', true)
+    } finally {
+      setAuthSubmitting(false)
+    }
+  }
+
+  const handleLogoutVk = async () => {
+    if (!window.confirm('Вы действительно хотите выйти из учетной записи VK?')) return
+    setActionPending(true)
+    try {
+      const res = await logoutVkTurnAuth()
+      if (res.success) {
+        notify('Вы вышли из учетной записи VK')
+        await loadStatus(true)
+      }
+    } catch (err: any) {
+      notify(err?.message || 'Ошибка выхода из учетной записи VK', true)
     } finally {
       setActionPending(false)
     }
@@ -330,7 +462,9 @@ export default function VkTurn({ notify }: VkTurnProps) {
   }
 
   const installing = Boolean(status?.install?.running)
-  const isConfigured = Boolean(status?.peer && status?.has_password && (status?.links_count ?? 0) > 0)
+  const isConfigured = Boolean(
+    status?.peer && status?.has_password && ((status?.links_count ?? 0) > 0 || Boolean(status?.has_token))
+  )
 
   const renderPhaseBadge = (phase: VkTurnPhase = 'disabled', connected = 0) => {
     switch (phase) {
@@ -404,6 +538,249 @@ export default function VkTurn({ notify }: VkTurnProps) {
           </span>
         )
     }
+  }
+
+  const renderVkAccountCard = () => {
+    const isAuthorized = Boolean(status?.has_token || status?.vk_user_id)
+
+    if (isAuthorized) {
+      return (
+        <div
+          className="card vk-account-card"
+          data-testid="vk-account-card"
+          style={{
+            padding: '16px 20px',
+            background: 'rgba(34, 197, 94, 0.06)',
+            border: '1px solid rgba(34, 197, 94, 0.3)',
+            borderRadius: 12,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: 12,
+            marginBottom: 16,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div
+              style={{
+                width: 38,
+                height: 38,
+                borderRadius: '50%',
+                background: '#0077ff',
+                color: '#fff',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontWeight: 700,
+                fontSize: 16,
+                flexShrink: 0,
+              }}
+            >
+              VK
+            </div>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                <span className="badge badge-success" style={{ fontSize: 12 }}>
+                  ✓ Учетная запись подключена
+                </span>
+                <span style={{ fontWeight: 600, fontSize: 14 }}>
+                  {status?.vk_user_name || 'Пользователь VK'}
+                </span>
+                {status?.vk_user_id && (
+                  <span className="badge badge-neutral" style={{ fontSize: 11 }}>
+                    ID: {status.vk_user_id}
+                  </span>
+                )}
+              </div>
+              <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                🟢 Автоматическое создание звонков активно · звонки удерживаются клиентом csqtt
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            disabled={actionPending}
+            onClick={handleLogoutVk}
+            style={{ fontSize: 13, padding: '6px 14px' }}
+          >
+            Выйти из аккаунта
+          </button>
+        </div>
+      )
+    }
+
+    return (
+      <div
+        className="card vk-auth-card"
+        data-testid="vk-auth-card"
+        style={{
+          padding: '18px 20px',
+          background: 'linear-gradient(135deg, rgba(0, 119, 255, 0.08) 0%, rgba(15, 23, 42, 0.6) 100%)',
+          border: '1px solid rgba(0, 119, 255, 0.35)',
+          borderRadius: 12,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 12,
+          marginBottom: 16,
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <span style={{ fontSize: 20 }}>🔵</span>
+              <h4 style={{ margin: 0, fontSize: 15, fontWeight: 700 }}>Учетная запись ВКонтакте (VK ID)</h4>
+              <span className="badge badge-warning" style={{ fontSize: 11 }}>Рекомендуется</span>
+            </div>
+            <div className="muted" style={{ fontSize: 13 }}>
+              Войдите через VK ID: роутер будет сам создавать звонки и удерживать их без ручного копирования ссылок.
+            </div>
+          </div>
+          <button
+            type="button"
+            className="btn"
+            data-testid="vk-login-btn"
+            onClick={handleStartVkOAuth}
+            style={{
+              background: '#0077ff',
+              color: '#ffffff',
+              border: 'none',
+              fontWeight: 600,
+              fontSize: 14,
+              padding: '9px 18px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              boxShadow: '0 2px 8px rgba(0, 119, 255, 0.35)',
+              cursor: 'pointer',
+              borderRadius: 8,
+            }}
+          >
+            <span>🔵</span>
+            <span>Войти через ВКонтакте (VK ID)</span>
+          </button>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}>
+          <button
+            type="button"
+            data-testid="toggle-manual-token"
+            onClick={() => setShowManualTokenField((prev) => !prev)}
+            style={{
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              color: 'var(--muted)',
+              cursor: 'pointer',
+              textDecoration: 'underline',
+              fontSize: 12,
+            }}
+          >
+            {showManualTokenField ? 'Скрыть ввод токена' : 'Ввести токен вручную или вставить ссылку авторизации'}
+          </button>
+        </div>
+
+        {showManualTokenField && (
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 4 }}>
+            <input
+              type="text"
+              className="input"
+              data-testid="manual-token-input"
+              placeholder="Вставьте ссылку oauth.vk.ru/blank.html#access_token=... или токен vk1.a...."
+              value={manualTokenInput}
+              onChange={(e) => setManualTokenInput(e.target.value)}
+              style={{ flex: 1, fontSize: 13 }}
+            />
+            <button
+              type="button"
+              className="btn btn-primary"
+              data-testid="save-manual-token-btn"
+              disabled={authSubmitting || !manualTokenInput.trim()}
+              onClick={() => handleSaveAuthString(manualTokenInput)}
+              style={{ fontSize: 13 }}
+            >
+              {authSubmitting ? 'Сохранение…' : 'Сохранить токен'}
+            </button>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const renderAuthModal = () => {
+    if (!authModalOpen) return null
+    return (
+      <div
+        data-testid="auth-modal"
+        style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          background: 'rgba(0, 0, 0, 0.7)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 9999,
+          padding: 16,
+        }}
+      >
+        <div
+          className="card"
+          style={{
+            maxWidth: 540,
+            width: '100%',
+            padding: 24,
+            borderRadius: 14,
+            boxShadow: '0 8px 32px rgba(0, 0, 0, 0.6)',
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>Завершение входа через VK ID</h3>
+            <button
+              type="button"
+              onClick={() => setAuthModalOpen(false)}
+              style={{ background: 'none', border: 'none', fontSize: 18, color: 'var(--muted)', cursor: 'pointer' }}
+            >
+              ✕
+            </button>
+          </div>
+          <p style={{ fontSize: 13.5, lineHeight: 1.5, marginBottom: 14 }}>
+            Если окно авторизации не закрылось автоматически, скопируйте адрес из адресной строки открытого окна (начинается с <code>https://oauth.vk.ru/blank.html#...</code>) и вставьте его сюда:
+          </p>
+          <input
+            type="text"
+            className="input"
+            autoFocus
+            data-testid="modal-token-input"
+            placeholder="https://oauth.vk.ru/blank.html#access_token=vk1.a...."
+            value={manualTokenInput}
+            onChange={(e) => setManualTokenInput(e.target.value)}
+            style={{ width: '100%', marginBottom: 14, fontSize: 13 }}
+          />
+          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => setAuthModalOpen(false)}
+            >
+              Отмена
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              data-testid="modal-save-btn"
+              disabled={authSubmitting || !manualTokenInput.trim()}
+              onClick={() => handleSaveAuthString(manualTokenInput)}
+            >
+              {authSubmitting ? 'Сохранение…' : 'Подтвердить вход'}
+            </button>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   // ---------------------------------------------------------
@@ -500,47 +877,52 @@ export default function VkTurn({ notify }: VkTurnProps) {
             Адрес внутри туннеля сервер выдаст сам.
           </p>
 
-          <h3 style={{ margin: '24px 0 16px 0', fontSize: 16 }}>3️⃣ Ссылки на звонки ВКонтакте</h3>
-          <p className="muted" style={{ fontSize: 13, marginTop: -8, marginBottom: 14 }}>
-            💡 Создайте звонок в ВК и не нажимайте «Завершить для всех» — тогда ссылка живёт долго. Можно добавить
-            до {maxLinks} ссылок: они работают одновременно, и если одна умрёт, остальные продолжат.
-          </p>
+          <h3 style={{ margin: '24px 0 16px 0', fontSize: 16 }}>3️⃣ Авторизация ВКонтакте и звонки</h3>
+          {renderVkAccountCard()}
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
-            {callLinks.map((link, idx) => (
-              <div key={idx} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                <input
-                  type="text"
-                  className="input"
-                  placeholder={idx === 0 ? 'Основная ссылка на звонок (https://vk.com/call/join/...)' : 'Запасная ссылка'}
-                  value={link}
-                  onChange={(e) => handleCallLinkChange(idx, e.target.value)}
-                  style={{ flex: 1 }}
-                />
-                {callLinks.length > 1 && (
-                  <button
-                    className="btn btn-secondary"
-                    onClick={() => setCallLinks((prev) => prev.filter((_, i) => i !== idx))}
-                    title="Удалить ссылку"
-                    style={{ padding: '6px 10px' }}
-                  >
-                    ✕
-                  </button>
+          {!status?.has_token && (
+            <>
+              <p className="muted" style={{ fontSize: 13, marginTop: 10, marginBottom: 14 }}>
+                💡 Или укажите прямые ссылки на звонки ВК вручную (до {maxLinks} ссылок):
+              </p>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
+                {callLinks.map((link, idx) => (
+                  <div key={idx} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <input
+                      type="text"
+                      className="input"
+                      placeholder={idx === 0 ? 'Основная ссылка на звонок (https://vk.com/call/join/...)' : 'Запасная ссылка'}
+                      value={link}
+                      onChange={(e) => handleCallLinkChange(idx, e.target.value)}
+                      style={{ flex: 1 }}
+                    />
+                    {callLinks.length > 1 && (
+                      <button
+                        className="btn btn-secondary"
+                        onClick={() => setCallLinks((prev) => prev.filter((_, i) => i !== idx))}
+                        title="Удалить ссылку"
+                        style={{ padding: '6px 10px' }}
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+                ))}
+                {callLinks.length < maxLinks && (
+                  <div>
+                    <button
+                      className="btn btn-secondary"
+                      onClick={() => setCallLinks((prev) => [...prev, ''])}
+                      style={{ fontSize: 13 }}
+                    >
+                      + Добавить запасную ссылку
+                    </button>
+                  </div>
                 )}
               </div>
-            ))}
-            {callLinks.length < maxLinks && (
-              <div>
-                <button
-                  className="btn btn-secondary"
-                  onClick={() => setCallLinks((prev) => [...prev, ''])}
-                  style={{ fontSize: 13 }}
-                >
-                  + Добавить запасную ссылку
-                </button>
-              </div>
-            )}
-          </div>
+            </>
+          )}
 
           <div style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
             <button
@@ -558,6 +940,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
             )}
           </div>
         </section>
+        {renderAuthModal()}
       </div>
     )
   }
@@ -635,6 +1018,10 @@ export default function VkTurn({ notify }: VkTurnProps) {
               <span className="slider" />
             </label>
           </div>
+        </div>
+
+        <div style={{ marginTop: 18 }}>
+          {renderVkAccountCard()}
         </div>
 
         {installing && (
@@ -963,6 +1350,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
           </div>
         )}
       </section>
+      {renderAuthModal()}
     </div>
   )
 }

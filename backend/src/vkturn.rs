@@ -36,6 +36,13 @@ pub const CORE_TAG: &str = "csqtt-core-0e90df2";
 pub const CORE_UPSTREAM: &str = "Afteroid/csqttr";
 pub const CORE_UPSTREAM_COMMIT: &str = "0e90df237583738741b50e86e4f51f87e96c94da";
 pub const CORE_RELEASES: &str = "https://github.com/nickitafedorov2012-code/xkeen-ui-ext/releases/download";
+
+// OAuth параметры официального приложения VK для звонков (CSQTT)
+pub const VK_APP_ID: &str = "7793118";
+pub const VK_OAUTH_SCOPE: &str = "1073737727";
+pub const VK_REDIRECT_URI: &str = "https://oauth.vk.ru/blank.html";
+pub const VK_AUTH_URL: &str = "https://oauth.vk.ru/authorize?client_id=7793118&scope=1073737727&redirect_uri=https%3A%2F%2Foauth.vk.ru%2Fblank.html&display=page&response_type=token&revoke=1&v=5.199";
+
 pub const CORE_PATH: &str = "/opt/sbin/csqtt-client";
 /// Ядро прошлой версии (WDTT): удаляется при установке нового, чтобы не занимать место.
 pub const LEGACY_CORE_PATH: &str = "/opt/sbin/wdtt-client";
@@ -217,14 +224,139 @@ pub fn call_hashes(cfg: &VkTurnConfig) -> Vec<String> {
     out
 }
 
+/// Маскирование токена VK в логах и API.
+pub fn mask_vk_token(token: &str) -> String {
+    let t = token.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    if t.starts_with("vk1.a.") {
+        "vk1.a.***".to_string()
+    } else {
+        "[REDACTED]".to_string()
+    }
+}
+
+/// Разбор редирект-хеша авторизации VK (#access_token=...&user_id=...) или прямого токена.
+pub fn parse_vk_redirect_hash(fragment_or_url: &str) -> Result<(String, Option<u64>), String> {
+    let input = fragment_or_url.trim();
+    if input.is_empty() {
+        return Err("Пустая строка авторизации".into());
+    }
+
+    // Если передан полный URL или строка с # — отсекаем часть до решётки
+    let fragment = if let Some((_, frag)) = input.split_once('#') {
+        frag.trim()
+    } else {
+        input
+    };
+
+    let mut token: Option<String> = None;
+    let mut user_id: Option<u64> = None;
+
+    for param in fragment.split('&') {
+        let p = param.trim();
+        if p.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = p.split_once('=') {
+            let key = k.trim().to_lowercase();
+            let val = v.trim();
+            if key == "access_token" && !val.is_empty() {
+                token = Some(val.to_string());
+            } else if key == "user_id" {
+                if let Ok(uid) = val.parse::<u64>() {
+                    user_id = Some(uid);
+                }
+            }
+        }
+    }
+
+    if let Some(tok) = token {
+        return Ok((tok, user_id));
+    }
+
+    // Запасной вариант: пользователь вставил чистый токен (например vk1.a....)
+    if fragment.starts_with("vk1.a.") || (!fragment.contains('=') && fragment.len() > 20) {
+        return Ok((fragment.to_string(), None));
+    }
+
+    Err("Не удалось найти access_token в предоставленной ссылке или строке".into())
+}
+
+/// Формирование строки инициализации csqtt-client в формате VK_JS_BOOTSTRAP:<base64-json>\n
+pub fn format_vk_bootstrap_line(token: &str, user_id: u64) -> String {
+    let payload = serde_json::json!({
+        "access_token": token.trim(),
+        "user_id": user_id,
+    });
+    let raw = serde_json::to_string(&payload).unwrap_or_default();
+    let b64 = crate::adguard::base64_encode(raw.as_bytes());
+    format!("VK_JS_BOOTSTRAP:{b64}\n")
+}
+
+/// Запрос профиля пользователя через официальный VK API (users.get v=5.199).
+pub async fn fetch_vk_user_profile(
+    http: &reqwest::Client,
+    token: &str,
+    fallback_id: Option<u64>,
+) -> Result<(u64, String), String> {
+    let url = "https://api.vk.ru/method/users.get";
+    let resp = http
+        .get(url)
+        .query(&[("access_token", token.trim()), ("v", "5.199")])
+        .timeout(Duration::from_secs(6))
+        .send()
+        .await
+        .map_err(|e| format!("Ошибка сетевого запроса к VK API: {e}"))?;
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Ошибка разбора ответа VK API: {e}"))?;
+
+    if let Some(err) = json.get("error") {
+        let msg = err.get("error_msg").and_then(|m| m.as_str()).unwrap_or("Неизвестная ошибка VK");
+        return Err(format!("VK API вернул ошибку: {msg}"));
+    }
+
+    if let Some(user) = json.get("response").and_then(|r| r.as_array()).and_then(|a| a.first()) {
+        let uid = user.get("id").and_then(|i| i.as_u64()).or(fallback_id).unwrap_or(0);
+        let first = user.get("first_name").and_then(|s| s.as_str()).unwrap_or("");
+        let last = user.get("last_name").and_then(|s| s.as_str()).unwrap_or("");
+        let full_name = format!("{first} {last}").trim().to_string();
+        let name = if full_name.is_empty() {
+            format!("Пользователь VK {}", uid)
+        } else {
+            full_name
+        };
+        Ok((uid, name))
+    } else if let Some(uid) = fallback_id {
+        Ok((uid, format!("Пользователь VK {}", uid)))
+    } else {
+        Err("VK API вернул пустой список пользователей".into())
+    }
+}
+
 /// Аргументы передаются МАССИВОМ, без shell — никакой подстановки команд. Пароля здесь нет:
 /// он уходит в `CSQTT_PASSWORD` (см. client_env).
 pub fn build_client_args(cfg: &VkTurnConfig) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "-peer".into(),
         cfg.peer.trim().to_string(),
-        "-vk".into(),
-        call_hashes(cfg).join(","),
+    ];
+
+    if cfg.vk_token.as_ref().map(|t| !t.trim().is_empty()).unwrap_or(false) {
+        args.push("--vk-hash-mode".into());
+        args.push("auto_js".into());
+        args.push("--vk-auth-mode".into());
+        args.push("auto_js".into());
+    } else {
+        args.push("-vk".into());
+        args.push(call_hashes(cfg).join(","));
+    }
+
+    args.extend(vec![
         "-n".into(),
         effective_workers(cfg).to_string(),
         "--exact-workers".into(),
@@ -234,7 +366,9 @@ pub fn build_client_args(cfg: &VkTurnConfig) -> Vec<String> {
         TUN_UDS_NAME.into(),
         "-captcha-mode".into(),
         "auto".into(),
-    ]
+    ]);
+
+    args
 }
 
 /// Переменные окружения клиента.
@@ -706,10 +840,10 @@ pub fn iptables_apply_script(dsts: &[String]) -> String {
     format!(
         r#"for tbl in mangle nat; do
   for ch in xkeen XKEEN_BS zapret; do
-    iptables -w 2 -t "$tbl" -nL "$ch" >/dev/null 2>&1 || continue
+    iptables -w -t "$tbl" -nL "$ch" >/dev/null 2>&1 || continue
     for dst in {list}; do
-      iptables -w 2 -t "$tbl" -C "$ch" -d "$dst" -m comment --comment {IPT_COMMENT} -j RETURN 2>/dev/null \
-        || iptables -w 2 -t "$tbl" -I "$ch" 1 -d "$dst" -m comment --comment {IPT_COMMENT} -j RETURN 2>/dev/null || true
+      iptables -w -t "$tbl" -C "$ch" -d "$dst" -m comment --comment {IPT_COMMENT} -j RETURN 2>/dev/null \
+        || iptables -w -t "$tbl" -I "$ch" 1 -d "$dst" -m comment --comment {IPT_COMMENT} -j RETURN 2>/dev/null || true
     done
   done
 done"#
@@ -721,8 +855,8 @@ pub fn iptables_remove_script() -> String {
     format!(
         r#"for tbl in mangle nat; do
   for ch in xkeen XKEEN_BS zapret; do
-    iptables -w 2 -t "$tbl" -S "$ch" 2>/dev/null | grep -- "--comment {IPT_COMMENT}" | sed 's/^-A /-D /' | while read -r rule; do
-      eval iptables -w 2 -t "$tbl" $rule 2>/dev/null || true
+    iptables -w -t "$tbl" -S "$ch" 2>/dev/null | grep -- "--comment {IPT_COMMENT}" | sed 's/^-A /-D /' | while read -r rule; do
+      eval iptables -w -t "$tbl" $rule 2>/dev/null || true
     done
   done
 done"#
@@ -1285,6 +1419,18 @@ impl VkTurnManager {
             let mut stdin = child.stdin.take();
             let mut fd_sending = false;
 
+            // Если настроена авторизация через VK-токен, передаем учетные данные в stdin
+            if let Some(ref tok) = cfg.vk_token {
+                if !tok.trim().is_empty() {
+                    let user_id = cfg.vk_user_id.unwrap_or(0);
+                    let bootstrap_line = format_vk_bootstrap_line(tok, user_id);
+                    if let Some(si) = stdin.as_mut() {
+                        let _ = si.write_all(bootstrap_line.as_bytes()).await;
+                        let _ = si.flush().await;
+                    }
+                }
+            }
+
             // ждём: выход процесса / команду стоп / «висим без соединений» дольше допустимого
             let started = Instant::now();
             let mut tick = tokio::time::interval(Duration::from_secs(10));
@@ -1714,7 +1860,7 @@ mod tests {
             vec![
                 "-peer", "1.2.3.4:46000",
                 "-vk", "abc12345,def67890",
-                "-n", "20",
+                "-n", "100",
                 "--exact-workers",
                 "-listen", "127.0.0.1:0",
                 "-tun-uds", "xkeen_route_csqtt_tun",
@@ -1727,6 +1873,50 @@ mod tests {
         assert!(env.contains(&("CSQTT_EVENTS", "1".to_string())));
         let dup = cfg_with(&["https://vk.com/call/join/abc12345", "abc12345"]);
         assert_eq!(call_hashes(&dup), vec!["abc12345"]);
+    }
+
+    #[test]
+    fn test_vk_auth_parsing_and_bootstrap_formatting() {
+        let url = "https://oauth.vk.ru/blank.html#access_token=vk1.a.TestTokenSecret123&user_id=12345678&expires_in=0";
+        let (token, uid) = parse_vk_redirect_hash(url).expect("redirect url should be parsed");
+        assert_eq!(token, "vk1.a.TestTokenSecret123");
+        assert_eq!(uid, Some(12345678));
+
+        let frag = "#access_token=vk1.a.AnotherToken&user_id=987654";
+        let (token2, uid2) = parse_vk_redirect_hash(frag).expect("fragment should be parsed");
+        assert_eq!(token2, "vk1.a.AnotherToken");
+        assert_eq!(uid2, Some(987654));
+
+        let raw = "vk1.a.RawDirectTokenOnly";
+        let (token3, uid3) = parse_vk_redirect_hash(raw).expect("raw token should be accepted");
+        assert_eq!(token3, "vk1.a.RawDirectTokenOnly");
+        assert_eq!(uid3, None);
+
+        assert!(parse_vk_redirect_hash("https://oauth.vk.ru/blank.html#error=access_denied").is_err());
+
+        // Проверка формирования строки VK_JS_BOOTSTRAP
+        let b_line = format_vk_bootstrap_line("vk1.a.SecretToken", 12345);
+        assert!(b_line.starts_with("VK_JS_BOOTSTRAP:"));
+        assert!(b_line.ends_with('\n'));
+        let b64 = b_line.trim_start_matches("VK_JS_BOOTSTRAP:").trim();
+        let decoded = crate::subscription_parser::base64_decode(b64).expect("valid base64");
+        let json: serde_json::Value = serde_json::from_slice(&decoded).expect("valid json in bootstrap");
+        assert_eq!(json["access_token"], "vk1.a.SecretToken");
+        assert_eq!(json["user_id"], 12345);
+
+        // Проверка маскирования токена
+        assert_eq!(mask_vk_token("vk1.a.SensitiveData"), "vk1.a.***");
+        assert_eq!(mask_vk_token("other_token_secret"), "[REDACTED]");
+        assert_eq!(mask_vk_token(""), "");
+
+        // Проверка аргументов csqtt в режиме auto_js при наличии vk_token
+        let mut oauth_cfg = cfg_with(&[]);
+        oauth_cfg.vk_token = Some("vk1.a.TestToken".into());
+        oauth_cfg.vk_user_id = Some(12345);
+        let oauth_args = build_client_args(&oauth_cfg);
+        assert!(oauth_args.contains(&"--vk-hash-mode".to_string()));
+        assert!(oauth_args.contains(&"--vk-auth-mode".to_string()));
+        assert!(!oauth_args.contains(&"-vk".to_string()));
     }
 
     #[test]
@@ -2061,16 +2251,59 @@ mod tests {
         assert!(CORE_TAG.ends_with(&CORE_UPSTREAM_COMMIT[..7]), "тег релиза ядра соответствует коммиту сборки");
     }
 
-    /// Пароль сервера csqtt — секрет: в API настроек он скрыт, а «******» при сохранении не затирает настоящий.
+    /// Пароль сервера csqtt и токен VK — секреты: в API настроек они скрыты, а «******» при сохранении не затирает настоящий.
     #[test]
     fn settings_api_masks_and_preserves_tunnel_password() {
         let mut cfg = crate::config::AppConfig::default();
         cfg.vkturn.password = "top-secret-pw".into();
+        cfg.vkturn.vk_token = Some("vk1.a.VerySecretTokenLongString".into());
         let masked = crate::api::mask_settings_for_api(&cfg);
         assert_eq!(masked["vkturn"]["password"], "******");
+        assert_eq!(masked["vkturn"]["vk_token"], "vk1.a.***");
         assert!(!masked.to_string().contains("top-secret-pw"));
+        assert!(!masked.to_string().contains("VerySecretTokenLongString"));
         let merged = crate::api::merge_settings_update(&cfg, &masked).expect("merge masked settings");
         assert_eq!(merged.vkturn.password, "top-secret-pw");
+    }
+
+    #[tokio::test]
+    async fn test_vk_auth_endpoints_save_and_logout() {
+        let (root, state) = setup_saved_state("auth").await;
+
+        // 1. Сохранение авторизации через фрагмент URL
+        let req = crate::api::VkTurnAuthSaveReq {
+            url: Some("https://oauth.vk.ru/blank.html#access_token=vk1.a.UnitTestSecretToken&user_id=88889999".into()),
+            auth_mode: Some("oauth".into()),
+            ..Default::default()
+        };
+        let resp = crate::api::save_vkturn_auth(axum::extract::State(state.clone()), axum::Json(req)).await;
+        let v = response_json(resp).await;
+        assert_eq!(v["success"], true);
+        assert_eq!(v["data"]["user_id"], 88889999);
+
+        let cur_cfg = state.config.read().await.vkturn.clone();
+        assert_eq!(cur_cfg.vk_token.as_deref(), Some("vk1.a.UnitTestSecretToken"));
+        assert_eq!(cur_cfg.vk_user_id, Some(88889999));
+        assert_eq!(cur_cfg.auth_mode, "oauth");
+
+        // 2. Проверка статуса API на отдачу маскированного токена и профиля
+        let st_resp = crate::api::get_vkturn_status(axum::extract::State(state.clone())).await;
+        let st = response_json(st_resp).await;
+        assert_eq!(st["data"]["has_token"], true);
+        assert_eq!(st["data"]["vk_token"], "vk1.a.***");
+        assert_eq!(st["data"]["vk_user_id"], 88889999);
+
+        // 3. Выход из аккаунта
+        let logout_resp = crate::api::logout_vkturn_auth(axum::extract::State(state.clone())).await;
+        let lv = response_json(logout_resp).await;
+        assert_eq!(lv["success"], true);
+
+        let logged_out_cfg = state.config.read().await.vkturn.clone();
+        assert!(logged_out_cfg.vk_token.is_none());
+        assert!(logged_out_cfg.vk_user_id.is_none());
+        assert!(logged_out_cfg.vk_user_name.is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -2339,14 +2572,16 @@ mod tests {
 
         let apply = iptables_apply_script(&dsts);
         assert!(apply.contains("for ch in xkeen XKEEN_BS zapret"));
-        assert!(apply.contains("-w 2"));
+        assert!(apply.contains("iptables -w -t"));
+        assert!(!apply.contains("-w 2"));
         assert!(apply.contains("-C \"$ch\""), "проверка -C делает правило идемпотентным");
         assert!(apply.contains("-I \"$ch\" 1"), "RETURN обязан стоять первым в цепочке");
         assert!(apply.contains(&format!("--comment {IPT_COMMENT} -j RETURN")));
         assert!(apply.contains("|| continue"), "отсутствующая цепочка пропускается");
         let remove = iptables_remove_script();
         assert!(remove.contains("for ch in xkeen XKEEN_BS zapret"));
-        assert!(remove.contains("-w 2"));
+        assert!(remove.contains("iptables -w -t"));
+        assert!(!remove.contains("-w 2"));
         assert!(remove.contains(&format!("--comment {IPT_COMMENT}")));
         assert!(remove.contains("sed 's/^-A /-D /'"));
     }

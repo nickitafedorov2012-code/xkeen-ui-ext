@@ -633,6 +633,13 @@ pub fn mask_settings_for_api(cfg: &config::AppConfig) -> serde_json::Value {
                 *pw = serde_json::Value::String("******".into());
             }
         }
+        if let Some(tok) = vkturn.get_mut("vk_token") {
+            if let Some(s) = tok.as_str() {
+                if !s.is_empty() {
+                    *tok = serde_json::Value::String(crate::vkturn::mask_vk_token(s));
+                }
+            }
+        }
     }
 
     val
@@ -7967,6 +7974,11 @@ pub async fn get_vkturn_status(State(state): State<AppState>) -> Response {
         "interface": crate::vkturn::TUN_IFACE,
         "default_port": crate::vkturn::DEFAULT_SERVER_PORT,
         "install": state.vkturn.install_state(),
+        "auth_mode": v.auth_mode,
+        "has_token": v.vk_token.as_ref().map(|t| !t.trim().is_empty()).unwrap_or(false),
+        "vk_token": v.vk_token.as_ref().map(|t| crate::vkturn::mask_vk_token(t)),
+        "vk_user_id": v.vk_user_id,
+        "vk_user_name": v.vk_user_name,
     }))
 }
 
@@ -7989,6 +8001,10 @@ pub struct SaveVkTurnConfigReq {
     /// Новая основная ссылка: встаёт первой, остальные (запасные) сохраняются без дублей
     pub primary_link: Option<String>,
     pub streams: Option<u8>,
+    pub auth_mode: Option<String>,
+    pub vk_token: Option<String>,
+    pub vk_user_id: Option<u64>,
+    pub vk_user_name: Option<String>,
 }
 
 /// POST /api/vkturn/config
@@ -8046,6 +8062,23 @@ pub async fn save_vkturn_config(
         }
         new_cfg.streams = s;
     }
+    if let Some(am) = body.auth_mode {
+        new_cfg.auth_mode = am;
+    }
+    if let Some(ref tok) = body.vk_token {
+        let t = tok.trim();
+        if t.is_empty() {
+            new_cfg.vk_token = None;
+        } else if t != "******" && !t.contains("***") && t != "[REDACTED]" {
+            new_cfg.vk_token = Some(t.to_string());
+        }
+    }
+    if let Some(uid) = body.vk_user_id {
+        new_cfg.vk_user_id = if uid == 0 { None } else { Some(uid) };
+    }
+    if let Some(ref name) = body.vk_user_name {
+        new_cfg.vk_user_name = Some(name.trim().to_string());
+    }
     if new_cfg.links.len() > crate::vkturn::MAX_LINKS {
         return api_err(format!("Можно указать не больше {} ссылок на звонки", crate::vkturn::MAX_LINKS));
     }
@@ -8061,8 +8094,9 @@ pub async fn save_vkturn_config(
         if let Err(e) = crate::vkturn::validate_password(&new_cfg.password) {
             return api_err(e);
         }
-        if crate::vkturn::call_hashes(&new_cfg).is_empty() {
-            return api_err("Укажите хотя бы одну ссылку на звонок ВКонтакте");
+        let has_valid_token = new_cfg.vk_token.as_ref().map(|t| !t.trim().is_empty()).unwrap_or(false);
+        if !has_valid_token && crate::vkturn::call_hashes(&new_cfg).is_empty() {
+            return api_err("Укажите хотя бы одну ссылку на звонок ВКонтакте или выполните вход через VK ID");
         }
     }
 
@@ -8166,6 +8200,108 @@ pub async fn vkturn_action(
         }
         _ => api_err(format!("Неизвестное действие: {act}")),
     }
+}
+
+#[derive(Deserialize, Default)]
+pub struct VkTurnAuthSaveReq {
+    pub token: Option<String>,
+    pub access_token: Option<String>,
+    pub user_id: Option<u64>,
+    pub url: Option<String>,
+    pub auth_mode: Option<String>,
+}
+
+/// POST /api/vkturn/auth/save — сохранение токена VK и информации о пользователе
+pub async fn save_vkturn_auth(
+    State(state): State<AppState>,
+    Json(body): Json<VkTurnAuthSaveReq>,
+) -> Response {
+    let _update_guard = state.vkturn.config_update_lock.lock().await;
+
+    let input_raw = body
+        .token
+        .as_deref()
+        .or(body.access_token.as_deref())
+        .or(body.url.as_deref())
+        .unwrap_or("")
+        .trim();
+
+    if input_raw.is_empty() {
+        return api_err("Токен или ссылка авторизации не переданы");
+    }
+
+    let (parsed_token, parsed_uid) = match crate::vkturn::parse_vk_redirect_hash(input_raw) {
+        Ok((t, u)) => (t, u),
+        Err(e) => return api_err(format!("Ошибка разбора данных авторизации: {e}")),
+    };
+
+    let target_uid = body.user_id.or(parsed_uid);
+
+    // Запрос профиля пользователя через VK API
+    let (real_uid, user_name) = match crate::vkturn::fetch_vk_user_profile(&state.http, &parsed_token, target_uid).await {
+        Ok((uid, name)) => (uid, name),
+        Err(e) => {
+            crate::log_w!("[VK-туннель] Не удалось получить профиль через users.get: {e}");
+            // Если запрос упал (например, нет интернета на роутере), но uid есть — сохраняем с заглушкой
+            let uid = target_uid.unwrap_or(0);
+            (uid, format!("Пользователь VK {uid}"))
+        }
+    };
+
+    let auth_mode = body.auth_mode.unwrap_or_else(|| "oauth".to_string());
+    let token_for_save = parsed_token.clone();
+    let name_for_save = user_name.clone();
+
+    let saved = match crate::vkturn::commit_vkturn(&state, move |v| {
+        v.auth_mode = auth_mode;
+        v.vk_token = Some(token_for_save);
+        v.vk_user_id = if real_uid > 0 { Some(real_uid) } else { None };
+        v.vk_user_name = Some(name_for_save);
+        Ok(())
+    })
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => return api_err(e),
+    };
+
+    if saved.enabled {
+        state.vkturn.restart(saved, state.clone()).await;
+    }
+
+    api_ok(json!({
+        "success": true,
+        "user_id": real_uid,
+        "user_name": user_name,
+        "message": "Учетная запись VK успешно подключена"
+    }))
+}
+
+/// POST /api/vkturn/auth/logout — выход из учетной записи VK и очистка токена
+pub async fn logout_vkturn_auth(State(state): State<AppState>) -> Response {
+    let _update_guard = state.vkturn.config_update_lock.lock().await;
+
+    let saved = match crate::vkturn::commit_vkturn(&state, |v| {
+        v.vk_token = None;
+        v.vk_user_id = None;
+        v.vk_user_name = None;
+        v.auth_mode = "oauth".to_string();
+        Ok(())
+    })
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => return api_err(e),
+    };
+
+    if saved.enabled {
+        state.vkturn.restart(saved, state.clone()).await;
+    }
+
+    api_ok(json!({
+        "success": true,
+        "message": "Вы успешно вышли из учетной записи VK"
+    }))
 }
 
 /// GET /api/zapret/status — статус nfqws/nfqws2, iptables и S51zapret
