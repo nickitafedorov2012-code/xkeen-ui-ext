@@ -8025,9 +8025,15 @@ pub async fn save_vkturn_config(
         new_cfg.enabled = en;
     }
     if let Some(ref p) = body.peer {
-        match crate::vkturn::normalize_peer(p) {
-            Ok(n) => new_cfg.peer = n,
-            Err(e) => return api_err(format!("Некорректный адрес сервера VPS: {e}")),
+        let p_trim = p.trim();
+        if let Some((addr, pw)) = crate::vkturn::parse_csqtt_link(p_trim) {
+            new_cfg.peer = addr;
+            new_cfg.password = pw;
+        } else {
+            match crate::vkturn::normalize_peer(p_trim) {
+                Ok(n) => new_cfg.peer = n,
+                Err(e) => return api_err(format!("Некорректный адрес сервера VPS: {e}")),
+            }
         }
     }
     if let Some(ref pw) = body.password {

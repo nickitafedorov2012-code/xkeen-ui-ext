@@ -181,11 +181,52 @@ pub fn validate_peer(peer: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Разбор ссылки профиля csqtt (как в focsq: csqtt://connect?v=2&host=...&peer=46000&password=... или csqtt://pass@host:port)
+pub fn parse_csqtt_link(raw: &str) -> Option<(String, String)> {
+    let s = raw.trim();
+    if !s.starts_with("csqtt://") {
+        return None;
+    }
+    if s.starts_with("csqtt://connect?") {
+        let query = s.trim_start_matches("csqtt://connect?");
+        let mut host = "";
+        let mut peer = "46000";
+        let mut password = "";
+        for pair in query.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                match k.trim() {
+                    "host" => host = v.trim(),
+                    "peer" => peer = v.trim(),
+                    "password" => password = v.trim(),
+                    _ => {}
+                }
+            }
+        }
+        if !host.is_empty() && !password.is_empty() {
+            let port = peer.parse::<u16>().unwrap_or(46000);
+            return Some((format!("{host}:{port}"), password.to_string()));
+        }
+    }
+    let rest = s.trim_start_matches("csqtt://");
+    if let Some((pw, addr)) = rest.split_once('@') {
+        if !pw.is_empty() && !addr.is_empty() {
+            let full_addr = if addr.contains(':') { addr.to_string() } else { format!("{addr}:46000") };
+            return Some((full_addr, pw.to_string()));
+        }
+    }
+    None
+}
+
 /// Пользователь может ввести только IP/домен — PEER-порт сервера csqtt по умолчанию подставляется сам.
+/// Также поддерживаются ссылки csqtt:// (извлекается хост:порт).
 pub fn normalize_peer(raw: &str) -> Result<String, String> {
     let s = raw.trim();
     if s.is_empty() {
         return Ok(String::new());
+    }
+    if let Some((addr, _)) = parse_csqtt_link(s) {
+        validate_peer(&addr)?;
+        return Ok(addr);
     }
     let with_port = if s.contains(':') { s.to_string() } else { format!("{s}:{DEFAULT_SERVER_PORT}") };
     validate_peer(&with_port)?;
@@ -385,11 +426,22 @@ pub fn call_count_for_workers(workers: u32) -> usize {
     MAX_LINKS
 }
 
-/// Запуск легального звонка через официальный VK API calls.start (как в focsq / VkAutoCallsManager).
-/// Возвращает (call_id, hash)
-pub async fn start_vk_call(http: &reqwest::Client, token: &str) -> Result<(String, String), String> {
+pub const TOKEN_INVALID_CODES: &[i64] = &[4, 5, 27, 28];
+
+pub fn is_token_invalid_code(code: i64) -> bool {
+    TOKEN_INVALID_CODES.contains(&code)
+}
+
+#[derive(Debug, Clone)]
+pub enum VkCallResult {
+    Started { call_id: String, hash: String },
+    TokenInvalid { code: i64, message: String },
+    TransientError(String),
+}
+
+pub async fn start_vk_call_single(http: &reqwest::Client, token: &str) -> VkCallResult {
     let url = "https://api.vk.ru/method/calls.start";
-    let resp = http
+    let resp = match http
         .post(url)
         .header("Authorization", format!("Bearer {}", token.trim()))
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -397,20 +449,29 @@ pub async fn start_vk_call(http: &reqwest::Client, token: &str) -> Result<(Strin
         .timeout(Duration::from_secs(8))
         .send()
         .await
-        .map_err(|e| format!("Сетевая ошибка calls.start: {e}"))?;
+    {
+        Ok(r) => r,
+        Err(e) => return VkCallResult::TransientError(format!("Сетевая ошибка calls.start: {e}")),
+    };
 
-    let json: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Ошибка парсинга JSON calls.start: {e}"))?;
+    let json: serde_json::Value = match resp.json().await {
+        Ok(j) => j,
+        Err(e) => return VkCallResult::TransientError(format!("Ошибка парсинга JSON calls.start: {e}")),
+    };
 
     if let Some(err) = json.get("error") {
         let code = err.get("error_code").and_then(|c| c.as_i64()).unwrap_or(0);
-        let msg = err.get("error_msg").and_then(|m| m.as_str()).unwrap_or("Ошибка VK");
-        return Err(format!("VK API calls.start вернул ошибку {code}: {msg}"));
+        let msg = err.get("error_msg").and_then(|m| m.as_str()).unwrap_or("Ошибка VK").to_string();
+        if is_token_invalid_code(code) {
+            return VkCallResult::TokenInvalid { code, message: msg };
+        }
+        return VkCallResult::TransientError(format!("VK API calls.start код {code}: {msg}"));
     }
 
-    let response = json.get("response").ok_or_else(|| "нет response в calls.start".to_string())?;
+    let Some(response) = json.get("response") else {
+        return VkCallResult::TransientError("нет response в ответе calls.start".into());
+    };
+
     let call_id = response.get("call_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let join_link = response.get("join_link").and_then(|v| v.as_str()).unwrap_or("");
     let ok_join_link = response.get("ok_join_link").and_then(|v| v.as_str()).unwrap_or("");
@@ -418,16 +479,43 @@ pub async fn start_vk_call(http: &reqwest::Client, token: &str) -> Result<(Strin
     let hash = if !ok_join_link.trim().is_empty() && !ok_join_link.contains('/') {
         ok_join_link.trim().to_string()
     } else if !join_link.trim().is_empty() {
-        parse_call_link(join_link)?
+        match parse_call_link(join_link) {
+            Ok(h) => h,
+            Err(e) => return VkCallResult::TransientError(e),
+        }
     } else {
-        parse_call_link(ok_join_link)?
+        match parse_call_link(ok_join_link) {
+            Ok(h) => h,
+            Err(e) => return VkCallResult::TransientError(e),
+        }
     };
 
     if call_id.is_empty() || hash.is_empty() {
-        return Err("Пустой call_id или hash в calls.start".into());
+        return VkCallResult::TransientError("Пустой call_id или hash в calls.start".into());
     }
 
-    Ok((call_id, hash))
+    VkCallResult::Started { call_id, hash }
+}
+
+/// Запуск легального звонка через официальный VK API calls.start (с до 3 повторных попыток, как в focsq).
+/// Возвращает Ok((call_id, hash)) или Err((is_token_invalid, error_message))
+pub async fn start_vk_call(http: &reqwest::Client, token: &str) -> Result<(String, String), (bool, String)> {
+    let mut last_err = "Не удалось выполнить запрос calls.start".to_string();
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+        }
+        match start_vk_call_single(http, token).await {
+            VkCallResult::Started { call_id, hash } => return Ok((call_id, hash)),
+            VkCallResult::TokenInvalid { code, message } => {
+                return Err((true, format!("Токен ВКонтакте недействителен (код {code}: {message})")));
+            }
+            VkCallResult::TransientError(e) => {
+                last_err = e;
+            }
+        }
+    }
+    Err((false, last_err))
 }
 
 pub async fn finish_vk_call(http: &reqwest::Client, token: &str, call_id: &str) {
@@ -443,6 +531,25 @@ pub async fn finish_vk_call(http: &reqwest::Client, token: &str, call_id: &str) 
         .timeout(Duration::from_secs(5))
         .send()
         .await;
+}
+
+/// Параллельное завершение всех звонков (как в focsq / finishAll)
+pub async fn finish_vk_calls_batch(http: &reqwest::Client, token: &str, call_ids: &[String]) {
+    if token.trim().is_empty() || call_ids.is_empty() {
+        return;
+    }
+    let mut tasks = Vec::new();
+    for cid in call_ids {
+        let h = http.clone();
+        let tok = token.trim().to_string();
+        let id = cid.clone();
+        tasks.push(tokio::spawn(async move {
+            finish_vk_call(&h, &tok, &id).await;
+        }));
+    }
+    for t in tasks {
+        let _ = t.await;
+    }
 }
 
 /// Аргументы передаются МАССИВОМ, без shell — никакой подстановки команд. Пароля здесь нет:
@@ -462,6 +569,8 @@ pub fn build_client_args_with_hashes(cfg: &VkTurnConfig, hashes: &[String]) -> V
         TUN_UDS_NAME.into(),
         "-captcha-mode".into(),
         "auto".into(),
+        "-obfs".into(),
+        "audio".into(),
     ]
 }
 
@@ -1461,9 +1570,8 @@ impl VkTurnManager {
 
             // Завершаем прошлые авто-звонки, если были
             if let Some(ref tok) = cfg.vk_token {
-                for cid in auto_call_ids.drain(..) {
-                    finish_vk_call(&state.http, tok, &cid).await;
-                }
+                finish_vk_calls_batch(&state.http, tok, &auto_call_ids).await;
+                auto_call_ids.clear();
             }
 
             // Получаем хеши звонков: автоматически через calls.start (как в focsq) или из конфига
@@ -1484,17 +1592,21 @@ impl VkTurnManager {
                                 created_ids.push(cid);
                                 created_hashes.push(h);
                             }
-                            Err(e) => {
-                                last_err = Some(e);
+                            Err((is_invalid, e)) => {
+                                last_err = Some((is_invalid, e));
                                 break;
                             }
                         }
                     }
 
                     if created_hashes.is_empty() {
-                        let err_msg = last_err.unwrap_or_else(|| "Не удалось создать звонок".into());
+                        let (is_invalid, err_msg) = last_err.unwrap_or((false, "Не удалось создать звонок".into()));
                         crate::log_w!("[VK-туннель] Ошибка создания авто-звонка через API: {err_msg}");
                         self.set_error(VkTurnPhase::AuthFailed, err_msg).await;
+                        if is_invalid {
+                            crate::log_w!("[VK-туннель] Токен VK отозван или аккаунт заблокирован. Остановка надзора до повторного входа.");
+                            break;
+                        }
                         if !sleep_or_stop(&mut stop_rx, backoff).await {
                             break;
                         }
@@ -1591,11 +1703,9 @@ impl VkTurnManager {
                 tokio::select! {
                     st = child.wait() => break format!("клиент завершился: {:?}", st.ok()),
                     _ = stop_rx.changed() => {
-                        // Завершаем звонки в VK API
+                        // Завершаем звонки в VK API параллельно
                         if let Some(ref tok) = cfg.vk_token {
-                            for cid in &auto_call_ids {
-                                finish_vk_call(&state.http, tok, cid).await;
-                            }
+                            finish_vk_calls_batch(&state.http, tok, &auto_call_ids).await;
                         }
                         // Мягкая остановка: клиент закрывает сессии, сервер сразу освобождает слоты.
                         if let Some(mut si) = stdin.take() {
@@ -1985,6 +2095,17 @@ mod tests {
         assert_eq!(normalize_peer(" vps.example.com:443 ").unwrap(), "vps.example.com:443");
         assert_eq!(normalize_peer("").unwrap(), "");
         assert!(normalize_peer("1.2.3.4;reboot").is_err());
+
+        // Проверка парсинга ссылок csqtt://
+        let (p1, pw1) = parse_csqtt_link("csqtt://connect?v=2&host=203.0.113.88&peer=46000&password=secret_pw").unwrap();
+        assert_eq!(p1, "203.0.113.88:46000");
+        assert_eq!(pw1, "secret_pw");
+
+        let (p2, pw2) = parse_csqtt_link("csqtt://myPass@198.51.100.5:1234").unwrap();
+        assert_eq!(p2, "198.51.100.5:1234");
+        assert_eq!(pw2, "myPass");
+
+        assert_eq!(normalize_peer("csqtt://connect?v=2&host=1.2.3.4&peer=46000&password=pw").unwrap(), "1.2.3.4:46000");
     }
 
     #[test]
@@ -2023,6 +2144,7 @@ mod tests {
                 "-listen", "127.0.0.1:0",
                 "-tun-uds", "xkeen_route_csqtt_tun",
                 "-captcha-mode", "auto",
+                "-obfs", "audio",
             ]
         );
         assert!(!args.iter().any(|a| a.contains("s3cret-pass")), "пароль в аргументах процесса");
