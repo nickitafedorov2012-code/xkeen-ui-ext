@@ -244,31 +244,22 @@ pub fn parse_vk_redirect_hash(fragment_or_url: &str) -> Result<(String, Option<u
         return Err("Пустая строка авторизации".into());
     }
 
-    // Если передан полный URL или строка с # — отсекаем часть до решётки
-    let fragment = if let Some((_, frag)) = input.split_once('#') {
-        frag.trim()
-    } else {
-        input
-    };
-
     let mut token: Option<String> = None;
     let mut user_id: Option<u64> = None;
 
-    for param in fragment.split('&') {
-        let p = param.trim();
-        if p.is_empty() {
-            continue;
+    if let Some(pos) = input.find("access_token=") {
+        let rest = &input[pos + "access_token=".len()..];
+        let tok = rest.split('&').next().unwrap_or("").trim();
+        if !tok.is_empty() {
+            token = Some(tok.to_string());
         }
-        if let Some((k, v)) = p.split_once('=') {
-            let key = k.trim().to_lowercase();
-            let val = v.trim();
-            if key == "access_token" && !val.is_empty() {
-                token = Some(val.to_string());
-            } else if key == "user_id" {
-                if let Ok(uid) = val.parse::<u64>() {
-                    user_id = Some(uid);
-                }
-            }
+    }
+
+    if let Some(pos) = input.find("user_id=") {
+        let rest = &input[pos + "user_id=".len()..];
+        let uid_str = rest.split('&').next().unwrap_or("").trim();
+        if let Ok(uid) = uid_str.parse::<u64>() {
+            user_id = Some(uid);
         }
     }
 
@@ -277,8 +268,8 @@ pub fn parse_vk_redirect_hash(fragment_or_url: &str) -> Result<(String, Option<u
     }
 
     // Запасной вариант: пользователь вставил чистый токен (например vk1.a....)
-    if fragment.starts_with("vk1.a.") || (!fragment.contains('=') && fragment.len() > 20) {
-        return Ok((fragment.to_string(), None));
+    if input.starts_with("vk1.a.") || (!input.contains('=') && input.len() > 20) {
+        return Ok((input.to_string(), None));
     }
 
     Err("Не удалось найти access_token в предоставленной ссылке или строке".into())

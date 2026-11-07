@@ -22,23 +22,24 @@ export const VK_AUTH_URL =
 
 /** Разбор redirect_uri fragment (#access_token=...&user_id=...) */
 export function parseVkRedirectFragment(urlOrFragment: string): { token: string; userId?: number } | null {
-  const input = urlOrFragment.trim()
+  let input = urlOrFragment.trim()
   if (!input) return null
-  const frag = input.includes('#') ? input.split('#')[1] : input
+  try {
+    input = decodeURIComponent(input)
+  } catch {}
+
   let token = ''
   let userId: number | undefined
 
-  for (const part of frag.split('&')) {
-    const [k, v] = part.split('=')
-    if (!k || !v) continue
-    const key = k.trim().toLowerCase()
-    const val = v.trim()
-    if (key === 'access_token') {
-      token = val
-    } else if (key === 'user_id') {
-      const parsed = parseInt(val, 10)
-      if (!isNaN(parsed)) userId = parsed
-    }
+  const tokenMatch = input.match(/access_token=([a-zA-Z0-9._-]+)/)
+  if (tokenMatch) {
+    token = tokenMatch[1]
+  }
+
+  const userMatch = input.match(/user_id=([0-9]+)/)
+  if (userMatch) {
+    const parsed = parseInt(userMatch[1], 10)
+    if (!isNaN(parsed)) userId = parsed
   }
 
   if (token) return { token, userId }
@@ -249,8 +250,10 @@ export default function VkTurn({ notify }: VkTurnProps) {
       `width=${width},height=${height},left=${left},top=${top},status=no,toolbar=no,menubar=no`
     )
 
+    // Сразу открываем модальное окно с подсказкой и кнопкой вставки из буфера
+    setAuthModalOpen(true)
+
     if (!popup) {
-      setAuthModalOpen(true)
       notify('Всплывающее окно заблокировано браузером. Вставьте адрес авторизации вручную', true)
       return
     }
@@ -271,13 +274,39 @@ export default function VkTurn({ notify }: VkTurnProps) {
         // Cross-origin restriction
       }
     }, 500)
-
-    setTimeout(() => {
-      if (popup && !popup.closed) {
-        setAuthModalOpen(true)
-      }
-    }, 6000)
   }
+
+  const handlePasteFromClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText()
+      const trimmed = text.trim()
+      if (!trimmed) {
+        notify('Буфер обмена пуст — скопируйте адрес из адресной строки окна VK', true)
+        return
+      }
+      await handleSaveAuthString(trimmed)
+    } catch {
+      notify('Нажмите сочетание Ctrl+V в поле ввода ниже, чтобы вставить адрес', true)
+    }
+  }
+
+  // Автоматический перехват токена при фокусе окна (когда пользователь скопировал URL в окне VK и кликнул обратно)
+  useEffect(() => {
+    const onWindowFocus = async () => {
+      if (authModalOpen && !authSubmitting) {
+        try {
+          const text = await navigator.clipboard.readText()
+          if (text && (text.includes('access_token=') || text.startsWith('vk1.a.'))) {
+            await handleSaveAuthString(text)
+          }
+        } catch {
+          // Буфер недоступен без явного действия пользователя
+        }
+      }
+    }
+    window.addEventListener('focus', onWindowFocus)
+    return () => window.removeEventListener('focus', onWindowFocus)
+  }, [authModalOpen, authSubmitting])
 
   const handleSaveAuthString = async (str: string) => {
     const trimmed = str.trim()
@@ -637,29 +666,42 @@ export default function VkTurn({ notify }: VkTurnProps) {
               Войдите через VK ID: роутер будет сам создавать звонки и удерживать их без ручного копирования ссылок.
             </div>
           </div>
-          <button
-            type="button"
-            className="btn"
-            data-testid="vk-login-btn"
-            onClick={handleStartVkOAuth}
-            style={{
-              background: '#0077ff',
-              color: '#ffffff',
-              border: 'none',
-              fontWeight: 600,
-              fontSize: 14,
-              padding: '9px 18px',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 8,
-              boxShadow: '0 2px 8px rgba(0, 119, 255, 0.35)',
-              cursor: 'pointer',
-              borderRadius: 8,
-            }}
-          >
-            <span>🔵</span>
-            <span>Войти через ВКонтакте (VK ID)</span>
-          </button>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              className="btn"
+              data-testid="vk-login-btn"
+              onClick={handleStartVkOAuth}
+              style={{
+                background: '#0077ff',
+                color: '#ffffff',
+                border: 'none',
+                fontWeight: 600,
+                fontSize: 14,
+                padding: '9px 18px',
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 8,
+                boxShadow: '0 2px 8px rgba(0, 119, 255, 0.35)',
+                cursor: 'pointer',
+                borderRadius: 8,
+              }}
+            >
+              <span>🔵</span>
+              <span>Войти через ВКонтакте (VK ID)</span>
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              data-testid="paste-clipboard-btn"
+              onClick={handlePasteFromClipboard}
+              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, padding: '9px 14px' }}
+              title="Автоматически прочитать скопированный адрес из буфера обмена"
+            >
+              <span>📋</span>
+              <span>Вставить из буфера</span>
+            </button>
+          </div>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}>
@@ -677,7 +719,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
               fontSize: 12,
             }}
           >
-            {showManualTokenField ? 'Скрыть ввод токена' : 'Ввести токен вручную или вставить ссылку авторизации'}
+            {showManualTokenField ? 'Скрыть прямое поле ввода' : 'Ввести токен или адрес вручную'}
           </button>
         </div>
 
@@ -719,7 +761,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
           left: 0,
           right: 0,
           bottom: 0,
-          background: 'rgba(0, 0, 0, 0.7)',
+          background: 'rgba(0, 0, 0, 0.75)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -730,52 +772,95 @@ export default function VkTurn({ notify }: VkTurnProps) {
         <div
           className="card"
           style={{
-            maxWidth: 540,
+            maxWidth: 580,
             width: '100%',
-            padding: 24,
-            borderRadius: 14,
-            boxShadow: '0 8px 32px rgba(0, 0, 0, 0.6)',
+            padding: 26,
+            borderRadius: 16,
+            boxShadow: '0 8px 32px rgba(0, 0, 0, 0.7)',
+            border: '1px solid rgba(0, 119, 255, 0.4)',
           }}
         >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700 }}>Завершение входа через VK ID</h3>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 24 }}>🔵</span>
+              <h3 style={{ margin: 0, fontSize: 17, fontWeight: 700 }}>Подключение аккаунта ВКонтакте</h3>
+            </div>
             <button
               type="button"
               onClick={() => setAuthModalOpen(false)}
-              style={{ background: 'none', border: 'none', fontSize: 18, color: 'var(--muted)', cursor: 'pointer' }}
+              style={{ background: 'none', border: 'none', fontSize: 20, color: 'var(--muted)', cursor: 'pointer' }}
             >
               ✕
             </button>
           </div>
-          <p style={{ fontSize: 13.5, lineHeight: 1.5, marginBottom: 14 }}>
-            Если окно авторизации не закрылось автоматически, скопируйте адрес из адресной строки открытого окна (начинается с <code>https://oauth.vk.ru/blank.html#...</code>) и вставьте его сюда:
-          </p>
-          <input
-            type="text"
-            className="input"
-            autoFocus
-            data-testid="modal-token-input"
-            placeholder="https://oauth.vk.ru/blank.html#access_token=vk1.a...."
-            value={manualTokenInput}
-            onChange={(e) => setManualTokenInput(e.target.value)}
-            style={{ width: '100%', marginBottom: 14, fontSize: 13 }}
-          />
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+
+          <div style={{ background: 'rgba(0, 119, 255, 0.08)', borderRadius: 10, padding: '12px 16px', marginBottom: 16, fontSize: 13, lineHeight: 1.5 }}>
+            <div style={{ fontWeight: 600, marginBottom: 4, color: '#60a5fa' }}>💡 Как завершить вход:</div>
+            <div>1. В открывшемся окне авторизуйтесь и подтвердите вход.</div>
+            <div>2. Страница перейдёт на белый экран <code>oauth.vk.ru/blank.html#access_token=...</code></div>
+            <div>3. Скопируйте адрес из адресной строки того окна (Ctrl+L, Ctrl+C) и нажмите кнопку ниже:</div>
+          </div>
+
+          <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
             <button
               type="button"
-              className="btn btn-secondary"
-              onClick={() => setAuthModalOpen(false)}
+              className="btn"
+              data-testid="modal-paste-btn"
+              onClick={handlePasteFromClipboard}
+              style={{
+                flex: 1,
+                background: '#0077ff',
+                color: '#fff',
+                padding: '10px 18px',
+                fontWeight: 600,
+                fontSize: 14,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                borderRadius: 8,
+              }}
             >
-              Отмена
+              <span>📋</span>
+              <span>Вставить из буфера и подключить</span>
             </button>
+          </div>
+
+          <div style={{ fontSize: 12.5, color: 'var(--muted)', marginBottom: 6 }}>
+            Или вставьте скопированную ссылку / токен вручную:
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 16 }}>
+            <input
+              type="text"
+              className="input"
+              autoFocus
+              data-testid="modal-token-input"
+              placeholder="https://oauth.vk.ru/blank.html#access_token=vk1.a...."
+              value={manualTokenInput}
+              onChange={(e) => setManualTokenInput(e.target.value)}
+              style={{ flex: 1, fontSize: 13 }}
+            />
             <button
               type="button"
               className="btn btn-primary"
               data-testid="modal-save-btn"
               disabled={authSubmitting || !manualTokenInput.trim()}
               onClick={() => handleSaveAuthString(manualTokenInput)}
+              style={{ padding: '8px 16px', fontSize: 13 }}
             >
-              {authSubmitting ? 'Сохранение…' : 'Подтвердить вход'}
+              {authSubmitting ? 'Сохранение…' : 'Подключить'}
+            </button>
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => setAuthModalOpen(false)}
+              style={{ fontSize: 13 }}
+            >
+              Закрыть
             </button>
           </div>
         </div>
