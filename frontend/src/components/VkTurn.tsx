@@ -290,10 +290,14 @@ export default function VkTurn({ notify }: VkTurnProps) {
     }
   }
 
+  const [localStreams, setLocalStreams] = useState<string>('')
+  const [streamsUpdating, setStreamsUpdating] = useState(false)
+
   const handleUpdateStreams = async (raw: string) => {
+    setLocalStreams(raw)
     const streams = Number(raw)
     if (!Number.isInteger(streams) || streams < 3 || streams > 100) return
-    setActionPending(true)
+    setStreamsUpdating(true)
     try {
       await saveVkTurnConfig({ streams })
       notify(`Число потоков изменено на ${streams}; туннель переподключается`)
@@ -302,7 +306,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
       notify(err?.message || 'Не удалось изменить число потоков', true)
       await loadStatus(true)
     } finally {
-      setActionPending(false)
+      setStreamsUpdating(false)
     }
   }
 
@@ -806,13 +810,14 @@ export default function VkTurn({ notify }: VkTurnProps) {
                   max={100}
                   className="input"
                   data-testid="stream-count"
-                  value={status?.target_streams || 100}
-                  disabled={actionPending || !status?.enabled}
+                  value={localStreams !== '' ? localStreams : (status?.target_streams || 100)}
+                  disabled={streamsUpdating || !status?.enabled}
                   onChange={(e) => handleUpdateStreams(e.target.value)}
                   style={{ width: 140, fontWeight: 600 }}
                 />
                 <span className="muted" style={{ fontSize: 13 }}>
-                  активно: {status?.connected_streams ?? 0} из {status?.target_streams ?? 0}
+                  активно: {status?.connected_streams ?? 0} из {status?.target_streams ?? 100}
+                  {streamsUpdating && ' (применение…)'}
                 </span>
               </div>
               <div className="muted" style={{ fontSize: 12, marginTop: 6, lineHeight: 1.4 }}>
