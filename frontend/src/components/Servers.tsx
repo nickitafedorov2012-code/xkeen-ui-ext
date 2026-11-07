@@ -142,6 +142,10 @@ export function isPoolServer(s: ServerInfo): boolean {
 export default function Servers({ notify, status, refresh }: Props) {
   const [servers, setServers] = useState<ServerInfo[]>([])
   const [providers, setProviders] = useState<ProviderInfo[]>([])
+  const [providersLoading, setProvidersLoading] = useState(false)
+  const [providersLoaded, setProvidersLoaded] = useState(false)
+  const [providersError, setProvidersError] = useState(false)
+  const providersRequestId = useRef(0)
   const [selectedProviders, setSelectedProviders] = useState<Set<string>>(new Set())
   const [subDropdownOpen, setSubDropdownOpen] = useState(false)
   const [viewMode, setViewMode] = useState<'detailed' | 'compact'>(() => {
@@ -263,22 +267,39 @@ export default function Servers({ notify, status, refresh }: Props) {
     localStorage.setItem('xr_servers_columns', String(cols))
   }
 
-  const load = useCallback(async () => {
+  const loadProviders = useCallback(async () => {
+    const requestId = ++providersRequestId.current
+    setProvidersLoading(true)
     try {
-      const [data, ig, provData] = await Promise.all([
+      const data = await apiGet<{ providers: ProviderInfo[] }>('providers')
+      if (!Array.isArray(data.providers)) throw new Error('Некорректный список подписок')
+      if (requestId !== providersRequestId.current) return
+      setProviders(data.providers)
+      setProvidersLoaded(true)
+      setProvidersError(false)
+    } catch {
+      if (requestId !== providersRequestId.current) return
+      setProvidersError(true)
+    } finally {
+      if (requestId === providersRequestId.current) setProvidersLoading(false)
+    }
+  }, [])
+
+  const load = useCallback(async () => {
+    void loadProviders()
+    try {
+      const [data, ig] = await Promise.all([
         apiGet<{ servers: ServerInfo[] }>('servers'),
         apiGet<{ servers: string[] }>('ignore').catch(() => ({ servers: [] as string[] })),
-        apiGet<{ providers: ProviderInfo[] }>('providers').catch(() => ({ providers: [] as ProviderInfo[] })),
       ])
       setServers(data.servers)
       setIgnored(new Set(ig.servers))
-      setProviders(provData.providers)
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка загрузки серверов', true)
     } finally {
       setLoading(false)
     }
-  }, [notify])
+  }, [loadProviders, notify])
 
   const pingAll = useCallback(async () => {
     setPinging(true)
@@ -1521,11 +1542,9 @@ export default function Servers({ notify, status, refresh }: Props) {
             <button className="btn sm" onClick={() => setGeneratorOpen(true)} title="Импорт ссылок">
               📥 Импорт
             </button>
-            {providers.length > 0 && (
-              <button className="btn sm" onClick={openProvidersModal} title="Управление подписками">
-                📦 Подписки ({providers.length})
-              </button>
-            )}
+            <button className="btn sm" onClick={openProvidersModal} title="Управление подписками">
+              📦 Подписки{providersLoaded ? ` (${providers.length})` : ''}{providersError ? ' ⚠' : ''}
+            </button>
             <button className="btn sm" onClick={openIgnore} title="Игнор-лист">
               🚫 Игнор{ignored.size > 0 ? ` (${ignored.size})` : ''}
             </button>
@@ -2203,7 +2222,16 @@ export default function Servers({ notify, status, refresh }: Props) {
             </p>
 
             <div className="modal-list" style={{ maxHeight: '56vh', display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {providers.length === 0 && <p className="muted">Нет активных подписок.</p>}
+              {providersError && (
+                <div role="alert">
+                  <span>Не удалось загрузить список подписок.{providersLoaded ? ' Показаны последние загруженные данные.' : ''}</span>{' '}
+                  <button type="button" className="btn sm" onClick={loadProviders} disabled={providersLoading}>
+                    {providersLoading ? 'Загрузка…' : 'Повторить'}
+                  </button>
+                </div>
+              )}
+              {providersLoading && !providersLoaded && !providersError && <p className="muted">Загрузка подписок…</p>}
+              {providersLoaded && !providersError && providers.length === 0 && <p className="muted">Нет активных подписок.</p>}
               {providers.map((p) => {
                 const draft = editingAliases[p.id] ?? (p.name === p.id ? '' : p.name)
                 const dotColor = providerColorMap.get(p.id) || '#a855f7'
