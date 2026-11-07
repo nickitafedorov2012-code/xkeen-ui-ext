@@ -1036,7 +1036,8 @@ export default function VkTurn({ notify }: VkTurnProps) {
   const phase = status?.phase || 'disabled'
   const isRunning = phase === 'connected'
   const waitingTunnel = Boolean(status?.enabled && !status?.tunnel_ready && phase !== 'not_installed')
-  const showPasswordFix = phase === 'auth_failed' || phase === 'server_unreachable'
+  const isVkAuthFailure = Boolean(status?.has_token) && phase === 'auth_failed'
+  const showPasswordFix = !isVkAuthFailure && (phase === 'auth_failed' || phase === 'server_unreachable')
   const showLastError = Boolean(
     status?.enabled && status?.last_error && !['captcha_required', 'disabled', 'not_installed'].includes(phase)
   )
@@ -1139,6 +1140,33 @@ export default function VkTurn({ notify }: VkTurnProps) {
           <div style={{ ...bannerStyle(true), color: 'var(--danger-fg, #ef4444)' }}>
             ⚠️ ВКонтакте запросил капчу, и автоматически пройти её не удалось. Повторная попытка будет предпринята
             автоматически через 10 минут.
+          </div>
+        )}
+
+        {isVkAuthFailure && (
+          <div style={bannerStyle(true)} data-testid="vk-auth-failure">
+            <div style={{ marginBottom: 8, fontWeight: 600, color: 'var(--danger-fg, #ef4444)' }}>
+              ⚠️ {status?.last_error || 'Вход в аккаунт VK отклонён: аккаунт заблокирован или токен отозван.'}
+            </div>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={handleStartVkOAuth}
+                style={{ fontSize: 13 }}
+              >
+                Войти под другим аккаунтом VK
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={actionPending}
+                onClick={handleLogoutVk}
+                style={{ fontSize: 13 }}
+              >
+                Сбросить авторизацию
+              </button>
+            </div>
           </div>
         )}
 

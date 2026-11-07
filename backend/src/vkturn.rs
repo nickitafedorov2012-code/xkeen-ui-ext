@@ -278,6 +278,7 @@ pub fn parse_vk_redirect_hash(fragment_or_url: &str) -> Result<(String, Option<u
 /// Формирование строки инициализации csqtt-client в формате VK_JS_BOOTSTRAP:<base64-json>\n
 pub fn format_vk_bootstrap_line(token: &str, user_id: u64) -> String {
     let payload = serde_json::json!({
+        "token": token.trim(),
         "access_token": token.trim(),
         "user_id": user_id,
     });
@@ -292,6 +293,28 @@ pub async fn fetch_vk_user_profile(
     token: &str,
     fallback_id: Option<u64>,
 ) -> Result<(u64, String), String> {
+    // 1. Проверяем валидность аккаунта через account.getAppPermissions
+    let perm_url = "https://api.vk.ru/method/account.getAppPermissions";
+    if let Ok(resp) = http
+        .get(perm_url)
+        .query(&[("access_token", token.trim()), ("v", "5.199")])
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+    {
+        if let Ok(json) = resp.json::<serde_json::Value>().await {
+            if let Some(err) = json.get("error") {
+                let code = err.get("error_code").and_then(|c| c.as_i64()).unwrap_or(0);
+                let msg = err.get("error_msg").and_then(|m| m.as_str()).unwrap_or("Неизвестная ошибка VK");
+                if code == 5 || msg.contains("blocked") || msg.contains("banned") {
+                    return Err(format!(
+                        "Аккаунт ВКонтакте заблокирован ({msg}). Пожалуйста, разблокируйте его на m.vk.com или используйте другой аккаунт."
+                    ));
+                }
+            }
+        }
+    }
+
     let url = "https://api.vk.ru/method/users.get";
     let resp = http
         .get(url)
@@ -560,6 +583,12 @@ pub fn apply_log_line(rt: &mut VkTurnRuntime, line: &str, now: Instant) -> LineE
     if line.contains("FATAL_AUTH") {
         rt.phase = VkTurnPhase::AuthFailed;
         rt.last_error = Some(auth_error_text(line).into());
+    } else if line.contains("User authorization failed")
+        || line.contains("User was deleted or banned")
+        || line.contains("API 5:")
+    {
+        rt.phase = VkTurnPhase::AuthFailed;
+        rt.last_error = Some("Вход в аккаунт VK отклонён (аккаунт заблокирован или токен отозван). Пожалуйста, войдите с другого аккаунта.".into());
     } else if line.contains("WRAP_AUTH_TIMEOUT") {
         if no_streams && rt.phase != VkTurnPhase::AuthFailed {
             rt.phase = VkTurnPhase::ServerUnreachable;
@@ -1892,6 +1921,7 @@ mod tests {
         let b64 = b_line.trim_start_matches("VK_JS_BOOTSTRAP:").trim();
         let decoded = crate::subscription_parser::base64_decode(b64).expect("valid base64");
         let json: serde_json::Value = serde_json::from_slice(&decoded).expect("valid json in bootstrap");
+        assert_eq!(json["token"], "vk1.a.SecretToken");
         assert_eq!(json["access_token"], "vk1.a.SecretToken");
         assert_eq!(json["user_id"], 12345);
 
