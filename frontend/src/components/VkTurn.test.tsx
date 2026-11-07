@@ -28,7 +28,7 @@ describe('VkTurn Component (ядро csqtt)', () => {
     phase: 'disabled',
     pid: null,
     connected_streams: 0,
-    target_streams: 20,
+    target_streams: 100,
     bytes_up: 0,
     bytes_down: 0,
     links_count: 0,
@@ -52,7 +52,7 @@ describe('VkTurn Component (ядро csqtt)', () => {
     phase: 'connected',
     pid: 12345,
     connected_streams: 3,
-    target_streams: 20,
+    target_streams: 100,
     bytes_up: 1536,
     bytes_down: 3 * 1024 * 1024,
     links_count: 2,
@@ -340,7 +340,7 @@ describe('VkTurn Component (ядро csqtt)', () => {
 
     const input = container?.querySelector('[data-testid="stream-count"]') as HTMLInputElement
     expect(input).toBeTruthy()
-    expect(input.value).toBe('20')
+    expect(input.value).toBe('100')
     await act(async () => {
       inputSetter.call(input, '40')
       input.dispatchEvent(new Event('change', { bubbles: true }))

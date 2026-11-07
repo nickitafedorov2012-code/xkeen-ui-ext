@@ -806,7 +806,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
                   max={100}
                   className="input"
                   data-testid="stream-count"
-                  value={status?.target_streams || 20}
+                  value={status?.target_streams || 100}
                   disabled={actionPending || !status?.enabled}
                   onChange={(e) => handleUpdateStreams(e.target.value)}
                   style={{ width: 140, fontWeight: 600 }}

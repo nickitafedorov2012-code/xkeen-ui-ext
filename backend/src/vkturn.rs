@@ -62,8 +62,8 @@ const LOG_TAIL: usize = 300;
 /// csqtt делит потоки на группы по 10 (`WORKERS_PER_GROUP` в worker.rs), каждая группа берёт свой хеш звонка.
 pub const WORKERS_PER_GROUP: u32 = 10;
 /// `MAX_WORKERS` в main.rs клиента.
+pub const DEFAULT_WORKERS: u32 = 100;
 pub const MAX_WORKERS: u32 = 100;
-pub const DEFAULT_WORKERS: u32 = 20;
 /// Максимум ссылок: все используются одновременно (`MAX_VK_HASHES` в main.rs клиента).
 pub const MAX_LINKS: usize = 6;
 /// Сколько адресов TURN запоминаем для исключений (защита от разрастания правил).
@@ -1689,7 +1689,7 @@ mod tests {
     #[test]
     fn test_effective_workers() {
         let mut cfg = cfg_with(&["https://vk.com/call/join/abc12345"]);
-        assert_eq!(effective_workers(&cfg), 20);
+        assert_eq!(effective_workers(&cfg), 100);
         cfg.streams = 35;
         assert_eq!(effective_workers(&cfg), 35, "точное число воркеров");
         cfg.streams = 200;
