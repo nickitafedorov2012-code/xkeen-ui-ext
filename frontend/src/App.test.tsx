@@ -131,6 +131,42 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
     expect(tabsNav?.textContent).not.toContain('⚙️')
   })
 
+  it('keeps VK calls inside the whitelist section and supports the existing link', async () => {
+    window.location.hash = '#vkturn'
+    await act(async () => {
+      root!.render(<App />)
+    })
+
+    const mainNav = container!.querySelector('nav.tabs')!
+    const whitelistButton = Array.from(mainNav.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Белые списки')
+    )!
+    expect(whitelistButton.classList.contains('active')).toBe(true)
+    expect(mainNav.textContent).not.toContain('VK-туннель')
+    expect(container!.querySelector('[data-testid="vkturn-view"]')).not.toBeNull()
+
+    const sectionNav = container!.querySelector('nav[aria-label="Настройки белых списков"]')!
+    const modeButton = Array.from(sectionNav.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Режим и устройства')
+    )!
+    const callsButton = Array.from(sectionNav.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Звонки ВКонтакте')
+    )!
+    expect(callsButton.getAttribute('aria-current')).toBe('page')
+
+    await act(async () => { modeButton.click() })
+    expect(window.location.hash).toBe('#whitelist')
+    expect(container!.querySelector('[data-testid="whitelist-view"]')).not.toBeNull()
+    expect(container!.querySelector('nav[aria-label="Настройки белых списков"] button[aria-current="page"]')?.textContent).toContain('Режим и устройства')
+
+    await act(async () => {
+      window.location.hash = '#vkturn'
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    })
+    expect(container!.querySelector('[data-testid="vkturn-view"]')).not.toBeNull()
+    expect(whitelistButton.classList.contains('active')).toBe(true)
+  })
+
   it('switches to Settings view when header settings button is clicked', async () => {
     await act(async () => {
       root!.render(<App />)
@@ -233,23 +269,23 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
     expect(container?.querySelector('[data-testid="adguard-view"]')).not.toBeNull()
   })
 
-  it('renders VK-turn tab button directly after zapret and switches to VkTurn view when clicked', async () => {
+  it('opens VK calls from the whitelist section', async () => {
     await act(async () => {
       root!.render(<App />)
     })
 
-    const buttons = Array.from(container?.querySelectorAll('nav.tabs button') || [])
-    const zapretIndex = buttons.findIndex((b) => b.textContent?.includes('Zapret'))
-    const vkturnIndex = buttons.findIndex((b) => b.textContent?.includes('VK-туннель'))
-
-    expect(zapretIndex).toBeGreaterThanOrEqual(0)
-    expect(vkturnIndex).toBe(zapretIndex + 1)
-
-    const vkturnTabBtn = buttons[vkturnIndex] as HTMLButtonElement
+    const buttons = Array.from(container?.querySelectorAll<HTMLButtonElement>('nav.tabs button') || [])
+    const whitelistTabBtn = buttons.find((b) => b.textContent?.includes('Белые списки'))
+    expect(whitelistTabBtn).toBeDefined()
     await act(async () => {
-      vkturnTabBtn.click()
+      whitelistTabBtn!.click()
     })
 
+    const callsButton = Array.from(container!.querySelectorAll('nav[aria-label="Настройки белых списков"] button')).find((button) =>
+      button.textContent?.includes('Звонки ВКонтакте')
+    ) as HTMLButtonElement
+    expect(callsButton).toBeDefined()
+    await act(async () => { callsButton.click() })
     expect(container?.querySelector('[data-testid="vkturn-view"]')).not.toBeNull()
   })
 

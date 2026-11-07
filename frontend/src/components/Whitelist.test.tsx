@@ -142,6 +142,63 @@ describe('Whitelist Component — Whitelist Tab (Overhaul & Anti-Regression)', (
     expect(customKpi?.textContent).toBe('2')
   })
 
+  it('navigates to the requested settings section without changing the page URL', async () => {
+    await act(async () => {
+      root!.render(<Whitelist notify={notifyMock} refresh={refreshMock} />)
+    })
+
+    const section = container!.querySelector('#whitelist-domains') as HTMLElement
+    const scroll = vi.fn()
+    section.scrollIntoView = scroll
+    const button = Array.from(container!.querySelectorAll('nav[aria-label="Быстрый переход по настройкам"] button'))
+      .find((item) => item.textContent === 'Домены') as HTMLButtonElement
+    const originalHash = window.location.hash
+    await act(async () => { button.click() })
+    expect(scroll).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' })
+    expect(window.location.hash).toBe(originalHash)
+  })
+
+  it('does not claim that nodes are healthy before any detector data exists', async () => {
+    await act(async () => { root!.render(<Whitelist notify={notifyMock} refresh={refreshMock} />) })
+    const card = container!.querySelector('[data-testid="whitelist-detector-sync-card"]')!
+    expect(card.textContent).toContain('Нет данных')
+    expect(card.textContent).not.toContain('Все узлы в строю')
+    expect(card.textContent).not.toContain('Штатная работа')
+  })
+
+  it('does not invent catalog counts when catalog loading fails', async () => {
+    vi.mocked(api.apiGet).mockImplementation((path: string) => {
+      if (path === 'whitelist') return Promise.resolve(mockWhitelistStatus)
+      if (path === 'whitelist/catalog') return Promise.reject(new Error('offline'))
+      if (path === 'devices') return Promise.resolve({ devices: mockDevices })
+      if (path === 'servers') return Promise.resolve({ servers: mockServers })
+      return Promise.resolve({ providers: [] })
+    })
+    await act(async () => { root!.render(<Whitelist notify={notifyMock} refresh={refreshMock} />) })
+    expect(container!.querySelector('[data-testid="kpi-catalog-count"]')?.textContent).toBe('—')
+    expect(container!.textContent).toContain('Каталог временно недоступен')
+    expect(container!.textContent).not.toContain('376 доменов')
+  })
+
+  it('does not describe the entire network as active while the mode is disabled', async () => {
+    vi.mocked(api.apiGet).mockResolvedValueOnce({ ...mockWhitelistStatus, enabled: false })
+    await act(async () => { root!.render(<Whitelist notify={notifyMock} refresh={refreshMock} />) })
+    expect(container!.querySelector('[data-testid="kpi-active-devices"]')?.textContent).toBe('Не активен')
+  })
+
+  it('does not present default settings as real data when the whitelist status cannot be loaded', async () => {
+    vi.mocked(api.apiGet).mockRejectedValueOnce(new Error('offline'))
+
+    await act(async () => { root!.render(<Whitelist notify={notifyMock} refresh={refreshMock} />) })
+    expect(container!.textContent).toContain('Не удалось загрузить настройки белых списков')
+    expect(container!.querySelector('[data-testid="whitelist-master-toggle"]')).toBeNull()
+
+    const retry = Array.from(container!.querySelectorAll('button')).find((button) => button.textContent?.includes('Повторить'))!
+    await act(async () => { retry.click() })
+    expect(container!.querySelector('[data-testid="whitelist-master-toggle"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="whitelist-status-badge"]')?.textContent).toContain('АКТИВЕН')
+  })
+
   it('toggles master switch when clicked', async () => {
     const postSpy = vi.spyOn(api, 'apiPost').mockResolvedValue({ saved: true })
 

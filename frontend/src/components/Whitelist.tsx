@@ -24,15 +24,15 @@ interface DomesticCatalogEntryView {
 }
 
 const CATEGORY_MAP: Record<string, { label: string; filterKey: string }> = {
-  all: { label: 'Все (376)', filterKey: 'all' },
-  gov: { label: '🏛️ Госуслуги (55)', filterKey: 'category 1' },
-  bank: { label: '💳 Банки (65)', filterKey: 'category 2' },
-  portal: { label: '🌐 Порталы (45)', filterKey: 'category 3' },
-  ecommerce: { label: '🛍️ E-commerce (55)', filterKey: 'category 4' },
-  logistics: { label: '📦 Логистика (40)', filterKey: 'category 5' },
-  telecom: { label: '📡 Телеком (35)', filterKey: 'category 6' },
-  media: { label: '📺 Медиа (45)', filterKey: 'category 7' },
-  cloud: { label: '☁️ Облака (36)', filterKey: 'category 8' },
+  all: { label: 'Все', filterKey: 'all' },
+  gov: { label: '🏛️ Госуслуги', filterKey: 'category 1' },
+  bank: { label: '💳 Банки', filterKey: 'category 2' },
+  portal: { label: '🌐 Порталы', filterKey: 'category 3' },
+  ecommerce: { label: '🛍️ Покупки', filterKey: 'category 4' },
+  logistics: { label: '📦 Логистика', filterKey: 'category 5' },
+  telecom: { label: '📡 Телеком', filterKey: 'category 6' },
+  media: { label: '📺 Медиа', filterKey: 'category 7' },
+  cloud: { label: '☁️ Облака', filterKey: 'category 8' },
 }
 
 export default function Whitelist({ notify, status, refresh }: Props) {
@@ -53,8 +53,9 @@ export default function Whitelist({ notify, status, refresh }: Props) {
   const [, setServersListUnused] = useState<ServerInfo[]>([])
   void setServersListUnused
   const [catalogItems, setCatalogItems] = useState<DomesticCatalogEntryView[]>([])
-  const [catalogTotal, setCatalogTotal] = useState<number>(376)
+  const [catalogTotal, setCatalogTotal] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
+  const [loadFailed, setLoadFailed] = useState(false)
   const [busy, setBusy] = useState(false)
   const [serversList, setServersList] = useState<ServerInfo[]>([])
   const [providersList, setProvidersList] = useState<Array<{ id: string; name: string }>>([])
@@ -90,6 +91,11 @@ export default function Whitelist({ notify, status, refresh }: Props) {
         apiGet<{ providers: Array<{ id: string; name: string }> }>('providers').catch(() => ({ providers: [] })),
       ])
 
+      if (!wlStatus) {
+        setLoadFailed(true)
+        return
+      }
+      setLoadFailed(false)
       if (wlStatus) {
         setConfig({
           enabled: Boolean(wlStatus.enabled),
@@ -122,8 +128,9 @@ export default function Whitelist({ notify, status, refresh }: Props) {
             (s) => !s.is_pool && s.id !== 'PROXY' && s.id !== 'GLOBAL' && s.id !== 'Fastest' && s.id !== 'Fallback'
           )
         )
-      }      if (catRes) {
-        setCatalogTotal(catRes.total || (catRes.domains ? catRes.domains.length : 376))
+      }
+      if (catRes) {
+        setCatalogTotal(catRes.total ?? catRes.domains?.length ?? catRes.items?.length ?? 0)
         if (catRes.items && catRes.items.length > 0) {
           setCatalogItems(
             catRes.items.map((it: WhitelistCatalogItem) => ({
@@ -139,9 +146,15 @@ export default function Whitelist({ notify, status, refresh }: Props) {
               category: 'Каталог РФ',
             }))
           )
+        } else {
+          setCatalogItems([])
         }
+      } else {
+        setCatalogTotal(null)
+        setCatalogItems([])
       }
     } catch (e) {
+      setLoadFailed(true)
       notify(e instanceof Error ? e.message : 'Ошибка загрузки данных белых списков', true)
     } finally {
       setLoading(false)
@@ -422,15 +435,37 @@ export default function Whitelist({ notify, status, refresh }: Props) {
     )
   }
 
+  if (loadFailed) {
+    return (
+      <section className="card" role="alert">
+        <h2>Не удалось загрузить настройки белых списков</h2>
+        <p className="muted">Состояние режима сейчас неизвестно. Проверьте соединение и повторите попытку.</p>
+        <button type="button" className="btn" onClick={() => { setLoading(true); void loadData() }}>Повторить</button>
+      </section>
+    )
+  }
+
   return (
     <section className="whitelist-page" data-testid="whitelist-component">
+      <nav className="whitelist-jump-nav" aria-label="Быстрый переход по настройкам">
+        {[
+          { id: 'whitelist-overview', label: 'Обзор' },
+          { id: 'whitelist-routing', label: 'Маршрутизация' },
+          { id: 'whitelist-devices', label: 'Устройства' },
+          { id: 'whitelist-domains', label: 'Домены' },
+        ].map(({ id, label }) => (
+          <button key={id} type="button" onClick={() => document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>
+            {label}
+          </button>
+        ))}
+      </nav>
       {/* 1. Hero Card: Master Switch & Status */}
-      <div className="whitelist-hero-card">
+      <div className="whitelist-hero-card" id="whitelist-overview">
         <div className="whitelist-hero-header">
           <div className="whitelist-hero-title-group">
             <h2 style={{ margin: 0, fontSize: 20, display: 'flex', alignItems: 'center', gap: 8 }}>
               <span>🛡️</span>
-              <span>Режим белых списков (Whitelist)</span>
+              <span>Режим белых списков</span>
             </h2>
             <span
               className={`whitelist-badge ${config.enabled ? 'active' : 'inactive'}`}
@@ -469,10 +504,8 @@ export default function Whitelist({ notify, status, refresh }: Props) {
         </div>
 
         <p className="muted" style={{ fontSize: 13, lineHeight: 1.5, margin: 0 }}>
-          Автоматический режим для работы через сотовых операторов и провайдеров в условиях мобильных блокировок. 
-          Все устройства домашней сети автоматически направляются в защищенный туннель, исключая сбои интернета. 
-          При этом <strong>376 сервисов РФ</strong> (Госуслуги, Банки, СБП, Маркетплейсы, Медиа) 
-          и ваши персональные домены идут строго <strong>напрямую (DIRECT)</strong> через локальный DNS без ошибок VPN.
+          Режим помогает пользоваться сетью при ограничениях доступа. При специальной стратегии внешний трафик
+          по умолчанию идёт через выбранный сервер белых списков; явно заданные исключения сохраняют свои маршруты.
         </p>
 
         {activeServer && (
@@ -490,9 +523,9 @@ export default function Whitelist({ notify, status, refresh }: Props) {
         <div className="whitelist-kpis">
           <div className="whitelist-kpi-card">
             <div className="whitelist-kpi-value" data-testid="kpi-active-devices">
-              {excludedCount > 0 ? `Все (искл: ${excludedCount})` : 'Все (100%)'}
+              {!config.enabled ? 'Не активен' : excludedCount > 0 ? `Все (искл: ${excludedCount})` : 'Все'}
             </div>
-            <div className="whitelist-kpi-label">Охват сети (Zero-Touch)</div>
+            <div className="whitelist-kpi-label">Устройства в режиме</div>
           </div>
           <div className="whitelist-kpi-card">
             <div className="whitelist-kpi-value" data-testid="kpi-strategy" style={{ fontSize: 15 }}>
@@ -501,7 +534,7 @@ export default function Whitelist({ notify, status, refresh }: Props) {
             <div className="whitelist-kpi-label">Логика маршрутизации</div>
           </div>
           <div className="whitelist-kpi-card">
-            <div className="whitelist-kpi-value" data-testid="kpi-catalog-count">{catalogTotal}</div>
+            <div className="whitelist-kpi-value" data-testid="kpi-catalog-count">{catalogTotal ?? '—'}</div>
             <div className="whitelist-kpi-label">Доменов в каталоге РФ</div>
           </div>
           <div className="whitelist-kpi-card">
@@ -517,6 +550,7 @@ export default function Whitelist({ notify, status, refresh }: Props) {
         const detCfg = status?.failover?.whitelist_detector
         const isDetectorOn = Boolean(detCfg?.enabled)
         const isDetected = detStatus?.state === 'WhitelistDetected' || status?.whitelist_mode_active
+        const statusKnown = status != null
 
         const handleRunCheckFromWhitelist = async () => {
           if (wlDetectorChecking) return
@@ -571,16 +605,16 @@ export default function Whitelist({ notify, status, refresh }: Props) {
                 <span
                   className="badge"
                   style={{
-                    background: isDetected ? 'rgba(168, 85, 247, 0.2)' : 'rgba(34, 197, 94, 0.15)',
-                    color: isDetected ? '#c084fc' : '#4ade80',
-                    border: `1px solid ${isDetected ? 'rgba(168, 85, 247, 0.4)' : 'rgba(34, 197, 94, 0.3)'}`,
+                    background: !statusKnown ? 'rgba(148, 163, 184, 0.15)' : isDetected ? 'rgba(168, 85, 247, 0.2)' : 'rgba(34, 197, 94, 0.15)',
+                    color: !statusKnown ? 'var(--muted)' : isDetected ? '#c084fc' : '#4ade80',
+                    border: `1px solid ${!statusKnown ? 'var(--border)' : isDetected ? 'rgba(168, 85, 247, 0.4)' : 'rgba(34, 197, 94, 0.3)'}`,
                     fontWeight: 600,
                   }}
                 >
-                  {isDetected ? '🟣 Режим БС активен (ТСПУ)' : '🟢 Штатный режим (VPS)'}
+                  {!statusKnown ? '⚪ Нет данных' : isDetected ? '🟣 Режим БС активен' : '🟢 Штатный режим'}
                 </span>
                 <span className="badge" style={{ background: isDetectorOn ? 'rgba(34, 197, 94, 0.15)' : 'rgba(255, 255, 255, 0.05)', color: isDetectorOn ? '#4ade80' : 'var(--muted)' }}>
-                  Автодетектор: {isDetectorOn ? 'ВКЛ' : 'ВЫКЛ'}
+                  Автодетектор: {!detCfg ? 'нет данных' : isDetectorOn ? 'ВКЛ' : 'ВЫКЛ'}
                 </span>
               </div>
 
@@ -616,19 +650,21 @@ export default function Whitelist({ notify, status, refresh }: Props) {
                         ? `${detStatus.online_nodes} из ${detStatus.total_nodes} онлайн (срез из ${detStatus.monitored_total_nodes} узлов, ${detStatus.offline_percent}% оффлайн)`
                         : `${detStatus.online_nodes} из ${detStatus.total_nodes} онлайн (${detStatus.offline_percent}% оффлайн)`
                       )
-                    : 'Все узлы в строю'}
+                    : 'Нет данных о проверке'}
                 </div>
               </div>
               <div style={{ background: 'rgba(255, 255, 255, 0.02)', padding: '8px 12px', borderRadius: 6, border: '1px solid var(--border)' }}>
                 <div className="muted small" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>Последнее событие</div>
                 <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--text-bright)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {detStatus?.last_event || 'Штатная работа'}
+                  {detStatus?.last_event || 'Событий пока нет'}
                 </div>
               </div>
               <div style={{ background: 'rgba(255, 255, 255, 0.02)', padding: '8px 12px', borderRadius: 6, border: '1px solid var(--border)' }}>
                 <div className="muted small" style={{ fontSize: 11, whiteSpace: 'nowrap' }}>Интервал сканирования</div>
                 <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-bright)', marginTop: 2, whiteSpace: 'nowrap' }}>
-                  каждые {detCfg?.check_interval_mins ?? detStatus?.check_interval_mins ?? 10} мин
+                  {detCfg?.check_interval_mins ?? detStatus?.check_interval_mins
+                    ? `каждые ${detCfg?.check_interval_mins ?? detStatus?.check_interval_mins} мин`
+                    : 'Нет данных'}
                 </div>
               </div>
             </div>
@@ -742,7 +778,7 @@ export default function Whitelist({ notify, status, refresh }: Props) {
       })()}
 
       {/* 2. Strategy Selector Card: XKeen Route vs Standard */}
-      <div className="card" style={{ marginBottom: 20 }}>
+      <div className="card" id="whitelist-routing" style={{ marginBottom: 20 }}>
         <h3 style={{ margin: '0 0 6px', fontSize: 16 }}>⚙️ Логика работы режима белых списков</h3>
         <p className="muted small" style={{ marginBottom: 14 }}>
           Определяет, как именно маршрутизируется трафик клиентов при активном режиме белых списков.
@@ -771,7 +807,7 @@ export default function Whitelist({ notify, status, refresh }: Props) {
               style={{ marginTop: 3 }}
             />
             <div>
-              <div style={{ fontWeight: 600, color: config.strategy === 'strict_xkeen' ? '#34d399' : '#f1f5f9', fontSize: 14 }}>
+              <div style={{ fontWeight: 600, color: isStrictStrategy ? '#34d399' : '#f1f5f9', fontSize: 14 }}>
                 🛡️ Специальная логика XKeen Route (Рекомендуется)
               </div>
               <div className="muted small" style={{ marginTop: 4, lineHeight: 1.5 }}>
@@ -856,7 +892,7 @@ export default function Whitelist({ notify, status, refresh }: Props) {
       </div>
 
       {/* 4. Zero-Touch Device Coverage & Exclusions */}
-      <div className="card" style={{ marginBottom: 20 }}>
+      <div className="card" id="whitelist-devices" style={{ marginBottom: 20 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, marginBottom: 12 }}>
           <div>
             <h3 style={{ margin: 0, fontSize: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -864,8 +900,8 @@ export default function Whitelist({ notify, status, refresh }: Props) {
               <span>Охват устройств (Zero-Touch)</span>
             </h3>
             <p className="muted small" style={{ margin: '4px 0 0' }}>
-              Все устройства домашней сети защищены автоматически. Если какому-то устройству НЕ нужен режим БС, 
-              исключите его кнопкой ниже (оно будет направляться напрямую мимо туннеля).
+              При включении режима устройства домашней сети включаются автоматически. Чтобы устройство не использовало
+              режим белых списков, добавьте его в исключения ниже.
             </p>
           </div>
 
@@ -991,7 +1027,7 @@ export default function Whitelist({ notify, status, refresh }: Props) {
       </div>
 
       {/* 5. Domain Manager: Built-in 376 Catalog & Custom Domains */}
-      <div className="card">
+      <div className="card" id="whitelist-domains">
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, borderBottom: '1px solid #1e2638', paddingBottom: 12, marginBottom: 14 }}>
           <button
             type="button"
@@ -1002,7 +1038,7 @@ export default function Whitelist({ notify, status, refresh }: Props) {
             }}
             data-testid="tab-catalog"
           >
-            🇷🇺 Базовый каталог РФ ({catalogTotal})
+            🇷🇺 Базовый каталог РФ{catalogTotal === null ? '' : ` (${catalogTotal})`}
           </button>
           <button
             type="button"
@@ -1014,7 +1050,12 @@ export default function Whitelist({ notify, status, refresh }: Props) {
           </button>
         </div>
 
-        {domainTab === 'catalog' ? (
+        {domainTab === 'catalog' && catalogTotal === null ? (
+          <div role="status">
+            <p className="muted">Каталог временно недоступен. Ваши домены остаются доступны во второй вкладке.</p>
+            <button type="button" className="btn" onClick={() => { setLoading(true); void loadData() }}>Повторить</button>
+          </div>
+        ) : domainTab === 'catalog' ? (
           <div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginBottom: 12 }}>
               <input

@@ -79,6 +79,7 @@ const badgeStyle = { fontSize: 13, padding: '4px 10px' }
 export default function VkTurn({ notify }: VkTurnProps) {
   const [status, setStatus] = useState<VkTurnStatus | null>(null)
   const [loading, setLoading] = useState(true)
+  const [statusUnavailable, setStatusUnavailable] = useState(false)
   const [actionPending, setActionPending] = useState(false)
   const [logs, setLogs] = useState<string[]>([])
   const [loadingLogs, setLoadingLogs] = useState(false)
@@ -107,8 +108,9 @@ export default function VkTurn({ notify }: VkTurnProps) {
     try {
       const data = await getVkTurnStatus()
       setStatus(data)
+      setStatusUnavailable(false)
     } catch {
-      // ignore network errors during polling
+      setStatusUnavailable(true)
     } finally {
       pollingRef.current = false
       if (isInitial) setLoading(false)
@@ -288,12 +290,38 @@ export default function VkTurn({ notify }: VkTurnProps) {
     }
   }
 
+  const handleUpdateStreams = async (raw: string) => {
+    const streams = Number(raw)
+    if (!Number.isInteger(streams) || streams < 10 || streams > 100 || streams % 10 !== 0) return
+    setActionPending(true)
+    try {
+      await saveVkTurnConfig({ streams })
+      notify(`Число потоков изменено на ${streams}; туннель переподключается`)
+      await loadStatus(true)
+    } catch (err: any) {
+      notify(err?.message || 'Не удалось изменить число потоков', true)
+      await loadStatus(true)
+    } finally {
+      setActionPending(false)
+    }
+  }
+
   if (loading && !status) {
     return (
       <div className="card" style={{ padding: 40, textAlign: 'center' }}>
         <div className="spinner" style={{ margin: '0 auto 16px' }} />
         <div className="muted">Загрузка модуля VK-туннель…</div>
       </div>
+    )
+  }
+
+  if (statusUnavailable || !status) {
+    return (
+      <section className="card" role="alert">
+        <h2>Не удалось получить состояние VK-туннеля</h2>
+        <p className="muted">Состояние туннеля сейчас неизвестно. Повторите попытку после восстановления связи.</p>
+        <button type="button" className="btn" onClick={() => void loadStatus(true)}>Повторить</button>
+      </section>
     )
   }
 
@@ -766,6 +794,27 @@ export default function VkTurn({ notify }: VkTurnProps) {
 
         {accordionOpen && (
           <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
+            <div style={{ marginBottom: 20, maxWidth: 640 }} data-testid="stream-controls">
+              <label htmlFor="vkturn-stream-count" style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
+                Потоки звонков
+              </label>
+              <select
+                id="vkturn-stream-count"
+                className="input"
+                data-testid="stream-count"
+                value={Math.max(10, Math.min(100, status?.target_streams || 20))}
+                disabled={actionPending || !status?.enabled}
+                onChange={(e) => handleUpdateStreams(e.target.value)}
+                style={{ width: '100%', maxWidth: 240 }}
+              >
+                {Array.from({ length: 10 }, (_, i) => (i + 1) * 10).map((n) => (
+                  <option key={n} value={n}>{n} потоков</option>
+                ))}
+              </select>
+              <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+                Изменение перезапустит звонки. Для каждой ссылки автоматически выделяется минимум 10 потоков.
+              </div>
+            </div>
             <div
               style={{
                 display: 'grid',
@@ -825,6 +874,31 @@ export default function VkTurn({ notify }: VkTurnProps) {
                 </button>
               </div>
             </div>
+
+            {!showPasswordFix && (
+              <div style={{ marginBottom: 20 }} data-testid="password-change">
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Пароль подключения к серверу</div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', maxWidth: 640 }}>
+                  <input
+                    type="password"
+                    className="input"
+                    autoComplete="new-password"
+                    placeholder="Сменить пароль подключения"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    style={{ flex: 1 }}
+                  />
+                  <button
+                    className="btn btn-secondary"
+                    disabled={updatingPassword || !newPassword.trim()}
+                    onClick={handleUpdatePassword}
+                    style={{ fontSize: 13 }}
+                  >
+                    {updatingPassword ? 'Сохранение…' : 'Сменить пароль'}
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>

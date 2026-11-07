@@ -9,6 +9,7 @@ import type { VkTurnStatus, VkTurnPhase } from '../types'
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+const selectSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')!.set!
 
 async function typeInto(el: HTMLInputElement, value: string) {
   await act(async () => {
@@ -139,6 +140,36 @@ describe('VkTurn Component (ядро csqtt)', () => {
     expect((container?.querySelector('input[type="password"]') as HTMLInputElement).value).toBe('')
   })
 
+  it('does not show first-time setup when the tunnel status is unavailable and allows retry', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockRejectedValueOnce(new Error('offline')).mockResolvedValue(defaultUnconfiguredStatus)
+    await act(async () => { root!.render(<VkTurn notify={notifyMock} />) })
+    expect(container!.textContent).toContain('Не удалось получить состояние VK-туннеля')
+    expect(container!.textContent).not.toContain('Мастер настройки VK-туннеля')
+
+    const retry = findButton('Повторить')!
+    await act(async () => { retry.click() })
+    expect(container!.textContent).toContain('Мастер настройки VK-туннеля')
+  })
+
+  it('marks the tunnel status unavailable after a polling failure and recovers', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.spyOn(api, 'getVkTurnStatus')
+        .mockResolvedValueOnce(defaultConnectedStatus)
+        .mockRejectedValueOnce(new Error('offline'))
+        .mockResolvedValue(defaultConnectedStatus)
+      await act(async () => { root!.render(<VkTurn notify={notifyMock} />) })
+      expect(container!.textContent).toContain('Работает · соединений')
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+      expect(container!.textContent).toContain('Не удалось получить состояние VK-туннеля')
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+      expect(container!.textContent).not.toContain('Не удалось получить состояние VK-туннеля')
+      expect(container!.textContent).toContain('Работает · соединений')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('wizard refuses to save without server address, password or link', async () => {
     vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue(defaultUnconfiguredStatus)
     const saveConfigSpy = vi.spyOn(api, 'saveVkTurnConfig').mockResolvedValue({ success: true })
@@ -264,6 +295,60 @@ describe('VkTurn Component (ядро csqtt)', () => {
     })
     expect(container?.querySelector('[data-testid="install-progress"]')?.textContent).toContain('3.0 МБ из 10.0 МБ (30%)')
     expect(findButton('Установить компонент')).toBeUndefined()
+  })
+
+  // Регрессия: пока статус «Подключаюсь…», поменять пароль было негде — поле появлялось только
+  // в фазах отказа, а ядро csqtt при неверном пароле до них не доходило.
+  it('lets the user change the connection password in tunnel settings while connecting', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({
+      ...defaultConnectedStatus,
+      phase: 'authorizing',
+      connected_streams: 0,
+      tunnel_ready: false,
+      tunnel_ip: null,
+    })
+    const saveConfigSpy = vi.spyOn(api, 'saveVkTurnConfig').mockResolvedValue({ success: true })
+    await act(async () => {
+      root!.render(<VkTurn notify={notifyMock} />)
+    })
+    expect(container?.querySelector('[data-testid="password-fix"]')).toBeNull()
+    const accordionToggle = Array.from(container?.querySelectorAll('[role="button"]') || []).find((el) =>
+      el.textContent?.includes('Настройки туннеля и подробности'),
+    ) as HTMLElement
+    await act(async () => {
+      accordionToggle.click()
+    })
+    const pw = container?.querySelector('input[placeholder="Сменить пароль подключения"]') as HTMLInputElement
+    expect(pw).toBeTruthy()
+    await typeInto(pw, 'TEST')
+    await act(async () => {
+      findButton('Сменить пароль')!.click()
+    })
+    expect(saveConfigSpy).toHaveBeenCalledWith({ password: 'TEST' })
+    expect(notifyMock).toHaveBeenCalledWith('Пароль подключения обновлён, переподключаюсь')
+  })
+
+  it('lets the user change stream count and saves only a supported value', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue(defaultConnectedStatus)
+    const saveConfigSpy = vi.spyOn(api, 'saveVkTurnConfig').mockResolvedValue({ success: true })
+    await act(async () => {
+      root!.render(<VkTurn notify={notifyMock} />)
+    })
+    const accordionToggle = Array.from(container?.querySelectorAll('[role="button"]') || []).find((el) =>
+      el.textContent?.includes('Настройки туннеля и подробности'),
+    ) as HTMLElement
+    await act(async () => accordionToggle.click())
+
+    const select = container?.querySelector('[data-testid="stream-count"]') as HTMLSelectElement
+    expect(select).toBeTruthy()
+    expect(select.value).toBe('20')
+    expect(select.options).toHaveLength(10)
+    await act(async () => {
+      selectSetter.call(select, '40')
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    expect(saveConfigSpy).toHaveBeenCalledWith({ streams: 40 })
+    expect(notifyMock).toHaveBeenCalledWith('Число потоков изменено на 40; туннель переподключается')
   })
 
   it('installProgressText and waitForCoreInstall', async () => {

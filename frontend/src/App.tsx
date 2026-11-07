@@ -52,7 +52,6 @@ const TABS: { id: TabId; label: string }[] = [
   { id: 'devices', label: '📱 Устройства' },
   { id: 'whitelist', label: '🛡️ Белые списки' },
   { id: 'zapret', label: '⚡ Zapret' },
-  { id: 'vkturn', label: '📞 VK-туннель' },
   { id: 'gaming', label: '🎮 Игры' },
   { id: 'google-ai', label: '🤖 Google AI' },
   { id: 'adguard', label: '🛡️ AdGuard' },
@@ -120,6 +119,7 @@ export default function App() {
     if (h === 'antigravity') return 'google-ai'
     if (h === 'xbox-dns') return 'gaming'
     if (h === 'bs' || h === 'whitelists') return 'whitelist'
+    if (h === 'vkturn') return 'vkturn'
     return (TABS.some((t) => t.id === h) || h === 'settings' || h === 'help' || h === 'adguard' || h === 'diagnostics' ? h : 'dashboard') as TabId
   })()
   const [tab, setTab] = useState<TabId>(initial)
@@ -215,7 +215,7 @@ export default function App() {
     const handleLocationChange = () => {
       const h = window.location.hash.replace('#', '')
       const targetTab = (h === 'antigravity' ? 'google-ai' : h === 'xbox-dns' ? 'gaming' : h) as TabId
-      if (TABS.some((t) => t.id === targetTab) || targetTab === 'settings' || targetTab === 'help' || targetTab === 'adguard') {
+      if (TABS.some((t) => t.id === targetTab) || targetTab === 'vkturn' || targetTab === 'settings' || targetTab === 'help' || targetTab === 'adguard') {
         setTab(targetTab)
       }
     }
@@ -360,7 +360,7 @@ export default function App() {
         {TABS.map((t) => (
           <button
             key={t.id}
-            className={'tab' + (tab === t.id ? ' active' : '')}
+            className={'tab' + (tab === t.id || (tab === 'vkturn' && t.id === 'whitelist') ? ' active' : '')}
             onClick={() => switchTab(t.id)}
           >
             {t.label}
@@ -390,9 +390,26 @@ export default function App() {
             {tab === 'dashboard' && <Dashboard status={status} notify={notify} refresh={refresh} onSwitchTab={switchTab} />}
             {tab === 'servers' && <Servers notify={notify} status={status} refresh={refresh} />}
             {tab === 'devices' && <Devices notify={notify} />}
-            {tab === 'whitelist' && <Whitelist notify={notify} status={status} refresh={refresh} />}
+            {(tab === 'whitelist' || tab === 'vkturn') && (
+              <div className="whitelist-workspace">
+                <section className="whitelist-workspace-header" aria-label="Разделы белых списков">
+                  <div className="whitelist-workspace-intro">
+                    <h2>🛡️ Белые списки</h2>
+                    <p>Настройте работу сети и подключение через звонки ВКонтакте.</p>
+                  </div>
+                  <nav className="whitelist-workspace-nav" aria-label="Настройки белых списков">
+                    <button type="button" className="whitelist-workspace-tab" aria-current={tab === 'whitelist' ? 'page' : undefined} onClick={() => switchTab('whitelist')}>
+                      <span>🛡️ Режим и устройства</span><small>Маршруты, исключения и домены</small>
+                    </button>
+                    <button type="button" className="whitelist-workspace-tab" aria-current={tab === 'vkturn' ? 'page' : undefined} onClick={() => switchTab('vkturn')}>
+                      <span>📞 Звонки ВКонтакте</span><small>Подключение и состояние туннеля</small>
+                    </button>
+                  </nav>
+                </section>
+                {tab === 'whitelist' ? <Whitelist notify={notify} status={status} refresh={refresh} /> : <VkTurn notify={notify} />}
+              </div>
+            )}
             {tab === 'zapret' && <Zapret notify={notify} />}
-            {tab === 'vkturn' && <VkTurn notify={notify} />}
             {(tab === 'gaming' || tab === 'xbox-dns') && <Gaming notify={notify} />}
             {(tab === 'google-ai' || tab === 'antigravity') && <Antigravity notify={notify} />}
             {tab === 'connections' && <ConnectionsViewer notify={notify} />}

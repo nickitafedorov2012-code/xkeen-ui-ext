@@ -995,6 +995,12 @@ pub struct SwitchReq {
 /// 5. Обновление и сохранение приоритета в config.json (чтобы фоновый failover не откатывал узел)
 /// 6. Запуск быстрого фонового замера пингов нового сервера
 pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -> Result<String, String> {
+    if server_id == crate::vkturn::PROXY_NAME {
+        let rt = state.vkturn.rt.read().await;
+        if !rt.tunnel_ready() || rt.connected_streams == 0 {
+            return Err("Туннель ещё не подключился к серверу csqtt — дождитесь подключения перед выбором сервера".into());
+        }
+    }
     // Ручной выбор пользователя имеет абсолютный приоритет:
     // Немедленно прерываем запущенный Speedtest и отменяем возврат старого узла
     crate::speedtest::cancel_active_speedtest();
@@ -1003,7 +1009,9 @@ pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -
         Ok(msg) => {
             log_i!("Смена сервера: {} — {}", server_id, msg);
             failover::record_manual_switch(server_id).await;
-            let (srv_name, srv_prov) = if let Ok(servers) = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
+            let (srv_name, srv_prov) = if server_id == crate::vkturn::PROXY_NAME {
+                (crate::vkturn::PROXY_NAME.to_string(), Some(crate::vkturn::PROVIDER_ID.to_string()))
+            } else if let Ok(servers) = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
                 servers.iter().find(|s| s.id == server_id).map(|s| (s.name.clone(), s.provider.clone())).unwrap_or_else(|| (server_id.to_string(), None))
             } else {
                 (server_id.to_string(), None)
@@ -7992,6 +8000,9 @@ pub async fn save_vkturn_config(
     State(state): State<AppState>,
     Json(body): Json<SaveVkTurnConfigReq>,
 ) -> Response {
+    // Держим блокировку до конца перезапуска: иначе поздно завершившийся запрос мог бы
+    // остановить более новый процесс и запустить клиент с уже устаревшими настройками.
+    let _update_guard = state.vkturn.config_update_lock.lock().await;
     let mut new_cfg = state.config.read().await.vkturn.clone();
 
     if let Some(en) = body.enabled {
@@ -8030,6 +8041,9 @@ pub async fn save_vkturn_config(
         }
     }
     if let Some(s) = body.streams {
+        if s != 0 && (!(10..=100).contains(&s) || s % 10 != 0) {
+            return api_err("Число потоков должно быть кратно 10 и находиться в диапазоне 10–100");
+        }
         new_cfg.streams = s;
     }
     if new_cfg.links.len() > crate::vkturn::MAX_LINKS {
