@@ -189,7 +189,7 @@ export default function Whitelist({ notify, status, refresh }: Props) {
       setConfig((prev) => ({ ...prev, strategy }))
       notify(
         isTargetStrict
-          ? '🛡️ Включена специальная логика XKeen Route (100% туннель, 376 РФ напрямую, без конфликтов игр)'
+          ? '🛡️ Включена специальная логика XKeen Route: трафик по умолчанию идёт через сервер белых списков'
           : '🌐 Включена стандартная логика маршрутизации (как у обычного сервера)'
       )
       window.dispatchEvent(new CustomEvent('xr:refresh-status'))
@@ -775,8 +775,9 @@ export default function Whitelist({ notify, status, refresh }: Props) {
                 🛡️ Специальная логика XKeen Route (Рекомендуется)
               </div>
               <div className="muted small" style={{ marginTop: 4, lineHeight: 1.5 }}>
-                • <strong>Весь трафик сети</strong> направляется в защищенный туннель [БС], предотвращая сбои интернета.<br />
-                • <strong>376 отечественных сервисов</strong> (Госуслуги, Банки, Ozon, WB) идут напрямую (DIRECT) без замедления и ошибок VPN.<br />
+                • Трафик устройств направляется через сервер белых списков.<br />
+                • <strong>Сайты из российского каталога</strong> тоже идут через туннель: российский домен не гарантирует прямой доступ у мобильного оператора.<br />
+                • Ваши домены из списка «Мои домены» остаются явными исключениями DIRECT.<br />
                 • <strong>Игровой режим временно приостанавливается</strong> для исключения конфликтов правил и утечек сессий.
               </div>
             </div>
@@ -1068,7 +1069,9 @@ export default function Whitelist({ notify, status, refresh }: Props) {
                       )}
                     </div>
                     <div className="whitelist-domain-meta">
-                      <span className="whitelist-tag-direct">DIRECT</span>
+                      <span className={isStrictStrategy ? 'whitelist-tag-cat' : 'whitelist-tag-direct'}>
+                        {isStrictStrategy ? 'через 🛡️ БС' : 'DIRECT'}
+                      </span>
                     </div>
                   </div>
                 ))

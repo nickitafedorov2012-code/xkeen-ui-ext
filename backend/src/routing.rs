@@ -2090,8 +2090,8 @@ pub fn remove_whitelist_dns(yaml: &str) -> String {
 /// Применение правил режима белых списков:
 /// 1. Вставка селектор-группы '🛡️ Whitelist' в proxy-groups:
 /// 2. Вставка блока # --- AUTO-WHITELIST-BEGIN --- в rules:
-///    - Отечественные домены (376 базовых + custom) -> DIRECT (строго без GEOIP-RU)
-///    - Трафик назначенных устройств -> 🛡️ Whitelist (или выбранный target_server)
+///    - В StrictXKeen весь внешний трафик LAN по умолчанию -> 🛡️ Whitelist
+///    - DIRECT остаётся только для явных пользовательских исключений и исключённых устройств
 /// Поиск IP адреса по MAC в содержимом ARP таблицы (/proc/net/arp)
 pub fn find_ip_for_mac_in_arp(mac: &str, arp_data: &str) -> Option<String> {
     let clean_mac = mac.trim().to_ascii_lowercase();
@@ -2212,12 +2212,11 @@ pub fn resolve_excluded_zapret_ips_internal(
 /// Применение правил режима белых списков:
 /// 1. Вставка селектор-группы '🛡️ Whitelist' в proxy-groups:
 /// 2. Вставка блока # --- AUTO-WHITELIST-BEGIN --- в rules:
-///    - Отечественные домены (376 базовых + custom) -> DIRECT (строго без GEOIP-RU)
-///    - При стратегии StrictXKeen:
-///      * Исключенные устройства -> DIRECT
-///      * Все остальные клиенты сети (Zero-Touch) -> 🛡️ Whitelist (или выбранный target_server)
-///    - При стратегии Standard: только селектор 🛡️ Whitelist без тотального перехвата
-/// Размещается непосредственно над AUTO-DEVICE-RULES.
+///    - StrictXKeen: только явно добавленные пользователем домены -> DIRECT;
+///      прочий трафик клиентов локальных подсетей по умолчанию -> 🛡️ Whitelist.
+///    - Standard: встроенный российский каталог и пользовательские домены -> DIRECT;
+///      полного перехвата локальных подсетей нет.
+/// Явные назначения устройств размещаются перед IPv4 catch-all.
 pub fn apply_whitelist_rules(
     content: &str,
     cfg: &crate::config::AppConfig,
@@ -2304,15 +2303,18 @@ pub fn apply_whitelist_rules(
         }
     }
 
-    // 2. Формирование правил rules:
-    // Отечественные домены -> DIRECT
-    // Устройства -> WHITELIST_GROUP_NAME (или явный target_server)
-    // ВАЖНО: Никакого GEOIP,RU wildcard!
+    // 2. Формирование правил rules. В StrictXKeen российские каталоги и гео-категории
+    // не создают DIRECT-маршрутов: мобильный оператор может не пропускать их напрямую.
     let mut wl_rules = Vec::new();
     wl_rules.push(WHITELIST_BEGIN.to_string());
 
-    let all_domains = get_all_whitelist_domains(&cfg.whitelist);
-    for dom in &all_domains {
+    let domains_direct = if cfg.whitelist.strategy == crate::config::WhitelistStrategy::StrictXKeen {
+        // Вкладка «Мои домены» — явное пользовательское исключение, в отличие от встроенного каталога РФ.
+        sanitize_domains(&cfg.whitelist.custom_domains)
+    } else {
+        get_all_whitelist_domains(&cfg.whitelist)
+    };
+    for dom in &domains_direct {
         wl_rules.push(format!("  - DOMAIN-SUFFIX,{dom},DIRECT"));
     }
 
@@ -2333,25 +2335,7 @@ pub fn apply_whitelist_rules(
             wl_rules.push(format!("  - SRC-IP-CIDR,{cidr},DIRECT"));
         }
 
-        // 2.2. Защита отечественного сегмента (RU домены и IP) для всех устройств сети и мобилок:
-        // Гарантирует, что мобильные приложения (банки, маркетплейсы, госуслуги, CDN, push)
-        // не перехватываются туннелем в зарубежный IP и работают напрямую без предупреждений «Обнаружен VPN».
-        let has_ru_ruleset = with_group.contains("category-ru@domain");
-        let has_ip_ruleset = with_group.contains("category-ru@ipcidr");
-        if with_group.contains("category-ip-geo-detect@domain") {
-            wl_rules.push("  - RULE-SET,category-ip-geo-detect@domain,DIRECT".to_string());
-        }
-        if has_ru_ruleset {
-            if has_ip_ruleset {
-                wl_rules.push("  - OR,((RULE-SET,category-ru@domain),(RULE-SET,category-ru@ipcidr)),DIRECT".to_string());
-            } else {
-                wl_rules.push("  - RULE-SET,category-ru@domain,DIRECT".to_string());
-            }
-        } else if with_group.contains("geosite") || with_group.contains("GEOSITE") {
-            wl_rules.push("  - GEOSITE,category-ru,DIRECT".to_string());
-        }
-
-        // 2.3. Явно сконфигурированные устройства из whitelist.devices (если есть).
+        // 2.2. Явно сконфигурированные устройства из whitelist.devices (если есть).
         // BS-PIN: устройство с закреплённой нодой получает СВОЁ правило (выше catch-all
         // 2.4), направленное на его per-device select-группу (group_name_for). Сама
         // группа существует благодаря device_routing-зеркалу в save_whitelist, а её
@@ -2377,7 +2361,7 @@ pub fn apply_whitelist_rules(
             }
         }
 
-        // 2.4. Zero-Touch: Все клиенты локальных сетей роутера -> в туннель Белых списков (для всего внешнего трафика)
+        // 2.3. Zero-Touch: все клиенты локальных сетей -> в выбранный туннель Белых списков.
         for subnet in &["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"] {
             wl_rules.push(format!("  - SRC-IP-CIDR,{subnet},{dev_target}"));
         }
@@ -2393,13 +2377,22 @@ pub fn apply_whitelist_rules(
     };
 
     let target_insert_idx = if cfg.whitelist.strategy == crate::config::WhitelistStrategy::StrictXKeen {
-        // В режиме StrictXKeen правила белых списков обязаны быть в самом верху секции rules:
-        // (сразу под AdBlock, если он есть, или сразу после 'rules:'), строго ВЫШЕ domain_rules, zapret и gaming (баг 3)
-        if let Some(adblock_end_idx) = lines[rules_pos + 1..].iter().position(|l| l.trim() == ADBLOCK_END) {
-            rules_pos + 1 + adblock_end_idx + 1
-        } else {
-            rules_pos + 1
-        }
+        // Явные назначения устройств из настроек идут перед catch-all. Блоки Zapret,
+        // игровые и исходные правила остаются ниже него; пользовательские списки доменов
+        // повторно накладываются в конце apply_routing и получают высший приоритет.
+        let managed_end = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                matches!(
+                    line.trim(),
+                    DEV_DOMAINS_END | DIRECT_END | FORCE_END | RULES_END | ADBLOCK_END
+                )
+            })
+            .map(|(idx, _)| idx + 1)
+            .max()
+            .unwrap_or(rules_pos + 1);
+        managed_end.max(rules_pos + 1)
     } else if let Some(dev_rules_idx) = lines[rules_pos + 1..].iter().position(|l| l.trim() == RULES_BEGIN) {
         rules_pos + 1 + dev_rules_idx
     } else if let Some(fallback_idx) = lines[rules_pos + 1..].iter().position(|l| {
@@ -2703,6 +2696,34 @@ pub fn apply_domain_rules(
     force: &[String],
     device_domains: &std::collections::BTreeMap<String, Vec<crate::config::DeviceDomainRule>>,
 ) -> Result<String, String> {
+    apply_domain_rules_with_priority(yaml, direct, force, device_domains, false)
+}
+
+/// Apply domain settings in the same order used by the full routing generator.
+/// StrictXKeen gives the two global settings lists priority over per-device domains.
+pub fn apply_domain_rules_for_config(
+    yaml: &str,
+    cfg: &crate::config::AppConfig,
+    force: &[String],
+) -> Result<String, String> {
+    let settings_first = cfg.whitelist.enabled
+        && cfg.whitelist.strategy == crate::config::WhitelistStrategy::StrictXKeen;
+    apply_domain_rules_with_priority(
+        yaml,
+        &cfg.direct_domains,
+        force,
+        &cfg.device_domain_rules,
+        settings_first,
+    )
+}
+
+fn apply_domain_rules_with_priority(
+    yaml: &str,
+    direct: &[String],
+    force: &[String],
+    device_domains: &std::collections::BTreeMap<String, Vec<crate::config::DeviceDomainRule>>,
+    settings_first: bool,
+) -> Result<String, String> {
     crate::routing::validate_marker_pair(yaml, DIRECT_BEGIN, DIRECT_END)?;
     crate::routing::validate_marker_pair(yaml, FORCE_BEGIN, FORCE_END)?;
     crate::routing::validate_marker_pair(yaml, DEV_DOMAINS_BEGIN, DEV_DOMAINS_END)?;
@@ -2725,48 +2746,61 @@ pub fn apply_domain_rules(
         .ok_or("В config.yaml нет секции rules:")?;
 
     let mut out = Vec::with_capacity(lines.len() + direct.len() + force.len() + 12);
+    let mut device_block = Vec::new();
+    if has_dev_domains {
+        device_block.push(DEV_DOMAINS_BEGIN.to_string());
+        for (ip, rules) in device_domains {
+            let cidr = format_src_ip_cidr(ip);
+            for r in rules {
+                let dom = r.domain.trim().to_lowercase();
+                let target = r.target.trim();
+                // Баг 119: домен и цель не должны ломать AND-правило; несуществующую цель
+                // заменяет sanitize_rule_targets в конце apply_routing (INV-4)
+                if is_valid_rule_domain(&dom) && is_safe_rule_target(target) {
+                    device_block.push(format!(
+                        "  - AND,((SRC-IP-CIDR,{cidr}),(DOMAIN-SUFFIX,{dom})),{target},no-resolve"
+                    ));
+                }
+            }
+        }
+        device_block.push(DEV_DOMAINS_END.to_string());
+    }
+
+    let mut direct_block = Vec::new();
+    if !direct.is_empty() {
+        direct_block.push(DIRECT_BEGIN.to_string());
+        for d in &direct {
+            direct_block.push(format!("  - DOMAIN-SUFFIX,{d},DIRECT"));
+        }
+        direct_block.push(DIRECT_END.to_string());
+    }
+
+    let mut force_block = Vec::new();
+    if !force.is_empty() {
+        let proxy_target = find_proxy_target_group(&content);
+        force_block.push(FORCE_BEGIN.to_string());
+        for d in &force {
+            if !FLOW_DOMAINS.iter().any(|g| g.eq_ignore_ascii_case(d)) {
+                force_block.push(format!("  - DOMAIN-SUFFIX,{d},{proxy_target}"));
+            }
+        }
+        force_block.push(FORCE_END.to_string());
+    }
+
     for (i, line) in lines.iter().enumerate() {
         out.push(line.to_string());
         if i == rules_idx {
-            // 1. Персональные доменные правила устройств (наивысший приоритет)
-            if has_dev_domains {
-                out.push(DEV_DOMAINS_BEGIN.to_string());
-                for (ip, rules) in device_domains {
-                    let cidr = format_src_ip_cidr(ip);
-                    for r in rules {
-                        let dom = r.domain.trim().to_lowercase();
-                        let target = r.target.trim();
-                        // Баг 119: домен и цель не должны ломать AND-правило; несуществующую цель
-                        // заменяет sanitize_rule_targets в конце apply_routing (INV-4)
-                        if is_valid_rule_domain(&dom) && is_safe_rule_target(target) {
-                            out.push(format!(
-                                "  - AND,((SRC-IP-CIDR,{cidr}),(DOMAIN-SUFFIX,{dom})),{target},no-resolve"
-                            ));
-                        }
-                    }
-                }
-                out.push(DEV_DOMAINS_END.to_string());
-            }
-
-            // 2. Прямые домены (DIRECT)
-            if !direct.is_empty() {
-                out.push(DIRECT_BEGIN.to_string());
-                for d in &direct {
-                    out.push(format!("  - DOMAIN-SUFFIX,{d},DIRECT"));
-                }
-                out.push(DIRECT_END.to_string());
-            }
-
-            // 3. Принудительные домены (динамическая прокси-группа, исключая специализированные Google AI домены)
-            if !force.is_empty() {
-                let proxy_target = find_proxy_target_group(&content);
-                out.push(FORCE_BEGIN.to_string());
-                for d in &force {
-                    if !FLOW_DOMAINS.iter().any(|g| g.eq_ignore_ascii_case(d)) {
-                        out.push(format!("  - DOMAIN-SUFFIX,{d},{proxy_target}"));
-                    }
-                }
-                out.push(FORCE_END.to_string());
+            // В strict_x_keen глобальные списки из настроек имеют высший приоритет,
+            // затем идут персональные доменные правила устройств. В остальных режимах
+            // сохраняется прежний порядок, где персональные правила стоят первыми.
+            if settings_first {
+                out.extend(direct_block.clone());
+                out.extend(force_block.clone());
+                out.extend(device_block.clone());
+            } else {
+                out.extend(device_block.clone());
+                out.extend(direct_block.clone());
+                out.extend(force_block.clone());
             }
         }
     }
@@ -3253,6 +3287,13 @@ pub fn apply_routing_with_filters(
     filters: &mut std::collections::BTreeMap<String, String>,
 ) -> Result<(String, usize), String> {
     let mut current = sync_disabled_providers_in_yaml(yaml, &cfg.disabled_providers).unwrap_or_else(|_| yaml.to_string());
+    let strict_whitelist_active = cfg.whitelist.enabled
+        && cfg.whitelist.strategy == crate::config::WhitelistStrategy::StrictXKeen;
+    if strict_whitelist_active {
+        // StrictXKeen rebuilds these blocks after all generated routing rules. Strip
+        // the previous copy first so a panel/core restart produces the same priority.
+        current = remove_domain_blocks(&current);
+    }
 
     let providers = if !cfg.mihomo.device_providers.is_empty() {
         cfg.mihomo.device_providers.clone()
@@ -3264,9 +3305,9 @@ pub fn apply_routing_with_filters(
         .filter(|p| !cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(p)))
         .collect();
 
-    // 1. Per-device назначения (базовый маршрут уровня устройства: SRC-IP-CIDR)
-    // Вставляется ПЕРВЫМ в rules, чтобы более специфичные правила (домены, AdBlock, Zapret, Flow, Gaming)
-    // вставлялись поверх него и имели безусловный приоритет (BUG-18 FIFO-порядок).
+    // 1. Per-device назначения (базовый маршрут уровня устройства: SRC-IP-CIDR).
+    // В обычном режиме они создаются первыми; при StrictXKeen блок пересоздаётся
+    // после auto-правил, но до Whitelist catch-all.
     let mut assignments = Vec::new();
     for (ip, dr) in &cfg.device_routing {
         if let Some(srv) = dr.servers.first() {
@@ -3306,8 +3347,10 @@ pub fn apply_routing_with_filters(
 
     let count = assignments.len();
     let pinned = pinned_whitelist_ips(cfg);
-    if let Ok(with_devices) = apply_assignments(&current, &assignments, &providers, &pinned) {
-        current = with_devices;
+    if !strict_whitelist_active {
+        if let Ok(with_devices) = apply_assignments(&current, &assignments, &providers, &pinned) {
+            current = with_devices;
+        }
     }
 
     // 2. Игнор-лист
@@ -3327,14 +3370,25 @@ pub fn apply_routing_with_filters(
     // Пользовательские force_domains имеют абсолютный приоритет над DIRECT-правилами Zapret
     current = apply_zapret_hybrid_rules_with_force(&current, &cfg.zapret, active_force)?;
 
-    // 5. Доменные правила (DIRECT / FORCE / PER-DEVICE DOMAINS)
-    // Баг 14: Вставляются поверх правил игрового режима и устройств (персональные доменные правила и DIRECT имеют высший приоритет)
+    // В StrictXKeen пользовательские назначения устройств ставим после auto-блоков
+    // игровых режимов/Zapret и до catch-all, чтобы они не теряли свой заданный маршрут.
+    if strict_whitelist_active {
+        if let Ok(with_devices) = apply_assignments(&current, &assignments, &providers, &pinned) {
+            current = with_devices;
+        }
+    }
+
+    // 5. Доменные правила (DIRECT / FORCE / PER-DEVICE DOMAINS).
+    // В обычном режиме сохраняется прежний порядок. В StrictXKeen эти блоки
+    // накладываются после системных правил ниже, чтобы два списка настроек были первыми.
     let direct = &cfg.direct_domains;
     let device_domains = &cfg.device_domain_rules;
-    current = apply_domain_rules(&current, direct, active_force, device_domains)?;
+    if !strict_whitelist_active {
+        current = apply_domain_rules(&current, direct, active_force, device_domains)?;
+    }
 
-    // 5.1. Режим белых списков (376 отечественных сервисов напрямую, прокси-туннель для устройств)
-    // В режиме StrictXKeen правила белых списков размещаются ВЫШЕ доменных, игровых и zapret-правил (баг 3)
+    // 5.1. Режим белых списков: в StrictXKeen LAN catch-all следует после
+    // явных назначений устройств и до остальных автоматически сгенерированных правил.
     let active_wl_tunnel = match cfg.whitelist.target_server.as_deref() {
         Some(s) if !s.trim().is_empty() && s.trim() != "follow_failover" => Some(s.trim()),
         _ => None,
@@ -3368,6 +3422,12 @@ pub fn apply_routing_with_filters(
     // 7. Правила прямого обхода VK-туннеля (TURN ВК / Телемост и VPS peer) в самый верх rules:
     if let Ok(with_vkturn) = crate::vkturn::apply_rules(&current, &cfg.vkturn) {
         current = with_vkturn;
+    }
+
+    // Пользовательские списки direct_domains/force_domains обязаны иметь наивысший
+    // приоритет в StrictXKeen. force_domains сохраняют назначение PROXY, direct_domains — DIRECT.
+    if strict_whitelist_active {
+        current = apply_domain_rules_with_priority(&current, direct, active_force, device_domains, true)?;
     }
 
     // INV-4 (баги 12, 39, 51): страховка — цель правила обязана быть группой, статическим прокси или
@@ -4795,6 +4855,7 @@ rules:
         let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - GEOIP,RU,DIRECT\n  - MATCH,PROXY\n";
         let mut cfg = crate::config::AppConfig::default();
         cfg.whitelist.enabled = true;
+        cfg.whitelist.custom_domains.push("user-added.example".into());
         cfg.whitelist.devices.push(crate::config::WhitelistDevice {
             mac: "AA:BB:CC:DD:EE:01".into(),
             ip: "192.168.1.105".into(),
@@ -4810,9 +4871,10 @@ rules:
         assert!(applied.contains(WHITELIST_GROUP_BEGIN));
         assert!(applied.contains(WHITELIST_GROUP_END));
         assert!(applied.contains(&format!("- name: '{WHITELIST_GROUP_NAME}'")));
-        assert!(applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
-        assert!(applied.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
-        assert!(applied.contains("DOMAIN-SUFFIX,vk.com,DIRECT"));
+        assert!(!applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
+        assert!(!applied.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
+        assert!(!applied.contains("DOMAIN-SUFFIX,vk.com,DIRECT"));
+        assert!(applied.contains("DOMAIN-SUFFIX,user-added.example,DIRECT"));
         assert!(applied.contains(&format!("SRC-IP-CIDR,192.168.1.105/32,{WHITELIST_GROUP_NAME}")));
         assert!(validate_marker_pair(&applied, WHITELIST_BEGIN, WHITELIST_END).is_ok());
         assert!(validate_marker_pair(&applied, WHITELIST_GROUP_BEGIN, WHITELIST_GROUP_END).is_ok());
@@ -4826,6 +4888,261 @@ rules:
         assert!(!disabled.contains(WHITELIST_GROUP_END));
         assert!(!disabled.contains("SRC-IP-CIDR,192.168.1.105/32"));
         assert!(disabled.contains("GEOIP,RU,DIRECT"), "Original fallback rules must be preserved");
+    }
+
+    #[test]
+    fn regression_strict_whitelist_tunnels_russian_catalog_and_category_matches() {
+        let base_yaml = r#"port: 7890
+rule-providers:
+  category-ru@domain: { type: http, url: "https://example.com/ru.mrs" }
+  category-ru@ipcidr: { type: http, url: "https://example.com/ru_ip.mrs" }
+  category-ip-geo-detect@domain: { type: http, url: "https://example.com/geo.mrs" }
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - Fastest
+rules:
+  - DOMAIN-SUFFIX,source-explicit.example,DIRECT
+  - RULE-SET,category-ip-geo-detect@domain,DIRECT
+  - OR,((RULE-SET,category-ru@domain),(RULE-SET,category-ru@ipcidr)),DIRECT
+  - MATCH,PROXY
+"#;
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
+        cfg.whitelist.custom_domains = vec!["user-explicit-direct.example".into()];
+
+        let applied = apply_whitelist_rules(base_yaml, &cfg, None);
+        let start = applied.find(WHITELIST_BEGIN).expect("whitelist rule block must exist");
+        let end = applied.find(WHITELIST_END).expect("whitelist rule block must end");
+        let block = &applied[start..end];
+        let catchall = applied.find("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist").expect("IPv4 LAN catch-all must exist");
+
+        assert!(
+            !block.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"),
+            "the built-in Russian catalog must not add automatic DIRECT rules in StrictXKeen"
+        );
+        assert!(
+            !block.contains("RULE-SET,category-ip-geo-detect@domain,DIRECT")
+                && !block.contains("category-ru@domain),(RULE-SET,category-ru@ipcidr)),DIRECT"),
+            "country and geo-detected IP rules must not outrank the Whitelist tunnel"
+        );
+        assert!(
+            block.contains("DOMAIN-SUFFIX,user-explicit-direct.example,DIRECT"),
+            "a domain explicitly added by the user must keep its DIRECT exception"
+        );
+        assert!(
+            applied.find("DOMAIN-SUFFIX,source-explicit.example,DIRECT").unwrap() > catchall,
+            "source-configured rules remain present below the LAN default route"
+        );
+        assert!(
+            applied.find("RULE-SET,category-ip-geo-detect@domain,DIRECT").unwrap() > catchall,
+            "source rule-providers and rules must remain intact after the LAN catch-all"
+        );
+
+        let disabled = apply_whitelist_rules(&applied, &crate::config::AppConfig::default(), None);
+        assert_eq!(disabled, base_yaml.trim_end(), "disabling StrictXKeen must restore the source rules unchanged");
+    }
+
+    #[test]
+    fn regression_strict_whitelist_keeps_user_domain_lists_and_device_routes_above_default() {
+        let base_yaml = r#"port: 7890
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - Fastest
+rules:
+  - GEOIP,RU,DIRECT
+  - MATCH,PROXY
+"#;
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
+        cfg.whitelist.excluded_devices = vec!["192.168.1.99".into()];
+        cfg.whitelist.custom_domains = vec!["custom-direct.example".into()];
+        cfg.direct_domains = vec!["direct-list.example".into()];
+        cfg.force_domains = vec!["proxy-list.example".into()];
+        cfg.adblock_enabled = true;
+        cfg.device_domain_rules.insert(
+            "192.168.1.24".into(),
+            vec![crate::config::DeviceDomainRule {
+                domain: "device-domain.example".into(),
+                target: "PROXY".into(),
+            }],
+        );
+        cfg.device_routing.insert(
+            "192.168.1.23".into(),
+            crate::config::DeviceRouting {
+                servers: vec!["PROXY".into()],
+                ..Default::default()
+            },
+        );
+
+        let (applied, _) = apply_routing(base_yaml, &cfg).expect("strict routing generation must succeed");
+        let direct_pos = applied.find("DOMAIN-SUFFIX,direct-list.example,DIRECT").expect("direct list entry must remain DIRECT");
+        let force_pos = applied.find("DOMAIN-SUFFIX,proxy-list.example,PROXY").expect("forced-proxy list entry must remain PROXY");
+        let default_pos = applied.find("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist").expect("LAN default must target Whitelist");
+        let source_country_pos = applied.find("GEOIP,RU,DIRECT").expect("source country rule must be preserved");
+        let adblock_pos = applied.find(ADBLOCK_BEGIN).expect("enabled AdBlock block must remain present");
+        let device_rule = "SRC-IP-CIDR,192.168.1.23/32,";
+        let device_pos = applied.find(device_rule).expect("explicit device route must remain present");
+
+        assert!(direct_pos < default_pos && force_pos < default_pos, "both settings lists must precede the Whitelist default");
+        assert!(default_pos < source_country_pos, "source country routes must remain below the StrictXKeen default");
+        assert!(direct_pos < adblock_pos && force_pos < adblock_pos, "both settings lists must outrank generated routing blocks");
+        let device_domain_pos = applied.find("DOMAIN-SUFFIX,device-domain.example").expect("per-device domain rule must remain present");
+        assert!(device_pos < default_pos, "an explicitly routed device must keep its own target ahead of the catch-all");
+        assert!(direct_pos < device_domain_pos && force_pos < device_domain_pos, "global domain settings must outrank per-device domain rules");
+        assert!(direct_pos < device_pos && force_pos < device_pos, "global domain settings must outrank per-device routes");
+        assert!(
+            applied.find("SRC-IP-CIDR,192.168.1.99/32,DIRECT").unwrap() < default_pos,
+            "an excluded device must keep its explicit DIRECT exception"
+        );
+        assert!(
+            applied.find("DOMAIN-SUFFIX,custom-direct.example,DIRECT").unwrap() < default_pos,
+            "a user-added whitelist domain must keep its explicit DIRECT exception"
+        );
+
+        let (reapplied, _) = apply_routing(&applied, &cfg).expect("rebuilding on panel/core restart must succeed");
+        let reapplied_default = reapplied.find("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist").expect("reapplied LAN default must target Whitelist");
+        assert!(reapplied.find("DOMAIN-SUFFIX,direct-list.example,DIRECT").unwrap() < reapplied_default);
+        assert!(reapplied.find("DOMAIN-SUFFIX,proxy-list.example,PROXY").unwrap() < reapplied_default);
+        assert!(reapplied.find("DOMAIN-SUFFIX,direct-list.example,DIRECT").unwrap() < reapplied.find("DOMAIN-SUFFIX,device-domain.example").unwrap());
+        assert!(reapplied.find("DOMAIN-SUFFIX,proxy-list.example,PROXY").unwrap() < reapplied.find("DOMAIN-SUFFIX,device-domain.example").unwrap());
+        assert!(reapplied.find(device_rule).unwrap() < reapplied_default);
+        assert!(reapplied.find("GEOIP,RU,DIRECT").unwrap() > reapplied_default);
+        assert!(reapplied.contains(WHITELIST_GROUP_BEGIN), "restart must regenerate the selected Whitelist group");
+    }
+
+    #[test]
+    fn regression_strict_domain_settings_updates_keep_global_lists_first() {
+        let yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
+        cfg.direct_domains = vec!["global-direct.example".into()];
+        cfg.device_domain_rules.insert(
+            "192.168.1.24".into(),
+            vec![crate::config::DeviceDomainRule {
+                domain: "device-specific.example".into(),
+                target: "PROXY".into(),
+            }],
+        );
+        let force = vec!["global-force.example".into()];
+
+        let applied = apply_domain_rules_for_config(yaml, &cfg, &force).expect("domain settings update must succeed");
+        let direct_pos = applied.find("DOMAIN-SUFFIX,global-direct.example,DIRECT").unwrap();
+        let force_pos = applied.find("DOMAIN-SUFFIX,global-force.example,PROXY").unwrap();
+        let device_pos = applied.find("DOMAIN-SUFFIX,device-specific.example").unwrap();
+        assert!(direct_pos < device_pos && force_pos < device_pos);
+
+        let mut zapret = crate::config::ZapretConfig::default();
+        zapret.enabled = true;
+        zapret.hybrid_youtube = true;
+        let with_auto_rules = apply_zapret_hybrid_rules_with_force(&applied, &zapret, &force)
+            .expect("automatic Zapret rules must be generated");
+        assert!(
+            with_auto_rules.find(ZAPRET_HYBRID_BEGIN).unwrap() < with_auto_rules.find(FORCE_BEGIN).unwrap(),
+            "Zapret may be inserted before force rules before the settings are reapplied"
+        );
+        let reprioritized = apply_domain_rules_for_config(&with_auto_rules, &cfg, &force)
+            .expect("reapplying domain settings must succeed");
+        let zapret_pos = reprioritized.find(ZAPRET_HYBRID_BEGIN).unwrap();
+        assert!(reprioritized.find("DOMAIN-SUFFIX,global-direct.example,DIRECT").unwrap() < zapret_pos);
+        assert!(reprioritized.find("DOMAIN-SUFFIX,global-force.example,PROXY").unwrap() < zapret_pos);
+
+        cfg.whitelist.enabled = false;
+        let disabled = apply_domain_rules_for_config(yaml, &cfg, &force).expect("disabled mode update must succeed");
+        assert!(disabled.find("DOMAIN-SUFFIX,device-specific.example").unwrap() < disabled.find("DOMAIN-SUFFIX,global-direct.example,DIRECT").unwrap());
+    }
+
+    #[test]
+    fn regression_strict_whitelist_keeps_gaming_country_bypasses_below_tunnel() {
+        let yaml = r#"port: 7890
+rule-providers:
+  category-ru@domain: { type: http, url: "https://example.com/ru.mrs" }
+  category-ru@ipcidr: { type: http, url: "https://example.com/ru_ip.mrs" }
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - Fastest
+rules:
+  - MATCH,PROXY
+"#;
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
+        cfg.gaming.enabled = true;
+        cfg.gaming.mode = crate::config::GamingMode::BypassRu;
+        cfg.gaming.devices.push(crate::config::GamingDevice {
+            mac: "aa:bb:cc:dd:ee:12".into(),
+            ip: "192.168.1.45".into(),
+            ipv6: vec![],
+            name: "Gaming client".into(),
+            enabled: true,
+            server: Some("PROXY".into()),
+        });
+
+        let (applied, _) = apply_routing(yaml, &cfg).expect("strict routing with a saved gaming profile must succeed");
+        let tunnel_pos = applied.find("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist").expect("strict default must be present");
+        for line in applied.lines().filter(|line| {
+            line.contains("(GEOIP,RU)")
+                || line.contains("(RULE-SET,category-ru@domain)")
+                || line.contains("(RULE-SET,category-ru@ipcidr)")
+                || line.contains("(GEOSITE,category-ru)")
+        }) {
+            let pos = applied.find(line).unwrap();
+            assert!(pos > tunnel_pos, "automatic gaming country bypass must not precede StrictXKeen default: {line}");
+        }
+
+        let (reapplied, _) = apply_routing(&applied, &cfg).expect("panel/core restart rebuild must preserve the order");
+        let tunnel_pos = reapplied.find("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist").unwrap();
+        for line in reapplied.lines().filter(|line| {
+            line.contains("(GEOIP,RU)")
+                || line.contains("(RULE-SET,category-ru@domain)")
+                || line.contains("(RULE-SET,category-ru@ipcidr)")
+                || line.contains("(GEOSITE,category-ru)")
+        }) {
+            assert!(reapplied.find(line).unwrap() > tunnel_pos, "reapplied automatic country bypass must remain below StrictXKeen default: {line}");
+        }
+    }
+
+    #[test]
+    fn regression_disabled_whitelist_preserves_legacy_domain_and_country_routing() {
+        let base_yaml = r#"port: 7890
+rule-providers:
+  category-ru@domain: { type: http, url: "https://example.com/ru.mrs" }
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - Fastest
+rules:
+  - RULE-SET,category-ru@domain,DIRECT
+  - GEOIP,RU,DIRECT
+  - MATCH,PROXY
+"#;
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = false;
+        // A retained strategy setting must have no effect while the mode is disabled.
+        cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
+        cfg.direct_domains = vec!["user-direct.example".into()];
+        cfg.force_domains = vec!["user-proxy.example".into()];
+
+        let (applied, _) = apply_routing(base_yaml, &cfg).expect("routing with whitelist disabled must succeed");
+        assert!(!applied.contains(WHITELIST_BEGIN), "disabled mode must not add whitelist routing rules");
+        assert!(!applied.contains(WHITELIST_GROUP_BEGIN), "disabled mode must not add the Whitelist group");
+        assert!(!applied.contains("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist"));
+        assert!(applied.contains("RULE-SET,category-ru@domain,DIRECT"), "source country rules must remain intact");
+        assert!(applied.contains("GEOIP,RU,DIRECT"), "source GEOIP rules must remain intact");
+
+        let direct_pos = applied.find("DOMAIN-SUFFIX,user-direct.example,DIRECT").expect("direct setting must remain active");
+        let force_pos = applied.find("DOMAIN-SUFFIX,user-proxy.example,PROXY").expect("force setting must remain active");
+        let source_country_pos = applied.find("RULE-SET,category-ru@domain,DIRECT").unwrap();
+        assert!(direct_pos < source_country_pos && force_pos < source_country_pos);
     }
 
     /// Анти-регрессия BS-PIN (сценарий бага v1.9.41): снятие узла устройства на
@@ -5015,7 +5332,7 @@ rules:
     }
 
     #[test]
-    fn test_whitelist_rule_hierarchy_precedes_device_assignments() {
+    fn test_whitelist_device_assignments_precede_strict_default_route() {
         let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - GEOIP,RU,DIRECT\n  - MATCH,PROXY\n";
         let mut cfg = crate::config::AppConfig::default();
         cfg.device_routing.insert("192.168.1.105".into(), crate::config::DeviceRouting {
@@ -5035,11 +5352,11 @@ rules:
         let wl_pos = applied.find(WHITELIST_BEGIN).expect("WHITELIST_BEGIN must be present");
         let dev_pos = applied.find(RULES_BEGIN).expect("RULES_BEGIN must be present");
 
-        // AUTO-WHITELIST обязан быть ВЫШЕ AUTO-DEVICE-RULES в секции rules:
+        // Индивидуальная настройка устройства обязана сохраниться перед catch-all туннелем.
         assert!(
-            wl_pos < dev_pos,
-            "CRITICAL REGRESSION: Whitelist rules ({}) must precede general device rules ({}) to avoid routing bypass",
-            wl_pos, dev_pos
+            dev_pos < wl_pos,
+            "explicit device rules ({}) must precede the StrictXKeen default ({})",
+            dev_pos, wl_pos
         );
     }
 
@@ -5048,6 +5365,7 @@ rules:
         let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - GEOIP,RU,DIRECT\n  - MATCH,PROXY\n";
         let mut cfg = crate::config::AppConfig::default();
         cfg.whitelist.enabled = true;
+        cfg.direct_domains = vec!["fcm.googleapis.com".into()];
         cfg.whitelist.devices.push(crate::config::WhitelistDevice {
             mac: "AA:BB:CC:DD:EE:01".into(),
             ip: "192.168.1.105".into(),
@@ -5060,12 +5378,12 @@ rules:
         let wl_pos = applied.find(WHITELIST_BEGIN).expect("WHITELIST_BEGIN must be present");
         let ai_pos = applied.find(GOOGLE_AI_BEGIN).expect("GOOGLE_AI_BEGIN must be present");
 
-        // AUTO-WHITELIST (fcm.googleapis.com, mtalk.google.com -> DIRECT) ОБЯЗАН быть ВЫШЕ GOOGLE-AI
+        // Пользовательский DIRECT список имеет приоритет над специализированными правилами Google AI.
         assert!(
-            wl_pos < ai_pos,
-            "CRITICAL REGRESSION: Push notification direct rules in whitelist ({}) must precede Google AI ({})",
-            wl_pos, ai_pos
+            applied.find("DOMAIN-SUFFIX,fcm.googleapis.com,DIRECT").unwrap() < ai_pos,
+            "user direct-domain setting must precede Google AI routing"
         );
+        assert!(wl_pos > 0, "StrictXKeen default block must remain present");
     }
 
     #[test]
@@ -5199,9 +5517,9 @@ rules:
         assert!(applied.contains(WHITELIST_BEGIN));
         assert!(applied.contains(WHITELIST_END));
 
-        // 1. Domestic domains -> DIRECT
-        assert!(applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
-        assert!(applied.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
+        // 1. The built-in catalog does not force domestic domains through DIRECT.
+        assert!(!applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
+        assert!(!applied.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
 
         // 2. Excluded device -> DIRECT
         assert!(applied.contains("SRC-IP-CIDR,192.168.1.99/32,DIRECT"));
@@ -5210,11 +5528,9 @@ rules:
         assert!(applied.contains("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist"));
         assert!(applied.contains("SRC-IP-CIDR,10.0.0.0/8,🛡️ Whitelist"));
 
-        // 4. Hierarchy inside whitelist block: domain DIRECT must be ABOVE subnet tunnel
-        let dom_pos = applied.find("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT").unwrap();
+        // 4. Explicit device exclusions must be ABOVE subnet tunnel.
         let ex_pos = applied.find("SRC-IP-CIDR,192.168.1.99/32,DIRECT").unwrap();
         let sub_pos = applied.find("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist").unwrap();
-        assert!(dom_pos < sub_pos, "Domestic DIRECT rules must precede subnet redirection");
         assert!(ex_pos < sub_pos, "Excluded devices must precede subnet redirection");
     }
 
@@ -5294,16 +5610,24 @@ IP address       HW type     Flags       HW address            Mask     Device\n
         let wl_pos = applied.find(WHITELIST_BEGIN).expect("WHITELIST_BEGIN must be present");
         let force_pos = applied.find(FORCE_BEGIN).expect("FORCE_BEGIN must be present");
 
-        // При StrictXKeen правила белых списков должны предшествовать force-доменам в PROXY
+        // Настроенные доменные списки — явные исключения с наивысшим приоритетом.
         assert!(
-            wl_pos < force_pos,
-            "В режиме StrictXKeen правила белых списков (pos {}) обязаны быть ВЫШЕ force_domains (pos {}), чтобы исключить утечку в третий канал PROXY",
-            wl_pos, force_pos
+            force_pos < wl_pos,
+            "force_domains (pos {}) must precede the StrictXKeen default route ({})",
+            force_pos, wl_pos
+        );
+        assert!(
+            applied.contains("DOMAIN-SUFFIX,force-site.com,PROXY"),
+            "force_domains must keep their configured PROXY target"
+        );
+        assert!(
+            applied.find("DOMAIN-SUFFIX,direct-site.com,DIRECT").unwrap() < wl_pos,
+            "direct_domains must also precede the StrictXKeen default route"
         );
     }
 
     #[test]
-    fn test_whitelist_strict_preserves_category_ru_above_subnet_tunnel() {
+    fn test_whitelist_strict_does_not_generate_country_direct_rules() {
         let base_yaml = r#"port: 7890
 rule-providers:
   category-ru@domain: { type: http, url: "https://example.com/ru.mrs" }
@@ -5325,29 +5649,19 @@ rules:
         assert!(applied.contains(WHITELIST_BEGIN));
         assert!(applied.contains(WHITELIST_END));
 
-        // 1. Проверяем наличие защитных отечественных правил
-        assert!(applied.contains("RULE-SET,category-ip-geo-detect@domain,DIRECT"));
-        assert!(applied.contains("OR,((RULE-SET,category-ru@domain),(RULE-SET,category-ru@ipcidr)),DIRECT"));
+        // Встроенные категории остаются доступны в YAML, но генератор StrictXKeen
+        // больше не добавляет им прямые маршруты.
+        let wl_start = applied.find(WHITELIST_BEGIN).unwrap();
+        let wl_end = applied.find(WHITELIST_END).unwrap();
+        let wl_block = &applied[wl_start..wl_end];
+        assert!(!wl_block.contains("RULE-SET,category-ip-geo-detect@domain,DIRECT"));
+        assert!(!wl_block.contains("category-ru@domain),(RULE-SET,category-ru@ipcidr)),DIRECT"));
 
-        // 2. Проверяем наличие общего перехвата подсети
+        // Общий IPv4 перехват стоит перед исходным fallback.
         assert!(applied.contains("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist"));
-
-        // 3. АНТИ-РЕГРЕССИЯ: Правила RU-сегмента обязаны физически предшествовать перехвату подсети,
-        // чтобы мобильные приложения (банки, маркетплейсы, госуслуги, CDN) шли напрямую без триггера «Обнаружен VPN».
-        let ru_detect_pos = applied.find("RULE-SET,category-ip-geo-detect@domain,DIRECT").expect("ru_detect must be present");
-        let ru_pos = applied.find("OR,((RULE-SET,category-ru@domain),(RULE-SET,category-ru@ipcidr)),DIRECT").expect("ru must be present");
         let subnet_pos = applied.find("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist").expect("subnet rule must be present");
-
-        assert!(
-            ru_detect_pos < subnet_pos,
-            "CRITICAL REGRESSION: category-ip-geo-detect ({}) must precede subnet tunnel ({})",
-            ru_detect_pos, subnet_pos
-        );
-        assert!(
-            ru_pos < subnet_pos,
-            "CRITICAL REGRESSION: category-ru rules ({}) must precede subnet tunnel ({}) to prevent mobile VPN false-positives",
-            ru_pos, subnet_pos
-        );
+        let match_pos = applied.find("- MATCH,PROXY").expect("source fallback must remain present");
+        assert!(subnet_pos < match_pos, "LAN default must precede fallback rules");
     }
 
     #[test]
@@ -5359,7 +5673,7 @@ rules:
 
         let applied = apply_whitelist_rules(base_yaml, &cfg, None);
 
-        // Ключевые домены OZON и отечественных CDN/DDoS-фильтров обязаны присутствовать в правилах DIRECT:
+        // Встроенный каталог сохраняет домены для UI/DNS, но StrictXKeen не выпускает его напрямую.
         let critical_domains = [
             "ozon.ru",
             "ozonusercontent.com",
@@ -5378,11 +5692,9 @@ rules:
         ];
 
         for &cd in &critical_domains {
-            let rule = format!("DOMAIN-SUFFIX,{cd},DIRECT");
             assert!(
-                applied.contains(&rule),
-                "CRITICAL REGRESSION: Domain {} must have direct rule in whitelist: '{}'",
-                cd, rule
+                !applied.contains(&format!("DOMAIN-SUFFIX,{cd},DIRECT")),
+                "StrictXKeen must route catalog domain {cd} through the selected tunnel"
             );
             assert!(
                 DOMESTIC_WHITELIST_DOMAINS.contains(&cd),

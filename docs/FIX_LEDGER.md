@@ -482,6 +482,16 @@
   `=== GATE OK bug 3 | diff a42402815e19 | лог docs/fix_logs/bug-3-green.log ===`
 - Статус: FIXED
 
+#### Переработка от 2026-11-07 по уточнённому требованию маршрутизации
+- Пользователь подтвердил, что `direct_domains` и `force_domains` — два явных списка настроек с наивысшим приоритетом. `direct_domains` остаются `DIRECT`, `force_domains` сохраняют назначение `PROXY`; это уточнение заменяет прежнее ожидание, что второй список должен быть ниже туннеля БС.
+- В StrictXKeen встроенный каталог российских доменов и автоматически добавляемые правила `category-ru`, `category-ip-geo-detect`, GEOIP/GEOSITE больше не получают `DIRECT` внутри AUTO-WHITELIST. IPv4 catch-all локальных подсетей направляет остальной клиентский трафик в `🛡️ Whitelist`; правила исходной конфигурации сохранены ниже него.
+- Настроенные устройства и исключения остаются отдельными явными маршрутами. Глобальные списки ставятся выше per-device domain/IP и автоматически создаваемых правил; API сохранения списков повторно применяет этот приоритет после правил Zapret только в StrictXKeen.
+- DNS-политика, firewall-перехват DNS/TCP/UDP и обновление целевого узла группы не изменялись. Внешний IPv6 по существующей архитектуре блокируется fail-closed; его туннелирование этим изменением не добавлено. Проверка на роутере не выполнялась, деплоя не было.
+- Регрессионные тесты: `regression_strict_whitelist_tunnels_russian_catalog_and_category_matches`, `regression_strict_whitelist_keeps_user_domain_lists_and_device_routes_above_default`, `regression_strict_domain_settings_updates_keep_global_lists_first`, `regression_strict_whitelist_keeps_gaming_country_bypasses_below_tunnel`, `regression_disabled_whitelist_preserves_legacy_domain_and_country_routing`. До исправления два строгих теста падали на автоправилах DIRECT и порядке маршрутов; после исправления все прошли.
+- Выпуск: patch-версия `1.12.2.0`; полный четырёхчастный номер используется тегом и версией бинаря, Cargo/npm package metadata остаются совместимыми с SemVer (`1.12.2`). CI нормализует только Cargo-версию.
+- Сравнение обновлений дополнено проверками patch/hotfix-порядка в `updater::tests::test_is_newer_versions`.
+- Полный gate: `=== GATE OK bug 3-rework | diff 4946958d5e04 | лог docs/fix_logs/bug-3-rework-green.log ===` (backend, frontend Vitest, TypeScript, проверка новых запрещённых конструкций и количества тестов).
+
 ### Баг 70 — Ни один iptables-вызов из Rust не использует `-w`
 - Правила перечитаны: 2026-11-05 03:31:13 | хеш bc29a182fac8
 - Где код (найдено grep по имени функции): `backend/src/api.rs:10385` (`build_gaming_full_tunnel_commands`), `backend/src/api.rs:10650` (`build_whitelist_full_tunnel_commands`), `backend/src/adguard.rs:1165` (`build_sync_tunnel_dns_ports_script`), `backend/src/adguard.rs:1180` (`build_adguard_ndm_hook_content`), `backend/src/direct_traffic.rs:10` (`init_direct_iptables`, `cleanup_direct_iptables`, `read_direct_bytes`)

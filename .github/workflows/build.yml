@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. v0.1.0)"
+        description: "Release version (e.g. v1.2.3.4)"
         required: false
         type: string
   push:
@@ -61,7 +61,14 @@ jobs:
       - name: Set version
         run: |
           VER="${{ inputs.version || github.ref_name }}"
-          sed -i "s/^version = .*/version = \"${VER#v}\"/" backend/Cargo.toml
+          RAW_VER="${VER#v}"
+          if [[ "$RAW_VER" =~ ^([0-9]+\.[0-9]+\.[0-9]+)(\.[0-9]+)?(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            CARGO_VER="${BASH_REMATCH[1]}${BASH_REMATCH[3]}${BASH_REMATCH[4]}"
+          else
+            echo "Invalid release version: $VER (expected X.Y.Z.W)"
+            exit 1
+          fi
+          sed -i "s/^version = .*/version = \"${CARGO_VER}\"/" backend/Cargo.toml
           grep '^version' backend/Cargo.toml
 
       - uses: swatinem/rust-cache@v2

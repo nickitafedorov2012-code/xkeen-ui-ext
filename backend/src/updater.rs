@@ -1561,6 +1561,9 @@ mod tests {
         assert!(is_newer("1.3.0", "1.2.9"));
         assert!(is_newer("v2.0.0", "v1.99.99"));
         assert!(!is_newer("v1.2.4", "v1.2.5"));
+        assert!(is_newer("v1.12.2.0", "v1.12.1.9"), "patch releases must outrank prior patch hotfixes");
+        assert!(is_newer("v1.12.1.2", "v1.12.1.1"), "hotfix versions must be compared as a fourth component");
+        assert!(!is_newer("v1.12.2.0", "v1.12.2.1"), "an older hotfix must not be offered as an update");
     }
 
     #[test]

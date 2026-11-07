@@ -2025,12 +2025,20 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
         Ok(y) => y,
         Err(e) => return api_err(e),
     };
-    let mut new_yaml = match routing::apply_domain_rules(&yaml, &tx.config().direct_domains, &all_force, &tx.config().device_domain_rules) {
+    let mut new_yaml = match routing::apply_domain_rules_for_config(&yaml, tx.config(), &all_force) {
         Ok(y) => y,
         Err(e) => return api_err(e),
     };
     if let Ok(with_zapret) = routing::apply_zapret_hybrid_rules_with_force(&new_yaml, &tx.config().zapret, &all_force) {
         new_yaml = with_zapret;
+    }
+    if tx.config().whitelist.enabled
+        && tx.config().whitelist.strategy == config::WhitelistStrategy::StrictXKeen
+    {
+        new_yaml = match routing::apply_domain_rules_for_config(&new_yaml, tx.config(), &all_force) {
+            Ok(y) => y,
+            Err(e) => return api_err(e),
+        };
     }
     if let Err(e) = tx.set_yaml(new_yaml) {
         return api_err(e);
@@ -2181,12 +2189,20 @@ pub async fn force_add_domain(
             Err(e) => return api_err(format!("Не удалось прочитать config.yaml: {e}")),
         };
 
-        let mut new_yaml = match routing::apply_domain_rules(&yaml, &tx.config().direct_domains, &force_list, &tx.config().device_domain_rules) {
+        let mut new_yaml = match routing::apply_domain_rules_for_config(&yaml, tx.config(), &force_list) {
             Ok(y) => y,
             Err(e) => return api_err(e),
         };
         if let Ok(with_zapret) = routing::apply_zapret_hybrid_rules_with_force(&new_yaml, &tx.config().zapret, &force_list) {
             new_yaml = with_zapret;
+        }
+        if tx.config().whitelist.enabled
+            && tx.config().whitelist.strategy == config::WhitelistStrategy::StrictXKeen
+        {
+            new_yaml = match routing::apply_domain_rules_for_config(&new_yaml, tx.config(), &force_list) {
+                Ok(y) => y,
+                Err(e) => return api_err(e),
+            };
         }
 
         if let Err(e) = tx.set_yaml(new_yaml) {
@@ -10985,7 +11001,8 @@ pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16
 /// Генерация полного перехвата для обеих стратегий режима белых списков.
 /// Захватывает ВЕСЬ трафик локальных подсетей (все TCP/UDP порты, а не только 80/443,
 /// которые берёт внешняя цепочка xkeen ядра) и направляет его в Mihomo, где правила БС
-/// решают судьбу каждого соединения (РФ-каталог -> DIRECT, остальное -> туннель).
+/// решают судьбу каждого соединения: Standard может отправлять РФ-каталог в DIRECT,
+/// а StrictXKeen по умолчанию направляет клиентский трафик через выбранный туннель.
 /// Исключённые устройства БС обходят перехват целиком (RETURN в начале цепочки).
 pub fn build_whitelist_full_tunnel_commands(
     cfg: &config::AppConfig,

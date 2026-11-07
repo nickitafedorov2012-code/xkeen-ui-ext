@@ -478,4 +478,14 @@ describe('Whitelist Component — Whitelist Tab (Overhaul & Anti-Regression)', (
     expect(modal).toBeTruthy()
     expect(modal?.textContent).toContain('Автоопределение узлов и подписок [БС]')
   })
+
+  it('labels the Russian catalog as tunneled in StrictXKeen', async () => {
+    await act(async () => {
+      root!.render(<Whitelist notify={notifyMock} refresh={refreshMock} />)
+    })
+
+    const catalogCard = container?.querySelector('[data-testid="catalog-card-sberbank.ru"]')
+    expect(catalogCard?.textContent).toContain('через 🛡️ БС')
+    expect(catalogCard?.textContent).not.toContain('DIRECT')
+  })
 })
