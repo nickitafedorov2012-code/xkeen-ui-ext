@@ -1115,8 +1115,9 @@ pub async fn get_servers(
     }
 
     // Провайдерные серверы: GET /proxies их НЕ содержит — мержим /providers/proxies.
-    if let Ok(providers) = get_provider_proxies(http, cfg).await {
-        for (name, p) in &providers {
+    let provider_proxies = get_provider_proxies(http, cfg).await;
+    if let Ok(providers) = &provider_proxies {
+        for (name, p) in providers {
             let typ = p.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
             if SKIP_TYPES.contains(&typ.as_str()) {
                 continue;
@@ -1168,9 +1169,37 @@ pub async fn get_servers(
         }
     }
 
+    // VK-звонок создаётся как Mihomo `direct`-proxy на интерфейсе csq0,
+    // поэтому обычно отфильтровывается как служебный тип. Для пользователя это
+    // полноценный узел: ищем его в обоих ответах Mihomo, включая file-провайдер.
+    // Если ядро ещё не зарегистрировало провайдер, но режим включен — узел всё равно показываем.
+    if cfg.vkturn.enabled {
+        let vk_proxy = proxies.get(crate::vkturn::PROXY_NAME).or_else(|| {
+            provider_proxies.as_ref().ok()?.get(crate::vkturn::PROXY_NAME)
+        });
+        let is_active = active == crate::vkturn::PROXY_NAME || proxy_now == crate::vkturn::PROXY_NAME;
+        if !servers.iter().any(|server| server.id == crate::vkturn::PROXY_NAME) {
+            let ping = vk_proxy.map(last_delay).unwrap_or(0);
+            servers.push(Server {
+                id: crate::vkturn::PROXY_NAME.into(),
+                name: "📞 Сервер звонков ВК".into(),
+                protocol: "VK-CALL".into(),
+                host: "Туннель через звонки ВКонтакте".into(),
+                port: 0,
+                is_active,
+                is_priority: priority_chain.iter().any(|id| id == crate::vkturn::PROXY_NAME),
+                ping_ms: ping,
+                provider: Some(crate::vkturn::PROVIDER_ID.into()),
+                provider_name: Some("Звонки ВКонтакте".into()),
+                is_pool: false,
+                resolved_ip: None,
+            });
+        }
+    }
+
     // Разрешаем DNS для активного узла, если он задан доменным именем
     for s in &mut servers {
-        if s.is_active && s.resolved_ip.is_none() && !s.is_pool {
+        if s.is_active && s.resolved_ip.is_none() && !s.is_pool && s.protocol != "VK-CALL" {
             s.resolved_ip = resolve_host_ip(&s.host).await;
         }
     }
@@ -1622,6 +1651,41 @@ pub async fn ping_server_url_expected_range(
     // Для групп/пулов (Fallback, Fastest, Selector) прямой /proxies/{id}/delay в ядре Mihomo отдаёт 404/ошибку.
     // Разрешаем активный листовой сервер ("now") группы и проверяем его задержку, исключая ложный таймаут:
     if let Ok(proxies) = get_proxies(http, cfg).await {
+        // Узел из file-provider не является ресурсом /proxies/{node}, хотя он может быть
+        // активным в selector-группе. Mihomo измеряет такие узлы только через /group/{group}/delay.
+        let mut selector_groups = find_primary_group(&proxies).into_iter().collect::<Vec<_>>();
+        let known_groups = selector_groups.clone();
+        let extra_groups = proxies.iter().filter_map(|(name, group)| {
+            let typ = group.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
+            let active = group.get("now").and_then(|n| n.as_str()) == Some(server_id);
+            let contains = group.get("all").and_then(|all| all.as_array()).is_some_and(|all| {
+                all.iter().any(|node| node.as_str() == Some(server_id))
+            });
+            (typ == "selector" && active && contains && !known_groups.iter().any(|known| known == name)).then(|| name.clone())
+        }).collect::<Vec<_>>();
+        selector_groups.extend(extra_groups);
+        for group_name in selector_groups {
+            let group_enc = urlencoding_lite(&group_name);
+            let group_url = format!(
+                "{}/group/{group_enc}/delay?timeout={timeout_ms}&url={check_url}{exp_param}",
+                cfg.mihomo_url()
+            );
+            let mut group_req = http.get(&group_url).timeout(std::time::Duration::from_millis(std::cmp::max(timeout_ms + 2000, 5000)));
+            if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
+                group_req = group_req.header(k, v);
+            }
+            if let Ok(resp) = group_req.send().await {
+                if resp.status().is_success() {
+                    if let Ok(delays) = resp.json::<BTreeMap<String, Value>>().await {
+                        if let Some(delay) = delays.get(server_id).and_then(|d| d.as_i64()) {
+                            if delay > 0 {
+                                return delay;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if let Some(group_val) = proxies.get(server_id) {
             let typ = group_val.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
             if typ == "fallback" || typ == "urltest" || typ == "selector" {
@@ -2837,6 +2901,98 @@ mod tests {
 
         let ping = ping_server_l7_split(&client, &cfg, "test_server", 1000).await;
         assert_eq!(ping, 85, "Expected primary response 85ms when secondary failed fast");
+    }
+
+    #[tokio::test]
+    async fn test_vk_call_server_catalog_includes_file_provider_node() {
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cfg = AppConfig::default();
+        cfg.vkturn.enabled = true;
+        let name = crate::vkturn::PROXY_NAME;
+        let proxies = BTreeMap::from([
+            ("PROXY".into(), json!({ "type": "Selector", "now": name })),
+            ("DIRECT".into(), json!({ "type": "Direct" })),
+        ]);
+        let providers = BTreeMap::from([
+            (name.into(), json!({
+                "name": name, "type": "Direct", "_provider": "vkturn",
+                "history": [{ "delay": 73 }]
+            })),
+            ("other-direct".into(), json!({ "type": "Direct" })),
+        ]);
+        set_proxies_cache_for_test(proxies, std::time::Instant::now());
+        set_provider_proxies_cache_for_test(providers, std::time::Instant::now());
+        let result = get_servers(&reqwest::Client::new(), &cfg, &[name.into()]).await;
+        clear_proxies_cache_for_test();
+        let servers = result.unwrap();
+        let vk: Vec<_> = servers.iter().filter(|s| s.id == name).collect();
+        assert_eq!(vk.len(), 1, "VK file-provider node must appear once in the server catalog");
+        assert_eq!(vk[0].protocol, "VK-CALL");
+        assert_eq!(vk[0].provider.as_deref(), Some("vkturn"));
+        assert_eq!(vk[0].ping_ms, 73);
+        assert!(vk[0].is_active);
+        assert!(vk[0].is_priority);
+        assert!(!vk[0].is_pool);
+        assert!(!servers.iter().any(|s| s.id == "DIRECT" || s.id == "other-direct"));
+    }
+
+    #[tokio::test]
+    async fn test_vk_call_server_catalog_deduplicates_and_hides_disabled_tunnel() {
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let name = crate::vkturn::PROXY_NAME;
+        let proxy = json!({ "name": name, "type": "Direct", "history": [] });
+        for enabled in [true, false] {
+            let mut cfg = AppConfig::default();
+            cfg.vkturn.enabled = enabled;
+            set_proxies_cache_for_test(BTreeMap::from([(name.into(), proxy.clone())]), std::time::Instant::now());
+            set_provider_proxies_cache_for_test(BTreeMap::from([(name.into(), proxy.clone())]), std::time::Instant::now());
+            let result = get_servers(&reqwest::Client::new(), &cfg, &[]).await;
+            clear_proxies_cache_for_test();
+            let servers = result.unwrap();
+            assert_eq!(servers.iter().filter(|s| s.id == name).count(), usize::from(enabled));
+            if enabled {
+                assert_eq!(servers[0].ping_ms, -1, "an unmeasured tunnel must not get a fabricated ping");
+                assert!(!servers[0].is_active);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn regression_vk_call_delay_uses_active_selector_for_file_provider() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { return };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let response = if req.contains("/group/PROXY/delay") {
+                        let body = "{\"📞 VK-туннель [БС]\":108}";
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len())
+                    } else {
+                        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_string()
+                    };
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        let node = crate::vkturn::PROXY_NAME;
+        set_proxies_cache_for_test(BTreeMap::from([(
+            "PROXY".into(),
+            json!({ "type": "Selector", "now": node, "all": [node] }),
+        )]), std::time::Instant::now());
+        set_provider_proxies_cache_for_test(BTreeMap::new(), std::time::Instant::now());
+        let mut cfg = AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+        let delay = ping_server_url_expected_range(&reqwest::Client::new(), &cfg, node, 5000, Some("http://example.test/204"), None).await;
+        clear_proxies_cache_for_test();
+        assert_eq!(delay, 108, "active file-provider proxy must be tested through its selector group");
     }
 
     fn sample_proxies() -> BTreeMap<String, Value> {
