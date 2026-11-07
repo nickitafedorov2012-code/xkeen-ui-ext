@@ -352,25 +352,69 @@ pub async fn fetch_vk_user_profile(
     }
 }
 
-/// Аргументы передаются МАССИВОМ, без shell — никакой подстановки команд. Пароля здесь нет:
-/// он уходит в `CSQTT_PASSWORD` (см. client_env).
-pub fn build_client_args(cfg: &VkTurnConfig) -> Vec<String> {
-    let mut args = vec![
-        "-peer".into(),
-        cfg.peer.trim().to_string(),
-    ];
+/// Запуск легального звонка через официальный VK API calls.start (как в focsq / VkAutoCallsManager).
+/// Возвращает (call_id, hash)
+pub async fn start_vk_call(http: &reqwest::Client, token: &str) -> Result<(String, String), String> {
+    let url = "https://api.vk.ru/method/calls.start";
+    let resp = http
+        .post(url)
+        .header("Authorization", format!("Bearer {}", token.trim()))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[("v", "5.199")])
+        .timeout(Duration::from_secs(8))
+        .send()
+        .await
+        .map_err(|e| format!("Сетевая ошибка calls.start: {e}"))?;
 
-    if cfg.vk_token.as_ref().map(|t| !t.trim().is_empty()).unwrap_or(false) {
-        args.push("--vk-hash-mode".into());
-        args.push("auto_js".into());
-        args.push("--vk-auth-mode".into());
-        args.push("auto_js".into());
-    } else {
-        args.push("-vk".into());
-        args.push(call_hashes(cfg).join(","));
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Ошибка парсинга JSON calls.start: {e}"))?;
+
+    if let Some(err) = json.get("error") {
+        let code = err.get("error_code").and_then(|c| c.as_i64()).unwrap_or(0);
+        let msg = err.get("error_msg").and_then(|m| m.as_str()).unwrap_or("Ошибка VK");
+        return Err(format!("VK API calls.start вернул ошибку {code}: {msg}"));
     }
 
-    args.extend(vec![
+    let response = json.get("response").ok_or_else(|| "нет response в calls.start".to_string())?;
+    let call_id = response.get("call_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let join_link = response.get("join_link").and_then(|v| v.as_str()).unwrap_or("");
+    let ok_join_link = response.get("ok_join_link").and_then(|v| v.as_str()).unwrap_or("");
+
+    let link = if !ok_join_link.is_empty() { ok_join_link } else { join_link };
+    let hash = parse_call_link(link)?;
+
+    if call_id.is_empty() || hash.is_empty() {
+        return Err("Пустой call_id или hash в calls.start".into());
+    }
+
+    Ok((call_id, hash))
+}
+
+pub async fn finish_vk_call(http: &reqwest::Client, token: &str, call_id: &str) {
+    if token.trim().is_empty() || call_id.trim().is_empty() {
+        return;
+    }
+    let url = "https://api.vk.ru/method/calls.forceFinish";
+    let _ = http
+        .post(url)
+        .header("Authorization", format!("Bearer {}", token.trim()))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .form(&[("v", "5.199"), ("call_id", call_id)])
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await;
+}
+
+/// Аргументы передаются МАССИВОМ, без shell — никакой подстановки команд. Пароля здесь нет:
+/// он уходит в `CSQTT_PASSWORD` (см. client_env).
+pub fn build_client_args_with_hashes(cfg: &VkTurnConfig, hashes: &[String]) -> Vec<String> {
+    vec![
+        "-peer".into(),
+        cfg.peer.trim().to_string(),
+        "-vk".into(),
+        hashes.join(","),
         "-n".into(),
         effective_workers(cfg).to_string(),
         "--exact-workers".into(),
@@ -380,9 +424,11 @@ pub fn build_client_args(cfg: &VkTurnConfig) -> Vec<String> {
         TUN_UDS_NAME.into(),
         "-captcha-mode".into(),
         "auto".into(),
-    ]);
+    ]
+}
 
-    args
+pub fn build_client_args(cfg: &VkTurnConfig) -> Vec<String> {
+    build_client_args_with_hashes(cfg, &call_hashes(cfg))
 }
 
 /// Переменные окружения клиента.
@@ -1297,7 +1343,8 @@ impl VkTurnManager {
         self.stop_locked(&mut slot).await;
         // Старые исключения снимаются всегда: адрес VPS мог смениться. Надзор поставит актуальные.
         remove_exemptions().await;
-        if !cfg.enabled || call_hashes(&cfg).is_empty() || cfg.password.is_empty() || cfg.peer.is_empty() {
+        let has_token = cfg.vk_token.as_ref().map(|t| !t.trim().is_empty()).unwrap_or(false);
+        if !cfg.enabled || (!has_token && call_hashes(&cfg).is_empty()) || cfg.password.is_empty() || cfg.peer.is_empty() {
             self.rt.write().await.phase = VkTurnPhase::Disabled;
             return;
         }
@@ -1361,6 +1408,7 @@ impl VkTurnManager {
             }
         };
         let tun = Arc::new(tun);
+        let mut auto_call_id: Option<String> = None;
 
         loop {
             if *stop_rx.borrow() {
@@ -1370,8 +1418,39 @@ impl VkTurnManager {
             let known_turn = self.rt.read().await.turn_ips.clone();
             apply_exemptions(&cfg.peer, &known_turn).await;
 
+            // Завершаем прошлый авто-звонок, если был
+            if let (Some(ref tok), Some(ref cid)) = (&cfg.vk_token, &auto_call_id.take()) {
+                finish_vk_call(&state.http, tok, cid).await;
+            }
+
+            // Получаем хеши звонков: автоматически через calls.start (как в focsq) или из конфига
+            let hashes = if let Some(ref tok) = cfg.vk_token {
+                if !tok.trim().is_empty() {
+                    match start_vk_call(&state.http, tok).await {
+                        Ok((cid, h)) => {
+                            crate::log_i!("[VK-туннель] Авто-звонок создан через API calls.start: {cid} (хеш: {h})");
+                            auto_call_id = Some(cid);
+                            vec![h]
+                        }
+                        Err(e) => {
+                            crate::log_w!("[VK-туннель] Ошибка создания авто-звонка через API: {e}");
+                            self.set_error(VkTurnPhase::AuthFailed, e).await;
+                            if !sleep_or_stop(&mut stop_rx, backoff).await {
+                                break;
+                            }
+                            backoff = (backoff * 2).min(Duration::from_secs(120));
+                            continue;
+                        }
+                    }
+                } else {
+                    call_hashes(&cfg)
+                }
+            } else {
+                call_hashes(&cfg)
+            };
+
             let mut cmd = tokio::process::Command::new(&self.core_path);
-            cmd.args(build_client_args(&cfg))
+            cmd.args(build_client_args_with_hashes(&cfg, &hashes))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -1410,7 +1489,7 @@ impl VkTurnManager {
             crate::log_i!(
                 "[VK-туннель] Клиент csqtt запущен (pid {:?}, ссылок {}, потоков {})",
                 pid,
-                call_hashes(&cfg).len(),
+                hashes.len(),
                 effective_workers(&cfg)
             );
 
@@ -1439,18 +1518,6 @@ impl VkTurnManager {
             let mut stdin = child.stdin.take();
             let mut fd_sending = false;
 
-            // Если настроена авторизация через VK-токен, передаем учетные данные в stdin
-            if let Some(ref tok) = cfg.vk_token {
-                if !tok.trim().is_empty() {
-                    let user_id = cfg.vk_user_id.unwrap_or(0);
-                    let bootstrap_line = format_vk_bootstrap_line(tok, user_id);
-                    if let Some(si) = stdin.as_mut() {
-                        let _ = si.write_all(bootstrap_line.as_bytes()).await;
-                        let _ = si.flush().await;
-                    }
-                }
-            }
-
             // ждём: выход процесса / команду стоп / «висим без соединений» дольше допустимого
             let started = Instant::now();
             let mut tick = tokio::time::interval(Duration::from_secs(10));
@@ -1463,6 +1530,10 @@ impl VkTurnManager {
                 tokio::select! {
                     st = child.wait() => break format!("клиент завершился: {:?}", st.ok()),
                     _ = stop_rx.changed() => {
+                        // Завершаем звонок в VK API
+                        if let (Some(ref tok), Some(ref cid)) = (&cfg.vk_token, &auto_call_id) {
+                            finish_vk_call(&state.http, tok, cid).await;
+                        }
                         // Мягкая остановка: клиент закрывает сессии, сервер сразу освобождает слоты.
                         if let Some(mut si) = stdin.take() {
                             let _ = si.write_all(b"STOP\n").await;
@@ -1618,11 +1689,15 @@ async fn sleep_or_stop(stop_rx: &mut watch::Receiver<bool>, d: Duration) -> bool
 }
 
 async fn kill_stale_from_pidfile() {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = tokio::process::Command::new("killall").arg("csqtt-client").status().await;
+    }
     let Ok(s) = tokio::fs::read_to_string(PID_FILE).await else { return };
     let Ok(pid) = s.trim().parse::<u32>() else { return };
     if let Ok(cmd) = tokio::fs::read(format!("/proc/{pid}/cmdline")).await {
         if String::from_utf8_lossy(&cmd).contains("csqtt-client") {
-            let _ = tokio::process::Command::new("kill").arg(pid.to_string()).status().await;
+            let _ = tokio::process::Command::new("kill").arg("-9").arg(pid.to_string()).status().await;
         }
     }
     let _ = tokio::fs::remove_file(PID_FILE).await;
@@ -1930,14 +2005,12 @@ mod tests {
         assert_eq!(mask_vk_token("other_token_secret"), "[REDACTED]");
         assert_eq!(mask_vk_token(""), "");
 
-        // Проверка аргументов csqtt в режиме auto_js при наличии vk_token
-        let mut oauth_cfg = cfg_with(&[]);
-        oauth_cfg.vk_token = Some("vk1.a.TestToken".into());
-        oauth_cfg.vk_user_id = Some(12345);
-        let oauth_args = build_client_args(&oauth_cfg);
-        assert!(oauth_args.contains(&"--vk-hash-mode".to_string()));
-        assert!(oauth_args.contains(&"--vk-auth-mode".to_string()));
-        assert!(!oauth_args.contains(&"-vk".to_string()));
+        // Проверка формирования аргументов csqtt с хешами auto_api (как в focsq)
+        let oauth_cfg = cfg_with(&[]);
+        let oauth_args = build_client_args_with_hashes(&oauth_cfg, &["autoGeneratedHash123".into()]);
+        assert!(oauth_args.contains(&"-vk".to_string()));
+        assert!(oauth_args.contains(&"autoGeneratedHash123".to_string()));
+        assert!(oauth_args.contains(&"--exact-workers".to_string()));
     }
 
     #[test]
