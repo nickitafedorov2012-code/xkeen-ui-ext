@@ -781,6 +781,10 @@ ip link set dev {TUN_IFACE} mtu {TUN_MTU} up
 ip route replace default dev {TUN_IFACE} table {ROUTE_TABLE}
 ip rule del pref {ROUTE_TABLE} 2>/dev/null
 ip rule add dev {TUN_IFACE} table {ROUTE_TABLE} pref {ROUTE_TABLE}
+ip rule del pref 40 2>/dev/null
+ip rule add from {ip} table {ROUTE_TABLE} pref 40 2>/dev/null
+ip rule del pref 45 2>/dev/null
+ip rule add fwmark {ROUTE_TABLE} table {ROUTE_TABLE} pref 45 2>/dev/null
 echo 2 > /proc/sys/net/ipv4/conf/{TUN_IFACE}/rp_filter 2>/dev/null
 true"
     )
@@ -790,6 +794,8 @@ true"
 pub fn tun_teardown_script() -> String {
     format!(
         "ip rule del pref {ROUTE_TABLE} 2>/dev/null
+ip rule del pref 40 2>/dev/null
+ip rule del pref 45 2>/dev/null
 ip route flush table {ROUTE_TABLE} 2>/dev/null
 true"
     )
@@ -1809,8 +1815,11 @@ mod tests {
         assert!(s.contains("ip route replace default dev csq0 table 222"));
         assert!(s.contains("ip rule add dev csq0 table 222 pref 222"));
         assert!(s.contains("ip rule del pref 222"), "правило не дублируется при повторной настройке");
+        assert!(s.contains("ip rule add from 10.66.67.3 table 222 pref 40"));
+        assert!(s.contains("ip rule add fwmark 222 table 222 pref 45"));
         let t = tun_teardown_script();
         assert!(t.contains("ip rule del pref 222") && t.contains("ip route flush table 222"));
+        assert!(t.contains("ip rule del pref 40") && t.contains("ip rule del pref 45"));
     }
 
     #[test]
