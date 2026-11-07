@@ -49,10 +49,10 @@ pub const DEFAULT_SERVER_PORT: u16 = 46000;
 pub const TUN_IFACE: &str = "csq0";
 /// Имя абстрактного unix-сокета, по которому клиент ждёт дескриптор TUN.
 pub const TUN_UDS_NAME: &str = "xkeen_route_csqtt_tun";
-/// MTU как у Android-клиента csqtt (CsqttConstants.Vpn.DEFAULT_MTU).
-pub const TUN_MTU: u16 = 1500;
-/// Отдельная таблица маршрутизации для сокетов, привязанных к csq0 (правило `oif csq0`).
-pub const ROUTE_TABLE: u32 = 7300;
+/// MTU для TUN-интерфейса поверх WebRTC/TURN (1380 исключает фрагментацию и зависание handshake).
+pub const TUN_MTU: u16 = 1380;
+/// Отдельная таблица маршрутизации для сокетов, привязанных к csq0 (в пределах 1..252 для Busybox).
+pub const ROUTE_TABLE: u32 = 222;
 /// Подсеть TURN-серверов ВК-звонков. Трафик клиента туда идёт строго напрямую.
 /// Конкретные адреса TURN, которые ВК выдал клиенту, панель дополнительно берёт из его лога.
 pub const VK_TURN_CIDRS: &[&str] = &["155.212.192.0/20"];
@@ -69,6 +69,12 @@ pub const MAX_LINKS: usize = 6;
 /// Сколько адресов TURN запоминаем для исключений (защита от разрастания правил).
 const MAX_TURN_IPS: usize = 32;
 const EVENT_PREFIX: &str = "__CSQTT_EVENT__|";
+/// Диагностика этапов каждого потока клиента csqtt (stream_diagnostics.rs).
+const STREAM_PREFIX: &str = "__CSQTT_STREAM__|";
+/// Сколько тайм-аутов GETCONF подряд необходимо для сообщения о недоступности сервера.
+const GETCONF_SILENT_THRESHOLD: u32 = 3;
+const SERVER_SILENT_ON_PASSWORD: &str =
+    "Сервер csqtt не ответил на запрос конфигурации: проверьте соединение и пароль подключения";
 const CAPTCHA_SOLVE_PREFIX: &str = "CAPTCHA_SOLVE|";
 /// Ответ клиенту на запрос WebView-капчи: на роутере WebView нет.
 pub const CAPTCHA_NO_WEBVIEW_REPLY: &str = "CAPTCHA_RESULT|error:webview unavailable on router\n";
@@ -262,6 +268,9 @@ pub struct VkTurnRuntime {
     pub started_at: Option<Instant>,
     #[serde(skip)]
     pub zero_streams_since: Option<Instant>,
+    /// Подряд оставшиеся без ответа запросы GETCONF при живом DTLS (признак неверного пароля).
+    #[serde(skip)]
+    pub getconf_silent: u32,
     pub log_tail: VecDeque<String>,
 }
 
@@ -281,6 +290,7 @@ impl Default for VkTurnRuntime {
             turn_ips: BTreeSet::new(),
             started_at: None,
             zero_streams_since: None,
+            getconf_silent: 0,
             log_tail: VecDeque::with_capacity(LOG_TAIL),
         }
     }
@@ -307,7 +317,7 @@ pub enum LineEffect {
 fn is_sticky(phase: VkTurnPhase) -> bool {
     matches!(
         phase,
-        VkTurnPhase::CaptchaRequired | VkTurnPhase::LinkInvalid | VkTurnPhase::AuthFailed
+        VkTurnPhase::CaptchaRequired | VkTurnPhase::LinkInvalid | VkTurnPhase::AuthFailed | VkTurnPhase::ServerUnreachable
     )
 }
 
@@ -318,7 +328,40 @@ fn push_log(rt: &mut VkTurnRuntime, line: String) {
     rt.log_tail.push_back(line);
 }
 
+/// Сервер промолчал на GETCONF: тайм-аут не доказывает отказ в авторизации.
+fn note_getconf_silent(rt: &mut VkTurnRuntime) {
+    rt.getconf_silent = rt.getconf_silent.saturating_add(1);
+    if rt.getconf_silent >= GETCONF_SILENT_THRESHOLD
+        && rt.connected_streams == 0
+        && !matches!(rt.phase, VkTurnPhase::CaptchaRequired | VkTurnPhase::LinkInvalid | VkTurnPhase::AuthFailed)
+    {
+        rt.phase = VkTurnPhase::ServerUnreachable;
+        rt.last_error = Some(SERVER_SILENT_ON_PASSWORD.into());
+    }
+}
+
+/// `__CSQTT_STREAM__|{json}`: успешные этапы в журнал не пишем (это сотни строк JSON в минуту),
+/// ошибки — коротко и по-человечески.
+fn apply_stream_line(rt: &mut VkTurnRuntime, payload: &str) {
+    let json: serde_json::Value = serde_json::from_str(payload).unwrap_or(serde_json::Value::Null);
+    let stage = json.get("stage").and_then(|v| v.as_str()).unwrap_or("");
+    let status = json.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    let reason = json.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+    if stage == "getconf" {
+        match status {
+            "ok" => rt.getconf_silent = 0,
+            "error" if reason.to_lowercase().contains("timeout") => note_getconf_silent(rt),
+            _ => {}
+        }
+    }
+    if status == "error" {
+        let worker = json.get("worker").and_then(|v| v.as_i64()).unwrap_or(0);
+        push_log(rt, redact_line(&format!("[ПОТОК #{worker}] {stage}: {reason}")));
+    }
+}
+
 fn set_connected(rt: &mut VkTurnRuntime) {
+    rt.getconf_silent = 0;
     rt.phase = VkTurnPhase::Connected;
     rt.zero_streams_since = None;
     rt.last_error = None;
@@ -351,6 +394,10 @@ pub fn apply_log_line(rt: &mut VkTurnRuntime, line: &str, now: Instant) -> LineE
         let (kind, payload) = rest.split_once('|').unwrap_or((rest, ""));
         let json: serde_json::Value = serde_json::from_str(payload).unwrap_or(serde_json::Value::Null);
         return apply_event(rt, kind, &json, now);
+    }
+    if let Some(payload) = t.strip_prefix(STREAM_PREFIX) {
+        apply_stream_line(rt, payload);
+        return LineEffect::None;
     }
 
     if t.starts_with(CAPTCHA_SOLVE_PREFIX) {
@@ -543,7 +590,7 @@ fn is_ipv4(s: &str) -> bool {
 /// Содержимое file-провайдера `vkturn`: трафик узла уходит в TUN-интерфейс клиента csqtt.
 /// Значений пользователя в нём нет — YAML-инъекция невозможна.
 pub fn render_provider_yaml() -> String {
-    format!("proxies:\n  - name: \"{PROXY_NAME}\"\n    type: direct\n    interface-name: {TUN_IFACE}\n    udp: true\n")
+    format!("proxies:\n  - name: \"{PROXY_NAME}\"\n    type: direct\n    interface-name: {TUN_IFACE}\n    routing-mark: 222\n    udp: true\n")
 }
 
 /// Правила DIRECT в начало `rules:`, чтобы трафик к TURN и к VPS никогда не ушёл в туннель или петлю.
@@ -639,11 +686,11 @@ pub fn iptables_apply_script(dsts: &[String]) -> String {
     let list = dsts.join(" ");
     format!(
         r#"for tbl in mangle nat; do
-  for ch in xkeen_mask zapret; do
-    iptables -t "$tbl" -nL "$ch" >/dev/null 2>&1 || continue
+  for ch in xkeen XKEEN_BS zapret; do
+    iptables -w 2 -t "$tbl" -nL "$ch" >/dev/null 2>&1 || continue
     for dst in {list}; do
-      iptables -t "$tbl" -C "$ch" -d "$dst" -m comment --comment {IPT_COMMENT} -j RETURN 2>/dev/null \
-        || iptables -t "$tbl" -I "$ch" 1 -d "$dst" -m comment --comment {IPT_COMMENT} -j RETURN 2>/dev/null || true
+      iptables -w 2 -t "$tbl" -C "$ch" -d "$dst" -m comment --comment {IPT_COMMENT} -j RETURN 2>/dev/null \
+        || iptables -w 2 -t "$tbl" -I "$ch" 1 -d "$dst" -m comment --comment {IPT_COMMENT} -j RETURN 2>/dev/null || true
     done
   done
 done"#
@@ -654,9 +701,9 @@ done"#
 pub fn iptables_remove_script() -> String {
     format!(
         r#"for tbl in mangle nat; do
-  for ch in xkeen_mask zapret; do
-    iptables -t "$tbl" -S "$ch" 2>/dev/null | grep -- "--comment {IPT_COMMENT}" | sed 's/^-A /-D /' | while read -r rule; do
-      eval iptables -t "$tbl" $rule 2>/dev/null || true
+  for ch in xkeen XKEEN_BS zapret; do
+    iptables -w 2 -t "$tbl" -S "$ch" 2>/dev/null | grep -- "--comment {IPT_COMMENT}" | sed 's/^-A /-D /' | while read -r rule; do
+      eval iptables -w 2 -t "$tbl" $rule 2>/dev/null || true
     done
   done
 done"#
@@ -706,6 +753,7 @@ pub async fn remove_exemptions() {
 
 /// Адрес туннеля на csq0 и маршрутизация сокетов, привязанных к интерфейсу (Mihomo `interface-name`).
 /// В скрипт попадают только константы и разобранный Ipv4Addr.
+/// Совместимо с Busybox на KeeneticOS: таблица < 255 и селектор dev вместо oif.
 pub fn tun_configure_script(ip: Ipv4Addr) -> String {
     format!(
         "ip addr flush dev {TUN_IFACE} 2>/dev/null
@@ -713,7 +761,7 @@ ip addr add {ip}/32 dev {TUN_IFACE}
 ip link set dev {TUN_IFACE} mtu {TUN_MTU} up
 ip route replace default dev {TUN_IFACE} table {ROUTE_TABLE}
 ip rule del pref {ROUTE_TABLE} 2>/dev/null
-ip rule add oif {TUN_IFACE} lookup {ROUTE_TABLE} pref {ROUTE_TABLE}
+ip rule add dev {TUN_IFACE} table {ROUTE_TABLE} pref {ROUTE_TABLE}
 echo 2 > /proc/sys/net/ipv4/conf/{TUN_IFACE}/rp_filter 2>/dev/null
 true"
     )
@@ -923,6 +971,9 @@ struct Supervisor {
 
 pub struct VkTurnManager {
     pub rt: RwLock<VkTurnRuntime>,
+    /// Сериализует изменение VK-настроек целиком — от чтения актуального конфига до перезапуска.
+    /// Без этого два сохранения могли применить конфиг в одном порядке, а запустить процессы в другом.
+    pub config_update_lock: Mutex<()>,
     /// Сериализует restart/stop целиком: два одновременных перезапуска не могут оставить
     /// «осиротевший» надзор и второй клиент.
     op_lock: Mutex<Option<Supervisor>>,
@@ -1024,6 +1075,7 @@ impl VkTurnManager {
     pub fn with_core_path(path: impl Into<std::path::PathBuf>) -> Arc<Self> {
         Arc::new(Self {
             rt: RwLock::new(VkTurnRuntime::default()),
+            config_update_lock: Mutex::new(()),
             op_lock: Mutex::new(None),
             core_path: path.into(),
             active_supervisors: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -1174,6 +1226,7 @@ impl VkTurnManager {
                 rt.tun_attached = false;
                 rt.started_at = Some(Instant::now());
                 rt.zero_streams_since = Some(Instant::now());
+                rt.getconf_silent = 0;
             }
             crate::log_i!(
                 "[VK-туннель] Клиент csqtt запущен (pid {:?}, ссылок {}, потоков {})",
@@ -1705,12 +1758,12 @@ mod tests {
     fn tun_scripts_only_use_constants_and_parsed_ip() {
         let s = tun_configure_script("10.66.67.3".parse().unwrap());
         assert!(s.contains("ip addr add 10.66.67.3/32 dev csq0"));
-        assert!(s.contains("ip link set dev csq0 mtu 1500 up"));
-        assert!(s.contains("ip route replace default dev csq0 table 7300"));
-        assert!(s.contains("ip rule add oif csq0 lookup 7300 pref 7300"));
-        assert!(s.contains("ip rule del pref 7300"), "правило не дублируется при повторной настройке");
+        assert!(s.contains("ip link set dev csq0 mtu 1380 up"));
+        assert!(s.contains("ip route replace default dev csq0 table 222"));
+        assert!(s.contains("ip rule add dev csq0 table 222 pref 222"));
+        assert!(s.contains("ip rule del pref 222"), "правило не дублируется при повторной настройке");
         let t = tun_teardown_script();
-        assert!(t.contains("ip rule del pref 7300") && t.contains("ip route flush table 7300"));
+        assert!(t.contains("ip rule del pref 222") && t.contains("ip route flush table 222"));
     }
 
     #[test]
@@ -1741,6 +1794,72 @@ mod tests {
         apply_log_line(&mut rt, EV_READY, now);
         assert_eq!(rt.phase, VkTurnPhase::Connected);
         assert!(rt.last_error.is_none());
+    }
+
+    // Строки клиента csqtt с роутера: DTLS с сервером проходит, а GETCONF с неверным паролем остаётся без ответа.
+    const S_DTLS_OK: &str = r#"__CSQTT_STREAM__|{"attempt":177,"elapsed_ms":164,"reason":"DTLS-SRTP established","sequence":1939,"stage":"dtls","status":"ok","time_ms":1793949028092,"transport":"UDP","turn":"95.163.34.139:19302","worker":16}"#;
+    const S_GETCONF_START: &str = r#"__CSQTT_STREAM__|{"attempt":177,"elapsed_ms":0,"reason":"","sequence":1940,"stage":"getconf","status":"start","time_ms":1793949028092,"transport":"UDP","turn":"95.163.34.139:19302","worker":16}"#;
+    const S_GETCONF_TIMEOUT: &str = r#"__CSQTT_STREAM__|{"attempt":160,"elapsed_ms":5804,"reason":"GETCONF чтение ответа конфига: timeout после 4 попыток","sequence":1950,"stage":"getconf","status":"error","time_ms":1793949030728,"transport":"UDP","turn":"95.163.34.176:19302","worker":5}"#;
+    const S_GETCONF_OK: &str = r#"__CSQTT_STREAM__|{"attempt":1,"elapsed_ms":90,"reason":"","sequence":20,"stage":"getconf","status":"ok","time_ms":1793949030728,"transport":"UDP","turn":"95.163.34.176:19302","worker":2}"#;
+
+    #[test]
+    fn regression_vk_getconf_timeouts_do_not_prove_wrong_password() {
+        let now = Instant::now();
+        let mut rt = VkTurnRuntime::default();
+        rt.phase = VkTurnPhase::Authorizing;
+        for _ in 0..3 {
+            apply_log_line(&mut rt, S_GETCONF_TIMEOUT, now);
+        }
+        assert_eq!(rt.phase, VkTurnPhase::ServerUnreachable);
+        assert!(rt.last_error.as_deref().unwrap().contains("пароль"));
+        apply_log_line(&mut rt, "[DTLS] retry", now);
+        assert_eq!(rt.phase, VkTurnPhase::ServerUnreachable);
+        apply_log_line(&mut rt, EV_READY, now);
+        assert_eq!(rt.phase, VkTurnPhase::Connected);
+    }
+
+    // Регрессия: при неверном пароле сервер csqtt молчит на GETCONF, а панель ждала строку
+    // WRAP_AUTH_TIMEOUT прежнего ядра — статус навсегда оставался «Подключаюсь…» без поля для пароля.
+    #[test]
+    fn silent_getconf_after_dtls_reports_unreachable_server() {
+        let now = Instant::now();
+        let mut rt = VkTurnRuntime::default();
+        rt.phase = VkTurnPhase::Authorizing;
+        apply_log_line(&mut rt, S_DTLS_OK, now);
+        apply_log_line(&mut rt, S_GETCONF_START, now);
+        apply_log_line(&mut rt, S_GETCONF_TIMEOUT, now);
+        apply_log_line(&mut rt, S_GETCONF_TIMEOUT, now);
+        assert_eq!(rt.phase, VkTurnPhase::Authorizing, "одна-две потери пакетов — ещё не повод");
+        apply_log_line(&mut rt, S_GETCONF_TIMEOUT, now);
+        assert_eq!(rt.phase, VkTurnPhase::ServerUnreachable);
+        assert!(rt.last_error.as_deref().unwrap().contains("пароль"));
+        assert!(is_sticky(rt.phase), "фаза держится и показывает поле для нового пароля");
+
+        // Журнал: успешные этапы не засоряют его JSON-ом, ошибки — коротко
+        assert!(rt.log_tail.iter().all(|l| !l.contains("__CSQTT_STREAM__")));
+        assert!(rt.log_tail.iter().any(|l| l == "[ПОТОК #5] getconf: GETCONF чтение ответа конфига: timeout после 4 попыток"));
+    }
+
+    #[test]
+    fn getconf_answer_resets_silence_counter() {
+        let now = Instant::now();
+        let mut rt = VkTurnRuntime::default();
+        rt.phase = VkTurnPhase::Authorizing;
+        apply_log_line(&mut rt, S_GETCONF_TIMEOUT, now);
+        apply_log_line(&mut rt, S_GETCONF_TIMEOUT, now);
+        apply_log_line(&mut rt, S_GETCONF_OK, now);
+        apply_log_line(&mut rt, S_GETCONF_TIMEOUT, now);
+        apply_log_line(&mut rt, S_GETCONF_TIMEOUT, now);
+        assert_eq!(rt.phase, VkTurnPhase::Authorizing, "сервер ответил — пароль верный, редкие потери не считаются");
+
+        // При живых потоках потерянный GETCONF не объявляет пароль неверным
+        let mut rt2 = VkTurnRuntime::default();
+        rt2.connected_streams = 3;
+        rt2.phase = VkTurnPhase::Connected;
+        for _ in 0..5 {
+            apply_log_line(&mut rt2, S_GETCONF_TIMEOUT, now);
+        }
+        assert_eq!(rt2.phase, VkTurnPhase::Connected);
     }
 
     #[test]
@@ -1837,6 +1956,7 @@ mod tests {
         assert!(yaml.contains("[БС]"));
         assert!(yaml.contains("type: direct"));
         assert!(yaml.contains("interface-name: csq0"), "трафик узла уходит в TUN клиента csqtt");
+        assert!(yaml.contains("routing-mark: 222"));
         assert!(yaml.contains("udp: true"));
     }
 
@@ -1905,6 +2025,30 @@ mod tests {
     }
 
     // ---------- Анти-регрессионные тесты ----------
+
+    #[tokio::test]
+    async fn regression_vk_switch_rejects_unready_tunnel_before_contacting_mihomo() {
+        let root = std::env::temp_dir();
+        let mgr = VkTurnManager::with_core_path(root.join("nonexistent-csqtt"));
+        let state = test_state(&root, mgr, 1);
+        let error = crate::api::execute_server_switch_workflow(&state, PROXY_NAME).await.unwrap_err();
+        assert!(error.contains("Туннель ещё не подключился"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn regression_vk_switch_rejects_tun_without_connected_streams() {
+        let root = std::env::temp_dir();
+        let mgr = VkTurnManager::with_core_path(root.join("nonexistent-csqtt"));
+        {
+            let mut rt = mgr.rt.write().await;
+            rt.tunnel_ip = Some("10.0.0.2".parse().unwrap());
+            rt.tun_attached = true;
+            rt.connected_streams = 0;
+        }
+        let state = test_state(&root, mgr, 1);
+        let error = crate::api::execute_server_switch_workflow(&state, PROXY_NAME).await.unwrap_err();
+        assert!(error.contains("Туннель ещё не подключился"), "unexpected error: {error}");
+    }
 
     fn test_state(root: &std::path::Path, mgr: Arc<VkTurnManager>, mihomo_port: u16) -> crate::AppState {
         let yaml_path = root.join("config.yaml");
@@ -2001,6 +2145,7 @@ mod tests {
         assert!(yaml.contains("  vkturn:"), "провайдер VK-туннеля добавлен: {yaml}");
         let prov = std::fs::read_to_string(root.join("providers").join("vkturn.yaml")).unwrap();
         assert!(prov.contains("interface-name: csq0"));
+        assert!(prov.contains("routing-mark: 222"));
         assert!(state.config.read().await.whitelist_providers.iter().any(|p| p == PROVIDER_ID));
 
         // Повторное сохранение не теряет пароль
@@ -2137,12 +2282,15 @@ mod tests {
         assert_eq!(exempt_destinations(None, &BTreeSet::new()), vec!["155.212.192.0/20"]);
 
         let apply = iptables_apply_script(&dsts);
-        assert!(apply.contains("for ch in xkeen_mask zapret"));
+        assert!(apply.contains("for ch in xkeen XKEEN_BS zapret"));
+        assert!(apply.contains("-w 2"));
         assert!(apply.contains("-C \"$ch\""), "проверка -C делает правило идемпотентным");
         assert!(apply.contains("-I \"$ch\" 1"), "RETURN обязан стоять первым в цепочке");
         assert!(apply.contains(&format!("--comment {IPT_COMMENT} -j RETURN")));
         assert!(apply.contains("|| continue"), "отсутствующая цепочка пропускается");
         let remove = iptables_remove_script();
+        assert!(remove.contains("for ch in xkeen XKEEN_BS zapret"));
+        assert!(remove.contains("-w 2"));
         assert!(remove.contains(&format!("--comment {IPT_COMMENT}")));
         assert!(remove.contains("sed 's/^-A /-D /'"));
     }
