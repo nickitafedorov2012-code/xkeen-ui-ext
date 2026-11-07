@@ -60,9 +60,32 @@ pub const TUN_UDS_NAME: &str = "xkeen_route_csqtt_tun";
 pub const TUN_MTU: u16 = 1380;
 /// Отдельная таблица маршрутизации для сокетов, привязанных к csq0 (в пределах 1..252 для Busybox).
 pub const ROUTE_TABLE: u32 = 222;
-/// Подсеть TURN-серверов ВК-звонков. Трафик клиента туда идёт строго напрямую.
+/// Подсети инфраструктуры ВК (AS47541) и TURN-серверов звонков. Трафик клиента туда идёт строго напрямую.
 /// Конкретные адреса TURN, которые ВК выдал клиенту, панель дополнительно берёт из его лога.
-pub const VK_TURN_CIDRS: &[&str] = &["155.212.192.0/20"];
+pub const VK_NETWORK_CIDRS: &[&str] = &[
+    "155.212.192.0/20",
+    "87.240.128.0/18",
+    "93.186.224.0/20",
+    "95.142.192.0/20",
+    "95.213.0.0/17",
+    "185.32.248.0/22",
+];
+pub const VK_TURN_CIDRS: &[&str] = VK_NETWORK_CIDRS;
+
+/// Хосты VK API из focsq (schedule_vk_endpoint_excludes), которые ядро посещает напрямую
+pub const VK_API_HOSTS: &[&str] = &[
+    "api.vk.me",
+    "api.vk.com",
+    "api.vk.ru",
+    "login.vk.ru",
+    "login.vk.com",
+    "id.vk.ru",
+    "id.vk.com",
+    "oauth.vk.ru",
+    "oauth.vk.com",
+    "vk.com",
+    "vk.ru",
+];
 pub const RULES_BEGIN: &str = "# BEGIN xkeen-route vkturn";
 pub const RULES_END: &str = "# END xkeen-route vkturn";
 const LOG_TAIL: usize = 300;
@@ -352,6 +375,16 @@ pub async fn fetch_vk_user_profile(
     }
 }
 
+/// Расчет необходимого числа звонков по числу воркеров (по архитектуре focsq: 1 звонок на 27 потоков, от 1 до MAX_LINKS).
+pub fn call_count_for_workers(workers: u32) -> usize {
+    for n in 1..=MAX_LINKS {
+        if workers <= (n as u32) * 27 {
+            return n;
+        }
+    }
+    MAX_LINKS
+}
+
 /// Запуск легального звонка через официальный VK API calls.start (как в focsq / VkAutoCallsManager).
 /// Возвращает (call_id, hash)
 pub async fn start_vk_call(http: &reqwest::Client, token: &str) -> Result<(String, String), String> {
@@ -382,8 +415,13 @@ pub async fn start_vk_call(http: &reqwest::Client, token: &str) -> Result<(Strin
     let join_link = response.get("join_link").and_then(|v| v.as_str()).unwrap_or("");
     let ok_join_link = response.get("ok_join_link").and_then(|v| v.as_str()).unwrap_or("");
 
-    let link = if !ok_join_link.is_empty() { ok_join_link } else { join_link };
-    let hash = parse_call_link(link)?;
+    let hash = if !ok_join_link.trim().is_empty() && !ok_join_link.contains('/') {
+        ok_join_link.trim().to_string()
+    } else if !join_link.trim().is_empty() {
+        parse_call_link(join_link)?
+    } else {
+        parse_call_link(ok_join_link)?
+    };
 
     if call_id.is_empty() || hash.is_empty() {
         return Err("Пустой call_id или hash в calls.start".into());
@@ -812,11 +850,14 @@ pub fn render_provider_yaml() -> String {
     format!("proxies:\n  - name: \"{PROXY_NAME}\"\n    type: direct\n    interface-name: {TUN_IFACE}\n    routing-mark: 222\n    udp: true\n")
 }
 
-/// Правила DIRECT в начало `rules:`, чтобы трафик к TURN и к VPS никогда не ушёл в туннель или петлю.
+/// Правила DIRECT в начало `rules:`, чтобы трафик к TURN, VK API и к VPS никогда не ушёл в туннель или петлю.
 pub fn rules_block(cfg: &VkTurnConfig) -> String {
     let mut lines = vec![format!("  {RULES_BEGIN}")];
-    for c in VK_TURN_CIDRS {
+    for c in VK_NETWORK_CIDRS {
         lines.push(format!("  - IP-CIDR,{c},DIRECT,no-resolve"));
+    }
+    for host in VK_API_HOSTS {
+        lines.push(format!("  - DOMAIN,{host},DIRECT"));
     }
     if let Some((host, _)) = cfg.peer.trim().rsplit_once(':') {
         let clean_host = host.trim_matches(['[', ']']);
@@ -1408,7 +1449,7 @@ impl VkTurnManager {
             }
         };
         let tun = Arc::new(tun);
-        let mut auto_call_id: Option<String> = None;
+        let mut auto_call_ids: Vec<String> = Vec::new();
 
         loop {
             if *stop_rx.borrow() {
@@ -1418,30 +1459,50 @@ impl VkTurnManager {
             let known_turn = self.rt.read().await.turn_ips.clone();
             apply_exemptions(&cfg.peer, &known_turn).await;
 
-            // Завершаем прошлый авто-звонок, если был
-            if let (Some(ref tok), Some(ref cid)) = (&cfg.vk_token, &auto_call_id.take()) {
-                finish_vk_call(&state.http, tok, cid).await;
+            // Завершаем прошлые авто-звонки, если были
+            if let Some(ref tok) = cfg.vk_token {
+                for cid in auto_call_ids.drain(..) {
+                    finish_vk_call(&state.http, tok, &cid).await;
+                }
             }
 
             // Получаем хеши звонков: автоматически через calls.start (как в focsq) или из конфига
             let hashes = if let Some(ref tok) = cfg.vk_token {
                 if !tok.trim().is_empty() {
-                    match start_vk_call(&state.http, tok).await {
-                        Ok((cid, h)) => {
-                            crate::log_i!("[VK-туннель] Авто-звонок создан через API calls.start: {cid} (хеш: {h})");
-                            auto_call_id = Some(cid);
-                            vec![h]
+                    let needed = call_count_for_workers(effective_workers(&cfg));
+                    let mut created_ids = Vec::new();
+                    let mut created_hashes = Vec::new();
+                    let mut last_err = None;
+
+                    for i in 0..needed {
+                        if i > 0 {
+                            tokio::time::sleep(Duration::from_millis(150)).await;
                         }
-                        Err(e) => {
-                            crate::log_w!("[VK-туннель] Ошибка создания авто-звонка через API: {e}");
-                            self.set_error(VkTurnPhase::AuthFailed, e).await;
-                            if !sleep_or_stop(&mut stop_rx, backoff).await {
+                        match start_vk_call(&state.http, tok).await {
+                            Ok((cid, h)) => {
+                                crate::log_i!("[VK-туннель] Авто-звонок {cid} (хеш: {h}) успешно создан через API calls.start");
+                                created_ids.push(cid);
+                                created_hashes.push(h);
+                            }
+                            Err(e) => {
+                                last_err = Some(e);
                                 break;
                             }
-                            backoff = (backoff * 2).min(Duration::from_secs(120));
-                            continue;
                         }
                     }
+
+                    if created_hashes.is_empty() {
+                        let err_msg = last_err.unwrap_or_else(|| "Не удалось создать звонок".into());
+                        crate::log_w!("[VK-туннель] Ошибка создания авто-звонка через API: {err_msg}");
+                        self.set_error(VkTurnPhase::AuthFailed, err_msg).await;
+                        if !sleep_or_stop(&mut stop_rx, backoff).await {
+                            break;
+                        }
+                        backoff = (backoff * 2).min(Duration::from_secs(120));
+                        continue;
+                    }
+                    auto_call_ids = created_ids;
+                    created_hashes
                 } else {
                     call_hashes(&cfg)
                 }
@@ -1530,9 +1591,11 @@ impl VkTurnManager {
                 tokio::select! {
                     st = child.wait() => break format!("клиент завершился: {:?}", st.ok()),
                     _ = stop_rx.changed() => {
-                        // Завершаем звонок в VK API
-                        if let (Some(ref tok), Some(ref cid)) = (&cfg.vk_token, &auto_call_id) {
-                            finish_vk_call(&state.http, tok, cid).await;
+                        // Завершаем звонки в VK API
+                        if let Some(ref tok) = cfg.vk_token {
+                            for cid in &auto_call_ids {
+                                finish_vk_call(&state.http, tok, cid).await;
+                            }
                         }
                         // Мягкая остановка: клиент закрывает сессии, сервер сразу освобождает слоты.
                         if let Some(mut si) = stdin.take() {
@@ -2661,8 +2724,11 @@ mod tests {
         turn.insert("203.0.113.50".parse().unwrap());
         turn.insert("155.212.200.1".parse().unwrap()); // уже покрыт подсетью ВК
         let dsts = exempt_destinations(Some("198.51.100.7".parse().unwrap()), &turn);
-        assert_eq!(dsts, vec!["155.212.192.0/20", "203.0.113.50/32", "198.51.100.7/32"]);
-        assert_eq!(exempt_destinations(None, &BTreeSet::new()), vec!["155.212.192.0/20"]);
+        let mut expected = VK_NETWORK_CIDRS.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        expected.push("203.0.113.50/32".into());
+        expected.push("198.51.100.7/32".into());
+        assert_eq!(dsts, expected);
+        assert_eq!(exempt_destinations(None, &BTreeSet::new()), VK_NETWORK_CIDRS);
 
         let apply = iptables_apply_script(&dsts);
         assert!(apply.contains("for ch in xkeen XKEEN_BS zapret"));
