@@ -96,6 +96,22 @@ describe('api client', () => {
     expect(callHeaders.get('X-Requested-With')).toBe('XMLHttpRequest')
   })
 
+  it('reports an unknown result when a mutation times out', async () => {
+    vi.useFakeTimers()
+    try {
+      global.fetch = vi.fn((_input: RequestInfo | URL, options?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')))
+        }),
+      )
+      const result = expect(apiPost('servers/switch', { server_id: 'vk' }))
+        .rejects.toThrow('Роутер не ответил за 30 сек. Результат запроса пока неизвестен.')
+      await Promise.all([result, vi.advanceTimersByTimeAsync(30000)])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('apiPut sends PUT request with json body', async () => {
     global.fetch = vi.fn().mockResolvedValue({
       status: 200,

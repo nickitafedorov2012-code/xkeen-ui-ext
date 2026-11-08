@@ -1245,6 +1245,108 @@ mod tests {
     /// Общее глобальное хранилище ожидающего подтверждения — тесты commit-confirmed идут по одному.
     static COMMIT_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    #[tokio::test]
+    async fn vkturn_worker_change_does_not_reload_mihomo() {
+        let root = std::env::temp_dir().join(format!("xkeen-vk-workers-{}", crate::auth::random_hex(8)));
+        let providers = root.join("providers");
+        tokio::fs::create_dir_all(&providers).await.unwrap();
+        let (state, yaml_path, _) = create_test_state(&root);
+        let mut cfg = (**state.config.read().await).clone();
+        let offline_mihomo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = offline_mihomo.local_addr().unwrap().port();
+        drop(offline_mihomo);
+        cfg.vkturn.enabled = true;
+        cfg.vkturn.peer = "192.0.2.10:46000".into();
+        cfg.whitelist_providers.push(crate::vkturn::PROVIDER_ID.into());
+        let yaml = crate::vkturn::apply_rules(
+            "proxy-providers:\n  vkturn:\n    type: file\n    path: ./providers/vkturn.yaml\nrules:\n  - MATCH,PROXY\n",
+            &cfg.vkturn,
+        ).unwrap();
+        tokio::fs::write(&yaml_path, &yaml).await.unwrap();
+        let provider = providers.join("vkturn.yaml");
+        let provider_yaml = crate::vkturn::render_provider_yaml();
+        tokio::fs::write(&provider, &provider_yaml).await.unwrap();
+        *state.config.write().await = Arc::new(cfg);
+
+        let result = crate::vkturn::commit_vkturn(&state, |v| {
+            v.streams = 27;
+            Ok(())
+        }).await;
+        let current_workers = state.config.read().await.vkturn.streams;
+        let current_yaml = tokio::fs::read_to_string(&yaml_path).await.unwrap();
+        let current_provider = tokio::fs::read_to_string(&provider).await.unwrap();
+        tokio::fs::remove_dir_all(&root).await.unwrap();
+
+        assert_eq!(result.unwrap().streams, 27);
+        assert_eq!(current_workers, 27);
+        assert_eq!(current_yaml, yaml);
+        assert_eq!(current_provider, provider_yaml);
+    }
+
+    #[tokio::test]
+    async fn vkturn_manual_switch_keeps_existing_connections() {
+        use axum::{extract::Request, http::StatusCode, response::IntoResponse, Json, Router};
+        use serde_json::json;
+        let _cache_guard = mihomo::PROXIES_CACHE_TEST_LOCK.lock().unwrap();
+        mihomo::clear_proxies_cache_for_test();
+
+        let root = std::env::temp_dir().join(format!("xkeen-vk-switch-{}", crate::auth::random_hex(8)));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let (state, _, _) = create_test_state(&root);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut cfg = (**state.config.read().await).clone();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = listener.local_addr().unwrap().port();
+        cfg.vkturn.enabled = true;
+        // Этот сценарий переключает узел при уже включённом режиме БС.
+        cfg.whitelist.enabled = true;
+        *state.config.write().await = Arc::new(cfg);
+        let target = crate::vkturn::PROXY_NAME;
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let app = Router::new().fallback(move |req: Request| {
+            let captured = captured.clone();
+            async move {
+                let path = req.uri().path().to_string();
+                captured.lock().unwrap().push((req.method().clone(), path.clone()));
+                match path.as_str() {
+                    "/proxies" => Json(json!({ "proxies": {
+                        "PROXY": { "type": "Selector", "now": "VPS", "all": ["VPS", target] },
+                        "VPS": { "type": "Vless" },
+                    }})).into_response(),
+                    "/proxies/PROXY" => {
+                        let body = axum::body::to_bytes(req.into_body(), 1024).await.unwrap();
+                        assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap(), json!({ "name": target }));
+                        StatusCode::NO_CONTENT.into_response()
+                    }
+                    _ => StatusCode::NO_CONTENT.into_response(),
+                }
+            }
+        });
+        let mock = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        assert!(crate::api::execute_server_switch_workflow(&state, target).await.is_err());
+        assert!(requests.lock().unwrap().is_empty());
+        {
+            let mut rt = state.vkturn.rt.write().await;
+            rt.tunnel_ip = Some("192.0.2.20".parse().unwrap());
+            rt.tun_attached = true;
+            rt.connected_streams = 1;
+        }
+        let result = crate::api::execute_server_switch_workflow(&state, target).await;
+        let chain = state.config.read().await.failover.bs_priority_chain.clone();
+        mock.abort();
+        tokio::fs::remove_dir_all(&root).await.unwrap();
+        mihomo::clear_proxies_cache_for_test();
+
+        result.unwrap();
+        assert_eq!(chain.first().map(String::as_str), Some(target));
+        let requests = requests.lock().unwrap();
+        assert!(requests.iter().any(|(method, path)| method == axum::http::Method::PUT && path == "/proxies/PROXY"));
+        assert!(!requests.iter().any(|(_, path)| path.starts_with("/connections") || path.starts_with("/configs")));
+    }
+
     /// Мок Mihomo: на любой запрос отвечает 204 (reload «принят»).
     async fn spawn_mock_mihomo_204() -> u16 {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};

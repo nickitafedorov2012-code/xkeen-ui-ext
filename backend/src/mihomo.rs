@@ -1,5 +1,6 @@
 //! Клиент Mihomo (Clash) REST API: серверы, переключение, пинг, reload конфига.
 
+use futures_util::{stream, StreamExt};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -206,6 +207,7 @@ pub async fn close_server_connections(
             ids_to_close.push(id.to_string());
         }
     }
+    drop(val);
 
     let count = ids_to_close.len();
     if count == 0 {
@@ -216,22 +218,11 @@ pub async fn close_server_connections(
         "Селективный сброс сокетов: закрытие {count} соединений для упавшего узла '{server_id}' (DIRECT не затронут)"
     );
 
-    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
-    let mut handles = Vec::with_capacity(count);
-
-    for cid in ids_to_close {
-        let http_c = http.clone();
-        let cfg_c = cfg.clone();
-        let sem_c = sem.clone();
-        handles.push(tokio::spawn(async move {
-            let _permit = sem_c.acquire().await.ok();
-            let _ = m_delete(&http_c, &cfg_c, &format!("/connections/{cid}"), 2).await;
-        }));
-    }
-
-    for h in handles {
-        let _ = h.await;
-    }
+    stream::iter(ids_to_close)
+        .for_each_concurrent(10, |cid| async move {
+            let _ = m_delete(http, cfg, &format!("/connections/{cid}"), 2).await;
+        })
+        .await;
 
     count
 }
@@ -1916,30 +1907,17 @@ pub async fn ping_all_url(
         return out;
     }
 
-    // Высокоскоростной параллельный пинг: 12 одновременных запросов с жестким таймаутом (до 2500 мс)
+    // Не более 12 активных запросов. Остальные узлы остаются в исходном списке,
+    // без выделения отдельной задачи и копии настроек на каждый узел подписки.
     let effective_timeout = std::cmp::min(timeout_ms, 2500);
-    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(12));
-    let mut handles = Vec::new();
-    let url_owned = test_url.map(|s| s.to_string());
-    let shared_cfg = std::sync::Arc::new(cfg.clone());
-
-    for id in ids {
-        let http = http.clone();
-        let cfg = shared_cfg.clone();
-        let url_opt = url_owned.clone();
-        let sem_clone = sem.clone();
-        let id_owned = id.clone();
-        handles.push(tokio::spawn(async move {
-            let _permit = sem_clone.acquire().await.ok();
-            let ms = ping_server_url(&http, &cfg, &id_owned, effective_timeout, url_opt.as_deref()).await;
-            (id_owned, ms)
-        }));
-    }
-
-    for h in handles {
-        if let Ok((id, ms)) = h.await {
-            out.insert(id, ms);
-        }
+    let mut pings = stream::iter(ids.iter().cloned())
+        .map(|id| async move {
+            let ms = ping_server_url(http, cfg, &id, effective_timeout, test_url).await;
+            (id, ms)
+        })
+        .buffer_unordered(12);
+    while let Some((id, ms)) = pings.next().await {
+        out.insert(id, ms);
     }
 
     // PING-AUTO: все замеры (фоновые, ручные, после переключения) попадают в кэш панели

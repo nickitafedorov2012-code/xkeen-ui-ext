@@ -48,10 +48,13 @@ describe('VK Call server selection', () => {
       expect(card?.textContent).toContain('Звонки ВКонтакте')
       const connect = card?.querySelector<HTMLButtonElement>('button[title="Сделать этот сервер активным"]')
       expect(connect).not.toBeNull()
+      const pingCount = () => fetchMock.mock.calls.filter(([url]) => String(url) === '/api/servers/ping').length
+      expect(pingCount()).toBe(0)
       await act(async () => { connect!.click() })
       const request = fetchMock.mock.calls.find(([url]) => String(url) === '/api/servers/switch')
       expect(request?.[1]?.method).toBe('POST')
       expect(JSON.parse(String(request?.[1]?.body))).toEqual({ server_id: id })
+      expect(pingCount()).toBe(0)
     } finally {
       await act(async () => { root.unmount() })
       container.remove()

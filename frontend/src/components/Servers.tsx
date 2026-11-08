@@ -321,7 +321,6 @@ export default function Servers({ notify, status, refresh }: Props) {
 
   useEffect(() => {
     load()
-    pingAll()
     const onSync = () => load()
     window.addEventListener('xr:data-changed', onSync)
     window.addEventListener('xr:refresh-status', onSync)
@@ -357,7 +356,7 @@ export default function Servers({ notify, status, refresh }: Props) {
       window.removeEventListener('xr:refresh-status', onSync)
       clearInterval(bgTimer)
     }
-  }, [load, pingAll])
+  }, [load])
 
   const runSpeedtest = async (s: ServerInfo) => {
     setSpeedtestingId(s.id)
@@ -644,13 +643,8 @@ export default function Servers({ notify, status, refresh }: Props) {
     try {
       const data = await apiPost<{ message: string }>('servers/switch', { server_id: s.id })
       notify(data.message || `Подключено: ${s.name}`)
-      load()
-      // PING-AUTO: сразу замеряем пинги — свежие значения видны сразу после переключения,
-      // а не после следующего ручного действия в панели
-      pingAll()
-      refresh?.()
+      // Выбранный узел проверяет бэкенд. Не запускаем замер всей подписки при переключении.
       window.dispatchEvent(new CustomEvent('xr:refresh-status'))
-      window.dispatchEvent(new CustomEvent('xr:data-changed', { detail: { entity: 'server' } }))
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка переключения', true)
     } finally {

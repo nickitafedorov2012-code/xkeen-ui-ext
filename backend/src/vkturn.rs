@@ -91,8 +91,9 @@ pub const RULES_END: &str = "# END xkeen-route vkturn";
 const LOG_TAIL: usize = 300;
 /// csqtt делит потоки на группы по 10 (`WORKERS_PER_GROUP` в worker.rs), каждая группа берёт свой хеш звонка.
 pub const WORKERS_PER_GROUP: u32 = 10;
+/// Автоматическое значение для роутера. Ручной выбор по-прежнему поддерживает до 100 потоков.
+pub const DEFAULT_WORKERS: u32 = 20;
 /// `MAX_WORKERS` в main.rs клиента.
-pub const DEFAULT_WORKERS: u32 = 100;
 pub const MAX_WORKERS: u32 = 100;
 /// Максимум ссылок: все используются одновременно (`MAX_VK_HASHES` в main.rs клиента).
 pub const MAX_LINKS: usize = 6;
@@ -1287,8 +1288,8 @@ impl TunHandle {
 
 // ---------- Запись в config.json / config.yaml (одна транзакция) ----------
 
-/// Применяет изменение настроек VK-туннеля: config.json, файл провайдера, провайдер и правила в config.yaml,
-/// перезагрузка Mihomo. Всё в одной транзакции ConfigTx (блокировки берёт только она).
+/// Сохраняет настройки VK-туннеля. Mihomo перечитывает конфигурацию только при изменении
+/// правил или файла провайдера. Всё в одной транзакции ConfigTx.
 pub async fn commit_vkturn<F>(state: &crate::AppState, mutate: F) -> Result<VkTurnConfig, String>
 where
     F: FnOnce(&mut VkTurnConfig) -> Result<(), String>,
@@ -1304,17 +1305,27 @@ where
         tx.config_mut().whitelist_providers.push(PROVIDER_ID.to_string());
     }
 
-    let providers_dir = std::path::Path::new(&tx.config().mihomo.config_path)
-        .parent()
-        .map(|p| p.join("providers"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/opt/etc/mihomo/providers"));
-    let prov_file = providers_dir.join(format!("{PROVIDER_ID}.yaml"));
-    tx.set_extra_file(&prov_file, render_provider_yaml(), true)
-        .await
-        .map_err(|e| format!("Ошибка записи файла провайдера VK-туннеля: {e}"))?;
-
     let yaml = tx.read_yaml().await.map_err(|e| format!("Ошибка чтения config.yaml: {e}"))?;
     let has_prov = crate::routing::parse_provider_names(&yaml).iter().any(|p| p == PROVIDER_ID);
+    let mut provider_changed = false;
+    if new_cfg.enabled || has_prov {
+        let providers_dir = std::path::Path::new(&tx.config().mihomo.config_path)
+            .parent()
+            .map(|p| p.join("providers"))
+            .unwrap_or_else(|| std::path::PathBuf::from("/opt/etc/mihomo/providers"));
+        let prov_file = providers_dir.join(format!("{PROVIDER_ID}.yaml"));
+        let provider_yaml = render_provider_yaml();
+        provider_changed = match tokio::fs::read_to_string(&prov_file).await {
+            Ok(current) => current != provider_yaml,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            Err(e) => return Err(format!("Ошибка чтения файла провайдера VK-туннеля: {e}")),
+        };
+        if provider_changed {
+            tx.set_extra_file(&prov_file, provider_yaml, true)
+                .await
+                .map_err(|e| format!("Ошибка записи файла провайдера VK-туннеля: {e}"))?;
+        }
+    }
     let yaml_with_prov = if new_cfg.enabled && !has_prov {
         crate::routing::add_file_provider_to_yaml(
             &yaml,
@@ -1325,14 +1336,22 @@ where
         )
         .map_err(|e| format!("Ошибка добавления провайдера в YAML: {e}"))?
     } else {
-        yaml
+        yaml.clone()
     };
 
     let new_yaml = apply_rules(&yaml_with_prov, &new_cfg)
         .map_err(|e| format!("Ошибка применения правил маршрутизации VK-туннеля: {e}"))?;
-    tx.set_yaml(new_yaml).map_err(|e| format!("Ошибка сохранения нового YAML: {e}"))?;
-    tx.commit_and_reload().await.map_err(|e| format!("Ошибка транзакции сохранения: {e}"))?;
-    drop(tx);
+    // Преобразование правил может убрать перевод строки в конце файла.
+    let yaml_changed = new_yaml.trim_end_matches(['\r', '\n']) != yaml.trim_end_matches(['\r', '\n']);
+    if yaml_changed {
+        tx.set_yaml(new_yaml).map_err(|e| format!("Ошибка сохранения нового YAML: {e}"))?;
+    }
+    let result = if yaml_changed || provider_changed {
+        tx.commit_and_reload().await
+    } else {
+        tx.commit_without_reload().await
+    };
+    result.map_err(|e| format!("Ошибка транзакции сохранения: {e}"))?;
     Ok(new_cfg)
 }
 
@@ -2120,7 +2139,7 @@ mod tests {
     #[test]
     fn test_effective_workers() {
         let mut cfg = cfg_with(&["https://vk.com/call/join/abc12345"]);
-        assert_eq!(effective_workers(&cfg), 100);
+        assert_eq!(effective_workers(&cfg), 20);
         cfg.streams = 35;
         assert_eq!(effective_workers(&cfg), 35, "точное число воркеров");
         cfg.streams = 200;
@@ -2139,7 +2158,7 @@ mod tests {
             vec![
                 "-peer", "1.2.3.4:46000",
                 "-vk", "abc12345,def67890",
-                "-n", "100",
+                "-n", "20",
                 "--exact-workers",
                 "-listen", "127.0.0.1:0",
                 "-tun-uds", "xkeen_route_csqtt_tun",

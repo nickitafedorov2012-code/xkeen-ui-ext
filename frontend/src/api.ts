@@ -94,7 +94,9 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
     return env.data as T
   } catch (err) {
     if (controller.signal.aborted) {
-      throw new Error('Превышено время ожидания ответа роутера (30 сек). Изменения НЕ применились на роутере!')
+      const message = 'Роутер не ответил за 30 сек.'
+      const method = options.method?.toUpperCase() ?? 'GET'
+      throw new Error(method === 'GET' ? message : `${message} Результат запроса пока неизвестен.`)
     }
     throw err
   } finally {

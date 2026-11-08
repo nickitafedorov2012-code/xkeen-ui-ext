@@ -54,6 +54,7 @@ export function parseVkRedirectFragment(urlOrFragment: string): { token: string;
 export const DEFAULT_CSQTT_PORT = 46000
 /** Клиент csqtt использует до шести ссылок одновременно */
 const MAX_LINKS_FALLBACK = 6
+const DEFAULT_STREAMS = 20
 
 /** Хост из "host:port" / "[v6]:port" для подстановки в поле адреса сервера. */
 export function hostFromPeer(peer?: string | null): string {
@@ -516,7 +517,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
   const [streamsUpdating, setStreamsUpdating] = useState(false)
 
   const handleSaveStreams = async () => {
-    const streams = draftStreams ?? status?.target_streams ?? 100
+    const streams = draftStreams ?? status?.target_streams ?? DEFAULT_STREAMS
     if (!Number.isInteger(streams) || streams < 3 || streams > 100) return
     setStreamsUpdating(true)
     try {
@@ -1390,7 +1391,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
           <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
             <div style={{ marginBottom: 20, maxWidth: 640 }} data-testid="stream-controls">
               <label htmlFor="vkturn-stream-range" style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
-                Потоки звонков (Workers / Streams): <span style={{ color: 'var(--accent, #3b82f6)', fontWeight: 700, fontSize: 16 }}>{draftStreams ?? status?.target_streams ?? 100}</span>
+                Потоки звонков (Workers / Streams): <span style={{ color: 'var(--accent, #3b82f6)', fontWeight: 700, fontSize: 16 }}>{draftStreams ?? status?.target_streams ?? DEFAULT_STREAMS}</span>
               </label>
               <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
                 <input
@@ -1401,7 +1402,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
                   step={1}
                   className="input"
                   data-testid="stream-range"
-                  value={draftStreams ?? status?.target_streams ?? 100}
+                  value={draftStreams ?? status?.target_streams ?? DEFAULT_STREAMS}
                   disabled={streamsUpdating || !status?.enabled}
                   onChange={(e) => setDraftStreams(Number(e.target.value))}
                   style={{ flex: '1 1 200px', maxWidth: 300, cursor: 'pointer' }}
@@ -1413,7 +1414,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
                   max={100}
                   className="input"
                   data-testid="stream-count"
-                  value={draftStreams ?? status?.target_streams ?? 100}
+                  value={draftStreams ?? status?.target_streams ?? DEFAULT_STREAMS}
                   disabled={streamsUpdating || !status?.enabled}
                   onChange={(e) => setDraftStreams(Math.max(3, Math.min(100, Number(e.target.value) || 3)))}
                   style={{ width: 85, fontWeight: 600 }}
@@ -1431,7 +1432,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
               </div>
               <div className="muted" style={{ fontSize: 12, marginTop: 8, lineHeight: 1.4 }}>
                 Установите ползунком нужное число потоков и нажмите «Сохранить». Потоки применяются однократно без промежуточных перезапусков.
-                Активно прямо сейчас: <strong style={{ color: 'var(--foreground)' }}>{status?.connected_streams ?? 0}</strong> из {status?.target_streams ?? 100}.
+                Активно прямо сейчас: <strong style={{ color: 'var(--foreground)' }}>{status?.connected_streams ?? 0}</strong> из {status?.target_streams ?? DEFAULT_STREAMS}.
               </div>
             </div>
             <div

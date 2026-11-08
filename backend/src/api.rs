@@ -1002,7 +1002,8 @@ pub struct SwitchReq {
 /// 5. Обновление и сохранение приоритета в config.json (чтобы фоновый failover не откатывал узел)
 /// 6. Запуск быстрого фонового замера пингов нового сервера
 pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -> Result<String, String> {
-    if server_id == crate::vkturn::PROXY_NAME {
+    let to_vkturn = server_id == crate::vkturn::PROXY_NAME;
+    if to_vkturn {
         let rt = state.vkturn.rt.read().await;
         if !rt.tunnel_ready() || rt.connected_streams == 0 {
             return Err("Туннель ещё не подключился к серверу csqtt — дождитесь подключения перед выбором сервера".into());
@@ -1012,11 +1013,18 @@ pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -
     // Немедленно прерываем запущенный Speedtest и отменяем возврат старого узла
     crate::speedtest::cancel_active_speedtest();
     let cfg = state.config.read().await.clone();
-    match mihomo::switch_server(&state.http, &cfg, server_id).await {
+    let switched = if to_vkturn {
+        // Существующие сессии через рабочий VPS могут завершиться штатно. Новые
+        // идут через VK сразу после смены селектора, без массового переподключения.
+        mihomo::switch_server_graceful(&state.http, &cfg, server_id).await
+    } else {
+        mihomo::switch_server(&state.http, &cfg, server_id).await
+    };
+    match switched {
         Ok(msg) => {
             log_i!("Смена сервера: {} — {}", server_id, msg);
             failover::record_manual_switch(server_id).await;
-            let (srv_name, srv_prov) = if server_id == crate::vkturn::PROXY_NAME {
+            let (srv_name, srv_prov) = if to_vkturn {
                 (crate::vkturn::PROXY_NAME.to_string(), Some(crate::vkturn::PROVIDER_ID.to_string()))
             } else if let Ok(servers) = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
                 servers.iter().find(|s| s.id == server_id).map(|s| (s.name.clone(), s.provider.clone())).unwrap_or_else(|| (server_id.to_string(), None))
@@ -1055,8 +1063,12 @@ pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -
             }
             // PING-AUTO: мгновенный фоновый замер — свежий пинг нового сервера
             // виден в панели уже следующим опросом, без действий пользователя
-            let cfg_now = (**state.config.read().await).clone();
-            spawn_ping_refresh(state.http.clone(), cfg_now);
+            let cfg_now = state.config.read().await.clone();
+            let http = state.http.clone();
+            let selected = server_id.to_string();
+            tokio::spawn(async move {
+                let _ = mihomo::ping_all_url(&http, &cfg_now, &[selected], 2500, None).await;
+            });
             Ok(msg)
         }
         Err(e) => {
@@ -7939,7 +7951,7 @@ fn mask_call_link(link: &str) -> String {
 /// GET /api/vkturn/status
 pub async fn get_vkturn_status(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
-    let rt = state.vkturn.rt.read().await.clone();
+    let rt = state.vkturn.rt.read().await;
     let installed = crate::vkturn::VkTurnManager::core_installed();
     let v = &cfg.vkturn;
 
@@ -8159,7 +8171,7 @@ pub async fn vkturn_action(
                 v.peer = String::new();
                 v.password = String::new();
                 v.links = Vec::new();
-                v.streams = 100;
+                v.streams = 0;
                 Ok(())
             })
             .await
