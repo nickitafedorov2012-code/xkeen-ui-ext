@@ -8152,6 +8152,30 @@ pub async fn vkturn_action(
                 "message": "VK-туннель перезапущен"
             }))
         }
+        "reset" => {
+            let _update_guard = state.vkturn.config_update_lock.lock().await;
+            let saved = match crate::vkturn::commit_vkturn(&state, |v| {
+                v.enabled = false;
+                v.peer = String::new();
+                v.password = String::new();
+                v.links = Vec::new();
+                v.streams = 100;
+                Ok(())
+            })
+            .await
+            {
+                Ok(c) => c,
+                Err(e) => return api_err(e),
+            };
+
+            state.vkturn.stop().await;
+
+            api_ok(json!({
+                "success": true,
+                "message": "Настройки сервера VK-туннеля сброшены",
+                "config": saved
+            }))
+        }
         "install_core" => {
             // Скачивание ядра (~11 МБ) на медленном канале идёт минутами — дольше таймаута запроса
             // веб-панели, поэтому установка идёт в фоне, а ход виден в статусе (поле install).

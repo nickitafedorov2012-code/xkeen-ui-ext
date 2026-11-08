@@ -757,4 +757,24 @@ describe('VkTurn Component (ядро csqtt)', () => {
     expect(passwordInput.value).toBe('my_secret_token')
     expect(notifyMock).toHaveBeenCalledWith(expect.stringContaining('Настройки сервера, порт и пароль успешно извлечены'))
   })
+
+  it('allows user to reset configured server and return to wizard', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue(defaultConnectedStatus)
+    const actionSpy = vi.spyOn(api, 'vkTurnAction').mockResolvedValue({ success: true })
+
+    await act(async () => {
+      root!.render(<VkTurn notify={notifyMock} />)
+    })
+
+    const resetBtn = container?.querySelector('[data-testid="reset-server-btn"]') as HTMLButtonElement
+    expect(resetBtn).toBeTruthy()
+
+    await act(async () => {
+      resetBtn.click()
+    })
+
+    expect(actionSpy).toHaveBeenCalledWith('reset')
+    expect(notifyMock).toHaveBeenCalledWith(expect.stringContaining('Настройки сервера csqtt сброшены'))
+  })
 })

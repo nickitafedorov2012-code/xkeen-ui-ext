@@ -437,6 +437,28 @@ export default function VkTurn({ notify }: VkTurnProps) {
     }
   }
 
+  const handleResetServer = async () => {
+    if (!window.confirm('Сбросить текущий сервер csqtt и настройки туннеля? Вы вернетесь в мастер настройки для ввода нового сервера.')) {
+      return
+    }
+    setActionPending(true)
+    try {
+      await vkTurnAction('reset')
+      setPeerHost('')
+      setServerPort(DEFAULT_CSQTT_PORT)
+      setPassword('')
+      setCallLinks([''])
+      setNewPassword('')
+      setNewLinkInput('')
+      notify('Настройки сервера csqtt сброшены. Вы можете указать новый сервер.')
+      await loadStatus(true)
+    } catch (err: any) {
+      notify(err?.message || 'Ошибка сброса настроек туннеля', true)
+    } finally {
+      setActionPending(false)
+    }
+  }
+
   const handleInstallCore = async () => {
     setActionPending(true)
     try {
@@ -1302,6 +1324,24 @@ export default function VkTurn({ notify }: VkTurnProps) {
           >
             <span>🔄</span>
             <span>Перезапустить</span>
+          </button>
+
+          <button
+            className="btn btn-secondary"
+            disabled={actionPending}
+            onClick={handleResetServer}
+            title="Отвязать текущий сервер csqtt и вернуться к мастеру настройки"
+            data-testid="reset-server-btn"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              color: 'var(--danger-fg, #ef4444)',
+              borderColor: 'rgba(239, 68, 68, 0.3)',
+            }}
+          >
+            <span>🗑️</span>
+            <span>Сбросить сервер</span>
           </button>
 
           {testLatency !== null && (

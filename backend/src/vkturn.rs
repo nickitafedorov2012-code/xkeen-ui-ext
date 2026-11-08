@@ -2741,6 +2741,25 @@ mod tests {
         .expect("выключение VK-туннеля зависло");
         assert_eq!(response_json(resp).await["success"], true);
         assert!(!std::fs::read_to_string(root.join("config.yaml")).unwrap().contains(RULES_BEGIN));
+
+        // Сброс через reset очищает peer, password и links
+        let reset_resp = tokio::time::timeout(
+            Duration::from_secs(15),
+            crate::api::vkturn_action(
+                axum::extract::State(state.clone()),
+                axum::Json(crate::api::VkTurnActionReq { action: "reset".into() }),
+            ),
+        )
+        .await
+        .expect("сброс VK-туннеля завис");
+        let reset_json = response_json(reset_resp).await;
+        assert_eq!(reset_json["success"], true);
+        let cur = state.config.read().await.vkturn.clone();
+        assert!(!cur.enabled);
+        assert!(cur.peer.is_empty());
+        assert!(cur.password.is_empty());
+        assert!(cur.links.is_empty());
+
         let _ = std::fs::remove_dir_all(&root);
     }
 
