@@ -813,27 +813,87 @@ fn urlencoding_lite(s: &str) -> String {
 }
 
 /// Включение/выключение защиты AdGuard Home с обязательной пост-валидацией
+/// При выключении защиты останавливаем процесс AdGuardHome и удаляем правила iptables для экономии памяти роутера.
+/// При включении проверяем работу процесса, запускаем службу при необходимости, включаем защиту и настраиваем iptables.
 pub async fn set_protection(http: &reqwest::Client, cfg: &AdGuardConfig, enabled: bool) -> Result<bool, String> {
-    let body = json!({
-        "protection_enabled": enabled,
-        "enabled": enabled
-    });
+    if !enabled {
+        // 1. Попытка корректно выставить protection_enabled: false через API AdGuard (если процесс отвечает)
+        let body = json!({
+            "protection_enabled": false,
+            "enabled": false
+        });
+        let _ = agh_request(http, cfg, reqwest::Method::POST, "/control/protection", Some(body), 2).await;
 
-    agh_request(http, cfg, reqwest::Method::POST, "/control/protection", Some(body), 5).await?;
-
-    // Пост-валидация: убеждаемся, что статус действительно изменился
-    let status = get_status(http, cfg).await;
-    if !status.running {
-        return Err("AdGuard Home перестал отвечать после изменения статуса защиты".to_string());
-    }
-    if status.protection_enabled {
-        let active_port = detect_adguard_dns_port().unwrap_or(cfg.dns_port);
-        let _ = apply_adguard_iptables(active_port);
-    } else {
+        // 2. Снимаем системный редирект DNS в iptables и чистим NDM-хук
         let _ = remove_adguard_iptables();
+
+        // 3. Останавливаем службу и принудительно убиваем процесс AdGuardHome для освобождения RAM
+        let _ = service_action("stop").await;
+
+        return Ok(false);
     }
 
-    Ok(status.protection_enabled)
+    // Включение (enabled == true):
+    // 1. Проверяем, запущен ли процесс AdGuardHome
+    let mut is_running = {
+        #[cfg(target_os = "linux")]
+        {
+            crate::system::is_process_running("AdGuardHome")
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            true
+        }
+    };
+
+    // 2. Если служба остановлена, запускаем её через init-скрипт
+    if !is_running {
+        crate::log_i!("AdGuard Home не запущен. Выполняется автоматический запуск службы...");
+        let _ = service_action("start").await;
+        // Даём службе время подняться
+        for _ in 0..10 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            #[cfg(target_os = "linux")]
+            {
+                is_running = crate::system::is_process_running("AdGuardHome");
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                is_running = true;
+            }
+            if is_running {
+                break;
+            }
+        }
+    }
+
+    // 3. Отправляем запрос включения защиты через API
+    let body = json!({
+        "protection_enabled": true,
+        "enabled": true
+    });
+    // Делаем несколько попыток с небольшой паузой, так как демон мог только что стартовать
+    let mut api_success = false;
+    for _ in 0..5 {
+        if agh_request(http, cfg, reqwest::Method::POST, "/control/protection", Some(body.clone()), 3).await.is_ok() {
+            api_success = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(600)).await;
+    }
+
+    // 4. Пост-валидация: убеждаемся, что статус действительно изменился
+    let status = get_status(http, cfg).await;
+    #[cfg(target_os = "linux")]
+    if !status.running && !api_success {
+        return Err("Не удалось запустить AdGuard Home или получить ответ службы".to_string());
+    }
+    let _ = (status, api_success);
+
+    let active_port = detect_adguard_dns_port().unwrap_or(cfg.dns_port);
+    let _ = apply_adguard_iptables(active_port);
+
+    Ok(true)
 }
 
 /// Фильтр подписки AdGuard Home
@@ -2726,6 +2786,17 @@ mod tests {
 
         // Проверка установки пакета
         assert!(install_adguard_package().await.is_ok());
+
+        // Проверка set_protection(true/false)
+        let http = reqwest::Client::new();
+        let cfg = AdGuardConfig::default();
+        let off_res = set_protection(&http, &cfg, false).await;
+        assert!(off_res.is_ok());
+        assert_eq!(off_res.unwrap(), false);
+
+        let on_res = set_protection(&http, &cfg, true).await;
+        assert!(on_res.is_ok());
+        assert_eq!(on_res.unwrap(), true);
     }
 
     #[test]

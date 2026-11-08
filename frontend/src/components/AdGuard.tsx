@@ -389,11 +389,11 @@ export default function AdGuard({ notify }: AdGuardProps) {
             type="button"
             className="dash-info-badge"
             onClick={handleToggleProtection}
-            disabled={actionPending || loading || !status?.running}
+            disabled={actionPending || loading}
             data-testid="adguard-duplicated-btn"
             title="Быстрое включение/отключение защиты AdGuard Home (дублированная кнопка с главной страницы)"
             style={{
-              cursor: status?.running ? 'pointer' : 'not-allowed',
+              cursor: 'pointer',
               background: status?.protection_enabled ? 'rgba(16, 185, 129, 0.15)' : 'rgba(255, 255, 255, 0.05)',
               border: status?.protection_enabled ? '1px solid #10b981' : '1px solid var(--border)',
               display: 'inline-flex',
