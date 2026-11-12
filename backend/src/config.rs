@@ -473,6 +473,9 @@ pub struct AppConfig {
     /// Серверы, отмеченные для обхода белых списков.
     #[serde(default)]
     pub whitelist_servers: Vec<String>,
+    /// Серверы, явно отмеченные как обычные (НЕ белые списки), независимо от тегов и подписок (баг 99).
+    #[serde(default)]
+    pub normal_servers: Vec<String>,
     /// Подписки (провайдеры), целиком отмеченные для обхода белых списков.
     #[serde(default)]
     pub whitelist_providers: Vec<String>,
@@ -824,12 +827,32 @@ impl Default for WhitelistStrategy {
     }
 }
 
+/// Источник активации режима белых списков (баг 107, 38).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WhitelistEnabledBy {
+    /// Включено пользователем вручную через UI / API / бот для всей сети
+    Manual,
+    /// Включено автоматически модулем failover при переходе на узел [БС]
+    Failover,
+    /// Включено выборочно для списка устройств (баг 38)
+    Devices,
+}
+
+impl Default for WhitelistEnabledBy {
+    fn default() -> Self {
+        Self::Manual
+    }
+}
+
 /// Настройки выделенного режима белых списков (Белые списки: 376 отечественных доменов напрямую, прокси-туннель).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(default)]
 pub struct WhitelistConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default)]
+    pub enabled_by: WhitelistEnabledBy,
     #[serde(default = "default_true")]
     pub auto_by_failover: bool,
     #[serde(default)]
@@ -852,6 +875,7 @@ impl Default for WhitelistConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            enabled_by: WhitelistEnabledBy::Manual,
             auto_by_failover: true,
             strategy: WhitelistStrategy::StrictXKeen,
             target_server: None,
@@ -1180,6 +1204,7 @@ impl Default for AppConfig {
             adguard: AdGuardConfig::default(),
             server_aliases: std::collections::HashMap::new(),
             whitelist_servers: Vec::new(),
+            normal_servers: Vec::new(),
             whitelist_providers: Vec::new(),
             whitelist: WhitelistConfig::default(),
             mobile_provider_urls: std::collections::HashMap::new(),
@@ -1291,6 +1316,43 @@ pub fn is_valid_init_script_path(path: &str) -> bool {
         return false;
     }
     !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/')
+}
+
+/// Проверка безопасности пути к бинарнику xkeen-route (баг 125).
+/// Путь должен быть абсолютным, строго под /opt/, без '..', имя файла начинается с 'xkeen-route',
+/// и это либо текущий запущенный exe, либо один из стандартных путей (/opt/sbin/xkeen-route, /opt/bin/xkeen-route).
+pub fn is_valid_xkeen_bin_path(path: &str) -> bool {
+    let p = path.trim();
+    if !p.starts_with("/opt/") || p.contains("..") {
+        return false;
+    }
+    if p.is_empty() || !p.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/') {
+        return false;
+    }
+    let p_path = std::path::Path::new(p);
+    let file_name = match p_path.file_name().and_then(|n| n.to_str()) {
+        Some(name) => name,
+        None => return false,
+    };
+    if !file_name.starts_with("xkeen-route") {
+        return false;
+    }
+
+    // Допустимые стандартные пути
+    if p == "/opt/sbin/xkeen-route" || p == "/opt/bin/xkeen-route" {
+        return true;
+    }
+
+    // Либо путь совпадает с текущим запущенным исполняемым файлом
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(cur_str) = current_exe.to_str() {
+            if cur_str == p {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Извлечение строкового поля из синтаксически поврежденного JSON через поиск подстроки
@@ -1694,6 +1756,17 @@ mod tests {
         assert!(!is_valid_init_script_path("/opt/bin/script.sh; rm -rf /"));
         assert!(!is_valid_init_script_path("/opt/bin/script.sh | sh"));
         assert!(!is_valid_init_script_path(""));
+    }
+
+    #[test]
+    fn regression_bug_125b_bin_path_is_strict_and_checked_first() {
+        assert!(is_valid_xkeen_bin_path("/opt/sbin/xkeen-route"));
+        assert!(is_valid_xkeen_bin_path("/opt/bin/xkeen-route"));
+        assert!(!is_valid_xkeen_bin_path("/opt/etc/passwd"));
+        assert!(!is_valid_xkeen_bin_path("/opt/../etc/x"));
+        assert!(!is_valid_xkeen_bin_path("/opt/bin/sh"));
+        assert!(!is_valid_xkeen_bin_path("/tmp/xkeen-route"));
+        assert!(!is_valid_xkeen_bin_path(""));
     }
 
     #[test]

@@ -414,48 +414,156 @@ pub fn detect_dhcp_ip_changes(
     out
 }
 
+/// Путь к файлу постоянного сохранения привязок MAC -> IP для DHCP-сторожа (баг 118)
+pub fn default_last_ip_by_mac_path(config_path: &Path) -> std::path::PathBuf {
+    config_path.parent().unwrap_or_else(|| Path::new(".")).join("dhcp_last_ip_by_mac.json")
+}
+
+/// Загрузка сохранённой карты MAC -> IP при старте панели
+pub fn load_last_ip_by_mac(path: &Path) -> std::collections::HashMap<String, String> {
+    if !path.exists() {
+        return std::collections::HashMap::new();
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(e) => {
+            log_w!("[DHCP-WATCHDOG] Ошибка чтения {}: {e}", path.display());
+            std::collections::HashMap::new()
+        }
+    }
+}
+
+/// Сохранение карты MAC -> IP на диск атомарно через tmp + rename
+pub fn save_last_ip_by_mac(
+    path: &Path,
+    map: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let json_bytes = serde_json::to_vec(map).map_err(|e| format!("JSON serialize error: {e}"))?;
+    let tmp_path = path.with_extension(format!("tmp.{}", crate::auth::random_hex(4)));
+    std::fs::write(&tmp_path, json_bytes).map_err(|e| format!("write error: {e}"))?;
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        format!("rename error: {e}")
+    })?;
+    Ok(())
+}
+
 /// Перенос всех настроек, привязанных к IP, на новый адрес устройства (баг 118).
 pub fn migrate_ip_keyed_config(cfg: &mut config::AppConfig, changes: &[(String, String)]) -> bool {
+    let valid_changes: Vec<(&str, &str)> = changes
+        .iter()
+        .map(|(o, n)| (o.trim(), n.trim()))
+        .filter(|(o, n)| !o.is_empty() && !n.is_empty() && o != n)
+        .collect();
+
+    if valid_changes.is_empty() {
+        return false;
+    }
+
     let mut changed = false;
-    for (old, new) in changes {
-        if old == new {
-            continue;
-        }
-        if let Some(v) = cfg.device_routing.remove(old) {
-            cfg.device_routing.insert(new.clone(), v);
+
+    // Шаг 1 (118.1): «все удалить, затем все вставить» для device_routing с осмысленным слиянием при коллизии (118.2)
+    let mut moved_routing: Vec<(&str, config::DeviceRouting)> = Vec::new();
+    for (old, new) in &valid_changes {
+        if let Some(v) = cfg.device_routing.remove(*old) {
+            moved_routing.push((*new, v));
             changed = true;
         }
-        if let Some(v) = cfg.device_domain_rules.remove(old) {
-            cfg.device_domain_rules.insert(new.clone(), v);
+    }
+    for (new_ip, new_routing) in moved_routing {
+        match cfg.device_routing.entry(new_ip.to_string()) {
+            std::collections::btree_map::Entry::Vacant(e) => {
+                e.insert(new_routing);
+            }
+            std::collections::btree_map::Entry::Occupied(mut e) => {
+                // Коллизия: осмысленное слияние цепочек серверов без дубликатов
+                let target = e.get_mut();
+                for s in new_routing.servers {
+                    if !target.servers.contains(&s) {
+                        target.servers.push(s);
+                    }
+                }
+                if target.ping_threshold_ms == 0 || target.ping_threshold_ms == 300 {
+                    target.ping_threshold_ms = new_routing.ping_threshold_ms;
+                }
+                target.auto_restore |= new_routing.auto_restore;
+                target.follow_whitelist &= new_routing.follow_whitelist;
+            }
+        }
+    }
+
+    // Шаг 2 (118.1): «все удалить, затем все вставить» для device_domain_rules со слиянием правил доменов (118.2)
+    let mut moved_domain_rules: Vec<(&str, Vec<config::DeviceDomainRule>)> = Vec::new();
+    for (old, new) in &valid_changes {
+        if let Some(v) = cfg.device_domain_rules.remove(*old) {
+            moved_domain_rules.push((*new, v));
             changed = true;
         }
-        for list in [&mut cfg.zapret.excluded_devices, &mut cfg.whitelist.excluded_devices] {
-            for e in list.iter_mut() {
-                if e.trim() == old {
-                    *e = new.clone();
-                    changed = true;
+    }
+    for (new_ip, new_rules) in moved_domain_rules {
+        match cfg.device_domain_rules.entry(new_ip.to_string()) {
+            std::collections::btree_map::Entry::Vacant(e) => {
+                e.insert(new_rules);
+            }
+            std::collections::btree_map::Entry::Occupied(mut e) => {
+                let target_rules = e.get_mut();
+                for r in new_rules {
+                    if !target_rules.iter().any(|existing| existing.domain.eq_ignore_ascii_case(&r.domain)) {
+                        target_rules.push(r);
+                    }
                 }
             }
         }
+    }
+
+    // Шаг 3: списки excluded_devices (Zapret, Whitelist)
+    for (old, new) in &valid_changes {
+        for list in [&mut cfg.zapret.excluded_devices, &mut cfg.whitelist.excluded_devices] {
+            for e in list.iter_mut() {
+                if e.trim() == *old {
+                    *e = (*new).to_string();
+                    changed = true;
+                }
+            }
+            // Дедупликация после замены
+            let mut seen = std::collections::HashSet::new();
+            list.retain(|item| seen.insert(item.clone()));
+        }
+    }
+
+    // Шаг 4: schedules
+    for (old, new) in &valid_changes {
         for sch in &mut cfg.schedules {
-            if sch.ip.trim() == old {
-                sch.ip = new.clone();
-                changed = true;
-            }
-        }
-        for d in &mut cfg.whitelist.devices {
-            if d.ip.trim() == old {
-                d.ip = new.clone();
-                changed = true;
-            }
-        }
-        for d in &mut cfg.gaming.devices {
-            if d.ip.trim() == old {
-                d.ip = new.clone();
+            if sch.ip.trim() == *old {
+                sch.ip = (*new).to_string();
                 changed = true;
             }
         }
     }
+
+    // Шаг 5: whitelist.devices
+    for (old, new) in &valid_changes {
+        for d in &mut cfg.whitelist.devices {
+            if d.ip.trim() == *old {
+                d.ip = (*new).to_string();
+                changed = true;
+            }
+        }
+    }
+
+    // Шаг 6: gaming.devices
+    for (old, new) in &valid_changes {
+        for d in &mut cfg.gaming.devices {
+            if d.ip.trim() == *old {
+                d.ip = (*new).to_string();
+                changed = true;
+            }
+        }
+    }
+
     changed
 }
 
@@ -468,7 +576,8 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
             sleep(Duration::from_secs(1)).await;
         }
 
-        let mut last_ip_by_mac: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let ip_map_path = default_last_ip_by_mac_path(state.config_path.as_ref());
+        let mut last_ip_by_mac: std::collections::HashMap<String, String> = load_last_ip_by_mac(&ip_map_path);
         loop {
             for _ in 0..15 {
                 if SHUTDOWN.load(std::sync::atomic::Ordering::Acquire) {
@@ -486,9 +595,20 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
                 current_devs.iter().map(|d| (d.mac.clone(), d.ip.clone())).collect();
             // Баг 118: общий перенос IP-привязанных настроек для ВСЕХ устройств, а не только гейминга
             let ip_changes = detect_dhcp_ip_changes(&last_ip_by_mac, &current_pairs);
+            let mut map_updated = false;
             for (mac, ip) in &current_pairs {
-                if !ip.trim().is_empty() {
-                    last_ip_by_mac.insert(mac.trim().to_lowercase(), ip.trim().to_string());
+                let mac_l = mac.trim().to_lowercase();
+                let ip_t = ip.trim();
+                if !ip_t.is_empty() && !mac_l.is_empty() {
+                    if last_ip_by_mac.get(&mac_l).map(|s| s.as_str()) != Some(ip_t) {
+                        last_ip_by_mac.insert(mac_l, ip_t.to_string());
+                        map_updated = true;
+                    }
+                }
+            }
+            if map_updated {
+                if let Err(e) = save_last_ip_by_mac(&ip_map_path, &last_ip_by_mac) {
+                    log_w!("[DHCP-WATCHDOG] Ошибка сохранения {}: {e}", ip_map_path.display());
                 }
             }
 
@@ -707,22 +827,42 @@ pub fn spawn_zapret_monitor(state: AppState) {
                     }
                 }
 
-                // NET-01: Контроль здоровья DNS-редиректа на порт 1053 во избежание блэкаута LAN
-                let dns_redirect_active = tokio::process::Command::new("sh")
+                // NET-01 & Баг 31: Контроль здоровья и целостности DNS-редиректа на порт dns_port во избежание блэкаута LAN
+                let dns_port = crate::routing::parse_mihomo_dns_listen_port(
+                    &std::fs::read_to_string(&state.config.read().await.mihomo.config_path).unwrap_or_default()
+                ).unwrap_or(crate::routing::DEFAULT_MIHOMO_DNS_PORT);
+
+                let iptables_nat_rules = tokio::process::Command::new("sh")
                     .arg("-c")
-                    .arg("iptables -w 2 -t nat -S PREROUTING 2>/dev/null | grep 'xkeen-route-zapret' | grep 'to-ports 1053' | grep -q .")
+                    .arg("iptables -w 2 -t nat -S PREROUTING 2>/dev/null")
                     .output()
                     .await
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
+                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                    .unwrap_or_default();
 
-                if dns_redirect_active {
-                    let resolver_ready = crate::zapret::check_dns_resolver_ready(1053).await;
+                let dns_rules_missing = crate::zapret::zapret_dns_rules_missing(&iptables_nat_rules, dns_port);
+
+                if !dns_rules_missing {
+                    let resolver_ready = crate::zapret::check_dns_resolver_ready(dns_port).await;
                     if !resolver_ready {
-                        log_w!("[WATCHDOG] ⚠️ DNS-редирект на 1053 активен в iptables, но резолвер не отвечает! Временное снятие редиректа для предотвращения DNS-блэкаута LAN...");
+                        log_w!("[WATCHDOG] ⚠️ DNS-редирект на {dns_port} активен в iptables, но резолвер не отвечает! Временное снятие редиректа для предотвращения DNS-блэкаута LAN...");
+                        let remove_cmd = crate::zapret::build_dns_redirect_remove_cmd(dns_port);
                         let _ = tokio::process::Command::new("sh")
                             .arg("-c")
-                            .arg(crate::zapret::DNS_REDIRECT_REMOVE_CMD)
+                            .arg(&remove_cmd)
+                            .output()
+                            .await;
+                    }
+                } else {
+                    // Баг 31.2: Zapret включён, но его DNS-правила пропали (например сброс NDM или перезапуск Mihomo).
+                    // Если резолвер отвечает и AdGuard не активен — восстанавливаем правила Zapret.
+                    let adguard_active = crate::adguard::detect_adguard_dns_port().is_some() || state.config.read().await.adguard.enabled;
+                    if !adguard_active && crate::zapret::check_dns_resolver_ready(dns_port).await {
+                        log_i!("[WATCHDOG] ℹ️ Zapret включён, но правила DNS-редиректа на {dns_port} отсутствуют, а резолвер готов. Восстановление правил...");
+                        let restore_cmd = crate::zapret::build_zapret_dns_restore_cmd(dns_port);
+                        let _ = tokio::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(&restore_cmd)
                             .output()
                             .await;
                     }
@@ -941,6 +1081,7 @@ pub fn spawn_adguard_monitor(state: AppState) {
             .unwrap_or(false);
 
             if !enabled && !is_running_protected {
+                set_adguard_down(false);
                 if iptables_active {
                     let _ = crate::adguard::remove_adguard_iptables();
                 }
@@ -948,10 +1089,14 @@ pub fn spawn_adguard_monitor(state: AppState) {
                 continue;
             }
 
-            if iptables_active || iptables_temporarily_suspended {
-                let listener_ok = crate::adguard::test_agh_dns_listener(&host, dns_port).await;
-                set_adguard_down(!listener_ok);
+            // Баг 1: флаг «AdGuard мёртв» обновляется на каждом тике сторожа через decide_adguard_down,
+            // независимо от того, стоят ли сейчас правила iptables или сняты
+            let listener_ok = crate::adguard::test_agh_dns_listener(&host, dns_port).await;
+            let process_running = agh_status.running;
+            let adguard_down = decide_adguard_down(enabled || is_running_protected, process_running, listener_ok);
+            set_adguard_down(adguard_down);
 
+            if iptables_active || iptables_temporarily_suspended {
                 if !listener_ok && iptables_active {
                     // AdGuard Home упал или завис при активных правилах перенаправления!
                     log_w!(
@@ -975,7 +1120,6 @@ pub fn spawn_adguard_monitor(state: AppState) {
                 // Если служба запущена и отвечает, но правила слетели (например, сброс KeeneticOS iptables)
                 // Защита от каскадного сбоя: не восстанавливаем AdGuard iptables, если Mihomo упал!
                 if !mihomo_down {
-                    let listener_ok = crate::adguard::test_agh_dns_listener(&host, dns_port).await;
                     if can_restore_adguard_iptables(mihomo_down, listener_ok) {
                         let _ = crate::adguard::apply_adguard_iptables(dns_port);
                         log_i!("[WATCHDOG] ✓ Восстановлен системный редирект XKEEN_ADGUARD iptables (порт 53 -> {})", dns_port);
@@ -1140,6 +1284,17 @@ pub fn evaluate_mihomo_health_step(
 /// Защита от каскадного сбоя: если Mihomo упал, AdGuard iptables НЕ восстанавливаются.
 pub fn can_restore_adguard_iptables(mihomo_down: bool, adguard_listener_ok: bool) -> bool {
     !mihomo_down && adguard_listener_ok
+}
+
+/// Чистая логика решения о том, считается ли AdGuard упавшим (ADGUARD_DOWN) (баг 1).
+/// Если интеграция включена (enabled), но процесс не запущен или DNS-слушатель не отвечает — down = true.
+/// Если интеграция выключена намеренно — down = false (флаг сбрасывается).
+pub fn decide_adguard_down(enabled: bool, process_running: bool, listener_ok: bool) -> bool {
+    if !enabled {
+        false
+    } else {
+        !process_running || !listener_ok
+    }
 }
 
 pub fn is_conn_target_ignored(target: &str, destination: &str, ignored_list: &[String]) -> bool {
@@ -1920,6 +2075,61 @@ mod tests {
         assert_eq!(cfg.whitelist.devices[0].ip, "192.168.1.30");
         assert!(!migrate_ip_keyed_config(&mut cfg, &[]), "нет изменений — нет записи");
     }
+
+    #[test]
+    fn regression_bug_118b_ip_swap_and_restart_baseline() {
+        // Подпункт 118.1: обмен IP двух устройств (A->B, B->A)
+        let mut cfg = crate::config::AppConfig::default();
+        let mut dev_a = crate::config::DeviceRouting::default();
+        dev_a.servers = vec!["NodeA".to_string()];
+        let mut dev_b = crate::config::DeviceRouting::default();
+        dev_b.servers = vec!["NodeB".to_string()];
+        cfg.device_routing.insert("192.168.1.10".into(), dev_a);
+        cfg.device_routing.insert("192.168.1.20".into(), dev_b);
+
+        let swap = vec![
+            ("192.168.1.10".to_string(), "192.168.1.20".to_string()),
+            ("192.168.1.20".to_string(), "192.168.1.10".to_string()),
+        ];
+        assert!(migrate_ip_keyed_config(&mut cfg, &swap));
+        assert_eq!(cfg.device_routing.get("192.168.1.20").unwrap().servers, vec!["NodeA".to_string()]);
+        assert_eq!(cfg.device_routing.get("192.168.1.10").unwrap().servers, vec!["NodeB".to_string()]);
+
+        // Подпункт 118.2: коллизия - запись уже есть по новому IP
+        let mut cfg2 = crate::config::AppConfig::default();
+        let mut dev_x = crate::config::DeviceRouting::default();
+        dev_x.servers = vec!["NodeX".into(), "BackupX".into()];
+        let mut dev_y = crate::config::DeviceRouting::default();
+        dev_y.servers = vec!["NodeY".into()];
+        cfg2.device_routing.insert("192.168.1.50".into(), dev_x);
+        cfg2.device_routing.insert("192.168.1.60".into(), dev_y);
+        cfg2.device_domain_rules.insert("192.168.1.50".into(), vec![
+            crate::config::DeviceDomainRule { domain: "example.com".into(), target: "PROXY".into() }
+        ]);
+        cfg2.device_domain_rules.insert("192.168.1.60".into(), vec![
+            crate::config::DeviceDomainRule { domain: "test.com".into(), target: "DIRECT".into() }
+        ]);
+        let change_collision = vec![("192.168.1.50".to_string(), "192.168.1.60".to_string())];
+        assert!(migrate_ip_keyed_config(&mut cfg2, &change_collision));
+        assert!(!cfg2.device_routing.contains_key("192.168.1.50"));
+        let merged_routing = cfg2.device_routing.get("192.168.1.60").unwrap();
+        // Серверы должны объединиться без потерь
+        assert!(merged_routing.servers.contains(&"NodeX".to_string()));
+        assert!(merged_routing.servers.contains(&"NodeY".to_string()));
+        let merged_rules = cfg2.device_domain_rules.get("192.168.1.60").unwrap();
+        assert_eq!(merged_rules.len(), 2);
+
+        // Подпункт 118.3: сохранение и чтение last_ip_by_mac
+        let tmp_dir = std::env::temp_dir().join(format!("xkeen-test-dhcp-{}", crate::auth::random_hex(6)));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let storage_path = tmp_dir.join("dhcp_mac_ip.json");
+        let mut map = std::collections::HashMap::new();
+        map.insert("00:11:22:33:44:55".to_string(), "192.168.1.100".to_string());
+        save_last_ip_by_mac(&storage_path, &map).unwrap();
+        let loaded = load_last_ip_by_mac(&storage_path);
+        assert_eq!(loaded.get("00:11:22:33:44:55").unwrap(), "192.168.1.100");
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
 }
 
 #[cfg(test)]
@@ -2042,5 +2252,39 @@ mod structural_regression_tests {
         assert!(!b.contains("mihomo_proxy_url()"), "не через общий mixed-port");
         assert!(b.contains("CANARY_PROBE_PORT"), "через слушатель изолированной группы выбранного узла");
         assert!(!b.contains("\"auto\""), "без захардкоженного списка групп");
+    }
+
+    #[test]
+    fn regression_bug_1b_adguard_down_flag_without_redirect() {
+        use super::decide_adguard_down;
+        // 1.1: флаг ADGUARD_DOWN должен вычисляться через чистую функцию decide_adguard_down(enabled, process_running, listener_ok)
+        assert!(!decide_adguard_down(false, false, false), "выключенный AdGuard не выставляет флаг ADGUARD_DOWN");
+        assert!(!decide_adguard_down(false, true, true));
+        assert!(decide_adguard_down(true, false, false), "включённый при мёртвом процессе и без редиректа -> down");
+        assert!(decide_adguard_down(true, true, false), "включённый при живом процессе, но мёртвом DNS-листенере -> down");
+        assert!(!decide_adguard_down(true, true, true), "включённый и здоровый -> alive");
+
+        // 1.3: resolve_active_dns_port_with_health при падении AdGuard берёт порт из dns.listen Mihomo, а не литерал 1053
+        let dir = std::env::temp_dir().join(format!("xkeen-bug1b-{}", crate::auth::random_hex(8)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let yaml_path = dir.join("config.yaml");
+        std::fs::write(&yaml_path, "mixed-port: 7890\ndns:\n  enable: true\n  listen: 0.0.0.0:7853\nrules:\n  - MATCH,DIRECT\n").unwrap();
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.config_path = yaml_path.display().to_string();
+        cfg.adguard.enabled = true;
+        cfg.adguard.dns_port = 5353;
+
+        let resolved = crate::api::resolve_active_dns_port_with_health(&cfg, false);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(resolved, 7853, "При падении AdGuard порт возврата должен браться из dns.listen Mihomo (7853), не 1053");
+
+        // 1.3 (проверка remove_adguard_iptables / порт возврата в adguard.rs без хардкода 1053):
+        let agh_src = include_str!("adguard.rs");
+        let agh_prod = &agh_src[..agh_src.find("#[cfg(test)]").unwrap_or(agh_src.len())];
+        assert!(
+            !agh_prod.contains("build_sync_tunnel_dns_ports_script(&format!(\"{port_str}|5353|5354\"), 1053)"),
+            "remove_adguard_iptables не должен хардкодить 1053 для возврата туннелей"
+        );
     }
 }

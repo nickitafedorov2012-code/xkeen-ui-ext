@@ -49,6 +49,24 @@ pub async fn resolve_domains(domains: &[String]) -> (BTreeSet<Ipv4Addr>, BTreeSe
 
 /// То же, что `resolve_domains`, плюс число доменов, для которых получен хотя бы один пригодный адрес.
 pub async fn resolve_domains_counted(domains: &[String]) -> (BTreeSet<Ipv4Addr>, BTreeSet<Ipv6Addr>, usize) {
+    let (map, count) = resolve_domains_map(domains).await;
+    let mut v4 = BTreeSet::new();
+    let mut v6 = BTreeSet::new();
+    for (_d, ips) in map {
+        for ip in ips {
+            match ip {
+                IpAddr::V4(addr) => { v4.insert(addr); }
+                IpAddr::V6(addr) => { v6.insert(addr); }
+            }
+        }
+    }
+    (v4, v6, count)
+}
+
+/// Асинхронно резолвит каждый домен в список его валидных публичных IP.
+pub async fn resolve_domains_map(
+    domains: &[String],
+) -> (std::collections::HashMap<String, Vec<IpAddr>>, usize) {
     let mut set = tokio::task::JoinSet::new();
 
     for (idx, d) in domains.iter().enumerate() {
@@ -56,10 +74,11 @@ pub async fn resolve_domains_counted(domains: &[String]) -> (BTreeSet<Ipv4Addr>,
         if clean.is_empty() {
             continue;
         }
+        let domain_orig = d.clone();
         for host in [clean.clone(), format!("www.{clean}")] {
+            let orig = domain_orig.clone();
             set.spawn(async move {
-                let mut v4_res = Vec::new();
-                let mut v6_res = Vec::new();
+                let mut ips = Vec::new();
                 let addr = format!("{host}:443");
                 let res = tokio::time::timeout(Duration::from_millis(1500), tokio::net::lookup_host(addr)).await;
                 if let Ok(Ok(iter)) = res {
@@ -67,38 +86,167 @@ pub async fn resolve_domains_counted(domains: &[String]) -> (BTreeSet<Ipv4Addr>,
                         match sa.ip() {
                             IpAddr::V4(ip) => {
                                 if is_override_eligible_v4(&ip) {
-                                    v4_res.push(ip);
+                                    ips.push(IpAddr::V4(ip));
                                 }
                             }
                             IpAddr::V6(ip) => {
                                 if is_override_eligible_v6(&ip) {
-                                    v6_res.push(ip);
+                                    ips.push(IpAddr::V6(ip));
                                 }
                             }
                         }
                     }
                 }
-                (idx, v4_res, v6_res)
+                (idx, orig, ips)
             });
         }
     }
 
-    let mut v4 = BTreeSet::new();
-    let mut v6 = BTreeSet::new();
-    let mut resolved = std::collections::HashSet::new();
+    let mut map: std::collections::HashMap<String, Vec<IpAddr>> = std::collections::HashMap::new();
+    let mut resolved_indices = std::collections::HashSet::new();
 
     while let Some(res) = set.join_next().await {
-        if let Ok((idx, v4_list, v6_list)) = res {
-            if !v4_list.is_empty() || !v6_list.is_empty() {
-                resolved.insert(idx);
+        if let Ok((idx, orig, ip_list)) = res {
+            if !ip_list.is_empty() {
+                resolved_indices.insert(idx);
+                let entry = map.entry(orig).or_default();
+                for ip in ip_list {
+                    if !entry.contains(&ip) {
+                        entry.push(ip);
+                    }
+                }
             }
-            v4.extend(v4_list);
-            v6.extend(v6_list);
         }
     }
 
-    (v4, v6, resolved.len())
+    let count = resolved_indices.len();
+    (map, count)
 }
+
+/// Путь к файлу дискового кэша DNS geo_override (баг 97, баг 13)
+#[cfg(target_os = "linux")]
+pub const DEFAULT_OVERRIDE_CACHE_FILE: &str = "/opt/etc/xkeen-route/override_cache.json";
+#[cfg(not(target_os = "linux"))]
+pub const DEFAULT_OVERRIDE_CACHE_FILE: &str = "xkeen-route.override_cache.json";
+
+static OVERRIDE_CACHE_PATH_OVERRIDE: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+pub fn get_override_cache_path() -> std::path::PathBuf {
+    let guard = OVERRIDE_CACHE_PATH_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref p) = *guard {
+        p.clone()
+    } else {
+        std::path::PathBuf::from(DEFAULT_OVERRIDE_CACHE_FILE)
+    }
+}
+
+#[cfg(test)]
+pub fn set_override_cache_path_override(path: Option<std::path::PathBuf>) {
+    let mut guard = OVERRIDE_CACHE_PATH_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = path;
+}
+
+/// Загрузка кэша домен -> IP с диска
+pub fn load_override_cache(path: &Path) -> std::collections::HashMap<String, Vec<IpAddr>> {
+    if !path.exists() {
+        return std::collections::HashMap::new();
+    }
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(e) => {
+            crate::log_w!("[OVERRIDE] Не удалось прочитать кэш {}: {e}", path.display());
+            std::collections::HashMap::new()
+        }
+    }
+}
+
+/// Атомарное сохранение кэша домен -> IP на диск (tmp + rename)
+pub fn save_override_cache(
+    path: &Path,
+    cache: &std::collections::HashMap<String, Vec<IpAddr>>,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let serialized = serde_json::to_vec(cache).map_err(|e| e.to_string())?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), nonce));
+
+    std::fs::write(&tmp, &serialized).map_err(|e| format!("Не удалось записать {}: {e}", tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("Не удалось переименовать {} в {}: {e}", tmp.display(), path.display()));
+    }
+    Ok(())
+}
+
+/// Чистая функция слияния DNS-ответов с кэшем последних успешных IP (баг 97).
+/// - Для разрешённых сейчас доменов обновляет кэш и включает их новые IP.
+/// - Для неразрешённых доменов берёт последние известные IP из кэша.
+/// - Отсекает fake-ip (198.18.0.0/15), частные и немаршрутизируемые адреса.
+pub fn merge_with_last_good(
+    requested: &[String],
+    resolved_now: &std::collections::HashMap<String, Vec<IpAddr>>,
+    cache: &mut std::collections::HashMap<String, Vec<IpAddr>>,
+) -> Vec<IpAddr> {
+    let mut out_set = std::collections::BTreeSet::new();
+
+    for d in requested {
+        let clean = d.trim().trim_start_matches("www.").to_lowercase();
+        if clean.is_empty() {
+            continue;
+        }
+
+        if let Some(ips_now) = resolved_now.get(d).or_else(|| resolved_now.get(&clean)) {
+            let mut valid_ips = Vec::new();
+            for ip in ips_now {
+                match ip {
+                    IpAddr::V4(v4) => {
+                        if is_override_eligible_v4(v4) {
+                            valid_ips.push(IpAddr::V4(*v4));
+                            out_set.insert(IpAddr::V4(*v4));
+                        }
+                    }
+                    IpAddr::V6(v6) => {
+                        if is_override_eligible_v6(v6) {
+                            valid_ips.push(IpAddr::V6(*v6));
+                            out_set.insert(IpAddr::V6(*v6));
+                        }
+                    }
+                }
+            }
+            if !valid_ips.is_empty() {
+                cache.insert(d.clone(), valid_ips);
+            }
+        } else if let Some(cached_ips) = cache.get(d).or_else(|| cache.get(&clean)) {
+            for ip in cached_ips {
+                match ip {
+                    IpAddr::V4(v4) => {
+                        if is_override_eligible_v4(v4) {
+                            out_set.insert(IpAddr::V4(*v4));
+                        }
+                    }
+                    IpAddr::V6(v6) => {
+                        if is_override_eligible_v6(v6) {
+                            out_set.insert(IpAddr::V6(*v6));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    out_set.into_iter().collect()
+}
+
+static OVERRIDE_CACHE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Vec<IpAddr>>>> =
+    std::sync::LazyLock::new(|| {
+        let path = get_override_cache_path();
+        std::sync::Mutex::new(load_override_cache(&path))
+    });
 
 /// Сбой DNS во время синхронизации (баг 97): если разрешилось меньше половины доменов,
 /// старый блок geo_override сохраняется, иначе force-домены молча уходят в DIRECT.
@@ -222,18 +370,53 @@ pub async fn sync_geo_override(domains: &[String]) -> Result<usize, String> {
 
     let _lock = IPSET_SYNC_LOCK.lock().await;
 
-    let requested = domains.iter().filter(|d| !d.trim().is_empty()).count();
-    let (v4, v6, resolved) = resolve_domains_counted(domains).await;
-    let total_ips = v4.len() + v6.len();
-    if keep_previous_override(requested, resolved) {
+    let requested_domains: Vec<String> = domains
+        .iter()
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty())
+        .collect();
+    let requested = requested_domains.len();
+
+    let (resolved_map, resolved) = resolve_domains_map(&requested_domains).await;
+
+    let merged_ips = {
+        let cache_path = get_override_cache_path();
+        let mut cache_guard = OVERRIDE_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+
+        // Если кэш в памяти пуст, пробуем прочитать его с диска
+        if cache_guard.is_empty() && cache_path.exists() {
+            *cache_guard = load_override_cache(&cache_path);
+        }
+
+        let ips = merge_with_last_good(&requested_domains, &resolved_map, &mut cache_guard);
+
+        // Сохраняем обновлённый кэш на диск
+        if let Err(e) = save_override_cache(&cache_path, &cache_guard) {
+            crate::log_w!("[OVERRIDE] Не удалось сохранить кэш geo_override: {e}");
+        }
+        ips
+    };
+
+    // Если ни один домен не разрешился и в кэше пусто (например первый старт без сети),
+    // действует предохранитель: старый файл и ipset не трогаем
+    if requested > 0 && merged_ips.is_empty() {
         crate::log_w!(
-            "[OVERRIDE] Разрешилось {resolved} из {requested} доменов — похоже на сбой DNS, geo_override не трогаем"
+            "[OVERRIDE] 0 из {requested} доменов имеют доступные IP (DNS сбой, кэш пуст) — geo_override не трогаем"
         );
         return Err(format!(
-            "DNS не ответил для {} из {requested} доменов: geo_override сохранён без изменений",
-            requested - resolved
+            "DNS не ответил для всех {requested} доменов и кэш пуст: geo_override сохранён без изменений"
         ));
     }
+
+    let mut v4 = BTreeSet::new();
+    let mut v6 = BTreeSet::new();
+    for ip in merged_ips {
+        match ip {
+            IpAddr::V4(addr) => { v4.insert(addr); }
+            IpAddr::V6(addr) => { v6.insert(addr); }
+        }
+    }
+    let total_ips = v4.len() + v6.len();
 
     // 1. Потоково обновляем файл ru_exclude_override.lst без буферизации всего содержимого в RAM
     let nonce = std::time::SystemTime::now()
@@ -255,7 +438,7 @@ pub async fn sync_geo_override(domains: &[String]) -> Result<usize, String> {
         crate::log_w!("[OVERRIDE] Ошибка синхронизации IPv6 ipset: {e}");
     }
 
-    crate::log_i!("[OVERRIDE] Синхронизировано {total_ips} IP для {} доменов", domains.len());
+    crate::log_i!("[OVERRIDE] Синхронизировано {total_ips} IP для {} доменов (разрешено сейчас: {resolved})", domains.len());
     Ok(total_ips)
 }
 
@@ -607,5 +790,66 @@ flush geo_override6_tmp
 add geo_override6_tmp 2001:db8::1 -exist
 "
         );
+    }
+
+    #[test]
+    fn regression_bug_97d_partial_dns_keeps_last_good_ips() {
+        use std::collections::HashMap;
+        use std::net::IpAddr;
+
+        let requested: Vec<String> = (1..=10).map(|i| format!("site{i}.example.com")).collect();
+        let mut cache: HashMap<String, Vec<IpAddr>> = HashMap::new();
+        for i in 1..=10 {
+            cache.insert(
+                format!("site{i}.example.com"),
+                vec![format!("1.1.1.{i}").parse().unwrap()],
+            );
+        }
+
+        // Частичный ответ DNS: разрешились только домены 1..=5 (и один из них вернул fake-ip + публичный)
+        let mut resolved_now: HashMap<String, Vec<IpAddr>> = HashMap::new();
+        for i in 1..=5 {
+            let mut ips: Vec<IpAddr> = vec![format!("2.2.2.{i}").parse().unwrap()];
+            if i == 1 {
+                ips.push("198.18.0.5".parse().unwrap());
+                ips.push("10.0.0.1".parse().unwrap());
+                ips.push("fc00::1".parse().unwrap());
+            }
+            resolved_now.insert(format!("site{i}.example.com"), ips);
+        }
+
+        let merged = merge_with_last_good(&requested, &resolved_now, &mut cache);
+
+        // Для разрешённых сейчас (1..=5) — новые публичные IP; для неразрешённых (6..=10) — кэшированные
+        for i in 1..=5 {
+            let new_ip: IpAddr = format!("2.2.2.{i}").parse().unwrap();
+            assert!(merged.contains(&new_ip), "должен содержать новый IP {new_ip}");
+        }
+        for i in 6..=10 {
+            let cached_ip: IpAddr = format!("1.1.1.{i}").parse().unwrap();
+            assert!(merged.contains(&cached_ip), "должен сохранить кэшированный IP {cached_ip}");
+        }
+        assert!(!merged.contains(&"198.18.0.5".parse::<IpAddr>().unwrap()), "fake-ip 198.18.0.5 не должен попадать");
+        assert!(!merged.contains(&"10.0.0.1".parse::<IpAddr>().unwrap()), "частный IP не должен попадать");
+        assert!(!merged.contains(&"fc00::1".parse::<IpAddr>().unwrap()), "ULA IPv6 не должен попадать");
+        assert_eq!(merged.len(), 10, "в итоге ровно 10 публичных IP для всех 10 доменов");
+
+        // Кэш обновился только для разрешённых доменов 1..=5, а 6..=10 сохранили прежние IP
+        assert_eq!(cache.get("site1.example.com").unwrap(), &vec!["2.2.2.1".parse::<IpAddr>().unwrap()]);
+        assert_eq!(cache.get("site6.example.com").unwrap(), &vec!["1.1.1.6".parse::<IpAddr>().unwrap()]);
+
+        // Проверка персистентного кэша на диске: сохранение и повторная загрузка переживают рестарт
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("xkr-bug97-cache-{}-{}", std::process::id(), nonce));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache_file = dir.join("override_cache.json");
+        save_override_cache(&cache_file, &cache).unwrap();
+        let loaded = load_override_cache(&cache_file);
+        assert_eq!(loaded.len(), 10);
+        assert_eq!(loaded.get("site6.example.com").unwrap(), &vec!["1.1.1.6".parse::<IpAddr>().unwrap()]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

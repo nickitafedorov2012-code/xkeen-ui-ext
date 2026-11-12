@@ -217,13 +217,41 @@ pub fn is_pid_alive(pid: u32) -> bool {
     }
 }
 
+/// Единые маркеры командной строки нашего процесса Zapret для Rust и shell-скриптов (баг 36)
+pub const ZAPRET_CMDLINE_MARKERS: &[&str] = &[
+    "--qnum=200",
+    "/opt/etc/zapret",
+    "/opt/zapret",
+    "xkeen-route",
+];
+
+/// Сборка shell-функции `is_zapret_pid` из единой константы маркеров `ZAPRET_CMDLINE_MARKERS` (баг 36)
+pub fn build_zapret_pid_check_fn() -> String {
+    let patterns = ZAPRET_CMDLINE_MARKERS
+        .iter()
+        .map(|m| format!("*{m}*"))
+        .collect::<Vec<_>>()
+        .join("|");
+    format!(
+        "is_zapret_pid() {{\n\
+  local p=\"$1\"\n\
+  [ -z \"$p\" ] && return 1\n\
+  [ -d \"/proc/$p\" ] || return 1\n\
+  if [ -r \"/proc/$p/cmdline\" ]; then\n\
+    local cmdline=$(tr '\\0' ' ' < \"/proc/$p/cmdline\" 2>/dev/null)\n\
+    case \"$cmdline\" in\n\
+      {patterns}) return 0 ;;\n\
+    esac\n\
+  fi\n\
+  return 1\n\
+}}"
+    )
+}
+
 /// Проверка, принадлежит ли командная строка процесса нашему экземпляру Zapret (баг 36)
 pub fn is_zapret_cmdline_ours(cmdline: &str) -> bool {
     let cl = cmdline.to_lowercase();
-    cl.contains("--qnum=200")
-        || cl.contains("/opt/etc/zapret")
-        || cl.contains("/opt/zapret")
-        || cl.contains("xkeen-route")
+    ZAPRET_CMDLINE_MARKERS.iter().any(|m| cl.contains(m))
 }
 /// Проверка соответствия PID процессу Zapret (nfqws / nfqws2 / tpws) (Z-08)
 pub fn is_zapret_pid_valid(pid: u32) -> bool {
@@ -247,21 +275,56 @@ pub fn is_zapret_pid_valid(pid: u32) -> bool {
     }
 }
 
+// Подпункт 31.1 & 31.3: сборка безопасной команды снятия DNS-редиректов Zapret
+pub fn build_dns_redirect_remove_cmd(port: u16) -> String {
+    format!(
+        r#"for ipt in "iptables -w 2" "ip6tables -w 2"; do
+  $ipt -t nat -S PREROUTING 2>/dev/null | grep 'xkeen-route-zapret' | grep -- "--to-ports {port}" | while read -r rule; do
+    del_cmd=$(echo "$rule" | sed 's/^-A/-D/')
+    $ipt -t nat $del_cmd 2>/dev/null || true
+  done
+  for iface in "br+" "Bridge+"; do
+    for proto in udp tcp; do
+      while $ipt -t nat -D PREROUTING -i "$iface" -p "$proto" --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports {port} 2>/dev/null; do :; done
+    done
+  done
+done"#
+    )
+}
+
+// Подпункт 31.2: проверка отсутствия правил DNS-редиректа Zapret
+pub fn zapret_dns_rules_missing(iptables_s_output: &str, port: u16) -> bool {
+    let port_str = format!("--to-ports {port}");
+    let alt_port_str = format!("to-ports {port}");
+    !iptables_s_output.lines().any(|line| {
+        line.contains("xkeen-route-zapret")
+            && line.contains("REDIRECT")
+            && (line.contains(&port_str) || line.contains(&alt_port_str))
+    })
+}
+
+// Подпункт 31.2 & 31.3: команда восстановления правил DNS-редиректа Zapret
+pub fn build_zapret_dns_restore_cmd(port: u16) -> String {
+    format!(
+        r#"iptables -w 2 -t nat -A PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports {port} 2>/dev/null || true
+iptables -w 2 -t nat -A PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports {port} 2>/dev/null || true
+iptables -w 2 -t nat -A PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports {port} 2>/dev/null || true
+iptables -w 2 -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports {port} 2>/dev/null || true"#
+    )
+}
+
 /// Надежная команда полного снятия правил перенаправления DNS на порт 1053 во избежание DNS-блэкаута
 pub const DNS_REDIRECT_REMOVE_CMD: &str = r#"
-for ipt in iptables ip6tables; do
-  $ipt -t nat -S PREROUTING 2>/dev/null | grep 'to-ports 1053' | while read -r rule; do
+for ipt in "iptables -w 2" "ip6tables -w 2"; do
+  $ipt -t nat -S PREROUTING 2>/dev/null | grep 'xkeen-route-zapret' | grep -- '--to-ports 1053' | while read -r rule; do
     del_cmd=$(echo "$rule" | sed 's/^-A/-D/')
     $ipt -t nat $del_cmd 2>/dev/null || true
   done
   for iface in "br+" "Bridge+"; do
     for proto in udp tcp; do
       while $ipt -t nat -D PREROUTING -i "$iface" -p "$proto" --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-      while $ipt -t nat -D PREROUTING -i "$iface" -p "$proto" --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
     done
   done
-  while $ipt -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-  while $ipt -t nat -D PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
 done
 "#;
 
@@ -944,12 +1007,58 @@ mod tests {
 
     #[test]
     fn test_dns_redirect_remove_cmd_regression() {
-        // Гарантируем, что команда удаления редиректа содержит адресное удаление для br+ и Bridge+
-        assert!(DNS_REDIRECT_REMOVE_CMD.contains("to-ports 1053"));
+        // Баг 31: команда удаления редиректа содержит адресное удаление для br+ и Bridge+
+        // строго по комментарию xkeen-route-zapret, без слепого удаления чужих правил
+        assert!(DNS_REDIRECT_REMOVE_CMD.contains("1053"));
         assert!(DNS_REDIRECT_REMOVE_CMD.contains("br+"));
         assert!(DNS_REDIRECT_REMOVE_CMD.contains("Bridge+"));
         assert!(DNS_REDIRECT_REMOVE_CMD.contains("xkeen-route-zapret"));
         assert!(DNS_REDIRECT_REMOVE_CMD.contains("ip6tables"));
+    }
+
+    #[test]
+    #[test]
+    fn regression_bug_31b_zapret_dns_redirect_only_own_rules() {
+        // Подпункт 31.1 & 31.3:
+        // build_dns_redirect_remove_cmd(port) должен собирать команду удаления только правил с маркером xkeen-route-zapret,
+        // не содержать слепого grep 'to-ports ...', и подставлять переданный порт (например 7853).
+        let cmd = super::build_dns_redirect_remove_cmd(7853);
+        assert!(cmd.contains("xkeen-route-zapret"), "команда удаления обязана фильтровать по xkeen-route-zapret");
+        assert!(!cmd.contains("grep 'to-ports"), "не должно быть слепого grep 'to-ports без привязки к xkeen-route-zapret");
+        assert!(cmd.contains("7853"), "порт должен быть подставлен из параметра");
+        assert!(!cmd.contains("1053"), "при порте 7853 не должно оставаться захардкоженного 1053");
+
+        // Подпункт 31.2:
+        // zapret_dns_rules_missing(iptables_s_output, port) -> bool
+        // Проверяет наличие правил DNS-редиректа Zapret (-m comment --comment "xkeen-route-zapret" ... REDIRECT --to-ports <port>)
+        let rules_present = r#"
+-A PREROUTING -i br+ -p udp -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053
+-A PREROUTING -i br+ -p tcp -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053
+"#;
+        assert!(!super::zapret_dns_rules_missing(rules_present, 1053), "правила на месте — missing == false");
+        assert!(super::zapret_dns_rules_missing(rules_present, 7853), "правила на 1053, а ищем 7853 — missing == true");
+
+        let foreign_rules = r#"
+-A PREROUTING -i br+ -p udp -j REDIRECT --to-ports 1053
+-A PREROUTING -i br+ -p tcp -j REDIRECT --to-ports 1053
+"#;
+        assert!(super::zapret_dns_rules_missing(foreign_rules, 1053), "чужие правила без комментария — missing == true");
+
+        let empty_output = "";
+        assert!(super::zapret_dns_rules_missing(empty_output, 1053), "пустой вывод iptables -S — missing == true");
+    }
+
+    #[test]
+    fn regression_bug_36b_shell_is_zapret_pid_checks_cmdline() {
+        let fn_def = build_zapret_pid_check_fn();
+        assert!(fn_def.contains("/proc/$p/cmdline"));
+        assert!(!fn_def.contains("case \"$comm\" in\n      nfqws|nfqws2|tpws) return 0 ;;"));
+        assert!(!fn_def.contains("case \"$comm\" in\r\n      nfqws|nfqws2|tpws) return 0 ;;"));
+        assert!(!fn_def.contains("*nfqws*|*nfqws2*|*tpws*) return 0 ;;"));
+        assert!(fn_def.contains("--qnum=200"));
+        assert!(fn_def.contains("/opt/etc/zapret"));
+        assert!(fn_def.contains("/opt/zapret"));
+        assert!(fn_def.contains("xkeen-route"));
     }
 }
 

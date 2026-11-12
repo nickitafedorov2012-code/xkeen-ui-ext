@@ -578,6 +578,31 @@ pub async fn install(State(state): State<AppState>) -> Response {
         Err(_) => return api_err("Операция обновления уже выполняется другим процессом"),
     };
 
+    let (bin_path_str, init_script_str) = {
+        let cfg = state.config.read().await;
+        let b = if cfg.system.xkeen_route_bin.is_empty() {
+            BIN_PATH.to_string()
+        } else {
+            cfg.system.xkeen_route_bin.clone()
+        };
+        let i = if cfg.system.xkeen_route_init.is_empty() {
+            INIT_SCRIPT.to_string()
+        } else {
+            cfg.system.xkeen_route_init.clone()
+        };
+        (b, i)
+    };
+
+    // Защита от инъекций и подмены путей (баг 125): проверяем ДО скачивания/записи
+    if !crate::config::is_valid_xkeen_bin_path(&bin_path_str) {
+        crate::log_e!("[UPDATE] Недопустимый путь к бинарнику '{bin_path_str}', установка отменена");
+        return api_err(format!("Недопустимый путь к исполняемому файлу '{bin_path_str}'"));
+    }
+    if !crate::config::is_valid_init_script_path(&init_script_str) {
+        crate::log_e!("[UPDATE] Недопустимый путь к init-скрипту '{init_script_str}', установка отменена");
+        return api_err(format!("Недопустимый путь к init-скрипту '{init_script_str}'"));
+    }
+
     let proxy_url = {
         let cfg = state.config.read().await;
         cfg.mihomo_proxy_url()
@@ -762,12 +787,8 @@ pub async fn install(State(state): State<AppState>) -> Response {
         }
     }
 
-    let cfg = state.config.read().await.clone();
-    let bin_path_str = if cfg.system.xkeen_route_bin.is_empty() { BIN_PATH } else { &cfg.system.xkeen_route_bin };
-    let init_script_str = if cfg.system.xkeen_route_init.is_empty() { INIT_SCRIPT } else { &cfg.system.xkeen_route_init };
-
     // Резервное копирование текущего бинарника
-    let target_bin = Path::new(bin_path_str);
+    let target_bin = Path::new(&bin_path_str);
     let bak_bin_buf = target_bin.with_extension("bak");
     let bak_bin = bak_bin_buf.as_path();
     if target_bin.exists() {
@@ -833,12 +854,7 @@ pub async fn install(State(state): State<AppState>) -> Response {
 
     crate::log_i!("[UPDATE] Установлена {ver} ({chosen_asset}), запуск перезапуска сервиса");
 
-    if !crate::config::is_valid_init_script_path(init_script_str) {
-        crate::log_e!("[UPDATE] Недопустимый путь к init-скрипту '{init_script_str}', перезапуск отменён");
-        return api_err(format!("Недопустимый путь к init-скрипту '{init_script_str}'"));
-    }
-
-    if Path::new(init_script_str).exists() {
+    if Path::new(&init_script_str).exists() {
         #[cfg(unix)]
         {
             let restart_cmd = format!("(sleep 1 && {} restart) >/dev/null 2>&1 &", init_script_str);

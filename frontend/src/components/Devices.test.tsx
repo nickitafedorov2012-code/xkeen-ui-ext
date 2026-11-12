@@ -464,4 +464,82 @@ describe('Devices Component — Per-Device Zapret DPI (Feature 3)', () => {
       device_name: 'Smart TV Samsung',
     })
   })
+
+  it('bug 138: zapret toggle ignores clicks while request is pending', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'devices') return Promise.resolve({ devices: mockDevices })
+      if (path === 'policies') return Promise.resolve({ policies: [{ id: 'default', name: 'Основная', is_default: true }] })
+      if (path === 'servers') return Promise.resolve({ servers: [] })
+      if (path === 'routing') return Promise.resolve({ assignments: [] })
+      if (path === 'device-routing') return Promise.resolve({ routing: {}, device_failover_enabled: false })
+      if (path === 'devices/zapret') return Promise.resolve({ excluded_devices: [] })
+      if (path === 'devices/traffic') return Promise.resolve({ download_total: 0, upload_total: 0, devices: {} })
+      return Promise.resolve({})
+    })
+
+    let resolvePost!: (val: unknown) => void
+    let rejectPost!: (err: Error) => void
+    const postSpy = vi.spyOn(api, 'apiPost').mockImplementation(
+      () =>
+        new Promise((resolve, reject) => {
+          resolvePost = resolve
+          rejectPost = reject
+        })
+    )
+
+    await act(async () => {
+      root!.render(<Devices notify={notifyMock} />)
+    })
+
+    const getTvBtn = () =>
+      container?.querySelectorAll('button.device-zapret-btn')[0] as HTMLButtonElement
+    const getLaptopBtn = () =>
+      container?.querySelectorAll('button.device-zapret-btn')[1] as HTMLButtonElement
+
+    expect(getTvBtn().className).toContain('active')
+    expect(getTvBtn().disabled).toBe(false)
+
+    // First click: starts pending request
+    await act(async () => {
+      getTvBtn().click()
+    })
+
+    expect(postSpy).toHaveBeenCalledTimes(1)
+    expect(getTvBtn().disabled).toBe(true)
+    // Per-device busy: other device's Zapret toggle remains enabled
+    expect(getLaptopBtn().disabled).toBe(false)
+
+    // Second click while pending: ignored
+    await act(async () => {
+      getTvBtn().click()
+    })
+    expect(postSpy).toHaveBeenCalledTimes(1)
+
+    // Resolve first request
+    await act(async () => {
+      resolvePost({ success: true })
+    })
+
+    expect(getTvBtn().disabled).toBe(false)
+    expect(getTvBtn().className).toContain('inactive')
+
+    // Third click after completion: allowed (2nd call)
+    await act(async () => {
+      getTvBtn().click()
+    })
+
+    expect(postSpy).toHaveBeenCalledTimes(2)
+    expect(getTvBtn().disabled).toBe(true)
+    expect(getTvBtn().className).toContain('active')
+
+    // Reject second request: state rolls back to inactive and busy is cleared
+    await act(async () => {
+      rejectPost(new Error('network error'))
+      await Promise.resolve()
+    })
+
+    expect(getTvBtn().disabled).toBe(false)
+    expect(getTvBtn().className).toContain('inactive')
+    expect(getTvBtn().textContent).toContain('Zapret OFF')
+  })
 })

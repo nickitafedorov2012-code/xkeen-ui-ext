@@ -106,6 +106,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
         "stack_memory": stack_memory,
         "whitelist_mode_active": whitelist_mode_active,
         "whitelist_servers": cfg.whitelist_servers,
+        "normal_servers": cfg.normal_servers,
         "whitelist_providers": cfg.whitelist_providers,
         "server_aliases": cfg.server_aliases,
         "mihomo": { "host": cfg.mihomo.host, "port": cfg.mihomo.port },
@@ -329,9 +330,9 @@ pub async fn api_not_found() -> Response {
         .into_response()
 }
 
-// ============================================================================
+// =====================================================================
 // 1. GET /api/system/diagnostics — глубокая системная диагностика
-// ============================================================================
+// =====================================================================
 pub async fn get_system_diagnostics(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
 
@@ -451,9 +452,9 @@ pub async fn get_system_diagnostics(State(state): State<AppState>) -> Response {
     api_ok(serde_json::to_value(diag).unwrap_or_default()).into_response()
 }
 
-// ============================================================================
+// =====================================================================
 // 2. GET /api/system/logs/recent — кольцевой буфер последних логов
-// ============================================================================
+// =====================================================================
 #[derive(Debug, Deserialize)]
 pub struct RecentLogsQuery {
     pub level: Option<String>,
@@ -469,9 +470,9 @@ pub async fn get_recent_logs(Query(q): Query<RecentLogsQuery>) -> Response {
     })).into_response()
 }
 
-// ============================================================================
+// =====================================================================
 // 3. POST /api/config/apply & confirm & rollback (Commit-Confirmed)
-// ============================================================================
+// =====================================================================
 #[derive(Debug, Deserialize)]
 pub struct ApplyConfigRequest {
     #[serde(default = "default_rollback_seconds")]
@@ -554,9 +555,9 @@ pub async fn rollback_config_tx(
     }
 }
 
-// ============================================================================
+// =====================================================================
 // 4. POST /api/config/validate — Dry-Run атомарная валидация
-// ============================================================================
+// =====================================================================
 #[derive(Debug, Deserialize)]
 pub struct ValidateConfigPayload {
     pub config_yaml: Option<String>,
@@ -571,6 +572,31 @@ pub async fn validate_config(
         body.config_json.as_ref(),
     );
     api_ok(serde_json::to_value(result).unwrap_or_default()).into_response()
+}
+
+/// Единый перечень секретных полей конфигурации (баг 141)
+pub const SECRET_FIELDS: &[&str] = &[
+    "notifications.telegram_bot_token",
+    "notifications.webhook_url",
+    "vkturn.vk_token",
+    "vkturn.password",
+    "adguard.password",
+    "rci.password",
+    "rci.token",
+    "mihomo.secret",
+    "antigravity.own_proxy",
+];
+
+/// Единый перечень известных масок для секретных полей
+pub const SECRET_MASKS: &[&str] = &["******", "vk1.a.***", "[REDACTED]"];
+
+/// Проверяет, является ли значение маской секрета или пустой строкой (там где пустая = не менять)
+pub fn is_secret_mask(val: &str, allow_empty: bool) -> bool {
+    let t = val.trim();
+    if allow_empty && t.is_empty() {
+        return true;
+    }
+    SECRET_MASKS.iter().any(|&m| t == m)
 }
 
 /// Маскирование секретных полей конфигурации при отдаче в UI
@@ -624,6 +650,20 @@ pub fn mask_settings_for_api(cfg: &config::AppConfig) -> serde_json::Value {
         if let Some(tok) = notifications.get_mut("telegram_bot_token") {
             if !tok.as_str().unwrap_or("").is_empty() {
                 *tok = serde_json::Value::String("******".into());
+            }
+        }
+        if let Some(wh) = notifications.get_mut("webhook_url") {
+            if !wh.as_str().unwrap_or("").is_empty() {
+                *wh = serde_json::Value::String("******".into());
+            }
+        }
+    }
+    if let Some(antigravity) = val.get_mut("antigravity") {
+        if let Some(proxy) = antigravity.get_mut("own_proxy") {
+            let p_str = proxy.as_str().unwrap_or("");
+            // Маскируем если не пустой или если содержит учетные данные / секреты
+            if !p_str.is_empty() {
+                *proxy = serde_json::Value::String("******".into());
             }
         }
     }
@@ -694,23 +734,36 @@ pub fn merge_settings_update(current: &config::AppConfig, body: &serde_json::Val
     new_cfg.failover.migrate_priority();
 
     // Восстановление замаскированных секретов (баг 141)
-    if new_cfg.notifications.telegram_bot_token == "******" {
+    if is_secret_mask(&new_cfg.notifications.telegram_bot_token, false) {
         new_cfg.notifications.telegram_bot_token = current.notifications.telegram_bot_token.clone();
     }
-    if new_cfg.rci.password == "******" {
+    if is_secret_mask(&new_cfg.notifications.webhook_url, false) {
+        new_cfg.notifications.webhook_url = current.notifications.webhook_url.clone();
+    }
+    if is_secret_mask(&new_cfg.rci.password, false) {
         new_cfg.rci.password = current.rci.password.clone();
     }
-    if new_cfg.rci.token == "******" {
+    if is_secret_mask(&new_cfg.rci.token, false) {
         new_cfg.rci.token = current.rci.token.clone();
     }
-    if new_cfg.mihomo.secret == "******" {
+    if is_secret_mask(&new_cfg.mihomo.secret, false) {
         new_cfg.mihomo.secret = current.mihomo.secret.clone();
     }
-    if new_cfg.adguard.password.as_deref() == Some("******") {
-        new_cfg.adguard.password = current.adguard.password.clone();
+    if let Some(ref pw) = new_cfg.adguard.password {
+        if is_secret_mask(pw, true) {
+            new_cfg.adguard.password = current.adguard.password.clone();
+        }
     }
-    if new_cfg.vkturn.password == "******" {
+    if is_secret_mask(&new_cfg.vkturn.password, false) {
         new_cfg.vkturn.password = current.vkturn.password.clone();
+    }
+    if let Some(ref tok) = new_cfg.vkturn.vk_token {
+        if is_secret_mask(tok, false) {
+            new_cfg.vkturn.vk_token = current.vkturn.vk_token.clone();
+        }
+    }
+    if is_secret_mask(&new_cfg.antigravity.own_proxy, false) {
+        new_cfg.antigravity.own_proxy = current.antigravity.own_proxy.clone();
     }
 
     // Защита от инъекций и подмены путей в system (баг 125)
@@ -724,13 +777,11 @@ pub fn merge_settings_update(current: &config::AppConfig, body: &serde_json::Val
             return Err(format!("Недопустимый путь к init-скрипту {name}: '{path}'"));
         }
     }
-    for (name, path) in [
-        ("xkeen_route_bin", &s.xkeen_route_bin),
-        ("mihomo_bin", &s.mihomo_bin),
-    ] {
-        if !path.is_empty() && !crate::config::is_valid_init_script_path(path) {
-            return Err(format!("Недопустимый путь к исполняемому файлу {name}: '{path}'"));
-        }
+    if !s.xkeen_route_bin.is_empty() && !crate::config::is_valid_xkeen_bin_path(&s.xkeen_route_bin) {
+        return Err(format!("Недопустимый путь к исполняемому файлу xkeen_route_bin: '{}'", s.xkeen_route_bin));
+    }
+    if !s.mihomo_bin.is_empty() && !crate::config::is_valid_init_script_path(&s.mihomo_bin) {
+        return Err(format!("Недопустимый путь к исполняемому файлу mihomo_bin: '{}'", s.mihomo_bin));
     }
 
     Ok(new_cfg)
@@ -774,8 +825,7 @@ pub async fn get_servers(State(state): State<AppState>) -> Response {
                         .as_ref()
                         .map_or(s.is_active, |fs| fs == &s.id);
                     let custom_alias = cfg.server_aliases.get(&s.id).cloned();
-                    let is_whitelist = cfg.whitelist_servers.iter().any(|ws| ws == &s.id)
-                        || s.provider.as_ref().map_or(false, |p| cfg.whitelist_providers.iter().any(|wp| wp == p));
+                    let is_whitelist = crate::failover::is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), &cfg);
                     // PING-AUTO: живой замер из кэша панели важнее протухшей истории
                     // healthcheck-а mihomo (обновляется лишь раз в ~5 минут)
                     let ping_ms = mihomo::cached_ping(&s.id).unwrap_or(s.ping_ms);
@@ -799,6 +849,7 @@ pub async fn get_servers(State(state): State<AppState>) -> Response {
                 "servers": list,
                 "server_aliases": cfg.server_aliases,
                 "whitelist_servers": cfg.whitelist_servers,
+                "normal_servers": cfg.normal_servers,
                 "whitelist_providers": cfg.whitelist_providers,
             }))
         }
@@ -843,6 +894,9 @@ pub struct ServerWhitelistReq {
     pub enabled: Option<bool>,
     #[serde(default)]
     pub servers: Option<Vec<String>>,
+    /// Явно отметить сервер обычным (баг 99)
+    #[serde(default)]
+    pub normal: Option<bool>,
 }
 
 /// Синхронизация режима белых списков.
@@ -862,14 +916,7 @@ pub fn compute_whitelist_mode_active(
     if cfg.whitelist.enabled {
         return true;
     }
-    let is_server_wl = !active_id.is_empty() && cfg.whitelist_servers.iter().any(|s| s == active_id);
-    let is_prov_wl = active_provider
-        .filter(|p| !p.is_empty())
-        .map(|p| cfg.whitelist_providers.iter().any(|wp| wp == p))
-        .unwrap_or(false);
-    is_server_wl
-        || is_prov_wl
-        || crate::failover::is_whitelist_server_full(active_name, active_id, active_provider, cfg)
+    crate::failover::is_whitelist_server_full(active_name, active_id, active_provider, cfg)
 }
 
 pub async fn sync_whitelist_mode_tunnel(state: &AppState, target_server_id: &str) -> Result<(), String> {
@@ -896,7 +943,7 @@ pub async fn sync_whitelist_mode_tunnel(state: &AppState, target_server_id: &str
             crate::failover::sync_whitelist_on_switch(&state.http, &cfg, target_server_id, &target_name).await;
         } else if let Some(ref target) = cfg.whitelist.target_server {
             if !target.trim().is_empty() {
-                let _ = mihomo::switch_group(&state.http, &cfg, routing::WHITELIST_GROUP_NAME, target.trim()).await;
+                let _ = mihomo::switch_group_scoped(&state.http, &cfg, routing::WHITELIST_GROUP_NAME, target.trim()).await;
             }
         }
     }
@@ -906,6 +953,8 @@ pub async fn sync_whitelist_mode_tunnel(state: &AppState, target_server_id: &str
 
 
 /// POST /api/servers/whitelist — добавить/удалить сервер из белого списка (обход белых списков)
+/// Если передано `normal: Some(true)` (или `enabled: Some(false)` при наличии тега/подписки),
+/// добавляет сервер в `normal_servers` (и убирает из `whitelist_servers`).
 pub async fn set_server_whitelist(
     State(state): State<AppState>,
     Json(req): Json<ServerWhitelistReq>,
@@ -915,29 +964,45 @@ pub async fn set_server_whitelist(
     if let Some(servers) = req.servers {
         cfg.whitelist_servers = servers;
     } else if let Some(server_id) = req.server_id {
-        let enable = req.enabled.unwrap_or(true);
-        if enable {
-            if !cfg.whitelist_servers.contains(&server_id) {
-                cfg.whitelist_servers.push(server_id);
+        if let Some(is_normal) = req.normal {
+            if is_normal {
+                cfg.whitelist_servers.retain(|s| s != &server_id);
+                if !cfg.normal_servers.contains(&server_id) {
+                    cfg.normal_servers.push(server_id);
+                }
+            } else {
+                cfg.normal_servers.retain(|s| s != &server_id);
             }
         } else {
-            cfg.whitelist_servers.retain(|s| s != &server_id);
+            let enable = req.enabled.unwrap_or(true);
+            if enable {
+                cfg.normal_servers.retain(|s| s != &server_id);
+                if !cfg.whitelist_servers.contains(&server_id) {
+                    cfg.whitelist_servers.push(server_id);
+                }
+            } else {
+                cfg.whitelist_servers.retain(|s| s != &server_id);
+                if !cfg.normal_servers.contains(&server_id) {
+                    cfg.normal_servers.push(server_id);
+                }
+            }
         }
     }
     if let Err(e) = config::save(&state.config_path, &cfg).await {
         return api_err(format!("Ошибка сохранения белого списка серверов: {e}"));
     }
     let wl = cfg.whitelist_servers.clone();
+    let nl = cfg.normal_servers.clone();
     let wl_p = cfg.whitelist_providers.clone();
     *state.config.write().await = std::sync::Arc::new(cfg.clone());
-    log_i!("Обновлён список серверов белых списков (всего: {})", wl.len());
+    log_i!("Обновлён список серверов белых списков (всего БС: {}, обычных: {})", wl.len(), nl.len());
 
     let active_id = mihomo::get_active_server(&state.http, &cfg).await.ok().flatten().map(|s| s.id).unwrap_or_default();
     if !active_id.is_empty() {
         let _ = sync_whitelist_mode_tunnel(&state, &active_id).await;
     }
 
-    api_ok(json!({ "whitelist_servers": wl, "whitelist_providers": wl_p }))
+    api_ok(json!({ "whitelist_servers": wl, "normal_servers": nl, "whitelist_providers": wl_p }))
 }
 
 #[derive(Deserialize)]
@@ -1269,44 +1334,74 @@ pub async fn repair_flow(State(state): State<AppState>) -> Response {
         }
     };
 
-    // 2. Переключение Flow сервера и проверка результата в runtime (DIAG-04)
-    if let Err(e) = mihomo::switch_flow_server(&state, &target_server).await {
-        return api_err(format!("Не удалось переключить маршрут Google AI на сервер '{}': {}", target_server, e));
+    // 2. Валидация существования группы Flow ДО любой записи на диск (баг 52)
+    let proxies_before = match mihomo::get_proxies(&state.http, &cfg).await {
+        Ok(p) => p,
+        Err(e) => return api_err(format!("Не удалось проверить группы маршрута в ядре Mihomo: {}", e)),
+    };
+    let group_names: Vec<String> = proxies_before.keys().cloned().collect();
+    let plan = match crate::routing::plan_repair_flow(&group_names, &target_server) {
+        Ok(p) => p,
+        Err(e) => return api_err(e),
+    };
+
+    // 3. Обновляем YAML (правила Flow) и flow_server в единой транзакции ConfigTx (баг 52)
+    {
+        let mut tx = match ConfigTx::begin(&state).await {
+            Ok(tx) => tx,
+            Err(e) => return api_err(format!("Не удалось начать транзакцию сохранения маршрута Google Flow: {}", e)),
+        };
+        let yaml = match tx.read_yaml().await {
+            Ok(y) => y,
+            Err(e) => return api_err(format!("Не удалось прочитать config.yaml для маршрута Google Flow: {}", e)),
+        };
+        let new_yaml = match crate::routing::apply_flow_rules(&yaml, &plan.target_server, Some(&plan.group_name)) {
+            Ok(y) => y,
+            Err(e) => return api_err(format!("Не удалось подготовить правила Google Flow: {}", e)),
+        };
+        let yaml_changed = new_yaml != yaml;
+        if yaml_changed {
+            if let Err(e) = tx.set_yaml(new_yaml) {
+                return api_err(format!("Некорректный YAML после применения правил Google Flow: {}", e));
+            }
+        }
+        tx.config_mut().flow_server = Some(plan.target_server.clone());
+        let commit_res = if yaml_changed {
+            tx.commit_and_reload().await
+        } else {
+            tx.commit_without_reload().await
+        };
+        if let Err(e) = commit_res {
+            return api_err(format!("Не удалось сохранить маршрут Google AI: {}", e));
+        }
     }
 
-    // 3. Подтверждение в runtime (DIAG-04: честная валидация)
+    // 4. Переключение селектора группы Flow и подтверждение в runtime (DIAG-04)
+    if let Err(e) = mihomo::switch_flow_server(&state, &plan.target_server).await {
+        return api_err(format!("Не удалось переключить маршрут Google AI на сервер '{}': {}", plan.target_server, e));
+    }
+
     let proxies = match mihomo::get_proxies(&state.http, &cfg).await {
         Ok(p) => p,
         Err(e) => return api_err(format!("Ошибка подтверждения маршрута в ядре Mihomo: {}", e)),
     };
     let is_confirmed = proxies.iter().any(|(name, obj)| {
-        let lower = name.to_lowercase();
-        (lower.contains("google ai") || lower.contains("flow")) && obj.get("now").and_then(|n| n.as_str()) == Some(&target_server)
+        crate::routing::is_flow_group_name(name)
+            && obj.get("now").and_then(|n| n.as_str()) == Some(plan.target_server.as_str())
     });
     if !is_confirmed {
-        return api_err(format!("Маршрут Google AI в ядре Mihomo не подтвердил выбор узла '{}' в runtime", target_server));
+        return api_err(format!("Маршрут Google AI в ядре Mihomo не подтвердил выбор узла '{}' в runtime", plan.target_server));
     }
 
-    // 4. Сохранение в config.json с проверкой результата
-    {
-        let _cfg_guard = state.config_lock.lock().await;
-        let mut mut_cfg = (**state.config.read().await).clone();
-        mut_cfg.flow_server = Some(target_server.clone());
-        if let Err(e) = config::save(&state.config_path, &mut_cfg).await {
-            return api_err(format!("Маршрут Google AI переключен, но сохранение конфигурации завершилось ошибкой: {}", e));
-        }
-        *state.config.write().await = std::sync::Arc::new(mut_cfg);
-    }
-
-    // 5. Сброс всех активных соединений ядра
-    let _ = mihomo::close_all_connections(&state.http, &cfg).await;
+    // 5. Селективный сброс соединений только для доменов Google Flow (баг 54)
+    let _ = mihomo::close_flow_connections(&state.http, &cfg).await;
 
     api_ok(json!({
         "success": true,
-        "flow_server": target_server,
+        "flow_server": plan.target_server,
         "verified": true,
         "min_ping": if min_ping == i64::MAX { None } else { Some(min_ping) },
-        "message": format!("Маршрут Google Flow подтвержден и переключен на '{target_server}', сокеты сброшены"),
+        "message": format!("Маршрут Google Flow подтвержден и переключен на '{}', сокеты сброшены", plan.target_server),
     }))
 }
 
@@ -1367,7 +1462,6 @@ pub async fn auto_select_flow_server(
         if let Some(ref target) = best_server_id {
             chosen_ping = Some(min_ping);
             if let Ok(_msg) = mihomo::switch_flow_server(&state, target).await {
-                let _ = mihomo::close_all_connections(&state.http, &current_cfg).await;
                 message = format!("Автоматически выбран лучший сервер для Google AI: '{target}' ({min_ping} мс)");
             }
         }
@@ -1955,7 +2049,7 @@ pub async fn set_device_routing(State(state): State<AppState>, Json(req): Json<D
     let mut reselected = false;
     if let Some(primary) = servers.first() {
         let gname = routing::group_name_for(&ip, &req.name);
-        if mihomo::switch_group(&state.http, tx.config(), &gname, primary).await.is_ok() {
+        if mihomo::switch_group_scoped(&state.http, tx.config(), &gname, primary).await.is_ok() {
             reselected = true;
         }
     }
@@ -2273,6 +2367,13 @@ pub struct ServiceReq {
     pub action: String,
 }
 
+/// Планирует обновлённый YAML маршрутизации при старте/рестарте XKeen.
+pub fn plan_xkeen_start_yaml(cfg: &config::AppConfig, raw_yaml: &str) -> Result<String, String> {
+    let (new_yaml, _) = routing::apply_routing(raw_yaml, cfg)?;
+    crate::transaction::validate_yaml_syntax(&new_yaml)?;
+    Ok(new_yaml)
+}
+
 /// POST /api/xkeen/service — start/stop/restart/restart_all/status сервисов проксирования и обхода.
 /// При stop останавливает xkeen, mihomo и zapret и очищает перехват iptables (все устройства идут напрямую без смены политики на роутере).
 pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<ServiceReq>) -> Response {
@@ -2313,18 +2414,11 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
               while ip6tables -w 2 -D FORWARD -j XKEEN_GAMING 2>/dev/null; do :; done
               ip6tables -w 2 -F XKEEN_GAMING 2>/dev/null || true
               ip6tables -w 2 -X XKEEN_GAMING 2>/dev/null || true
-              $ipt -t nat -S PREROUTING 2>/dev/null | grep 'to-ports 1053' | while read -r rule; do
-                del_cmd=$(echo "$rule" | sed 's/^-A/-D/')
-                $ipt -t nat $del_cmd 2>/dev/null || true
-              done
               for iface in "br+" "Bridge+"; do
                 for proto in udp tcp; do
-                  while $ipt -t nat -D PREROUTING -i "$iface" -p "$proto" --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-                  while $ipt -t nat -D PREROUTING -i "$iface" -p "$proto" --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+                  while $ipt -w 2 -t nat -D PREROUTING -i "$iface" -p "$proto" --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
                 done
               done
-              while $ipt -t nat -D PREROUTING -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-              while $ipt -t nat -D PREROUTING -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
             done
             while ip rule del fwmark 0x111/0xff lookup 111 2>/dev/null; do :; done
             while ip -6 rule del fwmark 0x111/0xff lookup 111 2>/dev/null; do :; done
@@ -2398,20 +2492,28 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
                 o.status.code().unwrap_or(-1)
             );
             if action == "start" || action == "restart" || action == "restart_all" {
-                // Восстанавливаем правила маршрутизации в config.yaml и перезапускаем Zapret (если он включен)
+                // Восстанавливаем правила маршрутизации в config.yaml через ConfigTx и перезапускаем Zapret (если он включен)
                 let path = std::path::Path::new(&cfg.mihomo.config_path);
                 if path.exists() {
-                    if let Ok(raw_yaml) = tokio::fs::read_to_string(path).await {
-                        if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &cfg) {
-                            let _ = atomic_write_file(path, &new_yaml).await;
-                            let _ = mihomo::reload_config(&state.http, &cfg).await;
-                            // stop снял цепочки XKEEN_GAMING/XKEEN_BS и NDM-хуки — без повторного
-                            // синка UI показывал «игровой режим/БС включён», а трафик не перехватывался
-                            let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
-                            let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
-                            let dns_port = resolve_active_dns_port(&cfg);
-                            sync_full_tunnel_modes(&cfg, redir_port, tproxy_port, dns_port).await;
-                        }
+                    let tx_res: Result<(), String> = async {
+                        let mut tx = crate::transaction::ConfigTx::begin(&state).await?;
+                        let raw_yaml = tx.read_yaml().await?;
+                        let new_yaml = plan_xkeen_start_yaml(tx.config(), &raw_yaml)?;
+                        let tx_cfg = tx.config().clone();
+                        tx.set_yaml(new_yaml.clone())?;
+                        tx.commit_and_reload().await?;
+                        // stop снял цепочки XKEEN_GAMING/XKEEN_BS и NDM-хуки — без повторного
+                        // синка UI показывал «игровой режим/БС включён», а трафик не перехватывался
+                        let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
+                        let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
+                        let dns_port = resolve_active_dns_port(&tx_cfg);
+                        sync_full_tunnel_modes(&tx_cfg, redir_port, tproxy_port, dns_port).await;
+                        Ok(())
+                    }
+                    .await;
+                    if let Err(e) = tx_res {
+                        log_e!("Ошибка применения маршрутизации при '{}' XKeen: {}", action, e);
+                        return api_err(format!("Ошибка обновления или перезагрузки конфигурации Mihomo: {}", e));
                     }
                 }
                 if cfg.zapret.enabled && std::path::Path::new("/opt/etc/init.d/S51zapret").exists() {
@@ -3052,7 +3154,8 @@ pub async fn get_providers(State(state): State<AppState>) -> Response {
             let list: Vec<serde_json::Value> = providers
                 .into_iter()
                 .map(|mut p| {
-                    let is_wl = cfg.whitelist_providers.iter().any(|wp| wp == &p.id);
+                    let is_wl = crate::failover::is_whitelist_server_full(&p.name, &p.id, None, &cfg)
+                        || cfg.whitelist_providers.iter().any(|wp| wp.eq_ignore_ascii_case(&p.id));
                     let live_delta = crate::traffic::get_provider_live_delta(&p.id);
 
                     // Если есть квота (total_bytes), вычисляем actual used (baseline + live_delta) и accurate remaining
@@ -3910,7 +4013,7 @@ pub async fn get_antigravity_fix_cmd() -> impl IntoResponse {
         .into_response()
 }
 
-// ==================== XBOX DNS & SMARTDNS ====================
+// ==================== XBOX DNS & SMARTDNS =============
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct XboxDnsServerInfo {
@@ -4176,7 +4279,7 @@ pub async fn get_xbox_dns_fix_cmd() -> impl IntoResponse {
         .into_response()
 }
 
-// ==================== ВСТРОЕННЫЙ РЕДАКТОР КОНФИГОВ ====================
+// ==================== ВСТРОЕННЫЙ РЕДАКТОР КОНФИГОВ =============
 
 #[derive(Deserialize)]
 pub struct ConfigFileQuery {
@@ -4357,7 +4460,7 @@ pub async fn save_config_file(
     api_ok(json!({ "saved": true, "path": path.display().to_string() }))
 }
 
-// ==================== ЭКСПОРТ И ИМПОРТ БЭКАПОВ В БРАУЗЕРЕ ====================
+// ==================== ЭКСПОРТ И ИМПОРТ БЭКАПОВ В БРАУЗЕРЕ =============
 
 /// GET /api/backups/export/:name — экспорт снимка конфигурации в формате JSON
 pub async fn export_backup(
@@ -4531,7 +4634,7 @@ pub async fn import_backup(
     api_ok(json!({ "imported": safe_name }))
 }
 
-// ==================== СТРИМИНГ ЛОГОВ ЯДРА MIHOMO ====================
+// ==================== СТРИМИНГ ЛОГОВ ЯДРА MIHOMO =============
 
 /// GET /api/logs/mihomo — получение хвоста логов ядра Mihomo
 pub async fn mihomo_logs_tail(
@@ -4607,7 +4710,7 @@ pub async fn mihomo_logs_clear(State(state): State<AppState>) -> Response {
     api_ok(json!({ "cleared": true }))
 }
 
-// ==================== МОНИТОРИНГ ТРАФИКА УСТРОЙСТВ ====================
+// ==================== МОНИТОРИНГ ТРАФИКА УСТРОЙСТВ =============
 
 /// GET /api/devices/traffic — активные соединения и трафик per-device из Mihomo /connections
 pub async fn get_devices_traffic(State(state): State<AppState>) -> Response {
@@ -4698,7 +4801,7 @@ pub async fn get_devices_traffic(State(state): State<AppState>) -> Response {
     }))
 }
 
-// ==================== ЗАМЕР СКОРОСТИ (SPEEDTEST) ====================
+// ==================== ЗАМЕР СКОРОСТИ (SPEEDTEST) =============
 
 /// POST /api/servers/speedtest
 pub async fn speedtest_server(
@@ -4726,7 +4829,7 @@ pub async fn speedtest_server_by_id(
     }
 }
 
-// ==================== ТЕСТ УВЕДОМЛЕНИЙ (TELEGRAM / WEBHOOK) ====================
+// ==================== ТЕСТ УВЕДОМЛЕНИЙ (TELEGRAM / WEBHOOK) =============
 
 #[derive(Deserialize)]
 pub struct TestNotificationRequest {
@@ -4803,7 +4906,7 @@ pub async fn test_notification(
     }
 }
 
-// ==================== ИМПОРТ НОД (OUTBOUND GENERATOR) ====================
+// ==================== ИМПОРТ НОД (OUTBOUND GENERATOR) =============
 
 #[derive(Deserialize)]
 pub struct ImportNodeRequest {
@@ -4918,7 +5021,7 @@ pub async fn import_node(
     api_ok(json!({ "imported": true, "target": "config" }))
 }
 
-// ==================== УПРАВЛЕНИЕ РЕЖИМАМИ DNS РОУТЕРА ====================
+// ==================== УПРАВЛЕНИЕ РЕЖИМАМИ DNS РОУТЕРА =============
 
 #[derive(Deserialize)]
 pub struct SetDnsModeRequest {
@@ -5029,7 +5132,7 @@ pub async fn apply_clean_dns(State(state): State<AppState>) -> Response {
     }
 }
 
-// ==================== PER-DEVICE DOMAIN RULES ====================
+// ==================== PER-DEVICE DOMAIN RULES =============
 
 #[derive(Deserialize)]
 pub struct SetDeviceDomainRulesRequest {
@@ -5102,7 +5205,7 @@ pub async fn set_device_domain_rules(
     api_ok(json!({ "saved": true, "applied": true, "ip": clean_ip }))
 }
 
-// ==================== СКВОЗНОЙ РЕЛЕЙ CLASH API (REVERSE PROXY) ====================
+// ==================== СКВОЗНОЙ РЕЛЕЙ CLASH API (REVERSE PROXY) =============
 
 /// Сквозной Reverse-Proxy для Clash REST API (/clash/{*path})
 pub async fn clash_proxy(
@@ -5157,7 +5260,7 @@ pub async fn clash_proxy(
     }
 }
 
-// ==================== ADBLOCK (БЛОКИРОВКА РЕКЛАМЫ) ====================
+// ==================== ADBLOCK (БЛОКИРОВКА РЕКЛАМЫ) =============
 
 /// GET /api/adblock — текущее состояние AdBlock
 pub async fn get_adblock(State(state): State<AppState>) -> Response {
@@ -5224,7 +5327,7 @@ pub async fn toggle_adblock(
     api_ok(json!({ "enabled": target_enabled, "saved": true, "applied": true }))
 }
 
-// ==================== GEOIP & GEOSITE БАЗЫ ====================
+// ==================== GEOIP & GEOSITE БАЗЫ =============
 
 /// GET /api/system/geo-info — информация о базах GeoIP и GeoSite
 pub async fn get_geo_info(State(state): State<AppState>) -> Response {
@@ -5311,7 +5414,7 @@ pub async fn update_geo_databases(State(state): State<AppState>) -> Response {
     }))
 }
 
-// ==================== CONNECTIONS VIEWER ====================
+// ==================== CONNECTIONS VIEWER =============
 
 /// GET /api/connections — список активных соединений Mihomo
 pub async fn get_connections(State(state): State<AppState>) -> Response {
@@ -5362,7 +5465,7 @@ pub async fn close_single_connection(
     }
 }
 
-// ==================== ТРАФИК В РЕАЛЬНОМ ВРЕМЕНИ ====================
+// ==================== ТРАФИК В РЕАЛЬНОМ ВРЕМЕНИ =============
 
 /// GET /api/traffic/poll — текущая скорость прямого и проксированного трафика
 pub async fn get_traffic_poll(_state: State<AppState>) -> Response {
@@ -5391,7 +5494,7 @@ pub async fn post_traffic_reset(
     }))
 }
 
-// ==================== RULES & MATCH TESTER («КУДА ПОЙДЁТ?») ====================
+// ==================== RULES & MATCH TESTER («КУДА ПОЙДЁТ?») =============
 
 /// GET /api/rules — список активных правил маршрутизации
 pub async fn get_rules(State(state): State<AppState>) -> Response {
@@ -5852,7 +5955,7 @@ pub async fn test_rule_match(
     }))
 }
 
-// ==================== ДИАГНОСТИКА СЕТИ & SMART DNS ====================
+// ==================== ДИАГНОСТИКА СЕТИ & SMART DNS =============
 
 /// GET /api/diagnostics/health — комплексная проверка здоровья роутера и компонентов
 pub async fn get_diagnostics_health(State(state): State<AppState>) -> Response {
@@ -6072,7 +6175,7 @@ pub async fn unblock_domain(
     }
 }
 
-// ==================== KEENETIC POLICIES MAP ====================
+// ==================== KEENETIC POLICIES MAP =============
 
 /// GET /api/policies/map — граф связей: Устройства -> Политики Keenetic / XKeen -> Выходные серверы
 pub async fn get_policies_map(State(state): State<AppState>) -> Response {
@@ -6125,7 +6228,7 @@ pub async fn get_policies_map(State(state): State<AppState>) -> Response {
     }))
 }
 
-// ==================== ZAPRET / DPI ИНТЕГРАЦИЯ ====================
+// ==================== ZAPRET / DPI ИНТЕГРАЦИЯ =============
 
 pub const DEFAULT_ZAPRET_HOSTS: &str = "# zapret-hosts.txt — Список доменов для универсального обхода DPI\n\
 # Поддомены применяются автоматически (subdomains auto apply)\n\
@@ -6214,6 +6317,11 @@ is_running || exit 0
 exit 0
 "#;
 
+pub fn render_s51_zapret_script() -> String {
+    let pid_check_fn = crate::zapret::build_zapret_pid_check_fn();
+    S51ZAPRET_SCRIPT.replace("__ZAPRET_PID_CHECK_FN__", &pid_check_fn)
+}
+
 pub const S51ZAPRET_SCRIPT: &str = r#"#!/bin/sh
 PATH=/opt/sbin:/opt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
@@ -6259,24 +6367,7 @@ release_zapret_lock() {
   rm -rf "$LOCKDIR" 2>/dev/null
 }
 
-is_zapret_pid() {
-  local p="$1"
-  [ -z "$p" ] && return 1
-  [ -d "/proc/$p" ] || return 1
-  if [ -r "/proc/$p/comm" ]; then
-    local comm=$(cat "/proc/$p/comm" 2>/dev/null)
-    case "$comm" in
-      nfqws|nfqws2|tpws) return 0 ;;
-    esac
-  fi
-  if [ -r "/proc/$p/cmdline" ]; then
-    local cmdline=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)
-    case "$cmdline" in
-      *nfqws*|*nfqws2*|*tpws*) return 0 ;;
-    esac
-  fi
-  return 1
-}
+__ZAPRET_PID_CHECK_FN__
 
 check_dns_resolver_ready() {
   # Z-06: порт слушателя ищем строго в колонке local_address ($2) — раньше grep ':041D'
@@ -6688,19 +6779,11 @@ remove_fw_rules() {
     done
   done
 
-  # Remove DNS redirects with or without comment
-  while iptables -t nat -D PREROUTING -i br+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i br+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i br+ -p udp --dport 53 ! -d 127.0.0.1 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i br+ -p tcp --dport 53 ! -d 127.0.0.1 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 ! -d 127.0.0.1 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 ! -d 127.0.0.1 -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-  while iptables -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  # Remove DNS redirects with our comment (Bug 31: only own rules)
+  while iptables -w 2 -t nat -D PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while iptables -w 2 -t nat -D PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while iptables -w 2 -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
+  while iptables -w 2 -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
 
 
   # Remove TCPMSS clamping rule (NET-02 / NET-04)
@@ -7603,13 +7686,15 @@ pub fn build_nfqws2_args(cfg: &crate::config::ZapretConfig) -> (String, bool) {
 
 pub const ZAPRET_HOSTS_MANAGED_BEGIN: &str = "# --- START XKEEN ROUTE DYNAMIC HOSTS ---";
 pub const ZAPRET_HOSTS_MANAGED_END: &str = "# --- END XKEEN ROUTE DYNAMIC HOSTS ---";
+pub const ZAPRET_COMMUNITY_MANAGED_BEGIN: &str = "# --- START COMMUNITY HOSTLIST ---";
+pub const ZAPRET_COMMUNITY_MANAGED_END: &str = "# --- END COMMUNITY HOSTLIST ---";
 
-pub fn sync_zapret_hosts_content(existing: &str, cfg: &crate::config::ZapretConfig) -> String {
-    // 1. Исключаем существующий блок авто-управления, сохраняя ручные строки пользователя
+pub fn strip_managed_blocks(text: &str) -> String {
     let mut manual_lines: Vec<String> = Vec::new();
     let mut in_managed_block = false;
+    let mut in_community_block = false;
 
-    for line in existing.lines() {
+    for line in text.lines() {
         let trimmed = line.trim();
         if trimmed == ZAPRET_HOSTS_MANAGED_BEGIN {
             in_managed_block = true;
@@ -7619,10 +7704,25 @@ pub fn sync_zapret_hosts_content(existing: &str, cfg: &crate::config::ZapretConf
             in_managed_block = false;
             continue;
         }
-        if !in_managed_block {
+        if trimmed == ZAPRET_COMMUNITY_MANAGED_BEGIN {
+            in_community_block = true;
+            continue;
+        }
+        if trimmed == ZAPRET_COMMUNITY_MANAGED_END {
+            in_community_block = false;
+            continue;
+        }
+        if !in_managed_block && !in_community_block {
             manual_lines.push(line.to_string());
         }
     }
+    manual_lines.join("\n")
+}
+
+pub fn sync_zapret_hosts_content(existing: &str, cfg: &crate::config::ZapretConfig) -> String {
+    // 1. Исключаем существующий блок авто-управления и community-блок, сохраняя ручные строки пользователя
+    let stripped = strip_managed_blocks(existing);
+    let mut manual_lines: Vec<String> = stripped.lines().map(|l| l.to_string()).collect();
 
     // 2. Список динамически управляемых доменов
     let mut dynamic_domains: Vec<String> = Vec::new();
@@ -7778,7 +7878,8 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
         .map_err(|e| format!("Не удалось создать /opt/etc/init.d: {e}"))?;
 
     // 1. S51zapret script
-    atomic_write_file("/opt/etc/init.d/S51zapret", S51ZAPRET_SCRIPT)
+    let s51_script = render_s51_zapret_script();
+    atomic_write_file("/opt/etc/init.d/S51zapret", &s51_script)
         .await
         .map_err(|e| format!("Не удалось записать /opt/etc/init.d/S51zapret: {e}"))?;
     tokio::process::Command::new("chmod")
@@ -7832,12 +7933,15 @@ pub async fn sync_zapret_files(cfg: &crate::config::ZapretConfig) -> Result<(), 
                 .filter(|l| !l.is_empty() && !l.starts_with('#'))
                 .collect();
             if !comm_domains.is_empty() {
-                synced_hosts.push_str("\n# --- START COMMUNITY HOSTLIST ---\n");
+                synced_hosts.push_str("\n");
+                synced_hosts.push_str(ZAPRET_COMMUNITY_MANAGED_BEGIN);
+                synced_hosts.push('\n');
                 for d in comm_domains {
                     synced_hosts.push_str(d);
                     synced_hosts.push('\n');
                 }
-                synced_hosts.push_str("# --- END COMMUNITY HOSTLIST ---\n");
+                synced_hosts.push_str(ZAPRET_COMMUNITY_MANAGED_END);
+                synced_hosts.push('\n');
             }
         }
     }
@@ -7936,9 +8040,9 @@ pub fn format_nfqws_proc_cmdline(raw: &[u8]) -> String {
     c
 }
 
-// ============================================================================
+// =====================================================================
 // VK-туннель (ядро csqtt)
-// ============================================================================
+// =====================================================================
 
 /// Ссылка для показа в панели без полного хеша звонка (по нему любой может зайти в звонок).
 fn mask_call_link(link: &str) -> String {
@@ -8532,12 +8636,120 @@ pub struct ZapretActionReq {
     pub hosts_content: Option<String>,
     pub feature: Option<String>,
     pub enabled: Option<bool>,
-    pub features: Option<crate::config::ZapretConfig>,
+    pub features: Option<ZapretFeatures>,
     pub domain: Option<String>,
     pub strategy_id: Option<String>,
     pub url: Option<String>,
     pub engine: Option<String>,
     pub version: Option<String>,
+}
+
+/// Поля «функций» Zapret, передаваемые из UI в `set_features` (без перезаписи устройств, движка и статистики).
+#[derive(Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct ZapretFeatures {
+    pub enabled: Option<bool>,
+    pub hybrid_youtube: Option<bool>,
+    pub hybrid_discord: Option<bool>,
+    pub discord_voice_udp: Option<bool>,
+    pub youtube_turbo: Option<bool>,
+    pub general_bypass: Option<bool>,
+    pub aggressive_dpi: Option<bool>,
+    pub isolated_proxy: Option<bool>,
+    pub bypass_github: Option<bool>,
+    pub bypass_torrents: Option<bool>,
+    pub bypass_adult: Option<bool>,
+    pub custom_entries: Option<Vec<crate::config::ZapretCustomEntry>>,
+    pub custom_args: Option<String>,
+    pub smart_tv_mode: Option<bool>,
+    pub community_hostlist_enabled: Option<bool>,
+    pub community_hostlist_url: Option<String>,
+    pub community_hostlist_auto_update: Option<bool>,
+    pub excluded_devices: Option<Vec<String>>,
+    pub engine: Option<String>,
+}
+
+/// Накладывает поля функций из запроса на текущий `ZapretConfig`, сохраняя
+/// `excluded_devices`, `custom_entries`, `engine`, метаданные community-листа и статистику.
+pub fn merge_zapret_features(
+    cur: &crate::config::ZapretConfig,
+    req: &ZapretFeatures,
+) -> crate::config::ZapretConfig {
+    let mut merged = cur.clone();
+    if let Some(v) = req.enabled {
+        merged.enabled = v;
+    }
+    if let Some(v) = req.hybrid_youtube {
+        merged.hybrid_youtube = v;
+    }
+    if let Some(v) = req.hybrid_discord {
+        merged.hybrid_discord = v;
+    }
+    if let Some(v) = req.discord_voice_udp {
+        merged.discord_voice_udp = v;
+    }
+    if let Some(v) = req.youtube_turbo {
+        merged.youtube_turbo = v;
+    }
+    if let Some(v) = req.general_bypass {
+        merged.general_bypass = v;
+    }
+    if let Some(v) = req.aggressive_dpi {
+        merged.aggressive_dpi = v;
+    }
+    if let Some(v) = req.isolated_proxy {
+        merged.isolated_proxy = v;
+    }
+    if let Some(v) = req.bypass_github {
+        merged.bypass_github = v;
+    }
+    if let Some(v) = req.bypass_torrents {
+        merged.bypass_torrents = v;
+    }
+    if let Some(v) = req.bypass_adult {
+        merged.bypass_adult = v;
+    }
+    if let Some(ref ca) = req.custom_args {
+        merged.custom_args = if !should_use_nfqws2(&merged)
+            && (ca.contains("--lua-desync") || ca.contains("multisplit"))
+        {
+            Some(convert_lua_to_legacy_desync(ca))
+        } else {
+            Some(ca.clone())
+        };
+    }
+    if let Some(v) = req.smart_tv_mode {
+        merged.smart_tv_mode = v;
+    }
+    if let Some(v) = req.community_hostlist_enabled {
+        merged.community_hostlist_enabled = v;
+    }
+    if let Some(ref u) = req.community_hostlist_url {
+        if !u.trim().is_empty() {
+            merged.community_hostlist_url = u.trim().to_string();
+        }
+    }
+    if let Some(v) = req.community_hostlist_auto_update {
+        merged.community_hostlist_auto_update = v;
+    }
+    merged
+}
+
+/// Сбрасывает только поля «функций» Zapret в значения по умолчанию,
+/// сохраняя `enabled`, `excluded_devices`, `custom_entries`, `engine`, метаданные и статистику.
+pub fn reset_zapret_features(cur: &crate::config::ZapretConfig) -> crate::config::ZapretConfig {
+    let mut reset = crate::config::ZapretConfig::default();
+    reset.enabled = cur.enabled;
+    reset.excluded_devices = cur.excluded_devices.clone();
+    reset.custom_entries = cur.custom_entries.clone();
+    reset.engine = cur.engine.clone();
+    reset.community_hostlist_last_updated = cur.community_hostlist_last_updated.clone();
+    reset.community_hostlist_count = cur.community_hostlist_count;
+    reset.last_update_check = cur.last_update_check.clone();
+    reset.update_available = cur.update_available;
+    reset.latest_version = cur.latest_version.clone();
+    reset.period_saved_bytes = cur.period_saved_bytes;
+    reset
 }
 
 /// Применение пресета конфигурации Zapret (используется и веб-панелью, и Telegram-ботом)
@@ -8738,6 +8950,27 @@ where
     tx.set_yaml(new_yaml.clone())?;
     tx.commit_and_reload().await?;
     Ok((new_cfg, new_yaml))
+}
+
+/// Сохранение zapret.conf с пересборкой правил Mihomo (apply_routing) внутри ConfigTx (баг 30).
+pub async fn apply_zapret_conf_save(
+    state: &AppState,
+    content: &str,
+) -> Result<config::AppConfig, String> {
+    let mut tx = crate::transaction::ConfigTx::begin(state).await?;
+    tx.config_mut().zapret = crate::zapret::parse_zapret_conf(content, &tx.config().zapret);
+    let new_cfg = tx.config().clone();
+
+    // Если есть config.yaml Mihomo — пересобираем правила маршрутизации
+    if let Ok(yaml) = tx.read_yaml().await {
+        if let Ok((new_yaml, _)) = crate::routing::apply_routing(&yaml, &new_cfg) {
+            tx.set_yaml(new_yaml)?;
+        }
+    }
+
+    // Сохраняем и перезагружаем ядро Mihomo атомарно
+    tx.commit_and_reload().await?;
+    Ok(new_cfg)
 }
 
 pub async fn persist_zapret_enabled_with_routing(state: &AppState, enabled: bool) -> Result<(), String> {
@@ -9212,7 +9445,7 @@ pub async fn zapret_action(
 
     // 0.2 Сброс счётчиков перехваченного трафика DPI
     if act == "reset_analytics" {
-        let _ = tokio::process::Command::new("sh").arg("-c").arg("iptables -t mangle -Z zapret 2>/dev/null || true").output().await;
+        let _ = tokio::process::Command::new("sh").arg("-c").arg("iptables -w 2 -t mangle -Z zapret 2>/dev/null || true").output().await;
         ZAPRET_LAST_IPT_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
         let _cfg_guard = state.config_lock.lock().await;
         let mut cfg = (**state.config.read().await).clone();
@@ -9300,26 +9533,31 @@ pub async fn zapret_action(
             if let Err(e) = validate_zapret_conf(&content) {
                 return api_err(format!("Ошибка валидации zapret.conf: {e}"));
             }
-            let _cfg_guard = state.config_lock.lock().await;
-            let mut cfg = (**state.config.read().await).clone();
-            let prev_zapret = cfg.zapret.clone();
             let prev_conf = tokio::fs::read_to_string("/opt/etc/zapret/zapret.conf").await.ok();
-
-            // BUG-26: Симметричный парсинг конфигурации через zapret::parse_zapret_conf (включая корректный сброс SMART_TV_MODE="0")
-            cfg.zapret = crate::zapret::parse_zapret_conf(&content, &cfg.zapret);
 
             let _ = tokio::fs::create_dir_all("/opt/etc/zapret").await;
             if let Err(e) = atomic_write_file("/opt/etc/zapret/zapret.conf", &content).await {
                 return api_err(format!("Ошибка записи zapret.conf: {e}"));
             }
 
+            // Баг 30: пересборка правил Mihomo (apply_routing) и сохранение в ConfigTx
+            let cfg = match apply_zapret_conf_save(&state, &content).await {
+                Ok(c) => c,
+                Err(e) => {
+                    if let Some(prev) = prev_conf {
+                        let _ = tokio::fs::write("/opt/etc/zapret/zapret.conf", prev).await;
+                    }
+                    return api_err(format!("Ошибка применения конфигурации Zapret: {e}"));
+                }
+            };
+
             if cfg.zapret.enabled {
                 match tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("restart").output().await {
                     Ok(out) if !out.status.success() => {
                         let err_msg = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-                        cfg.zapret = prev_zapret;
-                        if let Some(prev) = prev_conf {
+                        if let Some(ref prev) = prev_conf {
                             let _ = tokio::fs::write("/opt/etc/zapret/zapret.conf", prev).await;
+                            let _ = apply_zapret_conf_save(&state, prev).await;
                         } else {
                             let _ = sync_zapret_files(&cfg.zapret).await;
                         }
@@ -9327,17 +9565,15 @@ pub async fn zapret_action(
                         return api_err(format!("Ошибка перезапуска Zapret с новой конфигурацией:\n{}", err_msg.trim()));
                     }
                     Err(e) => {
-                        if let Some(prev) = prev_conf {
+                        if let Some(ref prev) = prev_conf {
                             let _ = tokio::fs::write("/opt/etc/zapret/zapret.conf", prev).await;
+                            let _ = apply_zapret_conf_save(&state, prev).await;
                         }
                         return api_err(format!("Ошибка вызова S51zapret restart: {e}"));
                     }
                     _ => {}
                 }
             }
-
-            let _ = config::save(&state.config_path, &cfg).await;
-            *state.config.write().await = std::sync::Arc::new(cfg.clone());
 
             let msg = if cfg.zapret.enabled {
                 "Конфигурация Zapret сохранена и служба перезапущена"
@@ -9565,17 +9801,14 @@ pub async fn zapret_action(
         let _routing_guard = state.routing_lock.lock().await;
         let mut cfg = (**state.config.read().await).clone();
         if act == "reset_features" {
-            cfg.zapret = crate::config::ZapretConfig::default();
-        } else if let Some(mut new_features) = body.features {
+            cfg.zapret = reset_zapret_features(&cfg.zapret);
+        } else if let Some(ref new_features) = body.features {
             if let Some(ref ca) = new_features.custom_args {
                 if let Err(e) = validate_custom_args(ca) {
                     return api_err(e);
                 }
-                if !should_use_nfqws2(&new_features) && (ca.contains("--lua-desync") || ca.contains("multisplit")) {
-                    new_features.custom_args = Some(convert_lua_to_legacy_desync(ca));
-                }
             }
-            cfg.zapret = new_features;
+            cfg.zapret = merge_zapret_features(&cfg.zapret, new_features);
         } else if let (Some(feat), Some(val)) = (body.feature.as_deref(), body.enabled) {
             match feat {
                 "hybrid_youtube" => cfg.zapret.hybrid_youtube = val,
@@ -10077,7 +10310,7 @@ pub async fn zapret_action(
     }
 }
 
-// ==================== ZAPRET DPI АНАЛИТИКА И АВТОПОДБОР ====================
+// ==================== ZAPRET DPI АНАЛИТИКА И АВТОПОДБОР =============
 
 static ZAPRET_LAST_IPT_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -10506,7 +10739,7 @@ pub async fn sync_community_hostlist(
     }
 }
 
-// ==================== РАЗДЕЛЕНИЕ ПО УСТРОЙСТВАМ (PER-DEVICE ZAPRET) ====================
+// ==================== РАЗДЕЛЕНИЕ ПО УСТРОЙСТВАМ (PER-DEVICE ZAPRET) =============
 
 /// GET /api/devices/zapret — список исключенных из Zapret устройств
 pub async fn get_devices_zapret(State(state): State<AppState>) -> Response {
@@ -10653,7 +10886,7 @@ pub async fn save_schedules(
     api_ok(json!({ "saved": true, "revision": new_rev }))
 }
 
-// ==================== ИГРОВОЙ РЕЖИМ (GAMING MODE) ====================
+// ==================== ИГРОВОЙ РЕЖИМ (GAMING MODE) =============
 
 fn resolve_group_leaf(proxies: &std::collections::BTreeMap<String, serde_json::Value>, start: &str) -> String {
     let mut cur = start.to_string();
@@ -10789,9 +11022,27 @@ async fn check_gaming_interception(cfg: &config::AppConfig) -> (bool, bool, bool
     }
 }
 
+/// Баг 5: ручное включение игрового режима при активном БС блокируется с понятным текстом.
+/// Выключение всегда разрешено.
+pub fn manual_gaming_enable_allowed(
+    cfg: &crate::config::AppConfig,
+    active_server: Option<&crate::mihomo::Server>,
+    enable: bool,
+) -> Result<(), String> {
+    if enable && crate::failover::gaming_enable_blocked_by_bs(cfg, active_server) {
+        Err(crate::failover::GAMING_BLOCKED_BY_BS.to_string())
+    } else {
+        Ok(())
+    }
+}
+
 async fn apply_and_verify_gaming(
     tx: &mut ConfigTx,
 ) -> Result<(), String> {
+    // Баг 5: проверяем блокировку ручного включения при активном БС
+    let active = mihomo::get_active_server(&tx.state.http, tx.config()).await.ok().flatten();
+    manual_gaming_enable_allowed(tx.config(), active.as_ref(), tx.config().gaming.enabled)?;
+
     if tx.config().gaming.enabled {
         // 1. По нажатию кнопки получаем актуальный IP устройства по MAC через Keenetic RCI
         if tx.config().gaming.mode == config::GamingMode::Compatibility || tx.config().gaming.mode == config::GamingMode::BypassRu {
@@ -10874,7 +11125,7 @@ async fn apply_and_verify_gaming(
         } else {
             tx.config().gaming.target_server.trim()
         };
-        let _ = mihomo::switch_group(&tx.state.http, tx.config(), routing::GAMING_GROUP_NAME, target_srv).await;
+        let _ = mihomo::switch_gaming_group(&tx.state.http, tx.config(), target_srv).await;
 
         // Верификация результата в ядре Mihomo
         tokio::time::sleep(std::time::Duration::from_millis(350)).await;
@@ -11174,7 +11425,7 @@ pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16
         if cfg.enabled && cfg.mode == config::GamingMode::Compatibility {
             let diag = tokio::process::Command::new("sh")
                 .arg("-c")
-                .arg("ip rule show; echo '--- table 115:'; ip route show table 115; echo '--- PREROUTING mangle:'; iptables -t mangle -S PREROUTING | grep -E 'compat|XKEEN_GAMING' || true; echo '--- PREROUTING nat:'; iptables -t nat -S PREROUTING | grep -E 'compat|XKEEN_GAMING' || true; echo '--- XKEEN_GAMING mangle:'; iptables -t mangle -S XKEEN_GAMING 2>/dev/null || true; echo '--- XKEEN_GAMING nat:'; iptables -t nat -S XKEEN_GAMING 2>/dev/null || true")
+                .arg("ip rule show; echo '--- table 115:'; ip route show table 115; echo '--- PREROUTING mangle:'; iptables -w 2 -t mangle -S PREROUTING | grep -E 'compat|XKEEN_GAMING' || true; echo '--- PREROUTING nat:'; iptables -w 2 -t nat -S PREROUTING | grep -E 'compat|XKEEN_GAMING' || true; echo '--- XKEEN_GAMING mangle:'; iptables -w 2 -t mangle -S XKEEN_GAMING 2>/dev/null || true; echo '--- XKEEN_GAMING nat:'; iptables -w 2 -t nat -S XKEEN_GAMING 2>/dev/null || true")
                 .output()
                 .await;
             if let Ok(d) = diag {
@@ -11248,26 +11499,47 @@ ip6tables -w -X XKEEN_BS6 2>/dev/null || true".to_string();
         }
     }
 
-    // Перехват по приватным подсетям (зеркалирует SRC-IP-CIDR правила БС в Mihomo)
-    for subnet in ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"] {
+    // Перехват по приватным подсетям или по списку включенных устройств (баг 38).
+    // Если режим БС включён выборочно для устройств (Devices), перехват настраивается только для них.
+    let is_devices_only = cfg.whitelist.enabled_by == config::WhitelistEnabledBy::Devices;
+    let target_subnets_or_ips: Vec<String> = if is_devices_only {
+        let mut ips = Vec::new();
+        let excluded = resolve_excluded_whitelist_ips_pub(cfg);
+        for dev in &cfg.whitelist.devices {
+            if dev.enabled && !dev.ip.trim().is_empty() {
+                let clean_ip = dev.ip.split('/').next().unwrap_or(&dev.ip).trim();
+                if let Ok(v4) = clean_ip.parse::<std::net::Ipv4Addr>() {
+                    let s = v4.to_string();
+                    if !excluded.iter().any(|ex| ex.split('/').next().unwrap_or(ex).trim() == s) && !ips.contains(&s) {
+                        ips.push(s);
+                    }
+                }
+            }
+        }
+        ips
+    } else {
+        vec!["192.168.0.0/16".to_string(), "10.0.0.0/8".to_string(), "172.16.0.0/12".to_string()]
+    };
+
+    for target in &target_subnets_or_ips {
         // NAT: DNS -> REDIRECT на активный DNS-порт (до байпаса локальных сетей)
         setup_cmds.push(format!(
-            "iptables -t nat -A XKEEN_BS -s {subnet} -p udp --dport 53 -j REDIRECT --to-ports {d_port} -w"
+            "iptables -t nat -A XKEEN_BS -s {target} -p udp --dport 53 -j REDIRECT --to-ports {d_port} -w"
         ));
         setup_cmds.push(format!(
-            "iptables -t nat -A XKEEN_BS -s {subnet} -p tcp --dport 53 -j REDIRECT --to-ports {d_port} -w"
+            "iptables -t nat -A XKEEN_BS -s {target} -p tcp --dport 53 -j REDIRECT --to-ports {d_port} -w"
         ));
         // NAT: байпас локальных подсетей (та же логика, что в игровом режиме)
         for local_dst in ["127.0.0.0/8", "169.254.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] {
-            setup_cmds.push(format!("iptables -t nat -A XKEEN_BS -s {subnet} -d {local_dst} -j RETURN -w"));
+            setup_cmds.push(format!("iptables -t nat -A XKEEN_BS -s {target} -d {local_dst} -j RETURN -w"));
         }
         // NAT: весь остальной TCP (ЛЮБЫЕ порты — включая игровые 9339) -> REDIRECT в Mihomo
         setup_cmds.push(format!(
-            "iptables -t nat -A XKEEN_BS -s {subnet} -p tcp -j REDIRECT --to-ports {r_port} -w"
+            "iptables -t nat -A XKEEN_BS -s {target} -p tcp -j REDIRECT --to-ports {r_port} -w"
         ));
         // MANGLE: DNS пропускаем (его забирает NAT REDIRECT)
         setup_cmds.push(format!(
-            "iptables -t mangle -A XKEEN_BS -s {subnet} -p udp --dport 53 -j RETURN -w"
+            "iptables -t mangle -A XKEEN_BS -s {target} -p udp --dport 53 -j RETURN -w"
         ));
         // MANGLE: байпас локальных и служебных подсетей
         for local_dst in [
@@ -11279,11 +11551,11 @@ ip6tables -w -X XKEEN_BS6 2>/dev/null || true".to_string();
             "224.0.0.0/4",
             "255.255.255.255/32",
         ] {
-            setup_cmds.push(format!("iptables -t mangle -A XKEEN_BS -s {subnet} -d {local_dst} -j RETURN -w"));
+            setup_cmds.push(format!("iptables -t mangle -A XKEEN_BS -s {target} -d {local_dst} -j RETURN -w"));
         }
         // MANGLE: весь остальной UDP (ЛЮБЫЕ порты) -> TPROXY в Mihomo
         setup_cmds.push(format!(
-            "iptables -t mangle -A XKEEN_BS -s {subnet} -p udp -j TPROXY --tproxy-mark 0x115/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1 -w"
+            "iptables -t mangle -A XKEEN_BS -s {target} -p udp -j TPROXY --tproxy-mark 0x115/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1 -w"
         ));
     }
 
@@ -11755,6 +12027,100 @@ mod settings_and_service_regression_tests {
     }
 
     #[test]
+    fn regression_bug_38c_device_toggle_does_not_intercept_whole_lan() {
+        // Баг 38:
+        // (а) Включение отдельного устройства НЕ включает перехват всей сети.
+        // Правила БС (iptables и Mihomo) действуют только на включённые устройства,
+        // пока пользователь не включил общий режим «вся сеть».
+        // (б) Выключение последнего включённого устройства выключает БС,
+        // если режим был включён именно этим путём (enabled_by == Devices / WhitelistModeChange::Disable).
+        // Общий режим «вся сеть», включённый вручную (Manual), не трогается.
+
+        let mut cfg = config::AppConfig::default();
+        cfg.whitelist.enabled = false;
+        cfg.whitelist.enabled_by = config::WhitelistEnabledBy::Manual;
+        cfg.whitelist.devices.clear();
+
+        // 1. Включение одного устройства при изначально выключенном БС:
+        let dev1 = config::WhitelistDevice {
+            mac: "AA:BB:CC:DD:EE:01".to_string(),
+            ip: "192.168.1.100".to_string(),
+            enabled: true,
+            name: Some("Phone".to_string()),
+            server: None,
+        };
+
+        let change = super::whitelist_mode_after_device_toggle(&cfg, &dev1, true);
+        assert_eq!(
+            change,
+            super::WhitelistModeChange::PerDeviceList,
+            "включение устройства при выключенном общем режиме должно переводить в PerDeviceList, а не всю сеть"
+        );
+
+        // Применяем изменение к конфигу:
+        cfg.whitelist.devices.push(dev1);
+        match change {
+            super::WhitelistModeChange::PerDeviceList => {
+                cfg.whitelist.enabled = true;
+                cfg.whitelist.enabled_by = config::WhitelistEnabledBy::Devices;
+            }
+            _ => {}
+        }
+
+        // Проверяем iptables: для PerDeviceList генерируются правила только для 192.168.1.100,
+        // а НЕ broad subnet-правила на всю подсеть 192.168.0.0/16!
+        let (cleanup, setup) = super::build_whitelist_full_tunnel_commands(&cfg, 5000, 5001, 1053);
+        assert!(!setup.is_empty(), "должен быть перехват включенного устройства");
+        assert!(
+            setup.iter().any(|c| c.contains("-s 192.168.1.100 -p tcp -j REDIRECT --to-ports 5000")),
+            "перехват TCP только для включенного устройства"
+        );
+        assert!(
+            setup.iter().any(|c| c.contains("-s 192.168.1.100 -p udp -j TPROXY")),
+            "перехват UDP только для включенного устройства"
+        );
+        assert!(
+            !setup.iter().any(|c| c.contains("-s 192.168.0.0/16 -p tcp -j REDIRECT")),
+            "при режиме по устройствам broad subnet перехват всей LAN (192.168.0.0/16) ЗАПРЕЩЁН!"
+        );
+
+        // Проверяем правила Mihomo (apply_whitelist_rules):
+        let base_yaml = "rules:\n  - MATCH,DIRECT\n";
+        let mihomo_yaml = crate::routing::apply_whitelist_rules(base_yaml, &cfg, None);
+        assert!(
+            mihomo_yaml.contains("SRC-IP-CIDR,192.168.1.100/32,🛡️ Whitelist"),
+            "устройство направляется в туннель БС"
+        );
+        assert!(
+            !mihomo_yaml.contains("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist"),
+            "в Mihomo при режиме по устройствам catch-all на всю LAN 192.168.0.0/16 отсутствует"
+        );
+
+        // 2. Выключение последнего включённого устройства, когда режим был включён через Devices:
+        let dev1_off = config::WhitelistDevice {
+            enabled: false,
+            ..cfg.whitelist.devices[0].clone()
+        };
+        let change_off = super::whitelist_mode_after_device_toggle(&cfg, &dev1_off, false);
+        assert_eq!(
+            change_off,
+            super::WhitelistModeChange::Disable,
+            "выключение последнего устройства, включённого через Devices, должно выключать БС"
+        );
+
+        // 3. Если общий режим был включён вручную (Manual), выключение устройства оставляет БС включённым:
+        let mut manual_cfg = cfg.clone();
+        manual_cfg.whitelist.enabled = true;
+        manual_cfg.whitelist.enabled_by = config::WhitelistEnabledBy::Manual;
+        let change_manual = super::whitelist_mode_after_device_toggle(&manual_cfg, &dev1_off, false);
+        assert_eq!(
+            change_manual,
+            super::WhitelistModeChange::Keep,
+            "ручной общий режим БС не должен отключаться при выключении отдельного устройства"
+        );
+    }
+
+    #[test]
     fn regression_bug_109_dpi_test_script_keeps_background_results() {
         // Баг 109: `var=$(curl …) &` присваивал результат в фоновом подшелле — после wait переменные пусты,
         // и «Проверка DPI» всегда показывала YouTube/Discord недоступными.
@@ -11944,6 +12310,57 @@ rules:
             "mihomo_secret_token",
             "merge_settings_update не должен затирать секрет Mihomo строкой '******'"
         );
+    }
+
+    #[test]
+    fn regression_bug_141b_all_masked_secrets_survive_put() {
+        let mut current = config::AppConfig::default();
+        current.notifications.telegram_bot_token = "123456789:ABCdefGHIjklMNOpqrs".into();
+        current.notifications.webhook_url = "https://discord.com/api/webhooks/123/secret_token".into();
+        current.vkturn.vk_token = Some("vk1.a.VerySecretTokenLongString".into());
+        current.vkturn.password = "csqtt_tunnel_secret".into();
+        current.adguard.password = Some("adguard_admin_password".into());
+        current.rci.password = "rci_secret_password".into();
+        current.rci.token = "rci_secret_token_12345".into();
+        current.mihomo.secret = "mihomo_secret_token".into();
+        current.antigravity.own_proxy = "http://user:pass123@10.0.0.5:8080".into();
+
+        // 1. Проверяем маскирование при отдаче настроек
+        let masked = mask_settings_for_api(&current);
+
+        // vkturn.vk_token должен маскироваться в GET
+        assert_eq!(masked["vkturn"]["vk_token"].as_str(), Some("vk1.a.***"));
+        // antigravity.own_proxy с учетными данными должен маскироваться
+        assert_eq!(masked["antigravity"]["own_proxy"].as_str(), Some("******"));
+
+        // 2. PUT с масками (как в GET) обязан восстанавливать ВСЕ поля из current
+        let merged = merge_settings_update(&current, &masked).expect("merge_settings_update with masked payload");
+        assert_eq!(merged.notifications.telegram_bot_token, current.notifications.telegram_bot_token);
+        assert_eq!(merged.notifications.webhook_url, current.notifications.webhook_url);
+        assert_eq!(merged.vkturn.vk_token, current.vkturn.vk_token);
+        assert_eq!(merged.vkturn.password, current.vkturn.password);
+        assert_eq!(merged.adguard.password, current.adguard.password);
+        assert_eq!(merged.rci.password, current.rci.password);
+        assert_eq!(merged.rci.token, current.rci.token);
+        assert_eq!(merged.mihomo.secret, current.mihomo.secret);
+        assert_eq!(merged.antigravity.own_proxy, current.antigravity.own_proxy);
+
+        // 3. PUT с альтернативными масками ([REDACTED], пустая строка там где пустая = не менять)
+        let alt_masked = serde_json::json!({
+            "vkturn": {
+                "vk_token": "[REDACTED]"
+            },
+            "adguard": {
+                "password": ""
+            },
+            "antigravity": {
+                "own_proxy": "******"
+            }
+        });
+        let merged_alt = merge_settings_update(&current, &alt_masked).expect("merge_settings_update with alt masked payload");
+        assert_eq!(merged_alt.vkturn.vk_token, current.vkturn.vk_token);
+        assert_eq!(merged_alt.adguard.password, current.adguard.password);
+        assert_eq!(merged_alt.antigravity.own_proxy, current.antigravity.own_proxy);
     }
 
     #[test]
@@ -12254,21 +12671,59 @@ pub async fn ignore_gaming_conn(
     }))
 }
 
-#[derive(Deserialize)]
-pub struct SaveGamingReq {
-    pub gaming: config::GamingConfig,
+/// Баг 6: частичное обновление настроек игрового режима накладывается на текущий конфиг.
+/// Поля `ignored_game_conns`, `gaming_suspended` через патч не меняются.
+pub fn merge_gaming_patch(
+    current: &crate::config::AppConfig,
+    patch: &serde_json::Value,
+) -> Result<crate::config::AppConfig, String> {
+    let mut updated = current.clone();
+    let raw_patch = if let Some(sub) = patch.get("gaming") {
+        sub
+    } else {
+        patch
+    };
+
+    let patch_obj = raw_patch.as_object().ok_or("Ожидается JSON-объект настроек игрового режима")?;
+    let mut base_val = serde_json::to_value(&current.gaming).map_err(|e| e.to_string())?;
+    let base_obj = base_val.as_object_mut().ok_or("internal")?;
+
+    for (k, v) in patch_obj {
+        // ignored_game_conns не меняются через патч формы
+        if k == "ignored_game_conns" {
+            continue;
+        }
+        base_obj.insert(k.clone(), v.clone());
+    }
+
+    let merged_gaming: config::GamingConfig = serde_json::from_value(base_val)
+        .map_err(|e| format!("Некорректные настройки игрового режима: {e}"))?;
+
+    // Сохраняем исходные ignored_game_conns и gaming_suspended
+    updated.gaming = merged_gaming;
+    updated.gaming.ignored_game_conns = current.gaming.ignored_game_conns.clone();
+    // gaming_suspended хранится в whitelist.gaming_suspended
+    updated.whitelist.gaming_suspended = current.whitelist.gaming_suspended;
+
+    Ok(updated)
 }
 
 /// POST /api/gaming/save — сохранение настроек игрового режима и применение маршрутов
 pub async fn save_gaming_config(
     State(state): State<AppState>,
-    Json(body): Json<SaveGamingReq>,
+    Json(body): Json<serde_json::Value>,
 ) -> Response {
     let mut tx = match ConfigTx::begin(&state).await {
         Ok(tx) => tx,
         Err(e) => return api_err(e),
     };
-    tx.config_mut().gaming = body.gaming;
+
+    let updated = match merge_gaming_patch(tx.config(), &body) {
+        Ok(u) => u,
+        Err(e) => return api_err(e),
+    };
+
+    *tx.config_mut() = updated;
 
     if let Err(e) = apply_and_verify_gaming(&mut tx).await {
         return api_err(e);
@@ -12282,7 +12737,7 @@ pub async fn save_gaming_config(
     }
 
     log_i!("Настройки игрового режима успешно сохранены и применены");
-    api_ok(json!({ "saved": true }))
+    api_ok(json!({ "saved": true, "config": tx.config().gaming }))
 }
 
 #[derive(Deserialize)]
@@ -12455,7 +12910,7 @@ pub async fn ping_gaming_targets(State(_state): State<AppState>) -> Response {
     api_ok(json!({ "results": results }))
 }
 
-// ==================== AdGuard Home API Handlers ====================
+// ==================== AdGuard Home API Handlers =============
 
 #[derive(Deserialize)]
 pub struct AdGuardQueryParams {
@@ -12777,9 +13232,9 @@ pub async fn adguard_set_config(
     }
 }
 
-// ============================================================================
+// =====================================================================
 // Whitelist Mode (Белые списки) API
-// ============================================================================
+// =====================================================================
 
 #[derive(Serialize)]
 pub struct WhitelistStatusResponse {
@@ -12796,6 +13251,7 @@ pub struct WhitelistStatusResponse {
     pub active_server: String,
     pub is_bs_server: bool,
     pub whitelist_servers: Vec<String>,
+    pub normal_servers: Vec<String>,
     pub whitelist_providers: Vec<String>,
 }
 
@@ -12822,11 +13278,11 @@ pub async fn get_whitelist(State(state): State<AppState>) -> Response {
             let is_bs = failover::is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), &cfg);
             (s.name.clone(), is_bs)
         } else {
-            let is_bs = failover::is_whitelist_server(&fallback_active, &fallback_active, &cfg);
+            let is_bs = failover::is_whitelist_server_full(&fallback_active, &fallback_active, None, &cfg);
             (fallback_active, is_bs)
         }
     } else {
-        let is_bs = failover::is_whitelist_server(&fallback_active, &fallback_active, &cfg);
+        let is_bs = failover::is_whitelist_server_full(&fallback_active, &fallback_active, None, &cfg);
         (fallback_active, is_bs)
     };
 
@@ -12844,6 +13300,7 @@ pub async fn get_whitelist(State(state): State<AppState>) -> Response {
         active_server,
         is_bs_server,
         whitelist_servers: cfg.whitelist_servers,
+        normal_servers: cfg.normal_servers,
         whitelist_providers: cfg.whitelist_providers,
     }))
 }
@@ -13007,6 +13464,9 @@ pub async fn save_whitelist(
 
     if let Some(enabled) = body.enabled {
         tx.config_mut().whitelist.enabled = enabled;
+        if enabled {
+            tx.config_mut().whitelist.enabled_by = config::WhitelistEnabledBy::Manual;
+        }
     }
     if let Some(auto_by_failover) = body.auto_by_failover {
         tx.config_mut().whitelist.auto_by_failover = auto_by_failover;
@@ -13188,6 +13648,54 @@ pub async fn sync_whitelist_runtime_after_commit(state: &AppState, cfg: &config:
     sync_full_tunnel_modes(cfg, redir_port, tproxy_port, dns_port).await;
 }
 
+/// Действие над глобальным статусом БС после переключения устройства (баг 38).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhitelistModeChange {
+    /// Переключить в режим «только указанные устройства»
+    PerDeviceList,
+    /// Полностью выключить БС (так как выключено последнее устройство, активировавшее режим)
+    Disable,
+    /// Не менять текущий статус (уже включен вручную, или остались другие устройства)
+    Keep,
+}
+
+/// Чистая функция расчета изменения режима БС при переключении устройства (баг 38).
+pub fn whitelist_mode_after_device_toggle(
+    cfg: &config::AppConfig,
+    target_dev: &config::WhitelistDevice,
+    next_enabled: bool,
+) -> WhitelistModeChange {
+    if next_enabled {
+        if !cfg.whitelist.enabled {
+            WhitelistModeChange::PerDeviceList
+        } else {
+            WhitelistModeChange::Keep
+        }
+    } else {
+        // Выключение устройства
+        if !cfg.whitelist.enabled {
+            return WhitelistModeChange::Keep;
+        }
+        if cfg.whitelist.enabled_by == config::WhitelistEnabledBy::Devices {
+            // Проверяем, останутся ли ещё активные устройства помимо target_dev
+            let has_other_enabled = cfg.whitelist.devices.iter().any(|d| {
+                let same_mac = !d.mac.is_empty() && !target_dev.mac.is_empty() && d.mac.eq_ignore_ascii_case(&target_dev.mac);
+                let same_ip = !d.ip.is_empty() && !target_dev.ip.is_empty() && d.ip == target_dev.ip;
+                let is_target = same_mac || same_ip;
+                !is_target && d.enabled
+            });
+            if !has_other_enabled {
+                WhitelistModeChange::Disable
+            } else {
+                WhitelistModeChange::Keep
+            }
+        } else {
+            // Если включен Manual или Failover — выключение устройства не трогает глобальный статус БС
+            WhitelistModeChange::Keep
+        }
+    }
+}
+
 pub async fn toggle_whitelist_device(
     State(state): State<AppState>,
     Json(body): Json<WhitelistDeviceToggleReq>,
@@ -13264,8 +13772,23 @@ pub async fn toggle_whitelist_device(
         });
     }
 
-    if body.enabled && !tx.config().whitelist.enabled {
-        tx.config_mut().whitelist.enabled = true;
+    let target_dev_probe = config::WhitelistDevice {
+        mac: mac_str.clone(),
+        ip: ip_str.clone(),
+        enabled: body.enabled,
+        name: name_opt.clone(),
+        server: None,
+    };
+    let mode_change = whitelist_mode_after_device_toggle(tx.config(), &target_dev_probe, body.enabled);
+    match mode_change {
+        WhitelistModeChange::PerDeviceList => {
+            tx.config_mut().whitelist.enabled = true;
+            tx.config_mut().whitelist.enabled_by = config::WhitelistEnabledBy::Devices;
+        }
+        WhitelistModeChange::Disable => {
+            tx.config_mut().whitelist.enabled = false;
+        }
+        WhitelistModeChange::Keep => {}
     }
 
     let raw_yaml = match tx.read_yaml().await {
@@ -13324,6 +13847,22 @@ pub async fn get_whitelist_catalog() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn production_source() -> &'static str {
+        include_str!("api.rs")
+    }
+
+    fn fn_body<'a>(src: &'a str, signature: &str) -> &'a str {
+        let needle = format!("{signature}(");
+        let start = src.find(&needle).unwrap_or_else(|| panic!("нет функции {signature}"));
+        let rest = &src[start + needle.len()..];
+        let end = rest.find("\npub async fn ")
+            .or_else(|| rest.find("\nasync fn "))
+            .or_else(|| rest.find("\npub fn "))
+            .or_else(|| rest.find("\nfn "))
+            .unwrap_or(rest.len());
+        &rest[..end]
+    }
 
     #[test]
     fn test_compute_whitelist_mode_active_consistency() {
@@ -14494,6 +15033,423 @@ mod tests {
         assert_eq!(tier_bs, 2, "Whitelist server must be Tier 2");
 
         assert_eq!(crate::failover::get_whitelist_episode_bytes(), 2048);
+    }
+
+    #[test]
+    fn regression_bug_70b_all_iptables_calls_have_wait() {
+        // Баг 70: вызовы iptables/ip6tables без -w при занятом xtables lock молча не применяются.
+        // Тест сканирует рабочий код (до #[cfg(test)]) во всех основных файлах backend/src/*.rs.
+        // Исключения с причиной:
+        // - S51ZAPRET_SCRIPT (api.rs): шаблон скрипта объявляет shell-функцию `iptables()`, которая
+        //   сама подставляет `$IPTABLES_CMD` (`iptables -w 2` если поддерживается).
+        // - `for ipt in iptables ip6tables; do` в zapret.rs: проверяется отдельно (должно использовать -w).
+        let files: &[(&str, &str)] = &[
+            ("adguard.rs", include_str!("adguard.rs")),
+            ("antigravity.rs", include_str!("antigravity.rs")),
+            ("api.rs", include_str!("api.rs")),
+            ("auth.rs", include_str!("auth.rs")),
+            ("bot.rs", include_str!("bot.rs")),
+            ("cdn_discovery.rs", include_str!("cdn_discovery.rs")),
+            ("config.rs", include_str!("config.rs")),
+            ("direct_traffic.rs", include_str!("direct_traffic.rs")),
+            ("failover.rs", include_str!("failover.rs")),
+            ("frontend.rs", include_str!("frontend.rs")),
+            ("logger.rs", include_str!("logger.rs")),
+            ("main.rs", include_str!("main.rs")),
+            ("mihomo.rs", include_str!("mihomo.rs")),
+            ("notifications.rs", include_str!("notifications.rs")),
+            ("override_sync.rs", include_str!("override_sync.rs")),
+            ("rci.rs", include_str!("rci.rs")),
+            ("routing.rs", include_str!("routing.rs")),
+            ("speedtest.rs", include_str!("speedtest.rs")),
+            ("subscription_parser.rs", include_str!("subscription_parser.rs")),
+            ("system.rs", include_str!("system.rs")),
+            ("traffic.rs", include_str!("traffic.rs")),
+            ("transaction.rs", include_str!("transaction.rs")),
+            ("updater.rs", include_str!("updater.rs")),
+            ("vkturn.rs", include_str!("vkturn.rs")),
+            ("watchdog.rs", include_str!("watchdog.rs")),
+            ("whitelist_catalog.rs", include_str!("whitelist_catalog.rs")),
+            ("zapret.rs", include_str!("zapret.rs")),
+        ];
+
+        let mut violations = Vec::new();
+        let mut inside_s51_zapret = false;
+
+        for (fname, content) in files {
+            let prod = &content[..content.find("#[cfg(test)]").unwrap_or(content.len())];
+            let lines: Vec<&str> = prod.lines().collect();
+            for (idx, line) in lines.iter().enumerate() {
+                let trimmed = line.trim();
+                if *fname == "api.rs" {
+                    if trimmed.starts_with("pub const S51ZAPRET_SCRIPT:") {
+                        inside_s51_zapret = true;
+                        continue;
+                    }
+                    if inside_s51_zapret {
+                        if trimmed == "\"#;" {
+                            inside_s51_zapret = false;
+                        }
+                        // Внутри S51ZAPRET_SCRIPT определена обёртка iptables() с -w 2
+                        continue;
+                    }
+                }
+                // Пропускаем комментарии
+                if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') || trimmed.starts_with('#') {
+                    continue;
+                }
+                // 1. Проверка Command::new("iptables") / Command::new("ip6tables")
+                if trimmed.contains("Command::new(\"iptables\")") || trimmed.contains("Command::new(\"ip6tables\")") {
+                    let end = (idx + 4).min(lines.len());
+                    let ctx = lines[idx..end].join(" ");
+                    if !ctx.contains("\"-w\"") {
+                        violations.push(format!("{}:{}: Command::new без -w: {}", fname, idx + 1, trimmed));
+                    }
+                }
+                // 2. Проверка цикла `for ipt in iptables ip6tables` без `-w`
+                if trimmed.contains("for ipt in iptables ip6tables") {
+                    violations.push(format!("{}:{}: цикл без -w: {}", fname, idx + 1, trimmed));
+                }
+                // 3. Проверка прямых shell-вызовов iptables / ip6tables с флагами (`-t`, `-A`, `-D`, `-I`, `-S`, `-L`, `-F`, `-X`, `-N`, `-C`, `-Z`)
+                let mut search_pos = 0;
+                while let Some(rel) = trimmed[search_pos..].find("iptables").or_else(|| trimmed[search_pos..].find("ip6tables")) {
+                    // Найдём ближайшее вхождение iptables или ip6tables
+                    let pos_v4 = trimmed[search_pos..].find("iptables");
+                    let pos_v6 = trimmed[search_pos..].find("ip6tables");
+                    let pos = match (pos_v4, pos_v6) {
+                        (Some(a), Some(b)) => a.min(b),
+                        (Some(a), None) => a,
+                        (None, Some(b)) => b,
+                        (None, None) => break,
+                    };
+                    let start = search_pos + pos;
+                    let word_len = if trimmed[start..].starts_with("ip6tables") { 9 } else { 8 };
+                    search_pos = start + word_len;
+
+                    // Граница слова слева
+                    if start > 0 {
+                        let prev = trimmed.as_bytes()[start - 1];
+                        if prev.is_ascii_alphanumeric() || prev == b'_' {
+                            continue;
+                        }
+                    }
+                    let after = &trimmed[start + word_len..];
+                    // Должен идти пробел, затем либо `-w`, либо `-<флаг>`
+                    if !after.starts_with(' ') {
+                        continue;
+                    }
+                    let after_space = after.trim_start();
+                    // Отсекаем тексты логов и описаний (например, "iptables для защиты", "iptables правил", "iptables (цепочка")
+                    if !after_space.starts_with('-') {
+                        continue;
+                    }
+                    // Берём команду до `;`, `|`, `&&`, `||`, `"`, `'`
+                    let cmd_end = after_space
+                        .find(|c| c == ';' || c == '|' || c == '"' || c == '\'')
+                        .unwrap_or(after_space.len());
+                    let cmd_args = &after_space[..cmd_end];
+                    // Если -w уже в начале (`-w ` или `-w2`) или в аргументах (` -w ` или ` -w` в конце)
+                    let has_w = cmd_args == "-w"
+                        || cmd_args.starts_with("-w ")
+                        || cmd_args.contains(" -w ")
+                        || cmd_args.ends_with(" -w");
+                    if !has_w {
+                        violations.push(format!("{}:{}: нет -w в вызове '{}': {}", fname, idx + 1, &trimmed[start..start + word_len + 1 + cmd_end.min(40)], trimmed));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "Найдены вызовы iptables/ip6tables без флага -w ({}):\n{}",
+            violations.len(),
+            violations.join("\n")
+        );
+    }
+
+    #[test]
+    fn regression_bug_29b_set_features_keeps_devices_and_enabled() {
+        let mut cur = crate::config::ZapretConfig::default();
+        cur.enabled = true;
+        cur.excluded_devices = vec!["192.168.1.50".to_string(), "aa:bb:cc:dd:ee:ff".to_string()];
+        cur.custom_entries = vec![crate::config::ZapretCustomEntry {
+            domain: "example.com".into(),
+            enabled: true,
+            cdns: vec!["cdn.example.com".into()],
+        }];
+        cur.engine = "v1".to_string();
+        cur.period_saved_bytes = 12345;
+        cur.last_update_check = Some("2026-11-12".to_string());
+        cur.update_available = true;
+        cur.latest_version = Some("2.4.0".to_string());
+        cur.hybrid_youtube = true;
+        cur.hybrid_discord = true;
+
+        let req = ZapretFeatures {
+            enabled: Some(false),
+            hybrid_youtube: Some(false),
+            hybrid_discord: Some(false),
+            discord_voice_udp: Some(false),
+            youtube_turbo: Some(false),
+            general_bypass: Some(false),
+            aggressive_dpi: Some(true),
+            isolated_proxy: Some(false),
+            bypass_github: Some(false),
+            bypass_torrents: Some(false),
+            bypass_adult: Some(false),
+            custom_entries: None,
+            custom_args: Some("--custom-test".into()),
+            smart_tv_mode: Some(true),
+            community_hostlist_enabled: Some(true),
+            community_hostlist_url: Some("https://example.com/hosts.txt".into()),
+            community_hostlist_auto_update: Some(true),
+            excluded_devices: None,
+            engine: None,
+        };
+
+        let merged = merge_zapret_features(&cur, &req);
+        assert_eq!(merged.excluded_devices, cur.excluded_devices);
+        assert_eq!(merged.custom_entries, cur.custom_entries);
+        assert_eq!(merged.engine, "v1");
+        assert_eq!(merged.period_saved_bytes, 12345);
+        assert_eq!(merged.last_update_check, cur.last_update_check);
+        assert_eq!(merged.update_available, cur.update_available);
+        assert_eq!(merged.latest_version, cur.latest_version);
+        assert_eq!(merged.enabled, false);
+        assert_eq!(merged.hybrid_youtube, false);
+        assert_eq!(merged.aggressive_dpi, true);
+        assert_eq!(merged.smart_tv_mode, true);
+        assert_eq!(merged.custom_args, Some("--custom-test".into()));
+
+        let reset = reset_zapret_features(&cur);
+        assert_eq!(reset.enabled, true);
+        assert_eq!(reset.excluded_devices, cur.excluded_devices);
+        assert_eq!(reset.custom_entries, cur.custom_entries);
+        assert_eq!(reset.engine, "v1");
+        assert_eq!(reset.period_saved_bytes, 12345);
+        assert_eq!(reset.aggressive_dpi, false);
+        assert_eq!(reset.custom_args, None);
+    }
+
+    #[test]
+    fn regression_bug_26b_community_hostlist_not_duplicated() {
+        let base_with_community = "# Manual user hosts\nuser-site.org\nanother-user.com\n\n# --- START COMMUNITY HOSTLIST ---\ncomm1.org\ncomm2.org\n# --- END COMMUNITY HOSTLIST ---\n";
+        let mut cfg = crate::config::ZapretConfig::default();
+        cfg.community_hostlist_enabled = false;
+
+        // When community_hostlist_enabled is false, community block should be stripped
+        let synced = sync_zapret_hosts_content(base_with_community, &cfg);
+        assert!(synced.contains("user-site.org"));
+        assert!(synced.contains("another-user.com"));
+        assert!(!synced.contains("COMMUNITY HOSTLIST"), "community block must be stripped when disabled");
+        assert!(!synced.contains("comm1.org"));
+
+        // Idempotency check: running sync twice does not duplicate anything
+        let synced_twice = sync_zapret_hosts_content(&synced, &cfg);
+        assert_eq!(synced, synced_twice);
+    }
+
+    #[tokio::test]
+    async fn regression_bug_30b_zapret_conf_save_rebuilds_routing() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { return };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 16384];
+                    let _ = sock.read(&mut buf).await;
+                    let _ = sock.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n").await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+
+        let root = std::env::temp_dir().join(format!("xkr-reg-30-{}", crate::auth::random_hex(8)));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let yaml_path = root.join("config.yaml");
+        let json_path = root.join("config.json");
+
+        let mut app_cfg = crate::config::AppConfig::default();
+        app_cfg.mihomo.port = port;
+        app_cfg.mihomo.config_path = yaml_path.display().to_string();
+        app_cfg.zapret.enabled = true;
+
+        let initial_yaml = "rules:\n  - MATCH,DIRECT\n";
+        tokio::fs::write(&yaml_path, initial_yaml).await.unwrap();
+        tokio::fs::write(&json_path, serde_json::to_string(&app_cfg).unwrap()).await.unwrap();
+
+        let cfg_arc = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(app_cfg)));
+        let ag = std::sync::Arc::new(crate::antigravity::AntigravityManager::new(cfg_arc.clone()));
+        let state = AppState {
+            config: cfg_arc,
+            config_path: std::sync::Arc::new(json_path.clone()),
+            http: reqwest::Client::new(),
+            failover_log: std::sync::Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        // Calling apply_zapret_conf_save with new zapret config content
+        let new_conf_content = "ZAPRET_ENGINE=\"v2\"\nDISCORD_VOICE_ENABLED=\"1\"\nSMART_TV_MODE=\"1\"\n";
+        let res = apply_zapret_conf_save(&state, new_conf_content).await;
+        assert!(res.is_ok(), "apply_zapret_conf_save should succeed: {:?}", res.err());
+
+        let final_cfg = state.config.read().await;
+        assert_eq!(final_cfg.zapret.engine, "v2");
+        assert_eq!(final_cfg.zapret.discord_voice_udp, true);
+        assert_eq!(final_cfg.zapret.smart_tv_mode, true);
+
+        let final_yaml = tokio::fs::read_to_string(&yaml_path).await.unwrap();
+        assert!(final_yaml.contains("rules:"), "YAML must be rebuilt and saved");
+    }
+
+    #[test]
+    fn regression_bug_5b_manual_gaming_blocked_by_bs() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist_providers = vec!["bs-sub".into()];
+        let srv = |name: &str, prov: Option<&str>| crate::mihomo::Server {
+            id: name.into(), name: name.into(), protocol: "vless".into(), host: "h".into(), port: 443,
+            is_active: true, is_priority: false, ping_ms: 0, provider: prov.map(String::from),
+            provider_name: None, is_pool: false, resolved_ip: None,
+        };
+        let bs_srv = srv("RU [БС]", None);
+        let bs_sub_srv = srv("Node 1", Some("bs-sub"));
+        let plain_srv = srv("Germany", None);
+
+        // Активный БС-узел + enable -> Err с понятным текстом
+        let err = manual_gaming_enable_allowed(&cfg, Some(&bs_srv), true);
+        assert!(err.is_err(), "активный БС-узел + enable обязан возвращать Err");
+        assert_eq!(err.unwrap_err(), crate::failover::GAMING_BLOCKED_BY_BS);
+
+        // Узел из подписки БС + enable -> Err
+        assert!(manual_gaming_enable_allowed(&cfg, Some(&bs_sub_srv), true).is_err());
+
+        // Тот же + disable -> Ok
+        assert!(manual_gaming_enable_allowed(&cfg, Some(&bs_srv), false).is_ok(), "активный БС-узел + disable обязан возвращать Ok");
+        assert!(manual_gaming_enable_allowed(&cfg, Some(&bs_sub_srv), false).is_ok());
+
+        // Обычный узел + enable -> Ok
+        assert!(manual_gaming_enable_allowed(&cfg, Some(&plain_srv), true).is_ok(), "обычный узел + enable обязан возвращать Ok");
+    }
+
+    #[test]
+    fn regression_bug_6b_gaming_patch_keeps_ignored_conns() {
+        // Баг 6: патч настроек игрового режима накладывается на текущий конфиг
+        // и не затирает ignored_game_conns, gaming_suspended и devices.
+        let mut current_cfg = crate::config::AppConfig::default();
+        current_cfg.gaming.ignored_game_conns = vec!["1.2.3.4:5678".to_string(), "game.server.com".to_string()];
+        current_cfg.whitelist.gaming_suspended = true;
+        current_cfg.gaming.devices = vec![crate::config::GamingDevice {
+            mac: "aa:bb:cc:dd:ee:ff".to_string(),
+            ip: "192.168.1.50".to_string(),
+            ipv6: vec![],
+            name: "PC".to_string(),
+            enabled: true,
+            server: None,
+        }];
+        current_cfg.gaming.smart_mode = false;
+
+        let patch = serde_json::json!({
+            "smart_mode": true
+        });
+
+        let merged = merge_gaming_patch(&current_cfg, &patch).expect("merge_gaming_patch should succeed");
+        assert!(merged.gaming.smart_mode, "smart_mode должно обновиться в true");
+        assert_eq!(
+            merged.gaming.ignored_game_conns,
+            vec!["1.2.3.4:5678".to_string(), "game.server.com".to_string()],
+            "ignored_game_conns не должны стираться через патч"
+        );
+        assert!(merged.whitelist.gaming_suspended, "gaming_suspended не должно сбрасываться через патч");
+        assert_eq!(merged.gaming.devices.len(), 1, "устройства не должны стираться через частичный патч");
+        assert_eq!(merged.gaming.devices[0].mac, "aa:bb:cc:dd:ee:ff");
+    }
+
+    #[test]
+    fn regression_bug_8b_no_global_connection_reset_on_toggle() {
+        // Баг 8: переключения в игровом режиме и при смене сервера БС рвут соединения всей сети:
+        // использовался switch_group, закрывающий все соединения LAN.
+        let gaming_body = fn_body(production_source(), "async fn apply_and_verify_gaming");
+        assert!(
+            !gaming_body.contains("mihomo::switch_group("),
+            "apply_and_verify_gaming must NOT call switch_group (global close_all_connections)"
+        );
+        assert!(
+            gaming_body.contains("switch_gaming_group("),
+            "apply_and_verify_gaming must use switch_gaming_group"
+        );
+
+        let wl_tunnel = fn_body(production_source(), "pub async fn sync_whitelist_mode_tunnel");
+        assert!(
+            !wl_tunnel.contains("mihomo::switch_group("),
+            "sync_whitelist_mode_tunnel must NOT call switch_group (global close_all_connections)"
+        );
+        assert!(
+            wl_tunnel.contains("switch_group_scoped(") || wl_tunnel.contains("switch_selector("),
+            "sync_whitelist_mode_tunnel must use switch_group_scoped or switch_selector"
+        );
+
+        let dev_routing = fn_body(production_source(), "pub async fn set_device_routing");
+        assert!(
+            !dev_routing.contains("mihomo::switch_group("),
+            "set_device_routing must NOT call switch_group (global close_all_connections)"
+        );
+        assert!(
+            dev_routing.contains("switch_group_scoped(") || dev_routing.contains("switch_selector("),
+            "set_device_routing must use switch_group_scoped or switch_selector"
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_bug_110b_xkeen_service_yaml_via_tx_and_errors_reported() {
+        let mut cfg = crate::config::AppConfig::default();
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "xkeen_110b_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let yaml_path = tmp_dir.join("config.yaml");
+        let base_yaml = "port: 7890\nsocks-port: 7891\nproxies:\n  - name: p1\n    type: direct\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [p1]\nrules:\n  - MATCH,DIRECT\n";
+        std::fs::write(&yaml_path, base_yaml).unwrap();
+        cfg.mihomo.config_path = yaml_path.to_string_lossy().to_string();
+
+        // 1. plan_xkeen_start_yaml validates and updates routing rules in yaml
+        let res = plan_xkeen_start_yaml(&cfg, base_yaml);
+        assert!(res.is_ok(), "Planning xkeen start yaml should succeed on valid yaml: {:?}", res.err());
+        let new_yaml = res.unwrap();
+        assert!(new_yaml.contains("rules:"), "Planned yaml must contain routing rules");
+
+        // 2. Planning with invalid/empty YAML produces Err
+        let err_res = plan_xkeen_start_yaml(&cfg, "");
+        assert!(err_res.is_err(), "Empty YAML must produce error");
+
+        // 3. Static check: xkeen_service must use ConfigTx to write YAML and report reload/write errors
+        let body = fn_body(production_source(), "pub async fn xkeen_service");
+        assert!(
+            body.contains("ConfigTx::begin"),
+            "xkeen_service must acquire ConfigTx to write yaml safely under config_lock + routing_lock"
+        );
+        assert!(
+            !body.contains("let _ = atomic_write_file(path, &new_yaml)"),
+            "atomic_write_file error must not be silenced with let _ in xkeen_service"
+        );
+        assert!(
+            !body.contains("let _ = mihomo::reload_config(&state.http, &cfg)"),
+            "mihomo::reload_config error must not be silenced with let _ in xkeen_service"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+
     }
 }
 

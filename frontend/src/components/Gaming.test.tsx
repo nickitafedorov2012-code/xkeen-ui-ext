@@ -602,4 +602,112 @@ describe('Gaming Component', () => {
       }),
     })
   })
+
+  it('bug 6: gaming toggle sends only changed field', async () => {
+    const baseStatus: GamingStatus = {
+      ...mockStatus,
+      config: {
+        ...mockStatus.config,
+        smart_mode: false,
+        ignored_game_conns: ['1.2.3.4:5678'],
+      },
+      recent_gaming_conns: [
+        {
+          host: 'game.example.com',
+          destination: '9.9.9.9:7777',
+          network: 'UDP',
+          last_seen: 'только что',
+          ignored: false,
+        },
+      ],
+    }
+
+    vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+      if (path === 'gaming/status') return Promise.resolve(baseStatus)
+      if (path === 'servers') return Promise.resolve({ proxies: [] })
+      if (path === 'devices') return Promise.resolve({ devices: [] })
+      return Promise.reject(new Error('not mocked'))
+    })
+
+    const postSpy = vi.spyOn(api, 'apiPost').mockImplementation((path: string) => {
+      if (path === 'gaming/ignore-conn') {
+        return Promise.resolve({
+          saved: true,
+          ignored_game_conns: ['1.2.3.4:5678', 'game.example.com'],
+          recent_gaming_conns: [
+            {
+              host: 'game.example.com',
+              destination: '9.9.9.9:7777',
+              network: 'UDP',
+              last_seen: 'только что',
+              ignored: true,
+            },
+          ],
+        })
+      }
+      if (path === 'gaming/save') {
+        return Promise.resolve({
+          saved: true,
+          config: {
+            ...baseStatus.config,
+            smart_mode: true,
+            ignored_game_conns: ['1.2.3.4:5678', 'game.example.com'],
+          },
+        })
+      }
+      return Promise.resolve({ saved: true })
+    })
+
+    await act(async () => {
+      root!.render(<Gaming notify={vi.fn()} />)
+    })
+
+    // 1. Toggle smart mode -> must send ONLY { smart_mode: true }, not full cfg snapshot
+    const smartCheckbox = container!.querySelector('input[type="checkbox"][checked]') === null
+      ? Array.from(container!.querySelectorAll('input[type="checkbox"]')).find((el) =>
+          (el.closest('label.switch') !== null)
+        ) as HTMLInputElement | undefined
+      : undefined
+    const switchInput = container!.querySelector('label.switch input[type="checkbox"]') as HTMLInputElement | null
+    expect(switchInput || smartCheckbox).toBeTruthy()
+
+    await act(async () => {
+      ;(switchInput || smartCheckbox)!.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledTimes(1)
+    const [callPath, callBody] = postSpy.mock.calls[0]
+    expect(callPath).toBe('gaming/save')
+    expect(callBody).toEqual({ smart_mode: true })
+    expect(Object.keys(callBody as Record<string, unknown>)).toEqual(['smart_mode'])
+
+    // 2. Click "Не реагировать" and then click "Сохранить и применить" -> ignored_game_conns must NOT be reverted or overwritten
+    postSpy.mockClear()
+    const ignoreBtn = Array.from(container!.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('Не реагировать')
+    )
+    expect(ignoreBtn).toBeDefined()
+    await act(async () => {
+      ignoreBtn!.click()
+    })
+    expect(postSpy).toHaveBeenCalledWith('gaming/ignore-conn', {
+      target: 'game.example.com',
+      remove: false,
+    })
+
+    postSpy.mockClear()
+    const saveBtn = Array.from(container!.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('Сохранить и применить')
+    )
+    expect(saveBtn).toBeDefined()
+    await act(async () => {
+      saveBtn!.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledTimes(1)
+    const [savePath, saveBody] = postSpy.mock.calls[0]
+    expect(savePath).toBe('gaming/save')
+    expect(saveBody).not.toHaveProperty('ignored_game_conns')
+    expect(saveBody).not.toHaveProperty('gaming_suspended')
+  })
 })

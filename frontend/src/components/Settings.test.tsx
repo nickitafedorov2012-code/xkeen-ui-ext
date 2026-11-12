@@ -258,6 +258,8 @@ describe('SwapRecommendationBanner Component', () => {
   })
 })
 
+const FAKE_BOT_TOKEN = '123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+
 describe('Settings Component — Notifications Guidance & Validation', () => {
   let container: HTMLDivElement | null = null
   let root: ReturnType<typeof createRoot> | null = null
@@ -278,8 +280,8 @@ describe('Settings Component — Notifications Guidance & Validation', () => {
           ...mockSettings,
           notifications: {
             telegram_enabled: true,
-            telegram_bot_token: '8959891087:AAHWkeSw_WL6b8k3J9tONrms-7F2NgE2Yfo',
-            telegram_chat_id: '123456789',
+            telegram_bot_token: FAKE_BOT_TOKEN,
+            telegram_chat_id: '987654321',
             webhook_url: '',
           },
         })
@@ -350,18 +352,18 @@ describe('Settings Component — Notifications Guidance & Validation', () => {
     // Find Chat ID input
     const inputs = container?.querySelectorAll('.card input.input') as NodeListOf<HTMLInputElement>
     // Search input with current chat id
-    const chatInput = Array.from(inputs).find((inp) => inp.value === '123456789')
+    const chatInput = Array.from(inputs).find((inp) => inp.value === '987654321')
     expect(chatInput).toBeDefined()
 
-    // Set Chat ID to the bot ID prefix '8959891087'
+    // Set Chat ID to the bot ID prefix '123456789'
     await act(async () => {
       const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
-      nativeInputValueSetter?.call(chatInput, '8959891087')
+      nativeInputValueSetter?.call(chatInput, '123456789')
       chatInput!.dispatchEvent(new Event('input', { bubbles: true }))
       chatInput!.dispatchEvent(new Event('change', { bubbles: true }))
     })
 
-    expect(container?.textContent).toContain('Вы указали ID самого бота (8959891087)! Бот не может писать сам себе')
+    expect(container?.textContent).toContain('Вы указали ID самого бота (123456789)! Бот не может писать сам себе')
   })
 
   it('detects when Bot Token is missing bot ID and warns user', async () => {
@@ -370,13 +372,13 @@ describe('Settings Component — Notifications Guidance & Validation', () => {
     })
 
     const inputs = container?.querySelectorAll('.card input.input') as NodeListOf<HTMLInputElement>
-    const tokenInput = Array.from(inputs).find((inp) => inp.value.includes('8959891087:'))
+    const tokenInput = Array.from(inputs).find((inp) => inp.value.includes('123456789:'))
     expect(tokenInput).toBeDefined()
 
     // Cut off bot ID (as in user screenshot 2)
     await act(async () => {
       const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
-      nativeInputValueSetter?.call(tokenInput, 'AAHWkeSw_WL6b8k3J9tONrms-7F2NgE2Yfo')
+      nativeInputValueSetter?.call(tokenInput, 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')
       tokenInput!.dispatchEvent(new Event('input', { bubbles: true }))
       tokenInput!.dispatchEvent(new Event('change', { bubbles: true }))
     })

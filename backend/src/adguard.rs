@@ -1350,8 +1350,13 @@ pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
     Ok(())
 }
 
-/// Полное и чистое удаление правил XKEEN_ADGUARD из iptables
+/// Полное и чистое удаление правил XKEEN_ADGUARD из iptables.
+/// Порт возврата туннелей (XKEEN_GAMING, XKEEN_BS) параметризован (баг 1, баг 45).
 pub fn remove_adguard_iptables() -> Result<(), String> {
+    remove_adguard_iptables_with_restore_port(None)
+}
+
+pub fn remove_adguard_iptables_with_restore_port(restore_port: Option<u16>) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         let port = detect_adguard_dns_port().unwrap_or(DEFAULT_ADGUARD_DNS_FALLBACK_PORT);
@@ -1410,8 +1415,9 @@ pub fn remove_adguard_iptables() -> Result<(), String> {
                 }
             }
         }
-        // Возвращаем XKEEN_GAMING и XKEEN_BS на порт 1053 (Mihomo) при остановке/падении AdGuard (баг 1)
-        let restore_cmd = build_sync_tunnel_dns_ports_script(&format!("{port_str}|5353|5354"), 1053);
+        // Возвращаем XKEEN_GAMING и XKEEN_BS на порт Mihomo при остановке/падении AdGuard (баг 1, баг 45)
+        let target_restore_port = restore_port.unwrap_or(crate::routing::DEFAULT_MIHOMO_DNS_PORT);
+        let restore_cmd = build_sync_tunnel_dns_ports_script(&format!("{port_str}|5353|5354"), target_restore_port);
         let _ = std::process::Command::new("sh")
             .arg("-c")
             .arg(&restore_cmd)
@@ -1427,6 +1433,7 @@ pub fn remove_adguard_iptables() -> Result<(), String> {
         let hook_path = std::path::Path::new("/opt/etc/ndm/netfilter.d/040-adguard.sh");
         let _ = std::fs::remove_file(hook_path);
     }
+    let _ = restore_port;
     Ok(())
 }
 

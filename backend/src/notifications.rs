@@ -1,6 +1,9 @@
 use serde_json::json;
 use crate::{config::NotificationsConfig, log_i, log_w};
 
+/// Общедоступная фиктивная константа токена бота для тестов и фикстур (баг A-02).
+pub const FAKE_BOT_TOKEN: &str = "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
 /// Валидация и нормализация токена Telegram бота.
 pub fn validate_telegram_bot_token(token: &str) -> Result<String, String> {
     let clean = token.trim().trim_matches(|c| c == '\'' || c == '"');
@@ -433,13 +436,14 @@ mod tests {
     fn test_validate_telegram_bot_token() {
         // Валидный токен
         assert_eq!(
-            validate_telegram_bot_token("8959891087:AAHWkeSw_WL6b8k3J9tONrms-7F2NgE2Yfo").unwrap(),
-            "8959891087:AAHWkeSw_WL6b8k3J9tONrms-7F2NgE2Yfo"
+            validate_telegram_bot_token(FAKE_BOT_TOKEN).unwrap(),
+            FAKE_BOT_TOKEN
         );
         // Токен с пробелами и кавычками
+        let quoted_token = format!("  \"{}\"  ", FAKE_BOT_TOKEN);
         assert_eq!(
-            validate_telegram_bot_token("  \"8959891087:AAHWkeSw_WL6b8k3J9tONrms-7F2NgE2Yfo\"  ").unwrap(),
-            "8959891087:AAHWkeSw_WL6b8k3J9tONrms-7F2NgE2Yfo"
+            validate_telegram_bot_token(&quoted_token).unwrap(),
+            FAKE_BOT_TOKEN
         );
         // Пустой токен
         assert!(validate_telegram_bot_token("").is_err());
@@ -447,21 +451,21 @@ mod tests {
         assert!(validate_telegram_bot_token("https://t.me/my_bot").is_err());
         assert!(validate_telegram_bot_token("@my_bot").is_err());
         // Отрезанный ID бота (как на скриншоте 2)
-        let err = validate_telegram_bot_token("AAHWkeSw_WL6b8k3J9tONrms-7F2NgE2Yfo").unwrap_err();
+        let err = validate_telegram_bot_token("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA").unwrap_err();
         assert!(err.contains("Некорректный формат токена бота"));
     }
 
     #[test]
     fn test_validate_telegram_chat_id() {
-        let token = "8959891087:AAHWkeSw_WL6b8k3J9tONrms-7F2NgE2Yfo";
+        let token = FAKE_BOT_TOKEN;
 
         // Валидный личный Chat ID
-        assert_eq!(validate_telegram_chat_id("123456789", Some(token)).unwrap(), "123456789");
+        assert_eq!(validate_telegram_chat_id("987654321", Some(token)).unwrap(), "987654321");
         // Валидный Chat ID супергруппы
         assert_eq!(validate_telegram_chat_id("-1001234567890", Some(token)).unwrap(), "-1001234567890");
 
         // Ошибка: совпадение Chat ID с ID самого бота (как на скриншотах 1 и 2)
-        let err_same_bot = validate_telegram_chat_id("8959891087", Some(token)).unwrap_err();
+        let err_same_bot = validate_telegram_chat_id("123456789", Some(token)).unwrap_err();
         assert!(err_same_bot.contains("Указан ID самого бота"));
 
         // Ошибка: буквы в Chat ID
@@ -503,7 +507,7 @@ mod tests {
     fn test_bot_token_preservation_and_fallback() {
         // Fallback-логика: если передан masked token ("******") или пустая строка,
         // должна использоваться сохранённая в конфиге строка.
-        let saved_token = "8959891087:AAHWkeSw_WL6b8k3J9tONrms-7F2NgE2Yfo";
+        let saved_token = FAKE_BOT_TOKEN;
         let body_masked = Some("******".to_string());
         let resolved = match body_masked {
             Some(ref t) if !t.trim().is_empty() && t.trim() != "******" => t.trim().to_string(),
@@ -511,12 +515,12 @@ mod tests {
         };
         assert_eq!(resolved, saved_token);
 
-        let body_custom = Some("123456789:ABC_DEF_GHI".to_string());
+        let body_custom = Some("987654321:ABC_DEF_GHI_12345678901234567890123".to_string());
         let resolved_custom = match body_custom {
             Some(ref t) if !t.trim().is_empty() && t.trim() != "******" => t.trim().to_string(),
             _ => saved_token.to_string(),
         };
-        assert_eq!(resolved_custom, "123456789:ABC_DEF_GHI");
+        assert_eq!(resolved_custom, "987654321:ABC_DEF_GHI_12345678901234567890123");
     }
 
     #[tokio::test]
@@ -579,5 +583,31 @@ mod tests {
         let held = hold.join().expect("тестовый прокси завершился");
         assert!(matches!(accepted, Ok(Ok(()))), "фоновая доставка должна подключиться к тестовому прокси");
         assert!(!held.is_empty(), "тестовый прокси должен принять хотя бы одно соединение");
+    }
+
+    #[test]
+    fn regression_bug_a02_no_real_looking_token_in_tests() {
+        assert_eq!(validate_telegram_bot_token(FAKE_BOT_TOKEN).unwrap(), FAKE_BOT_TOKEN);
+        let leak_indicator = ["89598", "91087"].concat();
+        let src_notifications = include_str!("notifications.rs");
+        let src_bot = include_str!("bot.rs");
+        let src_settings_test = include_str!("../../frontend/src/components/Settings.test.tsx");
+        let src_settings = include_str!("../../frontend/src/components/Settings.tsx");
+        assert!(
+            !src_notifications.contains(&leak_indicator),
+            "notifications.rs still contains leak indicator"
+        );
+        assert!(
+            !src_bot.contains(&leak_indicator),
+            "bot.rs still contains leak indicator"
+        );
+        assert!(
+            !src_settings_test.contains(&leak_indicator),
+            "Settings.test.tsx still contains leak indicator"
+        );
+        assert!(
+            !src_settings.contains(&leak_indicator),
+            "Settings.tsx still contains leak indicator"
+        );
     }
 }

@@ -1335,37 +1335,17 @@ pub fn sanitize_config_for_backup(raw_json: &[u8]) -> Result<Vec<u8>, String> {
         }
     }
 
-    // Маскируем notifications (токен Telegram бота и webhook url)
-    if let Some(notifications) = val.get_mut("notifications") {
-        if let Some(tok) = notifications.get_mut("telegram_bot_token") {
-            *tok = serde_json::Value::String("******".into());
-        }
-        if let Some(wh) = notifications.get_mut("webhook_url") {
-            *wh = serde_json::Value::String("******".into());
-        }
-    }
-
-    // Маскируем rci
-    if let Some(rci) = val.get_mut("rci") {
-        if let Some(p) = rci.get_mut("password") {
-            *p = serde_json::Value::String("******".into());
-        }
-        if let Some(t) = rci.get_mut("token") {
-            *t = serde_json::Value::String("******".into());
-        }
-    }
-
-    // Маскируем mihomo secret
-    if let Some(mihomo) = val.get_mut("mihomo") {
-        if let Some(s) = mihomo.get_mut("secret") {
-            *s = serde_json::Value::String("******".into());
-        }
-    }
-
-    // Маскируем adguard password
-    if let Some(adguard) = val.get_mut("adguard") {
-        if let Some(p) = adguard.get_mut("password") {
-            *p = serde_json::Value::String("******".into());
+    // Маскируем по единому перечню секретов (баг 141 и баг 61)
+    for field_path in crate::api::SECRET_FIELDS {
+        let parts: Vec<&str> = field_path.split('.').collect();
+        if parts.len() == 2 {
+            if let Some(sec) = val.get_mut(parts[0]) {
+                if let Some(target) = sec.get_mut(parts[1]) {
+                    if !target.is_null() {
+                        *target = serde_json::Value::String("******".into());
+                    }
+                }
+            }
         }
     }
 
@@ -1378,9 +1358,6 @@ pub fn sanitize_config_for_backup(raw_json: &[u8]) -> Result<Vec<u8>, String> {
 
     // Маскируем vkturn wireguard секреты
     if let Some(vkturn) = val.get_mut("vkturn") {
-        if let Some(pw) = vkturn.get_mut("password") {
-            *pw = serde_json::Value::String("******".into());
-        }
         if let Some(wg) = vkturn.get_mut("wg") {
             if let Some(pk) = wg.get_mut("private_key") {
                 *pk = serde_json::Value::String("******".into());
@@ -1791,7 +1768,7 @@ mod tests {
                 "session_secret": "session_secret_top_secret_xyz"
             },
             "notifications": {
-                "telegram_bot_token": "8959891087:AAHWkeSw_WL6b8k3J9tONrms-7F2NgE2Yfo",
+                "telegram_bot_token": crate::notifications::FAKE_BOT_TOKEN,
                 "webhook_url": "https://hooks.slack.com/services/T00/B00/secret_token_123"
             },
             "rci": {
@@ -1820,7 +1797,7 @@ mod tests {
         assert!(!sanitized_str.contains("$pbkdf2$100000$saltsalt$supersecretpasswordhash"), "хеш пароля не должен присутствовать в бэкапе");
         assert!(!sanitized_str.contains("secret_salt_123"), "соль пароля не должна присутствовать в бэкапе");
         assert!(!sanitized_str.contains("session_secret_top_secret_xyz"), "секрет сессии не должен присутствовать в бэкапе");
-        assert!(!sanitized_str.contains("8959891087:AAHWkeSw_WL6b8k3J9tONrms-7F2NgE2Yfo"), "токен бота не должен присутствовать в бэкапе");
+        assert!(!sanitized_str.contains(crate::notifications::FAKE_BOT_TOKEN), "токен бота не должен присутствовать в бэкапе");
         assert!(!sanitized_str.contains("rci_router_secret_pass"), "пароль RCI не должен присутствовать в бэкапе");
         assert!(!sanitized_str.contains("secret_sub_token_999"), "URL/токен подписок не должен присутствовать в бэкапе");
         assert!(!sanitized_str.contains("secret_vkturn_private_key_base64"), "private_key VK-туннеля не должен присутствовать в бэкапе");
@@ -1866,5 +1843,57 @@ mod tests {
         let resume = body("async fn handle_emergency_resume(");
         assert!(resume.contains("crate::api::xkeen_service"), "возобновление = штатный запуск служб");
         assert!(!resume.contains("PRE_EMERGENCY_SERVER"), "без поиска сервера по сохранённому имени");
+    }
+
+    #[test]
+    fn regression_bug_61c_backup_has_no_secrets_from_registry() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.auth.password_hash = "$pbkdf2$100000$saltsalt$fakehash61".into();
+        cfg.auth.salt = "fake_salt_61".into();
+        cfg.auth.session_secret = "fake_session_secret_61".into();
+        cfg.notifications.telegram_bot_token = "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into();
+        cfg.notifications.webhook_url = "https://example.invalid/webhook/secret_wh_61".into();
+        cfg.vkturn.vk_token = Some("vk1.a.fake_vk_token_secret_61".into());
+        cfg.vkturn.password = "fake_csqtt_password_61".into();
+        cfg.adguard.password = Some("fake_adguard_password_61".into());
+        cfg.rci.password = "fake_rci_password_61".into();
+        cfg.rci.token = "fake_rci_token_61".into();
+        cfg.mihomo.secret = "fake_mihomo_secret_61".into();
+        cfg.antigravity.own_proxy = "http://user_61:pass_61@10.0.0.5:8080".into();
+        cfg.mobile_provider_urls.insert(
+            "sub_61".into(),
+            "https://example.invalid/sub?token=fake_mobile_sub_secret_61".into(),
+        );
+
+        let raw_bytes = serde_json::to_vec(&cfg).expect("serialize AppConfig");
+        let sanitized_bytes = sanitize_config_for_backup(&raw_bytes).expect("sanitize backup");
+        let sanitized_str = String::from_utf8(sanitized_bytes).expect("utf8");
+
+        let secrets = [
+            "$pbkdf2$100000$saltsalt$fakehash61",
+            "fake_salt_61",
+            "fake_session_secret_61",
+            "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "https://example.invalid/webhook/secret_wh_61",
+            "vk1.a.fake_vk_token_secret_61",
+            "fake_csqtt_password_61",
+            "fake_adguard_password_61",
+            "fake_rci_password_61",
+            "fake_rci_token_61",
+            "fake_mihomo_secret_61",
+            "http://user_61:pass_61@10.0.0.5:8080",
+            "pass_61",
+            "fake_mobile_sub_secret_61",
+        ];
+
+        for s in secrets {
+            assert!(
+                !sanitized_str.contains(s),
+                "Секрет '{s}' не должен присутствовать в бэкапе"
+            );
+        }
+        // Проверяем, что перечень SECRET_FIELDS из api используется и доступен
+        assert!(crate::api::SECRET_FIELDS.contains(&"vkturn.vk_token"));
+        assert!(crate::api::SECRET_FIELDS.contains(&"antigravity.own_proxy"));
     }
 }

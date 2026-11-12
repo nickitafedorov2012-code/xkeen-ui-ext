@@ -45,63 +45,91 @@ export function validateEndpointData(cleanPath: string, data: any): void {
   }
 }
 
+const inflightPosts = new Map<string, Promise<unknown>>()
+
+function getInflightPostKey(cleanPath: string, options: RequestInit): string | null {
+  const method = (options.method ?? 'GET').toUpperCase()
+  if (method !== 'POST') return null
+  const body = typeof options.body === 'string' ? options.body : ''
+  return `${method}:${cleanPath}:${body}`
+}
+
 async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const cleanPath = path.replace(/^\//, '')
-  const headers = new Headers(options.headers || {})
-  if (!headers.has('X-Requested-With')) {
-    headers.set('X-Requested-With', 'XMLHttpRequest')
+  const cleanPath = path.replace(/^\/+/, '')
+  const inflightKey = getInflightPostKey(cleanPath, options)
+  if (inflightKey) {
+    const existing = inflightPosts.get(inflightKey)
+    if (existing) {
+      return existing as Promise<T>
+    }
   }
-  // FE-02: зависший бэкенд раньше означал вечный pending — добавляем таймаут 30с
-  const controller = new AbortController()
-  const abortTimer = setTimeout(() => controller.abort(), 30000)
-  try {
-    const res = await fetch(`/api/${cleanPath}`, {
-      ...options,
-      headers,
-      signal: controller.signal,
-    })
-    if (res.status === 401) {
-      window.dispatchEvent(new CustomEvent('xr:auth-required'))
+
+  const run = (async (): Promise<T> => {
+    const headers = new Headers(options.headers || {})
+    if (!headers.has('X-Requested-With')) {
+      headers.set('X-Requested-With', 'XMLHttpRequest')
     }
-    if (res.status === 204) {
-      return {} as T
-    }
-    const ct = res.headers?.get?.('content-type') || ''
-    if (ct && !ct.includes('application/json') && !ct.includes('text/json')) {
-      if (res.ok) {
-        throw new Error(`Эндпоинт /api/${cleanPath} недоступен на текущей версии бэкенда`)
-      }
-      throw new Error(`HTTP ${res.status}: ${res.statusText || 'Ошибка сервера'}`)
-    }
-    let env: ApiEnvelope<T>
+    // FE-02: зависший бэкенд раньше означал вечный pending — добавляем таймаут 30с
+    const controller = new AbortController()
+    const abortTimer = setTimeout(() => controller.abort(), 30000)
     try {
-      env = await res.json()
-    } catch {
-      if (res.ok) {
-        throw new Error(`Эндпоинт /api/${cleanPath} вернул некорректный ответ`)
+      const res = await fetch(`/api/${cleanPath}`, {
+        ...options,
+        headers,
+        signal: controller.signal,
+      })
+      if (res.status === 401) {
+        window.dispatchEvent(new CustomEvent('xr:auth-required'))
       }
-      throw new Error(`HTTP ${res.status}: ${res.statusText || 'Ошибка сервера'}`)
-    }
-    const serverError = typeof env?.error === 'string' && env.error ? env.error : undefined
-    if (res.status < 200 || res.status >= 300) {
-      throw new Error(serverError || `HTTP ${res.status}: ${res.statusText || 'Ошибка сервера'}`)
-    }
-    if (!env || env.success !== true) throw new Error(serverError || 'Ошибка API')
+      if (res.status === 204) {
+        return {} as T
+      }
+      const ct = res.headers?.get?.('content-type') || ''
+      if (ct && !ct.includes('application/json') && !ct.includes('text/json')) {
+        if (res.ok) {
+          throw new Error(`Эндпоинт /api/${cleanPath} недоступен на текущей версии бэкенда`)
+        }
+        throw new Error(`HTTP ${res.status}: ${res.statusText || 'Ошибка сервера'}`)
+      }
+      let env: ApiEnvelope<T>
+      try {
+        env = await res.json()
+      } catch {
+        if (res.ok) {
+          throw new Error(`Эндпоинт /api/${cleanPath} вернул некорректный ответ`)
+        }
+        throw new Error(`HTTP ${res.status}: ${res.statusText || 'Ошибка сервера'}`)
+      }
+      const serverError = typeof env?.error === 'string' && env.error ? env.error : undefined
+      if (res.status < 200 || res.status >= 300) {
+        throw new Error(serverError || `HTTP ${res.status}: ${res.statusText || 'Ошибка сервера'}`)
+      }
+      if (!env || env.success !== true) throw new Error(serverError || 'Ошибка API')
 
-    // UI-08: Runtime validation полезной нагрузки критических ответов
-    validateEndpointData(cleanPath, env.data)
+      // UI-08: Runtime validation полезной нагрузки критических ответов
+      validateEndpointData(cleanPath, env.data)
 
-    return env.data as T
-  } catch (err) {
-    if (controller.signal.aborted) {
-      const message = 'Роутер не ответил за 30 сек.'
-      const method = options.method?.toUpperCase() ?? 'GET'
-      throw new Error(method === 'GET' ? message : `${message} Результат запроса пока неизвестен.`)
+      return env.data as T
+    } catch (err) {
+      if (controller.signal.aborted) {
+        const message = 'Роутер не ответил за 30 сек.'
+        const method = options.method?.toUpperCase() ?? 'GET'
+        throw new Error(method === 'GET' ? message : `${message} Результат запроса пока неизвестен.`)
+      }
+      throw err
+    } finally {
+      clearTimeout(abortTimer)
+      if (inflightKey) {
+        inflightPosts.delete(inflightKey)
+      }
     }
-    throw err
-  } finally {
-    clearTimeout(abortTimer)
+  })()
+
+  if (inflightKey) {
+    inflightPosts.set(inflightKey, run)
   }
+
+  return run
 }
 
 export async function apiGet<T>(path: string): Promise<T> {
@@ -140,47 +168,29 @@ export async function runWhitelistDetectorCheck(): Promise<{ message: string }> 
 }
 
 /**
- * Локальное определение и классификация серверов и подписок белых списков
+ * Локальное определение и классификация серверов и подписок белых списков.
+ * Использует признак is_whitelist от бэкенда; не дублирует проверку тегов на фронтенде.
  */
 export function detectWhitelistServers(
-  servers: Array<{ id: string; name: string; provider?: string }>,
-  providers: Array<{ id: string; name: string }>
+  servers: Array<{ id: string; name: string; provider?: string; is_whitelist?: boolean }>,
+  providers: Array<{ id: string; name: string; is_whitelist?: boolean }>
 ): {
   detectedServerIds: string[]
   detectedProviderIds: string[]
   details: Array<{ id: string; name: string; reason: string; type: 'server' | 'provider' }>
 } {
-  const checkTag = (s: string) => {
-    const l = s.toLowerCase()
-    return (
-      l.includes('[бс]') ||
-      l.includes('(бс)') ||
-      l.includes('[бc]') ||
-      l.includes('(бc)') ||
-      l.includes('[бs]') ||
-      l.includes('(бs)') ||
-      l.includes('[bs]') ||
-      l.includes('(bs)') ||
-      l.includes('[wl]') ||
-      l.includes('(wl)') ||
-      l.includes('whitelist') ||
-      l.includes('белые списки') ||
-      l.includes('белый список')
-    )
-  }
-
   const detectedServerIds: string[] = []
   const detectedProviderIds: string[] = []
   const details: Array<{ id: string; name: string; reason: string; type: 'server' | 'provider' }> = []
 
   for (const prov of providers) {
-    if (checkTag(prov.name) || checkTag(prov.id)) {
+    if (prov.is_whitelist) {
       if (!detectedProviderIds.includes(prov.id)) {
         detectedProviderIds.push(prov.id)
         details.push({
           id: prov.id,
           name: prov.name,
-          reason: 'Тег БС в названии подписки',
+          reason: 'Подписка БС (по данным сервера)',
           type: 'provider',
         })
       }
@@ -188,13 +198,13 @@ export function detectWhitelistServers(
   }
 
   for (const srv of servers) {
-    if (checkTag(srv.name) || checkTag(srv.id)) {
+    if (srv.is_whitelist) {
       if (!detectedServerIds.includes(srv.id)) {
         detectedServerIds.push(srv.id)
         details.push({
           id: srv.id,
           name: srv.name,
-          reason: 'Тег [БС] / [WL] в имени узла',
+          reason: 'Сервер БС (по данным сервера)',
           type: 'server',
         })
       }

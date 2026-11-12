@@ -59,31 +59,199 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }
 
+export interface ParsedHostPort {
+  host: string
+  port: string | null
+  isIp: boolean
+  ipVersion: 4 | 6 | null
+}
+
+function isValidIPv4(s: string): boolean {
+  const parts = s.split('.')
+  if (parts.length !== 4) return false
+  return parts.every((p) => {
+    if (!/^\d{1,3}$/.test(p)) return false
+    const n = Number(p)
+    return n >= 0 && n <= 255
+  })
+}
+
+function isLikelyIPv6(s: string): boolean {
+  if (!s.includes(':')) return false
+  const noZone = s.split('%')[0]
+  return /^[0-9a-fA-F:]+$/.test(noZone)
+}
+
+/**
+ * Корректный разбор host[:port], включая IPv4, IPv6 [2a00::1]:443, [2a00::1], bare IPv6 2a00::1
+ */
+export function parseHostPort(rawHost: string): ParsedHostPort {
+  const trimmed = (rawHost || '').trim().toLowerCase()
+  if (!trimmed) return { host: '', port: null, isIp: false, ipVersion: null }
+
+  if (trimmed.startsWith('[')) {
+    const closeIdx = trimmed.indexOf(']')
+    if (closeIdx !== -1) {
+      const inner = trimmed.slice(1, closeIdx)
+      const rest = trimmed.slice(closeIdx + 1)
+      const port = rest.startsWith(':') && /^\d+$/.test(rest.slice(1)) ? rest.slice(1) : null
+      const isV6 = isLikelyIPv6(inner)
+      return {
+        host: inner,
+        port,
+        isIp: isV6,
+        ipVersion: isV6 ? 6 : null,
+      }
+    }
+  }
+
+  const firstColon = trimmed.indexOf(':')
+  const lastColon = trimmed.lastIndexOf(':')
+  if (firstColon !== -1 && firstColon !== lastColon) {
+    // Несколько двоеточий без скобок — голый IPv6 без порта
+    const isV6 = isLikelyIPv6(trimmed)
+    return { host: trimmed, port: null, isIp: isV6, ipVersion: isV6 ? 6 : null }
+  }
+
+  let host = trimmed
+  let port: string | null = null
+  if (lastColon !== -1) {
+    const maybePort = trimmed.slice(lastColon + 1)
+    if (/^\d+$/.test(maybePort)) {
+      host = trimmed.slice(0, lastColon)
+      port = maybePort
+    } else if (isLikelyIPv6(trimmed)) {
+      return { host: trimmed, port: null, isIp: true, ipVersion: 6 }
+    } else {
+      host = trimmed.slice(0, lastColon)
+    }
+  }
+
+  if (isValidIPv4(host)) {
+    return { host, port, isIp: true, ipVersion: 4 }
+  }
+  if (isLikelyIPv6(host)) {
+    return { host, port, isIp: true, ipVersion: 6 }
+  }
+
+  return { host, port, isIp: false, ipVersion: null }
+}
+
+const KNOWN_MULTI_PART_TLDS = new Set([
+  // UK
+  'co.uk', 'org.uk', 'me.uk', 'ac.uk', 'gov.uk', 'net.uk', 'ltd.uk', 'plc.uk', 'sch.uk',
+  // RU / CIS
+  'com.ru', 'org.ru', 'net.ru', 'msk.ru', 'spb.ru', 'gov.ru', 'edu.ru', 'pp.ru',
+  'com.ua', 'net.ua', 'org.ua', 'kiev.ua', 'kh.ua', 'dp.ua', 'od.ua', 'lviv.ua',
+  'com.by', 'gov.by', 'mil.by', 'com.kz', 'org.kz', 'edu.kz', 'gov.kz',
+  // Asia-Pacific & others
+  'com.au', 'net.au', 'org.au', 'edu.au', 'gov.au', 'asn.au', 'id.au',
+  'co.kr', 'or.kr', 'ne.kr', 're.kr', 'pe.kr', 'go.kr', 'ac.kr',
+  'com.cn', 'net.cn', 'org.cn', 'gov.cn', 'edu.cn', 'ac.cn',
+  'co.jp', 'ne.jp', 'or.jp', 'ac.jp', 'ad.jp', 'ed.jp', 'go.jp', 'gr.jp', 'lg.jp',
+  'com.br', 'net.br', 'org.br', 'gov.br', 'edu.br', 'emp.br',
+  'com.tr', 'net.tr', 'org.tr', 'gov.tr', 'edu.tr', 'bel.tr', 'web.tr',
+  'co.il', 'org.il', 'net.il', 'ac.il', 'gov.il',
+  'co.in', 'net.in', 'org.in', 'gov.in', 'ac.in', 'res.in', 'gen.in', 'firm.in', 'ind.in',
+  'co.nz', 'net.nz', 'org.nz', 'govt.nz', 'ac.nz',
+  'co.za', 'org.za', 'net.za', 'gov.za', 'ac.za',
+  'com.sg', 'org.sg', 'net.sg', 'edu.sg', 'gov.sg',
+  'com.hk', 'org.hk', 'net.hk', 'edu.hk', 'gov.hk', 'idv.hk',
+  'com.tw', 'org.tw', 'net.tw', 'edu.tw', 'gov.tw',
+  'com.mx', 'org.mx', 'net.mx', 'edu.mx', 'gob.mx',
+  'com.ar', 'org.ar', 'net.ar', 'gob.ar', 'edu.ar',
+  'com.pl', 'net.pl', 'org.pl', 'edu.pl', 'gov.pl',
+  'co.id', 'or.id', 'web.id', 'go.id', 'ac.id',
+  'co.th', 'in.th', 'ac.th', 'go.th', 'or.th', 'net.th',
+  'com.vn', 'net.vn', 'org.vn', 'edu.vn', 'gov.vn',
+  'com.my', 'net.my', 'org.my', 'edu.my', 'gov.my',
+  'com.ph', 'net.ph', 'org.ph', 'gov.ph', 'edu.ph',
+  'com.eg', 'edu.eg', 'gov.eg', 'net.eg', 'org.eg',
+  'com.sa', 'net.sa', 'org.sa', 'edu.sa', 'gov.sa',
+  'co.ae', 'net.ae', 'org.ae', 'gov.ae', 'ac.ae',
+  'com.ng', 'org.ng', 'gov.ng', 'edu.ng', 'net.ng',
+])
+
+const SHARED_HOSTING_SUFFIXES = [
+  'github.io',
+  'githubusercontent.com',
+  'gitlab.io',
+  'pages.dev',
+  'workers.dev',
+  'cloudfront.net',
+  'amazonaws.com',
+  's3.amazonaws.com',
+  'execute-api.amazonaws.com',
+  'appspot.com',
+  'web.app',
+  'firebaseapp.com',
+  'vercel.app',
+  'netlify.app',
+  'herokuapp.com',
+  'azurewebsites.net',
+  'cloudapp.azure.com',
+  'akamaihd.net',
+  'akamaized.net',
+  'fastly.net',
+  'edgekey.net',
+  'edgesuite.net',
+  'fly.dev',
+  'render.com',
+  'onrender.com',
+  'railway.app',
+  'surge.sh',
+  'glitch.me',
+  'repl.co',
+  'pythonanywhere.com',
+  'duckdns.org',
+  'no-ip.org',
+  'ddns.net',
+  'blogspot.com',
+  'wordpress.com',
+  'tumblr.com',
+  'wixsite.com',
+  'myshopify.com',
+]
+
+/**
+ * Вычисляет регистрируемый домен (или полное имя для общих хостингов).
+ * Возвращает null для IPv4/IPv6 и пустого ввода.
+ */
+export function registrableDomain(rawHost: string): string | null {
+  const { host, isIp } = parseHostPort(rawHost)
+  if (!host || isIp) return null
+
+  const normalized = host.replace(/\.+$/, '')
+  if (!normalized) return null
+
+  for (const suffix of SHARED_HOSTING_SUFFIXES) {
+    if (normalized === suffix || normalized.endsWith(`.${suffix}`)) {
+      return normalized
+    }
+  }
+
+  const parts = normalized.split('.').filter(Boolean)
+  if (parts.length <= 2) return normalized
+
+  const lastTwo = parts.slice(-2).join('.')
+  if (KNOWN_MULTI_PART_TLDS.has(lastTwo)) {
+    return parts.length >= 3 ? parts.slice(-3).join('.') : normalized
+  }
+
+  return lastTwo
+}
+
 /**
  * Очистка и извлечение корневого и полного домена из хоста соединения
  */
 export function extractCleanDomain(rawHost: string): { host: string; rootDomain: string; isIp: boolean } {
-  if (!rawHost) return { host: '', rootDomain: '', isIp: false }
-  const clean = rawHost.split(':')[0].trim().toLowerCase()
-  const isIp = /^(\d{1,3}\.){3}\d{1,3}$/.test(clean) || clean.includes(':')
+  const { host, isIp } = parseHostPort(rawHost)
+  if (!host) return { host: '', rootDomain: '', isIp: false }
   if (isIp) {
-    return { host: clean, rootDomain: clean, isIp: true }
+    return { host, rootDomain: host, isIp: true }
   }
-
-  const parts = clean.split('.')
-  if (parts.length > 2) {
-    const lastTwo = parts.slice(-2).join('.')
-    const knownTwoPartTlds = [
-      'co.uk', 'com.ru', 'org.ru', 'net.ru', 'msk.ru', 'spb.ru', 'gov.ru', 'edu.ru',
-      'com.ua', 'net.ua', 'org.ua', 'com.tr', 'co.il', 'com.br', 'co.jp'
-    ]
-    if (knownTwoPartTlds.includes(lastTwo) && parts.length > 2) {
-      return { host: clean, rootDomain: parts.slice(-3).join('.'), isIp: false }
-    }
-    return { host: clean, rootDomain: parts.slice(-2).join('.'), isIp: false }
-  }
-
-  return { host: clean, rootDomain: clean, isIp: false }
+  const rootDomain = registrableDomain(host) || host
+  return { host, rootDomain, isIp: false }
 }
 
 export function detectAppFromConn(c: ConnectionItem): { name: string; icon: string; category: string } {
@@ -359,9 +527,13 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
 
   // 1-клик отправка домена соединения в обход (Direct)
   const handleOneClickDirect = async (c: ConnectionItem) => {
-    const host = c.metadata.host || c.metadata.destinationIP || ''
-    const { host: cleanHost, rootDomain } = extractCleanDomain(host)
-    const domain = rootDomain || cleanHost
+    const rawHost = c.metadata.host || c.metadata.destinationIP || ''
+    const { host: cleanHost, isIp } = parseHostPort(rawHost)
+    if (!cleanHost || isIp) {
+      notify('Направление в обход в 1 клик доступно только для доменных имен', true)
+      return
+    }
+    const domain = registrableDomain(cleanHost) || cleanHost
     if (!domain) return
     try {
       const domRes = await apiGet<{ direct: string[]; force: string[] }>('domains')
@@ -837,7 +1009,8 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
                                       fontSize: 10,
                                       fontWeight: 600,
                                     }}
-                                    title="Направить напрямую (Direct)"
+                                    disabled={parseHostPort(host).isIp}
+                                    title={parseHostPort(host).isIp ? 'Недоступно для IP-адреса без доменного имени' : 'Направить напрямую (Direct)'}
                                     onClick={() => handleOneClickDirect(c)}
                                   >
                                     ⚡ Обход
@@ -1000,7 +1173,8 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
                                   fontSize: 11,
                                   fontWeight: 600,
                                 }}
-                                title="Направить домен в обход прокси (Direct)"
+                                disabled={parseHostPort(host).isIp}
+                                title={parseHostPort(host).isIp ? 'Недоступно для IP-адреса без доменного имени' : 'Направить домен в обход прокси (Direct)'}
                                 onClick={() => handleOneClickDirect(c)}
                               >
                                 ⚡ В обход

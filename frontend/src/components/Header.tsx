@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import { apiGet, apiPost } from '../api'
 import type { StatusInfo, SystemStats } from '../types'
+import { useUpdateCheck } from '../hooks/useUpdateCheck'
+import { isUpdateAvailable } from '../utils/version'
 
 export function is5AmCheckDue(lastCheckMs: number, nowMs?: number): boolean {
   const now = nowMs !== undefined ? new Date(nowMs) : new Date()
@@ -178,29 +180,14 @@ export default function Header({
     }
   }, [])
 
-  // Периодическая проверка наличия новой версии (при старте и раз в 60 сек)
+  // Панель XKeen Route: используем общий поллер обновлений
+  const { updateInfo: appUpdateInfo } = useUpdateCheck()
   useEffect(() => {
-    let active = true
-    const checkUpdate = async () => {
-      if (document.hidden) return
-      try {
-        const res = await apiGet<{ current: string; latest: string; update_available: boolean }>('update/check')
-        if (active && res) {
-          setUpdateAvailable(Boolean(res.update_available))
-          setLatestVersion(res.latest || '')
-        }
-      } catch {
-        /* игнорируем ошибку сети */
-      }
+    if (appUpdateInfo) {
+      setUpdateAvailable(Boolean(appUpdateInfo.update_available))
+      setLatestVersion(appUpdateInfo.latest || '')
     }
-
-    checkUpdate()
-    const timer = setInterval(checkUpdate, 60_000)
-    return () => {
-      active = false
-      clearInterval(timer)
-    }
-  }, [])
+  }, [appUpdateInfo])
 
   // Периодическая проверка обновления ядра Mihomo
   const [mihomoUpdateAvailable, setMihomoUpdateAvailable] = useState(false)
@@ -215,7 +202,7 @@ export default function Header({
         if (active && res) {
           const cur = res.current_version || ''
           const lat = res.latest_version || ''
-          const hasUpd = Boolean(lat && cur && lat !== cur && !cur.includes(lat))
+          const hasUpd = isUpdateAvailable(cur, lat)
           setMihomoUpdateAvailable(hasUpd)
           setMihomoLatestVersion(lat)
         }

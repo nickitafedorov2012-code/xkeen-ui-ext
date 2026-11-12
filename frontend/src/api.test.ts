@@ -349,4 +349,63 @@ describe('VK-turn API endpoints', () => {
 
     fetchSpy.mockRestore()
   })
+
+  it('bug 99: server list uses backend is_whitelist flag', async () => {
+    // Баг 99: фронтенд использует признак is_whitelist от бэкенда в списках серверов
+    // и не дублирует checkTag
+    const api = await import('./api')
+    expect('checkTag' in api).toBe(false)
+  })
+})
+
+describe('regression bug 101', () => {
+  it('bug 101: identical in-flight POST is not sent twice', async () => {
+    let resolveFetch!: (value: Response) => void
+    let fetchCalls = 0
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() => {
+      fetchCalls += 1
+      return new Promise<Response>((resolve) => {
+        resolveFetch = resolve
+      })
+    })
+
+    const p1 = apiPost<{ ok: boolean }>('zapret/action', { action: 'start' })
+    const p2 = apiPost<{ ok: boolean }>('zapret/action', { action: 'start' })
+    expect(fetchCalls).toBe(1)
+
+    resolveFetch(
+      new Response(JSON.stringify({ success: true, data: { ok: true } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    )
+
+    const [r1, r2] = await Promise.all([p1, p2])
+    expect(r1).toEqual({ ok: true })
+    expect(r2).toEqual({ ok: true })
+
+    // После завершения следующий вызов снова разрешён
+    const p3 = apiPost<{ ok: boolean }>('zapret/action', { action: 'start' })
+    expect(fetchCalls).toBe(2)
+    resolveFetch(
+      new Response(JSON.stringify({ success: true, data: { ok: true } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    )
+    expect(await p3).toEqual({ ok: true })
+
+    // После ошибки / таймаута следующий вызов также снова разрешён
+    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new Error('network error'))
+    await expect(apiPost('zapret/action', { action: 'start' })).rejects.toThrow('network error')
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true, data: { ok: true } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    )
+    await expect(apiPost<{ ok: boolean }>('zapret/action', { action: 'start' })).resolves.toEqual({ ok: true })
+    vi.restoreAllMocks()
+  })
 })

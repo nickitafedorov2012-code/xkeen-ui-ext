@@ -1607,14 +1607,28 @@ pub fn is_whitelist_server_full(
     provider: Option<&str>,
     cfg: &crate::config::AppConfig,
 ) -> bool {
-    // 1. Приоритет прямого назначения серверов пользователем
+    // 1. normal_servers перекрывает теги и подписки (баг 99.1, 99.2)
+    if (!node_id.is_empty() && cfg.normal_servers.iter().any(|s| s == node_id))
+        || (!node_name.is_empty() && cfg.normal_servers.iter().any(|s| s == node_name))
+    {
+        return false;
+    }
+    // 2. Приоритет прямого назначения серверов пользователем
     if !node_id.is_empty() && cfg.whitelist_servers.iter().any(|s| s == node_id) {
         return true;
     }
-    // 2. Приоритет явных тегов белых списков в названии или ID ноды
+    // 3. Подписка в whitelist_providers считается БС (баг 42.1)
+    // Сервер считается БС, кроме случая, когда сервер находится в normal_servers (проверено выше)
+    if let Some(p) = provider {
+        if !p.is_empty() && cfg.whitelist_providers.iter().any(|wp| wp.eq_ignore_ascii_case(p)) {
+            return true;
+        }
+    }
+    // 4. Приоритет явных тегов белых списков в названии или ID ноды
+    // Подстрока whitelist как слово тега не используется без границ ([BS], БС, whitelist как отдельное слово)
     let check_tag = |s: &str| -> bool {
         let lower = s.to_lowercase();
-        lower.contains("[бс]")
+        if lower.contains("[бс]")
             || lower.contains("(бс)")
             || lower.contains("[бc]")
             || lower.contains("(бc)")
@@ -1624,22 +1638,22 @@ pub fn is_whitelist_server_full(
             || lower.contains("(bs)")
             || lower.contains("[wl]")
             || lower.contains("(wl)")
-            || lower.contains("whitelist")
             || lower.contains("белые списки")
             || lower.contains("белый список")
+        {
+            return true;
+        }
+        // Слово whitelist с границами слов (не внутри другого слова)
+        let words = lower.split(|c: char| !c.is_alphanumeric());
+        for w in words {
+            if w == "whitelist" || w == "wl" || w == "бс" || w == "bs" {
+                return true;
+            }
+        }
+        false
     };
     if check_tag(node_name) || (!node_id.is_empty() && check_tag(node_id)) {
         return true;
-    }
-    // 3. Подписка в whitelist_providers считается БС:
-    // Если сервер явно указан в whitelist_servers — он БС.
-    // Если провайдер в whitelist_providers:
-    // Сервер считается БС, кроме случая, когда в этой же подписке пользователь явно пометил другие серверы,
-    // а этот оставил обычным (без тегов и не в whitelist_servers).
-    if let Some(p) = provider {
-        if !p.is_empty() && cfg.whitelist_providers.iter().any(|wp| wp.eq_ignore_ascii_case(p)) {
-            return true;
-        }
     }
     false
 }
@@ -1721,6 +1735,7 @@ pub fn apply_whitelist_transition_flags(cfg: &mut crate::config::AppConfig, is_b
     if is_bs {
         if !cfg.whitelist.enabled {
             cfg.whitelist.enabled = true;
+            cfg.whitelist.enabled_by = crate::config::WhitelistEnabledBy::Failover;
             changed = true;
         }
         if cfg.gaming.enabled {
@@ -1730,7 +1745,9 @@ pub fn apply_whitelist_transition_flags(cfg: &mut crate::config::AppConfig, is_b
             gaming_log = " (Игровой режим приостановлен во избежание конфликтов сокетов)".to_string();
         }
     } else {
-        if cfg.whitelist.enabled {
+        // Баг 107: failover выключает БС только если он был включён самим failover (Failover).
+        // Если пользователь включил БС вручную (Manual), failover не должен сбрасывать режим.
+        if cfg.whitelist.enabled && cfg.whitelist.enabled_by == crate::config::WhitelistEnabledBy::Failover {
             cfg.whitelist.enabled = false;
             changed = true;
         }
@@ -8059,6 +8076,46 @@ proxies:
         assert!(best_ping_should_continue_to_restore(true, true, false, false), "автовозврат по цепочке приоритетов");
         assert!(!best_ping_should_continue_to_restore(true, false, false, false), "цепочка пуста/устарела — возвращаться некуда");
         assert!(!best_ping_should_continue_to_restore(false, false, true, false), "на обычном VPS умному возврату нечего делать");
+    }
+
+    #[test]
+    fn regression_bug_107b_failover_keeps_manual_whitelist() {
+        let mut manual_cfg = crate::config::AppConfig::default();
+        manual_cfg.whitelist.enabled = true;
+        manual_cfg.whitelist.enabled_by = crate::config::WhitelistEnabledBy::Manual;
+        let (changed, _) = apply_whitelist_transition_flags(&mut manual_cfg, false);
+        assert!(manual_cfg.whitelist.enabled, "ручной БС должен оставаться включённым при переходе на обычный узел");
+        assert!(!changed, "при ручном БС переход на обычный узел не должен менять флаги");
+
+        let mut auto_cfg = crate::config::AppConfig::default();
+        auto_cfg.whitelist.enabled = false;
+        let (changed_on, _) = apply_whitelist_transition_flags(&mut auto_cfg, true);
+        assert!(changed_on);
+        assert!(auto_cfg.whitelist.enabled);
+        assert_eq!(auto_cfg.whitelist.enabled_by, crate::config::WhitelistEnabledBy::Failover);
+
+        let (changed_off, _) = apply_whitelist_transition_flags(&mut auto_cfg, false);
+        assert!(changed_off);
+        assert!(!auto_cfg.whitelist.enabled, "БС, включённый failover, должен выключаться на обычном узле");
+
+        let old_json = r#"{ "whitelist": { "enabled": true } }"#;
+        let parsed: crate::config::AppConfig = serde_json::from_str(old_json).expect("old config without enabled_by must deserialize");
+        assert!(parsed.whitelist.enabled);
+        assert_eq!(parsed.whitelist.enabled_by, crate::config::WhitelistEnabledBy::Manual);
+    }
+
+    #[test]
+    fn regression_bug_99b_normal_servers_override_tag() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.normal_servers = vec!["tag_override_id".into()];
+        assert!(
+            !is_whitelist_server_full("Node [БС] Moscow", "tag_override_id", None, &cfg),
+            "normal_servers must override [БС] tag"
+        );
+        assert!(
+            is_whitelist_server_full("Node [БС] Moscow", "other_id", None, &cfg),
+            "node with [БС] tag not in normal_servers must be recognized"
+        );
     }
 }
 

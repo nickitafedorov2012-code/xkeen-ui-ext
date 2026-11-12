@@ -423,5 +423,206 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
     expect(card?.textContent).toContain('Загрузка раздела…')
     expect(card?.style.minHeight).toBe('340px')
   })
+
+  it.each([
+    ['#bs', 'whitelist'],
+    ['#whitelists', 'whitelist'],
+    ['#whitelist', 'whitelist'],
+    ['#antigravity', 'google-ai'],
+    ['#xbox-dns', 'gaming'],
+    ['#diagnostics', 'diagnostics'],
+    ['#unknown-hash-garbage', null],
+    ['', null],
+  ] as const)('bug 47: tabFromHash(%s) -> %s', async (hash, expected) => {
+    // @ts-ignore - tabFromHash does not exist yet before implementation
+    const { tabFromHash } = await import('./utils/tabHash')
+    expect(tabFromHash(hash)).toBe(expected)
+  })
+
+  it('bug 47: hash aliases work for popstate and initial load', async () => {
+    // @ts-ignore - tabFromHash does not exist yet before implementation
+    const { tabFromHash } = await import('./utils/tabHash')
+    expect(tabFromHash('#bs')).toBe('whitelist')
+    expect(tabFromHash('#whitelists')).toBe('whitelist')
+    expect(tabFromHash('#whitelist')).toBe('whitelist')
+    expect(tabFromHash('#antigravity')).toBe('google-ai')
+    expect(tabFromHash('#xbox-dns')).toBe('gaming')
+    expect(tabFromHash('#diagnostics')).toBe('diagnostics')
+    expect(tabFromHash('#unknown-hash-garbage')).toBeNull()
+
+    // Initial load with #bs
+    window.location.hash = '#bs'
+    await act(async () => {
+      root!.render(<App />)
+    })
+    expect(container?.querySelector('[data-testid=\"whitelist-view\"]')).not.toBeNull()
+
+    // Switch to #dashboard first
+    await act(async () => {
+      window.location.hash = '#dashboard'
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    })
+    expect(container?.querySelector('[data-testid=\"dashboard-view\"]')).not.toBeNull()
+
+    // Test #bs alias via hashchange
+    await act(async () => {
+      window.location.hash = '#bs'
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    })
+    expect(container?.querySelector('[data-testid=\"whitelist-view\"]')).not.toBeNull()
+
+    // Switch back to #dashboard
+    await act(async () => {
+      window.location.hash = '#dashboard'
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    expect(container?.querySelector('[data-testid=\"dashboard-view\"]')).not.toBeNull()
+
+    // Test #whitelists alias via popstate
+    await act(async () => {
+      window.location.hash = '#whitelists'
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    expect(container?.querySelector('[data-testid=\"whitelist-view\"]')).not.toBeNull()
+
+    // Test #diagnostics alias via popstate
+    await act(async () => {
+      window.location.hash = '#diagnostics'
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    expect(container?.querySelector('[data-testid=\"diagnostics-view\"]')).not.toBeNull()
+  })
+
+  it('bug 139: refresh requested during in-flight poll runs afterwards', async () => {
+    vi.useFakeTimers()
+    let statusCallCount = 0
+    let resolveFirstStatus: ((val: unknown) => void) | null = null
+    let resolveSecondStatus: ((val: unknown) => void) | null = null
+
+    try {
+      vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+        if (path === 'status') {
+          statusCallCount++
+          if (statusCallCount === 1) {
+            return new Promise((resolve) => {
+              resolveFirstStatus = resolve
+            })
+          }
+          if (statusCallCount === 2) {
+            return new Promise((resolve) => {
+              resolveSecondStatus = resolve
+            })
+          }
+          return Promise.resolve({
+            version: 'v1.5.19',
+            refresh_interval_sec: 60,
+          })
+        }
+        if (path === 'auth/status') {
+          return Promise.resolve({ enabled: false, authenticated: true })
+        }
+        if (path === 'update/check') {
+          return Promise.resolve({ current: 'v1.5.19', latest: 'v1.5.19', update_available: false })
+        }
+        if (path === 'mihomo/releases') {
+          return Promise.resolve({ current: 'v1.19.0', latest: 'v1.19.0', update_available: false })
+        }
+        if (path === 'zapret/update/check') {
+          return Promise.resolve({
+            current_engine: 'v2',
+            current_version: '1.0.5.2',
+            latest_version: '1.0.5.2',
+            update_available: false,
+          })
+        }
+        return Promise.resolve({})
+      })
+
+      await act(async () => {
+        root!.render(<App />)
+      })
+
+      // Initial poll is in-flight
+      expect(statusCallCount).toBe(1)
+
+      // Dispatch xr:refresh-status while the first poll is still in-flight
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent('xr:refresh-status'))
+      })
+      // Should not start a second concurrent request while first is in-flight
+      expect(statusCallCount).toBe(1)
+
+      // Complete the first in-flight request
+      await act(async () => {
+        resolveFirstStatus!({
+          version: 'v1.5.19',
+          refresh_interval_sec: 60,
+          active_server: 'old-server',
+        })
+      })
+
+      // Exactly one follow-up poll must have started immediately after the first finished
+      expect(statusCallCount).toBe(2)
+
+      // Complete the follow-up request and verify no extra third request runs without another event
+      await act(async () => {
+        resolveSecondStatus!({
+          version: 'v1.5.19',
+          refresh_interval_sec: 60,
+          active_server: 'new-server',
+        })
+      })
+      expect(statusCallCount).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('bug 139: xr:refresh-status runs even when document.hidden is true while timer tick is skipped', async () => {
+    vi.useFakeTimers()
+    let statusCallCount = 0
+    const hiddenSpy = vi.spyOn(document, 'hidden', 'get')
+
+    try {
+      hiddenSpy.mockReturnValue(false)
+      vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
+        if (path === 'status') {
+          statusCallCount++
+          return Promise.resolve({
+            version: 'v1.5.19',
+            refresh_interval_sec: 60,
+          })
+        }
+        if (path === 'auth/status') {
+          return Promise.resolve({ enabled: false, authenticated: true })
+        }
+        return Promise.resolve({})
+      })
+
+      await act(async () => {
+        root!.render(<App />)
+      })
+      // Initial render calls refresh() (plus effect re-run when status.refresh_interval_sec updates from undefined->60).
+      // Reset counter after initial mount settles, then test hidden timer tick vs explicit xr:refresh-status.
+      const countBeforeHide = statusCallCount
+      expect(countBeforeHide).toBeGreaterThanOrEqual(1)
+
+      // Hide tab: timer tick must be skipped
+      hiddenSpy.mockReturnValue(true)
+      await act(async () => {
+        vi.advanceTimersByTime(60000)
+      })
+      expect(statusCallCount).toBe(countBeforeHide)
+
+      // Explicit xr:refresh-status event must NOT be skipped even when document.hidden is true
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent('xr:refresh-status'))
+      })
+      expect(statusCallCount).toBe(countBeforeHide + 1)
+    } finally {
+      hiddenSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
 })
 

@@ -413,7 +413,8 @@ export default function Gaming({ notify }: GamingProps) {
         custom_domains: uniqueDomains,
       }
 
-      await apiPost('gaming/save', { gaming: newCfg })
+      const { ignored_game_conns, ...patchFields } = newCfg
+      await apiPost('gaming/save', { gaming: patchFields })
       setCfg(newCfg)
       notify('✓ Настройки игрового режима успешно сохранены и применены')
       await loadData()
@@ -446,6 +447,9 @@ export default function Gaming({ notify }: GamingProps) {
         { target, remove: currentlyIgnored }
       )
       notify(currentlyIgnored ? `✓ Хост '${target}' удален из игнор-листа` : `✓ Хост '${target}' добавлен в игнор-лист`)
+      if (res?.ignored_game_conns) {
+        setCfg((prev: GamingConfig) => ({ ...prev, ignored_game_conns: res.ignored_game_conns }))
+      }
       if (res?.recent_gaming_conns) {
         setStatus((prev) => (prev ? { ...prev, recent_gaming_conns: res.recent_gaming_conns } : prev))
       } else {
@@ -457,10 +461,9 @@ export default function Gaming({ notify }: GamingProps) {
   }
 
   const handleToggleSmartMode = async (enabled: boolean) => {
-    const updated = { ...cfg, smart_mode: enabled }
-    setCfg(updated)
+    setCfg((prev: GamingConfig) => ({ ...prev, smart_mode: enabled }))
     try {
-      await apiPost('gaming/save', { gaming: updated })
+      await apiPost('gaming/save', { smart_mode: enabled })
       notify(enabled ? '✓ Умный игровой режим включен' : 'Умный игровой режим выключен')
     } catch (e: any) {
       notify(e.message || 'Ошибка сохранения настроек', true)

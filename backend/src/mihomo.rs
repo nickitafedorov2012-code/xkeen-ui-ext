@@ -259,6 +259,58 @@ pub fn gaming_device_ips(gaming: &crate::config::GamingConfig) -> Vec<String> {
 
 /// Переключение группы 🎮 Gaming (баг 8): сбрасываются только соединения игровых устройств, чтобы они
 /// пошли по новым правилам; остальная LAN (звонки, загрузки, DIRECT) не затрагивается.
+
+/// Баг 54: id соединений, направленных к доменам Google Flow/AI (по metadata.host или rulePayload).
+pub fn connection_ids_matching_flow(val: &Value) -> Vec<String> {
+    let Some(conns) = val.get("connections").and_then(|c| c.as_array()) else {
+        return Vec::new();
+    };
+    conns
+        .iter()
+        .filter(|c| {
+            let host = c.get("metadata").and_then(|m| m.get("host")).and_then(|s| s.as_str()).unwrap_or("").trim();
+            let rule_payload = c.get("rulePayload").and_then(|s| s.as_str()).unwrap_or("").trim();
+            let is_flow_domain = |d: &str| {
+                if d.is_empty() {
+                    return false;
+                }
+                let dl = d.to_lowercase();
+                crate::routing::FLOW_DOMAINS.iter().any(|g| {
+                    let gl = g.to_lowercase();
+                    dl == gl || dl.ends_with(&format!(".{gl}"))
+                })
+            };
+            is_flow_domain(host) || is_flow_domain(rule_payload)
+        })
+        .filter_map(|c| c.get("id").and_then(|i| i.as_str()).map(String::from))
+        .collect()
+}
+
+/// Баг 54: точечный сброс соединений только для доменов Google Flow.
+/// В отличие от close_all_connections, не рвёт соединения всей LAN (банки, Госуслуги, ТВ, SIP, загрузки).
+pub async fn close_flow_connections(http: &reqwest::Client, cfg: &AppConfig) -> usize {
+    let Ok(val) = m_get(http, cfg, "/connections").await else {
+        return 0;
+    };
+    let ids_to_close = connection_ids_matching_flow(&val);
+    drop(val);
+
+    let count = ids_to_close.len();
+    if count == 0 {
+        return 0;
+    }
+
+    crate::log_i!("Селективный сброс сокетов Flow: закрытие {count} соединений для доменов Google AI");
+
+    stream::iter(ids_to_close)
+        .for_each_concurrent(10, |cid| async move {
+            let _ = m_delete(http, cfg, &format!("/connections/{cid}"), 2).await;
+        })
+        .await;
+
+    count
+}
+
 pub async fn switch_gaming_group(http: &reqwest::Client, cfg: &AppConfig, server: &str) -> Result<(), String> {
     switch_selector(http, cfg, crate::routing::GAMING_GROUP_NAME, server).await?;
     let ips = gaming_device_ips(&cfg.gaming);
@@ -1304,8 +1356,7 @@ pub fn select_groups_to_switch(proxies: &BTreeMap<String, Value>, prev_active: &
         let lower_g = name.to_lowercase();
         if name == "Fastest"
             || name == "Fallback"
-            || lower_g.contains("google ai")
-            || lower_g.contains("flow")
+            || crate::routing::is_flow_group_name(name)
             || lower_g.contains("gaming")
             || lower_g.contains("гейминг")
             || name.contains("🎮")
@@ -1424,8 +1475,8 @@ pub async fn get_flow_status(http: &reqwest::Client, cfg: &AppConfig) -> Result<
     let mut active_server = String::new();
     let mut group_found: Option<String> = None;
 
-    for gname in ["Google AI", "Google-AI", "GoogleFlow", "Flow", "AI"] {
-        if let Some(p) = proxies.get(gname) {
+    for (gname, p) in &proxies {
+        if crate::routing::is_flow_group_name(gname) {
             group_found = Some(gname.to_string());
             if let Some(now) = p.get("now").and_then(|n| n.as_str()) {
                 if !now.is_empty() {
@@ -1465,44 +1516,38 @@ pub async fn switch_flow_server(state: &AppState, server_id: &str) -> Result<Str
     let cfg = state.config.read().await.clone();
     let proxies = get_proxies(&state.http, &cfg).await.unwrap_or_default();
 
-    let mut flow_group: Option<String> = None;
-    for gname in ["Google AI", "Google-AI", "GoogleFlow", "Flow", "AI"] {
-        if proxies.contains_key(gname) {
-            flow_group = Some(gname.to_string());
-            break;
-        }
+    // Проверяем наличие группы Google Flow ДО любой записи в конфиг (баг A-10).
+    // Если группы Flow нет, нельзя писать сырое имя ноды в правила Mihomo.
+    let group_names: Vec<String> = proxies.keys().cloned().collect();
+    let flow_plan = crate::routing::plan_switch_flow_server(&group_names, target)?;
+    let flow_group = flow_plan.group_name;
+
+    let member = proxies
+        .get(&flow_group)
+        .and_then(|p| p.get("all"))
+        .and_then(|a| a.as_array())
+        .map(|members| members.iter().any(|m| m.as_str() == Some(target)));
+
+    if member == Some(true) {
+        m_put(&state.http, &cfg, &format!("/proxies/{}", urlencoding_lite(&flow_group)), json!({ "name": target }), 3).await?;
+        invalidate_proxies_cache();
+        let _ = close_flow_connections(&state.http, &cfg).await;
+        return Ok(format!("Выделенный маршрут Google Flow & AI переключен на '{target}'"));
     }
 
-    if let Some(ref g) = flow_group {
-        let member = proxies
-            .get(g)
-            .and_then(|p| p.get("all"))
-            .and_then(|a| a.as_array())
-            .map(|members| members.iter().any(|m| m.as_str() == Some(target)));
-
-        if member == Some(true) {
-            m_put(&state.http, &cfg, &format!("/proxies/{}", urlencoding_lite(g)), json!({ "name": target }), 3).await?;
-            invalidate_proxies_cache();
-            let _ = close_all_connections(&state.http, &cfg).await;
-            return Ok(format!("Выделенный маршрут Google Flow & AI переключен на '{target}'"));
-        }
-    }
-
-    // Если группы нет в Mihomo или сервер в неё не входит, прописываем правила через ConfigTx
+    // Если сервер не входит в селекторную группу, прописываем правила через ConfigTx
     let mut tx = crate::transaction::ConfigTx::begin(state).await?;
     let yaml = tx.read_yaml().await?;
-    let new_yaml = crate::routing::apply_flow_rules(&yaml, target, flow_group.as_deref())?;
+    let new_yaml = crate::routing::apply_flow_rules(&yaml, target, Some(&flow_group))?;
     if new_yaml != yaml {
         tx.set_yaml(new_yaml)?;
         tx.commit_and_reload().await?;
     }
 
-    if let Some(ref g) = flow_group {
-        let _ = m_put(&state.http, &cfg, &format!("/proxies/{}", urlencoding_lite(g)), json!({ "name": target }), 3).await;
-        invalidate_proxies_cache();
-    }
+    let _ = m_put(&state.http, &cfg, &format!("/proxies/{}", urlencoding_lite(&flow_group)), json!({ "name": target }), 3).await;
+    invalidate_proxies_cache();
 
-    let _ = close_all_connections(&state.http, &cfg).await;
+    let _ = close_flow_connections(&state.http, &cfg).await;
     Ok(format!("Выделенный маршрут Google Flow & AI переключен на '{target}'"))
 }
 
@@ -1961,8 +2006,8 @@ pub async fn ping_flow_servers(http: &reqwest::Client, cfg: &AppConfig, timeout_
     let proxies = get_proxies(http, cfg).await.unwrap_or_default();
 
     // 1. Если есть группа 'Google AI' / 'Flow', пингуем её
-    for gname in ["Google AI", "Google-AI", "GoogleFlow", "Flow", "AI"] {
-        if proxies.contains_key(gname) {
+    for gname in proxies.keys() {
+        if crate::routing::is_flow_group_name(gname) {
             let pings = ping_group_url(http, cfg, gname, timeout_ms, Some(test_url)).await;
             if !pings.is_empty() {
                 return pings;
@@ -2295,7 +2340,21 @@ pub async fn check_google_geo(http: &reqwest::Client, cfg: &AppConfig, active_se
 
     // 2. Тестирование задержки до flow.google.com через группу Google AI в Mihomo
     let mut delay_ms: Option<u64> = None;
-    for gname in ["Google AI", "Google-AI", "GoogleFlow", "Flow", "AI"] {
+    let proxies = get_proxies(http, cfg).await.unwrap_or_default();
+    let mut flow_candidates: Vec<String> = ["Google AI", "Google-AI", "GoogleFlow", "Flow"]
+        .iter()
+        .filter(|g| proxies.contains_key(**g) && crate::routing::is_flow_group_name(g))
+        .map(|g| (*g).to_string())
+        .collect();
+    for gname in proxies.keys() {
+        if crate::routing::is_flow_group_name(gname) && !flow_candidates.iter().any(|c| c == gname) {
+            flow_candidates.push(gname.clone());
+        }
+    }
+    if flow_candidates.is_empty() {
+        flow_candidates.extend(["Google AI", "Google-AI", "GoogleFlow", "Flow"].iter().map(|s| (*s).to_string()));
+    }
+    for gname in &flow_candidates {
         let enc = urlencoding_lite(gname);
         if let Ok(v) = m_get(http, cfg, &format!("/proxies/{enc}/delay?url=https://flow.google.com&timeout=4000")).await {
             if let Some(d) = v.get("delay").and_then(|d| d.as_u64()) {
@@ -3146,8 +3205,32 @@ mod tests {
         let groups = select_groups_to_switch(&proxies, "node-a");
         assert_eq!(groups, vec!["PROXY".to_string(), "Telegram".to_string()]);
     }
+
+    #[test]
+    fn regression_bug_54b_flow_switch_does_not_reset_lan() {
+        // Баг 54: переключение маршрута Google AI не должно вызывать close_all_connections
+        let mihomo_src = include_str!("mihomo.rs");
+        let api_src = include_str!("api.rs");
+
+        // Проверяем тело функции switch_flow_server в mihomo.rs
+        let switch_fn = mihomo_src.split("pub async fn switch_flow_server")
+            .nth(1)
+            .expect("switch_flow_server function must exist");
+        let switch_body = switch_fn.split("pub async fn ping_group").next().unwrap_or(switch_fn);
+        assert!(!switch_body.contains("close_all_connections"), "switch_flow_server не должен вызывать close_all_connections");
+
+        // Проверяем тело функции repair_flow в api.rs
+        let repair_fn = api_src.split("pub async fn repair_flow")
+            .nth(1)
+            .expect("repair_flow function must exist");
+        let repair_body = repair_fn.split("pub struct FlowAutoSelectReq").next().unwrap_or(repair_fn);
+        assert!(!repair_body.contains("close_all_connections"), "repair_flow не должен вызывать close_all_connections");
+
+        // Проверяем тело функции auto_select_flow_server в api.rs
+        let autoselect_fn = api_src.split("pub async fn auto_select_flow_server")
+            .nth(1)
+            .expect("auto_select_flow_server function must exist");
+        let autoselect_body = autoselect_fn.split("pub async fn get_flow_extension").next().unwrap_or(autoselect_fn);
+        assert!(!autoselect_body.contains("close_all_connections"), "auto_select_flow_server не должен вызывать close_all_connections");
+    }
 }
-
-
-
-

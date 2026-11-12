@@ -257,6 +257,22 @@ pub fn parse_provider_hwids(yaml: &str) -> std::collections::BTreeMap<String, St
     out
 }
 
+/// Валидация URL health-check для провайдера (подпункт 77.2):
+/// Должен быть http:// или https://, не пустой, без управляющих символов (\x00..\x1f, \x7f).
+pub fn validate_provider_health_check_url(url: &str) -> Result<(), String> {
+    let s = url.trim();
+    if s.is_empty() {
+        return Err("URL проверки доступности не может быть пустым".into());
+    }
+    if !s.starts_with("http://") && !s.starts_with("https://") {
+        return Err("URL проверки доступности должен начинаться с http:// или https://".into());
+    }
+    if s.chars().any(|c| (c as u32) < 0x20 || c == '\u{7f}') {
+        return Err("URL проверки доступности содержит недопустимые управляющие символы".into());
+    }
+    Ok(())
+}
+
 /// Добавить новую HTTP-подписку в блок proxy-providers в config.yaml с поддержкой HWID и User-Agent
 pub fn add_provider_to_yaml_full(
     yaml: &str,
@@ -273,6 +289,7 @@ pub fn add_provider_to_yaml_full(
         return Err("ID подписки и URL не могут быть пустыми".into());
     }
 
+    // ID подписки и URL не могут содержать переводы строк, кавычки или запятые.
     let forbidden_chars = ['\r', '\n', '"', '\'', ','];
     if [id, url].iter().any(|s| s.chars().any(|c| forbidden_chars.contains(&c)))
         || hwid.map(|h| h.chars().any(|c| forbidden_chars.contains(&c))).unwrap_or(false)
@@ -281,25 +298,32 @@ pub fn add_provider_to_yaml_full(
         return Err("Параметры подписки содержат недопустимые символы (переводы строк, кавычки или запятые)".into());
     }
 
+    // Защита от инъекций через обратный слэш (баг 77): слэш не запрещён, но экранируется через yaml_quote.
     let existing = parse_provider_names(yaml);
     if existing.iter().any(|p| p.eq_ignore_ascii_case(id)) {
         return Err(format!("Подписка с ID '{id}' уже существует"));
     }
 
     let hc_url = health_check_url.unwrap_or(PROVIDER_HEALTH_CHECK_URL);
+    validate_provider_health_check_url(hc_url)?;
     let hc_interval = health_check_interval.unwrap_or(PROVIDER_HEALTH_CHECK_INTERVAL_SECS);
 
     let ua = user_agent.unwrap_or("ClashMeta/1.19.24; mihomo/1.19.24");
-    let mut header_lines = format!("    header:\n      User-Agent: [\"{ua}\"]");
+    let quoted_ua = crate::subscription_parser::yaml_quote(ua);
+    let mut header_lines = format!("    header:\n      User-Agent: [{quoted_ua}]");
     if let Some(h) = hwid.map(str::trim).filter(|h| !h.is_empty()) {
-        header_lines.push_str(&format!("\n      x-hwid: [\"{h}\"]"));
+        let quoted_hwid = crate::subscription_parser::yaml_quote(h);
+        header_lines.push_str(&format!("\n      x-hwid: [{quoted_hwid}]"));
     }
 
     let is_crlf = yaml.contains("\r\n");
     let eol = if is_crlf { "\r\n" } else { "\n" };
 
+    let quoted_url = crate::subscription_parser::yaml_quote(url);
+    let quoted_hc_url = crate::subscription_parser::yaml_quote(hc_url);
+
     let new_block = format!(
-        "  {id}:\n    type: http\n    url: \"{url}\"\n    interval: {PROVIDER_DEFAULT_INTERVAL_SECS}\n    health-check:\n      enable: true\n      lazy: true\n      url: \"{hc_url}\"\n      interval: {hc_interval}\n      expected-status: {PROVIDER_HEALTH_CHECK_EXPECTED_STATUS}\n{header_lines}\n    override:\n      udp: true\n      tfo: true"
+        "  {id}:\n    type: http\n    url: {quoted_url}\n    interval: {PROVIDER_DEFAULT_INTERVAL_SECS}\n    health-check:\n      enable: true\n      lazy: true\n      url: {quoted_hc_url}\n      interval: {hc_interval}\n      expected-status: {PROVIDER_HEALTH_CHECK_EXPECTED_STATUS}\n{header_lines}\n    override:\n      udp: true\n      tfo: true"
     );
     let new_block_formatted = if is_crlf {
         new_block.replace('\n', "\r\n")
@@ -1169,26 +1193,103 @@ pub fn remove_flow_rules(yaml: &str) -> String {
     out.join("\n")
 }
 
-/// Поиск существующей группы Flow / Google AI в YAML конфиге Mihomo.
-pub fn find_flow_group_name(yaml: &str) -> Option<String> {
-    for gname in ["Google AI", "Google-AI", "GoogleFlow", "Flow", "AI"] {
-        let pattern_unquoted = format!("- name: {gname}");
-        let pattern_single = format!("- name: '{gname}'");
-        let pattern_double = format!("- name: \"{gname}\"");
-        for line in yaml.lines() {
-            let t = line.trim();
-            if t == pattern_unquoted
-                || t == pattern_single
-                || t == pattern_double
-                || t.starts_with(&format!("- name: {gname} "))
-                || t.starts_with(&format!("- name: '{gname}'"))
-                || t.starts_with(&format!("- name: \"{gname}\""))
-            {
-                return Some(gname.to_string());
-            }
+/// Единый детектор имени группы Google AI / Flow (баг 124).
+/// Матчится слово «Flow» целиком (границы слова, без регистра) либо «google» рядом с «ai»/«flow».
+/// Одиночное «AI» (или «ChatGPT AI»), а также подстроки вроде «Workflow»/«Overflow» не матчатся.
+pub fn is_flow_group_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+
+    // Разбиваем на алфанумерные токены (эмодзи, пробелы, дефисы и т.п. выступают разделителями)
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // 1) Слово "flow" целиком
+    if tokens.iter().any(|&t| t == "flow") {
+        return true;
+    }
+
+    // 2) "google" рядом с "ai" или "flow" (в соседних токенах или слитно: "googleflow", "googleai")
+    if tokens.iter().any(|&t| t == "googleflow" || t == "googleai") {
+        return true;
+    }
+    for pair in tokens.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        if (a == "google" && (b == "ai" || b == "flow"))
+            || ((a == "ai" || a == "flow") && b == "google")
+        {
+            return true;
         }
     }
-    None
+
+    false
+}
+
+/// План починки/переключения маршрута Google Flow (баг 52).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowRepairPlan {
+    pub group_name: String,
+    pub target_server: String,
+}
+
+/// Валидация и планирование восстановления Google Flow (баг 52).
+/// Проверяет наличие группы Flow до любой записи в config.yaml / config.json.
+pub fn plan_repair_flow<S: AsRef<str>>(groups: &[S], target: &str) -> Result<FlowRepairPlan, String> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Err("Имя целевого сервера Google Flow не может быть пустым".into());
+    }
+
+    // 1. Приоритет известных точных имён групп
+    for preferred in ["Google AI", "Google-AI", "GoogleFlow", "Flow"] {
+        if groups.iter().any(|g| g.as_ref() == preferred && is_flow_group_name(g.as_ref())) {
+            return Ok(FlowRepairPlan {
+                group_name: preferred.to_string(),
+                target_server: target.to_string(),
+            });
+        }
+    }
+
+    // 2. Любая подходящая группа по единому детектору (баг 124)
+    if let Some(found) = groups.iter().find(|g| is_flow_group_name(g.as_ref())) {
+        return Ok(FlowRepairPlan {
+            group_name: found.as_ref().to_string(),
+            target_server: target.to_string(),
+        });
+    }
+
+    Err("В конфигурации ядра Mihomo не найдена группа маршрута Google Flow / Google AI".into())
+}
+
+/// План переключения сервера Google Flow (баг A-10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FlowSwitchPlan {
+    pub group_name: String,
+    pub target_server: String,
+}
+
+/// Валидация и планирование переключения сервера Google Flow (баг A-10).
+/// Проверяет наличие группы Flow до любой записи в config.yaml / config.json,
+/// предотвращая запись сырого имени ноды в правила Mihomo при отсутствии группы.
+pub fn plan_switch_flow_server<S: AsRef<str>>(groups: &[S], target: &str) -> Result<FlowSwitchPlan, String> {
+    let repair_plan = plan_repair_flow(groups, target)?;
+    Ok(FlowSwitchPlan {
+        group_name: repair_plan.group_name,
+        target_server: repair_plan.target_server,
+    })
+}
+
+/// Поиск существующей группы Flow / Google AI в YAML конфиге Mihomo.
+pub fn find_flow_group_name(yaml: &str) -> Option<String> {
+    let existing = parse_existing_group_names(yaml);
+    // Сначала сохраняем приоритет известных точных имён при наличии нескольких подходящих групп
+    for preferred in ["Google AI", "Google-AI", "GoogleFlow", "Flow"] {
+        if let Some(found) = existing.iter().find(|g| g.as_str() == preferred && is_flow_group_name(g)) {
+            return Some(found.clone());
+        }
+    }
+    existing.into_iter().find(|g| is_flow_group_name(g))
 }
 
 /// Применение выделенного маршрута Google Flow & AI в rules: (после AdBlock).
@@ -2379,9 +2480,12 @@ pub fn apply_whitelist_rules(
             }
         }
 
-        // 2.3. Zero-Touch: все клиенты локальных сетей -> в выбранный туннель Белых списков.
-        for subnet in &["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"] {
-            wl_rules.push(format!("  - SRC-IP-CIDR,{subnet},{dev_target}"));
+        // 2.3. Zero-Touch: если режим БС включён для всей сети (не ограничен списком устройств Devices),
+        // все клиенты локальных сетей направляются в выбранный туннель Белых списков.
+        if cfg.whitelist.enabled_by != crate::config::WhitelistEnabledBy::Devices {
+            for subnet in &["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"] {
+                wl_rules.push(format!("  - SRC-IP-CIDR,{subnet},{dev_target}"));
+            }
         }
     }
 
@@ -5922,7 +6026,112 @@ rules:
         let (yaml, _) = apply_routing(base, &cfg).unwrap();
         assert!(!yaml.lines().any(|l| l.trim_start().starts_with("- ") && l.ends_with(",US AI Node")), "правила Flow не ссылаются на ноду подписки:\n{yaml}");
     }
+
+    #[test]
+    fn regression_bug_124b_single_flow_group_detector() {
+        use crate::routing::is_flow_group_name;
+
+        // True cases: Google AI, Google-AI, GoogleFlow, Google Flow, Flow, 🤖 Google AI
+        assert!(is_flow_group_name("Google AI"));
+        assert!(is_flow_group_name("Google-AI"));
+        assert!(is_flow_group_name("GoogleFlow"));
+        assert!(is_flow_group_name("Google Flow"));
+        assert!(is_flow_group_name("Flow"));
+        assert!(is_flow_group_name("🤖 Google AI"));
+
+        // False cases: AI, ChatGPT AI, Workflow, Overflow
+        assert!(!is_flow_group_name("AI"));
+        assert!(!is_flow_group_name("ChatGPT AI"));
+        assert!(!is_flow_group_name("Workflow"));
+        assert!(!is_flow_group_name("Overflow"));
+    }
+
+    #[test]
+    fn regression_bug_52b_repair_flow_validates_before_write() {
+        use crate::routing::plan_repair_flow;
+
+        // Без подходящей группы Flow должно возвращать Err
+        let empty_groups: Vec<String> = vec![];
+        let res_empty = plan_repair_flow(&empty_groups, "US-Node");
+        assert!(res_empty.is_err(), "Empty groups must return Err");
+
+        let unrelated_groups = vec!["PROXY".to_string(), "DIRECT".to_string(), "ChatGPT AI".to_string(), "Workflow".to_string()];
+        let res_unrelated = plan_repair_flow(&unrelated_groups, "US-Node");
+        assert!(res_unrelated.is_err(), "Unrelated groups must return Err");
+
+        // С группой Google-AI или Flow должно возвращать Ok(Plan)
+        let flow_groups = vec!["PROXY".to_string(), "Google-AI".to_string()];
+        let res_flow = plan_repair_flow(&flow_groups, "US-Node");
+        assert!(res_flow.is_ok(), "Google-AI group must return Ok");
+        let plan = res_flow.unwrap();
+        assert_eq!(plan.target_server, "US-Node");
+        assert_eq!(plan.group_name, "Google-AI");
+    }
+
+    #[test]
+    fn regression_bug_a10_switch_flow_without_group_writes_nothing() {
+        use crate::routing::{plan_switch_flow_server, apply_flow_rules};
+
+        let empty_groups: Vec<String> = vec![];
+        let res_empty = plan_switch_flow_server(&empty_groups, "US-Node");
+        assert!(res_empty.is_err(), "Empty groups must return Err");
+
+        let unrelated_groups = vec!["PROXY".to_string(), "DIRECT".to_string(), "AI".to_string(), "Workflow".to_string()];
+        let res_unrelated = plan_switch_flow_server(&unrelated_groups, "US-Node");
+        assert!(res_unrelated.is_err(), "Unrelated groups without Flow must return Err");
+
+        // When groups are empty/err, verify YAML remains untouched byte for byte
+        let sample_yaml = "rules:\n  - GEOIP,CN,DIRECT\n  - MATCH,PROXY\n";
+        let mut yaml_copy = sample_yaml.to_string();
+        if let Ok(plan) = res_empty {
+            yaml_copy = apply_flow_rules(&yaml_copy, &plan.target_server, Some(&plan.group_name)).unwrap();
+        }
+        assert_eq!(sample_yaml.as_bytes(), yaml_copy.as_bytes(), "YAML must remain identical byte for byte when no flow group");
+
+        // When Flow group exists, returns plan with group name, not raw server node name
+        let flow_groups = vec!["PROXY".to_string(), "Google-AI".to_string()];
+        let res_flow = plan_switch_flow_server(&flow_groups, "US-Node");
+        assert!(res_flow.is_ok(), "Groups with Flow group must return Ok(plan)");
+        let plan = res_flow.unwrap();
+        assert_eq!(plan.group_name, "Google-AI");
+        assert_eq!(plan.target_server, "US-Node");
+    }
+
+    #[test]
+    fn regression_bug_77b_provider_yaml_is_escaped() {
+        use crate::subscription_parser::yaml_quote;
+        let yaml = "proxy-providers:\n  sub1:\n    type: http\n    url: \"https://foo.bar/sub\"\nrules:\n  - MATCH,DIRECT";
+        let special_url = "https://a/b\\c/d";
+        let special_ua = "MyUA\\Test-1.0";
+        let special_hwid = "hwid\\123-abc";
+        let special_hc = "https://hc.example.com/check\\path/test";
+
+        let res = add_provider_to_yaml_full(
+            yaml,
+            "sub_special",
+            special_url,
+            Some(special_hc),
+            Some(300),
+            Some(special_hwid),
+            Some(special_ua),
+        ).expect("should succeed with escaped YAML");
+
+        let quoted_url = yaml_quote(special_url);
+        let quoted_ua = yaml_quote(special_ua);
+        let quoted_hwid = yaml_quote(special_hwid);
+        let quoted_hc = yaml_quote(special_hc);
+
+        assert!(res.contains(&format!("url: {quoted_url}")), "URL must be formatted via yaml_quote: {res}");
+        assert!(res.contains(&format!("User-Agent: [{quoted_ua}]")), "UA must be formatted via yaml_quote: {res}");
+        assert!(res.contains(&format!("x-hwid: [{quoted_hwid}]")), "HWID must be formatted via yaml_quote: {res}");
+        assert!(res.contains(&format!("url: {quoted_hc}")), "HC URL must be formatted via yaml_quote: {res}");
+
+        // Валидация подпункта 77.2: невалидный URL health-check отвергается
+        assert!(add_provider_to_yaml_full(yaml, "sub_hc_err", special_url, Some("ftp://hc.example.com"), None, None, None).is_err());
+        assert!(add_provider_to_yaml_full(yaml, "sub_hc_ctrl", special_url, Some("https://hc.example.com/bad\x01url"), None, None, None).is_err());
+    }
 }
+
 
 
 

@@ -27,24 +27,8 @@ const ZapretCoreModal = lazy(() => import('./components/ZapretCoreModal'))
 
 import { apiGet, apiPost } from './api'
 import type { AuthStatus, StatusInfo } from './types'
-
-type TabId =
-  | 'dashboard'
-  | 'servers'
-  | 'devices'
-  | 'whitelist'
-  | 'zapret'
-  | 'vkturn'
-  | 'gaming'
-  | 'xbox-dns'
-  | 'google-ai'
-  | 'connections'
-  | 'rules'
-  | 'diagnostics'
-  | 'settings'
-  | 'adguard'
-  | 'help'
-  | 'antigravity'
+import { useUpdateCheck } from './hooks/useUpdateCheck'
+import { tabFromHash, type TabId } from './utils/tabHash'
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'dashboard', label: '📊 Дашборд' },
@@ -114,14 +98,7 @@ export function TabLoadingFallback() {
 }
 
 export default function App() {
-  const initial = (() => {
-    const h = window.location.hash.replace('#', '')
-    if (h === 'antigravity') return 'google-ai'
-    if (h === 'xbox-dns') return 'gaming'
-    if (h === 'bs' || h === 'whitelists') return 'whitelist'
-    if (h === 'vkturn') return 'vkturn'
-    return (TABS.some((t) => t.id === h) || h === 'settings' || h === 'help' || h === 'adguard' || h === 'diagnostics' ? h : 'dashboard') as TabId
-  })()
+  const initial = tabFromHash(window.location.hash) ?? 'dashboard'
   const [tab, setTab] = useState<TabId>(initial)
   const [status, setStatus] = useState<StatusInfo | null>(null)
   const [connected, setConnected] = useState(true)
@@ -140,7 +117,7 @@ export default function App() {
 
   // Обновление XKeen Route
   const [updateModalOpen, setUpdateModalOpen] = useState(false)
-  const [updateInfo, setUpdateInfo] = useState<{ current: string; latest: string; notes: string[]; update_available: boolean } | null>(null)
+  const { updateInfo } = useUpdateCheck()
 
   // Управление ядром Mihomo (релизы и обновление)
   const [mihomoModalOpen, setMihomoModalOpen] = useState(false)
@@ -161,30 +138,6 @@ export default function App() {
     }
   }, [])
 
-  useEffect(() => {
-    let active = true
-    const checkUpd = async () => {
-      try {
-        const res = await apiGet<{ current: string; latest: string; notes?: string[]; update_available: boolean }>('update/check')
-        if (active && res) {
-          setUpdateInfo({
-            current: res.current,
-            latest: res.latest,
-            notes: res.notes || [],
-            update_available: Boolean(res.update_available),
-          })
-        }
-      } catch {
-        /* игнорируем ошибку сети */
-      }
-    }
-    checkUpd()
-    const timer = setInterval(checkUpd, 60_000)
-    return () => {
-      active = false
-      clearInterval(timer)
-    }
-  }, [])
 
   // Применение темы
   useEffect(() => {
@@ -213,9 +166,8 @@ export default function App() {
   // Синхронизация активной вкладки при навигации назад/вперед в браузере
   useEffect(() => {
     const handleLocationChange = () => {
-      const h = window.location.hash.replace('#', '')
-      const targetTab = (h === 'antigravity' ? 'google-ai' : h === 'xbox-dns' ? 'gaming' : h) as TabId
-      if (TABS.some((t) => t.id === targetTab) || targetTab === 'vkturn' || targetTab === 'settings' || targetTab === 'help' || targetTab === 'adguard') {
+      const targetTab = tabFromHash(window.location.hash)
+      if (targetTab) {
         setTab(targetTab)
       }
     }
@@ -245,8 +197,15 @@ export default function App() {
 
   // FE-01: защита поллинга — не допускаем наложение запросов и опрос в фоновой вкладке
   const refreshInFlight = useRef(false)
-  const refresh = useCallback(async () => {
-    if (refreshInFlight.current || document.hidden) return
+  const pendingRefresh = useRef(false)
+  const refresh = useCallback(async (force = false) => {
+    if (refreshInFlight.current) {
+      if (force) {
+        pendingRefresh.current = true
+      }
+      return
+    }
+    if (!force && document.hidden) return
     refreshInFlight.current = true
     try {
       const data = await apiGet<StatusInfo>('status')
@@ -257,6 +216,10 @@ export default function App() {
       setConnected(false)
     } finally {
       refreshInFlight.current = false
+      if (pendingRefresh.current) {
+        pendingRefresh.current = false
+        void refresh(true)
+      }
     }
   }, [])
 
@@ -266,20 +229,20 @@ export default function App() {
       window.location.hash = t
     }
     if (t === 'dashboard' || t === 'settings') {
-      refresh()
+      refresh(true)
     }
   }, [refresh])
 
   useEffect(() => {
     refresh()
     const intervalMs = Math.max(3, status?.refresh_interval_sec ?? 3) * 1000
-    const interval = setInterval(refresh, intervalMs)
+    const interval = setInterval(() => refresh(false), intervalMs)
     return () => clearInterval(interval)
   }, [refresh, status?.refresh_interval_sec])
 
   useEffect(() => {
     const handleRefreshStatus = () => {
-      refresh()
+      refresh(true)
     }
     window.addEventListener('xr:refresh-status', handleRefreshStatus)
     return () => window.removeEventListener('xr:refresh-status', handleRefreshStatus)

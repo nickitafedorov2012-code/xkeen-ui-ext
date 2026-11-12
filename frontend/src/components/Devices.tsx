@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiGet, apiPost } from '../api'
 import DeviceRow from './DeviceRow'
 import DeviceRoutingModal from './DeviceRoutingModal'
@@ -44,6 +44,8 @@ export default function Devices({ notify }: Props) {
   const [offlineExpanded, setOfflineExpanded] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [excludedZapretDevices, setExcludedZapretDevices] = useState<Set<string>>(new Set())
+  const zapretBusyKeysRef = useRef<Set<string>>(new Set())
+  const [zapretBusyKeys, setZapretBusyKeys] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
 
@@ -459,6 +461,17 @@ export default function Devices({ notify }: Props) {
   }
 
   const handleToggleZapret = async (ip: string, mac: string, enabled: boolean) => {
+    const devKey = (mac || ip).toLowerCase()
+    if (!devKey || zapretBusyKeysRef.current.has(devKey)) return
+
+    const wasExcluded =
+      (Boolean(ip) && excludedZapretDevices.has(ip)) ||
+      (Boolean(mac) &&
+        (excludedZapretDevices.has(mac.toUpperCase()) ||
+          excludedZapretDevices.has(mac.toLowerCase())))
+
+    zapretBusyKeysRef.current.add(devKey)
+    setZapretBusyKeys((prev) => new Set(prev).add(devKey))
     setExcludedZapretDevices((prev) => {
       const next = new Set(prev)
       if (enabled) {
@@ -485,8 +498,31 @@ export default function Devices({ notify }: Props) {
           : `Zapret выключен для ${ip || mac}`
       )
     } catch (e) {
+      setExcludedZapretDevices((prev) => {
+        const next = new Set(prev)
+        if (wasExcluded) {
+          if (ip) next.add(ip)
+          if (mac) {
+            next.add(mac.toUpperCase())
+            next.add(mac.toLowerCase())
+          }
+        } else {
+          if (ip) next.delete(ip)
+          if (mac) {
+            next.delete(mac.toUpperCase())
+            next.delete(mac.toLowerCase())
+          }
+        }
+        return next
+      })
       notify(e instanceof Error ? e.message : 'Ошибка изменения Zapret для устройства', true)
-      load()
+    } finally {
+      zapretBusyKeysRef.current.delete(devKey)
+      setZapretBusyKeys((prev) => {
+        const next = new Set(prev)
+        next.delete(devKey)
+        return next
+      })
     }
   }
 
@@ -758,7 +794,7 @@ export default function Devices({ notify }: Props) {
                       drEntry={drMap[d.ip]}
                       devFailover={devFailover}
                       traffic={trafficMap[d.ip]}
-                      busy={busy}
+                      busy={busy || zapretBusyKeys.has(d.mac.toLowerCase()) || (Boolean(d.ip) && zapretBusyKeys.has(d.ip.toLowerCase()))}
                       selected={selected.has(d.mac)}
                       onToggleSelect={toggleSelect}
                       applyPolicy={applyPolicy}
@@ -815,7 +851,7 @@ export default function Devices({ notify }: Props) {
                         drEntry={drMap[d.ip]}
                         devFailover={devFailover}
                         traffic={trafficMap[d.ip]}
-                        busy={busy}
+                        busy={busy || zapretBusyKeys.has(d.mac.toLowerCase()) || (Boolean(d.ip) && zapretBusyKeys.has(d.ip.toLowerCase()))}
                         selected={selected.has(d.mac)}
                         onToggleSelect={toggleSelect}
                         applyPolicy={applyPolicy}
@@ -862,7 +898,7 @@ export default function Devices({ notify }: Props) {
                       drEntry={drMap[d.ip]}
                       devFailover={devFailover}
                       traffic={trafficMap[d.ip]}
-                      busy={busy}
+                      busy={busy || zapretBusyKeys.has(d.mac.toLowerCase()) || (Boolean(d.ip) && zapretBusyKeys.has(d.ip.toLowerCase()))}
                       selected={selected.has(d.mac)}
                       onToggleSelect={toggleSelect}
                       applyPolicy={applyPolicy}

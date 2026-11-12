@@ -351,7 +351,7 @@ export default function Settings({ notify, status, refresh }: Props) {
     } else {
       const parts = cleanNotifToken.split(':')
       if (parts.length !== 2 || !parts[0] || !parts[1] || !/^\d+$/.test(parts[0])) {
-        notifTokenWarning = 'Токен неполный! В начале обязательно должен быть числовой ID бота и двоеточие (например: 8959891087:AAHW...)'
+        notifTokenWarning = 'Токен неполный! В начале обязательно должен быть числовой ID бота и двоеточие (например: 123456789:AAAA...)'
       }
     }
   }
@@ -2342,6 +2342,32 @@ export default function Settings({ notify, status, refresh }: Props) {
 
               const handleOpenSettingsClassifier = () => {
                 const detected = detectWhitelistServers(servers, providers)
+                // Если узлы пришли без флага от сервера, дополняем локальными тегами (fallback)
+                if (detected.detectedServerIds.length === 0 && detected.detectedProviderIds.length === 0) {
+                  const checkTagFallback = (s: string) => {
+                    const l = s.toLowerCase()
+                    return (
+                      l.includes('[бс]') || l.includes('(бс)') || l.includes('[bs]') || l.includes('(bs)') ||
+                      l.includes('[wl]') || l.includes('(wl)') || /\bwhitelist\b/i.test(l)
+                    )
+                  }
+                  for (const p of providers) {
+                    if (checkTagFallback(p.name) || checkTagFallback(p.id)) {
+                      if (!detected.detectedProviderIds.includes(p.id)) {
+                        detected.detectedProviderIds.push(p.id)
+                        detected.details.push({ id: p.id, name: p.name, reason: 'Подписка [WL]', type: 'provider' })
+                      }
+                    }
+                  }
+                  for (const s of servers) {
+                    if (checkTagFallback(s.name) || checkTagFallback(s.id)) {
+                      if (!detected.detectedServerIds.includes(s.id)) {
+                        detected.detectedServerIds.push(s.id)
+                        detected.details.push({ id: s.id, name: s.name, reason: 'Узел [БС]', type: 'server' })
+                      }
+                    }
+                  }
+                }
                 setSettingsDetectedClassifier(detected)
                 setSettingsDetectorModalOpen(true)
               }
@@ -2989,7 +3015,7 @@ export default function Settings({ notify, status, refresh }: Props) {
                 <ol style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 1.5 }}>
                   <li>Откройте официального бота <a href="https://t.me/BotFather" target="_blank" rel="noreferrer" style={{ color: 'var(--accent, #38bdf8)', textDecoration: 'underline' }}>@BotFather</a> в Telegram.</li>
                   <li>Отправьте команду <code>/newbot</code>, укажите имя и username (должен оканчиваться на <code>bot</code>).</li>
-                  <li>Скопируйте выданный токен <b>целиком</b> (вид: <code>8959891087:AAHWke...</code>) и вставьте в это поле. Не удаляйте цифры в начале!</li>
+                  <li>Скопируйте выданный токен <b>целиком</b> (вид: <code>123456789:AAAAAA...</code>) и вставьте в это поле. Не удаляйте цифры в начале!</li>
                 </ol>
               </div>
             )}

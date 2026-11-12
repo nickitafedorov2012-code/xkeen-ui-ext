@@ -485,6 +485,19 @@ export default function Servers({ notify, status, refresh }: Props) {
     }
   }
 
+  const makeServerNormal = async (serverId: string) => {
+    try {
+      await apiPost('servers/whitelist', { server_id: serverId, normal: true })
+      setServers((prev) =>
+        prev.map((s) => (s.id === serverId ? { ...s, is_whitelist: false } : s))
+      )
+      notify('Узел помечен как обычный (теги белых списков отключены)')
+      refresh?.()
+    } catch (e: any) {
+      notify(e instanceof Error ? e.message : 'Ошибка сохранения настройки узла', true)
+    }
+  }
+
   // Фильтрация и сортировка полного пула серверов в памяти (Apple-Style Full Pool Sorting)
   const filtered = useMemo(() => {
     const q = filter.trim().toLowerCase()
@@ -1299,6 +1312,16 @@ export default function Servers({ notify, status, refresh }: Props) {
                     <span style={{ fontSize: 11 }}>{activeServer.is_whitelist ? '🟣' : '⚪'}</span>
                     <span style={{ fontSize: 11, fontWeight: 600 }}>{activeServer.is_whitelist ? 'В белом списке' : 'Белый список'}</span>
                   </button>
+                  {activeServer.is_whitelist && (
+                    <button
+                      type="button"
+                      className="btn sm ghost"
+                      onClick={() => makeServerNormal(activeServer.id)}
+                      title="Сделать узел обычным: перекрыть тег БС и убрать из аварийного туннеля"
+                    >
+                      <span style={{ fontSize: 11 }}>Сделать обычным</span>
+                    </button>
+                  )}
                 </div>
               </div>
             </>
@@ -1874,6 +1897,17 @@ export default function Servers({ notify, status, refresh }: Props) {
                         <span className="btn-label-full">{s.is_whitelist ? 'В белом списке' : 'Белый список'}</span>
                         <span className="btn-label-short">{s.is_whitelist ? 'БС ON' : 'БС'}</span>
                       </button>
+                      {s.is_whitelist && (
+                        <button
+                          type="button"
+                          className="btn sm ghost"
+                          onClick={() => makeServerNormal(s.id)}
+                          title="Сделать узел обычным: перекрыть тег БС и убрать из аварийного туннеля"
+                        >
+                          <span className="btn-label-full">Сделать обычным</span>
+                          <span className="btn-label-short">Обычный</span>
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -2050,6 +2084,17 @@ export default function Servers({ notify, status, refresh }: Props) {
                       <span style={{ fontSize: 11 }}>{s.is_whitelist ? '🟣' : '⚪'}</span>
                       <span style={{ fontSize: 11, fontWeight: 600 }}>{s.is_whitelist ? 'БС ON' : 'БС'}</span>
                     </button>
+                    {s.is_whitelist && (
+                      <button
+                        type="button"
+                        className="btn sm ghost"
+                        onClick={() => makeServerNormal(s.id)}
+                        style={{ padding: '3px 8px' }}
+                        title="Сделать узел обычным: перекрыть тег БС и убрать из аварийного туннеля"
+                      >
+                        <span style={{ fontSize: 11 }}>Обычный</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               ))}
