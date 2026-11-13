@@ -56,10 +56,11 @@ pub const DEFAULT_SERVER_PORT: u16 = 46000;
 pub const TUN_IFACE: &str = "csq0";
 /// Имя абстрактного unix-сокета, по которому клиент ждёт дескриптор TUN.
 pub const TUN_UDS_NAME: &str = "xkeen_route_csqtt_tun";
-/// MTU для TUN-интерфейса поверх WebRTC/TURN (1280 = MAX_PACKET_PAYLOAD ядра csqtt, исключает 0xCF-фрагментацию).
-pub const TUN_MTU: u16 = 1280;
-/// Максимальный TCP MSS для соединений через csq0 (1280 - 60 байт запаса на IP/TCP заголовки и опции).
-pub const TUN_TCP_MSS: u16 = 1220;
+/// MTU для TUN-интерфейса поверх WebRTC/TURN/LTE: с запасом ~140 байт на заголовки csqtt + WRAP-SRTP + TURN + UDP/IP
+/// внешний пакет укладывается в ~1040 байт и не дропается на мобильных LTE-каналах с пониженным Path MTU.
+pub const TUN_MTU: u16 = 900;
+/// Максимальный TCP MSS для соединений через csq0 (900 - 60 байт запаса на IP/TCP заголовки и опции).
+pub const TUN_TCP_MSS: u16 = 840;
 /// Отдельная таблица маршрутизации для сокетов, привязанных к csq0 (в пределах 1..252 для Busybox).
 pub const ROUTE_TABLE: u32 = 222;
 /// Подсети инфраструктуры ВК (AS47541) и TURN-серверов звонков. Трафик клиента туда идёт строго напрямую.
@@ -3097,8 +3098,8 @@ mod tests {
     fn tun_scripts_only_use_constants_and_parsed_ip() {
         let s = tun_configure_script("10.66.67.3".parse().unwrap());
         assert!(s.contains("ip addr add 10.66.67.3/32 dev csq0"));
-        assert!(s.contains("ip link set dev csq0 mtu 1280 up"));
-        assert!(s.contains("TCPMSS --set-mss 1220"));
+        assert!(s.contains("ip link set dev csq0 mtu 900 up"));
+        assert!(s.contains("TCPMSS --set-mss 840"));
         assert!(s.contains("-o csq0 -p udp --dport 443 -m comment --comment xkeen-route-vkturn -j REJECT"));
         assert!(s.contains("ip route add default dev csq0 table 222"));
         assert!(s.contains("ip rule add dev csq0 table 222 pref 222"));
@@ -3106,7 +3107,7 @@ mod tests {
         assert!(s.contains("ip rule add from 10.66.67.3 table 222 pref 40"));
         assert!(s.contains("ip rule add fwmark 222 table 222 pref 45"));
         let t = tun_teardown_script_for_ip(Some("10.66.67.3".parse().unwrap()));
-        assert!(t.contains("TCPMSS --set-mss 1220"));
+        assert!(t.contains("TCPMSS --set-mss 840"));
         assert!(t.contains("-o csq0 -p udp --dport 443 -m comment --comment xkeen-route-vkturn -j REJECT"));
         assert!(t.contains("ip rule del pref 222 dev csq0 table 222"));
         assert!(t.contains("ip route del default dev csq0 table 222"));
@@ -4021,9 +4022,9 @@ mod tests {
 
     #[test]
     fn regression_vkturn_speed_fix_mtu_mss_quic_and_mark222_exemptions() {
-        // 1. MTU TUN строго равен MAX_PACKET_PAYLOAD ядра csqtt (1280 байт), чтобы исключить фрагментацию 0xCF
-        assert_eq!(TUN_MTU, 1280);
-        assert_eq!(TUN_TCP_MSS, 1220);
+        // 1. MTU TUN = 900 / TCP MSS = 840 (учитывает оверхед WebRTC/TURN/WRAP-SRTP и пониженный Path MTU на LTE)
+        assert_eq!(TUN_MTU, 900);
+        assert_eq!(TUN_TCP_MSS, 840);
 
         // 2. TCP MSS clamping и мгновенный fallback с QUIC (UDP/443 REJECT) на csq0 + очистка
         let configure = tun_configure_script("10.66.67.3".parse().unwrap());
@@ -4034,12 +4035,12 @@ mod tests {
         for ch in ["PREROUTING", "INPUT", "FORWARD"] {
             assert!(configure.contains(ch), "отсутствует цепочка входящего зажима MSS: {ch}");
         }
-        assert!(configure.contains("-o csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 1220"));
-        assert!(configure.contains("-i csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 1220"));
+        assert!(configure.contains("-o csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 840"));
+        assert!(configure.contains("-i csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 840"));
         assert!(configure.contains("-o csq0 -p udp --dport 443 -m comment --comment xkeen-route-vkturn -j REJECT"));
 
-        assert!(teardown.contains("-o csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 1220"));
-        assert!(teardown.contains("-i csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 1220"));
+        assert!(teardown.contains("-o csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 840"));
+        assert!(teardown.contains("-i csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 840"));
         assert!(teardown.contains("-o csq0 -p udp --dport 443 -m comment --comment xkeen-route-vkturn -j REJECT"));
 
         // 3. Исключения в xkeen/xkeen_mask/XKEEN_BS/zapret для mark 222 и интерфейса csq0 + полная очистка
