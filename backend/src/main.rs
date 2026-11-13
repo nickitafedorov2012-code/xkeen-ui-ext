@@ -474,19 +474,25 @@ async fn main() {
     // FO-QUR-01: Восстановление состояния карантина из /opt/etc/xkeen-route/quarantine.json
     failover::init_quarantine_from_disk().await.ok();
 
-    {
-        let c = state.config.read().await;
-        if c.vkturn.enabled {
-            state.vkturn.restart(c.vkturn.clone(), state.clone()).await;
-        }
-    }
-
     // Инициализация постоянного хранилища отозванных токенов (баг 93)
     let revoked_storage_path = state.config_path.parent().unwrap_or(std::path::Path::new(".")).join("revoked_tokens.json");
     auth::init_revoked_tokens_storage(&revoked_storage_path);
 
     // Баг 131: неподтверждённое изменение (commit-confirmed), пережившее перезапуск, откатывается до старта сторожей
     transaction::recover_pending_commit_after_restart(&state).await;
+
+    let startup_vkturn = {
+        let c = state.config.read().await;
+        if c.vkturn.enabled {
+            Some(c.vkturn.clone())
+        } else {
+            None
+        }
+    };
+    if let Some(cfg) = startup_vkturn {
+        let synced = vkturn::commit_vkturn(&state, |_| Ok(())).await.unwrap_or(cfg);
+        state.vkturn.restart(synced, state.clone()).await;
+    }
 
     failover::spawn(state.clone());
     // Во временном каталоге (tmpfs): переживает рестарт панели, но не перезагрузку роутера —

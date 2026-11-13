@@ -396,8 +396,9 @@ pub fn add_file_provider_to_yaml(
     let is_crlf = yaml.contains("\r\n");
     let eol = if is_crlf { "\r\n" } else { "\n" };
 
+    let tfo = !id.eq_ignore_ascii_case(crate::vkturn::PROVIDER_ID);
     let new_block = format!(
-        "  {id}:\n    type: file\n    path: \"{file_path}\"\n    health-check:\n      enable: true\n      lazy: true\n      url: \"{hc_url}\"\n      interval: {hc_interval}\n      expected-status: {PROVIDER_HEALTH_CHECK_EXPECTED_STATUS}\n    override:\n      udp: true\n      tfo: true"
+        "  {id}:\n    type: file\n    path: \"{file_path}\"\n    health-check:\n      enable: true\n      lazy: true\n      url: \"{hc_url}\"\n      interval: {hc_interval}\n      expected-status: {PROVIDER_HEALTH_CHECK_EXPECTED_STATUS}\n    override:\n      udp: true\n      tfo: {tfo}"
     );
     let new_block_formatted = if is_crlf {
         new_block.replace('\n', "\r\n")

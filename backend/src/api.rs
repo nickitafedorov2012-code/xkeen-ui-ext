@@ -11697,6 +11697,10 @@ ip6tables -w -X XKEEN_BS6 2>/dev/null || true".to_string();
     setup_cmds.push("iptables -t nat -I PREROUTING 1 -j XKEEN_BS -w".to_string());
     setup_cmds.push("iptables -t mangle -N XKEEN_BS -w 2>/dev/null || true".to_string());
     setup_cmds.push("iptables -t mangle -I PREROUTING 1 -j XKEEN_BS -w".to_string());
+    setup_cmds.push(format!("iptables -t nat -A XKEEN_BS -i {} -j RETURN -w", crate::vkturn::TUN_IFACE));
+    setup_cmds.push(format!("iptables -t mangle -A XKEEN_BS -i {} -j RETURN -w", crate::vkturn::TUN_IFACE));
+    setup_cmds.push(format!("iptables -t nat -A XKEEN_BS -m mark --mark {} -j RETURN -w", crate::vkturn::ROUTE_TABLE));
+    setup_cmds.push(format!("iptables -t mangle -A XKEEN_BS -m mark --mark {} -j RETURN -w", crate::vkturn::ROUTE_TABLE));
 
     // Исключённые устройства БС: полный обход перехвата (и TCP, и UDP), до любых правил захвата
     for ex_ip in resolve_excluded_whitelist_ips_pub(cfg) {
@@ -14205,6 +14209,11 @@ mod tests {
         assert!(setup.iter().any(|c| c.contains("iptables -t nat -I PREROUTING 1 -j XKEEN_BS")));
         assert!(setup.iter().any(|c| c.contains("iptables -t mangle -N XKEEN_BS")));
         assert!(setup.iter().any(|c| c.contains("iptables -t mangle -I PREROUTING 1 -j XKEEN_BS")));
+        // Трафик TUN-интерфейса csq0 и пакеты с routing-mark 222 не должны зацикливаться через XKEEN_BS
+        assert!(setup.iter().any(|c| c == "iptables -t nat -A XKEEN_BS -i csq0 -j RETURN -w"));
+        assert!(setup.iter().any(|c| c == "iptables -t mangle -A XKEEN_BS -i csq0 -j RETURN -w"));
+        assert!(setup.iter().any(|c| c == "iptables -t nat -A XKEEN_BS -m mark --mark 222 -j RETURN -w"));
+        assert!(setup.iter().any(|c| c == "iptables -t mangle -A XKEEN_BS -m mark --mark 222 -j RETURN -w"));
 
         // TCP захват БЕЗ ограничения портов (для всех трёх приватных подсетей)
         for subnet in ["192.168.0.0/16", "10.0.0.0/8", "172.16.0.0/12"] {

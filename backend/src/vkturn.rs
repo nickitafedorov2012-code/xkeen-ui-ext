@@ -56,8 +56,10 @@ pub const DEFAULT_SERVER_PORT: u16 = 46000;
 pub const TUN_IFACE: &str = "csq0";
 /// Имя абстрактного unix-сокета, по которому клиент ждёт дескриптор TUN.
 pub const TUN_UDS_NAME: &str = "xkeen_route_csqtt_tun";
-/// MTU для TUN-интерфейса поверх WebRTC/TURN (1380 исключает фрагментацию и зависание handshake).
-pub const TUN_MTU: u16 = 1380;
+/// MTU для TUN-интерфейса поверх WebRTC/TURN (1280 = MAX_PACKET_PAYLOAD ядра csqtt, исключает 0xCF-фрагментацию).
+pub const TUN_MTU: u16 = 1280;
+/// Максимальный TCP MSS для соединений через csq0 (1280 - 60 байт запаса на IP/TCP заголовки и опции).
+pub const TUN_TCP_MSS: u16 = 1220;
 /// Отдельная таблица маршрутизации для сокетов, привязанных к csq0 (в пределах 1..252 для Busybox).
 pub const ROUTE_TABLE: u32 = 222;
 /// Подсети инфраструктуры ВК (AS47541) и TURN-серверов звонков. Трафик клиента туда идёт строго напрямую.
@@ -1158,7 +1160,67 @@ fn is_ipv4(s: &str) -> bool {
 /// Содержимое file-провайдера `vkturn`: трафик узла уходит в TUN-интерфейс клиента csqtt.
 /// Значений пользователя в нём нет — YAML-инъекция невозможна.
 pub fn render_provider_yaml() -> String {
-    format!("proxies:\n  - name: \"{PROXY_NAME}\"\n    type: direct\n    interface-name: {TUN_IFACE}\n    routing-mark: 222\n    udp: true\n")
+    format!("proxies:\n  - name: \"{PROXY_NAME}\"\n    type: direct\n    interface-name: {TUN_IFACE}\n    routing-mark: {ROUTE_TABLE}\n    ip-version: ipv4\n    udp: true\n    tfo: false\n")
+}
+
+/// Отключает принудительный `tfo: true` внутри секции `proxy-providers -> vkturn` существующего `config.yaml`,
+/// не затрагивая остальные провайдеры и оставляя YAML без изменений, если правок не требуется.
+pub fn normalize_vkturn_provider_in_yaml(yaml: &str) -> String {
+    let eol = if yaml.contains("\r\n") { "\r\n" } else { "\n" };
+    let had_trailing_eol = yaml.ends_with('\n');
+    let mut in_providers = false;
+    let mut vkturn_indent: Option<usize> = None;
+    let mut changed = false;
+    let mut out: Vec<String> = Vec::new();
+
+    for line in yaml.lines() {
+        let trimmed = line.trim();
+        let indent = line.len() - line.trim_start_matches(' ').len();
+
+        if indent == 0 && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            in_providers = trimmed == "proxy-providers:";
+            vkturn_indent = None;
+            out.push(line.to_string());
+            continue;
+        }
+
+        if in_providers && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            if let Some(vi) = vkturn_indent {
+                if indent <= vi {
+                    vkturn_indent = None;
+                }
+            }
+            if vkturn_indent.is_none() && trimmed == format!("{PROVIDER_ID}:") {
+                vkturn_indent = Some(indent);
+                out.push(line.to_string());
+                continue;
+            }
+            if vkturn_indent.is_some() {
+                let (before_comment, comment_part) = match line.find('#') {
+                    Some(idx) => (&line[..idx], &line[idx..]),
+                    None => (line, ""),
+                };
+                if before_comment.trim() == "tfo: true" {
+                    let prefix = &before_comment[..before_comment.len() - before_comment.trim_start().len()];
+                    let suffix_ws = &before_comment[before_comment.trim_end().len()..];
+                    out.push(format!("{prefix}tfo: false{suffix_ws}{comment_part}"));
+                    changed = true;
+                    continue;
+                }
+            }
+        }
+
+        out.push(line.to_string());
+    }
+
+    if !changed {
+        return yaml.to_string();
+    }
+    let mut joined = out.join(eol);
+    if had_trailing_eol && !joined.ends_with(eol) {
+        joined.push_str(eol);
+    }
+    joined
 }
 
 /// Правила DIRECT в начало `rules:`, чтобы трафик к TURN, VK API и к VPS никогда не ушёл в туннель или петлю.
@@ -1276,6 +1338,12 @@ pub fn iptables_apply_script(dsts: &[String]) -> String {
         r#"for tbl in mangle nat; do
   for ch in xkeen xkeen_mask XKEEN_BS zapret; do
     iptables -w -t "$tbl" -nL "$ch" >/dev/null 2>&1 || continue
+    iptables -w -t "$tbl" -C "$ch" -m mark --mark {ROUTE_TABLE} -m comment --comment {IPT_COMMENT} -j RETURN 2>/dev/null \
+      || iptables -w -t "$tbl" -I "$ch" 1 -m mark --mark {ROUTE_TABLE} -m comment --comment {IPT_COMMENT} -j RETURN 2>/dev/null || true
+    iptables -w -t "$tbl" -C "$ch" -o {TUN_IFACE} -m comment --comment {IPT_COMMENT} -j RETURN 2>/dev/null \
+      || iptables -w -t "$tbl" -I "$ch" 1 -o {TUN_IFACE} -m comment --comment {IPT_COMMENT} -j RETURN 2>/dev/null || true
+    iptables -w -t "$tbl" -C "$ch" -i {TUN_IFACE} -m comment --comment {IPT_COMMENT} -j RETURN 2>/dev/null \
+      || iptables -w -t "$tbl" -I "$ch" 1 -i {TUN_IFACE} -m comment --comment {IPT_COMMENT} -j RETURN 2>/dev/null || true
     for dst in {list}; do
       iptables -w -t "$tbl" -C "$ch" -d "$dst" -m comment --comment {IPT_COMMENT} -j RETURN 2>/dev/null \
         || iptables -w -t "$tbl" -I "$ch" 1 -d "$dst" -m comment --comment {IPT_COMMENT} -j RETURN 2>/dev/null || true
@@ -1293,6 +1361,16 @@ pub fn iptables_remove_script() -> String {
     iptables -w -t "$tbl" -S "$ch" 2>/dev/null | grep -- "--comment {IPT_COMMENT}" | sed 's/^-A /-D /' | while read -r rule; do
       eval iptables -w -t "$tbl" $rule 2>/dev/null || true
     done
+  done
+done
+for ch in POSTROUTING OUTPUT FORWARD PREROUTING INPUT; do
+  iptables -w -t mangle -S "$ch" 2>/dev/null | grep -- "--comment {IPT_COMMENT}" | sed 's/^-A /-D /' | while read -r rule; do
+    eval iptables -w -t mangle $rule 2>/dev/null || true
+  done
+done
+for ch in OUTPUT FORWARD; do
+  iptables -w -t filter -S "$ch" 2>/dev/null | grep -- "--comment {IPT_COMMENT}" | sed 's/^-A /-D /' | while read -r rule; do
+    eval iptables -w -t filter $rule 2>/dev/null || true
   done
 done"#
     )
@@ -1390,6 +1468,18 @@ ip rule add dev {TUN_IFACE} table {ROUTE_TABLE} pref {ROUTE_TABLE}; rule_dev=1
 ip rule add from {ip} table {ROUTE_TABLE} pref 40; rule_src=1
 ip rule add fwmark {ROUTE_TABLE} table {ROUTE_TABLE} pref 45; rule_mark=1
 echo 2 > /proc/sys/net/ipv4/conf/{TUN_IFACE}/rp_filter 2>/dev/null || true
+for ch in POSTROUTING OUTPUT; do
+  iptables -w -t mangle -C "$ch" -o {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS} 2>/dev/null \
+    || iptables -w -t mangle -I "$ch" 1 -o {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS} 2>/dev/null || true
+done
+for ch in PREROUTING INPUT FORWARD; do
+  iptables -w -t mangle -C "$ch" -i {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS} 2>/dev/null \
+    || iptables -w -t mangle -I "$ch" 1 -i {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS} 2>/dev/null || true
+done
+for ch in OUTPUT FORWARD; do
+  iptables -w -t filter -C "$ch" -o {TUN_IFACE} -p udp --dport 443 -m comment --comment {IPT_COMMENT} -j REJECT 2>/dev/null \
+    || iptables -w -t filter -I "$ch" 1 -o {TUN_IFACE} -p udp --dport 443 -m comment --comment {IPT_COMMENT} -j REJECT 2>/dev/null || true
+done
 trap - EXIT"#
     )
 }
@@ -1403,7 +1493,16 @@ fn tun_teardown_script_for_ip(ip: Option<Ipv4Addr>) -> String {
     let source_rule = ip.map(|ip| format!("ip rule del pref 40 from {ip} table {ROUTE_TABLE} 2>/dev/null || true\nip addr del {ip}/32 dev {TUN_IFACE} 2>/dev/null || true\n"))
         .unwrap_or_default();
     format!(
-        "ip rule del pref {ROUTE_TABLE} dev {TUN_IFACE} table {ROUTE_TABLE} 2>/dev/null || true
+        "for ch in POSTROUTING OUTPUT; do
+  while iptables -w -t mangle -D \"$ch\" -o {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS} 2>/dev/null; do :; done
+done
+for ch in PREROUTING INPUT FORWARD; do
+  while iptables -w -t mangle -D \"$ch\" -i {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS} 2>/dev/null; do :; done
+done
+for ch in OUTPUT FORWARD; do
+  while iptables -w -t filter -D \"$ch\" -o {TUN_IFACE} -p udp --dport 443 -m comment --comment {IPT_COMMENT} -j REJECT 2>/dev/null; do :; done
+done
+ip rule del pref {ROUTE_TABLE} dev {TUN_IFACE} table {ROUTE_TABLE} 2>/dev/null || true
 {source_rule}ip rule del pref 45 fwmark {ROUTE_TABLE} table {ROUTE_TABLE} 2>/dev/null || true
 ip route del default dev {TUN_IFACE} table {ROUTE_TABLE} 2>/dev/null || true"
     )
@@ -1651,6 +1750,11 @@ where
         crate::routing::delete_provider_from_yaml(&yaml, PROVIDER_ID).unwrap_or_else(|_| yaml.clone())
     } else {
         yaml.clone()
+    };
+    let yaml_with_prov = if new_cfg.enabled {
+        normalize_vkturn_provider_in_yaml(&yaml_with_prov)
+    } else {
+        yaml_with_prov
     };
 
     let new_yaml = apply_rules(&yaml_with_prov, &new_cfg)
@@ -2993,13 +3097,17 @@ mod tests {
     fn tun_scripts_only_use_constants_and_parsed_ip() {
         let s = tun_configure_script("10.66.67.3".parse().unwrap());
         assert!(s.contains("ip addr add 10.66.67.3/32 dev csq0"));
-        assert!(s.contains("ip link set dev csq0 mtu 1380 up"));
+        assert!(s.contains("ip link set dev csq0 mtu 1280 up"));
+        assert!(s.contains("TCPMSS --set-mss 1220"));
+        assert!(s.contains("-o csq0 -p udp --dport 443 -m comment --comment xkeen-route-vkturn -j REJECT"));
         assert!(s.contains("ip route add default dev csq0 table 222"));
         assert!(s.contains("ip rule add dev csq0 table 222 pref 222"));
         assert!(s.contains("ip rule del pref 222"), "правило не дублируется при повторной настройке");
         assert!(s.contains("ip rule add from 10.66.67.3 table 222 pref 40"));
         assert!(s.contains("ip rule add fwmark 222 table 222 pref 45"));
         let t = tun_teardown_script_for_ip(Some("10.66.67.3".parse().unwrap()));
+        assert!(t.contains("TCPMSS --set-mss 1220"));
+        assert!(t.contains("-o csq0 -p udp --dport 443 -m comment --comment xkeen-route-vkturn -j REJECT"));
         assert!(t.contains("ip rule del pref 222 dev csq0 table 222"));
         assert!(t.contains("ip route del default dev csq0 table 222"));
         assert!(t.contains("ip rule del pref 40 from 10.66.67.3 table 222"));
@@ -3197,7 +3305,9 @@ mod tests {
         assert!(yaml.contains("type: direct"));
         assert!(yaml.contains("interface-name: csq0"), "трафик узла уходит в TUN клиента csqtt");
         assert!(yaml.contains("routing-mark: 222"));
+        assert!(yaml.contains("ip-version: ipv4"));
         assert!(yaml.contains("udp: true"));
+        assert!(yaml.contains("tfo: false"));
     }
 
     #[test]
@@ -3812,6 +3922,9 @@ mod tests {
         assert!(apply.contains("for ch in xkeen xkeen_mask XKEEN_BS zapret"));
         assert!(apply.contains("iptables -w -t"));
         assert!(!apply.contains("-w 2"));
+        assert!(apply.contains("-m mark --mark 222"));
+        assert!(apply.contains("-o csq0"));
+        assert!(apply.contains("-i csq0"));
         assert!(apply.contains("-C \"$ch\""), "проверка -C делает правило идемпотентным");
         assert!(apply.contains("-I \"$ch\" 1"), "RETURN обязан стоять первым в цепочке");
         assert!(apply.contains(&format!("--comment {IPT_COMMENT} -j RETURN")));
@@ -3904,5 +4017,66 @@ mod tests {
             commit_body.contains("delete_provider_from_yaml"),
             "commit_vkturn must remove phantom vkturn provider when tunnel is disabled"
         );
+    }
+
+    #[test]
+    fn regression_vkturn_speed_fix_mtu_mss_quic_and_mark222_exemptions() {
+        // 1. MTU TUN строго равен MAX_PACKET_PAYLOAD ядра csqtt (1280 байт), чтобы исключить фрагментацию 0xCF
+        assert_eq!(TUN_MTU, 1280);
+        assert_eq!(TUN_TCP_MSS, 1220);
+
+        // 2. TCP MSS clamping и мгновенный fallback с QUIC (UDP/443 REJECT) на csq0 + очистка
+        let configure = tun_configure_script("10.66.67.3".parse().unwrap());
+        let teardown = tun_teardown_script_for_ip(Some("10.66.67.3".parse().unwrap()));
+        for ch in ["POSTROUTING", "OUTPUT"] {
+            assert!(configure.contains(ch), "отсутствует цепочка исходящего зажима MSS: {ch}");
+        }
+        for ch in ["PREROUTING", "INPUT", "FORWARD"] {
+            assert!(configure.contains(ch), "отсутствует цепочка входящего зажима MSS: {ch}");
+        }
+        assert!(configure.contains("-o csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 1220"));
+        assert!(configure.contains("-i csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 1220"));
+        assert!(configure.contains("-o csq0 -p udp --dport 443 -m comment --comment xkeen-route-vkturn -j REJECT"));
+
+        assert!(teardown.contains("-o csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 1220"));
+        assert!(teardown.contains("-i csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 1220"));
+        assert!(teardown.contains("-o csq0 -p udp --dport 443 -m comment --comment xkeen-route-vkturn -j REJECT"));
+
+        // 3. Исключения в xkeen/xkeen_mask/XKEEN_BS/zapret для mark 222 и интерфейса csq0 + полная очистка
+        let apply = iptables_apply_script(&[]);
+        assert!(apply.contains("-I \"$ch\" 1 -m mark --mark 222 -m comment --comment xkeen-route-vkturn -j RETURN"));
+        assert!(apply.contains("-I \"$ch\" 1 -o csq0 -m comment --comment xkeen-route-vkturn -j RETURN"));
+        assert!(apply.contains("-I \"$ch\" 1 -i csq0 -m comment --comment xkeen-route-vkturn -j RETURN"));
+
+        let remove = iptables_remove_script();
+        assert!(remove.contains("for ch in POSTROUTING OUTPUT FORWARD PREROUTING INPUT; do"));
+        assert!(remove.contains("iptables -w -t mangle -S \"$ch\""));
+        assert!(remove.contains("for ch in OUTPUT FORWARD; do"));
+        assert!(remove.contains("iptables -w -t filter -S \"$ch\""));
+
+        // 4. Провайдер vkturn использует IPv4-only и tfo: false (включая добавление и миграцию config.yaml)
+        let prov_yaml = render_provider_yaml();
+        assert!(prov_yaml.contains("ip-version: ipv4"));
+        assert!(prov_yaml.contains("tfo: false"));
+        assert!(!prov_yaml.contains("tfo: true"));
+
+        let base = "proxy-providers:\n  other:\n    type: file\n    override:\n      tfo: true\nrules:\n  - MATCH,DIRECT\n";
+        let with_vk = crate::routing::add_file_provider_to_yaml(base, PROVIDER_ID, "./providers/vkturn.yaml", None, None).unwrap();
+        let vk_section = with_vk.split("  vkturn:").nth(1).unwrap().split("  other:").next().unwrap();
+        assert!(vk_section.contains("tfo: false"), "add_file_provider_to_yaml обязан ставить tfo: false для vkturn: {vk_section}");
+        assert!(!vk_section.contains("tfo: true"));
+        let other_section = with_vk.split("  other:").nth(1).unwrap();
+        assert!(other_section.contains("tfo: true"), "другие провайдеры не должны терять tfo: true");
+
+        let legacy_yaml = "proxy-providers:\r\n  sub1:\r\n    type: http\r\n    override:\r\n      tfo: true\r\n  vkturn:\r\n    type: file\r\n    override:\r\n      udp: true\r\n      tfo: true\r\n  sub2:\r\n    type: file\r\n    override:\r\n      tfo: true\r\nrules:\r\n  - MATCH,PROXY\r\n";
+        let normalized = normalize_vkturn_provider_in_yaml(legacy_yaml);
+        assert!(normalized.contains("\r\n"), "CRLF должен сохраняться");
+        let norm_vk = normalized.split("  vkturn:").nth(1).unwrap().split("  sub2:").next().unwrap();
+        assert!(norm_vk.contains("tfo: false") && !norm_vk.contains("tfo: true"));
+        assert!(normalized.split("  sub1:").nth(1).unwrap().split("  vkturn:").next().unwrap().contains("tfo: true"));
+        assert!(normalized.split("  sub2:").nth(1).unwrap().contains("tfo: true"));
+        assert_eq!(normalize_vkturn_provider_in_yaml(&normalized), normalized, "идемпотентность нормализации");
+        let unchanged = "proxy-providers:\n  vkturn:\n    type: file\n    path: ./providers/vkturn.yaml\nrules:\n  - MATCH,PROXY\n";
+        assert_eq!(normalize_vkturn_provider_in_yaml(unchanged), unchanged);
     }
 }
