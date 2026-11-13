@@ -40,7 +40,7 @@ use tokio::sync::RwLock;
 
 pub const VERSION: &str = match option_env!("XKEEN_ROUTE_VERSION") {
     Some(v) => v,
-    None => concat!("v", "1.16.6.0"),
+    None => concat!("v", "1.16.7.0"),
 };
 pub const APP_NAME: &str = "XKeen Route";
 
@@ -909,6 +909,7 @@ async fn main() {
         // VK-туннель (VK-turn)
         .route("/api/vkturn/status", get(api::get_vkturn_status))
         .route("/api/vkturn/logs", get(api::get_vkturn_logs))
+        .route("/api/vkturn/decrypt-profile", post(api::decrypt_csqtt_profile))
         .route("/api/vkturn/config", post(api::save_vkturn_config))
         .route("/api/vkturn/action", post(api::vkturn_action))
         .route("/api/vkturn/auth/save", post(api::save_vkturn_auth))

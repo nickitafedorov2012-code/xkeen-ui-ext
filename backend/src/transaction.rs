@@ -1334,6 +1334,9 @@ mod tests {
             rt.tun_attached = true;
             rt.connected_streams = 1;
         }
+        assert!(crate::api::execute_server_switch_workflow(&state, target).await.is_err());
+        assert!(requests.lock().unwrap().is_empty());
+        state.vkturn.rt.write().await.tun_configured = true;
         let result = crate::api::execute_server_switch_workflow(&state, target).await;
         let chain = state.config.read().await.failover.bs_priority_chain.clone();
         mock.abort();

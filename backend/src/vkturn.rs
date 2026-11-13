@@ -70,7 +70,7 @@ pub const VK_NETWORK_CIDRS: &[&str] = &[
     "95.213.0.0/17",
     "185.32.248.0/22",
 ];
-pub const VK_TURN_CIDRS: &[&str] = VK_NETWORK_CIDRS;
+pub const VK_TURN_CIDRS: &[&str] = &["155.212.192.0/20"];
 
 /// Хосты VK API из focsq (schedule_vk_endpoint_excludes), которые ядро посещает напрямую
 pub const VK_API_HOSTS: &[&str] = &[
@@ -83,8 +83,6 @@ pub const VK_API_HOSTS: &[&str] = &[
     "id.vk.com",
     "oauth.vk.ru",
     "oauth.vk.com",
-    "vk.com",
-    "vk.ru",
 ];
 pub const RULES_BEGIN: &str = "# BEGIN xkeen-route vkturn";
 pub const RULES_END: &str = "# END xkeen-route vkturn";
@@ -136,7 +134,7 @@ pub fn parse_call_link(raw: &str) -> Result<String, String> {
     if s.to_ascii_lowercase().contains("telemost.yandex") {
         return Err("Ядро csqtt работает только со звонками ВКонтакте — ссылка Телемоста не подойдёт".into());
     }
-    let link_re = regex_lite::Regex::new(r"^https://(?:m\.)?vk\.(?:com|ru)/call/join/([^?#/\s]+)/?(?:[?#][^\s]*)?$").unwrap();
+    let link_re = regex_lite::Regex::new(r"^(?:https://)?(?:m\.)?vk\.(?:com|ru)/call/join/([^?#/\s]+)/?(?:[?#][^\s]*)?$").unwrap();
     let hash = if let Some(c) = link_re.captures(s) {
         c[1].to_string()
     } else if hash_re.is_match(s) {
@@ -183,39 +181,165 @@ pub fn validate_peer(peer: &str) -> Result<(), String> {
 }
 
 /// Разбор ссылки профиля csqtt (как в focsq: csqtt://connect?v=2&host=...&peer=46000&password=... или csqtt://pass@host:port)
+pub fn decrypt_csqtt_link(raw: &str) -> Option<String> {
+    use base64::Engine;
+    use sha2::Digest;
+    let payload = raw.trim().strip_prefix("csqtt://")?;
+    if payload.len() > 16384 { return None; }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(payload))
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(payload))
+        .ok()?;
+    if bytes.len() < 28 { return None; }
+    let nonce: [u8; 12] = bytes[..12].try_into().ok()?;
+    let digest = sha2::Sha256::digest(b"csqtt-chiper-key");
+    let key = ring::aead::UnboundKey::new(&ring::aead::AES_256_GCM, &digest).ok()?;
+    let key = ring::aead::LessSafeKey::new(key);
+    let mut encrypted = bytes[12..].to_vec();
+    let plain = key.open_in_place(ring::aead::Nonce::assume_unique_for_key(nonce), ring::aead::Aad::empty(), &mut encrypted).ok()?;
+    let decoded = std::str::from_utf8(plain).ok()?.trim();
+    if decoded.starts_with("csqtt://") {
+        Some(decoded.to_string())
+    } else if decoded.starts_with("connect?") || decoded.contains('@') {
+        Some(format!("csqtt://{decoded}"))
+    } else if decoded.contains("host=") {
+        Some(format!("csqtt://connect?{decoded}"))
+    } else {
+        None
+    }
+}
+
+fn decode_csqtt_component(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(i + 1..i + 3)?).ok()?;
+            result.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            result.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(result).ok()
+}
+
+fn repair_glued_csqtt_query(query: &str) -> Option<String> {
+    let re = regex_lite::Regex::new(r"(?i)^v=2host=([a-z0-9.-]+)&?peer=([0-9]+)&?password=([^&;]+)$").ok()?;
+    let glued_key_re = regex_lite::Regex::new(r"(?i)(?:v|host|peer|password|client|hashes|token|workers|power)=").ok()?;
+    let caps = re.captures(query)?;
+    if glued_key_re.is_match(&caps[3]) {
+        return None;
+    }
+    Some(format!("v=2&host={}&peer={}&password={}", &caps[1], &caps[2], &caps[3]))
+}
+
 pub fn parse_csqtt_link(raw: &str) -> Option<(String, String)> {
     let s = raw.trim();
     if !s.starts_with("csqtt://") {
         return None;
     }
+    if !s.starts_with("csqtt://connect?") && !s[8..].contains('@') {
+        let decoded = decrypt_csqtt_link(s)?;
+        return parse_csqtt_link(&decoded);
+    }
     if s.starts_with("csqtt://connect?") {
-        let query = s.trim_start_matches("csqtt://connect?");
-        let mut host = "";
-        let mut peer = "46000";
-        let mut password = "";
+        let raw_query = s.trim_start_matches("csqtt://connect?");
+        let repaired = repair_glued_csqtt_query(raw_query);
+        let query = repaired.as_deref().unwrap_or(raw_query);
+        let mut fields = std::collections::HashMap::new();
         for pair in query.split('&') {
-            if let Some((k, v)) = pair.split_once('=') {
-                match k.trim() {
-                    "host" => host = v.trim(),
-                    "peer" => peer = v.trim(),
-                    "password" => password = v.trim(),
-                    _ => {}
-                }
+            let (key, value) = pair.split_once('=')?;
+            let key = decode_csqtt_component(key)?;
+            if !matches!(key.as_str(), "v" | "host" | "peer" | "password") || fields.contains_key(&key) {
+                return None;
             }
+            fields.insert(key, decode_csqtt_component(value)?);
         }
-        if !host.is_empty() && !password.is_empty() {
-            let port = peer.parse::<u16>().unwrap_or(46000);
-            return Some((format!("{host}:{port}"), password.to_string()));
-        }
+        if fields.get("v")?.as_str() != "2" { return None; }
+        let host = fields.get("host")?;
+        let password = fields.get("password")?;
+        let port = fields.get("peer")?.parse::<u16>().ok().filter(|p| *p > 0)?;
+        let addr = format!("{host}:{port}");
+        validate_peer(&addr).ok()?;
+        validate_password(password).ok()?;
+        return Some((addr, password.clone()));
     }
     let rest = s.trim_start_matches("csqtt://");
     if let Some((pw, addr)) = rest.split_once('@') {
         if !pw.is_empty() && !addr.is_empty() {
-            let full_addr = if addr.contains(':') { addr.to_string() } else { format!("{addr}:46000") };
-            return Some((full_addr, pw.to_string()));
+            validate_peer(addr).ok()?;
+            let password = decode_csqtt_component(pw)?;
+            validate_password(&password).ok()?;
+            return Some((addr.to_string(), password));
         }
     }
     None
+}
+
+#[derive(Debug, PartialEq)]
+pub struct CsqttProfile {
+    pub peer: String,
+    pub password: String,
+    pub links: Vec<String>,
+    pub token: Option<String>,
+    pub power: Option<u8>,
+}
+
+/// Полный профиль для сохранения: поля, влияющие на подключение, не отбрасываются.
+pub fn parse_csqtt_profile(raw: &str) -> Option<CsqttProfile> {
+    let s = raw.trim();
+    let payload = s.strip_prefix("csqtt://")?;
+    if !payload.starts_with("connect?") {
+        if payload.contains('@') {
+            let (peer, password) = parse_csqtt_link(s)?;
+            return Some(CsqttProfile { peer, password, links: vec![], token: None, power: None });
+        }
+        return parse_csqtt_profile(&decrypt_csqtt_link(s)?);
+    }
+    let raw_query = payload.strip_prefix("connect?")?.replace("&amp;", "&");
+    let query = repair_glued_csqtt_query(&raw_query).unwrap_or(raw_query);
+    let mut fields = std::collections::HashMap::new();
+    for part in query.split(['&', ';']) {
+        if part.is_empty() { continue; }
+        let (raw_key, value) = part.split_once('=')?;
+        let key = decode_csqtt_component(raw_key)?;
+        if !matches!(key.as_str(), "v" | "host" | "peer" | "password" | "hashes" | "token" | "power" | "workers" | "client")
+            || fields.insert(key, value.to_string()).is_some() { return None; }
+    }
+    let field = |key: &str| fields.get(key).and_then(|v| decode_csqtt_component(v));
+    if field("v")?.as_str() != "2" || fields.contains_key("power") && fields.contains_key("workers") { return None; }
+    let host = field("host")?;
+    if host.eq_ignore_ascii_case("localhost") || matches!(host.as_str(), "127.0.0.1" | "0.0.0.0") { return None; }
+    let port = field("peer")?.parse::<u16>().ok().filter(|p| *p > 0)?;
+    let peer = format!("{host}:{port}");
+    validate_peer(&peer).ok()?;
+    let password = field("password")?;
+    if password.chars().any(char::is_whitespace) { return None; }
+    validate_password(&password).ok()?;
+    let mut links = Vec::new();
+    if let Some(raw_hashes) = fields.get("hashes") {
+        for raw_hash in raw_hashes.split(['+', ',']) {
+            let value = decode_csqtt_component(raw_hash)?;
+            let hash = parse_call_link(&value).ok()?;
+            if hash.len() < 16 || links.len() >= MAX_LINKS || links.iter().any(|h| h == &hash) { return None; }
+            links.push(hash);
+        }
+    }
+    let token = if fields.contains_key("token") {
+        let value = field("token")?;
+        if value.is_empty() || value.len() > 4096 || value.chars().any(char::is_whitespace) { return None; }
+        Some(value)
+    } else { None };
+    if token.is_some() && !links.is_empty() { return None; }
+    let power = if fields.contains_key("power") || fields.contains_key("workers") {
+        let raw = field(if fields.contains_key("power") { "power" } else { "workers" })?;
+        let value = raw.parse::<u32>().ok().filter(|n| *n > 0)?;
+        Some(value.clamp(10, 100) as u8)
+    } else { None };
+    Some(CsqttProfile { peer, password, links, token, power })
 }
 
 /// Пользователь может ввести только IP/домен — PEER-порт сервера csqtt по умолчанию подставляется сам.
@@ -289,6 +413,16 @@ pub fn call_hashes(cfg: &VkTurnConfig) -> Vec<String> {
     out
 }
 
+/// The saved account remains available, but manual mode uses only the supplied call hashes.
+pub fn selected_vk_token(cfg: &VkTurnConfig) -> Option<&str> {
+    let token = match cfg.auth_mode.as_str() {
+        "manual" => None,
+        "profile_token" => cfg.profile_token.as_deref(),
+        _ => cfg.vk_token.as_deref(),
+    };
+    token.filter(|value| !value.trim().is_empty())
+}
+
 /// Маскирование токена VK в логах и API.
 pub fn mask_vk_token(token: &str) -> String {
     let t = token.trim();
@@ -353,15 +487,31 @@ pub fn format_vk_bootstrap_line(token: &str, user_id: u64) -> String {
 }
 
 /// Запрос профиля пользователя через официальный VK API (users.get v=5.199).
+#[derive(Debug, PartialEq, Eq)]
+pub enum VkProfileError {
+    Rejected,
+    Unavailable,
+}
+
 pub async fn fetch_vk_user_profile(
     http: &reqwest::Client,
     token: &str,
     fallback_id: Option<u64>,
-) -> Result<(u64, String), String> {
+) -> Result<(u64, String), VkProfileError> {
+    fetch_vk_user_profile_at(http, "https://api.vk.ru", token, fallback_id).await
+}
+
+pub async fn fetch_vk_user_profile_at(
+    http: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+    fallback_id: Option<u64>,
+) -> Result<(u64, String), VkProfileError> {
+    let base = base_url.trim_end_matches('/');
     // 1. Проверяем валидность аккаунта через account.getAppPermissions
-    let perm_url = "https://api.vk.ru/method/account.getAppPermissions";
+    let perm_url = format!("{base}/method/account.getAppPermissions");
     if let Ok(resp) = http
-        .get(perm_url)
+        .get(&perm_url)
         .query(&[("access_token", token.trim()), ("v", "5.199")])
         .timeout(Duration::from_secs(5))
         .send()
@@ -371,32 +521,37 @@ pub async fn fetch_vk_user_profile(
             if let Some(err) = json.get("error") {
                 let code = err.get("error_code").and_then(|c| c.as_i64()).unwrap_or(0);
                 let msg = err.get("error_msg").and_then(|m| m.as_str()).unwrap_or("Неизвестная ошибка VK");
-                if code == 5 || msg.contains("blocked") || msg.contains("banned") {
-                    return Err(format!(
-                        "Аккаунт ВКонтакте заблокирован ({msg}). Пожалуйста, разблокируйте его на m.vk.com или используйте другой аккаунт."
-                    ));
+                if is_token_invalid_code(code) || msg.contains("blocked") || msg.contains("banned") {
+                    return Err(VkProfileError::Rejected);
                 }
             }
         }
     }
 
-    let url = "https://api.vk.ru/method/users.get";
+    let url = format!("{base}/method/users.get");
     let resp = http
-        .get(url)
+        .get(&url)
         .query(&[("access_token", token.trim()), ("v", "5.199")])
         .timeout(Duration::from_secs(6))
         .send()
         .await
-        .map_err(|e| format!("Ошибка сетевого запроса к VK API: {e}"))?;
+        .map_err(|_| VkProfileError::Unavailable)?;
+
+    if !resp.status().is_success() { return Err(VkProfileError::Unavailable); }
 
     let json: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| format!("Ошибка разбора ответа VK API: {e}"))?;
+        .map_err(|_| VkProfileError::Unavailable)?;
 
     if let Some(err) = json.get("error") {
-        let msg = err.get("error_msg").and_then(|m| m.as_str()).unwrap_or("Неизвестная ошибка VK");
-        return Err(format!("VK API вернул ошибку: {msg}"));
+        let code = err.get("error_code").and_then(|c| c.as_i64()).unwrap_or(0);
+        let msg = err.get("error_msg").and_then(|m| m.as_str()).unwrap_or("");
+        return Err(if is_token_invalid_code(code) || msg.contains("blocked") || msg.contains("banned") {
+            VkProfileError::Rejected
+        } else {
+            VkProfileError::Unavailable
+        });
     }
 
     if let Some(user) = json.get("response").and_then(|r| r.as_array()).and_then(|a| a.first()) {
@@ -410,10 +565,8 @@ pub async fn fetch_vk_user_profile(
             full_name
         };
         Ok((uid, name))
-    } else if let Some(uid) = fallback_id {
-        Ok((uid, format!("Пользователь VK {}", uid)))
     } else {
-        Err("VK API вернул пустой список пользователей".into())
+        Err(VkProfileError::Unavailable)
     }
 }
 
@@ -556,6 +709,14 @@ pub async fn finish_vk_calls_batch(http: &reqwest::Client, token: &str, call_ids
 /// Аргументы передаются МАССИВОМ, без shell — никакой подстановки команд. Пароля здесь нет:
 /// он уходит в `CSQTT_PASSWORD` (см. client_env).
 pub fn build_client_args_with_hashes(cfg: &VkTurnConfig, hashes: &[String]) -> Vec<String> {
+    build_client_args_for_uds(cfg, hashes, &new_tun_uds_name())
+}
+
+fn new_tun_uds_name() -> String {
+    format!("{TUN_UDS_NAME}_{}", crate::auth::random_hex(8))
+}
+
+fn build_client_args_for_uds(cfg: &VkTurnConfig, hashes: &[String], uds_name: &str) -> Vec<String> {
     vec![
         "-peer".into(),
         cfg.peer.trim().to_string(),
@@ -567,7 +728,7 @@ pub fn build_client_args_with_hashes(cfg: &VkTurnConfig, hashes: &[String]) -> V
         "-listen".into(),
         "127.0.0.1:0".into(),
         "-tun-uds".into(),
-        TUN_UDS_NAME.into(),
+        uds_name.into(),
         "-captcha-mode".into(),
         "auto".into(),
         "-obfs".into(),
@@ -616,12 +777,17 @@ pub struct VkTurnRuntime {
     pub bytes_down: u64,
     pub restarts: u32,
     pub last_error: Option<String>,
+    pub error_source: Option<&'static str>,
+    pub error_reason: Option<&'static str>,
     /// Адрес туннеля, выданный сервером (TUNCONF).
     pub tunnel_ip: Option<Ipv4Addr>,
     /// DNS, который сервер предлагает внутри туннеля.
     pub tunnel_dns: Option<String>,
     /// Дескриптор TUN передан текущему процессу клиента.
     pub tun_attached: bool,
+    pub tun_configured: bool,
+    #[serde(skip)]
+    run_generation: u64,
     /// Адреса TURN, которые ВК выдал клиенту — для исключений в iptables.
     #[serde(skip)]
     pub turn_ips: BTreeSet<Ipv4Addr>,
@@ -645,9 +811,13 @@ impl Default for VkTurnRuntime {
             bytes_down: 0,
             restarts: 0,
             last_error: None,
+            error_source: None,
+            error_reason: None,
             tunnel_ip: None,
             tunnel_dns: None,
             tun_attached: false,
+            tun_configured: false,
+            run_generation: 0,
             turn_ips: BTreeSet::new(),
             started_at: None,
             zero_streams_since: None,
@@ -660,7 +830,7 @@ impl Default for VkTurnRuntime {
 impl VkTurnRuntime {
     /// Туннель готов принимать трафик Mihomo: сервер выдал адрес и TUN передан клиенту.
     pub fn tunnel_ready(&self) -> bool {
-        self.tunnel_ip.is_some() && self.tun_attached
+        self.tunnel_ip.is_some() && self.tun_attached && self.tun_configured
     }
 }
 
@@ -698,6 +868,8 @@ fn note_getconf_silent(rt: &mut VkTurnRuntime) {
     {
         rt.phase = VkTurnPhase::ServerUnreachable;
         rt.last_error = Some(SERVER_SILENT_ON_PASSWORD.into());
+        rt.error_source = Some("network");
+        rt.error_reason = Some("server_timeout");
     }
 }
 
@@ -726,6 +898,8 @@ fn set_connected(rt: &mut VkTurnRuntime) {
     rt.phase = VkTurnPhase::Connected;
     rt.zero_streams_since = None;
     rt.last_error = None;
+    rt.error_source = None;
+    rt.error_reason = None;
 }
 
 /// `TUNCONF:<ip>:<dns>:<…>` → адрес и DNS туннеля (protocol.rs сервера: `TUNCONF:{ip}:{dns}:0:stream-v1`).
@@ -777,15 +951,21 @@ pub fn apply_log_line(rt: &mut VkTurnRuntime, line: &str, now: Instant) -> LineE
     if line.contains("FATAL_AUTH") {
         rt.phase = VkTurnPhase::AuthFailed;
         rt.last_error = Some(auth_error_text(line).into());
+        rt.error_source = Some("csqtt");
+        rt.error_reason = Some(password_error_reason(line));
     } else if line.contains("User authorization failed")
         || line.contains("User was deleted or banned")
         || line.contains("API 5:")
     {
         rt.phase = VkTurnPhase::AuthFailed;
         rt.last_error = Some("Вход в аккаунт VK отклонён (аккаунт заблокирован или токен отозван). Пожалуйста, войдите с другого аккаунта.".into());
+        rt.error_source = Some("vk");
+        rt.error_reason = Some("authorization_rejected");
     } else if line.contains("WRAP_AUTH_TIMEOUT") {
         if no_streams && rt.phase != VkTurnPhase::AuthFailed {
             rt.phase = VkTurnPhase::ServerUnreachable;
+            rt.error_source = Some("network");
+            rt.error_reason = Some("server_timeout");
             rt.last_error = Some(
                 "Сервер csqtt на VPS не отвечает: проверьте адрес, порт и пароль подключения (при неверном пароле сервер молчит)".into(),
             );
@@ -795,11 +975,15 @@ pub fn apply_log_line(rt: &mut VkTurnRuntime, line: &str, now: Instant) -> LineE
             rt.phase = VkTurnPhase::LinkInvalid;
         }
         rt.last_error = Some("Ссылка на звонок ВК не работает: звонок завершён или удалён".into());
+        rt.error_source = Some("vk");
+        rt.error_reason = Some("call_unavailable");
     } else if is_captcha_failed_line(line) {
         if no_streams {
             rt.phase = VkTurnPhase::CaptchaRequired;
         }
         rt.last_error = Some("ВК требует подтвердить «я не робот», автоматически пройти проверку не удалось".into());
+        rt.error_source = Some("vk");
+        rt.error_reason = Some("captcha_required");
     } else if line.contains("[КАПЧА]") || line.contains("[Captcha]") {
         if no_streams && !is_sticky(rt.phase) {
             rt.phase = VkTurnPhase::SolvingCaptcha;
@@ -816,6 +1000,8 @@ pub fn apply_log_line(rt: &mut VkTurnRuntime, line: &str, now: Instant) -> LineE
     } else if line.contains("[ФАТАЛ]") || line.contains("Нужен пароль") || line.contains("Нет хешей VK") {
         rt.phase = VkTurnPhase::Crashed;
         rt.last_error = Some(redact_line(line));
+        rt.error_source = Some("csqtt");
+        rt.error_reason = Some("client_error");
     }
     LineEffect::None
 }
@@ -856,7 +1042,10 @@ fn apply_event(rt: &mut VkTurnRuntime, kind: &str, json: &serde_json::Value, now
         }
         "TUN_LOST" => {
             rt.tun_attached = false;
-            push_log(rt, "[ТУННЕЛЬ] Клиент потерял TUN-интерфейс — передам заново после перезапуска".into());
+            push_log(rt, "[ТУННЕЛЬ] Клиент потерял TUN-интерфейс — повторяю передачу".into());
+            if let Some(ip) = rt.tunnel_ip {
+                return LineEffect::TunConfig { ip, dns: rt.tunnel_dns.clone() };
+            }
         }
         "ERROR" => {
             let msg = json.get("message").and_then(|v| v.as_str()).unwrap_or("ошибка клиента");
@@ -866,8 +1055,12 @@ fn apply_event(rt: &mut VkTurnRuntime, kind: &str, json: &serde_json::Value, now
             if code.contains("auth") || msg.contains("FATAL_AUTH") {
                 rt.phase = VkTurnPhase::AuthFailed;
                 rt.last_error = Some(auth_error_text(msg).into());
+                rt.error_source = Some("csqtt");
+                rt.error_reason = Some(password_error_reason(msg));
             } else {
                 rt.last_error = Some(redact_line(msg));
+                rt.error_source = Some("csqtt");
+                rt.error_reason = Some("client_error");
                 if fatal {
                     rt.phase = VkTurnPhase::Crashed;
                 }
@@ -890,6 +1083,14 @@ fn auth_error_text(line: &str) -> &'static str {
     } else {
         "Сервер csqtt отказал в доступе"
     }
+}
+
+fn password_error_reason(line: &str) -> &'static str {
+    let text = line.to_lowercase();
+    if text.contains("expired") || text.contains("истёк") { "password_expired" }
+    else if text.contains("deactivated") || text.contains("деактивирован") { "password_deactivated" }
+    else if text.contains("wrong_password") || text.contains("invalid password") || text.contains("неверный пароль") { "password_invalid" }
+    else { "authentication_rejected" }
 }
 
 /// Ошибки ВК «звонок недоступен».
@@ -963,7 +1164,7 @@ pub fn render_provider_yaml() -> String {
 /// Правила DIRECT в начало `rules:`, чтобы трафик к TURN, VK API и к VPS никогда не ушёл в туннель или петлю.
 pub fn rules_block(cfg: &VkTurnConfig) -> String {
     let mut lines = vec![format!("  {RULES_BEGIN}")];
-    for c in VK_NETWORK_CIDRS {
+    for c in VK_TURN_CIDRS {
         lines.push(format!("  - IP-CIDR,{c},DIRECT,no-resolve"));
     }
     for host in VK_API_HOSTS {
@@ -1035,10 +1236,27 @@ pub fn remove_rules(yaml: &str) -> String {
 
 pub const IPT_COMMENT: &str = "xkeen-route-vkturn";
 
+fn ipv4_in_cidr(ip: Ipv4Addr, cidr: &str) -> bool {
+    let Some((net_str, prefix_str)) = cidr.split_once('/') else {
+        return false;
+    };
+    let (Ok(net), Ok(prefix)) = (net_str.parse::<Ipv4Addr>(), prefix_str.parse::<u32>()) else {
+        return false;
+    };
+    if prefix == 0 {
+        return true;
+    }
+    if prefix > 32 {
+        return false;
+    }
+    let mask = !0u32 << (32 - prefix);
+    (u32::from(ip) & mask) == (u32::from(net) & mask)
+}
+
 /// Адреса, к которым клиент подключается сам. Только константы и разобранные Ipv4Addr — без инъекций.
 pub fn exempt_destinations(peer_ipv4: Option<Ipv4Addr>, turn_ips: &BTreeSet<Ipv4Addr>) -> Vec<String> {
-    let mut v: Vec<String> = VK_TURN_CIDRS.iter().map(|c| c.to_string()).collect();
-    let in_vk_subnet = |ip: &Ipv4Addr| (u32::from(*ip) & 0xFFFF_F000) == u32::from(Ipv4Addr::new(155, 212, 192, 0));
+    let mut v: Vec<String> = VK_NETWORK_CIDRS.iter().map(|c| c.to_string()).collect();
+    let in_vk_subnet = |ip: &Ipv4Addr| VK_NETWORK_CIDRS.iter().any(|cidr| ipv4_in_cidr(*ip, cidr));
     for ip in turn_ips.iter().filter(|ip| !in_vk_subnet(ip)) {
         v.push(format!("{ip}/32"));
     }
@@ -1056,7 +1274,7 @@ pub fn iptables_apply_script(dsts: &[String]) -> String {
     let list = dsts.join(" ");
     format!(
         r#"for tbl in mangle nat; do
-  for ch in xkeen XKEEN_BS zapret; do
+  for ch in xkeen xkeen_mask XKEEN_BS zapret; do
     iptables -w -t "$tbl" -nL "$ch" >/dev/null 2>&1 || continue
     for dst in {list}; do
       iptables -w -t "$tbl" -C "$ch" -d "$dst" -m comment --comment {IPT_COMMENT} -j RETURN 2>/dev/null \
@@ -1071,7 +1289,7 @@ done"#
 pub fn iptables_remove_script() -> String {
     format!(
         r#"for tbl in mangle nat; do
-  for ch in xkeen XKEEN_BS zapret; do
+  for ch in xkeen xkeen_mask XKEEN_BS zapret; do
     iptables -w -t "$tbl" -S "$ch" 2>/dev/null | grep -- "--comment {IPT_COMMENT}" | sed 's/^-A /-D /' | while read -r rule; do
       eval iptables -w -t "$tbl" $rule 2>/dev/null || true
     done
@@ -1088,6 +1306,26 @@ async fn run_sh(script: &str) {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = script;
+    }
+}
+
+async fn run_sh_checked(script: &str) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(script).kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(5), command.output()).await
+            .map_err(|_| "Превышено время настройки сетевых правил".to_string())?
+            .map_err(|e| format!("Не удалось запустить настройку сетевых правил: {e}"))?;
+        if !output.status.success() {
+            return Err(format!("Не удалось настроить сетевые правила (код {:?})", output.status.code()));
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = script;
+        Ok(())
     }
 }
 
@@ -1126,30 +1364,80 @@ pub async fn remove_exemptions() {
 /// Совместимо с Busybox на KeeneticOS: таблица < 255 и селектор dev вместо oif.
 pub fn tun_configure_script(ip: Ipv4Addr) -> String {
     format!(
-        "ip addr flush dev {TUN_IFACE} 2>/dev/null
-ip addr add {ip}/32 dev {TUN_IFACE}
+        r#"set -e
+ip rule show | sed -n 's/^40:.*from \([0-9.]*\) .*lookup {ROUTE_TABLE}.*/\1/p' | while read -r old_ip; do ip rule del pref 40 from "$old_ip" table {ROUTE_TABLE} 2>/dev/null || true; done
+ip rule del pref {ROUTE_TABLE} dev {TUN_IFACE} table {ROUTE_TABLE} 2>/dev/null || true
+ip rule del pref 45 fwmark {ROUTE_TABLE} table {ROUTE_TABLE} 2>/dev/null || true
+ip route del default dev {TUN_IFACE} table {ROUTE_TABLE} 2>/dev/null || true
+ip addr flush dev {TUN_IFACE} 2>/dev/null || true
+existing_rules="$(ip rule show)"
+if printf '%s\n' "$existing_rules" | grep -Eq '^(40|45|{ROUTE_TABLE}):'; then exit 1; fi
+existing_routes="$(ip route show table {ROUTE_TABLE} 2>/dev/null || true)"
+if [ -n "$existing_routes" ]; then exit 1; fi
+addr_added=0; route_added=0; rule_dev=0; rule_src=0; rule_mark=0
+cleanup() {{
+  [ "$rule_mark" = 0 ] || ip rule del pref 45 fwmark {ROUTE_TABLE} table {ROUTE_TABLE} 2>/dev/null || true
+  [ "$rule_src" = 0 ] || ip rule del pref 40 from {ip} table {ROUTE_TABLE} 2>/dev/null || true
+  [ "$rule_dev" = 0 ] || ip rule del pref {ROUTE_TABLE} dev {TUN_IFACE} table {ROUTE_TABLE} 2>/dev/null || true
+  [ "$route_added" = 0 ] || ip route del default dev {TUN_IFACE} table {ROUTE_TABLE} 2>/dev/null || true
+  [ "$addr_added" = 0 ] || ip addr del {ip}/32 dev {TUN_IFACE} 2>/dev/null || true
+}}
+trap cleanup EXIT
+ip addr add {ip}/32 dev {TUN_IFACE}; addr_added=1
 ip link set dev {TUN_IFACE} mtu {TUN_MTU} up
-ip route replace default dev {TUN_IFACE} table {ROUTE_TABLE}
-ip rule del pref {ROUTE_TABLE} 2>/dev/null
-ip rule add dev {TUN_IFACE} table {ROUTE_TABLE} pref {ROUTE_TABLE}
-ip rule del pref 40 2>/dev/null
-ip rule add from {ip} table {ROUTE_TABLE} pref 40 2>/dev/null
-ip rule del pref 45 2>/dev/null
-ip rule add fwmark {ROUTE_TABLE} table {ROUTE_TABLE} pref 45 2>/dev/null
-echo 2 > /proc/sys/net/ipv4/conf/{TUN_IFACE}/rp_filter 2>/dev/null
-true"
+ip route add default dev {TUN_IFACE} table {ROUTE_TABLE}; route_added=1
+ip rule add dev {TUN_IFACE} table {ROUTE_TABLE} pref {ROUTE_TABLE}; rule_dev=1
+ip rule add from {ip} table {ROUTE_TABLE} pref 40; rule_src=1
+ip rule add fwmark {ROUTE_TABLE} table {ROUTE_TABLE} pref 45; rule_mark=1
+echo 2 > /proc/sys/net/ipv4/conf/{TUN_IFACE}/rp_filter 2>/dev/null || true
+trap - EXIT"#
     )
 }
 
 /// Снимает маршрутизацию туннеля (сам интерфейс исчезает, когда панель закрывает дескриптор TUN).
 pub fn tun_teardown_script() -> String {
+    tun_teardown_script_for_ip(None)
+}
+
+fn tun_teardown_script_for_ip(ip: Option<Ipv4Addr>) -> String {
+    let source_rule = ip.map(|ip| format!("ip rule del pref 40 from {ip} table {ROUTE_TABLE} 2>/dev/null || true\nip addr del {ip}/32 dev {TUN_IFACE} 2>/dev/null || true\n"))
+        .unwrap_or_default();
     format!(
-        "ip rule del pref {ROUTE_TABLE} 2>/dev/null
-ip rule del pref 40 2>/dev/null
-ip rule del pref 45 2>/dev/null
-ip route flush table {ROUTE_TABLE} 2>/dev/null
-true"
+        "ip rule del pref {ROUTE_TABLE} dev {TUN_IFACE} table {ROUTE_TABLE} 2>/dev/null || true
+{source_rule}ip rule del pref 45 fwmark {ROUTE_TABLE} table {ROUTE_TABLE} 2>/dev/null || true
+ip route del default dev {TUN_IFACE} table {ROUTE_TABLE} 2>/dev/null || true"
     )
+}
+
+async fn apply_tun_config<F, Fut>(
+    rt: &RwLock<VkTurnRuntime>, ip: Ipv4Addr, dns: Option<String>, apply: F,
+) -> Result<(), String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let previous_ip = {
+        let mut state = rt.write().await;
+        if state.tun_configured && state.tunnel_ip == Some(ip) {
+            state.tunnel_dns = dns;
+            return Ok(());
+        }
+        let previous = if state.tun_configured { state.tunnel_ip } else { None };
+        state.tun_configured = false;
+        state.tun_attached = false;
+        state.tunnel_ip = None;
+        previous
+    };
+    let script = match previous_ip {
+        Some(previous) => format!("{}\n{}", tun_teardown_script_for_ip(Some(previous)), tun_configure_script(ip)),
+        None => tun_configure_script(ip),
+    };
+    apply(script).await?;
+    let mut state = rt.write().await;
+    state.tunnel_ip = Some(ip);
+    state.tunnel_dns = dns;
+    state.tun_configured = true;
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -1232,6 +1520,31 @@ mod tun_sys {
     }
 }
 
+fn retry_fd_send<F>(
+    cancel: &std::sync::atomic::AtomicBool,
+    attempts: usize,
+    delay: Duration,
+    mut send: F,
+) -> Result<(), String>
+where
+    F: FnMut() -> Result<(), String>,
+{
+    let mut last = String::new();
+    for _ in 0..attempts {
+        if cancel.load(std::sync::atomic::Ordering::Acquire) { return Err("Передача TUN отменена".into()); }
+        match send() {
+            Ok(()) => return Ok(()),
+            Err(e) => last = e,
+        }
+        let until = Instant::now() + delay;
+        while Instant::now() < until {
+            if cancel.load(std::sync::atomic::Ordering::Acquire) { return Err("Передача TUN отменена".into()); }
+            std::thread::sleep(until.saturating_duration_since(Instant::now()).min(Duration::from_millis(50)));
+        }
+    }
+    Err(format!("Клиент не принял TUN-интерфейс: {last}"))
+}
+
 /// Дескриптор TUN, которым владеет надзор. На других ОС (тесты на Windows) — пустышка.
 struct TunHandle {
     #[cfg(target_os = "linux")]
@@ -1265,22 +1578,17 @@ impl TunHandle {
     }
 
     /// Блокирующая передача: клиент поднимает сокет не сразу после старта — до 60 попыток раз в 0,5 с.
-    fn send_to_client_blocking(&self) -> Result<(), String> {
+    fn send_to_client_blocking(&self, uds_name: &str, cancel: &std::sync::atomic::AtomicBool) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         {
             use std::os::fd::AsRawFd;
-            let mut last = String::new();
-            for _ in 0..60 {
-                match tun_sys::send_fd(TUN_UDS_NAME, self.fd.as_raw_fd()) {
-                    Ok(()) => return Ok(()),
-                    Err(e) => last = e.to_string(),
-                }
-                std::thread::sleep(Duration::from_millis(500));
-            }
-            Err(format!("Клиент не принял TUN-интерфейс: {last}"))
+            retry_fd_send(cancel, 60, Duration::from_millis(500), || {
+                tun_sys::send_fd(uds_name, self.fd.as_raw_fd()).map_err(|e| e.to_string())
+            })
         }
         #[cfg(not(target_os = "linux"))]
         {
+            let _ = (uds_name, cancel);
             Err("TUN поддерживается только на Linux".into())
         }
     }
@@ -1301,14 +1609,18 @@ where
     let mut new_cfg = tx.config().vkturn.clone();
     mutate(&mut new_cfg)?;
     tx.config_mut().vkturn = new_cfg.clone();
-    if !tx.config().whitelist_providers.iter().any(|p| p == PROVIDER_ID) {
-        tx.config_mut().whitelist_providers.push(PROVIDER_ID.to_string());
+    if new_cfg.enabled {
+        if !tx.config().whitelist_providers.iter().any(|p| p == PROVIDER_ID) {
+            tx.config_mut().whitelist_providers.push(PROVIDER_ID.to_string());
+        }
+    } else {
+        tx.config_mut().whitelist_providers.retain(|p| p != PROVIDER_ID);
     }
 
     let yaml = tx.read_yaml().await.map_err(|e| format!("Ошибка чтения config.yaml: {e}"))?;
     let has_prov = crate::routing::parse_provider_names(&yaml).iter().any(|p| p == PROVIDER_ID);
     let mut provider_changed = false;
-    if new_cfg.enabled || has_prov {
+    if new_cfg.enabled {
         let providers_dir = std::path::Path::new(&tx.config().mihomo.config_path)
             .parent()
             .map(|p| p.join("providers"))
@@ -1335,6 +1647,8 @@ where
             Some(tx.config().mihomo.health_check_interval),
         )
         .map_err(|e| format!("Ошибка добавления провайдера в YAML: {e}"))?
+    } else if !new_cfg.enabled && has_prov {
+        crate::routing::delete_provider_from_yaml(&yaml, PROVIDER_ID).unwrap_or_else(|_| yaml.clone())
     } else {
         yaml.clone()
     };
@@ -1355,12 +1669,124 @@ where
     Ok(new_cfg)
 }
 
+/// Убирает узел VK-туннеля из активных селекторов Mihomo (`PROXY`, `🛡️ Whitelist`, `GLOBAL`),
+/// если туннель выключен или сброшен, чтобы маршрутизация не зависла на мёртвом прокси.
+pub async fn evacuate_vkturn_selectors(state: &crate::AppState) {
+    let cfg = state.config.read().await.clone();
+    let Ok(proxies) = crate::mihomo::get_proxies(&state.http, &cfg).await else { return };
+    for group_name in ["PROXY", "🛡️ Whitelist", "GLOBAL"] {
+        let Some(group) = proxies.get(group_name) else { continue };
+        let typ = group.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if !typ.eq_ignore_ascii_case("selector") {
+            continue;
+        }
+        if group.get("now").and_then(|n| n.as_str()) != Some(PROXY_NAME) {
+            continue;
+        }
+        let target = group
+            .get("all")
+            .and_then(|a| a.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .find(|id| *id != PROXY_NAME && *id != "REJECT" && *id != "DIRECT")
+                    .or_else(|| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .find(|id| *id != PROXY_NAME && *id != "REJECT")
+                    })
+                    .map(|s| s.to_string())
+            });
+        if let Some(target_node) = target {
+            if let Err(e) = crate::mihomo::switch_selector(&state.http, &cfg, group_name, &target_node).await {
+                crate::log_w!("[VK-туннель] Не удалось перевести селектор {group_name} с выключенного туннеля: {e}");
+            } else {
+                crate::log_i!("[VK-туннель] Селектор {group_name} автоматически переведён на '{target_node}'");
+            }
+        }
+    }
+}
+
+/// Синхронизирует файл провайдера/YAML и фоновый супервизор VK-туннеля после восстановления бэкапа.
+pub async fn sync_vkturn_after_restore(state: &crate::AppState) {
+    let _update_guard = state.vkturn.config_update_lock.lock().await;
+    let synced = match commit_vkturn(state, |_| Ok(())).await {
+        Ok(c) => c,
+        Err(e) => {
+            crate::log_w!("[VK-туннель] Не удалось синхронизировать конфигурацию после восстановления бэкапа: {e}");
+            state.config.read().await.vkturn.clone()
+        }
+    };
+    if synced.enabled {
+        state.vkturn.restart(synced, state.clone()).await;
+    } else {
+        state.vkturn.stop().await;
+        evacuate_vkturn_selectors(state).await;
+    }
+}
+
 // ---------- Менеджер процесса ----------
 
 /// Запущенный надзор: канал остановки и задача, завершения которой ждём при остановке.
 struct Supervisor {
     stop_tx: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
+}
+
+struct ClientLogTasks(Vec<tokio::task::JoinHandle<()>>);
+
+impl ClientLogTasks {
+    async fn stop(&mut self) {
+        for task in &self.0 { task.abort(); }
+        for task in self.0.drain(..) { let _ = task.await; }
+    }
+}
+
+impl Drop for ClientLogTasks {
+    fn drop(&mut self) {
+        for task in &self.0 { task.abort(); }
+    }
+}
+
+struct FdHandoff {
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HandoffDecision { Wait, Start, Restart }
+
+fn handoff_decision(configured: bool, attached: bool, task_running: bool, failures: u8, retry_ready: bool) -> HandoffDecision {
+    if !configured || attached || task_running { return HandoffDecision::Wait; }
+    if failures >= 3 { return HandoffDecision::Restart; }
+    if retry_ready { HandoffDecision::Start } else { HandoffDecision::Wait }
+}
+
+struct HandoffRecovery {
+    configured: bool,
+    failures: u8,
+    retry_at: Instant,
+}
+
+impl HandoffRecovery {
+    fn new() -> Self { Self { configured: false, failures: 0, retry_at: Instant::now() } }
+    fn failed(&mut self) {
+        self.failures = self.failures.saturating_add(1);
+        self.retry_at = Instant::now() + Duration::from_secs(1 << self.failures.min(3));
+    }
+}
+
+impl FdHandoff {
+    async fn stop(mut self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::Release);
+        let _ = tokio::time::timeout(Duration::from_secs(5), &mut self.task).await;
+    }
+}
+
+impl Drop for FdHandoff {
+    fn drop(&mut self) {
+        self.cancel.store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 
 pub struct VkTurnManager {
@@ -1512,7 +1938,7 @@ impl VkTurnManager {
         self.stop_locked(&mut slot).await;
         // Старые исключения снимаются всегда: адрес VPS мог смениться. Надзор поставит актуальные.
         remove_exemptions().await;
-        let has_token = cfg.vk_token.as_ref().map(|t| !t.trim().is_empty()).unwrap_or(false);
+        let has_token = selected_vk_token(&cfg).is_some();
         if !cfg.enabled || (!has_token && call_hashes(&cfg).is_empty()) || cfg.password.is_empty() || cfg.peer.is_empty() {
             self.rt.write().await.phase = VkTurnPhase::Disabled;
             return;
@@ -1540,21 +1966,27 @@ impl VkTurnManager {
 
     /// Останавливает надзор и ЖДЁТ его завершения (процесс клиента убит, TUN закрыт до выхода из функции).
     async fn stop_locked(&self, slot: &mut Option<Supervisor>) {
+        self.begin_run().await;
         if let Some(sup) = slot.take() {
             let _ = sup.stop_tx.send(true);
             let mut task = sup.task;
-            if tokio::time::timeout(Duration::from_secs(5), &mut task).await.is_err() {
+            if tokio::time::timeout(Duration::from_secs(15), &mut task).await.is_err() {
                 task.abort();
-                crate::log_w!("[VK-туннель] Надзор не завершился за 5 с — прерван принудительно");
+                crate::log_w!("[VK-туннель] Надзор не завершился за 15 с — прерван принудительно");
             }
-            run_sh(&tun_teardown_script()).await;
         }
+        let owned_ip = {
+            let rt = self.rt.read().await;
+            if rt.tun_configured { rt.tunnel_ip } else { None }
+        };
+        if owned_ip.is_some() { let _ = run_sh_checked(&tun_teardown_script_for_ip(owned_ip)).await; }
         let _ = tokio::fs::remove_file(PID_FILE).await;
         let mut rt = self.rt.write().await;
         rt.pid = None;
         rt.connected_streams = 0;
         rt.tunnel_ip = None;
         rt.tun_attached = false;
+        rt.tun_configured = false;
         rt.phase = VkTurnPhase::Disabled;
     }
 
@@ -1588,13 +2020,13 @@ impl VkTurnManager {
             apply_exemptions(&cfg.peer, &known_turn).await;
 
             // Завершаем прошлые авто-звонки, если были
-            if let Some(ref tok) = cfg.vk_token {
+            if let Some(tok) = selected_vk_token(&cfg) {
                 finish_vk_calls_batch(&state.http, tok, &auto_call_ids).await;
                 auto_call_ids.clear();
             }
 
             // Получаем хеши звонков: автоматически через calls.start (как в focsq) или из конфига
-            let hashes = if let Some(ref tok) = cfg.vk_token {
+            let hashes = if let Some(tok) = selected_vk_token(&cfg) {
                 if !tok.trim().is_empty() {
                     let needed = call_count_for_workers(effective_workers(&cfg));
                     let mut created_ids = Vec::new();
@@ -1621,7 +2053,13 @@ impl VkTurnManager {
                     if created_hashes.is_empty() {
                         let (is_invalid, err_msg) = last_err.unwrap_or((false, "Не удалось создать звонок".into()));
                         crate::log_w!("[VK-туннель] Ошибка создания авто-звонка через API: {err_msg}");
-                        self.set_error(VkTurnPhase::AuthFailed, err_msg).await;
+                        {
+                            let mut rt = self.rt.write().await;
+                            rt.phase = if is_invalid { VkTurnPhase::AuthFailed } else { VkTurnPhase::Backoff };
+                            rt.last_error = Some(err_msg);
+                            rt.error_source = Some(if is_invalid { "vk" } else { "network" });
+                            rt.error_reason = Some(if is_invalid { "authorization_rejected" } else { "call_creation_temporary" });
+                        }
                         if is_invalid {
                             crate::log_w!("[VK-туннель] Токен VK отозван или аккаунт заблокирован. Остановка надзора до повторного входа.");
                             break;
@@ -1641,8 +2079,10 @@ impl VkTurnManager {
                 call_hashes(&cfg)
             };
 
+            let run_generation = self.begin_run().await;
+            let uds_name = new_tun_uds_name();
             let mut cmd = tokio::process::Command::new(&self.core_path);
-            cmd.args(build_client_args_with_hashes(&cfg, &hashes))
+            cmd.args(build_client_args_for_uds(&cfg, &hashes, &uds_name))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -1687,6 +2127,7 @@ impl VkTurnManager {
 
             // stdout (события, CAPTCHA_SOLVE) и stderr (лог) → разбор; действия — в канал надзора.
             let (eff_tx, mut eff_rx) = mpsc::unbounded_channel::<LineEffect>();
+            let mut log_tasks = ClientLogTasks(Vec::new());
             for stream in [
                 child.stderr.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
                 child.stdout.take().map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
@@ -1694,25 +2135,17 @@ impl VkTurnManager {
             .into_iter()
             .flatten()
             {
-                let me = self.clone();
-                let eff_tx = eff_tx.clone();
-                tokio::spawn(async move {
-                    let mut lines = BufReader::new(stream).lines();
-                    while let Ok(Some(l)) = lines.next_line().await {
-                        let eff = apply_log_line(&mut *me.rt.write().await, &l, Instant::now());
-                        if eff != LineEffect::None {
-                            let _ = eff_tx.send(eff);
-                        }
-                    }
-                });
+                log_tasks.0.push(self.spawn_log_reader(stream, eff_tx.clone()));
             }
             drop(eff_tx);
             let mut stdin = child.stdin.take();
-            let mut fd_sending = false;
+            let mut fd_handoff: Option<FdHandoff> = None;
+            let mut handoff_recovery = HandoffRecovery::new();
 
             // ждём: выход процесса / команду стоп / «висим без соединений» дольше допустимого
             let started = Instant::now();
             let mut tick = tokio::time::interval(Duration::from_secs(10));
+            let mut handoff_tick = tokio::time::interval(Duration::from_secs(1));
             let mut ticks: u32 = 0;
             let mut last_tun_rx = 0u64;
             let mut last_tun_tx = 0u64;
@@ -1722,8 +2155,11 @@ impl VkTurnManager {
                 tokio::select! {
                     st = child.wait() => break format!("клиент завершился: {:?}", st.ok()),
                     _ = stop_rx.changed() => {
+                        eff_rx.close();
+                        log_tasks.stop().await;
+                        if let Some(handoff) = fd_handoff.take() { handoff.stop().await; }
                         // Завершаем звонки в VK API параллельно
-                        if let Some(ref tok) = cfg.vk_token {
+                        if let Some(tok) = selected_vk_token(&cfg) {
                             finish_vk_calls_batch(&state.http, tok, &auto_call_ids).await;
                         }
                         // Мягкая остановка: клиент закрывает сессии, сервер сразу освобождает слоты.
@@ -1744,23 +2180,25 @@ impl VkTurnManager {
                             }
                         }
                         LineEffect::TunConfig { ip, dns } => {
-                            let changed = {
-                                let mut rt = self.rt.write().await;
-                                let changed = rt.tunnel_ip != Some(ip);
-                                rt.tunnel_ip = Some(ip);
-                                rt.tunnel_dns = dns;
-                                changed
-                            };
-                            if changed {
-                                run_sh(&tun_configure_script(ip)).await;
+                            if let Err(error) = apply_tun_config(&self.rt, ip, dns, |script| async move { run_sh_checked(&script).await }).await {
+                                self.set_error(VkTurnPhase::Crashed, error).await;
+                                let _ = child.kill().await;
+                                break "не удалось настроить интерфейс или маршруты туннеля".to_string();
                             }
-                            if !fd_sending {
-                                fd_sending = true;
-                                self.spawn_fd_handoff(&tun);
+                            handoff_recovery.configured = true;
+                            if self.drive_handoff(&tun, run_generation, &uds_name, &mut fd_handoff, &mut handoff_recovery).await {
+                                let _ = child.kill().await;
+                                break "не удалось передать TUN после нескольких попыток".to_string();
                             }
                         }
                         LineEffect::None => {}
                     },
+                    _ = handoff_tick.tick() => {
+                        if self.drive_handoff(&tun, run_generation, &uds_name, &mut fd_handoff, &mut handoff_recovery).await {
+                            let _ = child.kill().await;
+                            break "не удалось передать TUN после нескольких попыток".to_string();
+                        }
+                    }
                     _ = tick.tick() => {
                         ticks = ticks.wrapping_add(1);
                         let rt = self.rt.read().await;
@@ -1812,12 +2250,27 @@ impl VkTurnManager {
                 }
             };
 
+            eff_rx.close();
+            log_tasks.stop().await;
+            self.begin_run().await;
+            if let Some(handoff) = fd_handoff.take() { handoff.stop().await; }
+
+            let owned_ip = {
+                let rt = self.rt.read().await;
+                if rt.tun_configured { rt.tunnel_ip } else { None }
+            };
+            if owned_ip.is_some() {
+                let _ = run_sh_checked(&tun_teardown_script_for_ip(owned_ip)).await;
+            }
+
             let phase = {
                 let mut rt = self.rt.write().await;
                 rt.restarts += 1;
                 rt.pid = None;
                 rt.connected_streams = 0;
                 rt.tun_attached = false;
+                rt.tun_configured = false;
+                rt.tunnel_ip = None;
                 rt.phase
             };
             crate::log_w!("[VK-туннель] Перезапуск: {exit_reason}, состояние {phase:?}");
@@ -1838,21 +2291,82 @@ impl VkTurnManager {
         }
     }
 
+    fn spawn_log_reader(
+        self: &Arc<Self>,
+        stream: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+        eff_tx: mpsc::UnboundedSender<LineEffect>,
+    ) -> tokio::task::JoinHandle<()> {
+        let me = self.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stream).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let mut rt = me.rt.write().await;
+                if eff_tx.is_closed() { break; }
+                let eff = apply_log_line(&mut *rt, &line, Instant::now());
+                drop(rt);
+                if eff != LineEffect::None { let _ = eff_tx.send(eff); }
+            }
+        })
+    }
+
+    async fn drive_handoff(
+        self: &Arc<Self>,
+        tun: &Arc<TunHandle>,
+        generation: u64,
+        uds_name: &str,
+        task: &mut Option<FdHandoff>,
+        recovery: &mut HandoffRecovery,
+    ) -> bool {
+        if task.as_ref().is_some_and(|handoff| handoff.task.is_finished()) {
+            if let Some(finished) = task.take() { finished.stop().await; }
+            if self.rt.read().await.tun_attached {
+                recovery.failures = 0;
+            } else {
+                recovery.failed();
+            }
+        }
+        let attached = self.rt.read().await.tun_attached;
+        match handoff_decision(recovery.configured, attached, task.is_some(), recovery.failures, Instant::now() >= recovery.retry_at) {
+            HandoffDecision::Wait => false,
+            HandoffDecision::Restart => true,
+            HandoffDecision::Start => {
+                *task = self.spawn_fd_handoff(tun, generation, uds_name.to_string());
+                if task.is_none() { recovery.failed(); }
+                recovery.failures >= 3 && task.is_none()
+            }
+        }
+    }
+
     /// Передаёт клиенту копию дескриптора TUN в фоне: надзор продолжает читать вывод клиента.
-    fn spawn_fd_handoff(self: &Arc<Self>, tun: &Arc<TunHandle>) {
+    async fn begin_run(&self) -> u64 {
+        let mut rt = self.rt.write().await;
+        rt.run_generation = rt.run_generation.wrapping_add(1);
+        rt.run_generation
+    }
+
+    fn spawn_fd_handoff(self: &Arc<Self>, tun: &Arc<TunHandle>, generation: u64, uds_name: String) -> Option<FdHandoff> {
         let copy = match tun.duplicate() {
             Ok(c) => c,
             Err(e) => {
                 crate::log_w!("[VK-туннель] {e}");
-                return;
+                return None;
             }
         };
         let me = self.clone();
-        tokio::spawn(async move {
-            let res = tokio::task::spawn_blocking(move || copy.send_to_client_blocking())
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let task = tokio::spawn(async move {
+            let res = tokio::task::spawn_blocking(move || copy.send_to_client_blocking(&uds_name, &worker_cancel))
                 .await
                 .unwrap_or_else(|e| Err(format!("задача передачи TUN: {e}")));
-            let mut rt = me.rt.write().await;
+            me.publish_handoff_result(generation, res).await;
+        });
+        Some(FdHandoff { cancel, task })
+    }
+
+    async fn publish_handoff_result(&self, generation: u64, res: Result<(), String>) {
+            let mut rt = self.rt.write().await;
+            if rt.run_generation != generation { return; }
             match res {
                 Ok(()) => {
                     rt.tun_attached = true;
@@ -1863,13 +2377,14 @@ impl VkTurnManager {
                     push_log(&mut rt, format!("[ОШИБКА] {e}"));
                 }
             }
-        });
     }
 
     async fn set_error(&self, phase: VkTurnPhase, msg: String) {
         let mut rt = self.rt.write().await;
         rt.phase = phase;
         rt.last_error = Some(msg);
+        rt.error_source = None;
+        rt.error_reason = None;
     }
 }
 
@@ -2101,6 +2616,56 @@ mod tests {
     }
 
     #[test]
+    fn regression_android_encrypted_profile_is_readable() {
+        let link = "csqtt://rGMTblReroqI7mbb2bHPcn2Ht7npV8ThxgOFgtHXHPhRHTbmWrXbOg8IO7oBJMO7wbpulj877bUgDF3do4Af6y1VvT9ipPKD4wwp7_lE6mItWw";
+        let (peer, password) = parse_csqtt_link(link).expect("encrypted Android profile");
+        assert_eq!(peer, "example.com:46000");
+        assert_eq!(password, "dummy");
+        let mut corrupted = link.to_string();
+        corrupted.pop();
+        corrupted.push('A');
+        assert!(parse_csqtt_link(&corrupted).is_none());
+    }
+
+    #[test]
+    fn regression_csqtt_backend_preserves_encoded_password_and_rejects_lost_fields() {
+        let parsed = parse_csqtt_link("csqtt://connect?v=2&host=example.com&peer=46000&password=abc%2Bxyz").unwrap();
+        assert_eq!(parsed.1, "abc+xyz");
+        assert!(parse_csqtt_link("csqtt://connect?v=2&host=example.com&peer=46000&password=p&token=profile").is_none());
+        assert!(parse_csqtt_link("csqtt://connect?v=3&host=example.com&peer=46000&password=p").is_none());
+        assert!(parse_csqtt_link("csqtt://connect?v=2&host=example.com&host=other.example&peer=46000&password=p").is_none());
+    }
+
+    #[test]
+    fn regression_csqtt_backend_rejects_invalid_profile_ports() {
+        assert!(parse_csqtt_link("csqtt://connect?v=2&host=example.com&peer=46000oops&password=p").is_none());
+        assert!(parse_csqtt_link("csqtt://connect?v=2&host=example.com&peer=0&password=p").is_none());
+        assert!(parse_csqtt_link("csqtt://p@example.com:99999").is_none());
+        assert!(parse_csqtt_link("csqtt://p@example.com:46000oops").is_none());
+    }
+
+    #[test]
+    fn regression_csqtt_backend_glued_query_and_scheme_less_call_links() {
+        assert_eq!(
+            parse_call_link("vk.com/call/join/abcDEF_1234567890").unwrap(),
+            "abcDEF_1234567890"
+        );
+        assert_eq!(
+            parse_call_link("m.vk.ru/call/join/abcDEF_1234567890?from=app").unwrap(),
+            "abcDEF_1234567890"
+        );
+        let glued = "csqtt://connect?v=2host=example.com&peer=46000&password=secret_pw";
+        assert_eq!(
+            parse_csqtt_link(glued),
+            Some(("example.com:46000".into(), "secret_pw".into()))
+        );
+        let prof = parse_csqtt_profile(glued).expect("glued profile");
+        assert_eq!(prof.peer, "example.com:46000");
+        assert_eq!(prof.password, "secret_pw");
+        assert!(parse_csqtt_profile("csqtt://connect?v=2host=example.com&peer=46000&password=pwtoken=abc").is_none());
+    }
+
+    #[test]
     fn test_validate_and_normalize_peer() {
         assert!(validate_peer("1.2.3.4:46000").is_ok());
         assert!(validate_peer("vps.example.com:46000").is_ok());
@@ -2150,9 +2715,71 @@ mod tests {
 
     /// Пароль не должен попадать в аргументы процесса (их видно в `ps` любому пользователю роутера).
     #[test]
+    fn regression_tun_scripts_do_not_delete_foreign_policy_rules_or_flush_table() {
+        let configure = tun_configure_script("10.66.67.3".parse().unwrap());
+        let teardown = tun_teardown_script();
+        for script in [&configure, &teardown] {
+            assert!(!script.contains("ip rule del pref 40 2>"));
+            assert!(!script.contains("ip rule del pref 45 2>"));
+            assert!(!script.contains("ip rule del pref 222 2>"));
+            assert!(!script.contains("ip route flush table 222"));
+        }
+        assert!(configure.contains("ip rule show"));
+        assert!(configure.contains("ip route show table 222"));
+    }
+
+    #[tokio::test]
+    async fn regression_failed_tun_setup_is_not_ready_and_same_config_retries() {
+        let rt = RwLock::new(VkTurnRuntime::default());
+        let ip = "10.66.67.3".parse().unwrap();
+        let first = apply_tun_config(&rt, ip, None, |_| async { Err("route failed".into()) }).await;
+        assert!(first.is_err());
+        assert!(rt.read().await.tunnel_ip.is_none());
+        let called = std::sync::atomic::AtomicBool::new(false);
+        apply_tun_config(&rt, ip, None, |_| async { called.store(true, std::sync::atomic::Ordering::SeqCst); Ok(()) }).await.unwrap();
+        assert!(called.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(rt.read().await.tunnel_ip, Some(ip));
+    }
+
+    #[test]
+    fn regression_handoff_retries_are_bounded_and_nonparallel() {
+        assert_eq!(handoff_decision(true, false, true, 0, true), HandoffDecision::Wait);
+        assert_eq!(handoff_decision(true, false, false, 1, false), HandoffDecision::Wait);
+        assert_eq!(handoff_decision(true, false, false, 1, true), HandoffDecision::Start);
+        assert_eq!(handoff_decision(true, false, false, 3, true), HandoffDecision::Restart);
+        assert_eq!(handoff_decision(true, true, false, 0, true), HandoffDecision::Wait);
+    }
+
+    #[test]
+    fn regression_handoff_retry_stops_after_cancellation() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let cancelled = AtomicBool::new(false);
+        let mut calls = 0;
+        let result = retry_fd_send(&cancelled, 3, Duration::ZERO, || {
+            calls += 1;
+            cancelled.store(true, Ordering::SeqCst);
+            Err("unavailable".into())
+        });
+        assert!(result.is_err());
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn regression_client_launches_use_distinct_tun_socket_names() {
+        let cfg = cfg_with(&["abcdefghijklmnop"]);
+        let first = build_client_args_with_hashes(&cfg, &call_hashes(&cfg));
+        let second = build_client_args_with_hashes(&cfg, &call_hashes(&cfg));
+        let socket = |args: &[String]| args[args.iter().position(|s| s == "-tun-uds").unwrap() + 1].clone();
+        assert_ne!(socket(&first), socket(&second));
+    }
+
+    #[test]
     fn test_build_client_args_and_env() {
         let cfg = cfg_with(&["https://vk.com/call/join/abc12345", "https://vk.com/call/join/def67890"]);
         let args = build_client_args(&cfg);
+        let uds_name = args[10].clone();
+        assert!(uds_name.starts_with(&format!("{TUN_UDS_NAME}_")));
+        assert_eq!(uds_name.len(), TUN_UDS_NAME.len() + 17);
         assert_eq!(
             args,
             vec![
@@ -2161,7 +2788,7 @@ mod tests {
                 "-n", "20",
                 "--exact-workers",
                 "-listen", "127.0.0.1:0",
-                "-tun-uds", "xkeen_route_csqtt_tun",
+                "-tun-uds", uds_name.as_str(),
                 "-captcha-mode", "auto",
                 "-obfs", "audio",
             ]
@@ -2242,6 +2869,71 @@ mod tests {
     const EV_STATS_3: &str = r#"__CSQTT_EVENT__|STATS|{"active":3,"bytes_down":2048,"bytes_up":1024}"#;
     const EV_STATS_0: &str = r#"__CSQTT_EVENT__|STATS|{"active":0,"bytes_down":2048,"bytes_up":1024}"#;
     const EV_AUTH: &str = r#"__CSQTT_EVENT__|ERROR|{"code":"authentication_rejected","fatal":true,"message":"FATAL_AUTH: invalid password"}"#;
+
+    #[test]
+    fn regression_tun_lost_requests_replacement_while_client_runs() {
+        let mut rt = VkTurnRuntime::default();
+        let ip = "10.66.67.3".parse().unwrap();
+        rt.tunnel_ip = Some(ip);
+        rt.tunnel_dns = Some("1.1.1.1".into());
+        rt.tun_attached = true;
+        let result = apply_log_line(&mut rt, r#"__CSQTT_EVENT__|TUN_LOST|{}"#, Instant::now());
+        assert_eq!(result, LineEffect::TunConfig { ip, dns: Some("1.1.1.1".into()) });
+        assert!(!rt.tun_attached);
+    }
+
+    #[test]
+    fn distinguishes_csqtt_vk_and_timeout_error_sources() {
+        let mut rt = VkTurnRuntime::default();
+        apply_log_line(&mut rt, EV_AUTH, Instant::now());
+        assert_eq!((rt.error_source, rt.error_reason), (Some("csqtt"), Some("password_invalid")));
+        apply_log_line(&mut rt, "User authorization failed", Instant::now());
+        assert_eq!((rt.error_source, rt.error_reason), (Some("vk"), Some("authorization_rejected")));
+        rt.phase = VkTurnPhase::Starting;
+        rt.connected_streams = 0;
+        for _ in 0..GETCONF_SILENT_THRESHOLD { note_getconf_silent(&mut rt); }
+        assert_eq!((rt.error_source, rt.error_reason), (Some("network"), Some("server_timeout")));
+    }
+
+    #[tokio::test]
+    async fn regression_stale_log_reader_cannot_change_new_status() {
+        let manager = VkTurnManager::with_core_path("unused");
+        let (reader, mut writer) = tokio::io::duplex(1024);
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let task = manager.spawn_log_reader(Box::new(reader), sender);
+        let mut rt = manager.rt.write().await;
+        rt.phase = VkTurnPhase::Starting;
+        writer.write_all(format!("{EV_AUTH}\n").as_bytes()).await.unwrap();
+        tokio::task::yield_now().await; // читатель может ждать блокировку состояния
+        drop(receiver); // завершённый запуск больше не имеет получателя событий
+        drop(rt);
+        drop(writer);
+        tokio::time::timeout(Duration::from_secs(2), task).await.unwrap().unwrap();
+        assert_eq!(manager.rt.read().await.phase, VkTurnPhase::Starting);
+    }
+
+    #[tokio::test]
+    async fn regression_stale_handoff_completion_cannot_mark_new_run_ready() {
+        let manager = VkTurnManager::with_core_path("unused");
+        let old_generation = manager.begin_run().await;
+        let (release, delayed) = tokio::sync::oneshot::channel();
+        let old_manager = manager.clone();
+        let old_task = tokio::spawn(async move {
+            let _ = delayed.await;
+            old_manager.publish_handoff_result(old_generation, Ok(())).await;
+        });
+        manager.stop().await;
+        let new_generation = manager.begin_run().await;
+        assert_ne!(old_generation, new_generation);
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), old_task).await.unwrap().unwrap();
+        assert!(!manager.rt.read().await.tun_attached);
+        manager.publish_handoff_result(new_generation, Ok(())).await;
+        manager.publish_handoff_result(old_generation, Err("old failure".into())).await;
+        let rt = manager.rt.read().await;
+        assert!(rt.tun_attached);
+        assert!(rt.last_error.is_none());
+    }
     const L_CREDS: &str = "[ГРУППА #1] Запрос кредов (хеш: dVi6izW6...)";
     const L_VKCALLS: &str = "[STREAM 100] [VKCalls] step1 OK, anonymous_token (290 chars)";
     const L_CAPTCHA_START: &str = "[STREAM 100] [КАПЧА] AUTO: старт цепочки (captcha attempt 1)";
@@ -2292,6 +2984,8 @@ mod tests {
         rt.tunnel_ip = Some("10.66.67.3".parse().unwrap());
         assert!(!rt.tunnel_ready());
         rt.tun_attached = true;
+        assert!(!rt.tunnel_ready());
+        rt.tun_configured = true;
         assert!(rt.tunnel_ready());
     }
 
@@ -2300,14 +2994,16 @@ mod tests {
         let s = tun_configure_script("10.66.67.3".parse().unwrap());
         assert!(s.contains("ip addr add 10.66.67.3/32 dev csq0"));
         assert!(s.contains("ip link set dev csq0 mtu 1380 up"));
-        assert!(s.contains("ip route replace default dev csq0 table 222"));
+        assert!(s.contains("ip route add default dev csq0 table 222"));
         assert!(s.contains("ip rule add dev csq0 table 222 pref 222"));
         assert!(s.contains("ip rule del pref 222"), "правило не дублируется при повторной настройке");
         assert!(s.contains("ip rule add from 10.66.67.3 table 222 pref 40"));
         assert!(s.contains("ip rule add fwmark 222 table 222 pref 45"));
-        let t = tun_teardown_script();
-        assert!(t.contains("ip rule del pref 222") && t.contains("ip route flush table 222"));
-        assert!(t.contains("ip rule del pref 40") && t.contains("ip rule del pref 45"));
+        let t = tun_teardown_script_for_ip(Some("10.66.67.3".parse().unwrap()));
+        assert!(t.contains("ip rule del pref 222 dev csq0 table 222"));
+        assert!(t.contains("ip route del default dev csq0 table 222"));
+        assert!(t.contains("ip rule del pref 40 from 10.66.67.3 table 222"));
+        assert!(t.contains("ip rule del pref 45 fwmark 222 table 222"));
     }
 
     #[test]
@@ -2565,8 +3261,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn regression_vk_unavailable_does_not_replace_existing_account() {
+        let (root, mut state) = setup_saved_state("auth-offline").await;
+        state.http = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
+            .timeout(Duration::from_secs(2)).build().unwrap();
+        commit_vkturn(&state, |v| { v.vk_token = Some("vk1.a.PreviousSyntheticToken".into()); Ok(()) }).await.unwrap();
+        let req = crate::api::VkTurnAuthSaveReq { token: Some("vk1.a.NewSyntheticToken".into()), ..Default::default() };
+        let result = response_json(crate::api::save_vkturn_auth(axum::extract::State(state.clone()), axum::Json(req)).await).await;
+        assert_eq!(result["success"], false);
+        assert_eq!(state.config.read().await.vkturn.vk_token.as_deref(), Some("vk1.a.PreviousSyntheticToken"));
+        commit_vkturn(&state, |v| { v.vk_token = None; Ok(()) }).await.unwrap();
+        let req = crate::api::VkTurnAuthSaveReq { token: Some("vk1.a.NewSyntheticToken".into()), ..Default::default() };
+        let result = response_json(crate::api::save_vkturn_auth(axum::extract::State(state.clone()), axum::Json(req)).await).await;
+        assert_eq!(result["success"], true);
+        assert_eq!(result["data"]["verified"], false);
+        assert!(!state.config.read().await.vkturn.vk_token_verified);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn regression_vk_rejected_permission_code_is_never_saved() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else { break; };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req_str = String::from_utf8_lossy(&buf[..n]);
+                    if req_str.contains("account.getAppPermissions") {
+                        let body = r#"{"error":{"error_code":27,"error_msg":"Group authorization failed: method is unavailable with group auth."}}"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                    } else {
+                        let resp = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                        let _ = stream.write_all(resp.as_bytes()).await;
+                    }
+                });
+            }
+        });
+
+        let (root, mut state) = setup_saved_state("auth-rejected-code27").await;
+        state.http = reqwest::Client::builder()
+            .resolve("api.vk.ru", addr)
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+
+        let err = fetch_vk_user_profile_at(
+            &state.http,
+            &format!("http://{addr}"),
+            "vk1.a.InvalidGroupTokenSynthetic",
+            Some(12345),
+        )
+        .await;
+        assert_eq!(err, Err(VkProfileError::Rejected));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn test_vk_auth_endpoints_save_and_logout() {
-        let (root, state) = setup_saved_state("auth").await;
+        let (root, mut state) = setup_saved_state("auth").await;
+        state.http = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:1").unwrap())
+            .timeout(Duration::from_secs(2)).build().unwrap();
 
         // 1. Сохранение авторизации через фрагмент URL
         let req = crate::api::VkTurnAuthSaveReq {
@@ -2578,6 +3343,7 @@ mod tests {
         let v = response_json(resp).await;
         assert_eq!(v["success"], true);
         assert_eq!(v["data"]["user_id"], 88889999);
+        assert_eq!(v["data"]["verified"], false);
 
         let cur_cfg = state.config.read().await.vkturn.clone();
         assert_eq!(cur_cfg.vk_token.as_deref(), Some("vk1.a.UnitTestSecretToken"));
@@ -2630,6 +3396,7 @@ mod tests {
             let mut rt = mgr.rt.write().await;
             rt.tunnel_ip = Some("10.0.0.2".parse().unwrap());
             rt.tun_attached = true;
+            rt.tun_configured = true;
             rt.connected_streams = 0;
         }
         let state = test_state(&root, mgr, 1);
@@ -2783,6 +3550,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn regression_reset_clears_profile_token_and_runtime_state() {
+        let (root, state) = setup_saved_state("reset-profile-token").await;
+        let req = crate::api::SaveVkTurnConfigReq {
+            enabled: Some(true),
+            peer: Some("example.com:46000".into()),
+            password: Some("dummy".into()),
+            auth_mode: Some("profile_token".into()),
+            profile_token: Some("profile-secret".into()),
+            vk_token: Some("vk1.a.PersonalSavedToken".into()),
+            streams: Some(35),
+            ..Default::default()
+        };
+        let saved = response_json(crate::api::save_vkturn_config(axum::extract::State(state.clone()), axum::Json(req)).await).await;
+        assert_eq!(saved["success"], true);
+        {
+            let mut rt = state.vkturn.rt.write().await;
+            rt.phase = VkTurnPhase::AuthFailed;
+            rt.last_error = Some("Сервер csqtt отклонил пароль".into());
+            rt.error_source = Some("csqtt");
+            rt.error_reason = Some("password_invalid");
+            rt.restarts = 4;
+            rt.bytes_up = 1024;
+            rt.bytes_down = 2048;
+            rt.log_tail.push_back("old log".into());
+        }
+
+        let reset_resp = crate::api::vkturn_action(
+            axum::extract::State(state.clone()),
+            axum::Json(crate::api::VkTurnActionReq { action: "reset".into() }),
+        )
+        .await;
+        let reset_json = response_json(reset_resp).await;
+        assert_eq!(reset_json["success"], true);
+        assert!(!reset_json.to_string().contains("PersonalSavedToken"));
+
+        let cur = state.config.read().await.vkturn.clone();
+        assert!(!cur.enabled);
+        assert!(cur.peer.is_empty());
+        assert!(cur.password.is_empty());
+        assert!(cur.links.is_empty());
+        assert!(cur.profile_token.is_none());
+        assert_eq!(cur.auth_mode, "oauth");
+        assert_eq!(cur.vk_token.as_deref(), Some("vk1.a.PersonalSavedToken"));
+
+        let rt = state.vkturn.rt.read().await;
+        assert_eq!(rt.phase, VkTurnPhase::Disabled);
+        assert!(rt.last_error.is_none());
+        assert!(rt.error_source.is_none());
+        assert!(rt.error_reason.is_none());
+        assert_eq!(rt.restarts, 0);
+        assert_eq!(rt.bytes_up, 0);
+        assert_eq!(rt.bytes_down, 0);
+        assert!(rt.log_tail.is_empty());
+        drop(rt);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn regression_logout_keeps_profile_source_and_running_status() {
+        let (root, state) = setup_saved_state("profile-logout").await;
+        let req = crate::api::SaveVkTurnConfigReq {
+            enabled: Some(true), peer: Some("example.com:46000".into()), password: Some("dummy".into()),
+            auth_mode: Some("profile_token".into()), profile_token: Some("profile-synthetic".into()),
+            vk_token: Some("vk1.a.PersonalSyntheticToken".into()), ..Default::default()
+        };
+        let saved = response_json(crate::api::save_vkturn_config(axum::extract::State(state.clone()), axum::Json(req)).await).await;
+        assert_eq!(saved["success"], true);
+        state.vkturn.rt.write().await.phase = VkTurnPhase::Connected;
+        let result = response_json(crate::api::logout_vkturn_auth(axum::extract::State(state.clone())).await).await;
+        assert_eq!(result["success"], true);
+        assert_eq!(state.vkturn.rt.read().await.phase, VkTurnPhase::Connected);
+        let persisted = crate::config::load(&root.join("config.json"));
+        assert_eq!(selected_vk_token(&persisted.vkturn), Some("profile-synthetic"));
+        assert!(persisted.vkturn.vk_token.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn regression_direct_profile_import_preserves_source_and_workers() {
+        let (root, state) = setup_saved_state("direct-profile").await;
+        let req = crate::api::SaveVkTurnConfigReq {
+            enabled: Some(true),
+            peer: Some("csqtt://connect?v=2&host=example.com&peer=46000&password=abc%2Bxyz&hashes=abcdefghijklmnop+qrstuvwxyzABCDEF&power=27".into()),
+            vk_token: Some("vk1.a.PersonalSyntheticToken".into()),
+            ..Default::default()
+        };
+        let result = response_json(crate::api::save_vkturn_config(axum::extract::State(state.clone()), axum::Json(req)).await).await;
+        assert_eq!(result["success"], true);
+        let saved = state.config.read().await.vkturn.clone();
+        assert_eq!(saved.password, "abc+xyz");
+        assert_eq!(saved.auth_mode, "manual");
+        assert_eq!(call_hashes(&saved), vec!["abcdefghijklmnop", "qrstuvwxyzABCDEF"]);
+        assert_eq!(saved.streams, 27);
+        assert_eq!(selected_vk_token(&saved), None);
+        let req = crate::api::SaveVkTurnConfigReq {
+            peer: Some("csqtt://connect?v=2&host=second.example&peer=443&password=p&token=profile-synthetic&workers=35".into()),
+            ..Default::default()
+        };
+        let result = response_json(crate::api::save_vkturn_config(axum::extract::State(state.clone()), axum::Json(req)).await).await;
+        assert_eq!(result["success"], true);
+        let saved = state.config.read().await.vkturn.clone();
+        assert!(saved.links.is_empty());
+        assert_eq!(selected_vk_token(&saved), Some("profile-synthetic"));
+        assert_eq!(saved.vk_token.as_deref(), Some("vk1.a.PersonalSyntheticToken"));
+        assert_eq!(saved.streams, 35);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn regression_profile_token_is_separate_and_masked() {
+        let (root, state) = setup_saved_state("profile-token").await;
+        let req: crate::api::SaveVkTurnConfigReq = serde_json::from_value(serde_json::json!({
+            "enabled": true, "peer": "example.com:46000", "password": "dummy",
+            "auth_mode": "profile_token", "profile_token": "profile-secret", "vk_token": "personal-secret", "streams": 27
+        })).unwrap();
+        let result = response_json(crate::api::save_vkturn_config(axum::extract::State(state.clone()), axum::Json(req)).await).await;
+        assert_eq!(result["success"], true);
+        let saved = state.config.read().await.vkturn.clone();
+        assert_eq!(selected_vk_token(&saved), Some("profile-secret"));
+        assert_eq!(saved.vk_token.as_deref(), Some("personal-secret"));
+        assert_eq!(effective_workers(&saved), 27);
+        let masked = crate::api::mask_settings_for_api(&**state.config.read().await);
+        assert!(!masked.to_string().contains("profile-secret"));
+        assert!(!masked.to_string().contains("personal-secret"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn regression_manual_source_requires_hashes_even_with_saved_account() {
+        let mut source = cfg_with(&["abcdefghijklmnop"]);
+        source.vk_token = Some("synthetic-token".into());
+        source.auth_mode = "manual".into();
+        assert_eq!(selected_vk_token(&source), None);
+        assert_eq!(call_hashes(&source), vec!["abcdefghijklmnop"]);
+        source.auth_mode = "oauth".into();
+        assert_eq!(selected_vk_token(&source), Some("synthetic-token"));
+        let (root, state) = setup_saved_state("manual-source").await;
+        let req = crate::api::SaveVkTurnConfigReq {
+            auth_mode: Some("manual".into()),
+            vk_token: Some("synthetic-token".into()),
+            links: Some(vec![]),
+            ..enable_req()
+        };
+        let result = response_json(crate::api::save_vkturn_config(axum::extract::State(state.clone()), axum::Json(req)).await).await;
+        assert_eq!(result["success"], false);
+        assert!(!state.config.read().await.vkturn.enabled);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn regression_enable_requires_peer_password_and_vk_link() {
         let (root, state) = setup_saved_state("validate").await;
         for (req, what) in [
@@ -2891,7 +3809,7 @@ mod tests {
         assert_eq!(exempt_destinations(None, &BTreeSet::new()), VK_NETWORK_CIDRS);
 
         let apply = iptables_apply_script(&dsts);
-        assert!(apply.contains("for ch in xkeen XKEEN_BS zapret"));
+        assert!(apply.contains("for ch in xkeen xkeen_mask XKEEN_BS zapret"));
         assert!(apply.contains("iptables -w -t"));
         assert!(!apply.contains("-w 2"));
         assert!(apply.contains("-C \"$ch\""), "проверка -C делает правило идемпотентным");
@@ -2899,7 +3817,7 @@ mod tests {
         assert!(apply.contains(&format!("--comment {IPT_COMMENT} -j RETURN")));
         assert!(apply.contains("|| continue"), "отсутствующая цепочка пропускается");
         let remove = iptables_remove_script();
-        assert!(remove.contains("for ch in xkeen XKEEN_BS zapret"));
+        assert!(remove.contains("for ch in xkeen xkeen_mask XKEEN_BS zapret"));
         assert!(remove.contains("iptables -w -t"));
         assert!(!remove.contains("-w 2"));
         assert!(remove.contains(&format!("--comment {IPT_COMMENT}")));
@@ -2910,5 +3828,81 @@ mod tests {
     async fn resolve_peer_ipv4_accepts_literal_and_rejects_garbage() {
         assert_eq!(resolve_peer_ipv4("1.2.3.4:46000").await, Some("1.2.3.4".parse().unwrap()));
         assert_eq!(resolve_peer_ipv4("no-port").await, None);
+    }
+
+    #[test]
+    fn regression_narrow_direct_rules_and_router_exemptions() {
+        let cfg = cfg_with(&["https://vk.com/call/join/abcdEFGH1234"]);
+        let block = rules_block(&cfg);
+        assert!(block.contains("IP-CIDR,155.212.192.0/20,DIRECT,no-resolve"));
+        assert!(block.contains("IP-CIDR,1.2.3.4/32,DIRECT,no-resolve"));
+        assert!(block.contains("DOMAIN,api.vk.com,DIRECT"));
+        assert!(block.contains("DOMAIN,oauth.vk.ru,DIRECT"));
+        assert!(!block.contains("DOMAIN,vk.com,DIRECT"));
+        assert!(!block.contains("DOMAIN,vk.ru,DIRECT"));
+        assert!(!block.contains("87.240.128.0/18"));
+        assert!(!block.contains("95.213.0.0/17"));
+
+        let mut turn = BTreeSet::new();
+        turn.insert("87.240.130.10".parse().unwrap());
+        turn.insert("95.213.10.20".parse().unwrap());
+        turn.insert("203.0.113.50".parse().unwrap());
+        let dsts = exempt_destinations(Some("198.51.100.7".parse().unwrap()), &turn);
+        assert!(!dsts.contains(&"87.240.130.10/32".to_string()));
+        assert!(!dsts.contains(&"95.213.10.20/32".to_string()));
+        assert!(dsts.contains(&"203.0.113.50/32".to_string()));
+        assert!(dsts.contains(&"198.51.100.7/32".to_string()));
+
+        let apply = iptables_apply_script(&dsts);
+        assert!(apply.contains("for ch in xkeen xkeen_mask XKEEN_BS zapret"));
+        let remove = iptables_remove_script();
+        assert!(remove.contains("for ch in xkeen xkeen_mask XKEEN_BS zapret"));
+    }
+
+    #[test]
+    fn regression_vkturn_25_tun_configure_precleans_stale_csq0_and_supervise_tears_down() {
+        let script = tun_configure_script("10.66.67.3".parse().unwrap());
+        let check_pos = script
+            .find("if printf '%s\\n' \"$existing_rules\"")
+            .expect("foreign rule guard must stay");
+        for stale_cleanup in [
+            "ip rule del pref 222 dev csq0 table 222",
+            "ip rule del pref 45 fwmark 222 table 222",
+            "ip route del default dev csq0 table 222",
+            "ip addr flush dev csq0",
+        ] {
+            let pos = script
+                .find(stale_cleanup)
+                .unwrap_or_else(|| panic!("missing pre-cleanup command: {stale_cleanup}"));
+            assert!(
+                pos < check_pos,
+                "stale csq0 cleanup `{stale_cleanup}` must run BEFORE foreign rule check"
+            );
+        }
+        assert!(
+            script.contains("ip rule del pref 40 from") && script.find("ip rule del pref 40 from").unwrap() < check_pos,
+            "stale pref 40 from old csq0 address must be pre-cleaned before foreign rule check"
+        );
+
+        let src = include_str!("vkturn.rs");
+        let sup_body = src
+            .split("async fn supervise(")
+            .nth(1)
+            .and_then(|s| s.split("fn spawn_log_reader(").next())
+            .expect("supervise function must exist");
+        assert!(
+            sup_body.contains("tun_teardown_script_for_ip") && sup_body.contains("rt.tun_configured = false"),
+            "supervise post-exit must tear down csq0 routes/rules and reset tun_configured before backoff"
+        );
+
+        let commit_body = src
+            .split("pub async fn commit_vkturn")
+            .nth(1)
+            .and_then(|s| s.split("struct Supervisor").next())
+            .expect("commit_vkturn function must exist");
+        assert!(
+            commit_body.contains("delete_provider_from_yaml"),
+            "commit_vkturn must remove phantom vkturn provider when tunnel is disabled"
+        );
     }
 }

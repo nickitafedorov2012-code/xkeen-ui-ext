@@ -1,7 +1,8 @@
 import { useState, useMemo } from 'react'
 import { parseMultipleLinks, type ParsedNode } from '../utils/nodeParser'
-import { apiPost } from '../api'
+import { apiPost, decryptCsqttProfile, saveVkTurnConfig } from '../api'
 import { copyToClipboard } from '../utils/clipboard'
+import { parseCsqttLink } from '../utils/csqttLink'
 
 interface OutboundGeneratorModalProps {
   isOpen?: boolean
@@ -21,7 +22,18 @@ export default function OutboundGeneratorModal({
   const [providerName, setProviderName] = useState('custom')
   const [importing, setImporting] = useState(false)
 
-  // Парсинг нод в реальном времени при вводе текста
+  // Парсинг нод и профилей csqtt:// в реальном времени при вводе текста
+  const csqttLines = useMemo(() => {
+    return inputText
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.toLowerCase().startsWith('csqtt://'))
+  }, [inputText])
+
+  const parsedCsqtt = useMemo(() => {
+    return csqttLines.map((raw) => ({ raw, parsed: parseCsqttLink(raw) }))
+  }, [csqttLines])
+
   const parsedNodes: ParsedNode[] = useMemo(() => {
     return parseMultipleLinks(inputText)
   }, [inputText])
@@ -29,6 +41,8 @@ export default function OutboundGeneratorModal({
   const combinedYaml = useMemo(() => {
     return parsedNodes.map((n) => n.yaml).join('\n\n')
   }, [parsedNodes])
+
+  const totalFound = parsedNodes.length + parsedCsqtt.length
 
   const handleCopyYaml = async () => {
     if (!combinedYaml) {
@@ -44,13 +58,45 @@ export default function OutboundGeneratorModal({
   }
 
   const handleImport = async () => {
-    if (parsedNodes.length === 0) {
+    if (totalFound === 0) {
       notify('Вставьте хотя бы одну корректную ссылку на сервер', true)
       return
     }
 
     setImporting(true)
     try {
+      if (csqttLines.length > 0) {
+        let profile = parseCsqttLink(csqttLines[0])
+        if (!profile) {
+          const dec = await decryptCsqttProfile(csqttLines[0])
+          profile = parseCsqttLink(dec.link)
+        }
+        if (!profile) {
+          notify('Не удалось распознать профиль VK-туннеля csqtt://', true)
+          return
+        }
+        await saveVkTurnConfig({
+          enabled: true,
+          peer: `${profile.host}:${profile.port}`,
+          password: profile.password,
+          ...(profile.hashes && profile.hashes.length > 0
+            ? {
+                links: profile.hashes.map((h) => `https://vk.com/call/join/${h}`),
+                auth_mode: 'manual',
+              }
+            : {}),
+          ...(profile.token
+            ? { profile_token: profile.token, auth_mode: 'profile_token' }
+            : {}),
+          ...(profile.power ? { streams: profile.power } : {}),
+        })
+        notify(`✓ Профиль VK-туннеля (${profile.host}:${profile.port}) успешно импортирован`)
+        if (onImportSuccess) onImportSuccess()
+        onClose()
+        window.dispatchEvent(new CustomEvent('xr:switch-tab', { detail: 'vkturn' }))
+        return
+      }
+
       const res = await apiPost<{ imported: boolean; target: string; file?: string }>('servers/import-node', {
         yaml_content: combinedYaml,
         target,
@@ -62,8 +108,9 @@ export default function OutboundGeneratorModal({
         if (onImportSuccess) onImportSuccess()
         onClose()
       }
-    } catch (err: any) {
-      notify('Ошибка импорта: ' + err.message, true)
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      notify('Ошибка импорта: ' + msg, true)
     } finally {
       setImporting(false)
     }
@@ -85,28 +132,48 @@ export default function OutboundGeneratorModal({
         </div>
 
         <p className="muted" style={{ margin: '4px 0 16px' }}>
-          Поддерживаются форматы: <code>vless:// (Reality/gRPC/WS)</code>, <code>vmess://</code>, <code>ss://</code>, <code>trojan://</code>, <code>hysteria2://</code>, <code>tuic://</code>. Можно вставить несколько ссылок сразу.
+          Поддерживаются форматы: <code>vless://</code>, <code>vmess://</code>, <code>ss://</code>, <code>trojan://</code>, <code>hysteria2://</code>, <code>tuic://</code> и профили VK-туннеля <code>csqtt://</code>.
         </p>
 
         <div className="generator-body">
           <div className="form-group">
             <label className="form-label">
               <span>Ссылки на серверы (по одной на строку):</span>
-              {parsedNodes.length > 0 && (
+              {totalFound > 0 && (
                 <span className="badge badge-success">
-                  Найдено: {parsedNodes.length}
+                  Найдено: {totalFound}
                 </span>
               )}
             </label>
             <textarea
               className="input-text generator-textarea"
-              placeholder="vless://uuid@host:443?security=reality&pbk=...#MyServer&#10;ss://base64...#SecondServer"
+              placeholder="vless://uuid@host:443?security=reality&pbk=...#MyServer&#10;csqtt://connect?v=2&host=..."
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
               rows={5}
               autoFocus
             />
           </div>
+
+          {parsedCsqtt.length > 0 && (
+            <div className="parsed-nodes-section">
+              <label className="form-label">Профиль VK-туннеля (csqtt://):</label>
+              <div className="parsed-nodes-list">
+                {parsedCsqtt.map((item, idx) => (
+                  <div key={idx} className="parsed-node-item" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', padding: '6px 0' }}>
+                    <span className="node-proto-badge">VK-CALL</span>
+                    <span className="node-name" style={{ fontWeight: 600 }}>Профиль VK-туннеля (csqtt)</span>
+                    <span className="node-host muted">
+                      {item.parsed ? `${item.parsed.host}:${item.parsed.port}` : 'Зашифрованный профиль (расшифруется при импорте)'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <p className="muted small" style={{ marginTop: 8 }}>
+                После импорта профиль сразу сохранится и откроется вкладка «📞 Звонки ВКонтакте».
+              </p>
+            </div>
+          )}
 
           {parsedNodes.length > 0 && (
             <div className="parsed-nodes-section">
@@ -183,10 +250,10 @@ export default function OutboundGeneratorModal({
             </button>
             <button
               className="btn btn-primary"
-              disabled={parsedNodes.length === 0 || importing}
+              disabled={totalFound === 0 || importing}
               onClick={handleImport}
             >
-              {importing ? '⏳ Импорт…' : `⚡ Импортировать (${parsedNodes.length})`}
+              {importing ? '⏳ Импорт…' : `⚡ Импортировать (${totalFound})`}
             </button>
           </div>
         </div>

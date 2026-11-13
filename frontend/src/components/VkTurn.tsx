@@ -6,9 +6,12 @@ import {
   vkTurnAction,
   saveVkTurnAuth,
   logoutVkTurnAuth,
+  decryptCsqttProfile,
 } from '../api'
 import type { VkTurnStatus, VkTurnPhase, VkTurnCoreInstall } from '../types'
 import { parseCsqttLink } from '../utils/csqttLink'
+
+type VkTurnAuthMode = 'manual' | 'oauth' | 'profile_token'
 
 interface VkTurnProps {
   notify: (msg: string, error?: boolean) => void
@@ -27,7 +30,9 @@ export function parseVkRedirectFragment(urlOrFragment: string): { token: string;
   if (!input) return null
   try {
     input = decodeURIComponent(input)
-  } catch {}
+  } catch {
+    // Оставляем исходную строку, если URI-декодирование не удалось
+  }
 
   let token = ''
   let userId: number | undefined
@@ -64,6 +69,17 @@ export function hostFromPeer(peer?: string | null): string {
   return host.replace(/^\[|\]$/g, '').trim()
 }
 
+/** Порт из "host:port" или значение по умолчанию. */
+function portFromPeer(peer?: string | null): string {
+  if (!peer) return String(DEFAULT_CSQTT_PORT)
+  const i = peer.lastIndexOf(':')
+  if (i > 0) {
+    const candidate = peer.slice(i + 1).trim()
+    if (/^\d+$/.test(candidate)) return candidate
+  }
+  return String(DEFAULT_CSQTT_PORT)
+}
+
 export function formatTraffic(bytes?: number | null): string {
   const b = Number(bytes) || 0
   if (b < 1024) return `${b} Б`
@@ -95,7 +111,7 @@ export async function waitForCoreInstall(
 ): Promise<void> {
   const deadline = Date.now() + maxWaitMs
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, pollMs))
+    if (pollMs > 0) await new Promise((r) => setTimeout(r, pollMs))
     let st: VkTurnStatus
     try {
       st = await fetchStatus()
@@ -116,6 +132,19 @@ export const vkTurnTiming = { installPollMs: 1500 }
 
 const badgeStyle = { fontSize: 13, padding: '4px 10px' }
 
+function errMessage(err: unknown, fallback: string): string {
+  return err instanceof Error && err.message ? err.message : fallback
+}
+
+function resolveEffectiveAuthMode(status: VkTurnStatus | null): VkTurnAuthMode {
+  if (status?.auth_mode === 'profile_token' && status?.has_profile_token) return 'profile_token'
+  if (status?.auth_mode === 'manual') return 'manual'
+  if (status?.auth_mode === 'oauth') return 'oauth'
+  if (status?.has_profile_token) return 'profile_token'
+  if (status?.has_token) return 'oauth'
+  return 'manual'
+}
+
 export default function VkTurn({ notify }: VkTurnProps) {
   const [status, setStatus] = useState<VkTurnStatus | null>(null)
   const [loading, setLoading] = useState(true)
@@ -124,28 +153,77 @@ export default function VkTurn({ notify }: VkTurnProps) {
   const [logs, setLogs] = useState<string[]>([])
   const [loadingLogs, setLoadingLogs] = useState(false)
   const [accordionOpen, setAccordionOpen] = useState(false)
-  const [testLatency, setTestLatency] = useState<number | null>(null)
+  const [testResult, setTestResult] = useState<{ delay: number | null; at: Date } | null>(null)
   const [testingPing, setTestingPing] = useState(false)
+  const testTicket = useRef(0)
 
-  // Мастер
+  // Мастер настройки (строковый ввод порта сохраняет свободный Backspace)
   const [peerHost, setPeerHost] = useState('')
-  const [serverPort, setServerPort] = useState<number>(DEFAULT_CSQTT_PORT)
+  const [portInput, setPortInput] = useState<string>(String(DEFAULT_CSQTT_PORT))
   const [password, setPassword] = useState('')
   const [callLinks, setCallLinks] = useState<string[]>([''])
+  const [sourceMode, setSourceMode] = useState<VkTurnAuthMode | null>(null)
+  const [profileToken, setProfileToken] = useState<string | null>(null)
+  const [profilePower, setProfilePower] = useState<number | null>(null)
+  const wizardTouchedRef = useRef(false)
 
-  // Карточка: новая ссылка / новый пароль
+  // Карточка мониторинга: редактирование адреса сервера, ссылки, пароля и потоков
   const [newLinkInput, setNewLinkInput] = useState('')
   const [updatingLink, setUpdatingLink] = useState(false)
   const [newPassword, setNewPassword] = useState('')
   const [updatingPassword, setUpdatingPassword] = useState(false)
+  const [editPeerInput, setEditPeerInput] = useState('')
+  const [updatingPeer, setUpdatingPeer] = useState(false)
+  const peerEditedRef = useRef(false)
+  const [manualSwitchPending, setManualSwitchPending] = useState(false)
 
-  // VK OAuth модальное окно и ручной токен
+  const [draftStreamsInput, setDraftStreamsInput] = useState<string | null>(null)
+  const [streamsUpdating, setStreamsUpdating] = useState(false)
+
+  // VK OAuth модальное окно
   const [authModalOpen, setAuthModalOpen] = useState(false)
   const [manualTokenInput, setManualTokenInput] = useState('')
   const [authSubmitting, setAuthSubmitting] = useState(false)
-  const [showManualTokenField, setShowManualTokenField] = useState(false)
 
   const pollingRef = useRef<boolean>(false)
+  const importTicket = useRef(0)
+
+  useEffect(() => () => { importTicket.current += 1 }, [])
+
+  useEffect(() => {
+    testTicket.current += 1
+    setTestResult(null)
+  }, [status?.peer, status?.pid, status?.restarts, status?.enabled, status?.tunnel_ready])
+
+  // Синхронизация редактируемого адреса сервера и полей мастера при возврате из сохранённого состояния
+  useEffect(() => {
+    if (!status) return
+    if (status.peer && !peerEditedRef.current) {
+      setEditPeerInput(status.peer)
+    }
+    if (!wizardTouchedRef.current) {
+      if (status.peer && !peerHost) {
+        setPeerHost(hostFromPeer(status.peer))
+        setPortInput(portFromPeer(status.peer))
+      }
+      if (status.links && status.links.length > 0 && callLinks.length === 1 && callLinks[0] === '') {
+        setCallLinks(status.links)
+      }
+    }
+    if (status.auth_mode === 'manual' && manualSwitchPending) {
+      setManualSwitchPending(false)
+    }
+  }, [status, peerHost, callLinks, manualSwitchPending])
+
+  const selectedSource: VkTurnAuthMode =
+    sourceMode ??
+    (status?.auth_mode === 'profile_token' && status.has_profile_token
+      ? 'profile_token'
+      : status?.auth_mode === 'manual' && (status?.links_count ?? 0) > 0
+        ? 'manual'
+        : status?.has_token
+          ? 'oauth'
+          : 'manual')
 
   const loadStatus = useCallback(async (isInitial = false) => {
     if (document.hidden && !isInitial) return
@@ -176,8 +254,8 @@ export default function VkTurn({ notify }: VkTurnProps) {
     try {
       const res = await getVkTurnLogs()
       setLogs(res.lines || [])
-    } catch (err: any) {
-      notify(err?.message || 'Не удалось загрузить логи VK-туннеля', true)
+    } catch (err: unknown) {
+      notify(errMessage(err, 'Не удалось загрузить логи VK-туннеля'), true)
     } finally {
       setLoadingLogs(false)
     }
@@ -191,6 +269,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
   }
 
   const handleCallLinkChange = (index: number, val: string) => {
+    wizardTouchedRef.current = true
     setCallLinks((prev) => {
       const copy = [...prev]
       copy[index] = val
@@ -205,12 +284,23 @@ export default function VkTurn({ notify }: VkTurnProps) {
       notify('Укажите адрес сервера VPS (IP или домен)', true)
       return
     }
-    if (!password.trim()) {
+    const rawPort = portInput.trim()
+    const portNum = rawPort === '' ? DEFAULT_CSQTT_PORT : Number(rawPort)
+    if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+      notify('Порт сервера csqtt должен быть от 1 до 65535', true)
+      return
+    }
+    const hasSavedPassword = Boolean(status?.has_password)
+    if (!password.trim() && !hasSavedPassword) {
       notify('Укажите пароль подключения к серверу csqtt', true)
       return
     }
     const links = callLinks.map((l) => l.trim()).filter(Boolean)
-    if (links.length === 0 && !status?.has_token) {
+    if (
+      (selectedSource === 'manual' && links.length === 0) ||
+      (selectedSource === 'oauth' && !status?.has_token) ||
+      (selectedSource === 'profile_token' && !(profileToken || (profileToken === null && status?.has_profile_token)))
+    ) {
       notify('Укажите хотя бы одну ссылку на звонок или выполните вход через VK ID', true)
       return
     }
@@ -223,54 +313,79 @@ export default function VkTurn({ notify }: VkTurnProps) {
       }
 
       notify('Сохранение конфигурации и запуск...')
-      // Одно сохранение с enabled: true уже запускает клиент — отдельный вызов «enable» не нужен
+      const peer = host.includes(':') ? `[${host}]:${portNum}` : `${host}:${portNum}`
       await saveVkTurnConfig({
         enabled: true,
-        peer: `${host}:${serverPort || DEFAULT_CSQTT_PORT}`,
-        password: password.trim(),
-        links,
+        peer,
+        ...(password.trim() ? { password: password.trim() } : {}),
+        links: selectedSource === 'manual' ? links : [],
+        auth_mode: selectedSource,
+        ...(profileToken !== null ? { profile_token: profileToken } : {}),
+        ...(profilePower !== null ? { streams: profilePower } : {}),
       })
       setPassword('')
+      wizardTouchedRef.current = false
       notify('VK-туннель настроен. Соединение устанавливается автоматически.')
       await loadStatus(true)
-    } catch (err: any) {
-      notify(err?.message || 'Ошибка настройки VK-туннеля', true)
+    } catch (err: unknown) {
+      notify(errMessage(err, 'Ошибка настройки VK-туннеля'), true)
     } finally {
       setActionPending(false)
     }
   }
 
-  // Автоматический разбор ссылки csqtt:// при вводе или вставке
-  const handleHostChange = (val: string) => {
-    const trimmed = val.trim()
-    const parsed = parseCsqttLink(trimmed)
-    if (parsed) {
-      setPeerHost(parsed.host)
-      setServerPort(parsed.port)
-      setPassword(parsed.password)
-      if (parsed.hashes && parsed.hashes.length > 0) {
-        setCallLinks(parsed.hashes.map((h) => `https://vk.com/call/join/${h}`))
-      }
-      notify('Настройки сервера, порт и пароль успешно извлечены из ссылки csqtt://')
-      return
+  const resolveCsqttInput = async (raw: string) => {
+    const trimmed = raw.trim()
+    let parsed = parseCsqttLink(trimmed)
+    if (!parsed && /^csqtt:\/\/[a-z0-9_+/=-]{40,}$/i.test(trimmed)) {
+      const result = await decryptCsqttProfile(trimmed)
+      parsed = parseCsqttLink(result.link)
     }
-    setPeerHost(val)
+    return parsed
   }
 
-  // Быстрая вставка ссылки csqtt:// из буфера обмена (как в focsq / ImportService)
+  const importProfile = async (raw: string): Promise<boolean> => {
+    const ticket = ++importTicket.current
+    const trimmed = raw.trim()
+    let parsed = parseCsqttLink(trimmed)
+    if (!parsed && /^csqtt:\/\/[a-z0-9_+/=-]{40,}$/i.test(trimmed)) {
+      try {
+        const result = await decryptCsqttProfile(trimmed)
+        parsed = parseCsqttLink(result.link)
+      } catch {
+        if (ticket === importTicket.current) notify('Не удалось прочитать профиль CSQTTR', true)
+        return false
+      }
+    }
+    if (ticket !== importTicket.current || !parsed) return false
+    if (parsed.host.includes(':')) {
+      notify('Адреса IPv6 в профилях пока не поддерживаются; нужен IPv4 или домен', true)
+      return false
+    }
+    wizardTouchedRef.current = true
+    setPeerHost(parsed.host)
+    setPortInput(String(parsed.port))
+    setPassword(parsed.password)
+    setCallLinks(parsed.hashes?.map((h) => `https://vk.com/call/join/${h}`) || [''])
+    setProfileToken(parsed.token || '')
+    setProfilePower(parsed.power ?? null)
+    setSourceMode(
+      parsed.token ? 'profile_token' : parsed.hashes?.length ? 'manual' : (status?.has_token ? 'oauth' : 'manual'),
+    )
+    notify('Настройки сервера, порт и пароль успешно извлечены из ссылки csqtt://')
+    return true
+  }
+
+  const handleHostChange = (val: string) => {
+    wizardTouchedRef.current = true
+    setPeerHost(val)
+    void importProfile(val)
+  }
+
   const handleImportFromClipboard = async () => {
     try {
       const text = await navigator.clipboard.readText()
-      const parsed = parseCsqttLink(text)
-      if (parsed) {
-        setPeerHost(parsed.host)
-        setServerPort(parsed.port)
-        setPassword(parsed.password)
-        if (parsed.hashes && parsed.hashes.length > 0) {
-          setCallLinks(parsed.hashes.map((h) => `https://vk.com/call/join/${h}`))
-        }
-        notify('Профиль csqtt:// успешно вставлен из буфера обмена!')
-      } else {
+      if (!await importProfile(text)) {
         notify('В буфере обмена нет ссылки csqtt:// (ожидается csqtt://connect?v=2... или csqtt://password@host:port)', true)
       }
     } catch {
@@ -287,33 +402,14 @@ export default function VkTurn({ notify }: VkTurnProps) {
     const popup = window.open(
       VK_AUTH_URL,
       'vk_oauth_popup',
-      `width=${width},height=${height},left=${left},top=${top},status=no,toolbar=no,menubar=no`
+      `width=${width},height=${height},left=${left},top=${top},status=no,toolbar=no,menubar=no`,
     )
 
-    // Сразу открываем модальное окно с подсказкой и кнопкой вставки из буфера
     setAuthModalOpen(true)
 
     if (!popup) {
       notify('Всплывающее окно заблокировано браузером. Вставьте адрес авторизации вручную', true)
-      return
     }
-
-    const timer = setInterval(async () => {
-      try {
-        if (!popup || popup.closed) {
-          clearInterval(timer)
-          return
-        }
-        const href = popup.location?.href
-        if (href && (href.includes('access_token=') || href.includes('oauth.vk.ru/blank.html'))) {
-          clearInterval(timer)
-          popup.close()
-          await handleSaveAuthString(href)
-        }
-      } catch {
-        // Cross-origin restriction
-      }
-    }, 500)
   }
 
   const handlePasteFromClipboard = async () => {
@@ -330,23 +426,13 @@ export default function VkTurn({ notify }: VkTurnProps) {
     }
   }
 
-  // Автоматический перехват токена при фокусе окна (когда пользователь скопировал URL в окне VK и кликнул обратно)
-  useEffect(() => {
-    const onWindowFocus = async () => {
-      if (authModalOpen && !authSubmitting) {
-        try {
-          const text = await navigator.clipboard.readText()
-          if (text && (text.includes('access_token=') || text.startsWith('vk1.a.'))) {
-            await handleSaveAuthString(text)
-          }
-        } catch {
-          // Буфер недоступен без явного действия пользователя
-        }
-      }
-    }
-    window.addEventListener('focus', onWindowFocus)
-    return () => window.removeEventListener('focus', onWindowFocus)
-  }, [authModalOpen, authSubmitting])
+  const hasActiveAuthSource =
+    status?.auth_mode === 'manual'
+      ? (status?.links_count ?? 0) > 0
+      : status?.auth_mode === 'profile_token'
+        ? Boolean(status?.has_profile_token)
+        : Boolean(status?.has_token) || (status?.links_count ?? 0) > 0
+  const isConfigured = Boolean(status?.peer && status?.has_password && hasActiveAuthSource)
 
   const handleSaveAuthString = async (str: string) => {
     const trimmed = str.trim()
@@ -362,18 +448,19 @@ export default function VkTurn({ notify }: VkTurnProps) {
         token,
         user_id: parsed?.userId,
         url: trimmed,
+        ...(!isConfigured ? { auth_mode: 'oauth' } : {}),
       })
       if (res.success) {
         notify(res.message || `✓ Учетная запись ${res.user_name || ''} успешно подключена!`)
         setAuthModalOpen(false)
         setManualTokenInput('')
-        setShowManualTokenField(false)
+        setSourceMode('oauth')
         await loadStatus(true)
       } else {
         notify('Ошибка сохранения данных авторизации VK', true)
       }
-    } catch (err: any) {
-      notify(err?.message || 'Ошибка авторизации VK', true)
+    } catch (err: unknown) {
+      notify(errMessage(err, 'Ошибка авторизации VK'), true)
     } finally {
       setAuthSubmitting(false)
     }
@@ -388,8 +475,8 @@ export default function VkTurn({ notify }: VkTurnProps) {
         notify('Вы вышли из учетной записи VK')
         await loadStatus(true)
       }
-    } catch (err: any) {
-      notify(err?.message || 'Ошибка выхода из учетной записи VK', true)
+    } catch (err: unknown) {
+      notify(errMessage(err, 'Ошибка выхода из учетной записи VK'), true)
     } finally {
       setActionPending(false)
     }
@@ -401,38 +488,73 @@ export default function VkTurn({ notify }: VkTurnProps) {
       await saveVkTurnConfig({ enabled: checked })
       notify(checked ? 'VK-туннель включен' : 'VK-туннель выключен')
       await loadStatus(true)
-    } catch (err: any) {
-      notify(err?.message || 'Ошибка переключения туннеля', true)
+    } catch (err: unknown) {
+      notify(errMessage(err, 'Ошибка переключения туннеля'), true)
+    } finally {
+      setActionPending(false)
+    }
+  }
+
+  const handleSwitchAuthMode = async (mode: VkTurnAuthMode) => {
+    if (mode === 'oauth' && !status?.has_token) {
+      handleStartVkOAuth()
+      return
+    }
+    if (mode === 'manual' && (status?.links_count ?? 0) === 0) {
+      setManualSwitchPending(true)
+      setAccordionOpen(true)
+      notify('Добавьте ссылку на звонок ВКонтакте для переключения на ручной режим')
+      return
+    }
+    setActionPending(true)
+    try {
+      await saveVkTurnConfig({ auth_mode: mode })
+      setManualSwitchPending(false)
+      const label =
+        mode === 'oauth' ? 'Мой аккаунт VK' : mode === 'profile_token' ? 'Токен профиля' : 'Ручные ссылки'
+      notify(`Источник звонков переключён: ${label}`)
+      await loadStatus(true)
+    } catch (err: unknown) {
+      notify(errMessage(err, 'Не удалось переключить источник звонков'), true)
     } finally {
       setActionPending(false)
     }
   }
 
   const handleTest = async () => {
+    const ticket = ++testTicket.current
+    setTestResult(null)
     setTestingPing(true)
     try {
       const res = await vkTurnAction('test')
-      if (res.delay_ms !== undefined) {
-        setTestLatency(res.delay_ms)
+      if (ticket !== testTicket.current) return
+      if (typeof res.delay_ms === 'number' && res.delay_ms > 0) {
+        setTestResult({ delay: res.delay_ms, at: new Date() })
         notify(`Проверка связи: задержка ${res.delay_ms} мс`)
       } else {
-        notify('Проверка завершена успешно')
+        setTestResult({ delay: null, at: new Date() })
+        notify('Не удалось измерить задержку туннеля', true)
       }
-    } catch (err: any) {
-      notify(err?.message || 'Ошибка проверки туннеля', true)
+    } catch (err: unknown) {
+      if (ticket === testTicket.current) {
+        setTestResult({ delay: null, at: new Date() })
+        notify(errMessage(err, 'Ошибка проверки туннеля'), true)
+      }
     } finally {
       setTestingPing(false)
     }
   }
 
   const handleRestart = async () => {
+    testTicket.current += 1
+    setTestResult(null)
     setActionPending(true)
     try {
       await vkTurnAction('restart')
       notify('VK-туннель перезапущен')
       await loadStatus(true)
-    } catch (err: any) {
-      notify(err?.message || 'Ошибка перезапуска туннеля', true)
+    } catch (err: unknown) {
+      notify(errMessage(err, 'Ошибка перезапуска туннеля'), true)
     } finally {
       setActionPending(false)
     }
@@ -442,19 +564,29 @@ export default function VkTurn({ notify }: VkTurnProps) {
     if (!window.confirm('Сбросить текущий сервер csqtt и настройки туннеля? Вы вернетесь в мастер настройки для ввода нового сервера.')) {
       return
     }
+    testTicket.current += 1
+    setTestResult(null)
     setActionPending(true)
     try {
       await vkTurnAction('reset')
+      wizardTouchedRef.current = false
+      peerEditedRef.current = false
       setPeerHost('')
-      setServerPort(DEFAULT_CSQTT_PORT)
+      setPortInput(String(DEFAULT_CSQTT_PORT))
       setPassword('')
       setCallLinks([''])
+      setSourceMode(null)
+      setProfileToken(null)
+      setProfilePower(null)
+      setLogs([])
       setNewPassword('')
       setNewLinkInput('')
+      setEditPeerInput('')
+      setManualSwitchPending(false)
       notify('Настройки сервера csqtt сброшены. Вы можете указать новый сервер.')
       await loadStatus(true)
-    } catch (err: any) {
-      notify(err?.message || 'Ошибка сброса настроек туннеля', true)
+    } catch (err: unknown) {
+      notify(errMessage(err, 'Ошибка сброса настроек туннеля'), true)
     } finally {
       setActionPending(false)
     }
@@ -467,14 +599,14 @@ export default function VkTurn({ notify }: VkTurnProps) {
       await installCore()
       notify('Компонент успешно установлен')
       await loadStatus(true)
-    } catch (err: any) {
-      notify(err?.message || 'Ошибка установки компонента', true)
+    } catch (err: unknown) {
+      notify(errMessage(err, 'Ошибка установки компонента'), true)
     } finally {
       setActionPending(false)
     }
   }
 
-  const handleUpdateCallLink = async () => {
+  const handleUpdateCallLink = async (asBackup = false) => {
     const trimmed = newLinkInput.trim()
     if (!trimmed) {
       notify('Введите новую ссылку на звонок', true)
@@ -482,13 +614,30 @@ export default function VkTurn({ notify }: VkTurnProps) {
     }
     setUpdatingLink(true)
     try {
-      // Новая ссылка становится основной, запасные сохраняются
-      await saveVkTurnConfig({ primary_link: trimmed })
-      notify('Ссылка на звонок обновлена')
+      await saveVkTurnConfig(
+        asBackup
+          ? { append_link: trimmed, auth_mode: 'manual' }
+          : { primary_link: trimmed, auth_mode: 'manual' },
+      )
+      notify(asBackup ? 'Запасная ссылка добавлена' : 'Ссылка на звонок обновлена')
       setNewLinkInput('')
+      setManualSwitchPending(false)
       await loadStatus(true)
-    } catch (err: any) {
-      notify(err?.message || 'Ошибка обновления ссылки', true)
+    } catch (err: unknown) {
+      notify(errMessage(err, 'Ошибка обновления ссылки'), true)
+    } finally {
+      setUpdatingLink(false)
+    }
+  }
+
+  const handleRemoveLink = async (index: number) => {
+    setUpdatingLink(true)
+    try {
+      await saveVkTurnConfig({ remove_link_index: index })
+      notify('Ссылка на звонок удалена')
+      await loadStatus(true)
+    } catch (err: unknown) {
+      notify(errMessage(err, 'Не удалось удалить ссылку'), true)
     } finally {
       setUpdatingLink(false)
     }
@@ -506,27 +655,69 @@ export default function VkTurn({ notify }: VkTurnProps) {
       notify('Пароль подключения обновлён, переподключаюсь')
       setNewPassword('')
       await loadStatus(true)
-    } catch (err: any) {
-      notify(err?.message || 'Ошибка обновления пароля', true)
+    } catch (err: unknown) {
+      notify(errMessage(err, 'Ошибка обновления пароля'), true)
     } finally {
       setUpdatingPassword(false)
     }
   }
 
-  const [draftStreams, setDraftStreams] = useState<number | null>(null)
-  const [streamsUpdating, setStreamsUpdating] = useState(false)
+  const handleUpdatePeer = async () => {
+    const trimmed = editPeerInput.trim()
+    if (!trimmed) {
+      notify('Укажите адрес сервера (host:port или ссылку csqtt://)', true)
+      return
+    }
+    setUpdatingPeer(true)
+    try {
+      if (trimmed.toLowerCase().startsWith('csqtt://')) {
+        const parsed = await resolveCsqttInput(trimmed)
+        if (!parsed) {
+          notify('Не удалось разобрать ссылку csqtt://', true)
+          return
+        }
+        const nextPeer = parsed.host.includes(':') ? `[${parsed.host}]:${parsed.port}` : `${parsed.host}:${parsed.port}`
+        await saveVkTurnConfig({
+          peer: nextPeer,
+          ...(parsed.password ? { password: parsed.password } : {}),
+          ...(parsed.token ? { profile_token: parsed.token, auth_mode: 'profile_token' } : {}),
+          ...(parsed.power ? { streams: parsed.power } : {}),
+        })
+        setEditPeerInput(nextPeer)
+        peerEditedRef.current = false
+        notify('Адрес и параметры профиля csqtt:// обновлены')
+      } else {
+        const normalizedPeer = trimmed.includes(':') ? trimmed : `${trimmed}:${DEFAULT_CSQTT_PORT}`
+        await saveVkTurnConfig({ peer: normalizedPeer })
+        setEditPeerInput(normalizedPeer)
+        peerEditedRef.current = false
+        notify('Адрес сервера csqtt обновлён, переподключаюсь')
+      }
+      await loadStatus(true)
+    } catch (err: unknown) {
+      notify(errMessage(err, 'Ошибка обновления адреса сервера'), true)
+    } finally {
+      setUpdatingPeer(false)
+    }
+  }
 
   const handleSaveStreams = async () => {
-    const streams = draftStreams ?? status?.target_streams ?? DEFAULT_STREAMS
-    if (!Number.isInteger(streams) || streams < 3 || streams > 100) return
+    const candidate =
+      draftStreamsInput !== null && /^\d+$/.test(draftStreamsInput.trim())
+        ? Number(draftStreamsInput.trim())
+        : (status?.target_streams ?? DEFAULT_STREAMS)
+    if (!Number.isInteger(candidate) || candidate < 3 || candidate > 100) {
+      notify('Число потоков должно быть от 3 до 100', true)
+      return
+    }
     setStreamsUpdating(true)
     try {
-      await saveVkTurnConfig({ streams })
-      notify(`Число потоков изменено на ${streams}; туннель переподключается`)
-      setDraftStreams(null)
+      await saveVkTurnConfig({ streams: candidate })
+      notify(`Число потоков изменено на ${candidate}; туннель переподключается`)
+      setDraftStreamsInput(null)
       await loadStatus(true)
-    } catch (err: any) {
-      notify(err?.message || 'Не удалось изменить число потоков', true)
+    } catch (err: unknown) {
+      notify(errMessage(err, 'Не удалось изменить число потоков'), true)
       await loadStatus(true)
     } finally {
       setStreamsUpdating(false)
@@ -535,7 +726,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
 
   if (loading && !status) {
     return (
-      <div className="card" style={{ padding: 40, textAlign: 'center' }}>
+      <div className="vk-section" style={{ padding: 40, textAlign: 'center' }}>
         <div className="spinner" style={{ margin: '0 auto 16px' }} />
         <div className="muted">Загрузка модуля VK-туннель…</div>
       </div>
@@ -544,7 +735,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
 
   if (statusUnavailable || !status) {
     return (
-      <section className="card" role="alert">
+      <section className="vk-section" role="alert">
         <h2>Не удалось получить состояние VK-туннеля</h2>
         <p className="muted">Состояние туннеля сейчас неизвестно. Повторите попытку после восстановления связи.</p>
         <button type="button" className="btn" onClick={() => void loadStatus(true)}>Повторить</button>
@@ -553,16 +744,17 @@ export default function VkTurn({ notify }: VkTurnProps) {
   }
 
   const installing = Boolean(status?.install?.running)
-  const isConfigured = Boolean(
-    status?.peer && status?.has_password && ((status?.links_count ?? 0) > 0 || Boolean(status?.has_token))
-  )
+  const effectiveAuthMode = resolveEffectiveAuthMode(status)
 
   const renderPhaseBadge = (phase: VkTurnPhase = 'disabled', connected = 0) => {
     switch (phase) {
       case 'connected':
+        if (!status?.tunnel_ready || connected === 0) {
+          return <span className="badge badge-warning" data-testid="status-badge" style={badgeStyle}>🟡 Подключаю туннель…</span>
+        }
         return (
           <span className="badge badge-success" data-testid="status-badge" style={badgeStyle}>
-            🟢 Работает · соединений: {connected}
+            🟢 Подключён · соединений: {connected}
           </span>
         )
       case 'starting':
@@ -593,7 +785,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
       case 'auth_failed':
         return (
           <span className="badge badge-danger" data-testid="status-badge" style={badgeStyle}>
-            🔴 Сервер отклонил пароль
+            {status?.error_source === 'vk' ? '🔴 Ошибка авторизации VK' : '🔴 Сервер отклонил пароль'}
           </span>
         )
       case 'server_unreachable':
@@ -633,102 +825,131 @@ export default function VkTurn({ notify }: VkTurnProps) {
 
   const renderVkAccountCard = () => {
     const isAuthorized = Boolean(status?.has_token || status?.vk_user_id)
-
-    if (isAuthorized) {
-      return (
-        <div
-          className="card vk-account-card"
-          data-testid="vk-account-card"
-          style={{
-            padding: '16px 20px',
-            background: 'rgba(34, 197, 94, 0.06)',
-            border: '1px solid rgba(34, 197, 94, 0.3)',
-            borderRadius: 12,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            flexWrap: 'wrap',
-            gap: 12,
-            marginBottom: 16,
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div
-              style={{
-                width: 38,
-                height: 38,
-                borderRadius: '50%',
-                background: '#0077ff',
-                color: '#fff',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                fontWeight: 700,
-                fontSize: 16,
-                flexShrink: 0,
-              }}
-            >
-              VK
-            </div>
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <span className="badge badge-success" style={{ fontSize: 12 }}>
-                  ✓ Учетная запись подключена
-                </span>
-                <span style={{ fontWeight: 600, fontSize: 14 }}>
-                  {status?.vk_user_name || 'Пользователь VK'}
-                </span>
-                {status?.vk_user_id && (
-                  <span className="badge badge-neutral" style={{ fontSize: 11 }}>
-                    ID: {status.vk_user_id}
-                  </span>
-                )}
-              </div>
-              <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-                🟢 Автоматическое создание звонков активно · звонки удерживаются клиентом csqtt
-              </div>
-            </div>
-          </div>
-          <button
-            type="button"
-            className="btn btn-secondary"
-            disabled={actionPending}
-            onClick={handleLogoutVk}
-            style={{ fontSize: 13, padding: '6px 14px' }}
-          >
-            Выйти из аккаунта
-          </button>
-        </div>
-      )
-    }
+    const isProfileTokenActive = effectiveAuthMode === 'profile_token' && Boolean(status?.has_profile_token)
 
     return (
-      <div
-        className="card vk-auth-card"
-        data-testid="vk-auth-card"
-        style={{
-          padding: '18px 20px',
-          background: 'linear-gradient(135deg, rgba(0, 119, 255, 0.08) 0%, rgba(15, 23, 42, 0.6) 100%)',
-          border: '1px solid rgba(0, 119, 255, 0.35)',
-          borderRadius: 12,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 12,
-          marginBottom: 16,
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-          <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-              <span style={{ fontSize: 20 }}>🔵</span>
-              <h4 style={{ margin: 0, fontSize: 15, fontWeight: 700 }}>Учетная запись ВКонтакте (VK ID)</h4>
-              <span className="badge badge-warning" style={{ fontSize: 11 }}>Рекомендуется</span>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {isProfileTokenActive && (
+          <div
+            className="vk-subcard vk-profile-token-card"
+            data-testid="vk-profile-token-card"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: 10,
+              borderColor: 'rgba(34, 197, 94, 0.35)',
+            }}
+          >
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>🔑 Токен из профиля csqtt:// активен</div>
+              <div className="muted" style={{ fontSize: 12, marginTop: 3 }}>
+                Звонки создаются автоматически по токену, встроенному в подключённый профиль сервера.
+              </div>
             </div>
-            <div className="muted" style={{ fontSize: 13 }}>
-              Войдите через VK ID: роутер будет сам создавать звонки и удерживать их без ручного копирования ссылок.
+            <span className="badge badge-success" style={{ fontSize: 12 }}>Готов</span>
+          </div>
+        )}
+
+        {isAuthorized ? (
+          <div
+            className="vk-subcard vk-account-card"
+            data-testid="vk-account-card"
+            style={{
+              borderColor: 'rgba(34, 197, 94, 0.35)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: 12,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div
+                style={{
+                  width: 38,
+                  height: 38,
+                  borderRadius: '50%',
+                  background: '#0077ff',
+                  color: '#fff',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontWeight: 700,
+                  fontSize: 16,
+                  flexShrink: 0,
+                }}
+              >
+                VK
+              </div>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span className={status?.vk_token_verified === false ? 'badge badge-warning' : 'badge badge-success'} style={{ fontSize: 12 }}>
+                    {status?.vk_token_verified === false ? 'Токен сохранён · аккаунт не проверен' : '✓ Учетная запись подключена'}
+                  </span>
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>
+                    {status?.vk_user_name || 'Пользователь VK'}
+                  </span>
+                  {status?.vk_user_id && (
+                    <span className="badge badge-neutral" style={{ fontSize: 11 }}>
+                      ID: {status.vk_user_id}
+                    </span>
+                  )}
+                </div>
+                <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+                  {isConfigured && effectiveAuthMode !== 'oauth'
+                    ? 'Для туннеля сейчас выбран другой источник звонков'
+                    : 'Аккаунт доступен для автоматического создания звонков'}
+                </div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              {isConfigured && effectiveAuthMode !== 'oauth' && (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  data-testid="use-vk-account-btn"
+                  disabled={actionPending}
+                  onClick={() => void handleSwitchAuthMode('oauth')}
+                  style={{ fontSize: 13, padding: '6px 14px' }}
+                >
+                  Использовать этот аккаунт
+                </button>
+              )}
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={actionPending}
+                onClick={handleLogoutVk}
+                style={{ fontSize: 13, padding: '6px 14px' }}
+              >
+                Выйти из аккаунта
+              </button>
             </div>
           </div>
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        ) : (
+          <div
+            className="vk-auth-banner vk-auth-card"
+            data-testid="vk-auth-card"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: 12,
+            }}
+          >
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                <span style={{ fontSize: 20 }}>🔵</span>
+                <h4 style={{ margin: 0, fontSize: 15, fontWeight: 700 }}>Учетная запись ВКонтакте (VK ID)</h4>
+                {!isProfileTokenActive && <span className="badge badge-warning" style={{ fontSize: 11 }}>Рекомендуется</span>}
+              </div>
+              <div className="muted" style={{ fontSize: 13 }}>
+                Войдите через VK ID: роутер будет сам создавать звонки и удерживать их без ручного копирования ссылок.
+              </div>
+            </div>
             <button
               type="button"
               className="btn"
@@ -752,60 +973,6 @@ export default function VkTurn({ notify }: VkTurnProps) {
               <span>🔵</span>
               <span>Войти через ВКонтакте (VK ID)</span>
             </button>
-            <button
-              type="button"
-              className="btn btn-secondary"
-              data-testid="paste-clipboard-btn"
-              onClick={handlePasteFromClipboard}
-              style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, padding: '9px 14px' }}
-              title="Автоматически прочитать скопированный адрес из буфера обмена"
-            >
-              <span>📋</span>
-              <span>Вставить из буфера</span>
-            </button>
-          </div>
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}>
-          <button
-            type="button"
-            data-testid="toggle-manual-token"
-            onClick={() => setShowManualTokenField((prev) => !prev)}
-            style={{
-              background: 'none',
-              border: 'none',
-              padding: 0,
-              color: 'var(--muted)',
-              cursor: 'pointer',
-              textDecoration: 'underline',
-              fontSize: 12,
-            }}
-          >
-            {showManualTokenField ? 'Скрыть прямое поле ввода' : 'Ввести токен или адрес вручную'}
-          </button>
-        </div>
-
-        {showManualTokenField && (
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 4 }}>
-            <input
-              type="text"
-              className="input"
-              data-testid="manual-token-input"
-              placeholder="Вставьте ссылку oauth.vk.ru/blank.html#access_token=... или токен vk1.a...."
-              value={manualTokenInput}
-              onChange={(e) => setManualTokenInput(e.target.value)}
-              style={{ flex: 1, fontSize: 13 }}
-            />
-            <button
-              type="button"
-              className="btn btn-primary"
-              data-testid="save-manual-token-btn"
-              disabled={authSubmitting || !manualTokenInput.trim()}
-              onClick={() => handleSaveAuthString(manualTokenInput)}
-              style={{ fontSize: 13 }}
-            >
-              {authSubmitting ? 'Сохранение…' : 'Сохранить токен'}
-            </button>
           </div>
         )}
       </div>
@@ -823,7 +990,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
           left: 0,
           right: 0,
           bottom: 0,
-          background: 'rgba(0, 0, 0, 0.75)',
+          background: 'rgba(0, 0, 0, 0.72)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -832,14 +999,13 @@ export default function VkTurn({ notify }: VkTurnProps) {
         }}
       >
         <div
-          className="card"
+          className="vk-section"
           style={{
             maxWidth: 580,
             width: '100%',
-            padding: 26,
+            padding: 24,
             borderRadius: 16,
-            boxShadow: '0 8px 32px rgba(0, 0, 0, 0.7)',
-            border: '1px solid rgba(0, 119, 255, 0.4)',
+            boxShadow: '0 8px 32px rgba(0, 0, 0, 0.45)',
           }}
         >
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
@@ -856,11 +1022,11 @@ export default function VkTurn({ notify }: VkTurnProps) {
             </button>
           </div>
 
-          <div style={{ background: 'rgba(0, 119, 255, 0.08)', borderRadius: 10, padding: '12px 16px', marginBottom: 16, fontSize: 13, lineHeight: 1.5 }}>
-            <div style={{ fontWeight: 600, marginBottom: 4, color: '#60a5fa' }}>💡 Как завершить вход:</div>
+          <div className="vk-auth-banner" style={{ marginBottom: 16, fontSize: 13, lineHeight: 1.5 }}>
+            <div style={{ fontWeight: 600, marginBottom: 4, color: 'var(--accent)' }}>💡 Как завершить вход:</div>
             <div>1. В открывшемся окне авторизуйтесь и подтвердите вход.</div>
             <div>2. Страница перейдёт на белый экран <code>oauth.vk.ru/blank.html#access_token=...</code></div>
-            <div>3. Скопируйте адрес из адресной строки того окна (Ctrl+L, Ctrl+C) и нажмите кнопку ниже:</div>
+            <div>3. Скопируйте адрес из адресной строки того окна (Ctrl+L, Ctrl+C). Вставьте его в поле ниже или используйте кнопку буфера.</div>
           </div>
 
           <div style={{ display: 'flex', gap: 10, marginBottom: 16 }}>
@@ -881,6 +1047,8 @@ export default function VkTurn({ notify }: VkTurnProps) {
                 justifyContent: 'center',
                 gap: 8,
                 borderRadius: 8,
+                border: 'none',
+                cursor: 'pointer',
               }}
             >
               <span>📋</span>
@@ -888,7 +1056,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
             </button>
           </div>
 
-          <div style={{ fontSize: 12.5, color: 'var(--muted)', marginBottom: 6 }}>
+          <div className="muted" style={{ fontSize: 12.5, marginBottom: 6 }}>
             Или вставьте скопированную ссылку / токен вручную:
           </div>
 
@@ -935,61 +1103,31 @@ export default function VkTurn({ notify }: VkTurnProps) {
   // ---------------------------------------------------------
   if (!isConfigured) {
     return (
-      <div className="vkturn-container" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-        <section
-          className="card"
-          style={{
-            position: 'relative',
-            overflow: 'hidden',
-            padding: '24px 26px',
-            background: 'linear-gradient(135deg, rgba(37, 99, 235, 0.08) 0%, rgba(15, 23, 42, 0.6) 100%)',
-            border: '1px solid rgba(59, 130, 246, 0.3)',
-            borderRadius: 16,
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+      <div className="vkturn-container" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <section className="vk-section" style={{ padding: '20px 24px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap', marginBottom: 18 }}>
             <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 6 }}>
-                <span style={{ fontSize: 28 }}>📞</span>
-                <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>Мастер настройки VK-туннеля</h2>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>Мастер настройки VK-туннеля</h2>
                 <span className="badge badge-warning" style={{ fontSize: 12 }}>Первоначальная настройка</span>
               </div>
-              <p className="muted" style={{ margin: 0, fontSize: 14 }}>
+              <p className="muted" style={{ margin: 0, fontSize: 13.5 }}>
                 Трафик идёт через серверы звонков ВКонтакте до вашего сервера csqtt на VPS — работает даже при белых списках.
               </p>
             </div>
             <button
-              className="btn"
-              disabled
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 8,
-                opacity: 0.6,
-                cursor: 'not-allowed',
-              }}
-              title="Скоро: этап 2"
-            >
-              <span>⚙️ Установить на мой VPS автоматически</span>
-              <span className="badge badge-neutral" style={{ fontSize: 11, background: 'rgba(255,255,255,0.1)' }}>скоро</span>
-            </button>
-          </div>
-        </section>
-
-        <section className="card" style={{ padding: '24px 26px' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
-            <h3 style={{ margin: 0, fontSize: 16 }}>1️⃣ Сервер csqtt на VPS</h3>
-            <button
               type="button"
               className="btn btn-secondary"
               onClick={handleImportFromClipboard}
-              style={{ fontSize: 12, padding: '5px 12px', display: 'flex', alignItems: 'center', gap: 6 }}
+              style={{ fontSize: 12.5, padding: '6px 12px', display: 'inline-flex', alignItems: 'center', gap: 6 }}
               title="Импортировать ссылку csqtt:// из буфера обмена"
             >
               📋 Вставить ссылку csqtt://
             </button>
           </div>
-          <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBottom: 16 }}>
+
+          <h3 style={{ margin: '0 0 12px 0', fontSize: 15 }}>1️⃣ Сервер csqtt на VPS</h3>
+          <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', marginBottom: 16 }}>
             <div style={{ flex: '1 1 260px', maxWidth: 420 }}>
               <label style={{ display: 'block', fontSize: 13, marginBottom: 6, fontWeight: 600 }}>
                 Адрес сервера (IP, домен или ссылка csqtt://):
@@ -1010,41 +1148,90 @@ export default function VkTurn({ notify }: VkTurnProps) {
               <input
                 type="number"
                 className="input"
+                data-testid="vk-port-input"
                 aria-label="Порт сервера csqtt"
-                value={serverPort}
-                onChange={(e) => setServerPort(Number(e.target.value) || DEFAULT_CSQTT_PORT)}
+                min={1}
+                max={65535}
+                value={portInput}
+                onChange={(e) => {
+                  wizardTouchedRef.current = true
+                  setPortInput(e.target.value)
+                }}
                 style={{ width: '100%' }}
               />
             </div>
           </div>
 
-          <h3 style={{ margin: '24px 0 16px 0', fontSize: 16 }}>2️⃣ Пароль подключения</h3>
+          <h3 style={{ margin: '20px 0 12px 0', fontSize: 15 }}>2️⃣ Пароль подключения</h3>
           <div style={{ marginBottom: 8, maxWidth: 420 }}>
             <input
               type="password"
               className="input"
               autoComplete="new-password"
-              placeholder="Пароль от сервера csqtt"
+              placeholder={status?.has_password ? 'Оставьте пустым, чтобы сохранить текущий пароль' : 'Пароль от сервера csqtt'}
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => {
+                wizardTouchedRef.current = true
+                setPassword(e.target.value)
+              }}
               style={{ width: '100%' }}
             />
           </div>
           <p className="muted" style={{ fontSize: 13, marginTop: 0, marginBottom: 0 }}>
-            🔑 Это пароль туннеля, заданный при установке сервера csqtt (или выданный владельцем сервера).
-            Адрес внутри туннеля сервер выдаст сам.
+            {status?.has_password
+              ? '🔑 Пароль уже сохранён на роутере — можно оставить поле пустым или ввести новый.'
+              : '🔑 Это пароль туннеля, заданный при установке сервера csqtt (или выданный владельцем сервера). Адрес внутри туннеля сервер выдаст сам.'}
           </p>
 
-          <h3 style={{ margin: '24px 0 16px 0', fontSize: 16 }}>3️⃣ Авторизация ВКонтакте и звонки</h3>
+          <h3 style={{ margin: '20px 0 12px 0', fontSize: 15 }}>3️⃣ Авторизация ВКонтакте и звонки</h3>
           {renderVkAccountCard()}
 
-          {!status?.has_token && (
+          {(status?.has_token || profileToken || status?.has_profile_token) && (
+            <div className="vk-source-pills" role="group" aria-label="Источник звонков" style={{ marginTop: 12 }}>
+              {status?.has_token && (
+                <label className={`vk-source-pill${selectedSource === 'oauth' ? ' active' : ''}`}>
+                  <input
+                    type="radio"
+                    name="vkturn-source"
+                    checked={selectedSource === 'oauth'}
+                    onChange={() => setSourceMode('oauth')}
+                    style={{ marginRight: 6 }}
+                  />
+                  Мой аккаунт VK
+                </label>
+              )}
+              {(profileToken || (profileToken === null && status?.has_profile_token)) && (
+                <label className={`vk-source-pill${selectedSource === 'profile_token' ? ' active' : ''}`}>
+                  <input
+                    type="radio"
+                    name="vkturn-source"
+                    checked={selectedSource === 'profile_token'}
+                    onChange={() => setSourceMode('profile_token')}
+                    style={{ marginRight: 6 }}
+                  />
+                  Токен профиля
+                </label>
+              )}
+              <label className={`vk-source-pill${selectedSource === 'manual' ? ' active' : ''}`}>
+                <input
+                  type="radio"
+                  name="vkturn-source"
+                  checked={selectedSource === 'manual'}
+                  onChange={() => setSourceMode('manual')}
+                  style={{ marginRight: 6 }}
+                />
+                Ссылки на звонки
+              </label>
+            </div>
+          )}
+
+          {selectedSource === 'manual' && (
             <>
-              <p className="muted" style={{ fontSize: 13, marginTop: 10, marginBottom: 14 }}>
+              <p className="muted" style={{ fontSize: 13, marginTop: 12, marginBottom: 12 }}>
                 💡 Или укажите прямые ссылки на звонки ВК вручную (до {maxLinks} ссылок):
               </p>
 
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 16 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 14 }}>
                 {callLinks.map((link, idx) => (
                   <div key={idx} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                     <input
@@ -1057,6 +1244,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
                     />
                     {callLinks.length > 1 && (
                       <button
+                        type="button"
                         className="btn btn-secondary"
                         onClick={() => setCallLinks((prev) => prev.filter((_, i) => i !== idx))}
                         title="Удалить ссылку"
@@ -1070,6 +1258,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
                 {callLinks.length < maxLinks && (
                   <div>
                     <button
+                      type="button"
                       className="btn btn-secondary"
                       onClick={() => setCallLinks((prev) => [...prev, ''])}
                       style={{ fontSize: 13 }}
@@ -1082,8 +1271,9 @@ export default function VkTurn({ notify }: VkTurnProps) {
             </>
           )}
 
-          <div style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
+          <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
             <button
+              type="button"
               className="btn btn-primary"
               disabled={actionPending}
               onClick={handleWizardEnable}
@@ -1107,55 +1297,45 @@ export default function VkTurn({ notify }: VkTurnProps) {
   // B. Карточка мониторинга
   // ---------------------------------------------------------
   const phase = status?.phase || 'disabled'
-  const isRunning = phase === 'connected'
+  const isRunning = phase === 'connected' && Boolean(status?.tunnel_ready) && (status?.connected_streams ?? 0) > 0
   const waitingTunnel = Boolean(status?.enabled && !status?.tunnel_ready && phase !== 'not_installed')
-  const isVkAuthFailure = Boolean(status?.has_token) && phase === 'auth_failed'
+  const isVkAuthFailure = status?.error_source === 'vk' && phase === 'auth_failed'
   const showPasswordFix = !isVkAuthFailure && (phase === 'auth_failed' || phase === 'server_unreachable')
   const showLastError = Boolean(
-    status?.enabled && status?.last_error && !['captcha_required', 'disabled', 'not_installed'].includes(phase)
+    status?.enabled && status?.last_error && !['captcha_required', 'disabled', 'not_installed'].includes(phase),
   )
+  const showManualLinksSection = effectiveAuthMode === 'manual' || manualSwitchPending
 
-  const bannerStyle = (danger: boolean) => ({
-    marginTop: 16,
-    padding: '12px 16px',
-    borderRadius: 8,
-    background: danger ? 'rgba(239, 68, 68, 0.1)' : 'rgba(234, 179, 8, 0.1)',
-    border: danger ? '1px solid rgba(239, 68, 68, 0.3)' : '1px solid rgba(234, 179, 8, 0.3)',
-    fontSize: 13.5,
-  })
+  const targetStreams = status?.target_streams ?? DEFAULT_STREAMS
+  const displayedStreamsStr = draftStreamsInput ?? String(targetStreams)
+  const parsedDraftStreams =
+    draftStreamsInput !== null && /^\d+$/.test(draftStreamsInput.trim()) ? Number(draftStreamsInput.trim()) : null
+  const rangeStreams =
+    parsedDraftStreams !== null ? Math.max(3, Math.min(100, parsedDraftStreams)) : targetStreams
+  const canSaveStreams =
+    !streamsUpdating &&
+    Boolean(status?.enabled) &&
+    parsedDraftStreams !== null &&
+    parsedDraftStreams >= 3 &&
+    parsedDraftStreams <= 100 &&
+    parsedDraftStreams !== targetStreams
 
   return (
-    <div className="vkturn-container" style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+    <div className="vkturn-container" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <section
-        className="card"
-        style={{
-          position: 'relative',
-          overflow: 'hidden',
-          padding: '24px 26px',
-          background: isRunning
-            ? 'linear-gradient(135deg, rgba(34, 197, 94, 0.08) 0%, rgba(15, 23, 42, 0.6) 100%)'
-            : 'linear-gradient(135deg, rgba(239, 68, 68, 0.06) 0%, rgba(15, 23, 42, 0.6) 100%)',
-          border: isRunning
-            ? '1px solid rgba(34, 197, 94, 0.3)'
-            : '1px solid rgba(239, 68, 68, 0.25)',
-          borderRadius: 16,
-        }}
+        className={`vk-section ${isRunning ? 'vk-alert-ok' : ''}`}
+        style={{ padding: '20px 24px' }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 14 }}>
           <div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
-              <span style={{ fontSize: 32 }}>📞</span>
-              <div>
-                <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>VK-туннель</h2>
-                <div style={{ fontSize: 12, color: 'var(--muted)', marginTop: 2 }}>
-                  Ядро csqtt {status?.core_version ? `· ${status.core_version}` : ''} {status?.pid ? `(PID: ${status.pid})` : ''}
-                </div>
-              </div>
-              <div style={{ marginLeft: 8 }}>
-                {renderPhaseBadge(phase, status?.connected_streams)}
-              </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 6 }}>
+              <h2 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>VK-туннель</h2>
+              <span className="muted" style={{ fontSize: 12 }}>
+                Ядро csqtt {status?.core_version ? `· ${status.core_version}` : ''} {status?.pid ? `(PID: ${status.pid})` : ''}
+              </span>
+              {renderPhaseBadge(phase, status?.connected_streams)}
             </div>
-            <div style={{ fontSize: 13, color: 'var(--muted)' }}>
+            <div className="muted" style={{ fontSize: 13 }}>
               Звонки ВКонтакте → сервер csqtt: <b>{status?.peer || 'не указан'}</b>
               {isRunning && (
                 <span data-testid="traffic-line">
@@ -1165,34 +1345,72 @@ export default function VkTurn({ notify }: VkTurnProps) {
             </div>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-            <label className="switch" title={status?.enabled ? 'Отключить туннель' : 'Включить туннель'}>
-              <input
-                type="checkbox"
-                aria-label="Включить или отключить VK-туннель"
-                checked={Boolean(status?.enabled)}
+          <label className="switch" title={status?.enabled ? 'Отключить туннель' : 'Включить туннель'}>
+            <input
+              type="checkbox"
+              aria-label="Включить или отключить VK-туннель"
+              checked={Boolean(status?.enabled)}
+              disabled={actionPending}
+              onChange={(e) => handleToggleEnabled(e.target.checked)}
+            />
+            <span className="slider" />
+          </label>
+        </div>
+
+        {/* Единый переключатель источника звонков */}
+        <div
+          data-testid="vk-source-switcher"
+          style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border)' }}
+        >
+          <span className="muted" style={{ fontSize: 13, fontWeight: 600 }}>Источник звонков:</span>
+          <div className="vk-source-pills">
+            <button
+              type="button"
+              className={`vk-source-pill${effectiveAuthMode === 'oauth' && !manualSwitchPending ? ' active' : ''}`}
+              disabled={actionPending}
+              onClick={() => void handleSwitchAuthMode('oauth')}
+            >
+              🔵 Аккаунт VK
+            </button>
+            {status?.has_profile_token && (
+              <button
+                type="button"
+                className={`vk-source-pill${effectiveAuthMode === 'profile_token' && !manualSwitchPending ? ' active' : ''}`}
                 disabled={actionPending}
-                onChange={(e) => handleToggleEnabled(e.target.checked)}
-              />
-              <span className="slider" />
-            </label>
+                onClick={() => void handleSwitchAuthMode('profile_token')}
+              >
+                🔑 Токен профиля
+              </button>
+            )}
+            <button
+              type="button"
+              className={`vk-source-pill${showManualLinksSection ? ' active' : ''}`}
+              disabled={actionPending}
+              onClick={() => void handleSwitchAuthMode('manual')}
+            >
+              🔗 Ручные ссылки
+            </button>
           </div>
         </div>
 
-        <div style={{ marginTop: 18 }}>
+        <div style={{ marginTop: 14 }}>
           {renderVkAccountCard()}
         </div>
 
         {installing && (
-          <div style={bannerStyle(false)} data-testid="install-progress">
+          <div className="vk-alert vk-alert-warn" style={{ marginTop: 14, fontSize: 13.5 }} data-testid="install-progress">
             ⏳ Скачиваю компонент VK-туннеля: {installProgressText(status?.install)}
           </div>
         )}
 
         {phase === 'not_installed' && !installing && (
-          <div style={{ ...bannerStyle(false), display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <div
+            className="vk-alert vk-alert-warn"
+            style={{ marginTop: 14, fontSize: 13.5, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}
+          >
             <div>Компонент ядра VK-туннеля не установлен на роутере.</div>
             <button
+              type="button"
               className="btn btn-primary"
               disabled={actionPending}
               onClick={handleInstallCore}
@@ -1203,53 +1421,108 @@ export default function VkTurn({ notify }: VkTurnProps) {
           </div>
         )}
 
-        {waitingTunnel && isRunning && (
-          <div style={bannerStyle(false)} data-testid="waiting-tunnel">
+        {waitingTunnel && phase === 'connected' && (
+          <div className="vk-alert vk-alert-warn" style={{ marginTop: 14, fontSize: 13.5 }} data-testid="waiting-tunnel">
             ⏳ Соединение с сервером есть, подключаю туннель к роутеру — узел заработает в списке серверов автоматически.
           </div>
         )}
 
         {phase === 'captcha_required' && (
-          <div style={{ ...bannerStyle(true), color: 'var(--danger-fg, #ef4444)' }}>
+          <div className="vk-alert vk-alert-danger" style={{ marginTop: 14, fontSize: 13.5, color: 'var(--danger-fg, #ef4444)' }}>
             ⚠️ ВКонтакте запросил капчу, и автоматически пройти её не удалось. Повторная попытка будет предпринята
             автоматически через 10 минут.
           </div>
         )}
 
         {isVkAuthFailure && (
-          <div style={bannerStyle(true)} data-testid="vk-auth-failure">
+          <div className="vk-alert vk-alert-danger" style={{ marginTop: 14, fontSize: 13.5 }} data-testid="vk-auth-failure">
             <div style={{ marginBottom: 8, fontWeight: 600, color: 'var(--danger-fg, #ef4444)' }}>
               ⚠️ {status?.last_error || 'Вход в аккаунт VK отклонён: аккаунт заблокирован или токен отозван.'}
             </div>
-            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={handleStartVkOAuth}
-                style={{ fontSize: 13 }}
-              >
-                Войти под другим аккаунтом VK
-              </button>
-              <button
-                type="button"
-                className="btn btn-secondary"
-                disabled={actionPending}
-                onClick={handleLogoutVk}
-                style={{ fontSize: 13 }}
-              >
-                Сбросить авторизацию
-              </button>
-            </div>
+            {effectiveAuthMode === 'profile_token' ? (
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={handleStartVkOAuth}
+                  style={{ fontSize: 13 }}
+                >
+                  Войти через VK ID
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => void handleSwitchAuthMode('manual')}
+                  style={{ fontSize: 13 }}
+                >
+                  Перейти на ручные ссылки
+                </button>
+              </div>
+            ) : effectiveAuthMode === 'manual' ? (
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={handleStartVkOAuth}
+                  style={{ fontSize: 13 }}
+                >
+                  Войти через VK ID
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={handleStartVkOAuth}
+                  style={{ fontSize: 13 }}
+                >
+                  Войти под другим аккаунтом VK
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={actionPending}
+                  onClick={handleLogoutVk}
+                  style={{ fontSize: 13 }}
+                >
+                  Сбросить авторизацию
+                </button>
+              </div>
+            )}
           </div>
         )}
 
         {showPasswordFix && (
-          <div style={bannerStyle(true)} data-testid="password-fix">
-            <div style={{ marginBottom: 8, fontWeight: 600, color: 'var(--danger-fg, #ef4444)' }}>
+          <div className="vk-alert vk-alert-danger" style={{ marginTop: 14, fontSize: 13.5 }} data-testid="password-fix">
+            <div style={{ marginBottom: 10, fontWeight: 600, color: 'var(--danger-fg, #ef4444)' }}>
               {phase === 'auth_failed'
                 ? status?.last_error || 'Сервер csqtt отклонил пароль подключения.'
                 : 'Сервер на VPS не отвечает. Проверьте, что сервер csqtt запущен и открыт его UDP-порт. ' +
-                  'При неверном пароле сервер тоже молчит — если пароль мог измениться, введите его заново.'}
+                  'При неверном пароле сервер тоже молчит — если пароль или адрес могли измениться, обновите их ниже.'}
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 8 }}>
+              <input
+                type="text"
+                className="input"
+                data-testid="quick-fix-peer-input"
+                placeholder="Адрес:порт или csqtt://..."
+                value={editPeerInput}
+                onChange={(e) => {
+                  peerEditedRef.current = true
+                  setEditPeerInput(e.target.value)
+                }}
+                style={{ flex: '1 1 220px' }}
+              />
+              <button
+                type="button"
+                className="btn btn-secondary"
+                disabled={updatingPeer || !editPeerInput.trim()}
+                onClick={handleUpdatePeer}
+                style={{ fontSize: 13 }}
+              >
+                {updatingPeer ? 'Сохранение…' : 'Сохранить адрес'}
+              </button>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <input
@@ -1262,6 +1535,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
                 style={{ flex: 1 }}
               />
               <button
+                type="button"
                 className="btn btn-primary"
                 disabled={updatingPassword || !newPassword.trim()}
                 onClick={handleUpdatePassword}
@@ -1274,7 +1548,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
         )}
 
         {phase === 'link_invalid' && (
-          <div style={bannerStyle(true)}>
+          <div className="vk-alert vk-alert-danger" style={{ marginTop: 14, fontSize: 13.5 }}>
             <div style={{ marginBottom: 8, fontWeight: 600, color: 'var(--danger-fg, #ef4444)' }}>
               Ссылка на звонок больше не действует или звонок был завершён.
             </div>
@@ -1288,9 +1562,10 @@ export default function VkTurn({ notify }: VkTurnProps) {
                 style={{ flex: 1 }}
               />
               <button
+                type="button"
                 className="btn btn-primary"
                 disabled={updatingLink || !newLinkInput.trim()}
-                onClick={handleUpdateCallLink}
+                onClick={() => void handleUpdateCallLink(false)}
                 style={{ fontSize: 13 }}
               >
                 {updatingLink ? 'Обновление…' : 'Обновить ссылку'}
@@ -1305,8 +1580,9 @@ export default function VkTurn({ notify }: VkTurnProps) {
           </div>
         )}
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 20, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 18, flexWrap: 'wrap' }}>
           <button
+            type="button"
             className="btn btn-secondary"
             disabled={testingPing || actionPending || !status?.enabled || !status?.tunnel_ready}
             onClick={handleTest}
@@ -1318,6 +1594,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
           </button>
 
           <button
+            type="button"
             className="btn btn-secondary"
             disabled={actionPending || !status?.enabled}
             onClick={handleRestart}
@@ -1328,6 +1605,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
           </button>
 
           <button
+            type="button"
             className="btn btn-secondary"
             disabled={actionPending}
             onClick={handleResetServer}
@@ -1345,15 +1623,15 @@ export default function VkTurn({ notify }: VkTurnProps) {
             <span>Сбросить сервер</span>
           </button>
 
-          {testLatency !== null && (
-            <span className="badge badge-success" data-testid="latency-badge" style={{ fontSize: 13 }}>
-              Задержка {testLatency} мс ✓
+          {testResult !== null && (
+            <span className={testResult.delay === null ? 'badge badge-danger' : 'badge badge-success'} data-testid="latency-badge" style={{ fontSize: 13 }}>
+              {testResult.delay === null ? 'Последняя проверка: ошибка' : `Задержка ${testResult.delay} мс ✓`} · {testResult.at.toLocaleTimeString()}
             </span>
           )}
         </div>
       </section>
 
-      <section className="card" style={{ padding: '20px 24px' }}>
+      <section className="vk-section" style={{ padding: '18px 24px' }}>
         <div
           role="button"
           tabIndex={0}
@@ -1388,12 +1666,20 @@ export default function VkTurn({ notify }: VkTurnProps) {
         </div>
 
         {accordionOpen && (
-          <div style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
+          <div style={{ marginTop: 18, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
             <div style={{ marginBottom: 20, maxWidth: 640 }} data-testid="stream-controls">
-              <label htmlFor="vkturn-stream-range" style={{ display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
-                Потоки звонков (Workers / Streams): <span style={{ color: 'var(--accent, #3b82f6)', fontWeight: 700, fontSize: 16 }}>{draftStreams ?? status?.target_streams ?? DEFAULT_STREAMS}</span>
-              </label>
-              <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
+                <label htmlFor="vkturn-stream-range" style={{ fontSize: 13.5, fontWeight: 600 }}>
+                  Мощность туннеля (потоки):{' '}
+                  <span style={{ color: 'var(--accent, #3b82f6)', fontWeight: 700, fontSize: 16 }}>
+                    {displayedStreamsStr || targetStreams}
+                  </span>
+                </label>
+                <span className="badge badge-neutral" style={{ fontSize: 12 }}>
+                  Активно: {status?.connected_streams ?? 0} из {targetStreams}
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
                 <input
                   id="vkturn-stream-range"
                   type="range"
@@ -1402,9 +1688,9 @@ export default function VkTurn({ notify }: VkTurnProps) {
                   step={1}
                   className="input"
                   data-testid="stream-range"
-                  value={draftStreams ?? status?.target_streams ?? DEFAULT_STREAMS}
+                  value={rangeStreams}
                   disabled={streamsUpdating || !status?.enabled}
-                  onChange={(e) => setDraftStreams(Number(e.target.value))}
+                  onChange={(e) => setDraftStreamsInput(e.target.value)}
                   style={{ flex: '1 1 200px', maxWidth: 300, cursor: 'pointer' }}
                 />
                 <input
@@ -1414,16 +1700,16 @@ export default function VkTurn({ notify }: VkTurnProps) {
                   max={100}
                   className="input"
                   data-testid="stream-count"
-                  value={draftStreams ?? status?.target_streams ?? DEFAULT_STREAMS}
+                  value={displayedStreamsStr}
                   disabled={streamsUpdating || !status?.enabled}
-                  onChange={(e) => setDraftStreams(Math.max(3, Math.min(100, Number(e.target.value) || 3)))}
+                  onChange={(e) => setDraftStreamsInput(e.target.value)}
                   style={{ width: 85, fontWeight: 600 }}
                 />
                 <button
                   type="button"
                   className="btn btn-primary"
                   data-testid="save-streams-btn"
-                  disabled={streamsUpdating || !status?.enabled || (draftStreams === null || draftStreams === status?.target_streams)}
+                  disabled={!canSaveStreams}
                   onClick={() => handleSaveStreams()}
                   style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
                 >
@@ -1431,91 +1717,151 @@ export default function VkTurn({ notify }: VkTurnProps) {
                 </button>
               </div>
               <div className="muted" style={{ fontSize: 12, marginTop: 8, lineHeight: 1.4 }}>
-                Установите ползунком нужное число потоков и нажмите «Сохранить». Потоки применяются однократно без промежуточных перезапусков.
-                Активно прямо сейчас: <strong style={{ color: 'var(--foreground)' }}>{status?.connected_streams ?? 0}</strong> из {status?.target_streams ?? DEFAULT_STREAMS}.
+                Установите нужное число потоков и нажмите «Сохранить». Потоки применяются однократно без промежуточных перезапусков.
               </div>
             </div>
+
             <div
               style={{
                 display: 'grid',
                 gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-                gap: 16,
+                gap: 14,
                 marginBottom: 20,
               }}
             >
-              <div className="stat-card" style={{ padding: 12, background: 'rgba(255,255,255,0.03)', borderRadius: 8 }}>
-                <div className="muted" style={{ fontSize: 12 }}>Соединений (сейчас / потоков)</div>
-                <div style={{ fontSize: 18, fontWeight: 700, marginTop: 4 }}>
-                  {status?.connected_streams ?? 0} / {status?.target_streams ?? 0}
+              {showManualLinksSection && (
+                <div className="vk-subcard">
+                  <div className="muted" style={{ fontSize: 12 }}>Ссылки на звонки</div>
+                  <div style={{ fontSize: 18, fontWeight: 700, marginTop: 4 }}>
+                    {status?.links_count ?? 0} из {maxLinks}
+                  </div>
                 </div>
-              </div>
-              <div className="stat-card" style={{ padding: 12, background: 'rgba(255,255,255,0.03)', borderRadius: 8 }}>
-                <div className="muted" style={{ fontSize: 12 }}>Ссылки на звонки</div>
-                <div style={{ fontSize: 18, fontWeight: 700, marginTop: 4 }}>
-                  {status?.links_count ?? 0} из {maxLinks}
-                </div>
-              </div>
-              <div className="stat-card" style={{ padding: 12, background: 'rgba(255,255,255,0.03)', borderRadius: 8 }}>
+              )}
+              <div className="vk-subcard">
                 <div className="muted" style={{ fontSize: 12 }}>Число перезапусков</div>
                 <div style={{ fontSize: 18, fontWeight: 700, marginTop: 4 }}>{status?.restarts ?? 0}</div>
               </div>
-              <div className="stat-card" style={{ padding: 12, background: 'rgba(255,255,255,0.03)', borderRadius: 8 }}>
+              <div className="vk-subcard">
                 <div className="muted" style={{ fontSize: 12 }}>Адрес роутера в туннеле</div>
-                <div style={{ fontSize: 16, fontWeight: 600, marginTop: 4, fontFamily: 'monospace' }} data-testid="tunnel-ip">
+                <div style={{ fontSize: 15, fontWeight: 600, marginTop: 4, fontFamily: 'monospace' }} data-testid="tunnel-ip">
                   {status?.tunnel_ip ? `${status.tunnel_ip} · ${status.interface}` : 'выдаст сервер при подключении'}
                 </div>
               </div>
             </div>
 
-            <div style={{ marginBottom: 20 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Ссылки на звонки</div>
-              <ul style={{ margin: '0 0 10px 0', paddingLeft: 18, fontSize: 13, fontFamily: 'monospace' }} data-testid="links-list">
-                {(status?.links || []).map((l, i) => (
-                  <li key={i}>{l}{i === 0 ? ' (основная)' : ''}</li>
-                ))}
-              </ul>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', maxWidth: 640 }}>
-                <input
-                  type="text"
-                  className="input"
-                  placeholder="Добавить ссылку как основную (https://vk.com/call/join/...)"
-                  value={phase === 'link_invalid' ? '' : newLinkInput}
-                  disabled={phase === 'link_invalid'}
-                  onChange={(e) => setNewLinkInput(e.target.value)}
-                  style={{ flex: 1 }}
-                />
-                <button
-                  className="btn btn-secondary"
-                  disabled={updatingLink || !newLinkInput.trim() || phase === 'link_invalid'}
-                  onClick={handleUpdateCallLink}
-                  style={{ fontSize: 13 }}
-                >
-                  Добавить
-                </button>
+            {showManualLinksSection && (
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Ссылки на звонки</div>
+                {(status?.links || []).length > 0 ? (
+                  <ul style={{ margin: '0 0 12px 0', paddingLeft: 18, fontSize: 13, fontFamily: 'monospace' }} data-testid="links-list">
+                    {(status?.links || []).map((l, i) => (
+                      <li key={`${l}-${i}`} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                        <span>{l}{i === 0 ? ' (основная)' : ''}</span>
+                        {((status?.links?.length ?? 0) > 1 || !status?.enabled) && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary"
+                            disabled={updatingLink || actionPending}
+                            onClick={() => void handleRemoveLink(i)}
+                            title="Удалить ссылку"
+                            style={{ padding: '1px 7px', fontSize: 11 }}
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="muted" data-testid="links-list" style={{ fontSize: 12.5, marginBottom: 10 }}>
+                    Ссылки ещё не добавлены. Укажите рабочую ссылку на звонок ВКонтакте.
+                  </div>
+                )}
+
+                {phase !== 'link_invalid' && (
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', maxWidth: 680 }}>
+                    <input
+                      type="text"
+                      className="input"
+                      placeholder="Добавить ссылку (https://vk.com/call/join/...)"
+                      value={newLinkInput}
+                      onChange={(e) => setNewLinkInput(e.target.value)}
+                      style={{ flex: '1 1 260px' }}
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={updatingLink || !newLinkInput.trim()}
+                      onClick={() => void handleUpdateCallLink(false)}
+                      style={{ fontSize: 13 }}
+                    >
+                      Основная
+                    </button>
+                    {(status?.links?.length ?? 0) < maxLinks && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        disabled={updatingLink || !newLinkInput.trim()}
+                        onClick={() => void handleUpdateCallLink(true)}
+                        style={{ fontSize: 13 }}
+                      >
+                        + Запасная
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
-            </div>
+            )}
 
             {!showPasswordFix && (
-              <div style={{ marginBottom: 20 }} data-testid="password-change">
-                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Пароль подключения к серверу</div>
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center', maxWidth: 640 }}>
+              <div style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Адрес сервера csqtt</div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', maxWidth: 640, marginBottom: 16 }}>
                   <input
-                    type="password"
+                    type="text"
                     className="input"
-                    autoComplete="new-password"
-                    placeholder="Сменить пароль подключения"
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
+                    data-testid="accordion-peer-input"
+                    placeholder="host:port или ссылка csqtt://..."
+                    value={editPeerInput}
+                    onChange={(e) => {
+                      peerEditedRef.current = true
+                      setEditPeerInput(e.target.value)
+                    }}
                     style={{ flex: 1 }}
                   />
                   <button
+                    type="button"
                     className="btn btn-secondary"
-                    disabled={updatingPassword || !newPassword.trim()}
-                    onClick={handleUpdatePassword}
+                    disabled={updatingPeer || !editPeerInput.trim()}
+                    onClick={handleUpdatePeer}
                     style={{ fontSize: 13 }}
                   >
-                    {updatingPassword ? 'Сохранение…' : 'Сменить пароль'}
+                    {updatingPeer ? 'Сохранение…' : 'Сохранить адрес'}
                   </button>
+                </div>
+
+                <div data-testid="password-change">
+                  <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>Пароль подключения к серверу</div>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'center', maxWidth: 640 }}>
+                    <input
+                      type="password"
+                      className="input"
+                      autoComplete="new-password"
+                      placeholder="Сменить пароль подключения"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      style={{ flex: 1 }}
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      disabled={updatingPassword || !newPassword.trim()}
+                      onClick={handleUpdatePassword}
+                      style={{ fontSize: 13 }}
+                    >
+                      {updatingPassword ? 'Сохранение…' : 'Сменить пароль'}
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -1524,6 +1870,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
                 <span style={{ fontSize: 13, fontWeight: 600 }}>Логи службы (Tail)</span>
                 <button
+                  type="button"
                   className="btn btn-secondary"
                   disabled={loadingLogs}
                   onClick={fetchLogs}

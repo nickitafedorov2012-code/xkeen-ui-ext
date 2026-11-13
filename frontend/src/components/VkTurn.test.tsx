@@ -122,7 +122,7 @@ describe('VkTurn Component (ядро csqtt)', () => {
     expect(container?.textContent).toContain('Мастер настройки VK-туннеля')
     expect(container?.textContent).toContain('Сервер csqtt на VPS')
     expect(container?.textContent).toContain('Пароль подключения')
-    expect(container?.textContent).toContain('Установить на мой VPS автоматически')
+    expect(container?.textContent).not.toContain('Установить на мой VPS автоматически')
     // csqtt: адрес туннеля выдаёт сервер — вставлять конфиги не нужно
     expect(container?.querySelector('textarea')).toBeNull()
     expect(container?.textContent).not.toContain('Телемост')
@@ -141,9 +141,78 @@ describe('VkTurn Component (ядро csqtt)', () => {
       peer: '198.51.100.1:46000',
       password: 'router-pass',
       links: ['https://vk.com/call/join/abcdef123'],
+      auth_mode: 'manual',
     })
     // Пароль не остаётся в поле после сохранения
     expect((container?.querySelector('input[type="password"]') as HTMLInputElement).value).toBe('')
+  })
+
+  it('imports owner hashes in manual mode even when a VK account is saved', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({ ...defaultUnconfiguredStatus, has_token: true, auth_mode: 'oauth' })
+    const save = vi.spyOn(api, 'saveVkTurnConfig').mockResolvedValue({ success: true })
+    await act(async () => { root!.render(<VkTurn notify={notifyMock} />) })
+    const host = container!.querySelector('input[placeholder*="203.0.113.10"]') as HTMLInputElement
+    await typeInto(host, 'csqtt://connect?v=2&host=example.com&peer=46000&password=p&hashes=abcdefghijklmnop+qrstuvwxyzABCDEF')
+    await act(async () => { findButton('Включить')!.click() })
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({
+      auth_mode: 'manual',
+      links: ['https://vk.com/call/join/abcdefghijklmnop', 'https://vk.com/call/join/qrstuvwxyzABCDEF'],
+    }))
+  })
+
+  it('saves profile token and workers separately from the personal VK account', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({ ...defaultUnconfiguredStatus, has_token: true, auth_mode: 'oauth' })
+    const save = vi.spyOn(api, 'saveVkTurnConfig').mockResolvedValue({ success: true })
+    await act(async () => { root!.render(<VkTurn notify={notifyMock} />) })
+    const host = container!.querySelector('input[placeholder*="203.0.113.10"]') as HTMLInputElement
+    await typeInto(host, 'csqtt://connect?v=2&host=example.com&peer=46000&password=p&token=synthetic-token&workers=27')
+    await act(async () => { findButton('Включить')!.click() })
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({ auth_mode: 'profile_token', profile_token: 'synthetic-token', streams: 27 }))
+    expect(save.mock.calls[0][0]).not.toHaveProperty('vk_token')
+  })
+
+  it('recognizes a saved profile-token connection after refreshing status', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({
+      ...defaultConnectedStatus, links: [], links_count: 0, has_token: false,
+      has_profile_token: true, auth_mode: 'profile_token',
+    })
+    await act(async () => { root!.render(<VkTurn notify={notifyMock} />) })
+    expect(container!.textContent).not.toContain('Первоначальная настройка')
+    expect(container!.querySelector('[data-testid="reset-server-btn"]')).not.toBeNull()
+  })
+
+  it('imports an encrypted Android profile through the local backend', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue(defaultUnconfiguredStatus)
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      success: true, data: { link: 'csqtt://connect?v=2&host=example.com&peer=46000&password=dummy&hashes=abcdefghijklmnop' },
+    }), { headers: { 'Content-Type': 'application/json' } }))
+    const save = vi.spyOn(api, 'saveVkTurnConfig').mockResolvedValue({ success: true })
+    await act(async () => { root!.render(<VkTurn notify={notifyMock} />) })
+    const host = container!.querySelector('input[placeholder*="203.0.113.10"]') as HTMLInputElement
+    await typeInto(host, 'csqtt://rGMTblReroqI7mbb2bHPcn2Ht7npV8ThxgOFgtHXHPhRHTbmWrXbOg8IO7oBJMO7wbpulj877bUgDF3do4Af6y1VvT9ipPKD4wwp7_lE6mItWw')
+    expect(fetchSpy).toHaveBeenCalledWith('/api/vkturn/decrypt-profile', expect.objectContaining({ method: 'POST' }))
+    await act(async () => { findButton('Включить')!.click() })
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({ peer: 'example.com:46000', auth_mode: 'manual', links: ['https://vk.com/call/join/abcdefghijklmnop'] }))
+  })
+
+  it('rejects an IPv6 profile before reporting a successful import', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue(defaultUnconfiguredStatus)
+    await act(async () => { root!.render(<VkTurn notify={notifyMock} />) })
+    const host = container!.querySelector('input[placeholder*="203.0.113.10"]') as HTMLInputElement
+    await typeInto(host, 'csqtt://dummy@[2001:db8::1]:46000')
+    expect(notifyMock).toHaveBeenCalledWith(expect.stringContaining('IPv6'), true)
+    expect(notifyMock).not.toHaveBeenCalledWith(expect.stringContaining('успешно извлечены'))
+  })
+
+  it('does not keep previous profile hashes after importing a profile without them', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({ ...defaultUnconfiguredStatus, has_token: true, auth_mode: 'oauth' })
+    const save = vi.spyOn(api, 'saveVkTurnConfig').mockResolvedValue({ success: true })
+    await act(async () => { root!.render(<VkTurn notify={notifyMock} />) })
+    const host = container!.querySelector('input[placeholder*="203.0.113.10"]') as HTMLInputElement
+    await typeInto(host, 'csqtt://connect?v=2&host=one.example&peer=46000&password=p&hashes=abcdefghijklmnop')
+    await typeInto(host, 'csqtt://connect?v=2&host=two.example&peer=46000&password=q')
+    await act(async () => { findButton('Включить')!.click() })
+    expect(save).toHaveBeenCalledWith(expect.objectContaining({ auth_mode: 'oauth', links: [], peer: 'two.example:46000' }))
   })
 
   it('does not show first-time setup when the tunnel status is unavailable and allows retry', async () => {
@@ -165,12 +234,12 @@ describe('VkTurn Component (ядро csqtt)', () => {
         .mockRejectedValueOnce(new Error('offline'))
         .mockResolvedValue(defaultConnectedStatus)
       await act(async () => { root!.render(<VkTurn notify={notifyMock} />) })
-      expect(container!.textContent).toContain('Работает · соединений')
+      expect(container!.textContent).toContain('Подключён · соединений')
       await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
       expect(container!.textContent).toContain('Не удалось получить состояние VK-туннеля')
       await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
       expect(container!.textContent).not.toContain('Не удалось получить состояние VK-туннеля')
-      expect(container!.textContent).toContain('Работает · соединений')
+      expect(container!.textContent).toContain('Подключён · соединений')
     } finally {
       vi.useRealTimers()
     }
@@ -411,7 +480,7 @@ describe('VkTurn Component (ядро csqtt)', () => {
     })
 
     const badge = container?.querySelector('[data-testid="status-badge"]')
-    expect(badge?.textContent).toContain('🟢 Работает · соединений: 3')
+    expect(badge?.textContent).toContain('🟢 Подключён · соединений: 3')
     expect(container?.textContent).toContain('сервер csqtt: 1.2.3.4:46000')
     expect(container?.textContent).toContain('Ядро csqtt')
     expect(container?.querySelector('[data-testid="traffic-line"]')?.textContent).toContain('↑ 1.5 КБ ↓ 3.0 МБ')
@@ -532,8 +601,19 @@ describe('VkTurn Component (ядро csqtt)', () => {
     await act(async () => {
       findButton('Обновить ссылку')!.click()
     })
-    // Новая ссылка становится основной, запасные не удаляются
-    expect(saveConfigSpy).toHaveBeenCalledWith({ primary_link: 'https://vk.com/call/join/freshlink' })
+    // Новая ссылка становится основной, переключая источник на ручные ссылки и сохраняя запасные
+    expect(saveConfigSpy).toHaveBeenCalledWith({ primary_link: 'https://vk.com/call/join/freshlink', auth_mode: 'manual' })
+  })
+
+  it('offers password recovery for a CSQTTR rejection even with a saved VK account', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({
+      ...defaultConnectedStatus, phase: 'auth_failed', has_token: true,
+      error_source: 'csqtt', error_reason: 'password_expired',
+      last_error: 'Срок действия пароля подключения истёк',
+    })
+    await act(async () => { root!.render(<VkTurn notify={notifyMock} />) })
+    expect(container!.querySelector('[data-testid="password-fix"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="vk-auth-failure"]')).toBeNull()
   })
 
   it('shows partial-failure warning while still connected', async () => {
@@ -544,7 +624,7 @@ describe('VkTurn Component (ядро csqtt)', () => {
     await act(async () => {
       root!.render(<VkTurn notify={notifyMock} />)
     })
-    expect(container?.querySelector('[data-testid="status-badge"]')?.textContent).toContain('Работает')
+    expect(container?.querySelector('[data-testid="status-badge"]')?.textContent).toContain('Подключён')
     expect(container?.querySelector('[data-testid="last-error"]')?.textContent).toContain('звонок завершён')
   })
 
@@ -629,6 +709,25 @@ describe('VkTurn Component (ядро csqtt)', () => {
     expect(notifyMock).toHaveBeenCalledWith('Connection timed out', true)
   })
 
+  it('replaces a previous successful latency result when the next test fails', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue(defaultConnectedStatus)
+    vi.spyOn(api, 'vkTurnAction').mockResolvedValueOnce({ delay_ms: 25 }).mockRejectedValueOnce(new Error('offline'))
+    await act(async () => { root!.render(<VkTurn notify={notifyMock} />) })
+    await act(async () => { findButton('Проверить')!.click() })
+    expect(container!.textContent).toContain('25 мс')
+    await act(async () => { findButton('Проверить')!.click() })
+    expect(container!.textContent).not.toContain('25 мс')
+    expect(container!.textContent).toContain('Последняя проверка: ошибка')
+  })
+
+  it('does not label an unattached tunnel as working', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({ ...defaultConnectedStatus, tunnel_ready: false })
+    await act(async () => { root!.render(<VkTurn notify={notifyMock} />) })
+    expect(container!.querySelector('[data-testid="status-badge"]')?.textContent).not.toContain('Работает')
+    expect(container!.querySelector('[data-testid="status-badge"]')?.textContent).toContain('Подключаю')
+    expect(container!.querySelector('[data-testid="waiting-tunnel"]')).not.toBeNull()
+  })
+
   it('hostFromPeer and formatTraffic helpers', () => {
     expect(hostFromPeer('198.51.100.1:46000')).toBe('198.51.100.1')
     expect(hostFromPeer('vps.example.com:46000')).toBe('vps.example.com')
@@ -669,22 +768,22 @@ describe('VkTurn Component (ядро csqtt)', () => {
       root!.render(<VkTurn notify={notifyMock} />)
     })
 
-    // Карточка входа видна
-    expect(container?.querySelector('[data-testid=\"vk-auth-card\"]')).not.toBeNull()
-    expect(container?.querySelector('[data-testid=\"vk-login-btn\"]')).not.toBeNull()
+    // Карточка входа видна и чиста (без дублей буфера/ручного поля на самой карточке)
+    const authCard = container?.querySelector('[data-testid="vk-auth-card"]')
+    expect(authCard).not.toBeNull()
+    const loginBtn = container?.querySelector('[data-testid="vk-login-btn"]') as HTMLButtonElement
+    expect(loginBtn).not.toBeNull()
 
-    // Раскрытие ручного поля ввода
-    const toggleBtn = container?.querySelector('[data-testid=\"toggle-manual-token\"]') as HTMLButtonElement
-    expect(toggleBtn).not.toBeNull()
+    // Открытие модального окна и ввод токена вручную
     await act(async () => {
-      toggleBtn.click()
+      loginBtn.click()
     })
 
-    const tokenInput = container?.querySelector('[data-testid=\"manual-token-input\"]') as HTMLInputElement
+    const tokenInput = container?.querySelector('[data-testid="modal-token-input"]') as HTMLInputElement
     expect(tokenInput).not.toBeNull()
     await typeInto(tokenInput, 'https://oauth.vk.ru/blank.html#access_token=vk1.a.MyToken&user_id=555666')
 
-    const saveBtn = container?.querySelector('[data-testid=\"save-manual-token-btn\"]') as HTMLButtonElement
+    const saveBtn = container?.querySelector('[data-testid="modal-save-btn"]') as HTMLButtonElement
     await act(async () => {
       saveBtn.click()
     })
@@ -696,6 +795,25 @@ describe('VkTurn Component (ядро csqtt)', () => {
       })
     )
     expect(notifyMock).toHaveBeenCalledWith('Учетная запись подключена')
+  })
+
+  it('offers manual VK callback without reading the cross-origin popup', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue(defaultConnectedStatus)
+      const readLocation = vi.fn(() => { throw new Error('cross-origin') })
+      const popup = Object.create(null) as Window
+      Object.defineProperty(popup, 'closed', { value: false })
+      Object.defineProperty(popup, 'location', { get: readLocation })
+      vi.spyOn(window, 'open').mockReturnValue(popup)
+      await act(async () => { root!.render(<VkTurn notify={notifyMock} />) })
+      await act(async () => { (container!.querySelector('[data-testid="vk-login-btn"]') as HTMLButtonElement).click() })
+      await act(async () => { await vi.advanceTimersByTimeAsync(600) })
+      expect(readLocation).not.toHaveBeenCalled()
+      expect(container!.querySelector('[data-testid="modal-token-input"]')).not.toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('renders authorized VK profile badge and allows logging out', async () => {
@@ -745,7 +863,7 @@ describe('VkTurn Component (ядро csqtt)', () => {
     await act(async () => {
       // Имитируем react onChange
       const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set
-      nativeInputValueSetter?.call(hostInput, 'csqtt://connect?v=2&host=203.0.113.99&peer=46100&password=my_secret_token&hashes=hash123')
+      nativeInputValueSetter?.call(hostInput, 'csqtt://connect?v=2&host=203.0.113.99&peer=46100&password=my_secret_token&hashes=abcdefghijklmnop')
       hostInput.dispatchEvent(new Event('input', { bubbles: true }))
       hostInput.dispatchEvent(new Event('change', { bubbles: true }))
     })
@@ -777,4 +895,292 @@ describe('VkTurn Component (ядро csqtt)', () => {
     expect(actionSpy).toHaveBeenCalledWith('reset')
     expect(notifyMock).toHaveBeenCalledWith(expect.stringContaining('Настройки сервера csqtt сброшены'))
   })
+
+  it('opens setup wizard when active auth_mode has no credentials even if another source exists', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({
+      ...defaultConnectedStatus,
+      enabled: false,
+      phase: 'disabled',
+      auth_mode: 'manual',
+      links_count: 0,
+      links: [],
+      has_token: true,
+      vk_user_id: 777888,
+      vk_user_name: 'Алексей Смирнов',
+    })
+
+    await act(async () => {
+      root!.render(<VkTurn notify={notifyMock} />)
+    })
+
+    expect(container?.textContent).toContain('Мастер настройки VK-туннеля')
+  })
+
+  it('clears profileToken and profilePower when resetting server back to wizard', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const statusSpy = vi.spyOn(api, 'getVkTurnStatus').mockResolvedValueOnce(defaultUnconfiguredStatus)
+    const saveConfigSpy = vi.spyOn(api, 'saveVkTurnConfig').mockResolvedValue({ success: true })
+    vi.spyOn(api, 'vkTurnAction').mockResolvedValue({ success: true })
+
+    await act(async () => {
+      root!.render(<VkTurn notify={notifyMock} />)
+    })
+
+    const hostInput = container?.querySelector('input[placeholder*="203.0.113.10"]') as HTMLInputElement
+    await typeInto(hostInput, 'csqtt://connect?v=2&host=203.0.113.99&peer=46100&password=my_secret_token&token=vk1.a.ProfileSecretToken123456&power=32')
+
+    statusSpy.mockResolvedValueOnce({
+      ...defaultConnectedStatus,
+      peer: '203.0.113.99:46100',
+      auth_mode: 'profile_token',
+      has_profile_token: true,
+      links_count: 0,
+      links: [],
+    })
+
+    await act(async () => {
+      findButton('Включить')!.click()
+    })
+
+    expect(saveConfigSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        auth_mode: 'profile_token',
+        profile_token: 'vk1.a.ProfileSecretToken123456',
+        streams: 32,
+      })
+    )
+
+    statusSpy.mockResolvedValueOnce(defaultUnconfiguredStatus)
+    const resetBtn = container?.querySelector('[data-testid="reset-server-btn"]') as HTMLButtonElement
+    expect(resetBtn).not.toBeNull()
+    await act(async () => {
+      resetBtn.click()
+    })
+
+    expect(container?.textContent).toContain('Мастер настройки VK-туннеля')
+    expect(container?.textContent).not.toContain('Токен профиля')
+  })
 })
+
+describe('regression_vkturn_25_frontend — UI/UX редизайн и исправление дублей', () => {
+  let container: HTMLDivElement | null = null
+  let root: ReturnType<typeof createRoot> | null = null
+  const notifyMock = vi.fn()
+
+  const findBtn = (text: string) =>
+    Array.from(container?.querySelectorAll('button') || []).find((b) => b.textContent?.includes(text))
+
+  const remount = async () => {
+    await act(async () => {
+      root?.unmount()
+    })
+    root = createRoot(container!)
+    await act(async () => {
+      root!.render(<VkTurn notify={notifyMock} />)
+    })
+  }
+
+  beforeEach(() => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    notifyMock.mockClear()
+    vi.restoreAllMocks()
+    vi.spyOn(api, 'getVkTurnLogs').mockResolvedValue({ lines: [] })
+  })
+
+  afterEach(async () => {
+    if (root) {
+      await act(async () => {
+        root!.unmount()
+      })
+    }
+    container?.remove()
+    container = null
+    root = null
+  })
+
+  const connectedOAuth: VkTurnStatus = {
+    installed: true,
+    core_version: '0.1.5',
+    phase: 'connected',
+    pid: 4321,
+    connected_streams: 12,
+    target_streams: 20,
+    bytes_up: 1024,
+    bytes_down: 2048,
+    links_count: 2,
+    links: ['https://vk.com/call/join/aabbccdd11223344', 'https://vk.com/call/join/eeffgghh55667788'],
+    max_links: 6,
+    restarts: 0,
+    last_error: null,
+    enabled: true,
+    peer: '203.0.113.10:46000',
+    has_password: true,
+    auth_mode: 'oauth',
+    has_token: true,
+    has_profile_token: false,
+    vk_token_verified: true,
+    vk_token: 'vk1.a.***6789',
+    vk_user_id: 123456,
+    vk_user_name: 'Иван Петров',
+    tunnel_ready: true,
+    tunnel_ip: '10.66.67.3',
+    tunnel_dns: '10.66.67.1',
+    interface: 'csq0',
+    default_port: 46000,
+  }
+
+  it('removes stream count triplication, manual links in oauth mode, nested cards, and dark hardcoded blobs', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue(connectedOAuth)
+    vi.spyOn(api, 'getVkTurnLogs').mockResolvedValue({ lines: [] })
+    await act(async () => {
+      root!.render(<VkTurn notify={notifyMock} />)
+    })
+
+    // Open accordion so stats grid and stream controls are mounted and verified
+    const accordionToggle = Array.from(container?.querySelectorAll('[role="button"]') || []).find((el) =>
+      el.textContent?.includes('Настройки туннеля и подробности'),
+    ) as HTMLElement
+    await act(async () => {
+      accordionToggle.click()
+    })
+
+    const text = container?.textContent || ''
+    // Item 1: No "(Workers / Streams)" jargon & no third "Соединений (сейчас / потоков)" stat card
+    expect(text).not.toContain('Workers / Streams')
+    expect(text).not.toContain('Соединений (сейчас / потоков)')
+    expect(text).toContain('Мощность туннеля (потоки)')
+
+    // Item 2: No manual call links card/input when auth_mode === 'oauth'
+    expect(text).not.toContain('Ссылки на звонки:')
+    expect(text).not.toContain('Добавить ссылку')
+
+    // Item 5: No nested .card inside .card matryoshka & no hardcoded rgba(15, 23, 42
+    expect(container?.querySelector('.card .card')).toBeNull()
+    expect(container?.innerHTML).not.toContain('rgba(15, 23, 42')
+    expect(container?.innerHTML).not.toContain('rgba(15,23,42')
+
+    // Item 9: Source switcher available in monitoring
+    expect(text).toContain('Источник звонков')
+    expect(container?.querySelector('[data-testid="vk-source-switcher"]')).not.toBeNull()
+  })
+
+  it('does not duplicate password or call link forms when quick-fix banners are open, and supports editing peer without reset', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({
+      ...connectedOAuth,
+      auth_mode: 'manual',
+      phase: 'link_invalid',
+      tunnel_ready: false,
+      last_error: 'Ссылка на звонок протухла',
+    })
+    vi.spyOn(api, 'getVkTurnLogs').mockResolvedValue({ lines: [] })
+    const saveSpy = vi.spyOn(api, 'saveVkTurnConfig').mockResolvedValue({ success: true })
+    await act(async () => {
+      root!.render(<VkTurn notify={notifyMock} />)
+    })
+
+    // Open accordion while quick-fix banners are rendered to ensure zero form duplication
+    const accordionToggle = Array.from(container?.querySelectorAll('[role="button"]') || []).find((el) =>
+      el.textContent?.includes('Настройки туннеля и подробности'),
+    ) as HTMLElement
+    await act(async () => {
+      accordionToggle.click()
+    })
+
+    // Item 2: Only one call-link input exists on screen even when link-fix banner and accordion are open
+    const linkInputs = container?.querySelectorAll('input[placeholder*="vk.com/call/join/"]') || []
+    expect(linkInputs.length).toBe(1)
+
+    // Switch to server_unreachable to verify no duplicate password inputs and editable peer
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({
+      ...connectedOAuth,
+      phase: 'server_unreachable',
+      tunnel_ready: false,
+      last_error: 'Сервер недоступен',
+    })
+    await remount()
+
+    const pwInputs = container?.querySelectorAll('input[type="password"][placeholder*="пароль" i]') || []
+    expect(pwInputs.length).toBe(1)
+    const peerInput = container?.querySelector('[data-testid="quick-fix-peer-input"]') as HTMLInputElement
+    expect(peerInput).not.toBeNull()
+    await typeInto(peerInput, '198.51.100.77:46001')
+    await act(async () => {
+      findBtn('Сохранить адрес')!.click()
+    })
+    expect(saveSpy).toHaveBeenCalledWith(expect.objectContaining({ peer: '198.51.100.77:46001' }))
+
+    // Item 9: Source switcher switches auth_mode to manual when clicked
+    const manualPill = Array.from(container?.querySelectorAll('[data-testid="vk-source-switcher"] button') || []).find((b) =>
+      b.textContent?.includes('Ручные ссылки'),
+    ) as HTMLButtonElement
+    expect(manualPill).toBeTruthy()
+    await act(async () => {
+      manualPill.click()
+    })
+    expect(saveSpy).toHaveBeenCalledWith({ auth_mode: 'manual' })
+  })
+
+  it('keeps auth card clean without duplicate clipboard/token controls and renders profile_token ready card', async () => {
+    // Wizard view check (Items 4, 12, 13, 14)
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({
+      installed: true,
+      core_version: '0.1.5',
+      phase: 'disabled',
+      pid: null,
+      connected_streams: 0,
+      target_streams: 20,
+      bytes_up: 0,
+      bytes_down: 0,
+      links_count: 0,
+      links: [],
+      max_links: 6,
+      restarts: 0,
+      enabled: false,
+      peer: '',
+      has_password: false,
+      auth_mode: 'oauth',
+      has_token: false,
+      tunnel_ready: false,
+      interface: 'csq0',
+      default_port: 46000,
+    })
+    await act(async () => {
+      root!.render(<VkTurn notify={notifyMock} />)
+    })
+
+    const authCard = container?.querySelector('.vk-auth-card')
+    expect(authCard?.textContent).not.toContain('Вставить из буфера')
+    expect(authCard?.textContent).not.toContain('Ввести токен или адрес вручную')
+    expect(container?.textContent).not.toContain('Установить на мой VPS автоматически')
+
+    // Port Backspace check (Item 13)
+    const portInput = container?.querySelector('[data-testid="vk-port-input"]') as HTMLInputElement
+    expect(portInput).not.toBeNull()
+    await typeInto(portInput, '')
+    expect(portInput.value).toBe('')
+
+    // profile_token active card (Item 11) + streams Backspace check (Item 13)
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({
+      ...connectedOAuth,
+      auth_mode: 'profile_token',
+      has_token: false,
+      has_profile_token: true,
+    })
+    await remount()
+    expect(container?.textContent).toContain('Токен из профиля')
+    expect(container?.textContent).toContain('активен')
+
+    const accordionToggle = Array.from(container?.querySelectorAll('[role="button"]') || []).find((el) =>
+      el.textContent?.includes('Настройки туннеля и подробности'),
+    ) as HTMLElement
+    await act(async () => {
+      accordionToggle.click()
+    })
+    const streamInput = container?.querySelector('[data-testid="stream-count"]') as HTMLInputElement
+    await typeInto(streamInput, '')
+    expect(streamInput.value).toBe('')
+  })
+})
+

@@ -2143,6 +2143,320 @@
 - **Предупреждения `never used` в сборке под Windows** у `build_gaming_full_tunnel_commands` и др. — артефакт `#[cfg(target_os = "linux")]`; на Linux функции вызываются (`sync_gaming_full_tunnel`), тесты бага 70 проверяют рабочий код.
 - Логи `bug-selftest*-red.log` (проверка самого шлюза до init) удалены перед коммитом — к багам не относились.
 
+## CSQTTR — сохранение пароля в корректной v2-ссылке (2026-11-13)
+
+- Область: только разбор корректно разделённой v2-ссылки во frontend; полный импорт профиля и передача пароля до процесса требуют отдельной проверки.
+- Причина: `separateParams` менял значения до разбора, а `URLSearchParams` преобразовывал буквальный плюс в пробел.
+- RED: `docs/fix_logs/bug-vk-csqtt-password-red.log`, тест `preserves literal plus and parameter-like text in a v2 password` получил `abc` вместо синтетического значения с `host=`.
+- Изменение: корректно разделённый запрос разбирается до попытки восстановления склеенной ссылки; буквальный плюс сохраняется при декодировании.
+- GREEN: целевой тест, 613 backend-тестов, 366 frontend-тестов и TypeScript; `=== GATE OK bug vk-csqtt-password | diff b6d45b898de0 | лог docs/fix_logs/bug-vk-csqtt-password-green.log ===`.
+- Ограничения: эвристический fallback для склеенных ссылок, проверка неоднозначности, полный импорт и сквозная передача пароля не завершены; роутер и Linux TUN не проверялись.
+
+## CSQTTR — порт ссылки во frontend (2026-11-13)
+
+- Причина: `parseInt` принимал числовой префикс, а legacy-разбор подменял неправильный порт значением по умолчанию.
+- RED: `docs/fix_logs/bug-vk-csqtt-port-red.log`, `rejects malformed and out-of-range profile ports` получил профиль с портом 46000 для неверного значения.
+- Изменение: порт ссылки обязан состоять из цифр и быть в диапазоне 1–65535; отсутствующий или неправильный порт не подменяется.
+- Проверка: `=== GATE OK bug vk-csqtt-port | diff a8fb0deedb1d | лог docs/fix_logs/bug-vk-csqtt-port-green.log ===`.
+- Ограничение: отдельный разбор ссылок бэкендом требует самостоятельной проверки и исправления.
+
+## CSQTTR — порт ссылки в бэкенде (2026-11-13)
+
+- Причина: v2-парсер подставлял порт по умолчанию при ошибке преобразования, legacy-парсер возвращал непроверенный адрес.
+- RED: `docs/fix_logs/bug-vk-csqtt-backend-port-red.log`, `regression_csqtt_backend_rejects_invalid_profile_ports` показал принятие неверного порта.
+- Изменение: оба формата проходят существующую проверку адреса и порта; ошибочный или отсутствующий порт не заменяется.
+- Проверка: `=== GATE OK bug vk-csqtt-backend-port | diff 3c6741acec11 | лог docs/fix_logs/bug-vk-csqtt-backend-port-green.log ===`.
+- Ограничение: полноценный разбор остальных параметров ссылки в бэкенде остаётся отдельной задачей.
+
+## CSQTTR — разделитель хешей ссылки (2026-11-13)
+
+- Причина: frontend делил хеши только по запятой, тогда как эталон использует буквальный плюс между закодированными элементами.
+- RED: `docs/fix_logs/bug-vk-csqtt-hash-separator-red.log`, `splits reference hashes before decoding their components` получал один хеш вместо двух.
+- Изменение: элементы разделяются до percent-декодирования; прежний разделитель запятая сохранён для совместимости.
+- Проверка: `=== GATE OK bug vk-csqtt-hash-separator | diff 2437f310de83 | лог docs/fix_logs/bug-vk-csqtt-hash-separator-green.log ===`.
+- Ограничение: валидация хешей и перенос источника авторизации при импорте не завершены.
+
+## CSQTTR — ручной источник на бэкенде (2026-11-13)
+
+- Причина: сохранённый токен принимался для запуска даже при `auth_mode=manual` и имел приоритет при создании звонков.
+- RED: `docs/fix_logs/bug-vk-csqtt-manual-source-red.log`, запрос на включение ручного режима без хешей ошибочно принимался при наличии токена.
+- Изменение: выбор токена учитывает ручной режим при проверке, запуске и завершении звонков; старые конфигурации с `oauth` сохраняют прежнее поведение.
+- Проверка: `=== GATE OK bug vk-csqtt-manual-source | diff 390c0d7d3a93 | лог docs/fix_logs/bug-vk-csqtt-manual-source-green.log ===`.
+- Ограничение: интерфейс выбора режима и отдельный токен профиля пока не реализованы; проверка реального запуска клиента не выполнена.
+
+## CSQTTR — выбор ручных хешей в мастере (2026-11-13)
+
+- Причина: интерфейс скрывал ручные ссылки при сохранённом аккаунте и не передавал выбранный источник в API.
+- RED: `docs/fix_logs/bug-vk-csqtt-ui-manual-source-red.log`, импорт двух хешей отправлял их без `auth_mode=manual`.
+- Изменение: мастер явно выбирает аккаунт или ссылки, импорт хешей выбирает ссылки; новый профиль без хешей очищает прежние.
+- Проверка: `=== GATE OK bug vk-csqtt-ui-manual-source | diff fd5398367797 | лог docs/fix_logs/bug-vk-csqtt-ui-manual-source-green.log ===`.
+- Ограничение: токен профиля, зашифрованные ссылки и полный набор проверок импорта остаются открытыми.
+
+## CSQTTR — извлечение токена и числа потоков (2026-11-13)
+
+- Причина: frontend-парсер отбрасывал `token`, `power` и `workers`.
+- RED: `docs/fix_logs/bug-vk-csqtt-profile-token-power-red.log`, `preserves profile token and worker limit` не находил оба поля.
+- Изменение: парсер извлекает токен и нормализует число потоков; конфликт токена с хешами отклоняется.
+- Проверка: `=== GATE OK bug vk-csqtt-profile-token-power | diff 8fa6c8e1e0f2 | лог docs/fix_logs/bug-vk-csqtt-profile-token-power-green.log ===`.
+- Ограничение: сохранение и использование этих полей ещё не подключены к мастеру и бэкенду.
+
+## CSQTTR — отдельный токен профиля на бэкенде (2026-11-13)
+
+- Причина: профильный токен не сохранялся отдельно, режим с ним выбирал токен личного аккаунта.
+- RED: `docs/fix_logs/bug-vk-csqtt-profile-token-backend-red.log`, `regression_profile_token_is_separate_and_masked` обнаружил выбор личного токена.
+- Изменение: конфигурация хранит отдельный токен профиля, режим `profile_token` выбирает его, API маскирует значение; выход из личного аккаунта сохраняет выбранный профильный или ручной режим.
+- Проверка: `=== GATE OK bug vk-csqtt-profile-token-backend | diff cc9e61c65051 | лог docs/fix_logs/bug-vk-csqtt-profile-token-backend-green.log ===`.
+- Ограничение: реальное подключение с профильным токеном и миграция с зашифрованных ссылок не проверены.
+
+## CSQTTR — применение токена и потоков из профиля (2026-11-13)
+
+- Причина: мастер игнорировал извлечённый токен и число потоков и выбирал личный аккаунт.
+- RED: `docs/fix_logs/bug-vk-csqtt-ui-profile-token-red.log`, `saves profile token and workers separately` наблюдал `oauth` вместо профильного источника.
+- Изменение: мастер передаёт отдельный профильный токен, режим и число потоков, не изменяя личный токен; повторный импорт очищает прежний профильный токен.
+- Проверка: `=== GATE OK bug vk-csqtt-ui-profile-token | diff 32bd43bcfb98 | лог docs/fix_logs/bug-vk-csqtt-ui-profile-token-green.log ===`.
+- Ограничение: зашифрованные ссылки и проверка подключения к серверу не охвачены этим тестом.
+
+## CSQTTR — защита от потери данных в бэкенд-парсере (2026-11-13)
+
+- Причина: прямой запрос с профилем не декодировал пароль, принимал неизвестную версию и повторные параметры, молча отбрасывал неподдерживаемые поля.
+- RED: `docs/fix_logs/bug-vk-csqtt-backend-loss-red.log`, `regression_csqtt_backend_preserves_encoded_password_and_rejects_lost_fields` наблюдал закодированный пароль вместо исходного.
+- Изменение: строгий percent-разбор без преобразования плюса, проверка версии и дублей; ссылка с полями, которые этот путь не способен сохранить, отклоняется.
+- Проверка: `=== GATE OK bug vk-csqtt-backend-loss | diff bdad53f69c57 | лог docs/fix_logs/bug-vk-csqtt-backend-loss-green.log ===`.
+- Ограничение: расширенные профили принимаются через мастер, прямой бэкенд-путь их отклоняет; сквозной импорт шифрованных ссылок не реализован.
+
+## CSQTTR — версия и дубли параметров (2026-11-13)
+
+- Причина: frontend-парсер не проверял версию и принимал повторные параметры.
+- RED: `docs/fix_logs/bug-vk-csqtt-profile-validation-red.log`, `rejects unsupported versions and repeated or conflicting parameters` принимал версию 3.
+- Изменение: требуется версия 2, отклоняются дубли, некорректные percent-последовательности и конфликт `power`/`workers`.
+- Проверка: `=== GATE OK bug vk-csqtt-profile-validation | diff bd464f6aa3b2 | лог docs/fix_logs/bug-vk-csqtt-profile-validation-green.log ===`.
+- Ограничение: валидация адресов и числа хешей требует отдельной проверки.
+
+## CSQTTR — расшифровка профиля Android на бэкенде (2026-11-13)
+
+- Причина: бэкенд не распознавал AES-GCM/base64url формат генератора Android.
+- RED: `docs/fix_logs/bug-vk-csqtt-encrypted-profile-red.log`, `regression_android_encrypted_profile_is_readable` не смог прочитать синтетический профиль.
+- Изменение: добавлена совместимая проверяемая расшифровка; повреждённый шифртекст отклоняется, простой профиль передаётся существующему строгому парсеру.
+- Проверка: `=== GATE OK bug vk-csqtt-encrypted-profile | diff f559779440c5 | лог docs/fix_logs/bug-vk-csqtt-encrypted-profile-green.log ===`.
+- Ограничение: мастер ещё не вызывает расшифровку; расширенные поля в прямом пути отклоняются.
+
+## CSQTTR — импорт зашифрованной ссылки в мастере (2026-11-13)
+
+- Причина: мастер не передавал шифрованную ссылку на локальную расшифровку и оставлял её в поле адреса.
+- RED: `docs/fix_logs/bug-vk-csqtt-ui-encrypted-red.log`, `imports an encrypted Android profile through the local backend` не обнаружил запроса к панели.
+- Изменение: POST панели расшифровывает профиль без записи содержимого в журнал; мастер разбирает результат и игнорирует устаревший асинхронный ответ.
+- Проверка: `=== GATE OK bug vk-csqtt-ui-encrypted | diff 06070832f1ac | лог docs/fix_logs/bug-vk-csqtt-ui-encrypted-green.log ===`.
+- Ограничение: тест мастера использует синтетический ответ API; алгоритм расшифровки проверен отдельным тестом бэкенда.
+
+## CSQTTR — неподдерживаемый IPv6-профиль (2026-11-13)
+
+- Причина: мастер сообщал об успешном импорте IPv6, хотя бэкенд принимает только IPv4 и домены.
+- RED: `docs/fix_logs/bug-vk-csqtt-ipv6-unsupported-red.log`, `rejects an IPv6 profile before reporting a successful import` наблюдал сообщение об успехе.
+- Изменение: мастер явно отклоняет IPv6-профиль до применения его настроек.
+- Проверка: `=== GATE OK bug vk-csqtt-ipv6-unsupported | diff f372513a1bc0 | лог docs/fix_logs/bug-vk-csqtt-ipv6-unsupported-green.log ===`.
+- Ограничение: полноценная маршрутизация IPv6 не добавлена.
+
+## CSQTTR — неоднозначная склеенная ссылка (2026-11-13)
+
+- Причина: эвристика вставляла разделители внутри значения пароля до разбора ссылки.
+- RED: `docs/fix_logs/bug-vk-csqtt-glued-ambiguity-red.log`, `rejects an ambiguous glued profile` получал обрезанный пароль и поддельное поле хешей.
+- Изменение: fallback допускает ограниченную структуру со строго распознаваемыми полями и отклоняет неоднозначные фрагменты; корректные ссылки разбираются без эвристики.
+- Проверка: `=== GATE OK bug vk-csqtt-glued-ambiguity | diff cdac3b856a27 | лог docs/fix_logs/bug-vk-csqtt-glued-ambiguity-green.log ===`.
+- Ограничение: другие виды склеивания отклоняются и требуют корректной ссылки.
+
+## CSQTTR — проверка хешей профиля (2026-11-13)
+
+- Причина: парсер принимал короткие, пустые, повторные и лишние хеши и сообщал об успешном импорте.
+- RED: `docs/fix_logs/bug-vk-csqtt-hash-validation-red.log`, `rejects duplicate, short, empty or excessive reference hashes` обнаружил принятие короткого хеша.
+- Изменение: проверяются 1–6 различных хешей, длина и символы, поддерживаемые бэкендом; прежние примеры коротких хешей в тестах заменены синтетическими данными эталонной длины.
+- Проверка: `=== GATE OK bug vk-csqtt-hash-validation | diff 6932682f86eb | лог docs/fix_logs/bug-vk-csqtt-hash-validation-green.log ===`.
+- Ограничение: действительность звонка на стороне VK тест не проверяет.
+
+## CSQTTR — адрес сервера в профиле (2026-11-13)
+
+- Причина: парсер принимал локальный адрес, пробелы и символы пути в адресе сервера.
+- RED: `docs/fix_logs/bug-vk-csqtt-host-validation-red.log`, `rejects profile hosts the backend cannot use` принимал localhost.
+- Изменение: отклоняются локальные адреса и символы, недопустимые для бэкенда; IPv6 отдельно отклоняется мастером.
+- Проверка: `=== GATE OK bug vk-csqtt-host-validation | diff 23f79337138b | лог docs/fix_logs/bug-vk-csqtt-host-validation-green.log ===`.
+- Ограничение: сетевую доступность адреса проверка не устанавливает.
+
+## CSQTTR — устаревший результат задержки (2026-11-13)
+
+- Причина: результат обновлялся только после успеха и оставался зелёным после ошибки.
+- RED: `docs/fix_logs/bug-vk-csqtt-stale-latency-red.log`, `replaces a previous successful latency result` наблюдал старые 25 мс после отказа.
+- Изменение: новая проверка очищает прежнее значение, ошибка отображается со временем; смена запуска, состояния готовности, перезапуск и сброс аннулируют старые ответы.
+- Проверка: `=== GATE OK bug vk-csqtt-stale-latency | diff bc904bd0873e | лог docs/fix_logs/bug-vk-csqtt-stale-latency-green.log ===`.
+- Ограничение: сама внешняя проверка трафика выполняется средствами Mihomo и не проверялась на рабочей сети.
+
+## CSQTTR — отображение сохранённого токена профиля (2026-11-13)
+
+- Причина: признак настроенного туннеля учитывал личный токен и ссылки, но не отдельный токен профиля.
+- RED: `docs/fix_logs/bug-vk-csqtt-profile-token-status-red.log`, `recognizes a saved profile-token connection` показывал первоначальный мастер.
+- Изменение: сохранённый профильный токен учитывается при определении настроенного туннеля.
+- Проверка: `=== GATE OK bug vk-csqtt-profile-token-status | diff b4aab6a39d80 | лог docs/fix_logs/bug-vk-csqtt-profile-token-status-green.log ===`.
+- Ограничение: тест имитирует ответ статуса, а не реальное подключение.
+
+## CSQTTR — возврат из VK OAuth (2026-11-13)
+
+- Причина: панель пыталась читать адрес окна другого origin, что запрещено браузером; таймер продолжал работу.
+- RED: `docs/fix_logs/bug-vk-csqtt-oauth-popup-red.log`, `offers manual VK callback without reading the cross-origin popup` обнаружил обращение к адресу окна.
+- Изменение: исключены чтение окна и таймер; показан ручной ввод адреса с возможностью вставки без Clipboard API.
+- Проверка: `=== GATE OK bug vk-csqtt-oauth-popup | diff 18902670cf90 | лог docs/fix_logs/bug-vk-csqtt-oauth-popup-green.log ===`.
+- Ограничение: реальную авторизацию пользователя тест не выполнял.
+
+## CSQTTR — недоступность проверки VK (2026-11-13)
+
+- Причина: любая ошибка проверки заменяла сохранённый токен и выдавалась за успешное подключение; сетевое сообщение могло содержать URL с токеном.
+- RED: `docs/fix_logs/bug-vk-csqtt-vk-auth-offline-red.log`, `regression_vk_unavailable_does_not_replace_existing_account` наблюдал замену старого токена. В выводе воспроизведения присутствует только синтетический токен теста.
+- Изменение: отказ VK отделён от временной ошибки; при временном сбое прежний аккаунт сохраняется, новый отмечается непроверенным; сетевой URL не записывается в журнал.
+- Проверка: `docs/fix_logs/bug-vk-csqtt-vk-auth-offline-green.log` содержит `# GATE OK`; целевой тест проверяет оба сценария временной недоступности.
+- Ограничение: отдельный тест явного отказа VK и визуальная проверка состояния ещё требуются.
+
+## CSQTTR — источник ошибки авторизации (2026-11-13)
+
+- Причина: интерфейс определял источник ошибки по наличию личного токена, а временный сбой создания звонка помечался отказом авторизации.
+- RED: `docs/fix_logs/bug-vk-csqtt-auth-error-source-red.log`, `offers password recovery for a CSQTTR rejection` не показывал восстановление пароля при сохранённом аккаунте.
+- Изменение: события передают источник и причину; интерфейс использует источник, а временный сбой звонка остаётся сетевой ошибкой с повторной попыткой.
+- Проверка: `=== GATE OK bug vk-csqtt-auth-error-source | diff 1a4e3c459b22 | лог docs/fix_logs/bug-vk-csqtt-auth-error-source-green.log ===`. Проверены реальные обработчики сообщений об отказе, ошибке VK и тайм-ауте.
+- Первый общий прогон выявил старый тест с зависимостью от реального VK; он переведён на предсказуемую временную недоступность и дополнен проверкой непроверенного статуса.
+- Ограничение: полный набор причин, уведомлений и задержек повторов ещё не проверен.
+
+## CSQTTR — расширенный профиль через API (2026-11-13)
+
+- Причина: прямой ввод профиля в API отклонял или терял дополнительные параметры подключения.
+- RED: `docs/fix_logs/bug-vk-csqtt-direct-profile-red.log`, `regression_direct_profile_import_preserves_source_and_workers` получал отказ вместо сохранения профиля.
+- Изменение: полный бэкенд-парсер сохраняет хеши или профильный токен, пароль и число потоков; повторный импорт заменяет предыдущие профильные данные, сохраняя личный аккаунт.
+- Проверка: `=== GATE OK bug vk-csqtt-direct-profile | diff 1d6bf98d12d0 | лог docs/fix_logs/bug-vk-csqtt-direct-profile-green.log ===`.
+- Ограничение: склеенные ссылки и некоторые варианты адресов звонков в прямом API ещё требуют сверки с мастером.
+
+## CSQTTR — статус до готовности туннеля (2026-11-13)
+
+- Причина: интерфейс показывал «Работает» по одному состоянию потоков, даже когда TUN не подключён.
+- RED: `docs/fix_logs/bug-vk-csqtt-ready-status-red.log`, `does not label an unattached tunnel as working` наблюдал зелёный статус.
+- Изменение: до готовности интерфейса показывается подключение; при готовности и потоках статус называется «Подключён», а результат проверки связи показывается отдельно.
+- Проверка: `=== GATE OK bug vk-csqtt-ready-status | diff abde4ae261d2 | лог docs/fix_logs/bug-vk-csqtt-ready-status-green.log ===`.
+- Ограничение: готовность бэкенда пока не подтверждает успешную настройку маршрутов и требует отдельного исправления.
+
+## CSQTTR — устаревшее чтение логов (2026-11-13)
+
+- Причина: фоновые читатели продолжали менять общий статус после завершения получателя событий своего запуска.
+- RED: `docs/fix_logs/bug-vk-csqtt-stale-logs-red.log`, `regression_stale_log_reader_cannot_change_new_status` менял новый статус на `AuthFailed`.
+- Изменение: читатель проверяет актуальность канала под блокировкой состояния; при остановке и выходе процесса канал закрывается, задачи чтения отменяются и ожидаются.
+- Проверка: `=== GATE OK bug vk-csqtt-stale-logs | diff f392458cec40 | лог docs/fix_logs/bug-vk-csqtt-stale-logs-green.log ===`.
+- Ограничение: передача TUN и её фоновые задачи этим изменением не исправлены и требуют отдельной работы.
+
+## CSQTTR — устаревший результат передачи (2026-11-13)
+
+- Причина: фоновое завершение передачи могло изменить состояние уже другого запуска.
+- RED: `docs/fix_logs/bug-vk-csqtt-stale-handoff-status-red.log`, `regression_stale_handoff_completion_cannot_mark_new_run_ready` устанавливал готовность после остановки и нового запуска.
+- Изменение: каждое поколение запуска имеет идентификатор; результат проверяется под блокировкой состояния, идентификатор меняется при остановке и выходе процесса.
+- Проверка: `=== GATE OK bug vk-csqtt-stale-handoff-status | diff b92f0fc94599 | лог docs/fix_logs/bug-vk-csqtt-stale-handoff-status-green.log ===`.
+- Ограничение: тест проверяет управление состоянием, а не фактическую передачу дескриптора; отмена блокирующей операции и уникальный сокет требуют отдельной работы.
+
+## CSQTTR — отдельное имя сокета на запуск (2026-11-13)
+
+- Причина: разные запуски клиента использовали одно постоянное имя сокета передачи дескриптора.
+- RED: `docs/fix_logs/bug-vk-csqtt-unique-socket-red.log`, `regression_client_launches_use_distinct_tun_socket_names` получил одинаковые имена.
+- Изменение: клиент и задача передачи получают одинаковое уникальное имя, отличающееся между запусками.
+- Проверка: `=== GATE OK bug vk-csqtt-unique-socket | diff 1eeda3a0dde3 | лог docs/fix_logs/bug-vk-csqtt-unique-socket-green.log ===`.
+- Ограничение: тест проверяет аргументы запуска, а не передачу дескриптора; отмена фоновой операции остаётся открытой.
+
+## CSQTTR — отмена повторов передачи дескриптора (2026-11-13)
+
+- Причина: отмена внешней задачи не останавливала блокирующие повторы передачи.
+- RED: `docs/fix_logs/bug-vk-csqtt-handoff-cancel-red.log`, `regression_handoff_retry_stops_after_cancellation` выполнил три попытки после отмены вместо одной.
+- Изменение: блокирующий цикл получает флаг отмены, периодически проверяет его во время ожидания; надзор отменяет и ожидает задачу при остановке и выходе процесса.
+- Проверка: `=== GATE OK bug vk-csqtt-handoff-cancel | diff 74bc41903e80 | лог docs/fix_logs/bug-vk-csqtt-handoff-cancel-green.log ===`.
+- Ограничение: тест проверяет управление повторами, а не передачу дескриптора. Ожидание завершения ограничено пятью секундами; окончательное закрытие при зависшем системном вызове не подтверждено.
+
+## CSQTTR — событие TUN_LOST (2026-11-13)
+
+- Причина: событие только снимало флаг готовности и не запрашивало замену дескриптора, хотя клиент может ждать её 20 секунд.
+- RED: `docs/fix_logs/bug-vk-csqtt-tun-lost-event-red.log`, `regression_tun_lost_requests_replacement_while_client_runs` получал `None`.
+- Изменение: при известной конфигурации событие направляет надзору запрос повторной передачи; завершённая предыдущая задача освобождается.
+- Проверка: `=== GATE OK bug vk-csqtt-tun-lost-event | diff 5a94e87021e9 | лог docs/fix_logs/bug-vk-csqtt-tun-lost-event-green.log ===`.
+- Ограничение: тест проверяет разбор события и решение, а не реальную передачу; ограниченные повторы после ошибки ещё не реализованы.
+
+## CSQTTR — ограниченные повторы передачи (2026-11-13)
+
+- Причина: после ошибки фоновая передача оставалась отмеченной как выполняющаяся, а надзор не пробовал снова при активных потоках.
+- RED: `docs/fix_logs/bug-vk-csqtt-handoff-recovery-red.log`, `regression_handoff_retries_are_bounded_and_nonparallel` не разрешал повтор после ошибки.
+- Изменение: надзор отслеживает завершение передачи, паузу и число ошибок; параллельные попытки исключены, после трёх неудач запускается перезапуск клиента.
+- Проверка: `=== GATE OK bug vk-csqtt-handoff-recovery | diff 75f16f77696f | лог docs/fix_logs/bug-vk-csqtt-handoff-recovery-green.log ===`.
+- Ограничение: проверена логика решения и общий набор; фактическая передача дескриптора и системные маршруты не проверялись.
+
+## CSQTTR — результат настройки маршрутов (2026-11-13)
+
+- Причина: адрес сохранялся до настройки, а результат команд игнорировался; повтор той же конфигурации не повторял неудачную настройку.
+- RED: `docs/fix_logs/bug-vk-csqtt-route-failure-red.log`, `regression_failed_tun_setup_is_not_ready_and_same_config_retries` обнаружил сохранённый адрес после ошибки.
+- Изменение: настройка возвращает результат; адрес и отметка готовности устанавливаются только после успеха, ошибка прерывает запуск, повторная конфигурация может повторить команды.
+- Проверка: `=== GATE OK bug vk-csqtt-route-failure | diff 1af693cc4d90 | лог docs/fix_logs/bug-vk-csqtt-route-failure-green.log ===`. Тест переключения дополнен проверкой отсутствующей настройки маршрутов.
+- Ограничение: проверены обработка результата и сформированные команды; их исполнение в целевой среде не проверялось. При принудительном завершении системной команды откат частичного состояния не подтверждён.
+
+## CSQTTR — селекторы очистки policy rules (2026-11-13)
+
+- Причина: настройка и остановка удаляли правила по одному приоритету и очищали таблицу маршрутов целиком.
+- RED: `docs/fix_logs/bug-vk-csqtt-policy-ownership-red.log`, `regression_tun_scripts_do_not_delete_foreign_policy_rules_or_flush_table` обнаружил широкое удаление.
+- Изменение: перед настройкой проверяются занятые приоритеты и таблица; очистка использует селекторы интерфейса, адреса, метки и маршрута, а частичные добавления откатываются скриптом.
+- Проверка: `=== GATE OK bug vk-csqtt-policy-ownership | diff 0bc8fef04b6a | лог docs/fix_logs/bug-vk-csqtt-policy-ownership-green.log ===`.
+- Ограничение: проверена генерация команд; фактическое исполнение, конфликты и поведение при принудительном прерывании системной команды не проверялись.
+
+## CSQTTR — выход из личного аккаунта при активном профиле (2026-11-13)
+
+- Причина: `logout_vkturn_auth` безусловно вызывала `state.vkturn.restart(...)` при `saved.enabled`, сбрасывая рабочий туннель даже тогда, когда источником звонков выбран `profile_token` или ручные ссылки (`manual`), а не личный аккаунт (`oauth`).
+- RED: `docs/fix_logs/bug-vk-csqtt-profile-logout-red.log`, `regression_logout_keeps_profile_source_and_running_status` обнаружил сброс фазы в `NotInstalled` вместо сохранения `Connected`.
+- Изменение: при выходе из личного аккаунта перезапуск туннеля выполняется только если активен источник личного аккаунта (`saved.enabled && saved.auth_mode != "manual" && saved.auth_mode != "profile_token"`).
+- Проверка: `=== GATE OK bug vk-csqtt-profile-logout | diff 140b98bc0579 | лог docs/fix_logs/bug-vk-csqtt-profile-logout-green.log ===`.
+- Ограничение: проверен API-обработчик выхода и сохранение состояния в памяти и конфиге; реальный процесс клиента не запускался.
+
+## CSQTTR — узкие DIRECT-правила в Mihomo и исключения роутера в iptables (2026-11-13)
+
+- Причина: `rules_block` добавлял в начало `rules:` Mihomo все подсети `VK_NETWORK_CIDRS` и домены `vk.com` / `vk.ru` с действием `DIRECT`, выводя пользовательский трафик локальной сети к ВК и CDN мимо туннеля; в `exempt_destinations` проверка попадания изученных TURN-адресов в подсеть учитывала только `155.212.192.0/20`, дублируя `/32` для других подсетей `VK_NETWORK_CIDRS`; в скриптах `iptables` отсутствовала цепочка `xkeen_mask` собственного трафика роутера.
+- RED: `docs/fix_logs/bug-vk-csqtt-direct-exemptions-red.log`, `regression_narrow_direct_rules_and_router_exemptions` обнаружил `DOMAIN,vk.com,DIRECT` в блоке правил Mihomo.
+- Изменение: `VK_TURN_CIDRS` сужен до `155.212.192.0/20`, из `VK_API_HOSTS` убраны `vk.com` и `vk.ru`, `rules_block` использует только `VK_TURN_CIDRS`, `VK_API_HOSTS` и пир; `exempt_destinations` сохраняет все `VK_NETWORK_CIDRS` для `iptables` роутера и проверяет вхождение TURN-адресов во все подсети `VK_NETWORK_CIDRS`; в `iptables_apply_script` и `iptables_remove_script` добавлена цепочка `xkeen_mask`.
+- Проверка: `=== GATE OK bug vk-csqtt-direct-exemptions | diff 58887b1408a5 | лог docs/fix_logs/bug-vk-csqtt-direct-exemptions-green.log ===`.
+- Ограничение: проверены сгенерированный блок правил Mihomo и скрипты `iptables`; применение правил в реальном ядре роутера не проверялось.
+
+## CSQTTR — отклонение недействительных кодов токена VK в account.getAppPermissions (2026-11-13)
+
+- Причина: `fetch_vk_user_profile` при ответе `account.getAppPermissions` проверяла только `code == 5` и подстроки `blocked`/`banned`, пропуская остальные коды недействительного токена из `TOKEN_INVALID_CODES` (`4`, `27`, `28`); если затем `users.get` был недоступен, ошибка классифицировалась как `Unavailable` вместо `Rejected`, что могло сохранить отклонённый токен как непроверенный при пустом аккаунте.
+- RED: `docs/fix_logs/bug-vk-csqtt-vk-auth-rejected-red.log`, `regression_vk_rejected_permission_code_is_never_saved` получил `Err(Unavailable)` вместо `Err(Rejected)` на синтетическом ответе `error_code: 27`.
+- Изменение: `fetch_vk_user_profile` проверяет `is_token_invalid_code(code)` и маркеры `blocked`/`banned` как в `account.getAppPermissions`, так и в `users.get`.
+- Проверка: `=== GATE OK bug vk-csqtt-vk-auth-rejected | diff 98a31d38b5f1 | лог docs/fix_logs/bug-vk-csqtt-vk-auth-rejected-green.log ===`.
+- Ограничение: проверено на локальном HTTP-стенде; реальный VK API не вызывался.
+
+## CSQTTR — склеенный v2-запрос и ссылки без схемы на бэкенде (2026-11-13)
+
+- Причина: `parse_call_link` требовал обязательный префикс `https://`, отклоняя ссылки вида `vk.com/call/join/...` и `m.vk.ru/call/join/...` без схемы, которые интерфейс уже принимал; `parse_csqtt_link` и `parse_csqtt_profile` не восстанавливали однозначно склеенные запросы `csqtt://connect?v=2host=...&peer=...&password=...` при прямом обращении к API.
+- RED: `docs/fix_logs/bug-vk-csqtt-backend-glued-links-red.log`, `regression_csqtt_backend_glued_query_and_scheme_less_call_links` упал на `parse_call_link("vk.com/call/join/abcDEF_1234567890")`.
+- Изменение: `parse_call_link` допускает необязательный префикс `https://` для `vk.com`/`vk.ru`/`m.vk.*` при сохранении запрета на `http://`; в `parse_csqtt_link` и `parse_csqtt_profile` добавлено восстановление склеенного запроса `repair_glued_csqtt_query` с проверкой отсутствия второго склеенного параметра в пароле.
+- Проверка: `=== GATE OK bug vk-csqtt-backend-glued-links | diff 2e7a8cb6536f | лог docs/fix_logs/bug-vk-csqtt-backend-glued-links-green.log ===`.
+- Ограничение: проверены функции разбора ссылок и профилей на синтетических входных данных.
+
+## CSQTTR — очистка токена профиля, маскирование токена и сброс runtime при reset (2026-11-13)
+
+- Причина: действие `vkturn_action("reset")` в `backend/src/api.rs` очищало `peer`, `password`, `links` и `streams`, но оставляло `profile_token` и `auth_mode: "profile_token"`, сохраняло устаревшие ошибки и статистику в `state.vkturn.rt` и возвращало необработанный `saved` в поле `"config"` без маскирования личного `vk_token`; в `VkTurn.tsx` сброс сервера не очищал `sourceMode`, `profileToken`, `profilePower` и `logs`.
+- RED: `docs/fix_logs/bug-vk-csqtt-reset-cleanup-red.log`, `regression_reset_clears_profile_token_and_runtime_state` упал на `assertion failed: cur.profile_token.is_none()`.
+- Изменение: при `reset` в `backend/src/api.rs` очищаются `profile_token`, `auth_mode` переводится в `"oauth"`, состояние `state.vkturn.rt` сбрасывается в `VkTurnRuntime::default()`, а в ответе `config.vk_token` маскируется через `mask_token`; в `VkTurn.tsx` при сбросе очищаются `sourceMode`, `profileToken`, `profilePower` и `logs`.
+- Проверка: `=== GATE OK bug vk-csqtt-reset-cleanup | diff b48cf6fce330 | лог docs/fix_logs/bug-vk-csqtt-reset-cleanup-green.log ===`.
+- Ограничение: проверен API-обработчик `reset` и состояние в памяти и файле конфигурации.
+
+## Белые списки — автоматическое включение при отметке активной подписки (2026-11-13)
+
+- Причина: `set_provider_whitelist` (`POST /api/whitelist/providers`) сохраняла `cfg.whitelist_providers`, но вызывала только `sync_whitelist_mode_tunnel`, которая проверяет уже включённый `cfg.whitelist.enabled` и не запускает `failover::handle_whitelist_transition` для автоматического включения режима белых списков (`auto_by_failover`) на уже выбранном активном сервере из отмеченной подписки; кроме того, `set_provider_whitelist` и `set_server_whitelist` удерживали `state.config_lock` до конца функции, а `is_whitelist_server_full` и `get_provider_proxies` не учитывали регистронезависимое Unicode-сопоставление (`to_lowercase`), `provider_aliases` и совпадение имён узлов между несколькими подписками.
+- RED: `docs/fix_logs/bug-whitelist-provider-active-server-red.log`, `regression_marking_active_subscription_enables_whitelist_mode` упал на `режим белых списков должен автоматически включиться для уже активного сервера из отмеченной подписки`.
+- Изменение: в `set_provider_whitelist`, `set_server_whitelist` и `whitelist_detector_detect_servers` освобождается `state.config_lock` перед вызовом `failover::handle_whitelist_transition` для текущего активного сервера (получаемого через `mihomo::get_servers` с учётом провайдера подписки); добавлена `provider_matches_whitelist` с поддержкой Unicode `to_lowercase()` и `provider_aliases`; в `get_provider_proxies` и `get_servers` сохраняется список всех провайдеров `_providers` для узлов с одинаковым именем с приоритетом провайдера из белых списков; в `Servers.tsx` после переключения БС-отметки подписки вызывается `refresh?.()`.
+- Проверка: `=== GATE OK bug whitelist-provider-active-server | diff 336e99b42df3 | лог docs/fix_logs/bug-whitelist-provider-active-server-green.log ===`.
+- Ограничение: проверено на локальном стенде с mock-сервером Mihomo API; сетевые правила на роутере не изменялись.
+
+## CSQTTR — учёт выбранного auth_mode при проверке настроенности в VkTurn.tsx (2026-11-13)
+
+- Причина: `isConfigured` в `frontend/src/components/VkTurn.tsx` проверяла `(status?.links_count ?? 0) > 0 || Boolean(status?.has_token) || Boolean(status?.has_profile_token)` без учёта выбранного `status?.auth_mode`, из-за чего при `auth_mode === 'manual'` без ссылок (или `auth_mode === 'profile_token'` без токена профиля) интерфейс открывал карточку мониторинга вместо мастера настройки только из-за сохранённого личного аккаунта VK, хотя бэкенд не считает такой источник настроенным.
+- RED: `docs/fix_logs/bug-vk-csqtt-active-source-configured-red.log`, тест `opens setup wizard when active auth_mode has no credentials even if another source exists` упал, получив карточку мониторинга вместо мастера настройки.
+- Изменение: `isConfigured` проверяет наличие учётных данных именно для активного `status?.auth_mode` (`manual` -> `links_count > 0`, `profile_token` -> `has_profile_token`, иначе `has_token || links_count > 0`); также добавлен компонентный тест очистки `profileToken` и `profilePower` при сбросе сервера (`reset`).
+- Проверка: `=== GATE OK bug vk-csqtt-active-source-configured | diff aae6d2237af0 | лог docs/fix_logs/bug-vk-csqtt-active-source-configured-green.log ===`.
+- Ограничение: проверено компонентными тестами в Vitest.
+
 ## Новые находки
 
 - `backend/src/notifications.rs` (тест `validate_telegram_bot_token`) содержит строку, похожую на настоящий токен бота `8959891087:AAH…`. Если токен реальный — его нужно отозвать у @BotFather и заменить в тесте на фиктивный.
@@ -2222,3 +2536,35 @@
 - **Не начаты: 91** — 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 29, 30, 32, 33, 34, 35, 36, 37, 40, 42, 43, 46, 47, 48, 49, 50, 52, 53, 54, 55, 58, 60, 63, 65, 66, 67, 74, 75, 78, 79, 81, 82, 83, 85, 86, 87, 95, 96, 98, 99, 100, 101, 104, 105, 106, 107, 108, 110, 111, 112, 113, 115, 117, 119, 120, 121, 123, 124, 126, 127, 129, 131, 132, 134, 136, 137, 138, 139, 140. Это фазы C (некритичные), D (конфликты режимов), E (Google AI), F, G (матрица кнопок, п.50) и H (интерфейс, пп. 47–49) — они не вошли в этот релиз.
 - Проверки перед коммитом: полный `cargo test` (Windows) — все тесты зелёные; `cargo check --target aarch64-unknown-linux-musl --tests` — компилируется; `npx vitest run`, `npx tsc --noEmit`, `npm run build` — зелёные. Запуск тестов под Linux выполняет только CI.
 - Ограничения: ничего не проверялось на реальном роутере до деплоя; red_kind=compile у части пунктов не доказывает воспроизведение (отмечено в записях); шаг backend-тестов в CI идёт с `|| true` и сам по себе не гарантирует зелёный Rust.
+
+## `vk-csqtt-25-backend` — интеграция VK-туннеля, идемпотентный TUN, исключения, Flow и трафик
+
+- Правила перечитаны: `2026-11-13`, хеш `bc29a182fac8`.
+- Регрессионные тесты (`be:regression_vkturn_25_`):
+  - `vkturn::tests::regression_vkturn_25_tun_configure_precleans_stale_csq0_and_supervise_tears_down`
+  - `mihomo::tests::regression_vkturn_25_providers_filter_unified_node_and_targeted_ping`
+  - `traffic::tests::regression_vkturn_25_provider_deltas_exclude_vkturn`
+  - `failover::tests::regression_vkturn_25_unready_vkturn_excluded_from_candidates`
+  - `api::tests::regression_vkturn_25_flow_zapret_backup_evacuation_and_links`
+- RED: `docs/fix_logs/bug-vk-csqtt-25-backend-red.log` (`5 failed`, `0 passed`).
+- Исправления:
+  - `backend/src/vkturn.rs`: пред-очистка собственных правил `csq0` в `tun_configure_script` (без удаления чужих правил таблицы 222); teardown `csq0` и сброс `tun_configured`/`tunnel_ip` при падении в `supervise`; удаление провайдера `vkturn` при выключении туннеля в `commit_vkturn`; добавлены `evacuate_vkturn_selectors` и `sync_vkturn_after_restore`.
+  - `backend/src/mihomo.rs`: исключён виртуальный провайдер `vkturn` из `get_providers_info` и `updatable_provider_names`; унифицированы имя (`display_name(PROXY_NAME)`) и реальный `host:port` из `cfg.vkturn.peer` в `get_servers`; точечная проверка задержки `vkturn` через `/providers/proxies/vkturn/healthcheck` до fallback на селекторы.
+  - `backend/src/failover.rs`: исключён неготoвый `vkturn` (`!tunnel_ready()`) из `detect_whitelist_servers_and_providers`, `evaluate_and_apply_whitelist_detector` и кандидатов `run_check` (с сохранением возможности переключиться С него при сбое).
+  - `backend/src/traffic.rs`: исключён `vkturn` из `node_to_provider` и `provider_deltas`, чтобы трафик VK-туннеля не списывался с квот подписок.
+  - `backend/src/api.rs`: исключены `vkturn` и `[БС]`-серверы в `repair_flow` и `auto_select_flow_server`; добавлены `append_link`/`remove_link_index` в `SaveVkTurnConfigReq`; эвакуация селекторов при выключении/сбросе; повторное применение `vkturn::apply_exemptions` после `xkeen_service`, `zapret_set_enabled_core` и `zapret_action`; синхронизация `sync_vkturn_after_restore` при восстановлении бэкапа.
+- GREEN: `docs/fix_logs/bug-vk-csqtt-25-backend-green.log` (`640 backend`, `365 frontend`, `tsc` — 0 ошибок).
+- `=== GATE OK bug vk-csqtt-25-backend | diff 99f0fdee4bb3 | лог docs/fix_logs/bug-vk-csqtt-25-backend-green.log ===`
+
+## `vk-csqtt-25-frontend` — UI/UX редизайн VK-туннеля, устранение дублей, светлая тема и интеграция по панели
+
+- Правила перечитаны: `2026-11-13`, хеш `bc29a182fac8`.
+- Регрессионные тесты (`fe:src/components/::regression_vkturn_25_`):
+  - `frontend/src/components/VkTurn.test.tsx`: `regression_vkturn_25_frontend` (3 теста: отсутствие тройного счётчика потоков и тех-жаргона `(Workers / Streams)`, скрытие ручных ссылок в режиме `oauth`, отсутствие вложенных `.card .card` и тёмного хардкода `rgba(15, 23, 42, ...)`, наличие переключателя источника звонков; отсутствие дублей форм пароля и ссылок при открытых баннерах и аккордеоне + редактирование адреса сервера без сброса + переключение источника на `manual`; чистота карточки `vk-auth-card` без дублей буфера/ручного поля и отсутствие кнопки `скоро`, свободный `Backspace` в полях порта и потоков, карточка `🔑 Токен из профиля csqtt:// активен`).
+  - `frontend/src/components/Servers.vk-call.test.tsx`: `regression_vkturn_25_frontend` (защитная фильтрация виртуального провайдера `vkturn`, отображение `Адрес VPS: host:port` и кнопки `📞 Настройки ВК` на карточке сервера, специальная карточка в `ShareNodeModal`, импорт `csqtt://` в `OutboundGeneratorModal`, раздел FAQ в `Help`).
+- RED: `docs/fix_logs/bug-vk-csqtt-25-frontend-red.log` (`4 failed`).
+- Исправления:
+  - `frontend/src/components/VkTurn.tsx`: единый блок управления мощностью туннеля (`Мощность туннеля (потоки)` + индикатор `Активно: X из Y`), условный показ ручных ссылок и форм редактирования, единая чистая карточка входа VK ID (детали в модальном окне), темы через классы `.vk-section`/`.vk-subcard`/`.vk-auth-banner`/`.vk-alert-*` из `styles.css`, переключатель источника (`oauth`/`profile_token`/`manual`), редактирование `peer` (в т.ч. `csqtt://`) без сброса, удаление/добавление запасных ссылок, строковый ввод порта и потоков с естественным `Backspace`, предзаполнение мастера и авто-выбор `auth_mode: 'oauth'` при входе через VK ID.
+  - `frontend/src/components/Servers.tsx`, `ShareNodeModal.tsx`, `OutboundGeneratorModal.tsx`, `Help.tsx`, `Whitelist.tsx`, `App.tsx`, `types.ts`, `styles.css`: сквозная интеграция VK-туннеля в список серверов, модальные окна, справку и поддержка светлой/тёмной тем.
+- GREEN: `docs/fix_logs/bug-vk-csqtt-25-frontend-green.log` (`640 backend`, `369 frontend`, `tsc` — 0 ошибок, `banned=ok`).
+- `=== GATE OK bug vk-csqtt-25-frontend | diff 28cc9defad35 | лог docs/fix_logs/bug-vk-csqtt-25-frontend-green.log ===`

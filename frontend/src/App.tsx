@@ -291,7 +291,7 @@ export default function App() {
     const handleSwitchTab = (e: Event) => {
       const ce = e as CustomEvent<TabId>
       const target = ce.detail as TabId
-      if (target && (TABS.some((t) => t.id === target) || target === 'settings' || target === 'help')) {
+      if (target && (TABS.some((t) => t.id === target) || target === 'settings' || target === 'help' || target === 'vkturn')) {
         switchTab(target)
       }
     }

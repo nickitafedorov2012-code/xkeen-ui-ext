@@ -501,9 +501,18 @@ pub async fn get_provider_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Re
             if let Some(list) = prov.get("proxies").and_then(|p| p.as_array()) {
                 for p in list {
                     if let Some(name) = p.get("name").and_then(|n| n.as_str()) {
+                        let mut providers_for_name: Vec<Value> = out
+                            .get(name)
+                            .and_then(|prev: &Value| prev.get("_providers"))
+                            .and_then(|arr: &Value| arr.as_array().cloned())
+                            .unwrap_or_default();
+                        if !providers_for_name.iter().any(|v| v.as_str() == Some(pname.as_str())) {
+                            providers_for_name.push(Value::String(pname.clone()));
+                        }
                         let mut p_val = p.clone();
                         if let Some(obj) = p_val.as_object_mut() {
                             obj.insert("_provider".to_string(), Value::String(pname.clone()));
+                            obj.insert("_providers".to_string(), Value::Array(providers_for_name));
                         }
                         out.insert(name.to_string(), p_val);
                     }
@@ -644,7 +653,9 @@ pub async fn get_providers_info(http: &reqwest::Client, cfg: &AppConfig) -> Resu
     let mut out = Vec::new();
     if let Some(map) = v.get("providers").and_then(|p| p.as_object()) {
         for (pname, prov) in map {
-            if prov.get("vehicleType").and_then(|t| t.as_str()) == Some("Compatible") {
+            if pname == crate::vkturn::PROVIDER_ID
+                || prov.get("vehicleType").and_then(|t| t.as_str()) == Some("Compatible")
+            {
                 continue;
             }
             let count = prov.get("proxies").and_then(|p| p.as_array()).map(|a| a.len()).unwrap_or(0);
@@ -714,6 +725,9 @@ pub async fn updatable_provider_names(http: &reqwest::Client, cfg: &AppConfig) -
     if let Ok(v) = m_get(http, cfg, "/providers/proxies").await {
         if let Some(map) = v.get("providers").and_then(|p| p.as_object()) {
             for (pname, prov) in map {
+                if pname == crate::vkturn::PROVIDER_ID {
+                    continue;
+                }
                 if let Some(t) = prov.get("vehicleType").and_then(|t| t.as_str()) {
                     if t == "HTTP" || t == "File" {
                         out.push(pname.clone());
@@ -1165,7 +1179,16 @@ pub async fn get_servers(
             if SKIP_TYPES.contains(&typ.as_str()) {
                 continue;
             }
-            let provider_id = p.get("_provider").and_then(|pr| pr.as_str()).map(|pr| pr.to_string());
+            let provider_id = p
+                .get("_providers")
+                .and_then(|arr| arr.as_array())
+                .and_then(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .find(|cand| crate::failover::provider_matches_whitelist(cand, cfg))
+                        .map(|s| s.to_string())
+                })
+                .or_else(|| p.get("_provider").and_then(|pr| pr.as_str()).map(|pr| pr.to_string()));
             let provider_name = provider_id.as_ref().map(|pid| {
                 cfg.provider_aliases.get(pid).cloned().unwrap_or_else(|| pid.clone())
             });
@@ -1182,7 +1205,11 @@ pub async fn get_servers(
                 if real_port > 0 {
                     existing.port = real_port;
                 }
-                if existing.provider.is_none() {
+                if existing.provider.is_none()
+                    || provider_id
+                        .as_deref()
+                        .map_or(false, |pid| crate::failover::provider_matches_whitelist(pid, cfg))
+                {
                     existing.provider = provider_id;
                     existing.provider_name = provider_name;
                 }
@@ -1221,14 +1248,38 @@ pub async fn get_servers(
             provider_proxies.as_ref().ok()?.get(crate::vkturn::PROXY_NAME)
         });
         let is_active = active == crate::vkturn::PROXY_NAME || proxy_now == crate::vkturn::PROXY_NAME;
-        if !servers.iter().any(|server| server.id == crate::vkturn::PROXY_NAME) {
+        let (peer_host, peer_port) = cfg
+            .vkturn
+            .peer
+            .trim()
+            .rsplit_once(':')
+            .and_then(|(h, p)| {
+                let host = h.trim();
+                let port = p.trim().parse::<u16>().ok()?;
+                if host.is_empty() || port == 0 {
+                    None
+                } else {
+                    Some((host.to_string(), port))
+                }
+            })
+            .unwrap_or_else(|| ("Интерфейс csq0 (Звонки ВК)".to_string(), 0));
+        let unified_name = display_name(crate::vkturn::PROXY_NAME);
+        if let Some(existing) = servers.iter_mut().find(|server| server.id == crate::vkturn::PROXY_NAME) {
+            existing.name = unified_name;
+            existing.protocol = "VK-CALL".into();
+            existing.host = peer_host;
+            existing.port = peer_port;
+            existing.is_active = is_active;
+            existing.provider = Some(crate::vkturn::PROVIDER_ID.into());
+            existing.provider_name = Some("Звонки ВКонтакте".into());
+        } else {
             let ping = vk_proxy.map(last_delay).unwrap_or(0);
             servers.push(Server {
                 id: crate::vkturn::PROXY_NAME.into(),
-                name: "📞 Сервер звонков ВК".into(),
+                name: unified_name,
                 protocol: "VK-CALL".into(),
-                host: "Туннель через звонки ВКонтакте".into(),
-                port: 0,
+                host: peer_host,
+                port: peer_port,
                 is_active,
                 is_priority: priority_chain.iter().any(|id| id == crate::vkturn::PROXY_NAME),
                 ping_ms: ping,
@@ -1238,6 +1289,8 @@ pub async fn get_servers(
                 resolved_ip: None,
             });
         }
+    } else {
+        servers.retain(|server| server.id != crate::vkturn::PROXY_NAME);
     }
 
     // Разрешаем DNS для активного узла, если он задан доменным именем
@@ -1673,6 +1726,44 @@ pub async fn ping_server_url_expected_range(
                 if let Some(d) = v.get("delay").and_then(|d| d.as_i64()) {
                     if d > 0 {
                         return d;
+                    }
+                }
+            }
+        }
+    }
+
+    // Для узла VK-туннеля (file-провайдер) сначала запускаем точечную проверку только провайдера vkturn,
+    // чтобы не запускать массовый задержковый тест всех серверов в группе PROXY.
+    if server_id == crate::vkturn::PROXY_NAME {
+        let prov_enc = urlencoding_lite(crate::vkturn::PROVIDER_ID);
+        let hc_url = format!(
+            "{}/providers/proxies/{prov_enc}/healthcheck?timeout={timeout_ms}&url={check_url}{exp_param}",
+            cfg.mihomo_url()
+        );
+        let req_timeout = std::time::Duration::from_millis(std::cmp::max(timeout_ms + 2000, 5000));
+        let mut hc_req = http.get(&hc_url).timeout(req_timeout);
+        if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
+            hc_req = hc_req.header(k, v);
+        }
+        if let Ok(hc_resp) = hc_req.send().await {
+            if hc_resp.status().is_success() {
+                let info_url = format!("{}/providers/proxies/{prov_enc}", cfg.mihomo_url());
+                let mut info_req = http.get(&info_url).timeout(std::time::Duration::from_millis(3000));
+                if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
+                    info_req = info_req.header(k, v);
+                }
+                if let Ok(info_resp) = info_req.send().await {
+                    if info_resp.status().is_success() {
+                        if let Ok(prov_json) = info_resp.json::<Value>().await {
+                            if let Some(arr) = prov_json.get("proxies").and_then(|p| p.as_array()) {
+                                if let Some(node) = arr.iter().find(|p| p.get("name").and_then(|n| n.as_str()) == Some(server_id)) {
+                                    let d = last_delay(node);
+                                    if d > 0 {
+                                        return d;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -3232,5 +3323,120 @@ mod tests {
             .expect("auto_select_flow_server function must exist");
         let autoselect_body = autoselect_fn.split("pub async fn get_flow_extension").next().unwrap_or(autoselect_fn);
         assert!(!autoselect_body.contains("close_all_connections"), "auto_select_flow_server не должен вызывать close_all_connections");
+    }
+
+    #[tokio::test]
+    async fn regression_vkturn_25_providers_filter_unified_node_and_targeted_ping() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let group_delay_hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let healthcheck_hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let hc_hits_srv = healthcheck_hits.clone();
+        let gd_hits_srv = group_delay_hits.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { return };
+                let hc_hits = hc_hits_srv.clone();
+                let gd_hits = gd_hits_srv.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req.lines().next().unwrap_or("");
+                    let body;
+                    let status;
+                    if first_line.contains("/providers/proxies/vkturn/healthcheck") {
+                        hc_hits.fetch_add(1, Ordering::SeqCst);
+                        status = "204 No Content";
+                        body = String::new();
+                    } else if first_line.contains("/providers/proxies/vkturn") {
+                        status = "200 OK";
+                        body = json!({
+                            "name": "vkturn",
+                            "vehicleType": "File",
+                            "proxies": [{
+                                "name": crate::vkturn::PROXY_NAME,
+                                "type": "Direct",
+                                "history": [{ "delay": 95 }]
+                            }]
+                        }).to_string();
+                    } else if first_line.starts_with("GET /providers/proxies ") {
+                        status = "200 OK";
+                        body = json!({
+                            "providers": {
+                                "vkturn": {
+                                    "name": "vkturn",
+                                    "vehicleType": "File",
+                                    "proxies": [{ "name": crate::vkturn::PROXY_NAME }]
+                                },
+                                "sub_main": {
+                                    "name": "sub_main",
+                                    "vehicleType": "HTTP",
+                                    "proxies": [{ "name": "DE-01" }]
+                                }
+                            }
+                        }).to_string();
+                    } else if first_line.contains("/group/PROXY/delay") {
+                        gd_hits.fetch_add(1, Ordering::SeqCst);
+                        status = "200 OK";
+                        body = "{\"📞 VK-туннель [БС]\":108}".to_string();
+                    } else {
+                        status = "404 Not Found";
+                        body = String::new();
+                    }
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        let mut cfg = AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+        cfg.vkturn.enabled = true;
+        cfg.vkturn.peer = "203.0.113.10:46000".into();
+
+        // Item 6: vkturn must not appear in get_providers_info or updatable_provider_names
+        let provs = get_providers_info(&reqwest::Client::new(), &cfg).await.unwrap();
+        assert!(!provs.iter().any(|p| p.id == crate::vkturn::PROVIDER_ID), "vkturn must be hidden from providers");
+        assert!(provs.iter().any(|p| p.id == "sub_main"));
+        let updatable = updatable_provider_names(&reqwest::Client::new(), &cfg).await;
+        assert!(!updatable.iter().any(|p| p == crate::vkturn::PROVIDER_ID));
+        assert!(updatable.iter().any(|p| p == "sub_main"));
+
+        // Items 7 & 16: unified name (without old "Сервер звонков ВК") and parsed peer host/port
+        let vk_name = crate::vkturn::PROXY_NAME;
+        set_proxies_cache_for_test(BTreeMap::from([
+            ("PROXY".into(), json!({ "type": "Selector", "now": vk_name, "all": [vk_name] })),
+        ]), std::time::Instant::now());
+        set_provider_proxies_cache_for_test(BTreeMap::new(), std::time::Instant::now());
+        let servers = get_servers(&reqwest::Client::new(), &cfg, &[]).await.unwrap();
+        let vk = servers.iter().find(|s| s.id == vk_name).expect("vkturn server present");
+        assert_eq!(vk.name, display_name(vk_name));
+        assert_eq!(vk.host, "203.0.113.10");
+        assert_eq!(vk.port, 46000);
+
+        // Item 21: targeted vkturn healthcheck instead of pinging entire PROXY group
+        let delay = ping_server_url_expected_range(
+            &reqwest::Client::new(),
+            &cfg,
+            vk_name,
+            5000,
+            Some("http://example.test/204"),
+            None,
+        ).await;
+        clear_proxies_cache_for_test();
+        assert_eq!(delay, 95);
+        assert!(healthcheck_hits.load(Ordering::SeqCst) >= 1, "targeted vkturn provider healthcheck must be used");
+        assert_eq!(group_delay_hits.load(Ordering::SeqCst), 0, "must not ping entire PROXY selector when provider healthcheck succeeds");
     }
 }

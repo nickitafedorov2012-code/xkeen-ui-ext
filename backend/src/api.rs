@@ -579,6 +579,7 @@ pub const SECRET_FIELDS: &[&str] = &[
     "notifications.telegram_bot_token",
     "notifications.webhook_url",
     "vkturn.vk_token",
+    "vkturn.profile_token",
     "vkturn.password",
     "adguard.password",
     "rci.password",
@@ -680,6 +681,11 @@ pub fn mask_settings_for_api(cfg: &config::AppConfig) -> serde_json::Value {
                 }
             }
         }
+        if let Some(tok) = vkturn.get_mut("profile_token") {
+            if tok.as_str().is_some_and(|s| !s.is_empty()) {
+                *tok = serde_json::Value::String("[REDACTED]".into());
+            }
+        }
     }
 
     val
@@ -760,6 +766,11 @@ pub fn merge_settings_update(current: &config::AppConfig, body: &serde_json::Val
     if let Some(ref tok) = new_cfg.vkturn.vk_token {
         if is_secret_mask(tok, false) {
             new_cfg.vkturn.vk_token = current.vkturn.vk_token.clone();
+        }
+    }
+    if let Some(ref tok) = new_cfg.vkturn.profile_token {
+        if is_secret_mask(tok, false) {
+            new_cfg.vkturn.profile_token = current.vkturn.profile_token.clone();
         }
     }
     if is_secret_mask(&new_cfg.antigravity.own_proxy, false) {
@@ -959,47 +970,56 @@ pub async fn set_server_whitelist(
     State(state): State<AppState>,
     Json(req): Json<ServerWhitelistReq>,
 ) -> Response {
-    let _cfg_guard = state.config_lock.lock().await;
-    let mut cfg = (**state.config.read().await).clone();
-    if let Some(servers) = req.servers {
-        cfg.whitelist_servers = servers;
-    } else if let Some(server_id) = req.server_id {
-        if let Some(is_normal) = req.normal {
-            if is_normal {
-                cfg.whitelist_servers.retain(|s| s != &server_id);
-                if !cfg.normal_servers.contains(&server_id) {
-                    cfg.normal_servers.push(server_id);
+    let (cfg, wl, nl, wl_p) = {
+        let _cfg_guard = state.config_lock.lock().await;
+        let mut cfg = (**state.config.read().await).clone();
+        if let Some(servers) = req.servers {
+            cfg.whitelist_servers = servers;
+        } else if let Some(server_id) = req.server_id {
+            if let Some(is_normal) = req.normal {
+                if is_normal {
+                    cfg.whitelist_servers.retain(|s| s != &server_id);
+                    if !cfg.normal_servers.contains(&server_id) {
+                        cfg.normal_servers.push(server_id);
+                    }
+                } else {
+                    cfg.normal_servers.retain(|s| s != &server_id);
                 }
             } else {
-                cfg.normal_servers.retain(|s| s != &server_id);
-            }
-        } else {
-            let enable = req.enabled.unwrap_or(true);
-            if enable {
-                cfg.normal_servers.retain(|s| s != &server_id);
-                if !cfg.whitelist_servers.contains(&server_id) {
-                    cfg.whitelist_servers.push(server_id);
-                }
-            } else {
-                cfg.whitelist_servers.retain(|s| s != &server_id);
-                if !cfg.normal_servers.contains(&server_id) {
-                    cfg.normal_servers.push(server_id);
+                let enable = req.enabled.unwrap_or(true);
+                if enable {
+                    cfg.normal_servers.retain(|s| s != &server_id);
+                    if !cfg.whitelist_servers.contains(&server_id) {
+                        cfg.whitelist_servers.push(server_id);
+                    }
+                } else {
+                    cfg.whitelist_servers.retain(|s| s != &server_id);
+                    if !cfg.normal_servers.contains(&server_id) {
+                        cfg.normal_servers.push(server_id);
+                    }
                 }
             }
         }
-    }
-    if let Err(e) = config::save(&state.config_path, &cfg).await {
-        return api_err(format!("Ошибка сохранения белого списка серверов: {e}"));
-    }
-    let wl = cfg.whitelist_servers.clone();
-    let nl = cfg.normal_servers.clone();
-    let wl_p = cfg.whitelist_providers.clone();
-    *state.config.write().await = std::sync::Arc::new(cfg.clone());
-    log_i!("Обновлён список серверов белых списков (всего БС: {}, обычных: {})", wl.len(), nl.len());
+        if let Err(e) = config::save(&state.config_path, &cfg).await {
+            return api_err(format!("Ошибка сохранения белого списка серверов: {e}"));
+        }
+        let wl = cfg.whitelist_servers.clone();
+        let nl = cfg.normal_servers.clone();
+        let wl_p = cfg.whitelist_providers.clone();
+        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+        log_i!("Обновлён список серверов белых списков (всего БС: {}, обычных: {})", wl.len(), nl.len());
+        (cfg, wl, nl, wl_p)
+    };
 
-    let active_id = mihomo::get_active_server(&state.http, &cfg).await.ok().flatten().map(|s| s.id).unwrap_or_default();
-    if !active_id.is_empty() {
-        let _ = sync_whitelist_mode_tunnel(&state, &active_id).await;
+    if let Ok(Some(active_srv)) = mihomo::get_active_server(&state.http, &cfg).await {
+        failover::handle_whitelist_transition(
+            &state,
+            &active_srv.id,
+            &active_srv.name,
+            active_srv.provider.as_deref(),
+        )
+        .await;
+        let _ = sync_whitelist_mode_tunnel(&state, &active_srv.id).await;
     }
 
     api_ok(json!({ "whitelist_servers": wl, "normal_servers": nl, "whitelist_providers": wl_p }))
@@ -1022,31 +1042,41 @@ pub async fn set_provider_whitelist(
     State(state): State<AppState>,
     Json(req): Json<ProviderWhitelistReq>,
 ) -> Response {
-    let _cfg_guard = state.config_lock.lock().await;
-    let mut cfg = (**state.config.read().await).clone();
-    if let Some(providers) = req.providers {
-        cfg.whitelist_providers = providers;
-    } else if let Some(provider_id) = req.provider_id.or(req.provider) {
-        let enable = req.enabled.unwrap_or(true);
-        if enable {
-            if !cfg.whitelist_providers.contains(&provider_id) {
-                cfg.whitelist_providers.push(provider_id);
+    let (cfg, wl_p, wl_s) = {
+        let _cfg_guard = state.config_lock.lock().await;
+        let mut cfg = (**state.config.read().await).clone();
+        if let Some(providers) = req.providers {
+            cfg.whitelist_providers = providers;
+        } else if let Some(provider_id) = req.provider_id.or(req.provider) {
+            let enable = req.enabled.unwrap_or(true);
+            let pid_lower = provider_id.trim().to_lowercase();
+            if enable {
+                if !cfg.whitelist_providers.iter().any(|p| p.trim().to_lowercase() == pid_lower) {
+                    cfg.whitelist_providers.push(provider_id);
+                }
+            } else {
+                cfg.whitelist_providers.retain(|p| p.trim().to_lowercase() != pid_lower);
             }
-        } else {
-            cfg.whitelist_providers.retain(|p| p != &provider_id);
         }
-    }
-    if let Err(e) = config::save(&state.config_path, &cfg).await {
-        return api_err(format!("Ошибка сохранения белого списка подписок: {e}"));
-    }
-    let wl_p = cfg.whitelist_providers.clone();
-    let wl_s = cfg.whitelist_servers.clone();
-    *state.config.write().await = std::sync::Arc::new(cfg.clone());
-    log_i!("Обновлён список подписок белых списков (всего: {})", wl_p.len());
+        if let Err(e) = config::save(&state.config_path, &cfg).await {
+            return api_err(format!("Ошибка сохранения белого списка подписок: {e}"));
+        }
+        let wl_p = cfg.whitelist_providers.clone();
+        let wl_s = cfg.whitelist_servers.clone();
+        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+        log_i!("Обновлён список подписок белых списков (всего: {})", wl_p.len());
+        (cfg, wl_p, wl_s)
+    };
 
-    let active_id = mihomo::get_active_server(&state.http, &cfg).await.ok().flatten().map(|s| s.id).unwrap_or_default();
-    if !active_id.is_empty() {
-        let _ = sync_whitelist_mode_tunnel(&state, &active_id).await;
+    if let Ok(Some(active_srv)) = mihomo::get_active_server(&state.http, &cfg).await {
+        failover::handle_whitelist_transition(
+            &state,
+            &active_srv.id,
+            &active_srv.name,
+            active_srv.provider.as_deref(),
+        )
+        .await;
+        let _ = sync_whitelist_mode_tunnel(&state, &active_srv.id).await;
     }
 
     api_ok(json!({ "whitelist_providers": wl_p, "whitelist_servers": wl_s }))
@@ -1285,12 +1315,50 @@ pub async fn switch_flow_server(
     }
 }
 
+fn is_excluded_for_flow(
+    id: &str,
+    name: &str,
+    provider: Option<&str>,
+    protocol: Option<&str>,
+    cfg: &config::AppConfig,
+) -> bool {
+    if id.is_empty()
+        || id == crate::vkturn::PROXY_NAME
+        || provider == Some(crate::vkturn::PROVIDER_ID)
+        || protocol == Some("VK-CALL")
+        || id.starts_with("AUTO-")
+        || name.starts_with("AUTO-")
+        || [
+            "PROXY",
+            "GLOBAL",
+            "Fastest",
+            "Fallback",
+            "DIRECT",
+            "REJECT",
+            "Google AI",
+            "YouTube",
+            "Discord",
+            "Telegram",
+            "Steam",
+            "Twitch",
+            "Torrent",
+        ]
+        .contains(&id)
+    {
+        return true;
+    }
+    crate::failover::is_whitelist_server_full(name, id, provider, cfg)
+}
+
 /// POST /api/flow/repair — комплексная починка Google Flow:
 /// 1) Находит лучший узел США
 /// 2) Переключает маршрут Google AI на этот узел
 /// 3) Сбрасывает сокеты и соединения ядра Mihomo
 pub async fn repair_flow(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
+    let known_servers = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain)
+        .await
+        .unwrap_or_default();
 
     // 1. Поиск лучшего сервера США
     let pings = mihomo::ping_flow_servers(&state.http, &cfg, 3500).await;
@@ -1298,6 +1366,14 @@ pub async fn repair_flow(State(state): State<AppState>) -> Response {
     let mut min_ping = i64::MAX;
 
     for (name, &ping) in &pings {
+        let srv_meta = known_servers.iter().find(|s| &s.id == name);
+        let excluded = srv_meta.map_or_else(
+            || is_excluded_for_flow(name, name, None, None, &cfg),
+            |s| is_excluded_for_flow(&s.id, &s.name, s.provider.as_deref(), Some(s.protocol.as_str()), &cfg),
+        );
+        if excluded {
+            continue;
+        }
         if ping > 0 && ping < min_ping {
             let country = crate::mihomo::detect_server_country(name);
             let is_blocked = country == "RU" || country == "BY";
@@ -1309,13 +1385,28 @@ pub async fn repair_flow(State(state): State<AppState>) -> Response {
     }
 
     // DIAG-04: Не выбирать отсутствующий узел, проверять реальное наличие в конфигурации
-    let target_server = match best_server.or_else(|| cfg.flow_server.clone()) {
-        Some(s) if !s.trim().is_empty() => s,
+    let target_server = match best_server.or_else(|| {
+        cfg.flow_server.as_ref().and_then(|s| {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let srv_meta = known_servers.iter().find(|srv| srv.id == trimmed);
+            let excluded = srv_meta.map_or_else(
+                || is_excluded_for_flow(trimmed, trimmed, None, None, &cfg),
+                |srv| is_excluded_for_flow(&srv.id, &srv.name, srv.provider.as_deref(), Some(srv.protocol.as_str()), &cfg),
+            );
+            if excluded { None } else { Some(trimmed.to_string()) }
+        })
+    }) {
+        Some(s) => s,
         _ => {
-            // Ищем подходящий сервер не из РФ/РБ из mihomo::get_servers, либо первый доступный узел
-            if let Ok(servers) = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
-                let cand = servers.iter().find(|s| {
-                    if s.id.is_empty() || s.id == "Fastest" || s.id == "Fallback" || s.is_pool || s.id == "PROXY" || s.id == "GLOBAL" || s.id == "DIRECT" || s.id == "REJECT" {
+            // Ищем подходящий сервер не из РФ/РБ/БС из mihomo::get_servers, либо первый доступный не-БС узел
+            if !known_servers.is_empty() {
+                let cand = known_servers.iter().find(|s| {
+                    if s.is_pool
+                        || is_excluded_for_flow(&s.id, &s.name, s.provider.as_deref(), Some(s.protocol.as_str()), &cfg)
+                    {
                         return false;
                     }
                     let country = crate::mihomo::detect_server_country(&s.id);
@@ -1323,7 +1414,10 @@ pub async fn repair_flow(State(state): State<AppState>) -> Response {
                 });
                 if let Some(srv) = cand {
                     srv.id.clone()
-                } else if let Some(first_valid) = servers.into_iter().find(|s| !s.id.is_empty() && s.id != "Fastest" && s.id != "Fallback" && !s.is_pool && s.id != "PROXY" && s.id != "GLOBAL" && s.id != "DIRECT" && s.id != "REJECT") {
+                } else if let Some(first_valid) = known_servers.into_iter().find(|s| {
+                    !s.is_pool
+                        && !is_excluded_for_flow(&s.id, &s.name, s.provider.as_deref(), Some(s.protocol.as_str()), &cfg)
+                }) {
                     first_valid.id
                 } else {
                     return api_err("В конфигурации ядра Mihomo не найдено ни одного действительного прокси-сервера для маршрута Google Flow");
@@ -1427,14 +1521,21 @@ pub async fn auto_select_flow_server(
     let mut chosen_ping: Option<i64> = None;
 
     if target_enabled {
+        let known_servers = mihomo::get_servers(&state.http, &current_cfg, &current_cfg.failover.priority_chain)
+            .await
+            .unwrap_or_default();
         let pings = mihomo::ping_flow_servers(&state.http, &current_cfg, 3500).await;
         let mut min_ping = i64::MAX;
-        let is_excluded_selector = |name: &str| -> bool {
-            ["PROXY", "GLOBAL", "Fastest", "Fallback", "DIRECT", "REJECT", "Google AI", "YouTube", "Discord", "Telegram", "Steam", "Twitch", "Torrent"].contains(&name)
+        let is_excluded_node = |id: &str| -> bool {
+            let meta = known_servers.iter().find(|s| s.id == id);
+            meta.map_or_else(
+                || is_excluded_for_flow(id, id, None, None, &current_cfg),
+                |s| is_excluded_for_flow(&s.id, &s.name, s.provider.as_deref(), Some(s.protocol.as_str()), &current_cfg),
+            )
         };
 
         for (name, &ping) in &pings {
-            if is_excluded_selector(name) {
+            if is_excluded_node(name) {
                 continue;
             }
             if ping > 0 && ping < min_ping {
@@ -1449,7 +1550,7 @@ pub async fn auto_select_flow_server(
 
         if best_server_id.is_none() {
             for (name, &ping) in &pings {
-                if is_excluded_selector(name) {
+                if is_excluded_node(name) {
                     continue;
                 }
                 if ping > 0 && ping < min_ping {
@@ -1567,43 +1668,58 @@ pub async fn whitelist_detector_detect_servers(
     };
 
     if req.apply.unwrap_or(false) {
-        let _cfg_guard = state.config_lock.lock().await;
-        let mut cfg = (**state.config.read().await).clone();
+        let cfg = {
+            let _cfg_guard = state.config_lock.lock().await;
+            let mut cfg = (**state.config.read().await).clone();
 
-        // 1. Добавляем обнаруженные BS провайдеры в whitelist_providers (дедупликация)
-        for wp in &detect_res.detected_bs_providers {
-            if !cfg.whitelist_providers.iter().any(|p| p.eq_ignore_ascii_case(wp)) {
-                cfg.whitelist_providers.push(wp.clone());
+            // 1. Добавляем обнаруженные BS провайдеры в whitelist_providers (дедупликация)
+            for wp in &detect_res.detected_bs_providers {
+                let wp_lower = wp.trim().to_lowercase();
+                if !cfg.whitelist_providers.iter().any(|p| p.trim().to_lowercase() == wp_lower) {
+                    cfg.whitelist_providers.push(wp.clone());
+                }
             }
-        }
 
-        // 2. Добавляем обнаруженные узлы БС в whitelist_servers (дедупликация)
-        for ws in &detect_res.detected_bs_servers {
-            if !cfg.whitelist_servers.iter().any(|s| s == ws) {
-                cfg.whitelist_servers.push(ws.clone());
+            // 2. Добавляем обнаруженные узлы БС в whitelist_servers (дедупликация)
+            for ws in &detect_res.detected_bs_servers {
+                if !cfg.whitelist_servers.iter().any(|s| s == ws) {
+                    cfg.whitelist_servers.push(ws.clone());
+                }
             }
-        }
 
-        // 3. Если monitored_provider пуст, заполняем suggested_monitored_provider
-        if cfg.failover.whitelist_detector.monitored_provider.trim().is_empty() {
-            if let Some(ref sug) = detect_res.suggested_monitored_provider {
-                cfg.failover.whitelist_detector.monitored_provider = sug.clone();
+            // 3. Если monitored_provider пуст, заполняем suggested_monitored_provider
+            if cfg.failover.whitelist_detector.monitored_provider.trim().is_empty() {
+                if let Some(ref sug) = detect_res.suggested_monitored_provider {
+                    cfg.failover.whitelist_detector.monitored_provider = sug.clone();
+                }
             }
-        }
 
-        // 4. Если target_bs_provider пуст, заполняем suggested_target_bs_provider
-        if cfg.failover.whitelist_detector.target_bs_provider.trim().is_empty() {
-            if let Some(ref sug) = detect_res.suggested_target_bs_provider {
-                cfg.failover.whitelist_detector.target_bs_provider = sug.clone();
+            // 4. Если target_bs_provider пуст, заполняем suggested_target_bs_provider
+            if cfg.failover.whitelist_detector.target_bs_provider.trim().is_empty() {
+                if let Some(ref sug) = detect_res.suggested_target_bs_provider {
+                    cfg.failover.whitelist_detector.target_bs_provider = sug.clone();
+                }
             }
-        }
 
-        if let Err(e) = config::save(&state.config_path, &cfg).await {
-            return api_err(format!("Ошибка сохранения конфигурации при автонастройке БС: {e}"));
-        }
+            if let Err(e) = config::save(&state.config_path, &cfg).await {
+                return api_err(format!("Ошибка сохранения конфигурации при автонастройке БС: {e}"));
+            }
 
-        *state.config.write().await = std::sync::Arc::new(cfg);
-        log_i!("[DETECTOR] Автоматически применены настройки обнаруженных БС узлов и провайдеров");
+            *state.config.write().await = std::sync::Arc::new(cfg.clone());
+            log_i!("[DETECTOR] Автоматически применены настройки обнаруженных БС узлов и провайдеров");
+            cfg
+        };
+
+        if let Ok(Some(active_srv)) = mihomo::get_active_server(&state.http, &cfg).await {
+            failover::handle_whitelist_transition(
+                &state,
+                &active_srv.id,
+                &active_srv.name,
+                active_srv.provider.as_deref(),
+            )
+            .await;
+            let _ = sync_whitelist_mode_tunnel(&state, &active_srv.id).await;
+        }
     }
 
     api_ok(json!(detect_res))
@@ -2527,6 +2643,10 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
                     )
                     .await;
                 }
+                if cfg.vkturn.enabled {
+                    let turn_ips = state.vkturn.rt.read().await.turn_ips.clone();
+                    crate::vkturn::apply_exemptions(&cfg.vkturn.peer, &turn_ips).await;
+                }
                 if action == "restart_all" {
                     tokio::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
@@ -2803,6 +2923,7 @@ pub async fn restore_backup(State(state): State<AppState>, Json(req): Json<Backu
     // 3. Атомарное применение и reload с автоматическим двухфазным откатом при сбое (BK-05)
     match tx.commit_and_reload().await {
         Ok(_) => {
+            crate::vkturn::sync_vkturn_after_restore(&state).await;
             log_i!("Конфиги атомарно восстановлены из бэкапа {}", req.name);
             api_ok(json!({ "restored": req.name }))
         }
@@ -3153,9 +3274,8 @@ pub async fn get_providers(State(state): State<AppState>) -> Response {
         Ok(providers) => {
             let list: Vec<serde_json::Value> = providers
                 .into_iter()
-                .map(|mut p| {
-                    let is_wl = crate::failover::is_whitelist_server_full(&p.name, &p.id, None, &cfg)
-                        || cfg.whitelist_providers.iter().any(|wp| wp.eq_ignore_ascii_case(&p.id));
+                .map(|p| {
+                    let is_wl = crate::failover::is_whitelist_server_full(&p.name, &p.id, Some(&p.id), &cfg);
                     let live_delta = crate::traffic::get_provider_live_delta(&p.id);
 
                     // Если есть квота (total_bytes), вычисляем actual used (baseline + live_delta) и accurate remaining
@@ -8081,6 +8201,8 @@ pub async fn get_vkturn_status(State(state): State<AppState>) -> Response {
         "max_links": crate::vkturn::MAX_LINKS,
         "restarts": rt.restarts,
         "last_error": rt.last_error,
+        "error_source": rt.error_source,
+        "error_reason": rt.error_reason,
         "enabled": v.enabled,
         "peer": v.peer,
         "has_password": !v.password.is_empty(),
@@ -8092,9 +8214,11 @@ pub async fn get_vkturn_status(State(state): State<AppState>) -> Response {
         "install": state.vkturn.install_state(),
         "auth_mode": v.auth_mode,
         "has_token": v.vk_token.as_ref().map(|t| !t.trim().is_empty()).unwrap_or(false),
+        "has_profile_token": v.profile_token.as_ref().map(|t| !t.trim().is_empty()).unwrap_or(false),
         "vk_token": v.vk_token.as_ref().map(|t| crate::vkturn::mask_vk_token(t)),
         "vk_user_id": v.vk_user_id,
         "vk_user_name": v.vk_user_name,
+        "vk_token_verified": v.vk_token_verified,
     }))
 }
 
@@ -8103,6 +8227,19 @@ pub async fn get_vkturn_logs(State(state): State<AppState>) -> Response {
     let rt = state.vkturn.rt.read().await;
     let lines: Vec<String> = rt.log_tail.iter().cloned().collect();
     api_ok(json!({ "lines": lines }))
+}
+
+#[derive(Deserialize)]
+pub struct DecryptCsqttProfileReq {
+    pub link: String,
+}
+
+/// Расшифровка выполняется локально; ссылка и её содержимое не записываются в журнал.
+pub async fn decrypt_csqtt_profile(Json(body): Json<DecryptCsqttProfileReq>) -> Response {
+    match crate::vkturn::decrypt_csqtt_link(&body.link) {
+        Some(link) => api_ok(json!({ "link": link })),
+        None => api_err("Не удалось прочитать зашифрованный профиль CSQTTR"),
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -8116,9 +8253,14 @@ pub struct SaveVkTurnConfigReq {
     pub links: Option<Vec<String>>,
     /// Новая основная ссылка: встаёт первой, остальные (запасные) сохраняются без дублей
     pub primary_link: Option<String>,
+    /// Добавить запасную ссылку в конец списка (без дублей)
+    pub append_link: Option<String>,
+    /// Удалить ссылку по индексу (полезно для удаления битых/скрытых ссылок без пересылки всего списка)
+    pub remove_link_index: Option<usize>,
     pub streams: Option<u8>,
     pub auth_mode: Option<String>,
     pub vk_token: Option<String>,
+    pub profile_token: Option<String>,
     pub vk_user_id: Option<u64>,
     pub vk_user_name: Option<String>,
 }
@@ -8142,9 +8284,13 @@ pub async fn save_vkturn_config(
     }
     if let Some(ref p) = body.peer {
         let p_trim = p.trim();
-        if let Some((addr, pw)) = crate::vkturn::parse_csqtt_link(p_trim) {
-            new_cfg.peer = addr;
-            new_cfg.password = pw;
+        if let Some(profile) = crate::vkturn::parse_csqtt_profile(p_trim) {
+            new_cfg.peer = profile.peer;
+            new_cfg.password = profile.password;
+            new_cfg.links = profile.links.iter().map(|h| format!("https://vk.com/call/join/{h}")).collect();
+            new_cfg.auth_mode = if profile.token.is_some() { "profile_token" } else if !new_cfg.links.is_empty() { "manual" } else { "oauth" }.to_string();
+            new_cfg.profile_token = profile.token;
+            new_cfg.streams = profile.power.unwrap_or(0);
         } else {
             match crate::vkturn::normalize_peer(p_trim) {
                 Ok(n) => new_cfg.peer = n,
@@ -8178,6 +8324,25 @@ pub async fn save_vkturn_config(
             Err(e) => return api_err(e),
         }
     }
+    if let Some(idx) = body.remove_link_index {
+        if idx >= new_cfg.links.len() {
+            return api_err("Указанная ссылка на звонок не найдена");
+        }
+        new_cfg.links.remove(idx);
+    }
+    if let Some(ref extra) = body.append_link {
+        let extra = extra.trim();
+        if !extra.is_empty() {
+            match crate::vkturn::normalize_call_link(extra) {
+                Ok(n) => {
+                    if !new_cfg.links.contains(&n) {
+                        new_cfg.links.push(n);
+                    }
+                }
+                Err(e) => return api_err(format!("Ссылка некорректна: {e}")),
+            }
+        }
+    }
     if let Some(s) = body.streams {
         if s != 0 && !(3..=100).contains(&s) {
             return api_err("Число потоков должно находиться в диапазоне 3–100 (или 0 для автовыбора)");
@@ -8191,8 +8356,20 @@ pub async fn save_vkturn_config(
         let t = tok.trim();
         if t.is_empty() {
             new_cfg.vk_token = None;
+            new_cfg.vk_token_verified = false;
         } else if t != "******" && !t.contains("***") && t != "[REDACTED]" {
             new_cfg.vk_token = Some(t.to_string());
+            new_cfg.vk_token_verified = false;
+        }
+    }
+    if let Some(ref tok) = body.profile_token {
+        let t = tok.trim();
+        if t.is_empty() {
+            new_cfg.profile_token = None;
+        } else if t.len() > 4096 || t.chars().any(char::is_whitespace) || is_secret_mask(t, false) {
+            return api_err("Некорректный токен профиля");
+        } else {
+            new_cfg.profile_token = Some(t.to_string());
         }
     }
     if let Some(uid) = body.vk_user_id {
@@ -8216,7 +8393,7 @@ pub async fn save_vkturn_config(
         if let Err(e) = crate::vkturn::validate_password(&new_cfg.password) {
             return api_err(e);
         }
-        let has_valid_token = new_cfg.vk_token.as_ref().map(|t| !t.trim().is_empty()).unwrap_or(false);
+        let has_valid_token = crate::vkturn::selected_vk_token(&new_cfg).is_some();
         if !has_valid_token && crate::vkturn::call_hashes(&new_cfg).is_empty() {
             return api_err("Укажите хотя бы одну ссылку на звонок ВКонтакте или выполните вход через VK ID");
         }
@@ -8233,7 +8410,11 @@ pub async fn save_vkturn_config(
         Err(e) => return api_err(e),
     };
 
+    let saved_enabled = saved.enabled;
     state.vkturn.restart(saved, state.clone()).await;
+    if !saved_enabled {
+        crate::vkturn::evacuate_vkturn_selectors(&state).await;
+    }
 
     api_ok(json!({
         "success": true,
@@ -8275,6 +8456,8 @@ pub async fn vkturn_action(
                 v.peer = String::new();
                 v.password = String::new();
                 v.links = Vec::new();
+                v.profile_token = None;
+                v.auth_mode = "oauth".to_string();
                 v.streams = 0;
                 Ok(())
             })
@@ -8285,11 +8468,17 @@ pub async fn vkturn_action(
             };
 
             state.vkturn.stop().await;
+            *state.vkturn.rt.write().await = crate::vkturn::VkTurnRuntime::default();
+            crate::vkturn::evacuate_vkturn_selectors(&state).await;
 
+            let mut masked_cfg = saved.clone();
+            if let Some(ref t) = masked_cfg.vk_token {
+                masked_cfg.vk_token = Some(crate::vkturn::mask_vk_token(t));
+            }
             api_ok(json!({
                 "success": true,
                 "message": "Настройки сервера VK-туннеля сброшены",
-                "config": saved
+                "config": masked_cfg
             }))
         }
         "install_core" => {
@@ -8384,13 +8573,15 @@ pub async fn save_vkturn_auth(
     let target_uid = body.user_id.or(parsed_uid);
 
     // Запрос профиля пользователя через VK API
-    let (real_uid, user_name) = match crate::vkturn::fetch_vk_user_profile(&state.http, &parsed_token, target_uid).await {
-        Ok((uid, name)) => (uid, name),
-        Err(e) => {
-            crate::log_w!("[VK-туннель] Не удалось получить профиль через users.get: {e}");
-            // Если запрос упал (например, нет интернета на роутере), но uid есть — сохраняем с заглушкой
+    let (real_uid, user_name, verified) = match crate::vkturn::fetch_vk_user_profile(&state.http, &parsed_token, target_uid).await {
+        Ok((uid, name)) => (uid, name, true),
+        Err(crate::vkturn::VkProfileError::Rejected) => return api_err("VK отклонил токен. Проверьте авторизацию аккаунта."),
+        Err(crate::vkturn::VkProfileError::Unavailable) => {
+            if state.config.read().await.vkturn.vk_token.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+                return api_err("Не удалось проверить новый токен VK. Текущий аккаунт сохранён; попробуйте позже.");
+            }
             let uid = target_uid.unwrap_or(0);
-            (uid, format!("Пользователь VK {uid}"))
+            (uid, if uid == 0 { "Профиль VK не проверен".to_string() } else { format!("Пользователь VK {uid}") }, false)
         }
     };
 
@@ -8399,8 +8590,11 @@ pub async fn save_vkturn_auth(
     let name_for_save = user_name.clone();
 
     let saved = match crate::vkturn::commit_vkturn(&state, move |v| {
-        v.auth_mode = auth_mode;
+        if v.auth_mode != "manual" && v.auth_mode != "profile_token" {
+            v.auth_mode = auth_mode;
+        }
         v.vk_token = Some(token_for_save);
+        v.vk_token_verified = verified;
         v.vk_user_id = if real_uid > 0 { Some(real_uid) } else { None };
         v.vk_user_name = Some(name_for_save);
         Ok(())
@@ -8411,7 +8605,7 @@ pub async fn save_vkturn_auth(
         Err(e) => return api_err(e),
     };
 
-    if saved.enabled {
+    if saved.enabled && verified && saved.auth_mode != "manual" && saved.auth_mode != "profile_token" {
         state.vkturn.restart(saved, state.clone()).await;
     }
 
@@ -8419,7 +8613,8 @@ pub async fn save_vkturn_auth(
         "success": true,
         "user_id": real_uid,
         "user_name": user_name,
-        "message": "Учетная запись VK успешно подключена"
+        "verified": verified,
+        "message": if verified { "Учётная запись VK проверена и подключена" } else { "Токен сохранён, но VK недоступен: проверить аккаунт пока не удалось" }
     }))
 }
 
@@ -8431,7 +8626,10 @@ pub async fn logout_vkturn_auth(State(state): State<AppState>) -> Response {
         v.vk_token = None;
         v.vk_user_id = None;
         v.vk_user_name = None;
-        v.auth_mode = "oauth".to_string();
+        v.vk_token_verified = false;
+        if v.auth_mode != "manual" && v.auth_mode != "profile_token" {
+            v.auth_mode = "oauth".to_string();
+        }
         Ok(())
     })
     .await
@@ -8440,7 +8638,7 @@ pub async fn logout_vkturn_auth(State(state): State<AppState>) -> Response {
         Err(e) => return api_err(e),
     };
 
-    if saved.enabled {
+    if saved.enabled && saved.auth_mode != "manual" && saved.auth_mode != "profile_token" {
         state.vkturn.restart(saved, state.clone()).await;
     }
 
@@ -8920,6 +9118,11 @@ pub async fn zapret_set_enabled_core(state: &AppState, enabled: bool) -> Result<
             ));
         }
         persist_zapret_enabled_with_routing(state, true).await?;
+        let cur_cfg = state.config.read().await.clone();
+        if cur_cfg.vkturn.enabled {
+            let turn_ips = state.vkturn.rt.read().await.turn_ips.clone();
+            crate::vkturn::apply_exemptions(&cur_cfg.vkturn.peer, &turn_ips).await;
+        }
         Ok("🟢 Служба Zapret запущена".to_string())
     } else {
         crate::zapret::set_zapret_disabled_marker();
@@ -10271,6 +10474,12 @@ pub async fn zapret_action(
             }
             let _ = config::save(&state.config_path, &cfg).await;
             *state.config.write().await = std::sync::Arc::new(cfg.clone());
+            if cfg.vkturn.enabled
+                && matches!(action_to_run, "start" | "restart" | "start-fw" | "reload-fw")
+            {
+                let turn_ips = state.vkturn.rt.read().await.turn_ips.clone();
+                crate::vkturn::apply_exemptions(&cfg.vkturn.peer, &turn_ips).await;
+            }
 
             let hot_reloaded = action_to_run == "reload" || action_to_run == "reload-hosts";
             api_ok(json!({
@@ -15450,6 +15659,263 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
 
+    }
+
+    #[tokio::test]
+    async fn regression_marking_active_subscription_enables_whitelist_mode() {
+        use axum::{routing::{get, put}, Json, Router, http::StatusCode};
+
+        crate::mihomo::invalidate_proxies_cache();
+
+        let app = Router::new()
+            .route(
+                "/proxies",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "proxies": {
+                            "PROXY": {
+                                "type": "Selector",
+                                "now": "Германия 01",
+                                "all": ["Германия 01"]
+                            },
+                            "Германия 01": {
+                                "type": "VLESS",
+                                "name": "Германия 01",
+                                "server": "203.0.113.10",
+                                "port": 443,
+                                "alive": true,
+                                "history": [{"delay": 42}]
+                            }
+                        }
+                    }))
+                }),
+            )
+            .route(
+                "/providers/proxies",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "providers": {
+                            "геодема2": {
+                                "name": "геодема2",
+                                "vehicleType": "HTTP",
+                                "proxies": [
+                                    {
+                                        "type": "VLESS",
+                                        "name": "Германия 01",
+                                        "server": "203.0.113.10",
+                                        "port": 443,
+                                        "alive": true,
+                                        "history": [{"delay": 42}]
+                                    }
+                                ]
+                            },
+                            "z_other_sub": {
+                                "name": "z_other_sub",
+                                "vehicleType": "HTTP",
+                                "proxies": [
+                                    {
+                                        "type": "VLESS",
+                                        "name": "Германия 01",
+                                        "server": "203.0.113.10",
+                                        "port": 443,
+                                        "alive": true,
+                                        "history": [{"delay": 42}]
+                                    }
+                                ]
+                            }
+                        }
+                    }))
+                }),
+            )
+            .route("/configs", put(|| async { StatusCode::NO_CONTENT }))
+            .route("/proxies/{group}", put(|| async { StatusCode::NO_CONTENT }));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv_handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "xkeen_wl_prov_active_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+        let yaml_path = tmp_dir.join("config.yaml");
+        let json_path = tmp_dir.join("config.json");
+        let base_yaml = "mode: rule\nproxies: []\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules:\n  - MATCH,PROXY\n";
+        std::fs::write(&yaml_path, base_yaml).unwrap();
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".to_string();
+        cfg.mihomo.port = port;
+        cfg.mihomo.config_path = yaml_path.to_string_lossy().to_string();
+        cfg.whitelist.auto_by_failover = true;
+        cfg.whitelist.enabled = false;
+        crate::config::save(&json_path, &cfg).await.unwrap();
+
+        let cfg_arc = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(cfg)));
+        let state = AppState {
+            config: cfg_arc.clone(),
+            config_path: std::sync::Arc::new(json_path.clone()),
+            http: reqwest::Client::new(),
+            failover_log: std::sync::Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: std::sync::Arc::new(crate::antigravity::AntigravityManager::new(cfg_arc)),
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        // 1. Отмечаем активную подписку «геодема2» как подходящую для белых списков
+        let resp = set_provider_whitelist(
+            axum::extract::State(state.clone()),
+            axum::Json(ProviderWhitelistReq {
+                provider_id: Some("геодема2".to_string()),
+                provider: None,
+                enabled: Some(true),
+                providers: None,
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let cur = state.config.read().await.clone();
+        assert!(
+            cur.whitelist_providers.iter().any(|p| p == "геодема2"),
+            "подписка должна сохраниться в whitelist_providers"
+        );
+        assert!(
+            cur.whitelist.enabled,
+            "режим белых списков должен автоматически включиться для уже активного сервера из отмеченной подписки"
+        );
+        assert_eq!(
+            cur.whitelist.enabled_by,
+            crate::config::WhitelistEnabledBy::Failover,
+            "источник включения режима БС должен быть Failover"
+        );
+
+        let saved_disk = crate::config::load(&json_path);
+        assert!(saved_disk.whitelist.enabled, "включение БС должно сохраниться в config.json");
+
+        // 2. Снимаем отметку с подписки — режим БС должен автоматически выключиться
+        crate::mihomo::invalidate_proxies_cache();
+        let resp_off = set_provider_whitelist(
+            axum::extract::State(state.clone()),
+            axum::Json(ProviderWhitelistReq {
+                provider_id: Some("геодема2".to_string()),
+                provider: None,
+                enabled: Some(false),
+                providers: None,
+            }),
+        )
+        .await;
+        assert_eq!(resp_off.status(), StatusCode::OK);
+        assert!(
+            !state.config.read().await.whitelist.enabled,
+            "после снятия отметки с активной подписки режим БС (включенный автоматически) должен выключиться"
+        );
+
+        srv_handle.abort();
+        crate::mihomo::invalidate_proxies_cache();
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn regression_vkturn_25_flow_zapret_backup_evacuation_and_links() {
+        let api_src = include_str!("api.rs");
+
+        // Item 22: repair_flow and auto_select_flow_server must exclude vkturn and [БС] nodes
+        let repair_fn = api_src
+            .split("pub async fn repair_flow(")
+            .nth(1)
+            .and_then(|s| s.split("pub struct FlowAutoSelectReq").next())
+            .expect("repair_flow must exist");
+        assert!(
+            repair_fn.contains("is_excluded_for_flow") || repair_fn.contains("PROXY_NAME"),
+            "repair_flow must exclude vkturn and [БС] servers from Google Flow selection"
+        );
+        let auto_fn = api_src
+            .split("pub async fn auto_select_flow_server(")
+            .nth(1)
+            .and_then(|s| s.split("pub async fn get_flow_extension(").next())
+            .expect("auto_select_flow_server must exist");
+        assert!(
+            auto_fn.contains("is_excluded_for_flow") || auto_fn.contains("PROXY_NAME"),
+            "auto_select_flow_server must exclude vkturn and [БС] servers"
+        );
+
+        // Item 9: SaveVkTurnConfigReq supports append_link and remove_link_index
+        let save_req_block = api_src
+            .split("pub struct SaveVkTurnConfigReq")
+            .nth(1)
+            .and_then(|s| s.split("pub async fn save_vkturn_config(").next())
+            .expect("SaveVkTurnConfigReq must exist");
+        assert!(save_req_block.contains("append_link") && save_req_block.contains("remove_link_index"));
+
+        // Item 19: save_vkturn_config and vkturn_action evacuate active vkturn selectors when disabled/reset/stopped
+        let vk_save_fn = api_src
+            .split("pub async fn save_vkturn_config(")
+            .nth(1)
+            .and_then(|s| s.split("pub struct VkTurnActionReq").next())
+            .expect("save_vkturn_config must exist");
+        assert!(
+            vk_save_fn.contains("evacuate_vkturn_selectors"),
+            "save_vkturn_config must evacuate PROXY and 🛡️ Whitelist selectors when vkturn is disabled"
+        );
+        let vk_act_fn = api_src
+            .split("pub async fn vkturn_action(")
+            .nth(1)
+            .and_then(|s| s.split("pub struct VkTurnAuthSaveReq").next())
+            .expect("vkturn_action must exist");
+        assert!(
+            vk_act_fn.contains("evacuate_vkturn_selectors"),
+            "vkturn_action reset must evacuate active vkturn selectors"
+        );
+
+        // Item 20: xkeen_service and zapret handlers re-apply vkturn exemptions
+        let xkeen_fn = api_src
+            .split("pub async fn xkeen_service(")
+            .nth(1)
+            .and_then(|s| s.split("/// Перезапуск службы XKeen").next())
+            .expect("xkeen_service must exist");
+        assert!(
+            xkeen_fn.contains("apply_exemptions"),
+            "xkeen_service start/restart must re-apply vkturn exemptions"
+        );
+        let zap_core_fn = api_src
+            .split("pub async fn zapret_set_enabled_core(")
+            .nth(1)
+            .and_then(|s| s.split("pub async fn persist_zapret_enabled_with_routing(").next())
+            .expect("zapret_set_enabled_core must exist");
+        assert!(
+            zap_core_fn.contains("apply_exemptions"),
+            "zapret_set_enabled_core must re-apply vkturn exemptions"
+        );
+        let zap_act_fn = api_src
+            .split("pub async fn zapret_action(")
+            .nth(1)
+            .and_then(|s| s.split("pub async fn get_zapret_status(").next())
+            .expect("zapret_action must exist");
+        assert!(
+            zap_act_fn.contains("apply_exemptions"),
+            "zapret_action must re-apply vkturn exemptions after firewall changes"
+        );
+
+        // Item 24: restore_backup syncs vkturn runtime & provider
+        let restore_fn = api_src
+            .split("pub async fn restore_backup(")
+            .nth(1)
+            .and_then(|s| s.split("pub async fn delete_backup(").next())
+            .expect("restore_backup must exist");
+        assert!(
+            restore_fn.contains("sync_vkturn_after_restore"),
+            "restore_backup must sync vkturn provider and runtime after config restore"
+        );
     }
 }
 

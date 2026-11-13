@@ -1074,6 +1074,8 @@ export interface VkTurnStatus {
   max_links: number
   restarts: number
   last_error?: string | null
+  error_source?: 'csqtt' | 'vk' | 'network' | null
+  error_reason?: string | null
   enabled: boolean
   peer: string
   has_password: boolean
@@ -1081,6 +1083,8 @@ export interface VkTurnStatus {
   auth_mode?: string
   /** Флаг наличия сохранённого токена VK */
   has_token?: boolean
+  has_profile_token?: boolean
+  vk_token_verified?: boolean
   /** Маскированный токен VK (vk1.a.***) */
   vk_token?: string | null
   /** ID авторизованного пользователя VK */
@@ -1117,8 +1121,13 @@ export interface VkTurnConfigPayload {
   streams?: number
   /** Новая основная ссылка: встаёт первой, запасные сохраняются */
   primary_link?: string
+  /** Добавить запасную ссылку без дублей */
+  append_link?: string
+  /** Удалить ссылку по индексу */
+  remove_link_index?: number
   auth_mode?: string
   vk_token?: string
+  profile_token?: string
   vk_user_id?: number
   vk_user_name?: string
 }

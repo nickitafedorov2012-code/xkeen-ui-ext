@@ -3,18 +3,25 @@ export interface ParsedCsqttProfile {
   port: number;
   password: string;
   hashes?: string[];
+  token?: string;
+  power?: number;
 }
 
-const KNOWN_KEYS = ['host', 'peer', 'password', 'hashes'];
+function repairGluedQuery(query: string): string | null {
+  const match = /^v=2host=([a-z0-9.-]+)&?peer=([0-9]+)&?password=([^&]+)$/i.exec(query);
+  if (!match || /(?:v|host|peer|password|client|hashes|token|workers|power)=/i.test(match[3])) return null;
+  return `v=2&host=${match[1]}&peer=${match[2]}&password=${match[3]}`;
+}
 
-function separateParams(link: string): string {
-  let result = link;
-  for (const key of KNOWN_KEYS) {
-    // В Telegram ссылки иногда склеиваются без '&'
-    result = result.replace(new RegExp(`([?&]|v=2)${key}=`, 'g'), `$1&${key}=`);
-    result = result.replace(new RegExp(`([^?&])${key}=`, 'g'), `$1&${key}=`);
-  }
-  return result;
+function parsePort(value: string): number | null {
+  if (!/^\d+$/.test(value)) return null;
+  const port = Number(value);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+}
+
+function isUsableHost(host: string): boolean {
+  if (['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(host.toLowerCase())) return false;
+  return /^[a-z0-9.-]{1,253}$/i.test(host) || /^[a-f0-9:]+$/i.test(host) && host.includes(':');
 }
 
 export function parseCsqttLink(raw: string): ParsedCsqttProfile | null {
@@ -25,33 +32,69 @@ export function parseCsqttLink(raw: string): ParsedCsqttProfile | null {
 
   // Формат v2: csqtt://connect?v=2&host=...&peer=46000&password=...
   if (trimmed.toLowerCase().startsWith('csqtt://connect?')) {
-    const fixed = separateParams(trimmed);
-    const queryPart = fixed.substring(fixed.indexOf('?') + 1);
-    const params = new URLSearchParams(queryPart);
+    let queryPart = trimmed.substring(trimmed.indexOf('?') + 1);
+    // A literal plus is data in CSQTT links, not a form-encoded space.
+    let params = new URLSearchParams(queryPart.replace(/\+/g, '%2B'));
+    // Only attempt the legacy repair when the structured query is incomplete.
+    if (!params.has('host') || !params.has('peer') || !params.has('password')) {
+      const fixed = repairGluedQuery(queryPart);
+      if (!fixed) return null;
+      queryPart = fixed;
+      params = new URLSearchParams(queryPart.replace(/\+/g, '%2B'));
+    }
 
-    const host = params.get('host')?.trim();
+    if (/%(?![0-9a-fA-F]{2})/.test(queryPart) || params.get('v') !== '2') return null;
+    const seen = new Set<string>();
+    for (const key of params.keys()) {
+      if (seen.has(key)) return null;
+      seen.add(key);
+    }
+    if (params.has('power') && params.has('workers')) return null;
+
+    const host = params.get('host');
     const peerStr = params.get('peer')?.trim();
     const password = params.get('password')?.trim();
-    const hashesStr = params.get('hashes')?.trim();
+    const hashesRaw = queryPart.split('&').find((part) => part.startsWith('hashes='))?.slice(7);
 
-    if (!host || !password) {
+    if (!host || !isUsableHost(host) || !password) {
       return null;
     }
 
-    const port = peerStr ? parseInt(peerStr, 10) : 46000;
-    if (isNaN(port) || port <= 0 || port > 65535) {
+    const port = peerStr ? parsePort(peerStr) : null;
+    if (port === null) {
       return null;
     }
 
-    const hashes = hashesStr
-      ? hashesStr.split(',').map((h) => h.trim()).filter((h) => h.length > 0)
-      : undefined;
+    let hashes: string[] | undefined;
+    if (hashesRaw !== undefined) {
+      try {
+        hashes = hashesRaw.split(/[+,]/).map((h) => decodeURIComponent(h).trim()
+          .replace(/^(?:https?:\/\/)?(?:m\.)?vk\.(?:com|ru)\/call\/join\//i, '')
+          .replace(/[?#].*$/, '').replace(/\/$/, ''));
+      } catch {
+        return null;
+      }
+      if (hashes.length > 6 || hashes.some((h) => !/^[a-z0-9_-]{16,128}$/i.test(h)) || new Set(hashes).size !== hashes.length) return null;
+    }
+    const token = params.get('token') ?? undefined;
+    if (token !== undefined && (!token || token.length > 4096 || /\s/.test(token))) return null;
+    if (token && hashes?.length) return null;
+    const rawPower = params.get('power') ?? params.get('workers');
+    let power: number | undefined;
+    if (rawPower !== null) {
+      if (!/^\d+$/.test(rawPower)) return null;
+      const value = Number(rawPower);
+      if (!Number.isSafeInteger(value) || value <= 0) return null;
+      power = Math.min(100, Math.max(10, value));
+    }
 
     return {
       host,
       port,
       password,
       hashes,
+      token,
+      power,
     };
   }
 
@@ -71,27 +114,21 @@ export function parseCsqttLink(raw: string): ParsedCsqttProfile | null {
 
   const address = withoutScheme.substring(atIndex + 1);
   let host = '';
-  let port: number = 46000;
+  let port: number | null = null;
 
   if (address.startsWith('[')) {
     const closeBracket = address.indexOf(']');
     if (closeBracket === -1) return null;
     host = address.substring(1, closeBracket);
     const rest = address.substring(closeBracket + 1);
-    if (rest.startsWith(':')) {
-      const p = parseInt(rest.substring(1), 10);
-      if (!isNaN(p) && p > 0 && p <= 65535) port = p;
-    }
+    if (rest.startsWith(':')) port = parsePort(rest.substring(1));
   } else {
     const parts = address.split(':');
     host = parts[0];
-    if (parts.length > 1) {
-      const p = parseInt(parts[1], 10);
-      if (!isNaN(p) && p > 0 && p <= 65535) port = p;
-    }
+    if (parts.length === 2) port = parsePort(parts[1]);
   }
 
-  if (!host || !password) {
+  if (!host || !isUsableHost(host) || !password || port === null) {
     return null;
   }
 

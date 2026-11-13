@@ -97,85 +97,112 @@ export default function ShareNodeModal({
             )}
           </div>
 
-          {isPlaceholder && (
-            <div
-              style={{
-                background: 'rgba(234, 179, 8, 0.08)',
-                border: '1px solid rgba(234, 179, 8, 0.25)',
-                borderRadius: 8,
-                padding: '8px 12px',
-                fontSize: 11.5,
-                color: '#eab308',
-                lineHeight: 1.4,
-              }}
-            >
-              ℹ️ <b>Безопасность ядра:</b> Mihomo скрывает секретные UUID серверов. Вы можете вставить рабочий ключ в поле ниже — QR-код обновится на лету.
-            </div>
-          )}
-
-          <div className="share-node-grid">
-            {/* Левая колонка: QR-код */}
-            <div className="share-qr-box">
-              <div className="share-qr-wrapper">
-                <img
-                  src={qrImageUrl}
-                  alt="QR Code"
-                  className="share-qr-img"
-                  width={200}
-                  height={200}
-                />
+          {server.protocol.toUpperCase() === 'VK-CALL' ? (
+            <div className="vk-subcard" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ fontSize: 13.5, fontWeight: 600 }}>
+                📞 Туннель через звонки ВКонтакте (csqtt)
               </div>
-              <p className="muted small" style={{ textAlign: 'center', margin: '8px 0 0', fontSize: 11 }}>
-                Сканируйте камерой телефона для быстрого импорта
-              </p>
-            </div>
-
-            {/* Правая колонка: Ссылка и быстрое копирование */}
-            <div className="share-link-box">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <label className="form-label" style={{ fontWeight: 600, fontSize: 12, margin: 0 }}>
-                  Ссылка конфигурации:
-                </label>
-                {customLink && (
-                  <button
-                    type="button"
-                    className="btn btn-sm ghost"
-                    style={{ fontSize: 11, padding: '2px 6px' }}
-                    onClick={() => setCustomLink('')}
-                  >
-                    Сброс
-                  </button>
-                )}
+              <div className="muted small" style={{ lineHeight: 1.45 }}>
+                Этот узел работает через защищённый туннель ВКонтакте на вашем сервере VPS
+                {server.host && server.port > 0 ? ` (${server.host}:${server.port})` : ''}.
+                Параметры подключения, авторизация VK ID и ссылки на звонки управляются во вкладке настроек.
               </div>
-              <textarea
-                className="input share-link-textarea mono"
-                value={customLink || defaultLink}
-                onChange={(e) => setCustomLink(e.target.value)}
-                rows={4}
-                placeholder="Вставьте ссылку конфигурации..."
-              />
-
-              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+              <div>
                 <button
                   type="button"
                   className="btn primary"
-                  style={{ flex: 1 }}
-                  onClick={handleCopy}
+                  onClick={() => {
+                    onClose()
+                    window.dispatchEvent(new CustomEvent('xr:switch-tab', { detail: 'vkturn' }))
+                  }}
                 >
-                  {copied ? '✓ Скопировано!' : '📋 Скопировать ссылку'}
+                  📞 Открыть настройки VK-туннеля
                 </button>
               </div>
-
-              <div className="share-instructions">
-                <b>💡 Клиенты для подключения:</b>
-                <ul>
-                  <li><b>Android:</b> v2rayNG, NekoBox, Hiddify, Happ.</li>
-                  <li><b>iOS / macOS:</b> Streisand, Shadowrocket, Sing-box, V2Box.</li>
-                  <li><b>Windows:</b> Hiddify, Nekoray, v2rayN, Clash Verge.</li>
-                </ul>
-              </div>
             </div>
-          </div>
+          ) : (
+            <>
+              {isPlaceholder && (
+                <div
+                  style={{
+                    background: 'rgba(234, 179, 8, 0.08)',
+                    border: '1px solid rgba(234, 179, 8, 0.25)',
+                    borderRadius: 8,
+                    padding: '8px 12px',
+                    fontSize: 11.5,
+                    color: '#eab308',
+                    lineHeight: 1.4,
+                  }}
+                >
+                  ℹ️ <b>Безопасность ядра:</b> Mihomo скрывает секретные UUID серверов. Вы можете вставить рабочий ключ в поле ниже — QR-код обновится на лету.
+                </div>
+              )}
+
+              <div className="share-node-grid">
+                {/* Левая колонка: QR-код */}
+                <div className="share-qr-box">
+                  <div className="share-qr-wrapper">
+                    <img
+                      src={qrImageUrl}
+                      alt="QR Code"
+                      className="share-qr-img"
+                      width={200}
+                      height={200}
+                    />
+                  </div>
+                  <p className="muted small" style={{ textAlign: 'center', margin: '8px 0 0', fontSize: 11 }}>
+                    Сканируйте камерой телефона для быстрого импорта
+                  </p>
+                </div>
+
+                {/* Правая колонка: Ссылка и быстрое копирование */}
+                <div className="share-link-box">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <label className="form-label" style={{ fontWeight: 600, fontSize: 12, margin: 0 }}>
+                      Ссылка конфигурации:
+                    </label>
+                    {customLink && (
+                      <button
+                        type="button"
+                        className="btn btn-sm ghost"
+                        style={{ fontSize: 11, padding: '2px 6px' }}
+                        onClick={() => setCustomLink('')}
+                      >
+                        Сброс
+                      </button>
+                    )}
+                  </div>
+                  <textarea
+                    className="input share-link-textarea mono"
+                    value={customLink || defaultLink}
+                    onChange={(e) => setCustomLink(e.target.value)}
+                    rows={4}
+                    placeholder="Вставьте ссылку конфигурации..."
+                  />
+
+                  <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                    <button
+                      type="button"
+                      className="btn primary"
+                      style={{ flex: 1 }}
+                      onClick={handleCopy}
+                    >
+                      {copied ? '✓ Скопировано!' : '📋 Скопировать ссылку'}
+                    </button>
+                  </div>
+
+                  <div className="share-instructions">
+                    <b>💡 Клиенты для подключения:</b>
+                    <ul>
+                      <li><b>Android:</b> v2rayNG, NekoBox, Hiddify, Happ.</li>
+                      <li><b>iOS / macOS:</b> Streisand, Shadowrocket, Sing-box, V2Box.</li>
+                      <li><b>Windows:</b> Hiddify, Nekoray, v2rayN, Clash Verge.</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
         </div>
 
         <div className="modal-footer" style={{ justifyContent: 'flex-end' }}>

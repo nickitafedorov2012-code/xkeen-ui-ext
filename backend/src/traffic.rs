@@ -355,7 +355,9 @@ pub fn split_connections_delta_with_providers(
                 deltas.proxy_bytes += delta;
             }
             if let Some(prov) = chains.iter().find_map(|name| server_to_provider.get(*name)) {
-                *deltas.provider_deltas.entry(prov.clone()).or_insert(0) += delta;
+                if prov != crate::vkturn::PROVIDER_ID {
+                    *deltas.provider_deltas.entry(prov.clone()).or_insert(0) += delta;
+                }
             }
         }
     }
@@ -399,7 +401,10 @@ async fn run_connections_accounting(state: AppState) {
                 node_to_provider = proxies
                     .iter()
                     .filter_map(|(name, v)| {
-                        v.get("_provider").and_then(|p| p.as_str()).map(|p| (name.clone(), p.to_string()))
+                        v.get("_provider")
+                            .and_then(|p| p.as_str())
+                            .filter(|p| *p != crate::vkturn::PROVIDER_ID)
+                            .map(|p| (name.clone(), p.to_string()))
                     })
                     .collect();
                 last_map_refresh = Some(std::time::Instant::now());
@@ -1117,5 +1122,28 @@ mod tests {
         let d3 = split_connections_delta_with_providers(&conns, &mut prev3, &map, true);
         assert_eq!(d3.whitelist_bytes, 1510);
         assert_eq!(d3.proxy_bytes, 0);
+    }
+
+    #[test]
+    fn regression_vkturn_25_provider_deltas_exclude_vkturn() {
+        let vk_name = crate::vkturn::PROXY_NAME;
+        let conns = serde_json::json!({
+            "connections": [
+                { "id": "vk1", "upload": 400, "download": 1600, "chains": [vk_name, "🛡️ Whitelist"], "rule": "Match" },
+                { "id": "sub1", "upload": 100, "download": 400, "chains": ["NL-01", "PROXY"], "rule": "Match" }
+            ]
+        });
+        let mut map = std::collections::HashMap::new();
+        map.insert(vk_name.to_string(), crate::vkturn::PROVIDER_ID.to_string());
+        map.insert("NL-01".to_string(), "my_sub".to_string());
+        let mut prev = std::collections::HashMap::new();
+
+        let d = split_connections_delta_with_providers(&conns, &mut prev, &map, false);
+        assert_eq!(
+            d.provider_deltas.get(crate::vkturn::PROVIDER_ID),
+            None,
+            "vkturn virtual provider must never be accounted in subscription provider_deltas"
+        );
+        assert_eq!(d.provider_deltas.get("my_sub"), Some(&500));
     }
 }

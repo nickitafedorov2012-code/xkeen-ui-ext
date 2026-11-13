@@ -259,6 +259,10 @@ export async function getVkTurnLogs(): Promise<{ lines: string[] }> {
   return apiGet<{ lines: string[] }>('vkturn/logs')
 }
 
+export async function decryptCsqttProfile(link: string): Promise<{ link: string }> {
+  return apiPost<{ link: string }>('vkturn/decrypt-profile', { link })
+}
+
 export async function saveVkTurnConfig(
   payload: import('./types').VkTurnConfigPayload
 ): Promise<{ success: boolean; message?: string }> {

@@ -509,10 +509,14 @@ pub struct VkTurnConfig {
     pub auth_mode: String,
     /// Сохранённый VK access_token
     pub vk_token: Option<String>,
+    /// Токен из профиля отделён от личного аккаунта VK. СЕКРЕТ.
+    pub profile_token: Option<String>,
     /// ID пользователя VK
     pub vk_user_id: Option<u64>,
     /// Имя и фамилия пользователя VK для профиля
     pub vk_user_name: Option<String>,
+    /// Результат последней проверки личного токена через VK API.
+    pub vk_token_verified: bool,
 }
 
 impl Default for VkTurnConfig {
@@ -525,8 +529,10 @@ impl Default for VkTurnConfig {
             streams: 0,
             auth_mode: "oauth".to_string(),
             vk_token: None,
+            profile_token: None,
             vk_user_id: None,
             vk_user_name: None,
+            vk_token_verified: false,
         }
     }
 }

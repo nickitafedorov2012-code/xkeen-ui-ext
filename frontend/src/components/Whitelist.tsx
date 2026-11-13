@@ -1003,9 +1003,9 @@ export default function Whitelist({ notify, status, refresh }: Props) {
                               fontSize: 11,
                               padding: '4px 6px',
                               borderRadius: 6,
-                              border: '1px solid rgba(148,163,184,0.35)',
-                              background: pinnedServer ? 'rgba(59,130,246,0.15)' : 'rgba(15,23,42,0.6)',
-                              color: '#e2e8f0',
+                              border: '1px solid var(--border)',
+                              background: pinnedServer ? 'rgba(59,130,246,0.15)' : 'var(--bg-tertiary)',
+                              color: 'var(--text)',
                             }}
                           >
                             <option value="">↔ Авто (сервер БС)</option>

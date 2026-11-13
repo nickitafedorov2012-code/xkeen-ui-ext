@@ -443,6 +443,7 @@ pub struct DetectedBsResult {
 /// Комплексный поиск и классификация серверов и провайдеров белых списков
 pub async fn detect_whitelist_servers_and_providers(state: &AppState) -> Result<DetectedBsResult, String> {
     let cfg = state.config.read().await.clone();
+    let vkturn_ready = state.vkturn.rt.read().await.tunnel_ready();
     let servers = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await?;
 
     // Читаем содержимое локальных файлов провайдеров для анализа SNI
@@ -459,6 +460,12 @@ pub async fn detect_whitelist_servers_and_providers(state: &AppState) -> Result<
 
     for s in &servers {
         if s.is_pool || s.id == "Fastest" || s.id == "Fallback" || s.id == "DIRECT" || s.id == "REJECT" || s.id == "GLOBAL" || s.id.starts_with("AUTO-") {
+            continue;
+        }
+        if !vkturn_ready
+            && (s.id == crate::vkturn::PROXY_NAME
+                || s.provider.as_deref() == Some(crate::vkturn::PROVIDER_ID))
+        {
             continue;
         }
 
@@ -789,6 +796,9 @@ pub async fn evaluate_and_apply_whitelist_detector(
         _ => offline_pct <= det_cfg.exit_offline_percent,
     };
 
+    let current_state = match get_detector_state().await { s => s };
+    let vkturn_ready = state.vkturn.rt.read().await.tunnel_ready();
+
     match current_state {
         WhitelistDetectorState::Normal => {
             if is_trigger_hit {
@@ -813,6 +823,9 @@ pub async fn evaluate_and_apply_whitelist_detector(
                 let mut seen_cand: std::collections::HashSet<String> = std::collections::HashSet::new();
 
                 for bs_id in &cfg.failover.bs_priority_chain {
+                    if !vkturn_ready && bs_id == crate::vkturn::PROXY_NAME {
+                        continue;
+                    }
                     if !is_quarantined(bs_id).await && seen_cand.insert(bs_id.clone()) {
                         bs_candidate_ids.push(bs_id.clone());
                     }
@@ -823,6 +836,12 @@ pub async fn evaluate_and_apply_whitelist_detector(
                         break;
                     }
                     if s.is_pool || s.id == "Fastest" || s.id == "Fallback" || s.id == "DIRECT" || s.id == "REJECT" || s.id == "GLOBAL" || s.id.starts_with("AUTO-") {
+                        continue;
+                    }
+                    if !vkturn_ready
+                        && (s.id == crate::vkturn::PROXY_NAME
+                            || s.provider.as_deref() == Some(crate::vkturn::PROVIDER_ID))
+                    {
                         continue;
                     }
                     if !is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), cfg) {
@@ -887,6 +906,9 @@ pub async fn evaluate_and_apply_whitelist_detector(
                 // Fallback: если все кандидаты не ответили по пингу, берем первого не находящегося в карантине из цепочки
                 if bs_target_id.is_none() {
                     for bs_id in &cfg.failover.bs_priority_chain {
+                        if !vkturn_ready && bs_id == crate::vkturn::PROXY_NAME {
+                            continue;
+                        }
                         if !is_quarantined(bs_id).await {
                             if let Some(s) = servers.iter().find(|srv| &srv.id == bs_id) {
                                 bs_target_id = Some(s.id.clone());
@@ -1137,6 +1159,7 @@ pub async fn evaluate_and_apply_whitelist_detector(
 /// Ручной или таймерный запуск проверки детектора белых списков
 pub async fn run_whitelist_detector_check(state: &AppState, reason: &str) -> Result<String, String> {
     let cfg = state.config.read().await.clone();
+    let vkturn_ready = state.vkturn.rt.read().await.tunnel_ready();
     let servers = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await?;
     match evaluate_and_apply_whitelist_detector(state, &cfg, &servers, reason).await? {
         Some(msg) => Ok(msg),
@@ -1601,6 +1624,34 @@ pub fn is_whitelist_server(node_name: &str, node_id: &str, cfg: &crate::config::
     is_whitelist_server_full(node_name, node_id, None, cfg)
 }
 
+pub fn provider_matches_whitelist(provider: &str, cfg: &crate::config::AppConfig) -> bool {
+    let p_trim = provider.trim();
+    if p_trim.is_empty() {
+        return false;
+    }
+    let p_lower = p_trim.to_lowercase();
+    let alias_lower = cfg
+        .provider_aliases
+        .iter()
+        .find(|(k, _)| k.trim().to_lowercase() == p_lower)
+        .map(|(_, v)| v.trim().to_lowercase());
+    let id_from_alias_lower = cfg
+        .provider_aliases
+        .iter()
+        .find(|(_, v)| v.trim().to_lowercase() == p_lower)
+        .map(|(k, _)| k.trim().to_lowercase());
+
+    cfg.whitelist_providers.iter().any(|wp| {
+        let wp_lower = wp.trim().to_lowercase();
+        if wp_lower.is_empty() {
+            return false;
+        }
+        wp_lower == p_lower
+            || alias_lower.as_deref() == Some(wp_lower.as_str())
+            || id_from_alias_lower.as_deref() == Some(wp_lower.as_str())
+    })
+}
+
 pub fn is_whitelist_server_full(
     node_name: &str,
     node_id: &str,
@@ -1620,7 +1671,7 @@ pub fn is_whitelist_server_full(
     // 3. Подписка в whitelist_providers считается БС (баг 42.1)
     // Сервер считается БС, кроме случая, когда сервер находится в normal_servers (проверено выше)
     if let Some(p) = provider {
-        if !p.is_empty() && cfg.whitelist_providers.iter().any(|wp| wp.eq_ignore_ascii_case(p)) {
+        if provider_matches_whitelist(p, cfg) {
             return true;
         }
     }
@@ -2939,6 +2990,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
     }
 
     let threshold = cfg.failover.ping_threshold_ms as i64;
+    let vkturn_ready = state.vkturn.rt.read().await.tunnel_ready();
     let servers = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await?;
 
     // Реальный активный сервер (предпочитаем конкретный прокси перед группами Fastest/Fallback).
@@ -3050,6 +3102,9 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                 if pool.len() >= pool_limit {
                     break;
                 }
+                if !vkturn_ready && id == crate::vkturn::PROXY_NAME {
+                    continue;
+                }
                 if id != act_id && !pool.contains(id) && servers.iter().any(|s| &s.id == id && !s.is_pool && s.id != "Fastest" && s.id != "Fallback" && s.id != "DIRECT") {
                     pool.push(id.clone());
                 }
@@ -3058,6 +3113,12 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             for s in &servers {
                 if pool.len() >= pool_limit {
                     break;
+                }
+                if !vkturn_ready
+                    && (s.id == crate::vkturn::PROXY_NAME
+                        || s.provider.as_deref() == Some(crate::vkturn::PROVIDER_ID))
+                {
+                    continue;
                 }
                 if s.id != act_id && !pool.contains(&s.id) && !s.is_pool && s.id != "Fastest" && s.id != "Fallback" && s.id != "DIRECT" {
                     pool.push(s.id.clone());
@@ -3319,7 +3380,16 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         // Унифицированный отбор кандидата (4-уровневая иерархия без блэкаутов)
         // Баг 103: цепочка «настроена», только если в ней есть живые сейчас серверы кроме активного.
         // Устаревшие после обновления подписки ID больше не блокируют переключение — работает best-of-rest.
-        let chain_candidates: Vec<String> = priority_chain_candidates(&cfg.failover.priority_chain, &servers, &active.id);
+        let cand_servers: Vec<Server> = servers
+            .iter()
+            .filter(|s| {
+                vkturn_ready
+                    || (s.id != crate::vkturn::PROXY_NAME
+                        && s.provider.as_deref() != Some(crate::vkturn::PROVIDER_ID))
+            })
+            .cloned()
+            .collect();
+        let chain_candidates: Vec<String> = priority_chain_candidates(&cfg.failover.priority_chain, &cand_servers, &active.id);
         let has_priority_chain = !chain_candidates.is_empty();
         if !has_priority_chain && !cfg.failover.priority_chain.is_empty() {
             state
@@ -3345,7 +3415,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                 select_failover_target_tiered(
                     true,
                     &chain_candidates,
-                    &servers,
+                    &cand_servers,
                     &active.id,
                     |id| q_ids.contains(id),
                     |s| is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), &cfg),
@@ -3359,7 +3429,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                 &crate::routing::parse_provider_names(&tokio::fs::read_to_string(&cfg.mihomo.config_path).await.unwrap_or_default()),
                 &cfg.whitelist_providers,
             );
-            let candidate_shortlist = build_fast_failover_shortlist(&servers, &active.id, &cfg);
+            let candidate_shortlist = build_fast_failover_shortlist(&cand_servers, &active.id, &cfg);
             if candidate_shortlist.is_empty() {
                 Err("Нет резервных серверов для переключения".to_string())
             } else {
@@ -3376,7 +3446,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                 select_failover_target_tiered_with_provider_chain(
                     false,
                     &[],
-                    &servers,
+                    &cand_servers,
                     &active.id,
                     |id| q_ids.contains(id),
                     |s| is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), &cfg),
@@ -8115,6 +8185,33 @@ proxies:
         assert!(
             is_whitelist_server_full("Node [БС] Moscow", "other_id", None, &cfg),
             "node with [БС] tag not in normal_servers must be recognized"
+        );
+    }
+
+    #[test]
+    fn regression_vkturn_25_unready_vkturn_excluded_from_candidates() {
+        let src = include_str!("failover.rs");
+        assert!(
+            src.contains("tunnel_ready()"),
+            "failover must check vkturn.rt.read().await.tunnel_ready() before considering vkturn as BS/failover candidate"
+        );
+        let det_body = src
+            .split("pub async fn detect_whitelist_servers_and_providers(")
+            .nth(1)
+            .and_then(|s| s.split("pub async fn get_whitelist_detector_status(").next())
+            .expect("detect_whitelist_servers_and_providers must exist");
+        assert!(
+            det_body.contains("PROXY_NAME") && det_body.contains("tunnel_ready"),
+            "detect_whitelist_servers_and_providers must skip unready vkturn node"
+        );
+        let eval_body = src
+            .split("pub async fn evaluate_and_apply_whitelist_detector(")
+            .nth(1)
+            .and_then(|s| s.split("pub async fn run_whitelist_detector_check(").next())
+            .expect("evaluate_and_apply_whitelist_detector must exist");
+        assert!(
+            eval_body.contains("PROXY_NAME") && eval_body.contains("tunnel_ready"),
+            "evaluate_and_apply_whitelist_detector must filter unready vkturn from bs_priority_chain and servers"
         );
     }
 }

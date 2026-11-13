@@ -274,7 +274,7 @@ export default function Servers({ notify, status, refresh }: Props) {
       const data = await apiGet<{ providers: ProviderInfo[] }>('providers')
       if (!Array.isArray(data.providers)) throw new Error('Некорректный список подписок')
       if (requestId !== providersRequestId.current) return
-      setProviders(data.providers)
+      setProviders(data.providers.filter((p) => p.id !== 'vkturn'))
       setProvidersLoaded(true)
       setProvidersError(false)
     } catch {
@@ -837,6 +837,7 @@ export default function Servers({ notify, status, refresh }: Props) {
       notify(target ? `Подписка "${provId}" добавлена в белые списки (аварийный туннель)` : `Подписка "${provId}" исключена из белых списков`)
       setProviders((prev) => prev.map((p) => (p.id === provId ? { ...p, is_whitelist: target } : p)))
       load()
+      refresh?.()
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка переключения белого списка для подписки', true)
     } finally {
@@ -1069,13 +1070,19 @@ export default function Servers({ notify, status, refresh }: Props) {
                 )}
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
                   <div className="muted small" style={{ fontSize: 11 }}>
-                    IP сервера:{' '}
+                    {activeServer.protocol === 'VK-CALL' ? 'Адрес VPS:' : 'IP сервера:'}{' '}
                     <code>
-                      {activeServer.resolved_ip || activeServer.host}
-                      {activeServer.resolved_ip && activeServer.resolved_ip !== activeServer.host
-                        ? ` (${activeServer.host})`
-                        : ''}
-                      {activeServer.port ? `:${activeServer.port}` : ''}
+                      {activeServer.protocol === 'VK-CALL' && (!activeServer.port || activeServer.port <= 0)
+                        ? activeServer.host || 'Интерфейс csq0 (Звонки ВК)'
+                        : (
+                          <>
+                            {activeServer.resolved_ip || activeServer.host}
+                            {activeServer.resolved_ip && activeServer.resolved_ip !== activeServer.host
+                              ? ` (${activeServer.host})`
+                              : ''}
+                            {activeServer.port ? `:${activeServer.port}` : ''}
+                          </>
+                        )}
                     </code>
                   </div>
                   {/* Роль в Failover-цепочке */}
@@ -1268,14 +1275,25 @@ export default function Servers({ notify, status, refresh }: Props) {
                     <span>{speedtestingId === activeServer.id ? '⏳' : '🚀'}</span>
                     <span>{speedtestingId === activeServer.id ? 'Замер…' : 'Скорость'}</span>
                   </button>
-                  <button
-                    type="button"
-                    className="btn sm ghost"
-                    onClick={() => setShareServer(activeServer)}
-                    title="Ссылка подключения и QR-код"
-                  >
-                    🔗 Ссылка
-                  </button>
+                  {activeServer.protocol === 'VK-CALL' ? (
+                    <button
+                      type="button"
+                      className="btn sm ghost"
+                      onClick={() => window.dispatchEvent(new CustomEvent('xr:switch-tab', { detail: 'vkturn' }))}
+                      title="Открыть настройки VK-туннеля"
+                    >
+                      📞 Настройки ВК
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn sm ghost"
+                      onClick={() => setShareServer(activeServer)}
+                      title="Ссылка подключения и QR-код"
+                    >
+                      🔗 Ссылка
+                    </button>
+                  )}
                   {(() => {
                     const chainIdx = failoverChain.indexOf(activeServer.id)
                     const isStart = chainIdx === 0
@@ -1847,15 +1865,27 @@ export default function Servers({ notify, status, refresh }: Props) {
                         <span className="btn-label-optional">{speedtestingId === s.id ? 'Замер…' : 'Скорость'}</span>
                       </button>
 
-                      <button
-                        type="button"
-                        className="btn sm ghost"
-                        onClick={() => setShareServer(s)}
-                        title="Сгенерировать ссылку подключения (vless/vmess/ss) и QR-код"
-                      >
-                        <span>🔗</span>
-                        <span className="btn-label-optional">Ссылка</span>
-                      </button>
+                      {s.protocol === 'VK-CALL' ? (
+                        <button
+                          type="button"
+                          className="btn sm ghost"
+                          onClick={() => window.dispatchEvent(new CustomEvent('xr:switch-tab', { detail: 'vkturn' }))}
+                          title="Открыть настройки VK-туннеля"
+                        >
+                          <span>📞</span>
+                          <span className="btn-label-optional">Настройки ВК</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn sm ghost"
+                          onClick={() => setShareServer(s)}
+                          title="Сгенерировать ссылку подключения (vless/vmess/ss) и QR-код"
+                        >
+                          <span>🔗</span>
+                          <span className="btn-label-optional">Ссылка</span>
+                        </button>
+                      )}
 
                       {(() => {
                         const chainIdx = failoverChain.indexOf(s.id)
@@ -2018,14 +2048,25 @@ export default function Servers({ notify, status, refresh }: Props) {
                   </span>
                   <Sparkline ping={s.ping_ms} />
                   <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                    <button
-                      className="btn sm ghost"
-                      onClick={() => setShareServer(s)}
-                      style={{ padding: '3px 6px' }}
-                      title="Ссылка подключения и QR-код"
-                    >
-                      🔗
-                    </button>
+                    {s.protocol === 'VK-CALL' ? (
+                      <button
+                        className="btn sm ghost"
+                        onClick={() => window.dispatchEvent(new CustomEvent('xr:switch-tab', { detail: 'vkturn' }))}
+                        style={{ padding: '3px 6px' }}
+                        title="Открыть настройки VK-туннеля"
+                      >
+                        📞
+                      </button>
+                    ) : (
+                      <button
+                        className="btn sm ghost"
+                        onClick={() => setShareServer(s)}
+                        style={{ padding: '3px 6px' }}
+                        title="Ссылка подключения и QR-код"
+                      >
+                        🔗
+                      </button>
+                    )}
                     <button
                       className={`btn sm ghost btn-speedtest ${speedtestingId === s.id ? 'loading' : ''}`}
                       onClick={() => runSpeedtest(s)}

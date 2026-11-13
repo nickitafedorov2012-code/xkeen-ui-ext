@@ -2367,9 +2367,10 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xkeen-route"
-version = "1.16.6"
+version = "1.16.7"
 dependencies = [
  "axum",
+ "base64",
  "chrono",
  "clap",
  "futures-util",
@@ -2379,6 +2380,7 @@ dependencies = [
  "mime_guess",
  "regex-lite",
  "reqwest",
+ "ring",
  "rust-embed",
  "serde",
  "serde_json",
