@@ -1664,6 +1664,12 @@ pub async fn save(path: &Path, cfg: &AppConfig) -> Result<(), String> {
     let mut cfg_to_save = cfg.clone();
     cfg_to_save.provider_filters.clear();
     let serialized = serde_json::to_string_pretty(&cfg_to_save).map_err(|e| e.to_string())?;
+    // Flash Wear Protection: не пишем на флеш-память роутера при идентичном содержимом.
+    if let Ok(existing) = tokio::fs::read_to_string(path).await {
+        if existing == serialized {
+            return Ok(());
+        }
+    }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let _ = tokio::fs::create_dir_all(parent).await;
 

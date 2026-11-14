@@ -51,7 +51,7 @@ export default function DeviceRoutingModal({
         const rulesMap = res?.rules ?? res ?? {}
         setDomainRules(rulesMap[modal.ip] || [])
       })
-      .catch(() => {})
+      .catch((err) => console.warn('Не удалось загрузить персональные правила доменов:', err))
   }, [modal.ip])
 
   const drMove = (idx: number, dir: -1 | 1) => {

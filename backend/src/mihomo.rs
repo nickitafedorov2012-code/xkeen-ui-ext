@@ -3419,7 +3419,7 @@ mod tests {
     fn regression_bug_54b_flow_switch_does_not_reset_lan() {
         // Баг 54: переключение маршрута Google AI не должно вызывать close_all_connections
         let mihomo_src = include_str!("mihomo.rs");
-        let api_src = include_str!("api/servers.rs");
+        let api_src = include_str!("api/servers/mod.rs");
 
         // Проверяем тело функции switch_flow_server в mihomo.rs
         let switch_fn = mihomo_src.split("pub async fn switch_flow_server")

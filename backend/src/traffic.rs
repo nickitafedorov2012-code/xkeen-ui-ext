@@ -223,6 +223,9 @@ pub fn load_stats_from_disk(path: &std::path::Path) {
     }
 }
 
+static LAST_SAVED_TRAFFIC: std::sync::OnceLock<std::sync::Mutex<Option<(u64, u64, u64, std::collections::HashMap<String, u64>)>>> =
+    std::sync::OnceLock::new();
+
 pub fn save_stats_to_disk() {
     let path_opt = {
         let lock = STATS_PATH.read().ok();
@@ -234,20 +237,38 @@ pub fn save_stats_to_disk() {
     } else {
         std::collections::HashMap::new()
     };
+    let direct_bytes = TOTAL_DIRECT_BYTES.load(Ordering::Relaxed);
+    let proxy_bytes = TOTAL_PROXY_BYTES.load(Ordering::Relaxed);
+    let whitelist_bytes = TOTAL_WHITELIST_BYTES.load(Ordering::Relaxed);
+
+    // Flash Wear Protection: не перезаписываем файл статистики, если счётчики не изменились.
+    let cache = LAST_SAVED_TRAFFIC.get_or_init(|| std::sync::Mutex::new(None));
+    if path.exists() {
+        if let Ok(guard) = cache.lock() {
+            if let Some((d, p, w, ref prev_deltas)) = *guard {
+                if d == direct_bytes && p == proxy_bytes && w == whitelist_bytes && prev_deltas == &deltas {
+                    return;
+                }
+            }
+        }
+    }
+
     let stats = StoredTrafficStats {
-        direct_bytes: TOTAL_DIRECT_BYTES.load(Ordering::Relaxed),
-        proxy_bytes: TOTAL_PROXY_BYTES.load(Ordering::Relaxed),
-        whitelist_bytes: TOTAL_WHITELIST_BYTES.load(Ordering::Relaxed),
+        direct_bytes,
+        proxy_bytes,
+        whitelist_bytes,
         updated_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
-        provider_deltas: deltas,
+        provider_deltas: deltas.clone(),
     };
     if let Ok(json_str) = serde_json::to_string_pretty(&stats) {
         let tmp = path.with_extension("tmp");
-        if let Ok(_) = std::fs::write(&tmp, json_str.as_bytes()) {
-            let _ = std::fs::rename(&tmp, &path);
+        if std::fs::write(&tmp, json_str.as_bytes()).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+            if let Ok(mut guard) = cache.lock() {
+                *guard = Some((direct_bytes, proxy_bytes, whitelist_bytes, deltas));
+            }
         }
     }
 }

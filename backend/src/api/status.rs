@@ -9,45 +9,65 @@ use super::{
     normalize_engine_choice,
 };
 use crate::{failover, log_i, mihomo, rci, AppState, VERSION};
+const STATUS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
+
+async fn with_probe_timeout<T, F>(fut: F) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, String>>,
+{
+    match tokio::time::timeout(STATUS_PROBE_TIMEOUT, fut).await {
+        Ok(res) => res,
+        Err(_) => Err("timeout".to_string()),
+    }
+}
+
 /// GET /api/status — сводка: панель + роутер + активный сервер Mihomo.
 pub async fn status(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
 
     let (router_res, system_res, mihomo_ver, router_lan_ip) = tokio::join!(
-        rci::get_version(&state.http, &cfg),
-        rci::get_system(&state.http, &cfg),
-        mihomo::get_version(&state.http, &cfg),
-        rci::get_router_lan_ip(&state.http, &cfg)
+        with_probe_timeout(rci::get_version(&state.http, &cfg)),
+        with_probe_timeout(rci::get_system(&state.http, &cfg)),
+        tokio::time::timeout(STATUS_PROBE_TIMEOUT, mihomo::get_version(&state.http, &cfg)),
+        tokio::time::timeout(STATUS_PROBE_TIMEOUT, rci::get_router_lan_ip(&state.http, &cfg))
     );
+    let rci_available = router_res.is_ok() || system_res.is_ok();
     let router = router_res.ok();
     let system = system_res.ok();
+    let mihomo_ver = mihomo_ver.ok().flatten();
+    let mihomo_available = mihomo_ver.is_some();
+    let router_lan_ip = router_lan_ip.ok().flatten();
 
-    let (active, priority_chain_pings) = match mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
-        Ok(servers) => {
-            let act = servers
-                .iter()
-                .find(|s| s.is_active && s.id != "Fastest" && s.id != "Fallback")
-                .or_else(|| servers.iter().find(|s| s.is_active))
-                .cloned()
-                .map(|s| {
-                    // PING-AUTO: живой замер из кэша панели важнее протухшей истории mihomo
-                    let ping_ms = mihomo::cached_ping(&s.id).unwrap_or(s.ping_ms);
-                    json!({
-                        "id": s.id, "name": s.name, "ping_ms": ping_ms,
-                        "protocol": s.protocol, "host": s.host, "port": s.port,
-                        "provider": s.provider, "provider_name": s.provider_name,
-                    })
-                });
-            let mut pings = std::collections::HashMap::new();
-            for s in &servers {
-                // PING-AUTO: и для карты пингов цепочки приоритетов тоже
-                pings.insert(s.id.clone(), mihomo::cached_ping(&s.id).unwrap_or(s.ping_ms));
+    let (active, priority_chain_pings) = if mihomo_available {
+        match with_probe_timeout(mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain)).await {
+            Ok(servers) => {
+                let act = servers
+                    .iter()
+                    .find(|s| s.is_active && s.id != "Fastest" && s.id != "Fallback")
+                    .or_else(|| servers.iter().find(|s| s.is_active))
+                    .cloned()
+                    .map(|s| {
+                        // PING-AUTO: живой замер из кэша панели важнее протухшей истории mihomo
+                        let ping_ms = mihomo::cached_ping(&s.id).unwrap_or(s.ping_ms);
+                        json!({
+                            "id": s.id, "name": s.name, "ping_ms": ping_ms,
+                            "protocol": s.protocol, "host": s.host, "port": s.port,
+                            "provider": s.provider, "provider_name": s.provider_name,
+                        })
+                    });
+                let mut pings = std::collections::HashMap::new();
+                for s in &servers {
+                    // PING-AUTO: и для карты пингов цепочки приоритетов тоже
+                    pings.insert(s.id.clone(), mihomo::cached_ping(&s.id).unwrap_or(s.ping_ms));
+                }
+                // Анти-регрессия: НЕ подменять реальный пинг на -1 (Таймаут),
+                // чтобы панель всегда отображала фактический живой пинг из Mihomo.
+                (act, pings)
             }
-            // Анти-регрессия: НЕ подменять реальный пинг на -1 (Таймаут),
-            // чтобы панель всегда отображала фактический живой пинг из Mihomo.
-            (act, pings)
+            Err(_) => (None, std::collections::HashMap::new()),
         }
-        Err(_) => (None, std::collections::HashMap::new()),
+    } else {
+        (None, std::collections::HashMap::new())
     };
 
     let zapret_engine = if normalize_engine_choice(&cfg.zapret.engine) == "v1" {
@@ -97,8 +117,63 @@ pub async fn status(State(state): State<AppState>) -> Response {
     let active_tier: u8 = if is_tier2 { 2 } else { 1 };
     let wl_episode_bytes = failover::get_whitelist_episode_bytes();
 
+    let failover_json = json!({
+        "enabled": cfg.failover.enabled,
+        "ping_threshold_ms": cfg.failover.ping_threshold_ms,
+        "priority_server": if !cfg.failover.priority_server.is_empty() {
+            cfg.failover.priority_server.clone()
+        } else {
+            cfg.failover.priority_chain.first().cloned().unwrap_or_default()
+        },
+        "priority_chain": cfg.failover.priority_chain,
+        "priority_chain_pings": priority_chain_pings,
+        "bs_priority_chain": cfg.failover.bs_priority_chain,
+        "whitelist_detector": cfg.failover.whitelist_detector,
+        "whitelist_detector_status": failover::get_whitelist_detector_status().await,
+        "last_good_regular_vps": cfg.failover.last_good_regular_vps,
+        "auto_restore_priority": cfg.failover.auto_restore_priority,
+        "interval_secs": cfg.failover.interval_secs,
+        "canary_duration_secs": cfg.failover.canary_duration_secs,
+        "device_failover_enabled": cfg.failover.device_failover_enabled,
+        "best_ping_enabled": cfg.failover.best_ping_enabled,
+        "best_ping_pool_size": cfg.failover.best_ping_pool_size,
+        "best_ping_hysteresis_ms": cfg.failover.best_ping_hysteresis_ms,
+        "smart_failover_enabled": cfg.failover.smart_failover_enabled,
+        "smart_failover_canary_duration_secs": cfg.failover.smart_failover_canary_duration_secs,
+        "provider_chain": cfg.failover.provider_chain,
+        "active_tier": active_tier,
+        "whitelist_episode_bytes": wl_episode_bytes,
+        "canary": failover::canary_status().await,
+        "last_test": failover::canary_last_result().await,
+        "quarantine_enabled": cfg.failover.quarantine_enabled,
+        "zombie_servers": if cfg.failover.quarantine_enabled { failover::get_zombie_servers().await } else { Vec::new() },
+        "quarantine": if cfg.failover.quarantine_enabled { failover::quarantine_status().await } else { Vec::new() },
+        "current_status": current_failover_status,
+    });
+    let zapret_json = json!({
+        "engine": zapret_engine,
+        "version": zapret_ver,
+        "label": zapret_label,
+        "installed": zapret_installed,
+        "running": cfg.zapret.enabled && !service_stopped,
+        "v1_installed": is_nfqws1_available(),
+        "v2_installed": is_nfqws2_available(),
+        "update_available": cfg.zapret.update_available
+            && cfg.zapret.latest_version.as_deref().is_some_and(|lat| crate::updater::is_newer(lat, &zapret_ver)),
+        "latest_version": cfg.zapret.latest_version,
+    });
+    let gaming_json = json!({
+        "enabled": cfg.gaming.enabled,
+        "mode": cfg.gaming.mode,
+        "smart_mode": cfg.gaming.smart_mode,
+        "smart_idle_timeout_mins": cfg.gaming.smart_idle_timeout_mins,
+    });
+
     api_ok(json!({
         "version": VERSION,
+        "available": rci_available || mihomo_available,
+        "rci_available": rci_available,
+        "mihomo_available": mihomo_available,
         "config_path": state.config_path.display().to_string(),
         "router": router,
         "router_ip": router_lan_ip,
@@ -113,61 +188,13 @@ pub async fn status(State(state): State<AppState>) -> Response {
         "normal_servers": cfg.normal_servers,
         "whitelist_providers": cfg.whitelist_providers,
         "server_aliases": cfg.server_aliases,
-        "mihomo": { "host": cfg.mihomo.host, "port": cfg.mihomo.port },
-        "rci": { "host": cfg.rci.host, "port": cfg.rci.port },
-        "failover": {
-            "enabled": cfg.failover.enabled,
-            "ping_threshold_ms": cfg.failover.ping_threshold_ms,
-            "priority_server": if !cfg.failover.priority_server.is_empty() {
-                cfg.failover.priority_server.clone()
-            } else {
-                cfg.failover.priority_chain.first().cloned().unwrap_or_default()
-            },
-            "priority_chain": cfg.failover.priority_chain,
-            "priority_chain_pings": priority_chain_pings,
-            "bs_priority_chain": cfg.failover.bs_priority_chain,
-            "whitelist_detector": cfg.failover.whitelist_detector,
-            "whitelist_detector_status": failover::get_whitelist_detector_status().await,
-            "last_good_regular_vps": cfg.failover.last_good_regular_vps,
-            "auto_restore_priority": cfg.failover.auto_restore_priority,
-            "interval_secs": cfg.failover.interval_secs,
-            "canary_duration_secs": cfg.failover.canary_duration_secs,
-            "device_failover_enabled": cfg.failover.device_failover_enabled,
-            "best_ping_enabled": cfg.failover.best_ping_enabled,
-            "best_ping_pool_size": cfg.failover.best_ping_pool_size,
-            "best_ping_hysteresis_ms": cfg.failover.best_ping_hysteresis_ms,
-            "smart_failover_enabled": cfg.failover.smart_failover_enabled,
-            "smart_failover_canary_duration_secs": cfg.failover.smart_failover_canary_duration_secs,
-            "provider_chain": cfg.failover.provider_chain,
-            "active_tier": active_tier,
-            "whitelist_episode_bytes": wl_episode_bytes,
-            "canary": failover::canary_status().await,
-            "last_test": failover::canary_last_result().await,
-            "quarantine_enabled": cfg.failover.quarantine_enabled,
-            "zombie_servers": if cfg.failover.quarantine_enabled { failover::get_zombie_servers().await } else { Vec::new() },
-            "quarantine": if cfg.failover.quarantine_enabled { failover::quarantine_status().await } else { Vec::new() },
-            "current_status": current_failover_status,
-        },
+        "mihomo": { "host": cfg.mihomo.host, "port": cfg.mihomo.port, "available": mihomo_available },
+        "rci": { "host": cfg.rci.host, "port": cfg.rci.port, "available": rci_available },
+        "failover": failover_json,
         "refresh_interval_sec": cfg.refresh_interval_sec,
         "adblock_enabled": cfg.adblock_enabled,
-        "zapret": {
-            "engine": zapret_engine,
-            "version": zapret_ver,
-            "label": zapret_label,
-            "installed": zapret_installed,
-            "running": cfg.zapret.enabled && !service_stopped,
-            "v1_installed": is_nfqws1_available(),
-            "v2_installed": is_nfqws2_available(),
-            "update_available": cfg.zapret.update_available
-                && cfg.zapret.latest_version.as_deref().is_some_and(|lat| crate::updater::is_newer(lat, &zapret_ver)),
-            "latest_version": cfg.zapret.latest_version,
-        },
-        "gaming": {
-            "enabled": cfg.gaming.enabled,
-            "mode": cfg.gaming.mode,
-            "smart_mode": cfg.gaming.smart_mode,
-            "smart_idle_timeout_mins": cfg.gaming.smart_idle_timeout_mins,
-        },
+        "zapret": zapret_json,
+        "gaming": gaming_json,
     }))
     .into_response()
 }
@@ -175,7 +202,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
 /// GET /api/system/metrics — сверхлёгкий эндпоинт для обновления метрик каждую секунду: CPU роутера, RAM роутера, RAM/CPU процесса панели.
 pub async fn get_system_metrics(State(state): State<AppState>) -> Response {
     let cfg = state.config.read().await.clone();
-    match rci::get_system(&state.http, &cfg).await {
+    match with_probe_timeout(rci::get_system(&state.http, &cfg)).await {
         Ok(stats) => api_ok(serde_json::to_value(stats).unwrap_or_default()).into_response(),
         Err(e) => api_err(e).into_response(),
     }
@@ -652,5 +679,88 @@ pub async fn test_notification(
         api_err(msg)
     } else {
         api_ok(json!({ "results": results, "message": msg }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn status_gracefully_degrades_on_stalled_backends() {
+        // Имитируем зависшие Mihomo и RCI (принимают TCP, но не отвечают)
+        let stalled_mihomo = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mihomo_port = stalled_mihomo.local_addr().unwrap().port();
+        let _h1 = tokio::spawn(async move {
+            loop {
+                if let Ok((sock, _)) = stalled_mihomo.accept().await {
+                    tokio::spawn(async move {
+                        let _keep = sock;
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    });
+                }
+            }
+        });
+
+        let stalled_rci = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rci_port = stalled_rci.local_addr().unwrap().port();
+        let _h2 = tokio::spawn(async move {
+            loop {
+                if let Ok((sock, _)) = stalled_rci.accept().await {
+                    tokio::spawn(async move {
+                        let _keep = sock;
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    });
+                }
+            }
+        });
+
+        let dir = std::env::temp_dir().join(format!("xkeen-status-deg-{}", crate::auth::random_hex(8)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.json");
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".to_string();
+        cfg.mihomo.port = mihomo_port;
+        cfg.rci.host = "127.0.0.1".to_string();
+        cfg.rci.port = rci_port;
+        cfg.mihomo.config_path = dir.join("config.yaml").display().to_string();
+
+        let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(cfg)));
+        let state = crate::AppState {
+            config: config_arc.clone(),
+            config_path: std::sync::Arc::new(cfg_path),
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap(),
+            failover_log: std::sync::Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: std::sync::Arc::new(crate::antigravity::AntigravityManager::new(config_arc)),
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        let start = std::time::Instant::now();
+        let resp = status(State(state)).await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(4),
+            "status must degrade quickly instead of hanging: {elapsed:?}"
+        );
+
+        let bytes = to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["success"], true);
+        assert_eq!(body["data"]["available"], false);
+        assert_eq!(body["data"]["rci_available"], false);
+        assert_eq!(body["data"]["mihomo_available"], false);
+        assert_eq!(body["data"]["mihomo"]["available"], false);
+        assert_eq!(body["data"]["rci"]["available"], false);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

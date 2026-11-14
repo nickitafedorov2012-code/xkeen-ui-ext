@@ -546,7 +546,9 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
         })
       }
       if (!c.isClosed) {
-        await apiDelete(`connections/${c.id}`).catch(() => {})
+        await apiDelete(`connections/${c.id}`).catch((err) => {
+          console.warn('Не удалось закрыть соединение после добавления правила:', err)
+        })
       }
       setDirectDomains((prev) => (prev.includes(domain) ? prev : [...prev, domain]))
       setForceDomains((prev) => prev.filter((d) => d !== domain))

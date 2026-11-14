@@ -1,13 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiGet, apiPost } from '../api'
-import { pingClass, getFlowStatus, type ProviderInfo, type ServerInfo, type SpeedtestResult, type StatusInfo } from '../types'
+import { getFlowStatus, type ProviderInfo, type ServerInfo, type SpeedtestResult, type StatusInfo } from '../types'
 import OutboundGeneratorModal from './OutboundGeneratorModal'
 import ShareNodeModal from './ShareNodeModal'
 import FlowRepairModal from './FlowRepairModal'
 import { copyToClipboard } from '../utils/clipboard'
-import { Sparkline, PROVIDER_COLORS, formatSpeed, formatBytes, formatQuotaBytes, isPoolServer } from './servers/serversHelpers'
+import { loadServersColumns, saveServersColumns } from '../utils/serversLayout'
+import { calcJitter, loadServerPingHistory, saveServerPingHistory } from '../utils/jitter'
+import { PROVIDER_COLORS, isPoolServer } from './servers/serversHelpers'
 import { IgnoreListModal } from './servers/IgnoreListModal'
 import { SubscriptionsModal } from './servers/SubscriptionsModal'
+import { ActiveServerBanner } from './servers/ActiveServerBanner'
+import { ServerList } from './servers/ServerList'
 
 export { formatQuotaBytes, isPoolServer } from './servers/serversHelpers'
 interface Props {
@@ -30,14 +34,7 @@ export default function Servers({ notify, status, refresh }: Props) {
   const [viewMode, setViewMode] = useState<'detailed' | 'compact'>(() => {
     return (localStorage.getItem('xr_servers_view') as 'detailed' | 'compact') || 'detailed'
   })
-  const [columns, setColumns] = useState<number>(() => {
-    const saved = localStorage.getItem('xr_servers_columns')
-    if (saved) {
-      const n = parseInt(saved, 10)
-      if (n >= 0 && n <= 4) return n
-    }
-    return 0 // 0 = Автоматическое заполнение (Auto-fill)
-  })
+  const [columns, setColumns] = useState<number>(loadServersColumns)
 
   const [filter, setFilter] = useState('')
   const [flowOnly, setFlowOnly] = useState(false)
@@ -143,7 +140,7 @@ export default function Servers({ notify, status, refresh }: Props) {
 
   const setAndSaveColumns = (cols: number) => {
     setColumns(cols)
-    localStorage.setItem('xr_servers_columns', String(cols))
+    saveServersColumns(cols)
   }
 
   const loadProviders = useCallback(async () => {
@@ -290,14 +287,7 @@ export default function Servers({ notify, status, refresh }: Props) {
   const [jitterMeasuring, setJitterMeasuring] = useState(false)
   const lastActiveServerIdRef = useRef<string | undefined>(undefined)
 
-  const jitterVal = useMemo(() => {
-    if (pingHistory.length < 2) return 0
-    let sum = 0
-    for (let i = 1; i < pingHistory.length; i++) {
-      sum += Math.abs(pingHistory[i] - pingHistory[i - 1])
-    }
-    return Math.round(sum / (pingHistory.length - 1))
-  }, [pingHistory])
+  const jitterVal = useMemo(() => calcJitter(pingHistory), [pingHistory])
 
   const failoverChain = useMemo(() => {
     return status?.failover?.priority_chain ?? (status?.failover?.priority_server ? [status.failover.priority_server] : [])
@@ -471,18 +461,12 @@ export default function Servers({ notify, status, refresh }: Props) {
 
     if (lastActiveServerIdRef.current !== sId) {
       lastActiveServerIdRef.current = sId
-      let stored: number[] = []
-      try {
-        const raw = sessionStorage.getItem(`xr_pings_${sId}`)
-        if (raw) stored = JSON.parse(raw)
-      } catch {}
+      let stored = loadServerPingHistory(sId)
 
       if (isValidPing) {
         if (stored.length === 0 || stored[stored.length - 1] !== ping) {
           stored = [...stored, ping].slice(-15)
-          try {
-            sessionStorage.setItem(`xr_pings_${sId}`, JSON.stringify(stored))
-          } catch {}
+          saveServerPingHistory(sId, stored)
         }
       }
       setPingHistory(stored)
@@ -492,9 +476,7 @@ export default function Servers({ notify, status, refresh }: Props) {
           return prev
         }
         const next = [...prev, ping].slice(-15)
-        try {
-          sessionStorage.setItem(`xr_pings_${sId}`, JSON.stringify(next))
-        } catch {}
+        saveServerPingHistory(sId, next)
         return next
       })
     }
@@ -856,378 +838,33 @@ export default function Servers({ notify, status, refresh }: Props) {
       {/* ВЕРХНИЙ ДЕК: Активный узел слева, Поиск/Фильтры/Действия справа — сбалансированная командная строка */}
       <div className="servers-top-deck">
         {/* Активный узел */}
-        <div className="servers-active-deck-card">
-          {activeServer ? (
-            <>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                  <span className="pinned-header-tag" style={{ background: '#22c55e', color: '#0f172a', fontWeight: 700, padding: '2px 8px', borderRadius: 4, fontSize: 10 }}>
-                    🟢 АКТИВНЫЙ УЗЕЛ
-                  </span>
-                  <span className="badge protocol-badge">{activeServer.protocol}</span>
-                  {activeServer.provider && (
-                    <span className="tag-provider" onClick={openProvidersModal} style={{ cursor: 'pointer' }}>
-                      <span className="sub-marker-dot" style={{ backgroundColor: providerColorMap.get(activeServer.provider) || '#a855f7' }} />
-                      <span className="tag-provider-name">{activeServer.provider_name || activeServer.provider}</span>
-                    </span>
-                  )}
-                  {status?.whitelist_mode_active && (
-                    <span className="badge" style={{ background: 'rgba(168, 85, 247, 0.25)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.5)', fontSize: 10, fontWeight: 700 }}>
-                      🟣 ОБХОД БЕЛЫХ СПИСКОВ
-                    </span>
-                  )}
-                </div>
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  {getFlowStatus(activeServer) === 'ok' && (
-                    <span className="badge badge-flow-ok" style={{ fontSize: 10, padding: '1px 5px' }}>🟢 Flow</span>
-                  )}
-                  {speedResults[activeServer.id] && (
-                    <span className="badge badge-speed" style={{ fontSize: 10, padding: '1px 5px' }}>
-                      ⚡ {speedResults[activeServer.id].speed_mbps.toFixed(1)} М
-                    </span>
-                  )}
-                  <span className={'ping ' + pingClass(activeServer.ping_ms)}>
-                    {activeServer.ping_ms > 0 ? `${activeServer.ping_ms} мс` : '—'}
-                  </span>
-                  <Sparkline ping={activeServer.ping_ms} />
-                </div>
-              </div>
-
-              {/* Название и псевдоним */}
-              <div>
-                {editingAliasId === activeServer.id ? (
-                  <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                    <input
-                      className="input sm"
-                      style={{ flex: 1, fontSize: 13 }}
-                      value={aliasInput}
-                      onChange={(e) => setAliasInput(e.target.value)}
-                      placeholder="Пользовательский псевдоним (пусто = сброс)"
-                      autoFocus
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') saveAlias(activeServer.id)
-                        if (e.key === 'Escape') setEditingAliasId(null)
-                      }}
-                    />
-                    <button className="btn sm primary" onClick={() => saveAlias(activeServer.id)} disabled={aliasSaving}>
-                      ✓
-                    </button>
-                    <button className="btn sm ghost" onClick={() => setEditingAliasId(null)}>
-                      ✕
-                    </button>
-                  </div>
-                ) : (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                    <b style={{ fontSize: 14, color: 'var(--text-bright)' }}>
-                      {activeServer.custom_alias ? `${activeServer.custom_alias} (${activeServer.name})` : activeServer.name}
-                    </b>
-                    <button
-                      type="button"
-                      className="btn sm ghost"
-                      style={{ padding: '0 4px', fontSize: 12, height: 22, opacity: 0.7 }}
-                      onClick={() => {
-                        setEditingAliasId(activeServer.id)
-                        setAliasInput(activeServer.custom_alias || '')
-                      }}
-                      title="Переименовать узел (задать псевдоним)"
-                    >
-                      ✏️
-                    </button>
-                    {activeServer.custom_alias && (
-                      <button
-                        type="button"
-                        className="btn sm ghost"
-                        style={{ padding: '0 4px', fontSize: 12, height: 22, opacity: 0.7, color: 'var(--text-danger, #ef4444)' }}
-                        onClick={() => saveAliasWithVal(activeServer.id, '')}
-                        title="Сбросить пользовательский псевдоним"
-                      >
-                        ✕
-                      </button>
-                    )}
-                  </div>
-                )}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
-                  <div className="muted small" style={{ fontSize: 11 }}>
-                    {activeServer.protocol === 'VK-CALL' ? 'Адрес VPS:' : 'IP сервера:'}{' '}
-                    <code>
-                      {activeServer.protocol === 'VK-CALL' && (!activeServer.port || activeServer.port <= 0)
-                        ? activeServer.host || 'Интерфейс csq0 (Звонки ВК)'
-                        : (
-                          <>
-                            {activeServer.resolved_ip || activeServer.host}
-                            {activeServer.resolved_ip && activeServer.resolved_ip !== activeServer.host
-                              ? ` (${activeServer.host})`
-                              : ''}
-                            {activeServer.port ? `:${activeServer.port}` : ''}
-                          </>
-                        )}
-                    </code>
-                  </div>
-                  {/* Роль в Failover-цепочке */}
-                  {status?.failover && (
-                    <span
-                      className="badge"
-                      style={{
-                        fontSize: 10.5,
-                        fontWeight: 700,
-                        padding: '2px 7px',
-                        borderRadius: 4,
-                        background:
-                          status.failover.priority_server === activeServer.id || status.failover.priority_chain?.[0] === activeServer.id
-                            ? 'rgba(56, 189, 248, 0.2)'
-                            : status.failover.priority_chain?.includes(activeServer.id)
-                            ? 'rgba(245, 158, 11, 0.2)'
-                            : 'rgba(255, 255, 255, 0.06)',
-                        color:
-                          status.failover.priority_server === activeServer.id || status.failover.priority_chain?.[0] === activeServer.id
-                            ? '#38bdf8'
-                            : status.failover.priority_chain?.includes(activeServer.id)
-                            ? '#fbbf24'
-                            : 'var(--muted)',
-                        border: '1px solid rgba(255, 255, 255, 0.1)',
-                      }}
-                      title="Позиция узла в автоматической цепочке защиты от сбоев (Failover)"
-                    >
-                      {status.failover.priority_server === activeServer.id || status.failover.priority_chain?.[0] === activeServer.id
-                        ? '👑 Основной сервер'
-                        : status.failover.priority_chain?.includes(activeServer.id)
-                        ? `⚡ Резерв #${status.failover.priority_chain.indexOf(activeServer.id) + 1}`
-                        : '🌐 Ручной выбор'}
-                    </span>
-                  )}
-                </div>
-
-                {/* Apple-style Live-телеметрия узла: скорость, трафик и спарклайн задержки */}
-                <div
-                  className="active-node-telemetry"
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 12,
-                    padding: '6px 12px',
-                    background: 'rgba(15, 23, 42, 0.55)',
-                    border: '1px solid rgba(56, 189, 248, 0.18)',
-                    borderRadius: 8,
-                    marginTop: 8,
-                    marginBottom: 4,
-                    flexWrap: 'wrap',
-                  }}
-                >
-                  {(() => {
-                    const isWl = Boolean(status?.whitelist_mode_active || activeServer.is_whitelist)
-                    const downSpeed = isWl
-                      ? (liveTraffic?.whitelist?.down ?? liveTraffic?.down ?? 0)
-                      : (liveTraffic?.proxy?.down ?? liveTraffic?.down ?? 0)
-                    const upSpeed = isWl
-                      ? (liveTraffic?.whitelist?.up ?? liveTraffic?.up ?? 0)
-                      : (liveTraffic?.proxy?.up ?? liveTraffic?.up ?? 0)
-                    const totalBytes = (liveTraffic?.proxy_bytes ?? 0) + (liveTraffic?.whitelist_bytes ?? 0)
-
-                    return (
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
-                        <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 600 }}>Live-трафик:</span>
-                        <span style={{ color: '#38bdf8', fontWeight: 700, fontFamily: 'Consolas, monospace' }}>
-                          ↓ {formatSpeed(downSpeed)}
-                        </span>
-                        <span style={{ color: '#c084fc', fontWeight: 700, fontFamily: 'Consolas, monospace' }}>
-                          ↑ {formatSpeed(upSpeed)}
-                        </span>
-                        {totalBytes > 0 && (
-                          <span className="muted" style={{ fontSize: 11, marginLeft: 2 }}>
-                            (всего {formatBytes(totalBytes)})
-                          </span>
-                        )}
-                      </div>
-                    )
-                  })()}
-
-                  {/* Квота подписки активного сервера */}
-                  {(() => {
-                    const prov = providers.find((p) => p.id === activeServer.provider)
-                    if (!prov || !prov.total_bytes || prov.total_bytes <= 0) return null
-                    const used = (prov.upload_bytes || 0) + (prov.download_bytes || 0)
-                    const total = prov.total_bytes
-                    const remaining = Math.max(0, total - used)
-                    const percent = Math.min(100, Math.round((used / total) * 100))
-                    return (
-                      <div
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 6,
-                          fontSize: 11,
-                          padding: '2px 8px',
-                          background: 'rgba(56, 189, 248, 0.08)',
-                          border: '1px solid rgba(56, 189, 248, 0.25)',
-                          borderRadius: 6,
-                        }}
-                        title={`Лимит: ${formatQuotaBytes(used)} из ${formatQuotaBytes(total)} (${percent}%)${prov.expire_timestamp ? ` · До ${new Date(prov.expire_timestamp * 1000).toLocaleDateString()}` : ''}`}
-                      >
-                        <span style={{ color: '#38bdf8', fontWeight: 600 }}>📊 Трафик подписки:</span>
-                        <span style={{ color: remaining === 0 ? '#ef4444' : '#4ade80', fontWeight: 700 }}>
-                          {formatQuotaBytes(remaining)} ост.
-                        </span>
-                        <span className="muted" style={{ fontSize: 10 }}>({percent}%)</span>
-                      </div>
-                    )
-                  })()}
-
-                  {activeServer && (
-                    <div
-                      onClick={measureLiveJitter}
-                      style={{
-                        display: 'inline-flex',
-                        alignItems: 'center',
-                        gap: 5,
-                        padding: '2px 8px',
-                        borderRadius: 6,
-                        cursor: jitterMeasuring ? 'wait' : 'pointer',
-                        background:
-                          pingHistory.length < 2
-                            ? 'rgba(148, 163, 184, 0.1)'
-                            : jitterVal > 25
-                            ? 'rgba(239, 68, 68, 0.12)'
-                            : jitterVal > 10
-                            ? 'rgba(234, 179, 8, 0.12)'
-                            : 'rgba(34, 197, 94, 0.12)',
-                        border: `1px solid ${
-                          pingHistory.length < 2
-                            ? 'rgba(148, 163, 184, 0.25)'
-                            : jitterVal > 25
-                            ? 'rgba(239, 68, 68, 0.35)'
-                            : jitterVal > 10
-                            ? 'rgba(234, 179, 8, 0.35)'
-                            : 'rgba(34, 197, 94, 0.35)'
-                        }`,
-                        fontSize: 11,
-                        userSelect: 'none',
-                        transition: 'all 0.2s ease',
-                      }}
-                      title={
-                        jitterMeasuring
-                          ? 'Выполняется измерение задержки...'
-                          : pingHistory.length < 2
-                          ? `Задержка: ${activeServer.ping_ms > 0 ? `${activeServer.ping_ms} мс` : '—'} | Джиттер: требуется от 2 замеров (нажмите для экспресс-замера)`
-                          : `Задержка: ${activeServer.ping_ms} мс | Джиттер: ±${jitterVal} мс (разброс по ${pingHistory.length} точкам) | Мин: ${Math.min(...pingHistory)} мс, Макс: ${Math.max(...pingHistory)} мс | Нажмите для экспресс-замера`
-                      }
-                    >
-                      <span>{jitterMeasuring ? '⏳' : '📶'}</span>
-                      <span style={{ color: 'var(--muted)', fontSize: 10.5 }}>Джиттер:</span>
-                      <span
-                        style={{
-                          fontFamily: 'Consolas, monospace',
-                          fontWeight: 600,
-                          color:
-                            pingHistory.length < 2
-                              ? 'var(--muted)'
-                              : jitterVal > 25
-                              ? '#ef4444'
-                              : jitterVal > 10
-                              ? '#eab308'
-                              : '#22c55e',
-                        }}
-                      >
-                        {jitterMeasuring ? '...' : pingHistory.length < 2 ? '—' : `±${jitterVal} мс`}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              {/* Действия */}
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                <span className="tag current-active-badge" style={{ fontSize: 11, padding: '2px 8px' }}>
-                  <span className="dot on" style={{ width: 6, height: 6, marginRight: 4, display: 'inline-block' }} />
-                  Активен
-                </span>
-                {/* FE-MOBILE: перенос кнопок на новую строку вместо распирания карточки на мобильных */}
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  <button
-                    type="button"
-                    className={`btn sm ghost btn-speedtest ${speedtestingId === activeServer.id ? 'loading' : ''}`}
-                    onClick={() => runSpeedtest(activeServer)}
-                    disabled={speedtestingId !== null}
-                    title="Замерить скорость"
-                  >
-                    <span>{speedtestingId === activeServer.id ? '⏳' : '🚀'}</span>
-                    <span>{speedtestingId === activeServer.id ? 'Замер…' : 'Скорость'}</span>
-                  </button>
-                  {activeServer.protocol === 'VK-CALL' ? (
-                    <button
-                      type="button"
-                      className="btn sm ghost"
-                      onClick={() => window.dispatchEvent(new CustomEvent('xr:switch-tab', { detail: 'vkturn' }))}
-                      title="Открыть настройки VK-туннеля"
-                    >
-                      📞 Настройки ВК
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      className="btn sm ghost"
-                      onClick={() => setShareServer(activeServer)}
-                      title="Ссылка подключения и QR-код"
-                    >
-                      🔗 Ссылка
-                    </button>
-                  )}
-                  {(() => {
-                    const chainIdx = failoverChain.indexOf(activeServer.id)
-                    const isStart = chainIdx === 0
-
-                    return (
-                      <>
-                        <button
-                          type="button"
-                          className={`btn sm ghost ${isStart ? 'is-priority' : ''}`}
-                          onClick={() => addToFailover(activeServer.id, 'start')}
-                          style={isStart ? { background: 'rgba(56, 189, 248, 0.2)', color: '#38bdf8', borderColor: '#38bdf8', fontWeight: 700 } : undefined}
-                          title={isStart ? 'Основной узел Failover (#1). Нажмите для снятия' : 'Сделать основным узлом (в начало Failover)'}
-                        >
-                          <span>{isStart ? '👑 Основной' : '⚡↑ В начало'}</span>
-                        </button>
-                        <button
-                          type="button"
-                          className={`btn sm ghost ${chainIdx > 0 ? 'is-priority' : ''}`}
-                          onClick={() => addToFailover(activeServer.id, 'end')}
-                          style={chainIdx > 0 ? { background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', borderColor: '#fbbf24', fontWeight: 600 } : undefined}
-                          title={chainIdx > 0 ? `Резерв #${chainIdx + 1} в Failover. Нажмите для снятия` : 'Добавить резервом (в конец Failover)'}
-                        >
-                          <span>{chainIdx > 0 ? `⚡#${chainIdx + 1} Резерв` : '⚡↓ В конец'}</span>
-                        </button>
-                      </>
-                    )
-                  })()}
-                  <button
-                    type="button"
-                    className={`btn sm btn-whitelist ${activeServer.is_whitelist ? 'is-whitelist' : 'ghost'}`}
-                    onClick={() => toggleWhitelist(activeServer.id)}
-                    title={activeServer.is_whitelist ? 'Удалить из белого списка' : 'Включить в белый список (аварийный туннель)'}
-                  >
-                    <span style={{ fontSize: 11 }}>{activeServer.is_whitelist ? '🟣' : '⚪'}</span>
-                    <span style={{ fontSize: 11, fontWeight: 600 }}>{activeServer.is_whitelist ? 'В белом списке' : 'Белый список'}</span>
-                  </button>
-                  {activeServer.is_whitelist && (
-                    <button
-                      type="button"
-                      className="btn sm ghost"
-                      onClick={() => makeServerNormal(activeServer.id)}
-                      title="Сделать узел обычным: перекрыть тег БС и убрать из аварийного туннеля"
-                    >
-                      <span style={{ fontSize: 11 }}>Сделать обычным</span>
-                    </button>
-                  )}
-                </div>
-              </div>
-            </>
-          ) : (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 90 }} className="muted">
-              Нет подключенного сервера
-            </div>
-          )}
-        </div>
+        <ActiveServerBanner
+          activeServer={activeServer ?? null}
+          status={status}
+          providers={providers}
+          providerColorMap={providerColorMap}
+          failoverChain={failoverChain}
+          pingHistory={pingHistory}
+          jitterVal={jitterVal}
+          jitterMeasuring={jitterMeasuring}
+          liveTraffic={liveTraffic}
+          speedResults={speedResults}
+          speedtestingId={speedtestingId}
+          editingAliasId={editingAliasId}
+          aliasInput={aliasInput}
+          aliasSaving={aliasSaving}
+          setEditingAliasId={setEditingAliasId}
+          setAliasInput={setAliasInput}
+          setShareServer={setShareServer}
+          openProvidersModal={openProvidersModal}
+          saveAlias={saveAlias}
+          saveAliasWithVal={saveAliasWithVal}
+          runSpeedtest={runSpeedtest}
+          measureLiveJitter={measureLiveJitter}
+          toggleWhitelist={toggleWhitelist}
+          makeServerNormal={makeServerNormal}
+          addToFailover={addToFailover}
+        />
 
         {/* Поиск, фильтры и управление */}
         <div className="servers-controls-deck-card">
@@ -1545,493 +1182,35 @@ export default function Servers({ notify, status, refresh }: Props) {
       </div>
 
       {/* ОСНОВНОЙ СПИСОК СЕРВЕРОВ: на ВСЮ ширину страницы (полноценные 3-4 колонки) */}
-      <div className="servers-main-content">
-        {loading ? (
-        /* Скелетоны при загрузке (Skeleton Shimmers) */
-        <div className={`server-list cols-${columns}`} style={{ marginTop: 12 }}>
-          {Array.from({ length: 8 }).map((_, idx) => (
-            <div
-              key={idx}
-              className="server-card skeleton-shimmer"
-              style={{
-                minHeight: 110,
-                display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'space-between',
-                padding: '12px 14px',
-                border: '1px solid rgba(255, 255, 255, 0.06)',
-              }}
-            >
-              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                <div style={{ width: 60, height: 16, borderRadius: 4, background: 'rgba(255, 255, 255, 0.06)' }} />
-                <div style={{ width: 50, height: 16, borderRadius: 4, background: 'rgba(255, 255, 255, 0.06)' }} />
-              </div>
-              <div style={{ width: '70%', height: 18, borderRadius: 4, background: 'rgba(255, 255, 255, 0.08)', margin: '10px 0' }} />
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <div style={{ width: 80, height: 24, borderRadius: 6, background: 'rgba(255, 255, 255, 0.06)' }} />
-                <div style={{ display: 'flex', gap: 6 }}>
-                  <div style={{ width: 24, height: 24, borderRadius: 6, background: 'rgba(255, 255, 255, 0.05)' }} />
-                  <div style={{ width: 24, height: 24, borderRadius: 6, background: 'rgba(255, 255, 255, 0.05)' }} />
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div>
-          <div className="pinned-divider" style={{ margin: '14px 0 12px' }}>
-            <span>Список серверов ({filtered.length})</span>
-          </div>
-
-          {/* ОСНОВНОЙ СПИСОК СЕРВЕРОВ */}
-          {filtered.length === 0 ? (
-            <p className="muted">Серверов по заданному фильтру не найдено.</p>
-          ) : viewMode === 'detailed' ? (
-            /* ПОДРОБНЫЙ ВИД (КАРТОЧКИ) */
-            <div className={`server-list cols-${columns}`}>
-              {filtered.slice(0, limit).map((s) => (
-                <div key={s.id} className={'server-card' + (s.is_active ? ' active' : '')}>
-                  {/* 1. Верхняя строка: метаданные слева, метрики справа */}
-                  <div className="server-card-top">
-                    <div className="server-card-badges">
-                      <span
-                        className="badge protocol-badge"
-                        style={s.protocol === 'VK-CALL' ? {
-                          background: 'rgba(34, 197, 94, 0.16)',
-                          border: '1px solid rgba(34, 197, 94, 0.42)',
-                          color: '#4ade80',
-                        } : undefined}
-                      >{s.protocol}</span>
-                      {s.provider && (
-                        <span
-                          className="tag-provider"
-                          title={`Подписка: ${s.provider_name || s.provider} (кликните для управления)`}
-                          onClick={openProvidersModal}
-                        >
-                          <span
-                            className="sub-marker-dot"
-                            style={{ backgroundColor: providerColorMap.get(s.provider) || '#a855f7' }}
-                          />
-                          <span className="tag-provider-name">{s.provider_name || s.provider}</span>
-                        </span>
-                      )}
-                      {(s.is_whitelist || status?.whitelist_servers?.includes(s.id)) && (
-                        <span className="badge" style={{ background: 'rgba(168, 85, 247, 0.2)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.4)', fontSize: 10 }}>
-                          🟣 Белый список
-                        </span>
-                      )}
-                      {ignored.has(s.id) && (
-                        <span className="tag ignored" title="Сервер исключён из авто-выбора (Fastest / Fallback)">
-                          🚫 Исключён
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="server-card-metrics">
-                      {getFlowStatus(s) === 'ok' ? (
-                        <span className="badge badge-flow-ok" title="Сервер подходит для Google Flow и Gemini Labs">
-                          🟢 Flow OK
-                        </span>
-                      ) : getFlowStatus(s) === 'blocked' ? (
-                        <span className="badge badge-flow-blocked" title="Заблокирован для Google Flow">
-                          🔴 Flow Блок
-                        </span>
-                      ) : null}
-                      {speedResults[s.id] && (
-                        <span
-                          className="badge badge-speed"
-                          title={`Замер скорости: ${speedResults[s.id].speed_mbps.toFixed(2)} Мбит/с (${speedResults[s.id].latency_ms} мс)`}
-                        >
-                          ⚡ {speedResults[s.id].speed_mbps.toFixed(1)} М
-                        </span>
-                      )}
-                      <span className={'ping ' + pingClass(s.ping_ms)}>
-                        {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
-                      </span>
-                      <Sparkline ping={s.ping_ms} />
-                    </div>
-                  </div>
-
-                  {/* 2. Средняя строка: Название сервера или inline-редактирование псевдонима */}
-                  <div className="server-card-main">
-                    {editingAliasId === s.id ? (
-                      <div style={{ display: 'flex', gap: 6, alignItems: 'center', width: '100%', margin: '4px 0' }}>
-                        <input
-                          className="input sm"
-                          style={{ flex: 1, fontSize: 13 }}
-                          value={aliasInput}
-                          onChange={(e) => setAliasInput(e.target.value)}
-                          placeholder="Пользовательское имя (или пусто для сброса)"
-                          autoFocus
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') saveAlias(s.id)
-                            if (e.key === 'Escape') setEditingAliasId(null)
-                          }}
-                        />
-                        <button className="btn sm primary" onClick={() => saveAlias(s.id)} disabled={aliasSaving}>
-                          ✓
-                        </button>
-                        <button className="btn sm ghost" onClick={() => setEditingAliasId(null)}>
-                          ✕
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="server-card-name" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <span title={`${s.name}\nХост: ${s.host}${s.port ? `:${s.port}` : ''}\nПротокол: ${s.protocol}`}>
-                          {s.custom_alias ? `${s.custom_alias} (${s.name})` : s.name}
-                        </span>
-                        <button
-                          type="button"
-                          className="btn sm ghost"
-                          style={{ padding: '0 4px', fontSize: 11, height: 20, opacity: 0.6 }}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setEditingAliasId(s.id)
-                            setAliasInput(s.custom_alias || '')
-                          }}
-                          title="Задать псевдоним (пользовательское имя)"
-                        >
-                          ✏️
-                        </button>
-                        {s.custom_alias && (
-                          <button
-                            type="button"
-                            className="btn sm ghost"
-                            style={{ padding: '0 4px', fontSize: 11, height: 20, opacity: 0.6, color: 'var(--text-danger, #ef4444)' }}
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              saveAliasWithVal(s.id, '')
-                            }}
-                            title="Сбросить пользовательский псевдоним"
-                          >
-                            ✕
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* 3. Нижняя строка: Кнопки действий без разрыва строк */}
-                  <div className="server-card-actions">
-                    <div className="server-card-action-primary">
-                      {s.is_active ? (
-                        <span className="tag current-active-badge">
-                          <span>✓</span>
-                          <span className="btn-label-optional">ПОДКЛЮЧЁН</span>
-                        </span>
-                      ) : (
-                        <button
-                          type="button"
-                          className="btn sm btn-connect"
-                          onClick={() => activate(s)}
-                          title="Сделать этот сервер активным"
-                        >
-                          <span>🔌</span>
-                          <span className="btn-label-optional">Подключить</span>
-                        </button>
-                      )}
-                    </div>
-
-                    <div className="server-card-action-secondary">
-                      <button
-                        type="button"
-                        className={`btn sm ghost btn-speedtest ${speedtestingId === s.id ? 'loading' : ''}`}
-                        onClick={() => runSpeedtest(s)}
-                        disabled={speedtestingId !== null}
-                        title="Замерить реальную скорость загрузки через этот прокси"
-                      >
-                        <span>{speedtestingId === s.id ? '⏳' : '🚀'}</span>
-                        <span className="btn-label-optional">{speedtestingId === s.id ? 'Замер…' : 'Скорость'}</span>
-                      </button>
-
-                      {s.protocol === 'VK-CALL' ? (
-                        <button
-                          type="button"
-                          className="btn sm ghost"
-                          onClick={() => window.dispatchEvent(new CustomEvent('xr:switch-tab', { detail: 'vkturn' }))}
-                          title="Открыть настройки VK-туннеля"
-                        >
-                          <span>📞</span>
-                          <span className="btn-label-optional">Настройки ВК</span>
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          className="btn sm ghost"
-                          onClick={() => setShareServer(s)}
-                          title="Сгенерировать ссылку подключения (vless/vmess/ss) и QR-код"
-                        >
-                          <span>🔗</span>
-                          <span className="btn-label-optional">Ссылка</span>
-                        </button>
-                      )}
-
-                      {(() => {
-                        const chainIdx = failoverChain.indexOf(s.id)
-                        const isStart = chainIdx === 0
-
-                        return (
-                          <>
-                            <button
-                              type="button"
-                              className={`btn sm ghost ${isStart ? 'is-priority' : ''}`}
-                              onClick={() => addToFailover(s.id, 'start')}
-                              style={isStart ? { background: 'rgba(56, 189, 248, 0.2)', color: '#38bdf8', borderColor: '#38bdf8', fontWeight: 700 } : undefined}
-                              title={isStart ? 'Основной узел Failover (#1). Нажмите для снятия' : 'Сделать основным узлом (в начало Failover)'}
-                            >
-                              <span>{isStart ? '👑' : '⚡↑'}</span>
-                              <span className="btn-label-optional">{isStart ? 'Основной' : 'В начало'}</span>
-                            </button>
-                            <button
-                              type="button"
-                              className={`btn sm ghost ${chainIdx > 0 ? 'is-priority' : ''}`}
-                              onClick={() => addToFailover(s.id, 'end')}
-                              style={chainIdx > 0 ? { background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', borderColor: '#fbbf24', fontWeight: 600 } : undefined}
-                              title={chainIdx > 0 ? `Резерв #${chainIdx + 1} в Failover. Нажмите для снятия` : 'Добавить резервом (в конец Failover)'}
-                            >
-                              <span>{chainIdx > 0 ? `⚡#${chainIdx + 1}` : '⚡↓'}</span>
-                              <span className="btn-label-optional">{chainIdx > 0 ? 'Резерв' : 'В конец'}</span>
-                            </button>
-                          </>
-                        )
-                      })()}
-
-                      <button
-                        type="button"
-                        className={`btn sm btn-whitelist ${s.is_whitelist ? 'is-whitelist' : 'ghost'}`}
-                        onClick={() => toggleWhitelist(s.id)}
-                        title={s.is_whitelist ? 'Удалить из белого списка (аварийный туннель)' : 'Включить в белый список (аварийный 100% туннель)'}
-                      >
-                        <span style={{ fontSize: 11 }}>{s.is_whitelist ? '🟣' : '⚪'}</span>
-                        <span className="btn-label-full">{s.is_whitelist ? 'В белом списке' : 'Белый список'}</span>
-                        <span className="btn-label-short">{s.is_whitelist ? 'БС ON' : 'БС'}</span>
-                      </button>
-                      {s.is_whitelist && (
-                        <button
-                          type="button"
-                          className="btn sm ghost"
-                          onClick={() => makeServerNormal(s.id)}
-                          title="Сделать узел обычным: перекрыть тег БС и убрать из аварийного туннеля"
-                        >
-                          <span className="btn-label-full">Сделать обычным</span>
-                          <span className="btn-label-short">Обычный</span>
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ))}
-              {filtered.length > limit && (
-                <button
-                  className="btn wide"
-                  style={{ gridColumn: '1 / -1', marginTop: 12, padding: '10px 16px', fontWeight: 600 }}
-                  onClick={() => setLimit(limit + PAGE)}
-                >
-                  Показать ещё {PAGE} (осталось {filtered.length - limit})
-                </button>
-              )}
-            </div>
-          ) : (
-            /* КОМПАКТНЫЙ ВИД (ОДНОСТРОЧНАЯ ТАБЛИЦА) */
-            <div className={`server-compact-list cols-${columns}`}>
-              {filtered.slice(0, limit).map((s) => (
-                <div key={s.id} className={'server-compact-row' + (s.is_active ? ' active' : '')}>
-                  <span className="badge" style={{ minWidth: 46, textAlign: 'center' }}>
-                    {s.protocol}
-                  </span>
-                  {s.provider && (
-                    <span
-                      className="sub-marker-dot"
-                      title={s.provider_name || s.provider}
-                      style={{ backgroundColor: providerColorMap.get(s.provider) || '#a855f7' }}
-                    />
-                  )}
-                  {(s.is_whitelist || status?.whitelist_servers?.includes(s.id)) && (
-                    <span className="badge" style={{ background: 'rgba(168, 85, 247, 0.2)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.4)', fontSize: 9, padding: '1px 4px' }}>
-                      🟣
-                    </span>
-                  )}
-                  {editingAliasId === s.id ? (
-                    <div style={{ display: 'inline-flex', gap: 4, alignItems: 'center', flex: 1 }}>
-                      <input
-                        className="input sm"
-                        style={{ height: 24, fontSize: 12 }}
-                        value={aliasInput}
-                        onChange={(e) => setAliasInput(e.target.value)}
-                        placeholder="Псевдоним"
-                        autoFocus
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') saveAlias(s.id)
-                          if (e.key === 'Escape') setEditingAliasId(null)
-                        }}
-                      />
-                      <button className="btn sm primary" style={{ padding: '0 6px', height: 24 }} onClick={() => saveAlias(s.id)}>✓</button>
-                      <button className="btn sm ghost" style={{ padding: '0 6px', height: 24 }} onClick={() => setEditingAliasId(null)}>✕</button>
-                    </div>
-                  ) : (
-                    <span
-                      className="server-compact-name"
-                      title={`${s.name}\nХост: ${s.host}${s.port ? `:${s.port}` : ''}`}
-                      style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
-                    >
-                      <span>{s.custom_alias ? `${s.custom_alias} (${s.name})` : s.name}</span>
-                      <button
-                        type="button"
-                        className="btn sm ghost"
-                        style={{ padding: '0 2px', fontSize: 10, height: 18, opacity: 0.5 }}
-                        onClick={() => {
-                          setEditingAliasId(s.id)
-                          setAliasInput(s.custom_alias || '')
-                        }}
-                        title="Переименовать"
-                      >
-                        ✏️
-                      </button>
-                      {s.custom_alias && (
-                        <button
-                          type="button"
-                          className="btn sm ghost"
-                          style={{ padding: '0 2px', fontSize: 10, height: 18, opacity: 0.5, color: 'var(--text-danger, #ef4444)' }}
-                          onClick={() => saveAliasWithVal(s.id, '')}
-                          title="Сбросить псевдоним"
-                        >
-                          ✕
-                        </button>
-                      )}
-                    </span>
-                  )}
-                  {getFlowStatus(s) === 'ok' ? (
-                    <span className="badge badge-flow-ok" style={{ fontSize: 10, padding: '1px 5px' }} title="Подходит для Google Flow">
-                      🟢 Flow
-                    </span>
-                  ) : getFlowStatus(s) === 'blocked' ? (
-                    <span className="badge badge-flow-blocked" style={{ fontSize: 10, padding: '1px 5px' }} title="Заблокирован для Flow">
-                      🔴 Блок
-                    </span>
-                  ) : null}
-                  {ignored.has(s.id) && (
-                    <span className="tag ignored" style={{ fontSize: 10, padding: '1px 5px' }} title="Исключён из авто-выбора">
-                      🚫 Исключён
-                    </span>
-                  )}
-                  {speedResults[s.id] && (
-                    <span className="badge badge-speed" style={{ fontSize: 10, padding: '1px 5px' }}>
-                      ⚡ {speedResults[s.id].speed_mbps.toFixed(1)}M
-                    </span>
-                  )}
-                  <span
-                    className={'ping ' + pingClass(s.ping_ms)}
-                    style={{ minWidth: 60, textAlign: 'right' }}
-                  >
-                    {s.ping_ms > 0 ? `${s.ping_ms} мс` : '—'}
-                  </span>
-                  <Sparkline ping={s.ping_ms} />
-                  <div style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-                    {s.protocol === 'VK-CALL' ? (
-                      <button
-                        className="btn sm ghost"
-                        onClick={() => window.dispatchEvent(new CustomEvent('xr:switch-tab', { detail: 'vkturn' }))}
-                        style={{ padding: '3px 6px' }}
-                        title="Открыть настройки VK-туннеля"
-                      >
-                        📞
-                      </button>
-                    ) : (
-                      <button
-                        className="btn sm ghost"
-                        onClick={() => setShareServer(s)}
-                        style={{ padding: '3px 6px' }}
-                        title="Ссылка подключения и QR-код"
-                      >
-                        🔗
-                      </button>
-                    )}
-                    <button
-                      className={`btn sm ghost btn-speedtest ${speedtestingId === s.id ? 'loading' : ''}`}
-                      onClick={() => runSpeedtest(s)}
-                      disabled={speedtestingId !== null}
-                      style={{ padding: '3px 6px' }}
-                      title="Замерить скорость"
-                    >
-                      {speedtestingId === s.id ? '⏳' : '🚀'}
-                    </button>
-                    {s.is_active ? (
-                      <span className="tag current" style={{ fontSize: 10, padding: '2px 6px' }}>✓</span>
-                    ) : (
-                      <button className="btn sm btn-connect" onClick={() => activate(s)} style={{ padding: '3px 8px' }}>
-                        🔌
-                      </button>
-                    )}
-                    {(() => {
-                      const chainIdx = failoverChain.indexOf(s.id)
-                      const isStart = chainIdx === 0
-                      return (
-                        <>
-                          <button
-                            type="button"
-                            className={`btn sm ghost ${isStart ? 'is-priority' : ''}`}
-                            onClick={() => addToFailover(s.id, 'start')}
-                            style={{
-                              padding: '3px 6px',
-                              ...(isStart ? { background: 'rgba(56, 189, 248, 0.2)', color: '#38bdf8', borderColor: '#38bdf8', fontWeight: 700 } : {}),
-                            }}
-                            title={isStart ? 'Основной узел Failover (#1). Нажмите для снятия' : 'В начало Failover (основной)'}
-                          >
-                            {isStart ? '👑' : '⚡↑'}
-                          </button>
-                          <button
-                            type="button"
-                            className={`btn sm ghost ${chainIdx > 0 ? 'is-priority' : ''}`}
-                            onClick={() => addToFailover(s.id, 'end')}
-                            style={{
-                              padding: '3px 6px',
-                              ...(chainIdx > 0 ? { background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', borderColor: '#fbbf24', fontWeight: 600 } : {}),
-                            }}
-                            title={chainIdx > 0 ? `Резерв #${chainIdx + 1} в Failover. Нажмите для снятия` : 'В конец Failover (резерв)'}
-                          >
-                            {chainIdx > 0 ? `⚡#${chainIdx + 1}` : '⚡↓'}
-                          </button>
-                        </>
-                      )
-                    })()}
-                    <button
-                      type="button"
-                      className={`btn sm btn-whitelist ${s.is_whitelist ? 'is-whitelist' : 'ghost'}`}
-                      onClick={() => toggleWhitelist(s.id)}
-                      style={{ padding: '3px 8px' }}
-                      title={s.is_whitelist ? 'Удалить из белого списка' : 'В белый список (аварийный туннель)'}
-                    >
-                      <span style={{ fontSize: 11 }}>{s.is_whitelist ? '🟣' : '⚪'}</span>
-                      <span style={{ fontSize: 11, fontWeight: 600 }}>{s.is_whitelist ? 'БС ON' : 'БС'}</span>
-                    </button>
-                    {s.is_whitelist && (
-                      <button
-                        type="button"
-                        className="btn sm ghost"
-                        onClick={() => makeServerNormal(s.id)}
-                        style={{ padding: '3px 8px' }}
-                        title="Сделать узел обычным: перекрыть тег БС и убрать из аварийного туннеля"
-                      >
-                        <span style={{ fontSize: 11 }}>Обычный</span>
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ))}
-              {filtered.length > limit && (
-                <button
-                  className="btn wide"
-                  style={{ gridColumn: '1 / -1', marginTop: 12, padding: '10px 16px', fontWeight: 600 }}
-                  onClick={() => setLimit(limit + PAGE)}
-                >
-                  Показать ещё {PAGE} (осталось {filtered.length - limit})
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-      </div>
+      <ServerList
+        loading={loading}
+        columns={columns}
+        viewMode={viewMode}
+        filtered={filtered}
+        limit={limit}
+        pageSize={PAGE}
+        setLimit={setLimit}
+        status={status}
+        providerColorMap={providerColorMap}
+        failoverChain={failoverChain}
+        ignored={ignored}
+        speedResults={speedResults}
+        speedtestingId={speedtestingId}
+        editingAliasId={editingAliasId}
+        aliasInput={aliasInput}
+        aliasSaving={aliasSaving}
+        setEditingAliasId={setEditingAliasId}
+        setAliasInput={setAliasInput}
+        setShareServer={setShareServer}
+        openProvidersModal={openProvidersModal}
+        saveAlias={saveAlias}
+        saveAliasWithVal={saveAliasWithVal}
+        activate={activate}
+        runSpeedtest={runSpeedtest}
+        toggleWhitelist={toggleWhitelist}
+        makeServerNormal={makeServerNormal}
+        addToFailover={addToFailover}
+      />
 
       {/* МОДАЛЬНОЕ ОКНО ИГНОР-ЛИСТА */}
       <IgnoreListModal

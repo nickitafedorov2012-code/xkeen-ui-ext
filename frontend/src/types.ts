@@ -74,6 +74,9 @@ export interface FailoverConfig {
 
 export interface StatusInfo {
   version: string
+  available?: boolean
+  rci_available?: boolean
+  mihomo_available?: boolean
   config_path: string
   service_running?: boolean
   service_stopped?: boolean

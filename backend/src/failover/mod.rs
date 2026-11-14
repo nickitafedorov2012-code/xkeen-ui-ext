@@ -105,7 +105,9 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         }
         return Ok(reason.message("Failover"));
     }
-    let _speedtest_guard = speedtest_res.expect("speedtest_res is Ok");
+    let Ok(_speedtest_guard) = speedtest_res else {
+        return Ok(SkipReason::SpeedtestRunning.message("Failover"));
+    };
 
     // F-04: ручной прогон ждёт завершения фоновой итерации (и наоборот)
     let _check_guard = CHECK_IN_PROGRESS.lock().await;
@@ -920,7 +922,12 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                             continue;
                         }
 
-                        let canary = canary_guard.as_mut().unwrap();
+                        let Some(canary) = canary_guard.as_mut() else {
+                            return Ok(format!(
+                                "Canary Soak Test: состояние '{}' сброшено во время проверки",
+                                pri.name
+                            ));
+                        };
                         canary.probes_passed += 1;
                         // Экономия трафика: в промежуточных тиках байты не увеличиваются фиктивно
 
@@ -1009,8 +1016,11 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                     } else {
                         // Кандидат недоступен или пинг выше гистерезиса: если он был в процессе Canary, прерываем
                         let mut canary_guard = CANARY_STAGE.lock().await;
-                        if canary_guard.as_ref().map_or(false, |c| c.target_id == pri.id) {
-                            let elapsed = canary_guard.as_ref().unwrap().started_at.elapsed().as_secs();
+                        if let Some(elapsed) = canary_guard
+                            .as_ref()
+                            .filter(|c| c.target_id == pri.id)
+                            .map(|c| c.started_at.elapsed().as_secs())
+                        {
                             *canary_guard = None;
                             drop(canary_guard);
                             let abort_msg = format!(
@@ -1068,7 +1078,9 @@ pub async fn run_device_check(state: &AppState) -> Result<String, String> {
         }
         return Ok(reason.message("Per-device failover"));
     }
-    let _speedtest_guard = speedtest_res.expect("speedtest_res is Ok");
+    let Ok(_speedtest_guard) = speedtest_res else {
+        return Ok(SkipReason::SpeedtestRunning.message("Per-device failover"));
+    };
 
     // F-04: сериализация с run_check (общий CHECK_IN_PROGRESS)
     let _check_guard = CHECK_IN_PROGRESS.lock().await;

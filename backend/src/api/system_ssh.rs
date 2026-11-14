@@ -326,6 +326,9 @@ pub async fn put_settings(
             SettingsEffect::LoggerLevel => {
                 crate::logger::set_level(&new_cfg.logs.level);
             }
+            SettingsEffect::RestartRequired("logs.remote_syslog") => {
+                crate::logger::reconfigure_syslog(&new_cfg.logs.remote_syslog);
+            }
             SettingsEffect::CanaryRouting => {
                 reapply_canary_routing(&state).await;
             }

@@ -2416,7 +2416,7 @@ mod structural_regression_tests {
     #[test]
     fn regression_bug_83_no_commit_per_provider_in_background_sync() {
         // Баг 83: миграция провайдеров делала N коммитов и N reload Mihomo подряд.
-        let b = body(include_str!("api/servers.rs"), "pub async fn sync_all_mobile_providers(");
+        let b = body(include_str!("api/servers/subscriptions.rs"), "pub async fn sync_all_mobile_providers(");
         assert!(!b.contains("ConfigTx::begin"), "фоновая синхронизация не открывает транзакцию на каждый провайдер");
         assert!(!b.contains("commit_and_reload"), "и не перезагружает Mihomo в цикле");
     }
@@ -2467,7 +2467,12 @@ mod structural_regression_tests {
         assert_eq!(crate::adguard::resolve_adguard_restore_port(Some(8853), "/nonexistent"), 8853);
 
         // 1.3 (проверка remove_adguard_iptables / порт возврата в adguard.rs без хардкода 1053):
-        let agh_src = include_str!("adguard.rs");
+        let agh_src = concat!(
+            include_str!("adguard/mod.rs"), "\n",
+            include_str!("adguard/yaml.rs"), "\n",
+            include_str!("adguard/iptables.rs"), "\n",
+            include_str!("adguard/service.rs"),
+        );
         let agh_prod = &agh_src[..agh_src.find("#[cfg(test)]").unwrap_or(agh_src.len())];
         assert!(
             !agh_prod.contains("build_sync_tunnel_dns_ports_script(&format!(\"{port_str}|5353|5354\"), 1053)"),

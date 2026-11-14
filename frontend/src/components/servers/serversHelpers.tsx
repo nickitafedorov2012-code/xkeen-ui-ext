@@ -1,10 +1,12 @@
 import type { ServerInfo } from '../../types'
+import { getSignalBarsInfo } from '../../utils/serversLayout'
 
 export function Sparkline({ ping }: { ping: number }) {
   // 4 полосы качества сигнала Apple-style (высоты: 4px, 7px, 10px, 14px)
   const barHeights = [4, 7, 10, 14]
+  const info = getSignalBarsInfo(ping)
 
-  if (ping <= 0 || ping >= 9999) {
+  if (info.status === 'timeout') {
     return (
       <div
         className="signal-bars-meter timeout"
@@ -24,22 +26,9 @@ export function Sparkline({ ping }: { ping: number }) {
     )
   }
 
-  // Оценка качества по пингу:
-  // < 80 мс: 4/4 (зеленый)
-  // 80..160 мс: 3/4 (голубой)
-  // 160..300 мс: 2/4 (янтарный)
-  // >= 300 мс: 1/4 (красный)
-  const activeBars = ping < 80 ? 4 : ping < 160 ? 3 : ping < 300 ? 2 : 1
-  const qualityColor =
-    activeBars === 4 ? '#22c55e' : activeBars === 3 ? '#38bdf8' : activeBars === 2 ? '#f59e0b' : '#ef4444'
-  const qualityLabel =
-    activeBars === 4
-      ? 'Отличное (4/4)'
-      : activeBars === 3
-      ? 'Хорошее (3/4)'
-      : activeBars === 2
-      ? 'Среднее (2/4)'
-      : 'Слабое (1/4)'
+  const activeBars = info.active
+  const qualityColor = info.color!
+  const qualityLabel = info.label!
 
   return (
     <div

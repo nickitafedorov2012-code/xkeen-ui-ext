@@ -900,8 +900,7 @@ pub fn three_way_merge_yaml(
 /// Откат неподтверждённой транзакции (баг 131): слияние config.json с изменениями других писателей,
 /// пересборка авто-блоков config.yaml под итоговую конфигурацию, reload и пересинхронизация iptables.
 pub async fn perform_commit_rollback(state: &AppState, p: &PersistedPendingCommit) -> Result<(), String> {
-    let _cfg_guard = state.config_lock.lock().await;
-    let _routing_guard = state.routing_lock.lock().await;
+    let _guards = state.lock_config_and_routing().await;
     let json_path = (*state.config_path).clone();
 
     let mut final_cfg = (**state.config.read().await).clone();
@@ -1831,8 +1830,12 @@ rules:
         assert!(res_json.errors.iter().any(|e| e.contains("1001")));
     }
 
-    #[test]
-    fn test_pending_commit_status_empty() {
+    #[tokio::test]
+    async fn test_pending_commit_status_empty() {
+        let _commit_lock = COMMIT_TEST_LOCK.lock().await;
+        if let Ok(mut g) = pending_commit_store().lock() {
+            *g = None;
+        }
         let status = get_pending_commit_status();
         assert!(!status.pending);
         assert!(status.tx_id.is_none());

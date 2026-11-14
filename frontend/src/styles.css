@@ -1,9 +1,13 @@
 @import './styles/base-header.css';
 @import './styles/cards-servers.css';
 @import './styles/devices-whitelist.css';
-@import './styles/antigravity-light.css';
+@import './styles/antigravity-tab.css';
+@import './styles/light-theme-base.css';
+@import './styles/light-theme-sections.css';
 @import './styles/modals-editors.css';
-@import './styles/telemetry-features.css';
+@import './styles/telemetry-graph-tiles.css';
+@import './styles/telemetry-viewers.css';
+@import './styles/telemetry-settings-modals.css';
 @import './styles/adguard.css';
 
 /* Fixed column widths for Devices table (preserved in styles.css for anti-regression & layout invariants) */

@@ -963,8 +963,12 @@ pub async fn run_whitelist_detector_check(state: &AppState, reason: &str) -> Res
     if let Err(skip) = crate::failover::scan_allowed(flags) {
         return Ok(skip.message("Детектор БС"));
     }
-    let _speedtest_guard = speedtest_res.expect("speedtest_res is Ok");
-    let _check_guard = check_res.expect("check_res is Ok");
+    let Ok(_speedtest_guard) = speedtest_res else {
+        return Ok(crate::failover::SkipReason::SpeedtestRunning.message("Детектор БС"));
+    };
+    let Ok(_check_guard) = check_res else {
+        return Ok(crate::failover::SkipReason::CheckInProgress.message("Детектор БС"));
+    };
 
     let servers = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await?;
     match evaluate_and_apply_whitelist_detector(state, &cfg, &servers, reason).await? {

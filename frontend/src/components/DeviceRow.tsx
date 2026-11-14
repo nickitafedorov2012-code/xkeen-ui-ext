@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react'
+import { kbpsToMbpsInput, mbpsInputToKbps } from '../utils/deviceSpeed'
 import {
   type DeviceInfo,
   type DeviceRoutingEntry,
@@ -247,18 +248,12 @@ function SpeedCell({
   busy: boolean
   applySpeed: (macs: string[], kbps: number) => void
 }) {
-  const formatInitial = (k?: number) => {
-    if (!k || k <= 0) return ''
-    const mbps = k / 1024
-    return k % 1024 === 0 ? String(mbps) : mbps.toFixed(1)
-  }
-
-  const [val, setVal] = useState(() => formatInitial(kbps))
+  const [val, setVal] = useState(() => kbpsToMbpsInput(kbps))
   const [editing, setEditing] = useState(false)
 
   useEffect(() => {
     if (!editing) {
-      setVal(formatInitial(kbps))
+      setVal(kbpsToMbpsInput(kbps))
     }
   }, [kbps, editing])
 
@@ -271,14 +266,13 @@ function SpeedCell({
       }
       return
     }
-    const num = parseFloat(trimmed.replace(',', '.'))
-    if (!isNaN(num) && num > 0) {
-      const nextKbps = Math.round(num * 1024)
+    const nextKbps = mbpsInputToKbps(trimmed)
+    if (nextKbps > 0) {
       if (nextKbps !== kbps) {
         applySpeed([mac], nextKbps)
       }
     } else {
-      setVal(formatInitial(kbps))
+      setVal(kbpsToMbpsInput(kbps))
     }
   }
 
@@ -286,7 +280,7 @@ function SpeedCell({
     if (e.key === 'Enter') {
       e.currentTarget.blur()
     } else if (e.key === 'Escape') {
-      setVal(formatInitial(kbps))
+      setVal(kbpsToMbpsInput(kbps))
       setEditing(false)
     }
   }

@@ -136,3 +136,4 @@
 - `main.rs`, еженедельное сканирование CDN (около строки 728): `weekly_state.config.read().await` держится на всё время сетевого `discover_all_cdns`. Пока идёт скан, все сохранения настроек ждут.
 - `backend/src/bot.rs` (тест бага 61) и `notifications.rs`: в тестах лежит строка, похожая на настоящий токен бота `8959891087:AAH…`. Если он реальный, отозвать его у @BotFather и заменить на фиктивный.
 - `failover.rs`: тест `test_adversarial_quarantine_12h_amnesty_boundary_oracle` нестабилен по времени (подробности в журнале, раздел «Новые находки»).
+- ~~`backend/src/transaction.rs` (`transaction::tests::test_pending_commit_status_empty`): при параллельном прогоне `cargo test` зафиксирован 1 флаки-фейл...~~ Исправлено: тест переведён на `#[tokio::test]` с захватом `COMMIT_TEST_LOCK.lock().await` (25/25 `transaction::tests` GREEN).

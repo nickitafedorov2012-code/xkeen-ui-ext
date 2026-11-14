@@ -10,11 +10,15 @@ export function getWsUrl(path: string): string {
   return `${protocol}//${window.location.host}/api/${path.replace(/^\//, '')}`
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 /**
  * UI-08: Валидация структуры полезной нагрузки (data payload) для критических эндпоинтов API.
  * Защищает UI от скрытых ошибок при нарушении контрактов данных даже при success === true.
  */
-export function validateEndpointData(cleanPath: string, data: any): void {
+export function validateEndpointData(cleanPath: string, data: unknown): void {
   const base = cleanPath.split('?')[0].replace(/^\/+|\/+$/g, '')
   if (data === undefined) {
     throw new Error(`Эндпоинт /api/${base} вернул некорректный ответ (отсутствует поле data)`)
@@ -23,24 +27,40 @@ export function validateEndpointData(cleanPath: string, data: any): void {
     return
   }
   if (base === 'config-files/read') {
-    if (typeof data !== 'object' || typeof data.content !== 'string') {
+    if (!isRecord(data) || typeof data.content !== 'string') {
       throw new Error(`Некорректная структура данных в ответе /api/${base}: отсутствует обязательное поле content`)
     }
   } else if (base === 'servers') {
-    if (typeof data !== 'object' || (!Array.isArray(data.servers) && !Array.isArray(data))) {
+    if (!Array.isArray(data) && (!isRecord(data) || !Array.isArray(data.servers))) {
       throw new Error(`Некорректная структура данных в ответе /api/${base}: отсутствует список серверов`)
     }
   } else if (base === 'diagnostics/health') {
-    if (typeof data !== 'object' || !Array.isArray(data.checks)) {
+    if (!isRecord(data) || !Array.isArray(data.checks)) {
       throw new Error(`Некорректная структура данных в ответе /api/${base}: отсутствует массив проверок checks`)
     }
   } else if (base === 'rules') {
-    if (typeof data !== 'object' || !Array.isArray(data.rules)) {
+    if (!isRecord(data) || !Array.isArray(data.rules)) {
       throw new Error(`Некорректная структура данных в ответе /api/${base}: отсутствует массив правил rules`)
     }
   } else if (base === 'antigravity/status') {
-    if (typeof data !== 'object' || typeof data.enabled !== 'boolean') {
+    if (!isRecord(data) || typeof data.enabled !== 'boolean') {
       throw new Error(`Некорректная структура данных в ответе /api/${base}: некорректный статус Antigravity`)
+    }
+  } else if (base === 'status') {
+    if (!isRecord(data) || (typeof data.version !== 'string' && typeof data.service_running !== 'boolean')) {
+      throw new Error(`Некорректная структура данных в ответе /api/${base}: некорректный статус панели`)
+    }
+  } else if (base === 'routing') {
+    if (!isRecord(data)) {
+      throw new Error(`Некорректная структура данных в ответе /api/${base}: ожидается объект маршрутизации`)
+    }
+  } else if (base === 'zapret/status') {
+    if (!isRecord(data) || (typeof data.running !== 'boolean' && typeof data.installed !== 'boolean')) {
+      throw new Error(`Некорректная структура данных в ответе /api/${base}: некорректный статус Zapret`)
+    }
+  } else if (base === 'adguard/status') {
+    if (!isRecord(data) || (typeof data.running !== 'boolean' && typeof data.installed !== 'boolean')) {
+      throw new Error(`Некорректная структура данных в ответе /api/${base}: некорректный статус AdGuard`)
     }
   }
 }
@@ -70,8 +90,22 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
       headers.set('X-Requested-With', 'XMLHttpRequest')
     }
     // FE-02: зависший бэкенд раньше означал вечный pending — добавляем таймаут 30с
+    // + объединяем внешний options.signal для отмены при смене вкладки
     const controller = new AbortController()
-    const abortTimer = setTimeout(() => controller.abort(), 30000)
+    let timedOut = false
+    const callerSignal = options.signal
+    const onCallerAbort = () => controller.abort()
+    if (callerSignal) {
+      if (callerSignal.aborted) {
+        controller.abort()
+      } else {
+        callerSignal.addEventListener('abort', onCallerAbort, { once: true })
+      }
+    }
+    const abortTimer = setTimeout(() => {
+      timedOut = true
+      controller.abort()
+    }, 30000)
     try {
       const res = await fetch(`/api/${cleanPath}`, {
         ...options,
@@ -111,7 +145,7 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
 
       return env.data as T
     } catch (err) {
-      if (controller.signal.aborted) {
+      if (controller.signal.aborted && timedOut) {
         const message = 'Роутер не ответил за 30 сек.'
         const method = options.method?.toUpperCase() ?? 'GET'
         throw new Error(method === 'GET' ? message : `${message} Результат запроса пока неизвестен.`)
@@ -119,6 +153,9 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
       throw err
     } finally {
       clearTimeout(abortTimer)
+      if (callerSignal) {
+        callerSignal.removeEventListener('abort', onCallerAbort)
+      }
       if (inflightKey) {
         inflightPosts.delete(inflightKey)
       }
@@ -132,15 +169,16 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
   return run
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
-  return apiFetch<T>(path)
+export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
+  return apiFetch<T>(path, signal ? { signal } : undefined)
 }
 
-export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
+export async function apiPost<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   return apiFetch<T>(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body ?? {}),
+    signal,
   })
 }
 

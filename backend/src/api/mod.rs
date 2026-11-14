@@ -11,6 +11,7 @@ pub mod dns_adguard;
 pub use dns_adguard::*;
 pub mod domains;
 pub use domains::*;
+pub mod router;
 pub mod routing;
 pub use routing::*;
 pub mod servers;
@@ -24,6 +25,8 @@ pub use vkturn::*;
 pub mod zapret;
 pub use zapret::*;
 
+pub use crate::error::{ApiResult, AppError};
+
 /// Вспомогательное: единый формат ответа API.
 pub fn api_ok(data: serde_json::Value) -> axum::response::Response {
     Json(json!({ "success": true, "data": data })).into_response()
@@ -34,11 +37,7 @@ pub fn api_err(error: impl Into<String>) -> axum::response::Response {
 }
 
 pub fn api_err_bad_request(error: impl Into<String>) -> axum::response::Response {
-    (
-        axum::http::StatusCode::BAD_REQUEST,
-        Json(json!({ "success": false, "error": error.into() })),
-    )
-        .into_response()
+    AppError::bad_request(error).into_response()
 }
 
 pub fn api_err_detailed(
@@ -144,12 +143,12 @@ mod settings_and_service_regression_tests {
             include_str!("clash_proxy.rs"), "\n",
             include_str!("dns_adguard.rs"), "\n",
             include_str!("domains.rs"), "\n",
-            include_str!("routing.rs"), "\n",
-            include_str!("servers.rs"), "\n",
+            include_str!("routing/mod.rs"), "\n", include_str!("routing/devices.rs"), "\n", include_str!("routing/gaming.rs"), "\n", include_str!("routing/whitelist.rs"), "\n",
+            include_str!("servers/mod.rs"), "\n", include_str!("servers/subscriptions.rs"), "\n",
             include_str!("status.rs"), "\n",
             include_str!("system_ssh.rs"), "\n",
             include_str!("vkturn.rs"), "\n",
-            include_str!("zapret.rs"), "\n",
+            include_str!("zapret/mod.rs"), "\n", include_str!("zapret/firewall.rs"), "\n", include_str!("zapret/presets.rs"), "\n", include_str!("zapret/diagnostics.rs"), "\n",
             include_str!("mod.rs")
         )
     }
@@ -218,12 +217,19 @@ mod settings_and_service_regression_tests {
             include_str!("clash_proxy.rs"),
             include_str!("dns_adguard.rs"),
             include_str!("domains.rs"),
-            include_str!("routing.rs"),
-            include_str!("servers.rs"),
+            include_str!("routing/mod.rs"),
+            include_str!("routing/devices.rs"),
+            include_str!("routing/gaming.rs"),
+            include_str!("routing/whitelist.rs"),
+            include_str!("servers/mod.rs"),
+            include_str!("servers/subscriptions.rs"),
             include_str!("status.rs"),
             include_str!("system_ssh.rs"),
             include_str!("vkturn.rs"),
-            include_str!("zapret.rs"),
+            include_str!("zapret/mod.rs"),
+            include_str!("zapret/firewall.rs"),
+            include_str!("zapret/presets.rs"),
+            include_str!("zapret/diagnostics.rs"),
         ]
         .into_iter()
         .map(|s| &s[..s.find("#[cfg(test)]").unwrap_or(s.len())])
@@ -371,16 +377,37 @@ mod settings_and_service_regression_tests {
     fn regression_bug_43_toggle_whitelist_device_does_not_corrupt_mac_on_ip_reuse() {
         // Баг 43: toggle_whitelist_device искал устройство по (match_mac || match_ip).
         // Если DHCP выдал старый IP другому устройству, у старой записи перезаписывался MAC!
-        let body = fn_body(production_source(), "pub async fn toggle_whitelist_device");
+        let mut devices = vec![config::WhitelistDevice {
+            mac: "AA:BB:CC:DD:EE:01".to_string(),
+            ip: "192.168.1.50".to_string(),
+            enabled: true,
+            name: Some("DeviceA".to_string()),
+            server: None,
+        }];
 
-        assert!(
-            !body.contains("match_mac || match_ip"),
-            "toggle_whitelist_device must NOT use loose 'match_mac || match_ip' which corrupts MAC on DHCP reuse"
+        // Новое устройство B получило освободившийся IP 192.168.1.50, но имеет другой MAC
+        super::apply_whitelist_device_toggle(
+            &mut devices,
+            "AA:BB:CC:DD:EE:02",
+            "192.168.1.50",
+            Some("DeviceB"),
+            true,
         );
-        assert!(
-            body.contains("is_target = if !mac_str.is_empty()"),
-            "toggle_whitelist_device must strictly prioritize MAC matching"
+        assert_eq!(devices.len(), 2, "при несовпадении MAC создаётся новая запись, чужой MAC не затирается");
+        assert_eq!(devices[0].mac, "AA:BB:CC:DD:EE:01");
+        assert_eq!(devices[1].mac, "AA:BB:CC:DD:EE:02");
+
+        // Повторное переключение устройства A по его MAC обновляет IP, не дублируя запись
+        super::apply_whitelist_device_toggle(
+            &mut devices,
+            "aa:bb:cc:dd:ee:01",
+            "192.168.1.55",
+            None,
+            false,
         );
+        assert_eq!(devices.len(), 2);
+        assert!(!devices[0].enabled);
+        assert_eq!(devices[0].ip, "192.168.1.55");
     }
     #[test]
     fn regression_bug_40_save_whitelist_pinned_devices_uses_scoped_switch() {
@@ -593,16 +620,39 @@ mod settings_and_service_regression_tests {
         assert!(!devs[0].enabled, "enabled не должен меняться при ошибке определения IP");
     }
 
-    #[test]
-    fn regression_bug_80_background_sync_never_migrates_http_providers() {
+    #[tokio::test]
+    async fn regression_bug_80_background_sync_never_migrates_http_providers() {
         // Баг 80: фоновая задача раз в час переводила ВСЕ http-провайдеры в формат конвертера
         // (lossy-парсер, type: file) — рабочая Clash-подписка ломалась без участия пользователя.
-        let body = fn_body(production_source(), "pub async fn sync_all_mobile_providers");
-        assert!(
-            !body.contains("convert_http_provider_to_file_in_yaml"),
-            "фоновая синхронизация не меняет тип провайдеров в config.yaml"
-        );
-        assert!(!body.contains("parse_provider_urls"), "обновляются только явно мобильные подписки пользователя");
+        let root = std::env::temp_dir().join(format!("xkeen-bug80-{}", crate::auth::random_hex(8)));
+        std::fs::create_dir_all(&root).unwrap();
+        let yaml_path = root.join("config.yaml");
+        let yaml_orig = "proxy-providers:\n  myhttp:\n    type: http\n    url: \"https://example.invalid/sub\"\n    path: ./providers/myhttp.yaml\nrules:\n  - MATCH,DIRECT\n";
+        std::fs::write(&yaml_path, yaml_orig).unwrap();
+
+        let mut cfg = config::AppConfig::default();
+        cfg.mihomo.config_path = yaml_path.display().to_string();
+        // mobile_provider_urls пуст — обычный http-провайдер не должен трогаться
+        let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(cfg)));
+        let ag = std::sync::Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = crate::AppState {
+            config: config_arc,
+            config_path: std::sync::Arc::new(root.join("config.json")),
+            http: reqwest::Client::new(),
+            failover_log: std::sync::Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        let updated = super::sync_all_mobile_providers(&state).await;
+        assert_eq!(updated, 0);
+        let yaml_after = std::fs::read_to_string(&yaml_path).unwrap();
+        assert_eq!(yaml_after, yaml_orig, "фоновая синхронизация не меняет тип http-провайдеров в config.yaml");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -695,16 +745,25 @@ rules:
 
         // 45.2: в рабочем коде (до #[cfg(test)], без комментариев) литерал 1053 встречается только в DEFAULT_MIHOMO_DNS_PORT
         let prod_files: &[(&str, &str)] = &[
-            ("adguard.rs", include_str!("../adguard.rs")),
+            ("adguard/mod.rs", include_str!("../adguard/mod.rs")),
+            ("adguard/yaml.rs", include_str!("../adguard/yaml.rs")),
+            ("adguard/iptables.rs", include_str!("../adguard/iptables.rs")),
+            ("adguard/service.rs", include_str!("../adguard/service.rs")),
             ("config.rs", include_str!("../config.rs")),
             ("zapret.rs", include_str!("../zapret.rs")),
             ("watchdog.rs", include_str!("../watchdog.rs")),
             ("routing/dns_redirect.rs", include_str!("../routing/dns_redirect.rs")),
             ("api/dns_adguard.rs", include_str!("dns_adguard.rs")),
-            ("api/routing.rs", include_str!("routing.rs")),
+            ("api/routing/mod.rs", include_str!("routing/mod.rs")),
+            ("api/routing/devices.rs", include_str!("routing/devices.rs")),
+            ("api/routing/gaming.rs", include_str!("routing/gaming.rs")),
+            ("api/routing/whitelist.rs", include_str!("routing/whitelist.rs")),
             ("api/status.rs", include_str!("status.rs")),
             ("api/system_ssh.rs", include_str!("system_ssh.rs")),
-            ("api/zapret.rs", include_str!("zapret.rs")),
+            ("api/zapret/mod.rs", include_str!("zapret/mod.rs")),
+            ("api/zapret/firewall.rs", include_str!("zapret/firewall.rs")),
+            ("api/zapret/presets.rs", include_str!("zapret/presets.rs")),
+            ("api/zapret/diagnostics.rs", include_str!("zapret/diagnostics.rs")),
             ("api/mod.rs", include_str!("mod.rs")),
         ];
         let mut offenders = Vec::new();
@@ -894,11 +953,50 @@ rules:
         assert!(body[start..].contains("sync_full_tunnel_modes("));
     }
 
-    #[test]
-    fn test_adguard_sync_firewall_route_registered() {
-        // REG: кнопка «Восстановить DNS» вызывала несуществующий маршрут
-        let main_src = include_str!("../main.rs");
-        assert!(main_src.contains("\"/api/adguard/sync-firewall\""));
+    #[tokio::test]
+    async fn test_adguard_sync_firewall_route_registered() {
+        // REG: кнопка «Восстановить DNS» вызывала несуществующий маршрут — проверяем реальный Axum-роутер.
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.auth.enabled = false;
+        let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(cfg)));
+        let ag = std::sync::Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = crate::AppState {
+            config: config_arc,
+            config_path: std::sync::Arc::new(std::env::temp_dir().join("xkeen-route-test-agh-sync.json")),
+            http: reqwest::Client::new(),
+            failover_log: std::sync::Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        let app = crate::build_app_router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await;
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://{}/api/adguard/sync-firewall", addr))
+            .header("Host", format!("127.0.0.1:{}", addr.port()))
+            .send()
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            reqwest::StatusCode::NOT_FOUND,
+            "/api/adguard/sync-firewall must be registered in Axum router (got 404)"
+        );
+        server.abort();
     }
 }
 
@@ -933,12 +1031,12 @@ mod tests {
             include_str!("clash_proxy.rs"), "\n",
             include_str!("dns_adguard.rs"), "\n",
             include_str!("domains.rs"), "\n",
-            include_str!("routing.rs"), "\n",
-            include_str!("servers.rs"), "\n",
+            include_str!("routing/mod.rs"), "\n", include_str!("routing/devices.rs"), "\n", include_str!("routing/gaming.rs"), "\n", include_str!("routing/whitelist.rs"), "\n",
+            include_str!("servers/mod.rs"), "\n", include_str!("servers/subscriptions.rs"), "\n",
             include_str!("status.rs"), "\n",
             include_str!("system_ssh.rs"), "\n",
             include_str!("vkturn.rs"), "\n",
-            include_str!("zapret.rs"), "\n",
+            include_str!("zapret/mod.rs"), "\n", include_str!("zapret/firewall.rs"), "\n", include_str!("zapret/presets.rs"), "\n", include_str!("zapret/diagnostics.rs"), "\n",
             include_str!("mod.rs")
         )
     }
@@ -2140,19 +2238,29 @@ mod tests {
         //   сама подставляет `$IPTABLES_CMD` (`iptables -w 2` если поддерживается).
         // - `for ipt in iptables ip6tables; do` в zapret.rs: проверяется отдельно (должно использовать -w).
         let files: &[(&str, &str)] = &[
-            ("adguard.rs", include_str!("../adguard.rs")),
+            ("adguard/mod.rs", include_str!("../adguard/mod.rs")),
+            ("adguard/yaml.rs", include_str!("../adguard/yaml.rs")),
+            ("adguard/iptables.rs", include_str!("../adguard/iptables.rs")),
+            ("adguard/service.rs", include_str!("../adguard/service.rs")),
             ("antigravity.rs", include_str!("../antigravity.rs")),
             ("api/mod.rs", include_str!("mod.rs")),
             ("api/backups.rs", include_str!("backups.rs")),
             ("api/clash_proxy.rs", include_str!("clash_proxy.rs")),
             ("api/dns_adguard.rs", include_str!("dns_adguard.rs")),
             ("api/domains.rs", include_str!("domains.rs")),
-            ("api/routing.rs", include_str!("routing.rs")),
-            ("api/servers.rs", include_str!("servers.rs")),
+            ("api/routing/mod.rs", include_str!("routing/mod.rs")),
+            ("api/routing/devices.rs", include_str!("routing/devices.rs")),
+            ("api/routing/gaming.rs", include_str!("routing/gaming.rs")),
+            ("api/routing/whitelist.rs", include_str!("routing/whitelist.rs")),
+            ("api/servers/mod.rs", include_str!("servers/mod.rs")),
+            ("api/servers/subscriptions.rs", include_str!("servers/subscriptions.rs")),
             ("api/status.rs", include_str!("status.rs")),
             ("api/system_ssh.rs", include_str!("system_ssh.rs")),
             ("api/vkturn.rs", include_str!("vkturn.rs")),
-            ("api/zapret.rs", include_str!("zapret.rs")),
+            ("api/zapret/mod.rs", include_str!("zapret/mod.rs")),
+            ("api/zapret/firewall.rs", include_str!("zapret/firewall.rs")),
+            ("api/zapret/presets.rs", include_str!("zapret/presets.rs")),
+            ("api/zapret/diagnostics.rs", include_str!("zapret/diagnostics.rs")),
             ("auth.rs", include_str!("../auth.rs")),
             ("bot.rs", include_str!("../bot.rs")),
             ("cdn_discovery.rs", include_str!("../cdn_discovery.rs")),
@@ -2184,7 +2292,10 @@ mod tests {
             ("traffic.rs", include_str!("../traffic.rs")),
             ("transaction.rs", include_str!("../transaction.rs")),
             ("updater.rs", include_str!("../updater.rs")),
-            ("vkturn.rs", include_str!("../vkturn.rs")),
+            ("vkturn/mod.rs", include_str!("../vkturn/mod.rs")),
+            ("vkturn/auth.rs", include_str!("../vkturn/auth.rs")),
+            ("vkturn/tunnel.rs", include_str!("../vkturn/tunnel.rs")),
+            ("vkturn/health.rs", include_str!("../vkturn/health.rs")),
             ("watchdog.rs", include_str!("../watchdog.rs")),
             ("whitelist_catalog.rs", include_str!("../whitelist_catalog.rs")),
             ("zapret.rs", include_str!("../zapret.rs")),
@@ -2198,7 +2309,7 @@ mod tests {
             let lines: Vec<&str> = prod.lines().collect();
             for (idx, line) in lines.iter().enumerate() {
                 let trimmed = line.trim();
-                if *fname == "api/mod.rs" || *fname == "api/zapret.rs" {
+                if *fname == "api/mod.rs" || *fname == "api/zapret/firewall.rs" {
                     if trimmed.starts_with("pub const S51ZAPRET_SCRIPT:") {
                         inside_s51_zapret = true;
                         continue;
@@ -2739,33 +2850,20 @@ mod tests {
     fn regression_vkturn_25_flow_zapret_backup_evacuation_and_links() {
         let api_src = production_source();
 
-        // Item 22: repair_flow and auto_select_flow_server must exclude vkturn and [БС] nodes
-        let repair_fn = api_src
-            .split("pub async fn repair_flow(")
-            .nth(1)
-            .and_then(|s| s.split("pub struct FlowAutoSelectReq").next())
-            .expect("repair_flow must exist");
-        assert!(
-            repair_fn.contains("is_excluded_for_flow") || repair_fn.contains("PROXY_NAME"),
-            "repair_flow must exclude vkturn and [БС] servers from Google Flow selection"
-        );
-        let auto_fn = api_src
-            .split("pub async fn auto_select_flow_server(")
-            .nth(1)
-            .and_then(|s| s.split("pub async fn get_flow_extension(").next())
-            .expect("auto_select_flow_server must exist");
-        assert!(
-            auto_fn.contains("is_excluded_for_flow") || auto_fn.contains("PROXY_NAME"),
-            "auto_select_flow_server must exclude vkturn and [БС] servers"
-        );
+        let cfg = config::AppConfig::default();
 
-        // Item 9: SaveVkTurnConfigReq supports append_link and remove_link_index
-        let save_req_block = api_src
-            .split("pub struct SaveVkTurnConfigReq")
-            .nth(1)
-            .and_then(|s| s.split("pub async fn save_vkturn_config(").next())
-            .expect("SaveVkTurnConfigReq must exist");
-        assert!(save_req_block.contains("append_link") && save_req_block.contains("remove_link_index"));
+        // Item 22: is_excluded_for_flow реально исключает vkturn, группы и [БС]-узлы
+        assert!(super::is_excluded_for_flow(crate::vkturn::PROXY_NAME, crate::vkturn::PROXY_NAME, Some(crate::vkturn::PROVIDER_ID), Some("VK-CALL"), &cfg));
+        assert!(super::is_excluded_for_flow("PROXY", "PROXY", None, Some("Selector"), &cfg));
+        assert!(super::is_excluded_for_flow("node_bs", "RU [БС]", None, Some("VLESS"), &cfg));
+        assert!(!super::is_excluded_for_flow("de_1", "Germany DE", None, Some("VLESS"), &cfg));
+
+        // Item 9: SaveVkTurnConfigReq реально десериализует append_link и remove_link_index
+        let req: super::SaveVkTurnConfigReq = serde_json::from_str(
+            r#"{"append_link":"https://vk.com/call/join/test","remove_link_index":2}"#
+        ).expect("SaveVkTurnConfigReq must deserialize append_link and remove_link_index");
+        assert_eq!(req.append_link.as_deref(), Some("https://vk.com/call/join/test"));
+        assert_eq!(req.remove_link_index, Some(2));
 
         // Item 19: save_vkturn_config and vkturn_action evacuate active vkturn selectors when disabled/reset/stopped
         let vk_save_fn = api_src

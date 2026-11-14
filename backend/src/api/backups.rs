@@ -3,7 +3,7 @@ use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{api_err, api_ok};
+use super::{api_err, api_ok, ApiResult, AppError};
 use crate::{config, log_e, log_i, AppState};
 
 /// Каталог бэкапов панели: {backup_dir}/xkeen-route.
@@ -46,8 +46,7 @@ pub async fn list_backups(State(state): State<AppState>) -> Response {
 
 /// POST /api/backups — создать бэкап (config.yaml Mihomo + config.json панели + опционально zapret.conf и zapret-hosts.txt).
 pub async fn create_backup(State(state): State<AppState>) -> Response {
-    let _cfg_guard = state.config_lock.lock().await;
-    let _routing_guard = state.routing_lock.lock().await;
+    let _guards = state.lock_config_and_routing().await;
 
     let cfg = state.config.read().await.clone();
     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S-%3f");
@@ -257,18 +256,18 @@ pub async fn restore_backup(State(state): State<AppState>, Json(req): Json<Backu
 }
 
 /// POST /api/backups/delete — удалить бэкап.
-pub async fn delete_backup(State(state): State<AppState>, Json(req): Json<BackupReq>) -> Response {
+pub async fn delete_backup(State(state): State<AppState>, Json(req): Json<BackupReq>) -> ApiResult<Response> {
     if !valid_backup_name(&req.name) {
-        return api_err("Некорректное имя бэкапа");
+        return Err(AppError::bad_request("Некорректное имя бэкапа"));
     }
     let cfg = state.config.read().await.clone();
     let dir = backup_root(&cfg).join(&req.name);
     match tokio::fs::remove_dir_all(&dir).await {
         Ok(_) => {
             log_i!("Бэкап {} удалён", req.name);
-            api_ok(json!({ "deleted": req.name }))
+            Ok(api_ok(json!({ "deleted": req.name })))
         }
-        Err(e) => api_err(format!("Не удалось удалить {}: {e}", req.name)),
+        Err(e) => Err(AppError::internal(format!("Не удалось удалить {}: {e}", req.name))),
     }
 }
 
@@ -278,24 +277,22 @@ pub async fn delete_backup(State(state): State<AppState>, Json(req): Json<Backup
 pub async fn export_backup(
     State(state): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
-) -> Response {
+) -> ApiResult<Response> {
     if !valid_backup_name(&name) {
-        return api_err("Некорректное имя бэкапа");
+        return Err(AppError::bad_request("Некорректное имя бэкапа"));
     }
     let cfg = state.config.read().await.clone();
     let dir = backup_root(&cfg).join(&name);
     if !dir.is_dir() {
-        return api_err("Бэкап не найден");
+        return Err(AppError::bad_request("Бэкап не найден"));
     }
 
-    let mihomo_yaml = match tokio::fs::read_to_string(dir.join("config.yaml")).await {
-        Ok(s) => s,
-        Err(e) => return api_err(format!("Ошибка чтения config.yaml из бэкапа: {e}")),
-    };
-    let route_json = match tokio::fs::read_to_string(dir.join("config.json")).await {
-        Ok(s) => s,
-        Err(e) => return api_err(format!("Ошибка чтения config.json из бэкапа: {e}")),
-    };
+    let mihomo_yaml = tokio::fs::read_to_string(dir.join("config.yaml"))
+        .await
+        .map_err(|e| AppError::internal(format!("Ошибка чтения config.yaml из бэкапа: {e}")))?;
+    let route_json = tokio::fs::read_to_string(dir.join("config.json"))
+        .await
+        .map_err(|e| AppError::internal(format!("Ошибка чтения config.json из бэкапа: {e}")))?;
 
     let mut files_map = serde_json::Map::new();
     files_map.insert("config.yaml".to_string(), json!(mihomo_yaml));
@@ -319,12 +316,10 @@ pub async fn export_backup(
     });
 
     let filename = format!("{}.xkbak", name);
-    let payload = match serde_json::to_string_pretty(&backup_bundle) {
-        Ok(p) => p,
-        Err(e) => return api_err(format!("Ошибка сериализации бэкапа: {e}")),
-    };
+    let payload = serde_json::to_string_pretty(&backup_bundle)
+        .map_err(|e| AppError::internal(format!("Ошибка сериализации бэкапа: {e}")))?;
 
-    (
+    Ok((
         [
             ("Content-Type", "application/json; charset=utf-8"),
             ("Content-Disposition", &format!("attachment; filename=\"{}\"", filename)),
@@ -332,7 +327,7 @@ pub async fn export_backup(
         ],
         payload,
     )
-        .into_response()
+        .into_response())
 }
 
 /// POST /api/backups/import — импорт снимка с ПК в хранилище бэкапов

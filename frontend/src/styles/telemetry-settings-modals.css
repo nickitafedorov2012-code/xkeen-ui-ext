@@ -1,0 +1,598 @@
+/* ==========================================================================
+   POLICIES MAP
+   ========================================================================== */
+.policies-map-view {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.map-columns-container {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+.map-column {
+  background: var(--card-bg, #161a23);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.map-column-header {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+}
+.map-column-header h4 { margin: 0 0 2px 0; font-size: 14px; }
+.map-nodes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.map-node {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary, #1e293b);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.map-node:hover {
+  border-color: var(--accent);
+}
+.map-node.selected {
+  border-color: var(--accent);
+  background: rgba(56, 189, 248, 0.15);
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.3);
+}
+.map-node.linked {
+  border-color: #10b981;
+  background: rgba(16, 185, 129, 0.15);
+}
+.map-node.active-target {
+  border-color: #a855f7;
+  background: rgba(168, 85, 247, 0.15);
+}
+.node-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.node-sub { font-size: 11px; margin-top: 4px; }
+.node-badge-server {
+  margin-top: 6px;
+  font-size: 11px;
+  background: rgba(0, 0, 0, 0.3);
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--accent);
+  display: inline-block;
+}
+.link-indicator {
+  margin-top: 6px;
+  font-size: 11px;
+  color: #10b981;
+  font-weight: 600;
+}
+.badge-main {
+  background: #10b981;
+  color: #fff;
+  font-size: 9px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  margin-left: 4px;
+}
+
+/* ==========================================================================
+   SCHEDULE MODAL
+   ========================================================================== */
+.schedule-modal {
+  max-width: 650px !important;
+}
+.schedules-current-list {
+  margin: 14px 0;
+}
+.schedule-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.schedule-item-card {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary, #1e293b);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.schedule-item-card.disabled {
+  opacity: 0.6;
+}
+.schedule-item-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.schedule-time { font-weight: 700; font-size: 14px; }
+.schedule-action-badge {
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+}
+.schedule-action-badge.block { background: rgba(239, 68, 68, 0.2); color: #ef4444; }
+.schedule-action-badge.direct { background: rgba(16, 185, 129, 0.2); color: #10b981; }
+.schedule-action-badge.proxy { background: rgba(56, 189, 248, 0.2); color: #38bdf8; }
+.schedule-days-row {
+  font-size: 11px;
+  color: var(--text-secondary, #94a3b8);
+}
+.schedule-add-form {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.days-pills {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+.day-pill {
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary, #1e293b);
+  color: var(--text-secondary, #94a3b8);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.day-pill.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+/* ==========================================================================
+   SETTINGS 2-COLUMN LAYOUT & LOGS VIEWER
+   ========================================================================== */
+.settings-container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.settings-toolbar-card {
+  width: 100%;
+}
+
+.settings-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 480px), 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.settings-columns > .card {
+  margin: 0 !important;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+@media (max-width: 960px) {
+  .settings-columns {
+    grid-template-columns: 1fr;
+  }
+}
+
+.settings-col {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* LOGS VIEWER STYLING */
+.logs-viewer-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+}
+
+.logs-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+@media (min-width: 960px) {
+  .logs-toolbar {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+  }
+}
+
+.logs-source-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.logs-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.logs-search {
+  min-width: 160px;
+  max-width: 220px;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.logs-level-pills {
+  display: inline-flex;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.logs-pill {
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: all 0.15s ease;
+}
+
+.logs-pill:hover {
+  color: var(--text);
+}
+
+.logs-pill.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.logs-pill.logs-pill-info.active {
+  background: rgba(34, 197, 94, 0.25);
+  color: #4ade80;
+}
+
+.logs-pill.logs-pill-warn.active {
+  background: rgba(234, 179, 8, 0.25);
+  color: #fde047;
+}
+
+.logs-pill.logs-pill-error.active {
+  background: rgba(239, 68, 68, 0.25);
+  color: #fca5a5;
+}
+
+.logs-pill-badge {
+  background: rgba(0, 0, 0, 0.25);
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.logs-terminal {
+  background: #0b0e14;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-family: 'Cascadia Code', Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  height: 400px;
+  overflow-y: auto;
+  color: #cbd5e1;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+[data-theme="light"] .logs-terminal {
+  background: #f8fafc;
+  color: #1e293b;
+  border-color: #cbd5e1;
+}
+
+.logs-loading,
+.logs-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.log-line {
+  padding: 1px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.02);
+}
+
+[data-theme="light"] .log-line {
+  border-bottom: 1px solid rgba(0, 0, 0, 0.03);
+}
+
+.log-error {
+  color: #f87171 !important;
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.log-warn {
+  color: #fbbf24 !important;
+  background: rgba(234, 179, 8, 0.06);
+}
+
+.log-success {
+  color: #4ade80 !important;
+}
+
+.logs-status-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11.5px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.logs-paused-badge {
+  color: #fbbf24;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Task Manager (htop) Expanded Full-Screen Mode */
+.task-manager-expanded {
+  position: fixed !important;
+  inset: 16px !important;
+  z-index: 999 !important;
+  background: var(--bg-card, #0d1117) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 12px !important;
+  padding: 20px !important;
+  overflow-y: auto !important;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.8) !important;
+}
+
+[data-theme="light"] .task-manager-expanded {
+  background: #ffffff !important;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25) !important;
+}
+
+/* ==========================================================================
+   ИСПРАВЛЕНИЕ ОТСТУПОВ МОДАЛЬНЫХ ОКОН (MihomoCoreModal, UpdateModal, ScheduleModal, ZapretModal)
+   ========================================================================== */
+.modal-card.padded-modal,
+.modal-card.update-modal-card,
+.modal-card.mihomo-modal-card,
+.modal-card.zapret-modal-card,
+.modal-card.schedule-modal {
+  padding: 22px 24px !important;
+  box-sizing: border-box;
+}
+
+.schedule-modal {
+  max-width: 640px !important;
+  width: 94vw !important;
+  max-height: 88vh !important;
+  overflow-y: auto !important;
+  gap: 16px;
+}
+
+.schedule-modal .modal-header {
+  padding: 0 0 14px 0;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.schedule-modal .modal-header h3 {
+  margin: 0 0 4px 0;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.schedule-modal .modal-header p {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.schedule-modal .btn-close {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+
+.schedule-modal .btn-close:hover {
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.schedules-current-list h4,
+.schedule-add-form h4 {
+  margin: 0 0 10px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-bright);
+}
+
+.schedule-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.schedule-item-card {
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.schedule-item-card.disabled {
+  opacity: 0.6;
+}
+
+.schedule-item-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.schedule-time {
+  font-weight: 700;
+  font-size: 13.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.schedule-action-badge {
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(56, 189, 248, 0.14);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  margin-right: auto;
+}
+
+.schedule-action-badge.block {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+.schedule-action-badge.direct {
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  border-color: rgba(34, 197, 94, 0.35);
+}
+
+.schedule-days-row {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.schedule-add-form {
+  background: rgba(15, 23, 42, 0.45);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.schedule-add-form .form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+@media (max-width: 560px) {
+  .schedule-add-form .form-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.schedule-add-form .form-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.schedule-add-form label {
+  font-size: 12.5px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.schedule-add-form .form-days {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.days-pills {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.day-pill {
+  height: 32px;
+  min-width: 40px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.day-pill.active {
+  background: linear-gradient(135deg, #2563eb, #1d4ed8);
+  border-color: #38bdf8;
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.35);
+}
+
+/* Растягивание карточек верхнего ряда Дашборда по одной высоте */
+.grid2.stretch-cards {
+  align-items: stretch;
+}
+
+.grid2.stretch-cards > .card {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+

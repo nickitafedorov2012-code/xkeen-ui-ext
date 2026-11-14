@@ -7,7 +7,7 @@
 use std::collections::VecDeque;
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 use serde::{Deserialize, Serialize};
 
 const MAX_BYTES: u64 = 2 * 1024 * 1024;
@@ -21,7 +21,7 @@ pub struct LogEntry {
 }
 
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
-static SYSLOG: OnceLock<Option<SyslogTarget>> = OnceLock::new();
+static SYSLOG: OnceLock<RwLock<Option<SyslogTarget>>> = OnceLock::new();
 static LOG_TX: OnceLock<tokio::sync::broadcast::Sender<String>> = OnceLock::new();
 static FILE_TX: OnceLock<std::sync::mpsc::SyncSender<String>> = OnceLock::new();
 static MIN_LEVEL: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0); // 0=info 1=warn 2=error
@@ -64,6 +64,34 @@ struct SyslogTarget {
     host: String,
 }
 
+fn syslog_store() -> &'static RwLock<Option<SyslogTarget>> {
+    SYSLOG.get_or_init(|| RwLock::new(None))
+}
+
+fn build_syslog_target(remote_syslog: &str) -> Option<SyslogTarget> {
+    remote_syslog.trim().split_once(':').and_then(|(host, port)| {
+        let host = host.trim();
+        let port: u16 = port.trim().parse().ok()?;
+        if host.is_empty() || port == 0 {
+            return None;
+        }
+        let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+        Some(SyslogTarget {
+            dest: format!("{host}:{port}"),
+            host: host.to_string(),
+            socket,
+        })
+    })
+}
+
+/// Горячее переключение адреса удалённого syslog без перезапуска демона.
+pub fn reconfigure_syslog(remote_syslog: &str) {
+    let target = build_syslog_target(remote_syslog);
+    if let Ok(mut guard) = syslog_store().write() {
+        *guard = target;
+    }
+}
+
 pub fn init(config_path: &Path, remote_syslog: &str) {
     let dir = config_path.parent().unwrap_or_else(|| Path::new("."));
     let path = dir.join("xkeen-route.log");
@@ -93,16 +121,7 @@ pub fn init(config_path: &Path, remote_syslog: &str) {
             }
         });
 
-    let target = remote_syslog.trim().split_once(':').and_then(|(host, port)| {
-        let port: u16 = port.parse().ok()?;
-        let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-        Some(SyslogTarget {
-            dest: format!("{host}:{port}"),
-            host: host.to_string(),
-            socket,
-        })
-    });
-    let _ = SYSLOG.set(target);
+    reconfigure_syslog(remote_syslog);
 }
 
 pub fn log(level: &str, msg: &str) {
@@ -138,20 +157,22 @@ pub fn log(level: &str, msg: &str) {
         let _ = tx.try_send(line);
     }
 
-    if let Some(Some(t)) = SYSLOG.get() {
-        // RFC 3164: <priority>timestamp hostname tag: msg
-        // facility local0 (16): priority = 16*8 + severity
-        let pr = match level {
-            "ERROR" => 131, // local0.err
-            "WARN" => 132,  // local0.warning
-            _ => 134,       // local0.info
-        };
-        let packet = format!(
-            "<{pr}>{} {host} xkeen-route: {msg}",
-            chrono::Local::now().format("%b %d %H:%M:%S"),
-            host = t.host
-        );
-        let _ = t.socket.send_to(packet.as_bytes(), &t.dest);
+    if let Ok(guard) = syslog_store().read() {
+        if let Some(t) = guard.as_ref() {
+            // RFC 3164: <priority>timestamp hostname tag: msg
+            // facility local0 (16): priority = 16*8 + severity
+            let pr = match level {
+                "ERROR" => 131, // local0.err
+                "WARN" => 132,  // local0.warning
+                _ => 134,       // local0.info
+            };
+            let packet = format!(
+                "<{pr}>{} {host} xkeen-route: {msg}",
+                chrono::Local::now().format("%b %d %H:%M:%S"),
+                host = t.host
+            );
+            let _ = t.socket.send_to(packet.as_bytes(), &t.dest);
+        }
     }
 }
 
@@ -370,5 +391,28 @@ mod tests {
         let limited = filter_recent_logs(test_rb.iter(), None, 10);
         assert_eq!(limited.len(), 10);
         assert_eq!(limited.last().unwrap().message, "Лог сообщение #249");
+    }
+
+    #[test]
+    fn test_remote_syslog_hot_reconfigure() {
+        reconfigure_syslog("127.0.0.1:1514");
+        {
+            let g = syslog_store().read().unwrap();
+            let t = g.as_ref().expect("syslog target must be set");
+            assert_eq!(t.dest, "127.0.0.1:1514");
+        }
+
+        reconfigure_syslog("127.0.0.1:2514");
+        {
+            let g = syslog_store().read().unwrap();
+            let t = g.as_ref().expect("syslog target must be updated live");
+            assert_eq!(t.dest, "127.0.0.1:2514");
+        }
+
+        reconfigure_syslog("");
+        {
+            let g = syslog_store().read().unwrap();
+            assert!(g.is_none(), "empty address must disable remote_syslog");
+        }
     }
 }

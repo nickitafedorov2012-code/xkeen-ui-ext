@@ -1012,7 +1012,7 @@ mod tests {
     fn regression_bug_90_get_speedtest_disallowed_in_routes() {
         // Баг 90: GET /api/servers/speedtest/{id} переключает всю LAN (мутирующее действие через GET -> CSRF через img src)
         // Проверяем, что в main.rs маршрут speedtest/{id} не привязан к GET-запросам
-        let main_src = include_str!("main.rs");
+        let main_src = concat!(include_str!("main.rs"), "\n", include_str!("api/router.rs"));
         let has_get_speedtest = main_src.lines().any(|line| {
             line.contains("/api/servers/speedtest/{id}") && line.contains(".get(")
         });

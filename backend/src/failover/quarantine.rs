@@ -57,12 +57,16 @@ pub fn quarantine_path(config_path: &std::path::Path) -> std::path::PathBuf {
 }
 
 pub fn init_quarantine_path(config_path: &std::path::Path) {
-    let mut guard = QUARANTINE_PATH_OVERRIDE.lock().unwrap();
+    let mut guard = QUARANTINE_PATH_OVERRIDE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     *guard = Some(quarantine_path(config_path));
 }
 
 pub fn get_quarantine_path() -> std::path::PathBuf {
-    let guard = QUARANTINE_PATH_OVERRIDE.lock().unwrap();
+    let guard = QUARANTINE_PATH_OVERRIDE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(ref p) = *guard {
         p.clone()
     } else {
