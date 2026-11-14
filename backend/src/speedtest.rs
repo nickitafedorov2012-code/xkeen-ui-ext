@@ -20,25 +20,7 @@ pub struct SpeedtestResponse {
     pub verified: bool,
 }
 
-/// Сохранение полного снимка выбора групп selector перед замером
-pub async fn take_groups_snapshot(
-    http: &reqwest::Client,
-    cfg: &AppConfig,
-) -> Result<(HashMap<String, String>, String), String> {
-    let proxies = crate::mihomo::get_proxies(http, cfg).await
-        .map_err(|e| format!("Ошибка получения списка прокси ядра Mihomo: {}", e))?;
-    let active_leaf = crate::mihomo::resolve_active_leaf(&proxies);
-    let mut snapshot = HashMap::new();
-    for (name, val) in &proxies {
-        let typ = val.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
-        if typ == "selector" || typ == "select" {
-            if let Some(now) = val.get("now").and_then(|n| n.as_str()) {
-                snapshot.insert(name.clone(), now.to_string());
-            }
-        }
-    }
-    Ok((snapshot, active_leaf))
-}
+
 
 /// Восстановление точного снимка выбора групп Selector, сохраненного перед замером
 pub async fn restore_groups_snapshot(

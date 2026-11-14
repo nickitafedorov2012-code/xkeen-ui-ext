@@ -211,21 +211,48 @@ pub fn parse_dns_a_records(buf: &[u8]) -> Vec<Ipv4Addr> {
     ips
 }
 
+/// Таблица официальных IPv4-подсетей Google (включая 172.253.0.0/16 и 192.178.0.0/15, Баг 22)
+const GOOGLE_IPV4_CIDRS: &[([u8; 4], u8)] = &[
+    ([172, 217, 0, 0], 16),
+    ([172, 253, 0, 0], 16),
+    ([142, 250, 0, 0], 15),
+    ([192, 178, 0, 0], 15),
+    ([216, 58, 0, 0], 16),
+    ([216, 239, 0, 0], 16),
+    ([74, 125, 0, 0], 16),
+    ([173, 194, 0, 0], 16),
+    ([209, 85, 0, 0], 16),
+    ([108, 177, 0, 0], 16),
+    ([64, 233, 0, 0], 16),
+    ([66, 102, 0, 0], 16),
+    ([66, 249, 0, 0], 16),
+];
+
+/// Классификация IP-адреса относительно эталонного DNS и подсетей Google (Баг 22)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpClass {
+    Real,
+    Substituted,
+    Unknown,
+}
+
+pub fn classify_ip(ip: &Ipv4Addr, ref_ips: &[Ipv4Addr]) -> IpClass {
+    if is_google_ip(ip) || ref_ips.contains(ip) {
+        return IpClass::Real;
+    }
+    if ref_ips.is_empty() {
+        return IpClass::Unknown;
+    }
+    IpClass::Substituted
+}
+
 /// Проверка, принадлежит ли IPv4-адрес официальным подсетям Google (Google APIs / Cloud Code)
 pub fn is_google_ip(ip: &Ipv4Addr) -> bool {
-    let o = ip.octets();
-    match o[0] {
-        172 => o[1] == 217,
-        142 => o[1] == 250 || o[1] == 251,
-        216 => o[1] == 58 || o[1] == 239,
-        74 => o[1] == 125,
-        173 => o[1] == 194,
-        209 => o[1] == 85,
-        108 => o[1] == 177,
-        64 => o[1] == 233,
-        66 => o[1] == 102 || o[1] == 249,
-        _ => false,
-    }
+    let ip_u32 = u32::from(*ip);
+    GOOGLE_IPV4_CIDRS.iter().any(|&(net, prefix)| {
+        let mask = if prefix == 0 { 0 } else { !0u32 << (32 - prefix) };
+        (ip_u32 & mask) == (u32::from_be_bytes(net) & mask)
+    })
 }
 
 async fn run_cmd(program: &str, args: &[&str]) -> Result<(), String> {
@@ -451,7 +478,7 @@ impl AntigravityManager {
                     Ok((ips, lat)) => {
                         prov_lat = Some(lat);
                         let is_sub = !ips.is_empty()
-                            && !ips.iter().any(|ip| ref_ips.contains(ip) || is_google_ip(ip));
+                            && ips.iter().all(|ip| classify_ip(ip, &ref_ips) == IpClass::Substituted);
 
                         if is_sub {
                             for ip in &ips {
@@ -474,7 +501,8 @@ impl AntigravityManager {
             }
 
             let has_ips = !prov_ips.is_empty();
-            let is_sub = has_ips && !prov_ips.iter().any(|ip| ref_ips.contains(ip) || is_google_ip(ip));
+            let is_sub = has_ips
+                && prov_ips.iter().all(|ip| classify_ip(ip, &ref_ips) == IpClass::Substituted);
 
             provider_statuses.push(DnsProviderStatus {
                 name: name.to_string(),
@@ -539,10 +567,19 @@ impl AntigravityManager {
             } else {
                 "healing".into()
             };
+            let prev_ip = if should_retreat_ip_host_rules(&st.state_status) {
+                st.active_ip.take()
+            } else {
+                None
+            };
             st.log(
                 format!("Внимание: не найдено доступных подменных IP (ошибок подряд: {fails})"),
                 "warn",
             );
+            drop(st);
+            if prev_ip.is_some() {
+                self.clean_keenetic_rules(&prev_ip).await;
+            }
         }
     }
 
@@ -562,6 +599,7 @@ impl AntigravityManager {
         while run_cmd("ip", &["rule", "del", "to", &ip_rule, "table", "main", "priority", "90"]).await.is_ok() {}
 
         // 3. Исключение подменного IP из перехвата Mihomo (ipset user_exclude)
+        let _ = run_cmd("ipset", &["create", "user_exclude", "hash:ip", "-exist"]).await;
         if let Err(e) = run_cmd("ipset", &["add", "user_exclude", &ip_str, "-exist"]).await {
             crate::log_w!("[ANTIGRAVITY] Не удалось добавить {ip_str} в ipset user_exclude: {e}");
         }
@@ -628,6 +666,13 @@ impl AntigravityManager {
                 }
             };
 
+            let (input_setup, input_cleanup) = build_antigravity_input_rules(port);
+            if cfg!(target_os = "linux") {
+                for cmd in &input_setup {
+                    let _ = run_cmd("sh", &["-c", cmd]).await;
+                }
+            }
+
             let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
             {
                 let mut guard = self.proxy_cancel_tx.lock().await;
@@ -673,6 +718,12 @@ impl AntigravityManager {
                             ).await;
                         });
                     }
+                }
+            }
+
+            if cfg!(target_os = "linux") {
+                for cmd in &input_cleanup {
+                    let _ = run_cmd("sh", &["-c", cmd]).await;
                 }
             }
 
@@ -746,6 +797,182 @@ impl AntigravityManager {
     }
 }
 
+/// Проверка допустимости цели CONNECT для прокси Antigravity (порт 443, белый список targets, защита от SSRF, Баг A-05)
+pub fn is_allowed_connect_target(host: &str, port: u16, targets: &[String]) -> bool {
+    if port != 443 {
+        return false;
+    }
+    let clean_host = host.trim();
+    if clean_host.is_empty() {
+        return false;
+    }
+    if let Ok(ip) = clean_host.parse::<std::net::IpAddr>() {
+        if is_ssrf_ip(ip) {
+            return false;
+        }
+    }
+    targets.iter().any(|t| t.eq_ignore_ascii_case(clean_host))
+}
+
+/// Правила iptables INPUT для прокси Antigravity: разрешаем только LAN (`br+`) и `lo`, остальное DROP (Баг A-05)
+pub fn build_antigravity_input_rules(port: u16) -> (Vec<String>, Vec<String>) {
+    let cleanup = vec![
+        format!("iptables -w -D INPUT -i lo -p tcp --dport {port} -j ACCEPT 2>/dev/null || true"),
+        format!("iptables -w -D INPUT ! -i br+ -p tcp --dport {port} -j DROP 2>/dev/null || true"),
+    ];
+    let mut setup = cleanup.clone();
+    setup.push(format!("iptables -w -I INPUT 1 ! -i br+ -p tcp --dport {port} -j DROP"));
+    setup.push(format!("iptables -w -I INPUT 1 -i lo -p tcp --dport {port} -j ACCEPT"));
+    (setup, cleanup)
+}
+
+pub fn should_retreat_ip_host_rules(state_status: &str) -> bool {
+    matches!(state_status, "healing" | "error")
+}
+
+/// Вычисляет разницу между текущими и желаемыми `ip host` правилами Keenetic (Баг 21)
+pub fn diff_ip_host_rules(
+    current: &[(String, Ipv4Addr)],
+    desired: &[(String, Ipv4Addr)],
+) -> (Vec<(String, Ipv4Addr)>, Vec<String>) {
+    let mut to_remove = Vec::new();
+    for (host, cur_ip) in current {
+        match desired.iter().find(|(d_host, _)| d_host.eq_ignore_ascii_case(host)) {
+            Some((_, d_ip)) if d_ip == cur_ip => {}
+            _ => {
+                if !to_remove.iter().any(|h: &String| h.eq_ignore_ascii_case(host)) {
+                    to_remove.push(host.clone());
+                }
+            }
+        }
+    }
+
+    let mut to_add = Vec::new();
+    for (host, d_ip) in desired {
+        let already_same = current
+            .iter()
+            .any(|(c_host, c_ip)| c_host.eq_ignore_ascii_case(host) && c_ip == d_ip);
+        if !already_same {
+            to_add.push((host.clone(), *d_ip));
+        }
+    }
+
+    (to_add, to_remove)
+}
+
+/// Выбранный маршрут прокси Antigravity для конкретного соединения (Баг 19)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    Direct,
+    ViaOwnProxy(String),
+    ViaMihomo,
+}
+
+/// Выбор маршрута на основе режима Antigravity и настроенного релея
+pub fn select_route(mode: &str, own_proxy: &str, _target: &str) -> Route {
+    match mode.trim().to_ascii_lowercase().as_str() {
+        "direct" => Route::Direct,
+        "proxy" | "own_proxy" => {
+            let trimmed = own_proxy.trim();
+            if trimmed.is_empty() {
+                Route::Direct
+            } else {
+                Route::ViaOwnProxy(trimmed.to_string())
+            }
+        }
+        "mihomo" => Route::ViaMihomo,
+        _ => Route::Direct,
+    }
+}
+
+/// Разбор и валидация собственного прокси (`[http://|https://][user:pass@]host:port`)
+pub fn parse_proxy_host_port(raw: &str) -> Result<(String, Option<String>), String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err("Пустой адрес прокси".into());
+    }
+    if s.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("Адрес прокси содержит недопустимые пробелы или управляющие символы".into());
+    }
+    let without_scheme = s
+        .strip_prefix("http://")
+        .or_else(|| s.strip_prefix("https://"))
+        .or_else(|| s.strip_prefix("socks5://"))
+        .unwrap_or(s);
+    if without_scheme.is_empty() {
+        return Err("Отсутствует host:port прокси".into());
+    }
+    let (auth, host_port) = match without_scheme.rsplit_once('@') {
+        Some((a, hp)) => {
+            if a.is_empty() {
+                return Err("Пустые учётные данные прокси".into());
+            }
+            (Some(a.to_string()), hp)
+        }
+        None => (None, without_scheme),
+    };
+    let host_port = host_port.trim_end_matches('/');
+    let (host, port_str) = host_port
+        .rsplit_once(':')
+        .ok_or_else(|| "Ожидается формат host:port для own_proxy".to_string())?;
+    if host.is_empty() {
+        return Err("Пустой хост прокси".into());
+    }
+    let port: u16 = port_str
+        .parse()
+        .map_err(|_| format!("Некорректный порт прокси: '{port_str}'"))?;
+    if port == 0 {
+        return Err("Порт прокси не может быть 0".into());
+    }
+    Ok((format!("{host}:{port}"), auth))
+}
+
+pub fn validate_own_proxy(raw: &str) -> Result<(), String> {
+    if raw.trim().is_empty() {
+        return Ok(());
+    }
+    parse_proxy_host_port(raw).map(|_| ())
+}
+
+async fn connect_via_http_proxy(
+    proxy_raw: &str,
+    destination: &str,
+) -> Result<TcpStream, String> {
+    let (proxy_addr, auth) = parse_proxy_host_port(proxy_raw)?;
+    let mut stream = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        TcpStream::connect(&proxy_addr),
+    )
+    .await
+    .map_err(|_| format!("Таймаут подключения к прокси {proxy_addr}"))?
+    .map_err(|e| format!("Ошибка подключения к прокси {proxy_addr}: {e}"))?;
+
+    let mut req = format!("CONNECT {destination} HTTP/1.1\r\nHost: {destination}\r\n");
+    if let Some(creds) = auth {
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(creds.as_bytes());
+        req.push_str(&format!("Proxy-Authorization: Basic {encoded}\r\n"));
+    }
+    req.push_str("\r\n");
+
+    stream
+        .write_all(req.as_bytes())
+        .await
+        .map_err(|e| format!("Ошибка записи CONNECT в прокси: {e}"))?;
+
+    let mut resp_buf = [0u8; 512];
+    let n = tokio::time::timeout(std::time::Duration::from_secs(10), stream.read(&mut resp_buf))
+        .await
+        .map_err(|_| "Таймаут ответа от прокси".to_string())?
+        .map_err(|e| format!("Ошибка чтения ответа прокси: {e}"))?;
+    let resp_line = String::from_utf8_lossy(&resp_buf[..n]);
+    let first = resp_line.lines().next().unwrap_or("");
+    if !first.contains(" 200") {
+        return Err(format!("Прокси отклонил CONNECT: {first}"));
+    }
+    Ok(stream)
+}
+
 /// Обработка клиентского HTTP CONNECT запроса (TCP splice без MITM)
 async fn handle_proxy_conn(mut client: TcpStream, mgr: Arc<AntigravityManager>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Безопасность: доступ разрешён только с loopback и локальной сети (RFC 1918 / ULA)
@@ -787,35 +1014,23 @@ async fn handle_proxy_conn(mut client: TcpStream, mgr: Arc<AntigravityManager>) 
         None => (target_host_port, 443),
     };
 
-    // SEC-04: Разрешаем CONNECT-прокси только на порт 443
-    if port != 443 {
-        crate::log_w!("[ANTIGRAVITY] Отклонён CONNECT-запрос на неразрешённый порт: {port}");
-        client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
-        return Ok(());
-    }
-
-    // SEC-04: Проверка, что домен входит в список разрешённых targets
+    // SEC-04 + Баг A-05: Разрешаем CONNECT только на порт 443, к доменам из targets и не к SSRF IP
     let targets = {
         let c = mgr.config.read().await;
         c.antigravity.targets.clone()
     };
-    let is_target_allowed = targets.iter().any(|t| t.eq_ignore_ascii_case(host));
-    if !is_target_allowed {
-        crate::log_w!("[ANTIGRAVITY] Отклонён CONNECT-запрос к недопустимому домену: {host}");
+    if !is_allowed_connect_target(host, port, &targets) {
+        crate::log_w!("[ANTIGRAVITY] Отклонён CONNECT-запрос к {host}:{port}");
         client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
         return Ok(());
     }
 
-    // SEC-04: Если передан литеральный IP, проверяем на SSRF
-    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if is_ssrf_ip(ip) {
-            crate::log_w!("[ANTIGRAVITY] Отклонён CONNECT-запрос к SSRF IP: {ip}");
-            client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
-            return Ok(());
-        }
-    }
-
-    // Определяем, куда отправлять трафик:
+    // Определяем режим маршрутизации и целевой узел (Баг 19)
+    let (mode, own_proxy, mihomo_port) = {
+        let c = mgr.config.read().await;
+        let port = if c.mihomo.mixed_port > 0 { c.mihomo.mixed_port } else { 7890 };
+        (c.antigravity.mode.clone(), c.antigravity.own_proxy.clone(), port)
+    };
     let destination = {
         let st = mgr.state.read().await;
         if let Some(sub_ip) = st.active_ip {
@@ -830,33 +1045,56 @@ async fn handle_proxy_conn(mut client: TcpStream, mgr: Arc<AntigravityManager>) 
         }
     };
 
-    // SEC-04: Разрешаем и проверяем IP адреса назначения перед подключением
-    let addrs = match tokio::net::lookup_host(&destination).await {
-        Ok(iter) => iter.collect::<Vec<_>>(),
-        Err(e) => {
-            let resp = format!("HTTP/1.1 502 Bad Gateway\r\nX-Error: {}\r\n\r\n", e);
-            client.write_all(resp.as_bytes()).await?;
-            return Ok(());
+    let mut server = match select_route(&mode, &own_proxy, &destination) {
+        Route::ViaOwnProxy(proxy_addr) => match connect_via_http_proxy(&proxy_addr, &destination).await {
+            Ok(s) => s,
+            Err(e) => {
+                let resp = format!("HTTP/1.1 502 Bad Gateway\r\nX-Error: {}\r\n\r\n", e);
+                client.write_all(resp.as_bytes()).await?;
+                return Ok(());
+            }
+        },
+        Route::ViaMihomo => {
+            let mihomo_proxy = format!("127.0.0.1:{mihomo_port}");
+            match connect_via_http_proxy(&mihomo_proxy, &destination).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let resp = format!("HTTP/1.1 502 Bad Gateway\r\nX-Error: {}\r\n\r\n", e);
+                    client.write_all(resp.as_bytes()).await?;
+                    return Ok(());
+                }
+            }
         }
-    };
+        Route::Direct => {
+            // SEC-04: Разрешаем и проверяем IP адреса назначения перед подключением
+            let addrs = match tokio::net::lookup_host(&destination).await {
+                Ok(iter) => iter.collect::<Vec<_>>(),
+                Err(e) => {
+                    let resp = format!("HTTP/1.1 502 Bad Gateway\r\nX-Error: {}\r\n\r\n", e);
+                    client.write_all(resp.as_bytes()).await?;
+                    return Ok(());
+                }
+            };
 
-    if addrs.is_empty() || addrs.iter().any(|a| is_ssrf_ip(a.ip())) {
-        crate::log_w!("[ANTIGRAVITY] Отклонён запрос к адресу из черного списка SSRF: {destination}");
-        client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
-        return Ok(());
-    }
+            if addrs.is_empty() || addrs.iter().any(|a| is_ssrf_ip(a.ip())) {
+                crate::log_w!("[ANTIGRAVITY] Отклонён запрос к адресу из черного списка SSRF: {destination}");
+                client.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+                return Ok(());
+            }
 
-    let mut server = match tokio::time::timeout(std::time::Duration::from_secs(10), TcpStream::connect(&addrs[..])).await {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
-            let resp = format!("HTTP/1.1 502 Bad Gateway\r\nX-Error: {}\r\n\r\n", e);
-            client.write_all(resp.as_bytes()).await?;
-            return Ok(());
-        }
-        Err(_) => {
-            let resp = "HTTP/1.1 504 Gateway Timeout\r\n\r\n";
-            client.write_all(resp.as_bytes()).await?;
-            return Ok(());
+            match tokio::time::timeout(std::time::Duration::from_secs(10), TcpStream::connect(&addrs[..])).await {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
+                    let resp = format!("HTTP/1.1 502 Bad Gateway\r\nX-Error: {}\r\n\r\n", e);
+                    client.write_all(resp.as_bytes()).await?;
+                    return Ok(());
+                }
+                Err(_) => {
+                    let resp = "HTTP/1.1 504 Gateway Timeout\r\n\r\n";
+                    client.write_all(resp.as_bytes()).await?;
+                    return Ok(());
+                }
+            }
         }
     };
 
@@ -1045,5 +1283,109 @@ mod tests {
         assert!(!dns.is_empty());
         // Fallback should be 1.1.1.1:53 if no AdGuard DNS configured, never 8.8.8.8:53
         assert_ne!(dns, "8.8.8.8:53");
+    }
+
+    #[test]
+    fn regression_bug_19b_antigravity_mode_selects_route() {
+        assert_eq!(select_route("direct", "http://10.0.0.2:8080", "cloudcode-pa.googleapis.com:443"), Route::Direct);
+        assert_eq!(
+            select_route("proxy", "http://10.0.0.2:8080", "cloudcode-pa.googleapis.com:443"),
+            Route::ViaOwnProxy("http://10.0.0.2:8080".to_string())
+        );
+        assert_eq!(
+            select_route("own_proxy", "10.0.0.2:8080", "cloudcode-pa.googleapis.com:443"),
+            Route::ViaOwnProxy("10.0.0.2:8080".to_string())
+        );
+        assert_eq!(
+            select_route("mihomo", "http://10.0.0.2:8080", "cloudcode-pa.googleapis.com:443"),
+            Route::ViaMihomo
+        );
+        assert_eq!(select_route("proxy", "", "cloudcode-pa.googleapis.com:443"), Route::Direct);
+
+        assert!(validate_own_proxy("").is_ok());
+        assert!(validate_own_proxy("http://user:pass@10.0.0.5:8080").is_ok());
+        assert!(validate_own_proxy("10.0.0.5:3128").is_ok());
+        assert!(validate_own_proxy("not-a-proxy").is_err());
+        assert!(validate_own_proxy("http://:8080").is_err());
+        assert!(validate_own_proxy("10.0.0.5:99999").is_err());
+    }
+
+    #[test]
+    fn regression_bug_21b_ip_host_rules_diff_and_retreat() {
+        let ip1 = Ipv4Addr::new(1, 2, 3, 4);
+        let ip2 = Ipv4Addr::new(5, 6, 7, 8);
+        let current = vec![
+            ("a.example.com".to_string(), ip1),
+            ("old.example.com".to_string(), ip1),
+        ];
+        let desired = vec![
+            ("a.example.com".to_string(), ip1),
+            ("b.example.com".to_string(), ip2),
+        ];
+        let (to_add, to_remove) = diff_ip_host_rules(&current, &desired);
+        assert_eq!(to_remove, vec!["old.example.com".to_string()]);
+        assert_eq!(to_add, vec![("b.example.com".to_string(), ip2)]);
+
+        // При смене IP для того же домена: старый удаляется, новый добавляется
+        let desired_changed = vec![("a.example.com".to_string(), ip2)];
+        let (to_add2, to_remove2) = diff_ip_host_rules(&current, &desired_changed);
+        assert!(to_remove2.contains(&"a.example.com".to_string()));
+        assert!(to_remove2.contains(&"old.example.com".to_string()));
+        assert_eq!(to_add2, vec![("a.example.com".to_string(), ip2)]);
+
+        // Отступление (healing/error): desired пустой -> все текущие правила удаляются
+        let (to_add_empty, to_remove_all) = diff_ip_host_rules(&current, &[]);
+        assert!(to_add_empty.is_empty());
+        assert_eq!(to_remove_all.len(), 2);
+        assert!(should_retreat_ip_host_rules("healing"));
+        assert!(should_retreat_ip_host_rules("error"));
+        assert!(!should_retreat_ip_host_rules("working"));
+    }
+
+    #[test]
+    fn regression_bug_22b_google_subnets_and_unknown_when_ref_dns_down() {
+        // Новые подсети Google: 172.253.0.0/16 и 192.178.0.0/15 (192.178.* и 192.179.*)
+        assert!(is_google_ip(&Ipv4Addr::new(172, 253, 62, 100)));
+        assert!(is_google_ip(&Ipv4Addr::new(192, 178, 10, 5)));
+        assert!(is_google_ip(&Ipv4Addr::new(192, 179, 255, 1)));
+        // Существующие подсети сохраняются
+        assert!(is_google_ip(&Ipv4Addr::new(142, 250, 185, 206)));
+        assert!(!is_google_ip(&Ipv4Addr::new(93, 184, 216, 34)));
+
+        let google_ip = Ipv4Addr::new(172, 253, 62, 100);
+        let proxy_ip = Ipv4Addr::new(185, 10, 20, 30);
+        let ref_ips = vec![Ipv4Addr::new(142, 250, 1, 1)];
+
+        assert_eq!(classify_ip(&google_ip, &ref_ips), IpClass::Real);
+        assert_eq!(classify_ip(&google_ip, &[]), IpClass::Real);
+        assert_eq!(classify_ip(&proxy_ip, &ref_ips), IpClass::Substituted);
+        // Когда эталонный DNS недоступен (ref_ips пуст), не-Google IP должен быть Unknown, а не Substituted
+        assert_eq!(classify_ip(&proxy_ip, &[]), IpClass::Unknown);
+    }
+
+    #[test]
+    fn regression_bug_a05_antigravity_proxy_is_not_open() {
+        let targets = vec![
+            "cloudcode-pa.googleapis.com".to_string(),
+            "generativelanguage.googleapis.com".to_string(),
+        ];
+        assert!(is_allowed_connect_target("cloudcode-pa.googleapis.com", 443, &targets));
+        assert!(!is_allowed_connect_target("cloudcode-pa.googleapis.com", 80, &targets));
+        assert!(!is_allowed_connect_target("cloudcode-pa.googleapis.com", 22, &targets));
+        assert!(!is_allowed_connect_target("evil.example.com", 443, &targets));
+        assert!(!is_allowed_connect_target("127.0.0.1", 443, &targets));
+        assert!(!is_allowed_connect_target("192.168.1.1", 443, &targets));
+
+        let (setup, cleanup) = build_antigravity_input_rules(53129);
+        let setup_joined = setup.join("\n");
+        let cleanup_joined = cleanup.join("\n");
+        assert!(
+            setup_joined.contains("! -i br+") && setup_joined.contains("--dport 53129") && setup_joined.contains("-j DROP"),
+            "Antigravity INPUT rules must drop non-LAN connections:\n{setup_joined}"
+        );
+        assert!(
+            cleanup_joined.contains("-D INPUT") && cleanup_joined.contains("--dport 53129"),
+            "Antigravity INPUT cleanup must remove rules:\n{cleanup_joined}"
+        );
     }
 }

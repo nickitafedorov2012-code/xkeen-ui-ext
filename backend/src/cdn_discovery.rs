@@ -144,11 +144,73 @@ pub fn expand_bundles(domains: &[String]) -> BTreeSet<String> {
     extra
 }
 
+/// Проверяет, что IP является публичным адресом, а не fake-ip (198.18.0.0/15) или частным/локальным адресом (баг 87).
+fn is_public_cdn_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            let is_fake_ip = o[0] == 198 && (o[1] & 0xfe) == 18; // 198.18.0.0/15
+            let is_cgnat = o[0] == 100 && (o[1] & 0xc0) == 64; // 100.64.0.0/10
+            !v4.is_private()
+                && !v4.is_loopback()
+                && !v4.is_link_local()
+                && !v4.is_broadcast()
+                && !v4.is_unspecified()
+                && !v4.is_multicast()
+                && !is_fake_ip
+                && !is_cgnat
+        }
+        std::net::IpAddr::V6(v6) => {
+            let s0 = v6.segments()[0];
+            let is_ula = (s0 & 0xfe00) == 0xfc00;
+            let is_ll = (s0 & 0xffc0) == 0xfe80;
+            !v6.is_loopback() && !v6.is_unspecified() && !v6.is_multicast() && !is_ula && !is_ll
+        }
+    }
+}
+
+/// Чистый фильтр поддоменов CDN (баг 87):
+/// отбрасывает fake-ip/частные адреса и результаты, полностью совпадающие с wildcard-DNS.
+pub fn accept_subdomains(
+    wildcard_ips: Option<&std::collections::HashSet<std::net::IpAddr>>,
+    results: &[(String, std::collections::HashSet<std::net::IpAddr>)],
+) -> Vec<String> {
+    let mut accepted = Vec::new();
+    for (sub, ips) in results {
+        let public_ips: std::collections::HashSet<std::net::IpAddr> =
+            ips.iter().copied().filter(|ip| is_public_cdn_ip(*ip)).collect();
+        if public_ips.is_empty() {
+            continue;
+        }
+        if let Some(wc) = wildcard_ips.filter(|s| !s.is_empty()) {
+            // Принимаем поддомен только если есть публичный IP, отличный от wildcard-набора
+            if !public_ips.iter().any(|ip| !wc.contains(ip)) {
+                continue;
+            }
+        }
+        accepted.push(sub.clone());
+    }
+    accepted
+}
+
 /// Асинхронно проверяет типичные CDN-поддомены (img., cdn., static. и т.д.) параллельно
 pub async fn probe_subdomains(domain: &str) -> Vec<String> {
     let clean = domain.trim().trim_start_matches("www.").to_lowercase();
     if clean.is_empty() || clean.contains('/') {
         return Vec::new();
+    }
+
+    // Проверяем wildcard-DNS через случайную несуществующую метку
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(1);
+    let wc_host = format!("xkr-{nonce:x}.{clean}:443");
+    let mut wildcard_ips = std::collections::HashSet::new();
+    if let Ok(Ok(iter)) = tokio::time::timeout(Duration::from_millis(1200), tokio::net::lookup_host(wc_host)).await {
+        for sa in iter {
+            wildcard_ips.insert(sa.ip());
+        }
     }
 
     let mut set = tokio::task::JoinSet::new();
@@ -157,22 +219,24 @@ pub async fn probe_subdomains(domain: &str) -> Vec<String> {
         set.spawn(async move {
             let addr = format!("{sub}:443");
             let res = tokio::time::timeout(Duration::from_millis(1200), tokio::net::lookup_host(addr)).await;
-            if let Ok(Ok(mut iter)) = res {
-                if iter.next().is_some() {
-                    return Some(sub);
+            if let Ok(Ok(iter)) = res {
+                let ips: std::collections::HashSet<std::net::IpAddr> = iter.map(|sa| sa.ip()).collect();
+                if !ips.is_empty() {
+                    return Some((sub, ips));
                 }
             }
             None
         });
     }
 
-    let mut found = Vec::new();
+    let mut results = Vec::new();
     while let Some(res) = set.join_next().await {
-        if let Ok(Some(sub)) = res {
-            found.push(sub);
+        if let Ok(Some(item)) = res {
+            results.push(item);
         }
     }
-    found
+    let wc_opt = if wildcard_ips.is_empty() { None } else { Some(&wildcard_ips) };
+    accept_subdomains(wc_opt, &results)
 }
 
 static PROXIED_CLIENT: std::sync::RwLock<Option<(String, reqwest::Client)>> = std::sync::RwLock::new(None);
@@ -359,6 +423,45 @@ mod tests {
         assert!(expanded.contains("githubassets.com"));
         assert!(expanded.contains("habrastorage.org"));
         assert!(!expanded.contains("routerai.ru"));
+    }
+
+    #[test]
+    fn regression_bug_87b_wildcard_dns_is_not_cdn() {
+        use std::collections::HashSet;
+        use std::net::IpAddr;
+
+        let wc_ip: IpAddr = "93.184.216.34".parse().unwrap();
+        let other_pub: IpAddr = "104.16.132.229".parse().unwrap();
+        let fake_ip: IpAddr = "198.18.0.15".parse().unwrap();
+        let fake_ip2: IpAddr = "198.19.255.10".parse().unwrap();
+        let priv_ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let loopback_ip: IpAddr = "127.0.0.1".parse().unwrap();
+
+        let wc_set: HashSet<IpAddr> = [wc_ip].into_iter().collect();
+
+        // 1. Все префиксы вернули тот же IP, что и случайная wildcard-метка -> пусто
+        let results_wc = vec![
+            ("img.example.com".to_string(), [wc_ip].into_iter().collect()),
+            ("cdn.example.com".to_string(), [wc_ip].into_iter().collect()),
+        ];
+        assert!(accept_subdomains(Some(&wc_set), &results_wc).is_empty());
+
+        // 2. Один префикс вернул иной публичный IP -> принят только он
+        let results_mixed = vec![
+            ("img.example.com".to_string(), [wc_ip].into_iter().collect()),
+            ("cdn.example.com".to_string(), [other_pub].into_iter().collect()),
+        ];
+        assert_eq!(accept_subdomains(Some(&wc_set), &results_mixed), vec!["cdn.example.com".to_string()]);
+
+        // 3. fake-ip (198.18.0.0/15) и частные/локальные адреса отклоняются
+        let results_fake_priv = vec![
+            ("fake1.example.com".to_string(), [fake_ip].into_iter().collect()),
+            ("fake2.example.com".to_string(), [fake_ip2].into_iter().collect()),
+            ("priv.example.com".to_string(), [priv_ip].into_iter().collect()),
+            ("loop.example.com".to_string(), [loopback_ip].into_iter().collect()),
+            ("real.example.com".to_string(), [other_pub].into_iter().collect()),
+        ];
+        assert_eq!(accept_subdomains(None, &results_fake_priv), vec!["real.example.com".to_string()]);
     }
 }
 

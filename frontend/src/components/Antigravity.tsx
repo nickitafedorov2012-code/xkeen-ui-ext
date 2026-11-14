@@ -4,6 +4,7 @@ import { getFlowStatus, formatFlowServerName, type AntigravityStatus, type Serve
 import { copyToClipboard as doCopy } from '../utils/clipboard'
 import { computeAntigravityParams } from '../utils/antigravity_commands'
 import FlowRepairModal from './FlowRepairModal'
+import { useDirtyGuard } from '../utils/dirtyGuard'
 
 interface Props {
   notify: (msg: string, isError?: boolean) => void
@@ -36,9 +37,7 @@ export default function Antigravity({ notify }: Props) {
   const [checkingFlow, setCheckingFlow] = useState(false)
   const [pingingFlow, setPingingFlow] = useState(false)
   const [flowServers, setFlowServers] = useState<ServerInfo[]>([])
-  const [selectedFlowServer, setSelectedFlowServer] = useState<string>(() => {
-    return localStorage.getItem('xr_flow_server') || ''
-  })
+  const [selectedFlowServer, setSelectedFlowServer] = useState<string>('')
   const [switchingFlowServer, setSwitchingFlowServer] = useState(false)
   const [repairModalOpen, setRepairModalOpen] = useState(false)
   const [autoSelectFlow, setAutoSelectFlow] = useState(false)
@@ -53,6 +52,7 @@ export default function Antigravity({ notify }: Props) {
   const [ownProxy, setOwnProxy] = useState('')
   const [isSettingsDirty, setIsSettingsDirty] = useState(false)
   const isSettingsDirtyRef = useRef(false)
+  useDirtyGuard('antigravity', isSettingsDirty)
 
   const load = useCallback(async () => {
     try {
@@ -81,7 +81,6 @@ export default function Antigravity({ notify }: Props) {
       const realServers = all.filter(
         (s) => !s.is_pool && s.id !== 'PROXY' && s.id !== 'GLOBAL' && s.id !== 'Fastest' && s.id !== 'Fallback' && s.id !== 'DIRECT' && s.id !== 'REJECT'
       )
-      const cleanNodes = realServers.filter((s) => getFlowStatus(s) === 'ok')
       setFlowServers(realServers)
 
       let flowSrv = ''
@@ -95,19 +94,10 @@ export default function Antigravity({ notify }: Props) {
         }
       } catch {}
 
-      if (!flowSrv) {
-        const stored = localStorage.getItem('xr_flow_server') || ''
-        if (stored !== 'PROXY' && stored !== 'GLOBAL') {
-          flowSrv = stored
-        }
-      }
-
       if (flowSrv && realServers.some((s) => s.id === flowSrv)) {
         setSelectedFlowServer(flowSrv)
-      } else if (cleanNodes.length > 0) {
-        setSelectedFlowServer(cleanNodes[0].id)
-      } else if (realServers.length > 0) {
-        setSelectedFlowServer(realServers[0].id)
+      } else {
+        setSelectedFlowServer('')
       }
     } catch {
       // ignore
@@ -178,7 +168,6 @@ export default function Antigravity({ notify }: Props) {
     }
     try {
       setSelectedFlowServer(serverId)
-      localStorage.setItem('xr_flow_server', serverId)
       await apiPost('flow/switch', { server_id: serverId })
       notify(`Выделенный узел Google Flow переключен на '${serverId}'. Основной прокси и Failover сохранены.`)
       setTimeout(checkFlowAccess, 1200)
@@ -197,7 +186,6 @@ export default function Antigravity({ notify }: Props) {
       setAutoSelectFlow(res.enabled)
       if (res.best_server) {
         setSelectedFlowServer(res.best_server)
-        localStorage.setItem('xr_flow_server', res.best_server)
         setGoogleGeo(null)
         try {
           localStorage.removeItem('xr_google_geo')
@@ -463,7 +451,7 @@ export default function Antigravity({ notify }: Props) {
               }}
               disabled={switchingFlowServer || pingingFlow}
             >
-              <option value="">-- Выберите сервер для AI ({flowServers.length}) --</option>
+              <option value="">-- не выбрано ({flowServers.length}) --</option>
               {usCaServers.length > 0 && (
                 <optgroup label="🇺🇸 🇨🇦 Проверенные для Google Flow (США / Канада)">
                   {usCaServers.map((s) => (
@@ -1066,7 +1054,6 @@ export default function Antigravity({ notify }: Props) {
         notify={notify}
         onRepaired={(srv) => {
           setSelectedFlowServer(srv)
-          localStorage.setItem('xr_flow_server', srv)
           load()
         }}
       />

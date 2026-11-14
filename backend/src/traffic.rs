@@ -28,11 +28,11 @@ pub fn is_whitelist_active() -> bool {
 }
 
 #[derive(Deserialize)]
-struct MihomoTrafficChunk {
+pub struct MihomoTrafficChunk {
     #[serde(default)]
-    up: u64,
+    pub up: u64,
     #[serde(default)]
-    down: u64,
+    pub down: u64,
 }
 
 #[derive(Serialize)]
@@ -277,10 +277,21 @@ pub fn reset_traffic(target: &str) -> TrafficSnapshot {
 
 pub static SHUTDOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+pub fn shutdown_with<F1, F2>(
+    flag: &std::sync::atomic::AtomicBool,
+    save_fn: F1,
+    cleanup_fn: F2,
+) where
+    F1: FnOnce(),
+    F2: FnOnce(),
+{
+    flag.store(true, Ordering::Release);
+    save_fn();
+    cleanup_fn();
+}
+
 pub fn shutdown() {
-    SHUTDOWN.store(true, Ordering::Release);
-    save_stats_to_disk();
-    crate::direct_traffic::cleanup_direct_iptables();
+    shutdown_with(&SHUTDOWN, save_stats_to_disk, crate::direct_traffic::cleanup_direct_iptables);
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -383,6 +394,36 @@ static NON_DIRECT_PERMILLE: AtomicU64 = AtomicU64::new(1000);
 
 fn scale_by_non_direct(v: u64) -> u64 {
     v.saturating_mul(NON_DIRECT_PERMILLE.load(Ordering::Relaxed)) / 1000
+}
+
+/// Переключатель маппинга направлений `/traffic` Mihomo (`up -> down`, `down -> up`) (баг 74).
+/// Менять только после замера на стендовом роутере `192.168.1.1`.
+pub const fn frame_direction_swapped() -> bool {
+    true
+}
+
+/// Обрабатывает один кадр `/traffic` от Mihomo и обновляет текущие скорости PROXY/WHITELIST (баг 75).
+pub fn apply_traffic_frame(msg: &MihomoTrafficChunk) -> (u64, u64) {
+    let (raw_down, raw_up) = if frame_direction_swapped() {
+        (msg.up, msg.down)
+    } else {
+        (msg.down, msg.up)
+    };
+    let down = scale_by_non_direct(raw_down);
+    let up = scale_by_non_direct(raw_up);
+    let is_wl_now = WHITELIST_ACTIVE.load(Ordering::Relaxed);
+    if is_wl_now {
+        WHITELIST_DOWN.store(down, Ordering::Relaxed);
+        WHITELIST_UP.store(up, Ordering::Relaxed);
+        PROXY_DOWN.store(0, Ordering::Relaxed);
+        PROXY_UP.store(0, Ordering::Relaxed);
+    } else {
+        PROXY_DOWN.store(down, Ordering::Relaxed);
+        PROXY_UP.store(up, Ordering::Relaxed);
+        WHITELIST_DOWN.store(0, Ordering::Relaxed);
+        WHITELIST_UP.store(0, Ordering::Relaxed);
+    }
+    (down, up)
 }
 
 /// Учёт трафика по соединениям Mihomo (баги 72, 73): раз в 2 с GET /connections, раз в 30 с —
@@ -509,23 +550,7 @@ async fn run_mihomo_stream(state: AppState) {
                                 buffer.drain(..=pos);
                                 if !line.is_empty() {
                                     if let Ok(msg) = serde_json::from_str::<MihomoTrafficChunk>(&line) {
-                                        // Инверсия направления Mihomo -> клиент: данные, отдаваемые Mihomo клиенту, являются Загрузкой (DOWN).
-                                        // Здесь только скорости (без DIRECT-доли); байты и квоты подписок считает
-                                        // run_connections_accounting по соединениям (баги 72, 73).
-                                        let down = scale_by_non_direct(msg.up);
-                                        let up = scale_by_non_direct(msg.down);
-                                        let is_wl_now = WHITELIST_ACTIVE.load(Ordering::Relaxed);
-                                        if is_wl_now {
-                                            WHITELIST_DOWN.store(down, Ordering::Relaxed);
-                                            WHITELIST_UP.store(up, Ordering::Relaxed);
-                                            PROXY_DOWN.store(0, Ordering::Relaxed);
-                                            PROXY_UP.store(0, Ordering::Relaxed);
-                                        } else {
-                                            PROXY_DOWN.store(down, Ordering::Relaxed);
-                                            PROXY_UP.store(up, Ordering::Relaxed);
-                                            WHITELIST_DOWN.store(0, Ordering::Relaxed);
-                                            WHITELIST_UP.store(0, Ordering::Relaxed);
-                                        }
+                                        apply_traffic_frame(&msg);
                                     }
                                 }
                             }
@@ -573,6 +598,12 @@ fn get_wan_interfaces() -> Vec<String> {
 }
 
 /// Чтение счетчиков байт WAN-интерфейсов из /proc/net/dev
+#[cfg(not(target_os = "linux"))]
+fn read_wan_bytes(_wan_ifaces: &[String]) -> (u64, u64) {
+    (0, 0)
+}
+
+#[cfg(target_os = "linux")]
 fn read_wan_bytes(wan_ifaces: &[String]) -> (u64, u64) {
     let mut rx = 0u64;
     let mut tx = 0u64;
@@ -768,9 +799,13 @@ mod tests {
 
     #[test]
     fn test_traffic_shutdown_flag() {
-        assert!(!is_shutdown());
-        shutdown();
-        assert!(is_shutdown());
+        let local_flag = std::sync::atomic::AtomicBool::new(false);
+        let mut saved = false;
+        let mut cleaned = false;
+        assert!(!local_flag.load(Ordering::Acquire));
+        shutdown_with(&local_flag, || saved = true, || cleaned = true);
+        assert!(local_flag.load(Ordering::Acquire));
+        assert!(saved && cleaned);
     }
 
     #[test]
@@ -805,22 +840,21 @@ mod tests {
     #[test]
     fn test_anti_regression_traffic_direction_mihomo_to_client_perspective() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_traffic("all");
+        NON_DIRECT_PERMILLE.store(1000, Ordering::Relaxed);
+        set_whitelist_active(false);
         // Проверка: Mihomo chunk 'up' (данные, отдаваемые прокси клиенту) парсится
         // и направляется в Загрузку (DOWN), а chunk 'down' (от клиента к прокси) — в Отдачу (UP).
         let chunk_json = r#"{"up":15000000,"down":250000}"#;
         let msg: MihomoTrafficChunk = serde_json::from_str(chunk_json).expect("valid chunk");
-        
-        // В run_mihomo_stream:
-        PROXY_DOWN.store(msg.up, Ordering::Relaxed);
-        PROXY_UP.store(msg.down, Ordering::Relaxed);
+
+        apply_traffic_frame(&msg);
 
         let snap = get_snapshot();
         assert_eq!(snap.proxy.down, 15000000, "Mihomo up must map to client download (DOWN)");
         assert_eq!(snap.proxy.up, 250000, "Mihomo down must map to client upload (UP)");
 
-        // Restore state to avoid polluting concurrent tests
-        PROXY_DOWN.store(0, Ordering::Relaxed);
-        PROXY_UP.store(0, Ordering::Relaxed);
+        reset_traffic("all");
     }
 
     #[test]
@@ -828,33 +862,28 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Сбросим для чистоты теста
         reset_traffic("all");
+        NON_DIRECT_PERMILLE.store(1000, Ordering::Relaxed);
         set_whitelist_active(false);
 
-        // 1. При неактивном Whitelist трафик должен идти в PROXY (VPS Безлимит)
+        // 1. При неактивном Whitelist кадр /traffic идёт в PROXY (VPS Безлимит)
         let chunk_regular = MihomoTrafficChunk { down: 500, up: 1500 };
-        let bytes_regular = chunk_regular.down + chunk_regular.up;
-        if WHITELIST_ACTIVE.load(Ordering::Relaxed) {
-            TOTAL_WHITELIST_BYTES.fetch_add(bytes_regular, Ordering::Relaxed);
-        } else {
-            TOTAL_PROXY_BYTES.fetch_add(bytes_regular, Ordering::Relaxed);
-        }
+        apply_traffic_frame(&chunk_regular);
+        let snap_proxy = get_snapshot();
+        assert_eq!(snap_proxy.proxy.down, 1500);
+        assert_eq!(snap_proxy.proxy.up, 500);
+        assert_eq!(snap_proxy.whitelist.down, 0);
+        assert_eq!(snap_proxy.whitelist.up, 0);
 
-        assert_eq!(TOTAL_PROXY_BYTES.load(Ordering::Relaxed), 2000);
-        assert_eq!(TOTAL_WHITELIST_BYTES.load(Ordering::Relaxed), 0);
-
-        // 2. Активируем Whitelist: теперь трафик должен идти ТОЛЬКО в WHITELIST (БС Лимит)
+        // 2. Активируем Whitelist: теперь кадр /traffic идёт ТОЛЬКО в WHITELIST (БС Лимит),
+        // а скорость PROXY обнуляется.
         set_whitelist_active(true);
         let chunk_wl = MihomoTrafficChunk { down: 1000, up: 4000 };
-        let bytes_wl = chunk_wl.down + chunk_wl.up;
-        if WHITELIST_ACTIVE.load(Ordering::Relaxed) {
-            TOTAL_WHITELIST_BYTES.fetch_add(bytes_wl, Ordering::Relaxed);
-        } else {
-            TOTAL_PROXY_BYTES.fetch_add(bytes_wl, Ordering::Relaxed);
-        }
-
-        // Счетчик PROXY не должен измениться!
-        assert_eq!(TOTAL_PROXY_BYTES.load(Ordering::Relaxed), 2000);
-        assert_eq!(TOTAL_WHITELIST_BYTES.load(Ordering::Relaxed), 5000);
+        apply_traffic_frame(&chunk_wl);
+        let snap_wl = get_snapshot();
+        assert_eq!(snap_wl.proxy.down, 0);
+        assert_eq!(snap_wl.proxy.up, 0);
+        assert_eq!(snap_wl.whitelist.down, 4000);
+        assert_eq!(snap_wl.whitelist.up, 1000);
 
         set_whitelist_active(false);
         reset_traffic("all");
@@ -1145,5 +1174,47 @@ mod tests {
             "vkturn virtual provider must never be accounted in subscription provider_deltas"
         );
         assert_eq!(d.provider_deltas.get("my_sub"), Some(&500));
+    }
+
+    #[test]
+    fn regression_bug_75b_traffic_tests_call_production_code() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        NON_DIRECT_PERMILLE.store(1000, Ordering::Relaxed);
+        set_whitelist_active(false);
+        let msg = MihomoTrafficChunk { up: 1200, down: 300 };
+        let (down, up) = apply_traffic_frame(&msg);
+        assert_eq!((down, up), (1200, 300));
+        let snap = get_snapshot();
+        assert_eq!(snap.proxy.down, 1200);
+        assert_eq!(snap.proxy.up, 300);
+
+        let local_flag = std::sync::atomic::AtomicBool::new(false);
+        let mut saved = false;
+        let mut cleaned = false;
+        shutdown_with(&local_flag, || saved = true, || cleaned = true);
+        assert!(local_flag.load(Ordering::Acquire));
+        assert!(saved && cleaned);
+        assert!(!is_shutdown(), "local shutdown_with must not mutate global SHUTDOWN");
+
+        PROXY_DOWN.store(0, Ordering::Relaxed);
+        PROXY_UP.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn regression_bug_74b_direction_mapping_is_single_switch() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_traffic("all");
+        NON_DIRECT_PERMILLE.store(1000, Ordering::Relaxed);
+        set_whitelist_active(false);
+
+        let msg = MihomoTrafficChunk { up: 9000, down: 1500 };
+        let (down, up) = apply_traffic_frame(&msg);
+        if frame_direction_swapped() {
+            assert_eq!((down, up), (9000, 1500));
+        } else {
+            assert_eq!((down, up), (1500, 9000));
+        }
+        assert!(frame_direction_swapped(), "current router behavior expects swapped Mihomo up->down until verified on 192.168.1.1");
+        reset_traffic("all");
     }
 }

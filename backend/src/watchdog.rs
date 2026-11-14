@@ -34,19 +34,32 @@ pub fn is_shutdown() -> bool {
 
 static SERVICE_STOPPED_FLAG_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
-/// Флаг «службы остановлены пользователем / режим паники» на диске (баг 59): после рестарта панели
-/// failover и сторожа не должны молча поднимать проксирование обратно.
+/// Путь флага «службы остановлены паникой» в постоянном хранилище рядом с config.json (A-12).
+pub fn service_stopped_flag_path(config_path: &std::path::Path) -> std::path::PathBuf {
+    let dir = config_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    dir.join("xkeen-route-service-stopped.flag")
+}
+
+/// Флаг «службы остановлены пользователем / режим паники» на диске (баг 59, A-12):
+/// после рестарта панели и перезагрузки роутера failover и сторожа не должны поднимать проксирование.
 pub fn init_service_stopped_flag(path: std::path::PathBuf) {
-    let stopped = read_service_stopped_flag(&path);
+    let stopped = load_service_stopped_flag(&path);
     let _ = SERVICE_STOPPED_FLAG_PATH.set(path);
     SERVICE_MANUALLY_STOPPED.store(stopped, std::sync::atomic::Ordering::Release);
     if stopped {
-        log_w!("[WATCHDOG] Службы были остановлены пользователем до перезапуска панели — режим DIRECT сохранён");
+        log_w!("[WATCHDOG] Службы были остановлены пользователем до перезапуска — режим DIRECT сохранён");
     }
 }
 
-pub fn read_service_stopped_flag(path: &std::path::Path) -> bool {
+pub fn load_service_stopped_flag(path: &std::path::Path) -> bool {
     path.exists()
+}
+
+pub fn read_service_stopped_flag(path: &std::path::Path) -> bool {
+    load_service_stopped_flag(path)
 }
 
 pub fn persist_service_stopped_flag(path: &std::path::Path, stopped: bool) {
@@ -630,11 +643,8 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
 
             if gaming_tracked {
                 let new_cfg = tx.config_mut();
-                let has_explicit_enabled = new_cfg.gaming.devices.iter().any(|d| d.enabled);
-                let devices_len = new_cfg.gaming.devices.len();
                 for dev in &mut new_cfg.gaming.devices {
-                    let is_active = if has_explicit_enabled { dev.enabled } else { devices_len == 1 };
-                    if !is_active {
+                    if !crate::config::is_gaming_device_active(dev, true) {
                         continue;
                     }
                     if let Some(rci_dev) = current_devs.iter().find(|d| d.mac.eq_ignore_ascii_case(&dev.mac)) {
@@ -660,6 +670,13 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
                 }
             }
 
+            // Обновляем кэш последних IP для MAC-исключений БС по актуальному ARP (баг 2)
+            if let Ok(arp) = tokio::fs::read_to_string("/proc/net/arp").await {
+                if crate::routing::refresh_excluded_whitelist_last_ips(tx.config_mut(), &arp) {
+                    changed = true;
+                }
+            }
+
             if !changed {
                 continue;
             }
@@ -672,8 +689,8 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
                 Ok(()) => {
                     log_i!("[DHCP-WATCHDOG] ✓ Маршруты устройств переприменены для новых IP");
                     let cfg_now = (**state.config.read().await).clone();
-                    let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
-                    let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
+                    let ports = routing::redir_ports(&new_yaml);
+                    let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
                     let dns_port = crate::api::resolve_active_dns_port(&cfg_now);
                     crate::api::sync_full_tunnel_modes(&cfg_now, redir_port, tproxy_port, dns_port).await;
                     if !cfg_now.zapret.excluded_devices.is_empty() {
@@ -726,13 +743,7 @@ pub fn spawn_zapret_monitor(state: AppState) {
                 // Z-03/Z-05: служба выключена в конфигурации — гасим осиротевший процесс и
                 // остаточные правила здесь (watchdog), а не в GET /api/zapret/status.
                 // Маркер не трогаем: он означает «выключено пользователем» и ставится UI/ботом.
-                let orphan_running = tokio::process::Command::new("sh")
-                    .arg("-c")
-                    .arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null")
-                    .output()
-                    .await
-                    .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-                    .unwrap_or(false);
+                let orphan_running = crate::zapret::find_our_zapret_pid().await.is_some();
                 if orphan_running {
                     log_w!("[WATCHDOG] ⚠️ Zapret выключен в настройках, но nfqws ещё запущен — остановка осиротевшего процесса...");
                     let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret")
@@ -740,9 +751,14 @@ pub fn spawn_zapret_monitor(state: AppState) {
                         .output()
                         .await;
                 } else {
+                    let mihomo_dns_port = crate::routing::parse_mihomo_dns_listen_port(
+                        &std::fs::read_to_string(&state.config.read().await.mihomo.config_path).unwrap_or_default(),
+                    )
+                    .unwrap_or(crate::routing::DEFAULT_MIHOMO_DNS_PORT);
+                    let left_check_cmd = crate::zapret::build_zapret_iptables_left_check_cmd(mihomo_dns_port);
                     let iptables_left = tokio::process::Command::new("sh")
                         .arg("-c")
-                        .arg("iptables -w 2 -t mangle -S 2>/dev/null | grep -q zapret || iptables -w 2 -t nat -S PREROUTING 2>/dev/null | grep 'xkeen-route-zapret' | grep 'to-ports 1053' | grep -q .")
+                        .arg(&left_check_cmd)
                         .output()
                         .await
                         .map(|o| o.status.success())
@@ -775,14 +791,8 @@ pub fn spawn_zapret_monitor(state: AppState) {
                 continue;
             }
 
-            // Проверяем, запущен ли бинарник nfqws / nfqws2
-            let is_running = tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg("pidof nfqws2 >/dev/null 2>&1 || pidof nfqws >/dev/null 2>&1")
-                .output()
-                .await
-                .map(|o| o.status.success())
-                .unwrap_or(false);
+            // Проверяем, запущен ли бинарник именно нашего экземпляра nfqws / nfqws2 (баг 36)
+            let is_running = crate::zapret::find_our_zapret_pid().await.is_some();
 
             if is_running {
                 restart_failures = 0;
@@ -1030,7 +1040,7 @@ pub fn spawn_adguard_monitor(state: AppState) {
             // пропускал тик при MIHOMO_DOWN и оставлял LAN без DNS, если падали оба сервиса.
             let mihomo_down = is_mihomo_down();
 
-            let (mut enabled, host, configured_port, adguard_cfg, router_ip) = {
+            let (mut enabled, host, configured_port, adguard_cfg, router_ip, mihomo_config_path) = {
                 let cfg = state.config.read().await;
                 (
                     cfg.adguard.enabled || cfg.adblock_enabled,
@@ -1038,6 +1048,7 @@ pub fn spawn_adguard_monitor(state: AppState) {
                     cfg.adguard.dns_port,
                     cfg.adguard.clone(),
                     cfg.rci.host.clone(),
+                    cfg.mihomo.config_path.clone(),
                 )
             };
             let dns_port = crate::adguard::detect_adguard_dns_port().unwrap_or(configured_port);
@@ -1055,10 +1066,8 @@ pub fn spawn_adguard_monitor(state: AppState) {
             if needs_cfg_sync && !mihomo_down {
                 // Транзакция завершается reload Mihomo — при упавшем ядре она бессмысленна
                 if let Ok(mut tx) = crate::transaction::ConfigTx::begin(&state).await {
-                    tx.config_mut().adguard.enabled = true;
-                    tx.config_mut().adblock_enabled = true;
-                    // Автоподхват — один раз: дальше решает только пользователь (баг 116)
-                    tx.config_mut().adguard.integration_choice_locked = true;
+                    // Автоподхват включает только интеграцию (один раз) и не трогает adblock_enabled (баг 116)
+                    crate::adguard::apply_integration_toggle(tx.config_mut(), true);
                     if dns_port > 0 {
                         tx.config_mut().adguard.dns_port = dns_port;
                     }
@@ -1080,10 +1089,12 @@ pub fn spawn_adguard_monitor(state: AppState) {
             .await
             .unwrap_or(false);
 
+            let mihomo_restore_port = crate::adguard::resolve_adguard_restore_port(None, &mihomo_config_path);
+
             if !enabled && !is_running_protected {
                 set_adguard_down(false);
                 if iptables_active {
-                    let _ = crate::adguard::remove_adguard_iptables();
+                    let _ = crate::adguard::remove_adguard_iptables_with_restore_port(Some(mihomo_restore_port));
                 }
                 iptables_temporarily_suspended = false;
                 continue;
@@ -1104,7 +1115,7 @@ pub fn spawn_adguard_monitor(state: AppState) {
                         host,
                         dns_port
                     );
-                    let _ = crate::adguard::remove_adguard_iptables();
+                    let _ = crate::adguard::remove_adguard_iptables_with_restore_port(Some(mihomo_restore_port));
                     iptables_temporarily_suspended = true;
                 } else if iptables_temporarily_suspended && can_restore_adguard_iptables(mihomo_down, listener_ok) {
                     // AdGuard Home восстановился (и Mihomo жив — каскадная защита)
@@ -1223,8 +1234,8 @@ pub fn spawn_mihomo_health_monitor(state: AppState) {
                 if bs_active || gaming_active {
                     let (redir_port, tproxy_port) = if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
                         (
-                            routing::parse_redir_port(&yaml).unwrap_or(5000),
-                            routing::parse_tproxy_port(&yaml).unwrap_or(5001),
+                            routing::redir_ports(&yaml).redir,
+                            routing::redir_ports(&yaml).tproxy,
                         )
                     } else {
                         (5000, 5001)
@@ -1313,6 +1324,50 @@ pub fn is_conn_target_ignored(target: &str, destination: &str, ignored_list: &[S
     })
 }
 
+/// Неигровые домены (магазин/сообщество/CDN Steam и фоновые домены Discord),
+/// которые не должны запускать или продлевать умный игровой режим (Баг 11.1).
+pub const NON_GAMING_TRIGGER_HOSTS: &[&str] = &[
+    "store.steampowered.com",
+    "steamcommunity.com",
+    "steamstatic.com",
+    "steamcontent.com",
+    "steamcdn-a.akamaihd.net",
+    "discord.com",
+    "discordapp.com",
+    "discordapp.net",
+    "discord.gg",
+    "discord.media",
+    "discordcdn.com",
+];
+
+/// Диапазоны UDP-портов, исключённых из игровой эвристики (Баг 11.2):
+/// VPN (OpenVPN 1194, IPsec 4500, Tailscale 41641, WireGuard 51820-51821),
+/// SSDP/mDNS (1900, 5353-5354), STUN/WebRTC/VoIP (3478-3481, 5060-5061, 5349, 19302-19309),
+/// Zoom (8801-8810), BitTorrent (6881-6889).
+pub const NON_GAMING_UDP_PORT_RANGES: &[(u16, u16)] = &[
+    (1194, 1194),
+    (1900, 1900),
+    (3478, 3481),
+    (4500, 4500),
+    (5060, 5061),
+    (5349, 5349),
+    (5353, 5354),
+    (6881, 6889),
+    (8801, 8810),
+    (19302, 19309),
+    (41641, 41641),
+    (51820, 51821),
+];
+
+fn is_non_gaming_trigger_host(host_low: &str) -> bool {
+    if host_low.is_empty() {
+        return false;
+    }
+    NON_GAMING_TRIGGER_HOSTS.iter().any(|&ex| {
+        host_low == ex || host_low.ends_with(&format!(".{ex}"))
+    })
+}
+
 pub fn is_gaming_connection_match(
     host: &str,
     dest_ip: &str,
@@ -1321,11 +1376,14 @@ pub fn is_gaming_connection_match(
     rule: &str,
     gaming_domains: &[String],
 ) -> bool {
+    let host_low = host.trim().to_lowercase();
+    if is_non_gaming_trigger_host(&host_low) {
+        return false;
+    }
     let rule_low = rule.to_lowercase();
     if rule_low.contains("category-games") || rule_low.contains("gaming") {
         return true;
     }
-    let host_low = host.trim().to_lowercase();
     if !host_low.is_empty() {
         for gd in gaming_domains {
             let gd_low = gd.trim().to_lowercase();
@@ -1337,8 +1395,7 @@ pub fn is_gaming_connection_match(
     is_gaming_udp_heuristic(dest_ip, dest_port, network)
 }
 
-/// UDP-эвристика игрового трафика: высокие порты, кроме DNS/QUIC/NTP/SSDP/mDNS, STUN/WebRTC/VoIP
-/// и (баг 11a) VPN (WireGuard 51820, OpenVPN 1194, IPsec 500/4500), Zoom 8801–8810, BitTorrent 6881–6889.
+/// UDP-эвристика игрового трафика: высокие порты, кроме портов из `NON_GAMING_UDP_PORT_RANGES` (Баг 11.2).
 pub fn is_gaming_udp_heuristic(dest_ip: &str, dest_port: &str, network: &str) -> bool {
     if !network.eq_ignore_ascii_case("udp") || dest_ip.is_empty() {
         return false;
@@ -1347,10 +1404,9 @@ pub fn is_gaming_udp_heuristic(dest_ip: &str, dest_port: &str, network: &str) ->
         return false;
     };
     port_num >= 1024
-        && !matches!(
-            port_num,
-            1194 | 1900 | 3478..=3481 | 4500 | 5060 | 5061 | 5349 | 5353 | 5354 | 6881..=6889 | 8801..=8810 | 19302..=19309 | 51820
-        )
+        && !NON_GAMING_UDP_PORT_RANGES
+            .iter()
+            .any(|&(lo, hi)| port_num >= lo && port_num <= hi)
 }
 
 /// Порог P2P (баг 11a): игра держит связь с 1–3 серверами, торрент/DHT — с десятками пиров.
@@ -1581,8 +1637,8 @@ pub async fn apply_smart_gaming_toggle(state: &AppState, enable: bool) -> Result
         // Баг 8: сбрасываем только сокеты игровых устройств, а не всей LAN
         let _ = mihomo::switch_gaming_group(&state.http, &new_cfg, target_srv).await;
     }
-    let redir_port = routing::parse_redir_port(&new_yaml).unwrap_or(5000);
-    let tproxy_port = routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
+    let ports = routing::redir_ports(&new_yaml);
+    let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
     let dns_port = crate::api::resolve_active_dns_port(&new_cfg);
     let _ = crate::api::sync_full_tunnel_modes(&new_cfg, redir_port, tproxy_port, dns_port).await;
     Ok(new_cfg)
@@ -1592,6 +1648,113 @@ pub async fn apply_smart_gaming_toggle(state: &AppState, enable: bool) -> Result
 /// пока интеграция выключена и пользователь ещё ни разу не делал выбор (Zero-Touch для внешнего AGH).
 pub fn should_auto_integrate_adguard(running_protected: bool, integration_enabled: bool, choice_locked: bool) -> bool {
     running_protected && !integration_enabled && !choice_locked
+}
+
+/// Интервал фонового автоподбора лучшего узла для Google AI / Flow (Баг 53): 15 минут.
+pub const FLOW_AUTO_SELECT_INTERVAL_SECS: u64 = 15 * 60;
+/// Порог гистерезиса для фонового переключения Google AI (мс).
+pub const FLOW_AUTO_SELECT_HYSTERESIS_MS: i64 = 40;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FlowAutoSelectFlags {
+    pub enabled: bool,
+    pub service_stopped: bool,
+    pub speedtest_busy: bool,
+    pub check_in_progress: bool,
+}
+
+/// Чистая проверка разрешения тика фонового автоподбора Google AI (Баг 53.2).
+pub fn flow_auto_select_tick_allowed(flags: FlowAutoSelectFlags) -> bool {
+    flags.enabled && !flags.service_stopped && !flags.speedtest_busy && !flags.check_in_progress
+}
+
+/// Чистое решение о переключении узла Google AI с гистерезисом (Баг 53.2).
+pub fn should_switch_flow_server(
+    current: Option<&str>,
+    candidates: &[(String, i64)],
+    hysteresis_ms: i64,
+) -> Option<String> {
+    let mut best: Option<(&str, i64)> = None;
+    for (id, ping) in candidates {
+        if *ping <= 0 || id.trim().is_empty() {
+            continue;
+        }
+        if best.map_or(true, |(_, bp)| *ping < bp) {
+            best = Some((id.as_str(), *ping));
+        }
+    }
+    let (best_id, best_ping) = best?;
+    let cur = current.map(str::trim).filter(|s| !s.is_empty());
+    match cur {
+        None => Some(best_id.to_string()),
+        Some(c) if c == best_id => None,
+        Some(c) => {
+            let cur_ping = candidates
+                .iter()
+                .find(|(id, p)| id == c && *p > 0)
+                .map(|(_, p)| *p);
+            match cur_ping {
+                None => Some(best_id.to_string()),
+                Some(cp) if cp - best_ping >= hysteresis_ms => Some(best_id.to_string()),
+                Some(_) => None,
+            }
+        }
+    }
+}
+
+/// Один тик фонового автоподбора узла Google AI (Баг 53).
+pub async fn run_flow_auto_select_tick(state: &AppState) {
+    let cfg = state.config.read().await.clone();
+    let flags = FlowAutoSelectFlags {
+        enabled: cfg.flow_auto_select,
+        service_stopped: is_service_stopped(),
+        speedtest_busy: state.speedtest_lock.try_lock().is_err(),
+        check_in_progress: crate::failover::CHECK_IN_PROGRESS.try_lock().is_err(),
+    };
+    if !flow_auto_select_tick_allowed(flags) {
+        return;
+    }
+
+    let pings = crate::mihomo::ping_flow_servers(&state.http, &cfg, 3500).await;
+    if pings.is_empty() {
+        return;
+    }
+    let candidates: Vec<(String, i64)> = pings
+        .into_iter()
+        .filter(|(name, ping)| {
+            *ping > 0
+                && !matches!(name.as_str(), "DIRECT" | "REJECT" | "GLOBAL" | "COMPATIBLE" | "PASS")
+                && !matches!(crate::mihomo::detect_country(name), Some("RU") | Some("BY"))
+        })
+        .collect();
+
+    if let Some(target) = should_switch_flow_server(
+        cfg.flow_server.as_deref(),
+        &candidates,
+        FLOW_AUTO_SELECT_HYSTERESIS_MS,
+    ) {
+        if crate::mihomo::switch_flow_server(state, &target).await.is_ok() {
+            if let Ok(mut tx) = crate::transaction::ConfigTx::begin(state).await {
+                tx.config_mut().flow_server = Some(target.clone());
+                let _ = tx.commit().await;
+            }
+            log_i!("[FLOW-AUTO] Фоновый автоподбор переключил Google AI на '{target}'");
+        }
+    }
+}
+
+/// Запуск фонового цикла автоподбора сервера Google AI (раз в `FLOW_AUTO_SELECT_INTERVAL_SECS`).
+pub fn spawn_flow_auto_select_loop(state: AppState) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+        loop {
+            if is_shutdown() {
+                break;
+            }
+            run_flow_auto_select_tick(&state).await;
+            tokio::time::sleep(std::time::Duration::from_secs(FLOW_AUTO_SELECT_INTERVAL_SECS)).await;
+        }
+    });
 }
 
 #[cfg(test)]
@@ -1607,15 +1770,15 @@ mod tests {
 
     #[test]
     fn test_smart_gaming_connection_match_and_ignore() {
-        let domains = vec!["steamcommunity.com".to_string(), "discord.gg".to_string()];
-        assert!(is_gaming_connection_match("api.steamcommunity.com", "1.2.3.4", "443", "tcp", "MATCH", &domains));
+        let domains = vec!["riotgames.com".to_string(), "blizzard.com".to_string()];
+        assert!(is_gaming_connection_match("api.riotgames.com", "1.2.3.4", "443", "tcp", "MATCH", &domains));
         assert!(is_gaming_connection_match("", "155.133.248.34", "27015", "udp", "MATCH", &domains));
         assert!(!is_gaming_connection_match("google.com", "8.8.8.8", "443", "udp", "MATCH", &domains));
 
-        let ignored = vec!["api.steamcommunity.com".to_string(), "155.133.248.34:27015".to_string()];
-        assert!(is_conn_target_ignored("api.steamcommunity.com", "1.2.3.4:443", &ignored));
+        let ignored = vec!["api.riotgames.com".to_string(), "155.133.248.34:27015".to_string()];
+        assert!(is_conn_target_ignored("api.riotgames.com", "1.2.3.4:443", &ignored));
         assert!(is_conn_target_ignored("155.133.248.34:27015", "155.133.248.34:27015", &ignored));
-        assert!(!is_conn_target_ignored("discord.gg", "162.159.130.234:443", &ignored));
+        assert!(!is_conn_target_ignored("blizzard.com", "162.159.130.234:443", &ignored));
     }
 
     #[test]
@@ -2027,7 +2190,11 @@ mod tests {
         // 2. Сторож держал config_lock на всё время выполнения команд S51zapret.
         let wd_src = include_str!("watchdog.rs");
         let start = wd_src.find("pub fn spawn_zapret_monitor(").expect("spawn_zapret_monitor exists");
-        let b = &wd_src[start..start + 3000];
+        let end = wd_src[start + 100..]
+            .find("\npub fn ")
+            .map(|i| start + 100 + i)
+            .unwrap_or((start + 5000).min(wd_src.len()));
+        let b = &wd_src[start..end];
 
         // Проверка 1: при проверке iptables_left не должно быть слепого grep 'to-ports 1053' без привязки к xkeen-route-zapret
         assert!(
@@ -2039,6 +2206,16 @@ mod tests {
         assert!(
             !b.contains("let Ok(_cfg_guard) = state.config_lock.try_lock()"),
             "Watchdog must not hold config_lock across long shell command execution"
+        );
+
+        // Проверка 3: watchdog обязан проверять только свой PID nfqws через find_our_zapret_pid (баг 36)
+        assert!(
+            !b.contains("pidof nfqws"),
+            "Watchdog must not treat any arbitrary pidof nfqws process as ours"
+        );
+        assert!(
+            b.contains("find_our_zapret_pid"),
+            "Watchdog must use find_our_zapret_pid to verify our nfqws instance"
         );
     }
     #[test]
@@ -2232,7 +2409,7 @@ mod structural_regression_tests {
     #[test]
     fn regression_bug_83_no_commit_per_provider_in_background_sync() {
         // Баг 83: миграция провайдеров делала N коммитов и N reload Mihomo подряд.
-        let b = body(include_str!("api.rs"), "pub async fn sync_all_mobile_providers(");
+        let b = body(include_str!("api/servers.rs"), "pub async fn sync_all_mobile_providers(");
         assert!(!b.contains("ConfigTx::begin"), "фоновая синхронизация не открывает транзакцию на каждый провайдер");
         assert!(!b.contains("commit_and_reload"), "и не перезагружает Mihomo в цикле");
     }
@@ -2276,8 +2453,11 @@ mod structural_regression_tests {
         cfg.adguard.dns_port = 5353;
 
         let resolved = crate::api::resolve_active_dns_port_with_health(&cfg, false);
+        let restore_resolved = crate::adguard::resolve_adguard_restore_port(None, &cfg.mihomo.config_path);
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(resolved, 7853, "При падении AdGuard порт возврата должен браться из dns.listen Mihomo (7853), не 1053");
+        assert_eq!(restore_resolved, 7853, "resolve_adguard_restore_port(None, ...) обязан читать порт из dns.listen Mihomo (7853), не 1053");
+        assert_eq!(crate::adguard::resolve_adguard_restore_port(Some(8853), "/nonexistent"), 8853);
 
         // 1.3 (проверка remove_adguard_iptables / порт возврата в adguard.rs без хардкода 1053):
         let agh_src = include_str!("adguard.rs");
@@ -2286,5 +2466,112 @@ mod structural_regression_tests {
             !agh_prod.contains("build_sync_tunnel_dns_ports_script(&format!(\"{port_str}|5353|5354\"), 1053)"),
             "remove_adguard_iptables не должен хардкодить 1053 для возврата туннелей"
         );
+    }
+
+    #[test]
+    fn regression_bug_11d_store_and_vpn_do_not_trigger_gaming() {
+        use super::is_gaming_connection_match;
+        let domains = vec![
+            "steampowered.com".to_string(),
+            "steamcommunity.com".to_string(),
+            "steamstatic.com".to_string(),
+            "discord.com".to_string(),
+            "riotgames.com".to_string(),
+        ];
+
+        // 11.1: магазин Steam, сообщество, CDN Steam и фоновые домены Discord не должны триггерить игровой режим
+        assert!(!is_gaming_connection_match("store.steampowered.com", "23.1.2.3", "443", "tcp", "DOMAIN-SUFFIX,steampowered.com,Gaming", &domains));
+        assert!(!is_gaming_connection_match("steamcommunity.com", "23.1.2.4", "443", "tcp", "DOMAIN-SUFFIX,steamcommunity.com,Gaming", &domains));
+        assert!(!is_gaming_connection_match("cdn.akamai.steamstatic.com", "23.1.2.5", "443", "tcp", "DOMAIN-SUFFIX,steamstatic.com,Gaming", &domains));
+        assert!(!is_gaming_connection_match("gateway.discord.gg", "162.159.130.1", "443", "tcp", "MATCH,PROXY", &domains));
+        assert!(!is_gaming_connection_match("discord.com", "162.159.135.232", "443", "tcp", "DOMAIN-SUFFIX,discord.com,Gaming", &domains));
+
+        // 11.2: VPN / WireGuard / Tailscale / Zoom / STUN UDP-порты не должны триггерить эвристику
+        assert!(!is_gaming_connection_match("", "1.2.3.4", "51820", "udp", "MATCH,DIRECT", &domains), "WireGuard 51820");
+        assert!(!is_gaming_connection_match("", "1.2.3.4", "41641", "udp", "MATCH,DIRECT", &domains), "Tailscale 41641");
+        assert!(!is_gaming_connection_match("", "1.2.3.4", "8801", "udp", "MATCH,DIRECT", &domains), "Zoom 8801");
+        assert!(!is_gaming_connection_match("", "1.2.3.4", "3478", "udp", "MATCH,DIRECT", &domains), "STUN 3478");
+        assert!(!is_gaming_connection_match("", "1.2.3.4", "19302", "udp", "MATCH,DIRECT", &domains), "WebRTC STUN 19302");
+
+        // Реальный игровой трафик (высокий UDP-порт или игровой домен/правило) -> true
+        assert!(is_gaming_connection_match("", "198.51.100.10", "27015", "udp", "MATCH,PROXY", &domains), "Valve SRCDS UDP 27015");
+        assert!(is_gaming_connection_match("prod.riotgames.com", "104.18.1.1", "443", "tcp", "MATCH,PROXY", &domains), "Riot game domain");
+    }
+
+    #[test]
+    fn regression_bug_53b_flow_auto_select_background_decision() {
+        use super::{flow_auto_select_tick_allowed, should_switch_flow_server, FlowAutoSelectFlags};
+
+        // 53.2: тик запрещён при выключенном флаге, остановленной службе, speedtest или check_in_progress
+        assert!(flow_auto_select_tick_allowed(FlowAutoSelectFlags {
+            enabled: true,
+            service_stopped: false,
+            speedtest_busy: false,
+            check_in_progress: false,
+        }));
+        assert!(!flow_auto_select_tick_allowed(FlowAutoSelectFlags {
+            enabled: false,
+            service_stopped: false,
+            speedtest_busy: false,
+            check_in_progress: false,
+        }));
+        assert!(!flow_auto_select_tick_allowed(FlowAutoSelectFlags {
+            enabled: true,
+            service_stopped: true,
+            speedtest_busy: false,
+            check_in_progress: false,
+        }));
+        assert!(!flow_auto_select_tick_allowed(FlowAutoSelectFlags {
+            enabled: true,
+            service_stopped: false,
+            speedtest_busy: true,
+            check_in_progress: false,
+        }));
+        assert!(!flow_auto_select_tick_allowed(FlowAutoSelectFlags {
+            enabled: true,
+            service_stopped: false,
+            speedtest_busy: false,
+            check_in_progress: true,
+        }));
+
+        // 53.2: гистерезис переключения Flow-сервера
+        let cands = vec![
+            ("DE-1".to_string(), 80_i64),
+            ("NL-1".to_string(), 65_i64),
+        ];
+        // Разница 15 мс < порога 40 мс -> не переключаем
+        assert_eq!(should_switch_flow_server(Some("DE-1"), &cands, 40), None);
+        // Разница 45 мс >= порога 40 мс -> переключаем на лучший
+        let cands_faster = vec![
+            ("DE-1".to_string(), 110_i64),
+            ("NL-1".to_string(), 65_i64),
+        ];
+        assert_eq!(
+            should_switch_flow_server(Some("DE-1"), &cands_faster, 40),
+            Some("NL-1".to_string())
+        );
+        // Текущий не задан или не отвечает -> выбираем лучший
+        assert_eq!(
+            should_switch_flow_server(None, &cands, 40),
+            Some("NL-1".to_string())
+        );
+    }
+
+    #[test]
+    fn regression_bug_a12_service_stopped_flag_survives_restart_dir() {
+        use super::{load_service_stopped_flag, persist_service_stopped_flag, service_stopped_flag_path};
+        let dir = std::env::temp_dir().join(format!("xkeen-bug-a12-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cfg_path = dir.join("config.json");
+        let flag = service_stopped_flag_path(&cfg_path);
+        assert_eq!(flag.parent().unwrap(), dir);
+        assert!(!flag.starts_with(std::env::temp_dir().join("xkeen-route-service-stopped.flag")));
+
+        persist_service_stopped_flag(&flag, true);
+        assert!(load_service_stopped_flag(&flag));
+
+        persist_service_stopped_flag(&flag, false);
+        assert!(!load_service_stopped_flag(&flag));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -16,10 +16,6 @@ pub fn percent_decode(s: &str) -> String {
                 i += 3;
                 continue;
             }
-        } else if bytes[i] == b'+' {
-            out.push(b' ');
-            i += 1;
-            continue;
         }
         out.push(bytes[i]);
         i += 1;
@@ -142,9 +138,11 @@ fn parse_host_port(host_port: &str) -> (String, u16) {
     }
 }
 
-/// Парсинг ссылки VLESS: `vless://uuid@host:port?params#name`
-pub fn parse_vless_uri(uri: &str) -> Option<Value> {
-    let after_scheme = uri.strip_prefix("vless://")?;
+/// Парсинг ссылки VLESS с возвратом причины отклонения (баг 79).
+pub fn parse_vless_uri_checked(uri: &str) -> Result<Value, String> {
+    let after_scheme = uri
+        .strip_prefix("vless://")
+        .ok_or_else(|| "некорректная схема vless://".to_string())?;
     let (main_part, fragment) = match after_scheme.split_once('#') {
         Some((m, f)) => (m, percent_decode(f)),
         None => (after_scheme, String::new()),
@@ -155,7 +153,9 @@ pub fn parse_vless_uri(uri: &str) -> Option<Value> {
         None => (main_part, ""),
     };
 
-    let (uuid, host_port) = auth_host.split_once('@')?;
+    let (uuid, host_port) = auth_host
+        .split_once('@')
+        .ok_or_else(|| "отсутствует uuid@host в vless://".to_string())?;
     let (server, port) = parse_host_port(host_port);
     let params = parse_query_params(query_str);
 
@@ -170,7 +170,7 @@ pub fn parse_vless_uri(uri: &str) -> Option<Value> {
     map.insert("type".into(), Value::String("vless".into()));
     map.insert("server".into(), Value::String(server));
     map.insert("port".into(), json!(port));
-    map.insert("uuid".into(), Value::String(uuid.to_string()));
+    map.insert("uuid".into(), Value::String(percent_decode(uuid)));
     map.insert("udp".into(), Value::Bool(true));
 
     if let Some(flow) = params.get("flow").filter(|f| !f.is_empty()) {
@@ -204,29 +204,86 @@ pub fn parse_vless_uri(uri: &str) -> Option<Value> {
         }
     }
 
-    let network = params.get("type").or_else(|| params.get("net")).map(String::as_str).unwrap_or("tcp");
-    if network == "ws" {
-        map.insert("network".into(), Value::String("ws".into()));
-        let mut ws_opts = serde_json::Map::new();
-        if let Some(path) = params.get("path") {
-            ws_opts.insert("path".into(), Value::String(path.clone()));
+    let network = params
+        .get("type")
+        .or_else(|| params.get("net"))
+        .map(|s| s.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "tcp".to_string());
+    match network.as_str() {
+        "" | "tcp" | "raw" => {}
+        "ws" | "httpupgrade" => {
+            map.insert("network".into(), Value::String("ws".into()));
+            let mut ws_opts = serde_json::Map::new();
+            if network == "httpupgrade" {
+                ws_opts.insert("v2ray-http-upgrade".into(), Value::Bool(true));
+            }
+            if let Some(path) = params.get("path") {
+                ws_opts.insert("path".into(), Value::String(path.clone()));
+            }
+            if let Some(host) = params.get("host") {
+                let mut headers = serde_json::Map::new();
+                headers.insert("Host".into(), Value::String(host.clone()));
+                ws_opts.insert("headers".into(), Value::Object(headers));
+            }
+            map.insert("ws-opts".into(), Value::Object(ws_opts));
         }
-        if let Some(host) = params.get("host") {
-            let mut headers = serde_json::Map::new();
-            headers.insert("Host".into(), Value::String(host.clone()));
-            ws_opts.insert("headers".into(), Value::Object(headers));
+        "grpc" => {
+            map.insert("network".into(), Value::String("grpc".into()));
+            let mut grpc_opts = serde_json::Map::new();
+            if let Some(sn) = params.get("servicename") {
+                grpc_opts.insert("grpc-service-name".into(), Value::String(sn.clone()));
+            }
+            map.insert("grpc-opts".into(), Value::Object(grpc_opts));
         }
-        map.insert("ws-opts".into(), Value::Object(ws_opts));
-    } else if network == "grpc" {
-        map.insert("network".into(), Value::String("grpc".into()));
-        let mut grpc_opts = serde_json::Map::new();
-        if let Some(sn) = params.get("servicename") {
-            grpc_opts.insert("grpc-service-name".into(), Value::String(sn.clone()));
+        "xhttp" | "splithttp" => {
+            map.insert("network".into(), Value::String("xhttp".into()));
+            let mut xopts = serde_json::Map::new();
+            if let Some(mode) = params.get("mode").filter(|v| !v.is_empty()) {
+                xopts.insert("mode".into(), Value::String(mode.clone()));
+            }
+            if let Some(path) = params.get("path").filter(|v| !v.is_empty()) {
+                xopts.insert("path".into(), Value::String(path.clone()));
+            }
+            if let Some(host) = params.get("host").filter(|v| !v.is_empty()) {
+                xopts.insert("host".into(), Value::String(host.clone()));
+            }
+            map.insert("xhttp-opts".into(), Value::Object(xopts));
         }
-        map.insert("grpc-opts".into(), Value::Object(grpc_opts));
+        "h2" => {
+            map.insert("network".into(), Value::String("h2".into()));
+            let mut h2_opts = serde_json::Map::new();
+            if let Some(path) = params.get("path").filter(|v| !v.is_empty()) {
+                h2_opts.insert("path".into(), Value::String(path.clone()));
+            }
+            if let Some(host) = params.get("host").filter(|v| !v.is_empty()) {
+                h2_opts.insert("host".into(), json!([host.clone()]));
+            }
+            map.insert("h2-opts".into(), Value::Object(h2_opts));
+        }
+        "http" => {
+            map.insert("network".into(), Value::String("http".into()));
+            let mut http_opts = serde_json::Map::new();
+            if let Some(path) = params.get("path").filter(|v| !v.is_empty()) {
+                http_opts.insert("path".into(), json!([path.clone()]));
+            }
+            if let Some(host) = params.get("host").filter(|v| !v.is_empty()) {
+                let mut headers = serde_json::Map::new();
+                headers.insert("Host".into(), json!([host.clone()]));
+                http_opts.insert("headers".into(), Value::Object(headers));
+            }
+            map.insert("http-opts".into(), Value::Object(http_opts));
+        }
+        other => {
+            return Err(format!("неподдерживаемый транспорт VLESS: {other}"));
+        }
     }
 
-    Some(Value::Object(map))
+    Ok(Value::Object(map))
+}
+
+/// Парсинг ссылки VLESS: `vless://uuid@host:port?params#name`
+pub fn parse_vless_uri(uri: &str) -> Option<Value> {
+    parse_vless_uri_checked(uri).ok()
 }
 
 /// Парсинг ссылки Hysteria2: `hy2://password@host:port?sni=...#name` или `hysteria2://...`
@@ -262,7 +319,7 @@ pub fn parse_hysteria2_uri(uri: &str) -> Option<Value> {
     map.insert("type".into(), Value::String("hysteria2".into()));
     map.insert("server".into(), Value::String(server));
     map.insert("port".into(), json!(port));
-    map.insert("password".into(), Value::String(password.to_string()));
+    map.insert("password".into(), Value::String(percent_decode(password)));
     map.insert("udp".into(), Value::Bool(true));
 
     if let Some(sni) = params.get("sni") {
@@ -271,13 +328,24 @@ pub fn parse_hysteria2_uri(uri: &str) -> Option<Value> {
     if let Some(insecure) = params.get("insecure") {
         map.insert("skip-cert-verify".into(), Value::Bool(insecure == "1" || insecure == "true"));
     }
+    if let Some(obfs) = params.get("obfs").filter(|v| !v.is_empty()) {
+        map.insert("obfs".into(), Value::String(obfs.clone()));
+    }
+    if let Some(obfs_pw) = params.get("obfs-password").filter(|v| !v.is_empty()) {
+        map.insert("obfs-password".into(), Value::String(obfs_pw.clone()));
+    }
+    if let Some(mport) = params.get("mport").filter(|v| !v.is_empty()) {
+        map.insert("ports".into(), Value::String(mport.clone()));
+    }
 
     Some(Value::Object(map))
 }
 
-/// Парсинг ссылки Trojan: `trojan://password@host:port?sni=...#name`
-pub fn parse_trojan_uri(uri: &str) -> Option<Value> {
-    let after_scheme = uri.strip_prefix("trojan://")?;
+/// Парсинг ссылки Trojan с возвратом причины отклонения (баг 79).
+pub fn parse_trojan_uri_checked(uri: &str) -> Result<Value, String> {
+    let after_scheme = uri
+        .strip_prefix("trojan://")
+        .ok_or_else(|| "некорректная схема trojan://".to_string())?;
     let (main_part, fragment) = match after_scheme.split_once('#') {
         Some((m, f)) => (m, percent_decode(f)),
         None => (after_scheme, String::new()),
@@ -288,7 +356,9 @@ pub fn parse_trojan_uri(uri: &str) -> Option<Value> {
         None => (main_part, ""),
     };
 
-    let (password, host_port) = auth_host.split_once('@')?;
+    let (password, host_port) = auth_host
+        .split_once('@')
+        .ok_or_else(|| "отсутствует password@host в trojan://".to_string())?;
     let (server, port) = parse_host_port(host_port);
     let params = parse_query_params(query_str);
 
@@ -303,40 +373,105 @@ pub fn parse_trojan_uri(uri: &str) -> Option<Value> {
     map.insert("type".into(), Value::String("trojan".into()));
     map.insert("server".into(), Value::String(server));
     map.insert("port".into(), json!(port));
-    map.insert("password".into(), Value::String(password.to_string()));
+    map.insert("password".into(), Value::String(percent_decode(password)));
     map.insert("udp".into(), Value::Bool(true));
 
     if let Some(sni) = params.get("sni") {
         map.insert("sni".into(), Value::String(sni.clone()));
     }
+    if let Some(fp) = params.get("fp").filter(|v| !v.is_empty()) {
+        map.insert("client-fingerprint".into(), Value::String(fp.clone()));
+    }
+    if let Some(insecure) = params.get("allowinsecure").or_else(|| params.get("insecure")) {
+        map.insert("skip-cert-verify".into(), Value::Bool(insecure == "1" || insecure == "true"));
+    }
 
-    Some(Value::Object(map))
+    let network = params
+        .get("type")
+        .or_else(|| params.get("net"))
+        .map(|s| s.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "tcp".to_string());
+    match network.as_str() {
+        "" | "tcp" | "raw" => {}
+        "ws" => {
+            map.insert("network".into(), Value::String("ws".into()));
+            let mut ws_opts = serde_json::Map::new();
+            if let Some(path) = params.get("path") {
+                ws_opts.insert("path".into(), Value::String(path.clone()));
+            }
+            if let Some(host) = params.get("host") {
+                let mut headers = serde_json::Map::new();
+                headers.insert("Host".into(), Value::String(host.clone()));
+                ws_opts.insert("headers".into(), Value::Object(headers));
+            }
+            map.insert("ws-opts".into(), Value::Object(ws_opts));
+        }
+        "grpc" => {
+            map.insert("network".into(), Value::String("grpc".into()));
+            let mut grpc_opts = serde_json::Map::new();
+            if let Some(sn) = params.get("servicename") {
+                grpc_opts.insert("grpc-service-name".into(), Value::String(sn.clone()));
+            }
+            map.insert("grpc-opts".into(), Value::Object(grpc_opts));
+        }
+        other => {
+            return Err(format!("неподдерживаемый транспорт Trojan: {other}"));
+        }
+    }
+
+    Ok(Value::Object(map))
 }
 
-/// Парсинг ссылки Shadowsocks: `ss://BASE64@host:port#name` или `ss://BASE64#name`
-pub fn parse_ss_uri(uri: &str) -> Option<Value> {
-    let after_scheme = uri.strip_prefix("ss://")?;
+/// Парсинг ссылки Trojan: `trojan://password@host:port?sni=...#name`
+pub fn parse_trojan_uri(uri: &str) -> Option<Value> {
+    parse_trojan_uri_checked(uri).ok()
+}
+
+/// Парсинг ссылки Shadowsocks с возвратом причины отклонения (баг 79).
+pub fn parse_ss_uri_checked(uri: &str) -> Result<Value, String> {
+    let after_scheme = uri
+        .strip_prefix("ss://")
+        .ok_or_else(|| "некорректная схема ss://".to_string())?;
     let (main_part, fragment) = match after_scheme.split_once('#') {
         Some((m, f)) => (m, percent_decode(f)),
         None => (after_scheme, String::new()),
     };
 
-    let (auth_host, _query_str) = match main_part.split_once('?') {
+    let (auth_host, query_str) = match main_part.split_once('?') {
         Some((ah, q)) => (ah, q),
         None => (main_part, ""),
     };
+    let params = parse_query_params(query_str);
 
-    // 1) SIP002: ss://BASE64(method:password)@host:port
+    // 1) SIP002: ss://BASE64(method:password)@host:port или plain SIP002 / SS-2022 ss://method:key@host:port
     let (server, port, cipher, password) = if let Some((user_info, host_port)) = auth_host.split_once('@') {
-        let decoded = String::from_utf8(base64_decode(user_info).ok()?).ok()?;
-        let (cipher, pass) = decoded.split_once(':')?;
+        let user_decoded_plain = percent_decode(user_info);
+        let (cipher, pass) = if let Some((c, p)) = user_decoded_plain.split_once(':') {
+            (c.to_string(), p.to_string())
+        } else {
+            let decoded = base64_decode(user_info)
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+                .ok_or_else(|| "некорректный userinfo в ss://".to_string())?;
+            let (c, p) = decoded
+                .split_once(':')
+                .ok_or_else(|| "отсутствует cipher:password в ss://".to_string())?;
+            (c.to_string(), p.to_string())
+        };
         let (s, p) = parse_host_port(host_port);
-        (s, p, cipher.to_string(), pass.to_string())
+        (s, p, cipher, pass)
     } else {
         // 2) Legacy: ss://BASE64(method:password@host:port)
-        let decoded = String::from_utf8(base64_decode(auth_host).ok()?).ok()?;
-        let (cipher_pass, host_port) = decoded.split_once('@')?;
-        let (cipher, pass) = cipher_pass.split_once(':')?;
+        let decoded = base64_decode(auth_host)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .ok_or_else(|| "некорректный base64 в ss://".to_string())?;
+        let (cipher_pass, host_port) = decoded
+            .split_once('@')
+            .ok_or_else(|| "отсутствует @host в legacy ss://".to_string())?;
+        let (cipher, pass) = cipher_pass
+            .split_once(':')
+            .ok_or_else(|| "отсутствует cipher:password в legacy ss://".to_string())?;
         let (s, p) = parse_host_port(host_port);
         (s, p, cipher.to_string(), pass.to_string())
     };
@@ -356,7 +491,40 @@ pub fn parse_ss_uri(uri: &str) -> Option<Value> {
     map.insert("password".into(), Value::String(password));
     map.insert("udp".into(), Value::Bool(true));
 
-    Some(Value::Object(map))
+    if let Some(plugin_raw) = params.get("plugin").filter(|v| !v.is_empty()) {
+        let mut parts = plugin_raw.split(';');
+        let plugin_name = parts.next().unwrap_or("").trim();
+        match plugin_name {
+            "obfs-local" | "simple-obfs" | "obfs" => {
+                map.insert("plugin".into(), Value::String("obfs".into()));
+                let mut popts = serde_json::Map::new();
+                for kv in parts {
+                    if let Some((k, v)) = kv.split_once('=') {
+                        match k.trim() {
+                            "obfs" => {
+                                popts.insert("mode".into(), Value::String(v.trim().to_string()));
+                            }
+                            "obfs-host" => {
+                                popts.insert("host".into(), Value::String(v.trim().to_string()));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                map.insert("plugin-opts".into(), Value::Object(popts));
+            }
+            other => {
+                return Err(format!("неподдерживаемый плагин Shadowsocks: {other}"));
+            }
+        }
+    }
+
+    Ok(Value::Object(map))
+}
+
+/// Парсинг ссылки Shadowsocks: `ss://BASE64@host:port#name` или `ss://BASE64#name`
+pub fn parse_ss_uri(uri: &str) -> Option<Value> {
+    parse_ss_uri_checked(uri).ok()
 }
 
 /// Парсинг ссылки VMess: `vmess://BASE64(JSON)`
@@ -430,22 +598,27 @@ pub fn parse_vmess_uri(uri: &str) -> Option<Value> {
     Some(Value::Object(map))
 }
 
-/// Парсинг отдельной URI-ссылки в объект узла Mihomo
-pub fn parse_v2ray_line(line: &str) -> Option<Value> {
+/// Парсинг отдельной URI-ссылки в объект узла Mihomo с причиной отклонения (баг 79).
+pub fn parse_v2ray_line_checked(line: &str) -> Result<Value, String> {
     let trimmed = line.trim();
     if trimmed.starts_with("vless://") {
-        parse_vless_uri(trimmed)
+        parse_vless_uri_checked(trimmed)
     } else if trimmed.starts_with("hy2://") || trimmed.starts_with("hysteria2://") {
-        parse_hysteria2_uri(trimmed)
+        parse_hysteria2_uri(trimmed).ok_or_else(|| "некорректная ссылка hysteria2://".to_string())
     } else if trimmed.starts_with("trojan://") {
-        parse_trojan_uri(trimmed)
+        parse_trojan_uri_checked(trimmed)
     } else if trimmed.starts_with("ss://") {
-        parse_ss_uri(trimmed)
+        parse_ss_uri_checked(trimmed)
     } else if trimmed.starts_with("vmess://") {
-        parse_vmess_uri(trimmed)
+        parse_vmess_uri(trimmed).ok_or_else(|| "некорректная ссылка vmess://".to_string())
     } else {
-        None
+        Err("неподдерживаемый протокол/схема".to_string())
     }
+}
+
+/// Парсинг отдельной URI-ссылки в объект узла Mihomo
+pub fn parse_v2ray_line(line: &str) -> Option<Value> {
+    parse_v2ray_line_checked(line).ok()
 }
 
 ///// Парсинг одного профиля из Xray/V2Ray JSON-массива подписки
@@ -480,7 +653,7 @@ pub fn parse_xray_json_profile(profile: &Value) -> Option<Value> {
             map.insert("type".into(), Value::String("vless".into()));
             map.insert("server".into(), Value::String(server.to_string()));
             map.insert("port".into(), json!(port));
-            map.insert("uuid".into(), Value::String(uuid.to_string()));
+            map.insert("uuid".into(), Value::String(percent_decode(uuid)));
             map.insert("udp".into(), Value::Bool(true));
             if !flow.is_empty() {
                 map.insert("flow".into(), Value::String(flow.to_string()));
@@ -681,6 +854,17 @@ fn emit_yaml_entry(out: &mut String, indent: usize, key: &str, v: &Value) {
 }
 
 pub fn convert_subscription_to_mihomo_yaml(raw_content: &str) -> Result<(String, usize), String> {
+    let (yaml, count, rejected) = convert_subscription_to_mihomo_yaml_with_report(raw_content)?;
+    for (node_hint, reason) in &rejected {
+        crate::log_w!("[SUB-PARSER] Узел отклонён ({reason}): {node_hint}");
+    }
+    Ok((yaml, count))
+}
+
+/// Преобразование подписки в YAML с возвратом списка отклонённых узлов `(строка/имя, причина)` (баг 79).
+pub fn convert_subscription_to_mihomo_yaml_with_report(
+    raw_content: &str,
+) -> Result<(String, usize, Vec<(String, String)>), String> {
     let decoded_text = if let Ok(bytes) = base64_decode(raw_content.trim()) {
         if let Ok(text) = String::from_utf8(bytes) {
             let t = text.trim();
@@ -697,6 +881,7 @@ pub fn convert_subscription_to_mihomo_yaml(raw_content: &str) -> Result<(String,
     };
 
     let mut proxies = Vec::new();
+    let mut rejected: Vec<(String, String)> = Vec::new();
     let trimmed = decoded_text.trim();
 
     // 1. Попытка распарсить как Xray/V2Ray JSON-массив подписки
@@ -705,20 +890,35 @@ pub fn convert_subscription_to_mihomo_yaml(raw_content: &str) -> Result<(String,
             for p in &profiles {
                 if let Some(proxy_val) = parse_xray_json_profile(p) {
                     proxies.push(proxy_val);
+                } else {
+                    let hint = p
+                        .get("remarks")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("xray-json-profile")
+                        .to_string();
+                    rejected.push((hint, "неподдерживаемый или неполный Xray JSON-профиль".to_string()));
                 }
             }
         }
     }
 
-    // 2. Если не JSON, парсим построчно (VLESS/Hysteria2/Trojan URI ссылки)
+    // 2. Если не JSON, парсим построчно (VLESS/Hysteria2/Trojan/SS/VMess URI ссылки)
     if proxies.is_empty() {
         for line in decoded_text.lines() {
             let trimmed_line = line.trim();
             if trimmed_line.is_empty() || trimmed_line.starts_with('#') || trimmed_line.starts_with("//") {
                 continue;
             }
-            if let Some(proxy_val) = parse_v2ray_line(trimmed_line) {
-                proxies.push(proxy_val);
+            match parse_v2ray_line_checked(trimmed_line) {
+                Ok(proxy_val) => proxies.push(proxy_val),
+                Err(reason) => {
+                    let label = trimmed_line
+                        .split_once('#')
+                        .map(|(_, f)| percent_decode(f))
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| trimmed_line.chars().take(48).collect());
+                    rejected.push((label, reason));
+                }
             }
         }
     }
@@ -751,7 +951,7 @@ pub fn convert_subscription_to_mihomo_yaml(raw_content: &str) -> Result<(String,
         }
     }
 
-    Ok((yaml, count))
+    Ok((yaml, count, rejected))
 }
 
 #[cfg(test)]
@@ -1003,5 +1203,78 @@ mod tests {
         let type_lines = yaml.lines().filter(|l| l.trim_start().starts_with("type:")).count();
         assert_eq!(type_lines, 1, "имя из подписки не может добавить ключ type:\n{yaml}");
         assert!(yaml.contains(r#"  - name: "evil\\\"\n    type: direct""#), "переводы строк и кавычки в имени экранированы:\n{yaml}");
+    }
+
+    #[test]
+    fn regression_bug_78b_userinfo_percent_decoded_plus_kept() {
+        let tr = parse_trojan_uri("trojan://p%40ss+1@h:443#n%201").unwrap();
+        assert_eq!(tr["password"], "p@ss+1", "Trojan password must be percent-decoded and keep '+'");
+        assert_eq!(tr["name"], "n 1");
+
+        let vl = parse_vless_uri("vless://u%2Bx@h:443?type=ws&path=%2Fa+b#n").unwrap();
+        assert_eq!(vl["uuid"], "u+x", "VLESS uuid must be percent-decoded");
+        assert_eq!(vl["ws-opts"]["path"], "/a+b", "query path must keep '+' (RFC 3986)");
+
+        let hy = parse_hysteria2_uri("hysteria2://p%21w+2@h:443#n").unwrap();
+        assert_eq!(hy["password"], "p!w+2", "Hy2 password must be percent-decoded and keep '+'");
+
+        let params = parse_query_params("path=%2Fws+v1&host=a+b.example.com");
+        assert_eq!(params.get("path").map(String::as_str), Some("/ws+v1"));
+        assert_eq!(params.get("host").map(String::as_str), Some("a+b.example.com"));
+    }
+
+    #[test]
+    fn regression_bug_79b_transports_not_silently_dropped() {
+        // 79.1: VLESS xhttp, httpupgrade, h2, and unknown transport rejection
+        let vl_xhttp = parse_vless_uri("vless://11111111-1111-1111-1111-111111111111@1.2.3.4:443?type=xhttp&path=%2Fx&host=cdn.example.com&mode=auto#XHTTP").unwrap();
+        assert_eq!(vl_xhttp["network"], "xhttp");
+        assert_eq!(vl_xhttp["xhttp-opts"]["path"], "/x");
+        assert_eq!(vl_xhttp["xhttp-opts"]["host"], "cdn.example.com");
+
+        let vl_hup = parse_vless_uri("vless://11111111-1111-1111-1111-111111111111@1.2.3.4:443?type=httpupgrade&path=%2Fup&host=h.example.com#HUP").unwrap();
+        assert_eq!(vl_hup["network"], "ws");
+        assert_eq!(vl_hup["ws-opts"]["v2ray-http-upgrade"], true);
+        assert_eq!(vl_hup["ws-opts"]["path"], "/up");
+
+        let vl_h2 = parse_vless_uri("vless://11111111-1111-1111-1111-111111111111@1.2.3.4:443?type=h2&path=%2Fh2&host=h2.example.com#H2").unwrap();
+        assert_eq!(vl_h2["network"], "h2");
+        assert_eq!(vl_h2["h2-opts"]["path"], "/h2");
+
+        // Неизвестный транспорт не должен молча превращаться в tcp
+        assert!(parse_vless_uri("vless://11111111-1111-1111-1111-111111111111@1.2.3.4:443?type=kcp#KCP").is_none());
+
+        // 79.2: Trojan ws + grpc
+        let tr_ws = parse_trojan_uri("trojan://secret@1.2.3.4:443?type=ws&path=%2Ftr&host=tr.example.com#TRWS").unwrap();
+        assert_eq!(tr_ws["network"], "ws");
+        assert_eq!(tr_ws["ws-opts"]["path"], "/tr");
+        assert_eq!(tr_ws["ws-opts"]["headers"]["Host"], "tr.example.com");
+
+        let tr_grpc = parse_trojan_uri("trojan://secret@1.2.3.4:443?type=grpc&serviceName=trgrpc#TRGRPC").unwrap();
+        assert_eq!(tr_grpc["network"], "grpc");
+        assert_eq!(tr_grpc["grpc-opts"]["grpc-service-name"], "trgrpc");
+
+        // 79.3: Hy2 obfs, obfs-password, mport
+        let hy = parse_hysteria2_uri("hy2://pass@1.2.3.4:443?obfs=salamander&obfs-password=obfspw&mport=20000-30000&sni=hy.example.com#HY2").unwrap();
+        assert_eq!(hy["obfs"], "salamander");
+        assert_eq!(hy["obfs-password"], "obfspw");
+        assert_eq!(hy["ports"], "20000-30000");
+
+        // 79.4: SS plain SIP002 / SS-2022 + plugin rejection
+        let ss_plain = parse_ss_uri("ss://2022-blake3-aes-128-gcm:plainKey%3D%3D@1.2.3.4:8388#SS2022").unwrap();
+        assert_eq!(ss_plain["cipher"], "2022-blake3-aes-128-gcm");
+        assert_eq!(ss_plain["password"], "plainKey==");
+
+        // Неподдерживаемый plugin отвергается с причиной, а не молча теряется
+        let ss_unknown_plugin = "ss://2022-blake3-aes-128-gcm:key@1.2.3.4:8388?plugin=shadow-tls%3Bv3#SSBAD";
+        assert!(parse_ss_uri(ss_unknown_plugin).is_none());
+
+        // 79.5: Отчёт об отклонённых нодах с понятной причиной
+        let sub = format!(
+            "vless://11111111-1111-1111-1111-111111111111@1.2.3.4:443?type=xhttp&path=%2Fx#OK\n{ss_unknown_plugin}\n"
+        );
+        let (_yaml, count, rejected) = convert_subscription_to_mihomo_yaml_with_report(&sub).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(rejected.len(), 1);
+        assert!(!rejected[0].1.is_empty(), "rejected node must include reason");
     }
 }

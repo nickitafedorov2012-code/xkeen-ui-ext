@@ -3,6 +3,7 @@ import { apiGet, apiPost } from '../api'
 import type { ConfigFile } from '../types'
 import { copyToClipboard } from '../utils/clipboard'
 import { validateYaml } from '../utils/yamlValidator'
+import { useDirtyGuard } from '../utils/dirtyGuard'
 
 interface ConfigEditorProps {
   isOpen?: boolean
@@ -249,6 +250,7 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
 
   const curFile = Array.isArray(files) ? files.find((f) => f.id === selectedFile) : null
   const isDirty = content !== originalContent
+  useDirtyGuard('config-editor', isOpen && isDirty)
   const linesCount = content ? content.split('\n').length : 1
   const lineNumbers = Array.from({ length: linesCount }, (_, i) => i + 1)
 

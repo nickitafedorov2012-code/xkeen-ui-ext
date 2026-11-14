@@ -42,12 +42,14 @@ pub fn is_override_eligible_v6(ip: &Ipv6Addr) -> bool {
 }
 
 /// Асинхронно резолвит список доменов во все уникальные IPv4 и IPv6 адреса параллельно.
+#[cfg(test)]
 pub async fn resolve_domains(domains: &[String]) -> (BTreeSet<Ipv4Addr>, BTreeSet<Ipv6Addr>) {
     let (v4, v6, _) = resolve_domains_counted(domains).await;
     (v4, v6)
 }
 
 /// То же, что `resolve_domains`, плюс число доменов, для которых получен хотя бы один пригодный адрес.
+#[cfg(test)]
 pub async fn resolve_domains_counted(domains: &[String]) -> (BTreeSet<Ipv4Addr>, BTreeSet<Ipv6Addr>, usize) {
     let (map, count) = resolve_domains_map(domains).await;
     let mut v4 = BTreeSet::new();
@@ -250,6 +252,7 @@ static OVERRIDE_CACHE: std::sync::LazyLock<std::sync::Mutex<std::collections::Ha
 
 /// Сбой DNS во время синхронизации (баг 97): если разрешилось меньше половины доменов,
 /// старый блок geo_override сохраняется, иначе force-домены молча уходят в DIRECT.
+#[cfg(test)]
 pub fn keep_previous_override(requested: usize, resolved: usize) -> bool {
     requested > 0 && resolved * 2 < requested
 }
@@ -284,6 +287,7 @@ pub fn build_ipset_restore_script(tmp: &str, family: &str, entries: &[String]) -
 }
 
 /// Обновляет блок в файле ru_exclude_override.lst, сохраняя любые ручные записи пользователя.
+#[cfg(test)]
 pub fn update_override_file_content(
     existing: &str,
     v4_ips: &BTreeSet<Ipv4Addr>,
@@ -345,16 +349,104 @@ pub fn update_override_file_content(
 
 static IPSET_SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static CACHED_AUTO_CDNS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+const DEFAULT_AUTO_CDNS_CACHE_FILE: &str = "/opt/etc/xkeen-route.auto_cdns.json";
+static AUTO_CDNS_CACHE_PATH_OVERRIDE: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
 
-/// Обновление глобального кэша найденных CDN доменов (баг 13)
-pub fn sync_cached_auto_cdns(cdns: &[String]) {
+fn get_auto_cdns_cache_path() -> std::path::PathBuf {
+    let guard = AUTO_CDNS_CACHE_PATH_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref p) = *guard {
+        p.clone()
+    } else {
+        std::path::PathBuf::from(DEFAULT_AUTO_CDNS_CACHE_FILE)
+    }
+}
+
+#[cfg(test)]
+static AUTO_CDNS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub fn set_auto_cdns_cache_path_override(path: Option<std::path::PathBuf>) {
+    let mut guard = AUTO_CDNS_CACHE_PATH_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = path;
+}
+
+#[cfg(test)]
+pub fn clear_cached_auto_cdns_for_test() {
     if let Ok(mut cache) = CACHED_AUTO_CDNS.write() {
+        cache.clear();
+    }
+}
+
+fn save_auto_cdns_cache_to_path(path: &Path, cdns: &[String]) {
+    #[cfg(test)]
+    if path == Path::new(DEFAULT_AUTO_CDNS_CACHE_FILE) {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(serialized) = serde_json::to_vec(cdns) else {
+        return;
+    };
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), nonce));
+    if std::fs::write(&tmp, &serialized).is_ok() {
+        if std::fs::rename(&tmp, path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
+
+/// Загрузка кэша найденных CDN с диска в память (баг 13).
+pub fn load_cached_auto_cdns() -> Vec<String> {
+    let path = get_auto_cdns_cache_path();
+    let loaded: Vec<String> = if path.exists() {
+        std::fs::read(&path)
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if !loaded.is_empty() {
+        if let Ok(mut cache) = CACHED_AUTO_CDNS.write() {
+            for c in &loaded {
+                let clean = c.trim().to_lowercase();
+                if !clean.is_empty() && !cache.contains(&clean) {
+                    cache.push(clean);
+                }
+            }
+            return cache.clone();
+        }
+    }
+    loaded
+}
+
+/// Обновление глобального кэша найденных CDN доменов в памяти и на диске (баг 13)
+pub fn sync_cached_auto_cdns(cdns: &[String]) {
+    let snapshot = if let Ok(mut cache) = CACHED_AUTO_CDNS.write() {
+        let mut changed = false;
         for c in cdns {
             let clean = c.trim().to_lowercase();
             if !clean.is_empty() && !cache.contains(&clean) {
                 cache.push(clean);
+                changed = true;
             }
         }
+        if changed {
+            Some(cache.clone())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(ref items) = snapshot {
+        save_auto_cdns_cache_to_path(&get_auto_cdns_cache_path(), items);
     }
 }
 
@@ -458,10 +550,10 @@ pub fn collect_override_domains(cfg: &crate::config::AppConfig, extra_cdns: &[St
                 all.push(cdn);
             }
         }
-    }
-    for cdn in cached {
-        if !all.contains(&cdn) {
-            all.push(cdn);
+        for cdn in cached {
+            if !all.contains(&cdn) {
+                all.push(cdn);
+            }
         }
     }
     for cdn in extra_cdns {
@@ -477,6 +569,17 @@ pub fn collect_override_domains(cfg: &crate::config::AppConfig, extra_cdns: &[St
                 all.push(g);
             }
         }
+    }
+
+    // Исключаем домены, которые пользователь явно направил в DIRECT
+    if !cfg.direct_domains.is_empty() {
+        all.retain(|d| {
+            let clean = crate::config::normalize_domain(d);
+            !cfg.direct_domains.iter().any(|dir| {
+                let clean_dir = crate::config::normalize_domain(dir);
+                !clean_dir.is_empty() && (clean == clean_dir || clean.ends_with(&format!(".{clean_dir}")))
+            })
+        });
     }
 
     // Исключаем домены, которые Zapret ведет в DIRECT (баг 13 ревизия)
@@ -642,6 +745,7 @@ mod tests {
 
     #[test]
     fn regression_bug_13_cached_cdns_and_zapret_direct_filtered() {
+        let _test_guard = AUTO_CDNS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Баг 13:
         // 1. Найденные сканированием CDN должны сохраняться в кэше и не стираться
         //    при последующем вызове sync_from_config(cfg, &[]).
@@ -662,12 +766,39 @@ mod tests {
             "Найденные сканированием CDN обязаны сохраняться и входить в geo_override"
         );
 
-        // Проверяем исключение доменов Zapret DIRECT (например, googlevideo.com)
+        // Проверяем исключение доменов Zapret DIRECT (YouTube, Discord, GitHub, пользовательские custom_entries)
+        cfg.zapret.hybrid_discord = true;
+        cfg.zapret.bypass_github = true;
+        cfg.zapret.custom_entries = vec![crate::config::ZapretCustomEntry {
+            domain: "mysku.club".into(),
+            enabled: true,
+            cdns: vec!["img.mysku-st.ru".into()],
+        }];
+        cfg.direct_domains = vec!["bank.ru".into()];
         cfg.force_domains.push("googlevideo.com".into());
+        cfg.force_domains.push("discord.gg".into());
+        cfg.force_domains.push("api.github.com".into());
+        cfg.force_domains.push("mysku.club".into());
+        cfg.force_domains.push("img.mysku-st.ru".into());
+        cfg.force_domains.push("sub.bank.ru".into());
         let domains_with_zapret = collect_override_domains(&cfg, &[]);
         assert!(
             !domains_with_zapret.contains(&"googlevideo.com".to_string()),
             "Zapret DIRECT домены не должны попадать в geo_override"
+        );
+        assert!(!domains_with_zapret.contains(&"discord.gg".to_string()));
+        assert!(!domains_with_zapret.contains(&"api.github.com".to_string()));
+        assert!(!domains_with_zapret.contains(&"mysku.club".to_string()));
+        assert!(!domains_with_zapret.contains(&"img.mysku-st.ru".to_string()));
+        assert!(!domains_with_zapret.contains(&"sub.bank.ru".to_string()));
+
+        // Когда пользователь очищает force_domains, старые кэшированные CDN не должны оставаться в geo_override
+        cfg.force_domains.clear();
+        let empty_force_domains = collect_override_domains(&cfg, &[]);
+        assert!(
+            empty_force_domains.is_empty(),
+            "При пустом force_domains устаревший кэш CDN не должен утекать в geo_override: {:?}",
+            empty_force_domains
         );
     }
 
@@ -676,9 +807,32 @@ mod tests {
         // стирало игровые домены и найденные CDN, тумблер игрового режима — CDN, старт без force-доменов
         // не синхронизировал вовсе.
         for (name, src) in [
-            ("api.rs", include_str!("api.rs")),
+            ("api/mod.rs", include_str!("api/mod.rs")),
+            ("api/backups.rs", include_str!("api/backups.rs")),
+            ("api/clash_proxy.rs", include_str!("api/clash_proxy.rs")),
+            ("api/dns_adguard.rs", include_str!("api/dns_adguard.rs")),
+            ("api/domains.rs", include_str!("api/domains.rs")),
+            ("api/routing.rs", include_str!("api/routing.rs")),
+            ("api/servers.rs", include_str!("api/servers.rs")),
+            ("api/status.rs", include_str!("api/status.rs")),
+            ("api/system_ssh.rs", include_str!("api/system_ssh.rs")),
+            ("api/vkturn.rs", include_str!("api/vkturn.rs")),
+            ("api/zapret.rs", include_str!("api/zapret.rs")),
             ("bot.rs", include_str!("bot.rs")),
+            ("failover/history.rs", include_str!("failover/history.rs")),
+            ("failover/mod.rs", include_str!("failover/mod.rs")),
+            ("failover/probe.rs", include_str!("failover/probe.rs")),
+            ("failover/quarantine.rs", include_str!("failover/quarantine.rs")),
+            ("failover/scoring.rs", include_str!("failover/scoring.rs")),
+            ("failover/switcher.rs", include_str!("failover/switcher.rs")),
+            ("failover/types.rs", include_str!("failover/types.rs")),
             ("main.rs", include_str!("main.rs")),
+            ("routing/dns_redirect.rs", include_str!("routing/dns_redirect.rs")),
+            ("routing/ipset.rs", include_str!("routing/ipset.rs")),
+            ("routing/iptables.rs", include_str!("routing/iptables.rs")),
+            ("routing/mod.rs", include_str!("routing/mod.rs")),
+            ("routing/policy_routing.rs", include_str!("routing/policy_routing.rs")),
+            ("routing/validator.rs", include_str!("routing/validator.rs")),
             ("watchdog.rs", include_str!("watchdog.rs")),
         ] {
             assert!(!src.contains("sync_geo_override(&"), "{name}: geo_override собирается одной функцией из полного конфига");
@@ -850,6 +1004,53 @@ add geo_override6_tmp 2001:db8::1 -exist
         let loaded = load_override_cache(&cache_file);
         assert_eq!(loaded.len(), 10);
         assert_eq!(loaded.get("site6.example.com").unwrap(), &vec!["1.1.1.6".parse::<IpAddr>().unwrap()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_override_cache_path_override_roundtrip() {
+        let custom = std::env::temp_dir().join(format!("xkr-cache-override-{}.json", std::process::id()));
+        set_override_cache_path_override(Some(custom.clone()));
+        assert_eq!(get_override_cache_path(), custom);
+        set_override_cache_path_override(None);
+        assert_eq!(
+            get_override_cache_path(),
+            std::path::PathBuf::from(DEFAULT_OVERRIDE_CACHE_FILE)
+        );
+    }
+
+    #[test]
+    fn regression_bug_13b_cdn_cache_survives_restart() {
+        let _test_guard = AUTO_CDNS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("xkr-bug13b-{}", crate::auth::random_hex(8)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache_file = dir.join("auto_cdns.json");
+
+        set_auto_cdns_cache_path_override(Some(cache_file.clone()));
+        clear_cached_auto_cdns_for_test();
+
+        // 13.1: sync_cached_auto_cdns сохраняет найденные CDN и в память, и на диск
+        sync_cached_auto_cdns(&["cdn.example-video.net".to_string(), "googlevideo.com".to_string()]);
+        assert!(cache_file.exists(), "файл кэша auto_cdns должен быть создан на диске");
+
+        // Имитация перезапуска панели: очищаем память, загружаем с диска
+        clear_cached_auto_cdns_for_test();
+        assert!(get_cached_auto_cdns().is_empty());
+
+        let loaded = load_cached_auto_cdns();
+        assert!(loaded.contains(&"cdn.example-video.net".to_string()));
+
+        // 13.2 & 13.3: collect_override_domains(cfg, &[]) возвращает CDN из кэша, но фильтрует Zapret DIRECT (googlevideo.com)
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.force_domains = vec!["example-video.net".to_string()];
+        cfg.zapret.enabled = true;
+        cfg.zapret.youtube_turbo = true;
+        let collected = collect_override_domains(&cfg, &[]);
+        assert!(collected.contains(&"cdn.example-video.net".to_string()), "CDN из дискового кэша обязан сохраняться при sync_from_config(cfg, &[])");
+        assert!(!collected.contains(&"googlevideo.com".to_string()), "домены Zapret DIRECT должны отфильтровываться");
+
+        clear_cached_auto_cdns_for_test();
+        set_auto_cdns_cache_path_override(None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

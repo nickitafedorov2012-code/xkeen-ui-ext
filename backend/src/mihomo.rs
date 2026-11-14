@@ -352,6 +352,7 @@ pub fn invalidate_proxies_cache() {
 }
 
 /// Тестовая блокировка для изоляции тестов кэша.
+#[cfg(test)]
 pub static PROXIES_CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Тестовый хелпер для очистки кэша между изолированными тестами.
@@ -1658,10 +1659,7 @@ pub async fn ping_group_url(
 pub const PRIMARY_L7_CHECK_URL: &str = "http://cp.cloudflare.com/generate_204";
 pub const SECONDARY_L7_CHECK_URL: &str = "https://www.gstatic.com/generate_204";
 
-/// Пинг сервера через delay-API Mihomo (мс; -1 = недоступен).
-pub async fn ping_server(http: &reqwest::Client, cfg: &AppConfig, server_id: &str, timeout_ms: u64) -> i64 {
-    ping_server_url(http, cfg, server_id, timeout_ms, None).await
-}
+
 
 /// Пинг сервера с произвольным тестовым URL (автоматическое определение ожидаемого HTTP-статуса).
 pub async fn ping_server_url(
@@ -2091,44 +2089,100 @@ pub fn collect_auto_ping_ids(cfg: &AppConfig) -> Vec<String> {
     ids
 }
 
+/// Выбор групп-кандидатов для пинга Google Flow (Баг 55):
+/// при активном БС (`bs_active=true`) используются только БС-группа и Flow-группы, без `PROXY`/`Fastest`.
+pub fn flow_ping_candidates(_cfg: &AppConfig, group_names: &[String], bs_active: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    if bs_active {
+        if let Some(wl) = group_names.iter().find(|g| g.as_str() == crate::routing::WHITELIST_GROUP_NAME) {
+            out.push(wl.clone());
+        }
+        for g in group_names {
+            if crate::routing::is_flow_group_name(g) && !out.contains(g) {
+                out.push(g.clone());
+            }
+        }
+        return out;
+    }
+
+    for g in group_names {
+        if crate::routing::is_flow_group_name(g) && !out.contains(g) {
+            out.push(g.clone());
+        }
+    }
+    for cand in &["PROXY", "Fastest", "Fallback", "GLOBAL"] {
+        if let Some(found) = group_names.iter().find(|g| g.as_str() == *cand) {
+            if !out.contains(found) {
+                out.push(found.clone());
+            }
+        }
+    }
+    out
+}
+
 /// Пинг участников Google AI группы и всех серверов специально по Google Flow URL (https://flow.google.com).
 pub async fn ping_flow_servers(http: &reqwest::Client, cfg: &AppConfig, timeout_ms: u64) -> BTreeMap<String, i64> {
     let test_url = "https://flow.google.com";
     let proxies = get_proxies(http, cfg).await.unwrap_or_default();
+    let bs_active = cfg.whitelist.enabled;
+    let group_names: Vec<String> = proxies.keys().cloned().collect();
 
-    // 1. Если есть группа 'Google AI' / 'Flow', пингуем её
-    for gname in proxies.keys() {
-        if crate::routing::is_flow_group_name(gname) {
-            let pings = ping_group_url(http, cfg, gname, timeout_ms, Some(test_url)).await;
-            if !pings.is_empty() {
-                return pings;
-            }
+    for gname in flow_ping_candidates(cfg, &group_names, bs_active) {
+        let mut pings = ping_group_url(http, cfg, &gname, timeout_ms, Some(test_url)).await;
+        if bs_active && gname != crate::routing::WHITELIST_GROUP_NAME {
+            let servers = get_servers(http, cfg, &cfg.failover.priority_chain).await.unwrap_or_default();
+            pings.retain(|node_id, _| {
+                if let Some(srv) = servers.iter().find(|s| s.id == *node_id) {
+                    crate::failover::is_whitelist_server_full(&srv.name, &srv.id, srv.provider.as_deref(), cfg)
+                } else {
+                    crate::failover::is_whitelist_server_full(node_id, node_id, None, cfg)
+                }
+            });
         }
-    }
-
-    // 2. Иначе пингуем через основную группу PROXY
-    if let Some(group) = find_primary_group(&proxies) {
-        return ping_group_url(http, cfg, &group, timeout_ms, Some(test_url)).await;
+        if !pings.is_empty() {
+            return pings;
+        }
     }
 
     BTreeMap::new()
 }
 
-/// Проверяет и вычисляет исправление для селектора, если его текущий узел отсутствует или невалиден.
-/// Возвращает Some(target) если селектор нужно переключить, или None если он валиден.
-pub fn evaluate_selector_auto_heal<'a>(
+/// Проверяет и вычисляет исправление для селектора с учётом типа группы (БС / Gaming / обычная, Баг 123).
+pub fn evaluate_selector_auto_heal_for_group<'a>(
+    group_name: &str,
     now: &'a str,
     all: &'a [&'a str],
     proxies_has_key: impl Fn(&str) -> bool,
+    cfg: &AppConfig,
 ) -> Option<&'a str> {
     if all.is_empty() {
         return None;
     }
     // Сервер считается валидным, если он не пуст И (содержится в all-списке группы ИЛИ присутствует среди корневых прокси).
-    // ВАЖНО: В Mihomo GET /proxies возвращает только статические прокси и группы.
-    // Серверы из подписок (proxy-providers) НЕ являются ключами /proxies, но всегда присутствуют в массиве all группы!
     let now_valid = !now.is_empty() && (all.contains(&now) || proxies_has_key(now));
     if now_valid {
+        return None;
+    }
+
+    let is_bs_group = group_name == crate::routing::WHITELIST_GROUP_NAME
+        || (group_name.starts_with("🛡️ ") && group_name != "🛡️ Canary Probe")
+        || group_name.starts_with("📱 ")
+        || group_name.contains("Whitelist");
+    if is_bs_group {
+        // Для БС-селекторов НИКОГДА не выбираем Fallback/Fastest/VPS — только узел БС, иначе оставляем без изменений
+        return all
+            .iter()
+            .find(|&&x| {
+                x != now
+                    && !matches!(x, "Fallback" | "Fastest" | "PROXY" | "DIRECT" | "REJECT")
+                    && crate::whitelist_tags::is_whitelist_server_full(x, x, None, cfg)
+            })
+            .copied();
+    }
+
+    let is_gaming_group =
+        group_name == crate::routing::GAMING_GROUP_NAME || group_name.starts_with("🎮 ");
+    if is_gaming_group {
         return None;
     }
 
@@ -2143,6 +2197,16 @@ pub fn evaluate_selector_auto_heal<'a>(
             .unwrap_or(all[0])
     };
     Some(target)
+}
+
+/// Проверяет и вычисляет исправление для селектора, если его текущий узел отсутствует или невалиден.
+/// Возвращает Some(target) если селектор нужно переключить, или None если он валиден.
+pub fn evaluate_selector_auto_heal<'a>(
+    now: &'a str,
+    all: &'a [&'a str],
+    proxies_has_key: impl Fn(&str) -> bool,
+) -> Option<&'a str> {
+    evaluate_selector_auto_heal_for_group("", now, all, proxies_has_key, &AppConfig::default())
 }
 
 /// Автоматическое восстановление зависших селекторов групп (если текущий сервер удален из подписки или переименован)
@@ -2165,7 +2229,9 @@ pub async fn auto_heal_proxy_selectors(http: &reqwest::Client, cfg: &AppConfig) 
             .map(|arr| arr.iter().filter_map(|x| x.as_str()).collect())
             .unwrap_or_default();
 
-        if let Some(target) = evaluate_selector_auto_heal(now, &all, |k| proxies.contains_key(k)) {
+        if let Some(target) =
+            evaluate_selector_auto_heal_for_group(name, now, &all, |k| proxies.contains_key(k), cfg)
+        {
             crate::log_w!(
                 "[AUTO-HEAL] Селектор '{}' ссылается на отсутствующий узел '{}'. Автоматическое переключение на '{}'",
                 name,
@@ -2192,14 +2258,7 @@ pub async fn reload_config(http: &reqwest::Client, cfg: &AppConfig) -> Result<()
     res
 }
 
-/// Выбор сервера в конкретной группе (для AUTO-DEVICE групп после reload).
-pub async fn switch_group(http: &reqwest::Client, cfg: &AppConfig, group: &str, server: &str) -> Result<(), String> {
-    let enc = urlencoding_lite(group);
-    m_put(http, cfg, &format!("/proxies/{enc}"), json!({ "name": server }), 5).await?;
-    invalidate_proxies_cache();
-    let _ = close_all_connections(http, cfg).await;
-    Ok(())
-}
+
 
 /// Переключение группы с точечным сбросом сокетов ТОЛЬКО этой группы
 /// (per-device failover, расписания устройств). В отличие от switch_group(),
@@ -2259,8 +2318,8 @@ pub struct GoogleGeoStatus {
     pub message: String,
 }
 
-/// Определение региона сервера по названию
-pub fn detect_server_country(name: &str) -> String {
+/// Определение региона сервера по названию (Баг 55: строгий разбор `BY` как заглавного токена, не ` by `).
+pub fn detect_country(name: &str) -> Option<&'static str> {
     let lower = name.to_lowercase();
     let is_ru = lower.contains("росси")
         || lower.contains("russia")
@@ -2282,10 +2341,12 @@ pub fn detect_server_country(name: &str) -> String {
         || lower.contains("питер")
         || lower.contains("спб");
 
+    let has_uppercase_by_token = name
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|tok| tok == "BY");
     let is_by = lower.contains("беларус")
         || lower.contains("belarus")
-        || lower.contains(" by ")
-        || lower.contains("[by]")
+        || has_uppercase_by_token
         || lower.contains("🇧🇾")
         || lower.contains("минск")
         || lower.contains("minsk");
@@ -2390,24 +2451,29 @@ pub fn detect_server_country(name: &str) -> String {
         || lower.ends_with("_nl");
 
     if is_us {
-        "US".to_string()
+        Some("US")
     } else if is_ca {
-        "CA".to_string()
+        Some("CA")
     } else if is_ru {
-        "RU".to_string()
+        Some("RU")
     } else if is_by {
-        "BY".to_string()
+        Some("BY")
     } else if is_de {
-        "DE".to_string()
+        Some("DE")
     } else if is_nl {
-        "NL".to_string()
+        Some("NL")
     } else if is_fi {
-        "FI".to_string()
+        Some("FI")
     } else if is_kz {
-        "KZ".to_string()
+        Some("KZ")
     } else {
-        "GLOBAL".to_string()
+        None
     }
+}
+
+/// Определение региона сервера по названию (со строковым фоллбеком `"GLOBAL"`).
+pub fn detect_server_country(name: &str) -> String {
+    detect_country(name).unwrap_or("GLOBAL").to_string()
 }
 
 /// Быстрая оценка статуса Flow для сервера ("ok" | "blocked" | "unknown")
@@ -2744,6 +2810,58 @@ mod tests {
         let all_no_fallback = ["Fastest", "ObsV-ne_dir"];
         let heal_no_fallback = evaluate_selector_auto_heal(missing_now, &all_no_fallback, proxies_has_key);
         assert_eq!(heal_no_fallback, Some("Fastest"));
+    }
+
+    #[test]
+    fn regression_bug_123b_auto_heal_never_sends_bs_group_to_vps() {
+        let cfg = AppConfig::default();
+        let proxies_has_key = |k: &str| k == "Fallback" || k == "Fastest" || k == "PROXY";
+
+        // 1. Группа БС с отсутствующим текущим выбором и наличием Fallback/Fastest + БС-узла:
+        // НИКОГДА не переключается на Fallback/Fastest/VPS — только на БС-узел (или None).
+        let all_with_bs = ["Fallback", "Fastest", "DE-VPS-1", "MSK [БС]"];
+        let res_bs = evaluate_selector_auto_heal_for_group(
+            crate::routing::WHITELIST_GROUP_NAME,
+            "Deleted-BS-Node",
+            &all_with_bs,
+            proxies_has_key,
+            &cfg,
+        );
+        assert_eq!(res_bs, Some("MSK [БС]"));
+
+        // 2. Если в группе БС нет ни одного БС-узла, ничего не трогаем (None), не отправляем в Fallback
+        let all_only_vps = ["Fallback", "Fastest", "DE-VPS-1"];
+        let res_no_bs = evaluate_selector_auto_heal_for_group(
+            crate::routing::WHITELIST_GROUP_NAME,
+            "Deleted-BS-Node",
+            &all_only_vps,
+            proxies_has_key,
+            &cfg,
+        );
+        assert_eq!(res_no_bs, None);
+
+        // 3. Игровая группа не переводится на Fallback/Fastest
+        let res_gaming = evaluate_selector_auto_heal_for_group(
+            crate::routing::GAMING_GROUP_NAME,
+            "Deleted-Game-Node",
+            &all_only_vps,
+            proxies_has_key,
+            &cfg,
+        );
+        assert_eq!(res_gaming, None);
+
+        // 4. Пустой all (провайдеры ещё не загружены после reload) -> None
+        let empty: [&str; 0] = [];
+        assert_eq!(
+            evaluate_selector_auto_heal_for_group("PROXY", "Any", &empty, proxies_has_key, &cfg),
+            None
+        );
+
+        // 5. Обычная группа PROXY по-прежнему лечится через Fallback
+        assert_eq!(
+            evaluate_selector_auto_heal_for_group("PROXY", "Deleted-Node", &all_only_vps, proxies_has_key, &cfg),
+            Some("Fallback")
+        );
     }
 
     #[test]
@@ -3301,7 +3419,7 @@ mod tests {
     fn regression_bug_54b_flow_switch_does_not_reset_lan() {
         // Баг 54: переключение маршрута Google AI не должно вызывать close_all_connections
         let mihomo_src = include_str!("mihomo.rs");
-        let api_src = include_str!("api.rs");
+        let api_src = include_str!("api/servers.rs");
 
         // Проверяем тело функции switch_flow_server в mihomo.rs
         let switch_fn = mihomo_src.split("pub async fn switch_flow_server")
@@ -3438,5 +3556,46 @@ mod tests {
         assert_eq!(delay, 95);
         assert!(healthcheck_hits.load(Ordering::SeqCst) >= 1, "targeted vkturn provider healthcheck must be used");
         assert_eq!(group_delay_hits.load(Ordering::SeqCst), 0, "must not ping entire PROXY selector when provider healthcheck succeeds");
+    }
+
+    #[test]
+    fn regression_bug_55b_country_by_not_english_word_and_bs_candidates() {
+        // 55.2: "by" как английское слово НЕ даёт Беларусь; флаг / заглавный токен BY / Belarus -> BY
+        assert_ne!(detect_country("Server by Hetzner"), Some("BY"));
+        assert_ne!(detect_country("Fast relay by user"), Some("BY"));
+        assert_eq!(detect_country("🇧🇾 Minsk"), Some("BY"));
+        assert_eq!(detect_country("DE-BY-1"), Some("BY"));
+        assert_eq!(detect_country("[BY] Belarus Relay"), Some("BY"));
+        assert_eq!(detect_country("Belarus-01"), Some("BY"));
+        assert_eq!(detect_country("🇩🇪 Germany by Hetzner"), Some("DE"));
+
+        // 55.1: при активном БС кандидаты берутся из БС-группы/Flow, а не из PROXY
+        let cfg = AppConfig::default();
+        let groups = vec![
+            "PROXY".to_string(),
+            "Fastest".to_string(),
+            crate::routing::WHITELIST_GROUP_NAME.to_string(),
+            "🤖 Google AI".to_string(),
+        ];
+        let bs_cands = flow_ping_candidates(&cfg, &groups, true);
+        assert!(
+            bs_cands.contains(&crate::routing::WHITELIST_GROUP_NAME.to_string()),
+            "when bs_active=true, whitelist group must be in candidates: {bs_cands:?}"
+        );
+        assert!(
+            !bs_cands.iter().any(|g| g == "PROXY" || g == "Fastest"),
+            "when bs_active=true, PROXY/Fastest must NOT be pinged: {bs_cands:?}"
+        );
+
+        let normal_cands = flow_ping_candidates(&cfg, &groups, false);
+        assert_eq!(
+            normal_cands.first().map(String::as_str),
+            Some("🤖 Google AI"),
+            "when bs_active=false, Flow group comes first: {normal_cands:?}"
+        );
+        assert!(
+            normal_cands.contains(&"PROXY".to_string()),
+            "when bs_active=false, PROXY fallback is allowed: {normal_cands:?}"
+        );
     }
 }

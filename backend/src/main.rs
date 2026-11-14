@@ -25,6 +25,7 @@ mod system;
 pub mod adguard;
 pub mod bot;
 pub mod whitelist_catalog;
+pub mod whitelist_tags;
 pub mod subscription_parser;
 
 use axum::extract::Request;
@@ -40,7 +41,7 @@ use tokio::sync::RwLock;
 
 pub const VERSION: &str = match option_env!("XKEEN_ROUTE_VERSION") {
     Some(v) => v,
-    None => concat!("v", "1.16.8.2"),
+    None => concat!("v", "1.16.9.0"),
 };
 pub const APP_NAME: &str = "XKeen Route";
 
@@ -430,6 +431,7 @@ async fn main() {
     let cfg = config::load_and_refresh_backup(&config_path);
     logger::init(&config_path, &cfg.logs.remote_syslog);
     logger::set_level(&cfg.logs.level);
+    updater::handle_startup_update_guard(&config_path);
     log_i!("{} {} запущен, конфиг: {}", APP_NAME, VERSION, config_path.display());
     if !cfg.logs.remote_syslog.is_empty() {
         log_i!("Логи дублируются на syslog {}", cfg.logs.remote_syslog);
@@ -471,8 +473,10 @@ async fn main() {
         vkturn: vkturn_mgr,
     };
 
-    // FO-QUR-01: Восстановление состояния карантина из /opt/etc/xkeen-route/quarantine.json
+    // FO-QUR-01: Восстановление состояния карантина из каталога рядом с config.json
+    failover::init_quarantine_path(&state.config_path);
     failover::init_quarantine_from_disk().await.ok();
+    failover::init_detector_state_from_disk().await;
 
     // Инициализация постоянного хранилища отозванных токенов (баг 93)
     let revoked_storage_path = state.config_path.parent().unwrap_or(std::path::Path::new(".")).join("revoked_tokens.json");
@@ -495,10 +499,19 @@ async fn main() {
     }
 
     failover::spawn(state.clone());
-    // Во временном каталоге (tmpfs): переживает рестарт панели, но не перезагрузку роутера —
-    // после неё XKeen стартует сам, и флаг «остановлено» не должен держать failover на паузе.
-    watchdog::init_service_stopped_flag(std::env::temp_dir().join("xkeen-route-service-stopped.flag"));
+    // В постоянном каталоге рядом с config.json (A-12): переживает и рестарт панели, и перезагрузку роутера.
+    watchdog::init_service_stopped_flag(watchdog::service_stopped_flag_path(&state.config_path));
     watchdog::spawn(state.clone());
+
+    let guard_cfg_path = state.config_path.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(updater::UPDATE_GUARD_HEALTHY_SECS)).await;
+        let marker = updater::update_guard_marker_path(&guard_cfg_path);
+        if marker.exists() {
+            updater::clear_update_guard_marker(&marker);
+            log_i!("[UPDATE] Новая версия стабильна {}s — маркер отката удалён", updater::UPDATE_GUARD_HEALTHY_SECS);
+        }
+    });
     traffic::spawn(state.clone());
     bot::spawn(state.clone());
 
@@ -526,8 +539,8 @@ async fn main() {
         let bs_active = cfg.whitelist.enabled;
         if gaming_active || bs_active {
             if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-                let redir_port = routing::parse_redir_port(&yaml).unwrap_or(5000);
-                let tproxy_port = routing::parse_tproxy_port(&yaml).unwrap_or(5001);
+                let ports = routing::redir_ports(&yaml);
+                let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
                 let dns_port = api::resolve_active_dns_port(&cfg);
                 let _ = api::sync_full_tunnel_modes(&cfg, redir_port, tproxy_port, dns_port).await;
             }
@@ -550,6 +563,9 @@ async fn main() {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         }
     });
+
+    // Фоновый автоподбор лучшего узла для Google AI / Flow (Баг 53)
+    watchdog::spawn_flow_auto_select_loop(state.clone());
 
     // Синхронизация AdGuard Home DNS-редиректа при старте панели
     let adguard_sync_state = state.clone();
@@ -574,8 +590,8 @@ async fn main() {
                     // Z-09: порты парсим из config.yaml, а не хардкодим 5000/5001 —
                     // при кастомном конфиге Mihomo правила уходили не на те порты
                     if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-                        let redir_port = routing::parse_redir_port(&yaml).unwrap_or(5000);
-                        let tproxy_port = routing::parse_tproxy_port(&yaml).unwrap_or(5001);
+                        let ports = routing::redir_ports(&yaml);
+                        let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
                         let _ = api::sync_full_tunnel_modes(&cfg, redir_port, tproxy_port, active_port).await;
                     }
                 }
@@ -645,8 +661,8 @@ async fn main() {
             let cfg = wl_sync_state.config.read().await;
             if cfg.whitelist.enabled {
                 if let Ok(yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-                    let redir_port = routing::parse_redir_port(&yaml).unwrap_or(5000);
-                    let tproxy_port = routing::parse_tproxy_port(&yaml).unwrap_or(5001);
+                    let ports = routing::redir_ports(&yaml);
+                    let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
                     let dns_port = api::resolve_active_dns_port(&cfg);
                     let _ = api::sync_full_tunnel_modes(&cfg, redir_port, tproxy_port, dns_port).await;
                     log_i!("[STARTUP] ✓ BS-FIX: полный перехват XKEEN_BS перемонтирован");
@@ -666,8 +682,8 @@ async fn main() {
             {
                 Ok((current_cfg, new_yaml)) => {
                     log_i!("[STARTUP] ✓ Игровой режим автоматически восстановлен после перезагрузки (активный узел не является [БС])");
-                    let redir_port = crate::routing::parse_redir_port(&new_yaml).unwrap_or(5000);
-                    let tproxy_port = crate::routing::parse_tproxy_port(&new_yaml).unwrap_or(5001);
+                    let ports = crate::routing::redir_ports(&new_yaml);
+                    let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
                     let dns_port = crate::api::resolve_active_dns_port(&current_cfg);
                     let _ = crate::api::sync_full_tunnel_modes(&current_cfg, redir_port, tproxy_port, dns_port).await;
                     log_i!("[STARTUP] ✓ Правила игрового туннеля перемонтированы после восстановления");
@@ -716,6 +732,7 @@ async fn main() {
         wait_for_router_ready(&sync_state).await;
 
         let cfg = sync_state.config.read().await;
+        override_sync::load_cached_auto_cdns();
         log_i!("[STARTUP] Быстрая синхронизация известных CDN бандлов и игровых доменов с geo_override...");
         if let Err(e) = override_sync::sync_from_config(&cfg, &[]).await {
             log_w!("[STARTUP] Ошибка быстрой синхронизации geo_override: {}", e);
@@ -745,12 +762,17 @@ async fn main() {
                 return;
             }
 
-            let cfg = weekly_state.config.read().await;
-            if !cfg.force_domains.is_empty() {
+            let (cfg_snapshot, domains, proxy_url) = {
+                let cfg = weekly_state.config.read().await;
+                let domains = weekly_scan_inputs(&cfg);
+                let proxy_url = cfg.mihomo_proxy_url();
+                ((**cfg).clone(), domains, proxy_url)
+            };
+            if !domains.is_empty() {
                 log_i!("[CDN-SCHEDULE] ⏰ Запуск планового еженедельного сканирования CDN (понедельник 05:00)...");
-                let auto_cdns = cdn_discovery::discover_all_cdns(&cfg.force_domains, &cfg.mihomo_proxy_url()).await;
+                let auto_cdns = cdn_discovery::discover_all_cdns(&domains, &proxy_url).await;
                 let auto_cdns_vec: Vec<String> = auto_cdns.into_iter().collect();
-                if let Err(e) = override_sync::sync_from_config(&cfg, &auto_cdns_vec).await {
+                if let Err(e) = override_sync::sync_from_config(&cfg_snapshot, &auto_cdns_vec).await {
                     log_w!("[CDN-SCHEDULE] Ошибка плановой синхронизации geo_override: {}", e);
                 } else {
                     log_i!("[CDN-SCHEDULE] ✓ Плановое еженедельное сканирование CDN успешно завершено");
@@ -1054,5 +1076,22 @@ pub fn duration_until_next_monday_5am() -> std::time::Duration {
         std::time::Duration::from_secs(diff.num_seconds() as u64)
     } else {
         std::time::Duration::from_secs(7 * 86400)
+    }
+}
+
+pub fn weekly_scan_inputs(cfg: &config::AppConfig) -> Vec<String> {
+    cfg.force_domains.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn regression_bug_a07_weekly_cdn_scan_releases_config_lock() {
+        let mut cfg = config::AppConfig::default();
+        cfg.force_domains = vec!["youtube.com".to_string(), "discord.com".to_string()];
+        let inputs = weekly_scan_inputs(&cfg);
+        assert_eq!(inputs, vec!["youtube.com".to_string(), "discord.com".to_string()]);
     }
 }

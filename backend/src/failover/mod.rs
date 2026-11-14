@@ -6,2938 +6,32 @@
 
 use std::time::{Instant, Duration};
 
-static LAST_SWITCH: tokio::sync::Mutex<Option<Instant>> = tokio::sync::Mutex::const_new(None);
-static LAST_WHITELIST_SYNC: tokio::sync::Mutex<Option<(String, Instant)>> =
+pub(crate) static LAST_SWITCH: tokio::sync::Mutex<Option<Instant>> = tokio::sync::Mutex::const_new(None);
+pub(crate) static LAST_WHITELIST_SYNC: tokio::sync::Mutex<Option<(String, Instant)>> =
     tokio::sync::Mutex::const_new(None);
 
 /// F-04: сериализация итераций проверки — фоновый цикл и ручной прогон
 /// (POST /api/failover/check) не должны выполняться параллельно (двойной switch).
-static CHECK_IN_PROGRESS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-pub const CANARY_DURATION_SECS: u64 = 180;
-pub const CANARY_PAYLOAD_PORT: u16 = 7894;
-pub const CANARY_PAYLOAD_BYTES: u64 = 65536; // Честные 64 КБ (FO-CNR-02)
-pub const CANARY_PAYLOAD_URL: &str = "http://speed.cloudflare.com/__down?bytes=65536";
-pub const CANARY_PROBE_BYTES: u64 = CANARY_PAYLOAD_BYTES;
-pub const CANARY_DOWNLOAD_TIMEOUT_SECS: u64 = 10;
-
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct CanaryDownloadResult {
-    pub success: bool,
-    pub bytes_downloaded: u64,
-    pub duration_ms: u64,
-    pub speed_kbps: f64,
-    pub status_code: u16,
-    pub error: Option<String>,
-}
-
-/// Выполнение реальной загрузки 64 КБ полезной нагрузки через локальный слушатель Canary Probe (127.0.0.1:7894).
-/// Проверяет статус 200, точный объем полученных байт (>= chunk_bytes) и возвращает (байты, скорость в кбит/с).
-pub async fn perform_canary_download(
-    port: u16,
-    chunk_bytes: u64,
-    timeout_ms: u64,
-) -> Result<(u64, f64), String> {
-    let target_url = format!("http://speed.cloudflare.com/__down?bytes={chunk_bytes}");
-    let res = perform_canary_download_detailed(port, &target_url, chunk_bytes, timeout_ms).await?;
-    Ok((res.bytes_downloaded, res.speed_kbps))
-}
-
-pub async fn perform_canary_download_detailed(
-    port: u16,
-    target_url: &str,
-    chunk_bytes: u64,
-    timeout_ms: u64,
-) -> Result<CanaryDownloadResult, String> {
-    let proxy_url = format!("http://127.0.0.1:{port}");
-    let proxy = reqwest::Proxy::all(&proxy_url)
-        .map_err(|e| format!("Ошибка создания Canary-прокси для {proxy_url}: {e}"))?;
-
-    let client = reqwest::Client::builder()
-        .proxy(proxy)
-        .timeout(std::time::Duration::from_millis(timeout_ms))
-        .build()
-        .map_err(|e| format!("Ошибка инициализации HTTP-клиента Canary: {e}"))?;
-
-    let start = std::time::Instant::now();
-    let resp = match client.get(target_url).send().await {
-        Ok(r) => r,
-        Err(e) => return Err(format!("Сетевой сбой при загрузке полезной нагрузки через {proxy_url}: {e}")),
-    };
-
-    let status = resp.status();
-    if status != reqwest::StatusCode::OK {
-        return Err(format!("Неверный HTTP-статус Canary: {} (ожидался 200 OK)", status.as_u16()));
-    }
-
-    let bytes = match resp.bytes().await {
-        Ok(b) => b,
-        Err(e) => return Err(format!("Сбой чтения данных полезной нагрузки Canary: {e}")),
-    };
-
-    let bytes_len = bytes.len() as u64;
-    let duration_ms = start.elapsed().as_millis().max(1) as u64;
-    let duration_secs = duration_ms as f64 / 1000.0;
-    let speed_kbps = ((bytes_len as f64 * 8.0) / duration_secs) / 1000.0;
-
-    if bytes_len < chunk_bytes {
-        return Err(format!(
-            "Усечённая полезная нагрузка Canary: получено {} байт из ожидаемых {}",
-            bytes_len, chunk_bytes
-        ));
-    }
-
-    Ok(CanaryDownloadResult {
-        success: true,
-        bytes_downloaded: bytes_len,
-        duration_ms,
-        speed_kbps,
-        status_code: status.as_u16(),
-        error: None,
-    })
-}
-
-
-#[derive(Clone, Debug)]
-pub struct CanaryState {
-    pub target_id: String,
-    pub target_name: String,
-    pub from_id: String,
-    pub from_name: String,
-    pub started_at: Instant,
-    pub probes_passed: u32,
-    pub total_bytes: u64,
-    pub duration_secs: u64,
-}
-
-static CANARY_STAGE: tokio::sync::Mutex<Option<CanaryState>> = tokio::sync::Mutex::const_new(None);
-
-/// Время последнего цикла скаутинга Smart Restore (для интервала 60-90 сек).
-static LAST_SMART_RESTORE_SCOUT: tokio::sync::Mutex<Option<Instant>> = tokio::sync::Mutex::const_new(None);
-/// Текущее смещение sliding window ротации при скаутинге Tier 1.
-static SMART_RESTORE_SCOUT_OFFSET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-/// Размер окна скаутинга (10-12 серверов).
-pub const SMART_RESTORE_WINDOW_SIZE: usize = 12;
-/// Интервал между запусками фонового скаутинга Smart Restore (60 сек).
-pub const SMART_RESTORE_SCOUT_INTERVAL_SECS: u64 = 60;
-
-/// Функция отбора окна скаутинга для Smart Restore.
-/// Первыми идут сервера с ранее успешным/низким пингом, затем round-robin скользящее окно.
-pub fn select_scouting_window(
-    servers: &[Server],
-    offset: usize,
-    window_size: usize,
-) -> (Vec<Server>, usize) {
-    if servers.is_empty() {
-        return (Vec::new(), 0);
-    }
-    if servers.len() <= window_size {
-        return (servers.to_vec(), 0);
-    }
-
-    // Разделяем на ранее успешные (ping > 0) и остальные
-    let mut successful: Vec<Server> = Vec::new();
-    let mut others: Vec<Server> = Vec::new();
-
-    for s in servers {
-        let p = crate::mihomo::cached_ping(&s.id).unwrap_or(s.ping_ms);
-        if p > 0 {
-            successful.push(s.clone());
-        } else {
-            others.push(s.clone());
-        }
-    }
-    successful.sort_by_key(|s| crate::mihomo::cached_ping(&s.id).unwrap_or(s.ping_ms));
-
-    let mut result = Vec::with_capacity(window_size);
-
-    // До половины окна (до window_size / 2) берем из ранее успешных нод
-    let max_success = (window_size / 2).min(successful.len());
-    for s in successful.iter().take(max_success) {
-        result.push(s.clone());
-    }
-
-    // Оставшиеся ноды: собираем список кандидатов для round-robin
-    let mut rr_candidates = Vec::new();
-    for s in successful.iter().skip(max_success) {
-        rr_candidates.push(s.clone());
-    }
-    for s in &others {
-        rr_candidates.push(s.clone());
-    }
-
-    let needed = window_size.saturating_sub(result.len());
-    let mut next_offset = offset;
-    if !rr_candidates.is_empty() && needed > 0 {
-        let start = offset % rr_candidates.len();
-        for i in 0..needed {
-            let idx = (start + i) % rr_candidates.len();
-            let cand = &rr_candidates[idx];
-            if !result.iter().any(|r| r.id == cand.id) {
-                result.push(cand.clone());
-            }
-        }
-        next_offset = (start + needed) % rr_candidates.len();
-    }
-
-    (result, next_offset)
-}
-
-/// Сервер, Canary-тест которого нужно продолжить на текущем тике умного возврата.
-/// `canary` — (target_id, from_id) активного теста. Тест продолжается, только если он
-/// запущен с текущего активного узла и целевой сервер всё ещё существует.
-pub fn canary_continuation_candidate(
-    canary: Option<(&str, &str)>,
-    active_id: &str,
-    servers: &[Server],
-) -> Option<Server> {
-    let (target_id, from_id) = canary?;
-    if from_id != active_id || target_id == active_id {
-        return None;
-    }
-    servers.iter().find(|s| s.id == target_id).cloned()
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CanaryStatus {
-    pub active: bool,
-    pub target_id: String,
-    pub target_name: String,
-    pub from_name: String,
-    pub elapsed_secs: u64,
-    pub duration_secs: u64,
-    pub remaining_secs: u64,
-    pub probes_passed: u32,
-    pub total_bytes: u64,
-}
-
-pub static WHITELIST_EPISODE_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-pub fn get_whitelist_episode_bytes() -> u64 {
-    WHITELIST_EPISODE_BYTES.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-pub fn reset_whitelist_episode_bytes() {
-    WHITELIST_EPISODE_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
-}
-
-pub fn record_whitelist_episode_bytes(bytes: u64) {
-    WHITELIST_EPISODE_BYTES.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// Суммарная дельта трафика за цикл (без переполнения).
-pub fn whitelist_cycle_delta(dl_bytes: u64, up_bytes: u64) -> u64 {
-    dl_bytes.saturating_add(up_bytes)
-}
-
-/// Учёт дельты трафика активного узла [БС] за цикл failover.
-/// Пополняет ТОЛЬКО счётчик эпизода БС. Накопительный TOTAL_WHITELIST_BYTES ведёт
-/// исключительно поток /traffic в traffic.rs — раньше failover добавлял туда ту же
-/// дельту /connections повторно, и объём БС на дашборде завышался примерно вдвое.
-pub fn account_whitelist_cycle_delta(dl_bytes: u64, up_bytes: u64) -> u64 {
-    let delta = whitelist_cycle_delta(dl_bytes, up_bytes);
-    if delta > 0 {
-        record_whitelist_episode_bytes(delta);
-    }
-    delta
-}
-
-pub async fn is_canary_active() -> bool {
-    CANARY_STAGE.lock().await.is_some()
-}
-
-pub async fn canary_status() -> Option<CanaryStatus> {
-    let guard = CANARY_STAGE.lock().await;
-    guard.as_ref().map(|c| {
-        let elapsed = c.started_at.elapsed().as_secs();
-        CanaryStatus {
-            active: true,
-            target_id: c.target_id.clone(),
-            target_name: c.target_name.clone(),
-            from_name: c.from_name.clone(),
-            elapsed_secs: elapsed,
-            duration_secs: c.duration_secs,
-            remaining_secs: c.duration_secs.saturating_sub(elapsed),
-            probes_passed: c.probes_passed,
-            total_bytes: c.total_bytes,
-        }
-    })
-}
-
-pub async fn reset_canary() {
-    *CANARY_STAGE.lock().await = None;
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct CanaryLastResult {
-    pub server_id: String,
-    pub server_name: String,
-    pub timestamp: String,
-    pub success: bool,
-    pub is_zombie: bool,
-    pub reason: String,
-    pub elapsed_secs: u64,
-}
-
-static LAST_CANARY_RESULT: tokio::sync::Mutex<Option<CanaryLastResult>> = tokio::sync::Mutex::const_new(None);
-
-pub async fn canary_last_result() -> Option<CanaryLastResult> {
-    LAST_CANARY_RESULT.lock().await.clone()
-}
-
-pub async fn set_canary_last_result(res: CanaryLastResult) {
-    *LAST_CANARY_RESULT.lock().await = Some(res);
-}
-
-// ============================================================================
-// Детектор белых списков (Whitelist Detector) и Классификатор [БС]
-// ============================================================================
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WhitelistSuitability {
-    pub is_suitable_bs: bool,
-    pub score: u32,
-    pub reasons: Vec<String>,
-}
-
-/// Классификатор серверов на пригодность в роли [БС] / Моста (Bridge Analyzer)
-pub fn classify_server_whitelist_suitability(
-    server: &Server,
-    provider_yaml_content_opt: Option<&str>,
-    _is_isolation_active: bool,
-) -> WhitelistSuitability {
-    let mut score = 0u32;
-    let mut reasons = Vec::new();
-
-    let name_lower = server.name.to_lowercase();
-    let id_lower = server.id.to_lowercase();
-    let host_lower = server.host.to_lowercase();
-
-    // 1. Маркеры в названии или ID:
-    // [БС], [WL], whitelist, белые списки, обход, мост, bridge, cascade, relay, вход рф
-    let bs_markers = [
-        "[бс]", "(бс)", "[бc]", "(бc)", "[бs]", "(бs)", "[bs]", "(bs)",
-        "[wl]", "(wl)", "whitelist", "белые списки", "белый список",
-        "обход", "мост", "bridge", "cascade", "каскад", "relay", "вход рф", "вход-рф", "вход_рф",
-    ];
-    for marker in &bs_markers {
-        if name_lower.contains(marker) || id_lower.contains(marker) {
-            score += 40;
-            reasons.push(format!("Маркер БС в названии/ID: '{marker}'"));
-            break;
-        }
-    }
-
-    // 2. Российские домены хоста: .ru, .рф, .su
-    if host_lower.ends_with(".ru") || host_lower.ends_with(".рф") || host_lower.ends_with(".su")
-        || host_lower.contains(".ru:") || host_lower.contains(".рф:") || host_lower.contains(".su:")
-    {
-        score += 30;
-        reasons.push("Российская доменная зона хоста (.ru/.рф/.su)".to_string());
-    }
-
-    // 3. Российские провайдеры / ASN / Хостинг-провайдеры в хосте или имени
-    let ru_infra_keywords = [
-        "selectel", "yandex", "ya.ru", "vk.com", "mail.ru", "rostelecom", "rt.ru",
-        "mts", "beeline", "megafon", "vdsina", "timeweb", "reg.ru", "ru-center", "nic.ru",
-        "sber", "tbank", "tinkoff", "spacecore", "fastvps", "aeza",
-    ];
-    for kw in &ru_infra_keywords {
-        if host_lower.contains(kw) || name_lower.contains(kw) || id_lower.contains(kw) {
-            score += 25;
-            reasons.push(format!("Инфраструктура/ASN РФ: '{kw}'"));
-            break;
-        }
-    }
-
-    // 4. Российские диапазоны IP-адресов
-    let host_ip_opt = server.host.parse::<std::net::IpAddr>().ok()
-        .or_else(|| server.resolved_ip.as_deref().and_then(|ip| ip.parse::<std::net::IpAddr>().ok()));
-
-    if let Some(std::net::IpAddr::V4(ipv4)) = host_ip_opt {
-        let oct = ipv4.octets();
-        // Диапазоны крупных российских провайдеров и ДЦ:
-        // Selectel (188.93.16.0/20, 95.213.128.0/18, 92.53.64.0/18, 178.62.192.0/18)
-        // Yandex (87.250.250.0/24, 77.88.0.0/18, 93.158.134.0/24, 213.180.193.0/24)
-        // VK / Mail.ru (95.163.0.0/16, 217.69.128.0/18, 128.140.168.0/21)
-        // Rostelecom (178.46.0.0/15, 188.162.0.0/16, 212.164.0.0/16, 85.26.0.0/16)
-        // MTS / Beeline / Megafon (213.87.0.0/16, 217.118.64.0/19, 83.149.0.0/16)
-        let is_ru_cidr = match oct[0] {
-            188 => oct[1] == 93 || oct[1] == 162 || oct[1] == 225,
-            95 => oct[1] == 213 || oct[1] == 163,
-            92 => oct[1] == 53,
-            77 => oct[1] == 88,
-            87 => oct[1] == 250,
-            93 => oct[1] == 158,
-            213 => oct[1] == 180 || oct[1] == 87,
-            217 => oct[1] == 69 || oct[1] == 118,
-            178 => oct[1] == 62 || (oct[1] >= 44 && oct[1] <= 47),
-            212 => oct[1] == 164,
-            85 => oct[1] == 26,
-            83 => oct[1] == 149,
-            _ => false,
-        };
-
-        if is_ru_cidr {
-            score += 35;
-            reasons.push(format!("Российский диапазон IP-адресов ({}.{}.*.*)", oct[0], oct[1]));
-        }
-    }
-
-    // 5. SNI из белых списков / Отечественные SNI в YAML конфигурации узла
-    if let Some(content) = provider_yaml_content_opt {
-        // Ищем упоминания узла в yaml
-        let escaped_name = regex_lite::escape(&server.name);
-        if let Ok(re) = regex_lite::Regex::new(&format!(r#"(?i)name:\s*['"]?{}['"]?"#, escaped_name)) {
-            if let Some(m) = re.find(content) {
-                let start = m.start();
-                let snippet = &content[start..std::cmp::min(start + 1500, content.len())];
-                for sni_cand in ["sni:", "server-name:"] {
-                    if let Some(sni_pos) = snippet.to_lowercase().find(sni_cand) {
-                        let line = snippet[sni_pos..].lines().next().unwrap_or_default();
-                        for domestic in ["gosuslugi.ru", "sberbank.ru", "yandex.ru", "vk.com", "mail.ru", "ozon.ru", "wildberries.ru", "tinkoff.ru", "mos.ru"] {
-                            if line.to_lowercase().contains(domestic) {
-                                score += 35;
-                                reasons.push(format!("Domestic Whitelist SNI ('{domestic}')"));
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 6. Российские маркеры локации в имени ноды (Москва, Спб, RU, Russia)
-    if is_ru_node(&server.name, &server.id) {
-        score += 20;
-        reasons.push("Российская локация узла".to_string());
-    }
-
-    let is_suitable = score >= 35;
-    WhitelistSuitability {
-        is_suitable_bs: is_suitable,
-        score,
-        reasons,
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DetectedProviderBsInfo {
-    pub provider: String,
-    pub bs_nodes_count: usize,
-    pub total_nodes_count: usize,
-    pub is_bs_provider: bool,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct DetectedBsResult {
-    pub detected_bs_servers: Vec<String>,
-    pub detected_bs_providers: Vec<String>,
-    pub suitability_map: std::collections::BTreeMap<String, WhitelistSuitability>,
-    pub provider_stats: Vec<DetectedProviderBsInfo>,
-    pub suggested_monitored_provider: Option<String>,
-    pub suggested_target_bs_provider: Option<String>,
-}
-
-/// Комплексный поиск и классификация серверов и провайдеров белых списков
-pub async fn detect_whitelist_servers_and_providers(state: &AppState) -> Result<DetectedBsResult, String> {
-    let cfg = state.config.read().await.clone();
-    let vkturn_ready = state.vkturn.rt.read().await.tunnel_ready();
-    let servers = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await?;
-
-    // Читаем содержимое локальных файлов провайдеров для анализа SNI
-    let prov_dir = std::path::Path::new(&cfg.mihomo.config_path)
-        .parent()
-        .map(|p| p.join("providers"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/opt/etc/mihomo/providers"));
-
-    let mut provider_yaml_cache: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-
-    let mut suitability_map = std::collections::BTreeMap::new();
-    let mut detected_bs_servers = Vec::new();
-    let mut provider_nodes: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new(); // (bs_nodes, total_nodes)
-
-    for s in &servers {
-        if s.is_pool || s.id == "Fastest" || s.id == "Fallback" || s.id == "DIRECT" || s.id == "REJECT" || s.id == "GLOBAL" || s.id.starts_with("AUTO-") {
-            continue;
-        }
-        if !vkturn_ready
-            && (s.id == crate::vkturn::PROXY_NAME
-                || s.provider.as_deref() == Some(crate::vkturn::PROVIDER_ID))
-        {
-            continue;
-        }
-
-        let prov_name = s.provider.as_deref().unwrap_or("").to_string();
-        let yaml_content = if !prov_name.is_empty() {
-            if let Some(c) = provider_yaml_cache.get(&prov_name) {
-                Some(c.as_str())
-            } else {
-                let path = prov_dir.join(format!("{prov_name}.yaml"));
-                if let Ok(c) = tokio::fs::read_to_string(&path).await {
-                    provider_yaml_cache.insert(prov_name.clone(), c);
-                    provider_yaml_cache.get(&prov_name).map(|s| s.as_str())
-                } else {
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        let suitability = classify_server_whitelist_suitability(s, yaml_content, false);
-        let is_bs = suitability.is_suitable_bs;
-
-        if is_bs {
-            detected_bs_servers.push(s.id.clone());
-        }
-
-        if !prov_name.is_empty() {
-            let entry = provider_nodes.entry(prov_name.clone()).or_insert((0, 0));
-            entry.1 += 1;
-            if is_bs {
-                entry.0 += 1;
-            }
-        }
-
-        suitability_map.insert(s.id.clone(), suitability);
-    }
-
-    let mut detected_bs_providers = Vec::new();
-    let mut provider_stats = Vec::new();
-    let mut regular_providers = Vec::new();
-
-    for (pname, (bs_cnt, tot_cnt)) in provider_nodes {
-        let is_bs_prov = if tot_cnt > 0 {
-            (bs_cnt as f64 / tot_cnt as f64) >= 0.5 || bs_cnt >= 3
-        } else {
-            false
-        };
-
-        if is_bs_prov {
-            detected_bs_providers.push(pname.clone());
-        } else {
-            regular_providers.push(pname.clone());
-        }
-
-        provider_stats.push(DetectedProviderBsInfo {
-            provider: pname,
-            bs_nodes_count: bs_cnt,
-            total_nodes_count: tot_cnt,
-            is_bs_provider: is_bs_prov,
-        });
-    }
-
-    provider_stats.sort_by(|a, b| a.provider.cmp(&b.provider));
-    detected_bs_providers.sort();
-    detected_bs_servers.sort();
-
-    let suggested_monitored_provider = regular_providers.first().cloned();
-    let suggested_target_bs_provider = detected_bs_providers.first().cloned();
-
-    Ok(DetectedBsResult {
-        detected_bs_servers,
-        detected_bs_providers,
-        suitability_map,
-        provider_stats,
-        suggested_monitored_provider,
-        suggested_target_bs_provider,
-    })
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WhitelistDetectorState {
-    Normal,
-    WhitelistDetected,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WhitelistDetectorStatus {
-    pub state: WhitelistDetectorState,
-    pub monitored_provider: String,
-    pub total_nodes: usize,
-    #[serde(default)]
-    pub monitored_total_nodes: usize,
-    pub offline_nodes: usize,
-    pub online_nodes: usize,
-    pub offline_percent: u32,
-    pub last_checked: Option<String>,
-    pub last_event: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub warning: Option<String>,
-}
-
-static DETECTOR_STATE: tokio::sync::Mutex<WhitelistDetectorState> = tokio::sync::Mutex::const_new(WhitelistDetectorState::Normal);
-static DETECTOR_LAST_STATUS: tokio::sync::Mutex<Option<WhitelistDetectorStatus>> = tokio::sync::Mutex::const_new(None);
-
-pub async fn get_detector_state() -> WhitelistDetectorState {
-    *DETECTOR_STATE.lock().await
-}
-
-pub async fn set_detector_state(state: WhitelistDetectorState) {
-    *DETECTOR_STATE.lock().await = state;
-}
-
-pub async fn get_whitelist_detector_status() -> WhitelistDetectorStatus {
-    if let Some(status) = DETECTOR_LAST_STATUS.lock().await.clone() {
-        status
-    } else {
-        WhitelistDetectorStatus {
-            state: get_detector_state().await,
-            monitored_provider: String::new(),
-            total_nodes: 0,
-            monitored_total_nodes: 0,
-            offline_nodes: 0,
-            online_nodes: 0,
-            offline_percent: 0,
-            last_checked: None,
-            last_event: None,
-            warning: None,
-        }
-    }
-}
-
-/// Проверка, является ли нода российской (для отсева RU нод из контролируемой группы зарубежных узлов)
-pub fn is_ru_node(node_name: &str, node_id: &str) -> bool {
-    let lower_name = node_name.to_lowercase();
-    let lower_id = node_id.to_lowercase();
-
-    let check = |s: &str| -> bool {
-        s.contains("росси")
-            || s.contains("russia")
-            || s.contains(" ru ")
-            || s.contains("[ru]")
-            || s.contains("(ru)")
-            || s.contains(" ru-")
-            || s.contains(" ru_")
-            || s.contains("-ru-")
-            || s.contains("-ru_")
-            || s.contains("_ru-")
-            || s.contains("_ru_")
-            || s.starts_with("ru ")
-            || s.starts_with("ru-")
-            || s.starts_with("ru_")
-            || s.ends_with(" ru")
-            || s.ends_with("-ru")
-            || s.ends_with("_ru")
-            || s.contains("🇷🇺")
-            || s.contains("москва")
-            || s.contains("moscow")
-            || s.contains("санкт-петербург")
-            || s.contains("питер")
-            || s.contains("спб")
-            || s.contains("spb")
-    };
-
-    check(&lower_name) || check(&lower_id)
-}
-
-/// Опрос контролируемых узлов детектора белых списков
-pub async fn check_whitelist_detector_nodes(
-    http: &reqwest::Client,
-    cfg: &crate::config::AppConfig,
-    servers: &[Server],
-) -> Result<(usize, usize, usize, u32, std::collections::BTreeMap<String, i64>, usize), String> {
-    let det_cfg = &cfg.failover.whitelist_detector;
-
-    // Отбираем узлы контролируемого провайдера (или все обычные VPS, если monitored_provider пуст)
-    let candidate_nodes: Vec<&Server> = servers
-        .iter()
-        .filter(|s| {
-            if s.is_pool || s.id == "Fastest" || s.id == "Fallback" || s.id == "DIRECT" || s.id == "REJECT" || s.id == "GLOBAL" || s.id.starts_with("AUTO-") {
-                return false;
-            }
-            // Не должен быть сервером белых списков
-            if is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), cfg) {
-                return false;
-            }
-            // Если задан конкретный провайдер подписки, фильтруем по нему
-            if !det_cfg.monitored_provider.is_empty() {
-                if let Some(ref p) = s.provider {
-                    if !p.eq_ignore_ascii_case(&det_cfg.monitored_provider) {
-                        return false;
-                    }
-                } else {
-                    return false;
-                }
-            }
-            // Отсев RU нод
-            if det_cfg.exclude_ru_nodes && is_ru_node(&s.name, &s.id) {
-                return false;
-            }
-            true
-        })
-        .collect();
-
-    let total = candidate_nodes.len();
-    if total == 0 {
-        return Err("Нет подходящих зарубежных узлов для мониторинга детектора белых списков".to_string());
-    }
-
-    // Если det_cfg.sample_size == 0: проверяем все подходящие узлы без ограничений.
-    // Если det_cfg.sample_size > 0 и узлов больше чем sample_size, равномерно распределяем выборку.
-    let sampled_candidates: Vec<&Server> = if det_cfg.sample_size > 0 && candidate_nodes.len() > det_cfg.sample_size {
-        let target_samples = det_cfg.sample_size;
-        let step = candidate_nodes.len() as f64 / target_samples as f64;
-        let mut picked = Vec::with_capacity(target_samples);
-        for i in 0..target_samples {
-            let idx = (i as f64 * step) as usize;
-            if idx < candidate_nodes.len() {
-                picked.push(candidate_nodes[idx]);
-            }
-        }
-        picked
-    } else {
-        candidate_nodes
-    };
-
-    let sample_total = sampled_candidates.len();
-    let ids: Vec<String> = sampled_candidates.iter().map(|s| s.id.clone()).collect();
-    let max_ping = det_cfg.max_acceptable_ping_ms as i64;
-    // Таймаут 1500мс для быстрого сканирования за 2-3 секунды
-    let ping_timeout = max_ping.clamp(1000, 1500) as u64;
-
-    let pings = mihomo::ping_all(http, cfg, &ids, ping_timeout).await;
-
-    let mut offline = 0;
-    let mut online = 0;
-
-    for id in &ids {
-        let p = pings.get(id).copied().unwrap_or(-1);
-        if p <= 0 || p > max_ping {
-            offline += 1;
-        } else {
-            online += 1;
-        }
-    }
-
-    let offline_pct = if sample_total > 0 {
-        ((offline as f64 / sample_total as f64) * 100.0).round() as u32
-    } else {
-        0
-    };
-
-    Ok((sample_total, offline, online, offline_pct, pings, total))
-}
-
-/// Выполняет единичную проверку детектора белых списков и, если порог превышен, переключает режим
-pub async fn evaluate_and_apply_whitelist_detector(
-    state: &AppState,
-    cfg: &crate::config::AppConfig,
-    servers: &[Server],
-    _trigger_reason: &str,
-) -> Result<Option<String>, String> {
-    let det_cfg = &cfg.failover.whitelist_detector;
-
-    // Проверяем наличие предупреждений о провайдере
-    let mut detector_warning = None;
-    if !det_cfg.monitored_provider.is_empty() {
-        if cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(&det_cfg.monitored_provider)) {
-            detector_warning = Some(format!("Контролируемый провайдер '{}' отключён в настройках", det_cfg.monitored_provider));
-        }
-    }
-
-    // Всегда опрашиваем узлы для актуализации метрик DETECTOR_LAST_STATUS
-    let check_res = check_whitelist_detector_nodes(&state.http, cfg, servers).await;
-    let (sample_total, offline, online, offline_pct, pings, total_candidates) = match check_res {
-        Ok(res) => res,
-        Err(e) => {
-            let now_str = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-            let warn = detector_warning.unwrap_or_else(|| e.clone());
-            let current_state = if det_cfg.enabled { get_detector_state().await } else { WhitelistDetectorState::Normal };
-            *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
-                state: current_state,
-                monitored_provider: det_cfg.monitored_provider.clone(),
-                total_nodes: 0,
-                monitored_total_nodes: 0,
-                offline_nodes: 0,
-                online_nodes: 0,
-                offline_percent: 0,
-                last_checked: Some(now_str),
-                last_event: None,
-                warning: Some(warn),
-            });
-            return Ok(None);
-        }
-    };
-
-    if sample_total == 0 && detector_warning.is_none() {
-        detector_warning = Some("0 доступных узлов для мониторинга".to_string());
-    }
-
-    let now_str = Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let current_state = get_detector_state().await;
-
-    // Если детектор выключен, сохраняем метрики, поддерживаем Normal (или текущее) состояние и выходим без переключений
-    if !det_cfg.enabled {
-        *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
-            state: current_state,
-            monitored_provider: det_cfg.monitored_provider.clone(),
-            total_nodes: sample_total,
-            monitored_total_nodes: total_candidates,
-            offline_nodes: offline,
-            online_nodes: online,
-            offline_percent: offline_pct,
-            last_checked: Some(now_str),
-            last_event: None,
-            warning: detector_warning,
-        });
-        return Ok(None);
-    }
-
-    let is_trigger_hit = match det_cfg.threshold_mode.as_str() {
-        "count" => offline >= det_cfg.trigger_offline_count,
-        _ => offline_pct >= det_cfg.trigger_offline_percent,
-    };
-
-    let is_exit_hit = match det_cfg.threshold_mode.as_str() {
-        "count" => offline <= det_cfg.exit_offline_count,
-        _ => offline_pct <= det_cfg.exit_offline_percent,
-    };
-
-    let current_state = match get_detector_state().await { s => s };
-    let vkturn_ready = state.vkturn.rt.read().await.tunnel_ready();
-
-    match current_state {
-        WhitelistDetectorState::Normal => {
-            if is_trigger_hit {
-                // Порог пробит! Переключаем в режим WHITELIST_DETECTED
-                set_detector_state(WhitelistDetectorState::WhitelistDetected).await;
-
-                // Сохраняем активный сервер как last_good_regular_vps, если он обычный VPS
-                let active = servers.iter().find(|s| s.is_active && s.id != "Fastest" && s.id != "Fallback");
-                let mut last_good = cfg.failover.last_good_regular_vps.clone();
-                if let Some(act) = active {
-                    if !is_whitelist_server_full(&act.name, &act.id, act.provider.as_deref(), cfg) {
-                        last_good = Some(act.id.clone());
-                    }
-                }
-                if last_good.is_none() {
-                    last_good = cfg.failover.priority_chain.first().cloned();
-                }
-
-                // Защитный отбор кандидатов БС:
-                // Формируем пул кандидатов (приоритет bs_priority_chain, затем target_bs_provider/whitelist)
-                let mut bs_candidate_ids: Vec<String> = Vec::new();
-                let mut seen_cand: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-                for bs_id in &cfg.failover.bs_priority_chain {
-                    if !vkturn_ready && bs_id == crate::vkturn::PROXY_NAME {
-                        continue;
-                    }
-                    if !is_quarantined(bs_id).await && seen_cand.insert(bs_id.clone()) {
-                        bs_candidate_ids.push(bs_id.clone());
-                    }
-                }
-
-                for s in servers {
-                    if bs_candidate_ids.len() >= 12 {
-                        break;
-                    }
-                    if s.is_pool || s.id == "Fastest" || s.id == "Fallback" || s.id == "DIRECT" || s.id == "REJECT" || s.id == "GLOBAL" || s.id.starts_with("AUTO-") {
-                        continue;
-                    }
-                    if !vkturn_ready
-                        && (s.id == crate::vkturn::PROXY_NAME
-                            || s.provider.as_deref() == Some(crate::vkturn::PROVIDER_ID))
-                    {
-                        continue;
-                    }
-                    if !is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), cfg) {
-                        continue;
-                    }
-                    if !det_cfg.target_bs_provider.is_empty() {
-                        if let Some(ref p) = s.provider {
-                            if !p.eq_ignore_ascii_case(&det_cfg.target_bs_provider) {
-                                continue;
-                            }
-                        } else {
-                            continue;
-                        }
-                    }
-                    if is_quarantined(&s.id).await {
-                        continue;
-                    }
-                    if seen_cand.insert(s.id.clone()) {
-                        bs_candidate_ids.push(s.id.clone());
-                    }
-                }
-
-                // Параллельный L7-пинг до 12 кандидатов БС с семафором 12 и таймаутом 1500мс
-                let mut bs_target_id: Option<String> = None;
-                let mut bs_target_name: Option<String> = None;
-
-                if !bs_candidate_ids.is_empty() {
-                    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(12));
-                    let mut handles = Vec::new();
-                    let shared_cfg = std::sync::Arc::new(cfg.clone());
-
-                    for cand_id in bs_candidate_ids {
-                        let http = state.http.clone();
-                        let cand_cfg = shared_cfg.clone();
-                        let sem_clone = sem.clone();
-                        handles.push(tokio::spawn(async move {
-                            let _permit = sem_clone.acquire().await.ok();
-                            let ping = mihomo::ping_server_url(&http, &cand_cfg, &cand_id, 1500, None).await;
-                            (cand_id, ping)
-                        }));
-                    }
-
-                    let mut responsive: Vec<(String, i64)> = Vec::new();
-                    for h in handles {
-                        if let Ok((id, ping)) = h.await {
-                            if ping > 0 {
-                                responsive.push((id, ping));
-                            }
-                        }
-                    }
-
-                    // Выбираем узел с наименьшим пингом
-                    responsive.sort_by_key(|(_, ping)| *ping);
-                    if let Some((best_id, _)) = responsive.first() {
-                        if let Some(s) = servers.iter().find(|srv| &srv.id == best_id) {
-                            bs_target_id = Some(s.id.clone());
-                            bs_target_name = Some(s.name.clone());
-                        }
-                    }
-                }
-
-                // Fallback: если все кандидаты не ответили по пингу, берем первого не находящегося в карантине из цепочки
-                if bs_target_id.is_none() {
-                    for bs_id in &cfg.failover.bs_priority_chain {
-                        if !vkturn_ready && bs_id == crate::vkturn::PROXY_NAME {
-                            continue;
-                        }
-                        if !is_quarantined(bs_id).await {
-                            if let Some(s) = servers.iter().find(|srv| &srv.id == bs_id) {
-                                bs_target_id = Some(s.id.clone());
-                                bs_target_name = Some(s.name.clone());
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                let event_msg = if let (Some(target_id), Some(target_name)) = (bs_target_id, bs_target_name) {
-                    let switch_res = mihomo::switch_server(&state.http, cfg, &target_id).await;
-                    match switch_res {
-                        Ok(_) => {
-                            record_switch(&target_id).await;
-                            let s_prov = servers.iter().find(|s| s.id == target_id).and_then(|s| s.provider.as_deref());
-                            handle_whitelist_transition(state, &target_id, &target_name, s_prov).await;
-
-                            // Обновляем конфиг с last_good_regular_vps и bs_priority_chain
-                            {
-                                let _cfg_guard = state.config_lock.lock().await;
-                                let mut mut_cfg = (**state.config.read().await).clone();
-                                mut_cfg.failover.last_good_regular_vps = last_good.clone();
-                                if let Some(pos) = mut_cfg.failover.bs_priority_chain.iter().position(|s| s == &target_id) {
-                                    mut_cfg.failover.bs_priority_chain.remove(pos);
-                                }
-                                mut_cfg.failover.bs_priority_chain.insert(0, target_id.clone());
-                                if let Err(e) = crate::config::save(&state.config_path, &mut_cfg).await {
-                                    crate::log_e!("[DETECTOR] Ошибка сохранения конфига: {e}");
-                                } else {
-                                    *state.config.write().await = std::sync::Arc::new(mut_cfg);
-                                }
-                            }
-
-                            format!(
-                                "🚨 Детектор Белых Списков: обнаружена блокировка ТСПУ ({}% оффлайн: {}/{} узлов). Аварийный переход на сервер [БС] '{}'",
-                                offline_pct, offline, sample_total, target_name
-                            )
-                        }
-                        Err(e) => {
-                            format!(
-                                "🚨 Детектор Белых Списков: обнаружена блокировка ({}% оффлайн), но ошибка переключения на '{}': {}",
-                                offline_pct, target_name, e
-                            )
-                        }
-                    }
-                } else {
-                    format!(
-                        "🚨 Детектор Белых Списков: обнаружена блокировка ТСПУ ({}% оффлайн: {}/{} узлов), но подходящий сервер [БС] не найден",
-                        offline_pct, offline, sample_total
-                    )
-                };
-
-                state.failover_log.push(&event_msg, true).await;
-                crate::notifications::notify_failover(
-                    &state.http,
-                    Some(&cfg.mihomo_proxy_url()),
-                    &cfg.notifications,
-                    "whitelist_detected",
-                    "Детектор Белых Списков: Активация [БС]",
-                    &event_msg,
-                ).await;
-
-                *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
-                    state: WhitelistDetectorState::WhitelistDetected,
-                    monitored_provider: det_cfg.monitored_provider.clone(),
-                    total_nodes: sample_total,
-                    monitored_total_nodes: total_candidates,
-                    offline_nodes: offline,
-                    online_nodes: online,
-                    offline_percent: offline_pct,
-                    last_checked: Some(now_str),
-                    last_event: Some(event_msg.clone()),
-                    warning: detector_warning.clone(),
-                });
-
-                return Ok(Some(event_msg));
-            } else {
-                *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
-                    state: WhitelistDetectorState::Normal,
-                    monitored_provider: det_cfg.monitored_provider.clone(),
-                    total_nodes: sample_total,
-                    monitored_total_nodes: total_candidates,
-                    offline_nodes: offline,
-                    online_nodes: online,
-                    offline_percent: offline_pct,
-                    last_checked: Some(now_str),
-                    last_event: None,
-                    warning: detector_warning.clone(),
-                });
-            }
-        }
-        WhitelistDetectorState::WhitelistDetected => {
-            if is_exit_hit {
-                // Блокировка снята! Порог выхода достигнут
-                set_detector_state(WhitelistDetectorState::Normal).await;
-
-                let mut restored_msg: Option<String> = None;
-                if det_cfg.auto_restore_vps {
-                    // Защитный отбор кандидата для возврата на обычный VPS:
-                    // 1) Не должен быть сервером белых списков (!is_whitelist_server_full).
-                    // 2) Приоритеты: last_good_regular_vps -> priority_chain -> любой зарубежный узел.
-                    // 3) Выбираем строго из тех, кто ответил alive в недавнем замере (pings) или подтверждён живым быстрым канареечным тестом.
-                    let mut candidate_ids: Vec<String> = Vec::new();
-                    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-                    if let Some(ref lg) = cfg.failover.last_good_regular_vps {
-                        if seen_ids.insert(lg.clone()) {
-                            candidate_ids.push(lg.clone());
-                        }
-                    }
-                    for pc in &cfg.failover.priority_chain {
-                        if seen_ids.insert(pc.clone()) {
-                            candidate_ids.push(pc.clone());
-                        }
-                    }
-                    for s in servers {
-                        if candidate_ids.len() >= 16 {
-                            break;
-                        }
-                        if seen_ids.insert(s.id.clone()) {
-                            candidate_ids.push(s.id.clone());
-                        }
-                    }
-
-                    let mut confirmed_target_id: Option<String> = None;
-                    let mut confirmed_target_name: Option<String> = None;
-
-                    for cand_id in candidate_ids {
-                        let cand_server = match servers.iter().find(|s| s.id == cand_id) {
-                            Some(s) => s,
-                            None => continue,
-                        };
-
-                        if cand_server.is_pool || cand_server.id == "Fastest" || cand_server.id == "Fallback" || cand_server.id == "DIRECT" || cand_server.id == "REJECT" || cand_server.id == "GLOBAL" || cand_server.id.starts_with("AUTO-") {
-                            continue;
-                        }
-
-                        // Кандидат НЕ должен быть сервером белых списков
-                        if is_whitelist_server_full(&cand_server.name, &cand_server.id, cand_server.provider.as_deref(), cfg) {
-                            continue;
-                        }
-
-                        // Отсев российских нод
-                        if det_cfg.exclude_ru_nodes && is_ru_node(&cand_server.name, &cand_server.id) {
-                            continue;
-                        }
-
-                        // Не должен быть в карантине
-                        if is_quarantined(&cand_server.id).await {
-                            continue;
-                        }
-
-                        // Проверяем доступность: либо подтверждён в pings, либо подтверждаем канареечным L7-тестом
-                        let is_alive = if let Some(&p) = pings.get(&cand_server.id) {
-                            p > 0 && p <= (det_cfg.max_acceptable_ping_ms as i64)
-                        } else {
-                            let ms = mihomo::ping_server_url(&state.http, cfg, &cand_server.id, 1500, None).await;
-                            ms > 0 && ms <= (det_cfg.max_acceptable_ping_ms as i64)
-                        };
-
-                        if is_alive {
-                            confirmed_target_id = Some(cand_server.id.clone());
-                            confirmed_target_name = Some(cand_server.name.clone());
-                            break;
-                        }
-                    }
-
-                    if let (Some(vps_id), Some(vps_name)) = (confirmed_target_id, confirmed_target_name) {
-                        let target_server = servers.iter().find(|s| s.id == vps_id);
-
-                        // Мягкое переключение со сбросом сокетов при переходе с БС на обычный VPS
-                        let switch_res = mihomo::switch_server(&state.http, cfg, &vps_id).await;
-                        match switch_res {
-                            Ok(_) => {
-                                record_switch(&vps_id).await;
-                                let s_prov = target_server.and_then(|s| s.provider.as_deref());
-                                handle_whitelist_transition(state, &vps_id, &vps_name, s_prov).await;
-
-                                let msg = format!(
-                                    "🟢 Детектор Белых Списков: блокировка ТСПУ снята (доступно {}/{} узлов, оффлайн {}%). Мягкий возврат на обычный VPS '{}'",
-                                    online, sample_total, offline_pct, vps_name
-                                );
-                                state.failover_log.push(&msg, true).await;
-                                crate::notifications::notify_failover(
-                                    &state.http,
-                                    Some(&cfg.mihomo_proxy_url()),
-                                    &cfg.notifications,
-                                    "whitelist_restored",
-                                    "Детектор Белых Списков: Возврат на VPS",
-                                    &msg,
-                                ).await;
-                                restored_msg = Some(msg);
-                            }
-                            Err(e) => {
-                                let err_msg = format!(
-                                    "🟢 Детектор Белых Списков: блокировка снята, но сбой возврата на '{}': {}",
-                                    vps_name, e
-                                );
-                                state.failover_log.push(&err_msg, false).await;
-                                restored_msg = Some(err_msg);
-                            }
-                        }
-                    }
-                }
-
-                let final_msg = restored_msg.unwrap_or_else(|| {
-                    format!(
-                        "🟢 Детектор Белых Списков: блокировка снята (доступно {}/{} узлов, оффлайн {}%)",
-                        online, sample_total, offline_pct
-                    )
-                });
-
-                *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
-                    state: WhitelistDetectorState::Normal,
-                    monitored_provider: det_cfg.monitored_provider.clone(),
-                    total_nodes: sample_total,
-                    monitored_total_nodes: total_candidates,
-                    offline_nodes: offline,
-                    online_nodes: online,
-                    offline_percent: offline_pct,
-                    last_checked: Some(now_str),
-                    last_event: Some(final_msg.clone()),
-                    warning: detector_warning.clone(),
-                });
-
-                return Ok(Some(final_msg));
-            } else {
-                *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
-                    state: WhitelistDetectorState::WhitelistDetected,
-                    monitored_provider: det_cfg.monitored_provider.clone(),
-                    total_nodes: sample_total,
-                    monitored_total_nodes: total_candidates,
-                    offline_nodes: offline,
-                    online_nodes: online,
-                    offline_percent: offline_pct,
-                    last_checked: Some(now_str),
-                    last_event: None,
-                    warning: detector_warning,
-                });
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-/// Ручной или таймерный запуск проверки детектора белых списков
-pub async fn run_whitelist_detector_check(state: &AppState, reason: &str) -> Result<String, String> {
-    let cfg = state.config.read().await.clone();
-    let vkturn_ready = state.vkturn.rt.read().await.tunnel_ready();
-    let servers = mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await?;
-    match evaluate_and_apply_whitelist_detector(state, &cfg, &servers, reason).await? {
-        Some(msg) => Ok(msg),
-        None => {
-            let status = get_whitelist_detector_status().await;
-            Ok(format!(
-                "Детектор БС ({reason}): статус {:?}, оффлайн {}% ({}/{} узлов). Переключение не требуется.",
-                status.state, status.offline_percent, status.offline_nodes, status.total_nodes
-            ))
-        }
-    }
-}
-
-pub async fn current_live_status(
-    active_id: &str,
-    active_name: &str,
-    active_ping: i64,
-    cfg: &crate::config::AppConfig,
-) -> String {
-    if !cfg.failover.enabled {
-        return "Failover выключен".to_string();
-    }
-    if let Some(canary) = canary_status().await {
-        return format!(
-            "Тестирование кандидата '{}' (Canary Soak: {}/{} с, {} КБ загружено)",
-            canary.target_name,
-            canary.elapsed_secs,
-            canary.duration_secs,
-            canary.total_bytes / 1024
-        );
-    }
-    let act_label = if !active_name.is_empty() { active_name } else if !active_id.is_empty() { active_id } else { "не выбран" };
-    let ping_str = if active_ping > 0 { format!("{active_ping} мс") } else { "—".to_string() };
-
-    let det_state = get_detector_state().await;
-    if det_state == WhitelistDetectorState::WhitelistDetected {
-        return format!("🛡️ Режим белых списков активен: '{act_label}' ({ping_str}, мониторинг снятия блокировки)");
-    }
-
-    if !cfg.failover.priority_chain.is_empty() {
-        if let Some(top_id) = cfg.failover.priority_chain.first() {
-            if top_id == active_id || top_id == act_label {
-                return format!("Штатно: активен приоритетный узел '{act_label}' ({ping_str})");
-            } else {
-                return format!("Удержание узла '{act_label}' ({ping_str}, поиск доступных в приоритете)");
-            }
-        }
-    }
-    format!("Активен '{act_label}' ({ping_str})")
-}
+pub(crate) static CHECK_IN_PROGRESS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 use crate::mihomo::{self, Server};
 use crate::AppState;
 use chrono::Local;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::VecDeque;
-use tokio::sync::Mutex;
 
-static LAST_ACTIVATED_SERVER: Mutex<Option<(String, Instant, bool)>> = Mutex::const_new(None);
-
-pub const EARLY_FAILURE_WINDOW_SECS: u64 = 300; // 5 минут после переключения
-
-// ============================================================================
-// FO-QUR-01: Persistent Quarantine Data Structures & Paths
-// ============================================================================
-
-#[cfg(target_os = "linux")]
-pub const DEFAULT_QUARANTINE_FILE: &str = "/opt/etc/xkeen-route/quarantine.json";
-#[cfg(not(target_os = "linux"))]
-pub const DEFAULT_QUARANTINE_FILE: &str = "xkeen-route.quarantine.json";
-
-pub const QUARANTINE_AMNESTY_SECS: u64 = 43200; // 12 часов до полной амнистии
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PersistentQuarantineEntry {
-    #[serde(default)]
-    pub server_name: String,
-    pub quarantined_at: u64,
-    pub fail_count: u32,
-    pub duration_secs: u64,
-    pub reason: String,
-}
-
-pub type InternalQuarantineEntry = PersistentQuarantineEntry;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct QuarantineInfo {
-    pub server_id: String,
-    pub server_name: String,
-    pub fail_count: u32,
-    pub remaining_secs: u64,
-    pub reason: String,
-}
-
-static SERVER_QUARANTINE: std::sync::LazyLock<Mutex<std::collections::HashMap<String, PersistentQuarantineEntry>>> =
-    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
-
-static QUARANTINE_SAVE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-static QUARANTINE_PATH_OVERRIDE: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
-
-pub fn current_unix_timestamp() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-pub fn get_quarantine_path() -> std::path::PathBuf {
-    let guard = QUARANTINE_PATH_OVERRIDE.lock().unwrap();
-    if let Some(ref p) = *guard {
-        p.clone()
-    } else {
-        std::path::PathBuf::from(DEFAULT_QUARANTINE_FILE)
-    }
-}
-
-#[cfg(test)]
-pub fn set_quarantine_path_override(path: Option<std::path::PathBuf>) {
-    let mut guard = QUARANTINE_PATH_OVERRIDE.lock().unwrap();
-    *guard = path;
-}
-
-/// Загрузка записей карантина из файла с авто-очисткой просроченных записей старше 12 часов.
-pub async fn load_quarantine_from_file(
-    path: impl AsRef<std::path::Path>,
-) -> Result<std::collections::HashMap<String, PersistentQuarantineEntry>, String> {
-    let p = path.as_ref();
-    if !p.exists() {
-        return Ok(std::collections::HashMap::new());
-    }
-
-    let content = tokio::fs::read_to_string(p)
-        .await
-        .map_err(|e| format!("Ошибка чтения {}: {e}", p.display()))?;
-
-    if content.trim().is_empty() {
-        return Ok(std::collections::HashMap::new());
-    }
-
-    let raw_entries: std::collections::HashMap<String, PersistentQuarantineEntry> =
-        serde_json::from_str(&content)
-            .map_err(|e| format!("Ошибка парсинга JSON из {}: {e}", p.display()))?;
-
-    let now = current_unix_timestamp();
-    let mut clean_map = std::collections::HashMap::new();
-
-    for (server_id, entry) in raw_entries {
-        // Если запись старше 12 часов непрерывной стабильности — полная амнистия, запись удаляется
-        if now.saturating_sub(entry.quarantined_at) > QUARANTINE_AMNESTY_SECS {
-            continue;
-        }
-        clean_map.insert(server_id, entry);
-    }
-
-    Ok(clean_map)
-}
-
-/// Атомарное сохранение записей карантина на диск через временный файл и rename
-pub async fn save_quarantine_to_file(
-    path: impl AsRef<std::path::Path>,
-    entries: &std::collections::HashMap<String, PersistentQuarantineEntry>,
-) -> Result<(), String> {
-    let _file_guard = QUARANTINE_SAVE_LOCK.lock().await;
-    let json = serde_json::to_string_pretty(entries)
-        .map_err(|e| format!("Ошибка сериализации карантина: {e}"))?;
-    crate::api::atomic_write_file(path.as_ref(), &json).await
-}
-
-/// Асинхронное фоновое сохранение снимка карантина
-pub fn spawn_quarantine_save(snapshot: std::collections::HashMap<String, PersistentQuarantineEntry>) {
-    let path = get_quarantine_path();
-    tokio::spawn(async move {
-        if let Err(e) = save_quarantine_to_file(&path, &snapshot).await {
-            crate::log_w!("Failover: ошибка сохранения карантина в {}: {e}", path.display());
-        }
-    });
-}
-
-/// Принудительный сброс текущего состояния карантина на диск (для shutdown / тестов)
-pub async fn flush_quarantine_to_disk() -> Result<(), String> {
-    let path = get_quarantine_path();
-    let snapshot = {
-        let q = SERVER_QUARANTINE.lock().await;
-        q.clone()
-    };
-    save_quarantine_to_file(&path, &snapshot).await
-}
-
-/// Инициализация подсистемы карантина при старте сервиса
-pub async fn init_quarantine_from_disk() -> Result<(), String> {
-    let path = get_quarantine_path();
-    match load_quarantine_from_file(&path).await {
-        Ok(entries) => {
-            let total = entries.len();
-            let now = current_unix_timestamp();
-            let active = entries.values().filter(|e| now < e.quarantined_at + e.duration_secs).count();
-            let mut q = SERVER_QUARANTINE.lock().await;
-            *q = entries;
-            crate::log_i!(
-                "Failover: загружено {} записей карантина из {} (активных: {}, в амнистии: {})",
-                total, path.display(), active, total.saturating_sub(active)
-            );
-            Ok(())
-        }
-        Err(e) => {
-            crate::log_w!(
-                "Failover: повреждённый файл карантина {} ({}), инициализация с пустым карантином",
-                path.display(), e
-            );
-            let mut q = SERVER_QUARANTINE.lock().await;
-            q.clear();
-            Ok(())
-        }
-    }
-}
-
-pub async fn is_quarantined(server_id: &str) -> bool {
-    let mut q = SERVER_QUARANTINE.lock().await;
-    let now = current_unix_timestamp();
-    if let Some(entry) = q.get(server_id) {
-        if now < entry.quarantined_at + entry.duration_secs {
-            true
-        } else {
-            // Не удаляем сразу fail_count, чтобы сохранялась история для прогрессивного бана.
-            // Полная амнистия наступает только через 12 часов непрерывной стабильности.
-            if now.saturating_sub(entry.quarantined_at) > QUARANTINE_AMNESTY_SECS {
-                q.remove(server_id);
-            }
-            false
-        }
-    } else {
-        false
-    }
-}
-
-pub async fn get_quarantine_remaining(server_id: &str) -> Option<u64> {
-    let mut q = SERVER_QUARANTINE.lock().await;
-    let now = current_unix_timestamp();
-    if let Some(entry) = q.get(server_id) {
-        if now < entry.quarantined_at + entry.duration_secs {
-            Some((entry.quarantined_at + entry.duration_secs) - now)
-        } else {
-            if now.saturating_sub(entry.quarantined_at) > QUARANTINE_AMNESTY_SECS {
-                q.remove(server_id);
-            }
-            None
-        }
-    } else {
-        None
-    }
-}
-
-pub async fn add_quarantine(server_id: &str, server_name: &str, reason: &str) -> u64 {
-    let now = current_unix_timestamp();
-    let (duration_secs, snapshot) = {
-        let mut q = SERVER_QUARANTINE.lock().await;
-        let prev_count = q.get(server_id)
-            .filter(|e| now.saturating_sub(e.quarantined_at) <= QUARANTINE_AMNESTY_SECS)
-            .map(|e| e.fail_count)
-            .unwrap_or(0);
-        let fail_count = prev_count + 1;
-        // Эскалация: 1-й сбой: 15 мин (900с), 2-й: 30 мин (1800с), 3-й+: максимум 1 час (3600с)
-        // Строго по указанию пользователя: "больше часа не надо бана"
-        let duration_secs = match fail_count {
-            1 => 900,
-            2 => 1800,
-            _ => 3600,
-        };
-        q.insert(server_id.to_string(), PersistentQuarantineEntry {
-            server_name: server_name.to_string(),
-            quarantined_at: now,
-            fail_count,
-            duration_secs,
-            reason: reason.to_string(),
-        });
-        (duration_secs, q.clone())
-    };
-    spawn_quarantine_save(snapshot);
-    duration_secs
-}
-
-pub async fn add_quarantine_with_duration(
-    server_id: &str,
-    server_name: &str,
-    reason: &str,
-    duration_secs: u64,
-) -> u64 {
-    let now = current_unix_timestamp();
-    let capped_duration = std::cmp::min(duration_secs, 3600);
-    let (duration, snapshot) = {
-        let mut q = SERVER_QUARANTINE.lock().await;
-        let prev_count = q.get(server_id)
-            .filter(|e| now.saturating_sub(e.quarantined_at) <= QUARANTINE_AMNESTY_SECS)
-            .map(|e| e.fail_count)
-            .unwrap_or(0);
-        let fail_count = prev_count + 1;
-        q.insert(server_id.to_string(), PersistentQuarantineEntry {
-            server_name: server_name.to_string(),
-            quarantined_at: now,
-            fail_count,
-            duration_secs: capped_duration,
-            reason: reason.to_string(),
-        });
-        (capped_duration, q.clone())
-    };
-    spawn_quarantine_save(snapshot);
-    duration
-}
-
-pub async fn get_zombie_servers() -> Vec<String> {
-    let q = SERVER_QUARANTINE.lock().await;
-    let now = current_unix_timestamp();
-    q.iter()
-        .filter(|(_, v)| {
-            if now >= v.quarantined_at + v.duration_secs {
-                return false;
-            }
-            let r = v.reason.to_lowercase();
-            // Истинный зомби: подтверждённая аномалия "Чёрная дыра" (DPI drop) или явный зомби-сервер.
-            // Обычный таймаут или L7-сбой отдельного проверочного URL НЕ является зомби!
-            r.contains("зомби") || r.contains("zombie") || r.contains("черн") || r.contains("blackhole")
-        })
-        .map(|(k, _)| k.clone())
-        .collect()
-}
-
-pub async fn clear_quarantine(server_id: &str) {
-    let snapshot = {
-        let mut q = SERVER_QUARANTINE.lock().await;
-        q.remove(server_id);
-        q.clone()
-    };
-    spawn_quarantine_save(snapshot);
-}
-
-pub async fn clear_all_quarantine() {
-    let snapshot = {
-        let mut q = SERVER_QUARANTINE.lock().await;
-        q.clear();
-        q.clone()
-    };
-    spawn_quarantine_save(snapshot);
-}
-
-pub async fn quarantine_status() -> Vec<QuarantineInfo> {
-    let mut q = SERVER_QUARANTINE.lock().await;
-    let now = current_unix_timestamp();
-    q.retain(|_, v| now < v.quarantined_at + v.duration_secs || now.saturating_sub(v.quarantined_at) <= QUARANTINE_AMNESTY_SECS);
-    let mut res: Vec<QuarantineInfo> = q.iter()
-        .filter(|(_, v)| now < v.quarantined_at + v.duration_secs)
-        .map(|(id, v)| QuarantineInfo {
-            server_id: id.clone(),
-            server_name: if v.server_name.is_empty() { id.clone() } else { v.server_name.clone() },
-            fail_count: v.fail_count,
-            remaining_secs: (v.quarantined_at + v.duration_secs).saturating_sub(now),
-            reason: v.reason.clone(),
-        })
-        .collect();
-    res.sort_by(|a, b| a.remaining_secs.cmp(&b.remaining_secs));
-    res
-}
-
-pub async fn record_switch_target(target_id: &str) {
-    let now = Instant::now();
-    *LAST_SWITCH.lock().await = Some(now);
-    *LAST_ACTIVATED_SERVER.lock().await = Some((target_id.to_string(), now, false));
-    reset_canary().await;
-}
-
-pub async fn record_manual_switch(target_id: &str) {
-    let now = Instant::now();
-    *LAST_SWITCH.lock().await = Some(now);
-    *LAST_ACTIVATED_SERVER.lock().await = Some((target_id.to_string(), now, true));
-    reset_canary().await;
-    clear_quarantine(target_id).await;
-}
-
-pub const MAX_EVENTS: usize = 50;
-
-#[derive(Clone, Serialize)]
-pub struct FailoverEvent {
-    pub time: String,
-    pub message: String,
-    pub switched: bool,
-}
-
-#[derive(Default)]
-pub struct FailoverLog {
-    events: Mutex<VecDeque<FailoverEvent>>,
-}
-
-impl FailoverLog {
-    pub async fn push(&self, message: impl Into<String>, switched: bool) {
-        let message = message.into();
-        if switched {
-            crate::log_w!("Failover: {}", message);
-        } else {
-            crate::log_i!("Failover: {}", message);
-        }
-        self.push_event_only(message, switched).await;
-    }
-
-    pub async fn push_event_only(&self, message: impl Into<String>, switched: bool) {
-        let message = message.into();
-        let mut q = self.events.lock().await;
-        q.push_back(FailoverEvent {
-            time: Local::now().format("%H:%M:%S").to_string(),
-            message,
-            switched,
-        });
-        while q.len() > MAX_EVENTS {
-            q.pop_front();
-        }
-    }
-
-    pub async fn snapshot(&self) -> Vec<FailoverEvent> {
-        self.events.lock().await.iter().rev().cloned().collect()
-    }
-}
-
-/// Вычисление адаптивного порога возврата (гистерезис):
-/// для высоких порогов (> 100 мс) порог возврата = threshold - 50 мс.
-/// для низких порогов (<= 100 мс) порог возврата = 80% от порога (минимум 1 мс),
-/// чтобы при threshold=50 мс гистерезис был 40 мс, а не 0 мс (что ломало автовозврат).
-pub fn calc_hysteresis(threshold: i64) -> i64 {
-    if threshold > 100 {
-        (threshold - 50).max(1)
-    } else {
-        ((threshold * 8) / 10).max(1)
-    }
-}
-
-/// Таймаут для проверки пинга с учётом заданного порога.
-pub fn calc_ping_timeout(threshold: i64) -> u64 {
-    (threshold as u64 + 1000).clamp(2000, 6000)
-}
-
-/// Находит список кандидатов с более высоким приоритетом для автовозврата.
-/// Если активный сервер находится в цепочке на позиции `pos`, кандидаты — `chain[..pos]`.
-/// Если активный сервер не входит в цепочку, кандидаты — вся цепочка `chain[..]`.
-pub fn get_higher_priority_candidates<'a, T: AsRef<str>>(
-    chain: &'a [T],
-    active_id: &str,
-) -> &'a [T] {
-    if let Some(pos) = chain.iter().position(|s| s.as_ref() == active_id) {
-        &chain[..pos]
-    } else {
-        chain
-    }
-}
-
-async fn record_switch(target_id: &str) {
-    record_switch_target(target_id).await;
-}
-
-/// Проверяет, является ли узел сервером белых списков:
-/// 1) По ID из `cfg.whitelist_servers`
-/// 2) По провайдеру/подписке из `cfg.whitelist_providers`
-/// 3) По тегам в названии `[БС]`, `(БС)`, `[WL]`, `(WL)`, `whitelist` (case-insensitive).
-pub fn is_whitelist_server(node_name: &str, node_id: &str, cfg: &crate::config::AppConfig) -> bool {
-    is_whitelist_server_full(node_name, node_id, None, cfg)
-}
-
-pub fn provider_matches_whitelist(provider: &str, cfg: &crate::config::AppConfig) -> bool {
-    let p_trim = provider.trim();
-    if p_trim.is_empty() {
-        return false;
-    }
-    let p_lower = p_trim.to_lowercase();
-    let alias_lower = cfg
-        .provider_aliases
-        .iter()
-        .find(|(k, _)| k.trim().to_lowercase() == p_lower)
-        .map(|(_, v)| v.trim().to_lowercase());
-    let id_from_alias_lower = cfg
-        .provider_aliases
-        .iter()
-        .find(|(_, v)| v.trim().to_lowercase() == p_lower)
-        .map(|(k, _)| k.trim().to_lowercase());
-
-    cfg.whitelist_providers.iter().any(|wp| {
-        let wp_lower = wp.trim().to_lowercase();
-        if wp_lower.is_empty() {
-            return false;
-        }
-        wp_lower == p_lower
-            || alias_lower.as_deref() == Some(wp_lower.as_str())
-            || id_from_alias_lower.as_deref() == Some(wp_lower.as_str())
-    })
-}
-
-pub fn is_whitelist_server_full(
-    node_name: &str,
-    node_id: &str,
-    provider: Option<&str>,
-    cfg: &crate::config::AppConfig,
-) -> bool {
-    // 1. normal_servers перекрывает теги и подписки (баг 99.1, 99.2)
-    if (!node_id.is_empty() && cfg.normal_servers.iter().any(|s| s == node_id))
-        || (!node_name.is_empty() && cfg.normal_servers.iter().any(|s| s == node_name))
-    {
-        return false;
-    }
-    // 2. Приоритет прямого назначения серверов пользователем
-    if !node_id.is_empty() && cfg.whitelist_servers.iter().any(|s| s == node_id) {
-        return true;
-    }
-    // 3. Подписка в whitelist_providers считается БС (баг 42.1)
-    // Сервер считается БС, кроме случая, когда сервер находится в normal_servers (проверено выше)
-    if let Some(p) = provider {
-        if provider_matches_whitelist(p, cfg) {
-            return true;
-        }
-    }
-    // 4. Приоритет явных тегов белых списков в названии или ID ноды
-    // Подстрока whitelist как слово тега не используется без границ ([BS], БС, whitelist как отдельное слово)
-    let check_tag = |s: &str| -> bool {
-        let lower = s.to_lowercase();
-        if lower.contains("[бс]")
-            || lower.contains("(бс)")
-            || lower.contains("[бc]")
-            || lower.contains("(бc)")
-            || lower.contains("[бs]")
-            || lower.contains("(бs)")
-            || lower.contains("[bs]")
-            || lower.contains("(bs)")
-            || lower.contains("[wl]")
-            || lower.contains("(wl)")
-            || lower.contains("белые списки")
-            || lower.contains("белый список")
-        {
-            return true;
-        }
-        // Слово whitelist с границами слов (не внутри другого слова)
-        let words = lower.split(|c: char| !c.is_alphanumeric());
-        for w in words {
-            if w == "whitelist" || w == "wl" || w == "бс" || w == "bs" {
-                return true;
-            }
-        }
-        false
-    };
-    if check_tag(node_name) || (!node_id.is_empty() && check_tag(node_id)) {
-        return true;
-    }
-    false
-}
-
-/// Баг 4: можно ли после перезагрузки вернуть игровой режим, приостановленный ради БС.
-/// Только если Mihomo ответил, активный узел известен и он не БС (с учётом подписок).
-pub fn startup_gaming_restore_allowed(
-    mihomo_answered: bool,
-    active: Option<&crate::mihomo::Server>,
-    cfg: &crate::config::AppConfig,
-) -> bool {
-    if !cfg.whitelist.gaming_suspended || !mihomo_answered {
-        return false;
-    }
-    match active {
-        Some(s) => !is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), cfg),
-        None => false,
-    }
-}
-
-/// Сообщение при попытке включить игровой режим на узле БС (баг 5).
-pub const GAMING_BLOCKED_BY_BS: &str =
-    "Сейчас активен сервер белых списков (БС) — игровой режим работает только на обычном сервере";
-
-/// Баг 5: включение игрового режима запрещено, пока активен узел БС («строго два канала»).
-/// Известен активный узел — решаем по нему (с учётом подписок); неизвестен — по флагу приостановки.
-pub fn gaming_enable_blocked_by_bs(cfg: &crate::config::AppConfig, active: Option<&crate::mihomo::Server>) -> bool {
-    match active {
-        Some(s) => is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), cfg),
-        None => cfg.whitelist.gaming_suspended,
-    }
-}
-
-/// Синхронизация селекторной группы '🛡️ Whitelist' в ядре Mihomo при переключении узла.
-pub async fn sync_whitelist_on_switch(
-    http: &reqwest::Client,
-    cfg: &crate::config::AppConfig,
-    node_id: &str,
-    node_name: &str,
-) {
-    if !cfg.whitelist.enabled {
-        return;
-    }
-
-    let is_auto = is_whitelist_server(node_name, node_id, cfg);
-    let should_follow = cfg.whitelist.follow_failover
-        || cfg.whitelist.target_server.as_deref() == Some("follow_failover")
-        || cfg.whitelist.target_server.as_deref().map_or(true, |s| s.trim().is_empty());
-
-    // Дедупликация: не спамить Mihomo API и логи, если тот же узел уже синхронизирован недавно (< 2 сек)
-    {
-        let mut last_sync = LAST_WHITELIST_SYNC.lock().await;
-        if let Some((ref last_id, ref last_time)) = *last_sync {
-            if last_id == node_id && last_time.elapsed() < Duration::from_secs(2) {
-                return;
-            }
-        }
-        *last_sync = Some((node_id.to_string(), Instant::now()));
-    }
-
-    if should_follow && !node_id.is_empty() {
-        // Только селектор: сброс сокетов уже решил основной switch_server/_graceful.
-        // switch_group здесь рвал ВСЕ соединения LAN и ломал мягкое переключение.
-        let _ = crate::mihomo::switch_selector(http, cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await;
-    }
-
-    crate::log_i!(
-        "[FAILOVER] Whitelist mode active server switched to: {} (auto-detected: {})",
-        node_name,
-        is_auto
-    );
-}
-
-/// Изменение флагов при переходе failover на узел [БС] или обратно (Zero-Touch, баг 108).
-/// Возвращает (что-то изменилось, пояснение для журнала).
-pub fn apply_whitelist_transition_flags(cfg: &mut crate::config::AppConfig, is_bs: bool) -> (bool, String) {
-    let mut changed = false;
-    let mut gaming_log = String::new();
-    if is_bs {
-        if !cfg.whitelist.enabled {
-            cfg.whitelist.enabled = true;
-            cfg.whitelist.enabled_by = crate::config::WhitelistEnabledBy::Failover;
-            changed = true;
-        }
-        if cfg.gaming.enabled {
-            cfg.gaming.enabled = false;
-            cfg.whitelist.gaming_suspended = true;
-            changed = true;
-            gaming_log = " (Игровой режим приостановлен во избежание конфликтов сокетов)".to_string();
-        }
-    } else {
-        // Баг 107: failover выключает БС только если он был включён самим failover (Failover).
-        // Если пользователь включил БС вручную (Manual), failover не должен сбрасывать режим.
-        if cfg.whitelist.enabled && cfg.whitelist.enabled_by == crate::config::WhitelistEnabledBy::Failover {
-            cfg.whitelist.enabled = false;
-            changed = true;
-        }
-        if cfg.whitelist.gaming_suspended {
-            cfg.gaming.enabled = true;
-            cfg.whitelist.gaming_suspended = false;
-            changed = true;
-            gaming_log = " (Игровой режим автоматически восстановлен)".to_string();
-        }
-    }
-    (changed, gaming_log)
-}
-
-/// Комплексная обработка перехода на сервер с учетом режима Белых списков (Zero-Touch):
-/// 1. Если включен auto_by_failover:
-///    - Если узел помечен как [БС]: автоматически активирует whitelist.enabled,
-///      отключает gaming.enabled (выставляя gaming_suspended = true),
-///      синхронизирует селекторную группу 🛡️ Whitelist на новый узел.
-///    - Если узел обычный: деактивирует whitelist.enabled,
-///      восстанавливает gaming.enabled (если gaming_suspended == true).
-/// 2. Применяет правила маршрутизации и сохраняет состояние.
-pub async fn handle_whitelist_transition(
-    state: &AppState,
-    node_id: &str,
-    node_name: &str,
-    provider: Option<&str>,
-) {
-    let cfg = state.config.read().await.clone();
-    let is_bs = is_whitelist_server_full(node_name, node_id, provider, &cfg);
-
-    if is_bs {
-        // Сброс счетчика эпизода белых списков при переходе на сервер БС (Tier 2)
-        reset_whitelist_episode_bytes();
-    }
-
-    if cfg.whitelist.auto_by_failover {
-        // Баг 108: флаги БС/гейминга, config.yaml и reload — одна транзакция. Если ядро не приняло конфиг,
-        // ничего не сохраняется и iptables не трогаются: config.json, правила и фаервол не расходятся.
-        let mut probe = (**state.config.read().await).clone();
-        let (cfg_changed, gaming_log) = apply_whitelist_transition_flags(&mut probe, is_bs);
-        if cfg_changed {
-            match crate::api::commit_config_with_routing(state, |c| {
-                let _ = apply_whitelist_transition_flags(c, is_bs);
-            })
-            .await
-            {
-                Ok((cur, applied_yaml)) => {
-                    if is_bs {
-                        crate::log_i!(
-                            "[FAILOVER] 🛡️ Авто-активация режима Белых списков (узел '{}' помечен как [БС]){}",
-                            node_name,
-                            gaming_log
-                        );
-                    } else {
-                        crate::log_i!(
-                            "[FAILOVER] ⚪ Деактивация режима Белых списков (переход на обычный узел '{}'){}",
-                            node_name,
-                            gaming_log
-                        );
-                    }
-                    // Синхронизируем режимы фаервола и цепочку XKEEN_BS в iptables
-                    let redir_port = crate::routing::parse_redir_port(&applied_yaml).unwrap_or(5000);
-                    let tproxy_port = crate::routing::parse_tproxy_port(&applied_yaml).unwrap_or(5001);
-                    let dns_port = crate::api::resolve_active_dns_port(&cur);
-                    crate::api::sync_full_tunnel_modes(&cur, redir_port, tproxy_port, dns_port).await;
-                }
-                Err(e) => {
-                    crate::log_e!("[FAILOVER] Режим Белых списков не переключён — ядро не приняло конфигурацию: {e}");
-                }
-            }
-        }
-
-        if is_bs {
-            let _ = crate::mihomo::switch_selector(&state.http, &cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await;
-        }
-    } else if cfg.whitelist.enabled {
-        // Селектор без сброса сокетов: решение о сбросе принимает вызывающий switch_server(_graceful)
-        let _ = crate::mihomo::switch_selector(&state.http, &cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await;
-    }
-
-    // FO-WL-03: Instant telemetry channel sync: актуализируем статус телеметрии сразу,
-    // чтобы график мгновенно переключил второй канал между фиолетовым БС и синим VPS без ожидания 15-секундного тика
-    let current_cfg_now = state.config.read().await.clone();
-    let is_wl_now = crate::api::compute_whitelist_mode_active(&current_cfg_now, node_id, node_name, provider);
-    crate::traffic::set_whitelist_active(is_wl_now);
-}
-
-/// Нагрузочный стресс-тест в 3 параллельных сокета через проверяемый узел.
-/// Симулирует реальный трафик клиентов (загрузка 100 КБ полезной нагрузки + 2 параллельных L7-пробника).
-/// Если сервер глушится DPI при открытии нескольких сокетов или таймаутит — возвращает <= 0 (-1).
-pub async fn run_canary_probe(
-    http: &reqwest::Client,
-    cfg: &crate::config::AppConfig,
-    server_id: &str,
-    timeout_ms: u64,
-) -> i64 {
-    let probe_timeout = timeout_ms.max(5000);
-    let (d1, d2, d3) = tokio::join!(
-        mihomo::probe_server_l7(http, cfg, server_id, probe_timeout, CANARY_PAYLOAD_URL, 200),
-        mihomo::probe_server_l7(http, cfg, server_id, probe_timeout, mihomo::SECONDARY_L7_CHECK_URL, 204),
-        mihomo::probe_server_l7(http, cfg, server_id, probe_timeout, mihomo::PRIMARY_L7_CHECK_URL, 204),
-    );
-    if d1 > 0 && d2 > 0 && d3 > 0 {
-        std::cmp::max(d1, std::cmp::max(d2, d3))
-    } else {
-        -1
-    }
-}
-
-/// F-05: WAN-проба по трём независимым эндпоинтам — падение одного сайта, DPI-блок
-/// или временный сбой не должны замораживать failover при живом канале
-/// (раньше единственный URL ya.ru через mihomo был точкой отказа самой защиты).
-pub const WAN_CHECK_URLS: &[&str] = &[
-    "http://ya.ru",
-    "http://cp.cloudflare.com/generate_204",
-    "http://connectivitycheck.gstatic.com/generate_204",
-];
-
-#[allow(dead_code)]
-pub const WAN_CHECK_URL: &str = WAN_CHECK_URLS[0];
-
-/// Проверка физической доступности провайдера (WAN) напрямую через DIRECT.
-/// Если шлюз провайдера или кабель упал, возвращает false.
-pub async fn is_wan_online(http: &reqwest::Client, cfg: &crate::config::AppConfig) -> bool {
-    for url in WAN_CHECK_URLS {
-        let ms = mihomo::ping_server_url_expected_range(
-            http,
-            cfg,
-            "DIRECT",
-            1500,
-            Some(url),
-            Some(wan_check_expected_status(url)),
-        ).await;
-        if ms > 0 {
-            return true;
-        }
-    }
-    false
-}
-
-/// Ожидаемый HTTP-статус для WAN-пробы (баг 102): generate_204 отвечает 204, а http://ya.ru —
-/// 200 или редиректом на https. Раньше всем трём слали expected=200, и 204-пробы падали всегда.
-pub fn wan_check_expected_status(url: &str) -> &'static str {
-    if url.contains("generate_204") {
-        "204"
-    } else {
-        "200-399"
-    }
-}
-
-/// F-01: строгое сопоставление соединения с сервером (без fuzzy contains).
-/// Раньше `sl.contains(&active_lower)` зачислял трафик сервера «DE-10» узлу «DE-1»:
-/// критерий здоровья «есть живой трафик» получал чужие байты, упавший сервер
-/// считался живым и failover не переключал. Служебные группы (proxy/global/direct/reject)
-/// никогда не считаются трафиком конкретного узла.
-pub fn conn_chain_matches_server(chains: &[Value], active_lower: &str) -> bool {
-    chains.iter().any(|item| {
-        item.as_str()
-            .map(|s| {
-                let sl = s.to_lowercase();
-                if sl == "proxy" || sl == "global" || sl == "direct" || sl == "reject" {
-                    false
-                } else {
-                    sl == active_lower
-                }
-            })
-            .unwrap_or(false)
-    })
-}
-
-/// Снимок сокетов для вычисления прироста трафика (дельты): { id -> (cumulative_upload, cumulative_download) }
-static CONN_SNAPSHOT: std::sync::LazyLock<tokio::sync::Mutex<std::collections::HashMap<String, (u64, u64)>>> =
-    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
-
-#[allow(dead_code)]
-pub async fn clear_conn_snapshot() {
-    CONN_SNAPSHOT.lock().await.clear();
-}
-
-/// Снимок сокетов для per-device failover: { id -> (cumulative_upload, cumulative_download) }
-static DEV_CONN_SNAPSHOT: std::sync::LazyLock<tokio::sync::Mutex<std::collections::HashMap<String, (u64, u64)>>> =
-    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
-
-#[allow(dead_code)]
-pub async fn clear_dev_conn_snapshot() {
-    DEV_CONN_SNAPSHOT.lock().await.clear();
-}
-
-/// Снятие снимка сокетов через единый запрос /connections к Mihomo API
-#[allow(dead_code)]
-pub async fn fetch_connections_snapshot(
-    http: &reqwest::Client,
-    cfg: &crate::config::AppConfig,
-) -> Result<std::collections::HashMap<String, (u64, u64)>, String> {
-    let val = mihomo::m_get(http, cfg, "/connections").await?;
-    let mut map = std::collections::HashMap::new();
-    if let Some(conns) = val.get("connections").and_then(|c| c.as_array()) {
-        for c in conns {
-            if let Some(id) = c.get("id").and_then(|i| i.as_str()) {
-                let up = c.get("upload").and_then(|u| u.as_u64()).unwrap_or(0);
-                let dl = c.get("download").and_then(|d| d.as_u64()).unwrap_or(0);
-                map.insert(id.to_string(), (up, dl));
-            }
-        }
-    }
-    Ok(map)
-}
-
-/// Вычисление дельт трафика (download_delta, upload_delta) между предыдущим и текущим снимками
-pub fn calc_traffic_deltas(prev: (u64, u64), current: (u64, u64)) -> (u64, u64) {
-    let delta_up = current.0.saturating_sub(prev.0);
-    let delta_dl = current.1.saturating_sub(prev.1);
-    (delta_dl, delta_up)
-}
-
-/// Чистая обработка массива соединений с расчётом дельт трафика и детекцией чёрной дыры.
-/// Возвращает (has_live_traffic, total_delta_download, total_delta_upload, matched_sockets, is_blackhole).
-pub fn process_connections_delta(
-    conns: &[Value],
-    active_server_id: &str,
-    snapshot: &mut std::collections::HashMap<String, (u64, u64)>,
-) -> (bool, u64, u64, usize, bool) {
-    if active_server_id.is_empty() || active_server_id.eq_ignore_ascii_case("direct") {
-        return (false, 0, 0, 0, false);
-    }
-    let active_lower = active_server_id.to_lowercase();
-    let mut matched_sockets = 0usize;
-    let mut total_delta_upload = 0u64;
-    let mut total_delta_download = 0u64;
-
-    let mut current_ids = std::collections::HashSet::new();
-
-    for c in conns {
-        let Some(id) = c.get("id").and_then(|i| i.as_str()) else { continue; };
-        let cur_up = c.get("upload").and_then(|u| u.as_u64()).unwrap_or(0);
-        let cur_dl = c.get("download").and_then(|d| d.as_u64()).unwrap_or(0);
-        current_ids.insert(id.to_string());
-
-        let in_chains = c.get("chains")
-            .and_then(|ch| ch.as_array())
-            .map(|arr| conn_chain_matches_server(arr, &active_lower))
-            .unwrap_or(false);
-
-        let (prev_up, prev_dl) = snapshot.get(id).copied().unwrap_or((0, 0));
-        let (delta_dl, delta_up) = calc_traffic_deltas((prev_up, prev_dl), (cur_up, cur_dl));
-
-        snapshot.insert(id.to_string(), (cur_up, cur_dl));
-
-        if in_chains {
-            matched_sockets += 1;
-            total_delta_upload += delta_up;
-            total_delta_download += delta_dl;
-        }
-    }
-
-    // Удаляем закрытые соединения, чтобы предотвратить утечку памяти
-    snapshot.retain(|k, _| current_ids.contains(k));
-
-    let has_live_traffic = total_delta_download > 1024;
-    let is_blackhole = matched_sockets >= 3 && total_delta_upload > 5120 && total_delta_download == 0;
-
-    (has_live_traffic, total_delta_download, total_delta_upload, matched_sockets, is_blackhole)
-}
-
-/// Обработка соединений для отдельного устройства с расчётом дельт трафика и детекцией чёрной дыры.
-/// Сравнивает текущие соединения со снимком prev_snapshot.
-/// Возвращает (has_live_traffic, total_delta_download, total_delta_upload, matched_sockets, is_blackhole).
-pub fn process_device_connections_delta(
-    conns: &[Value],
-    device_ip: &str,
-    device_group: &str,
-    active_server_id: &str,
-    prev_snapshot: &std::collections::HashMap<String, (u64, u64)>,
-) -> (bool, u64, u64, usize, bool) {
-    if active_server_id.is_empty() || active_server_id.eq_ignore_ascii_case("direct") {
-        return (false, 0, 0, 0, false);
-    }
-    let active_lower = active_server_id.to_lowercase();
-    let group_lower = device_group.to_lowercase();
-    let mut matched_sockets = 0usize;
-    let mut total_delta_upload = 0u64;
-    let mut total_delta_download = 0u64;
-
-    for c in conns {
-        let Some(id) = c.get("id").and_then(|i| i.as_str()) else { continue; };
-        let cur_up = c.get("upload").and_then(|u| u.as_u64()).unwrap_or(0);
-        let cur_dl = c.get("download").and_then(|d| d.as_u64()).unwrap_or(0);
-
-        let src_ip = c.get("metadata")
-            .and_then(|m| m.get("sourceIP"))
-            .and_then(|s| s.as_str())
-            .unwrap_or("");
-
-        let chains = c.get("chains").and_then(|ch| ch.as_array());
-
-        let matches_device = src_ip == device_ip
-            || (!group_lower.is_empty() && chains.map_or(false, |arr| {
-                arr.iter().any(|item| {
-                    item.as_str().map_or(false, |s| s.to_lowercase() == group_lower)
-                })
-            }));
-
-        let matches_server = chains.map_or(false, |arr| {
-            conn_chain_matches_server(arr, &active_lower)
-        });
-
-        if matches_device && matches_server {
-            let (prev_up, prev_dl) = prev_snapshot.get(id).copied().unwrap_or((0, 0));
-            let (delta_dl, delta_up) = calc_traffic_deltas((prev_up, prev_dl), (cur_up, cur_dl));
-
-            matched_sockets += 1;
-            total_delta_upload += delta_up;
-            total_delta_download += delta_dl;
-        }
-    }
-
-    let has_live_traffic = total_delta_download > 1024;
-    let is_blackhole = matched_sockets >= 3 && total_delta_upload > 5120 && total_delta_download == 0;
-
-    (has_live_traffic, total_delta_download, total_delta_upload, matched_sockets, is_blackhole)
-}
-
-/// Единая функция оценки активного трафика и аномалии "Чёрная дыра" за один проход.
-/// Принимает опционально предзагруженный срез соединений (для исключения повторных запросов).
-pub async fn check_active_traffic_and_blackhole(
-    http: &reqwest::Client,
-    cfg: &crate::config::AppConfig,
-    active_server_id: &str,
-    cached_conns: Option<&[Value]>,
-) -> (bool, u64, u64, usize, bool) {
-    if let Some(conns) = cached_conns {
-        let mut snap = CONN_SNAPSHOT.lock().await;
-        let res = process_connections_delta(conns, active_server_id, &mut snap);
-        if res.4 {
-            crate::log_w!(
-                "Обнаружена аномалия 'Чёрная дыра' на сервере '{}': {} сокетов, delta upload: {} байт, delta download: 0 байт",
-                active_server_id, res.3, res.2
-            );
-        }
-        return res;
-    }
-
-    let Ok(val) = mihomo::m_get(http, cfg, "/connections").await else {
-        return (false, 0, 0, 0, false);
-    };
-    let Some(conns) = val.get("connections").and_then(|c| c.as_array()) else {
-        return (false, 0, 0, 0, false);
-    };
-
-    let mut snap = CONN_SNAPSHOT.lock().await;
-    let res = process_connections_delta(conns, active_server_id, &mut snap);
-    if res.4 {
-        crate::log_w!(
-            "Обнаружена аномалия 'Чёрная дыра' на сервере '{}': {} сокетов, delta upload: {} байт, delta download: 0 байт",
-            active_server_id, res.3, res.2
-        );
-    }
-    res
-}
-
-/// Пассивный детектор "Чёрной дыры" (DPI Zero-Download Anomaly):
-/// Детектирует DPI-сброс, когда прирост upload > 5 КБ при delta download == 0 на >= 3 активных сокетах.
-pub async fn check_blackhole_anomaly(
-    http: &reqwest::Client,
-    cfg: &crate::config::AppConfig,
-    active_server_id: &str,
-) -> bool {
-    let (_, _, _, _, is_blackhole) = check_active_traffic_and_blackhole(http, cfg, active_server_id, None).await;
-    is_blackhole
-}
-
-/// Проверка реального входящего клиентского трафика через активный узел в Mihomo по дельте.
-/// Возвращает (has_live_traffic, delta_download_bytes).
-/// Живой трафик — только при дельте download > 1 КБ (1024 байта) за интервал проверки.
-#[allow(dead_code)]
-pub async fn check_active_download_traffic(
-    http: &reqwest::Client,
-    cfg: &crate::config::AppConfig,
-    active_server_id: &str,
-) -> (bool, u64) {
-    let (has_live, dl_delta, _, _, _) = check_active_traffic_and_blackhole(http, cfg, active_server_id, None).await;
-    (has_live, dl_delta)
-}
-
-/// Определение исправности активного сервера:
-/// 1) Если обнаружена "чёрная дыра" — ВСЕГДА неисправен.
-/// 2) Если пинг в норме (ping > 0 && ping <= threshold) — исправен.
-/// 3) Если пинг сбоит, но клиенты реально скачивают трафик (has_live_traffic) — исправен.
-pub fn is_active_server_healthy(
-    ping: i64,
-    threshold: i64,
-    has_live_traffic: bool,
-    is_blackhole: bool,
-) -> bool {
-    !is_blackhole && ((ping > 0 && ping <= threshold) || has_live_traffic)
-}
-
-/// Проверка условий переключения Best-Ping с учётом гистерезиса:
-/// 1) Если обнаружена "чёрная дыра" — немедленное переключение.
-/// 2) Если сервер мёртв / не отвечает (act_ping <= 0) — немедленное переключение.
-/// 3) Сервер сбоит по задержке (act_ping > 0), и лучший кандидат превосходит его
-///    минимум на величину гистерезиса (best_ms + hysteresis < act_ping).
-pub fn should_best_ping_switch(
-    act_ping: i64,
-    is_blackhole: bool,
-    best_ms: i64,
-    hysteresis: i64,
-) -> bool {
-    if is_blackhole || act_ping <= 0 {
-        return true;
-    }
-    best_ms + hysteresis < act_ping
-}
-
-/// Лимит одновременных L7-проверок для мгновенного фейловера.
-pub const PING_CONCURRENCY_LIMIT: usize = 12;
-
-/// Построение компактного шортлиста серверов для быстрого параллельного L7 пинга (~1.5-2с).
-/// Отбирает до 8-10 лучших из Tier 1 (обычные VPS) и до 4 из Tier 2 (белые списки),
-/// суммарно не более 12 (PING_CONCURRENCY_LIMIT), чтобы пинг выполнился за один параллельный залп.
-pub fn build_fast_failover_shortlist(
-    servers: &[Server],
-    active_id: &str,
-    cfg: &crate::config::AppConfig,
-) -> Vec<String> {
-    let eligible: Vec<&Server> = servers
-        .iter()
-        .filter(|s| {
-            s.id != active_id
-                && !s.is_pool
-                && s.protocol != "URL-TEST"
-                && s.protocol != "FALLBACK"
-                && s.id != "DIRECT"
-                && s.id != "REJECT"
-                && s.id != "GLOBAL"
-                && !s.id.starts_with("AUTO-")
-        })
-        .collect();
-
-    let is_bs = |s: &Server| is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), cfg);
-
-    let mut tier1: Vec<&Server> = eligible.iter().filter(|s| !is_bs(s)).copied().collect();
-    let mut tier2: Vec<&Server> = eligible.iter().filter(|s| is_bs(s)).copied().collect();
-
-    // Сортировка кандидатов по известному историческому/кэшированному пингу
-    let sort_fn = |list: &mut Vec<&Server>| {
-        list.sort_by_key(|s| {
-            let p = crate::mihomo::cached_ping(&s.id).unwrap_or(s.ping_ms);
-            if p > 0 { p } else { i64::MAX }
-        });
-    };
-    sort_fn(&mut tier1);
-    sort_fn(&mut tier2);
-
-    let mut shortlist = Vec::with_capacity(PING_CONCURRENCY_LIMIT);
-
-    // До 8-10 из Tier 1
-    let t1_target = if tier2.is_empty() {
-        PING_CONCURRENCY_LIMIT
-    } else {
-        8.min(PING_CONCURRENCY_LIMIT)
-    };
-    for s in tier1.iter().take(t1_target) {
-        shortlist.push(s.id.clone());
-    }
-
-    // До 4 из Tier 2
-    let remaining = PING_CONCURRENCY_LIMIT.saturating_sub(shortlist.len());
-    for s in tier2.iter().take(remaining.min(4)) {
-        shortlist.push(s.id.clone());
-    }
-
-    // Если остались слоты, добираем из Tier 1
-    if shortlist.len() < PING_CONCURRENCY_LIMIT {
-        let current_count = shortlist.len();
-        for s in tier1.iter().skip(t1_target).take(PING_CONCURRENCY_LIMIT - current_count) {
-            if !shortlist.contains(&s.id) {
-                shortlist.push(s.id.clone());
-            }
-        }
-    }
-
-    // Если все еще остались слоты, добираем из Tier 2
-    if shortlist.len() < PING_CONCURRENCY_LIMIT {
-        let current_count = shortlist.len();
-        for s in tier2.iter().skip(4).take(PING_CONCURRENCY_LIMIT - current_count) {
-            if !shortlist.contains(&s.id) {
-                shortlist.push(s.id.clone());
-            }
-        }
-    }
-
-    shortlist
-}
-
-/// Ступенчатый опрос списка серверов через семафор (по 4 потока) с интервалом между запусками,
-/// чтобы минимизировать нагрузку на CPU роутера Keenetic.
-pub async fn ping_servers_staggered(
-    http: &reqwest::Client,
-    cfg: &crate::config::AppConfig,
-    ids: &[String],
-    timeout_ms: u64,
-    concurrency: usize,
-    interval_ms: u64,
-) -> std::collections::BTreeMap<String, i64> {
-    let mut out = std::collections::BTreeMap::new();
-    if ids.is_empty() {
-        return out;
-    }
-    let max_concurrency = concurrency.clamp(1, 6);
-    let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrency));
-    let shared_cfg = std::sync::Arc::new(cfg.clone());
-    let bounded_timeout = timeout_ms.clamp(1000, 2500);
-    let mut handles = Vec::new();
-
-    for id in ids {
-        let http_c = http.clone();
-        let cfg_c = shared_cfg.clone();
-        let sem_c = sem.clone();
-        let id_c = id.clone();
-        handles.push(tokio::spawn(async move {
-            let _permit = sem_c.acquire().await.ok();
-            let ms = mihomo::ping_server_url(&http_c, &cfg_c, &id_c, bounded_timeout, None).await;
-            (id_c, ms)
-        }));
-        if interval_ms > 0 {
-            tokio::time::sleep(Duration::from_millis(interval_ms)).await;
-        }
-    }
-
-    for h in handles {
-        if let Ok((id, ms)) = h.await {
-            out.insert(id, ms);
-        }
-    }
-    out
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SelectedTarget {
-    pub id: String,
-    pub ping_ms: i64,
-    pub is_quarantined: bool,
-    pub is_alive_slow: bool,
-    pub tier: u8,
-}
-
-impl std::ops::Deref for SelectedTarget {
-    type Target = str;
-    fn deref(&self) -> &Self::Target {
-        &self.id
-    }
-}
-
-impl PartialEq<str> for SelectedTarget {
-    fn eq(&self, other: &str) -> bool {
-        self.id == other
-    }
-}
-
-impl PartialEq<&str> for SelectedTarget {
-    fn eq(&self, other: &&str) -> bool {
-        self.id == *other
-    }
-}
-
-impl PartialEq<String> for SelectedTarget {
-    fn eq(&self, other: &String) -> bool {
-        &self.id == other
-    }
-}
-
-/// Чистая 4-уровневая иерархия отбора резервного сервера:
-/// 1. В пределах порога пинга вне карантина (0 < ping <= threshold)
-/// 2. Живой медленный вне карантина (ping > threshold)
-pub trait PingMap {
-    fn get_ping(&self, id: &str) -> Option<i64>;
-}
-
-impl PingMap for std::collections::HashMap<String, i64> {
-    fn get_ping(&self, id: &str) -> Option<i64> {
-        self.get(id).copied()
-    }
-}
-
-impl PingMap for std::collections::BTreeMap<String, i64> {
-    fn get_ping(&self, id: &str) -> Option<i64> {
-        self.get(id).copied()
-    }
-}
-
-/// Отбор кандидата только по 1-му уровню иерархии (Быстрый и здоровый: 0 < ping <= threshold && !quarantined).
-pub fn select_fast_healthy_from_candidates(
-    candidates: &[String],
-    pings: &impl PingMap,
-    is_quarantined_fn: impl Fn(&str) -> bool,
-    threshold: i64,
-    preserve_order: bool,
-) -> Option<SelectedTarget> {
-    let mut list = Vec::new();
-    for id in candidates {
-        if let Some(ms) = pings.get_ping(id.as_str()) {
-            if ms <= 0 {
-                continue;
-            }
-            if !is_quarantined_fn(id.as_str()) && ms <= threshold {
-                list.push((id.clone(), ms));
-            }
-        }
-    }
-    if list.is_empty() {
-        return None;
-    }
-    if !preserve_order {
-        list.sort_by_key(|(_, ms)| *ms);
-    }
-    list.first().map(|(id, ms)| SelectedTarget {
-        id: id.clone(),
-        ping_ms: *ms,
-        is_quarantined: false,
-        is_alive_slow: false,
-        tier: 1,
-    })
-}
-
-/// Отбор аварийного медленного / карантинного кандидата (уровни 2, 3, 4: slow или quarantined).
-pub fn select_fallback_emergency_from_candidates(
-    candidates: &[String],
-    pings: &impl PingMap,
-    is_quarantined_fn: impl Fn(&str) -> bool,
-    threshold: i64,
-    preserve_order: bool,
-) -> Option<SelectedTarget> {
-    let mut tier2 = Vec::new();
-    let mut tier3 = Vec::new();
-    let mut tier4 = Vec::new();
-
-    for id in candidates {
-        if let Some(ms) = pings.get_ping(id.as_str()) {
-            if ms <= 0 {
-                continue;
-            }
-            let quarantined = is_quarantined_fn(id.as_str());
-            if !quarantined && ms > threshold {
-                tier2.push((id.clone(), ms));
-            } else if quarantined && ms <= threshold {
-                tier3.push((id.clone(), ms));
-            } else if quarantined && ms > threshold {
-                tier4.push((id.clone(), ms));
-            }
-        }
-    }
-
-    let pick = |mut list: Vec<(String, i64)>, tier: u8, is_q: bool, is_slow: bool| -> Option<SelectedTarget> {
-        if list.is_empty() {
-            return None;
-        }
-        if !preserve_order {
-            list.sort_by_key(|(_, ms)| *ms);
-        }
-        list.first().map(|(id, ms)| SelectedTarget {
-            id: id.clone(),
-            ping_ms: *ms,
-            is_quarantined: is_q,
-            is_alive_slow: is_slow,
-            tier,
-        })
-    };
-
-    if let Some(target) = pick(tier2, 2, false, true) {
-        return Some(target);
-    }
-    if let Some(target) = pick(tier3, 3, true, false) {
-        return Some(target);
-    }
-    if let Some(target) = pick(tier4, 4, true, true) {
-        return Some(target);
-    }
-
-    None
-}
-
-/// Чистая 4-уровневая иерархия отбора резервного сервера:
-/// 1. В пределах порога пинга вне карантина (0 < ping <= threshold)
-/// 2. Живой медленный вне карантина (ping > threshold)
-/// 3. В пределах порога пинга в карантине (0 < ping <= threshold)
-/// 4. Живой медленный в карантине (ping > threshold)
-pub fn select_from_candidates(
-    candidates: &[String],
-    pings: &impl PingMap,
-    is_quarantined_fn: impl Fn(&str) -> bool,
-    threshold: i64,
-    preserve_order: bool,
-) -> Option<SelectedTarget> {
-    let mut tier1 = Vec::new();
-    let mut tier2 = Vec::new();
-    let mut tier3 = Vec::new();
-    let mut tier4 = Vec::new();
-
-    for id in candidates {
-        if let Some(ms) = pings.get_ping(id.as_str()) {
-            if ms <= 0 {
-                continue; // узел лежит или таймаут
-            }
-            let quarantined = is_quarantined_fn(id.as_str());
-            if !quarantined && ms <= threshold {
-                tier1.push((id.clone(), ms));
-            } else if !quarantined && ms > threshold {
-                tier2.push((id.clone(), ms));
-            } else if quarantined && ms <= threshold {
-                tier3.push((id.clone(), ms));
-            } else if quarantined && ms > threshold {
-                tier4.push((id.clone(), ms));
-            }
-        }
-    }
-
-    let pick = |mut list: Vec<(String, i64)>, tier: u8, is_q: bool, is_slow: bool| -> Option<SelectedTarget> {
-        if list.is_empty() {
-            return None;
-        }
-        if !preserve_order {
-            list.sort_by_key(|(_, ms)| *ms);
-        }
-        list.first().map(|(id, ms)| SelectedTarget {
-            id: id.clone(),
-            ping_ms: *ms,
-            is_quarantined: is_q,
-            is_alive_slow: is_slow,
-            tier,
-        })
-    };
-
-    if let Some(target) = pick(tier1, 1, false, false) {
-        return Some(target);
-    }
-    if let Some(target) = pick(tier2, 2, false, true) {
-        return Some(target);
-    }
-    if let Some(target) = pick(tier3, 3, true, false) {
-        return Some(target);
-    }
-    if let Some(target) = pick(tier4, 4, true, true) {
-        return Some(target);
-    }
-
-    None
-}
-
-/// Нужно ли после Best-Ping (активный узел здоров) идти дальше к автовозврату «Сценария Б» (баг 62).
-pub fn best_ping_should_continue_to_restore(
-    auto_restore_priority: bool,
-    chain_has_servers: bool,
-    smart_failover_enabled: bool,
-    active_is_bs: bool,
-) -> bool {
-    (auto_restore_priority && chain_has_servers) || (smart_failover_enabled && active_is_bs)
-}
-
-/// Кандидаты цепочки приоритетов в её порядке: только существующие сейчас серверы, кроме активного (баг 103).
-pub fn priority_chain_candidates(chain_ids: &[String], servers: &[Server], active_id: &str) -> Vec<String> {
-    chain_ids
-        .iter()
-        .filter(|id| id.as_str() != active_id && servers.iter().any(|s| &s.id == *id))
-        .cloned()
-        .collect()
-}
-
-/// Логика отбора кандидата при аварийном переключении (Strict Chain Boundary vs Best-of-Rest)
-/// с поддержкой Умного фейловера (Tier 1: обычные VPS -> Tier 2: серверы белых списков),
-/// приоритетом цепочки провайдеров (provider_chain) и отсечкой медленных якорей (Anchor Cutoff).
-pub fn select_failover_target_tiered(
-    has_chain: bool,
-    chain_candidate_ids: &[String],
-    all_servers: &[Server],
-    active_id: &str,
-    is_quarantined_fn: impl Fn(&str) -> bool,
-    is_whitelist_fn: impl Fn(&Server) -> bool,
-    smart_failover_enabled: bool,
-    pings: &impl PingMap,
-    threshold: i64,
-) -> Result<SelectedTarget, String> {
-    select_failover_target_tiered_with_provider_chain(
-        has_chain,
-        chain_candidate_ids,
-        all_servers,
-        active_id,
-        is_quarantined_fn,
-        is_whitelist_fn,
-        smart_failover_enabled,
-        &[],
-        pings,
-        threshold,
-    )
-}
-
-/// Расширенная версия select_failover_target_tiered с поддержкой provider_chain.
-pub fn select_failover_target_tiered_with_provider_chain(
-    has_chain: bool,
-    chain_candidate_ids: &[String],
-    all_servers: &[Server],
-    active_id: &str,
-    is_quarantined_fn: impl Fn(&str) -> bool,
-    is_whitelist_fn: impl Fn(&Server) -> bool,
-    smart_failover_enabled: bool,
-    provider_chain: &[String],
-    pings: &impl PingMap,
-    threshold: i64,
-) -> Result<SelectedTarget, String> {
-    if has_chain {
-        if chain_candidate_ids.is_empty() {
-            return Err("Все серверы цепочки приоритетов недоступны (в таймауте или карантине). Переключение заблокировано.".to_string());
-        }
-        if smart_failover_enabled {
-            let tier1_chain: Vec<String> = chain_candidate_ids
-                .iter()
-                .filter(|id| {
-                    all_servers.iter().find(|s| &s.id == *id).map_or(true, |s| !is_whitelist_fn(s))
-                })
-                .cloned()
-                .collect();
-            let tier2_chain: Vec<String> = chain_candidate_ids
-                .iter()
-                .filter(|id| {
-                    all_servers.iter().find(|s| &s.id == *id).map_or(false, |s| is_whitelist_fn(s))
-                })
-                .cloned()
-                .collect();
-
-            // Bucket 1: Здоровые и быстрые (<= threshold) из Tier 1
-            if !tier1_chain.is_empty() {
-                if let Some(target) = select_fast_healthy_from_candidates(&tier1_chain, pings, &is_quarantined_fn, threshold, true) {
-                    return Ok(target);
-                }
-            }
-            // Bucket 2: Здоровые и быстрые (<= threshold) из Tier 2
-            if !tier2_chain.is_empty() {
-                if let Some(target) = select_fast_healthy_from_candidates(&tier2_chain, pings, &is_quarantined_fn, threshold, true) {
-                    return Ok(target);
-                }
-            }
-            // Bucket 3: Аварийный отбор (slow / quarantine: Tier 1 -> Tier 2)
-            if !tier1_chain.is_empty() {
-                if let Some(target) = select_fallback_emergency_from_candidates(&tier1_chain, pings, &is_quarantined_fn, threshold, true) {
-                    return Ok(target);
-                }
-            }
-            if !tier2_chain.is_empty() {
-                if let Some(target) = select_fallback_emergency_from_candidates(&tier2_chain, pings, &is_quarantined_fn, threshold, true) {
-                    return Ok(target);
-                }
-            }
-        } else {
-            if let Some(target) = select_from_candidates(chain_candidate_ids, pings, &is_quarantined_fn, threshold, true) {
-                return Ok(target);
-            }
-        }
-        return Err("Все серверы цепочки приоритетов недоступны (в таймауте или карантине). Переключение заблокировано.".to_string());
-    }
-
-    // Резервный поиск среди всех остальных серверов (best-of-rest) — ТОЛЬКО если цепочка НЕ настроена
-    let eligible_servers: Vec<&Server> = all_servers
-        .iter()
-        .filter(|s| {
-            s.id != active_id
-                && !s.is_pool
-                && s.protocol != "URL-TEST"
-                && s.protocol != "FALLBACK"
-                && s.id != "DIRECT"
-                && s.id != "REJECT"
-                && s.id != "GLOBAL"
-                && !s.id.starts_with("AUTO-")
-        })
-        .collect();
-
-    if eligible_servers.is_empty() {
-        return Err("Нет резервных серверов для переключения".to_string());
-    }
-
-    if smart_failover_enabled {
-        // Разделяем на Tier 1 (обычные VPS) и Tier 2 (серверы белых списков)
-        let tier1_servers: Vec<&Server> = eligible_servers
-            .iter()
-            .filter(|s| !is_whitelist_fn(s))
-            .copied()
-            .collect();
-        let tier2_servers: Vec<&Server> = eligible_servers
-            .iter()
-            .filter(|s| is_whitelist_fn(s))
-            .copied()
-            .collect();
-
-        // Сортировка серверов по provider_chain, если она задана
-        let sort_by_prov = |servers: &[&Server]| -> Vec<String> {
-            if provider_chain.is_empty() {
-                return servers.iter().map(|s| s.id.clone()).collect();
-            }
-            let mut sorted: Vec<&Server> = servers.to_vec();
-            sorted.sort_by_key(|s| {
-                let prov = s.provider.as_deref().unwrap_or("");
-                provider_chain.iter().position(|p| p.eq_ignore_ascii_case(prov)).unwrap_or(usize::MAX)
-            });
-            sorted.iter().map(|s| s.id.clone()).collect()
-        };
-
-        let tier1_ids = sort_by_prov(&tier1_servers);
-        let tier2_ids = sort_by_prov(&tier2_servers);
-        let preserve_order = !provider_chain.is_empty();
-
-        // Bucket 1: Здоровые и быстрые (<= threshold) из Tier 1 (с учетом приоритета провайдеров)
-        if !tier1_ids.is_empty() {
-            if !provider_chain.is_empty() {
-                // Группируем по провайдерам по цепочке
-                let mut chosen: Option<SelectedTarget> = None;
-                for prov in provider_chain {
-                    let group_ids: Vec<String> = tier1_servers
-                        .iter()
-                        .filter(|s| s.provider.as_deref().map_or(false, |p| p.eq_ignore_ascii_case(prov)))
-                        .map(|s| s.id.clone())
-                        .collect();
-                    if !group_ids.is_empty() {
-                        if let Some(target) = select_fast_healthy_from_candidates(&group_ids, pings, &is_quarantined_fn, threshold, false) {
-                            chosen = Some(target);
-                            break;
-                        }
-                    }
-                }
-                if let Some(target) = chosen {
-                    return Ok(target);
-                }
-                // Оставшиеся Tier 1 провайдеры вне цепочки
-                let rest_ids: Vec<String> = tier1_servers
-                    .iter()
-                    .filter(|s| {
-                        let prov = s.provider.as_deref().unwrap_or("");
-                        !provider_chain.iter().any(|p| p.eq_ignore_ascii_case(prov))
-                    })
-                    .map(|s| s.id.clone())
-                    .collect();
-                if !rest_ids.is_empty() {
-                    if let Some(target) = select_fast_healthy_from_candidates(&rest_ids, pings, &is_quarantined_fn, threshold, false) {
-                        return Ok(target);
-                    }
-                }
-            } else if let Some(target) = select_fast_healthy_from_candidates(&tier1_ids, pings, &is_quarantined_fn, threshold, false) {
-                return Ok(target);
-            }
-        }
-
-        // Bucket 2: Здоровые и быстрые (<= threshold) из Tier 2 (whitelist_providers)
-        if !tier2_ids.is_empty() {
-            if !provider_chain.is_empty() {
-                let mut chosen: Option<SelectedTarget> = None;
-                for prov in provider_chain {
-                    let group_ids: Vec<String> = tier2_servers
-                        .iter()
-                        .filter(|s| s.provider.as_deref().map_or(false, |p| p.eq_ignore_ascii_case(prov)))
-                        .map(|s| s.id.clone())
-                        .collect();
-                    if !group_ids.is_empty() {
-                        if let Some(target) = select_fast_healthy_from_candidates(&group_ids, pings, &is_quarantined_fn, threshold, false) {
-                            chosen = Some(target);
-                            break;
-                        }
-                    }
-                }
-                if let Some(target) = chosen {
-                    return Ok(target);
-                }
-                let rest_ids: Vec<String> = tier2_servers
-                    .iter()
-                    .filter(|s| {
-                        let prov = s.provider.as_deref().unwrap_or("");
-                        !provider_chain.iter().any(|p| p.eq_ignore_ascii_case(prov))
-                    })
-                    .map(|s| s.id.clone())
-                    .collect();
-                if !rest_ids.is_empty() {
-                    if let Some(target) = select_fast_healthy_from_candidates(&rest_ids, pings, &is_quarantined_fn, threshold, false) {
-                        return Ok(target);
-                    }
-                }
-            } else if let Some(target) = select_fast_healthy_from_candidates(&tier2_ids, pings, &is_quarantined_fn, threshold, false) {
-                return Ok(target);
-            }
-        }
-
-        // Bucket 3: Аварийный fallback (slow / quarantine: Tier 1 -> Tier 2)
-        if !tier1_ids.is_empty() {
-            if let Some(target) = select_fallback_emergency_from_candidates(&tier1_ids, pings, &is_quarantined_fn, threshold, preserve_order) {
-                return Ok(target);
-            }
-        }
-        if !tier2_ids.is_empty() {
-            if let Some(target) = select_fallback_emergency_from_candidates(&tier2_ids, pings, &is_quarantined_fn, threshold, preserve_order) {
-                return Ok(target);
-            }
-        }
-    } else {
-        let candidate_ids: Vec<String> = eligible_servers.iter().map(|s| s.id.clone()).collect();
-        if let Some(target) = select_from_candidates(&candidate_ids, pings, &is_quarantined_fn, threshold, false) {
-            return Ok(target);
-        }
-    }
-
-    Err("Все резервные серверы недоступны".to_string())
-}
-
-pub fn select_failover_target(
-    has_chain: bool,
-    chain_candidate_ids: &[String],
-    all_servers: &[Server],
-    active_id: &str,
-    is_quarantined_fn: impl Fn(&str) -> bool,
-    pings: &impl PingMap,
-    threshold: i64,
-) -> Result<SelectedTarget, String> {
-    select_failover_target_tiered(
-        has_chain,
-        chain_candidate_ids,
-        all_servers,
-        active_id,
-        is_quarantined_fn,
-        |_| false,
-        false,
-        pings,
-        threshold,
-    )
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DeviceFailoverDecision {
-    KeepCurrent {
-        reason: String,
-        has_live_traffic: bool,
-    },
-    AutoRestore {
-        target: String,
-        ping_ms: i64,
-        is_main: bool,
-    },
-    Switch {
-        target: SelectedTarget,
-        reason: String,
-    },
-    NoBackupAvailable {
-        reason: String,
-    },
-}
-
-/// Чистая функция принятия решения для per-device failover.
-/// Учитывает наличие активного трафика загрузки (> 1 КБ), детекцию чёрной дыры,
-/// 4-уровневую иерархию и субординацию уровней (Smart Failover: Tier 1 VPS -> Tier 2 БС).
-pub fn evaluate_device_failover(
-    _device_ip: &str,
-    cur: &str,
-    servers_chain: &[String],
-    cur_ping: i64,
-    threshold: i64,
-    auto_restore: bool,
-    has_live_traffic: bool,
-    is_blackhole: bool,
-    all_servers: &[Server],
-    higher_pings: &impl PingMap,
-    candidate_pings: &impl PingMap,
-    is_quarantined_fn: impl Fn(&str) -> bool,
-    is_whitelist_fn: impl Fn(&Server) -> bool,
-    smart_failover_enabled: bool,
-) -> DeviceFailoverDecision {
-    let hyst = calc_hysteresis(threshold);
-    let is_cur_healthy = is_active_server_healthy(cur_ping, threshold, has_live_traffic, is_blackhole);
-
-    if is_cur_healthy {
-        // При активной загрузке (> 1 КБ) сбои пинга толерируются
-        if has_live_traffic && (cur_ping <= 0 || cur_ping > threshold) {
-            return DeviceFailoverDecision::KeepCurrent {
-                reason: format!("пинг сбоит ({cur_ping} мс), но идёт активная загрузка (> 1 КБ)"),
-                has_live_traffic: true,
-            };
-        }
-
-        // Автовозврат: только если на устройстве НЕТ активной загрузки (> 1 КБ)
-        if auto_restore && !has_live_traffic {
-            let higher = get_higher_priority_candidates(servers_chain, cur);
-            for target_server in higher {
-                // Не восстанавливаем на узел в карантине
-                if is_quarantined_fn(target_server) {
-                    continue;
-                }
-                if let Some(p) = higher_pings.get_ping(target_server) {
-                    if p > 0 && p <= hyst {
-                        let is_main = target_server == &servers_chain[0];
-                        return DeviceFailoverDecision::AutoRestore {
-                            target: target_server.to_string(),
-                            ping_ms: p,
-                            is_main,
-                        };
-                    }
-                }
-            }
-        }
-
-        return DeviceFailoverDecision::KeepCurrent {
-            reason: format!("пинг {cur_ping} мс в норме"),
-            has_live_traffic,
-        };
-    }
-
-    // Текущий сервер сбоит или попал в чёрную дыру
-    let reason = if is_blackhole {
-        "DPI чёрная дыра (upload > 5KB, download == 0)".to_string()
-    } else if cur_ping > 0 {
-        format!("пинг {cur_ping} мс > порога {threshold} мс")
-    } else {
-        "сервер не отвечает".to_string()
-    };
-
-    let cands: Vec<String> = servers_chain.iter().filter(|s| *s != cur).cloned().collect();
-    if cands.is_empty() {
-        return DeviceFailoverDecision::NoBackupAvailable { reason };
-    }
-
-    let target_res = select_failover_target_tiered(
-        true, // has_chain = true (соблюдает порядок цепочки dr.servers)
-        &cands,
-        all_servers,
-        cur,
-        &is_quarantined_fn,
-        &is_whitelist_fn,
-        smart_failover_enabled,
-        candidate_pings,
-        threshold,
-    );
-
-    match target_res {
-        Ok(target) => DeviceFailoverDecision::Switch { target, reason },
-        Err(_) => DeviceFailoverDecision::NoBackupAvailable { reason },
-    }
-}
+pub mod types;
+pub mod probe;
+pub mod quarantine;
+pub mod history;
+pub mod switcher;
+pub mod scoring;
+
+pub use types::*;
+pub use probe::*;
+pub use quarantine::*;
+pub use history::*;
+pub use switcher::*;
+pub use scoring::*;
 
 pub const ACTIVE_FAILOVER_CHECK_INTERVAL_SECS: u64 = 10;
 
@@ -2951,21 +45,67 @@ pub async fn is_post_switch_pending() -> bool {
     }
 }
 
+/// Причина пропуска сканирования Failover / детектора БС (Баг 104)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    FailoverDisabled,
+    ServiceStopped,
+    SpeedtestRunning,
+    CheckInProgress,
+}
+
+impl SkipReason {
+    pub fn message(&self, prefix: &str) -> String {
+        match self {
+            SkipReason::FailoverDisabled => format!("{prefix} пропущен: Failover выключен"),
+            SkipReason::ServiceStopped => format!("{prefix} пропущен: служба XKeen остановлена пользователем"),
+            SkipReason::SpeedtestRunning => format!("{prefix} пропущен: выполняется Speedtest"),
+            SkipReason::CheckInProgress => format!("{prefix} пропущен: проверка уже выполняется"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ScanGuardFlags {
+    pub failover_enabled: bool,
+    pub service_stopped: bool,
+    pub speedtest_running: bool,
+    pub check_in_progress: bool,
+}
+
+/// Единая проверка охранных флагов для run_check, run_device_check и run_whitelist_detector_check (Баг 104)
+pub fn scan_allowed(flags: ScanGuardFlags) -> Result<(), SkipReason> {
+    if !flags.failover_enabled {
+        return Err(SkipReason::FailoverDisabled);
+    }
+    if flags.service_stopped {
+        return Err(SkipReason::ServiceStopped);
+    }
+    if flags.speedtest_running {
+        return Err(SkipReason::SpeedtestRunning);
+    }
+    if flags.check_in_progress {
+        return Err(SkipReason::CheckInProgress);
+    }
+    Ok(())
+}
+
 /// Одна итерация проверки. Возвращает текст решения (для ручного прогона).
 pub async fn run_check(state: &AppState) -> Result<String, String> {
-    // DIAG-01: Изоляция от Speedtest — если выполняется замер скорости, пропускаем переключение failover
-    let _speedtest_guard = match state.speedtest_lock.try_lock() {
-        Ok(guard) => guard,
-        Err(_) => {
+    // DIAG-01 / F-07 / Баг 104: единая проверка через scan_allowed
+    let speedtest_res = state.speedtest_lock.try_lock();
+    if let Err(reason) = scan_allowed(ScanGuardFlags {
+        failover_enabled: true,
+        service_stopped: crate::watchdog::is_service_stopped(),
+        speedtest_running: speedtest_res.is_err(),
+        check_in_progress: false,
+    }) {
+        if reason == SkipReason::SpeedtestRunning {
             crate::log_i!("Failover пропущен: в данный момент выполняется Speedtest");
-            return Ok("Проверка failover пропущена: выполняется Speedtest".to_string());
         }
-    };
-
-    // F-07: служба остановлена пользователем — failover не трогает маршруты и соединения
-    if crate::watchdog::is_service_stopped() {
-        return Ok("Failover пропущен: служба XKeen остановлена пользователем".to_string());
+        return Ok(reason.message("Failover"));
     }
+    let _speedtest_guard = speedtest_res.expect("speedtest_res is Ok");
 
     // F-04: ручной прогон ждёт завершения фоновой итерации (и наоборот)
     let _check_guard = CHECK_IN_PROGRESS.lock().await;
@@ -3042,7 +182,19 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
             account_whitelist_cycle_delta(dl_bytes, up_bytes);
         }
 
-        let is_active_healthy = is_active_server_healthy(act_ping, threshold, has_live_traffic, is_blackhole);
+        let is_active_vkturn = act_id == crate::vkturn::PROXY_NAME || act_name == crate::vkturn::PROXY_NAME;
+        let is_manual_active = {
+            let last_act = LAST_ACTIVATED_SERVER.lock().await;
+            last_act.as_ref().map_or(false, |(id, _, manual)| (id == act_id || (is_active_vkturn && id == crate::vkturn::PROXY_NAME)) && *manual)
+        };
+        let is_manual_vkturn = is_active_vkturn && is_manual_active;
+        let vkturn_tunnel_ready = if is_active_vkturn {
+            state.vkturn.rt.read().await.tunnel_ready()
+        } else {
+            false
+        };
+
+        let is_active_healthy = is_active_server_healthy(act_ping, threshold, has_live_traffic, is_blackhole) || (is_manual_vkturn && vkturn_tunnel_ready);
 
         if is_active_healthy {
             if has_live_traffic && (act_ping <= 0 || act_ping > threshold) {
@@ -3051,7 +203,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                     act_name, act_ping, dl_bytes / 1024
                 );
             }
-            if best_ping_should_continue_to_restore(
+            if !is_manual_vkturn && best_ping_should_continue_to_restore(
                 cfg.failover.auto_restore_priority,
                 chain_has_servers,
                 cfg.failover.smart_failover_enabled,
@@ -3178,7 +330,7 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
 
             // Гистерезис Best-Ping:
             let hysteresis = cfg.failover.best_ping_hysteresis_ms as i64;
-            if !should_best_ping_switch(act_ping, is_blackhole, best_ms, hysteresis) {
+            if !should_best_ping_switch(act_ping, threshold, is_blackhole, best_ms, hysteresis) {
                 let msg = format!(
                     "Best-Ping Failover: активный '{}' ({act_ping} мс) сбоит, но лучший кандидат '{}' ({best_ms} мс) не превышает гистерезис ({hysteresis} мс) — переключение отклонено",
                     act_name, best_name
@@ -3295,11 +447,24 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
         account_whitelist_cycle_delta(dl_bytes, up_bytes);
     }
 
+    let is_active_vkturn = active.id == crate::vkturn::PROXY_NAME || active.name == crate::vkturn::PROXY_NAME;
+    let is_manual_active = {
+        let last_act = LAST_ACTIVATED_SERVER.lock().await;
+        last_act.as_ref().map_or(false, |(id, _, manual)| (id == &active.id || (is_active_vkturn && id == crate::vkturn::PROXY_NAME)) && *manual)
+    };
+    let is_manual_vkturn = is_active_vkturn && is_manual_active;
+    let vkturn_tunnel_ready = if is_active_vkturn {
+        state.vkturn.rt.read().await.tunnel_ready()
+    } else {
+        false
+    };
+
     // ПРИОРИТЕТ РЕАЛЬНОГО ТРАФИКА:
     // Сервер признаётся живым и исправным:
     // 1) Если клиенты прямо сейчас скачивают трафик (дельта download > 1 КБ) и нет аномалии черной дыры.
     // 2) ИЛИ если L7-пинг в норме (<= threshold) и нет аномалии черной дыры.
-    let is_active_healthy = !is_blackhole && ((current > 0 && current <= threshold) || has_live_traffic);
+    // 3) ИЛИ если активен ручной выбор VK-туннеля и tunnel_ready() == true.
+    let is_active_healthy = !is_blackhole && ((current > 0 && current <= threshold) || has_live_traffic || (is_manual_vkturn && vkturn_tunnel_ready));
 
     if has_live_traffic && (current <= 0 || current > threshold) {
         crate::log_i!(
@@ -3534,8 +699,8 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
     };
 
     let is_active_bs = is_whitelist_server_full(&active.name, &active.id, active.provider.as_deref(), &cfg);
-    let should_restore_chain = cfg.failover.auto_restore_priority && !chain.is_empty();
-    let should_restore_smart = cfg.failover.smart_failover_enabled && is_active_bs;
+    let should_restore_chain = !is_manual_vkturn && cfg.failover.auto_restore_priority && !chain.is_empty();
+    let should_restore_smart = !is_manual_vkturn && cfg.failover.smart_failover_enabled && is_active_bs;
 
     if should_restore_chain || should_restore_smart {
         // Если активный сервер уже совпадает с целевым сервером Canary, сбрасываем стадию
@@ -3596,6 +761,11 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                     .cloned()
                     .collect();
 
+                let unreachable_ids: std::collections::HashSet<String> = {
+                    let q_guard = SERVER_QUARANTINE.lock().await;
+                    q_guard.keys().cloned().collect()
+                };
+                let all_tier1 = filter_scouting_candidates(&all_tier1, &unreachable_ids);
                 let offset = SMART_RESTORE_SCOUT_OFFSET.load(std::sync::atomic::Ordering::Relaxed);
                 let (scout_window, next_offset) = select_scouting_window(&all_tier1, offset, SMART_RESTORE_WINDOW_SIZE);
                 SMART_RESTORE_SCOUT_OFFSET.store(next_offset, std::sync::atomic::Ordering::Relaxed);
@@ -3646,8 +816,9 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                             // Переключаем селектор-группу Canary на кандидата без сброса сокетов клиентов
                             let _ = mihomo::switch_selector(&state.http, &cfg, mihomo::CANARY_PROBE_GROUP_NAME, &pri.id).await;
 
-                            // Выполняем реальную загрузку тестового блока 64 КБ полезной нагрузки через 127.0.0.1:7894
-                            let download_res = perform_canary_download(CANARY_PAYLOAD_PORT, CANARY_PROBE_BYTES, ping_timeout.max(5000)).await;
+                            // Выполняем реальную загрузку тестового блока 64 КБ полезной нагрузки через локальный слушатель Canary Probe
+                            let canary_url = canary_payload_url(&cfg);
+                            let download_res = perform_canary_download_with_url(canary_payload_port(), &canary_url, CANARY_PROBE_BYTES, ping_timeout.max(5000)).await;
 
                             let (downloaded_bytes, measured_speed_kbps) = match download_res {
                                 Ok((b, s)) => (b, s),
@@ -3765,7 +936,8 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                         }
 
                         // Финальная квалификационная загрузка 64 КБ полезной нагрузки
-                        if let Ok((final_bytes, _)) = perform_canary_download(CANARY_PAYLOAD_PORT, CANARY_PROBE_BYTES, ping_timeout.max(5000)).await {
+                        let canary_url = canary_payload_url(&cfg);
+                        if let Ok((final_bytes, _)) = perform_canary_download_with_url(canary_payload_port(), &canary_url, CANARY_PROBE_BYTES, ping_timeout.max(5000)).await {
                             canary.total_bytes += final_bytes;
                             canary.probes_passed += 1;
                         }
@@ -3801,6 +973,10 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
                             pri.name, active.name
                         );
                         let is_from_bs = is_whitelist_server_full(&active.name, &active.id, active.provider.as_deref(), &cfg);
+                        if is_manual_vkturn {
+                            crate::log_i!("Failover: пропуск переключения Canary soak test — активен ручной выбор VK-туннеля");
+                            return Ok("Пропуск переключения: активен ручной выбор VK-туннеля".to_string());
+                        }
                         let switch_res = if is_from_bs && !target_is_bs {
                             // Только при переходе с БС на обычный VPS переключаем со сбросом сокетов
                             mihomo::switch_server(&state.http, &cfg, &pri.id).await
@@ -3879,19 +1055,20 @@ pub async fn run_check(state: &AppState) -> Result<String, String> {
 /// пинг текущего; отвалился или пинг > порога → переключение на следующий
 /// живой из цепочки; автовозврат на основной, когда восстановился.
 pub async fn run_device_check(state: &AppState) -> Result<String, String> {
-    // DIAG-01: Изоляция от Speedtest
-    let _speedtest_guard = match state.speedtest_lock.try_lock() {
-        Ok(guard) => guard,
-        Err(_) => {
+    // DIAG-01 / F-07 / Баг 104: единая проверка через scan_allowed
+    let speedtest_res = state.speedtest_lock.try_lock();
+    if let Err(reason) = scan_allowed(ScanGuardFlags {
+        failover_enabled: true,
+        service_stopped: crate::watchdog::is_service_stopped(),
+        speedtest_running: speedtest_res.is_err(),
+        check_in_progress: false,
+    }) {
+        if reason == SkipReason::SpeedtestRunning {
             crate::log_i!("Per-device failover пропущен: выполняется Speedtest");
-            return Ok("Per-device failover пропущен: выполняется Speedtest".to_string());
         }
-    };
-
-    // F-07: служба остановлена пользователем — per-device failover не переключает группы
-    if crate::watchdog::is_service_stopped() {
-        return Ok("Per-device failover пропущен: служба XKeen остановлена пользователем".to_string());
+        return Ok(reason.message("Per-device failover"));
     }
+    let _speedtest_guard = speedtest_res.expect("speedtest_res is Ok");
 
     // F-04: сериализация с run_check (общий CHECK_IN_PROGRESS)
     let _check_guard = CHECK_IN_PROGRESS.lock().await;
@@ -4157,7 +1334,15 @@ mod tests {
 
     /// Продакшн-часть исходника (без модуля тестов) для анти-регрессионных проверок вызовов.
     fn production_source() -> &'static str {
-        let src = include_str!("failover.rs");
+        let src = concat!(
+            include_str!("types.rs"), "\n",
+            include_str!("probe.rs"), "\n",
+            include_str!("quarantine.rs"), "\n",
+            include_str!("history.rs"), "\n",
+            include_str!("switcher.rs"), "\n",
+            include_str!("scoring.rs"), "\n",
+            include_str!("mod.rs")
+        );
         let cut = src.find("#[cfg(test)]\nmod tests").or_else(|| src.find("#[cfg(test)]\r\nmod tests")).unwrap_or(src.len());
         &src[..cut]
     }
@@ -6742,8 +3927,8 @@ mod tests {
         // 3. Пинг в таймауте (-1), но идет реальный трафик (has_live_traffic=true) -> исправен!
         assert!(is_active_server_healthy(-1, threshold, true, false));
 
-        // 4. Пинг выше порога (250мс > 200мс), но идет реальный трафик -> исправен!
-        assert!(is_active_server_healthy(250, threshold, true, false));
+        // 4. Пинг выше порога (250мс > 200мс), даже при трафике -> неисправен (Баг 63)
+        assert!(!is_active_server_healthy(250, threshold, true, false));
 
         // 5. Пинг выше порога (250мс), трафика нет -> неисправен
         assert!(!is_active_server_healthy(250, threshold, false, false));
@@ -6755,28 +3940,29 @@ mod tests {
     #[test]
     fn test_should_best_ping_switch_hysteresis_matrix() {
         let hysteresis = 40i64;
+        let threshold = 200i64;
 
         // 1. Активный сервер мертв (пинг <= 0) -> немедленное переключение
-        assert!(should_best_ping_switch(-1, false, 80, hysteresis));
-        assert!(should_best_ping_switch(0, false, 80, hysteresis));
+        assert!(should_best_ping_switch(-1, threshold, false, 80, hysteresis));
+        assert!(should_best_ping_switch(0, threshold, false, 80, hysteresis));
 
         // 2. Активный сервер — черная дыра (is_blackhole = true) -> немедленное переключение
-        assert!(should_best_ping_switch(30, true, 80, hysteresis));
+        assert!(should_best_ping_switch(30, threshold, true, 80, hysteresis));
 
         // 3. Активный 110мс, кандидат 80мс: 80 + 40 = 120 >= 110 -> переключение ОТКЛОНЕНО
-        assert!(!should_best_ping_switch(110, false, 80, hysteresis));
+        assert!(!should_best_ping_switch(110, threshold, false, 80, hysteresis));
 
         // 4. Активный 110мс, кандидат 60мс: 60 + 40 = 100 < 110 -> переключение РАЗРЕШЕНО
-        assert!(should_best_ping_switch(110, false, 60, hysteresis));
+        assert!(should_best_ping_switch(110, threshold, false, 60, hysteresis));
 
-        // 5. Активный 210мс (выше threshold 200), кандидат 190мс: 190 + 40 = 230 >= 210 -> ОТКЛОНЕНО
-        assert!(!should_best_ping_switch(210, false, 190, hysteresis));
+        // 5. Активный 210мс (выше threshold 200), кандидат 190мс (<= 200) -> гистерезис не блокирует (Баг 63)
+        assert!(should_best_ping_switch(210, threshold, false, 190, hysteresis));
 
         // 6. Активный 260мс, кандидат 190мс: 190 + 40 = 230 < 260 -> РАЗРЕШЕНО
-        assert!(should_best_ping_switch(260, false, 190, hysteresis));
+        assert!(should_best_ping_switch(260, threshold, false, 190, hysteresis));
 
         // 7. Медленный резерв: активный 260мс, кандидат 250мс: 250 + 40 = 290 >= 260 -> ОТКЛОНЕНО
-        assert!(!should_best_ping_switch(260, false, 250, hysteresis));
+        assert!(!should_best_ping_switch(260, threshold, false, 250, hysteresis));
     }
 
     #[test]
@@ -7151,7 +4337,7 @@ mod tests {
         });
 
         save_quarantine_to_file(&tmp, &map).await.unwrap();
-        let loaded = load_quarantine_from_file(&tmp).await.unwrap();
+        let loaded = load_quarantine_from_file_at(&tmp, now).await.unwrap();
 
         assert!(loaded.contains_key("srv_active"), "Active entry must be preserved");
         assert!(loaded.contains_key("srv_expired_recent"), "Recent failure within 12h must be retained for progressive escalation");
@@ -7709,7 +4895,7 @@ mod tests {
         });
 
         save_quarantine_to_file(&tmp, &map).await.unwrap();
-        let loaded = load_quarantine_from_file(&tmp).await.unwrap();
+        let loaded = load_quarantine_from_file_at(&tmp, now).await.unwrap();
 
         assert!(loaded.contains_key("srv_boundary_exact"), "Boundary exact (43200s) must be retained");
         assert!(loaded.contains_key("srv_boundary_inside"), "Boundary inside (43199s) must be retained");
@@ -8189,8 +5375,181 @@ proxies:
     }
 
     #[test]
+    fn regression_bug_42b_provider_with_normal_exceptions() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist_providers = vec!["P".into()];
+        cfg.normal_servers = vec!["P:b".into()];
+        assert!(
+            is_whitelist_server_full("Node A", "P:a", Some("P"), &cfg),
+            "node in whitelist_providers and not in normal_servers must be BS"
+        );
+        assert!(
+            !is_whitelist_server_full("Node B", "P:b", Some("P"), &cfg),
+            "node in whitelist_providers but listed in normal_servers must NOT be BS"
+        );
+    }
+
+    #[test]
+    fn regression_bug_104b_detector_scan_respects_guards() {
+        let all_clear = ScanGuardFlags {
+            failover_enabled: true,
+            service_stopped: false,
+            speedtest_running: false,
+            check_in_progress: false,
+        };
+        assert_eq!(scan_allowed(all_clear), Ok(()));
+        assert_eq!(
+            scan_allowed(ScanGuardFlags { failover_enabled: false, ..all_clear }),
+            Err(SkipReason::FailoverDisabled)
+        );
+        assert_eq!(
+            scan_allowed(ScanGuardFlags { service_stopped: true, ..all_clear }),
+            Err(SkipReason::ServiceStopped)
+        );
+        assert_eq!(
+            scan_allowed(ScanGuardFlags { speedtest_running: true, ..all_clear }),
+            Err(SkipReason::SpeedtestRunning)
+        );
+        assert_eq!(
+            scan_allowed(ScanGuardFlags { check_in_progress: true, ..all_clear }),
+            Err(SkipReason::CheckInProgress)
+        );
+    }
+
+    #[test]
+    fn regression_bug_105b_detector_state_persists() {
+        let dir = std::env::temp_dir().join(format!("xkeen_bug105_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("detector_state.json");
+
+        persist_detector_state(&path, WhitelistDetectorState::WhitelistDetected).unwrap();
+        assert_eq!(load_detector_state(&path), WhitelistDetectorState::WhitelistDetected);
+
+        persist_detector_state(&path, WhitelistDetectorState::Normal).unwrap();
+        assert_eq!(load_detector_state(&path), WhitelistDetectorState::Normal);
+
+        // Повреждённый файл -> Normal
+        std::fs::write(&path, "{broken json").unwrap();
+        assert_eq!(load_detector_state(&path), WhitelistDetectorState::Normal);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn regression_bug_106b_slow_nodes_are_not_offline() {
+        let pings = [-1, 0, -1, 500, 600, 700, 800, 50, 80, 120];
+        let (offline, slow, ok) = probe::classify_pings(&pings, 300);
+        assert_eq!(offline, 3, "only p <= 0 are offline");
+        assert_eq!(slow, 4, "pings > max_ping must be counted as slow, not offline");
+        assert_eq!(ok, 3, "pings in 1..=max_ping must be counted as ok");
+
+        let items = vec![0usize, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let s1 = probe::sample_candidates(&items, 4, 101);
+        let s2 = probe::sample_candidates(&items, 4, 202);
+        assert_eq!(s1.len(), 4);
+        assert_eq!(s2.len(), 4);
+        let uniq: std::collections::HashSet<usize> = s1.iter().copied().collect();
+        assert_eq!(uniq.len(), 4, "sampled items must be unique");
+        assert_ne!(s1, s2, "different seeds should produce different samples");
+    }
+
+    #[test]
+    fn regression_bug_63b_traffic_does_not_mask_slow_active_node() {
+        let threshold = 200i64;
+        // 63.1: пинг > порога не маскируется живым трафиком
+        assert!(
+            !is_active_server_healthy(350, threshold, true, false),
+            "slow active node (> threshold) must be unhealthy even with live traffic"
+        );
+        // При таймауте (ping <= 0) живой трафик по-прежнему защищает от ложного срыва
+        assert!(is_active_server_healthy(-1, threshold, true, false));
+        // В пределах порога (<= threshold) узел здоров
+        assert!(is_active_server_healthy(150, threshold, false, false));
+
+        // 63.2: если активный > порога, а кандидат <= порога, гистерезис НЕ блокирует переключение
+        assert!(
+            should_best_ping_switch(210, threshold, false, 190, 40),
+            "candidate <= threshold must bypass hysteresis when active > threshold"
+        );
+        // Если оба <= порога или оба > порога, гистерезис продолжает действовать
+        assert!(!should_best_ping_switch(110, threshold, false, 80, 40));
+        assert!(!should_best_ping_switch(260, threshold, false, 250, 40));
+    }
+
+    #[test]
+    fn regression_bug_113b_canary_port_and_url_come_from_config() {
+        assert_eq!(canary_payload_port(), crate::routing::CANARY_PROBE_PORT);
+
+        let mut cfg = crate::config::AppConfig::default();
+        assert_eq!(
+            canary_payload_url(&cfg),
+            "http://speed.cloudflare.com/__down?bytes=65536"
+        );
+
+        cfg.failover.canary_url = "https://mirror.example.org/64k.bin".to_string();
+        assert_eq!(
+            canary_payload_url(&cfg),
+            "https://mirror.example.org/64k.bin"
+        );
+
+        // Пустая/пробельная строка откатывается к дефолтному URL
+        cfg.failover.canary_url = "   ".to_string();
+        assert_eq!(
+            canary_payload_url(&cfg),
+            "http://speed.cloudflare.com/__down?bytes=65536"
+        );
+
+        // Скаутинг пропускает заведомо недоступные VPS-кандидаты
+        let cands = vec![test_server("vps-ok"), test_server("vps-dead")];
+        let mut unreachable = std::collections::HashSet::new();
+        unreachable.insert("vps-dead".to_string());
+        let filtered = filter_scouting_candidates(&cands, &unreachable);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "vps-ok");
+    }
+
+    #[tokio::test]
+    async fn regression_bug_a03_amnesty_boundary_is_deterministic() {
+        let _lock = FAILOVER_TEST_LOCK.lock().await;
+        let tmp = std::env::temp_dir().join(format!("q_a03_det_{}.json", std::process::id()));
+        let _ = tokio::fs::remove_file(&tmp).await;
+
+        const FIXED_NOW: u64 = 1_700_000_000;
+        let mut map = std::collections::HashMap::new();
+        map.insert("at_11_59_59".into(), PersistentQuarantineEntry {
+            server_name: "11h59m59s".into(),
+            quarantined_at: FIXED_NOW - 43199,
+            fail_count: 1,
+            duration_secs: 900,
+            reason: "inside".into(),
+        });
+        map.insert("at_12_00_00".into(), PersistentQuarantineEntry {
+            server_name: "12h00m00s".into(),
+            quarantined_at: FIXED_NOW - 43200,
+            fail_count: 1,
+            duration_secs: 900,
+            reason: "exact".into(),
+        });
+        map.insert("at_12_00_01".into(), PersistentQuarantineEntry {
+            server_name: "12h00m01s".into(),
+            quarantined_at: FIXED_NOW - 43201,
+            fail_count: 1,
+            duration_secs: 900,
+            reason: "outside".into(),
+        });
+
+        save_quarantine_to_file(&tmp, &map).await.unwrap();
+        let loaded = load_quarantine_from_file_at(&tmp, FIXED_NOW).await.unwrap();
+        assert!(loaded.contains_key("at_11_59_59"), "43199s must be retained");
+        assert!(loaded.contains_key("at_12_00_00"), "43200s must be retained");
+        assert!(!loaded.contains_key("at_12_00_01"), "43201s must be purged");
+
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+
+    #[test]
     fn regression_vkturn_25_unready_vkturn_excluded_from_candidates() {
-        let src = include_str!("failover.rs");
+        let src = production_source();
         assert!(
             src.contains("tunnel_ready()"),
             "failover must check vkturn.rt.read().await.tunnel_ready() before considering vkturn as BS/failover candidate"
@@ -8212,6 +5571,73 @@ proxies:
         assert!(
             eval_body.contains("PROXY_NAME") && eval_body.contains("tunnel_ready"),
             "evaluate_and_apply_whitelist_detector must filter unready vkturn from bs_priority_chain and servers"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_manual_vkturn_selection_suppresses_smart_and_chain_restore() {
+        let _lock = FAILOVER_TEST_LOCK.lock().await;
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.failover.smart_failover_enabled = true;
+        cfg.failover.auto_restore_priority = true;
+        cfg.failover.priority_chain = vec!["vps_1".into(), "vps_2".into()];
+
+        let mut active_vk = test_server(crate::vkturn::PROXY_NAME);
+        active_vk.provider = Some(crate::vkturn::PROVIDER_ID.into());
+
+        // When manually selected:
+        record_manual_switch(crate::vkturn::PROXY_NAME).await;
+
+        let is_active_vkturn = active_vk.id == crate::vkturn::PROXY_NAME || active_vk.name == crate::vkturn::PROXY_NAME;
+        let is_manual_active = {
+            let last_act = LAST_ACTIVATED_SERVER.lock().await;
+            last_act.as_ref().map_or(false, |(id, _, manual)| (id == &active_vk.id || (is_active_vkturn && id == crate::vkturn::PROXY_NAME)) && *manual)
+        };
+        let is_manual_vkturn = is_active_vkturn && is_manual_active;
+        assert!(is_manual_vkturn, "VK Calls tunnel must be recognized as manually active");
+
+        let is_active_bs = is_whitelist_server_full(&active_vk.name, &active_vk.id, active_vk.provider.as_deref(), &cfg);
+        let chain = vec![test_server("vps_1")];
+        let should_restore_chain = !is_manual_vkturn && cfg.failover.auto_restore_priority && !chain.is_empty();
+        let should_restore_smart = !is_manual_vkturn && cfg.failover.smart_failover_enabled && is_active_bs;
+
+        assert!(!should_restore_chain, "Chain restore must be suppressed for manually selected VK tunnel");
+        assert!(!should_restore_smart, "Smart failover restore must be suppressed for manually selected VK tunnel");
+
+        // When not manually selected:
+        *LAST_ACTIVATED_SERVER.lock().await = Some((crate::vkturn::PROXY_NAME.into(), Instant::now(), false));
+        let is_manual_active_auto = {
+            let last_act = LAST_ACTIVATED_SERVER.lock().await;
+            last_act.as_ref().map_or(false, |(id, _, manual)| (id == &active_vk.id || (is_active_vkturn && id == crate::vkturn::PROXY_NAME)) && *manual)
+        };
+        let is_manual_vkturn_auto = is_active_vkturn && is_manual_active_auto;
+        let should_restore_smart_auto = !is_manual_vkturn_auto && cfg.failover.smart_failover_enabled && is_active_bs;
+        assert!(should_restore_smart_auto, "Automatic activation of BS server must allow smart restore");
+    }
+
+    #[test]
+    fn test_selector_groups_not_reverted_during_soak() {
+        let src = production_source();
+        assert!(
+            src.contains("if is_manual_vkturn {") && src.contains("активен ручной выбор VK-туннеля"),
+            "Canary soak test completion must guard against reverting selector groups away from manual VK tunnel"
+        );
+    }
+
+    #[test]
+    fn regression_bug_a01_quarantine_path_is_not_cwd() {
+        let dir = std::env::temp_dir().join(format!("xkeen-a01-{}", std::process::id()));
+        let cfg = dir.join("config.json");
+        let qp = quarantine_path(&cfg);
+        assert_eq!(qp, dir.join("quarantine.json"));
+
+        // Default test quarantine path without override must be in temp_dir, never in CWD
+        set_quarantine_path_override(None);
+        let default_qp = get_quarantine_path();
+        assert!(
+            default_qp.starts_with(std::env::temp_dir()),
+            "default test quarantine path must live in temp_dir, got: {}",
+            default_qp.display()
         );
     }
 }

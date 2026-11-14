@@ -3,13 +3,19 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
 import * as api from './api'
+import { useDirtyGuard, clearAllDirty } from './utils/dirtyGuard'
+import { useTabCache, clearTabCache } from './utils/tabCache'
 
 // @ts-ignore
 globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 // Mock heavy sub-components
 vi.mock('./components/Dashboard', () => ({
-  default: () => <div data-testid="dashboard-view">Dashboard View</div>,
+  default: ({ notify }: { notify?: (msg: string, err?: boolean) => void }) => (
+    <div data-testid="dashboard-view" onClick={() => notify?.('Тестовое уведомление')}>
+      Dashboard View
+    </div>
+  ),
 }))
 vi.mock('./components/Servers', () => ({
   default: () => <div data-testid="servers-view">Servers View</div>,
@@ -413,15 +419,15 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
     expect(container?.querySelector('[data-testid="zapret-core-modal"]')).not.toBeNull()
   })
 
-  it('anti-regression (STARTUP-02): TabLoadingFallback renders with 340px minimum height and zero CLS', async () => {
+  it('anti-regression (STARTUP-02): TabLoadingFallback renders skeleton with zero CLS', async () => {
     const { TabLoadingFallback } = await import('./App')
     await act(async () => {
       root!.render(<TabLoadingFallback />)
     })
-    const card = container?.querySelector('section.card') as HTMLElement | null
-    expect(card).not.toBeNull()
-    expect(card?.textContent).toContain('Загрузка раздела…')
-    expect(card?.style.minHeight).toBe('340px')
+    const skeleton = container?.querySelector('.tab-skeleton[role="status"]') as HTMLElement | null
+    expect(skeleton).not.toBeNull()
+    expect(skeleton?.getAttribute('aria-label')).toContain('Загрузка раздела')
+    expect(skeleton?.querySelectorAll('.tab-skeleton-line').length).toBe(3)
   })
 
   it.each([
@@ -581,10 +587,14 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
   it('bug 139: xr:refresh-status runs even when document.hidden is true while timer tick is skipped', async () => {
     vi.useFakeTimers()
     let statusCallCount = 0
-    const hiddenSpy = vi.spyOn(document, 'hidden', 'get')
+    let isHidden = false
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => isHidden,
+    })
 
     try {
-      hiddenSpy.mockReturnValue(false)
+      isHidden = false
       vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
         if (path === 'status') {
           statusCallCount++
@@ -608,7 +618,7 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
       expect(countBeforeHide).toBeGreaterThanOrEqual(1)
 
       // Hide tab: timer tick must be skipped
-      hiddenSpy.mockReturnValue(true)
+      isHidden = true
       await act(async () => {
         vi.advanceTimersByTime(60000)
       })
@@ -620,8 +630,158 @@ describe('App Component — Top Header Navigation & Settings Tab Relocation', ()
       })
       expect(statusCallCount).toBe(countBeforeHide + 1)
     } finally {
-      hiddenSpy.mockRestore()
+      delete (document as any).hidden
       vi.useRealTimers()
+    }
+  })
+
+  it('bug 48: tab switch asks before dropping unsaved changes', async () => {
+    clearAllDirty()
+    function DirtyForm({ dirty }: { dirty: boolean }) {
+      useDirtyGuard('test-form', dirty)
+      return <div data-testid="dirty-probe" />
+    }
+
+    const confirmSpy = vi.spyOn(window, 'confirm')
+    try {
+      await act(async () => {
+        root!.render(<App />)
+      })
+
+      // Without dirty forms, switching tabs does not call confirm
+      confirmSpy.mockReturnValue(true)
+      const serversBtn = container!.querySelector('[data-testid="nav-servers"]') as HTMLButtonElement | null
+      if (serversBtn) {
+        await act(async () => {
+          serversBtn.click()
+        })
+      }
+      expect(confirmSpy).not.toHaveBeenCalled()
+
+      // Mount a dirty guard alongside App
+      const probeRootEl = document.createElement('div')
+      document.body.appendChild(probeRootEl)
+      const probeRoot = createRoot(probeRootEl)
+      await act(async () => {
+        probeRoot.render(<DirtyForm dirty={true} />)
+      })
+
+      // Reject confirm -> tab stays on current view
+      confirmSpy.mockReturnValue(false)
+      const hashBefore = window.location.hash
+      await act(async () => {
+        window.location.hash = '#devices'
+        window.dispatchEvent(new HashChangeEvent('hashchange'))
+      })
+      expect(confirmSpy).toHaveBeenCalledTimes(1)
+      expect(container!.querySelector('[data-testid="devices-view"]')).toBeNull()
+      expect(window.location.hash).toBe(hashBefore || '#dashboard')
+
+      // Accept confirm -> tab switches to devices
+      confirmSpy.mockReturnValue(true)
+      await act(async () => {
+        window.location.hash = '#devices'
+        window.dispatchEvent(new HashChangeEvent('hashchange'))
+      })
+      expect(confirmSpy).toHaveBeenCalledTimes(2)
+      expect(container!.querySelector('[data-testid="devices-view"]')).not.toBeNull()
+
+      await act(async () => {
+        probeRoot.unmount()
+      })
+      probeRootEl.remove()
+    } finally {
+      confirmSpy.mockRestore()
+      clearAllDirty()
+    }
+  })
+
+  it('bug 49: toast leaves with exit class before removal', async () => {
+    clearTabCache()
+    vi.useFakeTimers()
+    try {
+      await act(async () => {
+        root!.render(<App />)
+      })
+
+      const dash = container!.querySelector('[data-testid="dashboard-view"]') as HTMLElement
+      await act(async () => {
+        dash.click()
+      })
+      const toastBefore = container!.querySelector('.toast')
+      expect(toastBefore).not.toBeNull()
+      expect(toastBefore?.classList.contains('toast-exit')).toBe(false)
+
+      // Just before removal (~4800ms): toast enters exit phase with .toast-exit
+      await act(async () => {
+        vi.advanceTimersByTime(4800)
+      })
+      const toastExiting = container!.querySelector('.toast')
+      expect(toastExiting).not.toBeNull()
+      expect(toastExiting?.classList.contains('toast-exit')).toBe(true)
+
+      // After exit animation (~250ms): toast is removed from DOM
+      await act(async () => {
+        vi.advanceTimersByTime(250)
+      })
+      expect(container!.querySelector('.toast')).toBeNull()
+
+      // Test useTabCache stale-while-revalidate:
+      let resolveSecond!: (v: string) => void
+      const fetcher = vi
+        .fn<() => Promise<string>>()
+        .mockResolvedValueOnce('cached-v1')
+        .mockImplementationOnce(
+          () =>
+            new Promise<string>((res) => {
+              resolveSecond = res
+            })
+        )
+
+      function CacheProbe({ label }: { label: string }) {
+        const { data, loading } = useTabCache('probe-key', fetcher)
+        return (
+          <div data-testid="cache-probe" data-loading={String(loading)}>
+            {label}:{data ?? 'none'}
+          </div>
+        )
+      }
+
+      const probeEl = document.createElement('div')
+      document.body.appendChild(probeEl)
+      const probeRoot = createRoot(probeEl)
+
+      await act(async () => {
+        probeRoot.render(<CacheProbe label="first" />)
+      })
+      await act(async () => {
+        await Promise.resolve()
+      })
+      expect(probeEl.textContent).toBe('first:cached-v1')
+
+      // Unmount and remount: stale data must render immediately BEFORE second fetch resolves
+      await act(async () => {
+        probeRoot.unmount()
+      })
+      const probeRoot2 = createRoot(probeEl)
+      await act(async () => {
+        probeRoot2.render(<CacheProbe label="second" />)
+      })
+      expect(probeEl.textContent).toBe('second:cached-v1')
+
+      await act(async () => {
+        resolveSecond('fresh-v2')
+        await Promise.resolve()
+      })
+      expect(probeEl.textContent).toBe('second:fresh-v2')
+
+      await act(async () => {
+        probeRoot2.unmount()
+      })
+      probeEl.remove()
+    } finally {
+      vi.useRealTimers()
+      clearTabCache()
     }
   })
 })

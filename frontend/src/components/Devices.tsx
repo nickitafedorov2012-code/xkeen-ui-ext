@@ -338,8 +338,9 @@ export default function Devices({ notify }: Props) {
     if (!macs.length) return
     setBusy(true)
     try {
-      const data = await apiPost<{ applied: number }>('devices/speed', { macs, kbps })
-      notify(`Speed limit applied to ${data.applied} device(s)`)
+      const data = await apiPost<{ applied: number; errors?: string[] }>('devices/speed', { macs, kbps })
+      const errCount = data.errors?.length ?? 0
+      notify(`Speed limit applied to ${data.applied} device(s)${errCount ? `, errors: ${errCount}` : ''}`, errCount > 0)
       load()
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Error applying speed', true)

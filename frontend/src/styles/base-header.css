@@ -1,0 +1,965 @@
+:root {
+  --bg: #0f1115;
+  --panel: #161a22;
+  --panel-2: #1c2130;
+  --card-bg: #161a22;
+  --bg-tertiary: #1e293b;
+  --border: #262c3b;
+  --border-focus: #4f8cff;
+  --text: #e6e9ef;
+  --text-bright: #f8fafc;
+  --text-dim: #94a3b8;
+  --text-secondary: #94a3b8;
+  --muted: #8b93a7;
+  --muted-dim: #64748b;
+  --text-muted: #8b93a7;
+  --accent: #4f8cff;
+  --accent-2: #2f6fe0;
+  --green: #22c55e;
+  --yellow: #eab308;
+  --red: #ef4444;
+  --btn-secondary-bg: #334155;
+}
+
+* {
+  box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: #2b3548 transparent;
+}
+
+/* Стилизация скроллбаров (Dark Theme) */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb {
+  background: #2b3548;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3b4862;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Стилизация скроллбаров (Light Theme) */
+[data-theme="light"] * {
+  scrollbar-color: #cbd5e1 transparent;
+}
+[data-theme="light"] ::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.04);
+}
+[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border: 1px solid rgba(0, 0, 0, 0.05);
+}
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  max-width: 100vw;
+  /* FE-MOBILE: clip вместо hidden — hidden превращает body в scroll-контейнер
+     и ломает position: sticky у таб-навигации; clip так же запрещает
+     горизонтальный скролл, но sticky продолжает работать */
+  overflow-x: clip;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+}
+
+.app { max-width: 1180px; margin: 0 auto; padding: 16px 20px 40px; box-sizing: border-box; }
+
+/* Верхняя панель в стиле XKeen UI: 5 групп в одну горизонтальную строку */
+.header-bar,
+.toolbar.header-bar {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto auto;
+  grid-template-areas: "logo status versions service utility";
+  align-items: center;
+  gap: 12px;
+  min-height: 72px;
+  height: 72px;
+  padding: 0 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
+  box-sizing: border-box;
+  max-width: 100%;
+  width: 100%;
+}
+
+/* 1. Группа логотипа */
+.header-brand-group {
+  grid-area: logo;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.header-brand-link {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  flex-shrink: 0;
+}
+
+.header-brand-link:hover {
+  opacity: 0.95;
+  transform: translateY(-1px);
+}
+
+.header-brand-icon {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  transition: all 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+  filter: drop-shadow(0 0 6px rgba(0, 211, 242, 0.35));
+}
+
+.header-brand-link:hover .header-brand-icon {
+  filter: drop-shadow(0 0 12px rgba(0, 211, 242, 0.75));
+  transform: rotate(20deg) scale(1.08);
+}
+
+.header-brand-text {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  white-space: nowrap;
+  background: linear-gradient(90deg, #00D3F2 0%, #2B7FFF 50%, #155DFC 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* 2. Группа статуса: компактный бейдж со встроенным поповером стека процессов */
+.header-status-group {
+  grid-area: status;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.status-badge-custom {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  background: #111520;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 3px 10px;
+  height: 44px;
+  min-width: 210px;
+  max-width: 250px;
+  box-sizing: border-box;
+  position: relative;
+  overflow: visible;
+  user-select: none;
+  cursor: pointer;
+  transition: all 0.25s ease;
+}
+
+.status-badge-running {
+  border-color: rgba(34, 197, 94, 0.45);
+  box-shadow: 0 0 10px rgba(34, 197, 94, 0.15), inset 0 0 6px rgba(34, 197, 94, 0.05);
+}
+
+.status-badge-running:hover {
+  border-color: rgba(34, 197, 94, 0.75);
+  box-shadow: 0 0 14px rgba(34, 197, 94, 0.3);
+}
+
+.status-badge-stopped {
+  border-color: rgba(239, 68, 68, 0.45);
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.15), inset 0 0 6px rgba(239, 68, 68, 0.05);
+}
+
+.status-badge-stopped:hover {
+  border-color: rgba(239, 68, 68, 0.75);
+  box-shadow: 0 0 14px rgba(239, 68, 68, 0.3);
+}
+
+.status-badge-content {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  position: relative;
+  z-index: 2;
+  gap: 2px;
+  width: 100%;
+}
+
+.status-badge-row1 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.status-dot-running {
+  background-color: #22c55e;
+  box-shadow: 0 0 6px #22c55e;
+}
+
+.status-dot-stopped {
+  background-color: #ef4444;
+  box-shadow: 0 0 6px #ef4444;
+}
+
+.status-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #f1f5f9;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.status-badge-row2 {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10.5px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.status-stat-sep {
+  opacity: 0.45;
+  font-size: 10.5px;
+  margin: 0 1px;
+  color: var(--muted);
+  user-select: none;
+}
+
+.status-xr-label {
+  color: #00D3F2;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+/* Всплывающее Apple-style окно информации о службах XKeen и ресурсах роутера */
+.header-status-popover {
+  display: none;
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 290px;
+  background: rgba(17, 21, 32, 0.96);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  border-radius: 12px;
+  padding: 12px 14px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.55);
+  z-index: 1000;
+  pointer-events: none;
+  text-align: left;
+  animation: fadeIn 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.status-badge-custom:hover .header-status-popover {
+  display: block;
+}
+
+.status-popover-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  margin-bottom: 8px;
+}
+
+.status-popover-section {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 8px;
+}
+
+.status-popover-sec-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted, #94a3b8);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.status-popover-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text, #e2e8f0);
+}
+
+.status-popover-proc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 8px;
+  padding: 6px 8px;
+  margin-top: 2px;
+}
+
+.status-popover-proc-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11.5px;
+  color: var(--text, #e2e8f0);
+}
+
+.proc-val-active {
+  font-weight: 600;
+  color: #38bdf8;
+  font-variant-numeric: tabular-nums;
+}
+
+.proc-val-dim {
+  color: var(--muted, #64748b);
+  font-weight: 400;
+}
+
+.status-popover-hint {
+  font-size: 10.5px;
+  color: #38bdf8;
+  text-align: center;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  opacity: 0.85;
+}
+
+/* 3. Группа версий: без жесткого min-width: 380px */
+.header-versions-group {
+  grid-area: versions;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.header-beta-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  background: rgba(245, 158, 11, 0.18);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  padding: 2px 6px;
+  border-radius: 6px;
+  margin-left: 6px;
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+}
+
+.header-stack-mem-container {
+  position: relative;
+  display: inline-flex;
+}
+
+.header-stack-mem-tooltip {
+  display: none;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 6px;
+  width: 250px;
+  background: var(--panel-2, #1c2130);
+  border: 1px solid var(--border, #262c3b);
+  border-radius: 10px;
+  padding: 10px 12px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+  z-index: 1000;
+  pointer-events: none;
+  text-align: left;
+}
+
+.header-stack-mem-container:hover .header-stack-mem-tooltip {
+  display: block;
+}
+
+.stack-mem-header {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted, #94a3b8);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+
+.stack-mem-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.stack-mem-item {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.stack-mem-name {
+  color: var(--text, #e6e9ef);
+}
+
+.stack-mem-val {
+  font-weight: 600;
+  color: #38bdf8;
+  font-variant-numeric: tabular-nums;
+}
+
+.stack-mem-dim {
+  color: var(--muted, #64748b);
+  font-weight: 400;
+}
+
+.stack-mem-divider {
+  height: 1px;
+  background: var(--border, #262c3b);
+  margin: 6px 0;
+}
+
+.stack-mem-footer {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--muted, #94a3b8);
+}
+
+.beta-banner {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #fbbf24;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  line-height: 1.4;
+}
+
+.device-row-offline {
+  opacity: 0.65;
+}
+
+.skeleton-shimmer {
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.03) 25%, rgba(255, 255, 255, 0.08) 50%, rgba(255, 255, 255, 0.03) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 8px;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+.sparkline-wrap {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 16px;
+  padding: 0 4px;
+}
+
+.sparkline-bar {
+  width: 3px;
+  background: #38bdf8;
+  border-radius: 1px;
+  transition: height 0.2s ease;
+}
+
+.jitter-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.jitter-dot.good { background-color: #22c55e; box-shadow: 0 0 4px #22c55e; }
+.jitter-dot.warn { background-color: #eab308; box-shadow: 0 0 4px #eab308; }
+.jitter-dot.bad { background-color: #ef4444; box-shadow: 0 0 4px #ef4444; }
+
+/* 4. Группа запуск/остановка: 82 px (кнопки высотой 38 px, промежуток 6 px) */
+.header-service-actions {
+  grid-area: service;
+  width: 82px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.header-service-actions .header-action-btn {
+  width: 38px;
+  height: 38px;
+}
+
+/* Общие стили служебных кнопок тулбара */
+.header-action-btn {
+  width: 38px;
+  height: 38px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  padding: 0;
+  line-height: 1;
+}
+
+.header-action-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: #fff;
+  background: rgba(79, 140, 255, 0.12);
+}
+
+.header-action-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Красным выделить только остановку */
+.header-action-btn.header-action-btn-stop {
+  border-color: rgba(239, 68, 68, 0.5);
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+}
+
+.header-action-btn.header-action-btn-stop:hover:not(:disabled) {
+  border-color: #ef4444;
+  background: rgba(239, 68, 68, 0.22);
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.35);
+}
+
+/* 5. Четыре служебные кнопки: 159 px (высота 38 px, промежуток 5 px) */
+.header-utility-actions {
+  grid-area: utility;
+  width: 159px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.header-utility-actions .header-action-btn {
+  width: 36px;
+  height: 38px;
+  flex: 1 1 36px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text-muted, #94a3b8);
+}
+
+.header-utility-actions .header-action-btn:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.25);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+/* Синим выделить активную настройку, а не все иконки сразу */
+.header-utility-actions .header-action-btn.active,
+.header-action-btn.active {
+  border-color: var(--accent, #3b82f6);
+  background: rgba(59, 130, 246, 0.2);
+  color: #60a5fa;
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.25);
+}
+
+.header-action-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  filter: grayscale(0.5) opacity(0.85);
+  transition: filter 0.15s ease, opacity 0.15s ease;
+}
+
+.header-action-btn:hover .header-action-icon,
+.header-action-btn.active .header-action-icon {
+  filter: none;
+  opacity: 1;
+}
+
+.header-pill-btn {
+  height: 36px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-size: 12.5px;
+  white-space: nowrap;
+  box-sizing: border-box;
+}
+
+.header-pill-btn:hover {
+  border-color: var(--accent);
+  color: #fff;
+  background: rgba(79, 140, 255, 0.12);
+}
+
+.header-pill-title {
+  font-weight: 600;
+  color: var(--text-bright, #f1f5f9);
+}
+
+.header-pill-subtitle {
+  font-size: 11px;
+  color: var(--muted, #94a3b8);
+  margin-left: 2px;
+}
+
+.header-pill-btn.header-pill-update,
+.header-pill-btn.header-pill-update-blue {
+  border-color: rgba(56, 189, 248, 0.7);
+  background: rgba(56, 189, 248, 0.12);
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.3), inset 0 0 5px rgba(56, 189, 248, 0.08);
+  animation: pill-blue-pulse 2.2s infinite ease-in-out;
+  cursor: pointer;
+}
+
+.header-pill-btn.header-pill-update:hover,
+.header-pill-btn.header-pill-update-blue:hover {
+  border-color: #38bdf8;
+  background: rgba(56, 189, 248, 0.22);
+  box-shadow: 0 0 16px rgba(56, 189, 248, 0.5), inset 0 0 8px rgba(56, 189, 248, 0.15);
+}
+
+.header-pill-btn.header-pill-update .header-pill-title,
+.header-pill-btn.header-pill-update-blue .header-pill-title {
+  color: #38bdf8;
+}
+
+.header-pill-btn.header-pill-update svg,
+.header-pill-btn.header-pill-update-blue svg {
+  stroke: #38bdf8;
+}
+
+/* Зеленая индикация обновления (для ядра Mihomo и Запрета) */
+.header-pill-btn.header-pill-update-green {
+  border-color: rgba(34, 197, 94, 0.7);
+  background: rgba(34, 197, 94, 0.12);
+  box-shadow: 0 0 10px rgba(34, 197, 94, 0.3), inset 0 0 5px rgba(34, 197, 94, 0.08);
+  animation: pill-green-pulse 2.2s infinite ease-in-out;
+  cursor: pointer;
+}
+
+.header-pill-btn.header-pill-update-green:hover {
+  border-color: #22c55e;
+  background: rgba(34, 197, 94, 0.22);
+  box-shadow: 0 0 16px rgba(34, 197, 94, 0.5), inset 0 0 8px rgba(34, 197, 94, 0.15);
+}
+
+.header-pill-btn.header-pill-update-green .header-pill-title {
+  color: #22c55e;
+}
+
+.header-pill-btn.header-pill-update-green svg {
+  stroke: #22c55e;
+}
+
+/* Красная индикация (сохранена для ошибок / предупреждений) */
+.header-pill-btn.header-pill-update-red {
+  border-color: rgba(239, 68, 68, 0.7);
+  background: rgba(239, 68, 68, 0.12);
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.3), inset 0 0 5px rgba(239, 68, 68, 0.08);
+  animation: pill-red-pulse 2.2s infinite ease-in-out;
+  cursor: pointer;
+}
+
+.header-pill-btn.header-pill-update-red:hover {
+  border-color: #ef4444;
+  background: rgba(239, 68, 68, 0.22);
+  box-shadow: 0 0 16px rgba(239, 68, 68, 0.5), inset 0 0 8px rgba(239, 68, 68, 0.15);
+}
+
+.header-pill-btn.header-pill-update-red .header-pill-title {
+  color: #ef4444;
+}
+
+.header-pill-btn.header-pill-update-red svg {
+  stroke: #ef4444;
+}
+
+/* Скрытие дублирующегося подзаголовка при наличии бейджа обновления для предотвращения наложения */
+.header-pill-btn.header-pill-update .header-pill-subtitle,
+.header-pill-btn.header-pill-update-blue .header-pill-subtitle,
+.header-pill-btn.header-pill-update-green .header-pill-subtitle,
+.header-pill-btn.header-pill-update-red .header-pill-subtitle {
+  display: none;
+}
+
+
+.update-pill-badge,
+.update-pill-badge-blue {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: linear-gradient(135deg, #0284c7, #2563eb);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  line-height: 1.2;
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.55);
+  animation: badge-bounce 2.2s infinite ease-in-out;
+}
+
+.update-pill-badge-green {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: linear-gradient(135deg, #16a34a, #22c55e);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  line-height: 1.2;
+  box-shadow: 0 0 8px rgba(34, 197, 94, 0.55);
+  animation: badge-bounce 2.2s infinite ease-in-out;
+}
+
+.update-pill-badge-red {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: linear-gradient(135deg, #dc2626, #ef4444);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  line-height: 1.2;
+  box-shadow: 0 0 8px rgba(239, 68, 68, 0.55);
+  animation: badge-bounce 2.2s infinite ease-in-out;
+}
+
+@keyframes pill-blue-pulse {
+  0%, 100% {
+    border-color: rgba(56, 189, 248, 0.45);
+    box-shadow: 0 0 8px rgba(56, 189, 248, 0.2), inset 0 0 4px rgba(56, 189, 248, 0.05);
+  }
+  50% {
+    border-color: #38bdf8;
+    box-shadow: 0 0 16px rgba(56, 189, 248, 0.55), inset 0 0 8px rgba(56, 189, 248, 0.18);
+  }
+}
+
+@keyframes pill-green-pulse {
+  0%, 100% {
+    border-color: rgba(34, 197, 94, 0.45);
+    box-shadow: 0 0 8px rgba(34, 197, 94, 0.2), inset 0 0 4px rgba(34, 197, 94, 0.05);
+  }
+  50% {
+    border-color: #22c55e;
+    box-shadow: 0 0 16px rgba(34, 197, 94, 0.55), inset 0 0 8px rgba(34, 197, 94, 0.18);
+  }
+}
+
+@keyframes pill-red-pulse {
+  0%, 100% {
+    border-color: rgba(239, 68, 68, 0.45);
+    box-shadow: 0 0 8px rgba(239, 68, 68, 0.2), inset 0 0 4px rgba(239, 68, 68, 0.05);
+  }
+  50% {
+    border-color: #ef4444;
+    box-shadow: 0 0 16px rgba(239, 68, 68, 0.55), inset 0 0 8px rgba(239, 68, 68, 0.18);
+  }
+}
+
+@keyframes badge-bounce {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-1px);
+  }
+}
+
+.spin-icon {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* Адаптивность: при ширине окна меньше 1140 px переключаем панель на две строки:
+   В первой строке — логотип слева и четыре служебные кнопки справа;
+   Во второй строке — статус, версии и кнопки перезапуска/остановки. */
+@media (max-width: 1139.98px) {
+  .header-bar,
+  .toolbar.header-bar {
+    grid-template-columns: auto 1fr auto;
+    grid-template-rows: auto auto;
+    grid-template-areas:
+      "logo . utility"
+      "status versions service";
+    gap: 10px 12px;
+    height: auto;
+    min-height: unset;
+    padding: 12px 16px;
+  }
+  .header-brand-group {
+    grid-area: logo;
+    justify-self: start;
+    width: auto;
+  }
+  .header-utility-actions {
+    grid-area: utility;
+    justify-self: end;
+    width: 159px;
+  }
+  .header-status-group {
+    grid-area: status;
+    justify-self: start;
+    width: 270px;
+  }
+  .header-versions-group {
+    grid-area: versions;
+    min-width: 0;
+    justify-content: center;
+  }
+  .header-service-actions {
+    grid-area: service;
+    justify-self: end;
+    width: 82px;
+  }
+}
+
+/* Мобильный экран / планшет < 820px */
+@media (max-width: 819.98px) {
+  .header-bar,
+  .toolbar.header-bar {
+    grid-template-columns: 1fr auto;
+    grid-template-rows: auto auto auto;
+    grid-template-areas:
+      "logo utility"
+      "status service"
+      "versions versions";
+    gap: 10px 8px;
+    padding: 10px 12px;
+  }
+  .header-versions-group {
+    min-width: unset;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 20px;
+  padding-top: 6px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: visible;
+  align-items: center;
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE/Edge */
+}
+.tabs::-webkit-scrollbar {
+  display: none; /* Chrome/Safari */
+}
+.tab {
+  background: var(--panel);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 12.5px;
+  font-weight: 500;
+  transition: transform 0.1s ease, border-color 0.1s ease, box-shadow 0.1s ease, color 0.1s ease, background 0.1s ease;
+  user-select: none;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.tab:hover {
+  color: var(--text);
+  background: var(--panel-2);
+  border-color: rgba(255, 255, 255, 0.15);
+  transform: translateY(-1px);
+}
+.tab.active {
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+  box-shadow: 0 4px 14px rgba(79, 140, 255, 0.35);
+}
+
+
+.card {
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 12px; padding: 18px 20px;
+}
+.card h2 { margin: 0 0 10px; font-size: 16px; }
+.muted { color: var(--muted); }
+
+.kv { list-style: none; margin: 12px 0 0; padding: 0; }
+.kv li {
+  display: flex; justify-content: space-between; gap: 16px;
+  padding: 7px 0; border-bottom: 1px solid var(--border);
+}
+.kv li:last-child { border-bottom: none; }
+.kv span { color: var(--muted); }

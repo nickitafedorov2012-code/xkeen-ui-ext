@@ -2,8 +2,7 @@ use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
-#[allow(unused_imports)]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use crate::config::AdGuardConfig;
 
@@ -212,10 +211,12 @@ pub fn detect_agh_loop_risk(
         }
 
         // Проверка loopback
+        let loop_ip = format!("127.0.0.1:{local_dns_port}");
+        let loop_host = format!("localhost:{local_dns_port}");
         if u.contains("127.0.0.1:53")
             || u.contains("localhost:53")
-            || u.contains("127.0.0.1:1053")
-            || u.contains("localhost:1053")
+            || u.contains(&loop_ip)
+            || u.contains(&loop_host)
             || u.contains("127.0.0.1:7874")
         {
             return (
@@ -305,7 +306,8 @@ pub async fn get_health(
                     }
                 }
             }
-            let (lr, lw) = detect_agh_loop_risk(&upstreams, router_ip, 1053);
+            let check_port = if cfg.dns_port > 0 { cfg.dns_port } else { DEFAULT_ADGUARD_PORT };
+            let (lr, lw) = detect_agh_loop_risk(&upstreams, router_ip, check_port);
             loop_risk = lr;
             loop_warning = lw;
         }
@@ -332,6 +334,10 @@ pub fn clean_adguard_upstreams(upstreams: &[String], router_ip: Option<&str>) ->
     let r_ip = router_ip.map(str::trim).filter(|s| !s.is_empty());
     let mut modified = false;
 
+    let mihomo_port = crate::routing::mihomo_dns_port_from_path(&crate::config::MihomoConfig::default().config_path);
+    let loop_ip = format!("127.0.0.1:{mihomo_port}");
+    let loop_host = format!("localhost:{mihomo_port}");
+    let loop_suffix = format!(":{mihomo_port}");
     let mut cleaned: Vec<String> = upstreams
         .iter()
         .map(|s| s.trim().to_string())
@@ -339,8 +345,8 @@ pub fn clean_adguard_upstreams(upstreams: &[String], router_ip: Option<&str>) ->
             if s.is_empty() {
                 return false;
             }
-            if s.contains("127.0.0.1:1053")
-                || s.contains("localhost:1053")
+            if s.contains(&loop_ip)
+                || s.contains(&loop_host)
                 || s.contains("127.0.0.1:53")
                 || s.contains("localhost:53")
                 || s.contains("127.0.0.1:7874")
@@ -350,7 +356,7 @@ pub fn clean_adguard_upstreams(upstreams: &[String], router_ip: Option<&str>) ->
             }
             if let Some(rip) = r_ip {
                 if (s.starts_with(rip) || s.contains(&format!("//{rip}")))
-                    && (s.ends_with(":53") || s.ends_with(":1053") || !s.contains(':'))
+                    && (s.ends_with(":53") || s.ends_with(&loop_suffix) || !s.contains(':'))
                 {
                     modified = true;
                     return false;
@@ -1215,14 +1221,66 @@ pub struct AghDiagnostics {
 
 pub const AGH_IPTABLES_CHAIN: &str = "XKEEN_ADGUARD";
 pub const AGH_LAN_INTERFACES: &[&str] = &["br+", "Bridge+", "ra+"];
+pub const DEFAULT_ADGUARD_PORT: u16 = 5353;
 pub const DEFAULT_ADGUARD_DNS_FALLBACK_PORT: u16 = 5354;
+
+/// Проверка активности процесса AdGuardHome на роутере (на не-Linux платформах возвращает true для dev/test).
+pub fn is_adguard_process_alive() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::system::is_process_running("AdGuardHome")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
+/// Чтение DNS-порта AdGuard Home из YAML с безопасным стандартным значением DEFAULT_ADGUARD_PORT (5353).
+pub fn get_adguard_port_from_yaml(yaml: &str) -> u16 {
+    parse_adguard_dns_port_from_yaml(yaml).unwrap_or(DEFAULT_ADGUARD_PORT)
+}
+
+/// Построение списка команд удаления и повторной вставки правил iptables с сохранением порядка (баг A-09):
+/// каждое правило вставляется на нарастающую позицию 1, 2, 3..., а не все на позицию 1.
+pub fn reinsert_rules_commands(rules: &[&str], to_port: u16) -> Vec<String> {
+    let mut cmds = Vec::with_capacity(rules.len() * 2);
+    for (idx, raw_line) in rules.iter().enumerate() {
+        let line = raw_line.trim();
+        if !line.starts_with("-A ") {
+            continue;
+        }
+        let pos = idx + 1;
+        let del_cmd = line.replacen("-A ", "-D ", 1);
+        let mut parts = line.splitn(3, ' ');
+        let _flag = parts.next();
+        let chain = parts.next().unwrap_or("");
+        let rest = parts.next().unwrap_or("");
+        let updated_rest = if let Some(p_idx) = rest.find("--to-ports ") {
+            let after = &rest[p_idx + "--to-ports ".len()..];
+            let end = after.find(' ').unwrap_or(after.len());
+            format!("{}--to-ports {}{}", &rest[..p_idx], to_port, &after[end..])
+        } else {
+            rest.to_string()
+        };
+        cmds.push(format!("iptables -w 2 -t nat {del_cmd}"));
+        cmds.push(format!("iptables -w 2 -t nat -I {chain} {pos} {updated_rest}"));
+    }
+    cmds
+}
 
 pub fn build_sync_tunnel_dns_ports_script(from_ports: &str, to_port: u16) -> String {
     format!(
         "for chain in XKEEN_GAMING XKEEN_BS; do \\\n\
+            pos=1; \\\n\
             iptables -w 2 -t nat -S $chain 2>/dev/null | grep -E 'to-ports ({from_ports})' | while read -r line; do \\\n\
                 del_cmd=$(echo \"$line\" | sed 's/^-A/-D/'); \\\n\
-                add_cmd=$(echo \"$line\" | sed -E 's/--to-ports [0-9]+/--to-ports {to_port}/' | sed 's/^-A/-I 1/'); \\\n\
+                if [ \"$pos\" -eq 1 ]; then \\\n\
+                    add_cmd=$(echo \"$line\" | sed -E 's/--to-ports [0-9]+/--to-ports {to_port}/' | sed \"s/^-A $chain/-I $chain 1/\"); \\\n\
+                else \\\n\
+                    add_cmd=$(echo \"$line\" | sed -E 's/--to-ports [0-9]+/--to-ports {to_port}/' | sed \"s/^-A $chain/-I $chain $pos/\"); \\\n\
+                fi; \\\n\
+                pos=$((pos + 1)); \\\n\
                 iptables -w 2 -t nat $del_cmd 2>/dev/null || true; \\\n\
                 iptables -w 2 -t nat $add_cmd 2>/dev/null || true; \\\n\
             done; \\\n\
@@ -1239,7 +1297,8 @@ pub fn build_sync_tunnel_dns_ports_script(from_ports: &str, to_port: u16) -> Str
 
 pub fn build_adguard_ndm_hook_content(dns_port: u16) -> String {
     let port_str = dns_port.to_string();
-    let sync_script = build_sync_tunnel_dns_ports_script("1053|5353|5354", dns_port);
+    let mihomo_port = crate::routing::mihomo_dns_port_from_path(&crate::config::MihomoConfig::default().config_path);
+    let sync_script = build_sync_tunnel_dns_ports_script(&format!("{mihomo_port}|5353|5354"), dns_port);
     format!(
         "#!/bin/sh\n[ \"$table\" != \"nat\" ] && [ \"$table\" != \"filter\" ] && [ -n \"$table\" ] && exit 0\n\
         iptables -w 2 -t nat -N {chain} 2>/dev/null || true\n\
@@ -1326,7 +1385,8 @@ pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
         }
 
         // 6. Синхронизируем XKEEN_GAMING и XKEEN_BS, если цепочки активны (перехват DNS туннелями на порт AdGuard, баг 1)
-        let sync_cmd = build_sync_tunnel_dns_ports_script("1053|5353|5354", dns_port);
+        let mihomo_port = crate::routing::mihomo_dns_port_from_path(&crate::config::MihomoConfig::default().config_path);
+        let sync_cmd = build_sync_tunnel_dns_ports_script(&format!("{mihomo_port}|5353|5354"), dns_port);
         let _ = std::process::Command::new("sh")
             .arg("-c")
             .arg(&sync_cmd)
@@ -1348,6 +1408,17 @@ pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
     }
     let _ = dns_port;
     Ok(())
+}
+
+/// Определяет порт возврата туннелей (dns.listen Mihomo) при снятии правил AdGuard (баг 1, баг 45).
+pub fn resolve_adguard_restore_port(restore_port: Option<u16>, mihomo_config_path: &str) -> u16 {
+    if let Some(p) = restore_port {
+        return p;
+    }
+    std::fs::read_to_string(mihomo_config_path)
+        .ok()
+        .and_then(|y| crate::routing::parse_mihomo_dns_listen_port(&y))
+        .unwrap_or(crate::routing::DEFAULT_MIHOMO_DNS_PORT)
 }
 
 /// Полное и чистое удаление правил XKEEN_ADGUARD из iptables.
@@ -1416,7 +1487,10 @@ pub fn remove_adguard_iptables_with_restore_port(restore_port: Option<u16>) -> R
             }
         }
         // Возвращаем XKEEN_GAMING и XKEEN_BS на порт Mihomo при остановке/падении AdGuard (баг 1, баг 45)
-        let target_restore_port = restore_port.unwrap_or(crate::routing::DEFAULT_MIHOMO_DNS_PORT);
+        let target_restore_port = resolve_adguard_restore_port(
+            restore_port,
+            &crate::config::MihomoConfig::default().config_path,
+        );
         let restore_cmd = build_sync_tunnel_dns_ports_script(&format!("{port_str}|5353|5354"), target_restore_port);
         let _ = std::process::Command::new("sh")
             .arg("-c")
@@ -1519,7 +1593,8 @@ pub async fn get_diagnostics(
                     }
                 }
             }
-            let (lr, lw) = detect_agh_loop_risk(&upstreams, router_ip, 1053);
+            let check_port = if cfg.dns_port > 0 { cfg.dns_port } else { DEFAULT_ADGUARD_PORT };
+            let (lr, lw) = detect_agh_loop_risk(&upstreams, router_ip, check_port);
             loop_risk = lr;
             if let Some(w) = lw {
                 recommendations.push(w);
@@ -1619,7 +1694,7 @@ pub fn find_adguard_binary() -> Option<PathBuf> {
             if let Ok(out) = std::process::Command::new("which").arg(cmd).output() {
                 if out.status.success() {
                     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                    if !s.is_empty() && Path::new(&s).is_file() {
+                    if !s.is_empty() && std::path::Path::new(&s).is_file() {
                         return Some(PathBuf::from(s));
                     }
                 }
@@ -1961,11 +2036,20 @@ schema_version: 29
 /// 1. Переключение с конфликтующего порта 5353 (занят avahi-daemon на KeeneticOS) на 5354.
 /// 2. Исключение дублирования 127.0.0.1 в bind_hosts (оставляем только 0.0.0.0 для dual-stack).
 /// 3. Настройка http_proxy ("http://127.0.0.1:7890") для мгновенного обновления фильтров через локальный прокси.
-/// 4. Удаление 127.0.0.1:1053 из upstream_dns для устранения бесконечного зацикливания с Mihomo и добавление быстрых апстримов (77.88.8.8, 1.1.1.1).
+/// 4. Удаление 127.0.0.1:1053 из upstream_dns для устранения бесконечного зацикливания с Mihomo и добавление быстрых апстримов (77.88.8.8, 77.88.8.1) при пустом списке.
 /// 5. Добавление rewrite для probe.test -> 127.0.0.1 для мгновенного ответа на healthcheck.
 /// 6. Защита от DoH-обхода в браузерах (chrome.cloudflare-dns.com, mozilla.cloudflare-dns.com) и блокировка рекламы в user_rules.
 /// 7. Внедрение AdGuard Russian Filter и HaGeZi Multi Pro в список подписок filters.
 pub fn sanitize_and_heal_adguard_yaml(content: &str, target_port: u16) -> (String, bool) {
+    let mixed_port = crate::routing::mihomo_mixed_port_from_path(&crate::config::MihomoConfig::default().config_path);
+    sanitize_and_heal_adguard_yaml_with_proxy_port(content, target_port, mixed_port)
+}
+
+pub fn sanitize_and_heal_adguard_yaml_with_proxy_port(
+    content: &str,
+    target_port: u16,
+    mixed_port: u16,
+) -> (String, bool) {
     let mut changed = false;
     let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
 
@@ -2025,27 +2109,32 @@ pub fn sanitize_and_heal_adguard_yaml(content: &str, target_port: u16) -> (Strin
     }
 
     // 3. Настройка http_proxy для скачивания фильтров через Mihomo (обход блокировок GitHub/CDN)
+    let proxy_port = if mixed_port > 0 { mixed_port } else { 7890 };
+    let proxy_line = format!("http_proxy: \"http://127.0.0.1:{proxy_port}\"");
     let mut has_http_proxy = false;
     for line in &mut lines {
         let trimmed = line.trim();
         if trimmed.starts_with("http_proxy:") {
             has_http_proxy = true;
             if trimmed == "http_proxy: \"\"" || trimmed == "http_proxy:" || trimmed == "http_proxy: ''" {
-                *line = "http_proxy: \"http://127.0.0.1:7890\"".to_string();
+                *line = proxy_line.clone();
                 changed = true;
             }
         }
     }
     if !has_http_proxy {
-        lines.insert(0, "http_proxy: \"http://127.0.0.1:7890\"".to_string());
+        lines.insert(0, proxy_line);
         changed = true;
     }
 
-    // 4. Устранение циклического DNS-лупа (Mihomo nameserver 5354 <-> AdGuard upstream 1053):
-    // Удаляем 127.0.0.1:1053 и 127.0.0.1:53 из upstream_dns, гарантируя прямые чистые резолверы.
+    // 4. Устранение циклического DNS-лупа (Mihomo nameserver <-> AdGuard upstream):
+    // Удаляем 127.0.0.1:<mihomo_port> и 127.0.0.1:53 из upstream_dns, гарантируя прямые чистые резолверы.
+    let mihomo_port = crate::routing::mihomo_dns_port_from_path(&crate::config::MihomoConfig::default().config_path);
+    let loop_ip_line = format!("- 127.0.0.1:{mihomo_port}");
+    let loop_host_line = format!("- localhost:{mihomo_port}");
     lines.retain(|l| {
         let t = l.trim();
-        if t == "- 127.0.0.1:1053" || t == "- 127.0.0.1:53" || t == "- localhost:1053" {
+        if t == loop_ip_line || t == "- 127.0.0.1:53" || t == loop_host_line || t == "- localhost:53" {
             changed = true;
             false
         } else {
@@ -2166,7 +2255,8 @@ pub fn sanitize_and_heal_adguard_yaml(content: &str, target_port: u16) -> (Strin
     if content.ends_with('\n') && !result.ends_with('\n') {
         result.push('\n');
     }
-    (result, changed)
+    let actually_changed = changed && result != content;
+    (result, actually_changed)
 }
 
 /// Гарантированное создание стандартного файла конфигурации, если он еще не существует
@@ -2649,6 +2739,41 @@ pub async fn unblock_domain_adguard(
     Ok(unblock_rule)
 }
 
+/// Переключение AdBlock независимо от интеграции AdGuard в Mihomo (баг 116).
+pub fn apply_adblock_toggle(cfg: &mut crate::config::AppConfig, target: bool) {
+    cfg.adblock_enabled = target;
+}
+
+/// Переключение интеграции AdGuard в Mihomo независимо от AdBlock (баг 116).
+/// Фиксирует выбор пользователя, чтобы автоподхват сторожа больше не перезаписывал настройку.
+pub fn apply_integration_toggle(cfg: &mut crate::config::AppConfig, target: bool) {
+    cfg.adguard.enabled = target;
+    cfg.adguard.integration_choice_locked = true;
+}
+
+/// Шаг переключения AdBlock (баг 60): общий план для API и Telegram-бота.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdblockStep {
+    CommitConfig,
+    SetProtection(bool),
+    SyncIptables { enable: bool, port: u16 },
+    ResyncTunnels,
+}
+
+/// Чистый планировщик переключения AdBlock (баг 60):
+/// CommitConfig всегда строго первый, и только потом действия над AdGuard, iptables и туннелями.
+pub fn plan_adblock_toggle(cfg: &crate::config::AppConfig, target: bool) -> Vec<AdblockStep> {
+    vec![
+        AdblockStep::CommitConfig,
+        AdblockStep::SetProtection(target),
+        AdblockStep::SyncIptables {
+            enable: target,
+            port: cfg.adguard.dns_port,
+        },
+        AdblockStep::ResyncTunnels,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3062,11 +3187,93 @@ http:
         assert!(!healed.contains("77.88.8.8"), "в YAML пользователя не дописываются публичные DNS:\n{healed}");
         assert!(!healed.contains("    - 8.8.8.8"));
 
-        // Проверяем, что в сгенерированном по умолчанию шаблоне нет 1.1.1.1, 8.8.8.8, dns.google
-        let default_yaml = generate_default_adguard_yaml(5353, 3000);
+        // Проверяем, что в сгенерированном по умолчанию шаблоне нет 1.1.1.1, 8.8.8.8, 94.140.14.14, 94.140.15.15, dns.google
+        let default_yaml = generate_default_adguard_yaml(DEFAULT_ADGUARD_PORT, 3000);
         assert!(!default_yaml.contains("1.1.1.1"), "default template must not contain 1.1.1.1");
         assert!(!default_yaml.contains("8.8.8.8"), "default template must not contain 8.8.8.8");
+        assert!(!default_yaml.contains("94.140.14.14"), "default template must not contain legacy 94.140.14.14");
+        assert!(!default_yaml.contains("94.140.15.15"), "default template must not contain legacy 94.140.15.15");
         assert!(!default_yaml.contains("dns.google/dns-query"), "default template must not contain dns.google");
+    }
+
+    #[test]
+    fn regression_bug_1_default_adguard_port_and_yaml_fallback() {
+        assert_eq!(DEFAULT_ADGUARD_PORT, 5353);
+        assert_eq!(get_adguard_port_from_yaml("http:\n  port: 3000\n"), 5353, "fallback port must be 5353, never 1053");
+        assert_eq!(get_adguard_port_from_yaml("dns:\n  port: 5354\n"), 5354);
+    }
+
+    #[test]
+    fn regression_bug_116b_adblock_and_integration_are_independent() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.adblock_enabled = false;
+        cfg.adguard.enabled = true;
+        cfg.adguard.integration_choice_locked = false;
+
+        // 1. toggle AdBlock ON не должен менять adguard.enabled
+        apply_adblock_toggle(&mut cfg, true);
+        assert!(cfg.adblock_enabled);
+        assert!(cfg.adguard.enabled, "apply_adblock_toggle(true) не должен сбрасывать adguard.enabled");
+
+        // 2. toggle AdBlock OFF не должен выключать интеграцию adguard.enabled
+        apply_adblock_toggle(&mut cfg, false);
+        assert!(!cfg.adblock_enabled);
+        assert!(cfg.adguard.enabled, "apply_adblock_toggle(false) не должен выключать adguard.enabled");
+
+        // 3. toggle integration OFF не должен менять adblock_enabled и должен ставить integration_choice_locked
+        cfg.adblock_enabled = true;
+        apply_integration_toggle(&mut cfg, false);
+        assert!(!cfg.adguard.enabled);
+        assert!(cfg.adguard.integration_choice_locked, "пользовательский выбор интеграции должен фиксироваться");
+        assert!(cfg.adblock_enabled, "apply_integration_toggle(false) не должен выключать adblock_enabled");
+
+        // 4. Автоподхват сторожа включается один раз и включает только интеграцию, не трогая adblock_enabled
+        cfg.adblock_enabled = false;
+        cfg.adguard.integration_choice_locked = false;
+        assert!(crate::watchdog::should_auto_integrate_adguard(true, cfg.adguard.enabled, cfg.adguard.integration_choice_locked));
+        apply_integration_toggle(&mut cfg, true);
+        assert!(cfg.adguard.enabled);
+        assert!(cfg.adguard.integration_choice_locked);
+        assert!(!cfg.adblock_enabled, "автоподхват не должен включать adblock_enabled");
+        assert!(!crate::watchdog::should_auto_integrate_adguard(true, cfg.adguard.enabled, cfg.adguard.integration_choice_locked));
+    }
+
+    #[test]
+    fn regression_bug_60b_bot_adblock_shares_core_and_orders_steps() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.adguard.dns_port = 5353;
+
+        // 1. Включение AdBlock: CommitConfig строго первым, затем SetProtection(true), SyncIptables(enable=true), ResyncTunnels
+        let steps_on = plan_adblock_toggle(&cfg, true);
+        assert_eq!(
+            steps_on,
+            vec![
+                AdblockStep::CommitConfig,
+                AdblockStep::SetProtection(true),
+                AdblockStep::SyncIptables { enable: true, port: 5353 },
+                AdblockStep::ResyncTunnels,
+            ]
+        );
+        assert_eq!(steps_on.first(), Some(&AdblockStep::CommitConfig));
+
+        // 2. Выключение AdBlock: CommitConfig строго первым, затем снятие защиты и редиректа
+        let steps_off = plan_adblock_toggle(&cfg, false);
+        assert_eq!(
+            steps_off,
+            vec![
+                AdblockStep::CommitConfig,
+                AdblockStep::SetProtection(false),
+                AdblockStep::SyncIptables { enable: false, port: 5353 },
+                AdblockStep::ResyncTunnels,
+            ]
+        );
+
+        // 3. И API, и бот используют adblock_toggle_core
+        let api_src = include_str!("api/dns_adguard.rs");
+        let bot_src = include_str!("bot.rs");
+        assert!(api_src.contains("pub async fn adblock_toggle_core("));
+        assert!(bot_src.contains("adblock_toggle_core("));
+        assert!(!bot_src.contains("let _ = crate::adguard::set_protection("));
     }
 }
 
@@ -3081,5 +3288,42 @@ mod regression_bug_115_tests {
         assert!(!prod.contains("tokio::fs::write(p, healed)"), "лечение конфигов — атомарная запись");
         assert!(!prod.contains("tokio::fs::write(&conf_path, patched)"), "смена порта — атомарная запись");
         assert!(!prod.contains("std::fs::write(&conf_path, healed)"), "самоисцеление — атомарная запись");
+    }
+
+    #[test]
+    fn regression_bug_115b_http_proxy_port_from_config() {
+        let input = "http_proxy: \"\"\ndns:\n  port: 53\n  bootstrap_dns:\n  - 1.1.1.1\n";
+        let (healed, changed) = super::sanitize_and_heal_adguard_yaml_with_proxy_port(input, 5353, 7891);
+        assert!(changed, "первый проход должен применить изменения");
+        assert!(
+            healed.contains("http_proxy: \"http://127.0.0.1:7891\""),
+            "порт http_proxy должен браться из mixed-port конфига Mihomo (7891):\n{healed}"
+        );
+        assert!(!healed.contains("7890"), "не должен зашиваться порт 7890 при mixed_port=7891");
+
+        // Повторный вызов на результате: идемпотентность -> changed == false (запись пропускается)
+        let (healed2, changed2) = super::sanitize_and_heal_adguard_yaml_with_proxy_port(&healed, 5353, 7891);
+        assert!(!changed2, "повторный вызов на уже вылеченном конфиге не должен менять файл");
+        assert_eq!(healed2, healed);
+
+        // Парсер mixed-port из config.yaml Mihomo
+        let mihomo_yaml = "mixed-port: 7895\ndns:\n  enable: true\n";
+        assert_eq!(crate::routing::parse_mixed_port(mihomo_yaml), Some(7895));
+        assert_eq!(crate::routing::parse_mixed_port("port: 7890\n"), None);
+    }
+
+    #[test]
+    fn regression_bug_a09_reinsert_keeps_rule_order() {
+        let rules = [
+            "-A XKEEN_GAMING -s 192.168.1.10 -p udp --dport 53 -j REDIRECT --to-ports 1053",
+            "-A XKEEN_GAMING -s 192.168.1.10 -p tcp --dport 53 -j REDIRECT --to-ports 1053",
+            "-A XKEEN_GAMING -s 192.168.1.11 -p udp --dport 53 -j REDIRECT --to-ports 1053",
+        ];
+        let cmds = super::reinsert_rules_commands(&rules, 5353);
+        let add_cmds: Vec<&String> = cmds.iter().filter(|c| c.contains(" -I ")).collect();
+        assert_eq!(add_cmds.len(), 3);
+        assert!(add_cmds[0].contains("-I XKEEN_GAMING 1 ") && add_cmds[0].contains("192.168.1.10") && add_cmds[0].contains("--to-ports 5353"));
+        assert!(add_cmds[1].contains("-I XKEEN_GAMING 2 ") && add_cmds[1].contains("-p tcp"));
+        assert!(add_cmds[2].contains("-I XKEEN_GAMING 3 ") && add_cmds[2].contains("192.168.1.11"));
     }
 }

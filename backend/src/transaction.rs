@@ -877,6 +877,26 @@ pub fn three_way_merge_json(original: &serde_json::Value, applied: &serde_json::
     }
 }
 
+/// Слияние YAML при откате (баг 131): если текущий файл на диске не менялся после транзакции
+/// (`current == applied`), восстанавливаем из снимка `original`; если другой писатель изменил `config.yaml`
+/// за время окна подтверждения (`current != applied`), пересобираем авто-блоки поверх ТЕКУЩЕГО файла,
+/// сохраняя сторонние правки.
+pub fn three_way_merge_yaml(
+    original: &str,
+    applied: Option<&str>,
+    current: Option<&str>,
+    final_cfg: &config::AppConfig,
+) -> String {
+    let base = match (current, applied) {
+        (Some(cur), Some(app)) if cur != app => cur,
+        _ => original,
+    };
+    match crate::routing::apply_routing(base, final_cfg) {
+        Ok((y, _)) if validate_yaml_syntax(&y).is_ok() => y,
+        _ => base.to_string(),
+    }
+}
+
 /// Откат неподтверждённой транзакции (баг 131): слияние config.json с изменениями других писателей,
 /// пересборка авто-блоков config.yaml под итоговую конфигурацию, reload и пересинхронизация iptables.
 pub async fn perform_commit_rollback(state: &AppState, p: &PersistedPendingCommit) -> Result<(), String> {
@@ -905,11 +925,14 @@ pub async fn perform_commit_rollback(state: &AppState, p: &PersistedPendingCommi
 
     let mut final_yaml = None;
     if let Some(ref orig_yaml) = p.yaml_snapshot {
-        // Авто-блоки пересобираются под итоговую конфигурацию (с изменениями других писателей)
-        let rebuilt = match crate::routing::apply_routing(orig_yaml, &final_cfg) {
-            Ok((y, _)) if validate_yaml_syntax(&y).is_ok() => y,
-            _ => orig_yaml.clone(),
-        };
+        // Перечитываем текущий config.yaml под блокировкой и сохраняем правки других писателей
+        let current_yaml = tokio::fs::read_to_string(&p.yaml_path).await.ok();
+        let rebuilt = three_way_merge_yaml(
+            orig_yaml,
+            p.applied_yaml.as_deref(),
+            current_yaml.as_deref(),
+            &final_cfg,
+        );
         crate::api::atomic_write_file(&p.yaml_path, &rebuilt).await?;
         final_yaml = Some(rebuilt);
     }
@@ -919,8 +942,8 @@ pub async fn perform_commit_rollback(state: &AppState, p: &PersistedPendingCommi
         Some(y) => y,
         None => tokio::fs::read_to_string(&p.yaml_path).await.unwrap_or_default(),
     };
-    let redir_port = crate::routing::parse_redir_port(&yaml_now).unwrap_or(5000);
-    let tproxy_port = crate::routing::parse_tproxy_port(&yaml_now).unwrap_or(5001);
+    let ports = crate::routing::redir_ports(&yaml_now);
+    let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
     let dns_port = crate::api::resolve_active_dns_port(&final_cfg);
     crate::api::sync_full_tunnel_modes(&final_cfg, redir_port, tproxy_port, dns_port).await;
     let _ = tokio::fs::remove_file(pending_commit_file(&json_path)).await;
@@ -1406,6 +1429,26 @@ mod tests {
         assert_eq!(after.zapret.engine, "v1", "изменение другого писателя за окно не стёрто");
         assert_eq!(state.config.read().await.zapret.engine, "v1", "и в памяти тоже");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn regression_bug_131b_rollback_keeps_foreign_yaml_changes() {
+        let orig_yaml = "mode: rule\nproxies: []\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules:\n  - MATCH,PROXY\n";
+        let applied_yaml = "mode: rule\nproxies: []\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules:\n  - DOMAIN,tx.example,DIRECT\n  - MATCH,PROXY\n";
+        let current_yaml = "mode: rule\nproxies: []\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules:\n  - DOMAIN,foreign.example,PROXY\n  - DOMAIN,tx.example,DIRECT\n  - MATCH,PROXY\n";
+        let cfg = config::AppConfig::default();
+
+        let merged = three_way_merge_yaml(orig_yaml, Some(applied_yaml), Some(current_yaml), &cfg);
+        assert!(
+            merged.contains("DOMAIN,foreign.example,PROXY"),
+            "rollback must preserve foreign YAML edits made during confirmation window: {merged}"
+        );
+
+        let unchanged = three_way_merge_yaml(orig_yaml, Some(applied_yaml), Some(applied_yaml), &cfg);
+        assert!(
+            !unchanged.contains("DOMAIN,tx.example,DIRECT"),
+            "when no foreign edits occurred, rollback must revert transaction YAML changes: {unchanged}"
+        );
     }
 
     #[tokio::test]

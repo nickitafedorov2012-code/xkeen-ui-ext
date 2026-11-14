@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { apiGet, apiPost, apiPut, detectWhitelistServers, applyDetectedWhitelistServers } from '../api'
+import { apiGet, apiPost, apiPut } from '../api'
 import { diffSettings } from '../utils/settingsDiff'
+import { useDirtyGuard } from '../utils/dirtyGuard'
 import {
   pingClass,
   type AppSettings,
@@ -9,8 +10,6 @@ import {
   type ServerInfo,
   type ProviderInfo,
   type StatusInfo,
-  type SwapStatus,
-  type SwapSizePresetMb,
 } from '../types'
 import NumberInput from './NumberInput'
 import { formatQuotaBytes } from './Servers'
@@ -18,198 +17,17 @@ import ConfigEditor from './ConfigEditor'
 import PresetCatalogModal from './PresetCatalogModal'
 import LogsViewer from './LogsViewer'
 import TaskManager from './TaskManager'
+import {
+  SwapManager,
+  fmtTrafficBytes,
+  cleanServerDisplayName,
+} from './settings/SwapManager'
+import { WhitelistDetectorSection } from './settings/WhitelistDetectorSection'
+import { DomainsAndNotificationsSection } from './settings/DomainsAndNotificationsSection'
+import { SystemSettingsCards, type GeoInfo } from './settings/SystemSettingsCards'
+import { SecurityCard } from './settings/SecurityCard'
 
-export function SwapManager({ notify }: { notify: (msg: string, isErr?: boolean) => void }) {
-  const [status, setStatus] = useState<SwapStatus | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [selectedSize, setSelectedSize] = useState<SwapSizePresetMb>(512)
-
-  const loadStatus = useCallback(async () => {
-    try {
-      const data = await apiGet<SwapStatus>('system/swap/status')
-      setStatus(data)
-    } catch (e: any) {
-      console.warn('Ошибка получения статуса Swap:', e)
-    }
-  }, [])
-
-  useEffect(() => {
-    loadStatus()
-  }, [loadStatus])
-
-  const handleCreate = async () => {
-    setLoading(true)
-    notify(`⏳ Выделение файла подкачки ${selectedSize} МБ на USB... Подождите 10-20 сек.`)
-    try {
-      const res = await apiPost<SwapStatus>('system/swap/create', { size_mb: selectedSize })
-      setStatus(res)
-      notify(`✓ Файл подкачки ${selectedSize} МБ успешно создан и активирован!`)
-    } catch (err: any) {
-      notify(err.message || 'Ошибка создания Swap', true)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const handleRemove = async () => {
-    if (typeof window !== 'undefined' && !window.confirm('Отключить и удалить файл подкачки?')) return
-    setLoading(true)
-    try {
-      const res = await apiPost<SwapStatus>('system/swap/remove', {})
-      setStatus(res)
-      notify('Файл подкачки отключен и удален')
-    } catch (err: any) {
-      notify(err.message || 'Ошибка отключения Swap', true)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  if (!status || !status.swap_supported) return null
-
-  const ramUsedMb = Math.max(0, status.ram_total_mb - status.ram_free_mb)
-  const ramPercent = Math.min(100, Math.round((ramUsedMb / (status.ram_total_mb || 1)) * 100))
-  const swapPercent =
-    status.swap_total_mb > 0
-      ? Math.min(100, Math.round((status.swap_used_mb / status.swap_total_mb) * 100))
-      : 0
-
-  return (
-    <div className="card" style={{ marginTop: 16 }} data-testid="swap-manager-card">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h3 style={{ margin: 0 }}>🚀 Память и файл подкачки (Swap)</h3>
-        <span
-          className={`badge ${status.swap_active ? 'badge-success' : 'badge-muted'}`}
-          data-testid="swap-status-badge"
-        >
-          {status.swap_active ? '🟢 Swap активен' : '⚪ Swap выключен'}
-        </span>
-      </div>
-      <p className="muted small" style={{ margin: '8px 0 16px' }}>
-        Технология защиты от вылетов ядра и нехватки ОЗУ на роутере Keenetic.
-        Используется щадящий режим флешки (swappiness=10).
-      </p>
-
-      {/* Метрики памяти */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12, marginBottom: 16 }}>
-        <div style={{ background: 'rgba(255,255,255,0.03)', padding: 12, borderRadius: 8 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 6 }}>
-            <span>ОЗУ роутера</span>
-            <b>{ramUsedMb} / {status.ram_total_mb} МБ ({ramPercent}%)</b>
-          </div>
-          <div className="progress-bar">
-            <div
-              className="progress-fill"
-              style={{
-                width: `${ramPercent}%`,
-                background: ramPercent > 85 ? '#ef4444' : '#38bdf8',
-              }}
-            />
-          </div>
-          <div className="muted small" style={{ marginTop: 4 }}>
-            Свободно: {status.ram_free_mb} МБ
-          </div>
-        </div>
-
-        <div style={{ background: 'rgba(255,255,255,0.03)', padding: 12, borderRadius: 8 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 6 }}>
-            <span>Файл подкачки (Swap)</span>
-            <b>{status.swap_used_mb} / {status.swap_total_mb} МБ ({swapPercent}%)</b>
-          </div>
-          <div className="progress-bar">
-            <div
-              className="progress-fill"
-              style={{ width: `${swapPercent}%`, background: '#22c55e' }}
-            />
-          </div>
-          <div className="muted small" style={{ marginTop: 4 }}>
-            Накопитель /opt: свободно {status.opt_disk_free_mb} МБ
-          </div>
-        </div>
-      </div>
-
-      {/* Управление */}
-      {!status.swap_active ? (
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-          <div style={{ display: 'flex', background: 'rgba(255,255,255,0.05)', borderRadius: 6, padding: 3 }}>
-            {([256, 512, 1024] as const).map((sz) => (
-              <button
-                key={sz}
-                type="button"
-                className={`btn-tab ${selectedSize === sz ? 'active' : ''}`}
-                style={{ padding: '6px 14px', fontSize: 12 }}
-                onClick={() => setSelectedSize(sz)}
-                data-testid={`swap-preset-${sz}`}
-              >
-                {sz} МБ {sz === 512 ? '★' : ''}
-              </button>
-            ))}
-          </div>
-          <button
-            className="btn btn-primary"
-            disabled={loading}
-            onClick={handleCreate}
-            style={{ minWidth: 200 }}
-            data-testid="swap-create-button"
-          >
-            {loading ? '⏳ Создание (15 сек)...' : `🚀 Создать Swap ${selectedSize} МБ в 1 клик`}
-          </button>
-        </div>
-      ) : (
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
-          <span className="small muted">
-            Файл <code>{status.swap_file_path}</code> ({status.swap_total_mb} МБ) активен. Автозапуск настроен в <code>S01swap</code>.
-          </span>
-          <button
-            className="btn btn-danger"
-            disabled={loading}
-            onClick={handleRemove}
-            data-testid="swap-remove-button"
-          >
-            {loading ? '⏳ Удаление...' : '🗑 Отключить и удалить Swap'}
-          </button>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function fmtTrafficBytes(bytes: number): string {
-  if (!bytes || bytes <= 0) return '0 B'
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
-}
-
-export function cleanServerDisplayName(name: string): string {
-  if (!name) return ''
-  return name.trim()
-}
-
-export function formatActiveServerStatus(statusText?: string, activeServer?: any, chain?: string[]): string {
-  if (chain && chain.length > 0 && activeServer?.id) {
-    const idx = chain.indexOf(activeServer.id)
-    if (idx === 0) {
-      return 'Штатно: активен основной узел #1'
-    } else if (idx > 0) {
-      return `Резерв #${idx + 1}: основной узел недоступен`
-    }
-  }
-  if (!statusText) {
-    return 'Штатный режим: переключения не требуются'
-  }
-  let s = statusText.replace(/\.?\s*В карантине.*$/i, '').trim()
-  s = cleanServerDisplayName(s)
-  if (s.length === 0) {
-    if (activeServer?.name) {
-      return `Штатно: активен узел '${cleanServerDisplayName(activeServer.name)}'`
-    }
-    return 'Штатный режим: переключения не требуются'
-  }
-  return s
-}
-
+export { SwapManager, cleanServerDisplayName, formatActiveServerStatus } from './settings/SwapManager'
 interface Props {
   notify: (msg: string, isError?: boolean) => void
   status?: StatusInfo | null
@@ -225,6 +43,7 @@ export default function Settings({ notify, status, refresh }: Props) {
   const [forceDomains, setForceDomains] = useState('')
   const [savedDirectDomains, setSavedDirectDomains] = useState('')
   const [savedForceDomains, setSavedForceDomains] = useState('')
+  useDirtyGuard('settings', directDomains !== savedDirectDomains || forceDomains !== savedForceDomains)
   const [autoCdns, setAutoCdns] = useState<string[]>([])
   const [cdnsCollapsed, setCdnsCollapsed] = useState(true)
   const [savingDomains, setSavingDomains] = useState(false)
@@ -302,13 +121,6 @@ export default function Settings({ notify, status, refresh }: Props) {
   // Модальные окна
   const [configEditorOpen, setConfigEditorOpen] = useState(false)
   const [presetCatalogOpen, setPresetCatalogOpen] = useState(false)
-  const [settingsDetectorModalOpen, setSettingsDetectorModalOpen] = useState(false)
-  const [settingsDetectedClassifier, setSettingsDetectedClassifier] = useState<{
-    detectedServerIds: string[]
-    detectedProviderIds: string[]
-    details: Array<{ id: string; name: string; reason: string; type: 'server' | 'provider' }>
-  } | null>(null)
-  const [settingsClassifierApplying, setSettingsClassifierApplying] = useState(false)
 
   // --- DNS режим ---
   const [dnsMode, setDnsMode] = useState<DnsEnhancedMode>('fake-ip')
@@ -394,11 +206,6 @@ export default function Settings({ notify, status, refresh }: Props) {
   const [adblockEnabled, setAdblockEnabled] = useState(false)
   const [adblockBusy, setAdblockBusy] = useState(false)
 
-  // --- GeoIP & GeoSite ---
-  interface GeoInfo {
-    geoip: { size: number; updated_at: string }
-    geosite: { size: number; updated_at: string }
-  }
   const [geoInfo, setGeoInfo] = useState<GeoInfo | null>(null)
   const [geoUpdating, setGeoUpdating] = useState(false)
 
@@ -2304,509 +2111,14 @@ export default function Settings({ notify, status, refresh }: Props) {
             )}
 
             {/* Whitelist Detector Card */}
-            {(() => {
-              const det = settings.failover.whitelist_detector || {
-                enabled: false,
-                monitored_provider: '',
-                exclude_ru_nodes: true,
-                target_bs_provider: '',
-                threshold_mode: 'percent',
-                trigger_offline_percent: 80,
-                trigger_offline_count: 75,
-                max_acceptable_ping_ms: 450,
-                exit_offline_percent: 45,
-                exit_offline_count: 48,
-                check_interval_mins: 10,
-                auto_restore_vps: true,
-              }
-
-              const ensureDetector = (s: AppSettings) => {
-                if (!s.failover.whitelist_detector) {
-                  s.failover.whitelist_detector = {
-                    enabled: false,
-                    monitored_provider: '',
-                    exclude_ru_nodes: true,
-                    target_bs_provider: '',
-                    threshold_mode: 'percent',
-                    trigger_offline_percent: 80,
-                    trigger_offline_count: 75,
-                    max_acceptable_ping_ms: 450,
-                    exit_offline_percent: 45,
-                    exit_offline_count: 48,
-                    check_interval_mins: 10,
-                    auto_restore_vps: true,
-                  }
-                }
-                return s.failover.whitelist_detector
-              }
-
-              const handleOpenSettingsClassifier = () => {
-                const detected = detectWhitelistServers(servers, providers)
-                // Если узлы пришли без флага от сервера, дополняем локальными тегами (fallback)
-                if (detected.detectedServerIds.length === 0 && detected.detectedProviderIds.length === 0) {
-                  const checkTagFallback = (s: string) => {
-                    const l = s.toLowerCase()
-                    return (
-                      l.includes('[бс]') || l.includes('(бс)') || l.includes('[bs]') || l.includes('(bs)') ||
-                      l.includes('[wl]') || l.includes('(wl)') || /\bwhitelist\b/i.test(l)
-                    )
-                  }
-                  for (const p of providers) {
-                    if (checkTagFallback(p.name) || checkTagFallback(p.id)) {
-                      if (!detected.detectedProviderIds.includes(p.id)) {
-                        detected.detectedProviderIds.push(p.id)
-                        detected.details.push({ id: p.id, name: p.name, reason: 'Подписка [WL]', type: 'provider' })
-                      }
-                    }
-                  }
-                  for (const s of servers) {
-                    if (checkTagFallback(s.name) || checkTagFallback(s.id)) {
-                      if (!detected.detectedServerIds.includes(s.id)) {
-                        detected.detectedServerIds.push(s.id)
-                        detected.details.push({ id: s.id, name: s.name, reason: 'Узел [БС]', type: 'server' })
-                      }
-                    }
-                  }
-                }
-                setSettingsDetectedClassifier(detected)
-                setSettingsDetectorModalOpen(true)
-              }
-
-              const handleApplySettingsClassifier = async () => {
-                if (!settingsDetectedClassifier || settingsClassifierApplying) return
-                setSettingsClassifierApplying(true)
-                try {
-                  const res = await applyDetectedWhitelistServers(
-                    settingsDetectedClassifier.detectedServerIds,
-                    settingsDetectedClassifier.detectedProviderIds
-                  )
-                  notify(
-                    `Применено: серверов БС — ${res.whitelist_servers.length}, подписок БС — ${res.whitelist_providers.length}`
-                  )
-                  setSettingsDetectorModalOpen(false)
-                  refresh?.()
-                } catch (e: any) {
-                  notify(e?.message || 'Ошибка применения белых списков', true)
-                } finally {
-                  setSettingsClassifierApplying(false)
-                }
-              }
-
-              return (
-                <div
-                  style={{
-                    marginTop: 6,
-                    padding: 14,
-                    background: 'rgba(168, 85, 247, 0.04)',
-                    border: '1px solid rgba(168, 85, 247, 0.25)',
-                    borderRadius: 10,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 12,
-                  }}
-                  data-testid="settings-whitelist-detector-card"
-                >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-                    <div>
-                      <b style={{ display: 'block', fontSize: 13.5, color: '#c084fc' }}>
-                        🛡️ Автодетекция блокировок ТСПУ и режим [БС]
-                      </b>
-                      <span className="muted small">
-                        Постоянный контроль доступности зарубежных серверов и мгновенное переключение на [БС] при изоляции
-                      </span>
-                    </div>
-                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
-                      <label className="switch" title="Включить детектор белых списков">
-                        <input
-                          type="checkbox"
-                          checked={Boolean(det.enabled)}
-                          onChange={(e) =>
-                            patch((s) => {
-                              const d = ensureDetector(s)
-                              d.enabled = e.target.checked
-                            })
-                          }
-                          data-testid="settings-whitelist-detector-toggle"
-                        />
-                        <span className="slider" />
-                      </label>
-                      <span style={{ fontSize: 13, minWidth: 64, color: det.enabled ? '#c084fc' : 'var(--muted)', fontWeight: 600 }}>
-                        {det.enabled ? 'Включён' : 'Выключен'}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
-                    {/* Контролируемый провайдер */}
-                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4, width: '100%' }}>
-                      <span style={{ fontSize: 12, fontWeight: 500 }}>Контролируемый пул (зарубежный VPS)</span>
-                      <select
-                        className="input"
-                        value={det.monitored_provider || ''}
-                        onChange={(e) =>
-                          patch((s) => {
-                            const d = ensureDetector(s)
-                            d.monitored_provider = e.target.value
-                          })
-                        }
-                        style={{ width: '100%', boxSizing: 'border-box' }}
-                        data-testid="settings-detector-monitored-provider"
-                      >
-                        <option value="">Авто (все зарубежные узлы Tier 1)</option>
-                        {providers.map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.name || p.id} ({p.count} узлов)
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    {/* Целевой сервер / провайдер БС */}
-                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4, width: '100%' }}>
-                      <span style={{ fontSize: 12, fontWeight: 500 }}>Целевой шлюз белых списков [БС]</span>
-                      <select
-                        className="input"
-                        value={det.target_bs_provider || ''}
-                        onChange={(e) =>
-                          patch((s) => {
-                            const d = ensureDetector(s)
-                            d.target_bs_provider = e.target.value
-                          })
-                        }
-                        style={{ width: '100%', boxSizing: 'border-box' }}
-                        data-testid="settings-detector-target-provider"
-                      >
-                        <option value="">Авто (серверы, помеченные [БС])</option>
-                        {providers.map((p) => (
-                          <option key={p.id} value={p.id}>
-                            {p.name || p.id} {p.is_whitelist ? '⭐ [БС]' : ''}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                  </div>
-
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
-                    {/* Порог срабатывания % */}
-                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
-                      <span style={{ fontSize: 12 }}>Порог изоляции (%)</span>
-                      <NumberInput
-                        min={10}
-                        max={100}
-                        step={5}
-                        fallback={80}
-                        value={det.trigger_offline_percent ?? 80}
-                        onChange={(val) =>
-                          patch((s) => {
-                            const d = ensureDetector(s)
-                            d.trigger_offline_percent = val
-                          })
-                        }
-                      />
-                    </label>
-
-                    {/* Порог выхода % */}
-                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
-                      <span style={{ fontSize: 12 }}>Порог снятия ТСПУ (%)</span>
-                      <NumberInput
-                        min={5}
-                        max={90}
-                        step={5}
-                        fallback={45}
-                        value={det.exit_offline_percent ?? 45}
-                        onChange={(val) =>
-                          patch((s) => {
-                            const d = ensureDetector(s)
-                            d.exit_offline_percent = val
-                          })
-                        }
-                      />
-                    </label>
-
-                    {/* Макс допустимый пинг */}
-                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
-                      <span style={{ fontSize: 12 }}>Макс. допустимый пинг (мс)</span>
-                      <NumberInput
-                        min={100}
-                        max={2000}
-                        step={50}
-                        fallback={450}
-                        value={det.max_acceptable_ping_ms ?? 450}
-                        onChange={(val) =>
-                          patch((s) => {
-                            const d = ensureDetector(s)
-                            d.max_acceptable_ping_ms = val
-                          })
-                        }
-                      />
-                    </label>
-
-                    {/* Интервал проверки в минутах */}
-                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
-                      <span style={{ fontSize: 12 }}>Интервал сканирования (мин)</span>
-                      <NumberInput
-                        min={1}
-                        max={1440}
-                        step={1}
-                        fallback={10}
-                        value={det.check_interval_mins ?? 10}
-                        onChange={(val) =>
-                          patch((s) => {
-                            const d = ensureDetector(s)
-                            d.check_interval_mins = val
-                          })
-                        }
-                      />
-                    </label>
-
-                    {/* Пул проверки зарубежных узлов (sample_size) */}
-                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
-                      <span style={{ fontSize: 12 }}>Пул проверки зарубежных узлов</span>
-                      <select
-                        className="input"
-                        value={
-                          det.sample_size === undefined || det.sample_size === 0
-                            ? '0'
-                            : det.sample_size === 24
-                            ? '24'
-                            : det.sample_size === 50
-                            ? '50'
-                            : 'custom'
-                        }
-                        onChange={(e) => {
-                          const val = e.target.value
-                          patch((s) => {
-                            const d = ensureDetector(s)
-                            if (val === '0') d.sample_size = 0
-                            else if (val === '24') d.sample_size = 24
-                            else if (val === '50') d.sample_size = 50
-                            else if (val === 'custom') {
-                              if (!d.sample_size || d.sample_size === 0 || d.sample_size === 24 || d.sample_size === 50) {
-                                d.sample_size = 30
-                              }
-                            }
-                          })
-                        }}
-                        data-testid="settings-detector-sample-size-select"
-                      >
-                        <option value="0">Все узлы подписки (100% охват, 93+ узлов)</option>
-                        <option value="24">Быстрый срез: 24 узла (2-3 сек)</option>
-                        <option value="50">Расширенный срез: 50 узлов</option>
-                        <option value="custom">Свой размер пула…</option>
-                      </select>
-                    </label>
-                  </div>
-
-                  {/* Если выбран произвольный размер пула узлов */}
-                  {Boolean(
-                    det.sample_size !== undefined &&
-                    det.sample_size !== 0 &&
-                    det.sample_size !== 24 &&
-                    det.sample_size !== 50
-                  ) && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4, maxWidth: 220 }}>
-                        <span style={{ fontSize: 12 }}>Произвольное число узлов (шт.)</span>
-                        <NumberInput
-                          min={1}
-                          max={500}
-                          step={5}
-                          fallback={30}
-                          value={det.sample_size ?? 30}
-                          onChange={(val) =>
-                            patch((s) => {
-                              const d = ensureDetector(s)
-                              d.sample_size = val
-                            })
-                          }
-                          data-testid="settings-detector-sample-size-custom-input"
-                        />
-                      </label>
-                      <span className="muted small" style={{ fontSize: 11, marginTop: 18 }}>
-                        Проверяет первые N активных зарубежных серверов провайдера для ускорения детекции ТСПУ
-                      </span>
-                    </div>
-                  )}
-
-                  {/* Подсказка/бейдж для размера пула */}
-                  <div
-                    style={{
-                      fontSize: 11.5,
-                      padding: '6px 10px',
-                      borderRadius: 6,
-                      background: 'rgba(168, 85, 247, 0.08)',
-                      border: '1px solid rgba(168, 85, 247, 0.2)',
-                      color: 'var(--text-bright)',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 6,
-                    }}
-                    data-testid="settings-detector-sample-size-hint"
-                  >
-                    <span>💡</span>
-                    <span>
-                      {(det.sample_size === undefined || det.sample_size === 0)
-                        ? 'Режим 100% охвата: опрашивает все узлы провайдера. Точнее всего фиксирует ковровые блокировки ТСПУ.'
-                        : `Режим среза (${det.sample_size} узлов): проверяет репрезентативную выборку серверов, снижая нагрузку на роутер и давая вердикт за секунды.`}
-                    </span>
-                  </div>
-
-                  {/* Чекбоксы: Отсев RU нод и Автовозврат на VPS */}
-                  <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
-                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5 }}>
-                      <input
-                        type="checkbox"
-                        checked={det.exclude_ru_nodes ?? true}
-                        onChange={(e) =>
-                          patch((s) => {
-                            const d = ensureDetector(s)
-                            d.exclude_ru_nodes = e.target.checked
-                          })
-                        }
-                        data-testid="settings-detector-exclude-ru"
-                      />
-                      <span>Исключать ноды РФ из контрольной группы зарубежных узлов</span>
-                    </label>
-
-                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5 }}>
-                      <input
-                        type="checkbox"
-                        checked={det.auto_restore_vps ?? true}
-                        onChange={(e) =>
-                          patch((s) => {
-                            const d = ensureDetector(s)
-                            d.auto_restore_vps = e.target.checked
-                          })
-                        }
-                        data-testid="settings-detector-auto-restore"
-                      />
-                      <span>Авто-возврат на обычный VPS при снятии блокировки ТСПУ</span>
-                    </label>
-                  </div>
-
-                  {/* Кнопка автоопределения БС узлов */}
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 6, flexWrap: 'wrap', gap: 8, padding: '8px 10px', background: 'rgba(255, 255, 255, 0.02)', borderRadius: 8, border: '1px solid var(--border)' }}>
-                    <button
-                      type="button"
-                      className="btn sm"
-                      onClick={handleOpenSettingsClassifier}
-                      data-testid="settings-detector-classify-btn"
-                      title="Автоматически распознать серверы с метками БС и добавить в список"
-                    >
-                      ✨ Автоопределение серверов БС
-                    </button>
-                    <span className="muted small" style={{ fontSize: 11, flex: 1, minWidth: 200 }}>
-                      Находит конкретные узлы обхода (теги [БС], Whitelist) и помечает их как Tier 2
-                    </span>
-                  </div>
-
-                  {/* Модальное окно классификатора внутри настроек */}
-                  {settingsDetectorModalOpen && settingsDetectedClassifier && (
-                    <div
-                      className="modal-backdrop"
-                      style={{
-                        position: 'fixed',
-                        top: 0,
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        background: 'rgba(0, 0, 0, 0.7)',
-                        backdropFilter: 'blur(3px)',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        zIndex: 9999,
-                        padding: 16,
-                      }}
-                      onClick={() => setSettingsDetectorModalOpen(false)}
-                    >
-                      <div
-                        className="modal-content card"
-                        style={{
-                          maxWidth: 580,
-                          width: '100%',
-                          background: 'var(--card-bg, #1e293b)',
-                          border: '1px solid var(--border, rgba(255, 255, 255, 0.1))',
-                          borderRadius: 12,
-                          padding: 20,
-                        }}
-                        onClick={(e) => e.stopPropagation()}
-                        data-testid="settings-detector-classifier-modal"
-                      >
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                          <h3 style={{ margin: 0, fontSize: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
-                            <span>✨</span> Результаты классификации БС
-                          </h3>
-                          <button
-                            type="button"
-                            className="btn ghost sm"
-                            onClick={() => setSettingsDetectorModalOpen(false)}
-                          >
-                            ✕
-                          </button>
-                        </div>
-
-                        {settingsDetectedClassifier.details.length === 0 ? (
-                          <div style={{ padding: 16, textAlign: 'center', color: 'var(--muted)', fontSize: 13 }}>
-                            ℹ️ Теги белых списков не обнаружены среди доступных узлов и подписок.
-                          </div>
-                        ) : (
-                          <div style={{ maxHeight: 280, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
-                            {settingsDetectedClassifier.details.map((d) => (
-                              <div
-                                key={`${d.type}-${d.id}`}
-                                style={{
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  justifyContent: 'space-between',
-                                  gap: 10,
-                                  padding: '8px 12px',
-                                  background: 'rgba(255, 255, 255, 0.03)',
-                                  border: '1px solid rgba(255, 255, 255, 0.08)',
-                                  borderRadius: 6,
-                                  fontSize: 12,
-                                }}
-                              >
-                                <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
-                                  <span className="badge" style={{ background: d.type === 'provider' ? 'rgba(56, 189, 248, 0.2)' : 'rgba(168, 85, 247, 0.2)', color: d.type === 'provider' ? '#38bdf8' : '#c084fc', fontSize: 10 }}>
-                                    {d.type === 'provider' ? 'Подписка' : 'Сервер'}
-                                  </span>
-                                  <b style={{ color: 'var(--text-bright)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                    {d.name || d.id}
-                                  </b>
-                                </div>
-                                <span className="muted small" style={{ fontSize: 10.5, whiteSpace: 'nowrap' }}>
-                                  {d.reason}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 16 }}>
-                          <button
-                            type="button"
-                            className="btn ghost"
-                            onClick={() => setSettingsDetectorModalOpen(false)}
-                          >
-                            Отмена
-                          </button>
-                          <button
-                            type="button"
-                            className="btn primary"
-                            disabled={settingsDetectedClassifier.details.length === 0 || settingsClassifierApplying}
-                            onClick={handleApplySettingsClassifier}
-                            data-testid="settings-detector-apply-classifier-btn"
-                          >
-                            {settingsClassifierApplying ? 'Применение…' : `Применить в 1 клик (${settingsDetectedClassifier.details.length})`}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )
-            })()}
+            <WhitelistDetectorSection
+              settings={settings}
+              servers={servers}
+              providers={providers}
+              patch={patch}
+              notify={notify}
+              refresh={refresh}
+            />
 
             <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', alignItems: 'center', marginTop: 4, flexWrap: 'wrap' }}>
               <button className="btn" onClick={testCheck}>🔍 Тестовая проверка сейчас</button>
@@ -2830,691 +2142,87 @@ export default function Settings({ notify, status, refresh }: Props) {
             </div>
           </section>
 
-          {/* ДОМЕНЫ */}
-          <section className="card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <h2 style={{ margin: 0, fontSize: 16 }}>🌐 Домены</h2>
-                <span className="badge" style={{ background: 'rgba(56, 189, 248, 0.1)', color: '#38bdf8' }}>
-                  {directDomains.split('\n').filter(Boolean).length} DIRECT · {forceDomains.split('\n').filter(Boolean).length} PROXY
-                </span>
-              </div>
-              <button type="button" className="btn sm" onClick={() => setPresetCatalogOpen(true)} title="Добавить готовые списки (YouTube, Discord, AI...)">
-                ✨ Каталог пресетов
-              </button>
-            </div>
-            <p className="muted small" style={{ margin: 0 }}>
-              По одному домену в строке. Вставляются в начало <code>rules:</code> (DOMAIN-SUFFIX). Сопутствующие CDN и медиа-серверы определяются автоматически.
-            </p>
+          <DomainsAndNotificationsSection
+            notify={notify}
+            directDomains={directDomains}
+            setDirectDomains={setDirectDomains}
+            forceDomains={forceDomains}
+            setForceDomains={setForceDomains}
+            savedDirectDomains={savedDirectDomains}
+            savedForceDomains={savedForceDomains}
+            autoCdns={autoCdns}
+            cdnsCollapsed={cdnsCollapsed}
+            setCdnsCollapsed={setCdnsCollapsed}
+            savingDomains={savingDomains}
+            scanningCdn={scanningCdn}
+            hasUnsavedDirect={hasUnsavedDirect}
+            hasUnsavedForce={hasUnsavedForce}
+            hasUnsavedDomains={hasUnsavedDomains}
+            setPresetCatalogOpen={setPresetCatalogOpen}
+            saveDomains={saveDomains}
+            scanCdnManual={scanCdnManual}
+            telegramEnabled={telegramEnabled}
+            setTelegramEnabled={setTelegramEnabled}
+            telegramBotToken={telegramBotToken}
+            setTelegramBotToken={setTelegramBotToken}
+            telegramChatId={telegramChatId}
+            setTelegramChatId={setTelegramChatId}
+            webhookUrl={webhookUrl}
+            setWebhookUrl={setWebhookUrl}
+            notifTesting={notifTesting}
+            notifSaving={notifSaving}
+            activeNotifHelp={activeNotifHelp}
+            setActiveNotifHelp={setActiveNotifHelp}
+            notifTokenWarning={notifTokenWarning}
+            notifChatIdWarning={notifChatIdWarning}
+            handleSaveNotifications={handleSaveNotifications}
+            handleTestNotification={handleTestNotification}
+          />
 
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 14, marginTop: 4 }}>
-              {/* DIRECT */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', minHeight: 24 }}>
-                  <b style={{ fontSize: 13, color: '#34d399', whiteSpace: 'nowrap' }}>⏭ Напрямую (DIRECT)</b>
-                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', whiteSpace: 'nowrap' }}>
-                    <span className="muted small">{directDomains.split('\n').filter(Boolean).length} шт.</span>
-                    {hasUnsavedDirect ? (
-                      <span style={{ fontSize: 10.5, background: 'rgba(245, 158, 11, 0.2)', color: '#f59e0b', padding: '1px 6px', borderRadius: 4, fontWeight: 600 }}>
-                        🟠 Не применено
-                      </span>
-                    ) : (
-                      <span style={{ fontSize: 10.5, background: 'rgba(16, 185, 129, 0.15)', color: '#10b981', padding: '1px 6px', borderRadius: 4 }}>
-                        ✅ Активно
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <textarea
-                  className="input"
-                  rows={6}
-                  placeholder={'example.com\nlocal-service.net\nw3.org'}
-                  value={directDomains}
-                  onChange={(e) => setDirectDomains(e.target.value)}
-                  style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'Consolas, monospace', fontSize: 12, resize: 'vertical' }}
-                />
-              </div>
-
-              {/* PROXY */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', minHeight: 24 }}>
-                  <b style={{ fontSize: 13, color: '#38bdf8', whiteSpace: 'nowrap' }}>🔒 Через прокси (PROXY)</b>
-                  <div style={{ display: 'flex', gap: 6, alignItems: 'center', whiteSpace: 'nowrap' }}>
-                    <span className="muted small">{forceDomains.split('\n').filter(Boolean).length} шт.</span>
-                    {hasUnsavedForce ? (
-                      <span style={{ fontSize: 10.5, background: 'rgba(245, 158, 11, 0.2)', color: '#f59e0b', padding: '1px 6px', borderRadius: 4, fontWeight: 600 }}>
-                        🟠 Не применено
-                      </span>
-                    ) : (
-                      <span style={{ fontSize: 10.5, background: 'rgba(16, 185, 129, 0.15)', color: '#10b981', padding: '1px 6px', borderRadius: 4 }}>
-                        ✅ Активно
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <textarea
-                  className="input"
-                  rows={6}
-                  placeholder={'openai.com\nyoutube.com\ngithub.com'}
-                  value={forceDomains}
-                  onChange={(e) => setForceDomains(e.target.value)}
-                  style={{ width: '100%', boxSizing: 'border-box', fontFamily: 'Consolas, monospace', fontSize: 12, resize: 'vertical' }}
-                />
-              </div>
-            </div>
-
-            {autoCdns.length > 0 && (
-              <div style={{ marginTop: 4, padding: '8px 10px', background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.2)', borderRadius: 6, fontSize: 12 }}>
-                <div
-                  style={{ color: '#38bdf8', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', userSelect: 'none' }}
-                  onClick={() => setCdnsCollapsed((prev) => !prev)}
-                  title={cdnsCollapsed ? 'Развернуть список найденных CDN' : 'Свернуть список CDN'}
-                >
-                  <span>⚡ Автоматически подключенные CDN и медиа-сервера ({autoCdns.length})</span>
-                  <span style={{ fontSize: 12, opacity: 0.85, background: 'rgba(56, 189, 248, 0.15)', padding: '2px 8px', borderRadius: 4 }}>
-                    {cdnsCollapsed ? '▼ Развернуть' : '▲ Свернуть'}
-                  </span>
-                </div>
-                {!cdnsCollapsed && (
-                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 8 }}>
-                    {autoCdns.map((cdn) => (
-                      <span key={cdn} style={{ fontSize: 11, background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', padding: '1px 6px', borderRadius: 4, fontFamily: 'monospace' }}>
-                        {cdn}
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div style={{ display: 'flex', gap: 8, marginTop: 4, flexWrap: 'wrap', alignItems: 'center' }}>
-              <button
-                className="btn primary"
-                onClick={saveDomains}
-                disabled={savingDomains}
-                style={hasUnsavedDomains ? { boxShadow: '0 0 10px rgba(56, 189, 248, 0.4)', borderColor: '#38bdf8' } : undefined}
-              >
-                {savingDomains ? 'Применение доменов…' : hasUnsavedDomains ? '💾 Применить изменения' : '🌐 Применить домены'}
-              </button>
-              {hasUnsavedDomains && (
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={() => {
-                    setDirectDomains(savedDirectDomains)
-                    setForceDomains(savedForceDomains)
-                    notify('Введённые домены сброшены до сохранённых на роутере')
-                  }}
-                  title="Сбросить введённый черновик к тому, что сейчас сохранено на роутере"
-                  style={{ fontSize: 12 }}
-                >
-                  ↺ Сбросить к сохранённым
-                </button>
-              )}
-              <button className="btn" onClick={scanCdnManual} disabled={scanningCdn || savingDomains}>
-                {scanningCdn ? '🔍 Поиск CDN…' : '🔍 Сканировать CDN сейчас'}
-              </button>
-            </div>
-            <p className="muted small" style={{ marginTop: 2, marginBottom: 0 }}>
-              💡 Фоновое сканирование выполняется автоматически 1 раз в неделю (в понедельник в 05:00) или вручную кнопкой выше, чтобы не нагружать процессор роутера.
-            </p>
-          </section>
-
-          {/* ОПОВЕЩЕНИЯ (TELEGRAM / WEBHOOK) */}
-          <section className="card">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-              <h2 style={{ margin: 0 }}>🔔 Оповещения о сбоях</h2>
-              <span className={`badge ${telegramEnabled ? 'badge-online' : ''}`}>
-                {telegramEnabled ? '🟢 Telegram вкл' : '⚪ выкл'}
-              </span>
-            </div>
-            <p className="muted small">Мгновенные уведомления в Telegram при падении серверов и переключении Failover.</p>
-            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-              <b>Telegram оповещения</b>
-              <label className="switch">
-                <input
-                  type="checkbox"
-                  checked={telegramEnabled}
-                  onChange={(e) => setTelegramEnabled(e.target.checked)}
-                />
-                <span className="slider" />
-              </label>
-            </div>
-
-            {/* BOT TOKEN */}
-            <label className="row" style={{ alignItems: 'flex-start', marginTop: 8 }}>
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, paddingTop: 6 }}>
-                Bot Token
-                <button
-                  type="button"
-                  className={`badge-help-btn ${activeNotifHelp === 'token' ? 'active' : ''}`}
-                  title="Где взять токен бота? Нажмите для инструкции"
-                  onClick={() => setActiveNotifHelp((prev) => (prev === 'token' ? null : 'token'))}
-                >
-                  ?
-                </button>
-              </span>
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3 }}>
-                <input
-                  className="input"
-                  placeholder="123456789:ABCdefGhIJKlmNoPQRstuVWXyz"
-                  value={telegramBotToken}
-                  onChange={(e) => setTelegramBotToken(e.target.value)}
-                  style={notifTokenWarning ? { borderColor: 'var(--red, #ef4444)' } : undefined}
-                />
-                {notifTokenWarning && (
-                  <span style={{ fontSize: 11, color: 'var(--red, #ef4444)', lineHeight: 1.3 }}>
-                    ⚠️ {notifTokenWarning}
-                  </span>
-                )}
-              </div>
-            </label>
-            {activeNotifHelp === 'token' && (
-              <div className="help-box-tip" style={{ marginTop: 4, marginBottom: 8 }}>
-                <div style={{ fontWeight: 600, marginBottom: 4, color: 'var(--accent, #38bdf8)' }}>🤖 Как получить Bot Token:</div>
-                <ol style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 1.5 }}>
-                  <li>Откройте официального бота <a href="https://t.me/BotFather" target="_blank" rel="noreferrer" style={{ color: 'var(--accent, #38bdf8)', textDecoration: 'underline' }}>@BotFather</a> в Telegram.</li>
-                  <li>Отправьте команду <code>/newbot</code>, укажите имя и username (должен оканчиваться на <code>bot</code>).</li>
-                  <li>Скопируйте выданный токен <b>целиком</b> (вид: <code>123456789:AAAAAA...</code>) и вставьте в это поле. Не удаляйте цифры в начале!</li>
-                </ol>
-              </div>
-            )}
-
-            {/* CHAT ID */}
-            <label className="row" style={{ alignItems: 'flex-start', marginTop: 8 }}>
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, paddingTop: 6 }}>
-                Chat ID
-                <button
-                  type="button"
-                  className={`badge-help-btn ${activeNotifHelp === 'chatId' ? 'active' : ''}`}
-                  title="Как узнать свой Chat ID? Нажмите для инструкции"
-                  onClick={() => setActiveNotifHelp((prev) => (prev === 'chatId' ? null : 'chatId'))}
-                >
-                  ?
-                </button>
-              </span>
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3 }}>
-                <input
-                  className="input"
-                  placeholder="123456789 или -1001234567890"
-                  value={telegramChatId}
-                  onChange={(e) => setTelegramChatId(e.target.value)}
-                  style={notifChatIdWarning ? { borderColor: 'var(--red, #ef4444)' } : undefined}
-                />
-                {notifChatIdWarning && (
-                  <span style={{ fontSize: 11, color: 'var(--red, #ef4444)', lineHeight: 1.3 }}>
-                    {notifChatIdWarning}
-                  </span>
-                )}
-              </div>
-            </label>
-            {activeNotifHelp === 'chatId' && (
-              <div className="help-box-tip" style={{ marginTop: 4, marginBottom: 8 }}>
-                <div style={{ fontWeight: 600, marginBottom: 4, color: 'var(--accent, #38bdf8)' }}>🆔 Как узнать ваш Chat ID:</div>
-                <ol style={{ margin: 0, paddingLeft: 18, fontSize: 12, lineHeight: 1.5 }}>
-                  <li>Откройте бота <a href="https://t.me/userinfobot" target="_blank" rel="noreferrer" style={{ color: 'var(--accent, #38bdf8)', textDecoration: 'underline' }}>@userinfobot</a> (или @getmyid_bot) и нажмите <b>/start</b>.</li>
-                  <li>Скопируйте ваш числовой <code>Id</code> (например, <code>712345678</code>) и вставьте в это поле.</li>
-                  <li>⚠️ <b>Обязательно:</b> зайдите в вашего <b>созданного бота</b> и нажмите кнопку <b>СТАРТ (/start)</b>, иначе Telegram запретит боту писать вам!</li>
-                  <li><i>Для группы: добавьте бота в группу и укажите ID группы (начинается с <code>-100...</code>).</i></li>
-                </ol>
-              </div>
-            )}
-
-            {/* WEBHOOK URL */}
-            <label className="row" style={{ alignItems: 'flex-start', marginTop: 8 }}>
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, paddingTop: 6 }}>
-                Webhook URL
-                <button
-                  type="button"
-                  className={`badge-help-btn ${activeNotifHelp === 'webhook' ? 'active' : ''}`}
-                  title="Что такое Webhook URL? Нажмите для справки"
-                  onClick={() => setActiveNotifHelp((prev) => (prev === 'webhook' ? null : 'webhook'))}
-                >
-                  ?
-                </button>
-              </span>
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 3 }}>
-                <input
-                  className="input"
-                  placeholder="https://my-server.com/api/failover-hook"
-                  value={webhookUrl}
-                  onChange={(e) => setWebhookUrl(e.target.value)}
-                />
-                <span className="muted small" style={{ fontSize: 11 }}>
-                  💡 Не требуется для Telegram! Используется только для Discord, Home Assistant или внешних серверов.
-                </span>
-              </div>
-            </label>
-            {activeNotifHelp === 'webhook' && (
-              <div className="help-box-tip" style={{ marginTop: 4, marginBottom: 8 }}>
-                <div style={{ fontWeight: 600, marginBottom: 4, color: 'var(--accent, #38bdf8)' }}>🔗 Для чего нужно поле Webhook URL:</div>
-                <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5 }}>
-                  Если вы настраиваете оповещения в <b>Telegram</b> — оставьте это поле <b>пустым</b>.<br />
-                  Webhook URL нужен только для автоматической отправки JSON-событий в сторонние сервисы:
-                </p>
-                <ul style={{ margin: '4px 0 0 0', paddingLeft: 18, fontSize: 12, lineHeight: 1.5 }}>
-                  <li><b>Discord</b> (URL вебхука текстового канала из настроек сервера)</li>
-                  <li><b>Home Assistant / Node-RED / n8n</b> (умный дом)</li>
-                  <li>Собственные сервера и скрипты мониторинга</li>
-                </ul>
-              </div>
-            )}
-
-            <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-              <button className="btn primary" onClick={handleSaveNotifications} disabled={notifSaving}>
-                {notifSaving ? 'Сохранение…' : '💾 Сохранить оповещения'}
-              </button>
-              <button className="btn" onClick={handleTestNotification} disabled={notifTesting}>
-                {notifTesting ? 'Отправка…' : '💬 Тестовое сообщение'}
-              </button>
-            </div>
-          </section>
-
-          {/* ADBLOCK */}
-          <section className="card">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <h2 style={{ margin: 0 }}>🛡️ Блокировка рекламы (AdBlock)</h2>
-              <span className={`badge ${adblockEnabled ? 'badge-online' : ''}`} style={{ color: adblockEnabled ? '#22c55e' : 'var(--muted)' }}>
-                {adblockEnabled ? '🟢 Активно на роутере' : '⚪ Отключено'}
-              </span>
-            </div>
-            <p className="muted small">
-              Блокирует рекламные баннеры, видеовставки, счетчики трекеров и аналитику для всех устройств в сети без установки расширений в браузеры (правило <code>category-ads-all</code> из базы GeoSite).
-            </p>
-            <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
-              <span>Включить AdBlock для всех устройств</span>
-              <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
-                <label className="switch">
-                  <input
-                    type="checkbox"
-                    checked={adblockEnabled}
-                    disabled={adblockBusy}
-                    onChange={(e) => handleToggleAdblock(e.target.checked)}
-                  />
-                  <span className="slider" />
-                </label>
-                <span style={{ fontSize: 13, minWidth: 64, color: adblockEnabled ? 'var(--green)' : 'var(--muted)' }}>
-                  {adblockBusy ? '⏳…' : adblockEnabled ? 'Да' : 'Нет'}
-                </span>
-              </div>
-            </div>
-          </section>
-
-          {/* RCI (KEENETIC) */}
-          <section className="card">
-            <h2>🔌 RCI (Keenetic)</h2>
-            <label className="row"><span>Host</span>
-              <input className="input" value={settings.rci.host} onChange={(e) => patch((s) => (s.rci.host = e.target.value))} />
-            </label>
-            <label className="row"><span>Порт</span>
-              <NumberInput
-                min={1}
-                max={65535}
-                fallback={79}
-                value={settings.rci.port}
-                onChange={(val) => patch((s) => (s.rci.port = val))}
-              />
-            </label>
-            <label className="row"><span>Логин</span>
-              <input className="input" value={settings.rci.login} onChange={(e) => patch((s) => (s.rci.login = e.target.value))} />
-            </label>
-            <label className="row"><span>Пароль (fallback)</span>
-              <input className="input" type="password" value={settings.rci.password} onChange={(e) => patch((s) => (s.rci.password = e.target.value))} />
-            </label>
-            <label className="row"><span>Токен (X-Ndma-Tkn)</span>
-              <input className="input" value={settings.rci.token} placeholder="пусто = из /opt/etc/xkeen/xkeen.json"
-                onChange={(e) => patch((s) => (s.rci.token = e.target.value))} />
-            </label>
-            <p className="muted small">Если токен не задан, панель возьмёт его из /opt/etc/xkeen/xkeen.json; иначе — challenge-auth.</p>
-          </section>
-
-          {/* СЕРВИС XKEEN */}
-          <section className="card">
-            <h2>🖥 Сервис XKeen</h2>
-            <p className="muted small">Restart перегенерирует config.yaml — настройки маршрутизации возвращаются к исходным (до любых изменений из панели).</p>
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <button className="btn" disabled={svcBusy !== ''} onClick={() => svc('status')}>📊 Статус</button>
-              <button className="btn" disabled={svcBusy !== ''} onClick={() => svc('start')}>▶ Старт</button>
-              <button className="btn" disabled={svcBusy !== ''} onClick={() => svc('restart')}>🔄 Рестарт</button>
-              <button className="btn" style={{ borderColor: 'var(--red)', color: 'var(--red)' }} disabled={svcBusy !== ''} onClick={() => { if (confirm('Остановить сервис XKeen? Интернет через прокси пропадёт.')) svc('stop') }}>⏹ Стоп</button>
-            </div>
-            <label className="row" style={{ marginTop: 10 }}><span>Init-скрипт XKeen</span>
-              <input className="input" value={settings.system?.xkeen_init ?? '/opt/etc/init.d/S05xkeen'}
-                onChange={(e) => patch((s) => (s.system.xkeen_init = e.target.value))} />
-            </label>
-          </section>
-
-          {/* DNS РЕЖИМ (MIHOMO) */}
-          <section className="card">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-              <h2 style={{ margin: 0 }}>🧭 DNS Режим (Mihomo)</h2>
-              <span className="badge" style={{ textTransform: 'uppercase' }}>{dnsMode}</span>
-            </div>
-            <p className="muted small">Режим обработки DNS-запросов ядром. Изменение режима перезапускает службу DNS.</p>
-            <div className="tile-options-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))' }}>
-              <label className={`option-tile-card ${dnsMode === 'fake-ip' ? 'active' : ''}`}>
-                <div className="option-tile-header">
-                  <input
-                    type="radio"
-                    name="dns_mode_setting"
-                    checked={dnsMode === 'fake-ip'}
-                    onChange={() => handleSetDnsMode('fake-ip')}
-                    disabled={dnsModeBusy}
-                  />
-                  <span className="option-tile-title">⚡ Fake-IP</span>
-                  <span className="badge badge-accent" style={{ fontSize: 10, padding: '1px 5px', marginLeft: 'auto' }}>
-                    Рекомендуется
-                  </span>
-                </div>
-                <div className="option-tile-desc">
-                  Мгновенный отклик DNS (~1 мс), эффективный обход DPI и блокировок, идеален для стримов, мессенджеров и игр.
-                </div>
-              </label>
-
-              <label className={`option-tile-card ${dnsMode === 'redir-host' ? 'active' : ''}`}>
-                <div className="option-tile-header">
-                  <input
-                    type="radio"
-                    name="dns_mode_setting"
-                    checked={dnsMode === 'redir-host'}
-                    onChange={() => handleSetDnsMode('redir-host')}
-                    disabled={dnsModeBusy}
-                  />
-                  <span className="option-tile-title">🌐 Redir-Host</span>
-                  <span className="badge" style={{ fontSize: 10, padding: '1px 5px', marginLeft: 'auto' }}>
-                    Прямой
-                  </span>
-                </div>
-                <div className="option-tile-desc">
-                  Классический резолв реальных IP-адресов. Используйте, если требуются локальные домены роутера (.keenetic.io / Home LAN).
-                </div>
-              </label>
-            </div>
-          </section>
-
-
-          {/* GEOIP / GEOSITE */}
-          <section className="card">
-            <h2>🔄 Базы данных GeoIP и GeoSite</h2>
-            <p className="muted small">
-              Используются ядром Mihomo для точного определения стран и категорий сайтов (включая списки рекламы AdBlock). Загрузка выполняется через прокси Mihomo для стабильности.
-            </p>
-            <div className="stats-grid four-col" style={{ marginBottom: 12 }}>
-              <div className="stat-card">
-                <div className="stat-label">База GeoIP</div>
-                <div className="stat-value" style={{ fontSize: 16 }}>
-                  {geoInfo?.geoip?.size ? `${(geoInfo.geoip.size / (1024 * 1024)).toFixed(1)} МБ` : '—'}
-                </div>
-                <div className="muted small">{geoInfo?.geoip?.updated_at || 'Mihomo Core'}</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-label">База GeoSite</div>
-                <div className="stat-value" style={{ fontSize: 16 }}>
-                  {geoInfo?.geosite?.size ? `${(geoInfo.geosite.size / (1024 * 1024)).toFixed(1)} МБ` : '—'}
-                </div>
-                <div className="muted small">{geoInfo?.geosite?.updated_at || 'Meta Rules Dat'}</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-label">Источник баз</div>
-                <div className="stat-value" style={{ fontSize: 14, color: '#38bdf8' }}>
-                  MetaCubeX
-                </div>
-                <div className="muted small">Загрузка через прокси</div>
-              </div>
-              <div className="stat-card">
-                <div className="stat-label">Интеграция</div>
-                <div className="stat-value" style={{ fontSize: 14, color: '#22c55e' }}>
-                  ✓ Активны
-                </div>
-                <div className="muted small">Маршрутизация & AdBlock</div>
-              </div>
-            </div>
-            <button
-              type="button"
-              className="btn primary"
-              onClick={handleUpdateGeo}
-              disabled={geoUpdating}
-            >
-              {geoUpdating ? '⏳ Загрузка баз (может занять до 1 мин)…' : '🔄 Обновить GeoIP / GeoSite базы'}
-            </button>
-          </section>
-
-          {/* MIHOMO */}
-          <section className="card">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
-              <h2 style={{ margin: 0 }}>⚙️ Mihomo</h2>
-              <button
-                type="button"
-                className="btn sm primary"
-                onClick={() => window.dispatchEvent(new CustomEvent('xr:open-mihomo-modal'))}
-                title="Открыть список релизов MetaCubeX и обновить ядро Mihomo"
-              >
-                🚀 Релизы и обновление ядра
-              </button>
-            </div>
-            <label className="row"><span>Host</span>
-              <input className="input" value={settings.mihomo.host} onChange={(e) => patch((s) => (s.mihomo.host = e.target.value))} />
-            </label>
-            <label className="row"><span>Порт</span>
-              <NumberInput
-                min={1}
-                max={65535}
-                fallback={9090}
-                value={settings.mihomo.port}
-                onChange={(val) => patch((s) => (s.mihomo.port = val))}
-              />
-            </label>
-            <label className="row"><span>Secret</span>
-              <input className="input" value={settings.mihomo.secret} onChange={(e) => patch((s) => (s.mihomo.secret = e.target.value))} />
-            </label>
-            <label className="row"><span>Путь к config.yaml</span>
-              <input className="input" value={settings.mihomo.config_path} onChange={(e) => patch((s) => (s.mihomo.config_path = e.target.value))} />
-            </label>
-            <label className="row"><span>Провайдеры групп устройств</span>
-              <input
-                className="input"
-                placeholder="пусто = авто из config.yaml"
-                value={(settings.mihomo.device_providers ?? []).join(', ')}
-                onChange={(e) => patch((s) => (s.mihomo.device_providers = e.target.value.split(',').map((x) => x.trim()).filter(Boolean)))}
-              />
-            </label>
-            <p className="muted small">Имена proxy-providers, подключаемые к per-device группам (use:). Пусто — берутся все из config.yaml автоматически.</p>
-          </section>
-
-          {/* БЭКАПЫ */}
-          <section className="card">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-              <h2 style={{ margin: 0 }}>💾 Бэкапы (.xkbak)</h2>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button className="btn sm primary" onClick={createBackup} disabled={backupBusy}>
-                  {backupBusy ? 'Создание…' : '＋ Создать бэкап'}
-                </button>
-                <button className="btn sm" onClick={() => backupFileRef.current?.click()} disabled={backupBusy} title="Загрузить архив бэкапа с компьютера">
-                  📤 Загрузить архив
-                </button>
-                <input
-                  ref={backupFileRef}
-                  type="file"
-                  accept=".xkbak,.tar.gz,.tar,.zip"
-                  style={{ display: 'none' }}
-                  onChange={handleImportBackup}
-                />
-              </div>
-            </div>
-            <p className="muted small">Снимок config.yaml (Mihomo) + config.json (панель). Каталог: {backupDir || '…'}</p>
-            <div className="modal-list" style={{ marginTop: 10 }}>
-              {backups.length === 0 && <p className="muted small">Бэкапов пока нет.</p>}
-              {backups.map((b) => (
-                <div key={b} className="check-row" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                  <span className="server-name" style={{ flex: 1 }}>{b}</span>
-                  <button className="btn sm" disabled={backupBusy} onClick={() => restoreBackup(b)}>Восстановить</button>
-                  <a className="btn sm ghost" href={`/api/backups/export/${encodeURIComponent(b)}`} download title="Скачать архив бэкапа (.xkbak)">
-                    ⬇ .xkbak
-                  </a>
-                  <button className="btn sm ghost" disabled={backupBusy} onClick={() => deleteBackup(b)}>✕</button>
-                </div>
-              ))}
-            </div>
-            <label className="row" style={{ marginTop: 10 }}><span>Каталог бэкапов</span>
-              <input className="input" value={settings.system?.backup_dir ?? ''}
-                onChange={(e) => patch((s) => (s.system.backup_dir = e.target.value))} />
-            </label>
-          </section>
-
-          {/* ПАНЕЛЬ */}
-          <section className="card">
-            <h2>🖥 Панель</h2>
-            <label className="row"><span>Интервал автообновления, сек</span>
-              <NumberInput
-                min={3}
-                max={300}
-                step={1}
-                fallback={10}
-                value={settings.refresh_interval_sec}
-                onChange={(val) => patch((s) => (s.refresh_interval_sec = val))}
-              />
-            </label>
-            <label className="row"><span>Уровень логов</span>
-              <select className="select" value={settings.logs?.level ?? 'info'}
-                onChange={(e) => patch((s) => { s.logs.level = e.target.value })}>
-                <option value="info">info (подробно)</option>
-                <option value="warn">warn (предупреждения и ошибки)</option>
-                <option value="error">error (только ошибки)</option>
-              </select>
-            </label>
-            <label className="row" style={{ justifyContent: 'flex-start', gap: 8, cursor: 'pointer' }}>
-              <input type="checkbox" checked={settings.logs?.log_requests ?? true}
-                onChange={(e) => patch((s) => (s.logs.log_requests = e.target.checked))} />
-              <span>Логировать HTTP-запросы к панели</span>
-            </label>
-            <label className="row"><span>Удалённый syslog (host:port, UDP)</span>
-              <input className="input" placeholder="пусто = не отправлять, напр. 192.168.2.10:514"
-                value={settings.logs?.remote_syslog ?? ''}
-                onChange={(e) => patch((s) => (s.logs.remote_syslog = e.target.value))} />
-            </label>
-            <p className="muted small">Syslog начнёт работать после перезапуска панели (restart в разделе «Сервис XKeen» не нужен — перезапуск S99xkeen-route).</p>
-            <button className="btn primary" onClick={save} disabled={saving}>
-              {saving ? 'Сохранение…' : '💾 Сохранить настройки'}
-            </button>
-            <p className="muted small">Конфиг хранится в /opt/etc/xkeen-route/config.json (путь — на дашборде).</p>
-
-            <div style={{ marginTop: 14, borderTop: '1px solid var(--border)', paddingTop: 12 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-                <span className="muted small">
-                  Версия панели: <b style={{ color: 'var(--text-bright)' }}>{status?.version || '…'}</b>
-                </span>
-                <button
-                  type="button"
-                  className="btn sm"
-                  onClick={() => window.dispatchEvent(new CustomEvent('xr:open-update-modal'))}
-                  title="Открыть окно управления версией и обновления панели"
-                >
-                  🚀 Меню обновления панели
-                </button>
-              </div>
-            </div>
-          </section>
+          <SystemSettingsCards
+            settings={settings}
+            status={status}
+            saving={saving}
+            patch={patch}
+            save={save}
+            adblockEnabled={adblockEnabled}
+            adblockBusy={adblockBusy}
+            handleToggleAdblock={handleToggleAdblock}
+            svc={svc}
+            svcBusy={svcBusy}
+            dnsMode={dnsMode}
+            dnsModeBusy={dnsModeBusy}
+            handleSetDnsMode={handleSetDnsMode}
+            geoInfo={geoInfo}
+            geoUpdating={geoUpdating}
+            handleUpdateGeo={handleUpdateGeo}
+            backups={backups}
+            backupDir={backupDir}
+            backupBusy={backupBusy}
+            backupFileRef={backupFileRef}
+            createBackup={createBackup}
+            handleImportBackup={handleImportBackup}
+            restoreBackup={restoreBackup}
+            deleteBackup={deleteBackup}
+          />
       </div>
 
-      {/* БЕЗОПАСНОСТЬ И ПАРОЛЬ (Сжатая Apple-карточка) */}
-      <section className="card" style={{ padding: authEnabled ? '16px' : '8px 16px', transition: 'all 0.25s ease' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', minHeight: authEnabled ? 'auto' : 36 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 16 }}>🔐</span>
-            <div>
-              <b style={{ fontSize: 13.5 }}>Безопасность и пароль</b>
-              {!authEnabled && (
-                <span className="muted small" style={{ marginLeft: 8, fontSize: 12 }}>
-                  (пароль выключен — свободный вход)
-                </span>
-              )}
-            </div>
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span className={`badge ${authEnabled ? 'badge-online' : ''}`} style={{ fontSize: 11, padding: '2px 8px' }}>
-              {authEnabled ? '🟢 защита включена' : '⚪ без пароля'}
-            </span>
-            <label className="switch" style={{ margin: 0 }}>
-              <input
-                type="checkbox"
-                checked={authEnabled}
-                onChange={async (e) => {
-                  const checked = e.target.checked
-                  setAuthEnabled(checked)
-                  if (!checked && settings?.auth?.enabled) {
-                    if (window.confirm('Отключить защиту паролем для веб-панели?')) {
-                      setAuthSaving(true)
-                      try {
-                        await apiPost('auth/change-password', {
-                          enabled: false,
-                          new_password: '',
-                        })
-                        notify('Авторизация отключена')
-                        refresh?.()
-                      } catch (err: any) {
-                        notify(err.message || 'Ошибка отключения пароля', true)
-                        setAuthEnabled(true)
-                      } finally {
-                        setAuthSaving(false)
-                      }
-                    } else {
-                      setAuthEnabled(true)
-                    }
-                  }
-                }}
-              />
-              <span className="slider" />
-            </label>
-          </div>
-        </div>
-
-        {authEnabled && (
-          <div style={{ marginTop: 12, borderTop: '1px solid rgba(255,255,255,0.06)', paddingTop: 12 }}>
-            <p className="muted small" style={{ margin: '0 0 10px' }}>Защита веб-панели паролем с сессией (24 часа).</p>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {settings?.auth?.enabled && (
-                <label className="row">
-                  <span>Текущий пароль</span>
-                  <input
-                    className="input"
-                    type="password"
-                    placeholder="Текущий пароль (для подтверждения)"
-                    value={currentPassword}
-                    onChange={(e) => setCurrentPassword(e.target.value)}
-                  />
-                </label>
-              )}
-              <label className="row">
-                <span>Новый пароль</span>
-                <input
-                  className="input"
-                  type="password"
-                  placeholder="Введите новый пароль"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                />
-              </label>
-              <label className="row">
-                <span>Повторите пароль</span>
-                <input
-                  className="input"
-                  type="password"
-                  placeholder="Повторите новый пароль"
-                  value={confirmPassword}
-                  onChange={(e) => setConfirmPassword(e.target.value)}
-                />
-              </label>
-            </div>
-
-            <button className="btn primary" style={{ marginTop: 12 }} onClick={handleSaveAuth} disabled={authSaving}>
-              {authSaving ? 'Сохранение…' : '💾 Сохранить настройки доступа'}
-            </button>
-            <p className="muted small" style={{ marginTop: 8, marginBottom: 0 }}>
-              💡 Сброс пароля при утере через SSH: <code style={{ color: 'var(--accent)' }}>xkeen-route reset-password</code>
-            </p>
-          </div>
-        )}
-      </section>
+      <SecurityCard
+        settings={settings}
+        authEnabled={authEnabled}
+        setAuthEnabled={setAuthEnabled}
+        currentPassword={currentPassword}
+        setCurrentPassword={setCurrentPassword}
+        newPassword={newPassword}
+        setNewPassword={setNewPassword}
+        confirmPassword={confirmPassword}
+        setConfirmPassword={setConfirmPassword}
+        authSaving={authSaving}
+        setAuthSaving={setAuthSaving}
+        handleSaveAuth={handleSaveAuth}
+        notify={notify}
+        refresh={refresh}
+      />
 
       {/* ФАЙЛ ПОДКАЧКИ (SWAP НА USB) */}
       <SwapManager notify={notify} />

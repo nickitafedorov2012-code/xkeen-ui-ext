@@ -848,15 +848,69 @@ pub async fn save_config(http: &reqwest::Client, cfg: &AppConfig) -> Result<(), 
     Ok(())
 }
 
-/// Настройка чистых DNS-серверов в KeeneticOS (Яндекс DNS 77.88.8.8, 77.88.8.1, Cloudflare 1.1.1.1)
+/// Чистые DNS-серверы, доступные при белых списках (Яндекс DNS).
+pub const CLEAN_DNS_SERVERS: [&str; 2] = ["77.88.8.8", "77.88.8.1"];
+
+/// Извлекает адреса текущих DNS-серверов из ответа RCI `/rci/show/ip/name-server` (баг 56).
+pub fn parse_rci_name_servers(val: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    match val {
+        Value::Array(arr) => {
+            for item in arr {
+                if let Some(addr) = item.get("address").and_then(|v| v.as_str()) {
+                    let t = addr.trim();
+                    if !t.is_empty() {
+                        out.push(t.to_string());
+                    }
+                } else if let Some(addr) = item.as_str() {
+                    let t = addr.trim();
+                    if !t.is_empty() {
+                        out.push(t.to_string());
+                    }
+                }
+            }
+        }
+        Value::Object(map) => {
+            if let Some(addr) = map.get("address").and_then(|v| v.as_str()) {
+                let t = addr.trim();
+                if !t.is_empty() {
+                    out.push(t.to_string());
+                }
+            } else if let Some(servers) = map.get("server") {
+                return parse_rci_name_servers(servers);
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Возвращает только те чистые DNS-серверы (Яндекс), которых ещё нет в списке `existing` (баг 56).
+pub fn clean_dns_servers_to_add(existing: &[String]) -> Vec<String> {
+    CLEAN_DNS_SERVERS
+        .iter()
+        .filter(|&&srv| !existing.iter().any(|e| e.trim() == srv))
+        .map(|&srv| srv.to_string())
+        .collect()
+}
+
+/// Настройка чистых DNS-серверов в KeeneticOS (Яндекс DNS 77.88.8.8, 77.88.8.1)
 /// для устранения отравления DNS провайдером (NXDOMAIN для YouTube и сайтов).
 pub async fn set_clean_dns_servers(http: &reqwest::Client, cfg: &AppConfig) -> Result<(), String> {
     let token = ensure_auth(http, cfg).await?;
-    let servers = ["77.88.8.8", "77.88.8.1", "1.1.1.1"];
+    let existing = match rci_get(http, cfg, &token, "/rci/show/ip/name-server").await {
+        Ok(val) => parse_rci_name_servers(&val),
+        Err(_) => Vec::new(),
+    };
+    let to_add = clean_dns_servers_to_add(&existing);
+    if to_add.is_empty() {
+        return Ok(());
+    }
+
     let mut success_count = 0;
     let mut last_err = None;
 
-    for addr in servers {
+    for addr in &to_add {
         match rci_post(http, cfg, &token, "/rci/ip/name-server", json!({ "address": addr })).await {
             Ok(_) => success_count += 1,
             Err(e) => {
@@ -1009,6 +1063,43 @@ mod tests {
 
         let invalid = json!({ "id": "eth0", "address": "0.0.0.0" });
         assert_eq!(extract_ip_from_interface_val(&invalid), None);
+    }
+
+    #[test]
+    fn regression_bug_56b_clean_dns_no_cloudflare_no_noop_save() {
+        // 56.1: только Яндекс (77.88.8.8, 77.88.8.1), без 1.1.1.1 и 8.8.8.8
+        let empty: Vec<String> = vec![];
+        let added = clean_dns_servers_to_add(&empty);
+        assert_eq!(added, vec!["77.88.8.8".to_string(), "77.88.8.1".to_string()]);
+        assert!(!added.contains(&"1.1.1.1".to_string()));
+        assert!(!added.contains(&"8.8.8.8".to_string()));
+
+        // 56.2: если оба Яндекса уже присутствуют — список на добавление пуст (save_config не вызывается)
+        let already = vec!["77.88.8.8".to_string(), " 77.88.8.1 ".to_string()];
+        assert!(clean_dns_servers_to_add(&already).is_empty());
+
+        // 56.2: если присутствует 1.1.1.1 — его не удаляем и не добавляем, добавляем только недостающий Яндекс
+        let with_cf = vec!["1.1.1.1".to_string(), "77.88.8.8".to_string()];
+        assert_eq!(clean_dns_servers_to_add(&with_cf), vec!["77.88.8.1".to_string()]);
+
+        // Проверка парсера ответа RCI
+        let rci_val = json!([
+            { "address": "77.88.8.8" },
+            { "address": "1.1.1.1" }
+        ]);
+        let parsed = parse_rci_name_servers(&rci_val);
+        assert_eq!(parsed, vec!["77.88.8.8".to_string(), "1.1.1.1".to_string()]);
+        assert_eq!(clean_dns_servers_to_add(&parsed), vec!["77.88.8.1".to_string()]);
+
+        // 56.3: save_config вызывается только при непустом to_add и ошибка save_config пробрасывается (без let _ =)
+        let body = include_str!("rci.rs");
+        let fn_start = body.find("pub async fn set_clean_dns_servers").unwrap();
+        let fn_end = body[fn_start..].find("\nstatic ROUTER_IP_CACHE").unwrap();
+        let fn_body = &body[fn_start..fn_start + fn_end];
+        assert!(!fn_body.contains("1.1.1.1"));
+        assert!(!fn_body.contains("8.8.8.8"));
+        assert!(fn_body.contains("save_config(http, cfg).await?;"));
+        assert!(fn_body.contains("to_add.is_empty()"));
     }
 }
 

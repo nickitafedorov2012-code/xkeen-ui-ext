@@ -101,23 +101,33 @@ pub fn init_revoked_tokens_storage(path: &Path) {
     *guard = Some(loaded_map);
 }
 
+#[cfg(test)]
 pub fn reset_in_memory_revoked_tokens_for_test() {
     let mut guard = REVOKED_TOKENS.lock().unwrap_or_else(|e| e.into_inner());
     *guard = None;
 }
 
+pub fn persist_revoked_tokens_to(
+    path: &std::path::Path,
+    map: &std::collections::HashMap<String, u64>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let json_bytes = serde_json::to_vec(map)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp_path = path.with_extension("tmp");
+    let mut file = std::fs::File::create(&tmp_path)?;
+    file.write_all(&json_bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&tmp_path, path)
+}
+
 fn persist_revoked_tokens(map: &std::collections::HashMap<String, u64>) {
     let p_guard = REVOKED_TOKENS_PATH.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref path) = *p_guard {
-        if let Ok(json_bytes) = serde_json::to_vec(map) {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let tmp_path = path.with_extension("tmp");
-            if std::fs::write(&tmp_path, &json_bytes).is_ok() {
-                let _ = std::fs::rename(&tmp_path, path);
-            }
-        }
+        let _ = persist_revoked_tokens_to(path, map);
     }
 }
 
@@ -190,6 +200,7 @@ pub fn check_and_reserve_rate_limit(ip: IpAddr) -> bool {
     true
 }
 
+#[cfg(test)]
 fn check_rate_limit(ip: IpAddr) -> bool {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -226,6 +237,7 @@ pub async fn hash_password_async(password: String, salt: String) -> String {
     .unwrap_or_default()
 }
 
+#[cfg(test)]
 fn record_failed_attempt(ip: IpAddr) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -625,7 +637,10 @@ pub fn is_valid_origin(origin_host_only: &str) -> bool {
 /// сам Host должен быть легитимным адресом роутера (loopback, RFC1918 приватная сеть,
 /// link-local, либо известные локальные домены вроде *.keenetic.pro / *.keenetic.link / *.keenetic.name, my.keenetic.net, router).
 pub fn is_legitimate_host(host_only: &str) -> bool {
-    let unbracketed = host_only.trim_start_matches('[').trim_end_matches(']');
+    let unbracketed = host_only.trim().trim_start_matches('[').trim_end_matches(']');
+    if unbracketed.is_empty() {
+        return false;
+    }
     if let Ok(ip) = unbracketed.parse::<std::net::IpAddr>() {
         match ip {
             std::net::IpAddr::V4(ipv4) => ipv4.is_loopback() || ipv4.is_private() || ipv4.is_link_local(),
@@ -670,6 +685,56 @@ pub fn is_trusted_origin(origin_or_referer: &str, host_header: Option<&str>) -> 
 }
 
 /// Middleware защиты API и reverse-proxy Clash
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostHeaderPolicy {
+    Allow,
+    Deny,
+}
+
+pub fn host_header_policy(host: Option<&str>, peer_is_loopback: bool) -> HostHeaderPolicy {
+    match host {
+        Some(h) => {
+            let host_only = extract_host_only(h);
+            if is_legitimate_host(host_only) {
+                HostHeaderPolicy::Allow
+            } else {
+                HostHeaderPolicy::Deny
+            }
+        }
+        None => {
+            if peer_is_loopback {
+                HostHeaderPolicy::Allow
+            } else {
+                HostHeaderPolicy::Deny
+            }
+        }
+    }
+}
+
+fn reject_host_header_response(host_header: Option<&str>, path: &str) -> Response {
+    if let Some(host) = host_header {
+        log_w!("[AUTH] ⚠️ Отклонен запрос с нелегитимным Host (DNS-rebinding): {} к {}", host, path);
+        (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "success": false,
+                "error": "forbidden",
+                "message": "Отклонено политикой безопасности: недопустимый заголовок Host"
+            })),
+        ).into_response()
+    } else {
+        log_w!("[AUTH] ⚠️ Отклонен запрос без заголовка Host к {}", path);
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "success": false,
+                "error": "bad_request",
+                "message": "Отсутствует обязательный заголовок Host"
+            })),
+        ).into_response()
+    }
+}
+
 pub async fn auth_middleware(
     State(state): State<AppState>,
     req: Request,
@@ -684,27 +749,19 @@ pub async fn auth_middleware(
         || path == "/api/antigravity/fix.cmd"
         || path == "/api/flow/extension.zip";
 
-    // Разрешаем статики фронтенда и явно открытые эндпоинты
     if !is_protected || is_exempt {
         return next.run(req).await;
     }
 
-    // Защита от DNS-rebinding для всех защищенных эндпоинтов (/api/ и /clash/):
-    // Любой запрос (включая GET при выключенной авторизации) обязан иметь легитимный заголовок Host (баг 91)
+    // Защита от DNS-rebinding (is_legitimate_host, баг 91, A-06)
+    let peer_is_loopback = req
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip().is_loopback())
+        .unwrap_or(false);
     let host_header = req.headers().get("host").and_then(|h| h.to_str().ok());
-    if let Some(host) = host_header {
-        let host_only = extract_host_only(host);
-        if !is_legitimate_host(host_only) {
-            log_w!("[AUTH] ⚠️ Отклонен запрос с нелегитимным Host (DNS-rebinding): {} к {}", host, path);
-            return (
-                StatusCode::FORBIDDEN,
-                Json(json!({
-                    "success": false,
-                    "error": "forbidden",
-                    "message": "Отклонено политикой безопасности: недопустимый заголовок Host"
-                })),
-            ).into_response();
-        }
+    if host_header_policy(host_header, peer_is_loopback) == HostHeaderPolicy::Deny {
+        return reject_host_header_response(host_header, &path);
     }
 
     // CSRF Guard для всех мутирующих запросов (POST, PUT, DELETE, PATCH)
@@ -1079,5 +1136,85 @@ mod tests {
         assert!(is_token_revoked(test_token), "После перезапуска отозванный токен должен оставаться отозванным (прочитан с диска)");
 
         let _ = std::fs::remove_file(&storage_path);
+    }
+
+    #[tokio::test]
+    async fn regression_bug_91_get_api_and_clash_reject_dns_rebinding_host() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.auth.enabled = false;
+        let cfg_arc = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(cfg)));
+        let ag = std::sync::Arc::new(crate::antigravity::AntigravityManager::new(cfg_arc.clone()));
+        let state = AppState {
+            config: cfg_arc,
+            config_path: std::sync::Arc::new(std::env::temp_dir().join("xkr-bug91-test.json")),
+            http: reqwest::Client::new(),
+            failover_log: std::sync::Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        let app = axum::Router::new()
+            .route("/api/status", axum::routing::get(|| async { "ok" }))
+            .route("/clash/proxies", axum::routing::get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware))
+            .with_state(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        async fn raw_get(addr: std::net::SocketAddr, path: &str, host: &str) -> String {
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            let req = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+            stream.write_all(req.as_bytes()).await.unwrap();
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).await.unwrap();
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+
+        let res_evil = raw_get(addr, "/api/status", "evil.attacker.com").await;
+        assert!(res_evil.starts_with("HTTP/1.1 403"), "GET /api/status с evil Host должен быть отклонён: {res_evil}");
+
+        let res_clash = raw_get(addr, "/clash/proxies", "rebind.network:1001").await;
+        assert!(res_clash.starts_with("HTTP/1.1 403"), "GET /clash/proxies с evil Host должен быть отклонён: {res_clash}");
+
+        let res_empty = raw_get(addr, "/api/status", "").await;
+        assert!(res_empty.starts_with("HTTP/1.1 403"), "GET /api/status с пустым Host должен быть отклонён: {res_empty}");
+
+        let res_lan = raw_get(addr, "/api/status", "192.168.1.1:1001").await;
+        assert!(res_lan.starts_with("HTTP/1.1 200"), "GET /api/status с LAN Host должен пройти: {res_lan}");
+
+        let res_keenetic = raw_get(addr, "/clash/proxies", "my.keenetic.net").await;
+        assert!(res_keenetic.starts_with("HTTP/1.1 200"), "GET /clash/proxies с my.keenetic.net должен пройти: {res_keenetic}");
+
+        server.abort();
+    }
+
+    #[test]
+    fn regression_bug_a06_host_header_policy_and_atomic_revocation_store() {
+        assert_eq!(host_header_policy(None, false), HostHeaderPolicy::Deny);
+        assert_eq!(host_header_policy(None, true), HostHeaderPolicy::Allow);
+        assert_eq!(host_header_policy(Some("evil.example"), true), HostHeaderPolicy::Deny);
+        assert_eq!(host_header_policy(Some("192.168.1.1:1001"), false), HostHeaderPolicy::Allow);
+
+        let dir = std::env::temp_dir().join(format!("xkeen-bug-a06-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let store = dir.join("revoked.json");
+        let mut map = std::collections::HashMap::new();
+        map.insert("tok-1".to_string(), 9_999_999_999u64);
+        persist_revoked_tokens_to(&store, &map).unwrap();
+        let loaded: std::collections::HashMap<String, u64> =
+            serde_json::from_slice(&std::fs::read(&store).unwrap()).unwrap();
+        assert_eq!(loaded.get("tok-1").copied(), Some(9_999_999_999));
+        assert!(!store.with_extension("tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

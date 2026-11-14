@@ -263,6 +263,7 @@ pub fn get_recent_logs(level_filter: Option<&str>, limit: usize) -> Vec<LogEntry
     }
 }
 
+#[cfg(test)]
 pub fn push_to_ring_buffer_deque(rb: &mut VecDeque<LogEntry>, entry: LogEntry) {
     if rb.len() >= RING_BUFFER_CAP {
         rb.pop_front();
@@ -270,11 +271,7 @@ pub fn push_to_ring_buffer_deque(rb: &mut VecDeque<LogEntry>, entry: LogEntry) {
     rb.push_back(entry);
 }
 
-pub fn clear_ring_buffer() {
-    if let Ok(mut rb) = ring_buffer().lock() {
-        rb.clear();
-    }
-}
+
 
 #[macro_export]
 macro_rules! log_d {

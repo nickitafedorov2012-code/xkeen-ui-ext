@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
 use std::sync::Mutex;
+#[cfg(target_os = "linux")]
 use std::time::Instant;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -80,6 +82,7 @@ pub struct KillRequest {
     pub signal: Option<String>,
 }
 
+#[cfg(target_os = "linux")]
 struct CpuSample {
     timestamp: Instant,
     total_cpu_time: u64,
@@ -88,8 +91,10 @@ struct CpuSample {
     proc_times: HashMap<u32, u64>,   // pid -> utime + stime
 }
 
+#[cfg(target_os = "linux")]
 static TRACKER: Mutex<Option<CpuSample>> = Mutex::new(None);
 
+#[cfg(target_os = "linux")]
 pub fn detect_category(name: &str, cmdline: &str) -> &'static str {
     let name_lower = name.to_lowercase();
     let cmd_lower = cmdline.to_lowercase();
@@ -123,6 +128,7 @@ pub fn detect_category(name: &str, cmdline: &str) -> &'static str {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub const PROTECTED_PROCESSES: &[&str] = &[
     "ndm", "ndns", "ndnproxy", "dnsmasq", "hostapd", "wpa_supplicant",
     "dropbear", "sshd", "udhcpc", "pppd", "netifd",
@@ -130,6 +136,7 @@ pub const PROTECTED_PROCESSES: &[&str] = &[
     "cron", "crond", "mihomo", "transmissiond", "nfqws", "nfqws2",
 ];
 
+#[cfg(any(target_os = "linux", test))]
 pub fn is_protected(pid: u32, name: &str) -> bool {
     if pid <= 2 || pid == std::process::id() {
         return true;
@@ -739,6 +746,7 @@ pub async fn kill_process_by_pid(pid: u32, signal: Option<&str>) -> Result<Strin
 }
 
 /// Проверяет, запущен ли процесс с указанным PID и соответствует ли имя/бинарник ожидаемому (Z-08)
+#[cfg(any(target_os = "linux", test))]
 pub fn is_process_running_match(pid: u32, expected_name: &str) -> bool {
     if pid <= 1 {
         return false;
@@ -810,6 +818,7 @@ pub fn is_process_running(expected_name: &str) -> bool {
 
 /// Проверяет совпадение имени процесса с учетом ограничения длины TASK_COMM_LEN в Linux (15 символов)
 /// и резервной проверки строки аргументов cmdline.
+#[cfg(any(target_os = "linux", test))]
 pub fn matches_target_needle(comm_trim: &str, pid: u32, needle: &str, cmdline: Option<&str>) -> bool {
     let comm_lower = comm_trim.to_lowercase();
     let needle_lower = needle.to_lowercase();
@@ -1188,11 +1197,14 @@ Filesystem           1K-blocks      Used Available Use% Mounted on
 // ============================================================================
 
 pub const SWAP_FILE_PATH: &str = "/opt/swapfile";
+#[cfg(target_os = "linux")]
 pub const INIT_SCRIPT_PATH: &str = "/opt/etc/init.d/S01swap";
 pub const SAFETY_MARGIN_MB: u64 = 300;
+#[cfg(target_os = "linux")]
 pub const TARGET_SWAPPINESS: u32 = 10;
 pub const ALLOWED_SWAP_SIZES_MB: [u64; 3] = [256, 512, 1024];
 
+#[cfg(any(target_os = "linux", test))]
 pub const INIT_SCRIPT_CONTENT: &str = r#"#!/bin/sh
 case "$1" in
   start)
@@ -1239,6 +1251,7 @@ pub fn read_meminfo() -> (u64, u64, u64, u64) {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 pub fn parse_meminfo_str(content: &str) -> (u64, u64, u64, u64) {
     let mut mem_total_kb = 0u64;
     let mut mem_free_kb = 0u64;
@@ -1316,6 +1329,7 @@ pub fn read_swappiness() -> u32 {
 }
 
 /// Парсер строки вывода df -k /opt
+#[cfg(any(target_os = "linux", test))]
 pub fn parse_df_output(stdout: &str) -> Result<(u64, u64), String> {
     let data_line = stdout
         .lines()

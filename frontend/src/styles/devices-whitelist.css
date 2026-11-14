@@ -1,0 +1,1049 @@
+
+/* --- Вкладка Devices (Редизайн по макету) --- */
+.devices-card {
+  background: #0f131c;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 0;
+  overflow: visible;
+  position: relative;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25);
+}
+
+.devices-toolbar-wrap {
+  padding: 16px 18px 8px;
+}
+
+.devices-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.devices-search-box {
+  position: relative;
+  flex: 1;
+  min-width: 200px;
+  max-width: 320px;
+}
+
+.devices-search-icon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #94a3b8;
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.devices-search-input {
+  width: 100%;
+  height: 36px;
+  padding: 0 12px 0 32px;
+  background: #141923;
+  border: 1px solid #232c3f;
+  border-radius: 8px;
+  color: #f1f5f9;
+  font-size: 13px;
+  outline: none;
+  transition: all 0.15s ease;
+}
+
+.devices-search-input:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
+.devices-filter-pills {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #131722;
+  border: 1px solid #1e2638;
+  border-radius: 10px;
+  padding: 3px;
+}
+
+.devices-pill-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 7px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: #94a3b8;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  user-select: none;
+}
+
+.devices-pill-btn:hover {
+  color: #e2e8f0;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.devices-pill-btn.active {
+  background: #1e2638;
+  border-color: #334155;
+  color: #f8fafc;
+  font-weight: 600;
+}
+
+.devices-pill-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.devices-pill-dot.online {
+  background: #22c55e;
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.6);
+}
+.devices-pill-dot.offline {
+  background: #94a3b8;
+}
+
+.devices-pill-count {
+  font-size: 11px;
+  color: #94a3b8;
+  font-weight: 600;
+  margin-left: 2px;
+}
+.devices-pill-btn.active .devices-pill-count {
+  color: #cbd5e1;
+}
+
+.devices-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  background: #141923;
+  border: 1px solid #232c3f;
+  border-radius: 8px;
+  color: #cbd5e1;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.devices-refresh-btn:hover {
+  background: #1e2638;
+  border-color: #3b82f6;
+  color: #fff;
+}
+
+.devices-summary-text {
+  font-size: 12px;
+  color: #94a3b8;
+  margin-top: 8px;
+}
+
+/* --- Таблица устройств --- */
+.devices-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+table.devices-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+table.devices-table th {
+  text-align: left;
+  color: #94a3b8;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 8px 6px;
+  border-bottom: 1px solid #1e2638;
+  user-select: none;
+  white-space: nowrap;
+}
+table.devices-table th.sortable {
+  cursor: pointer;
+}
+table.devices-table th.sortable:hover {
+  color: #cbd5e1;
+}
+
+/* Ввод ограничения скорости (Мбит/с) */
+.device-speed-input-wrap {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+  background: #141923;
+  border: 1px solid #232c3f;
+  border-radius: 8px;
+  padding: 0 6px 0 8px;
+  height: 32px;
+  max-width: 105px;
+  width: 100%;
+  transition: all 0.15s ease;
+  box-sizing: border-box;
+}
+.device-speed-input-wrap:focus-within {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+.device-speed-input {
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: #f1f5f9;
+  font-size: 13px;
+  font-weight: 500;
+  outline: none;
+  padding: 0;
+  min-width: 0;
+}
+.device-speed-unit {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-left: 2px;
+  white-space: nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+.device-speed-clear-btn {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 4px;
+  margin-left: 2px;
+  border-radius: 4px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+}
+.device-speed-clear-btn:hover {
+  color: #f87171;
+  background: rgba(239, 68, 68, 0.15);
+}
+
+/* Секция Online */
+.devices-group-header {
+  padding: 12px 14px 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.devices-group-header.online {
+  color: #22c55e;
+}
+
+table.devices-table tr.device-row {
+  border-bottom: 1px solid #182030;
+  transition: background 0.15s ease;
+}
+table.devices-table tr.device-row:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+table.devices-table tr.device-row.selected {
+  background: rgba(59, 130, 246, 0.07);
+}
+table.devices-table tr.device-row.me {
+  background: rgba(59, 130, 246, 0.04);
+}
+
+table.devices-table td {
+  padding: 8px 6px;
+  vertical-align: middle;
+  font-size: 12.5px;
+  color: #e2e8f0;
+}
+
+.device-name-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.device-name-text {
+  font-size: 13px;
+  color: #f1f5f9;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.device-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.device-dot.online {
+  background: #22c55e;
+  box-shadow: 0 0 6px rgba(34, 197, 94, 0.6);
+}
+.device-dot.offline {
+  background: #475569;
+}
+
+.badge-you {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(56, 189, 248, 0.12);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  line-height: 1.2;
+  white-space: nowrap;
+  user-select: none;
+}
+
+[data-theme="light"] .badge-you {
+  background: rgba(14, 165, 233, 0.12);
+  color: #0284c7;
+  border-color: rgba(14, 165, 233, 0.3);
+}
+
+.device-ip-text {
+  font-family: Consolas, monospace;
+  font-size: 13px;
+  color: #cbd5e1;
+}
+
+.device-select {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  height: 32px;
+  background: #141923;
+  border: 1px solid #232c3f;
+  border-radius: 6px;
+  color: #cbd5e1;
+  padding: 0 28px 0 10px;
+  font-size: 12.5px;
+  outline: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+.device-select:hover {
+  border-color: #334155;
+  color: #fff;
+  background-color: #171e2c;
+}
+.device-select:focus {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+}
+.device-select option {
+  background: #141923;
+  color: #f1f5f9;
+  padding: 8px 10px;
+}
+
+.device-reserve-hint {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.device-gear-btn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #182030;
+  border: 1px solid #25334c;
+  border-radius: 6px;
+  color: #94a3b8;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-sizing: border-box;
+}
+.device-gear-btn:hover {
+  background: #25334c;
+  color: #f1f5f9;
+  border-color: #3b82f6;
+  transform: scale(1.04);
+}
+
+/* --- Кнопка переключения Zapret DPI для устройства (Per-Device Zapret) --- */
+.device-zapret-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 26px;
+  width: 98px;
+  min-width: 98px;
+  max-width: 98px;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  user-select: none;
+  white-space: nowrap;
+  box-sizing: border-box;
+}
+
+.device-zapret-btn.active {
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.22) 0%, rgba(56, 189, 248, 0.22) 100%);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.65);
+  box-shadow: 0 0 12px rgba(56, 189, 248, 0.45), inset 0 0 8px rgba(56, 189, 248, 0.15);
+  text-shadow: 0 0 8px rgba(56, 189, 248, 0.5);
+}
+
+.device-zapret-btn.active:hover {
+  background: linear-gradient(135deg, rgba(6, 182, 212, 0.35) 0%, rgba(56, 189, 248, 0.35) 100%);
+  box-shadow: 0 0 16px rgba(56, 189, 248, 0.7), inset 0 0 10px rgba(56, 189, 248, 0.25);
+  border-color: #38bdf8;
+}
+
+.device-zapret-btn.active .device-zapret-icon {
+  filter: drop-shadow(0 0 4px #38bdf8);
+  display: flex;
+  align-items: center;
+}
+
+.device-zapret-btn.inactive {
+  background: rgba(255, 255, 255, 0.04);
+  color: #64748b;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: none;
+}
+
+.device-zapret-btn.inactive:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #94a3b8;
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.device-zapret-btn.inactive .device-zapret-icon {
+  filter: none;
+  opacity: 0.6;
+  display: flex;
+  align-items: center;
+}
+
+.device-zapret-label {
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  letter-spacing: 0.2px;
+}
+
+[data-theme="light"] .device-zapret-btn.active {
+  background: rgba(14, 165, 233, 0.15);
+  color: #0284c7;
+  border-color: #0284c7;
+  box-shadow: 0 0 10px rgba(14, 165, 233, 0.35);
+  text-shadow: none;
+}
+
+[data-theme="light"] .device-zapret-btn.inactive {
+  background: #f1f5f9;
+  color: #94a3b8;
+  border-color: #cbd5e1;
+}
+
+/* --- Кнопка переключения Игрового режима для устройства (Per-Device Gaming) --- */
+.device-gaming-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 26px;
+  width: 98px;
+  min-width: 98px;
+  max-width: 98px;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  user-select: none;
+  white-space: nowrap;
+  box-sizing: border-box;
+}
+
+.device-gaming-btn.active {
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.22) 0%, rgba(217, 70, 239, 0.22) 100%);
+  color: #c084fc;
+  border: 1px solid rgba(192, 132, 252, 0.65);
+  box-shadow: 0 0 12px rgba(168, 85, 247, 0.45), inset 0 0 8px rgba(168, 85, 247, 0.15);
+  text-shadow: 0 0 8px rgba(168, 85, 247, 0.5);
+}
+
+.device-gaming-btn.active:hover {
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.35) 0%, rgba(217, 70, 239, 0.35) 100%);
+  box-shadow: 0 0 16px rgba(168, 85, 247, 0.7), inset 0 0 10px rgba(168, 85, 247, 0.25);
+  border-color: #c084fc;
+}
+
+.device-gaming-btn.active .device-gaming-icon {
+  filter: drop-shadow(0 0 4px #c084fc);
+  display: flex;
+  align-items: center;
+}
+
+.device-gaming-btn.inactive {
+  background: rgba(255, 255, 255, 0.04);
+  color: #64748b;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: none;
+}
+
+.device-gaming-btn.inactive:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #94a3b8;
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.device-gaming-btn.inactive .device-gaming-icon {
+  filter: none;
+  opacity: 0.6;
+  display: flex;
+  align-items: center;
+}
+
+.device-gaming-label {
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  letter-spacing: 0.2px;
+}
+
+[data-theme="light"] .device-gaming-btn.active {
+  background: rgba(168, 85, 247, 0.15);
+  color: #9333ea;
+  border-color: #9333ea;
+  box-shadow: 0 0 10px rgba(168, 85, 247, 0.35);
+  text-shadow: none;
+}
+
+[data-theme="light"] .device-gaming-btn.inactive {
+  background: #f1f5f9;
+  color: #94a3b8;
+  border-color: #cbd5e1;
+}
+
+/* --- Кнопка переключения Белого списка (БС) для устройства (Per-Device Whitelist) --- */
+.device-whitelist-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 26px;
+  width: 74px;
+  min-width: 74px;
+  max-width: 74px;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  user-select: none;
+  white-space: nowrap;
+  box-sizing: border-box;
+}
+
+.device-whitelist-btn.active {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.22) 0%, rgba(52, 211, 153, 0.22) 100%);
+  color: #34d399;
+  border: 1px solid rgba(52, 211, 153, 0.65);
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.45), inset 0 0 8px rgba(16, 185, 129, 0.15);
+  text-shadow: 0 0 8px rgba(52, 211, 153, 0.5);
+}
+
+.device-whitelist-btn.active:hover {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.35) 0%, rgba(52, 211, 153, 0.35) 100%);
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.7), inset 0 0 10px rgba(16, 185, 129, 0.25);
+  border-color: #34d399;
+}
+
+.device-whitelist-btn.active .device-whitelist-icon,
+.device-whitelist-btn.active .btn-icon {
+  filter: drop-shadow(0 0 4px #34d399);
+  display: flex;
+  align-items: center;
+}
+
+.device-whitelist-btn.inactive {
+  background: rgba(255, 255, 255, 0.04);
+  color: #64748b;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: none;
+}
+
+.device-whitelist-btn.inactive:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #94a3b8;
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
+.device-whitelist-btn.inactive .device-whitelist-icon,
+.device-whitelist-btn.inactive .btn-icon {
+  filter: none;
+  opacity: 0.6;
+  display: flex;
+  align-items: center;
+}
+
+.device-whitelist-label,
+.device-whitelist-btn .btn-label {
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  letter-spacing: 0.2px;
+}
+
+[data-theme="light"] .device-whitelist-btn.active {
+  background: rgba(16, 185, 129, 0.15);
+  color: #059669;
+  border-color: #059669;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.35);
+  text-shadow: none;
+}
+
+[data-theme="light"] .device-whitelist-btn.inactive {
+  background: #f1f5f9;
+  color: #94a3b8;
+  border-color: #cbd5e1;
+}
+
+/* --- Стили страницы "Белые списки" (Whitelist Tab) --- */
+.whitelist-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.whitelist-workspace-header {
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card-bg, var(--bg-card));
+}
+
+.whitelist-workspace-intro h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.whitelist-workspace-intro p {
+  margin: 6px 0 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.whitelist-workspace-nav {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: 8px;
+}
+
+.whitelist-workspace-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  padding: 11px 14px;
+  color: var(--text);
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.whitelist-workspace-tab span { font-weight: 700; }
+.whitelist-workspace-tab small { color: var(--muted); line-height: 1.4; }
+.whitelist-workspace-tab[aria-current="page"] {
+  border-color: var(--primary, #38bdf8);
+  background: rgba(56, 189, 248, 0.1);
+}
+.whitelist-workspace-tab:focus-visible { outline: 2px solid var(--primary, #38bdf8); outline-offset: 2px; }
+
+.whitelist-jump-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+.whitelist-jump-nav button {
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card-bg);
+  color: var(--text);
+  cursor: pointer;
+}
+.whitelist-jump-nav button:hover { border-color: var(--accent); }
+.whitelist-jump-nav button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.whitelist-page [id^="whitelist-"] { scroll-margin-top: 100px; }
+
+.whitelist-hero-card {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.08) 0%, rgba(5, 150, 105, 0.04) 100%);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 20px;
+  position: relative;
+  overflow: hidden;
+}
+
+.whitelist-hero-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.whitelist-hero-title-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.whitelist-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.whitelist-badge.active {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
+  border: 1px solid rgba(52, 211, 153, 0.4);
+}
+
+.whitelist-badge.inactive {
+  background: rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.whitelist-master-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  user-select: none;
+}
+
+.whitelist-master-toggle-btn.btn-active {
+  background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+  color: #ffffff;
+  border: none;
+  box-shadow: 0 0 16px rgba(16, 185, 129, 0.4);
+}
+
+.whitelist-master-toggle-btn.btn-active:hover {
+  background: linear-gradient(135deg, #059669 0%, #047857 100%);
+  box-shadow: 0 0 20px rgba(16, 185, 129, 0.6);
+}
+
+.whitelist-master-toggle-btn.btn-inactive {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+.whitelist-master-toggle-btn.btn-inactive:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.whitelist-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.whitelist-kpi-card {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.whitelist-kpi-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: #f1f5f9;
+  font-family: Consolas, monospace;
+}
+
+.whitelist-kpi-label {
+  font-size: 11.5px;
+  color: #94a3b8;
+  margin-top: 2px;
+}
+
+.whitelist-pills {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+}
+
+.whitelist-pill {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #94a3b8;
+  border-radius: 20px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.whitelist-pill:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #f1f5f9;
+}
+
+.whitelist-pill.active {
+  background: rgba(16, 185, 129, 0.2);
+  border-color: #10b981;
+  color: #34d399;
+  font-weight: 600;
+}
+
+.whitelist-catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.whitelist-domain-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  transition: all 0.15s ease;
+}
+
+.whitelist-domain-card:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(52, 211, 153, 0.3);
+}
+
+.whitelist-domain-name {
+  font-family: Consolas, monospace;
+  font-size: 13px;
+  color: #f1f5f9;
+  font-weight: 500;
+  word-break: break-all;
+}
+
+.whitelist-domain-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.whitelist-tag-direct {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.whitelist-tag-cat {
+  background: rgba(255, 255, 255, 0.06);
+  color: #94a3b8;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.whitelist-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  color: #34d399;
+  border-radius: 6px;
+  padding: 4px 8px 4px 10px;
+  font-size: 12px;
+  font-family: Consolas, monospace;
+}
+
+.whitelist-chip-remove {
+  background: transparent;
+  border: none;
+  color: #f87171;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.whitelist-chip-remove:hover {
+  color: #ef4444;
+}
+
+/* Offline Section */
+
+.offline-section-title {
+  padding: 14px 0 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #94a3b8;
+  border-top: 1px solid #182030;
+  margin-top: 6px;
+}
+
+.offline-accordion-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  border-radius: 8px;
+  transition: background 0.15s ease;
+  user-select: none;
+}
+.offline-accordion-row:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.offline-accordion-chevron {
+  font-size: 16px;
+  color: #94a3b8;
+  line-height: 1;
+  display: inline-block;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  margin-top: 2px;
+}
+.offline-accordion-chevron.expanded {
+  color: #38bdf8;
+  transform: rotate(90deg);
+}
+
+.offline-accordion-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.offline-accordion-heading {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #cbd5e1;
+}
+.offline-accordion-preview {
+  font-size: 12px;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* --- Плавающая нижняя панель массовых действий (Floating batch bar) --- */
+.floating-batch-bar {
+  position: fixed;
+  bottom: 24px;
+  right: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  background: #111622;
+  border: 1px solid #232c3f;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  padding: 8px 12px;
+  z-index: 45;
+  animation: batch-slide-up 0.2s ease-out;
+}
+@keyframes batch-slide-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.floating-batch-text {
+  font-size: 13px;
+  font-weight: 500;
+  color: #94a3b8;
+  padding: 0 6px;
+}
+
+.floating-batch-btn {
+  height: 32px;
+  padding: 0 14px;
+  background: #182030;
+  border: 1px solid #25334c;
+  border-radius: 6px;
+  color: #f1f5f9;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.floating-batch-btn:hover {
+  background: #25334c;
+  border-color: #3b82f6;
+  color: #fff;
+}
+.floating-batch-btn.danger {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #f87171;
+}
+.floating-batch-btn.danger:hover {
+  background: rgba(239, 68, 68, 0.24);
+  border-color: #ef4444;
+  color: #fca5a5;
+}

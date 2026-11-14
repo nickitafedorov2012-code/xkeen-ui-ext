@@ -5,7 +5,11 @@ import OutboundGeneratorModal from './OutboundGeneratorModal'
 import ShareNodeModal from './ShareNodeModal'
 import FlowRepairModal from './FlowRepairModal'
 import { copyToClipboard } from '../utils/clipboard'
+import { Sparkline, PROVIDER_COLORS, formatSpeed, formatBytes, formatQuotaBytes, isPoolServer } from './servers/serversHelpers'
+import { IgnoreListModal } from './servers/IgnoreListModal'
+import { SubscriptionsModal } from './servers/SubscriptionsModal'
 
+export { formatQuotaBytes, isPoolServer } from './servers/serversHelpers'
 interface Props {
   notify: (msg: string, isError?: boolean) => void
   status?: StatusInfo | null
@@ -13,131 +17,6 @@ interface Props {
 }
 
 const PAGE = 20
-
-function Sparkline({ ping }: { ping: number }) {
-  // 4 полосы качества сигнала Apple-style (высоты: 4px, 7px, 10px, 14px)
-  const barHeights = [4, 7, 10, 14]
-
-  if (ping <= 0 || ping >= 9999) {
-    return (
-      <div
-        className="signal-bars-meter timeout"
-        title="Таймаут соединения: сервер не отвечает на ICMP/TCP пинг (оффлайн)"
-      >
-        <span className="signal-dot timeout" />
-        <div className="signal-bars-wrap">
-          {barHeights.map((h, idx) => (
-            <span
-              key={idx}
-              className="signal-bar bar-timeout"
-              style={{ height: h }}
-            />
-          ))}
-        </div>
-      </div>
-    )
-  }
-
-  // Оценка качества по пингу:
-  // < 80 мс: 4/4 (зеленый)
-  // 80..160 мс: 3/4 (голубой)
-  // 160..300 мс: 2/4 (янтарный)
-  // >= 300 мс: 1/4 (красный)
-  const activeBars = ping < 80 ? 4 : ping < 160 ? 3 : ping < 300 ? 2 : 1
-  const qualityColor =
-    activeBars === 4 ? '#22c55e' : activeBars === 3 ? '#38bdf8' : activeBars === 2 ? '#f59e0b' : '#ef4444'
-  const qualityLabel =
-    activeBars === 4
-      ? 'Отличное (4/4)'
-      : activeBars === 3
-      ? 'Хорошее (3/4)'
-      : activeBars === 2
-      ? 'Среднее (2/4)'
-      : 'Слабое (1/4)'
-
-  return (
-    <div
-      className="signal-bars-meter"
-      title={`Качество связи: ${qualityLabel} • Пинг: ${ping} мс • Стабильное соединение`}
-    >
-      <span className="signal-dot" style={{ backgroundColor: qualityColor, boxShadow: `0 0 6px ${qualityColor}` }} />
-      <div className="signal-bars-wrap">
-        {barHeights.map((h, idx) => {
-          const isActive = idx < activeBars
-          return (
-            <span
-              key={idx}
-              className={`signal-bar ${isActive ? 'active' : 'dimmed'}`}
-              style={{
-                height: h,
-                backgroundColor: isActive ? qualityColor : undefined,
-              }}
-            />
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
-const PROVIDER_COLORS = [
-  '#22c55e', // green
-  '#a855f7', // purple
-  '#38bdf8', // sky blue
-  '#f59e0b', // amber
-  '#ec4899', // pink
-  '#14b8a6', // teal
-  '#6366f1', // indigo
-]
-
-function formatSpeed(bytesPerSec: number): string {
-  if (!bytesPerSec || bytesPerSec <= 0) return '0 Б/с'
-  if (bytesPerSec < 1024) return `${bytesPerSec} Б/с`
-  if (bytesPerSec < 1024 * 1024) return `${(bytesPerSec / 1024).toFixed(1)} КБ/с`
-  if (bytesPerSec < 1024 * 1024 * 1024) return `${(bytesPerSec / (1024 * 1024)).toFixed(1)} МБ/с`
-  return `${(bytesPerSec / (1024 * 1024 * 1024)).toFixed(2)} ГБ/с`
-}
-
-function formatBytes(bytes: number): string {
-  if (!bytes || bytes <= 0) return '0 Б'
-  if (bytes < 1024) return `${bytes} Б`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} ГБ`
-}
-
-export function formatQuotaBytes(bytes: number): string {
-  if (!bytes || bytes <= 0) return '0 Б'
-  if (bytes < 1024) return `${bytes} Б`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`
-
-  // Поддержка как десятичных (1000^3/1000^4), так и двоичных (1024^3/1024^4) квот провайдеров
-  // Если число кратно или рассчитано в десятичных ГБ (например 700 * 1e9 или 2 * 1e12)
-  const isDecimalGb = bytes % 1000000000 === 0 && bytes % 1073741824 !== 0
-  const isDecimalTb = bytes % 1000000000000 === 0 && bytes % (1024 * 1024 * 1024 * 1024) !== 0
-  if (isDecimalTb) {
-    return `${(bytes / 1000000000000).toFixed(2)} ТБ`
-  }
-  if (isDecimalGb) {
-    return `${(bytes / 1000000000).toFixed(2)} ГБ`
-  }
-
-  if (bytes < 1024 * 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} ГБ`
-  return `${(bytes / (1024 * 1024 * 1024 * 1024)).toFixed(2)} ТБ`
-}
-
-export function isPoolServer(s: ServerInfo): boolean {
-  if (s.is_pool) return true
-  const proto = (s.protocol || '').toUpperCase()
-  if (proto.includes('POOL') || proto === 'URL-TEST' || proto === 'FALLBACK' || proto === 'SELECTOR' || proto === 'LOAD-BALANCE') {
-    return true
-  }
-  if (s.id === 'Fastest' || s.id === 'Fallback' || s.id === 'PROXY' || s.id === 'GLOBAL') {
-    return true
-  }
-  return false
-}
 
 export default function Servers({ notify, status, refresh }: Props) {
   const [servers, setServers] = useState<ServerInfo[]>([])
@@ -2155,757 +2034,83 @@ export default function Servers({ notify, status, refresh }: Props) {
       </div>
 
       {/* МОДАЛЬНОЕ ОКНО ИГНОР-ЛИСТА */}
-      {ignoreOpen && (
-        <div className="modal-overlay" onClick={() => setIgnoreOpen(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <h2>🚫 Игнор-лист серверов</h2>
-              <button
-                type="button"
-                className="btn sm ghost"
-                onClick={() => setIgnoreOpen(false)}
-                style={{ fontSize: 16, padding: '2px 8px' }}
-              >
-                ✕
-              </button>
-            </div>
-            <p className="muted small" style={{ margin: '0 0 6px' }}>
-              Отмеченные серверы исключаются из авто-групп <b>Fastest</b> и <b>Fallback</b>. Ручное подключение остаётся доступным.
-            </p>
-
-            {/* Поиск и фильтр по подписке внутри модалки */}
-            <div className="modal-filter-row">
-              <input
-                className="input sm"
-                placeholder="Поиск серверов в модалке…"
-                value={ignoreSearch}
-                onChange={(e) => setIgnoreSearch(e.target.value)}
-                style={{ flex: 1 }}
-              />
-              {providers.length > 0 && (
-                <select
-                  className="input sm"
-                  value={ignoreProviderFilter}
-                  onChange={(e) => setIgnoreProviderFilter(e.target.value)}
-                  style={{ maxWidth: 180 }}
-                >
-                  <option value="">Все подписки ({ignoreCandidates.length})</option>
-                  {providers.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name} ({p.count})
-                    </option>
-                  ))}
-                  <option value="__static__">Статические</option>
-                </select>
-              )}
-              <button
-                type="button"
-                className="btn sm ghost"
-                onClick={selectAllFilteredIgnore}
-                title="Отметить все отфильтрованные серверы"
-              >
-                Выбрать все
-              </button>
-              <button
-                type="button"
-                className="btn sm ghost"
-                onClick={unselectAllFilteredIgnore}
-                title="Снять отметки с отфильтрованных"
-              >
-                Снять все
-              </button>
-            </div>
-
-            {/* Список серверов */}
-            <div className="modal-list">
-              {filteredIgnoreCandidates.length === 0 ? (
-                <p className="muted">Серверов не найдено.</p>
-              ) : (
-                filteredIgnoreCandidates.map((s) => {
-                  const isChecked = ignoreDraft.has(s.id)
-                  const wasInitiallyChecked = initialIgnored.has(s.id)
-                  return (
-                    <label key={s.id} className="check-row">
-                      <input
-                        type="checkbox"
-                        checked={isChecked}
-                        onChange={(e) => toggleIgnoreDraft(s.id, e.target.checked)}
-                      />
-                      <span className="badge">{s.protocol}</span>
-                      {s.provider && (
-                        <span
-                          className="sub-marker-dot"
-                          style={{ backgroundColor: providerColorMap.get(s.provider) || '#a855f7' }}
-                        />
-                      )}
-                      <span className="server-name" title={s.name}>
-                        {s.name}
-                      </span>
-                      {/* Индикация изменений сессии */}
-                      {isChecked && !wasInitiallyChecked && (
-                        <span className="diff-added-badge">+добавлен</span>
-                      )}
-                      {!isChecked && wasInitiallyChecked && (
-                        <span className="diff-removed-badge">-снят</span>
-                      )}
-                      {s.ping_ms > 0 && (
-                        <span className={'ping ' + pingClass(s.ping_ms)}>{s.ping_ms} мс</span>
-                      )}
-                    </label>
-                  )
-                })
-              )}
-            </div>
-
-            {/* Липкий футер (Sticky actions) */}
-            <div className="modal-actions">
-              <button className="btn" onClick={() => setIgnoreOpen(false)}>
-                Отмена
-              </button>
-              <button
-                className="btn ghost"
-                disabled={ignoreSaving || ignoreDraft.size === 0}
-                onClick={() => setIgnoreDraft(new Set())}
-              >
-                Сбросить всё
-              </button>
-              <button className="btn primary" onClick={saveIgnore} disabled={ignoreSaving}>
-                {ignoreSaving ? 'Применение…' : `Применить (${ignoreDraft.size})`}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <IgnoreListModal
+        ignoreOpen={ignoreOpen}
+        setIgnoreOpen={setIgnoreOpen}
+        providers={providers}
+        providerColorMap={providerColorMap}
+        ignoreCandidates={ignoreCandidates}
+        filteredIgnoreCandidates={filteredIgnoreCandidates}
+        ignoreDraft={ignoreDraft}
+        setIgnoreDraft={setIgnoreDraft}
+        initialIgnored={initialIgnored}
+        ignoreSearch={ignoreSearch}
+        setIgnoreSearch={setIgnoreSearch}
+        ignoreProviderFilter={ignoreProviderFilter}
+        setIgnoreProviderFilter={setIgnoreProviderFilter}
+        ignoreSaving={ignoreSaving}
+        toggleIgnoreDraft={toggleIgnoreDraft}
+        selectAllFilteredIgnore={selectAllFilteredIgnore}
+        unselectAllFilteredIgnore={unselectAllFilteredIgnore}
+        saveIgnore={saveIgnore}
+      />
 
       {/* МОДАЛЬНОЕ ОКНО УПРАВЛЕНИЯ ПОДПИСКАМИ */}
-      {providersOpen && (
-        <div className="modal-overlay" onClick={() => setProvidersOpen(false)}>
-          <div className="modal" style={{ width: 'min(720px, 94vw)' }} onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <h2>📦 Управление подписками</h2>
-              <div style={{ display: 'flex', gap: 6 }}>
-                <button
-                  type="button"
-                  className="btn sm"
-                  onClick={updateAllProvidersNow}
-                  disabled={updatingAllProviders}
-                  title="Принудительно обновить все подписки"
-                >
-                  {updatingAllProviders ? 'Обновление…' : '↻ Обновить все'}
-                </button>
-                <button
-                  type="button"
-                  className="btn sm ghost"
-                  onClick={() => setProvidersOpen(false)}
-                  style={{ fontSize: 16, padding: '2px 8px' }}
-                >
-                  ✕
-                </button>
-              </div>
-            </div>
-
-            <p className="muted small" style={{ margin: '0 0 8px' }}>
-              Вы можете переименовывать подписки, копировать их URL, добавлять новые или удалять неиспользуемые.
-            </p>
-
-            <div className="modal-list" style={{ maxHeight: '56vh', display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {providersError && (
-                <div role="alert">
-                  <span>Не удалось загрузить список подписок.{providersLoaded ? ' Показаны последние загруженные данные.' : ''}</span>{' '}
-                  <button type="button" className="btn sm" onClick={loadProviders} disabled={providersLoading}>
-                    {providersLoading ? 'Загрузка…' : 'Повторить'}
-                  </button>
-                </div>
-              )}
-              {providersLoading && !providersLoaded && !providersError && <p className="muted">Загрузка подписок…</p>}
-              {providersLoaded && !providersError && providers.length === 0 && <p className="muted">Нет активных подписок.</p>}
-              {providers.map((p) => {
-                const draft = editingAliases[p.id] ?? (p.name === p.id ? '' : p.name)
-                const dotColor = providerColorMap.get(p.id) || '#a855f7'
-                const showUrl = urlVisibility[p.id]
-                const isConfirming = confirmDeleteSub?.id === p.id
-
-                return (
-                  <div
-                    key={p.id}
-                    className="provider-edit-card"
-                    style={{
-                      background: 'rgba(255, 255, 255, 0.025)',
-                      border: isConfirming ? '1px solid rgba(239, 68, 68, 0.5)' : '1px solid var(--border)',
-                      borderRadius: 10,
-                      padding: '12px 14px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: 10,
-                      transition: 'border-color 0.2s, box-shadow 0.2s',
-                    }}
-                  >
-                    {/* Заголовок подписки и действия */}
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                        <span
-                          className="sub-marker-dot"
-                          style={{
-                            backgroundColor: dotColor,
-                            width: 10,
-                            height: 10,
-                            borderRadius: '50%',
-                            display: 'inline-block',
-                            boxShadow: `0 0 8px ${dotColor}66`,
-                          }}
-                        />
-                        {editingProviderNameId === p.id ? (
-                          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                            <input
-                              className="input sm"
-                              style={{ width: 170, height: 26, fontSize: 13, padding: '2px 8px' }}
-                              value={draft}
-                              onChange={(e) =>
-                                setEditingAliases((prev) => ({ ...prev, [p.id]: e.target.value }))
-                              }
-                              autoFocus
-                              onKeyDown={(e) => {
-                                if (e.key === 'Enter') {
-                                  saveProviderAlias(p.id, draft)
-                                  setEditingProviderNameId(null)
-                                }
-                                if (e.key === 'Escape') setEditingProviderNameId(null)
-                              }}
-                            />
-                            <button
-                              type="button"
-                              className="btn sm primary"
-                              style={{ padding: '0 6px', height: 26 }}
-                              onClick={() => {
-                                saveProviderAlias(p.id, draft)
-                                setEditingProviderNameId(null)
-                              }}
-                              title="Сохранить имя"
-                            >
-                              ✓
-                            </button>
-                            <button
-                              type="button"
-                              className="btn sm ghost"
-                              style={{ padding: '0 6px', height: 26 }}
-                              onClick={() => setEditingProviderNameId(null)}
-                              title="Отмена"
-                            >
-                              ✕
-                            </button>
-                          </div>
-                        ) : (
-                          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                            <b
-                              style={{ fontSize: 14, cursor: 'pointer' }}
-                              onClick={() => {
-                                setEditingAliases((prev) => ({ ...prev, [p.id]: p.name === p.id ? '' : p.name }))
-                                setEditingProviderNameId(p.id)
-                              }}
-                              title="Нажмите для переименования"
-                            >
-                              {p.name}
-                            </b>
-                            <button
-                              type="button"
-                              className="btn sm ghost"
-                              style={{ padding: '0 4px', fontSize: 11, height: 20, opacity: 0.7 }}
-                              onClick={() => {
-                                setEditingAliases((prev) => ({ ...prev, [p.id]: p.name === p.id ? '' : p.name }))
-                                setEditingProviderNameId(p.id)
-                              }}
-                              title="Переименовать подписку"
-                            >
-                              ✏️
-                            </button>
-                          </div>
-                        )}
-                        {p.is_whitelist && (
-                          <span className="badge" style={{ background: 'rgba(168, 85, 247, 0.25)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.5)', fontSize: 10, fontWeight: 600 }}>
-                            🟣 Белый список
-                          </span>
-                        )}
-                        <span
-                          style={{
-                            fontFamily: 'Consolas, monospace',
-                            fontSize: 11,
-                            background: 'rgba(255,255,255,0.06)',
-                            padding: '1px 6px',
-                            borderRadius: 4,
-                            color: 'var(--muted)',
-                          }}
-                        >
-                          {p.id}
-                        </span>
-                        <span
-                          style={{
-                            fontSize: 11,
-                            background: 'rgba(56, 189, 248, 0.1)',
-                            color: '#38bdf8',
-                            padding: '1px 7px',
-                            borderRadius: 12,
-                            fontWeight: 500,
-                          }}
-                        >
-                          {p.count} серв.
-                        </span>
-                        {p.updated_at && (
-                          <span style={{ fontSize: 11, color: 'var(--muted)' }}>
-                            · обновл. {p.updated_at.slice(0, 10)}
-                          </span>
-                        )}
-                      </div>
-
-                      {/* Кнопки переключения, обновления, белых списков и удаления */}
-                      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                        <button
-                          type="button"
-                          className={`btn sm ${p.enabled !== false ? 'primary' : 'ghost'}`}
-                          style={{
-                            fontWeight: 600,
-                            minWidth: 90,
-                            background: p.enabled !== false ? 'rgba(34, 197, 94, 0.2)' : 'rgba(255, 255, 255, 0.05)',
-                            borderColor: p.enabled !== false ? 'rgba(34, 197, 94, 0.6)' : 'var(--border)',
-                            color: p.enabled !== false ? '#4ade80' : 'var(--muted)',
-                          }}
-                          title={p.enabled !== false ? 'Отключить подписку (серверы будут скрыты)' : 'Включить подписку'}
-                          disabled={togglingProvider === p.id || deletingSub}
-                          onClick={() => toggleProviderEnable(p.id, p.enabled !== false)}
-                        >
-                          {togglingProvider === p.id ? '⏳…' : p.enabled !== false ? '● Активна' : '○ Отключена'}
-                        </button>
-                        <button
-                          type="button"
-                          className={`btn sm ghost btn-whitelist ${p.is_whitelist ? 'is-whitelist' : ''}`}
-                          style={{
-                            color: p.is_whitelist ? '#c084fc' : undefined,
-                            borderColor: p.is_whitelist ? 'rgba(168, 85, 247, 0.5)' : undefined,
-                            background: p.is_whitelist ? 'rgba(168, 85, 247, 0.15)' : undefined,
-                            fontWeight: p.is_whitelist ? 600 : 400,
-                          }}
-                          title={p.is_whitelist ? 'Исключить подписку из белых списков' : 'Включить всю подписку в белые списки (100% туннель)'}
-                          disabled={togglingWhitelistSub === p.id || deletingSub}
-                          onClick={() => toggleProviderWhitelist(p.id, Boolean(p.is_whitelist))}
-                        >
-                          {togglingWhitelistSub === p.id ? '⏳…' : p.is_whitelist ? '🟣 В белом списке' : '⚪ Белые списки'}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn sm ghost"
-                          title="Загрузить свежие серверы из этой подписки"
-                          disabled={updatingProvider === p.id || deletingSub}
-                          onClick={() => updateProviderNow(p.id)}
-                        >
-                          {updatingProvider === p.id ? '⏳ Обновление…' : '↻ Обновить'}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn sm"
-                          style={{
-                            color: '#f87171',
-                            background: isConfirming ? 'rgba(239,68,68,0.2)' : 'rgba(239, 68, 68, 0.08)',
-                            border: '1px solid rgba(239,68,68,0.3)',
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: 5,
-                          }}
-                          title="Удалить подписку"
-                          disabled={deletingSub}
-                          onClick={() => handleDeleteSubscription(p.id, p.name)}
-                        >
-                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
-                            <polyline points="3 6 5 6 21 6" />
-                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                          </svg>
-                          Удалить
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Баннер подтверждения удаления */}
-                    {isConfirming && (
-                      <div
-                        style={{
-                          padding: '10px 12px',
-                          background: 'rgba(239, 68, 68, 0.12)',
-                          border: '1px solid rgba(239, 68, 68, 0.35)',
-                          borderRadius: 8,
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          gap: 10,
-                          flexWrap: 'wrap',
-                        }}
-                      >
-                        <span style={{ fontSize: 12.5, color: '#fca5a5' }}>
-                          Удалить подписку <b>«{p.name}»</b> из config.yaml и всех групп маршрутизации?
-                        </span>
-                        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                          <button
-                            type="button"
-                            className="btn sm"
-                            style={{ background: '#dc2626', color: '#fff', border: 'none' }}
-                            disabled={deletingSub}
-                            onClick={() => executeDeleteSubscription(p.id, p.name)}
-                          >
-                            {deletingSub ? 'Удаление…' : 'Да, удалить'}
-                          </button>
-                          <button
-                            type="button"
-                            className="btn sm ghost"
-                            disabled={deletingSub}
-                            onClick={() => setConfirmDeleteSub(null)}
-                          >
-                            Отмена
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Виджет квоты трафика подписки (если провайдер отдал Subscription-Userinfo) */}
-                    {p.total_bytes && p.total_bytes > 0 ? (
-                      <div
-                        style={{
-                          background: 'rgba(56, 189, 248, 0.05)',
-                          border: '1px solid rgba(56, 189, 248, 0.18)',
-                          borderRadius: 8,
-                          padding: '8px 12px',
-                          fontSize: 11.5,
-                        }}
-                      >
-                        {(() => {
-                          const used = (p.upload_bytes || 0) + (p.download_bytes || 0)
-                          const total = p.total_bytes!
-                          const percent = Math.min(100, Math.round((used / total) * 100))
-                          const remaining = Math.max(0, total - used)
-                          const expireStr = p.expire_timestamp
-                            ? new Date(p.expire_timestamp * 1000).toLocaleDateString()
-                            : null
-
-                          return (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
-                                <span style={{ color: '#38bdf8', fontWeight: 600 }}>
-                                  📊 Лимит трафика: {formatQuotaBytes(used)} / {formatQuotaBytes(total)} ({percent}%)
-                                </span>
-                                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                                  <span style={{ color: remaining === 0 ? '#ef4444' : remaining < total * 0.1 ? '#fbbf24' : '#4ade80', fontWeight: 600 }}>
-                                    Осталось: {formatQuotaBytes(remaining)}
-                                  </span>
-                                  {expireStr && (
-                                    <span className="muted" style={{ fontSize: 10.5 }}>
-                                      · До {expireStr}
-                                    </span>
-                                  )}
-                                </div>
-                              </div>
-                              <div
-                                style={{
-                                  width: '100%',
-                                  height: 4,
-                                  background: 'rgba(255,255,255,0.08)',
-                                  borderRadius: 2,
-                                  overflow: 'hidden',
-                                }}
-                              >
-                                <div
-                                  style={{
-                                    width: `${percent}%`,
-                                    height: '100%',
-                                    background: percent > 90 ? '#ef4444' : percent > 75 ? '#fbbf24' : '#38bdf8',
-                                    borderRadius: 2,
-                                    transition: 'width 0.3s ease',
-                                  }}
-                                />
-                              </div>
-                            </div>
-                          )
-                        })()}
-                      </div>
-                    ) : null}
-
-                    {/* Единый аккуратный блок реквизитов подписки (HWID + URL) */}
-                    <div
-                      className="provider-props-box"
-                      style={{
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: 6,
-                        background: 'rgba(0, 0, 0, 0.22)',
-                        border: '1px solid rgba(255, 255, 255, 0.05)',
-                        borderRadius: 8,
-                        padding: '8px 10px',
-                      }}
-                    >
-                      {/* Строка HWID */}
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', minHeight: 28 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 200 }}>
-                          <span style={{ fontSize: 11, color: '#38bdf8', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
-                            🔑 HWID:
-                          </span>
-                          {editingHwidId === p.id ? (
-                            <div style={{ display: 'flex', alignItems: 'center', gap: 4, flex: 1 }}>
-                              <input
-                                className="input sm"
-                                style={{ flex: 1, height: 24, fontSize: 11.5, fontFamily: 'Consolas, monospace', padding: '2px 6px' }}
-                                value={hwidInput}
-                                onChange={(e) => setHwidInput(e.target.value)}
-                                placeholder="keenetic-router-xxx или ваш HWID"
-                                autoFocus
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') handleSaveHwid(p.id, hwidInput)
-                                  if (e.key === 'Escape') setEditingHwidId(null)
-                                }}
-                              />
-                              <button
-                                type="button"
-                                className="btn sm primary"
-                                style={{ height: 24, padding: '0 6px', fontSize: 11 }}
-                                disabled={savingHwidId === p.id}
-                                onClick={() => handleSaveHwid(p.id, hwidInput)}
-                                title="Сохранить HWID"
-                              >
-                                ✓
-                              </button>
-                              <button
-                                type="button"
-                                className="btn sm ghost"
-                                style={{ height: 24, padding: '0 6px', fontSize: 11 }}
-                                onClick={() => setEditingHwidId(null)}
-                                title="Отмена"
-                              >
-                                ✕
-                              </button>
-                            </div>
-                          ) : p.hwid ? (
-                            <span
-                              style={{
-                                fontFamily: 'Consolas, monospace',
-                                fontSize: 11,
-                                color: '#38bdf8',
-                                background: 'rgba(56, 189, 248, 0.12)',
-                                padding: '1px 7px',
-                                borderRadius: 4,
-                                border: '1px solid rgba(56, 189, 248, 0.25)',
-                              }}
-                            >
-                              {p.hwid}
-                            </span>
-                          ) : (
-                            <button
-                              type="button"
-                              className="btn sm ghost"
-                              style={{ fontSize: 11, padding: '1px 6px', color: '#38bdf8', height: 22, borderStyle: 'dashed' }}
-                              onClick={() => {
-                                setEditingHwidId(p.id)
-                                setHwidInput('')
-                              }}
-                              title="Привязать уникальный идентификатор роутера к подписке"
-                            >
-                              ➕ Привязать HWID
-                            </button>
-                          )}
-                        </div>
-
-                        {editingHwidId !== p.id && p.hwid && (
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                            <button
-                              type="button"
-                              className="btn sm ghost"
-                              style={{ padding: '2px 8px', fontSize: 11 }}
-                              onClick={() => handleCopyHwid(p.id, p.hwid!)}
-                              title="Скопировать HWID в буфер обмена"
-                            >
-                              {copiedHwidId === p.id ? '✓ Скопирован' : '📋 Скопировать HWID'}
-                            </button>
-                            <button
-                              type="button"
-                              className="btn sm ghost"
-                              style={{ padding: '2px 6px', fontSize: 11 }}
-                              onClick={() => {
-                                setEditingHwidId(p.id)
-                                setHwidInput(p.hwid || '')
-                              }}
-                              title="Изменить HWID"
-                            >
-                              ✏️
-                            </button>
-                            <button
-                              type="button"
-                              className="btn sm ghost"
-                              style={{ padding: '2px 6px', fontSize: 11, color: '#ef4444' }}
-                              disabled={savingHwidId === p.id}
-                              onClick={() => handleSaveHwid(p.id, '')}
-                              title="Удалить HWID из подписки"
-                            >
-                              🗑
-                            </button>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Строка URL */}
-                      {p.url && (
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', paddingTop: 4, borderTop: '1px solid rgba(255,255,255,0.04)' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 1, minWidth: 200, overflow: 'hidden' }}>
-                            <span className="muted small" style={{ fontSize: 11, flexShrink: 0, fontWeight: 600 }}>
-                              URL:
-                            </span>
-                            <span
-                              style={{
-                                fontFamily: 'Consolas, monospace',
-                                fontSize: 11.5,
-                                color: showUrl ? 'var(--text)' : 'var(--muted)',
-                                overflow: 'hidden',
-                                textOverflow: 'ellipsis',
-                                whiteSpace: 'nowrap',
-                              }}
-                              title={showUrl ? p.url : 'Нажмите «Показать» для просмотра полного URL'}
-                            >
-                              {showUrl ? p.url : '••••••••••••••••••••••••••••••••••••••••••••'}
-                            </span>
-                          </div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                            <button
-                              type="button"
-                              className="btn sm ghost"
-                              onClick={() => setUrlVisibility((prev) => ({ ...prev, [p.id]: !showUrl }))}
-                              title={showUrl ? 'Скрыть URL' : 'Показать URL'}
-                              style={{ padding: '2px 8px', fontSize: 11 }}
-                            >
-                              {showUrl ? '🙈 Скрыть' : '👁 Показать'}
-                            </button>
-                            <button
-                              type="button"
-                              className="btn sm ghost"
-                              onClick={() => copySubUrl(p.id, p.url!)}
-                              title="Скопировать URL в буфер обмена"
-                              style={{ padding: '2px 8px', fontSize: 11 }}
-                            >
-                              {copiedUrlId === p.id ? '✓ Скопировано' : '📋 Копировать'}
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
-
-              {/* Форма добавления новой подписки */}
-              <div style={{ marginTop: 12, padding: '12px 14px', background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)', borderRadius: 8 }}>
-                {!newSubOpen ? (
-                  <button
-                    type="button"
-                    className="btn sm ghost"
-                    onClick={() => {
-                      setNewSubOpen(true)
-                      if (!newSubHwid) generateHwid()
-                    }}
-                    style={{ width: '100%', color: 'var(--accent)' }}
-                  >
-                    ➕ Добавить новую подписку (с HWID / https sub)
-                  </button>
-                ) : (
-                  <form onSubmit={handleAddSubscription} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <b style={{ fontSize: 13, color: 'var(--accent)' }}>➕ Добавление подписки с HWID</b>
-                      <span className="muted small">HTTPS Sub & Mihomo Provider</span>
-                    </div>
-
-                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                      <input
-                        className="input sm"
-                        placeholder="ID (латиница, напр. geodema, sub_main)"
-                        value={newSubId}
-                        onChange={(e) => setNewSubId(e.target.value)}
-                        style={{ flex: '1 1 180px' }}
-                        required
-                      />
-                      <input
-                        className="input sm"
-                        placeholder="Отображаемое имя (напр. Основная подписка)"
-                        value={newSubName}
-                        onChange={(e) => setNewSubName(e.target.value)}
-                        style={{ flex: '1 1 180px' }}
-                      />
-                    </div>
-
-                    <input
-                      className="input sm"
-                      placeholder="URL подписки (https://domain.com/sub/...)"
-                      value={newSubUrl}
-                      onChange={(e) => {
-                        const val = e.target.value
-                        setNewSubUrl(val)
-                        if (!newSubId && val.startsWith('http')) {
-                          try {
-                            const u = new URL(val)
-                            const seg = u.pathname.split('/').filter(Boolean).pop()
-                            const cleanHost = u.hostname.replace(/^(sub|account|api|vpn)\./, '').split('.')[0]
-                            setNewSubId((cleanHost || seg || 'sub').replace(/[^a-zA-Z0-9_]/g, '').toLowerCase())
-                          } catch {}
-                        }
-                      }}
-                      required
-                    />
-
-                    {/* Поле HWID и генератор */}
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                      <input
-                        className="input sm"
-                        placeholder="HWID устройства (напр. keenetic-router-228)"
-                        value={newSubHwid}
-                        onChange={(e) => setNewSubHwid(e.target.value)}
-                        style={{ flex: 1, fontFamily: 'Consolas, monospace' }}
-                      />
-                      <button
-                        type="button"
-                        className="btn sm ghost"
-                        onClick={generateHwid}
-                        title="Сгенерировать случайный HWID"
-                        style={{ whiteSpace: 'nowrap' }}
-                      >
-                        🎲 Сгенерировать
-                      </button>
-                    </div>
-
-                    {/* Опция добавления HWID в URL */}
-                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, cursor: 'pointer', userSelect: 'none' }}>
-                      <input
-                        type="checkbox"
-                        checked={newSubAppendHwid}
-                        onChange={(e) => setNewSubAppendHwid(e.target.checked)}
-                      />
-                      <span>Добавить параметр <code style={{ color: '#38bdf8' }}>?hwid=...</code> в URL подписки (формат https sub)</span>
-                    </label>
-
-                    <div style={{ fontSize: 11, color: 'var(--muted)', lineHeight: 1.4 }}>
-                      💡 Заголовок <code style={{ color: '#38bdf8' }}>x-hwid</code> и User-Agent ClashMeta прописываются автоматически в <code style={{ color: 'var(--accent)' }}>config.yaml</code>.
-                    </div>
-
-                    <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 6, marginTop: 4 }}>
-                      <button type="button" className="btn sm ghost" onClick={() => setNewSubOpen(false)}>
-                        Отмена
-                      </button>
-                      <button type="submit" className="btn sm primary" disabled={addingSub}>
-                        {addingSub ? 'Добавление…' : 'Добавить подписку'}
-                      </button>
-                    </div>
-                  </form>
-                )}
-              </div>
-            </div>
-
-            {/* Липкий футер */}
-            <div className="modal-actions">
-              <button className="btn primary" onClick={() => setProvidersOpen(false)}>
-                Закрыть
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <SubscriptionsModal
+        providersOpen={providersOpen}
+        setProvidersOpen={setProvidersOpen}
+        providers={providers}
+        providersLoading={providersLoading}
+        providersLoaded={providersLoaded}
+        providersError={providersError}
+        confirmDeleteSub={confirmDeleteSub}
+        setConfirmDeleteSub={setConfirmDeleteSub}
+        deletingSub={deletingSub}
+        editingAliases={editingAliases}
+        setEditingAliases={setEditingAliases}
+        togglingProvider={togglingProvider}
+        updatingProvider={updatingProvider}
+        updatingAllProviders={updatingAllProviders}
+        urlVisibility={urlVisibility}
+        setUrlVisibility={setUrlVisibility}
+        copiedUrlId={copiedUrlId}
+        editingProviderNameId={editingProviderNameId}
+        setEditingProviderNameId={setEditingProviderNameId}
+        editingHwidId={editingHwidId}
+        setEditingHwidId={setEditingHwidId}
+        hwidInput={hwidInput}
+        setHwidInput={setHwidInput}
+        copiedHwidId={copiedHwidId}
+        savingHwidId={savingHwidId}
+        newSubOpen={newSubOpen}
+        setNewSubOpen={setNewSubOpen}
+        newSubId={newSubId}
+        setNewSubId={setNewSubId}
+        newSubUrl={newSubUrl}
+        setNewSubUrl={setNewSubUrl}
+        newSubName={newSubName}
+        setNewSubName={setNewSubName}
+        newSubHwid={newSubHwid}
+        setNewSubHwid={setNewSubHwid}
+        newSubAppendHwid={newSubAppendHwid}
+        setNewSubAppendHwid={setNewSubAppendHwid}
+        addingSub={addingSub}
+        providerColorMap={providerColorMap}
+        togglingWhitelistSub={togglingWhitelistSub}
+        loadProviders={loadProviders}
+        saveProviderAlias={saveProviderAlias}
+        toggleProviderEnable={toggleProviderEnable}
+        toggleProviderWhitelist={toggleProviderWhitelist}
+        updateProviderNow={updateProviderNow}
+        updateAllProvidersNow={updateAllProvidersNow}
+        copySubUrl={copySubUrl}
+        generateHwid={generateHwid}
+        handleAddSubscription={handleAddSubscription}
+        handleSaveHwid={handleSaveHwid}
+        handleCopyHwid={handleCopyHwid}
+        handleDeleteSubscription={handleDeleteSubscription}
+        executeDeleteSubscription={executeDeleteSubscription}
+      />
 
       {/* Модальное окно импорта ссылок */}
       <OutboundGeneratorModal

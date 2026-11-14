@@ -396,9 +396,14 @@ pub fn read_tun_interface_bytes(iface_name: &str) -> (u64, u64) {
     (0, 0)
 }
 
-/// Число потоков для `-n`: поддерживает точные потоки (3-100) или дефолтные 20.
+/// Число потоков для `-n`: поддерживает точные потоки (3-100) или дефолтные 10 на ссылку (TRN-WRK-01).
 pub fn effective_workers(cfg: &VkTurnConfig) -> u32 {
-    let wanted = if cfg.streams == 0 { DEFAULT_WORKERS } else { cfg.streams as u32 };
+    let wanted = if cfg.streams == 0 {
+        let links_count = call_hashes(cfg).len().max(1) as u32;
+        (links_count * WORKERS_PER_GROUP).clamp(WORKERS_PER_GROUP, DEFAULT_WORKERS)
+    } else {
+        cfg.streams as u32
+    };
     wanted.clamp(3, MAX_WORKERS)
 }
 
@@ -1161,7 +1166,7 @@ fn is_ipv4(s: &str) -> bool {
 /// Содержимое file-провайдера `vkturn`: трафик узла уходит в TUN-интерфейс клиента csqtt.
 /// Значений пользователя в нём нет — YAML-инъекция невозможна.
 pub fn render_provider_yaml() -> String {
-    format!("proxies:\n  - name: \"{PROXY_NAME}\"\n    type: direct\n    interface-name: {TUN_IFACE}\n    routing-mark: {ROUTE_TABLE}\n    ip-version: ipv4\n    udp: true\n    tfo: false\n")
+    format!("proxies:\n  - name: \"{PROXY_NAME}\"\n    type: direct\n    interface-name: {TUN_IFACE}\n    routing-mark: {ROUTE_TABLE}\n    ip-version: ipv4\n    udp: false\n    tfo: false\n")
 }
 
 /// Отключает принудительный `tfo: true` внутри секции `proxy-providers -> vkturn` существующего `config.yaml`,
@@ -1350,6 +1355,10 @@ pub fn iptables_apply_script(dsts: &[String]) -> String {
         || iptables -w -t "$tbl" -I "$ch" 1 -d "$dst" -m comment --comment {IPT_COMMENT} -j RETURN 2>/dev/null || true
     done
   done
+done
+for ch in OUTPUT FORWARD; do
+  iptables -w -t filter -C "$ch" -o {TUN_IFACE} -p udp --dport 443 -m comment --comment {IPT_COMMENT} -j REJECT --reject-with icmp-port-unreachable 2>/dev/null \
+    || iptables -w -t filter -I "$ch" 1 -o {TUN_IFACE} -p udp --dport 443 -m comment --comment {IPT_COMMENT} -j REJECT --reject-with icmp-port-unreachable 2>/dev/null || true
 done"#
     )
 }
@@ -1469,6 +1478,7 @@ ip rule add dev {TUN_IFACE} table {ROUTE_TABLE} pref {ROUTE_TABLE}; rule_dev=1
 ip rule add from {ip} table {ROUTE_TABLE} pref 40; rule_src=1
 ip rule add fwmark {ROUTE_TABLE} table {ROUTE_TABLE} pref 45; rule_mark=1
 echo 2 > /proc/sys/net/ipv4/conf/{TUN_IFACE}/rp_filter 2>/dev/null || true
+echo 1 > /proc/sys/net/ipv4/tcp_mtu_probing 2>/dev/null || true
 for ch in POSTROUTING OUTPUT; do
   iptables -w -t mangle -C "$ch" -o {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS} 2>/dev/null \
     || iptables -w -t mangle -I "$ch" 1 -o {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS} 2>/dev/null || true
@@ -1478,8 +1488,8 @@ for ch in PREROUTING INPUT FORWARD; do
     || iptables -w -t mangle -I "$ch" 1 -i {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS} 2>/dev/null || true
 done
 for ch in OUTPUT FORWARD; do
-  iptables -w -t filter -C "$ch" -o {TUN_IFACE} -p udp --dport 443 -m comment --comment {IPT_COMMENT} -j REJECT 2>/dev/null \
-    || iptables -w -t filter -I "$ch" 1 -o {TUN_IFACE} -p udp --dport 443 -m comment --comment {IPT_COMMENT} -j REJECT 2>/dev/null || true
+  iptables -w -t filter -C "$ch" -o {TUN_IFACE} -p udp --dport 443 -m comment --comment {IPT_COMMENT} -j REJECT --reject-with icmp-port-unreachable 2>/dev/null \
+    || iptables -w -t filter -I "$ch" 1 -o {TUN_IFACE} -p udp --dport 443 -m comment --comment {IPT_COMMENT} -j REJECT --reject-with icmp-port-unreachable 2>/dev/null || true
 done
 trap - EXIT"#
     )
@@ -1501,6 +1511,7 @@ for ch in PREROUTING INPUT FORWARD; do
   while iptables -w -t mangle -D \"$ch\" -i {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS} 2>/dev/null; do :; done
 done
 for ch in OUTPUT FORWARD; do
+  while iptables -w -t filter -D \"$ch\" -o {TUN_IFACE} -p udp --dport 443 -m comment --comment {IPT_COMMENT} -j REJECT --reject-with icmp-port-unreachable 2>/dev/null; do :; done
   while iptables -w -t filter -D \"$ch\" -o {TUN_IFACE} -p udp --dport 443 -m comment --comment {IPT_COMMENT} -j REJECT 2>/dev/null; do :; done
 done
 ip rule del pref {ROUTE_TABLE} dev {TUN_IFACE} table {ROUTE_TABLE} 2>/dev/null || true
@@ -1620,6 +1631,7 @@ mod tun_sys {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn retry_fd_send<F>(
     cancel: &std::sync::atomic::AtomicBool,
     attempts: usize,
@@ -2515,6 +2527,15 @@ async fn kill_stale_from_pidfile() {
     let _ = tokio::fs::remove_file(PID_FILE).await;
 }
 
+pub fn spawn_vkturn_notification_task<F>(timeout: Duration, fut: F) -> tokio::task::JoinHandle<bool>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        tokio::time::timeout(timeout, fut).await.is_ok()
+    })
+}
+
 async fn notify_user(state: &crate::AppState, text: &str) {
     let cfg = state.config.read().await;
     if !cfg.notifications.telegram_enabled
@@ -2530,7 +2551,7 @@ async fn notify_user(state: &crate::AppState, text: &str) {
     let msg = text.to_string();
     drop(cfg);
 
-    tokio::spawn(async move {
+    let _ = spawn_vkturn_notification_task(Duration::from_secs(10), async move {
         let _ = crate::notifications::send_telegram_with_proxy(
             &http,
             Some(&proxy_url),
@@ -2809,7 +2830,9 @@ mod tests {
     #[test]
     fn test_effective_workers() {
         let mut cfg = cfg_with(&["https://vk.com/call/join/abc12345"]);
-        assert_eq!(effective_workers(&cfg), 20);
+        assert_eq!(effective_workers(&cfg), 10, "10 workers per link (TRN-WRK-01)");
+        cfg.links.push("https://vk.com/call/join/def67890".into());
+        assert_eq!(effective_workers(&cfg), 20, "20 workers for 2 links");
         cfg.streams = 35;
         assert_eq!(effective_workers(&cfg), 35, "точное число воркеров");
         cfg.streams = 200;
@@ -3307,7 +3330,7 @@ mod tests {
         assert!(yaml.contains("interface-name: csq0"), "трафик узла уходит в TUN клиента csqtt");
         assert!(yaml.contains("routing-mark: 222"));
         assert!(yaml.contains("ip-version: ipv4"));
-        assert!(yaml.contains("udp: true"));
+        assert!(yaml.contains("udp: false"));
         assert!(yaml.contains("tfo: false"));
     }
 
@@ -4079,5 +4102,50 @@ mod tests {
         assert_eq!(normalize_vkturn_provider_in_yaml(&normalized), normalized, "идемпотентность нормализации");
         let unchanged = "proxy-providers:\n  vkturn:\n    type: file\n    path: ./providers/vkturn.yaml\nrules:\n  - MATCH,PROXY\n";
         assert_eq!(normalize_vkturn_provider_in_yaml(unchanged), unchanged);
+    }
+
+    #[test]
+    fn test_vkturn_provider_disables_udp_quic() {
+        let yaml = render_provider_yaml();
+        assert!(yaml.contains("udp: false"), "VK Calls provider must disable UDP/QUIC to force instant TCP: {yaml}");
+    }
+
+    #[test]
+    fn test_iptables_apply_script_includes_filter_reject() {
+        let script = iptables_apply_script(&[]);
+        assert!(
+            script.contains("-t filter -I \"$ch\" 1 -o csq0 -p udp --dport 443 -m comment --comment xkeen-route-vkturn -j REJECT --reject-with icmp-port-unreachable"),
+            "iptables_apply_script must persistently include filter table UDP 443 REJECT: {script}"
+        );
+    }
+
+    #[test]
+    fn test_tun_configure_script_enables_mtu_probing() {
+        let script = tun_configure_script("10.66.67.3".parse().unwrap());
+        assert!(
+            script.contains("echo 1 > /proc/sys/net/ipv4/tcp_mtu_probing"),
+            "tun_configure_script must enable kernel tcp_mtu_probing: {script}"
+        );
+        assert!(
+            script.contains("-t filter -I \"$ch\" 1 -o csq0 -p udp --dport 443 -m comment --comment xkeen-route-vkturn -j REJECT --reject-with icmp-port-unreachable"),
+            "tun_configure_script must include icmp-port-unreachable reject: {script}"
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_bug_a14_vkturn_notification_does_not_block() {
+        let start = std::time::Instant::now();
+        let handle = spawn_vkturn_notification_task(Duration::from_millis(50), async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        assert!(
+            start.elapsed() < Duration::from_millis(40),
+            "notification dispatch must not block caller"
+        );
+        let completed_within_timeout = handle.await.unwrap();
+        assert!(
+            !completed_within_timeout,
+            "stalled notification task must time out instead of hanging"
+        );
     }
 }

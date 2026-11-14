@@ -227,7 +227,21 @@ pub const ZAPRET_CMDLINE_MARKERS: &[&str] = &[
 
 /// Сборка shell-функции `is_zapret_pid` из единой константы маркеров `ZAPRET_CMDLINE_MARKERS` (баг 36)
 pub fn build_zapret_pid_check_fn() -> String {
-    let patterns = ZAPRET_CMDLINE_MARKERS
+    build_zapret_pid_check_fn_with_qnum(200)
+}
+
+/// Сборка shell-функции `is_zapret_pid` с учётом настроенного `--qnum` (баг 34 / баг 36)
+pub fn build_zapret_pid_check_fn_with_qnum(qnum: u16) -> String {
+    let mut markers: Vec<String> = ZAPRET_CMDLINE_MARKERS.iter().map(|m| (*m).to_string()).collect();
+    let q_eq = format!("--qnum={qnum}");
+    let q_sp = format!("--qnum {qnum}");
+    if !markers.contains(&q_eq) {
+        markers.push(q_eq);
+    }
+    if !markers.contains(&q_sp) {
+        markers.push(q_sp);
+    }
+    let patterns = markers
         .iter()
         .map(|m| format!("*{m}*"))
         .collect::<Vec<_>>()
@@ -250,8 +264,23 @@ pub fn build_zapret_pid_check_fn() -> String {
 
 /// Проверка, принадлежит ли командная строка процесса нашему экземпляру Zapret (баг 36)
 pub fn is_zapret_cmdline_ours(cmdline: &str) -> bool {
+    is_zapret_cmdline_ours_with_qnum(cmdline, None)
+}
+
+/// Проверка принадлежности процесса с учётом кастомного `--qnum` (баг 34 / баг 36)
+pub fn is_zapret_cmdline_ours_with_qnum(cmdline: &str, expected_qnum: Option<u16>) -> bool {
     let cl = cmdline.to_lowercase();
-    ZAPRET_CMDLINE_MARKERS.iter().any(|m| cl.contains(m))
+    if ZAPRET_CMDLINE_MARKERS.iter().any(|m| cl.contains(m)) {
+        return true;
+    }
+    if let Some(qnum) = expected_qnum {
+        let q_eq = format!("--qnum={qnum}");
+        let q_sp = format!("--qnum {qnum}");
+        if cl.contains(&q_eq) || cl.contains(&q_sp) {
+            return true;
+        }
+    }
+    false
 }
 /// Проверка соответствия PID процессу Zapret (nfqws / nfqws2 / tpws) (Z-08)
 pub fn is_zapret_pid_valid(pid: u32) -> bool {
@@ -273,6 +302,39 @@ pub fn is_zapret_pid_valid(pid: u32) -> bool {
         let _ = pid;
         true
     }
+}
+
+/// Выбирает из вывода `pidof` первый PID, принадлежащий нашему экземпляру Zapret (баг 36).
+pub fn select_our_zapret_pid_from_list<F>(pidof_stdout: &str, mut is_valid: F) -> Option<u32>
+where
+    F: FnMut(u32) -> bool,
+{
+    pidof_stdout
+        .split_whitespace()
+        .filter_map(|s| s.parse::<u32>().ok())
+        .find(|&p| is_valid(p))
+}
+
+/// Находит живой PID именно нашего экземпляра Zapret (nfqws / nfqws2), проверяя `/opt/var/run/zapret.pid`,
+/// `/var/run/zapret.pid` и все PID из `pidof nfqws2; pidof nfqws` через `is_zapret_pid_valid` (баг 36).
+pub async fn find_our_zapret_pid() -> Option<u32> {
+    for pid_path in ["/opt/var/run/zapret.pid", "/var/run/zapret.pid"] {
+        if let Ok(pid_txt) = tokio::fs::read_to_string(pid_path).await {
+            if let Ok(p) = pid_txt.trim().parse::<u32>() {
+                if is_zapret_pid_valid(p) {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    let out = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg("pidof nfqws2 2>/dev/null; pidof nfqws 2>/dev/null")
+        .output()
+        .await
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    select_our_zapret_pid_from_list(&stdout, is_zapret_pid_valid)
 }
 
 // Подпункт 31.1 & 31.3: сборка безопасной команды снятия DNS-редиректов Zapret
@@ -303,6 +365,13 @@ pub fn zapret_dns_rules_missing(iptables_s_output: &str, port: u16) -> bool {
     })
 }
 
+// Подпункт 31.2 & 31.3: проверка остаточных правил Zapret в iptables при выключенном Zapret
+pub fn build_zapret_iptables_left_check_cmd(port: u16) -> String {
+    format!(
+        "iptables -w 2 -t mangle -S 2>/dev/null | grep -q zapret || iptables -w 2 -t nat -S PREROUTING 2>/dev/null | grep 'xkeen-route-zapret' | grep 'to-ports {port}' | grep -q ."
+    )
+}
+
 // Подпункт 31.2 & 31.3: команда восстановления правил DNS-редиректа Zapret
 pub fn build_zapret_dns_restore_cmd(port: u16) -> String {
     format!(
@@ -313,20 +382,7 @@ iptables -w 2 -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --com
     )
 }
 
-/// Надежная команда полного снятия правил перенаправления DNS на порт 1053 во избежание DNS-блэкаута
-pub const DNS_REDIRECT_REMOVE_CMD: &str = r#"
-for ipt in "iptables -w 2" "ip6tables -w 2"; do
-  $ipt -t nat -S PREROUTING 2>/dev/null | grep 'xkeen-route-zapret' | grep -- '--to-ports 1053' | while read -r rule; do
-    del_cmd=$(echo "$rule" | sed 's/^-A/-D/')
-    $ipt -t nat $del_cmd 2>/dev/null || true
-  done
-  for iface in "br+" "Bridge+"; do
-    for proto in udp tcp; do
-      while $ipt -t nat -D PREROUTING -i "$iface" -p "$proto" --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports 1053 2>/dev/null; do :; done
-    done
-  done
-done
-"#;
+
 
 /// Валидация байтов ответа DNS: проверка длины, совпадения Transaction ID и флага QR (Response)
 pub fn validate_dns_response(query_id: (u8, u8), buf: &[u8]) -> bool {
@@ -524,7 +580,7 @@ pub async fn verify_zapret_failsafe(
     let mut details = Vec::new();
     let mut router_alive = false;
     let mut internet_reachable = false;
-    let mut lan_bridge_valid = false;
+    let lan_bridge_valid;
 
     // 1. Проверка liveness роутера с адаптивным таймаутом (NET-03)
     let router_timeout = get_hardware_adaptive_timeout(std::time::Duration::from_secs(2));
@@ -614,8 +670,8 @@ pub async fn verify_zapret_failsafe(
     }
 }
 
-/// Симметричная сериализация zapret.conf (Z-07)
-pub fn serialize_zapret_conf(cfg: &crate::config::ZapretConfig) -> String {
+/// Симметричная сериализация zapret.conf (Z-07, баг 35: единый сериализатор с параметром config_path)
+pub fn serialize_zapret_conf(cfg: &crate::config::ZapretConfig, config_path: &std::path::Path) -> String {
     let use_v2 = crate::api::should_use_nfqws2(cfg);
     let engine_str = if use_v2 { "v2" } else { "v1" };
 
@@ -661,12 +717,18 @@ pub fn serialize_zapret_conf(cfg: &crate::config::ZapretConfig) -> String {
 
     let block_quic_str = if cfg.smart_tv_mode { "1" } else { "0" };
     let smart_tv_str = if cfg.smart_tv_mode { "1" } else { "0" };
-    let adguard_enabled = std::path::Path::new("/opt/etc/xkeen-route/config.json")
+    let cfg_adguard = config_path
         .exists()
-        .then(|| crate::config::load(std::path::Path::new("/opt/etc/xkeen-route/config.json")).adguard.enabled)
-        .unwrap_or(false)
-        || std::path::Path::new("/opt/etc/init.d/S99adguardhome").exists()
-        || crate::system::is_process_running("AdGuardHome");
+        .then(|| {
+            let c = crate::config::load(config_path);
+            c.adguard.enabled || c.adblock_enabled
+        })
+        .unwrap_or(false);
+    let adguard_enabled = crate::api::zapret_conf_adguard_flag(
+        cfg_adguard,
+        crate::system::is_process_running("AdGuardHome"),
+        std::path::Path::new("/opt/etc/init.d/S99adguardhome").exists(),
+    );
     let adguard_str = if adguard_enabled { "1" } else { "0" };
 
     format!(
@@ -810,7 +872,7 @@ mod tests {
         cfg.discord_voice_udp = true;
         cfg.excluded_devices = vec!["192.168.1.50".to_string(), "00:11:22:33:44:55".to_string()];
 
-        let serialized = serialize_zapret_conf(&cfg);
+        let serialized = serialize_zapret_conf(&cfg, std::path::Path::new("/opt/etc/xkeen-route/config.json"));
         assert!(serialized.contains("SMART_TV_MODE=\"0\""));
         assert!(serialized.contains("EXCLUDED_IPS=\"192.168.1.50\""));
         assert!(serialized.contains("EXCLUDED_MACS=\"00:11:22:33:44:55\""));
@@ -838,7 +900,7 @@ mod tests {
             "  ".to_string(),
         ];
 
-        let serialized = serialize_zapret_conf(&cfg);
+        let serialized = serialize_zapret_conf(&cfg, std::path::Path::new("/opt/etc/xkeen-route/config.json"));
         assert!(serialized.contains("EXCLUDED_IPS=\"192.168.1.50 10.0.0.0/24\""));
         assert!(serialized.contains("EXCLUDED_MACS=\"00:11:22:33:44:55 00-11-22-33-44-66\""));
         assert!(!serialized.contains("rm -rf"));
@@ -858,6 +920,25 @@ mod tests {
             parsed.excluded_devices.is_empty(),
             "Empty EXCLUDED_IPS and EXCLUDED_MACS must clear excluded_devices"
         );
+    }
+
+    #[test]
+    fn regression_bug_35b_single_zapret_conf_serializer() {
+        let dir = std::env::temp_dir().join(format!("xkeen_bug35_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cfg_path = dir.join("config.json");
+        let mut app_cfg = crate::config::AppConfig::default();
+        app_cfg.adguard.enabled = true;
+        std::fs::write(&cfg_path, serde_json::to_string_pretty(&app_cfg).unwrap())
+            .expect("save temp config");
+
+        let serialized = serialize_zapret_conf(&app_cfg.zapret, &cfg_path);
+        assert!(
+            serialized.contains("ADGUARD_ENABLED=\"1\""),
+            "serialize_zapret_conf must read adguard.enabled from passed config_path, got:\n{serialized}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -948,6 +1029,8 @@ mod tests {
         assert!(!is_zapret_cmdline_ours("nfqws --daemon --qnum=100"), "сторонний nfqws с qnum 100 не наш");
         assert!(!is_zapret_cmdline_ours("/usr/bin/nfqws --dpi-desync=split2"), "сторонний nfqws без наших параметров не наш");
         assert!(!is_zapret_cmdline_ours("python3 test_nfqws.py"), "произвольный процесс не наш");
+        assert_eq!(select_our_zapret_pid_from_list("101 202 303", |pid| pid == 202), Some(202));
+        assert_eq!(select_our_zapret_pid_from_list("101 202", |_| false), None);
     }
     #[test]
     fn test_detect_dns_loop_risk() {
@@ -1009,14 +1092,14 @@ mod tests {
     fn test_dns_redirect_remove_cmd_regression() {
         // Баг 31: команда удаления редиректа содержит адресное удаление для br+ и Bridge+
         // строго по комментарию xkeen-route-zapret, без слепого удаления чужих правил
-        assert!(DNS_REDIRECT_REMOVE_CMD.contains("1053"));
-        assert!(DNS_REDIRECT_REMOVE_CMD.contains("br+"));
-        assert!(DNS_REDIRECT_REMOVE_CMD.contains("Bridge+"));
-        assert!(DNS_REDIRECT_REMOVE_CMD.contains("xkeen-route-zapret"));
-        assert!(DNS_REDIRECT_REMOVE_CMD.contains("ip6tables"));
+        let cmd = super::build_dns_redirect_remove_cmd(crate::routing::DEFAULT_MIHOMO_DNS_PORT);
+        assert!(cmd.contains("1053"));
+        assert!(cmd.contains("br+"));
+        assert!(cmd.contains("Bridge+"));
+        assert!(cmd.contains("xkeen-route-zapret"));
+        assert!(cmd.contains("ip6tables"));
     }
 
-    #[test]
     #[test]
     fn regression_bug_31b_zapret_dns_redirect_only_own_rules() {
         // Подпункт 31.1 & 31.3:
@@ -1046,6 +1129,16 @@ mod tests {
 
         let empty_output = "";
         assert!(super::zapret_dns_rules_missing(empty_output, 1053), "пустой вывод iptables -S — missing == true");
+
+        // Подпункт 31.3: S51zapret и проверка остаточных правил в watchdog используют переданный порт (7853), не 1053
+        let s51_7853 = crate::api::render_s51_zapret_script_with_dns_port(7853);
+        assert!(s51_7853.contains("--to-ports 7853"), "S51zapret должен редиректить на порт 7853");
+        assert!(s51_7853.contains(":1EAD"), "check_dns_resolver_ready в S51zapret должен проверять hex-порт 7853 (0x1EAD)");
+        assert!(!s51_7853.contains("--to-ports 1053"), "S51zapret для 7853 не должен содержать --to-ports 1053");
+        let left_cmd = super::build_zapret_iptables_left_check_cmd(7853);
+        assert!(left_cmd.contains("xkeen-route-zapret"));
+        assert!(left_cmd.contains("to-ports 7853"));
+        assert!(!left_cmd.contains("1053"));
     }
 
     #[test]

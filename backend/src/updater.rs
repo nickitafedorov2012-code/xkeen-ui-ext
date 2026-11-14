@@ -2,16 +2,15 @@
 use crate::VERSION;
 use axum::extract::State;
 use axum::response::Response;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::Digest;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::api::{api_err, api_ok};
 use crate::AppState;
 
-const REPO: &str = "nickitafedorov2012-code/xkeen-ui-ext";
 const JSDELIVR_RESOLVED: &str =
     "https://data.jsdelivr.com/v1/packages/gh/nickitafedorov2012-code/xkeen-ui-ext/resolved";
 const JSDELIVR_CDN: &str = "https://cdn.jsdelivr.net/gh/nickitafedorov2012-code/xkeen-ui-ext";
@@ -21,6 +20,150 @@ const GITHUB_RELEASE: &str = "https://github.com/nickitafedorov2012-code/xkeen-u
 const GITHUB_LATEST: &str = "https://github.com/nickitafedorov2012-code/xkeen-ui-ext/releases/latest";
 const BIN_PATH: &str = "/opt/sbin/xkeen-route";
 const INIT_SCRIPT: &str = "/opt/etc/init.d/S99xkeen-route";
+
+pub const UPDATE_GUARD_HEALTHY_SECS: u64 = 30;
+pub const UPDATE_GUARD_MAX_ATTEMPTS: u32 = 3;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateGuardState {
+    pub version: String,
+    pub bin_path: String,
+    pub bak_path: String,
+    pub init_script: String,
+    pub started_at: u64,
+    pub attempts: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateGuardAction {
+    Nothing,
+    Wait,
+    ClearMarker,
+    Rollback,
+}
+
+pub fn update_guard_marker_path(config_path: &Path) -> PathBuf {
+    let dir = config_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    dir.join("update-guard.json")
+}
+
+pub fn write_update_guard_marker(marker: &Path, state: &UpdateGuardState) -> std::io::Result<()> {
+    use std::io::Write;
+    let body = serde_json::to_vec_pretty(state)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = marker.with_extension("json.tmp");
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(&body)?;
+    f.sync_all()?;
+    std::fs::rename(&tmp, marker)
+}
+
+pub fn read_update_guard_marker(marker: &Path) -> Option<UpdateGuardState> {
+    let bytes = std::fs::read(marker).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+pub fn clear_update_guard_marker(marker: &Path) {
+    let _ = std::fs::remove_file(marker);
+}
+
+pub fn update_guard_decision(
+    state: Option<&UpdateGuardState>,
+    now: u64,
+    healthy_for: u64,
+) -> UpdateGuardAction {
+    let Some(st) = state else {
+        return UpdateGuardAction::Nothing;
+    };
+    if st.attempts >= UPDATE_GUARD_MAX_ATTEMPTS {
+        return UpdateGuardAction::Rollback;
+    }
+    if now.saturating_sub(st.started_at) >= healthy_for {
+        return UpdateGuardAction::ClearMarker;
+    }
+    UpdateGuardAction::Wait
+}
+
+fn current_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Проверяет маркер незавершённого обновления при старте: инкрементирует attempts,
+/// при достижении порога откатывает бинарник из .bak и перезапускает сервис.
+pub fn handle_startup_update_guard(config_path: &Path) {
+    let marker = update_guard_marker_path(config_path);
+    let Some(mut guard) = read_update_guard_marker(&marker) else {
+        return;
+    };
+    guard.attempts = guard.attempts.saturating_add(1);
+    let now = current_unix_secs();
+    match update_guard_decision(Some(&guard), now, UPDATE_GUARD_HEALTHY_SECS) {
+        UpdateGuardAction::Rollback => {
+            crate::log_e!(
+                "[UPDATE] Обнаружено {} неудачных запусков после обновления до {} — выполняю откат из {}",
+                guard.attempts,
+                guard.version,
+                guard.bak_path
+            );
+            let bak = Path::new(&guard.bak_path);
+            let bin = Path::new(&guard.bin_path);
+            if bak.exists() {
+                if let Err(e) = std::fs::copy(bak, bin) {
+                    crate::log_e!("[UPDATE] Ошибка отката бинарника из {}: {e}", guard.bak_path);
+                    let _ = write_update_guard_marker(&marker, &guard);
+                    return;
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(bin, std::fs::Permissions::from_mode(0o755));
+                }
+            } else {
+                crate::log_e!("[UPDATE] Файл бэкапа {} не найден, откат невозможен", guard.bak_path);
+            }
+            clear_update_guard_marker(&marker);
+            if Path::new(&guard.init_script).exists() {
+                #[cfg(unix)]
+                {
+                    let cmd = format!("(sleep 1 && {} restart) >/dev/null 2>&1 &", guard.init_script);
+                    let _ = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&cmd)
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = std::process::Command::new(&guard.init_script)
+                        .arg("restart")
+                        .stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn();
+                }
+                std::process::exit(1);
+            }
+        }
+        UpdateGuardAction::ClearMarker => {
+            clear_update_guard_marker(&marker);
+        }
+        UpdateGuardAction::Wait => {
+            let _ = write_update_guard_marker(&marker, &guard);
+        }
+        UpdateGuardAction::Nothing => {}
+    }
+}
 
 #[derive(Deserialize, Clone)]
 struct GhRelease {
@@ -81,6 +224,11 @@ pub fn verify_release_checksum(
     Ok(())
 }
 
+/// Строгая верификация SHA-256 архива ядра Mihomo (баг 68): при отсутствии хеша установка отменяется.
+pub fn verify_core_checksum(expected: Option<&str>, actual: &str) -> Result<(), String> {
+    verify_release_checksum(actual, expected)
+}
+
 /// Извлекает ожидаемый SHA-256 хеш из текста чексуммы (GNU format, BSD format или plain hash)
 pub fn extract_hash_from_checksum_text(text: &str, target_filename: &str) -> Option<String> {
     let clean_target = target_filename.trim();
@@ -113,20 +261,6 @@ pub fn extract_hash_from_checksum_text(text: &str, target_filename: &str) -> Opt
         }
     }
     None
-}
-
-/// Загрузка файла с прямой проверкой через GitHub и fallback на локальный прокси Mihomo,
-/// с обязательной верификацией контрольной суммы SHA-256 (SEC-01).
-pub async fn download_file_verified(
-    url: &str,
-    expected_sha256: Option<&str>,
-    proxy_fallback: &str,
-) -> Result<Vec<u8>, String> {
-    let direct = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("Ошибка создания HTTP клиента: {e}"))?;
-    download_file_verified_with_client(&direct, url, expected_sha256, proxy_fallback).await
 }
 
 /// Лимиты скачивания. Общий таймаут на весь файл обрывал медленную, но живую загрузку:
@@ -210,23 +344,6 @@ pub async fn fetch_body(
         }
     }
     Ok(body)
-}
-
-pub async fn download_file_verified_with_client(
-    direct: &reqwest::Client,
-    url: &str,
-    expected_sha256: Option<&str>,
-    proxy_fallback: &str,
-) -> Result<Vec<u8>, String> {
-    download_file_verified_with_progress(
-        direct,
-        url,
-        expected_sha256,
-        proxy_fallback,
-        DownloadLimits::default(),
-        &|_, _| {},
-    )
-    .await
 }
 
 pub async fn download_file_verified_with_progress(
@@ -854,6 +971,19 @@ pub async fn install(State(state): State<AppState>) -> Response {
 
     crate::log_i!("[UPDATE] Установлена {ver} ({chosen_asset}), запуск перезапуска сервиса");
 
+    let guard_marker = update_guard_marker_path(&state.config_path);
+    let guard_state = UpdateGuardState {
+        version: ver.clone(),
+        bin_path: target_bin.to_string_lossy().to_string(),
+        bak_path: bak_bin.to_string_lossy().to_string(),
+        init_script: init_script_str.clone(),
+        started_at: current_unix_secs(),
+        attempts: 0,
+    };
+    if let Err(e) = write_update_guard_marker(&guard_marker, &guard_state) {
+        crate::log_w!("[UPDATE] Не удалось записать маркер отката: {e}");
+    }
+
     if Path::new(&init_script_str).exists() {
         #[cfg(unix)]
         {
@@ -868,6 +998,7 @@ pub async fn install(State(state): State<AppState>) -> Response {
 
             if let Err(e) = spawn_res {
                 // Если не удалось даже запустить команду перезапуска, пробуем восстановить из .bak
+                clear_update_guard_marker(&guard_marker);
                 if bak_bin.exists() {
                     let _ = tokio::fs::copy(bak_bin, target_bin).await;
                 }
@@ -1039,26 +1170,29 @@ pub async fn mihomo_releases(State(state): State<AppState>) -> Response {
     let arch = detect_mihomo_arch().await;
 
     // Определяем текущую установленную версию Mihomo
-    let mut current_ver = crate::mihomo::get_version(&state.http, &cfg).await.unwrap_or_default();
-    let mut full_ver = current_ver.clone();
-
-    let bin_path = if cfg.system.mihomo_bin.is_empty() { "/opt/sbin/mihomo" } else { &cfg.system.mihomo_bin };
+    let initial_ver = crate::mihomo::get_version(&state.http, &cfg).await.unwrap_or_default();
 
     #[cfg(unix)]
-    {
+    let (current_ver, full_ver) = {
+        let mut cur_v = initial_ver;
+        let mut full_v = cur_v.clone();
+        let bin_path = if cfg.system.mihomo_bin.is_empty() { "/opt/sbin/mihomo" } else { &cfg.system.mihomo_bin };
         if let Ok(out) = tokio::process::Command::new(bin_path).arg("-v").output().await {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !s.is_empty() {
-                full_ver = s.clone();
+                full_v = s.clone();
                 for part in s.split_whitespace() {
                     if part.starts_with('v') && part.chars().nth(1).map(|c| c.is_ascii_digit()).unwrap_or(false) {
-                        current_ver = part.to_string();
+                        cur_v = part.to_string();
                         break;
                     }
                 }
             }
         }
-    }
+        (cur_v, full_v)
+    };
+    #[cfg(not(unix))]
+    let (current_ver, full_ver) = (initial_ver.clone(), initial_ver);
 
     let raw_releases = match fetch_mihomo_releases_cached(&state.http, &proxy_url).await {
         Ok(r) => r,
@@ -1249,21 +1383,14 @@ pub async fn mihomo_install(
                 continue;
             }
 
-            // Проверка контрольной суммы SHA-256 ДО распаковки архива (SEC-01)
+            // Проверка контрольной суммы SHA-256 ДО распаковки архива (SEC-01, баг 68)
             let actual_sha256 = hex::encode(sha2::Digest::finalize(hasher));
-            if let Some(ref exp) = expected_sha256 {
-                let exp_clean = exp.trim().to_ascii_lowercase();
-                if !exp_clean.is_empty() && actual_sha256 != exp_clean {
-                    let _ = tokio::fs::remove_file(&gz_path).await;
-                    crate::log_e!("[Mihomo Update] Ошибка верификации SHA-256: ожидалось {exp_clean}, получено {actual_sha256}");
-                    return api_err(format!(
-                        "Ошибка верификации SHA-256 ядра Mihomo: контрольная сумма не совпадает (ожидалось: {exp_clean}, получено: {actual_sha256})"
-                    ));
-                }
-                crate::log_i!("[Mihomo Update] SHA-256 архива успешно верифицирован: {actual_sha256}");
-            } else {
-                crate::log_i!("[Mihomo Update] SHA-256 архива: {actual_sha256}");
+            if let Err(err) = verify_core_checksum(expected_sha256.as_deref(), &actual_sha256) {
+                let _ = tokio::fs::remove_file(&gz_path).await;
+                crate::log_e!("[Mihomo Update] {err}");
+                return api_err(format!("Ошибка верификации SHA-256 ядра Mihomo: {err}"));
             }
+            crate::log_i!("[Mihomo Update] SHA-256 архива успешно верифицирован: {actual_sha256}");
 
             crate::log_i!("[Mihomo Update] Загружено {} байт через {mode_name}", total_bytes);
             downloaded_ok = true;
@@ -1773,5 +1900,55 @@ mod tests {
         assert!(!notes.trim().is_empty(), "для текущей версии {VERSION} должна быть секция в DEVELOPMENT.md");
         assert!(is_newer("v1.10.1", "1.9.63"));
         assert!(!is_newer("v1.9.63", "1.10.1"));
+    }
+
+    #[test]
+    fn regression_bug_68b_core_update_requires_checksum() {
+        let actual = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        assert!(verify_core_checksum(None, actual).is_err(), "missing checksum must reject core update");
+        assert!(verify_core_checksum(Some("   "), actual).is_err(), "blank checksum must reject core update");
+        assert!(
+            verify_core_checksum(
+                Some("0000000000000000000000000000000000000000000000000000000000000000"),
+                actual
+            )
+            .is_err(),
+            "mismatched checksum must reject"
+        );
+        assert!(
+            verify_core_checksum(Some(&actual.to_uppercase()), actual).is_ok(),
+            "matching checksum (case-insensitive) must succeed"
+        );
+    }
+
+    #[test]
+    fn regression_bug_127b_failed_update_rolls_back() {
+        assert_eq!(update_guard_decision(None, 1000, 30), UpdateGuardAction::Nothing);
+
+        let guard = UpdateGuardState {
+            version: "1.17.0".to_string(),
+            bin_path: "/opt/sbin/xkeen-route".to_string(),
+            bak_path: "/opt/sbin/xkeen-route.bak".to_string(),
+            init_script: "/opt/etc/init.d/S99xkeen-route".to_string(),
+            started_at: 1000,
+            attempts: 1,
+        };
+        assert_eq!(update_guard_decision(Some(&guard), 1010, 30), UpdateGuardAction::Wait);
+        assert_eq!(update_guard_decision(Some(&guard), 1030, 30), UpdateGuardAction::ClearMarker);
+
+        let crashed = UpdateGuardState { attempts: 3, ..guard.clone() };
+        assert_eq!(update_guard_decision(Some(&crashed), 1005, 30), UpdateGuardAction::Rollback);
+
+        // Запись, чтение и удаление маркера во временной папке
+        let dir = std::env::temp_dir().join(format!("xkeen-bug127-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let cfg_path = dir.join("config.json");
+        let marker = update_guard_marker_path(&cfg_path);
+        write_update_guard_marker(&marker, &guard).unwrap();
+        let read_back = read_update_guard_marker(&marker).expect("marker must be readable");
+        assert_eq!(read_back, guard);
+        clear_update_guard_marker(&marker);
+        assert!(read_update_guard_marker(&marker).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -3,6 +3,7 @@ import React from 'react'
 import Dashboard from './components/Dashboard'
 import Header from './components/Header'
 import LoginModal from './components/LoginModal'
+import { confirmDiscardUnsaved, useHasUnsavedChanges } from './utils/dirtyGuard'
 
 // 12 Secondary Tabs (Code Splitting via React.lazy)
 const Servers = lazy(() => import('./components/Servers'))
@@ -48,7 +49,11 @@ interface Toast {
   id: number
   msg: string
   error: boolean
+  exiting?: boolean
 }
+
+const TOAST_VISIBLE_MS = 4780
+const TOAST_EXIT_MS = 220
 
 let toastSeq = 1
 
@@ -76,24 +81,11 @@ class ErrorBoundary extends React.Component<
 
 export function TabLoadingFallback() {
   return (
-    <section
-      className="card"
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        minHeight: 340,
-        gap: 14,
-      }}
-    >
-      <span className="spin-icon" style={{ fontSize: 28, color: 'var(--primary, #38bdf8)' }}>
-        ⏳
-      </span>
-      <span className="muted" style={{ fontSize: 14, fontWeight: 500 }}>
-        Загрузка раздела…
-      </span>
-    </section>
+    <div className="tab-skeleton" role="status" aria-label="Загрузка раздела">
+      <div className="tab-skeleton-line wide" />
+      <div className="tab-skeleton-line" />
+      <div className="tab-skeleton-line short" />
+    </div>
   )
 }
 
@@ -163,11 +155,27 @@ export default function App() {
     return () => window.removeEventListener('xr:auth-required', handleAuthRequired)
   }, [checkAuth])
 
+  // Предупреждение браузера при закрытии/обновлении вкладки с несохранёнными правками
+  const hasUnsaved = useHasUnsavedChanges()
+  useEffect(() => {
+    if (!hasUnsaved) return
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault()
+      e.returnValue = ''
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+  }, [hasUnsaved])
+
   // Синхронизация активной вкладки при навигации назад/вперед в браузере
   useEffect(() => {
     const handleLocationChange = () => {
       const targetTab = tabFromHash(window.location.hash)
-      if (targetTab) {
+      if (targetTab && targetTab !== tab) {
+        if (!confirmDiscardUnsaved()) {
+          window.history.replaceState(null, '', '#' + tab)
+          return
+        }
         setTab(targetTab)
       }
     }
@@ -177,7 +185,7 @@ export default function App() {
       window.removeEventListener('popstate', handleLocationChange)
       window.removeEventListener('hashchange', handleLocationChange)
     }
-  }, [])
+  }, [tab])
 
   const handleLogout = async () => {
     try {
@@ -192,7 +200,12 @@ export default function App() {
   const notify = useCallback((msg: string, error = false) => {
     const id = toastSeq++
     setToasts((prev) => [...prev, { id, msg, error }])
-    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 5000)
+    setTimeout(() => {
+      setToasts((prev) => prev.map((t) => (t.id === id ? { ...t, exiting: true } : t)))
+      setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== id))
+      }, TOAST_EXIT_MS)
+    }, TOAST_VISIBLE_MS)
   }, [])
 
   // FE-01: защита поллинга — не допускаем наложение запросов и опрос в фоновой вкладке
@@ -224,6 +237,7 @@ export default function App() {
   }, [])
 
   const switchTab = useCallback((t: TabId) => {
+    if (t !== tab && !confirmDiscardUnsaved()) return
     setTab(t)
     if (window.location.hash !== '#' + t) {
       window.location.hash = t
@@ -231,7 +245,7 @@ export default function App() {
     if (t === 'dashboard' || t === 'settings') {
       refresh(true)
     }
-  }, [refresh])
+  }, [refresh, tab])
 
   useEffect(() => {
     refresh()
@@ -387,7 +401,7 @@ export default function App() {
 
       <div className="toasts">
         {toasts.map((t) => (
-          <div key={t.id} className={'toast' + (t.error ? ' err' : '')}>
+          <div key={t.id} className={'toast' + (t.error ? ' err' : '') + (t.exiting ? ' toast-exit' : '')}>
             <span className="toast-icon">{t.error ? '❌' : '✅'}</span>
             <span>{t.msg}</span>
           </div>

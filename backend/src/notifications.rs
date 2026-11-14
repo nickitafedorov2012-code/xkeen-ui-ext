@@ -2,6 +2,7 @@ use serde_json::json;
 use crate::{config::NotificationsConfig, log_i, log_w};
 
 /// Общедоступная фиктивная константа токена бота для тестов и фикстур (баг A-02).
+#[cfg(test)]
 pub const FAKE_BOT_TOKEN: &str = "123456789:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
 /// Валидация и нормализация токена Telegram бота.
@@ -164,15 +165,7 @@ pub async fn send_telegram_with_proxy(
     ))
 }
 
-/// Отправка форматированного уведомления в Telegram через Bot API (обратная совместимость).
-pub async fn send_telegram(
-    http: &reqwest::Client,
-    bot_token: &str,
-    chat_id: &str,
-    text: &str,
-) -> Result<(), String> {
-    send_telegram_with_proxy(http, None, bot_token, chat_id, text).await
-}
+
 
 /// Экранирование HTML-спецсимволов для безопасной отправки сообщений в Telegram HTML mode (SEC-14).
 pub fn escape_html(input: &str) -> String {
@@ -241,8 +234,27 @@ pub fn validate_webhook_url(url_str: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Асинхронный DNS-резолвинг хоста и проверка полученных IP адресов на SSRF (баг 89)
-pub async fn resolve_and_validate_webhook_host(url_str: &str) -> Result<(), String> {
+/// Проверка списка разрешённых IP вебхука и выбор первого безопасного SocketAddr для пиннинга (баг 89).
+/// Ошибка DNS или пустой список отклоняются (проверка никогда не пропускается).
+pub fn validated_target<F>(host: &str, resolver: F) -> Result<std::net::SocketAddr, String>
+where
+    F: FnOnce(&str) -> Result<Vec<std::net::SocketAddr>, String>,
+{
+    let addrs = resolver(host).map_err(|e| format!("Ошибка DNS при проверке хоста вебхука {host}: {e}"))?;
+    if addrs.is_empty() {
+        return Err(format!("DNS не вернул ни одного адреса для хоста вебхука {host}"));
+    }
+    for socket_addr in &addrs {
+        let ip = socket_addr.ip();
+        if is_unsafe_ip(&ip) {
+            return Err(format!("Домен {host} резолвится в локальный IP {ip}, запрещено политикой SSRF"));
+        }
+    }
+    Ok(addrs[0])
+}
+
+/// Асинхронный DNS-резолвинг хоста, проверка полученных IP адресов на SSRF и возврат (host, SocketAddr) для пиннинга (баг 89).
+pub async fn resolve_and_pin_webhook_target(url_str: &str) -> Result<Option<(String, std::net::SocketAddr)>, String> {
     validate_webhook_url(url_str)?;
     let parsed = reqwest::Url::parse(url_str.trim()).map_err(|e| format!("Некорректный URL вебхука: {e}"))?;
     let host = parsed.host_str().ok_or_else(|| "В URL вебхука отсутствует хост".to_string())?;
@@ -251,25 +263,22 @@ pub async fn resolve_and_validate_webhook_host(url_str: &str) -> Result<(), Stri
     // Если хост — уже IP адрес, он проверен в validate_webhook_url
     let host_unbracketed = host.trim_start_matches('[').trim_end_matches(']');
     if host_unbracketed.parse::<std::net::IpAddr>().is_ok() {
-        return Ok(());
+        return Ok(None);
     }
 
-    // Резолвим DNS имя хоста
+    // Резолвим DNS имя хоста (ошибка DNS = отказ отправки, баг 89)
     let addr_str = format!("{}:{}", host, port);
-    if let Ok(addrs) = tokio::net::lookup_host(&addr_str).await {
-        for socket_addr in addrs {
-            let ip = socket_addr.ip();
-            if is_unsafe_ip(&ip) {
-                return Err(format!("Домен {host} резолвится в локальный IP {ip}, запрещено политикой SSRF"));
-            }
-        }
-    }
-    Ok(())
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host(&addr_str)
+        .await
+        .map_err(|e| format!("Ошибка DNS при проверке хоста вебхука {host}: {e}"))?
+        .collect();
+    let pinned = validated_target(host, |_| Ok(addrs))?;
+    Ok(Some((host.to_string(), pinned)))
 }
 
 /// Отправка webhook POST запроса.
 pub async fn send_webhook(
-    http: &reqwest::Client,
+    _http: &reqwest::Client,
     webhook_url: &str,
     event_type: &str,
     title: &str,
@@ -278,8 +287,8 @@ pub async fn send_webhook(
     if webhook_url.trim().is_empty() {
         return Ok(());
     }
-    // Проверяем URL и DNS-резолвинг на SSRF (баг 89)
-    resolve_and_validate_webhook_host(webhook_url).await?;
+    // Проверяем URL и DNS-резолвинг на SSRF и закрепляем проверенный IP за соединением (баг 89)
+    let pinned = resolve_and_pin_webhook_target(webhook_url).await?;
 
     let payload = json!({
         "source": "xkeen-route",
@@ -289,12 +298,16 @@ pub async fn send_webhook(
         "timestamp": chrono::Local::now().to_rfc3339()
     });
 
-    // Создаем клиент без следования редиректам (баг 89: защита от open redirect SSRF)
-    let webhook_client = reqwest::Client::builder()
+    // Создаем клиент без следования редиректам и с закреплённым IP (защита от open redirect и DNS-rebinding SSRF)
+    let mut builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(10));
+    if let Some((host, addr)) = pinned {
+        builder = builder.resolve(&host, addr);
+    }
+    let webhook_client = builder
         .build()
-        .unwrap_or_else(|_| http.clone());
+        .map_err(|e| format!("Ошибка создания клиента Webhook: {e}"))?;
 
     let res = webhook_client
         .post(webhook_url.trim())
@@ -609,5 +622,28 @@ mod tests {
             !src_settings.contains(&leak_indicator),
             "Settings.tsx still contains leak indicator"
         );
+    }
+
+    #[test]
+    fn regression_bug_89b_webhook_pins_validated_ip() {
+        let lan: std::net::SocketAddr = "192.168.1.5:443".parse().unwrap();
+        assert!(
+            validated_target("hook.example.com", |_| Ok(vec![lan])).is_err(),
+            "private IP from DNS must be rejected"
+        );
+
+        assert!(
+            validated_target("hook.example.com", |_| Err("NXDOMAIN".to_string())).is_err(),
+            "DNS resolution failure must reject webhook, not skip check"
+        );
+
+        assert!(
+            validated_target("hook.example.com", |_| Ok(vec![])).is_err(),
+            "empty DNS result must reject webhook"
+        );
+
+        let pub_addr: std::net::SocketAddr = "93.184.216.34:443".parse().unwrap();
+        let pinned = validated_target("hook.example.com", |_| Ok(vec![pub_addr])).unwrap();
+        assert_eq!(pinned, pub_addr);
     }
 }

@@ -130,6 +130,10 @@ fn default_smart_failover_canary_duration_secs() -> u64 {
     60
 }
 
+pub fn default_canary_url() -> String {
+    "http://speed.cloudflare.com/__down?bytes=65536".to_string()
+}
+
 fn default_detector_threshold_mode() -> String {
     "percent".to_string()
 }
@@ -258,6 +262,9 @@ pub struct FailoverConfig {
     /// Укороченный Canary Soak Test для автовозврата с серверов белых списков на обычные серверы (сек, по умолчанию 60)
     #[serde(default = "default_smart_failover_canary_duration_secs")]
     pub smart_failover_canary_duration_secs: u64,
+    /// URL полезной нагрузки (64 КБ) для Canary-проверки (можно переопределить при недоступности speed.cloudflare.com)
+    #[serde(default = "default_canary_url")]
+    pub canary_url: String,
 }
 
 impl Default for FailoverConfig {
@@ -282,6 +289,7 @@ impl Default for FailoverConfig {
             provider_chain: Vec::new(),
             smart_failover_enabled: true,
             smart_failover_canary_duration_secs: 60,
+            canary_url: default_canary_url(),
         }
     }
 }
@@ -349,7 +357,7 @@ impl FailoverConfig {
 
 /// Цепочка серверов для устройства: [основной, резерв1, резерв2, ...].
 /// Ключ — IP устройства. Порог 0 = наследовать глобальный failover.ping_threshold_ms.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct DeviceRouting {
     pub servers: Vec<String>,
@@ -635,6 +643,39 @@ fn default_smart_idle_mins() -> u32 {
     60
 }
 
+/// Чистая проверка активности игрового устройства (Баг 17):
+/// для современного формата (с признаком `enabled`) возвращает `dev.enabled`,
+/// для устаревшего формата без признака явности (`has_explicit = false`) — `true`.
+pub fn is_gaming_device_active(dev: &GamingDevice, has_explicit: bool) -> bool {
+    if has_explicit {
+        dev.enabled
+    } else {
+        true
+    }
+}
+
+fn deserialize_gaming_devices<'de, D>(deserializer: D) -> Result<Vec<GamingDevice>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw_items: Vec<serde_json::Value> = serde::Deserialize::deserialize(deserializer)?;
+    let single_legacy = raw_items.len() == 1
+        && raw_items
+            .first()
+            .and_then(|v| v.as_object())
+            .map_or(false, |obj| !obj.contains_key("enabled"));
+    let mut devices = Vec::with_capacity(raw_items.len());
+    for v in raw_items {
+        let mut dev: GamingDevice =
+            serde_json::from_value(v).map_err(serde::de::Error::custom)?;
+        if single_legacy {
+            dev.enabled = true;
+        }
+        devices.push(dev);
+    }
+    Ok(devices)
+}
+
 /// Настройки игрового режима (обход блокировок игр через VPS/Mihomo).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
@@ -644,6 +685,7 @@ pub struct GamingConfig {
     /// Выходной сервер: "Fastest", "PROXY", или имя конкретной ноды.
     pub target_server: String,
     /// Устройства, для которых действует игровой режим.
+    #[serde(default, deserialize_with = "deserialize_gaming_devices")]
     pub devices: Vec<GamingDevice>,
     /// Флаги включения игровых платформ.
     pub platforms: GamingPlatforms,
@@ -732,7 +774,7 @@ fn default_agh_mode() -> String {
 
 fn default_agh_upstream() -> Vec<String> {
     vec![
-        "127.0.0.1:1053".to_string(),
+        format!("127.0.0.1:{}", crate::routing::DEFAULT_MIHOMO_DNS_PORT),
         "77.88.8.8".to_string(),
     ]
 }
@@ -869,6 +911,9 @@ pub struct WhitelistConfig {
     pub follow_failover: bool,
     #[serde(default)]
     pub excluded_devices: Vec<String>,
+    /// Кэш последних известных IPv4 для MAC из excluded_devices (баг 2)
+    #[serde(default)]
+    pub excluded_last_ips: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub devices: Vec<WhitelistDevice>,
     #[serde(default)]
@@ -887,11 +932,96 @@ impl Default for WhitelistConfig {
             target_server: None,
             follow_failover: true,
             excluded_devices: Vec::new(),
+            excluded_last_ips: std::collections::HashMap::new(),
             devices: Vec::new(),
             gaming_suspended: false,
             custom_domains: Vec::new(),
         }
     }
+}
+
+/// Описание несовместимой комбинации флагов для одного устройства (Баг 65).
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct DeviceConflict {
+    pub device_id: String,
+    pub reason: String,
+}
+
+fn device_matches_excluded(mac: &str, ip: &str, excluded: &[String], last_ips: &std::collections::HashMap<String, String>) -> bool {
+    let mac_trim = mac.trim();
+    let ip_trim = ip.trim();
+    if excluded.iter().any(|ex| {
+        let ex = ex.trim();
+        (!mac_trim.is_empty() && ex.eq_ignore_ascii_case(mac_trim))
+            || (!ip_trim.is_empty() && ex.eq_ignore_ascii_case(ip_trim))
+    }) {
+        return true;
+    }
+    if !mac_trim.is_empty() {
+        if let Some(cached_ip) = last_ips.get(&mac_trim.to_lowercase()) {
+            if !cached_ip.trim().is_empty() && excluded.iter().any(|ex| ex.trim().eq_ignore_ascii_case(cached_ip.trim())) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Единая чистая проверка несовместимых комбинаций флагов устройств (Баг 65).
+pub fn device_conflicts(cfg: &AppConfig) -> Vec<DeviceConflict> {
+    let mut conflicts = Vec::new();
+    if !cfg.whitelist.enabled {
+        return conflicts;
+    }
+
+    let excluded = &cfg.whitelist.excluded_devices;
+    let last_ips = &cfg.whitelist.excluded_last_ips;
+
+    if cfg.gaming.enabled {
+        for dev in &cfg.gaming.devices {
+            if !is_gaming_device_active(dev, true) {
+                continue;
+            }
+            if device_matches_excluded(&dev.mac, &dev.ip, excluded, last_ips) {
+                let id = if !dev.ip.trim().is_empty() { dev.ip.trim() } else { dev.mac.trim() };
+                let label = if dev.name.trim().is_empty() { id } else { dev.name.trim() };
+                conflicts.push(DeviceConflict {
+                    device_id: id.to_string(),
+                    reason: format!(
+                        "Устройство «{label}» ({id}) нельзя одновременно держать в игровом режиме и исключать из режима белых списков (БС): исключение БС подавляет игровую цепочку."
+                    ),
+                });
+            }
+        }
+    }
+
+    for dev in &cfg.whitelist.devices {
+        let srv = dev.server.as_deref().map(str::trim).unwrap_or("");
+        if srv.is_empty() {
+            continue;
+        }
+        if device_matches_excluded(&dev.mac, &dev.ip, excluded, last_ips) {
+            let id = if !dev.ip.trim().is_empty() { dev.ip.trim() } else { dev.mac.trim() };
+            let label = dev.name.as_deref().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(id);
+            conflicts.push(DeviceConflict {
+                device_id: id.to_string(),
+                reason: format!(
+                    "Устройство «{label}» ({id}) не может одновременно быть исключено из БС и иметь закреплённый узел ({srv})."
+                ),
+            });
+        }
+    }
+
+    conflicts
+}
+
+/// Форматирует список конфликтов в понятное сообщение для пользователя.
+pub fn format_device_conflicts(conflicts: &[DeviceConflict]) -> String {
+    conflicts
+        .iter()
+        .map(|c| c.reason.as_str())
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Нормализует введенный адрес сайта в чистый FQDN (домен без протокола, порта, пути, query, www и концевых точек).
@@ -1290,26 +1420,10 @@ pub fn parse_config_strict(content: &str) -> Result<AppConfig, String> {
     let mut cfg: AppConfig = serde_json::from_value(base)
         .map_err(|e| format!("Некорректная структура конфигурации: {e}"))?;
     cfg.failover.migrate_priority();
-    // Умная миграция серверов БС из priority_chain в bs_priority_chain
-    let wl_servers = cfg.whitelist_servers.clone();
+    // Умная миграция серверов БС из priority_chain в bs_priority_chain через единый детектор (Баг 132)
+    let cfg_snapshot = cfg.clone();
     cfg.failover.migrate_chains_with_full_whitelist(|s| {
-        if wl_servers.iter().any(|ws| ws == s) {
-            return true;
-        }
-        let lower = s.to_lowercase();
-        lower.contains("[бс]")
-            || lower.contains("(бс)")
-            || lower.contains("[бc]")
-            || lower.contains("(бc)")
-            || lower.contains("[бs]")
-            || lower.contains("(бs)")
-            || lower.contains("[bs]")
-            || lower.contains("(bs)")
-            || lower.contains("[wl]")
-            || lower.contains("(wl)")
-            || lower.contains("whitelist")
-            || lower.contains("белые списки")
-            || lower.contains("белый список")
+        crate::whitelist_tags::is_whitelist_chain_entry(s, &cfg_snapshot)
     });
     cfg.provider_filters.clear();
     Ok(cfg)
@@ -1423,6 +1537,12 @@ pub fn backup_path(path: &Path) -> std::path::PathBuf {
     path.with_file_name(format!("{name}.bak"))
 }
 
+/// Путь для сохранения повреждённого файла конфига: config.json → config.json.corrupted.<ts>.bak (баг 130).
+pub fn corrupted_backup_path(path: &Path, ts: u64) -> std::path::PathBuf {
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "config.json".into());
+    path.with_file_name(format!("{name}.corrupted.{ts}.bak"))
+}
+
 fn load_backup(path: &Path) -> Option<AppConfig> {
     let content = std::fs::read_to_string(backup_path(path)).ok()?;
     match parse_config_strict(&content) {
@@ -1477,11 +1597,18 @@ pub fn load(path: &Path) -> AppConfig {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
-                    let backup_path = path.with_extension(format!("corrupted.{ts}.bak"));
-                    let _ = std::fs::copy(path, &backup_path);
-                    eprintln!("[INFO] Создан бэкап поврежденного конфига: {}", backup_path.display());
-                    // Баг 130: сначала последняя рабочая копия, дефолты — только если её нет
-                    load_backup(path).unwrap_or_else(|| parse_config_content(&content, &path.display().to_string()))
+                    let corr_path = corrupted_backup_path(path, ts);
+                    let _ = std::fs::copy(path, &corr_path);
+                    eprintln!("[INFO] Создан бэкап поврежденного конфига: {}", corr_path.display());
+                    // Баг 130: сначала последняя рабочая копия; при отсутствии .bak — защитный режим с auth.enabled=true
+                    load_backup(path).unwrap_or_else(|| {
+                        let mut fallback = parse_config_content(&content, &path.display().to_string());
+                        if !fallback.auth.enabled {
+                            eprintln!("[SECURITY] Повреждённый/пустой конфиг без .bak: принудительно включаем auth.enabled=true.");
+                            fallback.auth.enabled = true;
+                        }
+                        fallback
+                    })
                 }
             }
         }
@@ -1497,6 +1624,7 @@ pub fn load(path: &Path) -> AppConfig {
 }
 
 /// Асинхронная загрузка конфига (не блокирует воркеры Tokio в обработчиках API).
+#[cfg(test)]
 pub async fn load_async(path: &Path) -> AppConfig {
     match tokio::fs::read_to_string(path).await {
         Ok(content) => {
@@ -1560,6 +1688,14 @@ pub async fn save(path: &Path, cfg: &AppConfig) -> Result<(), String> {
     if let Err(e) = write_res {
         let _ = tokio::fs::remove_file(&tmp).await;
         return Err(e);
+    }
+    // Баг 130: перед заменой сохраняем предыдущую ХОРОШУЮ версию в .bak (не перезаписывая .bak из битого файла)
+    if let Ok(prev_content) = tokio::fs::read_to_string(path).await {
+        if parse_config_strict(&prev_content).is_ok() {
+            if let Err(e) = write_file_synced(&backup_path(path), &prev_content) {
+                eprintln!("[WARN] Не удалось обновить .bak перед сохранением конфига: {e}");
+            }
+        }
     }
     if let Err(e) = tokio::fs::rename(&tmp, path).await {
         let _ = tokio::fs::remove_file(&tmp).await;
@@ -1994,5 +2130,81 @@ mod tests {
         assert_eq!(cfg.vkturn.links, vec!["https://vk.com/call/join/abcdEFGH1234"]);
         let back = serde_json::to_string(&cfg.vkturn).unwrap();
         assert!(!back.contains("SECRET_WG_KEY"), "ключ WireGuard от WDTT не переносится в новый конфиг");
+    }
+
+    #[test]
+    fn regression_bug_132b_migration_uses_shared_bs_detector() {
+        let json = r#"{
+            "whitelist_providers": ["sub_bs"],
+            "normal_servers": ["sub_bs:normal_override", "tag_override [BS]"],
+            "failover": {
+                "priority_chain": [
+                    "sub_bs:node1",
+                    "sub_bs:normal_override",
+                    "tag_override [BS]",
+                    "mywhitelistnode",
+                    "Node [БС]"
+                ]
+            }
+        }"#;
+        let cfg = parse_config_strict(json).expect("config must parse");
+        assert!(
+            cfg.failover.bs_priority_chain.contains(&"sub_bs:node1".to_string()),
+            "node from whitelist_providers must migrate to bs_priority_chain: {:?}",
+            cfg.failover.bs_priority_chain
+        );
+        assert!(
+            cfg.failover.bs_priority_chain.contains(&"Node [БС]".to_string()),
+            "node with [БС] tag must migrate to bs_priority_chain"
+        );
+        assert!(
+            cfg.failover.priority_chain.contains(&"sub_bs:normal_override".to_string()),
+            "normal_servers override must stay in priority_chain: {:?}",
+            cfg.failover.priority_chain
+        );
+        assert!(
+            cfg.failover.priority_chain.contains(&"tag_override [BS]".to_string()),
+            "normal_servers tag override must stay in priority_chain"
+        );
+        assert!(
+            cfg.failover.priority_chain.contains(&"mywhitelistnode".to_string()),
+            "substring 'whitelist' without word boundaries must NOT be treated as BS tag"
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_bug_130b_save_rotates_bak_and_corruption_keeps_auth() {
+        let dir = std::env::temp_dir().join(format!("xkeen-bug130-rot-{}", crate::auth::random_hex(8)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+
+        // 130.1: save(A), затем save(B) -> config.json.bak содержит A
+        let mut cfg_a = AppConfig::default();
+        cfg_a.refresh_interval_sec = 11;
+        save(&path, &cfg_a).await.unwrap();
+
+        let mut cfg_b = AppConfig::default();
+        cfg_b.refresh_interval_sec = 22;
+        save(&path, &cfg_b).await.unwrap();
+
+        let bak_content = std::fs::read_to_string(backup_path(&path)).expect("save() must rotate previous valid config to .bak");
+        let bak_cfg = parse_config_strict(&bak_content).unwrap();
+        assert_eq!(bak_cfg.refresh_interval_sec, 11, ".bak must contain version A");
+
+        // 130.2 & 130.3: пустой/битый config.json БЕЗ .bak -> auth.enabled == true и создаётся config.json.corrupted.<ts>.bak
+        let dir2 = std::env::temp_dir().join(format!("xkeen-bug130-no-bak-{}", crate::auth::random_hex(8)));
+        std::fs::create_dir_all(&dir2).unwrap();
+        let empty_path = dir2.join("config.json");
+        std::fs::write(&empty_path, "").unwrap();
+        let loaded_empty = load(&empty_path);
+        assert!(loaded_empty.auth.enabled, "corrupted/empty config without .bak must keep auth.enabled=true");
+        let has_corrupted = std::fs::read_dir(&dir2)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with("config.json.corrupted."));
+        assert!(has_corrupted, "corrupted config must be preserved as config.json.corrupted.<ts>.bak");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
     }
 }

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { apiGet, apiPost, detectWhitelistServers, applyDetectedWhitelistServers, runWhitelistDetectorCheck } from '../api'
+import { useDirtyGuard } from '../utils/dirtyGuard'
 import {
   type DeviceInfo,
   type ServerInfo,
@@ -80,6 +81,7 @@ export default function Whitelist({ notify, status, refresh }: Props) {
 
   // Добавление пользовательского домена
   const [newDomainInput, setNewDomainInput] = useState('')
+  useDirtyGuard('whitelist', newDomainInput.trim().length > 0)
 
   const loadData = useCallback(async () => {
     try {
@@ -214,16 +216,15 @@ export default function Whitelist({ notify, status, refresh }: Props) {
     }
   }
 
-  // Переключение авто-активации при Failover
+  // Переключение авто-активации при Failover (только auto_by_failover, баг 66)
   const handleAutoFailoverToggle = async () => {
     const nextVal = !(config.auto_by_failover ?? true)
     setBusy(true)
     try {
       await apiPost('whitelist', {
         auto_by_failover: nextVal,
-        follow_failover: nextVal,
       })
-      setConfig((prev) => ({ ...prev, auto_by_failover: nextVal, follow_failover: nextVal }))
+      setConfig((prev) => ({ ...prev, auto_by_failover: nextVal }))
       notify(
         nextVal
           ? '🔄 Автоматическое включение белых списков при переходе Failover на [БС] включено'
@@ -232,6 +233,29 @@ export default function Whitelist({ notify, status, refresh }: Props) {
       window.dispatchEvent(new CustomEvent('xr:refresh-status'))
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка изменения настройки Failover', true)
+      await loadData()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Переключение следования выходного узла БС за активным узлом Failover (баг 66)
+  const handleFollowFailoverToggle = async () => {
+    const nextVal = !(config.follow_failover ?? true)
+    setBusy(true)
+    try {
+      await apiPost('whitelist', {
+        follow_failover: nextVal,
+      })
+      setConfig((prev) => ({ ...prev, follow_failover: nextVal }))
+      notify(
+        nextVal
+          ? '🔗 Выходной узел БС теперь следует за активным узлом Failover'
+          : '📌 Выходной узел БС зафиксирован независимо от переключений Failover'
+      )
+      window.dispatchEvent(new CustomEvent('xr:refresh-status'))
+    } catch (e) {
+      notify(e instanceof Error ? e.message : 'Ошибка изменения режима следования Failover', true)
       await loadData()
     } finally {
       setBusy(false)
@@ -298,7 +322,15 @@ export default function Whitelist({ notify, status, refresh }: Props) {
     })()
     setConfig((prev) => ({ ...prev, devices: nextDevices }))
     try {
-      await apiPost('whitelist', { devices: nextDevices })
+      await apiPost('whitelist', {
+        device_patch: {
+          mac: device.mac,
+          ip,
+          enabled: true,
+          name: device.name,
+          server: serverId,
+        },
+      })
       notify(
         serverId
           ? `📌 ${device.name || device.ip}: закреплён за узлом ${serverId} — Failover его не трогает`
@@ -864,30 +896,57 @@ export default function Whitelist({ notify, status, refresh }: Props) {
             </p>
           </div>
 
-          <label
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 8,
-              cursor: 'pointer',
-              userSelect: 'none',
-              background: config.auto_by_failover ? 'rgba(16, 185, 129, 0.15)' : 'rgba(255,255,255,0.05)',
-              border: `1px solid ${config.auto_by_failover ? '#10b981' : 'rgba(255,255,255,0.15)'}`,
-              borderRadius: 20,
-              padding: '6px 14px',
-            }}
-          >
-            <input
-              type="checkbox"
-              checked={Boolean(config.auto_by_failover)}
-              disabled={busy}
-              onChange={handleAutoFailoverToggle}
-              data-testid="auto-failover-toggle"
-            />
-            <span style={{ fontWeight: 600, fontSize: 13, color: config.auto_by_failover ? '#34d399' : '#94a3b8' }}>
-              {config.auto_by_failover ? 'Авто: ВКЛ 🟢' : 'Авто: ВЫКЛ ⚪'}
-            </span>
-          </label>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-end' }}>
+            <label
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 8,
+                cursor: 'pointer',
+                userSelect: 'none',
+                background: config.auto_by_failover ? 'rgba(16, 185, 129, 0.15)' : 'rgba(255,255,255,0.05)',
+                border: `1px solid ${config.auto_by_failover ? '#10b981' : 'rgba(255,255,255,0.15)'}`,
+                borderRadius: 20,
+                padding: '6px 14px',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={Boolean(config.auto_by_failover)}
+                disabled={busy}
+                onChange={handleAutoFailoverToggle}
+                data-testid="auto-failover-toggle"
+              />
+              <span style={{ fontWeight: 600, fontSize: 13, color: config.auto_by_failover ? '#34d399' : '#94a3b8' }}>
+                {config.auto_by_failover ? 'Авто: ВКЛ 🟢' : 'Авто: ВЫКЛ ⚪'}
+              </span>
+            </label>
+
+            <label
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 8,
+                cursor: 'pointer',
+                userSelect: 'none',
+                background: config.follow_failover ? 'rgba(59, 130, 246, 0.12)' : 'rgba(255,255,255,0.04)',
+                border: `1px solid ${config.follow_failover ? '#3b82f6' : 'rgba(255,255,255,0.12)'}`,
+                borderRadius: 16,
+                padding: '5px 12px',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={Boolean(config.follow_failover)}
+                disabled={busy}
+                onChange={handleFollowFailoverToggle}
+                data-testid="follow-failover-toggle"
+              />
+              <span style={{ fontWeight: 500, fontSize: 12, color: config.follow_failover ? '#93c5fd' : '#94a3b8' }}>
+                Следовать за узлом Failover
+              </span>
+            </label>
+          </div>
         </div>
       </div>
 

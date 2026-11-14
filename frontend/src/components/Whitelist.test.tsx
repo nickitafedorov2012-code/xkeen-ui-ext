@@ -261,7 +261,6 @@ describe('Whitelist Component — Whitelist Tab (Overhaul & Anti-Regression)', (
 
     expect(postSpy).toHaveBeenCalledWith('whitelist', {
       auto_by_failover: false,
-      follow_failover: false,
     })
   })
 
@@ -544,5 +543,61 @@ describe('Whitelist Component — Whitelist Tab (Overhaul & Anti-Regression)', (
     const catalogCard = container?.querySelector('[data-testid="catalog-card-sberbank.ru"]')
     expect(catalogCard?.textContent).toContain('через 🛡️ БС')
     expect(catalogCard?.textContent).not.toContain('DIRECT')
+  })
+
+  it('bug 67: pin sends single device', async () => {
+    const postSpy = vi.spyOn(api, 'apiPost').mockResolvedValue({ saved: true })
+
+    await act(async () => {
+      root!.render(<Whitelist notify={notifyMock} refresh={refreshMock} />)
+    })
+
+    const select = container?.querySelector('[data-testid="pin-server-11:22:33:44:55:01"]') as HTMLSelectElement
+    expect(select).toBeTruthy()
+    const targetServer = select.options[1]?.value || 'node_nl_01'
+
+    await act(async () => {
+      select.value = targetServer
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+
+    expect(postSpy).toHaveBeenCalledWith(
+      'whitelist',
+      expect.objectContaining({
+        device_patch: expect.objectContaining({
+          mac: '11:22:33:44:55:01',
+          server: targetServer,
+        }),
+      })
+    )
+    const sentBody = postSpy.mock.calls.find((c) => c[0] === 'whitelist')?.[1] as Record<string, unknown>
+    expect(sentBody).not.toHaveProperty('devices')
+  })
+
+  it('bug 66: auto-bs toggle does not touch follow_failover', async () => {
+    const postSpy = vi.spyOn(api, 'apiPost').mockResolvedValue({ saved: true })
+
+    await act(async () => {
+      root!.render(<Whitelist notify={notifyMock} refresh={refreshMock} />)
+    })
+
+    const autoToggle = container?.querySelector('[data-testid="auto-failover-toggle"]') as HTMLInputElement
+    expect(autoToggle).toBeTruthy()
+
+    await act(async () => {
+      autoToggle.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('whitelist', { auto_by_failover: false })
+
+    postSpy.mockClear()
+    const followToggle = container?.querySelector('[data-testid="follow-failover-toggle"]') as HTMLInputElement
+    expect(followToggle).toBeTruthy()
+
+    await act(async () => {
+      followToggle.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('whitelist', { follow_failover: false })
   })
 })

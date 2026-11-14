@@ -275,7 +275,7 @@ async fn handle_update(
 
 /// Проверка авторизации отправителя (баг 128):
 /// Авторизация должна производиться по личному ID пользователя (from.id), а не по ID группы (chat.id).
-pub fn is_authorized_sender(from_id: Option<i64>, chat_id: i64, target_id_str: &str) -> bool {
+pub fn is_authorized_sender(from_id: Option<i64>, _chat_id: i64, target_id_str: &str) -> bool {
     let target = target_id_str.trim();
     if target.is_empty() {
         return false;
@@ -937,8 +937,19 @@ pub fn format_devices_report_str(devices: &[crate::rci::Device]) -> String {
     out
 }
 
+pub fn try_begin_speedtest<'a>(
+    lock: &'a tokio::sync::Mutex<()>,
+) -> Result<tokio::sync::MutexGuard<'a, ()>, &'static str> {
+    lock.try_lock()
+        .map_err(|_| "⏳ Замер скорости уже выполняется. Дождитесь завершения.")
+}
+
 /// Замер скорости интернета (Speedtest) через активный сервер
 async fn generate_speedtest_report(state: &AppState) -> String {
+    let _speedtest_guard = match try_begin_speedtest(&state.speedtest_lock) {
+        Ok(g) => g,
+        Err(msg) => return msg.to_string(),
+    };
     let cfg = state.config.read().await.clone();
     let servers = crate::mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await.ok().unwrap_or_default();
     let active_server = servers.into_iter().find(|s| s.is_active);
@@ -1414,20 +1425,7 @@ async fn handle_backup_request(
 // ----------------- Вспомогательные функции изменения конфигурации -----------------
 
 async fn bot_toggle_adblock(state: &AppState) -> Result<bool, String> {
-    let mut tx = crate::transaction::ConfigTx::begin(state).await?;
-    let new_val = !tx.config().adblock_enabled;
-    tx.config_mut().adblock_enabled = new_val;
-    tx.config_mut().adguard.integration_choice_locked = true;
-
-    let _ = crate::adguard::set_protection(&state.http, &tx.config().adguard, new_val).await;
-
-    let raw_yaml = tx.read_yaml().await?;
-    let (new_yaml, _) = crate::routing::apply_routing(&raw_yaml, tx.config())
-        .map_err(|e| format!("Ошибка роутинга: {e}"))?;
-
-    tx.set_yaml(new_yaml)?;
-    tx.commit_and_reload().await?;
-    Ok(new_val)
+    crate::api::adblock_toggle_core(state, None).await
 }
 
 async fn bot_add_force_domain(state: &AppState, domain: &str) -> Result<(), String> {
@@ -1895,5 +1893,15 @@ mod tests {
         // Проверяем, что перечень SECRET_FIELDS из api используется и доступен
         assert!(crate::api::SECRET_FIELDS.contains(&"vkturn.vk_token"));
         assert!(crate::api::SECRET_FIELDS.contains(&"antigravity.own_proxy"));
+    }
+
+    #[test]
+    fn regression_bug_129b_bot_speedtest_respects_lock() {
+        let lock = tokio::sync::Mutex::new(());
+        let guard = try_begin_speedtest(&lock).expect("unlocked speedtest_lock must succeed");
+        let err = try_begin_speedtest(&lock).expect_err("held speedtest_lock must return busy error");
+        assert!(err.contains("уже выполняется"));
+        drop(guard);
+        assert!(try_begin_speedtest(&lock).is_ok());
     }
 }

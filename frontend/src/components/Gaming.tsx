@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { apiGet, apiPost } from '../api'
 import XboxDns from './XboxDns'
+import { useDirtyGuard } from '../utils/dirtyGuard'
 import type {
   DeviceInfo,
   GamingConfig,
@@ -186,6 +187,10 @@ export default function Gaming({ notify }: GamingProps) {
   })
 
   const [customText, setCustomText] = useState('')
+  useDirtyGuard(
+    'gaming',
+    customText.trim() !== (cfg.custom_domains || []).join('\n').trim()
+  )
 
   const loadData = useCallback(async () => {
     let statusOk = false

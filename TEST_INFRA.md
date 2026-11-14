@@ -1,31 +1,42 @@
-# E2E Test Infra: Failover 2.0 & Smart Failover
+# E2E Test Infra: YouTube Playback & VK Calls Tunnel Optimization
 
 ## Test Philosophy
-- Opaque-box, requirement-driven verification derived from ORIGINAL_REQUEST.md.
-- Methodology: Category-Partition + Boundary Value Analysis + Pairwise Interaction Testing + Real-World Workload Testing.
-- 100% green tests in `cargo test` and `npm test` / `npm run build`.
-- Zero tolerance for fake metrics, hardcoded bypasses, or skipped checks.
+- Opaque-box and requirement-driven empirical validation.
+- Verification targets:
+  - QUIC UDP/443 rejection (<10ms ICMP Port Unreachable).
+  - TLS 1.3 Handshake over `csq0` (<2s, 0% HTTP timeouts).
+  - Happy Eyeballs parallel connection dialing (`tcp-concurrent: true`).
+  - Failover selector preservation on manual selection of `📞 VK-туннель [БС]`.
+  - Target router 192.168.2.1 safety and backup `xr-20261113-200126-766` intactness.
 
-## Feature Inventory & Test Coverage Goals
-| # | Feature | Requirement | Tier 1 (Coverage) | Tier 2 (Boundary) | Tier 3 (Pairwise) | Tier 4 (Scenario) |
-|---|---------|-------------|:-----------------:|:-----------------:|:-----------------:|:-----------------:|
-| 1 | FO-DELT-01..02 | Traffic Delta Accounting | 5 tests | 5 tests | ✓ | ✓ |
-| 2 | FO-HOLE-01 | Blackhole Anomaly Detection | 5 tests | 5 tests | ✓ | ✓ |
-| 3 | FO-FALL-01 | 4-Tier Fallback Hierarchy | 5 tests | 5 tests | ✓ | ✓ |
-| 4 | FO-L7-01..03 | Parallel L7 Split & Fast Retry | 5 tests | 5 tests | ✓ | ✓ |
-| 5 | FO-SWT-01 | 5s Post-Switch Fast Recheck | 5 tests | 5 tests | ✓ | ✓ |
-| 6 | FO-SEL-01 | Unified Target Selection | 5 tests | 5 tests | ✓ | ✓ |
-| 7 | FO-TIER-01..03 | Smart Failover Tiers (1 vs 2) | 5 tests | 5 tests | ✓ | ✓ |
-| 8 | FO-PING-01..03 | Best-Ping Hysteresis & Isolation | 5 tests | 5 tests | ✓ | ✓ |
-| 9 | FO-CFG-01 | Smart Failover Config Toggle | 5 tests | 5 tests | ✓ | ✓ |
-| 10 | FO-TRF-01 | Honest Whitelist Traffic Delta | 5 tests | 5 tests | ✓ | ✓ |
-| 11 | FO-CNR-01..03 | Real Canary Soak Test & Listener | 5 tests | 5 tests | ✓ | ✓ |
-| 12 | FO-MHO-01 | Mihomo Proxies TTL Cache | 5 tests | 5 tests | ✓ | ✓ |
-| 13 | FO-DEV-01 | Unified Per-Device Failover | 5 tests | 5 tests | ✓ | ✓ |
-| 14 | FO-QUR-01 | Atomic Quarantine Persistence | 5 tests | 5 tests | ✓ | ✓ |
-| 15 | FO-UI-01..03 | UI Zero Fake Metrics & Badges | 5 tests | 5 tests | ✓ | ✓ |
+## Feature Inventory
+| # | Feature | Requirement | Tier 1 (Unit) | Tier 2 (Boundary) | Tier 3 (Integration) | Tier 4 (Live Router) |
+|---|---------|-------------|:-------------:|:-----------------:|:--------------------:|:--------------------:|
+| 1 | QUIC-ORD-01 | R1, R2 | ✓ | ✓ | ✓ | ✓ |
+| 2 | QUIC-INGR-01 | R1, R2 | ✓ | ✓ | ✓ | ✓ |
+| 3 | VK-PROV-01 | R1, R3 | ✓ | ✓ | ✓ | ✓ |
+| 4 | VK-IPT-01 | R1, R3 | ✓ | ✓ | ✓ | ✓ |
+| 5 | TRN-MTU-01 | R3 | ✓ | ✓ | ✓ | ✓ |
+| 6 | TRN-WRK-01 | R3 | ✓ | ✓ | ✓ | ✓ |
+| 7 | DNS-HE-01 | R4 | ✓ | ✓ | ✓ | ✓ |
+| 8 | FO-SEL-01 | R4 | ✓ | ✓ | ✓ | ✓ |
+| 9 | FO-SEL-02 | R4 | ✓ | ✓ | ✓ | ✓ |
+| 10 | TST-REG-01 | R5 | ✓ | ✓ | ✓ | ✓ |
+| 11 | VLD-RTR-01 | R5 | ✓ | ✓ | ✓ | ✓ |
 
-## Test Architecture
-- Backend Unit & Integration Tests: `backend/tests/` and `backend/src/failover.rs` `#[cfg(test)]`.
-- Frontend Unit & Visual Tests: `frontend/src/tests/` and Vitest component tests.
-- Verification semantic: 0 exit code, 0 compilation warnings, strict assertions.
+## Test Commands
+- Backend anti-regression unit & integration tests:
+  ```powershell
+  cd backend
+  cargo test
+  ```
+- Live Router verification:
+  - Verify QUIC port unreachable:
+    ```powershell
+    python -c "import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(1.0); s.connect(('142.250.74.78', 443)); s.send(b'\x00'*10); s.recv(1024)"
+    ```
+  - Verify TLS handshake < 2s over `csq0`:
+    ```bash
+    curl -v --interface csq0 --max-time 5 https://www.youtube.com/
+    ```
+  - Verify Mihomo `tcp-concurrent: true` and active rules.
