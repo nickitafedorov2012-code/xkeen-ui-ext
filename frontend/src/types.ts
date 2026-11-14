@@ -1103,6 +1103,14 @@ export interface VkTurnStatus {
   interface: string
   /** PEER-порт сервера csqtt по умолчанию */
   default_port: number
+  /** Режим транспорта TURN: auto (UDP с автопереходом на TCP), udp или tcp */
+  turn_transport?: 'auto' | 'udp' | 'tcp'
+  /** Фактически активный сейчас транспорт TURN (udp или tcp) */
+  active_transport?: 'udp' | 'tcp'
+  /** Число потоков с успешным DTLS-SRTP рукопожатием */
+  dtls_ok_streams?: number
+  /** Число потоков, откатившихся с DTLS на обычный WRAP-SRTP */
+  dtls_fallback_streams?: number
   /** Фоновая установка компонента (ядра) */
   install?: VkTurnCoreInstall
 }
@@ -1133,6 +1141,7 @@ export interface VkTurnConfigPayload {
   profile_token?: string
   vk_user_id?: number
   vk_user_name?: string
+  turn_transport?: 'auto' | 'udp' | 'tcp' | string
 }
 
 export interface VkTurnActionResponse {

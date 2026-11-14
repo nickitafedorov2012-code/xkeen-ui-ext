@@ -80,6 +80,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
 
   const [draftStreamsInput, setDraftStreamsInput] = useState<string | null>(null)
   const [streamsUpdating, setStreamsUpdating] = useState(false)
+  const [transportUpdating, setTransportUpdating] = useState(false)
 
   // VK OAuth модальное окно
   const [authModalOpen, setAuthModalOpen] = useState(false)
@@ -622,6 +623,21 @@ export default function VkTurn({ notify }: VkTurnProps) {
       await loadStatus(true)
     } finally {
       setStreamsUpdating(false)
+    }
+  }
+
+  const handleSaveTurnTransport = async (mode: 'auto' | 'udp' | 'tcp') => {
+    setTransportUpdating(true)
+    try {
+      await saveVkTurnConfig({ turn_transport: mode })
+      const label = mode === 'auto' ? 'Авто (UDP → TCP)' : mode.toUpperCase()
+      notify(`Транспорт TURN переключён на ${label}; туннель переподключается`)
+      await loadStatus(true)
+    } catch (err: unknown) {
+      notify(errMessage(err, 'Не удалось изменить транспорт TURN'), true)
+      await loadStatus(true)
+    } finally {
+      setTransportUpdating(false)
     }
   }
 
@@ -1400,6 +1416,8 @@ export default function VkTurn({ notify }: VkTurnProps) {
         streamsUpdating={streamsUpdating}
         setDraftStreamsInput={setDraftStreamsInput}
         handleSaveStreams={handleSaveStreams}
+        transportUpdating={transportUpdating}
+        handleSaveTurnTransport={handleSaveTurnTransport}
       />
       {renderAuthModal()}
     </div>

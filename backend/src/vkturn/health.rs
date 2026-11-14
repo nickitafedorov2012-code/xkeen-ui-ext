@@ -275,6 +275,7 @@ impl VkTurnManager {
     async fn supervise(self: Arc<Self>, cfg: VkTurnConfig, mut stop_rx: watch::Receiver<bool>, state: crate::AppState) {
         let mut backoff = Duration::from_secs(5);
         let mut last_notice: Option<VkTurnPhase> = None;
+        let mut active_transport: &'static str = if cfg.turn_transport.eq_ignore_ascii_case("tcp") { "tcp" } else { "udp" };
         let _ = tokio::fs::create_dir_all(WORK_DIR).await;
 
         // TUN живёт, пока жив надзор: перезапуски клиента получают тот же интерфейс.
@@ -363,8 +364,9 @@ impl VkTurnManager {
 
             let run_generation = self.begin_run().await;
             let uds_name = new_tun_uds_name();
+            let mut transport_switched = false;
             let mut cmd = tokio::process::Command::new(&self.core_path);
-            cmd.args(build_client_args_for_uds(&cfg, &hashes, &uds_name))
+            cmd.args(build_client_args_for_uds_with_transport(&cfg, &hashes, &uds_name, active_transport))
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -396,15 +398,21 @@ impl VkTurnManager {
                 rt.pid = pid;
                 rt.connected_streams = 0;
                 rt.tun_attached = false;
+                rt.active_transport = active_transport;
+                rt.dtls_ok_streams = 0;
+                rt.dtls_fallback_streams = 0;
+                rt.dtls_ok_workers.clear();
+                rt.dtls_fallback_workers.clear();
                 rt.started_at = Some(Instant::now());
                 rt.zero_streams_since = Some(Instant::now());
                 rt.getconf_silent = 0;
             }
             crate::log_i!(
-                "[VK-туннель] Клиент csqtt запущен (pid {:?}, ссылок {}, потоков {})",
+                "[VK-туннель] Клиент csqtt запущен (pid {:?}, ссылок {}, потоков {}, транспорт {})",
                 pid,
                 hashes.len(),
-                effective_workers(&cfg)
+                effective_workers_for_transport(&cfg, active_transport),
+                active_transport
             );
 
             // stdout (события, CAPTCHA_SOLVE) и stderr (лог) → разбор; действия — в канал надзора.
@@ -462,7 +470,7 @@ impl VkTurnManager {
                             }
                         }
                         LineEffect::TunConfig { ip, dns } => {
-                            if let Err(error) = apply_tun_config(&self.rt, ip, dns, |script| async move { run_sh_checked(&script).await }).await {
+                            if let Err(error) = apply_tun_config_for_transport(&self.rt, ip, dns, active_transport, |script| async move { run_sh_checked(&script).await }).await {
                                 self.set_error(VkTurnPhase::Crashed, error).await;
                                 let _ = child.kill().await;
                                 break "не удалось настроить интерфейс или маршруты туннеля".to_string();
@@ -486,6 +494,8 @@ impl VkTurnManager {
                         let rt = self.rt.read().await;
                         let turn_now = rt.turn_ips.clone();
                         let is_connected = rt.phase == VkTurnPhase::Connected && rt.tun_attached;
+                        let dtls_ok = rt.dtls_ok_streams;
+                        let dtls_fallback = rt.dtls_fallback_streams;
                         let stalled = rt.connected_streams == 0
                             && rt.zero_streams_since.map(|t| t.elapsed() > stall_limit(rt.phase)).unwrap_or(false);
                         drop(rt);
@@ -509,6 +519,16 @@ impl VkTurnManager {
                                 if tx_delta > 30_000 && rx_delta == 0 {
                                     blackhole_ticks += 1;
                                     if blackhole_ticks >= 2 {
+                                        if should_fallback_to_tcp(&cfg.turn_transport, active_transport, started.elapsed(), dtls_ok, dtls_fallback, true) {
+                                            crate::log_w!(
+                                                "[VK-туннель] Blackhole Detector на UDP (TX delta {} байт, RX delta 0) — переключаюсь на TCP-транспорт",
+                                                tx_delta
+                                            );
+                                            active_transport = "tcp";
+                                            transport_switched = true;
+                                            let _ = child.kill().await;
+                                            break "UDP заблокирован (Blackhole) — переход на TCP-транспорт".to_string();
+                                        }
                                         crate::log_w!(
                                             "[VK-туннель] Blackhole Detector: TX delta {} байт, RX delta 0 байт за 60 сек — сессия сброшена, мягкий перезапуск",
                                             tx_delta
@@ -522,6 +542,18 @@ impl VkTurnManager {
                             }
                             last_tun_rx = cur_rx;
                             last_tun_tx = cur_tx;
+                        }
+
+                        if should_fallback_to_tcp(&cfg.turn_transport, active_transport, started.elapsed(), dtls_ok, dtls_fallback, false) {
+                            crate::log_w!(
+                                "[VK-туннель] Сбой DTLS/потери UDP (DTLS OK: {}, fallback: {}) — переключаюсь на TCP-транспорт",
+                                dtls_ok,
+                                dtls_fallback
+                            );
+                            active_transport = "tcp";
+                            transport_switched = true;
+                            let _ = child.kill().await;
+                            break "массовый сбой DTLS на UDP — автоматический переход на TCP".to_string();
                         }
 
                         if stalled {
@@ -556,6 +588,14 @@ impl VkTurnManager {
                 rt.phase
             };
             crate::log_w!("[VK-туннель] Перезапуск: {exit_reason}, состояние {phase:?}");
+
+            if transport_switched {
+                backoff = Duration::from_secs(5);
+                if !sleep_or_stop(&mut stop_rx, Duration::from_secs(1)).await {
+                    break;
+                }
+                continue;
+            }
 
             let d = decide_after_exit(phase, started.elapsed(), &mut backoff, &mut last_notice);
             if let Some(text) = d.notice {

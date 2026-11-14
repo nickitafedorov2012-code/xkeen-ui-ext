@@ -34,6 +34,8 @@ export interface VkTurnDetailsSectionProps {
   streamsUpdating: boolean
   setDraftStreamsInput: React.Dispatch<React.SetStateAction<string | null>>
   handleSaveStreams: () => void
+  transportUpdating: boolean
+  handleSaveTurnTransport: (mode: 'auto' | 'udp' | 'tcp') => void
 }
 
 export function VkTurnDetailsSection({
@@ -69,6 +71,8 @@ export function VkTurnDetailsSection({
   streamsUpdating,
   setDraftStreamsInput,
   handleSaveStreams,
+  transportUpdating,
+  handleSaveTurnTransport,
 }: VkTurnDetailsSectionProps) {
   return (
   <section className="vk-section" style={{ padding: '18px 24px' }}>
@@ -158,6 +162,54 @@ export function VkTurnDetailsSection({
           </div>
           <div className="muted" style={{ fontSize: 12, marginTop: 8, lineHeight: 1.4 }}>
             Установите нужное число потоков и нажмите «Сохранить». Потоки применяются однократно без промежуточных перезапусков.
+          </div>
+        </div>
+
+        <div
+          className="vk-subcard"
+          style={{
+            marginBottom: 20,
+            padding: '14px 16px',
+            background: 'var(--bg-elevated, rgba(255,255,255,0.03))',
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 13, fontWeight: 600 }}>Транспорт TURN (обход потерь UDP)</span>
+            <span className="muted" style={{ fontSize: 12 }} data-testid="active-transport-badge">
+              {`Активен: ${(status?.active_transport ?? (status?.turn_transport === 'tcp' ? 'tcp' : 'udp')).toUpperCase()}`}
+              {(status?.dtls_ok_streams ?? 0) + (status?.dtls_fallback_streams ?? 0) > 0
+                ? ` · DTLS: ${status?.dtls_ok_streams ?? 0}✓ / ${status?.dtls_fallback_streams ?? 0} fallback`
+                : ''}
+            </span>
+          </div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {([
+              { id: 'auto', label: 'Авто (UDP → TCP)' },
+              { id: 'udp', label: 'UDP' },
+              { id: 'tcp', label: 'TCP' },
+            ] as const).map((opt) => {
+              const currentMode = status?.turn_transport ?? 'auto'
+              const active = currentMode === opt.id
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  data-testid={`transport-mode-${opt.id}`}
+                  className={active ? 'btn btn-primary' : 'btn'}
+                  disabled={transportUpdating || actionPending}
+                  onClick={() => {
+                    if (!active) {
+                      handleSaveTurnTransport(opt.id)
+                    }
+                  }}
+                >
+                  {opt.label}
+                </button>
+              )
+            })}
+          </div>
+          <div className="muted" style={{ fontSize: 12, marginTop: 8, lineHeight: 1.4 }}>
+            В режиме «Авто» туннель стартует по UDP (максимальная скорость) и автоматически переключается на TCP при массовых потерях DTLS-пакетов.
           </div>
         </div>
 

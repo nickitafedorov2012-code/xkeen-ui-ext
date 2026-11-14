@@ -59,6 +59,10 @@ pub async fn get_vkturn_status(State(state): State<AppState>) -> Response {
         "default_port": crate::vkturn::DEFAULT_SERVER_PORT,
         "install": state.vkturn.install_state(),
         "auth_mode": v.auth_mode,
+        "turn_transport": v.turn_transport,
+        "active_transport": rt.active_transport,
+        "dtls_ok_streams": rt.dtls_ok_streams,
+        "dtls_fallback_streams": rt.dtls_fallback_streams,
         "has_token": v.vk_token.as_ref().map(|t| !t.trim().is_empty()).unwrap_or(false),
         "has_profile_token": v.profile_token.as_ref().map(|t| !t.trim().is_empty()).unwrap_or(false),
         "vk_token": v.vk_token.as_ref().map(|t| crate::vkturn::mask_vk_token(t)),
@@ -104,6 +108,7 @@ pub struct SaveVkTurnConfigReq {
     /// Удалить ссылку по индексу (полезно для удаления битых/скрытых ссылок без пересылки всего списка)
     pub remove_link_index: Option<usize>,
     pub streams: Option<u8>,
+    pub turn_transport: Option<String>,
     pub auth_mode: Option<String>,
     pub vk_token: Option<String>,
     pub profile_token: Option<String>,
@@ -194,6 +199,12 @@ pub async fn save_vkturn_config(
             return api_err("Число потоков должно находиться в диапазоне 3–100 (или 0 для автовыбора)");
         }
         new_cfg.streams = s;
+    }
+    if let Some(ref tr) = body.turn_transport {
+        match crate::vkturn::normalize_turn_transport(tr) {
+            Ok(norm) => new_cfg.turn_transport = norm.to_string(),
+            Err(e) => return api_err(e),
+        }
     }
     if let Some(am) = body.auth_mode {
         new_cfg.auth_mode = am;

@@ -1182,5 +1182,35 @@ describe('regression_vkturn_25_frontend — UI/UX редизайн и испра
     await typeInto(streamInput, '')
     expect(streamInput.value).toBe('')
   })
+
+  it('displays active transport with DTLS stats and saves turn_transport mode', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({
+      ...connectedOAuth,
+      turn_transport: 'auto',
+      active_transport: 'udp',
+      dtls_ok_streams: 2,
+      dtls_fallback_streams: 8,
+    })
+    const saveSpy = vi.spyOn(api, 'saveVkTurnConfig').mockResolvedValue({ success: true })
+    await remount()
+
+    const accordionToggle = Array.from(container?.querySelectorAll('[role="button"]') || []).find((el) =>
+      el.textContent?.includes('Настройки туннеля и подробности'),
+    ) as HTMLElement
+    await act(async () => {
+      accordionToggle.click()
+    })
+
+    const badge = container?.querySelector('[data-testid="active-transport-badge"]')
+    expect(badge?.textContent).toContain('Активен: UDP')
+    expect(badge?.textContent).toContain('DTLS: 2✓ / 8 fallback')
+
+    const tcpBtn = container?.querySelector('[data-testid="transport-mode-tcp"]') as HTMLButtonElement
+    expect(tcpBtn).not.toBeNull()
+    await act(async () => {
+      tcpBtn.click()
+    })
+    expect(saveSpy).toHaveBeenCalledWith({ turn_transport: 'tcp' })
+  })
 })
 

@@ -15,13 +15,24 @@ pub(super) fn new_tun_uds_name() -> String {
 }
 
 pub(super) fn build_client_args_for_uds(cfg: &VkTurnConfig, hashes: &[String], uds_name: &str) -> Vec<String> {
+    let initial = if cfg.turn_transport.eq_ignore_ascii_case("tcp") { "tcp" } else { "udp" };
+    build_client_args_for_uds_with_transport(cfg, hashes, uds_name, initial)
+}
+
+pub(super) fn build_client_args_for_uds_with_transport(
+    cfg: &VkTurnConfig,
+    hashes: &[String],
+    uds_name: &str,
+    transport: &str,
+) -> Vec<String> {
+    let tr = if transport.eq_ignore_ascii_case("tcp") { "tcp" } else { "udp" };
     vec![
         "-peer".into(),
         cfg.peer.trim().to_string(),
         "-vk".into(),
         hashes.join(","),
         "-n".into(),
-        effective_workers(cfg).to_string(),
+        effective_workers_for_transport(cfg, tr).to_string(),
         "--exact-workers".into(),
         "-listen".into(),
         "127.0.0.1:0".into(),
@@ -31,6 +42,8 @@ pub(super) fn build_client_args_for_uds(cfg: &VkTurnConfig, hashes: &[String], u
         "auto".into(),
         "-obfs".into(),
         "audio".into(),
+        "-turn-transport".into(),
+        tr.into(),
     ]
 }
 
@@ -84,6 +97,16 @@ pub struct VkTurnRuntime {
     /// Дескриптор TUN передан текущему процессу клиента.
     pub tun_attached: bool,
     pub tun_configured: bool,
+    /// Фактически используемый транспорт до TURN-серверов ("udp" | "tcp").
+    pub active_transport: &'static str,
+    /// Число потоков, успешно завершивших DTLS-SRTP рукопожатие в текущем запуске.
+    pub dtls_ok_streams: u32,
+    /// Число потоков, упавших в WRAP-SRTP (входящих 0) / ошибку DTLS в текущем запуске.
+    pub dtls_fallback_streams: u32,
+    #[serde(skip)]
+    pub(super) dtls_ok_workers: BTreeSet<u32>,
+    #[serde(skip)]
+    pub(super) dtls_fallback_workers: BTreeSet<u32>,
     #[serde(skip)]
     pub(super) run_generation: u64,
     /// Адреса TURN, которые ВК выдал клиенту — для исключений в iptables.
@@ -115,6 +138,11 @@ impl Default for VkTurnRuntime {
             tunnel_dns: None,
             tun_attached: false,
             tun_configured: false,
+            active_transport: "udp",
+            dtls_ok_streams: 0,
+            dtls_fallback_streams: 0,
+            dtls_ok_workers: BTreeSet::new(),
+            dtls_fallback_workers: BTreeSet::new(),
             run_generation: 0,
             turn_ips: BTreeSet::new(),
             started_at: None,
@@ -185,10 +213,51 @@ fn apply_stream_line(rt: &mut VkTurnRuntime, payload: &str) {
             _ => {}
         }
     }
+    if stage == "dtls" {
+        let worker = json.get("worker").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        match status {
+            "ok" => {
+                rt.dtls_fallback_workers.remove(&worker);
+                rt.dtls_ok_workers.insert(worker);
+                rt.dtls_ok_streams = rt.dtls_ok_workers.len() as u32;
+                rt.dtls_fallback_streams = rt.dtls_fallback_workers.len() as u32;
+            }
+            "error" => {
+                if !rt.dtls_ok_workers.contains(&worker) {
+                    rt.dtls_fallback_workers.insert(worker);
+                    rt.dtls_fallback_streams = rt.dtls_fallback_workers.len() as u32;
+                }
+            }
+            _ => {}
+        }
+    }
     if status == "error" {
         let worker = json.get("worker").and_then(|v| v.as_i64()).unwrap_or(0);
         push_log(rt, redact_line(&format!("[ПОТОК #{worker}] {stage}: {reason}")));
     }
+}
+
+/// Чистая функция: решает, пора ли в режиме `auto` переключить транспорт с UDP на TCP
+/// из-за массового провала DTLS-рукопожатий (резка/потери крупных UDP-пакетов на LTE/ТСПУ)
+/// или при срабатывании детектора blackhole.
+pub fn should_fallback_to_tcp(
+    turn_transport: &str,
+    current_transport: &str,
+    elapsed: Duration,
+    dtls_ok: u32,
+    dtls_fallback: u32,
+    blackhole_hit: bool,
+) -> bool {
+    if !turn_transport.trim().eq_ignore_ascii_case("auto") || current_transport != "udp" {
+        return false;
+    }
+    if blackhole_hit {
+        return true;
+    }
+    if elapsed < Duration::from_secs(25) {
+        return false;
+    }
+    (dtls_fallback >= 2 && dtls_ok == 0) || (dtls_fallback >= 3 && dtls_ok * 2 < dtls_fallback)
 }
 
 fn set_connected(rt: &mut VkTurnRuntime) {
@@ -244,6 +313,12 @@ pub fn apply_log_line(rt: &mut VkTurnRuntime, line: &str, now: Instant) -> LineE
 
     push_log(rt, redact_line(line));
     learn_turn_ips(rt, line);
+
+    if line.contains("WRAP-SRTP") && line.contains("входящих 0") {
+        let synthetic_id = 10_000u32.saturating_add(rt.dtls_fallback_workers.len() as u32);
+        rt.dtls_fallback_workers.insert(synthetic_id);
+        rt.dtls_fallback_streams = rt.dtls_fallback_workers.len() as u32;
+    }
 
     let no_streams = rt.connected_streams == 0;
     if line.contains("FATAL_AUTH") {
@@ -741,6 +816,15 @@ pub async fn remove_exemptions() {
 /// В скрипт попадают только константы и разобранный Ipv4Addr.
 /// Совместимо с Busybox на KeeneticOS: таблица < 255 и селектор dev вместо oif.
 pub fn tun_configure_script(ip: Ipv4Addr) -> String {
+    tun_configure_script_for_transport(ip, "udp")
+}
+
+pub fn tun_configure_script_for_transport(ip: Ipv4Addr, transport: &str) -> String {
+    let (mtu, mss) = if transport.eq_ignore_ascii_case("tcp") {
+        (TUN_MTU_TCP, TUN_TCP_MSS_TCP)
+    } else {
+        (TUN_MTU, TUN_TCP_MSS)
+    };
     format!(
         r#"set -e
 ip rule show | sed -n 's/^40:.*from \([0-9.]*\) .*lookup {ROUTE_TABLE}.*/\1/p' | while read -r old_ip; do ip rule del pref 40 from "$old_ip" table {ROUTE_TABLE} 2>/dev/null || true; done
@@ -762,7 +846,7 @@ cleanup() {{
 }}
 trap cleanup EXIT
 ip addr add {ip}/32 dev {TUN_IFACE}; addr_added=1
-ip link set dev {TUN_IFACE} mtu {TUN_MTU} up
+ip link set dev {TUN_IFACE} mtu {mtu} up
 ip route add default dev {TUN_IFACE} table {ROUTE_TABLE}; route_added=1
 ip rule add dev {TUN_IFACE} table {ROUTE_TABLE} pref {ROUTE_TABLE}; rule_dev=1
 ip rule add from {ip} table {ROUTE_TABLE} pref 40; rule_src=1
@@ -770,12 +854,12 @@ ip rule add fwmark {ROUTE_TABLE} table {ROUTE_TABLE} pref 45; rule_mark=1
 echo 2 > /proc/sys/net/ipv4/conf/{TUN_IFACE}/rp_filter 2>/dev/null || true
 echo 1 > /proc/sys/net/ipv4/tcp_mtu_probing 2>/dev/null || true
 for ch in POSTROUTING OUTPUT; do
-  iptables -w -t mangle -C "$ch" -o {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS} 2>/dev/null \
-    || iptables -w -t mangle -I "$ch" 1 -o {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS} 2>/dev/null || true
+  iptables -w -t mangle -C "$ch" -o {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {mss} 2>/dev/null \
+    || iptables -w -t mangle -I "$ch" 1 -o {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {mss} 2>/dev/null || true
 done
 for ch in PREROUTING INPUT FORWARD; do
-  iptables -w -t mangle -C "$ch" -i {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS} 2>/dev/null \
-    || iptables -w -t mangle -I "$ch" 1 -i {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS} 2>/dev/null || true
+  iptables -w -t mangle -C "$ch" -i {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {mss} 2>/dev/null \
+    || iptables -w -t mangle -I "$ch" 1 -i {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {mss} 2>/dev/null || true
 done
 for ch in OUTPUT FORWARD; do
   iptables -w -t filter -C "$ch" -o {TUN_IFACE} -p udp --dport 443 -m comment --comment {IPT_COMMENT} -j REJECT --reject-with icmp-port-unreachable 2>/dev/null \
@@ -796,9 +880,11 @@ pub(super) fn tun_teardown_script_for_ip(ip: Option<Ipv4Addr>) -> String {
     format!(
         "for ch in POSTROUTING OUTPUT; do
   while iptables -w -t mangle -D \"$ch\" -o {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS} 2>/dev/null; do :; done
+  while iptables -w -t mangle -D \"$ch\" -o {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS_TCP} 2>/dev/null; do :; done
 done
 for ch in PREROUTING INPUT FORWARD; do
   while iptables -w -t mangle -D \"$ch\" -i {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS} 2>/dev/null; do :; done
+  while iptables -w -t mangle -D \"$ch\" -i {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS_TCP} 2>/dev/null; do :; done
 done
 for ch in OUTPUT FORWARD; do
   while iptables -w -t filter -D \"$ch\" -o {TUN_IFACE} -p udp --dport 443 -m comment --comment {IPT_COMMENT} -j REJECT --reject-with icmp-port-unreachable 2>/dev/null; do :; done
@@ -817,6 +903,16 @@ where
     F: FnOnce(String) -> Fut,
     Fut: std::future::Future<Output = Result<(), String>>,
 {
+    apply_tun_config_for_transport(rt, ip, dns, "udp", apply).await
+}
+
+pub(super) async fn apply_tun_config_for_transport<F, Fut>(
+    rt: &RwLock<VkTurnRuntime>, ip: Ipv4Addr, dns: Option<String>, transport: &str, apply: F,
+) -> Result<(), String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
     let previous_ip = {
         let mut state = rt.write().await;
         if state.tun_configured && state.tunnel_ip == Some(ip) {
@@ -830,8 +926,8 @@ where
         previous
     };
     let script = match previous_ip {
-        Some(previous) => format!("{}\n{}", tun_teardown_script_for_ip(Some(previous)), tun_configure_script(ip)),
-        None => tun_configure_script(ip),
+        Some(previous) => format!("{}\n{}", tun_teardown_script_for_ip(Some(previous)), tun_configure_script_for_transport(ip, transport)),
+        None => tun_configure_script_for_transport(ip, transport),
     };
     apply(script).await?;
     let mut state = rt.write().await;

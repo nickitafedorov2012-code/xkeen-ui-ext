@@ -513,6 +513,9 @@ pub struct VkTurnConfig {
     pub links: Vec<String>,
     /// Точное число потоков клиента (3–100), 0 — автоматическое значение.
     pub streams: u8,
+    /// Транспорт до TURN-серверов: "auto" (UDP с автопереходом на TCP при потерях) | "udp" | "tcp".
+    #[serde(default = "default_turn_transport")]
+    pub turn_transport: String,
     /// Режим авторизации: "oauth" | "manual" | "token". По умолчанию "oauth".
     pub auth_mode: String,
     /// Сохранённый VK access_token
@@ -527,6 +530,10 @@ pub struct VkTurnConfig {
     pub vk_token_verified: bool,
 }
 
+fn default_turn_transport() -> String {
+    "auto".to_string()
+}
+
 impl Default for VkTurnConfig {
     fn default() -> Self {
         Self {
@@ -535,6 +542,7 @@ impl Default for VkTurnConfig {
             password: String::new(),
             links: Vec::new(),
             streams: 0,
+            turn_transport: default_turn_transport(),
             auth_mode: "oauth".to_string(),
             vk_token: None,
             profile_token: None,
