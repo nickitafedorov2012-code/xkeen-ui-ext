@@ -3,7 +3,7 @@ use axum::response::{Json, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::{api_err, api_err_bad_request, api_ok, atomic_write_file, resolve_active_dns_port, sync_whitelist_mode_tunnel};
+use super::{api_err, api_err_bad_request, api_ok, resolve_active_dns_port, sync_whitelist_mode_tunnel};
 use crate::{config, failover, log_i, log_w, mihomo, rci, routing, transaction::ConfigTx, AppState};
 /// GET /api/devices — устройства с политиками.
 pub async fn get_devices(
@@ -742,33 +742,42 @@ pub async fn save_schedules(
     State(state): State<AppState>,
     axum::extract::Json(body): axum::extract::Json<SaveSchedulesReq>,
 ) -> Response {
-    let _guard = state.config_lock.lock().await;
-    let _rguard = state.routing_lock.lock().await;
-    let mut cfg = state.config.read().await.as_ref().clone();
+    let mut tx = match ConfigTx::begin(&state).await {
+        Ok(tx) => tx,
+        Err(e) => return api_err(e),
+    };
 
     // UI-03: Optimistic concurrency check
     if let Some(exp) = &body.expected_revision {
-        let cur_rev = calc_schedules_revision(&cfg.schedules);
+        let cur_rev = calc_schedules_revision(&tx.config().schedules);
         if exp != &cur_rev {
             return api_err("Конфликт параллельного сохранения расписаний: данные были изменены другим клиентом");
         }
     }
 
-    cfg.schedules = body.schedules;
-    let new_rev = calc_schedules_revision(&cfg.schedules);
+    tx.config_mut().schedules = body.schedules;
+    let new_rev = calc_schedules_revision(&tx.config().schedules);
 
-    if let Err(e) = config::save(&state.config_path, &cfg).await {
-        return api_err(format!("Ошибка сохранения расписаний: {}", e));
-    }
-    if std::path::Path::new(&cfg.mihomo.config_path).exists() {
-        if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-            if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &cfg) {
-                let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
-                let _ = mihomo::reload_config(&state.http, &cfg).await;
-            }
+    let yaml_exists = std::path::Path::new(&tx.config().mihomo.config_path).exists();
+    if yaml_exists {
+        let raw_yaml = match tx.read_yaml().await {
+            Ok(y) => y,
+            Err(e) => return api_err(format!("Ошибка чтения config.yaml: {e}")),
+        };
+        let (new_yaml, _) = match routing::apply_routing(&raw_yaml, tx.config()) {
+            Ok(res) => res,
+            Err(e) => return api_err(format!("Ошибка генерации правил расписаний: {e}")),
+        };
+        if let Err(e) = tx.set_yaml(new_yaml) {
+            return api_err(format!("Ошибка валидации config.yaml: {e}"));
         }
+        if let Err(e) = tx.commit_and_reload().await {
+            return api_err(format!("Ошибка сохранения и перезагрузки расписаний: {e}"));
+        }
+    } else if let Err(e) = tx.commit_without_reload().await {
+        return api_err(format!("Ошибка сохранения расписаний: {e}"));
     }
-    *state.config.write().await = std::sync::Arc::new(cfg);
+
     api_ok(json!({ "saved": true, "revision": new_rev }))
 }
 
@@ -1007,6 +1016,7 @@ async fn apply_and_verify_gaming(
 
         // Верификация результата в ядре Mihomo
         tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+        mihomo::invalidate_proxies_cache();
         match mihomo::get_proxies(&tx.state.http, tx.config()).await {
             Ok(proxies) => {
                 let has_group = proxies.contains_key(routing::GAMING_GROUP_NAME) || proxies.contains_key("Gaming");
@@ -2101,6 +2111,27 @@ pub async fn toggle_gaming(
     State(state): State<AppState>,
     Json(body): Json<ToggleGamingReq>,
 ) -> Response {
+    // Сетевой поиск IP/имени устройства в RCI выполняем ДО захвата ConfigTx (config_lock + routing_lock)
+    let mut rci_ip = body.device_ip.clone().filter(|s| !s.trim().is_empty());
+    let mut rci_name = body.device_name.clone();
+    if let Some(ref mac) = body.device_mac {
+        let mac_trimmed = mac.trim().to_lowercase();
+        if !mac_trimmed.is_empty() && rci_ip.is_none() && body.enabled {
+            let cfg_snap = state.config.read().await.clone();
+            let policies = rci::get_policies(&state.http, &cfg_snap).await.unwrap_or_default();
+            if let Ok(devs) = rci::get_devices(&state.http, &cfg_snap, &policies, "").await {
+                if let Some(found) = devs.iter().find(|d| d.mac.eq_ignore_ascii_case(&mac_trimmed)) {
+                    if !found.ip.trim().is_empty() {
+                        rci_ip = Some(found.ip.clone());
+                    }
+                    if rci_name.is_none() {
+                        rci_name = Some(found.name.clone());
+                    }
+                }
+            }
+        }
+    }
+
     let mut tx = match ConfigTx::begin(&state).await {
         Ok(tx) => tx,
         Err(e) => return api_err(e),
@@ -2116,28 +2147,11 @@ pub async fn toggle_gaming(
     if let Some(mac) = body.device_mac {
         let mac_trimmed = mac.trim().to_lowercase();
         if !mac_trimmed.is_empty() {
-            // Если UI не прислал IP — ищем его по MAC в списке устройств роутера
-            let mut ip = body.device_ip.clone().filter(|s| !s.trim().is_empty());
-            let mut name = body.device_name.clone();
-            if ip.is_none() && body.enabled {
-                let cfg_snap = tx.config().clone();
-                let policies = rci::get_policies(&state.http, &cfg_snap).await.unwrap_or_default();
-                if let Ok(devs) = rci::get_devices(&state.http, &cfg_snap, &policies, "").await {
-                    if let Some(found) = devs.iter().find(|d| d.mac.eq_ignore_ascii_case(&mac_trimmed)) {
-                        if !found.ip.trim().is_empty() {
-                            ip = Some(found.ip.clone());
-                        }
-                        if name.is_none() {
-                            name = Some(found.name.clone());
-                        }
-                    }
-                }
-            }
             if let Err(e) = upsert_gaming_device(
                 &mut tx.config_mut().gaming.devices,
                 &mac_trimmed,
-                ip.as_deref(),
-                name.as_deref(),
+                rci_ip.as_deref(),
+                rci_name.as_deref(),
                 body.enabled,
             ) {
                 return api_err(e);
@@ -2164,8 +2178,9 @@ pub async fn toggle_gaming(
     if let Err(e) = tx.commit().await {
         return api_err(format!("Ошибка сохранения config.json: {e}"));
     }
-    log_i!("Игровой режим {}", if body.enabled { "включен" } else { "отключен" });
-    api_ok(json!({ "enabled": body.enabled, "saved": true }))
+    let effective_enabled = tx.config().gaming.enabled;
+    log_i!("Игровой режим {}", if effective_enabled { "включен" } else { "отключен" });
+    api_ok(json!({ "enabled": effective_enabled, "saved": true }))
 }
 
 /// POST /api/gaming/ping — замер реальной сетевой задержки (TCP 443) до популярных игровых серверов

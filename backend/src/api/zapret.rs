@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::{api_err, api_err_bad_request, api_ok, atomic_write_file};
-use crate::{config, log_e, log_w, mihomo, routing, AppState};
+use crate::{config, log_w, routing, AppState};
 // ==================== ZAPRET / DPI ИНТЕГРАЦИЯ =============
 
 pub const DEFAULT_ZAPRET_HOSTS: &str = "# zapret-hosts.txt — Список доменов для универсального обхода DPI\n\
@@ -2409,44 +2409,52 @@ pub fn apply_zapret_preset(
     Ok(())
 }
 
+/// Атомарное обновление настроек Zapret, файлов zapret.conf/S51zapret и правил config.yaml через ConfigTx.
+/// При ошибке reload Mihomo выполняется автоматический откат.
+async fn commit_zapret_config_with_routing<F>(
+    state: &AppState,
+    mutate: F,
+) -> Result<config::AppConfig, String>
+where
+    F: FnOnce(&mut config::ZapretConfig) -> Result<(), String>,
+{
+    let mut tx = crate::transaction::ConfigTx::begin(state).await?;
+    mutate(&mut tx.config_mut().zapret)?;
+
+    sync_zapret_files_with_config_path(&tx.config().zapret, &state.config_path)
+        .await
+        .map_err(|e| format!("Ошибка синхронизации файлов Zapret: {e}"))?;
+
+    if std::path::Path::new(&tx.config().mihomo.config_path).exists() {
+        let raw_yaml = tx.read_yaml().await?;
+        let (new_yaml, _) = routing::apply_routing(&raw_yaml, tx.config())
+            .map_err(|e| format!("Ошибка формирования маршрутов Zapret: {e}"))?;
+        tx.set_yaml(new_yaml)?;
+        tx.commit_and_reload().await?;
+    } else {
+        tx.commit_without_reload().await?;
+    }
+
+    Ok(tx.config().clone())
+}
+
 /// Применение пресета конфигурации Zapret (используется и веб-панелью, и Telegram-ботом)
 pub async fn apply_zapret_preset_action(
     state: &AppState,
     p: &str,
     custom_args_opt: Option<&str>,
 ) -> Result<String, String> {
-    let _cfg_guard = state.config_lock.lock().await;
-    let _routing_guard = state.routing_lock.lock().await;
-    let mut cfg = (**state.config.read().await).clone();
-
-    apply_zapret_preset(&mut cfg.zapret, p, custom_args_opt)?;
-
-    sync_zapret_files_with_config_path(&cfg.zapret, &state.config_path)
-        .await
-        .map_err(|e| format!("Ошибка синхронизации файлов Zapret: {e}"))?;
-    // X-07: set_clean_dns_servers (добавление Яндекс/Cloudflare DNS в KeeneticOS + save
-    // конфига роутера) убран из пресетов — это скрытая мутация настроек роутера из
-    // «косметического» действия. Чистые DNS применяются только явной кнопкой (/api/dns/clean-servers, баг 56).
-
-    // Обновляем правила в config.yaml ядра Mihomo через apply_routing
-    if std::path::Path::new(&cfg.mihomo.config_path).exists() {
-        if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-            if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &cfg) {
-                let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
-                let _ = mihomo::reload_config(&state.http, &cfg).await;
-            }
-        }
-    }
-
-    let _ = config::save(&state.config_path, &cfg).await;
-    *state.config.write().await = std::sync::Arc::new(cfg.clone());
+    let _cfg = commit_zapret_config_with_routing(state, |zapret_cfg| {
+        apply_zapret_preset(zapret_cfg, p, custom_args_opt)
+    })
+    .await?;
 
     #[cfg(unix)]
     {
         let is_running = crate::zapret::find_our_zapret_pid().await.is_some();
-        if is_running && !cfg.zapret.enabled {
+        if is_running && !_cfg.zapret.enabled {
             let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("stop").output().await;
-        } else if cfg.zapret.enabled {
+        } else if _cfg.zapret.enabled {
             let cmd_arg = if is_running { "restart" } else { "start" };
             if let Ok(out) = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg(cmd_arg).output().await {
                 if !out.status.success() {
@@ -3361,44 +3369,45 @@ pub async fn zapret_action(
 
     // 5. Управление независимыми режимами и выключателями (toggle_feature / set_features / reset_features)
     if act == "toggle_feature" || act == "set_features" || act == "reset_features" {
-        let _cfg_guard = state.config_lock.lock().await;
-        let _routing_guard = state.routing_lock.lock().await;
-        let mut cfg = (**state.config.read().await).clone();
-        if act == "reset_features" {
-            cfg.zapret = reset_zapret_features(&cfg.zapret);
-        } else if let Some(ref new_features) = body.features {
-            if let Some(ref ca) = new_features.custom_args {
-                if let Err(e) = validate_custom_args(ca) {
-                    return api_err(e);
+        let cfg = match commit_zapret_config_with_routing(&state, |zapret| {
+            if act == "reset_features" {
+                *zapret = reset_zapret_features(zapret);
+            } else if let Some(ref new_features) = body.features {
+                if let Some(ref ca) = new_features.custom_args {
+                    validate_custom_args(ca)?;
+                }
+                *zapret = merge_zapret_features(zapret, new_features);
+            } else if let (Some(feat), Some(val)) = (body.feature.as_deref(), body.enabled) {
+                match feat {
+                    "hybrid_youtube" => zapret.hybrid_youtube = val,
+                    "hybrid_discord" => zapret.hybrid_discord = val,
+                    "discord_voice_udp" => zapret.discord_voice_udp = val,
+                    "youtube_turbo" => zapret.youtube_turbo = val,
+                    "general_bypass" => zapret.general_bypass = val,
+                    "aggressive_dpi" => zapret.aggressive_dpi = val,
+                    "isolated_proxy" => zapret.isolated_proxy = val,
+                    "bypass_github" => zapret.bypass_github = val,
+                    "bypass_torrents" => zapret.bypass_torrents = val,
+                    "bypass_adult" => zapret.bypass_adult = val,
+                    "smart_tv_mode" => zapret.smart_tv_mode = val,
+                    "community_hostlist_enabled" => zapret.community_hostlist_enabled = val,
+                    "community_hostlist_auto_update" => zapret.community_hostlist_auto_update = val,
+                    "enabled" => zapret.enabled = val,
+                    _ => return Err(format!("Неизвестный параметр функции: {feat}")),
+                }
+                if let Some(ref u) = body.url {
+                    if !u.trim().is_empty() {
+                        zapret.community_hostlist_url = u.trim().to_string();
+                    }
                 }
             }
-            cfg.zapret = merge_zapret_features(&cfg.zapret, new_features);
-        } else if let (Some(feat), Some(val)) = (body.feature.as_deref(), body.enabled) {
-            match feat {
-                "hybrid_youtube" => cfg.zapret.hybrid_youtube = val,
-                "hybrid_discord" => cfg.zapret.hybrid_discord = val,
-                "discord_voice_udp" => cfg.zapret.discord_voice_udp = val,
-                "youtube_turbo" => cfg.zapret.youtube_turbo = val,
-                "general_bypass" => cfg.zapret.general_bypass = val,
-                "aggressive_dpi" => cfg.zapret.aggressive_dpi = val,
-                "isolated_proxy" => cfg.zapret.isolated_proxy = val,
-                "bypass_github" => cfg.zapret.bypass_github = val,
-                "bypass_torrents" => cfg.zapret.bypass_torrents = val,
-                "bypass_adult" => cfg.zapret.bypass_adult = val,
-                "smart_tv_mode" => cfg.zapret.smart_tv_mode = val,
-                "community_hostlist_enabled" => cfg.zapret.community_hostlist_enabled = val,
-                "community_hostlist_auto_update" => cfg.zapret.community_hostlist_auto_update = val,
-                "enabled" => cfg.zapret.enabled = val,
-                _ => return api_err(format!("Неизвестный параметр функции: {feat}")),
-            }
-            if let Some(ref u) = body.url {
-                if !u.trim().is_empty() {
-                    cfg.zapret.community_hostlist_url = u.trim().to_string();
-                }
-            }
-        }
-
-        let is_running = crate::zapret::find_our_zapret_pid().await.is_some();
+            Ok(())
+        })
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => return api_err(e),
+        };
 
         // Z-03: синхронизируем маркер автозапуска с желаемым состоянием службы
         if cfg.zapret.enabled {
@@ -3407,27 +3416,15 @@ pub async fn zapret_action(
             crate::zapret::set_zapret_disabled_marker();
         }
 
-        // Обновляем файлы zapret.conf и S51zapret
-        if let Err(e) = sync_zapret_files(&cfg.zapret).await {
-            return api_err(format!("Ошибка синхронизации файлов Zapret: {e}"));
-        }
-
-        // Сохраняем статус в памяти ДО запуска S51zapret, чтобы параллельный опрос
-        // GET /api/zapret/status не убил процесс nfqws во время старта
-        if let Err(e) = config::save(&state.config_path, &cfg).await {
-            log_e!("Ошибка сохранения config.json: {e}");
-            return api_err(format!("Настройки Zapret не сохранены в config.json: {e}"));
-        }
-        *state.config.write().await = std::sync::Arc::new(cfg.clone());
-
-        let is_domain_only = match body.feature.as_deref() {
-            Some("bypass_github") | Some("bypass_torrents") | Some("bypass_adult") | Some("community_hostlist_enabled") => true,
-            _ => false,
-        };
-        let is_no_reload = match body.feature.as_deref() {
-            Some("community_hostlist_auto_update") => true,
-            _ => false,
-        };
+        let is_running = crate::zapret::find_our_zapret_pid().await.is_some();
+        let is_domain_only = matches!(
+            body.feature.as_deref(),
+            Some("bypass_github" | "bypass_torrents" | "bypass_adult" | "community_hostlist_enabled")
+        );
+        let is_no_reload = matches!(
+            body.feature.as_deref(),
+            Some("community_hostlist_auto_update")
+        );
 
         if is_running && !cfg.zapret.enabled {
             let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("stop").output().await;
@@ -3445,22 +3442,6 @@ pub async fn zapret_action(
             }
         }
 
-        // Обновляем правила в config.yaml ядра Mihomo через apply_routing
-        if std::path::Path::new(&cfg.mihomo.config_path).exists() {
-            if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-                let (new_yaml, _) = match routing::apply_routing(&raw_yaml, &cfg) {
-                    Ok(res) => res,
-                    Err(e) => return api_err(format!("Ошибка формирования маршрутов Zapret: {e}")),
-                };
-                if let Err(e) = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await {
-                    return api_err(format!("Ошибка сохранения config.yaml: {e}"));
-                }
-                if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
-                    log_w!("Ошибка reload Mihomo после изменения настроек Zapret: {e}");
-                }
-            }
-        }
-
         let hot_reloaded = is_running && is_domain_only;
         let restart_required = !is_running || (!is_domain_only && !is_no_reload);
         return api_ok(json!({
@@ -3470,6 +3451,15 @@ pub async fn zapret_action(
             "features": cfg.zapret,
             "message": "Параметры и правила маршрутизации успешно обновлены"
         }));
+    }
+
+    async fn reload_zapret_hosts_if_running(enabled: bool) {
+        if enabled && crate::zapret::find_our_zapret_pid().await.is_some() {
+            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret")
+                .arg("reload-hosts")
+                .output()
+                .await;
+        }
     }
 
     // 5.1 Добавление пользовательского сайта с автоматическим подтягиванием CDN (/boost)
@@ -3491,43 +3481,30 @@ pub async fn zapret_action(
             .collect();
         let cdns_count = cdns_vec.len();
 
-        let _cfg_guard = state.config_lock.lock().await;
-        let _routing_guard = state.routing_lock.lock().await;
-        let mut cfg = (**state.config.read().await).clone();
-
-        if let Some(existing) = cfg.zapret.custom_entries.iter_mut().find(|e| e.domain.eq_ignore_ascii_case(&clean)) {
-            existing.enabled = true;
-            for cdn in cdns_vec {
-                if !existing.cdns.iter().any(|c| c.eq_ignore_ascii_case(&cdn)) {
-                    existing.cdns.push(cdn);
+        let cfg = match commit_zapret_config_with_routing(&state, |zapret| {
+            if let Some(existing) = zapret.custom_entries.iter_mut().find(|e| e.domain.eq_ignore_ascii_case(&clean)) {
+                existing.enabled = true;
+                for cdn in cdns_vec {
+                    if !existing.cdns.iter().any(|c| c.eq_ignore_ascii_case(&cdn)) {
+                        existing.cdns.push(cdn);
+                    }
                 }
+            } else {
+                zapret.custom_entries.push(crate::config::ZapretCustomEntry {
+                    domain: clean.clone(),
+                    enabled: true,
+                    cdns: cdns_vec,
+                });
             }
-        } else {
-            cfg.zapret.custom_entries.push(crate::config::ZapretCustomEntry {
-                domain: clean.clone(),
-                enabled: true,
-                cdns: cdns_vec,
-            });
-        }
+            Ok(())
+        })
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => return api_err(e),
+        };
 
-        let _ = sync_zapret_files(&cfg.zapret).await;
-
-        if std::path::Path::new(&cfg.mihomo.config_path).exists() {
-            if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-                if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &cfg) {
-                    let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
-                    let _ = mihomo::reload_config(&state.http, &cfg).await;
-                }
-            }
-        }
-
-        let is_running = crate::zapret::find_our_zapret_pid().await.is_some();
-        if is_running && cfg.zapret.enabled {
-            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("reload-hosts").output().await;
-        }
-
-        let _ = config::save(&state.config_path, &cfg).await;
-        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+        reload_zapret_hosts_if_running(cfg.zapret.enabled).await;
 
         return api_ok(json!({
             "success": true,
@@ -3542,30 +3519,18 @@ pub async fn zapret_action(
         if raw_domain.is_empty() {
             return api_err("Не указан домен для удаления");
         }
-        let _cfg_guard = state.config_lock.lock().await;
-        let _routing_guard = state.routing_lock.lock().await;
-        let mut cfg = (**state.config.read().await).clone();
 
-        cfg.zapret.custom_entries.retain(|e| !e.domain.eq_ignore_ascii_case(&raw_domain));
+        let cfg = match commit_zapret_config_with_routing(&state, |zapret| {
+            zapret.custom_entries.retain(|e| !e.domain.eq_ignore_ascii_case(&raw_domain));
+            Ok(())
+        })
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => return api_err(e),
+        };
 
-        let _ = sync_zapret_files(&cfg.zapret).await;
-
-        if std::path::Path::new(&cfg.mihomo.config_path).exists() {
-            if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-                if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &cfg) {
-                    let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
-                    let _ = mihomo::reload_config(&state.http, &cfg).await;
-                }
-            }
-        }
-
-        let is_running = crate::zapret::find_our_zapret_pid().await.is_some();
-        if is_running && cfg.zapret.enabled {
-            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("reload-hosts").output().await;
-        }
-
-        let _ = config::save(&state.config_path, &cfg).await;
-        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+        reload_zapret_hosts_if_running(cfg.zapret.enabled).await;
 
         return api_ok(json!({
             "success": true,
@@ -3581,36 +3546,24 @@ pub async fn zapret_action(
             return api_err("Не указан домен для переключения");
         }
         let new_state = body.enabled.unwrap_or(true);
-        let _cfg_guard = state.config_lock.lock().await;
-        let _routing_guard = state.routing_lock.lock().await;
-        let mut cfg = (**state.config.read().await).clone();
 
-        if raw_domain == "all" {
-            for entry in &mut cfg.zapret.custom_entries {
+        let cfg = match commit_zapret_config_with_routing(&state, |zapret| {
+            if raw_domain == "all" {
+                for entry in &mut zapret.custom_entries {
+                    entry.enabled = new_state;
+                }
+            } else if let Some(entry) = zapret.custom_entries.iter_mut().find(|e| e.domain.eq_ignore_ascii_case(&raw_domain)) {
                 entry.enabled = new_state;
             }
-        } else if let Some(entry) = cfg.zapret.custom_entries.iter_mut().find(|e| e.domain.eq_ignore_ascii_case(&raw_domain)) {
-            entry.enabled = new_state;
-        }
+            Ok(())
+        })
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => return api_err(e),
+        };
 
-        let _ = sync_zapret_files(&cfg.zapret).await;
-
-        if std::path::Path::new(&cfg.mihomo.config_path).exists() {
-            if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-                if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &cfg) {
-                    let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
-                    let _ = mihomo::reload_config(&state.http, &cfg).await;
-                }
-            }
-        }
-
-        let is_running = crate::zapret::find_our_zapret_pid().await.is_some();
-        if is_running && cfg.zapret.enabled {
-            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("reload-hosts").output().await;
-        }
-
-        let _ = config::save(&state.config_path, &cfg).await;
-        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+        reload_zapret_hosts_if_running(cfg.zapret.enabled).await;
 
         return api_ok(json!({
             "success": true,
@@ -3635,38 +3588,25 @@ pub async fn zapret_action(
             .filter(|c| crate::config::is_valid_domain(c) && !c.eq_ignore_ascii_case(&raw_domain))
             .collect();
 
-        let _cfg_guard = state.config_lock.lock().await;
-        let _routing_guard = state.routing_lock.lock().await;
-        let mut cfg = (**state.config.read().await).clone();
-
         let mut count_added = 0;
-        if let Some(entry) = cfg.zapret.custom_entries.iter_mut().find(|e| e.domain.eq_ignore_ascii_case(&raw_domain)) {
-            for cdn in cdns_vec {
-                if !entry.cdns.iter().any(|c| c.eq_ignore_ascii_case(&cdn)) {
-                    entry.cdns.push(cdn);
-                    count_added += 1;
+        let cfg = match commit_zapret_config_with_routing(&state, |zapret| {
+            if let Some(entry) = zapret.custom_entries.iter_mut().find(|e| e.domain.eq_ignore_ascii_case(&raw_domain)) {
+                for cdn in cdns_vec {
+                    if !entry.cdns.iter().any(|c| c.eq_ignore_ascii_case(&cdn)) {
+                        entry.cdns.push(cdn);
+                        count_added += 1;
+                    }
                 }
             }
-        }
+            Ok(())
+        })
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => return api_err(e),
+        };
 
-        let _ = sync_zapret_files(&cfg.zapret).await;
-
-        if std::path::Path::new(&cfg.mihomo.config_path).exists() {
-            if let Ok(raw_yaml) = tokio::fs::read_to_string(&cfg.mihomo.config_path).await {
-                if let Ok((new_yaml, _)) = routing::apply_routing(&raw_yaml, &cfg) {
-                    let _ = atomic_write_file(&cfg.mihomo.config_path, &new_yaml).await;
-                    let _ = mihomo::reload_config(&state.http, &cfg).await;
-                }
-            }
-        }
-
-        let is_running = crate::zapret::find_our_zapret_pid().await.is_some();
-        if is_running && cfg.zapret.enabled {
-            let _ = tokio::process::Command::new("/opt/etc/init.d/S51zapret").arg("reload-hosts").output().await;
-        }
-
-        let _ = config::save(&state.config_path, &cfg).await;
-        *state.config.write().await = std::sync::Arc::new(cfg.clone());
+        reload_zapret_hosts_if_running(cfg.zapret.enabled).await;
 
         return api_ok(json!({
             "success": true,

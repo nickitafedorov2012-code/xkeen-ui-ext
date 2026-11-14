@@ -8,15 +8,22 @@
 ---
 
 ## Текущий глобальный этап
-Этапы 1, 2 и 3 полностью завершены. Ожидание дальнейших указаний пользователя (не коммитить без разрешения).
+Исправление багов и фейковых тестов по результатам ревизии кода (модули `api/*`, `failover/*`, `routing/*`, `frontend/src/components/*`, `bot.rs`, `watchdog.rs`, `adguard.rs`).
 
 ## [IN_PROGRESS] (Что делается прямо сейчас)
-- Нет активных задач. Все этапы кампании (А, Б, В) полностью завершены.
+- Нет активных шагов — все пункты ревизии R1..R7 выполнены.
 
 ## [NEXT] (Очередь следующих шагов)
-- Ожидание разрешения пользователя на `git commit` и `git push` (самовольный коммит запрещён).
+- Ожидается решение пользователя по коммиту (`git commit` / `git push` без одобрения запрещены).
 
 ## [DONE] (Завершённые шаги)
+- [x] **Шаг R7 (Анти-регрессионные тесты)**: Заменены/дополнены фейковые и недостающие тесты реальными поведенческими проверками: `failover/mod.rs` (`test_auto_transition_whitelist_and_gaming_suspension` через `apply_whitelist_transition_flags`), `watchdog.rs` (`regression_smart_gaming_watch_ips_and_p2p_udp_sources`, `regression_apply_smart_gaming_toggle_commits_and_rolls_back`), `api/mod.rs` (`regression_save_schedules_rolls_back_config_and_yaml_on_reload_failure`, `regression_toggle_gaming_returns_effective_enabled_and_scan_cdn_avoids_routing_lock`), `frontend/src/components/Dashboard.test.tsx` (негативный тест отказа `/adguard/protection`).
+- [x] **Шаг R6 (Dashboard.tsx)**: Убраны `.catch(() => null)` в `handleToggleAdblock` при вызовах `/adguard/protection` и `adblock/toggle`, ошибки показываются пользователю через `notify(..., true)` без ложного переключения тумблера.
+- [x] **Шаг R5 (api/zapret.rs + watchdog.rs)**: `spawn_config_watchdog` в `watchdog.rs` и все ветки `apply_zapret_preset_action` / `zapret_features_action` (`toggle_feature`, `set_features`, `reset_features`, `add_custom_domain`, `remove_custom_domain`, `toggle_custom_domain`, `boost_custom_domain`) в `api/zapret.rs` переведены на `ConfigTx` (общий хелпер `commit_zapret_config_with_routing`), а вызовы `S51zapret` вынесены за пределы блокировок.
+- [x] **Шаг R4 (api/routing.rs)**: `save_schedules` переведён на `ConfigTx` с откатом при сбое reload; в `toggle_gaming` сетевой RCI-поиск устройства вынесен до `ConfigTx::begin`, а ответ `"enabled"` возвращает фактическое `tx.config().gaming.enabled`.
+- [x] **Шаг R3 (api/domains.rs)**: `scan_cdn_manual` освобождает `state.config` до `discover_all_cdns` и не удерживает `state.routing_lock` на время сетевого сканирования.
+- [x] **Шаг R2 (adguard.rs + api/dns_adguard.rs)**: Добавлен `remove_adguard_iptables_for_mihomo_config` с передачей реального `cfg.mihomo.config_path` в `adblock_toggle_core`, `adguard_sync_firewall`, `adguard_set_protection`; ошибка `apply_adguard_iptables` в `adguard_set_protection` возвращает ошибку API до коммита `ConfigTx`.
+- [x] **Шаг R1 (bot.rs)**: `is_zapret_running()` переведён на `crate::zapret::find_our_zapret_pid().await.is_some()`, добавлен тест `regression_bug_36_bot_is_zapret_running_checks_our_pid` (13/13 `bot::tests` GREEN).
 - [x] **ЭТАП В — Финальная проверка**: `cargo test --manifest-path backend/Cargo.toml` (**719 passed; 0 failed; 0 ignored**), `cargo check --tests` (**0 warnings**), `npm --prefix frontend test -- --run` (**40 files, 399 passed**), `npm --prefix frontend run build` (**✓ 93 modules, 2.83s**). Устранены 3 регрессии после рефакторинга (`api/routing.rs` `-w 2` -> `-w`, `api/zapret.rs` `-w` в 10 правилах `build_zapret_firewall_script_with_queue`, `api/mod.rs:1513` проверка `render_s51_zapret_script_with_dns_port(1053)`), а также обновлены legacy-тесты `api/mod.rs:3318` (`-w`) и `App.test.tsx` (`STARTUP-02` под `.tab-skeleton` + `Object.defineProperty(document, 'hidden', ...)` в `bug 139`).
 - [x] **ЭТАП Б — Баг 50 (INT)**: `frontend/src/components/ConflictPairs.test.tsx` — добавлены 5 интеграционных тестов `it('bug 50: ...')` на конфликтные пары: (а) игровой режим при активном БС (баг 5), (б) независимость AdGuard и AdBlock (баг 116), (в) запрет исключения устройства из БС при игровом режиме (баг 65), (г) умный режим + «Не реагировать» + сохранение без отката игнор-листа (баг 6), (д) закрепление узла БС через одиночный `device_patch` (баг 67). Проверено: `ConflictPairs.test.tsx` (5/5 passed). **Этап Б (все линии L01..L12 и INT) закрыт на 100%.**
 - [x] **ЭТАП Б — Баг 74 (L12)**: `traffic.rs:399-413,1194-1210` (`frame_direction_swapped() -> bool` в `apply_traffic_frame`, текущее поведение роутера сохранено), тест `regression_bug_74b_direction_mapping_is_single_switch` + 20/20 `traffic::` (GREEN, 0 warnings); инструкция замера `74.1` для роутера `192.168.1.1` записана в `ПРОВЕРКИ_И_РЕШЕНИЯ.md`. **Линия L12 закрыта на 100%.**

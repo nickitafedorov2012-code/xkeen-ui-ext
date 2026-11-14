@@ -124,9 +124,11 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
 
 /// POST /api/domains/scan-cdn — ручной запуск глубокого сканирования CDN и синхронизации geo_override
 pub async fn scan_cdn_manual(State(state): State<AppState>) -> Response {
-    let _guard = state.routing_lock.lock().await;
-    let cfg = state.config.read().await.clone();
-    if cfg.force_domains.is_empty() {
+    let (force_domains, proxy_url) = {
+        let cfg = state.config.read().await;
+        (cfg.force_domains.clone(), cfg.mihomo_proxy_url())
+    };
+    if force_domains.is_empty() {
         return api_ok(json!({
             "auto_cdns": [],
             "overridden_ips": 0,
@@ -135,15 +137,11 @@ pub async fn scan_cdn_manual(State(state): State<AppState>) -> Response {
     }
 
     crate::log_i!("[MANUAL] Ручной запуск глубокого сканирования CDN...");
-    let auto_cdns = crate::cdn_discovery::discover_all_cdns(&cfg.force_domains, &cfg.mihomo_proxy_url()).await;
-    let mut all_domains = cfg.force_domains.clone();
-    for cdn in &auto_cdns {
-        if !all_domains.contains(cdn) {
-            all_domains.push(cdn.clone());
-        }
-    }
-
+    // Сетевой скан CDN выполняется без удержания config_lock/routing_lock
+    let auto_cdns = crate::cdn_discovery::discover_all_cdns(&force_domains, &proxy_url).await;
     let auto_cdns_list: Vec<String> = auto_cdns.into_iter().collect();
+
+    let cfg = state.config.read().await.clone();
     let overridden = match crate::override_sync::sync_from_config(&cfg, &auto_cdns_list).await {
         Ok(count) => count,
         Err(e) => {

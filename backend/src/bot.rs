@@ -85,20 +85,9 @@ async fn get_bot_client(proxy_url: &str) -> Option<reqwest::Client> {
         .ok()
 }
 
-/// Проверка, активен ли процесс Zapret (nfqws или nfqws2)
+/// Проверка, активен ли именно наш процесс Zapret (nfqws / nfqws2) (баг 36)
 async fn is_zapret_running() -> bool {
-    #[cfg(unix)]
-    {
-        if let Ok(out) = tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg("pidof nfqws2 2>/dev/null || pidof nfqws 2>/dev/null")
-            .output()
-            .await
-        {
-            return !out.stdout.is_empty();
-        }
-    }
-    false
+    crate::zapret::find_our_zapret_pid().await.is_some()
 }
 
 /// Основной цикл Long Polling
@@ -1903,5 +1892,13 @@ mod tests {
         assert!(err.contains("уже выполняется"));
         drop(guard);
         assert!(try_begin_speedtest(&lock).is_ok());
+    }
+
+    #[tokio::test]
+    async fn regression_bug_36_bot_is_zapret_running_checks_our_pid() {
+        // Без запущенного нашего экземпляра nfqws/nfqws2 бот не должен считать сторонний процесс активным
+        assert!(!is_zapret_running().await);
+        assert!(!crate::zapret::is_zapret_cmdline_ours("nfqws --daemon --qnum=999"));
+        assert!(crate::zapret::is_zapret_cmdline_ours("nfqws --daemon --qnum=200"));
     }
 }

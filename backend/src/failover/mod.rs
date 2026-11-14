@@ -2288,33 +2288,22 @@ mod tests {
         cfg.whitelist.enabled = false;
         cfg.gaming.enabled = true;
 
-        // Transition to BS node:
+        // Transition to BS node via real production helper:
         let is_bs = is_whitelist_server_full("Germany [БС] Fast", "node_bs", None, &cfg);
         assert!(is_bs);
 
-        // Emulate transition logic:
-        if is_bs && cfg.whitelist.auto_by_failover {
-            cfg.whitelist.enabled = true;
-            if cfg.gaming.enabled {
-                cfg.gaming.enabled = false;
-                cfg.whitelist.gaming_suspended = true;
-            }
-        }
+        let (changed_on, _) = super::switcher::apply_whitelist_transition_flags(&mut cfg, is_bs);
+        assert!(changed_on);
         assert!(cfg.whitelist.enabled, "Whitelist mode must be enabled on BS node");
         assert!(!cfg.gaming.enabled, "Gaming mode must be disabled on BS node to prevent hijacking");
         assert!(cfg.whitelist.gaming_suspended, "gaming_suspended flag must be true");
 
-        // Transition back to normal node:
+        // Transition back to normal node via real production helper:
         let is_normal = !is_whitelist_server_full("Germany Normal", "node_de", None, &cfg);
         assert!(is_normal);
 
-        if is_normal && cfg.whitelist.auto_by_failover {
-            cfg.whitelist.enabled = false;
-            if cfg.whitelist.gaming_suspended {
-                cfg.gaming.enabled = true;
-                cfg.whitelist.gaming_suspended = false;
-            }
-        }
+        let (changed_off, _) = super::switcher::apply_whitelist_transition_flags(&mut cfg, !is_normal);
+        assert!(changed_off);
         assert!(!cfg.whitelist.enabled, "Whitelist mode must be disabled on normal node");
         assert!(cfg.gaming.enabled, "Gaming mode must be restored on normal node");
         assert!(!cfg.whitelist.gaming_suspended);

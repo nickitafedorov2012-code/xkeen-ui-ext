@@ -274,12 +274,17 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
     const nextState = !isAghActive
     setAdguardToggling(true)
     try {
-      // 1. Переключаем защиту в AdGuard Home через REST API
-      const aghRes = await apiPost<{ enabled: boolean }>('/adguard/protection', { enabled: nextState }).catch(() => null)
+      // 1. Переключаем защиту в AdGuard Home через REST API (синхронизирует iptables 53->5353 и config)
+      const aghRes = await apiPost<{ enabled: boolean }>('/adguard/protection', { enabled: nextState })
       // 2. Синхронизируем флаг adblock в Mihomo
-      await apiPost<{ enabled: boolean }>('adblock/toggle', { enabled: nextState }).catch(() => null)
+      const adblockRes = await apiPost<{ enabled: boolean }>('adblock/toggle', { enabled: nextState })
 
-      const effectiveState = aghRes?.enabled !== undefined ? aghRes.enabled : nextState
+      const effectiveState =
+        aghRes?.enabled !== undefined
+          ? aghRes.enabled
+          : adblockRes?.enabled !== undefined
+            ? adblockRes.enabled
+            : nextState
       setAdblockEnabled(effectiveState)
       setAdguardStatus((prev) => (prev ? { ...prev, protection_enabled: effectiveState } : null))
 

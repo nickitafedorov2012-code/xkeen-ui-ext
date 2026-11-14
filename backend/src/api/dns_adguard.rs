@@ -170,7 +170,8 @@ pub async fn adblock_toggle_core(state: &AppState, target: Option<bool>) -> Resu
                     crate::adguard::apply_adguard_iptables(active_port)
                         .map_err(|e| format!("Ошибка настройки DNS-редиректа iptables: {e}"))?;
                 } else {
-                    crate::adguard::remove_adguard_iptables()
+                    let latest_cfg = state.config.read().await;
+                    crate::adguard::remove_adguard_iptables_for_mihomo_config(&latest_cfg.mihomo.config_path)
                         .map_err(|e| format!("Ошибка снятия DNS-редиректа iptables: {e}"))?;
                 }
             }
@@ -334,7 +335,7 @@ pub async fn adguard_sync_firewall(State(state): State<AppState>) -> Response {
         format!("DNS-редирект 53 -> {port} переприменён")
     } else {
         // AdGuard не отвечает: держим DNS LAN живым, редирект не ставим
-        let _ = crate::adguard::remove_adguard_iptables();
+        let _ = crate::adguard::remove_adguard_iptables_for_mihomo_config(&cfg.mihomo.config_path);
         return api_err(format!("AdGuard Home не отвечает на порту {port} — редирект снят, чтобы сеть не осталась без DNS"));
     };
     resync_full_tunnel_from_disk(&cfg).await;
@@ -417,6 +418,17 @@ pub async fn adguard_set_protection(
     let cfg = state.config.read().await.clone();
     match crate::adguard::set_protection(&state.http, &cfg.adguard, body.enabled).await {
         Ok(now_enabled) => {
+            if now_enabled {
+                let active_port = crate::adguard::detect_adguard_dns_port().unwrap_or(cfg.adguard.dns_port);
+                if let Err(e) = crate::adguard::apply_adguard_iptables(active_port) {
+                    return api_err(format!("Ошибка настройки DNS-редиректа iptables для AdGuard: {e}"));
+                }
+                let _ = crate::adguard::heal_adguard_live_config(&state.http, &cfg.adguard, Some(&cfg.rci.host)).await;
+            } else {
+                if let Err(e) = crate::adguard::remove_adguard_iptables_for_mihomo_config(&cfg.mihomo.config_path) {
+                    log_w!("Ошибка снятия DNS-редиректа iptables для AdGuard: {e}");
+                }
+            }
             if let Ok(mut tx) = ConfigTx::begin(&state).await {
                 crate::adguard::apply_integration_toggle(tx.config_mut(), now_enabled);
                 let active_port = crate::adguard::detect_adguard_dns_port().unwrap_or(cfg.adguard.dns_port);
@@ -431,13 +443,6 @@ pub async fn adguard_set_protection(
                 if let Err(e) = tx.commit_and_reload().await {
                     log_e!("Ошибка сохранения транзакции защиты AdGuard: {e}");
                 }
-            }
-            if now_enabled {
-                let active_port = crate::adguard::detect_adguard_dns_port().unwrap_or(cfg.adguard.dns_port);
-                let _ = crate::adguard::apply_adguard_iptables(active_port);
-                let _ = crate::adguard::heal_adguard_live_config(&state.http, &cfg.adguard, Some(&cfg.rci.host)).await;
-            } else {
-                let _ = crate::adguard::remove_adguard_iptables();
             }
             let latest_cfg = state.config.read().await.clone();
             resync_full_tunnel_from_disk(&latest_cfg).await;

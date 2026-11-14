@@ -3319,6 +3319,191 @@ mod tests {
             "BS nat/mangle must bypass user_exclude ipset:\n{bs_all}"
         );
     }
+
+    #[tokio::test]
+    async fn regression_save_schedules_rolls_back_config_and_yaml_on_reload_failure() {
+        let dir = std::env::temp_dir().join(format!(
+            "xkeen-reg-schedules-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let json_path = dir.join("config.json");
+        let yaml_path = dir.join("config.yaml");
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.config_path = yaml_path.display().to_string();
+        cfg.mihomo.port = 1; // недоступен -> reload обязан упасть
+        let orig_yaml = "mode: rule\nproxies: []\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules:\n  - MATCH,PROXY\n";
+        std::fs::write(&yaml_path, orig_yaml).unwrap();
+        crate::config::save(&json_path, &cfg).await.unwrap();
+
+        let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(cfg)));
+        let ag = std::sync::Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = AppState {
+            config: config_arc,
+            config_path: std::sync::Arc::new(json_path.clone()),
+            http: reqwest::Client::new(),
+            failover_log: std::sync::Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        let req = crate::api::routing::SaveSchedulesReq {
+            schedules: vec![crate::config::DeviceSchedule {
+                id: "s1".to_string(),
+                ip: "192.168.1.50".to_string(),
+                enabled: true,
+                time_start: "01:00".to_string(),
+                time_end: "06:00".to_string(),
+                days: vec![1, 2],
+                action: "direct".to_string(),
+                target_server: Some("DIRECT".to_string()),
+            }],
+            expected_revision: None,
+        };
+        let resp = crate::api::routing::save_schedules(
+            axum::extract::State(state.clone()),
+            axum::extract::Json(req),
+        )
+        .await;
+        let bytes = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body.get("success").and_then(|x| x.as_bool()), Some(false), "reload failure must return success:false: {body}");
+        assert!(state.config.read().await.schedules.is_empty(), "schedules must roll back in memory");
+        let saved_cfg = crate::config::load(&json_path);
+        assert!(saved_cfg.schedules.is_empty(), "schedules must roll back in config.json");
+        assert_eq!(std::fs::read_to_string(&yaml_path).unwrap(), orig_yaml, "config.yaml must roll back");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn regression_toggle_gaming_returns_effective_enabled_and_scan_cdn_avoids_routing_lock() {
+        let _cache_guard = crate::mihomo::PROXIES_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::mihomo::clear_proxies_cache_for_test();
+        let dir = std::env::temp_dir().join(format!(
+            "xkeen-reg-gaming-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let json_path = dir.join("config.json");
+        let yaml_path = dir.join("config.yaml");
+
+        // Поднимаем локальный mock Mihomo для reload (PUT /configs -> 204, GET /proxies -> 200)
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server_task = tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let resp = if req.starts_with("GET ") {
+                        let body = r#"{"proxies":{"🎮 Gaming":{"name":"🎮 Gaming","type":"Selector","all":["Fastest","DIRECT"],"now":"Fastest"},"Fastest":{"name":"Fastest","type":"Direct"}}}"#;
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                    } else {
+                        "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+                    };
+                    let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, resp.as_bytes()).await;
+                });
+            }
+        });
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.config_path = yaml_path.display().to_string();
+        cfg.mihomo.port = port;
+        cfg.gaming.enabled = true;
+        cfg.gaming.devices = vec![
+            crate::config::GamingDevice {
+                mac: "AA:BB:CC:DD:EE:01".into(),
+                ip: "192.168.1.50".into(),
+                name: "PS5".into(),
+                server: None,
+                enabled: true,
+                ..Default::default()
+            },
+            crate::config::GamingDevice {
+                mac: "AA:BB:CC:DD:EE:02".into(),
+                ip: "192.168.1.51".into(),
+                name: "PC".into(),
+                server: None,
+                enabled: true,
+                ..Default::default()
+            },
+        ];
+        let orig_yaml = "redir-port: 5000\ntproxy-port: 5001\nmode: rule\nproxies:\n  - name: Fastest\n    type: direct\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [Fastest, DIRECT]\nrules:\n  - MATCH,PROXY\n";
+        std::fs::write(&yaml_path, orig_yaml).unwrap();
+        crate::config::save(&json_path, &cfg).await.unwrap();
+
+        let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(cfg)));
+        let ag = std::sync::Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = AppState {
+            config: config_arc,
+            config_path: std::sync::Arc::new(json_path.clone()),
+            http: reqwest::Client::new(),
+            failover_log: std::sync::Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        // 1. Выключаем одно из двух игровых устройств -> общий gaming.enabled должен остаться true
+        crate::mihomo::clear_proxies_cache_for_test();
+        let req = crate::api::routing::ToggleGamingReq {
+            enabled: false,
+            mode: None,
+            target_server: None,
+            device_mac: Some("AA:BB:CC:DD:EE:01".into()),
+            device_ip: Some("192.168.1.50".into()),
+            device_name: None,
+        };
+        let resp = crate::api::routing::toggle_gaming(
+            axum::extract::State(state.clone()),
+            axum::extract::Json(req),
+        )
+        .await;
+        assert!(resp.status().is_success());
+        let body = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            v.get("data").and_then(|d| d.get("enabled")).and_then(|x| x.as_bool()),
+            Some(true),
+            "toggle_gaming response must reflect effective gaming.enabled=true while second device is active: {v}"
+        );
+
+        // 2. scan_cdn_manual не должен зависать при удерживаемом routing_lock
+        let _routing_guard = state.routing_lock.lock().await;
+        let scan_res = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            crate::api::domains::scan_cdn_manual(axum::extract::State(state.clone())),
+        )
+        .await;
+        assert!(scan_res.is_ok(), "scan_cdn_manual must not wait on routing_lock");
+
+        server_task.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 

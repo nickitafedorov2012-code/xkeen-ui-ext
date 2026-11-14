@@ -261,4 +261,33 @@ describe('Dashboard Component — Failover Card 10-Point Audit & Tier Modernizat
     expect(modal).toBeTruthy()
     expect(modal?.textContent).toContain('Автоопределение серверов и подписок БС')
   })
+
+  it('does not flip AdGuard toggle state and notifies error when /adguard/protection rejects', async () => {
+    vi.spyOn(api, 'apiGet').mockImplementation(async (path: string) => {
+      if (path === 'failover/events') return { events: [] }
+      if (path === 'devices') return { devices: [] }
+      if (path === '/adguard/status') return { running: true, protection_enabled: false }
+      return {}
+    })
+    const postSpy = vi.spyOn(api, 'apiPost').mockRejectedValue(new Error('iptables failed'))
+
+    await act(async () => {
+      root!.render(
+        <Dashboard status={{ ...baseStatus, adblock: false }} notify={notifyMock} refresh={refreshMock} />,
+      )
+    })
+
+    const aghBtn = container?.querySelector('[data-testid="dashboard-adguard-btn"]') as HTMLButtonElement
+    expect(aghBtn).toBeTruthy()
+    expect(aghBtn.textContent).toContain('ВЫКЛ')
+
+    await act(async () => {
+      aghBtn.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith('/adguard/protection', { enabled: true })
+    expect(notifyMock).toHaveBeenCalledWith('Ошибка переключения AdGuard: iptables failed', true)
+    expect(aghBtn.textContent).toContain('ВЫКЛ')
+    expect(aghBtn.textContent).not.toContain('ВКЛ 🟢')
+  })
 })

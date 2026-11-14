@@ -218,13 +218,16 @@ pub fn spawn(state: AppState) {
                     if missing_device || missing_dev_domains || missing_force || missing_ignore || missing_adblock || missing_flow || missing_zapret || missing_gaming || missing_whitelist {
                         log_w!("[WATCHDOG] Обнаружена перезапись config.yaml (рестарт XKeen)! Восстановление маршрутизации...");
 
-                        // BUG-15: Строгий порядок блокировок (config_lock -> routing_lock)
-                        let _cfg_guard = state.config_lock.lock().await;
-                        let _routing_guard = state.routing_lock.lock().await;
-                        let cfg = state.config.read().await.clone();
+                        // BUG-15 / ConfigTx: строгий порядок блокировок и авто-откат при сбое reload Mihomo
+                        let mut tx = match crate::transaction::ConfigTx::begin(&state).await {
+                            Ok(tx) => tx,
+                            Err(e) => {
+                                log_w!("[WATCHDOG] Ошибка захвата транзакции: {}", e);
+                                continue;
+                            }
+                        };
 
-                        // Повторное применение маршрутизации
-                        let raw_yaml = match tokio::fs::read_to_string(path).await {
+                        let raw_yaml = match tx.read_yaml().await {
                             Ok(c) => c,
                             Err(e) => {
                                 log_w!("[WATCHDOG] Ошибка чтения config.yaml: {}", e);
@@ -232,30 +235,34 @@ pub fn spawn(state: AppState) {
                             }
                         };
 
-                        let (new_yaml, _applied) = match routing::apply_routing(&raw_yaml, &cfg) {
+                        let (new_yaml, _applied) = match routing::apply_routing(&raw_yaml, tx.config()) {
                             Ok(res) => res,
                             Err(e) => {
                                 log_w!("[WATCHDOG] Ошибка роутинга: {}", e);
                                 continue;
                             }
                         };
-                        if let Err(e) = crate::api::atomic_write_file(path, &new_yaml).await {
-                            log_w!("[WATCHDOG] Ошибка записи config.yaml: {}", e);
+                        if let Err(e) = tx.set_yaml(new_yaml) {
+                            log_w!("[WATCHDOG] Ошибка валидации config.yaml: {}", e);
                             continue;
                         }
 
-                        // Перезагрузка ядра Mihomo (RT-04)
-                        if let Err(e) = mihomo::reload_config(&state.http, &cfg).await {
+                        // Перезагрузка ядра Mihomo (RT-04) с откатом при сбое
+                        if let Err(e) = tx.apply_and_reload().await {
                             log_w!("[WATCHDOG] Ошибка перезагрузки Mihomo: {}", e);
                             reload_pending = true;
                             last_mtime = None; // Сброс для обязательного повтора
                         } else {
+                            let _ = tx.commit().await;
                             log_i!("[WATCHDOG] ✓ Правила маршрутизации успешно восстановлены и применены в ядре");
                             reload_pending = false;
                         }
 
+                        let cfg_snap = tx.config().clone();
+                        drop(tx);
+
                         // Синхронизация ipset geo_override (быстрые статические бандлы без сетевой нагрузки)
-                        let _ = override_sync::sync_from_config(&cfg, &[]).await;
+                        let _ = override_sync::sync_from_config(&cfg_snap, &[]).await;
 
                         // RT-04: Обновляем зафиксированные метаданные только если reload успешен
                         if !reload_pending {
@@ -2572,6 +2579,112 @@ mod structural_regression_tests {
 
         persist_service_stopped_flag(&flag, false);
         assert!(!load_service_stopped_flag(&flag));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn regression_smart_gaming_watch_ips_and_p2p_udp_sources() {
+        use super::{p2p_udp_sources, smart_gaming_watch_ips, P2P_UDP_PEER_THRESHOLD};
+
+        let mut gaming = crate::config::GamingConfig::default();
+        gaming.devices = vec![
+            crate::config::GamingDevice {
+                mac: "AA:BB:CC:DD:EE:01".into(),
+                ip: " 192.168.1.50 ".into(),
+                name: "PS5".into(),
+                server: None,
+                enabled: true,
+                ..Default::default()
+            },
+            crate::config::GamingDevice {
+                mac: "AA:BB:CC:DD:EE:02".into(),
+                ip: "192.168.1.51".into(),
+                name: "Disabled".into(),
+                server: None,
+                enabled: false,
+                ..Default::default()
+            },
+            crate::config::GamingDevice {
+                mac: "AA:BB:CC:DD:EE:03".into(),
+                ip: "   ".into(),
+                name: "NoIP".into(),
+                server: None,
+                enabled: true,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(smart_gaming_watch_ips(&gaming), vec!["192.168.1.50".to_string()]);
+
+        let mut conns = Vec::new();
+        // Источник с P2P_UDP_PEER_THRESHOLD + 1 разными пирами на игровых UDP-портах -> P2P
+        for i in 1..=(P2P_UDP_PEER_THRESHOLD + 1) {
+            conns.push(serde_json::json!({
+                "metadata": {
+                    "sourceIP": "192.168.1.99",
+                    "destinationIP": format!("198.51.100.{i}"),
+                    "destinationPort": "27015",
+                    "network": "udp"
+                }
+            }));
+        }
+        // Обычный игрок с 2 серверами -> НЕ P2P
+        for i in 1..=2 {
+            conns.push(serde_json::json!({
+                "metadata": {
+                    "sourceIP": "192.168.1.50",
+                    "destinationIP": format!("203.0.113.{i}"),
+                    "destinationPort": "27015",
+                    "network": "udp"
+                }
+            }));
+        }
+        let p2p = p2p_udp_sources(&conns);
+        assert!(p2p.contains("192.168.1.99"));
+        assert!(!p2p.contains("192.168.1.50"));
+    }
+
+    #[tokio::test]
+    async fn regression_apply_smart_gaming_toggle_commits_and_rolls_back() {
+        let dir = std::env::temp_dir().join(format!(
+            "xkeen-reg-wd-gaming-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let json_path = dir.join("config.json");
+        let yaml_path = dir.join("config.yaml");
+        let orig_yaml = "mode: rule\nproxies:\n  - name: Fastest\n    type: direct\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [Fastest, DIRECT]\nrules:\n  - MATCH,PROXY\n";
+        std::fs::write(&yaml_path, orig_yaml).unwrap();
+
+        // 1. При недоступном Mihomo apply_smart_gaming_toggle(false) должен откатить изменения
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.config_path = yaml_path.display().to_string();
+        cfg.mihomo.port = 1;
+        cfg.gaming.enabled = true;
+        crate::config::save(&json_path, &cfg).await.unwrap();
+
+        let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(cfg)));
+        let ag = std::sync::Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = crate::AppState {
+            config: config_arc,
+            config_path: std::sync::Arc::new(json_path.clone()),
+            http: reqwest::Client::new(),
+            failover_log: std::sync::Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        assert!(super::apply_smart_gaming_toggle(&state, false).await.is_err());
+        assert!(state.config.read().await.gaming.enabled);
+        assert_eq!(std::fs::read_to_string(&yaml_path).unwrap(), orig_yaml);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

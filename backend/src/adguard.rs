@@ -1427,6 +1427,12 @@ pub fn remove_adguard_iptables() -> Result<(), String> {
     remove_adguard_iptables_with_restore_port(None)
 }
 
+/// Удаление правил XKEEN_ADGUARD с автоматическим определением порта возврата из указанного `config.yaml` Mihomo.
+pub fn remove_adguard_iptables_for_mihomo_config(mihomo_config_path: &str) -> Result<(), String> {
+    let restore_port = resolve_adguard_restore_port(None, mihomo_config_path);
+    remove_adguard_iptables_with_restore_port(Some(restore_port))
+}
+
 pub fn remove_adguard_iptables_with_restore_port(restore_port: Option<u16>) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -3328,5 +3334,25 @@ mod regression_bug_115_tests {
         assert!(add_cmds[0].contains("-I XKEEN_GAMING 1 ") && add_cmds[0].contains("192.168.1.10") && add_cmds[0].contains("--to-ports 5353"));
         assert!(add_cmds[1].contains("-I XKEEN_GAMING 2 ") && add_cmds[1].contains("-p tcp"));
         assert!(add_cmds[2].contains("-I XKEEN_GAMING 3 ") && add_cmds[2].contains("192.168.1.11"));
+    }
+
+    #[test]
+    fn regression_adguard_remove_iptables_uses_mihomo_config_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "agh_restore_port_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let yaml_path = dir.join("custom_mihomo.yaml");
+        std::fs::write(&yaml_path, "dns:\n  enable: true\n  listen: 0.0.0.0:7853\n").unwrap();
+
+        let port = super::resolve_adguard_restore_port(None, yaml_path.to_str().unwrap());
+        assert_eq!(port, 7853, "порт возврата должен читаться из указанного config.yaml");
+        assert!(super::remove_adguard_iptables_for_mihomo_config(yaml_path.to_str().unwrap()).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
