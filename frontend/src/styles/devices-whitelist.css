@@ -1,4 +1,4 @@
-
+﻿
 /* --- Вкладка Devices (Редизайн по макету) --- */
 .devices-card {
   background: #0f131c;
@@ -49,7 +49,7 @@
   color: #f1f5f9;
   font-size: 13px;
   outline: none;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
 .devices-search-input:focus {
@@ -80,7 +80,7 @@
   font-size: 12.5px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.18s ease;
+  transition: transform 0.18s ease, opacity 0.18s ease, background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
   user-select: none;
 }
 
@@ -132,7 +132,7 @@
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 .devices-refresh-btn:hover {
   background: #1e2638;
@@ -149,7 +149,59 @@
 /* --- Таблица устройств --- */
 .devices-table-wrap {
   width: 100%;
+  max-width: 100%;
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+@media (min-width: 769px) {
+  table.devices-main-table {
+    table-layout: fixed;
+    width: 100%;
+  }
+  table.devices-main-table th,
+  table.devices-main-table td {
+    padding: 8px 5px;
+  }
+}
+
+@media (max-width: 768px) {
+  table.devices-table:not(.devices-main-table) {
+    table-layout: auto;
+    min-width: 540px;
+  }
+  table.devices-main-table colgroup,
+  table.devices-main-table thead {
+    display: none;
+  }
+  table.devices-main-table,
+  table.devices-main-table tbody {
+    display: block;
+    width: 100%;
+  }
+  table.devices-main-table tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  table.devices-main-table tr td {
+    display: inline-flex;
+    align-items: center;
+    width: auto !important;
+    padding: 2px 0;
+    border: none;
+  }
+  table.devices-main-table tr td:nth-child(2) {
+    flex: 1 1 180px;
+    min-width: 0;
+  }
+  table.devices-main-table tr td[colspan] {
+    width: 100% !important;
+    display: block;
+  }
 }
 
 table.devices-table {
@@ -187,7 +239,7 @@ table.devices-table th.sortable:hover {
   height: 32px;
   max-width: 105px;
   width: 100%;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   box-sizing: border-box;
 }
 .device-speed-input-wrap:focus-within {
@@ -330,7 +382,7 @@ table.devices-table td {
   font-size: 12.5px;
   outline: none;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   text-overflow: ellipsis;
   overflow: hidden;
   white-space: nowrap;
@@ -375,7 +427,7 @@ table.devices-table td {
   border-radius: 6px;
   color: #94a3b8;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   box-sizing: border-box;
 }
 .device-gear-btn:hover {
@@ -400,7 +452,7 @@ table.devices-table td {
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   user-select: none;
   white-space: nowrap;
   box-sizing: border-box;
@@ -481,7 +533,7 @@ table.devices-table td {
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   user-select: none;
   white-space: nowrap;
   box-sizing: border-box;
@@ -562,7 +614,7 @@ table.devices-table td {
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   user-select: none;
   white-space: nowrap;
   box-sizing: border-box;
@@ -761,7 +813,7 @@ table.devices-table td {
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: transform 0.2s ease, opacity 0.2s ease, background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
   user-select: none;
 }
 
@@ -831,7 +883,7 @@ table.devices-table td {
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
 .whitelist-pill:hover {
@@ -862,7 +914,7 @@ table.devices-table td {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
 .whitelist-domain-card:hover {
@@ -1029,7 +1081,7 @@ table.devices-table td {
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   white-space: nowrap;
 }
 .floating-batch-btn:hover {

@@ -123,7 +123,7 @@ export default function AdGuard({ notify }: AdGuardProps) {
     try {
       const res = await apiGet<{ filters: AghFilterSubscription[]; user_rules: string[] }>('/adguard/filtering')
       if (res?.filters) setFilters(res.filters)
-      if (res?.user_rules) setUserRulesText(res.user_rules.join('\n'))
+      if (Array.isArray(res?.user_rules)) setUserRulesText(res.user_rules.join('\n'))
     } catch (e: any) {
       notify(`Ошибка загрузки фильтров: ${e.message || e}`, true)
     }
@@ -872,7 +872,7 @@ export default function AdGuard({ notify }: AdGuardProps) {
                 <li>
                   <span>IP-адреса слушателя:</span>
                   <span className="mono">
-                    {status?.dns_addresses?.length ? status.dns_addresses.join(', ') : '0.0.0.0'}
+                    {Array.isArray(status?.dns_addresses) && status.dns_addresses.length ? status.dns_addresses.join(', ') : '0.0.0.0'}
                   </span>
                 </li>
                 <li>

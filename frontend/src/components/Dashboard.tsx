@@ -728,9 +728,16 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                      {f.last_test.success ? '✓' : '✗'} {f.last_test.target_name}
                   </span>
                   <span className="muted small" style={{ marginLeft: 6, fontWeight: 'normal' }}>
-                    ({typeof f.last_test.timestamp === 'string'
-                      ? f.last_test.timestamp
-                      : new Date(f.last_test.timestamp > 1e11 ? f.last_test.timestamp : f.last_test.timestamp * 1000).toLocaleTimeString()})
+                    ({(() => {
+                      const ts = f.last_test.timestamp
+                      if (typeof ts === 'string') {
+                        const ms = Date.parse(ts)
+                        return Number.isFinite(ms)
+                          ? new Date(ms).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                          : ts
+                      }
+                      return new Date(ts > 1e11 ? ts : ts * 1000).toLocaleTimeString()
+                    })()})
                   </span>
                 </b>
               </li>

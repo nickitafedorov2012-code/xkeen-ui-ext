@@ -132,33 +132,33 @@ export default function Devices({ notify }: Props) {
       const zDev = zapretDevRes.status === 'fulfilled' ? zapretDevRes.value : { excluded_devices: [] }
       const gamingData = gamingRes.status === 'fulfilled' ? gamingRes.value : null
       const whitelistData = whitelistRes.status === 'fulfilled' ? whitelistRes.value : null
-      setDevices(d.devices)
-      setPolicies(p.policies)
-      setServers(s.servers)
-      setWhitelistProviders((s as any)?.whitelist_providers || [])
-      setRouting(r.assignments)
-      setDrMap(dr.routing)
-      setDevFailover(dr.device_failover_enabled)
-      setExcludedZapretDevices(new Set(zDev.excluded_devices || []))
+      setDevices(Array.isArray(d?.devices) ? d.devices : [])
+      setPolicies(Array.isArray(p?.policies) ? p.policies : [])
+      setServers(Array.isArray(s?.servers) ? s.servers : [])
+      setWhitelistProviders(Array.isArray((s as any)?.whitelist_providers) ? (s as any).whitelist_providers : [])
+      setRouting(Array.isArray(r?.assignments) ? r.assignments : [])
+      setDrMap(dr?.routing && typeof dr.routing === 'object' ? dr.routing : {})
+      setDevFailover(Boolean(dr?.device_failover_enabled))
+      setExcludedZapretDevices(new Set(Array.isArray(zDev?.excluded_devices) ? zDev.excluded_devices : []))
       if (gamingData) {
         const macs = new Set<string>()
         const isGamingActive = Boolean(gamingData.is_active ?? gamingData.config?.enabled ?? gamingData.enabled)
-        if (isGamingActive && gamingData.config?.devices) {
+        if (isGamingActive && Array.isArray(gamingData.config?.devices)) {
           for (const gd of gamingData.config.devices) {
-            if (gd.enabled) macs.add(gd.mac.toLowerCase())
+            if (gd?.enabled && gd.mac) macs.add(gd.mac.toLowerCase())
           }
         }
         setGamingDeviceMacs(macs)
       }
       const wlMacs = new Set<string>()
-      if (whitelistData && whitelistData.devices) {
+      if (whitelistData && Array.isArray(whitelistData.devices)) {
         for (const wd of whitelistData.devices) {
-          if (wd.enabled) wlMacs.add(wd.mac.toLowerCase())
+          if (wd?.enabled && wd.mac) wlMacs.add(wd.mac.toLowerCase())
         }
       }
-      if (d && d.devices) {
+      if (Array.isArray(d?.devices)) {
         for (const dev of d.devices) {
-          if ((dev as any).is_whitelist) wlMacs.add(dev.mac.toLowerCase())
+          if ((dev as any)?.is_whitelist && dev.mac) wlMacs.add(dev.mac.toLowerCase())
         }
       }
       setWhitelistDeviceMacs(wlMacs)
@@ -697,7 +697,7 @@ export default function Devices({ notify }: Props) {
           <table className="devices-table">
             <thead>
               <tr>
-                <th><input type="checkbox" disabled /></th>
+                <th><input type="checkbox" checked={false} readOnly disabled /></th>
                 <th>Device</th>
                 <th>IP</th>
                 <th>Policy</th>
@@ -733,13 +733,26 @@ export default function Devices({ notify }: Props) {
         <PoliciesMap notify={notify} />
       ) : (
         <div className="devices-table-wrap">
-          <table className="devices-table">
+          <table className="devices-table devices-main-table">
+            <colgroup>
+              <col style={{ width: '32px' }} />
+              <col />
+              <col style={{ width: '104px' }} />
+              <col style={{ width: '132px' }} />
+              <col style={{ width: '84px' }} />
+              <col style={{ width: '64px' }} />
+              <col style={{ width: '136px' }} />
+              <col style={{ width: '94px' }} />
+              <col style={{ width: '90px' }} />
+              <col style={{ width: '78px' }} />
+              <col style={{ width: '76px' }} />
+            </colgroup>
             <thead>
               <tr>
                 <th>
                   <input
                     type="checkbox"
-                    checked={allVisibleSelected}
+                    checked={Boolean(allVisibleSelected)}
                     onChange={(e) => toggleSelectAll(e.target.checked)}
                   />
                 </th>

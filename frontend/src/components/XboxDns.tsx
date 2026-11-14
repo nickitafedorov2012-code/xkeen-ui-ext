@@ -80,7 +80,8 @@ export default function XboxDns({ notify }: XboxDnsProps) {
     }
   }
 
-  const servers = status?.servers && status.servers.length > 0 ? status.servers : DEFAULT_SERVERS
+  const servers = Array.isArray(status?.servers) && status.servers.length > 0 ? status.servers : DEFAULT_SERVERS
+  const checkResultsList = Array.isArray(checkResults?.results) ? checkResults.results : []
 
   return (
     <div className="tab-pane xbox-dns-page" data-testid="xbox-dns-view">
@@ -202,10 +203,12 @@ export default function XboxDns({ notify }: XboxDnsProps) {
 
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 14, marginBottom: 20 }}>
         {servers.map((srv, idx) => {
-          const primaryIp = srv.ips[0] || ''
-          const secondaryIp = srv.ips[1] || ''
-          const ipv6 = srv.ipv6[0] || ''
-          const checkRes = checkResults?.results.find((r) => r.ip === primaryIp)
+          const ips = Array.isArray(srv?.ips) ? srv.ips : []
+          const ipv6List = Array.isArray(srv?.ipv6) ? srv.ipv6 : []
+          const primaryIp = ips[0] || ''
+          const secondaryIp = ips[1] || ''
+          const ipv6 = ipv6List[0] || ''
+          const checkRes = checkResultsList.find((r) => r?.ip === primaryIp)
           const testId = srv.is_recommended ? 'xbox-dns-primary-card' : 'xbox-dns-alt-card'
 
           return (
@@ -305,7 +308,7 @@ export default function XboxDns({ notify }: XboxDnsProps) {
                 >
                   {checkRes.reachable ? (
                     <span>
-                      ⚡ Задержка ответа: <b>{checkRes.latency_ms} мс</b> · Реверс-прокси: <code>{checkRes.resolved_ips[0] || '188.68.214.130'}</code>
+                      ⚡ Задержка ответа: <b>{checkRes.latency_ms ?? 0} мс</b> · Реверс-прокси: <code>{checkRes.resolved_ips?.[0] || '188.68.214.130'}</code>
                     </span>
                   ) : (
                     <span style={{ color: '#ef4444' }}>
@@ -316,7 +319,7 @@ export default function XboxDns({ notify }: XboxDnsProps) {
               )}
 
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                {(srv.supported_features || ['Xbox Live', 'Game Pass', 'Google AI Studio', 'Gemini']).map((tag) => (
+                {(Array.isArray(srv.supported_features) ? srv.supported_features : ['Xbox Live', 'Game Pass', 'Google AI Studio', 'Gemini']).map((tag) => (
                   <span key={tag} className="badge" style={{ fontSize: 11, background: 'rgba(255,255,255,0.05)', color: '#cbd5e1' }}>
                     {tag}
                   </span>

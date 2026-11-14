@@ -1,4 +1,4 @@
-/* ==========================================================================
+﻿/* ==========================================================================
    МОДАЛЬНЫЕ ОКНА (MODAL SYSTEM)
    ========================================================================== */
 .modal-backdrop {
@@ -112,7 +112,7 @@
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: all 0.18s ease;
+  transition: transform 0.18s ease, opacity 0.18s ease, background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
   user-select: none;
 }
 
@@ -201,7 +201,7 @@
   border-radius: 10px;
   padding: 12px 14px;
   cursor: pointer;
-  transition: all 0.18s ease;
+  transition: transform 0.18s ease, opacity 0.18s ease, background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
 }
 
 .preset-service-card:hover {
@@ -494,17 +494,81 @@
 /* ==========================================================================
    SHARE NODE & QR STYLES
    ========================================================================== */
+.update-version-card {
+  background: linear-gradient(135deg, rgba(30, 41, 59, 0.5) 0%, rgba(15, 23, 42, 0.6) 100%);
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+
+.update-version-badge {
+  font-size: 11px;
+  background: rgba(56, 189, 248, 0.18);
+  color: #38bdf8;
+  border-color: rgba(56, 189, 248, 0.4);
+}
+
+.update-version-badge.is-current {
+  background: rgba(56, 189, 248, 0.12);
+  border-color: rgba(56, 189, 248, 0.3);
+}
+
+.update-notes-card {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.update-notes-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+  font-size: 13.5px;
+  margin-bottom: 12px;
+  color: #38bdf8;
+}
+
+.update-note-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
 .share-node-card {
   max-width: 620px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .share-node-body {
   padding: 16px 20px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .share-node-info {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 14px;
   padding-bottom: 10px;
@@ -514,10 +578,9 @@
 .share-node-name {
   font-weight: 700;
   font-size: 14px;
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  flex: 1 1 160px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .share-node-grid {
@@ -694,7 +757,7 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
 .logs-pill:hover {
@@ -813,6 +876,135 @@
     padding: 12px;
     max-height: 92vh;
   }
+  .editor-card {
+    width: 96vw !important;
+    max-width: 96vw !important;
+    height: 90vh;
+    max-height: 90vh;
+    padding: 0 !important;
+  }
+  .editor-header {
+    flex-wrap: wrap;
+    padding: 10px 12px;
+    gap: 8px;
+  }
+  .editor-title-group {
+    flex: 1 1 100%;
+    min-width: 0;
+    gap: 8px;
+  }
+  .editor-select {
+    min-width: 0;
+    width: 100%;
+    max-width: 100%;
+  }
+  .editor-header-actions {
+    width: 100%;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .editor-search-input {
+    width: 140px;
+    max-width: 45vw;
+  }
+  .presets-card {
+    width: 96vw !important;
+    max-width: 96vw !important;
+    padding: 0 !important;
+  }
+  .presets-card-body {
+    padding: 12px 12px 0;
+  }
+  .presets-target-toggle {
+    flex-wrap: wrap;
+    gap: 8px;
+    width: 100%;
+  }
+  .presets-target-toggle .radio-label {
+    white-space: nowrap;
+  }
+  .presets-modal-footer {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+  .presets-footer-actions {
+    display: flex;
+    gap: 8px;
+    width: 100%;
+  }
+  .presets-footer-actions .btn {
+    flex: 1 1 auto;
+    min-width: 0;
+    justify-content: center;
+    white-space: normal;
+    text-align: center;
+  }
+  .update-version-card {
+  background: linear-gradient(135deg, rgba(30, 41, 59, 0.5) 0%, rgba(15, 23, 42, 0.6) 100%);
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+
+.update-version-badge {
+  font-size: 11px;
+  background: rgba(56, 189, 248, 0.18);
+  color: #38bdf8;
+  border-color: rgba(56, 189, 248, 0.4);
+}
+
+.update-version-badge.is-current {
+  background: rgba(56, 189, 248, 0.12);
+  border-color: rgba(56, 189, 248, 0.3);
+}
+
+.update-notes-card {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.update-notes-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+  font-size: 13.5px;
+  margin-bottom: 12px;
+  color: #38bdf8;
+}
+
+.update-note-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.share-node-card {
+    padding: 0 !important;
+    max-height: 92vh;
+  }
+  .share-node-body {
+    padding: 12px;
+  }
 }
 
 /* ==========================================================================
@@ -841,16 +1033,5 @@ button.delete-btn:focus-visible {
   outline: none !important;
   border-color: #38bdf8 !important;
   box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.25) !important;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
-  }
 }
 

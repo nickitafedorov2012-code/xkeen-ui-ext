@@ -278,6 +278,35 @@
   color: #475569;
 }
 
+[data-theme="light"] .simulator-card {
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  border-color: rgba(2, 132, 199, 0.28);
+  box-shadow: 0 2px 12px rgba(15, 23, 42, 0.06);
+}
+
+[data-theme="light"] .simulator-fast-pill {
+  background: rgba(2, 132, 199, 0.12);
+  color: #0369a1;
+  border-color: rgba(2, 132, 199, 0.32);
+}
+
+[data-theme="light"] .simulator-chip {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+  color: #0f172a;
+}
+
+[data-theme="light"] .simulator-chip:hover {
+  background: #e2e8f0;
+  border-color: #94a3b8;
+}
+
+[data-theme="light"] .simulator-chip.active {
+  background: #e0f2fe;
+  border-color: #0284c7;
+  color: #0369a1;
+}
+
 [data-theme="light"] .simulator-result {
   background: #f8fafc;
   border-color: #e2e8f0;

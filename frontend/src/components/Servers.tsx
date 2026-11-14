@@ -168,8 +168,8 @@ export default function Servers({ notify, status, refresh }: Props) {
         apiGet<{ servers: ServerInfo[] }>('servers'),
         apiGet<{ servers: string[] }>('ignore').catch(() => ({ servers: [] as string[] })),
       ])
-      setServers(data.servers)
-      setIgnored(new Set(ig.servers))
+      setServers(Array.isArray(data?.servers) ? data.servers : [])
+      setIgnored(new Set(Array.isArray(ig?.servers) ? ig.servers : []))
     } catch (e) {
       notify(e instanceof Error ? e.message : 'Ошибка загрузки серверов', true)
     } finally {
@@ -180,8 +180,9 @@ export default function Servers({ notify, status, refresh }: Props) {
   const pingAll = useCallback(async () => {
     setPinging(true)
     try {
-      const data = await apiPost<{ pings: Record<string, number> }>('servers/ping', {})
-      setServers((prev) => prev.map((s) => ({ ...s, ping_ms: data.pings[s.id] ?? s.ping_ms })))
+      const data = await apiPost<{ pings?: Record<string, number> }>('servers/ping', {})
+      const pingsMap = data?.pings && typeof data.pings === 'object' ? data.pings : {}
+      setServers((prev) => prev.map((s) => ({ ...s, ping_ms: pingsMap[s.id] ?? s.ping_ms })))
       const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
       setLastPingTime(nowStr)
       try {
@@ -204,7 +205,7 @@ export default function Servers({ notify, status, refresh }: Props) {
     const bgTimer = setInterval(() => {
       apiGet<{ servers: ServerInfo[] }>('servers')
         .then((data) => {
-          if (data?.servers) {
+          if (Array.isArray(data?.servers)) {
             setServers((prev) => {
               if (prev.length !== data.servers.length) {
                 return data.servers
@@ -535,9 +536,13 @@ export default function Servers({ notify, status, refresh }: Props) {
       let currentChain: string[] = []
       try {
         const st = await apiGet<StatusInfo>('status')
-        currentChain = st?.failover?.priority_chain ?? (st?.failover?.priority_server ? [st.failover.priority_server] : [])
+        currentChain = Array.isArray(st?.failover?.priority_chain)
+          ? st.failover.priority_chain
+          : (st?.failover?.priority_server ? [st.failover.priority_server] : [])
       } catch {
-        currentChain = status?.failover?.priority_chain ?? (status?.failover?.priority_server ? [status.failover.priority_server] : [])
+        currentChain = Array.isArray(status?.failover?.priority_chain)
+          ? status.failover.priority_chain
+          : (status?.failover?.priority_server ? [status.failover.priority_server] : [])
       }
       const filteredChain = currentChain.filter((id) => id !== serverId)
       const isAtStart = currentChain[0] === serverId
@@ -637,8 +642,8 @@ export default function Servers({ notify, status, refresh }: Props) {
     try {
       const data = await apiPost<{ fixed: number; names: string[] }>('servers/fix-names', {})
       notify(
-        data.fixed > 0
-          ? `Исправлено имён: ${data.fixed} — ${data.names.join('; ')}`
+        data?.fixed > 0
+          ? `Исправлено имён: ${data.fixed}${Array.isArray(data?.names) && data.names.length ? ` — ${data.names.join('; ')}` : ''}`
           : 'Битых (mojibake) имён не найдено',
       )
       load()

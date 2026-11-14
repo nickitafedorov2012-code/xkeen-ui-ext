@@ -134,7 +134,7 @@ export function ServerList({
                     </span>
                   )}
                   {(s.is_whitelist || status?.whitelist_servers?.includes(s.id)) && (
-                    <span className="badge" style={{ background: 'rgba(168, 85, 247, 0.2)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.4)', fontSize: 10 }}>
+                    <span className="badge" style={{ background: 'rgba(168, 85, 247, 0.2)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.4)', fontSize: 10, whiteSpace: 'nowrap', flexShrink: 0 }}>
                       🟣 Белый список
                     </span>
                   )}

@@ -88,9 +88,9 @@ export default function RulesViewer({ notify }: RulesViewerProps) {
     if (!search.trim()) return true
     const q = search.toLowerCase()
     return (
-      r.payload.toLowerCase().includes(q) ||
-      r.proxy.toLowerCase().includes(q) ||
-      r.type.toLowerCase().includes(q)
+      (r.payload || '').toLowerCase().includes(q) ||
+      (r.proxy || '').toLowerCase().includes(q) ||
+      (r.type || '').toLowerCase().includes(q)
     )
   })
 
@@ -106,16 +106,7 @@ export default function RulesViewer({ notify }: RulesViewerProps) {
       </div>
 
       {/* Интерактивный симулятор «Куда пойдёт?» */}
-      <section
-        className="card simulator-card"
-        style={{
-          background: 'linear-gradient(180deg, rgba(30, 41, 59, 0.4) 0%, rgba(15, 23, 42, 0.4) 100%)',
-          border: '1px solid rgba(56, 189, 248, 0.25)',
-          borderRadius: 12,
-          padding: '18px 20px',
-          boxShadow: '0 4px 20px rgba(0, 0, 0, 0.2)',
-        }}
-      >
+      <section className="card simulator-card">
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span style={{ fontSize: 22 }}>🎯</span>
@@ -126,17 +117,7 @@ export default function RulesViewer({ notify }: RulesViewerProps) {
               </p>
             </div>
           </div>
-          <span
-            style={{
-              fontSize: 11,
-              background: 'rgba(56, 189, 248, 0.15)',
-              color: '#38bdf8',
-              border: '1px solid rgba(56, 189, 248, 0.3)',
-              padding: '2px 8px',
-              borderRadius: 12,
-              fontWeight: 600,
-            }}
-          >
+          <span className="simulator-fast-pill">
             ⚡ Быстрая симуляция
           </span>
         </div>
@@ -148,17 +129,9 @@ export default function RulesViewer({ notify }: RulesViewerProps) {
             <button
               key={q.domain}
               type="button"
-              className="btn sm ghost"
+              className={`btn sm ghost simulator-chip ${testDomain === q.domain ? 'active' : ''}`}
               onClick={() => runDomainTest(q.domain)}
               disabled={testing}
-              style={{
-                fontSize: 11.5,
-                padding: '3px 10px',
-                borderRadius: 20,
-                background: testDomain === q.domain ? 'rgba(56, 189, 248, 0.2)' : 'rgba(255, 255, 255, 0.04)',
-                borderColor: testDomain === q.domain ? 'rgba(56, 189, 248, 0.5)' : 'rgba(255, 255, 255, 0.08)',
-                color: testDomain === q.domain ? '#38bdf8' : 'var(--text)',
-              }}
             >
               {q.label}
             </button>
@@ -287,14 +260,14 @@ export default function RulesViewer({ notify }: RulesViewerProps) {
                     fontSize: 12,
                     fontWeight: 600,
                     fontFamily: 'Consolas, monospace',
-                    color: testResult.matched_rule.includes('DIRECT') ? '#10b981' : testResult.matched_rule.includes('MATCH') ? '#f59e0b' : '#38bdf8',
+                    color: (testResult?.matched_rule || '').includes('DIRECT') ? '#10b981' : (testResult?.matched_rule || '').includes('MATCH') ? '#f59e0b' : '#38bdf8',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
                     whiteSpace: 'nowrap',
                   }}
-                  title={testResult.matched_rule}
+                  title={testResult?.matched_rule || '—'}
                 >
-                  {testResult.matched_rule}
+                  {testResult?.matched_rule || '—'}
                 </span>
               </div>
 

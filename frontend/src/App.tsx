@@ -199,7 +199,8 @@ export default function App() {
 
   const notify = useCallback((msg: string, error = false) => {
     const id = toastSeq++
-    setToasts((prev) => [...prev, { id, msg, error }])
+    const maxToasts = typeof window !== 'undefined' && window.innerWidth <= 640 ? 2 : 3
+    setToasts((prev) => [...prev, { id, msg, error }].slice(-maxToasts))
     setTimeout(() => {
       setToasts((prev) => prev.map((t) => (t.id === id ? { ...t, exiting: true } : t)))
       setTimeout(() => {

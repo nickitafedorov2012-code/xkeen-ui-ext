@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { PRESET_CATEGORIES, type PresetCategory, type PresetService } from '../constants/presets'
 import { apiGet, apiPost } from '../api'
 
@@ -21,6 +21,15 @@ export default function PresetCatalogModal({
   const [selectedServices, setSelectedServices] = useState<Set<string>>(new Set())
   const [targetType, setTargetType] = useState<'force' | 'direct'>('force')
   const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    if (!isOpen) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [isOpen, onClose])
 
   const currentCategory: PresetCategory =
     PRESET_CATEGORIES.find((c) => c.id === activeCat) || PRESET_CATEGORIES[0]
@@ -214,12 +223,12 @@ export default function PresetCatalogModal({
         </div>
 
         {/* Футер модалки */}
-        <div className="modal-footer">
+        <div className="modal-footer presets-modal-footer">
           <div className="presets-summary muted">
             Выбрано сервисов: <b>{selectedServices.size}</b> | Уникальных доменов: <b>{uniqueDomains.length}</b>
           </div>
 
-          <div style={{ display: 'flex', gap: '8px' }}>
+          <div className="presets-footer-actions">
             <button className="btn btn-secondary" onClick={onClose}>
               Отмена
             </button>

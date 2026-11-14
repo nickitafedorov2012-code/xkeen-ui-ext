@@ -86,22 +86,24 @@ export function IgnoreListModal({
                   <option value="__static__">Статические</option>
                 </select>
               )}
-              <button
-                type="button"
-                className="btn sm ghost"
-                onClick={selectAllFilteredIgnore}
-                title="Отметить все отфильтрованные серверы"
-              >
-                Выбрать все
-              </button>
-              <button
-                type="button"
-                className="btn sm ghost"
-                onClick={unselectAllFilteredIgnore}
-                title="Снять отметки с отфильтрованных"
-              >
-                Снять все
-              </button>
+              <div className="modal-filter-actions">
+                <button
+                  type="button"
+                  className="btn sm ghost"
+                  onClick={selectAllFilteredIgnore}
+                  title="Отметить все отфильтрованные серверы"
+                >
+                  Выбрать все
+                </button>
+                <button
+                  type="button"
+                  className="btn sm ghost"
+                  onClick={unselectAllFilteredIgnore}
+                  title="Снять отметки с отфильтрованных"
+                >
+                  Снять все
+                </button>
+              </div>
             </div>
 
             {/* Список серверов */}

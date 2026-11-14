@@ -1,4 +1,4 @@
-
+﻿
 /* сетки и тулбары */
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
 @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
@@ -105,7 +105,7 @@ select option, .select option, .editor-select option {
   padding: 3px 6px;
   border-radius: 6px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 .btn-icon-danger:hover {
   background: rgba(239, 68, 68, 0.15);
@@ -155,6 +155,11 @@ select option, .select option, .editor-select option {
 }
 
 /* модальное окно */
+.active-node-telemetry {
+  background: rgba(15, 23, 42, 0.55);
+  border: 1px solid rgba(56, 189, 248, 0.18);
+}
+
 .modal-overlay {
   position: fixed;
   inset: 0;
@@ -168,24 +173,33 @@ select option, .select option, .editor-select option {
   padding: 16px;
   animation: modal-fade-in 0.18s ease-out;
 }
-.modal { background: var(--card, #171a21); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; padding: 18px 20px; width: min(660px, 92vw); max-height: 86vh; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6); position: relative; }
+.modal { background: var(--card, #171a21); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px; padding: 18px 20px; width: min(720px, 94vw); max-height: 86vh; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6); position: relative; }
 .modal h2 { margin: 0; font-size: 17px; }
 .modal-filter-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
+.modal-filter-actions { display: inline-flex; align-items: center; gap: 6px; flex-wrap: nowrap; flex-shrink: 0; }
 .modal-list { overflow-y: auto; display: flex; flex-direction: column; gap: 4px; min-height: 60px; max-height: 48vh; padding-right: 4px; }
-.check-row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; cursor: pointer; transition: background 0.15s; }
+.check-row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; cursor: pointer; transition: background-color 0.15s; }
 .check-row:hover { background: rgba(255, 255, 255, 0.05); }
-.check-row .server-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.check-row .server-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .modal-actions {
   position: sticky;
   bottom: 0;
   background: var(--card, #171a21);
   display: flex;
   justify-content: flex-end;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
   padding: 12px 0 2px;
   margin-top: auto;
   z-index: 10;
+}
+.modal-actions .btn {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 .diff-added-badge {
   background: rgba(34, 197, 94, 0.18);
@@ -263,7 +277,7 @@ select option, .select option, .editor-select option {
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 10px 13px;
-  transition: all 0.18s ease;
+  transition: transform 0.18s ease, opacity 0.18s ease, background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -319,16 +333,18 @@ select option, .select option, .editor-select option {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  row-gap: 6px;
   gap: 8px;
   min-width: 0;
 }
 .server-card-badges {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   min-width: 0;
-  flex: 1;
-  overflow: hidden;
+  flex: 1 1 160px;
 }
 .server-card-badges .badge.protocol-badge {
   font-size: 10.5px;
@@ -341,7 +357,7 @@ select option, .select option, .editor-select option {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  max-width: 140px;
+  max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -351,7 +367,7 @@ select option, .select option, .editor-select option {
   background: rgba(255, 255, 255, 0.05);
   border: 1px solid rgba(255, 255, 255, 0.08);
   cursor: pointer;
-  flex-shrink: 1;
+  flex-shrink: 0;
 }
 .tag-provider-name {
   overflow: hidden;
@@ -464,7 +480,7 @@ select option, .select option, .editor-select option {
   border-radius: 6px;
   font-size: 12px;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: transform 0.15s, opacity 0.15s, background-color 0.15s, border-color 0.15s, color 0.15s;
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -484,7 +500,7 @@ select option, .select option, .editor-select option {
   background: var(--panel-2);
   border: 1px solid var(--border);
   border-radius: 8px;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 .server-compact-row:hover {
   border-color: rgba(255, 255, 255, 0.15);
@@ -556,7 +572,7 @@ select option, .select option, .editor-select option {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  transition: all 0.15s;
+  transition: transform 0.15s, opacity 0.15s, background-color 0.15s, border-color 0.15s, color 0.15s;
 }
 .btn-priority.is-priority {
   color: #eab308;
@@ -572,7 +588,7 @@ select option, .select option, .editor-select option {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  transition: all 0.15s;
+  transition: transform 0.15s, opacity 0.15s, background-color 0.15s, border-color 0.15s, color 0.15s;
 }
 .btn-whitelist.is-whitelist {
   color: #c084fc;
@@ -601,7 +617,7 @@ select option, .select option, .editor-select option {
   color: var(--text);
   font-size: 13px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   user-select: none;
 }
 .subscription-dropdown-btn:hover {
@@ -668,7 +684,8 @@ select option, .select option, .editor-select option {
   display: block;
   height: 100%;
   border-radius: 4px;
-  transition: width 0.35s ease, background-color 0.35s ease;
+  transform-origin: left center;
+  transition: transform 0.35s ease, background-color 0.35s ease;
 }
 .mini-progress-fill.fill-green { background: #22c55e; box-shadow: 0 0 6px rgba(34, 197, 94, 0.4); }
 .mini-progress-fill.fill-yellow { background: #eab308; box-shadow: 0 0 6px rgba(234, 179, 8, 0.4); }
@@ -734,7 +751,7 @@ select option, .select option, .editor-select option {
   font-size: 12.5px;
   background: rgba(255, 255, 255, 0.02);
   border: 1px solid rgba(255, 255, 255, 0.05);
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 .event-entry:hover {
   background: rgba(255, 255, 255, 0.05);
@@ -886,13 +903,27 @@ table.devices tr.me { background: rgba(79, 140, 255, 0.05); }
 .events li:last-child { border-bottom: none; }
 .ev-switch { color: var(--yellow); }
 .ev-time { color: var(--muted); margin-right: 6px; font-family: Consolas, monospace; }
-.toasts { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 50; }
+.toasts { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 6px; z-index: 50; max-width: min(400px, calc(100vw - 24px)); pointer-events: none; }
 .toast {
   background: var(--panel-2); border: 1px solid var(--green); color: var(--text);
-  border-radius: 10px; padding: 10px 16px; font-size: 13px; max-width: 420px;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
-  display: flex; align-items: center; gap: 10px;
+  border-radius: 10px; padding: 8px 13px; font-size: 12.5px; line-height: 1.35; max-width: 400px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.38);
+  display: flex; align-items: center; gap: 8px;
   animation: toast-in 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: auto;
+}
+@media (max-width: 640px) {
+  .toasts {
+    right: 10px;
+    left: 10px;
+    bottom: 10px;
+    max-width: none;
+  }
+  .toast {
+    max-width: none;
+    padding: 7px 11px;
+    font-size: 12px;
+  }
 }
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(12px) scale(0.96); }
@@ -938,19 +969,36 @@ table.devices tr.me { background: rgba(79, 140, 255, 0.05); }
 
 /* --- Индикатор обновления панели --- */
 .upd-glow {
-  animation: upd-glow-pulse 2s ease-in-out infinite;
+  position: relative;
+  border-color: #38bdf8;
 }
-@keyframes upd-glow-pulse {
-  0%, 100% { box-shadow: 0 0 4px 1px rgba(56, 189, 248, .35); border-color: #38bdf8; }
-  50% { box-shadow: 0 0 14px 4px rgba(56, 189, 248, .75); border-color: #38bdf8; }
+.upd-glow::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: 0 0 12px 3px rgba(56, 189, 248, 0.65);
+  animation: upd-opacity-pulse 2s ease-in-out infinite;
+  will-change: opacity;
+}
+@keyframes upd-opacity-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
 }
 .upd-dot {
+  position: relative;
   width: 9px; height: 9px; border-radius: 50%; background: #38bdf8; display: inline-block;
-  animation: upd-dot-pulse 2s ease-in-out infinite;
 }
-@keyframes upd-dot-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(56, 189, 248, .6); }
-  50% { box-shadow: 0 0 0 6px rgba(56, 189, 248, 0); }
+.upd-dot::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  box-shadow: 0 0 0 5px rgba(56, 189, 248, 0.55);
+  animation: upd-opacity-pulse 2s ease-in-out infinite;
+  will-change: opacity;
 }
 
 /* --- Современный тумблер-переключатель (Switch) --- */
@@ -974,7 +1022,7 @@ table.devices tr.me { background: rgba(79, 140, 255, 0.05); }
   inset: 0;
   background-color: #242b3a;
   border: 1px solid var(--border);
-  transition: all 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.22s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.22s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.22s cubic-bezier(0.4, 0, 0.2, 1), color 0.22s cubic-bezier(0.4, 0, 0.2, 1);
   border-radius: 20px;
 }
 .switch .slider:before {
@@ -985,7 +1033,7 @@ table.devices tr.me { background: rgba(79, 140, 255, 0.05); }
   left: 2px;
   bottom: 2px;
   background-color: #7b859b;
-  transition: all 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.22s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.22s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.22s cubic-bezier(0.4, 0, 0.2, 1), color 0.22s cubic-bezier(0.4, 0, 0.2, 1);
   border-radius: 50%;
 }
 .switch:hover .slider:before {
@@ -1019,7 +1067,7 @@ table.devices tr.me { background: rgba(79, 140, 255, 0.05); }
   border: 1px solid rgba(168, 85, 247, 0.3);
   white-space: nowrap;
   cursor: pointer;
-  transition: all 0.18s ease;
+  transition: transform 0.18s ease, opacity 0.18s ease, background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease;
   user-select: none;
 }
 .tag-provider:hover {

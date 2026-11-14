@@ -65,10 +65,13 @@ export default function FlowRepairModal({
 
   // REPAIR-01: Repair is executed strictly on explicit user button click, never automatically on open.
   useEffect(() => {
-    if (isOpen) {
-      // Intentionally empty: do not auto-invoke handleRepair()
+    if (!isOpen) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
     }
-  }, [isOpen])
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [isOpen, onClose])
 
   const handleCopyLink = async () => {
     const ok = await copyToClipboard(cleanUrl)
@@ -115,9 +118,11 @@ export default function FlowRepairModal({
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
+                flexWrap: 'wrap',
+                gap: 10,
               }}
             >
-              <div>
+              <div style={{ minWidth: 0, flex: '1 1 200px' }}>
                 <div style={{ fontWeight: 600, color: '#3b82f6', fontSize: 13 }}>
                   ⏳ Настройка маршрута и сброс сокетов…
                 </div>
@@ -136,9 +141,11 @@ export default function FlowRepairModal({
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
+                flexWrap: 'wrap',
+                gap: 10,
               }}
             >
-              <div>
+              <div style={{ minWidth: 0, flex: '1 1 200px' }}>
                 <div style={{ fontWeight: 600, color: '#ef4444', fontSize: 13 }}>
                   ⚠️ Не удалось подтвердить маршрут Flow
                 </div>
@@ -166,9 +173,11 @@ export default function FlowRepairModal({
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
+                flexWrap: 'wrap',
+                gap: 10,
               }}
             >
-              <div>
+              <div style={{ minWidth: 0, flex: '1 1 200px' }}>
                 <div style={{ fontWeight: 600, color: 'var(--text)', fontSize: 13 }}>
                   Маршрутизация Google Flow
                 </div>
@@ -182,6 +191,7 @@ export default function FlowRepairModal({
                 onClick={handleRepair}
                 disabled={repairing}
                 data-testid="flow-repair-btn"
+                style={{ whiteSpace: 'nowrap', flexShrink: 0 }}
                 title="Сбросить сокеты и настроить маршрут на роутере"
               >
                 🔄 Сбросить сокеты
@@ -197,9 +207,11 @@ export default function FlowRepairModal({
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
+                flexWrap: 'wrap',
+                gap: 10,
               }}
             >
-              <div>
+              <div style={{ minWidth: 0, flex: '1 1 200px' }}>
                 <div style={{ fontWeight: 600, color: '#22c55e', fontSize: 13 }}>
                   {isVerified ? '✓ Маршрут подтвержден и активен' : '✓ Сокеты сброшены'}
                 </div>
@@ -287,15 +299,16 @@ export default function FlowRepairModal({
           </div>
         </div>
 
-        <div className="modal-footer" style={{ justifyContent: 'space-between', marginTop: 16 }}>
+        <div className="modal-footer flow-repair-footer" style={{ justifyContent: 'space-between', marginTop: 16, flexWrap: 'wrap', gap: 8 }}>
           <button
             type="button"
             className="btn ghost"
+            style={{ whiteSpace: 'nowrap' }}
             onClick={handleCopyLink}
           >
             {copiedLink ? '✓ Ссылка скопирована!' : '🔗 Скопировать ссылку'}
           </button>
-          <div style={{ display: 'flex', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
             <button type="button" className="btn" onClick={onClose}>
               Закрыть
             </button>
@@ -304,7 +317,7 @@ export default function FlowRepairModal({
               target="_blank"
               rel="noreferrer"
               className="btn primary"
-              style={{ textDecoration: 'none' }}
+              style={{ textDecoration: 'none', whiteSpace: 'nowrap' }}
               onClick={onClose}
             >
               🚀 Открыть Google Flow ↗

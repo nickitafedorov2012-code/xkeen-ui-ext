@@ -322,7 +322,7 @@ export default function SelfDiagnosticsCard({ notify, onSwitchTab, refresh }: Pr
               Движок: <b style={{ color: 'var(--text)' }}>{diag.components.zapret.version || 'v1.0.5'}</b>
             </div>
             <div style={{ fontSize: 11, marginTop: 2 }} className="muted">
-              Модули: <b>{diag.components.zapret.binaries_found.join(', ') || 'nfqws2'}</b>
+              Модули: <b>{(Array.isArray(diag?.components?.zapret?.binaries_found) ? diag.components.zapret.binaries_found : []).join(', ') || 'nfqws2'}</b>
             </div>
           </div>
 

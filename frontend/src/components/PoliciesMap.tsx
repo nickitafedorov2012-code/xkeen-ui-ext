@@ -45,9 +45,12 @@ export default function PoliciesMap({ notify }: PoliciesMapProps) {
     setLoading(true)
     try {
       const res = await apiGet<PoliciesMapResponse>('policies/map')
-      setData(res)
-      if (res.devices.length > 0 && !selectedDeviceIp) {
-        setSelectedDeviceIp(res.devices[0].ip)
+      const safeDevices = Array.isArray(res?.devices) ? res.devices : []
+      const safePolicies = Array.isArray(res?.policies) ? res.policies : []
+      const safeServers = Array.isArray(res?.servers) ? res.servers : []
+      setData({ devices: safeDevices, policies: safePolicies, servers: safeServers })
+      if (safeDevices.length > 0 && !selectedDeviceIp) {
+        setSelectedDeviceIp(safeDevices[0].ip)
       }
     } catch (e: any) {
       notify('Ошибка загрузки карты политик: ' + e.message, true)
@@ -60,8 +63,11 @@ export default function PoliciesMap({ notify }: PoliciesMapProps) {
     loadData()
   }, [])
 
+  const safeDevices = Array.isArray(data?.devices) ? data.devices : []
+  const safePolicies = Array.isArray(data?.policies) ? data.policies : []
+
   // UI-04: Всегда брать актуальный объект устройства из свежих данных data.devices по IP
-  const selectedDevice = data?.devices.find((d) => d.ip === selectedDeviceIp) || data?.devices[0] || null
+  const selectedDevice = safeDevices.find((d) => d.ip === selectedDeviceIp) || safeDevices[0] || null
 
   if (loading || !data) {
     return <div className="card loading-placeholder">⏳ Построение карты политик роутера…</div>
@@ -87,11 +93,11 @@ export default function PoliciesMap({ notify }: PoliciesMapProps) {
         {/* Колонка 1: Устройства */}
         <div className="map-column">
           <div className="map-column-header">
-            <h4>📱 Устройства ({data.devices.length})</h4>
+            <h4>📱 Устройства ({safeDevices.length})</h4>
             <span className="muted">Кликните для выбора</span>
           </div>
           <div className="map-nodes-list">
-            {data.devices.map((d) => {
+            {safeDevices.map((d) => {
               const isSelected = selectedDevice?.ip === d.ip
               return (
                 <div
@@ -118,11 +124,11 @@ export default function PoliciesMap({ notify }: PoliciesMapProps) {
         {/* Колонка 2: Политики Keenetic */}
         <div className="map-column">
           <div className="map-column-header">
-            <h4>🛡️ Политики KeeneticOS ({data.policies.length})</h4>
+            <h4>🛡️ Политики KeeneticOS ({safePolicies.length})</h4>
             <span className="muted">Шлюзы провайдеров</span>
           </div>
           <div className="map-nodes-list">
-            {data.policies.map((p) => {
+            {safePolicies.map((p) => {
               const isLinked = selectedDevice?.policy_id === p.id
               return (
                 <div

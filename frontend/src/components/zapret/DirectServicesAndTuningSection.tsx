@@ -39,7 +39,7 @@ export function DirectServicesSection({
           </div>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 14 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))', gap: 14 }}>
           {/* 1. YouTube Direct */}
           {renderStrategyCard(
             'hybrid_youtube',
@@ -254,7 +254,7 @@ export function DpiTuningSection({
           })()}
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: 14 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))', gap: 14 }}>
           {/* 1. YouTube Turbo */}
           {renderStrategyCard(
             'youtube_turbo',

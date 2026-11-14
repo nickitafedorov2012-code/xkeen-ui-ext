@@ -122,7 +122,7 @@ export function ZapretMainCard({
                     border: `1px solid ${isRunning ? 'rgba(34, 197, 94, 0.3)' : 'var(--border)'}`,
                   }}
                 >
-                  {isRunning ? `🟢 Работает: ${activeEngine === 'v2' ? 'Zapret 2.0' : 'Zapret 1.x'} (PID: ${status?.pid})` : isInstalled ? '⚪ Выключен' : '🔴 Не установлен'}
+                  {isRunning ? `🟢 Работает: ${activeEngine === 'v2' ? 'Zapret 2.0' : 'Zapret 1.x'}${status?.pid ? ` (PID: ${status.pid})` : ''}` : isInstalled ? '⚪ Выключен' : '🔴 Не установлен'}
                 </span>
               </div>
               <div className="muted small" style={{ marginTop: 4 }}>
@@ -257,7 +257,7 @@ export function ZapretMainCard({
             }}
           >
             <div style={{ fontSize: 12, color: '#eab308' }}>
-              ⚠️ Служба Zapret активна (PID: {status?.pid}), но перехват Netfilter отключен. Трафик не попадает в nfqws.
+              ⚠️ Служба Zapret активна{status?.pid ? ` (PID: ${status.pid})` : ''}, но перехват Netfilter отключен. Трафик не попадает в nfqws.
             </div>
             <button
               type="button"
@@ -531,13 +531,13 @@ export function ZapretMainCard({
               <span
                 className="badge"
                 style={{
-                  background: testResult.youtube.ok ? 'rgba(34, 197, 94, 0.2)' : testResult.youtube.proxy_ok ? 'rgba(56, 189, 248, 0.2)' : 'rgba(239, 68, 68, 0.2)',
-                  color: testResult.youtube.ok ? '#22c55e' : testResult.youtube.proxy_ok ? '#38bdf8' : '#ef4444',
+                  background: testResult?.youtube?.ok ? 'rgba(34, 197, 94, 0.2)' : testResult?.youtube?.proxy_ok ? 'rgba(56, 189, 248, 0.2)' : 'rgba(239, 68, 68, 0.2)',
+                  color: testResult?.youtube?.ok ? '#22c55e' : testResult?.youtube?.proxy_ok ? '#38bdf8' : '#ef4444',
                 }}
               >
-                {testResult.youtube.ok
-                  ? `🟢 Прямой Zapret: HTTP ${testResult.youtube.code} (${Math.round(testResult.youtube.time_secs * 1000)} мс)`
-                  : testResult.youtube.proxy_ok
+                {testResult?.youtube?.ok
+                  ? `🟢 Прямой Zapret: HTTP ${testResult.youtube.code ?? 200} (${Math.round((testResult.youtube.time_secs ?? 0) * 1000)} мс)`
+                  : testResult?.youtube?.proxy_ok
                     ? `🔵 Через прокси: HTTP ${testResult.youtube.proxy_code || 200}`
                     : '🔴 Заблокирован ТСПУ'}
               </span>
@@ -548,13 +548,13 @@ export function ZapretMainCard({
               <span
                 className="badge"
                 style={{
-                  background: testResult.discord.ok ? 'rgba(34, 197, 94, 0.2)' : testResult.discord.proxy_ok ? 'rgba(56, 189, 248, 0.2)' : 'rgba(239, 68, 68, 0.2)',
-                  color: testResult.discord.ok ? '#22c55e' : testResult.discord.proxy_ok ? '#38bdf8' : '#ef4444',
+                  background: testResult?.discord?.ok ? 'rgba(34, 197, 94, 0.2)' : testResult?.discord?.proxy_ok ? 'rgba(56, 189, 248, 0.2)' : 'rgba(239, 68, 68, 0.2)',
+                  color: testResult?.discord?.ok ? '#22c55e' : testResult?.discord?.proxy_ok ? '#38bdf8' : '#ef4444',
                 }}
               >
-                {testResult.discord.ok
-                  ? `🟢 Прямой: HTTP ${testResult.discord.code} (${Math.round(testResult.discord.time_secs * 1000)} мс)`
-                  : testResult.discord.proxy_ok
+                {testResult?.discord?.ok
+                  ? `🟢 Прямой: HTTP ${testResult.discord.code ?? 200} (${Math.round((testResult.discord.time_secs ?? 0) * 1000)} мс)`
+                  : testResult?.discord?.proxy_ok
                     ? `🔵 Через прокси: HTTP ${testResult.discord.proxy_code || 200}`
                     : '🔴 Заблокирован'}
               </span>

@@ -298,8 +298,8 @@ export default function Settings({ notify, status, refresh }: Props) {
     const provInterval = setInterval(fetchProviders, 15000)
     apiGet<{ direct: string[]; force: string[]; auto_cdns?: string[]; revision?: string }>('domains')
       .then((d) => {
-        const dStr = d.direct.join('\n')
-        const fStr = d.force.join('\n')
+        const dStr = (Array.isArray(d?.direct) ? d.direct : []).join('\n')
+        const fStr = (Array.isArray(d?.force) ? d.force : []).join('\n')
         setDirectDomains(dStr)
         setForceDomains(fStr)
         setSavedDirectDomains(dStr)
@@ -782,9 +782,9 @@ export default function Settings({ notify, status, refresh }: Props) {
         telegram_chat_id: cleanNotifChatId || undefined,
         webhook_url: webhookUrl.trim() || undefined,
       })
-      const results = res.results || []
-      const hasError = results.some((r) => r.includes('❌'))
-      const summary = results.join('\n') || res.message || 'Тестовое оповещение успешно отправлено'
+      const results = Array.isArray(res?.results) ? res.results : []
+      const hasError = results.some((r) => String(r).includes('❌'))
+      const summary = results.join('\n') || res?.message || 'Тестовое оповещение успешно отправлено'
       notify(summary, hasError)
     } catch (err) {
       notify(err instanceof Error ? err.message : 'Ошибка отправки тестового сообщения', true)

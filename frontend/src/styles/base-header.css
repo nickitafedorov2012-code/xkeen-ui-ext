@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   --bg: #0f1115;
   --panel: #161a22;
   --panel-2: #1c2130;
@@ -115,7 +115,7 @@ html, body {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s cubic-bezier(0.4, 0, 0.2, 1), background-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s cubic-bezier(0.4, 0, 0.2, 1);
   flex-shrink: 0;
 }
 
@@ -128,7 +128,7 @@ html, body {
   width: 26px;
   height: 26px;
   flex-shrink: 0;
-  transition: all 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), border-color 0.35s cubic-bezier(0.34, 1.56, 0.64, 1), color 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
   filter: drop-shadow(0 0 6px rgba(0, 211, 242, 0.35));
 }
 
@@ -172,7 +172,7 @@ html, body {
   overflow: visible;
   user-select: none;
   cursor: pointer;
-  transition: all 0.25s ease;
+  transition: transform 0.25s ease, opacity 0.25s ease, background-color 0.25s ease, border-color 0.25s ease, color 0.25s ease;
 }
 
 .status-badge-running {
@@ -548,7 +548,7 @@ html, body {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   padding: 0;
   line-height: 1;
 }
@@ -638,7 +638,7 @@ html, body {
   align-items: center;
   gap: 5px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   font-size: 12.5px;
   white-space: nowrap;
   box-sizing: border-box;
@@ -663,11 +663,21 @@ html, body {
 
 .header-pill-btn.header-pill-update,
 .header-pill-btn.header-pill-update-blue {
+  position: relative;
   border-color: rgba(56, 189, 248, 0.7);
   background: rgba(56, 189, 248, 0.12);
-  box-shadow: 0 0 10px rgba(56, 189, 248, 0.3), inset 0 0 5px rgba(56, 189, 248, 0.08);
-  animation: pill-blue-pulse 2.2s infinite ease-in-out;
   cursor: pointer;
+}
+.header-pill-btn.header-pill-update::after,
+.header-pill-btn.header-pill-update-blue::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: 0 0 14px rgba(56, 189, 248, 0.45), inset 0 0 6px rgba(56, 189, 248, 0.14);
+  animation: pill-glow-opacity 2.2s infinite ease-in-out;
+  will-change: opacity;
 }
 
 .header-pill-btn.header-pill-update:hover,
@@ -689,11 +699,20 @@ html, body {
 
 /* Зеленая индикация обновления (для ядра Mihomo и Запрета) */
 .header-pill-btn.header-pill-update-green {
+  position: relative;
   border-color: rgba(34, 197, 94, 0.7);
   background: rgba(34, 197, 94, 0.12);
-  box-shadow: 0 0 10px rgba(34, 197, 94, 0.3), inset 0 0 5px rgba(34, 197, 94, 0.08);
-  animation: pill-green-pulse 2.2s infinite ease-in-out;
   cursor: pointer;
+}
+.header-pill-btn.header-pill-update-green::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: 0 0 14px rgba(34, 197, 94, 0.45), inset 0 0 6px rgba(34, 197, 94, 0.14);
+  animation: pill-glow-opacity 2.2s infinite ease-in-out;
+  will-change: opacity;
 }
 
 .header-pill-btn.header-pill-update-green:hover {
@@ -712,11 +731,20 @@ html, body {
 
 /* Красная индикация (сохранена для ошибок / предупреждений) */
 .header-pill-btn.header-pill-update-red {
+  position: relative;
   border-color: rgba(239, 68, 68, 0.7);
   background: rgba(239, 68, 68, 0.12);
-  box-shadow: 0 0 10px rgba(239, 68, 68, 0.3), inset 0 0 5px rgba(239, 68, 68, 0.08);
-  animation: pill-red-pulse 2.2s infinite ease-in-out;
   cursor: pointer;
+}
+.header-pill-btn.header-pill-update-red::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: 0 0 14px rgba(239, 68, 68, 0.45), inset 0 0 6px rgba(239, 68, 68, 0.14);
+  animation: pill-glow-opacity 2.2s infinite ease-in-out;
+  will-change: opacity;
 }
 
 .header-pill-btn.header-pill-update-red:hover {
@@ -788,36 +816,12 @@ html, body {
   animation: badge-bounce 2.2s infinite ease-in-out;
 }
 
-@keyframes pill-blue-pulse {
+@keyframes pill-glow-opacity {
   0%, 100% {
-    border-color: rgba(56, 189, 248, 0.45);
-    box-shadow: 0 0 8px rgba(56, 189, 248, 0.2), inset 0 0 4px rgba(56, 189, 248, 0.05);
+    opacity: 0.35;
   }
   50% {
-    border-color: #38bdf8;
-    box-shadow: 0 0 16px rgba(56, 189, 248, 0.55), inset 0 0 8px rgba(56, 189, 248, 0.18);
-  }
-}
-
-@keyframes pill-green-pulse {
-  0%, 100% {
-    border-color: rgba(34, 197, 94, 0.45);
-    box-shadow: 0 0 8px rgba(34, 197, 94, 0.2), inset 0 0 4px rgba(34, 197, 94, 0.05);
-  }
-  50% {
-    border-color: #22c55e;
-    box-shadow: 0 0 16px rgba(34, 197, 94, 0.55), inset 0 0 8px rgba(34, 197, 94, 0.18);
-  }
-}
-
-@keyframes pill-red-pulse {
-  0%, 100% {
-    border-color: rgba(239, 68, 68, 0.45);
-    box-shadow: 0 0 8px rgba(239, 68, 68, 0.2), inset 0 0 4px rgba(239, 68, 68, 0.05);
-  }
-  50% {
-    border-color: #ef4444;
-    box-shadow: 0 0 16px rgba(239, 68, 68, 0.55), inset 0 0 8px rgba(239, 68, 68, 0.18);
+    opacity: 1;
   }
 }
 

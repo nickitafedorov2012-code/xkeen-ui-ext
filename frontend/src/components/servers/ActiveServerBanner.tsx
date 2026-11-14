@@ -218,8 +218,6 @@ export function ActiveServerBanner({
               justifyContent: 'space-between',
               gap: 12,
               padding: '6px 12px',
-              background: 'rgba(15, 23, 42, 0.55)',
-              border: '1px solid rgba(56, 189, 248, 0.18)',
               borderRadius: 8,
               marginTop: 8,
               marginBottom: 4,
@@ -238,7 +236,7 @@ export function ActiveServerBanner({
 
               return (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
-                  <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 600 }}>Live-трафик:</span>
+                  <span className="active-node-telemetry-label" style={{ fontSize: 11, color: 'var(--muted)', fontWeight: 600 }}>Live-трафик:</span>
                   <span style={{ color: '#38bdf8', fontWeight: 700, fontFamily: 'Consolas, monospace' }}>
                     ↓ {formatSpeed(downSpeed)}
                   </span>

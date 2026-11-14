@@ -157,7 +157,8 @@ export default function TaskManager({ notify }: TaskManagerProps) {
   }, [snapshot])
 
   // Форматирование RSS памяти
-  const formatRss = (kb: number) => {
+  const formatRss = (kb?: number | null) => {
+    if (kb == null || !Number.isFinite(kb)) return '—'
     if (kb >= 1024 * 1024) {
       return `${(kb / (1024 * 1024)).toFixed(1)} ГБ`
     }
@@ -168,7 +169,8 @@ export default function TaskManager({ notify }: TaskManagerProps) {
   }
 
   // Форматирование аптайма
-  const formatUptime = (sec: number) => {
+  const formatUptime = (sec?: number | null) => {
+    if (sec == null || !Number.isFinite(sec)) return '—'
     const days = Math.floor(sec / 86400)
     const hours = Math.floor((sec % 86400) / 3600)
     const minutes = Math.floor((sec % 3600) / 60)

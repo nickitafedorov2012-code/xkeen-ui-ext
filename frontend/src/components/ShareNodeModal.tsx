@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import type { ServerInfo } from '../types'
 import { exportServerToLink } from '../utils/nodeParser'
 import { generateQrSvg } from '../utils/qrCode'
@@ -18,6 +18,15 @@ export default function ShareNodeModal({
   notify,
 }: ShareNodeModalProps) {
   const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    if (!isOpen || !server) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [isOpen, server, onClose])
 
   // Базовая генерация ссылки подключения
   const defaultLink = useMemo(() => {

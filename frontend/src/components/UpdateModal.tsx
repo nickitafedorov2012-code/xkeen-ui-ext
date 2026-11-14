@@ -144,34 +144,20 @@ export default function UpdateModal({
         </div>
 
         {/* Карточка текущей версии */}
-        <div
-          style={{
-            background: 'linear-gradient(135deg, rgba(30, 41, 59, 0.5) 0%, rgba(15, 23, 42, 0.6) 100%)',
-            border: '1px solid rgba(56, 189, 248, 0.2)',
-            borderRadius: 10,
-            padding: '14px 16px',
-            marginBottom: 16,
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            flexWrap: 'wrap',
-            gap: 12,
-            boxShadow: '0 4px 16px rgba(0, 0, 0, 0.2)',
-          }}
-        >
+        <div className="update-version-card">
           <div>
             <div className="muted small" style={{ marginBottom: 4 }}>Текущая версия панели на роутере</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               <span className="upd-dot" style={{ background: '#38bdf8', boxShadow: '0 0 8px #38bdf8' }} />
-              <span style={{ fontWeight: 700, fontSize: 16, color: '#f8fafc' }}>
+              <span style={{ fontWeight: 700, fontSize: 16, color: 'var(--text-bright)' }}>
                 {curVer}
               </span>
               {hasUpdate ? (
-                <span className="badge" style={{ fontSize: 11, background: 'rgba(56, 189, 248, 0.18)', color: '#38bdf8', borderColor: 'rgba(56, 189, 248, 0.4)' }}>
+                <span className="badge update-version-badge">
                   ★ Доступна {latVer}
                 </span>
               ) : (
-                <span className="badge" style={{ fontSize: 11, background: 'rgba(56, 189, 248, 0.12)', color: '#38bdf8', borderColor: 'rgba(56, 189, 248, 0.3)' }}>
+                <span className="badge update-version-badge is-current">
                   ✓ Актуальная версия
                 </span>
               )}
@@ -291,15 +277,8 @@ export default function UpdateModal({
           )}
 
           {notesList.length > 0 && (
-            <div
-              style={{
-                background: 'rgba(0, 0, 0, 0.25)',
-                border: '1px solid var(--border)',
-                borderRadius: 10,
-                padding: '14px 16px',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontWeight: 700, fontSize: 13.5, marginBottom: 12, color: '#38bdf8' }}>
+            <div className="update-notes-card">
+              <div className="update-notes-title">
                 <span>✨</span>
                 <span>Что нового в {hasUpdate ? latVer : curVer}:</span>
               </div>
@@ -309,18 +288,7 @@ export default function UpdateModal({
                   return (
                     <div
                       key={i}
-                      style={{
-                        display: 'flex',
-                        alignItems: 'flex-start',
-                        gap: 10,
-                        background: 'rgba(255, 255, 255, 0.025)',
-                        border: '1px solid rgba(255, 255, 255, 0.06)',
-                        borderRadius: 8,
-                        padding: '8px 12px',
-                        fontSize: 13,
-                        lineHeight: 1.5,
-                        color: 'var(--text)',
-                      }}
+                      className="update-note-item"
                     >
                       <span style={{ color: '#38bdf8', fontSize: 14, flexShrink: 0, marginTop: 1 }}>•</span>
                       <div style={{ flex: 1 }}>

@@ -339,16 +339,16 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
         apiGet<{ devices: Array<{ ip: string; name: string }> }>('devices'),
         apiGet<{ direct: string[]; force: string[] }>('domains'),
       ])
-      if (devRes.status === 'fulfilled' && devRes.value.devices) {
+      if (devRes.status === 'fulfilled' && Array.isArray(devRes.value?.devices)) {
         const map: Record<string, string> = {}
         for (const d of devRes.value.devices) {
-          if (d.ip && d.name) map[d.ip] = d.name
+          if (d?.ip && d?.name) map[d.ip] = d.name
         }
         setDeviceNames(map)
       }
       if (domRes.status === 'fulfilled' && domRes.value) {
-        if (domRes.value.force) setForceDomains(domRes.value.force.map((d) => d.toLowerCase()))
-        if (domRes.value.direct) setDirectDomains(domRes.value.direct.map((d) => d.toLowerCase()))
+        if (Array.isArray(domRes.value.force)) setForceDomains(domRes.value.force.map((d) => String(d).toLowerCase()))
+        if (Array.isArray(domRes.value.direct)) setDirectDomains(domRes.value.direct.map((d) => String(d).toLowerCase()))
       }
     } catch {
       // Игнорируем ошибки фоновой загрузки доп. данных
@@ -366,10 +366,10 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
       const res = await apiGet<ConnectionsResponse>('connections')
       if (!activeRef.current) return
 
-      const live = res.connections || []
+      const live = Array.isArray(res?.connections) ? res.connections : []
       setConnections(live)
-      setDownloadTotal(res.downloadTotal || 0)
-      setUploadTotal(res.uploadTotal || 0)
+      setDownloadTotal(res?.downloadTotal || 0)
+      setUploadTotal(res?.uploadTotal || 0)
 
       // Вычисляем только что закрывшиеся соединения
       const currentIds = new Set(live.map((c) => c.id))
@@ -595,8 +595,10 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
   // Фильтрация по табам и поиску
   const filtered = useMemo(() => {
     return allConnections.filter((c) => {
+      if (!c) return false
       // Фильтр по типу таба
-      const isProxy = c.chains && c.chains.length > 0 && c.chains[0].toUpperCase() !== 'DIRECT'
+      const chains = Array.isArray(c.chains) ? c.chains : []
+      const isProxy = chains.length > 0 && String(chains[0] || '').toUpperCase() !== 'DIRECT'
       const isDirect = !isProxy
 
       if (filterTab === 'active' && c.isClosed) return false
@@ -607,12 +609,12 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
       // Поиск
       if (!search.trim()) return true
       const q = search.toLowerCase()
-      const host = (c.metadata.host || '').toLowerCase()
-      const srcIp = (c.metadata.sourceIP || '').toLowerCase()
-      const dstIp = (c.metadata.destinationIP || '').toLowerCase()
-      const devName = (deviceNames[c.metadata.sourceIP] || '').toLowerCase()
+      const host = (c.metadata?.host || '').toLowerCase()
+      const srcIp = (c.metadata?.sourceIP || '').toLowerCase()
+      const dstIp = (c.metadata?.destinationIP || '').toLowerCase()
+      const devName = (deviceNames[c.metadata?.sourceIP || ''] || '').toLowerCase()
       const rule = (c.rule || '').toLowerCase()
-      const chainStr = (c.chains || []).join(' ').toLowerCase()
+      const chainStr = chains.join(' ').toLowerCase()
 
       return (
         host.includes(q) ||
@@ -962,20 +964,22 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
                 <table className="connections-table" style={{ fontSize: 12 }}>
                   <tbody>
                     {conns.map((c) => {
-                      const host = c.metadata.host || c.metadata.destinationIP || 'Неизвестно'
-                      const isProxy = c.chains && c.chains.length > 0 && c.chains[0].toUpperCase() !== 'DIRECT'
+                      const host = c.metadata?.host || c.metadata?.destinationIP || 'Неизвестно'
+                      const chains = Array.isArray(c.chains) ? c.chains : []
+                      const isProxy = chains.length > 0 && String(chains[0] || '').toUpperCase() !== 'DIRECT'
                       const isForced = isHostAlreadyForced(host)
+                      const net = (c.metadata?.network || 'TCP').toLowerCase()
                       return (
                         <tr key={c.id}>
                           <td style={{ width: 60 }}>
-                            <span className={`net-badge ${c.metadata.network.toLowerCase()}`}>{c.metadata.network}</span>
+                            <span className={`net-badge ${net}`}>{c.metadata?.network || 'TCP'}</span>
                           </td>
-                          <td className="host-cell" title={`${host}:${c.metadata.destinationPort}`}>
+                          <td className="host-cell" title={`${host}:${c.metadata?.destinationPort || ''}`}>
                             <span className="host-name">{host}</span>
-                            <span className="host-port muted">:{c.metadata.destinationPort}</span>
+                            <span className="host-port muted">:{c.metadata?.destinationPort || ''}</span>
                           </td>
                           <td style={{ width: 140 }}>
-                            <span className="client-ip">{c.metadata.sourceIP}</span>
+                            <span className="client-ip">{c.metadata?.sourceIP || '—'}</span>
                           </td>
                           <td style={{ width: 100 }}>
                             <span className="chain-badge">{c.chains?.[0] || 'DIRECT'}</span>
@@ -1088,12 +1092,16 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
               </thead>
               <tbody>
                 {sorted.map((c) => {
-                  const host = c.metadata.host || c.metadata.destinationIP || 'Неизвестно'
-                  const client = c.metadata.sourceIP
+                  const meta = c.metadata ?? ({} as any)
+                  const host = meta.host || meta.destinationIP || 'Неизвестно'
+                  const client = meta.sourceIP || '—'
                   const clientName = deviceNames[client]
-                  const chain = c.chains && c.chains.length > 0 ? c.chains.join(' → ') : 'DIRECT'
+                  const chains = Array.isArray(c.chains) ? c.chains : []
+                  const chain = chains.length > 0 ? chains.join(' → ') : 'DIRECT'
                   const isForced = isHostAlreadyForced(host)
-                  const isProxy = c.chains && c.chains.length > 0 && c.chains[0].toUpperCase() !== 'DIRECT'
+                  const isProxy = chains.length > 0 && String(chains[0] ?? '').toUpperCase() !== 'DIRECT'
+                  const net = String(meta.network || 'tcp')
+                  const destPort = meta.destinationPort || '—'
 
                   return (
                     <tr key={c.id} className={c.isClosed ? 'conn-row-closed' : ''}>
@@ -1103,14 +1111,14 @@ export default function ConnectionsViewer({ notify }: ConnectionsViewerProps) {
                             className={`conn-dot ${c.isClosed ? 'conn-dot-closed' : 'conn-dot-active'}`}
                             title={c.isClosed ? 'Сессия завершена' : 'Активная сессия'}
                           />
-                          <span className={`net-badge ${c.metadata.network.toLowerCase()}`}>
-                            {c.metadata.network}
+                          <span className={`net-badge ${net.toLowerCase()}`}>
+                            {net}
                           </span>
                         </div>
                       </td>
-                      <td className="host-cell" title={`${host}:${c.metadata.destinationPort}`}>
+                      <td className="host-cell" title={`${host}:${destPort}`}>
                         <div className="host-name">{host}</div>
-                        <div className="host-port muted">:{c.metadata.destinationPort}</div>
+                        <div className="host-port muted">:{destPort}</div>
                       </td>
                       <td>
                         <div className="client-cell">

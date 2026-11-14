@@ -192,7 +192,7 @@ export default function Gaming({ notify }: GamingProps) {
   const [customText, setCustomText] = useState('')
   useDirtyGuard(
     'gaming',
-    customText.trim() !== (cfg.custom_domains || []).join('\n').trim()
+    customText.trim() !== (Array.isArray(cfg?.custom_domains) ? cfg.custom_domains : []).join('\n').trim()
   )
 
   const loadData = useCallback(async () => {
@@ -210,7 +210,7 @@ export default function Gaming({ notify }: GamingProps) {
         if (statusRes.config) {
           setCfg(statusRes.config)
           setActiveServer(statusRes.active_server || statusRes.config.target_server || 'Fastest')
-          setCustomText((statusRes.config.custom_domains || []).join('\n'))
+          setCustomText((Array.isArray(statusRes.config.custom_domains) ? statusRes.config.custom_domains : []).join('\n'))
         }
       }
 
@@ -917,7 +917,7 @@ export default function Gaming({ notify }: GamingProps) {
                       {c.rule || 'SRC-IP-CIDR'}
                     </td>
                     <td style={{ padding: '6px 8px', color: '#4ade80', fontWeight: 600 }}>
-                      <span title={c.chains?.join(' → ') || '🎮 Gaming'}>
+                      <span title={(Array.isArray(c.chains) ? c.chains : []).join(' → ') || '🎮 Gaming'}>
                         {c.chains && c.chains.length > 1
                           ? `${c.chains[0]} → ${c.chains[c.chains.length - 1]}`
                           : (c.chains?.[0] || '🎮 Gaming')}

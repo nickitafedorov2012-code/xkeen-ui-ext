@@ -586,7 +586,7 @@ const DeviceRow = memo(function DeviceRow({
             if (isOfflineOrNoIp) return
             onOpenSchedule?.(d)
           }}
-          style={{ marginLeft: 6 }}
+          style={{ marginLeft: 4 }}
         >
           <svg
             width="15"

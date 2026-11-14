@@ -1,4 +1,4 @@
-/* ==========================================================================
+﻿/* ==========================================================================
    TRAFFIC GRAPH & QUICK WINS
    ========================================================================== */
 .traffic-graph-card {
@@ -143,7 +143,7 @@
   margin-left: 5px;
   border-radius: 4px;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   user-select: none;
 }
 .traffic-reset-btn:hover:not(:disabled) {
@@ -387,7 +387,7 @@
   border: 1px solid var(--border);
   border-radius: 10px;
   cursor: pointer;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), color 0.2s cubic-bezier(0.16, 1, 0.3, 1);
   user-select: none;
 }
 .option-tile-card:hover {

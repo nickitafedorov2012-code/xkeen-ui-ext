@@ -1,4 +1,4 @@
-/* ======================================================== */
+﻿/* ======================================================== */
 /* AdGuard Home Modern Glassmorphism Design System (.agh-*) */
 /* ======================================================== */
 
@@ -142,7 +142,7 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
   user-select: none;
   white-space: nowrap;
 }
@@ -378,7 +378,8 @@
 .agh-stat-bar-fill {
   height: 100%;
   border-radius: 2px;
-  transition: width 0.3s ease;
+  transform-origin: left center;
+  transition: transform 0.3s ease;
 }
 
 .agh-stat-bar-fill.blue {
@@ -406,9 +407,25 @@
 .agh-search-group {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   flex: 1;
-  min-width: 260px;
+  min-width: 0;
+  max-width: 100%;
+}
+.agh-search-group .select,
+.agh-search-group .input {
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+@media (max-width: 640px) {
+  .agh-search-group .input,
+  .agh-search-group .select {
+    flex: 1 1 100% !important;
+    width: 100% !important;
+    min-width: 0 !important;
+  }
 }
 
 .agh-table-container {
@@ -604,7 +621,8 @@
 .progress-fill {
   height: 100%;
   border-radius: 999px;
-  transition: width 0.3s ease, background-color 0.3s ease;
+  transform-origin: left center;
+  transition: transform 0.3s ease, background-color 0.3s ease;
 }
 
 .badge-success {
@@ -626,7 +644,7 @@
   border-radius: 4px;
   cursor: pointer;
   font-weight: 500;
-  transition: all 0.15s ease;
+  transition: transform 0.15s ease, opacity 0.15s ease, background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 }
 
 .btn-tab:hover {
@@ -671,7 +689,7 @@
   color: var(--accent, #38bdf8);
   border: 1px solid var(--border, rgba(255, 255, 255, 0.18));
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: transform 0.2s ease, opacity 0.2s ease, background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
   padding: 0;
   user-select: none;
 }

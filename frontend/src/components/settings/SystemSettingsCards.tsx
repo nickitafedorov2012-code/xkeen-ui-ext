@@ -266,7 +266,7 @@ export function SystemSettingsCards({
               <input
                 className="input"
                 placeholder="пусто = авто из config.yaml"
-                value={(settings.mihomo.device_providers ?? []).join(', ')}
+                value={(Array.isArray(settings?.mihomo?.device_providers) ? settings.mihomo.device_providers : []).join(', ')}
                 onChange={(e) => patch((s) => (s.mihomo.device_providers = e.target.value.split(',').map((x) => x.trim()).filter(Boolean)))}
               />
             </label>

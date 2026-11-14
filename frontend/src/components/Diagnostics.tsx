@@ -210,7 +210,7 @@ export default function Diagnostics({ notify }: DiagnosticsProps) {
                 <div className="dns-detail-row">
                   <span className="detail-label">Полученные IP адреса:</span>
                   <span className="detail-value">
-                    {dnsResult.resolved_ips.length > 0 ? (
+                    {Array.isArray(dnsResult.resolved_ips) && dnsResult.resolved_ips.length > 0 ? (
                       dnsResult.resolved_ips.map((ip) => (
                         <code key={ip} className="ip-badge">{ip}</code>
                       ))
