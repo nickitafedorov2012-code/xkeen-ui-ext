@@ -535,14 +535,28 @@ describe('Whitelist Component — Whitelist Tab (Overhaul & Anti-Regression)', (
     expect(modal?.textContent).toContain('Автоопределение узлов и подписок [БС]')
   })
 
-  it('labels the Russian catalog as tunneled in StrictXKeen', async () => {
+  it('defaults Russian catalog cards to DIRECT and allows toggling a card to БС tunnel', async () => {
+    const postSpy = vi.spyOn(api, 'apiPost').mockResolvedValue({ saved: true })
+
     await act(async () => {
       root!.render(<Whitelist notify={notifyMock} refresh={refreshMock} />)
     })
 
     const catalogCard = container?.querySelector('[data-testid="catalog-card-sberbank.ru"]')
+    expect(catalogCard?.textContent).toContain('DIRECT')
+    expect(catalogCard?.textContent).not.toContain('через 🛡️ БС')
+
+    const toggleBtn = container?.querySelector('[data-testid="catalog-route-toggle-sberbank.ru"]') as HTMLButtonElement
+    expect(toggleBtn).toBeTruthy()
+    await act(async () => {
+      toggleBtn.click()
+    })
+
+    expect(postSpy).toHaveBeenCalledWith(
+      'whitelist',
+      expect.objectContaining({ proxy_catalog_domains: ['sberbank.ru'] })
+    )
     expect(catalogCard?.textContent).toContain('через 🛡️ БС')
-    expect(catalogCard?.textContent).not.toContain('DIRECT')
   })
 
   it('bug 67: pin sends single device', async () => {

@@ -318,6 +318,29 @@ pub struct SwitchReq {
     pub server_id: String,
 }
 
+/// Стабилизация пинга после переключения сервера:
+/// если первый замер после переключения провалился в 0 или дал холодный пик > 600 мс,
+/// учитывает повторный замер и не перезаписывает прежний живой пинг ложным таймаутом.
+pub fn stabilize_post_switch_ping(prev_ms: Option<i64>, attempt1_ms: i64, attempt2_ms: Option<i64>) -> Option<i64> {
+    if attempt1_ms > 0 && attempt1_ms <= 600 {
+        return Some(attempt1_ms);
+    }
+    if let Some(a2) = attempt2_ms {
+        if a2 > 0 && attempt1_ms > 0 {
+            return Some(attempt1_ms.min(a2));
+        }
+        if a2 > 0 {
+            return Some(a2);
+        }
+        if attempt1_ms > 0 {
+            return Some(attempt1_ms);
+        }
+    } else if attempt1_ms > 0 {
+        return Some(attempt1_ms);
+    }
+    prev_ms.filter(|&p| p > 0)
+}
+
 /// Единый обработчик переключения сервера (из API веб-панели и Telegram-бота).
 /// Выполняет полный рабочий процесс:
 /// 1. Отмена активного замера скорости
@@ -371,6 +394,11 @@ pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -
                         mut_cfg.failover.bs_priority_chain.remove(pos);
                     }
                     mut_cfg.failover.bs_priority_chain.insert(0, id.clone());
+                    // Баг #16: при ручном выборе БС-узла (в т.ч. VK-туннеля) синхронизируем цель БС,
+                    // чтобы группа 🛡️ Whitelist не оставалась на старом Fallback.
+                    if mut_cfg.whitelist.enabled {
+                        mut_cfg.whitelist.target_server = Some(id.clone());
+                    }
                 } else {
                     if let Some(pos) = mut_cfg.failover.priority_chain.iter().position(|s| s == &id) {
                         mut_cfg.failover.priority_chain.remove(pos);
@@ -386,13 +414,30 @@ pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -
                     *state.config.write().await = std::sync::Arc::new(mut_cfg);
                 }
             }
-            // PING-AUTO: мгновенный фоновый замер — свежий пинг нового сервера
-            // виден в панели уже следующим опросом, без действий пользователя
+            // Баг #16: всегда синхронизируем группу 🛡️ Whitelist в рантайме с выбранным узлом,
+            // чтобы трафик БС не уходил в Fallback на обычный сервер подписки.
+            let _ = sync_whitelist_mode_tunnel(state, server_id).await;
+
+            // Баг #13: стабилизированный фоновый замер пинга после переключения —
+            // ждём 800 мс после смены маршрута и не перезаписываем хороший пинг холодным пиком/таймаутом.
             let cfg_now = state.config.read().await.clone();
             let http = state.http.clone();
             let selected = server_id.to_string();
+            let prev_ping = mihomo::cached_ping(&selected);
             tokio::spawn(async move {
-                let _ = mihomo::ping_all_url(&http, &cfg_now, &[selected], 2500, None).await;
+                tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                let a1 = mihomo::ping_server_url(&http, &cfg_now, &selected, 3500, None).await;
+                let a2 = if a1 == 0 || a1 > 600 {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    Some(mihomo::ping_server_url(&http, &cfg_now, &selected, 3500, None).await)
+                } else {
+                    None
+                };
+                if let Some(stable) = stabilize_post_switch_ping(prev_ping, a1, a2) {
+                    let mut map = std::collections::BTreeMap::new();
+                    map.insert(selected, stable);
+                    mihomo::store_ping_cache(&map);
+                }
             });
             Ok(msg)
         }
@@ -1341,5 +1386,19 @@ mod tests {
             ProviderUpdateAction::Reject(msg) => assert!(!msg.is_empty()),
             other => panic!("expected Reject for unknown body, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn regression_bug_13_stabilize_post_switch_ping_prevents_false_timeout() {
+        // Нормальный быстрый пинг принимается сразу
+        assert_eq!(stabilize_post_switch_ping(Some(180), 175, None), Some(175));
+        // Холодный скачок 2900 мс, второй замер 185 мс -> берём 185 мс
+        assert_eq!(stabilize_post_switch_ping(Some(180), 2900, Some(185)), Some(185));
+        // Первый таймаут (0), второй успешный (190) -> 190
+        assert_eq!(stabilize_post_switch_ping(Some(180), 0, Some(190)), Some(190));
+        // Оба таймаута сразу после переключения при наличии живого прежнего пинга -> сохраняем прежний пинг
+        assert_eq!(stabilize_post_switch_ping(Some(180), 0, Some(0)), Some(180));
+        // Если прежнего пинга не было и оба таймаут -> None
+        assert_eq!(stabilize_post_switch_ping(None, 0, Some(0)), None);
     }
 }

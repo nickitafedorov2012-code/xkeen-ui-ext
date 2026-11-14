@@ -302,6 +302,30 @@ pub fn selected_vk_token(cfg: &VkTurnConfig) -> Option<&str> {
     token.filter(|value| !value.trim().is_empty())
 }
 
+/// Строгая проверка источника звонков в зависимости от выбранного режима авторизации.
+pub fn validate_auth_source(cfg: &VkTurnConfig) -> Result<(), String> {
+    match cfg.auth_mode.as_str() {
+        "manual" => {
+            if call_hashes(cfg).is_empty() {
+                return Err("Выбран режим ручных ссылок, но не указано ни одной ссылки на звонок ВКонтакте".into());
+            }
+            Ok(())
+        }
+        "profile_token" => {
+            if selected_vk_token(cfg).is_none() && call_hashes(cfg).is_empty() {
+                return Err("Профиль csqtt не содержит токена VK или ссылок на звонок".into());
+            }
+            Ok(())
+        }
+        _ => {
+            if selected_vk_token(cfg).is_none() {
+                return Err("Выбран режим «Аккаунт VK», но вход в аккаунт не выполнен. Войдите через VK ID или переключитесь на «Ручные ссылки».".into());
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Маскирование токена VK в логах и API.
 pub fn mask_vk_token(token: &str) -> String {
     let t = token.trim();
@@ -582,6 +606,32 @@ pub async fn finish_vk_calls_batch(http: &reqwest::Client, token: &str, call_ids
     }
     for t in tasks {
         let _ = t.await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn regression_oauth_mode_requires_vk_token_even_if_manual_links_exist() {
+        let mut cfg = VkTurnConfig::default();
+        cfg.auth_mode = "oauth".to_string();
+        cfg.vk_token = None;
+        cfg.links = vec!["https://vk.com/call/join/abc12345".to_string()];
+
+        let err = validate_auth_source(&cfg).unwrap_err();
+        assert!(err.contains("Аккаунт VK"));
+
+        cfg.vk_token = Some("vk1.a.test_token".to_string());
+        assert!(validate_auth_source(&cfg).is_ok());
+
+        cfg.auth_mode = "manual".to_string();
+        cfg.vk_token = None;
+        assert!(validate_auth_source(&cfg).is_ok());
+
+        cfg.links.clear();
+        assert!(validate_auth_source(&cfg).is_err());
     }
 }
 

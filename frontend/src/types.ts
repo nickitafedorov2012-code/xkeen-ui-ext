@@ -115,6 +115,7 @@ export interface StatusInfo {
     ping_ms: number
     provider?: string
     provider_name?: string
+    is_whitelist?: boolean
   } | null
   mihomo: { host: string; port: number }
   rci: { host: string; port: number }
@@ -1010,6 +1011,7 @@ export interface WhitelistConfig {
   devices: WhitelistDevice[]
   gaming_suspended?: boolean
   custom_domains: string[]
+  proxy_catalog_domains?: string[]
 }
 
 export interface WhitelistStatusResponse {
@@ -1022,6 +1024,7 @@ export interface WhitelistStatusResponse {
   devices: WhitelistDevice[]
   gaming_suspended: boolean
   custom_domains: string[]
+  proxy_catalog_domains?: string[]
   domestic_catalog_count: number
   active_server?: string
   is_bs_server?: boolean

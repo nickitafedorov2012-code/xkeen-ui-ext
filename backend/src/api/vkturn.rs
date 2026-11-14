@@ -155,6 +155,7 @@ pub async fn save_vkturn_config(
             new_cfg.password = pw.to_string();
         }
     }
+    let had_links_in_req = body.links.as_ref().map_or(false, |l| !l.is_empty());
     if let Some(links) = body.links {
         let mut out: Vec<String> = Vec::new();
         for (idx, l) in links.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).enumerate() {
@@ -208,6 +209,12 @@ pub async fn save_vkturn_config(
     }
     if let Some(am) = body.auth_mode {
         new_cfg.auth_mode = am;
+    } else if !new_cfg.links.is_empty() && crate::vkturn::selected_vk_token(&new_cfg).is_none() && new_cfg.auth_mode == "oauth" {
+        // Если явно переданы ручные ссылки без токена VK и без указания auth_mode —
+        // считаем режим ручным, но при явном auth_mode="oauth" требуем токен.
+        if had_links_in_req {
+            new_cfg.auth_mode = "manual".to_string();
+        }
     }
     if let Some(ref tok) = body.vk_token {
         let t = tok.trim();
@@ -250,9 +257,8 @@ pub async fn save_vkturn_config(
         if let Err(e) = crate::vkturn::validate_password(&new_cfg.password) {
             return api_err(e);
         }
-        let has_valid_token = crate::vkturn::selected_vk_token(&new_cfg).is_some();
-        if !has_valid_token && crate::vkturn::call_hashes(&new_cfg).is_empty() {
-            return api_err("Укажите хотя бы одну ссылку на звонок ВКонтакте или выполните вход через VK ID");
+        if let Err(e) = crate::vkturn::validate_auth_source(&new_cfg) {
+            return api_err(e);
         }
     }
 

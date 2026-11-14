@@ -618,6 +618,20 @@ pub async fn get_policies(http: &reqwest::Client, cfg: &AppConfig) -> Result<Vec
     Ok(map.into_values().collect())
 }
 
+/// Извлечь непустое отображаемое имя устройства из JSON-объекта Keenetic RCI.
+pub fn resolve_device_name(h: &Value) -> String {
+    ["name", "hostname", "ip"]
+        .iter()
+        .find_map(|k| {
+            h.get(*k)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or("Устройство")
+        .to_string()
+}
+
 /// Устройства: 3 параллельных RCI-запроса + склейка по MAC (порт get_devices).
 pub async fn get_devices(
     http: &reqwest::Client,
@@ -698,11 +712,7 @@ pub async fn get_devices(
         if mac.is_empty() {
             continue;
         }
-        let name = ["name", "hostname", "ip"]
-            .iter()
-            .find_map(|k| h.get(*k).and_then(|v| v.as_str()))
-            .unwrap_or("Устройство")
-            .to_string();
+        let name = resolve_device_name(h);
         let ip = h.get("ip").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let online = h
             .get("active")
@@ -1100,6 +1110,27 @@ mod tests {
         assert!(!fn_body.contains("8.8.8.8"));
         assert!(fn_body.contains("save_config(http, cfg).await?;"));
         assert!(fn_body.contains("to_add.is_empty()"));
+    }
+
+    #[test]
+    fn regression_device_name_ignores_empty_name_and_uses_hostname() {
+        let unregistered = json!({
+            "mac": "de:0d:ab:54:2f:6b",
+            "name": "",
+            "hostname": "Keenetic",
+            "ip": "192.168.2.52"
+        });
+        assert_eq!(resolve_device_name(&unregistered), "Keenetic");
+
+        let spaces_only = json!({
+            "name": "   ",
+            "hostname": "",
+            "ip": "192.168.2.52"
+        });
+        assert_eq!(resolve_device_name(&spaces_only), "192.168.2.52");
+
+        let all_empty = json!({ "name": "", "hostname": "", "ip": "" });
+        assert_eq!(resolve_device_name(&all_empty), "Устройство");
     }
 }
 

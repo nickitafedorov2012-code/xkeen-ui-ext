@@ -536,28 +536,47 @@ export default function TrafficGraph({ notify }: TrafficGraphProps = {}) {
             strokeLinejoin="round"
           />
 
-          {/* Индикатор точки на графике при наведении */}
-          {hoverIndex !== null && hoverIndex >= 0 && hoverIndex < history.length && (
-            <g>
-              <circle
-                cx={directPoints[hoverIndex].x}
-                cy={directPoints[hoverIndex].y}
-                r="3.5"
-                fill="#22c55e"
-                stroke="white"
-                strokeWidth="1.5"
-              />
-              <circle
-                cx={tunnelPoints[hoverIndex].x}
-                cy={tunnelPoints[hoverIndex].y}
-                r="3.5"
-                fill={isWhitelistActive ? "#a855f7" : "#38bdf8"}
-                stroke="white"
-                strokeWidth="1.5"
-              />
-            </g>
-          )}
         </svg>
+
+        {/* Идеально круглые HTML-маркеры точек на графике при наведении (без искажения SVG preserveAspectRatio="none") */}
+        {hoverIndex !== null && hoverIndex >= 0 && hoverIndex < history.length && (
+          <>
+            <div
+              data-testid="traffic-hover-dot-direct"
+              style={{
+                position: 'absolute',
+                left: `${(directPoints[hoverIndex].x / width) * 100}%`,
+                top: `${(directPoints[hoverIndex].y / height) * 100}%`,
+                width: 9,
+                height: 9,
+                borderRadius: '50%',
+                background: '#22c55e',
+                border: '2px solid #ffffff',
+                transform: 'translate(-50%, -50%)',
+                pointerEvents: 'none',
+                zIndex: 3,
+                boxSizing: 'border-box',
+              }}
+            />
+            <div
+              data-testid="traffic-hover-dot-tunnel"
+              style={{
+                position: 'absolute',
+                left: `${(tunnelPoints[hoverIndex].x / width) * 100}%`,
+                top: `${(tunnelPoints[hoverIndex].y / height) * 100}%`,
+                width: 9,
+                height: 9,
+                borderRadius: '50%',
+                background: isWhitelistActive ? '#a855f7' : '#38bdf8',
+                border: '2px solid #ffffff',
+                transform: 'translate(-50%, -50%)',
+                pointerEvents: 'none',
+                zIndex: 3,
+                boxSizing: 'border-box',
+              }}
+            />
+          </>
+        )}
 
         {/* Вертикальная направляющая линия */}
         {hoverPos && (
@@ -577,17 +596,17 @@ export default function TrafficGraph({ notify }: TrafficGraphProps = {}) {
               {formatTimestamp(hoveredItem.timestamp)}
             </div>
             <div className="traffic-tooltip-row">
-              <span className="traffic-tooltip-arrow-up">↑</span>
-              <span>Передача:</span>
-              <span className="traffic-tooltip-val">
-                {formatSpeedMbps(hoveredTotalUp)}
-              </span>
-            </div>
-            <div className="traffic-tooltip-row">
               <span className="traffic-tooltip-arrow-down">↓</span>
               <span>Приём:</span>
               <span className="traffic-tooltip-val">
                 {formatSpeedMbps(hoveredTotalDown)}
+              </span>
+            </div>
+            <div className="traffic-tooltip-row">
+              <span className="traffic-tooltip-arrow-up">↑</span>
+              <span>Передача:</span>
+              <span className="traffic-tooltip-val">
+                {formatSpeedMbps(hoveredTotalUp)}
               </span>
             </div>
           </div>

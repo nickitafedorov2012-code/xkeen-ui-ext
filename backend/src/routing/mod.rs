@@ -1401,9 +1401,9 @@ rules:
         assert!(applied.contains(WHITELIST_GROUP_BEGIN));
         assert!(applied.contains(WHITELIST_GROUP_END));
         assert!(applied.contains(&format!("- name: '{WHITELIST_GROUP_NAME}'")));
-        assert!(!applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
-        assert!(!applied.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
-        assert!(!applied.contains("DOMAIN-SUFFIX,vk.com,DIRECT"));
+        assert!(applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
+        assert!(applied.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
+        assert!(applied.contains("DOMAIN-SUFFIX,vk.com,DIRECT"));
         assert!(applied.contains("DOMAIN-SUFFIX,user-added.example,DIRECT"));
         assert!(applied.contains(&format!("SRC-IP-CIDR,192.168.1.105/32,{WHITELIST_GROUP_NAME}")));
         assert!(validate_marker_pair(&applied, WHITELIST_BEGIN, WHITELIST_END).is_ok());
@@ -1442,6 +1442,7 @@ rules:
         cfg.whitelist.enabled = true;
         cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
         cfg.whitelist.custom_domains = vec!["user-explicit-direct.example".into()];
+        cfg.whitelist.proxy_catalog_domains = vec!["hh.ru".into()];
 
         let applied = apply_whitelist_rules(base_yaml, &cfg, None);
         let start = applied.find(WHITELIST_BEGIN).expect("whitelist rule block must exist");
@@ -1450,8 +1451,13 @@ rules:
         let catchall = applied.find("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist").expect("IPv4 LAN catch-all must exist");
 
         assert!(
-            !block.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"),
-            "the built-in Russian catalog must not add automatic DIRECT rules in StrictXKeen"
+            block.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"),
+            "the built-in Russian catalog must route DIRECT by default (Bug #14)"
+        );
+        assert!(
+            block.contains(&format!("DOMAIN-SUFFIX,hh.ru,{WHITELIST_GROUP_NAME}"))
+                && !block.contains("DOMAIN-SUFFIX,hh.ru,DIRECT"),
+            "domain explicitly switched to БС via proxy_catalog_domains must route through Whitelist"
         );
         assert!(
             !block.contains("RULE-SET,category-ip-geo-detect@domain,DIRECT")
@@ -2050,9 +2056,9 @@ rules:
         assert!(applied.contains(WHITELIST_BEGIN));
         assert!(applied.contains(WHITELIST_END));
 
-        // 1. The built-in catalog does not force domestic domains through DIRECT.
-        assert!(!applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
-        assert!(!applied.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
+        // 1. Баг #14: базовый каталог РФ по умолчанию идёт DIRECT.
+        assert!(applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
+        assert!(applied.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
 
         // 2. Excluded device -> DIRECT
         assert!(applied.contains("SRC-IP-CIDR,192.168.1.99/32,DIRECT"));
@@ -2353,8 +2359,8 @@ rules:
 
         for &cd in &critical_domains {
             assert!(
-                !applied.contains(&format!("DOMAIN-SUFFIX,{cd},DIRECT")),
-                "StrictXKeen must route catalog domain {cd} through the selected tunnel"
+                applied.contains(&format!("DOMAIN-SUFFIX,{cd},DIRECT")),
+                "Russian catalog domain {cd} must route DIRECT by default (Bug #14)"
             );
             assert!(
                 DOMESTIC_WHITELIST_DOMAINS.contains(&cd),
@@ -2390,6 +2396,21 @@ rules:
         assert!(restored.contains("- sub1"), "Restored provider must be uncommented: {restored}");
         assert!(!restored.contains("# - sub1"), "No commented sub1 should remain: {restored}");
         assert!(restored.contains("- sub2"));
+
+        // 3. Баг #15: отключаем ВСЕ подписки -> не остаётся пустых use: [] / голых use:,
+        // добавляется валидный fallback DIRECT, а при обратном включении всё восстанавливается
+        let all_disabled = vec!["sub1".to_string(), "sub2".to_string()];
+        let no_subs = sync_disabled_providers_in_yaml(&restored, &all_disabled).expect("no_subs");
+        assert!(!no_subs.contains("use: []"), "Empty inline use: [] must not remain: {no_subs}");
+        assert!(no_subs.contains("- DIRECT # xk-empty-use-fallback"), "Fallback DIRECT must be added: {no_subs}");
+        assert!(no_subs.contains("# use-disabled:"), "Disabled use must be preserved as comment: {no_subs}");
+
+        let re_enabled = sync_disabled_providers_in_yaml(&no_subs, &none_disabled).expect("re_enabled");
+        assert!(
+            re_enabled.contains("use: [") && re_enabled.contains("sub1") && re_enabled.contains("sub2"),
+            "Inline use must be restored: {re_enabled}"
+        );
+        assert!(!re_enabled.contains("xk-empty-use-fallback"), "Fallback marker must be cleaned up: {re_enabled}");
     }
 
     #[test]

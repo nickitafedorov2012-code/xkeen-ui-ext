@@ -47,6 +47,7 @@ export default function Whitelist({ notify, status, refresh }: Props) {
     devices: [],
     gaming_suspended: false,
     custom_domains: [],
+    proxy_catalog_domains: [],
   })
   const [activeServer, setActiveServer] = useState<string>('')
   const [isBsServer, setIsBsServer] = useState<boolean>(false)
@@ -109,6 +110,7 @@ export default function Whitelist({ notify, status, refresh }: Props) {
           devices: wlStatus.devices || [],
           gaming_suspended: Boolean(wlStatus.gaming_suspended),
           custom_domains: wlStatus.custom_domains || [],
+          proxy_catalog_domains: wlStatus.proxy_catalog_domains || [],
         })
         if (wlStatus.active_server) {
           setActiveServer(wlStatus.active_server)
@@ -456,6 +458,38 @@ export default function Whitelist({ notify, status, refresh }: Props) {
   const excludedCount = useMemo(() => {
     return (config.excluded_devices || []).length
   }, [config.excluded_devices])
+
+  const proxyCatalogSet = useMemo(() => {
+    return new Set((config.proxy_catalog_domains || []).map((d) => d.trim().toLowerCase()))
+  }, [config.proxy_catalog_domains])
+
+  const handleToggleCatalogDomainRoute = async (domain: string) => {
+    const clean = domain.trim().toLowerCase()
+    const current = (config.proxy_catalog_domains || []).map((d) => d.trim().toLowerCase())
+    const isCurrentlyProxied = current.includes(clean)
+    const nextList = isCurrentlyProxied
+      ? current.filter((d) => d !== clean)
+      : [...current, clean]
+
+    setBusy(true)
+    setConfig((prev) => ({ ...prev, proxy_catalog_domains: nextList }))
+    try {
+      await apiPost('whitelist', {
+        proxy_catalog_domains: nextList,
+      })
+      notify(
+        isCurrentlyProxied
+          ? `⚪ ${domain}: переведён на прямой доступ (DIRECT)`
+          : `🛡️ ${domain}: переведён на маршрут через БС-туннель`
+      )
+      window.dispatchEvent(new CustomEvent('xr:refresh-status'))
+    } catch (e) {
+      setConfig((prev) => ({ ...prev, proxy_catalog_domains: current }))
+      notify(e instanceof Error ? e.message : 'Ошибка смены маршрута домена', true)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   if (loading) {
     return (
@@ -1160,21 +1194,36 @@ export default function Whitelist({ notify, status, refresh }: Props) {
                   {catalogSearch ? `Сервисы по запросу «${catalogSearch}» не найдены` : 'Сервисы не найдены'}
                 </div>
               ) : (
-                paginatedCatalog.map((item) => (
-                  <div key={item.domain} className="whitelist-domain-card" data-testid={`catalog-card-${item.domain}`}>
-                    <div>
-                      <div className="whitelist-domain-name">{item.domain}</div>
-                      {item.description && (
-                        <div className="muted small" style={{ fontSize: 11, marginTop: 2 }}>{item.description}</div>
-                      )}
+                paginatedCatalog.map((item) => {
+                  const isProxied = proxyCatalogSet.has(item.domain.trim().toLowerCase())
+                  return (
+                    <div key={item.domain} className="whitelist-domain-card" data-testid={`catalog-card-${item.domain}`}>
+                      <div>
+                        <div className="whitelist-domain-name">{item.domain}</div>
+                        {item.description && (
+                          <div className="muted small" style={{ fontSize: 11, marginTop: 2 }}>{item.description}</div>
+                        )}
+                      </div>
+                      <div className="whitelist-domain-meta">
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => handleToggleCatalogDomainRoute(item.domain)}
+                          className={isProxied ? 'whitelist-tag-cat' : 'whitelist-tag-direct'}
+                          style={{ cursor: busy ? 'wait' : 'pointer', border: '1px solid currentColor' }}
+                          title={
+                            isProxied
+                              ? 'Нажмите, чтобы пустить домен напрямую (DIRECT)'
+                              : 'Нажмите, чтобы направить домен через туннель белых списков (БС)'
+                          }
+                          data-testid={`catalog-route-toggle-${item.domain}`}
+                        >
+                          {isProxied ? 'через 🛡️ БС' : 'DIRECT'}
+                        </button>
+                      </div>
                     </div>
-                    <div className="whitelist-domain-meta">
-                      <span className={isStrictStrategy ? 'whitelist-tag-cat' : 'whitelist-tag-direct'}>
-                        {isStrictStrategy ? 'через 🛡️ БС' : 'DIRECT'}
-                      </span>
-                    </div>
-                  </div>
-                ))
+                  )
+                })
               )}
             </div>
 

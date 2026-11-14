@@ -230,11 +230,11 @@ interface Props {
 }
 
 function fmtBytes(bytes: number): string {
-  if (!bytes || bytes <= 0) return '0 B'
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+  if (!bytes || bytes <= 0) return '0 Б'
+  if (bytes < 1024) return `${bytes} Б`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} КБ`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} ГБ`
 }
 
 function SpeedCell({
@@ -306,7 +306,9 @@ function SpeedCell({
         onKeyDown={handleKeyDown}
         title="Ограничение скорости в Мбит/с. Введите число (например, 10, 50, 100) и нажмите Enter или кликните вне поля. 0 или пусто = без лимита."
       />
-      <span className="device-speed-unit">Мб/с</span>
+      {(val.trim().length > 0 || editing) && (
+        <span className="device-speed-unit">Мб/с</span>
+      )}
       {kbps && kbps > 0 && !busy ? (
         <button
           type="button"
@@ -419,7 +421,7 @@ const DeviceRow = memo(function DeviceRow({
         )}
       </td>
       <td>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'nowrap', minWidth: 160, width: '100%' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'nowrap', minWidth: 0, width: '100%' }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <CustomSelect
               value={assigned || 'default'}

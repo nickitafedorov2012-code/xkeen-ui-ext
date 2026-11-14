@@ -82,7 +82,23 @@ pub async fn sync_whitelist_on_switch(
     if should_follow && !node_id.is_empty() {
         // Только селектор: сброс сокетов уже решил основной switch_server/_graceful.
         // switch_group здесь рвал ВСЕ соединения LAN и ломал мягкое переключение.
-        let _ = crate::mihomo::switch_selector(http, cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await;
+        if let Err(e) = crate::mihomo::switch_selector(http, cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await {
+            crate::log_w!(
+                "[FAILOVER] Первая попытка синхронизации '{}' -> '{}' не удалась: {} — повторяем...",
+                crate::routing::WHITELIST_GROUP_NAME,
+                node_id,
+                e
+            );
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            if let Err(e2) = crate::mihomo::switch_selector(http, cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await {
+                crate::log_e!(
+                    "[FAILOVER] Не удалось переключить '{}' на '{}': {}",
+                    crate::routing::WHITELIST_GROUP_NAME,
+                    node_id,
+                    e2
+                );
+            }
+        }
     }
 
     crate::log_i!(

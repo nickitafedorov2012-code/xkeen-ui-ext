@@ -576,6 +576,36 @@ echo "AdGuard Home успешно установлен."
     }
 }
 
+/// Переключить флаг ENABLED=yes/no в init-скрипте Entware для AdGuard Home.
+#[cfg(target_os = "linux")]
+fn set_init_script_enabled(script_path: &std::path::Path, enabled: bool) -> Result<(), String> {
+    let raw = std::fs::read_to_string(script_path).map_err(|e| e.to_string())?;
+    let target = if enabled { "ENABLED=yes" } else { "ENABLED=no" };
+    let mut changed = false;
+    let updated: Vec<String> = raw
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with("ENABLED=") {
+                if trimmed != target {
+                    changed = true;
+                }
+                target.to_string()
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    if changed {
+        let mut content = updated.join("\n");
+        if raw.ends_with('\n') {
+            content.push('\n');
+        }
+        std::fs::write(script_path, content).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Управление системной службой AdGuard Home (/opt/etc/init.d/S99adguardhome)
 pub async fn service_action(action: &str) -> Result<String, String> {
     let act = action.trim().to_lowercase();
@@ -585,6 +615,28 @@ pub async fn service_action(action: &str) -> Result<String, String> {
 
     #[cfg(target_os = "linux")]
     {
+        if act == "stop" {
+            if let Ok(script_path) = ensure_adguard_init_script() {
+                let script = script_path.to_string_lossy().to_string();
+                if crate::config::is_valid_init_script_path(&script) {
+                    let cmd_str = format!("exec '{script}' 'stop' </dev/null >/tmp/agh_service.log 2>&1");
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(10),
+                        tokio::process::Command::new("sh").arg("-c").arg(&cmd_str).status(),
+                    )
+                    .await;
+                    let _ = set_init_script_enabled(&script_path, false);
+                }
+            }
+            let _ = remove_adguard_iptables();
+            let _ = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg("killall -9 AdGuardHome 2>/dev/null || true; pkill -9 -f AdGuardHome 2>/dev/null || true")
+                .status()
+                .await;
+            return Ok("Служба AdGuard Home остановлена и выгружена из памяти".to_string());
+        }
+
         let script_path = match ensure_adguard_init_script() {
             Ok(p) => p,
             Err(e) => {
@@ -605,6 +657,10 @@ pub async fn service_action(action: &str) -> Result<String, String> {
                 }
             }
         };
+
+        if act == "start" || act == "restart" {
+            let _ = set_init_script_enabled(&script_path, true);
+        }
 
         let script = script_path.to_string_lossy().to_string();
         if !crate::config::is_valid_init_script_path(&script) {
@@ -636,16 +692,6 @@ pub async fn service_action(action: &str) -> Result<String, String> {
             .unwrap_or_default()
             .trim()
             .to_string();
-
-        if act == "stop" {
-            let _ = remove_adguard_iptables();
-            let _ = tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg("killall -9 AdGuardHome 2>/dev/null || true")
-                .status()
-                .await;
-            return Ok("Служба AdGuard Home остановлена".to_string());
-        }
 
         if act == "status" {
             let is_running = crate::system::is_process_running("AdGuardHome");

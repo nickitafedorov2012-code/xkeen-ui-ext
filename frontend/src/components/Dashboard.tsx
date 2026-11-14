@@ -153,15 +153,22 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
     const interval = setInterval(fetchProviders, 15000)
     return () => clearInterval(interval)
   }, [])
-  // История пинга активного сервера (для sparkline): {значение, было ли измерение}
-  const [pingHistory, setPingHistory] = useState<{ ms: number; ok: boolean }[]>([])
+  // История пинга активного сервера (для sparkline): сохраняем в localStorage, чтобы не терялась между вкладками и перезагрузками
+  const [pingHistory, setPingHistory] = useState<{ ms: number; ok: boolean }[]>(() => {
+    const initId = status?.active_server?.id || status?.active_server?.name
+    if (!initId) return []
+    try {
+      const raw = localStorage.getItem(`xr_dash_pings_${initId}`)
+      if (raw) return JSON.parse(raw)
+    } catch {}
+    return []
+  })
   const lastActiveServerIdRef = useRef<string | undefined>(undefined)
 
   useEffect(() => {
     const sId = status?.active_server?.id || status?.active_server?.name
     if (!sId) {
-      setPingHistory([])
-      lastActiveServerIdRef.current = undefined
+      // Не затираем историю в момент первичной загрузки, пока status ещё не пришёл
       return
     }
 
@@ -172,44 +179,33 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
       lastActiveServerIdRef.current = sId
       let stored: { ms: number; ok: boolean }[] = []
       try {
-        const raw = sessionStorage.getItem(`xr_dash_pings_${sId}`)
+        const raw = localStorage.getItem(`xr_dash_pings_${sId}`) || sessionStorage.getItem(`xr_dash_pings_${sId}`)
         if (raw) stored = JSON.parse(raw)
       } catch {}
 
       if (isValidPing) {
         if (stored.length === 0) {
-          // Pre-populate initial 20 points smoothly so sparkline doesn't render as a 1-2 point stub
-          stored = Array(20).fill({ ms: ping, ok: true })
-        } else if (stored.length < 20) {
-          // Pad existing history up to at least 20 points smoothly
-          const padCount = 20 - stored.length
-          const firstVal = stored[0]
-          stored = [...Array(padCount).fill(firstVal), ...stored]
-          if (stored[stored.length - 1].ms !== ping) {
-            stored = [...stored.slice(1), { ms: ping, ok: true }]
-          }
+          stored = Array(12).fill({ ms: ping, ok: true })
         } else if (stored[stored.length - 1].ms !== ping) {
           stored = [...stored, { ms: ping, ok: true }].slice(-40)
         }
         try {
-          sessionStorage.setItem(`xr_dash_pings_${sId}`, JSON.stringify(stored))
+          localStorage.setItem(`xr_dash_pings_${sId}`, JSON.stringify(stored))
         } catch {}
       }
       setPingHistory(stored)
     } else if (isValidPing) {
       setPingHistory((prev) => {
         let currentList = prev
-        if (currentList.length < 20) {
-          const padCount = 20 - currentList.length
-          const padVal = currentList.length > 0 ? currentList[0] : { ms: ping, ok: true }
-          currentList = [...Array(padCount).fill(padVal), ...currentList]
+        if (currentList.length === 0) {
+          currentList = Array(12).fill({ ms: ping, ok: true })
         }
-        if (currentList.length > 0 && currentList[currentList.length - 1].ms === ping) {
+        if (currentList[currentList.length - 1].ms === ping) {
           return currentList
         }
         const next = [...currentList, { ms: ping, ok: true }].slice(-40)
         try {
-          sessionStorage.setItem(`xr_dash_pings_${sId}`, JSON.stringify(next))
+          localStorage.setItem(`xr_dash_pings_${sId}`, JSON.stringify(next))
         } catch {}
         return next
       })
@@ -537,6 +533,8 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                         <span style={{ color: '#38bdf8' }}>★ Основной (в цепочке)</span>
                       ) : f?.priority_chain && f.priority_chain.indexOf(status.active_server.id) > 0 ? (
                         <span style={{ color: '#eab308' }}>⚡ Резервный (РЕЗ{f.priority_chain.indexOf(status.active_server.id)})</span>
+                      ) : status.active_server.is_whitelist ? (
+                        <span style={{ color: '#c084fc' }}>🛡️ Сервер белых списков (БС)</span>
                       ) : (
                         <span style={{ color: 'var(--muted)' }}>Обычный сервер</span>
                       )}
@@ -1348,10 +1346,12 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
   )
 }
 
-/// Мини-график пинга (SVG sparkline): последняя точка справа, провалы — красные.
+/// Мини-график пинга (плавная кривая Безье + круглый HTML-маркер без искажения SVG).
 function PingSparkline({ data }: { data: { ms: number; ok: boolean }[] }) {
   const W = 280
   const H = 40
+  const PAD_X = 5
+  const PAD_Y = 5
   if (!data || data.length === 0) return null
   const okVals = data.filter((d) => d.ok).map((d) => d.ms)
   const maxVal = okVals.length > 0 ? okVals.reduce((a, b) => Math.max(a, b)) : 100
@@ -1359,39 +1359,86 @@ function PingSparkline({ data }: { data: { ms: number; ok: boolean }[] }) {
   const max = Math.max(100, maxVal) * 1.15
   const min = Math.max(0, minVal * 0.85)
   const range = max - min || 1
-  const step = data.length > 1 ? W / (data.length - 1) : W
+  const usableW = W - PAD_X * 2
+  const step = data.length > 1 ? usableW / (data.length - 1) : usableW
   const y = (d: { ms: number; ok: boolean }) =>
-    d.ok ? H - 4 - ((d.ms - min) / range) * (H - 8) : H - 2
+    d.ok ? H - PAD_Y - ((d.ms - min) / range) * (H - PAD_Y * 2) : H - PAD_Y
   const last = data[data.length - 1]
 
   if (data.length === 1) {
     const singleY = y(last)
     return (
-      <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: 'block' }}>
-        <line x1="0" y1={singleY} x2={W} y2={singleY} stroke="#38bdf8" strokeWidth="1.5" strokeDasharray="4 4" opacity="0.6" />
-        <circle cx={W / 2} cy={singleY} r="3.5" fill="#38bdf8" />
-      </svg>
+      <div style={{ position: 'relative', width: '100%', height: H }}>
+        <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: 'block' }}>
+          <line x1={PAD_X} y1={singleY} x2={W - PAD_X} y2={singleY} stroke="#38bdf8" strokeWidth="1.5" strokeDasharray="4 4" opacity="0.6" />
+        </svg>
+        <div
+          style={{
+            position: 'absolute',
+            left: '50%',
+            top: `${(singleY / H) * 100}%`,
+            width: 7,
+            height: 7,
+            borderRadius: '50%',
+            background: '#38bdf8',
+            transform: 'translate(-50%, -50%)',
+            pointerEvents: 'none',
+          }}
+        />
+      </div>
     )
   }
 
-  const pts = data.map((d, i) => `${(i * step).toFixed(1)},${y(d).toFixed(1)}`).join(' ')
-  const areaPts = `0,${H} ` + pts + ` ${W},${H}`
+  const coords = data.map((d, i) => ({ x: PAD_X + i * step, y: y(d) }))
+  const buildSmoothPath = (pts: { x: number; y: number }[]) => {
+    if (pts.length < 2) return ''
+    let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[Math.max(0, i - 1)]
+      const p1 = pts[i]
+      const p2 = pts[i + 1]
+      const p3 = pts[Math.min(pts.length - 1, i + 2)]
+      const t = 0.25
+      const cp1x = p1.x + (p2.x - p0.x) * t
+      const cp1y = Math.max(PAD_Y, Math.min(H - PAD_Y, p1.y + (p2.y - p0.y) * t))
+      const cp2x = p2.x - (p3.x - p1.x) * t
+      const cp2y = Math.max(PAD_Y, Math.min(H - PAD_Y, p2.y - (p3.y - p1.y) * t))
+      d += ` C ${cp1x.toFixed(1)} ${cp1y.toFixed(1)}, ${cp2x.toFixed(1)} ${cp2y.toFixed(1)}, ${p2.x.toFixed(1)} ${p2.y.toFixed(1)}`
+    }
+    return d
+  }
+
+  const lineD = buildSmoothPath(coords)
+  const firstPt = coords[0]
+  const lastPt = coords[coords.length - 1]
+  const areaD = `${lineD} L ${lastPt.x.toFixed(1)} ${H} L ${firstPt.x.toFixed(1)} ${H} Z`
+
   return (
-    <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: 'block' }}>
-      <defs>
-        <linearGradient id="dashSparkGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.25" />
-          <stop offset="100%" stopColor="#38bdf8" stopOpacity="0.0" />
-        </linearGradient>
-      </defs>
-      <polygon points={areaPts} fill="url(#dashSparkGrad)" />
-      <polyline points={pts} fill="none" stroke="#38bdf8" strokeWidth="1.8" />
-      {data.map((d, i) =>
-        d.ok ? null : (
-          <circle key={i} cx={i * step} cy={y(d)} r="2.6" fill="var(--red, #e5484d)" />
-        ),
-      )}
-      <circle cx={(data.length - 1) * step} cy={y(last)} r="3" fill="#38bdf8" />
-    </svg>
+    <div style={{ position: 'relative', width: '100%', height: H }}>
+      <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: 'block' }}>
+        <defs>
+          <linearGradient id="dashSparkGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.25" />
+            <stop offset="100%" stopColor="#38bdf8" stopOpacity="0.0" />
+          </linearGradient>
+        </defs>
+        <path d={areaD} fill="url(#dashSparkGrad)" />
+        <path d={lineD} fill="none" stroke="#38bdf8" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+      <div
+        style={{
+          position: 'absolute',
+          left: `${(lastPt.x / W) * 100}%`,
+          top: `${(lastPt.y / H) * 100}%`,
+          width: 7,
+          height: 7,
+          borderRadius: '50%',
+          background: '#38bdf8',
+          boxShadow: '0 0 0 2px rgba(56, 189, 248, 0.25)',
+          transform: 'translate(-50%, -50%)',
+          pointerEvents: 'none',
+        }}
+      />
+    </div>
   )
 }

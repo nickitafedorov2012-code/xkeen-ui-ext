@@ -175,21 +175,48 @@
 }
 
 .settings-columns {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 480px), 1fr));
-  gap: 16px;
-  align-items: start;
+  column-count: 2;
+  column-gap: 16px;
 }
 
 .settings-columns > .card {
-  margin: 0 !important;
+  break-inside: avoid;
+  display: inline-block;
+  margin: 0 0 16px 0 !important;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.settings-columns .card label.row {
+  display: grid;
+  grid-template-columns: minmax(145px, 38%) minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.settings-columns .card label.row > div {
+  min-width: 0;
+  width: 100%;
+}
+
+.settings-columns .card label.row .input,
+.settings-columns .card label.row .input-text,
+.settings-columns .card label.row .select {
+  max-width: 100%;
   width: 100%;
   box-sizing: border-box;
 }
 
 @media (max-width: 960px) {
   .settings-columns {
+    column-count: 1;
+  }
+}
+
+@media (max-width: 560px) {
+  .settings-columns .card label.row {
     grid-template-columns: 1fr;
+    gap: 6px;
   }
 }
 

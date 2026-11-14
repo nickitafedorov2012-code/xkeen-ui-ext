@@ -418,7 +418,7 @@ export default function Header({
       {/* 2. СТАТУС (компактный статус-виджет + выпадающий Apple-style стек сервисов и памяти при наведении) */}
       <div className="header-status-group" data-testid="header-status-group">
         <div
-          className={`status-badge-custom ${isRunning ? 'status-badge-running' : 'status-badge-stopped'}`}
+          className={`status-badge-custom ${!status ? 'status-badge-loading' : isRunning ? 'status-badge-running' : 'status-badge-stopped'}`}
           onClick={() => onSwitchTab('dashboard')}
           role="button"
           tabIndex={0}
@@ -426,7 +426,7 @@ export default function Header({
         >
           <div className="status-badge-content">
             <div className="status-badge-row1">
-              <span className={`status-dot ${isRunning ? 'status-dot-running' : 'status-dot-stopped'}`} />
+              <span className={`status-dot ${!status ? 'status-dot-loading' : isRunning ? 'status-dot-running' : 'status-dot-stopped'}`} />
               <span
                 className="status-label"
                 style={serviceFeedback ? {
@@ -435,7 +435,7 @@ export default function Header({
                 } : undefined}
                 data-testid="header-status-label"
               >
-                {serviceFeedback ? serviceFeedback.text : (isRunning ? 'Сервис запущен' : 'Сервис остановлен')}
+                {serviceFeedback ? serviceFeedback.text : !status ? 'Проверка...' : (isRunning ? 'Сервис запущен' : 'Сервис остановлен')}
               </span>
             </div>
             <div className="status-badge-row2">

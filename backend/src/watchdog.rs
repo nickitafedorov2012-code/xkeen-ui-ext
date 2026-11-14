@@ -1103,6 +1103,10 @@ pub fn spawn_adguard_monitor(state: AppState) {
                 if iptables_active {
                     let _ = crate::adguard::remove_adguard_iptables_with_restore_port(Some(mihomo_restore_port));
                 }
+                if should_stop_idle_adguard(enabled, agh_status.running, agh_status.protection_enabled) {
+                    log_i!("[WATCHDOG] AdGuard Home выключен, но процесс всё ещё занимает ОЗУ — выгружаем из памяти...");
+                    let _ = crate::adguard::service_action("stop").await;
+                }
                 iptables_temporarily_suspended = false;
                 continue;
             }
@@ -1307,6 +1311,11 @@ pub fn can_restore_adguard_iptables(mihomo_down: bool, adguard_listener_ok: bool
 /// Чистая логика решения о том, считается ли AdGuard упавшим (ADGUARD_DOWN) (баг 1).
 /// Если интеграция включена (enabled), но процесс не запущен или DNS-слушатель не отвечает — down = true.
 /// Если интеграция выключена намеренно — down = false (флаг сбрасывается).
+/// Нужно ли принудительно выгрузить процесс AdGuardHome из ОЗУ, когда интеграция выключена.
+pub fn should_stop_idle_adguard(enabled: bool, process_running: bool, protection_enabled: bool) -> bool {
+    !enabled && process_running && !protection_enabled
+}
+
 pub fn decide_adguard_down(enabled: bool, process_running: bool, listener_ok: bool) -> bool {
     if !enabled {
         false
@@ -2691,5 +2700,13 @@ mod structural_regression_tests {
         assert_eq!(std::fs::read_to_string(&yaml_path).unwrap(), orig_yaml);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn regression_idle_adguard_process_is_stopped_when_disabled() {
+        assert!(super::should_stop_idle_adguard(false, true, false));
+        assert!(!super::should_stop_idle_adguard(true, true, false));
+        assert!(!super::should_stop_idle_adguard(false, false, false));
+        assert!(!super::should_stop_idle_adguard(false, true, true));
     }
 }

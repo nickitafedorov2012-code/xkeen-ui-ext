@@ -698,12 +698,12 @@ export default function Devices({ notify }: Props) {
             <thead>
               <tr>
                 <th><input type="checkbox" checked={false} readOnly disabled /></th>
-                <th>Device</th>
+                <th>Устройство</th>
                 <th>IP</th>
-                <th>Policy</th>
-                <th>Speed</th>
-                <th>Traffic</th>
-                <th>Server</th>
+                <th>Политика</th>
+                <th>Скорость</th>
+                <th>Трафик</th>
+                <th>Сервер</th>
                 <th style={{ textAlign: 'center' }}>Zapret (DPI)</th>
                 <th style={{ textAlign: 'center' }}>Игры 🎮</th>
                 <th style={{ textAlign: 'center' }}>БС 🛡️</th>
@@ -737,15 +737,15 @@ export default function Devices({ notify }: Props) {
             <colgroup>
               <col style={{ width: '32px' }} />
               <col />
-              <col style={{ width: '104px' }} />
-              <col style={{ width: '132px' }} />
-              <col style={{ width: '84px' }} />
-              <col style={{ width: '64px' }} />
-              <col style={{ width: '136px' }} />
+              <col style={{ width: '108px' }} />
+              <col style={{ width: '154px' }} />
+              <col style={{ width: '92px' }} />
+              <col style={{ width: '80px' }} />
+              <col style={{ width: '188px' }} />
+              <col style={{ width: '112px' }} />
               <col style={{ width: '94px' }} />
-              <col style={{ width: '90px' }} />
-              <col style={{ width: '78px' }} />
-              <col style={{ width: '76px' }} />
+              <col style={{ width: '82px' }} />
+              <col style={{ width: '74px' }} />
             </colgroup>
             <thead>
               <tr>
@@ -757,22 +757,22 @@ export default function Devices({ notify }: Props) {
                   />
                 </th>
                 <th className="sortable" onClick={() => handleSort('device')}>
-                  Device{sortIndicator('device')}
+                  Устройство{sortIndicator('device')}
                 </th>
                 <th className="sortable" onClick={() => handleSort('ip')}>
                   IP{sortIndicator('ip')}
                 </th>
                 <th className="sortable" onClick={() => handleSort('policy')}>
-                  Policy{sortIndicator('policy')}
+                  Политика{sortIndicator('policy')}
                 </th>
                 <th className="sortable" onClick={() => handleSort('speed')}>
-                  Speed{sortIndicator('speed')}
+                  Скорость{sortIndicator('speed')}
                 </th>
                 <th className="sortable" onClick={() => handleSort('traffic')}>
-                  Traffic{sortIndicator('traffic')}
+                  Трафик{sortIndicator('traffic')}
                 </th>
                 <th className="sortable" onClick={() => handleSort('server')}>
-                  Server{sortIndicator('server')}
+                  Сервер{sortIndicator('server')}
                 </th>
                 <th style={{ textAlign: 'center' }}>Zapret (DPI)</th>
                 <th style={{ textAlign: 'center' }}>Игры 🎮</th>
@@ -781,13 +781,13 @@ export default function Devices({ notify }: Props) {
               </tr>
             </thead>
             <tbody>
-              {/* Секция Online */}
+              {/* Секция В сети */}
               {(statusFilter === 'all' || statusFilter === 'online') && (
                 <>
                   <tr>
                     <td colSpan={11} style={{ padding: '12px 14px 4px', borderBottom: 'none' }}>
                       <span className="devices-group-header online">
-                        Online ({sortedOnline.length})
+                        В сети ({sortedOnline.length})
                       </span>
                     </td>
                   </tr>
@@ -843,7 +843,7 @@ export default function Devices({ notify }: Props) {
                         </span>
                         <div className="offline-accordion-info">
                           <span className="offline-accordion-heading">
-                            Offline ({sortedOffline.length})
+                            Не в сети ({sortedOffline.length})
                           </span>
                           {!offlineExpanded && (
                             <span className="offline-accordion-preview">

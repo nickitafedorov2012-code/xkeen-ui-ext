@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect, useRef } from 'react'
 import type { VkTurnPhase, VkTurnStatus } from '../../types'
 
 export interface VkTurnDetailsSectionProps {
@@ -64,7 +64,7 @@ export function VkTurnDetailsSection({
   updatingPassword,
   handleUpdatePassword,
   actionPending,
-  targetStreams,
+  targetStreams: _targetStreams,
   displayedStreamsStr,
   rangeStreams,
   canSaveStreams,
@@ -74,6 +74,21 @@ export function VkTurnDetailsSection({
   transportUpdating,
   handleSaveTurnTransport,
 }: VkTurnDetailsSectionProps) {
+  const fetchLogsRef = useRef(fetchLogs)
+  fetchLogsRef.current = fetchLogs
+
+  // Баг #1: при открытой вкладке/аккордеоне «Логи службы (Tail)» автоматически обновляем логи
+  useEffect(() => {
+    if (!accordionOpen) return
+    fetchLogsRef.current()
+    const timer = window.setInterval(() => {
+      if (typeof document === 'undefined' || !document.hidden) {
+        fetchLogsRef.current()
+      }
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [accordionOpen])
+
   return (
   <section className="vk-section" style={{ padding: '18px 24px' }}>
     <div
@@ -114,13 +129,10 @@ export function VkTurnDetailsSection({
         <div style={{ marginBottom: 20, maxWidth: 640 }} data-testid="stream-controls">
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 8 }}>
             <label htmlFor="vkturn-stream-range" style={{ fontSize: 13.5, fontWeight: 600 }}>
-              Мощность туннеля (потоки):{' '}
-              <span style={{ color: 'var(--accent, #3b82f6)', fontWeight: 700, fontSize: 16 }}>
-                {displayedStreamsStr || targetStreams}
-              </span>
+              Мощность туннеля (потоки)
             </label>
             <span className="badge badge-neutral" style={{ fontSize: 12 }}>
-              Активно: {status?.connected_streams ?? 0} из {targetStreams}
+              Активных: {status?.connected_streams ?? 0}
             </span>
           </div>
           <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>

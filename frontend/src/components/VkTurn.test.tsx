@@ -483,7 +483,7 @@ describe('VkTurn Component (ядро csqtt)', () => {
     expect(badge?.textContent).toContain('🟢 Подключён · соединений: 3')
     expect(container?.textContent).toContain('сервер csqtt: 1.2.3.4:46000')
     expect(container?.textContent).toContain('Ядро csqtt')
-    expect(container?.querySelector('[data-testid="traffic-line"]')?.textContent).toContain('↑ 1.5 КБ ↓ 3.0 МБ')
+    expect(container?.querySelector('[data-testid="traffic-line"]')?.textContent).toContain('↓ 3.0 МБ ↑ 1.5 КБ')
     expect(container?.querySelector('[data-testid="waiting-tunnel"]')).toBeNull()
 
     const toggleInput = container?.querySelector('input[type="checkbox"][aria-label*="VK-туннель"]') as HTMLInputElement
@@ -1211,6 +1211,32 @@ describe('regression_vkturn_25_frontend — UI/UX редизайн и испра
       tcpBtn.click()
     })
     expect(saveSpy).toHaveBeenCalledWith({ turn_transport: 'tcp' })
+  })
+
+  it('shows oauth login error without fallback to manual links and warns before switching to VK account', async () => {
+    vi.spyOn(api, 'getVkTurnStatus').mockResolvedValue({
+      ...connectedOAuth,
+      auth_mode: 'oauth',
+      has_token: false,
+      links_count: 2,
+      links: ['https://vk.com/call/join/test1', 'https://vk.com/call/join/test2'],
+      phase: 'disabled',
+      enabled: false,
+    })
+    await remount()
+
+    const errBanner = container?.querySelector('[data-testid="vk-not-logged-in-error"]')
+    expect(errBanner).not.toBeNull()
+    expect(errBanner?.textContent).toContain('Выбран режим «Аккаунт VK», но вход в аккаунт не выполнен')
+
+    const oauthSwitchBtn = Array.from(container?.querySelectorAll('button') || []).find((b) =>
+      b.textContent?.includes('Аккаунт VK'),
+    ) as HTMLButtonElement | undefined
+    expect(oauthSwitchBtn).toBeDefined()
+    await act(async () => {
+      oauthSwitchBtn!.click()
+    })
+    expect(container?.textContent).toContain('Предупреждение о безопасности аккаунта VK')
   })
 })
 

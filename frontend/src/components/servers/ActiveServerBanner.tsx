@@ -204,6 +204,8 @@ export function ActiveServerBanner({
                   ? '👑 Основной сервер'
                   : status.failover.priority_chain?.includes(activeServer.id)
                   ? `⚡ Резерв #${status.failover.priority_chain.indexOf(activeServer.id) + 1}`
+                  : activeServer.is_whitelist
+                  ? '🛡️ Туннель БС'
                   : '🌐 Ручной выбор'}
               </span>
             )}
@@ -322,7 +324,7 @@ export function ActiveServerBanner({
                     : `Задержка: ${activeServer.ping_ms} мс | Джиттер: ±${jitterVal} мс (разброс по ${pingHistory.length} точкам) | Мин: ${Math.min(...pingHistory)} мс, Макс: ${Math.max(...pingHistory)} мс | Нажмите для экспресс-замера`
                 }
               >
-                <span>{jitterMeasuring ? '⏳' : '📶'}</span>
+                <span>{jitterMeasuring ? '⏳' : '〰️'}</span>
                 <span style={{ color: 'var(--muted)', fontSize: 10.5 }}>Джиттер:</span>
                 <span
                   style={{

@@ -609,27 +609,103 @@ pub fn sync_disabled_providers_in_yaml(yaml: &str, disabled_providers: &[String]
             in_use_block = false;
         }
 
+        // Пропускаем авто-добавленный fallback для пустого use (перегенерируется ниже при необходимости)
+        if trimmed.ends_with("# xk-empty-use-fallback") {
+            continue;
+        }
+
+        // Раскомментирование ранее сохранённого inline use-disabled: [sub1, sub2] или use: [sub2] # xk-disabled-inline: [sub1]
+        if trimmed.starts_with("# use-disabled:") || trimmed.contains("# xk-disabled-inline:") {
+            let indent_spaces = &line[..line.len() - line.trim_start().len()];
+            let mut all_items: Vec<String> = Vec::new();
+            if trimmed.starts_with("# use-disabled:") && trimmed.ends_with(']') {
+                let raw_val = trimmed.trim_start_matches("# use-disabled:").trim();
+                let inner = &raw_val[1..raw_val.len() - 1];
+                for s in inner.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                    all_items.push(s.to_string());
+                }
+            } else if let Some((left, right)) = trimmed.split_once("# xk-disabled-inline:") {
+                let left_trim = left.trim();
+                if (left_trim.starts_with("use: [") || left_trim.starts_with("use:[")) && left_trim.ends_with(']') {
+                    let raw_val = left_trim.trim_start_matches("use:").trim();
+                    let inner = &raw_val[1..raw_val.len() - 1];
+                    for s in inner.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                        if !all_items.iter().any(|x| x.eq_ignore_ascii_case(s)) {
+                            all_items.push(s.to_string());
+                        }
+                    }
+                }
+                let right_trim = right.trim();
+                if right_trim.starts_with('[') && right_trim.ends_with(']') {
+                    let inner = &right_trim[1..right_trim.len() - 1];
+                    for s in inner.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                        if !all_items.iter().any(|x| x.eq_ignore_ascii_case(s)) {
+                            all_items.push(s.to_string());
+                        }
+                    }
+                }
+            }
+            if !all_items.is_empty() {
+                let mut remaining: Vec<String> = Vec::new();
+                let mut dropped: Vec<String> = Vec::new();
+                for item in &all_items {
+                    let clean = item.trim_matches('\'').trim_matches('"').trim();
+                    if disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(clean)) {
+                        dropped.push(item.clone());
+                    } else {
+                        remaining.push(item.clone());
+                    }
+                }
+                if remaining.is_empty() {
+                    out.push(format!("{indent_spaces}# use-disabled: [{}]", all_items.join(", ")));
+                } else if dropped.is_empty() {
+                    out.push(format!("{indent_spaces}use: [{}]", remaining.join(", ")));
+                } else {
+                    out.push(format!(
+                        "{indent_spaces}use: [{}] # xk-disabled-inline: [{}]",
+                        remaining.join(", "),
+                        dropped.join(", ")
+                    ));
+                }
+                continue;
+            }
+        }
+
         // Inline use: [sub1, sub2]
         if (trimmed.starts_with("use: [") || trimmed.starts_with("use:[")) && trimmed.ends_with(']') {
             let raw_val = trimmed.trim_start_matches("use:").trim();
             let inner = &raw_val[1..raw_val.len() - 1];
             let items: Vec<&str> = inner.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
-            let remaining: Vec<&str> = items
-                .into_iter()
-                .filter(|item| {
-                    let clean = item.trim_matches('\'').trim_matches('"').trim();
-                    !disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(clean))
-                })
-                .collect();
+            let mut remaining: Vec<&str> = Vec::new();
+            let mut dropped: Vec<&str> = Vec::new();
+            for item in &items {
+                let clean = item.trim_matches('\'').trim_matches('"').trim();
+                if disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(clean)) {
+                    dropped.push(item);
+                } else {
+                    remaining.push(item);
+                }
+            }
             let indent_spaces = &line[..line.len() - line.trim_start().len()];
-            out.push(format!("{indent_spaces}use: [{}]", remaining.join(", ")));
+            if remaining.is_empty() && !items.is_empty() {
+                out.push(format!("{indent_spaces}# use-disabled: [{}]", items.join(", ")));
+            } else if dropped.is_empty() {
+                out.push(format!("{indent_spaces}use: [{}]", remaining.join(", ")));
+            } else {
+                out.push(format!(
+                    "{indent_spaces}use: [{}] # xk-disabled-inline: [{}]",
+                    remaining.join(", "),
+                    dropped.join(", ")
+                ));
+            }
             continue;
         }
 
-        if trimmed == "use:" {
+        if trimmed == "use:" || trimmed == "# use-disabled:" {
             in_use_block = true;
             use_indent = line.len() - line.trim_start().len();
-            out.push(line.to_string());
+            let indent_spaces = &line[..use_indent];
+            out.push(format!("{indent_spaces}use:"));
             continue;
         }
 
@@ -664,9 +740,106 @@ pub fn sync_disabled_providers_in_yaml(yaml: &str, disabled_providers: &[String]
         out.push(line.to_string());
     }
 
+    // Пост-проход по proxy-groups: если у группы блочный `use:` остался без активных элементов,
+    // комментируем его как `# use-disabled:` и при отсутствии `proxies:` добавляем `proxies:\n      - DIRECT # xk-empty-use-fallback`
+    let mut final_lines: Vec<String> = Vec::with_capacity(out.len());
+    let mut in_proxy_groups = false;
+    let mut i = 0;
+    while i < out.len() {
+        let line = &out[i];
+        let trimmed = line.trim();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+        if is_top {
+            in_proxy_groups = trimmed == "proxy-groups:";
+            final_lines.push(line.clone());
+            i += 1;
+            continue;
+        }
+
+        if in_proxy_groups && trimmed.starts_with("- name:") {
+            // Собираем границы текущей группы до следующего `- name:` или top-level секции
+            let group_start = i;
+            let mut group_end = i + 1;
+            while group_end < out.len() {
+                let gl = &out[group_end];
+                let gt = gl.trim();
+                let g_top = !gl.starts_with(' ') && !gt.is_empty();
+                if g_top || gt.starts_with("- name:") {
+                    break;
+                }
+                group_end += 1;
+            }
+
+            let mut group_slice = out[group_start..group_end].to_vec();
+            let mut has_proxies_key = false;
+            let mut has_active_use = false;
+            let mut has_disabled_use = false;
+            let mut use_idx: Option<usize> = None;
+            let mut use_ind = 0usize;
+
+            for (idx, gl) in group_slice.iter().enumerate() {
+                let gt = gl.trim();
+                if gt == "proxies:" || gt.starts_with("proxies:") {
+                    has_proxies_key = true;
+                } else if gt.starts_with("use: [") || gt.starts_with("use:[") {
+                    if !gt.ends_with("[]") {
+                        has_active_use = true;
+                    }
+                } else if gt == "use:" {
+                    use_idx = Some(idx);
+                    use_ind = gl.len() - gl.trim_start().len();
+                } else if gt.starts_with("# use-disabled:") {
+                    has_disabled_use = true;
+                }
+            }
+
+            if let Some(uidx) = use_idx {
+                let mut active_items = 0usize;
+                for gl in &group_slice[uidx + 1..] {
+                    let gt = gl.trim();
+                    if gt.is_empty() {
+                        continue;
+                    }
+                    let ind = gl.len() - gl.trim_start().len();
+                    if ind <= use_ind {
+                        break;
+                    }
+                    if gt.starts_with('-') {
+                        active_items += 1;
+                    }
+                }
+                if active_items > 0 {
+                    has_active_use = true;
+                } else {
+                    let spaces = " ".repeat(use_ind);
+                    group_slice[uidx] = format!("{spaces}# use-disabled:");
+                    has_disabled_use = true;
+                }
+            }
+
+            if !has_active_use && has_disabled_use && !has_proxies_key {
+                let prop_indent = group_slice
+                    .get(1)
+                    .map(|l| l.len() - l.trim_start().len())
+                    .filter(|&n| n > 0)
+                    .unwrap_or(4);
+                let sp = " ".repeat(prop_indent);
+                group_slice.push(format!("{sp}proxies: # xk-empty-use-fallback"));
+                group_slice.push(format!("{sp}  - DIRECT # xk-empty-use-fallback"));
+            }
+
+            final_lines.extend(group_slice);
+            i = group_end;
+            continue;
+        }
+
+        final_lines.push(line.clone());
+        i += 1;
+    }
+
     let is_crlf = yaml.contains("\r\n");
     let eol = if is_crlf { "\r\n" } else { "\n" };
-    Ok(out.join(eol))
+    Ok(final_lines.join(eol))
 }
 
 fn replace_hwid_in_url_line(line: &str, new_hwid: &str) -> String {

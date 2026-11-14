@@ -928,6 +928,9 @@ pub struct WhitelistConfig {
     pub gaming_suspended: bool,
     #[serde(default)]
     pub custom_domains: Vec<String>,
+    /// Домены из «Базового каталога РФ», которые пользователь явно переключил «через 🛡️ БС» (по умолчанию все идут DIRECT)
+    #[serde(default)]
+    pub proxy_catalog_domains: Vec<String>,
 }
 
 impl Default for WhitelistConfig {
@@ -944,6 +947,7 @@ impl Default for WhitelistConfig {
             devices: Vec::new(),
             gaming_suspended: false,
             custom_domains: Vec::new(),
+            proxy_catalog_domains: Vec::new(),
         }
     }
 }

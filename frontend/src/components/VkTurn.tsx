@@ -84,6 +84,8 @@ export default function VkTurn({ notify }: VkTurnProps) {
 
   // VK OAuth модальное окно
   const [authModalOpen, setAuthModalOpen] = useState(false)
+  const [vkRiskModalOpen, setVkRiskModalOpen] = useState(false)
+  const [oauthSelectedNoToken, setOauthSelectedNoToken] = useState(false)
   const [manualTokenInput, setManualTokenInput] = useState('')
   const [authSubmitting, setAuthSubmitting] = useState(false)
 
@@ -329,12 +331,16 @@ export default function VkTurn({ notify }: VkTurnProps) {
   }
 
   const hasActiveAuthSource =
-    status?.auth_mode === 'manual'
-      ? (status?.links_count ?? 0) > 0
+    status?.auth_mode === 'oauth'
+      ? Boolean(status?.has_token)
       : status?.auth_mode === 'profile_token'
         ? Boolean(status?.has_profile_token)
-        : Boolean(status?.has_token) || (status?.links_count ?? 0) > 0
-  const isConfigured = Boolean(status?.peer && status?.has_password && hasActiveAuthSource)
+        : (status?.links_count ?? 0) > 0
+  const isConfigured = Boolean(
+    status?.peer &&
+      status?.has_password &&
+      (hasActiveAuthSource || status?.auth_mode === 'oauth' || (status?.links_count ?? 0) > 0),
+  )
 
   const handleSaveAuthString = async (str: string) => {
     const trimmed = str.trim()
@@ -397,15 +403,39 @@ export default function VkTurn({ notify }: VkTurnProps) {
     }
   }
 
-  const handleSwitchAuthMode = async (mode: VkTurnAuthMode) => {
-    if (mode === 'oauth' && !status?.has_token) {
+  const confirmOAuthRiskAndProceed = async () => {
+    setVkRiskModalOpen(false)
+    if (!status?.has_token) {
+      setManualSwitchPending(false)
+      setOauthSelectedNoToken(true)
+      notify('Вход в аккаунт VK не выполнен — войдите через VK ID или перейдите на ручные ссылки', true)
       handleStartVkOAuth()
       return
     }
+    setOauthSelectedNoToken(false)
+    setActionPending(true)
+    try {
+      await saveVkTurnConfig({ auth_mode: 'oauth' })
+      setManualSwitchPending(false)
+      notify('Источник звонков переключён: Мой аккаунт VK')
+      await loadStatus(true)
+    } catch (err: unknown) {
+      notify(errMessage(err, 'Не удалось переключить источник звонков'), true)
+    } finally {
+      setActionPending(false)
+    }
+  }
+
+  const handleSwitchAuthMode = async (mode: VkTurnAuthMode) => {
+    if (mode === 'oauth') {
+      setVkRiskModalOpen(true)
+      return
+    }
+    setOauthSelectedNoToken(false)
     if (mode === 'manual' && (status?.links_count ?? 0) === 0) {
       setManualSwitchPending(true)
       setAccordionOpen(true)
-      notify('Добавьте ссылку на звонок ВКонтакте для переключения на ручной режим')
+      notify('Добавьте ссылку на звонок ВКонтакте для переключения на ручной режим', true)
       return
     }
     setActionPending(true)
@@ -413,7 +443,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
       await saveVkTurnConfig({ auth_mode: mode })
       setManualSwitchPending(false)
       const label =
-        mode === 'oauth' ? 'Мой аккаунт VK' : mode === 'profile_token' ? 'Токен профиля' : 'Ручные ссылки'
+        mode === 'profile_token' ? 'Токен профиля' : 'Ручные ссылки'
       notify(`Источник звонков переключён: ${label}`)
       await loadStatus(true)
     } catch (err: unknown) {
@@ -1091,7 +1121,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
               Звонки ВКонтакте → сервер csqtt: <b>{status?.peer || 'не указан'}</b>
               {isRunning && (
                 <span data-testid="traffic-line">
-                  {' '}• ↑ {formatTraffic(status?.bytes_up)} ↓ {formatTraffic(status?.bytes_down)}
+                  {' '}• ↓ {formatTraffic(status?.bytes_down)} ↑ {formatTraffic(status?.bytes_up)}
                 </span>
               )}
             </div>
@@ -1118,7 +1148,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
           <div className="vk-source-pills">
             <button
               type="button"
-              className={`vk-source-pill${effectiveAuthMode === 'oauth' && !manualSwitchPending ? ' active' : ''}`}
+              className={`vk-source-pill${(effectiveAuthMode === 'oauth' || oauthSelectedNoToken) && !manualSwitchPending ? ' active' : ''}`}
               disabled={actionPending}
               onClick={() => void handleSwitchAuthMode('oauth')}
             >
@@ -1127,7 +1157,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
             {status?.has_profile_token && (
               <button
                 type="button"
-                className={`vk-source-pill${effectiveAuthMode === 'profile_token' && !manualSwitchPending ? ' active' : ''}`}
+                className={`vk-source-pill${effectiveAuthMode === 'profile_token' && !manualSwitchPending && !oauthSelectedNoToken ? ' active' : ''}`}
                 disabled={actionPending}
                 onClick={() => void handleSwitchAuthMode('profile_token')}
               >
@@ -1136,7 +1166,7 @@ export default function VkTurn({ notify }: VkTurnProps) {
             )}
             <button
               type="button"
-              className={`vk-source-pill${showManualLinksSection ? ' active' : ''}`}
+              className={`vk-source-pill${showManualLinksSection && !oauthSelectedNoToken ? ' active' : ''}`}
               disabled={actionPending}
               onClick={() => void handleSwitchAuthMode('manual')}
             >
@@ -1144,6 +1174,17 @@ export default function VkTurn({ notify }: VkTurnProps) {
             </button>
           </div>
         </div>
+
+        {(oauthSelectedNoToken || (effectiveAuthMode === 'oauth' && !status?.has_token)) && (
+          <div className="vk-alert vk-alert-danger" style={{ marginTop: 12, fontSize: 13.5 }} data-testid="vk-not-logged-in-error">
+            <div style={{ fontWeight: 600, color: 'var(--danger-fg, #ef4444)', marginBottom: 6 }}>
+              ❌ Выбран режим «Аккаунт VK», но вход в аккаунт не выполнен.
+            </div>
+            <div className="muted" style={{ fontSize: 12.5, marginBottom: 8 }}>
+              Без авторизованного аккаунта VK звонки не могут создаваться автоматически. Войдите через VK ID или переключитесь на «Ручные ссылки».
+            </div>
+          </div>
+        )}
 
         <div style={{ marginTop: 14 }}>
           {renderVkAccountCard()}
@@ -1419,6 +1460,37 @@ export default function VkTurn({ notify }: VkTurnProps) {
         transportUpdating={transportUpdating}
         handleSaveTurnTransport={handleSaveTurnTransport}
       />
+      {vkRiskModalOpen && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" data-testid="vk-risk-modal">
+          <div className="modal" style={{ maxWidth: 480 }}>
+            <div className="modal-header">
+              <h3 style={{ margin: 0, fontSize: 16 }}>⚠️ Предупреждение о безопасности аккаунта VK</h3>
+              <button type="button" className="btn btn-xs" onClick={() => setVkRiskModalOpen(false)}>✕</button>
+            </div>
+            <div className="modal-body" style={{ fontSize: 13.5, lineHeight: 1.55 }}>
+              <p style={{ marginTop: 0 }}>
+                Использование авторизации через ваш личный аккаунт ВКонтакте для автоматического создания и удержания звонков может привести к <strong>временной заморозке или полной блокировке (бану) аккаунта</strong> со стороны ВКонтакте.
+              </p>
+              <p style={{ marginBottom: 0, color: 'var(--muted)' }}>
+                Продолжая, вы подтверждаете, что используете данный режим исключительно на свой страх и риск. Разработчик полностью снимает с себя любую ответственность за возможные ограничения, санкции или блокировку вашего аккаунта VK.
+              </p>
+            </div>
+            <div className="modal-footer" style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+              <button type="button" className="btn btn-secondary" onClick={() => setVkRiskModalOpen(false)}>
+                Отмена
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary"
+                data-testid="vk-risk-confirm-btn"
+                onClick={() => void confirmOAuthRiskAndProceed()}
+              >
+                Понимаю риски, продолжить
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {renderAuthModal()}
     </div>
   )

@@ -309,6 +309,8 @@ pub struct WhitelistUpdateReq {
     pub device_patch: Option<WhitelistDevicePatch>,
     #[serde(default)]
     pub custom_domains: Option<Vec<String>>,
+    #[serde(default)]
+    pub proxy_catalog_domains: Option<Vec<String>>,
 }
 
 /// POST /api/whitelist — полное сохранение настроек режима белых списков
@@ -360,6 +362,22 @@ pub fn merge_whitelist_patch(
             }
         }
         wl.custom_domains = clean_domains;
+    }
+    if let Some(ref proxy_catalog_domains) = body.proxy_catalog_domains {
+        let mut clean_domains = Vec::new();
+        for d in proxy_catalog_domains {
+            let clean = config::normalize_domain(d);
+            if clean.is_empty() {
+                continue;
+            }
+            if !config::is_valid_domain(&clean) {
+                return Err(format!("Некорректный домен в маршруте каталога: {d}"));
+            }
+            if !clean_domains.contains(&clean) {
+                clean_domains.push(clean);
+            }
+        }
+        wl.proxy_catalog_domains = clean_domains;
     }
     Ok(())
 }

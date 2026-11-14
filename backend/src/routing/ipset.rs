@@ -465,14 +465,18 @@ pub fn apply_whitelist_rules(
     let mut wl_rules = Vec::new();
     wl_rules.push(WHITELIST_BEGIN.to_string());
 
-    let domains_direct = if cfg.whitelist.strategy == crate::config::WhitelistStrategy::StrictXKeen {
-        // Вкладка «Мои домены» — явное пользовательское исключение, в отличие от встроенного каталога РФ.
-        sanitize_domains(&cfg.whitelist.custom_domains)
-    } else {
-        get_all_whitelist_domains(&cfg.whitelist)
-    };
+    let proxy_catalog: std::collections::HashSet<String> = sanitize_domains(&cfg.whitelist.proxy_catalog_domains)
+        .into_iter()
+        .collect();
+    // Баг #14: по умолчанию все домены «Базового каталога РФ» (в т.ч. hh.ru) идут напрямую (DIRECT),
+    // кроме тех карточек, которые пользователь явно переключил в режим «через 🛡️ БС».
+    let mut domains_direct = get_all_whitelist_domains(&cfg.whitelist);
+    domains_direct.retain(|d| !proxy_catalog.contains(d));
     for dom in &domains_direct {
         wl_rules.push(format!("  - DOMAIN-SUFFIX,{dom},DIRECT"));
+    }
+    for dom in &proxy_catalog {
+        wl_rules.push(format!("  - DOMAIN-SUFFIX,{dom},{WHITELIST_GROUP_NAME}"));
     }
 
     // При стратегии StrictXKeen маршрутизируем всех клиентов сети в защищенный туннель (Zero-Touch)
