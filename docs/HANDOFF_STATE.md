@@ -1,12 +1,13 @@
-# Handoff State — v1.16.15.0
+# Handoff State — Каталог РФ (удаление 153 неработающих в DIRECT доменов)
 
 ## Цель
-Гарантировать железный инвариант выбранного сервера: при выборе любого сервера пользователем всё, что идёт НЕ напрямую (`DIRECT`/`REJECT`), идёт через выбранный сервер (в т.ч. `🛡️ Whitelist` при активном БС), без гонок старта, потери синхронизации при `reload_config` и залипания сокетов.
+Удалить 153 не открывающихся напрямую (`DIRECT`) домена из встроенного каталога РФ (`DOMESTIC_WHITELIST_DOMAINS` / `DOMESTIC_CATALOG`, 402 -> 249), исключать `proxy_catalog_domains` из `apply_whitelist_dns`, отдавать `proxy_catalog_domains` в `GET /api/whitelist`, обновить тесты и применить список на живом роутере `192.168.2.1:1001`.
 
 ## План шагов
-- [DONE] Шаг 1: Фильтрация `disabled_providers` и порядок `PROXY -> Fastest -> Fallback` в `backend/src/routing/ipset.rs` (`apply_whitelist_rules`), очистка осиротевшего `whitelist.devices[].server` в `backend/src/api/routing/devices.rs` (`set_device_routing`) — `cargo check` passed (0 errors)
-- [DONE] Шаг 2: Актуальная проверка `🛡️ Whitelist.now` и селективный сброс сокетов в `backend/src/failover/switcher.rs` (`sync_whitelist_on_switch`) + единое обновление `target_server` и `switch_server` в `backend/src/api/servers/mod.rs` + обновление `vkturn_manual_switch_keeps_existing_connections` в `backend/src/transaction.rs`
-- [DONE] Шаг 3: Восстановление активных селекторов `PROXY` и `🛡️ Whitelist` при `reload_config` и переключении в `backend/src/mihomo.rs` (`desired_tunnel_server_for_cfg`, `restore_active_selectors_after_reload`, `switch_server_inner`) — `cargo check --tests` passed (0 errors)
-- [DONE] Шаг 3.5: Хранение `LAST_SELECTED_TUNNEL_SERVER` и приоритет `desired_for_primary` для `🛡️ Whitelist` в `backend/src/mihomo.rs` + синхронизация `whitelist.target_server` в `backend/src/failover/probe.rs`
-- [DONE] Шаг 4: Исправление порядка стартовой инициализации и 30-секундный сторож инварианта в `backend/src/main.rs` (`regression_bug_4` passed)
-- [IN_PROGRESS] Шаг 5: Анти-регрессионные тесты, релиз `v1.16.15.0` и проверка на `192.168.2.1:1001`
+- [DONE] Шаг 1: Очистка встроенного каталога в `backend/src/whitelist_catalog.rs` (`DOMESTIC_WHITELIST_DOMAINS`, `DOMESTIC_CATALOG`, тест `test_mobile_infrastructure_and_cdns_present`: 402 -> 249 доменов; тесты `whitelist_catalog::tests` passed)
+- [DONE] Шаг 2: Исключение `proxy_catalog_domains` в `backend/src/routing/ipset.rs` (`apply_whitelist_dns`) и возврат `proxy_catalog_domains` в `backend/src/api/routing/whitelist.rs` (`WhitelistStatusResponse`, `get_whitelist`) — `cargo check --tests` passed
+- [DONE] Шаг 3: Обновление тестов и добавление анти-регрессионного теста `regression_pruned_153_non_connecting_direct_domains_and_dns_policy` в `backend/src/routing/mod.rs` (`routing::tests`: 116 passed, 0 failed)
+- [DONE] Шаг 4: Бэкап на `192.168.2.1:1001` (`xr-20261114-234503-757`), применение `proxy_catalog_domains` (153 адреса переведены из `DIRECT` в `🛡️ Whitelist`, `PROXY` и `🛡️ Whitelist` сохранены на `📞 VK-туннель [БС]`), `cargo test` (738 passed, 0 failed) и `npm --prefix frontend run build` (`tsc && vite build`, built in 2.78s)
+- [DONE] Шаг 5.1: Bump версии до `1.16.16` / `v1.16.16.0` (`backend/Cargo.toml`, `backend/Cargo.lock`, `frontend/package.json`), ченжлог в `DEVELOPMENT.md`, `cargo check` и `npm --prefix frontend run build` (`built in 2.15s`)
+- [IN_PROGRESS] Шаг 5.2: Коммит `v1.16.16.0`, тег `v1.16.16.0`, push в `origin main`, ожидание GitHub Release CI
+- [PENDING] Шаг 5.3: Установка `v1.16.16.0` на `192.168.2.1:1001` (`POST /api/backups`, `POST /api/update/install`), очистка временного `proxy_catalog_domains`, проверка каталога (249) и активного туннеля (`📞 VK-туннель [БС]`)

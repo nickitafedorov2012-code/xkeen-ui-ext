@@ -11,6 +11,26 @@ pub fn get_all_whitelist_domains(whitelist_cfg: &crate::config::WhitelistConfig)
     out
 }
 
+/// Нормализованное множество доменов каталога, переведённых в группу `🛡️ Whitelist`.
+fn proxy_catalog_domain_set(
+    whitelist_cfg: &crate::config::WhitelistConfig,
+) -> std::collections::HashSet<String> {
+    sanitize_domains(&whitelist_cfg.proxy_catalog_domains)
+        .into_iter()
+        .collect()
+}
+
+/// Возвращает домены белого списка, направляемые в `DIRECT` и локальный DNS,
+/// исключая домены из `proxy_catalog`.
+fn direct_whitelist_domains_excluding(
+    whitelist_cfg: &crate::config::WhitelistConfig,
+    proxy_catalog: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut domains = get_all_whitelist_domains(whitelist_cfg);
+    domains.retain(|d| !proxy_catalog.contains(d));
+    domains
+}
+
 /// Удаление блока управляемого отклонения QUIC (UDP/443).
 pub fn remove_quic_reject_rules(yaml: &str) -> String {
     let mut out = Vec::new();
@@ -476,13 +496,10 @@ pub fn apply_whitelist_rules(
     let mut wl_rules = Vec::new();
     wl_rules.push(WHITELIST_BEGIN.to_string());
 
-    let proxy_catalog: std::collections::HashSet<String> = sanitize_domains(&cfg.whitelist.proxy_catalog_domains)
-        .into_iter()
-        .collect();
+    let proxy_catalog = proxy_catalog_domain_set(&cfg.whitelist);
     // Баг #14: по умолчанию все домены «Базового каталога РФ» (в т.ч. hh.ru) идут напрямую (DIRECT),
     // кроме тех карточек, которые пользователь явно переключил в режим «через 🛡️ БС».
-    let mut domains_direct = get_all_whitelist_domains(&cfg.whitelist);
-    domains_direct.retain(|d| !proxy_catalog.contains(d));
+    let domains_direct = direct_whitelist_domains_excluding(&cfg.whitelist, &proxy_catalog);
     for dom in &domains_direct {
         wl_rules.push(format!("  - DOMAIN-SUFFIX,{dom},DIRECT"));
     }
@@ -624,7 +641,8 @@ pub fn apply_whitelist_dns(
         local_dns_endpoint.trim()
     };
 
-    let all_domains = get_all_whitelist_domains(&cfg.whitelist);
+    let proxy_catalog = proxy_catalog_domain_set(&cfg.whitelist);
+    let all_domains = direct_whitelist_domains_excluding(&cfg.whitelist, &proxy_catalog);
     let mut dns_block = Vec::with_capacity(all_domains.len() + 2);
     dns_block.push(format!("    {WHITELIST_DNS_BEGIN}"));
     for dom in &all_domains {

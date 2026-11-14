@@ -1367,8 +1367,8 @@ rules:
 
     #[test]
     fn test_domestic_catalog_invariants() {
-        assert_eq!(DOMESTIC_WHITELIST_DOMAINS.len(), 402, "Must contain exactly 402 base domains");
-        assert_eq!(DOMESTIC_CATALOG.len(), 402, "Catalog entries must equal 402");
+        assert_eq!(DOMESTIC_WHITELIST_DOMAINS.len(), 249, "Must contain exactly 249 verified DIRECT base domains");
+        assert_eq!(DOMESTIC_CATALOG.len(), 249, "Catalog entries must equal 249");
 
         let mut seen = std::collections::HashSet::new();
         for &dom in DOMESTIC_WHITELIST_DOMAINS {
@@ -2339,22 +2339,20 @@ rules:
 
         let applied = apply_whitelist_rules(base_yaml, &cfg, None);
 
-        // Встроенный каталог сохраняет домены для UI/DNS, но StrictXKeen не выпускает его напрямую.
+        // Проверенные рабочие в DIRECT домены Ozon и российских CDN остаются в каталоге и идут напрямую.
         let critical_domains = [
             "ozon.ru",
-            "ozonusercontent.com",
             "ozone.ru",
             "ozonru.me",
-            "o3.ru",
-            "o3team.ru",
             "ozon.tech",
             "ozon.travel",
-            "ozon.app",
-            "ozonfresh.ru",
+            "ozon.dev",
+            "ozoncard.ru",
+            "ozon-credit.ru",
             "ngenix.net",
-            "qrator.net",
-            "wbstatic.net",
             "yastatic.net",
+            "avito.st",
+            "cdnvideo.ru",
         ];
 
         for &cd in &critical_domains {
@@ -2368,6 +2366,99 @@ rules:
                 cd
             );
         }
+
+        // Не открывающиеся в DIRECT домены исключены из встроенного каталога и не получают правил DIRECT.
+        let pruned_domains = [
+            "ozonusercontent.com",
+            "o3.ru",
+            "o3team.ru",
+            "ozon.app",
+            "ozonfresh.ru",
+            "qrator.net",
+            "wbstatic.net",
+            "vkuser.net",
+            "aliexpress.ru",
+            "citilink.ru",
+            "raiffeisen.ru",
+            "sovcombank.ru",
+            "push.apple.com",
+            "fcm.googleapis.com",
+        ];
+
+        for &pd in &pruned_domains {
+            assert!(
+                !DOMESTIC_WHITELIST_DOMAINS.contains(&pd),
+                "Pruned non-connecting domain {pd} must not remain in DOMESTIC_WHITELIST_DOMAINS"
+            );
+            assert!(
+                !applied.contains(&format!("DOMAIN-SUFFIX,{pd},DIRECT")),
+                "Pruned non-connecting domain {pd} must not generate a DIRECT rule"
+            );
+        }
+    }
+
+    #[test]
+    fn regression_pruned_153_non_connecting_direct_domains_and_dns_policy() {
+        const REMOVED_153: &[&str] = &[
+            "5post.ru", "adm-kbr.ru", "afisha.ru", "akbars.ru", "alfa-direct.ru", "alfastrah.ru",
+            "aliexpress.ru", "api.xmpush.xiaomi.com", "apteka.ru", "aviasales.ru", "azimuth.aero",
+            "banki.com", "bashkortostan.ru", "beeline.business", "beget.com", "bfm.ru", "blank.ru",
+            "castorama.ru", "cbrnet.ru", "ccl.ru", "cdek-express.ru", "cdek.market", "center-invest.ru",
+            "citilink.ru", "courier.push.apple.com", "crediteurope.ru", "culture.ru", "delimobil.ru",
+            "dochkisinochki.com", "dochkisinochki.ru", "domrfbank.ru", "duma.gov.ru", "echo-msk.ru",
+            "economy.gov.ru", "eisz.ru", "erc.ur.ru", "expert.ru", "express-courier.ru", "fas.gov.ru",
+            "fcm.googleapis.com", "fontanka.ru", "forbes.ru", "fssp.gov.ru", "garantpost.ru", "gcdn.co",
+            "genproc.gov.ru", "gis-zhkh.ru", "gkh.ru", "gorzdrav.org", "gosuslugi.org", "hcfb.ru",
+            "homecredit.ru", "hse.ru", "ingos.ru", "interfax.ru", "kinopoisk.hd", "kolesa-darom.ru",
+            "krasnodar.ru", "kremlin-cis.ru", "ksrf.ru", "lemanapro.ru", "leroymerlin.ru", "lk.tele2.ru",
+            "lockobank.ru", "mchost.ru", "megalabs.ru", "mephi.ru", "metallinvestbank.ru", "mgtu.ru",
+            "minobrnauki.gov.ru", "minzdrav.gov.ru", "mipt.ru", "mironline.ru", "mkb.ru",
+            "mosgortrans.ru", "mosoblgaz.ru", "msu.ru", "mtalk.google.com", "mts.by", "mts.cloud",
+            "mts.media", "mtsbank.mobi", "mvd.gov.ru", "national-clearing.ru", "o3.ru", "o3team.ru",
+            "ozon-dostavka.ru", "ozon.app", "ozon.global", "ozon.st", "ozonfresh.ru", "ozonpartners.ru",
+            "ozonusercontent.com", "planetazdorovo.ru", "pravo.gov.ru", "psbank.ru", "push.apple.com",
+            "push.hicloud.com", "qrator.net", "raiffeisen.ru", "redwings.ru", "ren.tv", "rendez-vous.ru",
+            "reso.ru", "rgs.ru", "rivegauche.com", "rkn.gov.ru", "rosbank.ru", "roskomnadzor.ru",
+            "rosreestr.gov.ru", "rosstat.gov.ru", "rt-solar.ru", "rtk-dc.ru", "ru-tld.ru", "rutube.net",
+            "sberins.ru", "sberinvest.ru", "selectel.ru", "shinservice.ru", "sledcom.ru", "smartavia.net",
+            "soglasie.ru", "sovcombank.ru", "spb.ru", "spbu.ru", "start.ru", "stepik.org", "sudrf.ru",
+            "tattelecom.ru", "tinkoffinvest.ru", "transcapitalbank.ru", "trudvsem.ru", "ttk.ru",
+            "unicreditbank.ru", "uralairlines.ru", "veon.com", "vesti.fm", "vgtrk.ru", "vkuser.net",
+            "vkusvill.ru", "vokrug.tv", "vseinstrumenti.ru", "vsrf.ru", "vtb-invest.ru", "vtb24.ru",
+            "vz.ru", "wbstatic.net", "webnames.ru", "wnd.ru", "xmpush.xiaomi.com", "yandexgo.ru",
+            "yastatic.com", "zdravcity.ru",
+        ];
+        assert_eq!(REMOVED_153.len(), 153);
+
+        for &dom in REMOVED_153 {
+            assert!(
+                !DOMESTIC_WHITELIST_DOMAINS.contains(&dom),
+                "Removed domain {dom} must not be present in DOMESTIC_WHITELIST_DOMAINS"
+            );
+            assert!(
+                !DOMESTIC_CATALOG.iter().any(|entry| entry.domain == dom),
+                "Removed domain {dom} must not be present in DOMESTIC_CATALOG"
+            );
+        }
+
+        // proxy_catalog_domains должны исключаться как из DIRECT-правил, так и из nameserver-policy (127.0.0.1:53)
+        let base_yaml = "port: 7890\ndns:\n  enable: true\n  nameserver:\n    - 77.88.8.8\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - MATCH,PROXY\n";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
+        cfg.whitelist.proxy_catalog_domains = vec!["sberbank.ru".into(), "ozon.ru".into()];
+
+        let with_rules = apply_whitelist_rules(base_yaml, &cfg, None);
+        assert!(!with_rules.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
+        assert!(!with_rules.contains("DOMAIN-SUFFIX,ozon.ru,DIRECT"));
+        assert!(with_rules.contains(&format!("DOMAIN-SUFFIX,sberbank.ru,{WHITELIST_GROUP_NAME}")));
+        assert!(with_rules.contains(&format!("DOMAIN-SUFFIX,ozon.ru,{WHITELIST_GROUP_NAME}")));
+        assert!(with_rules.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
+
+        let with_dns = apply_whitelist_dns(&with_rules, &cfg, "127.0.0.1:53");
+        assert!(!with_dns.contains("'+.sberbank.ru': '127.0.0.1:53'"));
+        assert!(!with_dns.contains("'+.ozon.ru': '127.0.0.1:53'"));
+        assert!(with_dns.contains("'+.gosuslugi.ru': '127.0.0.1:53'"));
     }
 
     #[test]
