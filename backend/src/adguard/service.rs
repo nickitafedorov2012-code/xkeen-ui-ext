@@ -6,6 +6,11 @@ use crate::config::AdGuardConfig;
 use super::{agh_request, get_status};
 use super::iptables::is_adguard_iptables_active;
 use super::yaml::{detect_agh_loop_risk, ensure_default_adguard_config, find_adguard_config};
+#[cfg(target_os = "linux")]
+use super::{
+    DEFAULT_ADGUARD_DNS_FALLBACK_PORT, apply_adguard_iptables, detect_adguard_dns_port,
+    remove_adguard_iptables, sanitize_and_heal_adguard_yaml,
+};
 
 /// Тестирование локального UDP DNS слушателя AdGuard Home
 pub async fn test_agh_dns_listener(host: &str, port: u16) -> bool {

@@ -18,13 +18,20 @@
 //!   `CAPTCHA_RESULT|<token>` в stdin. На роутере WebView нет — панель сразу отвечает ошибкой,
 //!   и клиент продолжает встроенное автоматическое решение без ожидания таймаутов; `STOP` — мягкая остановка.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
+#[cfg(test)]
+use std::collections::BTreeSet;
+#[cfg(test)]
 use std::sync::Arc;
+#[cfg(test)]
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+#[cfg(test)]
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
+#[cfg(test)]
+use tokio::sync::mpsc;
 
 use crate::config::VkTurnConfig;
 

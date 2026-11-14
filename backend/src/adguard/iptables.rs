@@ -1,4 +1,6 @@
 use super::AGH_IPTABLES_CHAIN;
+#[cfg(target_os = "linux")]
+use super::{AGH_LAN_INTERFACES, DEFAULT_ADGUARD_DNS_FALLBACK_PORT, detect_adguard_dns_port};
 
 /// каждое правило вставляется на нарастающую позицию 1, 2, 3..., а не все на позицию 1.
 pub fn reinsert_rules_commands(rules: &[&str], to_port: u16) -> Vec<String> {

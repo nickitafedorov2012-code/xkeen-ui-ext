@@ -304,9 +304,6 @@ pub(super) async fn apply_and_verify_gaming(
     Ok(())
 }
 
-/// Синхронизация перехвата полного туннеля в iptables для Compatibility-режима (100% Всё в прокси)
-/// Генерация shell-команд для полной изоляции/перехвата игрового режима (iptables REDIRECT, TPROXY, policy routing).
-#[cfg(any(target_os = "linux", test))]
 /// Баг 112: нужно ли восстанавливать исходные значения rp_filter (только когда оба режима выключены).
 pub fn rp_filter_restore_needed(gaming_on: bool, bs_on: bool) -> bool {
     !gaming_on && !bs_on
