@@ -679,6 +679,41 @@ async fn main() {
             let restore = failover::startup_gaming_restore_allowed(mihomo_answered, active_srv.as_ref(), &cfg);
             (active_id, is_bs, restore)
         };
+        if mihomo_answered {
+            if let Ok(mut tx) = crate::transaction::ConfigTx::begin(&wl_sync_state).await {
+                if let Ok(current_yaml) = tx.read_yaml().await {
+                    let cfg_snapshot = wl_sync_state.config.read().await.clone();
+                    match reconcile_startup_yaml(&current_yaml, &cfg_snapshot) {
+                        Ok(Some(new_yaml)) => {
+                            if let Err(e) = tx.set_yaml(new_yaml) {
+                                log_w!("[STARTUP] Отклонена синхронизация config.yaml: {}", e);
+                            } else if let Err(e) = tx.commit_and_reload().await {
+                                log_w!("[STARTUP] Не удалось применить обновлённый config.yaml: {}", e);
+                            } else {
+                                log_i!("[STARTUP] ✓ config.yaml синхронизирован с актуальной версией правил панели");
+                                let closed = mihomo::close_server_connections(
+                                    &wl_sync_state.http,
+                                    &cfg_snapshot,
+                                    crate::routing::WHITELIST_GROUP_NAME,
+                                )
+                                .await;
+                                if closed > 0 {
+                                    log_i!(
+                                        "[STARTUP] Закрыто {} устаревших соединений группы {}",
+                                        closed,
+                                        crate::routing::WHITELIST_GROUP_NAME
+                                    );
+                                }
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            log_w!("[STARTUP] Ошибка проверки актуальности config.yaml: {}", e);
+                        }
+                    }
+                }
+            }
+        }
         if !active_id.is_empty() {
             let _ = api::sync_whitelist_mode_tunnel(&wl_sync_state, &active_id).await;
         }
@@ -951,6 +986,17 @@ pub fn weekly_scan_inputs(cfg: &config::AppConfig) -> Vec<String> {
     cfg.force_domains.clone()
 }
 
+/// Пересобирает управляемые блоки config.yaml по текущей конфигурации и правилам панели.
+/// Возвращает `Ok(Some(new_yaml))`, если итоговый YAML отличается от текущего, иначе `Ok(None)`.
+pub fn reconcile_startup_yaml(current_yaml: &str, cfg: &config::AppConfig) -> Result<Option<String>, String> {
+    let (new_yaml, _) = crate::routing::apply_routing(current_yaml, cfg)?;
+    if new_yaml == current_yaml {
+        Ok(None)
+    } else {
+        Ok(Some(new_yaml))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -961,5 +1007,34 @@ mod tests {
         cfg.force_domains = vec!["youtube.com".to_string(), "discord.com".to_string()];
         let inputs = weekly_scan_inputs(&cfg);
         assert_eq!(inputs, vec!["youtube.com".to_string(), "discord.com".to_string()]);
+    }
+
+    #[test]
+    fn regression_startup_reconcile_migrates_stale_whitelist_rules_for_hh_ru() {
+        let stale_yaml = r#"rules:
+  # --- AUTO-WHITELIST-BEGIN ---
+  - SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist
+  # --- AUTO-WHITELIST-END ---
+  - MATCH,🌐 Proxy
+"#;
+        let mut cfg = config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.strategy = config::WhitelistStrategy::StrictXKeen;
+
+        let updated = reconcile_startup_yaml(stale_yaml, &cfg)
+            .expect("reconcile_startup_yaml should succeed")
+            .expect("stale YAML without catalog DIRECT rules must be updated on startup");
+
+        let hh_pos = updated
+            .find("- DOMAIN-SUFFIX,hh.ru,DIRECT")
+            .expect("updated YAML must include DIRECT rule for hh.ru");
+        let src_pos = updated
+            .find("- SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist")
+            .expect("updated YAML must keep LAN SRC-IP-CIDR rule");
+        assert!(hh_pos < src_pos, "hh.ru DIRECT rule must appear before SRC-IP-CIDR whitelist catch-all");
+
+        let second_pass = reconcile_startup_yaml(&updated, &cfg)
+            .expect("second reconcile pass should succeed");
+        assert!(second_pass.is_none(), "reconcile_startup_yaml must be idempotent when YAML is already up to date");
     }
 }

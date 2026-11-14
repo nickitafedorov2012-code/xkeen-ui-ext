@@ -556,6 +556,7 @@ pub async fn sync_whitelist_runtime_after_commit(state: &AppState, cfg: &config:
     let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
     let dns_port = resolve_active_dns_port(cfg);
     sync_full_tunnel_modes(cfg, redir_port, tproxy_port, dns_port).await;
+    let _ = mihomo::close_server_connections(&state.http, cfg, routing::WHITELIST_GROUP_NAME).await;
 }
 
 /// Действие над глобальным статусом БС после переключения устройства (баг 38).
