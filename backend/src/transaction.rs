@@ -1330,14 +1330,21 @@ mod tests {
         let app = Router::new().fallback(move |req: Request| {
             let captured = captured.clone();
             async move {
+                let method = req.method().clone();
                 let path = req.uri().path().to_string();
-                captured.lock().unwrap().push((req.method().clone(), path.clone()));
-                match path.as_str() {
-                    "/proxies" => Json(json!({ "proxies": {
+                captured.lock().unwrap().push((method.clone(), path.clone()));
+                match (method, path.as_str()) {
+                    (axum::http::Method::GET, "/proxies") => Json(json!({ "proxies": {
                         "PROXY": { "type": "Selector", "now": "VPS", "all": ["VPS", target] },
                         "VPS": { "type": "Vless" },
                     }})).into_response(),
-                    "/proxies/PROXY" => {
+                    (axum::http::Method::GET, "/connections") => Json(json!({
+                        "connections": [
+                            { "id": "conn-old-vps", "chains": ["VPS", "PROXY"] },
+                            { "id": "conn-direct", "chains": ["DIRECT"] },
+                        ]
+                    })).into_response(),
+                    (axum::http::Method::PUT, "/proxies/PROXY") => {
                         let body = axum::body::to_bytes(req.into_body(), 1024).await.unwrap();
                         assert_eq!(serde_json::from_slice::<serde_json::Value>(&body).unwrap(), json!({ "name": target }));
                         StatusCode::NO_CONTENT.into_response()
@@ -1369,7 +1376,9 @@ mod tests {
         assert_eq!(chain.first().map(String::as_str), Some(target));
         let requests = requests.lock().unwrap();
         assert!(requests.iter().any(|(method, path)| method == axum::http::Method::PUT && path == "/proxies/PROXY"));
-        assert!(!requests.iter().any(|(_, path)| path.starts_with("/connections") || path.starts_with("/configs")));
+        assert!(requests.iter().any(|(method, path)| method == axum::http::Method::DELETE && path == "/connections/conn-old-vps"));
+        assert!(!requests.iter().any(|(method, path)| method == axum::http::Method::DELETE && (path == "/connections" || path == "/connections/conn-direct")));
+        assert!(!requests.iter().any(|(_, path)| path.starts_with("/configs")));
     }
 
     /// Мок Mihomo: на любой запрос отвечает 204 (reload «принят»).

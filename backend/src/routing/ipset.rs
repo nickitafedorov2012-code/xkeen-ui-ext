@@ -388,13 +388,24 @@ pub fn apply_whitelist_rules(
     let existing_groups = parse_existing_group_names(&clean);
     let static_proxies = parse_static_proxy_names(&clean);
     let has_providers_section = clean.contains("proxy-providers:");
-    let providers = parse_provider_names(&clean);
+    let providers: Vec<String> = parse_provider_names(&clean)
+        .into_iter()
+        .filter(|p| !cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(p.trim())))
+        .collect();
 
     let target_srv = match cfg.whitelist.target_server.as_deref() {
         Some(s) if !s.trim().is_empty() && s.trim() != "follow_failover" => s.trim(),
         _ => match active_tunnel_node {
             Some(node) if !node.trim().is_empty() => node.trim(),
-            _ => "Fastest",
+            _ => {
+                if existing_groups.iter().any(|g| g == "PROXY") || existing_groups.is_empty() {
+                    "PROXY"
+                } else if existing_groups.iter().any(|g| g == "Fastest") {
+                    "Fastest"
+                } else {
+                    "PROXY"
+                }
+            }
         },
     };
 
@@ -421,7 +432,7 @@ pub fn apply_whitelist_rules(
                     if target_is_static_or_group {
                         group_proxies.push(target_srv.to_string());
                     }
-                    for p in &["Fastest", "PROXY", "Fallback"] {
+                    for p in &["PROXY", "Fastest", "Fallback"] {
                         let exists = existing_groups.iter().any(|g| g == *p)
                             || with_group.contains(&format!("- {p}"))
                             || existing_groups.is_empty();

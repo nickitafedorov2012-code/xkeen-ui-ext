@@ -729,6 +729,9 @@ pub async fn evaluate_and_apply_whitelist_detector(
                                     mut_cfg.failover.bs_priority_chain.remove(pos);
                                 }
                                 mut_cfg.failover.bs_priority_chain.insert(0, target_id.clone());
+                                if mut_cfg.whitelist.enabled {
+                                    mut_cfg.whitelist.target_server = Some(target_id.clone());
+                                }
                                 if let Err(e) = crate::config::save(&state.config_path, &mut_cfg).await {
                                     crate::log_e!("[DETECTOR] Ошибка сохранения конфига: {e}");
                                 } else {

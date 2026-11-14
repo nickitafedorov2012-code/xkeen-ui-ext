@@ -342,6 +342,24 @@ pub struct ProxiesCacheEntry {
 
 static PROXIES_CACHE: std::sync::RwLock<Option<ProxiesCacheEntry>> = std::sync::RwLock::new(None);
 static PROVIDER_PROXIES_CACHE: std::sync::RwLock<Option<ProxiesCacheEntry>> = std::sync::RwLock::new(None);
+static LAST_SELECTED_TUNNEL_SERVER: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Возвращает последний конкретный узел туннеля, выбранный в рантайме (вручную, failover или детектором БС).
+pub fn last_selected_tunnel_server() -> Option<String> {
+    LAST_SELECTED_TUNNEL_SERVER
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// Фиксирует последний выбранный конкретный узел туннеля в рантайме.
+pub fn record_selected_tunnel_server(server: &str) {
+    let trimmed = server.trim();
+    if is_concrete_server_candidate(trimmed) {
+        let mut guard = LAST_SELECTED_TUNNEL_SERVER.write().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(trimmed.to_string());
+    }
+}
 
 /// Инвалидация кэша прокси и провайдеров: вызывается при переключении узлов, групп или reload конфига.
 pub fn invalidate_proxies_cache() {
@@ -359,6 +377,7 @@ pub static PROXIES_CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new
 #[cfg(test)]
 pub fn clear_proxies_cache_for_test() {
     invalidate_proxies_cache();
+    *LAST_SELECTED_TUNNEL_SERVER.write().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// Тестовый хелпер для внедрения данных в кэш без сетевых запросов к Mihomo.
@@ -1470,6 +1489,19 @@ async fn switch_server_inner(http: &reqwest::Client, cfg: &AppConfig, server_id:
     }
     let proxies = get_proxies(http, cfg).await?;
     let prev_active = resolve_active_leaf(&proxies);
+    let prev_wl_now = proxies
+        .get(crate::routing::WHITELIST_GROUP_NAME)
+        .and_then(|v| v.get("now"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let wl_has_target = cfg.whitelist.enabled
+        && proxies
+            .get(crate::routing::WHITELIST_GROUP_NAME)
+            .and_then(|v| v.get("all"))
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().any(|x| x.as_str() == Some(&target)))
+            .unwrap_or(false);
     let groups = select_groups_to_switch(&proxies, &prev_active);
     if groups.is_empty() {
         return Err("Не найдено ни одной select-группы для переключения".into());
@@ -1494,8 +1526,21 @@ async fn switch_server_inner(http: &reqwest::Client, cfg: &AppConfig, server_id:
             Err(e) => last_err = e,
         }
     }
+    let mut wl_switched = false;
     if switched > 0 {
         invalidate_proxies_cache();
+        record_selected_tunnel_server(&target);
+        if wl_has_target && prev_wl_now != target {
+            match switch_selector(http, cfg, crate::routing::WHITELIST_GROUP_NAME, &target).await {
+                Ok(_) => wl_switched = true,
+                Err(e) => crate::log_w!(
+                    "[MIHOMO] Не удалось синхронизировать '{}' -> '{}': {}",
+                    crate::routing::WHITELIST_GROUP_NAME,
+                    target,
+                    e
+                ),
+            }
+        }
         if !graceful {
             if !prev_active.is_empty() && prev_active != target && !prev_active.eq_ignore_ascii_case("direct") {
                 let closed = close_server_connections(http, cfg, &prev_active).await;
@@ -1512,6 +1557,23 @@ async fn switch_server_inner(http: &reqwest::Client, cfg: &AppConfig, server_id:
             }
         } else {
             crate::log_i!("Graceful Failback: группы переключены на '{target}', активные сокеты старого узла не сбрасываются");
+        }
+        if !graceful && wl_switched && !prev_wl_now.is_empty() && prev_wl_now != target {
+            let wl_closed = close_server_connections(http, cfg, crate::routing::WHITELIST_GROUP_NAME).await;
+            let prev_wl_closed = if !prev_wl_now.eq_ignore_ascii_case("direct") && prev_wl_now != prev_active {
+                close_server_connections(http, cfg, &prev_wl_now).await
+            } else {
+                0
+            };
+            if wl_closed > 0 || prev_wl_closed > 0 {
+                crate::log_i!(
+                    "[MIHOMO] Сброшены устаревшие сокеты '{}' (закрыто {} через группу, {} через прежний узел '{}')",
+                    crate::routing::WHITELIST_GROUP_NAME,
+                    wl_closed,
+                    prev_wl_closed,
+                    prev_wl_now
+                );
+            }
         }
         invalidate_proxies_cache();
         let skip_note = if skipped > 0 { format!(", пропущено: {skipped}") } else { String::new() };
@@ -2250,11 +2312,180 @@ pub async fn auto_heal_proxy_selectors(http: &reqwest::Client, cfg: &AppConfig) 
     }
 }
 
+fn is_concrete_server_candidate(name: &str) -> bool {
+    let t = name.trim();
+    !t.is_empty()
+        && !t.eq_ignore_ascii_case("DIRECT")
+        && !t.eq_ignore_ascii_case("REJECT")
+        && !t.eq_ignore_ascii_case("Fallback")
+        && !t.eq_ignore_ascii_case("Fastest")
+        && !t.eq_ignore_ascii_case("GLOBAL")
+        && !t.eq_ignore_ascii_case("follow_failover")
+}
+
+/// Вычисляет целевой сервер туннеля для восстановления селекторов после `reload_config` или старта панели.
+pub fn desired_tunnel_server_for_cfg(
+    cfg: &AppConfig,
+    pre_reload_proxy_now: Option<&str>,
+) -> Option<String> {
+    if let Some(live) = pre_reload_proxy_now
+        .map(str::trim)
+        .filter(|s| is_concrete_server_candidate(s))
+    {
+        return Some(live.to_string());
+    }
+    if cfg.whitelist.enabled {
+        if let Some(target) = cfg
+            .whitelist
+            .target_server
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| is_concrete_server_candidate(s))
+        {
+            return Some(target.to_string());
+        }
+    }
+    if is_concrete_server_candidate(&cfg.failover.priority_server) {
+        return Some(cfg.failover.priority_server.trim().to_string());
+    }
+    if let Some(first) = cfg
+        .failover
+        .priority_chain
+        .iter()
+        .map(String::as_str)
+        .map(str::trim)
+        .find(|s| is_concrete_server_candidate(s))
+    {
+        return Some(first.to_string());
+    }
+    if let Some(first_bs) = cfg
+        .failover
+        .bs_priority_chain
+        .iter()
+        .map(String::as_str)
+        .map(str::trim)
+        .find(|s| is_concrete_server_candidate(s))
+    {
+        return Some(first_bs.to_string());
+    }
+    None
+}
+
+/// Восстанавливает активные селекторы `PROXY` и `🛡️ Whitelist` после `reload_config` или на старте,
+/// чтобы перезагрузка YAML не сбрасывала выбранный сервер к первому элементу списка.
+pub async fn restore_active_selectors_after_reload(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    pre_reload_proxy_now: Option<&str>,
+) {
+    invalidate_proxies_cache();
+    let proxies = match get_proxies(http, cfg).await {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+
+    let primary_group = find_primary_group(&proxies).unwrap_or_else(|| "PROXY".to_string());
+    let primary_all: Vec<String> = proxies
+        .get(&primary_group)
+        .and_then(|v| v.get("all"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let primary_now = proxies
+        .get(&primary_group)
+        .and_then(|v| v.get("now"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let candidate = desired_tunnel_server_for_cfg(cfg, pre_reload_proxy_now);
+    let desired_for_primary = match candidate {
+        Some(ref c) if primary_all.is_empty() || primary_all.iter().any(|x| x == c) => Some(c.clone()),
+        _ => desired_tunnel_server_for_cfg(cfg, None)
+            .filter(|c| primary_all.is_empty() || primary_all.iter().any(|x| x == c)),
+    };
+
+    if let Some(ref target) = desired_for_primary {
+        if primary_now != target {
+            if let Err(e) = switch_selector(http, cfg, &primary_group, target).await {
+                crate::log_w!(
+                    "[MIHOMO] Не удалось восстановить селектор '{}' -> '{}' после reload: {}",
+                    primary_group,
+                    target,
+                    e
+                );
+            } else {
+                crate::log_i!(
+                    "[MIHOMO] Селектор '{}' восстановлен на '{}' после reload (было '{}')",
+                    primary_group,
+                    target,
+                    primary_now
+                );
+            }
+        }
+    }
+
+    if cfg.whitelist.enabled {
+        if let Some(wl_group) = proxies.get(crate::routing::WHITELIST_GROUP_NAME) {
+            let wl_all: Vec<String> = wl_group
+                .get("all")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            let wl_now = wl_group.get("now").and_then(|v| v.as_str()).unwrap_or("");
+
+            let configured_wl = cfg
+                .whitelist
+                .target_server
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| is_concrete_server_candidate(s))
+                .map(str::to_string);
+            let wl_target = desired_for_primary
+                .as_ref()
+                .filter(|c| wl_all.is_empty() || wl_all.iter().any(|x| x == *c))
+                .cloned()
+                .or_else(|| configured_wl.filter(|c| wl_all.is_empty() || wl_all.iter().any(|x| x == c)));
+
+            if let Some(ref target) = wl_target {
+                if wl_now != target {
+                    if let Err(e) = switch_selector(http, cfg, crate::routing::WHITELIST_GROUP_NAME, target).await {
+                        crate::log_w!(
+                            "[MIHOMO] Не удалось восстановить селектор '{}' -> '{}' после reload: {}",
+                            crate::routing::WHITELIST_GROUP_NAME,
+                            target,
+                            e
+                        );
+                    } else {
+                        crate::log_i!(
+                            "[MIHOMO] Селектор '{}' восстановлен на '{}' после reload (было '{}')",
+                            crate::routing::WHITELIST_GROUP_NAME,
+                            target,
+                            wl_now
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Reload конфига Mihomo (после правки config.yaml). Путь — из настроек.
 pub async fn reload_config(http: &reqwest::Client, cfg: &AppConfig) -> Result<(), String> {
+    invalidate_proxies_cache();
+    let pre_reload_proxy_now = get_proxies(http, cfg).await.ok().and_then(|proxies| {
+        let pg = find_primary_group(&proxies)?;
+        proxies
+            .get(&pg)
+            .and_then(|v| v.get("now"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    });
     let res = m_put(http, cfg, "/configs?force=true", json!({ "path": cfg.mihomo.config_path }), 15).await;
     invalidate_proxies_cache();
     auto_heal_proxy_selectors(http, cfg).await;
+    if res.is_ok() {
+        restore_active_selectors_after_reload(http, cfg, pre_reload_proxy_now.as_deref()).await;
+    }
     res
 }
 
@@ -3596,6 +3827,128 @@ mod tests {
         assert!(
             normal_cands.contains(&"PROXY".to_string()),
             "when bs_active=false, PROXY fallback is allowed: {normal_cands:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_v1_16_15_desired_tunnel_server_and_reload_selector_restore() {
+        use axum::{extract::Request, http::StatusCode, response::IntoResponse, Json, Router};
+        use serde_json::json;
+        use std::sync::{Arc, Mutex};
+
+        let _cache_guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap();
+        clear_proxies_cache_for_test();
+
+        let mut cfg = AppConfig::default();
+        cfg.failover.priority_server = "🇩🇪 Обход".into();
+        cfg.failover.priority_chain = vec!["🇫🇮 Finland".into()];
+        cfg.failover.bs_priority_chain = vec!["📞 VK-туннель [БС]".into()];
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.follow_failover = false;
+        cfg.whitelist.target_server = Some("📞 VK-туннель [БС]".into());
+
+        // 1. desired_tunnel_server_for_cfg: concrete pre_reload wins over cfg; meta-groups ignored
+        assert_eq!(
+            desired_tunnel_server_for_cfg(&cfg, Some("🇫🇮 Finland")).as_deref(),
+            Some("🇫🇮 Finland")
+        );
+        assert_eq!(
+            desired_tunnel_server_for_cfg(&cfg, Some("Fallback")).as_deref(),
+            Some("📞 VK-туннель [БС]")
+        );
+        assert_eq!(
+            desired_tunnel_server_for_cfg(&cfg, Some("Fastest")).as_deref(),
+            Some("📞 VK-туннель [БС]")
+        );
+        assert_eq!(
+            desired_tunnel_server_for_cfg(&cfg, None).as_deref(),
+            Some("📞 VK-туннель [БС]")
+        );
+        cfg.whitelist.enabled = false;
+        assert_eq!(
+            desired_tunnel_server_for_cfg(&cfg, None).as_deref(),
+            Some("🇩🇪 Обход")
+        );
+        cfg.whitelist.enabled = true;
+
+        // 2. Runtime tracking (LAST_SELECTED_TUNNEL_SERVER) ignores meta-groups
+        record_selected_tunnel_server("Fallback");
+        assert_eq!(last_selected_tunnel_server(), None);
+        record_selected_tunnel_server("📞 VK-туннель [БС]");
+        assert_eq!(last_selected_tunnel_server().as_deref(), Some("📞 VK-туннель [БС]"));
+
+        // 3. reload_config preserves active server across PUT /configs?force=true even if YAML resets selectors
+        //    and syncs 🛡️ Whitelist even when follow_failover == false and target_server was stale.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = listener.local_addr().unwrap().port();
+        cfg.whitelist.target_server = Some("🇩🇪 Обход".into());
+
+        let reloaded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reloaded_srv = reloaded.clone();
+        let calls: Arc<Mutex<Vec<(axum::http::Method, String, Option<String>)>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let calls_srv = calls.clone();
+
+        let app = Router::new().fallback(move |req: Request| {
+            let reloaded_srv = reloaded_srv.clone();
+            let calls_srv = calls_srv.clone();
+            async move {
+                let method = req.method().clone();
+                let path = req.uri().path().to_string();
+                let body_bytes = axum::body::to_bytes(req.into_body(), 4096)
+                    .await
+                    .unwrap_or_default();
+                let body_name = serde_json::from_slice::<serde_json::Value>(&body_bytes)
+                    .ok()
+                    .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string));
+                calls_srv.lock().unwrap().push((method.clone(), path.clone(), body_name));
+
+                match (method, path.as_str()) {
+                    (axum::http::Method::GET, "/proxies") => {
+                        let (proxy_now, wl_now) = if reloaded_srv.load(std::sync::atomic::Ordering::SeqCst) {
+                            ("🇩🇪 Обход", "🇩🇪 Обход")
+                        } else {
+                            ("📞 VK-туннель [БС]", "🇩🇪 Обход")
+                        };
+                        Json(json!({
+                            "proxies": {
+                                "PROXY": { "type": "Selector", "now": proxy_now, "all": ["🇩🇪 Обход", "📞 VK-туннель [БС]", "Fallback"] },
+                                "🛡️ Whitelist": { "type": "Selector", "now": wl_now, "all": ["🇩🇪 Обход", "📞 VK-туннель [БС]", "DIRECT"] },
+                                "🇩🇪 Обход": { "type": "Vless" },
+                                "📞 VK-туннель [БС]": { "type": "Vless" },
+                            }
+                        }))
+                        .into_response()
+                    }
+                    (axum::http::Method::PUT, "/configs") => {
+                        reloaded_srv.store(true, std::sync::atomic::Ordering::SeqCst);
+                        StatusCode::NO_CONTENT.into_response()
+                    }
+                    _ => StatusCode::NO_CONTENT.into_response(),
+                }
+            }
+        });
+        let mock = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let http = reqwest::Client::new();
+
+        reload_config(&http, &cfg).await.expect("reload_config must succeed");
+        mock.abort();
+        clear_proxies_cache_for_test();
+
+        let wl_path = format!("/proxies/{}", urlencoding_lite(crate::routing::WHITELIST_GROUP_NAME));
+        let recorded = calls.lock().unwrap();
+        assert!(
+            recorded.iter().any(|(m, p, n)| {
+                *m == axum::http::Method::PUT && p == "/proxies/PROXY" && n.as_deref() == Some("📞 VK-туннель [БС]")
+            }),
+            "PROXY selector must be restored to pre-reload active server: {recorded:?}"
+        );
+        assert!(
+            recorded.iter().any(|(m, p, n)| {
+                *m == axum::http::Method::PUT && *p == wl_path && n.as_deref() == Some("📞 VK-туннель [БС]")
+            }),
+            "🛡️ Whitelist selector must be restored to active tunnel server too: {recorded:?}"
         );
     }
 }

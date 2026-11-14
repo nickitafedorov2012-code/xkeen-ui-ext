@@ -304,6 +304,11 @@ pub async fn set_device_routing(State(state): State<AppState>, Json(req): Json<D
     // 1. Сохранить/удалить настройки в конфиге
     if servers.is_empty() {
         tx.config_mut().device_routing.remove(&ip);
+        for dev in &mut tx.config_mut().whitelist.devices {
+            if dev.ip.trim() == ip {
+                dev.server = None;
+            }
+        }
     } else {
         tx.config_mut().device_routing.insert(
             ip.clone(),

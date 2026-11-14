@@ -582,6 +582,12 @@ async fn main() {
                 break;
             }
             let cfg = ping_auto_state.config.read().await.clone();
+            crate::mihomo::restore_active_selectors_after_reload(
+                &ping_auto_state.http,
+                &cfg,
+                crate::mihomo::last_selected_tunnel_server().as_deref(),
+            )
+            .await;
             let ids = crate::mihomo::collect_auto_ping_ids(&cfg);
             if !ids.is_empty() {
                 let _ = crate::mihomo::ping_all_url(&ping_auto_state.http, &cfg, &ids, 2500, None).await;
@@ -669,16 +675,6 @@ async fn main() {
                 Err(e) => log_w!("[STARTUP] Mihomo не ответил, авто-восстановление игрового режима отложено: {}", e),
             }
         }
-        let (active_id, is_bs, restore_gaming) = {
-            let cfg = wl_sync_state.config.read().await;
-            let active_id = active_srv.as_ref().map(|s| s.id.clone()).unwrap_or_default();
-            let is_bs = active_srv
-                .as_ref()
-                .map(|s| failover::is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), &cfg))
-                .unwrap_or(false);
-            let restore = failover::startup_gaming_restore_allowed(mihomo_answered, active_srv.as_ref(), &cfg);
-            (active_id, is_bs, restore)
-        };
         if mihomo_answered {
             if let Ok(mut tx) = crate::transaction::ConfigTx::begin(&wl_sync_state).await {
                 if let Ok(current_yaml) = tx.read_yaml().await {
@@ -713,7 +709,26 @@ async fn main() {
                     }
                 }
             }
+            let cfg_after = wl_sync_state.config.read().await.clone();
+            mihomo::restore_active_selectors_after_reload(&wl_sync_state.http, &cfg_after, None).await;
+            active_srv = match mihomo::get_active_server(&wl_sync_state.http, &cfg_after).await {
+                Ok(s) => s,
+                Err(_) => active_srv,
+            };
+            if let Some(ref s) = active_srv {
+                mihomo::record_selected_tunnel_server(&s.id);
+            }
         }
+        let (active_id, is_bs, restore_gaming) = {
+            let cfg = wl_sync_state.config.read().await;
+            let active_id = active_srv.as_ref().map(|s| s.id.clone()).unwrap_or_default();
+            let is_bs = active_srv
+                .as_ref()
+                .map(|s| failover::is_whitelist_server_full(&s.name, &s.id, s.provider.as_deref(), &cfg))
+                .unwrap_or(false);
+            let restore = failover::startup_gaming_restore_allowed(mihomo_answered, active_srv.as_ref(), &cfg);
+            (active_id, is_bs, restore)
+        };
         if !active_id.is_empty() {
             let _ = api::sync_whitelist_mode_tunnel(&wl_sync_state, &active_id).await;
         }

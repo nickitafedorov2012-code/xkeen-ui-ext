@@ -64,39 +64,68 @@ pub async fn sync_whitelist_on_switch(
     }
 
     let is_auto = is_whitelist_server(node_name, node_id, cfg);
+    let target_trimmed = cfg.whitelist.target_server.as_deref().map(str::trim).unwrap_or("");
     let should_follow = cfg.whitelist.follow_failover
-        || cfg.whitelist.target_server.as_deref() == Some("follow_failover")
-        || cfg.whitelist.target_server.as_deref().map_or(true, |s| s.trim().is_empty());
+        || target_trimmed == "follow_failover"
+        || target_trimmed.is_empty();
+    let matches_target = !node_id.is_empty() && target_trimmed == node_id;
 
-    // Дедупликация: не спамить Mihomo API и логи, если тот же узел уже синхронизирован недавно (< 2 сек)
+    let prev_wl_now = match crate::mihomo::get_proxies(http, cfg).await {
+        Ok(proxies) => proxies
+            .get(crate::routing::WHITELIST_GROUP_NAME)
+            .and_then(|v| v.get("now"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        Err(_) => String::new(),
+    };
+
+    // Дедупликация: пропускаем только если тот же узел, прошло < 2 сек И селектор 🛡️ Whitelist в рантайме уже на нём
     {
         let mut last_sync = LAST_WHITELIST_SYNC.lock().await;
         if let Some((ref last_id, ref last_time)) = *last_sync {
-            if last_id == node_id && last_time.elapsed() < Duration::from_secs(2) {
+            if last_id == node_id
+                && last_time.elapsed() < Duration::from_secs(2)
+                && !node_id.is_empty()
+                && prev_wl_now == node_id
+            {
                 return;
             }
         }
         *last_sync = Some((node_id.to_string(), Instant::now()));
     }
 
-    if should_follow && !node_id.is_empty() {
-        // Только селектор: сброс сокетов уже решил основной switch_server/_graceful.
-        // switch_group здесь рвал ВСЕ соединения LAN и ломал мягкое переключение.
-        if let Err(e) = crate::mihomo::switch_selector(http, cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await {
-            crate::log_w!(
-                "[FAILOVER] Первая попытка синхронизации '{}' -> '{}' не удалась: {} — повторяем...",
-                crate::routing::WHITELIST_GROUP_NAME,
-                node_id,
-                e
-            );
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            if let Err(e2) = crate::mihomo::switch_selector(http, cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await {
-                crate::log_e!(
-                    "[FAILOVER] Не удалось переключить '{}' на '{}': {}",
+    if !node_id.is_empty() && (should_follow || matches_target) {
+        // Только селектор: никогда не вызываем здесь полный switch_group, чтобы не рвать LAN-сессии,
+        // а после переключения точечно закрываем только прокси-сокеты прежней цели группы 🛡️ Whitelist.
+        let mut switched_ok = false;
+        match crate::mihomo::switch_selector(http, cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await {
+            Ok(_) => switched_ok = true,
+            Err(e) => {
+                crate::log_w!(
+                    "[FAILOVER] Первая попытка синхронизации '{}' -> '{}' не удалась: {} — повторяем...",
                     crate::routing::WHITELIST_GROUP_NAME,
                     node_id,
-                    e2
+                    e
                 );
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                match crate::mihomo::switch_selector(http, cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await {
+                    Ok(_) => switched_ok = true,
+                    Err(e2) => {
+                        crate::log_e!(
+                            "[FAILOVER] Не удалось переключить '{}' на '{}': {}",
+                            crate::routing::WHITELIST_GROUP_NAME,
+                            node_id,
+                            e2
+                        );
+                    }
+                }
+            }
+        }
+        if switched_ok && !prev_wl_now.is_empty() && prev_wl_now != node_id {
+            crate::mihomo::close_server_connections(http, cfg, crate::routing::WHITELIST_GROUP_NAME).await;
+            if !prev_wl_now.eq_ignore_ascii_case("direct") {
+                crate::mihomo::close_server_connections(http, cfg, &prev_wl_now).await;
             }
         }
     }

@@ -164,14 +164,13 @@ pub async fn sync_whitelist_mode_tunnel(state: &AppState, target_server_id: &str
     crate::traffic::set_whitelist_active(is_whitelist);
 
     if cfg.whitelist.enabled {
-        let should_follow = cfg.whitelist.follow_failover
-            || cfg.whitelist.target_server.as_deref() == Some("follow_failover")
-            || cfg.whitelist.target_server.as_deref().map_or(true, |s| s.trim().is_empty());
-        if should_follow {
-            crate::failover::sync_whitelist_on_switch(&state.http, &cfg, target_server_id, &target_name).await;
+        let trimmed_id = target_server_id.trim();
+        if !trimmed_id.is_empty() {
+            crate::failover::sync_whitelist_on_switch(&state.http, &cfg, trimmed_id, &target_name).await;
         } else if let Some(ref target) = cfg.whitelist.target_server {
-            if !target.trim().is_empty() {
-                let _ = mihomo::switch_group_scoped(&state.http, &cfg, crate::routing::WHITELIST_GROUP_NAME, target.trim()).await;
+            let trimmed_target = target.trim();
+            if !trimmed_target.is_empty() && trimmed_target != "follow_failover" {
+                let _ = mihomo::switch_group_scoped(&state.http, &cfg, crate::routing::WHITELIST_GROUP_NAME, trimmed_target).await;
             }
         }
     }
@@ -361,13 +360,7 @@ pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -
     // Немедленно прерываем запущенный Speedtest и отменяем возврат старого узла
     crate::speedtest::cancel_active_speedtest();
     let cfg = state.config.read().await.clone();
-    let switched = if to_vkturn {
-        // Существующие сессии через рабочий VPS могут завершиться штатно. Новые
-        // идут через VK сразу после смены селектора, без массового переподключения.
-        mihomo::switch_server_graceful(&state.http, &cfg, server_id).await
-    } else {
-        mihomo::switch_server(&state.http, &cfg, server_id).await
-    };
+    let switched = mihomo::switch_server(&state.http, &cfg, server_id).await;
     match switched {
         Ok(msg) => {
             log_i!("Смена сервера: {} — {}", server_id, msg);
@@ -394,11 +387,6 @@ pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -
                         mut_cfg.failover.bs_priority_chain.remove(pos);
                     }
                     mut_cfg.failover.bs_priority_chain.insert(0, id.clone());
-                    // Баг #16: при ручном выборе БС-узла (в т.ч. VK-туннеля) синхронизируем цель БС,
-                    // чтобы группа 🛡️ Whitelist не оставалась на старом Fallback.
-                    if mut_cfg.whitelist.enabled {
-                        mut_cfg.whitelist.target_server = Some(id.clone());
-                    }
                 } else {
                     if let Some(pos) = mut_cfg.failover.priority_chain.iter().position(|s| s == &id) {
                         mut_cfg.failover.priority_chain.remove(pos);
@@ -406,6 +394,11 @@ pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -
                     mut_cfg.failover.priority_chain.insert(0, id.clone());
                     mut_cfg.failover.priority_server = id.clone();
                     mut_cfg.failover.last_good_regular_vps = Some(id.clone());
+                }
+                // Синхронизируем цель 🛡️ Whitelist для любого вручную выбранного сервера (и БС, и обычного VPS),
+                // чтобы исключить рассинхрон между PROXY и 🛡️ Whitelist.
+                if mut_cfg.whitelist.enabled {
+                    mut_cfg.whitelist.target_server = Some(id.clone());
                 }
 
                 if let Err(e) = config::save(&state.config_path, &mut_cfg).await {

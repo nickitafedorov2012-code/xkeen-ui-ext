@@ -2830,6 +2830,61 @@ rules:
             "Zapret safeguard must route FLOW_DOMAINS to Flow group, not PROXY:\n{with_zapret}"
         );
     }
+
+    #[test]
+    fn regression_v1_16_15_whitelist_group_prefers_proxy_and_filters_disabled_providers() {
+        let base_yaml = concat!(
+            "proxy-providers:\n",
+            "  Platinum:\n",
+            "    type: http\n",
+            "    url: https://example.com/sub\n",
+            "  vk-turn:\n",
+            "    type: file\n",
+            "    path: ./vk.yaml\n",
+            "proxy-groups:\n",
+            "  - name: PROXY\n",
+            "    type: select\n",
+            "    proxies:\n",
+            "      - Fastest\n",
+            "      - Fallback\n",
+            "  - name: Fastest\n",
+            "    type: url-test\n",
+            "  - name: Fallback\n",
+            "    type: fallback\n",
+            "rules:\n",
+            "  - MATCH,PROXY\n",
+        );
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.target_server = Some("follow_failover".into());
+        cfg.disabled_providers = vec!["platinum".into()];
+
+        let (applied, _) = apply_routing(base_yaml, &cfg).expect("apply_routing must succeed");
+        let wl_start = applied
+            .find(WHITELIST_GROUP_BEGIN)
+            .expect("WHITELIST_GROUP_BEGIN must exist");
+        let wl_end = applied[wl_start..]
+            .find(WHITELIST_GROUP_END)
+            .map(|o| wl_start + o)
+            .expect("WHITELIST_GROUP_END must exist");
+        let wl_block = &applied[wl_start..wl_end];
+
+        let proxy_pos = wl_block.find("- PROXY").expect("PROXY must be in whitelist group");
+        let fastest_pos = wl_block.find("- Fastest").expect("Fastest must be in whitelist group");
+        assert!(
+            proxy_pos < fastest_pos,
+            "🛡️ Whitelist group must prefer PROXY before Fastest as fallback:\n{wl_block}"
+        );
+        assert!(
+            wl_block.contains("- vk-turn"),
+            "active provider vk-turn must remain in whitelist use list:\n{wl_block}"
+        );
+        assert!(
+            !wl_block.contains("- Platinum"),
+            "disabled provider Platinum must be filtered out of whitelist use list:\n{wl_block}"
+        );
+    }
 }
 
 
