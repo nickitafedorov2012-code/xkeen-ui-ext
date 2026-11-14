@@ -580,7 +580,6 @@ pub async fn verify_zapret_failsafe(
     let mut details = Vec::new();
     let mut router_alive = false;
     let mut internet_reachable = false;
-    let lan_bridge_valid;
 
     // 1. Проверка liveness роутера с адаптивным таймаутом (NET-03)
     let router_timeout = get_hardware_adaptive_timeout(std::time::Duration::from_secs(2));
@@ -640,24 +639,28 @@ pub async fn verify_zapret_failsafe(
     }
 
     // 3. Проверка LAN-пути (наличие мостовых интерфейсов br+ / Bridge+)
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(interfaces) = std::fs::read_to_string("/proc/net/dev") {
-            if has_lan_bridge_interface(&interfaces) {
-                lan_bridge_valid = true;
-                details.push("Мостовой интерфейс LAN (br+/Bridge+) обнаружен".into());
+    let lan_bridge_valid = {
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(interfaces) = std::fs::read_to_string("/proc/net/dev") {
+                if has_lan_bridge_interface(&interfaces) {
+                    details.push("Мостовой интерфейс LAN (br+/Bridge+) обнаружен".into());
+                    true
+                } else {
+                    details.push("Предупреждение: мостовые интерфейсы LAN не найдены в /proc/net/dev".into());
+                    false
+                }
             } else {
-                details.push("Предупреждение: мостовые интерфейсы LAN не найдены в /proc/net/dev".into());
+                details.push("Не удалось прочитать /proc/net/dev".into());
+                false
             }
-        } else {
-            details.push("Не удалось прочитать /proc/net/dev".into());
         }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        lan_bridge_valid = true;
-        details.push("(Симуляция) LAN bridge валиден".into());
-    }
+        #[cfg(not(target_os = "linux"))]
+        {
+            details.push("(Симуляция) LAN bridge валиден".into());
+            true
+        }
+    };
 
     let overall_success = router_alive && internet_reachable && lan_bridge_valid;
 

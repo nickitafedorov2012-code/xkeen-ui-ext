@@ -1545,8 +1545,11 @@ pub fn is_adguard_iptables_active(dns_port: u16) -> bool {
         let port_str = format!("--to-ports {}", dns_port);
         return rules.contains("--dport 53") && rules.contains(&port_str);
     }
-    let _ = dns_port;
-    false
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = dns_port;
+        false
+    }
 }
 
 /// Запуск комплексной диагностики интеграции AdGuard Home
