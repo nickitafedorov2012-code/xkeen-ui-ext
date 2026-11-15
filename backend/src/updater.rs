@@ -16,6 +16,8 @@ const JSDELIVR_RESOLVED: &str =
 const JSDELIVR_CDN: &str = "https://cdn.jsdelivr.net/gh/nickitafedorov2012-code/xkeen-ui-ext";
 const GITHUB_RELEASES: &str =
     "https://api.github.com/repos/nickitafedorov2012-code/xkeen-ui-ext/releases?per_page=10";
+const GITHUB_RELEASES_ATOM: &str =
+    "https://github.com/nickitafedorov2012-code/xkeen-ui-ext/releases.atom";
 const GITHUB_RELEASE: &str = "https://github.com/nickitafedorov2012-code/xkeen-ui-ext/releases/download";
 const GITHUB_LATEST: &str = "https://github.com/nickitafedorov2012-code/xkeen-ui-ext/releases/latest";
 const GITHUB_RAW: &str = "https://raw.githubusercontent.com/nickitafedorov2012-code/xkeen-ui-ext";
@@ -498,7 +500,24 @@ pub fn extract_notes_from_markdown(text: &str, tag: &str) -> String {
     lines.join("\n")
 }
 
-/// Выбирает лучший (максимальный по версии) релиз из списка GitHub Releases.
+/// Извлекает теги релизов из GitHub Atom feed (`/releases.atom`), включая pre-release.
+pub fn parse_releases_atom_tags(xml: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    let marker = "/releases/tag/";
+    let mut rest = xml;
+    while let Some(pos) = rest.find(marker) {
+        let after = &rest[pos + marker.len()..];
+        let end = after
+            .find(|c: char| c == '"' || c == '\'' || c == '<' || c.is_whitespace())
+            .unwrap_or(after.len());
+        let tag = after[..end].trim().to_string();
+        if !tag.is_empty() && !tags.contains(&tag) {
+            tags.push(tag);
+        }
+        rest = &after[end..];
+    }
+    tags
+}
 /// Отсеивает draft, а для stable-канала — также prerelease.
 pub fn select_best_release(list: Vec<GhRelease>, include_beta: bool) -> Option<GhRelease> {
     list.into_iter()
@@ -562,6 +581,30 @@ async fn fetch_latest(
                                 rel.body = fetch_notes(http, &rel.tag_name).await;
                             }
                             return Ok(rel);
+                        }
+                    }
+                }
+            }
+            // Fallback для beta-канала: GitHub Atom feed (/releases.atom) без rate limit API
+            if let Ok(res) = http
+                .get(GITHUB_RELEASES_ATOM)
+                .header("User-Agent", "xkeen-route")
+                .timeout(Duration::from_secs(8))
+                .send()
+                .await
+            {
+                if res.status().is_success() {
+                    if let Ok(xml) = res.text().await {
+                        if let Some(tag) = parse_releases_atom_tags(&xml)
+                            .into_iter()
+                            .max_by(|a, b| version_tuple(a).cmp(&version_tuple(b)))
+                        {
+                            let notes = fetch_notes(http, &tag).await;
+                            return Ok(GhRelease {
+                                tag_name: tag,
+                                body: notes,
+                                ..Default::default()
+                            });
                         }
                     }
                 }
@@ -2340,5 +2383,15 @@ mod tests {
         let cfg_unknown: crate::config::SystemConfig =
             serde_json::from_str(r#"{"update_channel":"beta","future_field":123}"#).unwrap();
         assert_eq!(cfg_unknown.update_channel, "beta");
+    }
+
+    #[test]
+    fn test_parse_releases_atom_tags() {
+        let xml = r#"
+            <entry><link rel="alternate" href="https://github.com/u/r/releases/tag/v1.17.0-beta.2"/></entry>
+            <entry><link rel="alternate" href="https://github.com/u/r/releases/tag/v1.16.19"/></entry>
+        "#;
+        let tags = parse_releases_atom_tags(xml);
+        assert_eq!(tags, vec!["v1.17.0-beta.2", "v1.16.19"]);
     }
 }
