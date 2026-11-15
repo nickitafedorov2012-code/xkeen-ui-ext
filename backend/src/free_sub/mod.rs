@@ -202,7 +202,16 @@ const VPN_SOURCES: &[CuratedSource] = &[
     },
 ];
 
+const EMBEDDED_VPN_SEED: &str = include_str!("embedded_vpn_seed.txt");
+const EMBEDDED_WHITELIST_SEED: &str = include_str!("embedded_whitelist_seed.txt");
+
 const WHITELIST_SOURCES: &[CuratedSource] = &[
+    CuratedSource {
+        label: "Yandex Disk БС-зеркало (Документ)",
+        urls: &[
+            "https://disk.yandex.ru/i/xXnBLHAuIfFpSA",
+        ],
+    },
     CuratedSource {
         label: "GitVerse RU Mirror (Whitelist/SNI)",
         urls: &[
@@ -247,13 +256,19 @@ pub async fn save_disk_cache(path: &Path, cache: &FreeSubCache) -> Result<(), St
     Ok(())
 }
 
-/// Потоковая загрузка текста с жёстким лимитом размера и таймаутом.
-pub async fn fetch_bounded_text(
+pub fn is_yandex_disk_public_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("https://disk.yandex.ru/")
+        || lower.starts_with("https://disk.yandex.com/")
+        || lower.starts_with("https://yadi.sk/")
+}
+
+async fn fetch_bounded_bytes(
     client: &reqwest::Client,
     url: &str,
     max_bytes: usize,
     timeout_secs: u64,
-) -> Result<String, String> {
+) -> Result<Vec<u8>, String> {
     let mut resp = client
         .get(url)
         .header("User-Agent", "v2rayNG/1.8.23")
@@ -279,7 +294,240 @@ pub async fn fetch_bounded_text(
         buf.extend_from_slice(&chunk);
     }
 
-    Ok(String::from_utf8_lossy(&buf).to_string())
+    Ok(buf)
+}
+
+async fn resolve_yandex_disk_download_url(
+    client: &reqwest::Client,
+    public_url: &str,
+    timeout_secs: u64,
+) -> Result<String, String> {
+    let resp = client
+        .get("https://cloud-api.yandex.net/v1/disk/public/resources/download")
+        .query(&[("public_key", public_url.trim())])
+        .header("User-Agent", "v2rayNG/1.8.23")
+        .timeout(Duration::from_secs(timeout_secs))
+        .send()
+        .await
+        .map_err(|e| format!("Yandex Disk API: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Yandex Disk API HTTP {}", resp.status()));
+    }
+    let val: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Yandex Disk JSON: {e}"))?;
+    val.get("href")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "В ответе Yandex Disk API отсутствует href".to_string())
+}
+
+fn read_u16_le(buf: &[u8], off: usize) -> Option<u16> {
+    let slice = buf.get(off..off + 2)?;
+    Some(u16::from_le_bytes([slice[0], slice[1]]))
+}
+
+fn read_u32_le(buf: &[u8], off: usize) -> Option<u32> {
+    let slice = buf.get(off..off + 4)?;
+    Some(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+/// Извлекает содержимое одного файла из ZIP-архива через Central Directory.
+fn extract_zip_entry(zip_bytes: &[u8], target_name: &str, max_uncompressed: usize) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+
+    if zip_bytes.len() < 22 {
+        return Err("Файл слишком мал для ZIP".into());
+    }
+    let search_start = zip_bytes.len().saturating_sub(65535 + 22);
+    let mut eocd_off = None;
+    for i in (search_start..=zip_bytes.len() - 22).rev() {
+        if zip_bytes.get(i..i + 4) == Some(b"PK\x05\x06") {
+            eocd_off = Some(i);
+            break;
+        }
+    }
+    let eocd = eocd_off.ok_or_else(|| "Не найден заголовок EOCD ZIP".to_string())?;
+    let total_entries = read_u16_le(zip_bytes, eocd + 10).ok_or("Некорректный EOCD")? as usize;
+    let cd_size = read_u32_le(zip_bytes, eocd + 12).ok_or("Некорректный размер CD")? as usize;
+    let cd_offset = read_u32_le(zip_bytes, eocd + 16).ok_or("Некорректное смещение CD")? as usize;
+    let cd_end = cd_offset
+        .checked_add(cd_size)
+        .filter(|&e| e <= zip_bytes.len())
+        .ok_or_else(|| "Границы Central Directory выходят за пределы архива".to_string())?;
+
+    let mut pos = cd_offset;
+    for _ in 0..total_entries {
+        if pos + 46 > cd_end || zip_bytes.get(pos..pos + 4) != Some(b"PK\x01\x02") {
+            break;
+        }
+        let method = read_u16_le(zip_bytes, pos + 10).ok_or("ZIP method")?;
+        let comp_size = read_u32_le(zip_bytes, pos + 20).ok_or("ZIP comp_size")? as usize;
+        let uncomp_size = read_u32_le(zip_bytes, pos + 24).ok_or("ZIP uncomp_size")? as usize;
+        let name_len = read_u16_le(zip_bytes, pos + 28).ok_or("ZIP name_len")? as usize;
+        let extra_len = read_u16_le(zip_bytes, pos + 30).ok_or("ZIP extra_len")? as usize;
+        let comment_len = read_u16_le(zip_bytes, pos + 32).ok_or("ZIP comment_len")? as usize;
+        let local_off = read_u32_le(zip_bytes, pos + 42).ok_or("ZIP local_off")? as usize;
+
+        let name_start = pos + 46;
+        let name_end = name_start + name_len;
+        if name_end > cd_end {
+            break;
+        }
+        let name = std::str::from_utf8(&zip_bytes[name_start..name_end]).unwrap_or("");
+        pos = name_end + extra_len + comment_len;
+
+        if name != target_name {
+            continue;
+        }
+        if uncomp_size > max_uncompressed {
+            return Err("Превышен лимит распакованного DOCX XML".into());
+        }
+        if local_off + 30 > zip_bytes.len() || zip_bytes.get(local_off..local_off + 4) != Some(b"PK\x03\x04") {
+            return Err("Некорректный Local File Header в ZIP".into());
+        }
+        let l_name_len = read_u16_le(zip_bytes, local_off + 26).ok_or("LFH name_len")? as usize;
+        let l_extra_len = read_u16_le(zip_bytes, local_off + 28).ok_or("LFH extra_len")? as usize;
+        let data_start = local_off + 30 + l_name_len + l_extra_len;
+        let data_end = data_start
+            .checked_add(comp_size)
+            .filter(|&e| e <= zip_bytes.len())
+            .ok_or_else(|| "Сжатые данные выходят за границы файла".to_string())?;
+        let raw_slice = &zip_bytes[data_start..data_end];
+
+        return match method {
+            0 => Ok(raw_slice.to_vec()),
+            8 => {
+                let mut decoder = flate2::read::DeflateDecoder::new(raw_slice);
+                let mut out = Vec::new();
+                let mut limited = decoder.by_ref().take((max_uncompressed + 1) as u64);
+                limited
+                    .read_to_end(&mut out)
+                    .map_err(|e| format!("Ошибка распаковки Deflate: {e}"))?;
+                if out.len() > max_uncompressed {
+                    return Err("Превышен лимит распакованного DOCX XML".into());
+                }
+                Ok(out)
+            }
+            other => Err(format!("Неподдерживаемый метод сжатия ZIP: {other}")),
+        };
+    }
+
+    Err(format!("Файл {target_name} не найден в архиве"))
+}
+
+fn unescape_xml_entities(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp..];
+        if let Some(semi) = after.find(';') {
+            let ent = &after[1..semi];
+            match ent {
+                "amp" => out.push('&'),
+                "lt" => out.push('<'),
+                "gt" => out.push('>'),
+                "quot" => out.push('"'),
+                "apos" => out.push('\''),
+                _ if ent.starts_with("#x") || ent.starts_with("#X") => {
+                    if let Ok(cp) = u32::from_str_radix(&ent[2..], 16) {
+                        if let Some(ch) = char::from_u32(cp) {
+                            out.push(ch);
+                        }
+                    }
+                }
+                _ if ent.starts_with('#') => {
+                    if let Ok(cp) = ent[1..].parse::<u32>() {
+                        if let Some(ch) = char::from_u32(cp) {
+                            out.push(ch);
+                        }
+                    }
+                }
+                _ => {
+                    out.push('&');
+                    out.push_str(ent);
+                    out.push(';');
+                }
+            }
+            rest = &after[semi + 1..];
+        } else {
+            out.push_str(after);
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Извлекает чистый текст построчно из `.docx` (`word/document.xml`).
+pub fn extract_docx_text(docx_bytes: &[u8]) -> Result<String, String> {
+    let xml_bytes = extract_zip_entry(docx_bytes, "word/document.xml", 4 * 1024 * 1024)?;
+    let xml = String::from_utf8_lossy(&xml_bytes);
+    let mut out = String::new();
+    let mut pos = 0usize;
+    let bytes = xml.as_bytes();
+
+    while pos < bytes.len() {
+        if let Some(rel_lt) = xml[pos..].find('<') {
+            pos += rel_lt;
+            let Some(rel_gt) = xml[pos..].find('>') else {
+                break;
+            };
+            let tag = &xml[pos + 1..pos + rel_gt];
+            pos += rel_gt + 1;
+
+            let tag_name = tag
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_end_matches('/');
+            if tag_name == "w:t" && !tag.ends_with('/') {
+                if let Some(end_rel) = xml[pos..].find("</w:t>") {
+                    let raw_text = &xml[pos..pos + end_rel];
+                    out.push_str(&unescape_xml_entities(raw_text));
+                    pos += end_rel + "</w:t>".len();
+                }
+            } else if tag_name == "/w:p" || tag_name == "w:br" || tag_name == "w:cr" {
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    Ok(out)
+}
+
+/// Декодирует скачанные байты подписки: автоматически распознаёт `.docx` (ZIP) и обычный текст.
+pub fn decode_subscription_bytes(bytes: &[u8]) -> String {
+    if bytes.starts_with(b"PK\x03\x04") {
+        if let Ok(text) = extract_docx_text(bytes) {
+            return text;
+        }
+    }
+    String::from_utf8_lossy(bytes).to_string()
+}
+
+/// Потоковая загрузка текста (поддерживает прямые URL, публичные ссылки Яндекс Диска и `.docx` / `.txt`).
+pub async fn fetch_bounded_text(
+    client: &reqwest::Client,
+    url: &str,
+    max_bytes: usize,
+    timeout_secs: u64,
+) -> Result<String, String> {
+    let target_url = if is_yandex_disk_public_url(url) {
+        resolve_yandex_disk_download_url(client, url, timeout_secs).await?
+    } else {
+        url.to_string()
+    };
+    let buf = fetch_bounded_bytes(client, &target_url, max_bytes, timeout_secs).await?;
+    Ok(decode_subscription_bytes(&buf))
 }
 
 #[derive(Clone, Debug)]
@@ -922,6 +1170,17 @@ async fn fetch_sources_or_cache(
         }
     }
 
+    // 4) Вшитый в бинарник стартовый seed-список (на случай первого запуска в БС без интернета)
+    let embedded_raw = match mode {
+        FreeSubMode::Vpn => EMBEDDED_VPN_SEED,
+        FreeSubMode::Whitelist => EMBEDDED_WHITELIST_SEED,
+    };
+    let (embedded_nodes, embedded_rejected) = parse_subscription_nodes_bounded(embedded_raw, MAX_PARSED_NODES);
+    rejected_invalid += embedded_rejected.len();
+    if !embedded_nodes.is_empty() {
+        return (embedded_nodes, Some("Вшитый стартовый список".to_string()), rejected_invalid);
+    }
+
     (Vec::new(), None, rejected_invalid)
 }
 
@@ -1452,5 +1711,82 @@ mod tests {
             prod.contains("crate::api::sync_whitelist_mode_tunnel(state, &target_name)"),
             "publish_and_connect must call sync_whitelist_mode_tunnel after switching server so whitelist/VPN mode and iptables stay in sync"
         );
+    }
+
+    #[test]
+    fn test_7_yandex_disk_url_detection_and_docx_extraction() {
+        use std::io::Write;
+        assert!(is_yandex_disk_public_url("https://disk.yandex.ru/i/xXnBLHAuIfFpSA"));
+        assert!(is_yandex_disk_public_url("https://yadi.sk/d/abc123"));
+        assert!(!is_yandex_disk_public_url("https://raw.githubusercontent.com/zieng2/wl/main/vless.txt"));
+
+        // Собираем минимальный валидный ZIP (DOCX) в памяти со сжатием Deflate для word/document.xml
+        let doc_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>vless://11111111-1111-1111-1111-111111111111@1.2.3.4:443?security=reality&amp;sni=vk.com&amp;pbk=abc#NodeOne</w:t></w:r></w:p>
+    <w:p><w:r><w:t>vless://22222222-2222-2222-2222-222222222222@5.6.7.8:443?security=tls&amp;sni=yandex.ru#NodeTwo</w:t></w:r></w:p>
+  </w:body>
+</w:document>"#;
+
+        let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(doc_xml.as_bytes()).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let name = b"word/document.xml";
+
+        let mut zip = Vec::new();
+        // Local File Header
+        zip.extend_from_slice(b"PK\x03\x04");
+        zip.extend_from_slice(&20u16.to_le_bytes()); // version
+        zip.extend_from_slice(&0u16.to_le_bytes()); // flags
+        zip.extend_from_slice(&8u16.to_le_bytes()); // method = deflate
+        zip.extend_from_slice(&0u16.to_le_bytes()); // time
+        zip.extend_from_slice(&0u16.to_le_bytes()); // date
+        zip.extend_from_slice(&0u32.to_le_bytes()); // crc32 (unused here)
+        zip.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(doc_xml.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes()); // extra len
+        zip.extend_from_slice(name);
+        zip.extend_from_slice(&compressed);
+
+        let cd_offset = zip.len();
+        // Central Directory Header
+        zip.extend_from_slice(b"PK\x01\x02");
+        zip.extend_from_slice(&20u16.to_le_bytes());
+        zip.extend_from_slice(&20u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&8u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u32.to_le_bytes());
+        zip.extend_from_slice(&(compressed.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(doc_xml.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes()); // extra
+        zip.extend_from_slice(&0u16.to_le_bytes()); // comment
+        zip.extend_from_slice(&0u16.to_le_bytes()); // disk
+        zip.extend_from_slice(&0u16.to_le_bytes()); // int attr
+        zip.extend_from_slice(&0u32.to_le_bytes()); // ext attr
+        zip.extend_from_slice(&0u32.to_le_bytes()); // local header offset
+        zip.extend_from_slice(name);
+        let cd_size = zip.len() - cd_offset;
+
+        // EOCD
+        zip.extend_from_slice(b"PK\x05\x06");
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+        zip.extend_from_slice(&1u16.to_le_bytes());
+        zip.extend_from_slice(&1u16.to_le_bytes());
+        zip.extend_from_slice(&(cd_size as u32).to_le_bytes());
+        zip.extend_from_slice(&(cd_offset as u32).to_le_bytes());
+        zip.extend_from_slice(&0u16.to_le_bytes());
+
+        let decoded = decode_subscription_bytes(&zip);
+        let (nodes, rejected) = parse_subscription_nodes_bounded(&decoded, 10);
+        assert!(rejected.is_empty(), "rejected: {:?}", rejected);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0]["server"], "1.2.3.4");
+        assert_eq!(nodes[1]["server"], "5.6.7.8");
     }
 }
