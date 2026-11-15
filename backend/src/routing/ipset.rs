@@ -20,24 +20,31 @@ fn proxy_catalog_domain_set(
         .collect()
 }
 
-/// Возвращает ТОЛЬКО явно добавленные пользователем домены белого списка (custom_domains),
-/// направляемые в `DIRECT` и локальный DNS, исключая домены из `proxy_catalog`.
-/// Встроенные 249 доменов `DOMESTIC_WHITELIST_DOMAINS` больше НЕ инжектируются автоматически.
+/// Возвращает объединённый без дублей список прямых доменов для режима Белых списков (БС):
+/// 1) все 249 доменов `DOMESTIC_WHITELIST_DOMAINS`, не входящие в `proxy_catalog`;
+/// 2) валидные нормализованные домены из `cfg.whitelist.custom_domains`, не входящие в `proxy_catalog`;
+/// 3) валидные нормализованные домены из `cfg.direct_domains`, не входящие в `proxy_catalog`.
 fn explicit_whitelist_direct_domains(
-    whitelist_cfg: &crate::config::WhitelistConfig,
+    cfg: &crate::config::AppConfig,
     proxy_catalog: &std::collections::HashSet<String>,
 ) -> Vec<String> {
     let mut out = Vec::new();
-    for d in &whitelist_cfg.custom_domains {
-        let clean = crate::config::normalize_domain(d);
-        if !clean.is_empty()
-            && crate::config::is_valid_domain(&clean)
-            && !proxy_catalog.contains(&clean)
-            && !out.contains(&clean)
-        {
+    let mut seen = std::collections::HashSet::new();
+
+    for &raw in DOMESTIC_WHITELIST_DOMAINS {
+        let clean = crate::config::normalize_domain(raw);
+        if is_valid_rule_domain(&clean) && !proxy_catalog.contains(&clean) && seen.insert(clean.clone()) {
             out.push(clean);
         }
     }
+
+    for raw in cfg.whitelist.custom_domains.iter().chain(cfg.direct_domains.iter()) {
+        let clean = crate::config::normalize_domain(raw);
+        if is_valid_rule_domain(&clean) && !proxy_catalog.contains(&clean) && seen.insert(clean.clone()) {
+            out.push(clean);
+        }
+    }
+
     out
 }
 
@@ -610,17 +617,20 @@ pub fn apply_whitelist_rules(
         }
     }
 
-    // 2. Формирование правил rules. В StrictXKeen российские каталоги и гео-категории
-    // не создают DIRECT-маршрутов: мобильный оператор может не пропускать их напрямую.
+    // 2. Формирование правил rules: прямые домены каталога и пользователя + IP/CIDR + proxy_catalog
+    // всегда стоят выше SRC-IP-CIDR устройств/подсетей и выше финального MATCH,🛡️ Whitelist.
     let mut wl_rules = Vec::new();
     wl_rules.push(WHITELIST_BEGIN.to_string());
 
     let proxy_catalog = proxy_catalog_domain_set(&cfg.whitelist);
-    let domains_direct = explicit_whitelist_direct_domains(&cfg.whitelist, &proxy_catalog);
+    let domains_direct = explicit_whitelist_direct_domains(cfg, &proxy_catalog);
     for dom in &domains_direct {
         wl_rules.push(format!("  - DOMAIN-SUFFIX,{dom},DIRECT"));
     }
-    for cidr in sanitize_ip_cidrs(&cfg.whitelist.custom_domains) {
+    let mut direct_ip_sources = Vec::with_capacity(cfg.whitelist.custom_domains.len() + cfg.direct_domains.len());
+    direct_ip_sources.extend(cfg.whitelist.custom_domains.iter().cloned());
+    direct_ip_sources.extend(cfg.direct_domains.iter().cloned());
+    for cidr in sanitize_ip_cidrs(&direct_ip_sources) {
         wl_rules.push(format!("  - IP-CIDR,{cidr},DIRECT,no-resolve"));
     }
     for dom in &proxy_catalog {
@@ -762,7 +772,7 @@ pub fn apply_whitelist_dns(
     };
 
     let proxy_catalog = proxy_catalog_domain_set(&cfg.whitelist);
-    let all_domains = explicit_whitelist_direct_domains(&cfg.whitelist, &proxy_catalog);
+    let all_domains = explicit_whitelist_direct_domains(cfg, &proxy_catalog);
     let mut dns_block = Vec::with_capacity(all_domains.len() + 2);
     dns_block.push(format!("    {WHITELIST_DNS_BEGIN}"));
     for dom in &all_domains {

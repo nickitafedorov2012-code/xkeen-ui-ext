@@ -1045,7 +1045,10 @@ mod tests {
             .find("- SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist")
             .expect("updated YAML must keep LAN SRC-IP-CIDR rule");
         assert!(hh_pos < src_pos, "hh.ru DIRECT rule must appear before SRC-IP-CIDR whitelist catch-all");
-        assert!(!updated.contains("yandex.net"), "unrequested catalog domain must not be injected");
+        let yandex_pos = updated
+            .find("- DOMAIN-SUFFIX,yandex.net,DIRECT")
+            .expect("built-in catalog domain yandex.net must be routed DIRECT");
+        assert!(yandex_pos < src_pos, "catalog DIRECT rule must appear before SRC-IP-CIDR whitelist catch-all");
         assert!(updated.contains("- MATCH,🛡️ Whitelist"), "global БС must end with MATCH,🛡️ Whitelist");
 
         let second_pass = reconcile_startup_yaml(&updated, &cfg)

@@ -93,6 +93,17 @@ pub fn redir_ports(yaml: &str) -> RedirPorts {
     }
     RedirPorts { redir, tproxy, source }
 }
+fn whitelist_local_dns_endpoint(cfg: &crate::config::AppConfig) -> (bool, u16, String) {
+    let agh_enabled = cfg.adguard.enabled || cfg.adblock_enabled;
+    let agh_port = if cfg.adguard.dns_port > 0 { cfg.adguard.dns_port } else { 5354 };
+    let local_dns = if agh_enabled {
+        format!("127.0.0.1:{agh_port}")
+    } else {
+        "127.0.0.1:53".to_string()
+    };
+    (agh_enabled, agh_port, local_dns)
+}
+
 /// Применение всей сохраненной в AppConfig маршрутизации к сырому YAML Mihomo с сохранением фильтров провайдеров.
 pub fn apply_routing_with_filters(
     yaml: &str,
@@ -137,12 +148,11 @@ pub fn apply_routing_with_filters(
             Some(s) if !s.trim().is_empty() && s.trim() != "follow_failover" => Some(s.trim()),
             _ => None,
         };
+        let (agh_enabled, agh_port, local_dns) = whitelist_local_dns_endpoint(cfg);
         current = apply_whitelist_rules(&current, cfg, active_wl_tunnel);
-        current = apply_whitelist_dns(&current, cfg, "127.0.0.1:53");
+        current = apply_whitelist_dns(&current, cfg, &local_dns);
         current = apply_canary_rules_with_providers(&current, &providers);
 
-        let agh_enabled = cfg.adguard.enabled || cfg.adblock_enabled;
-        let agh_port = if cfg.adguard.dns_port > 0 { cfg.adguard.dns_port } else { 5354 };
         if let Ok(with_agh_dns) = apply_adguard_dns_upstream(&current, agh_port, agh_enabled) {
             current = with_agh_dns;
         }
@@ -266,8 +276,9 @@ pub fn apply_routing_with_filters(
         Some(s) if !s.trim().is_empty() && s.trim() != "follow_failover" => Some(s.trim()),
         _ => None,
     };
+    let (agh_enabled, agh_port, local_dns) = whitelist_local_dns_endpoint(cfg);
     current = apply_whitelist_rules(&current, cfg, active_wl_tunnel);
-    current = apply_whitelist_dns(&current, cfg, "127.0.0.1:53");
+    current = apply_whitelist_dns(&current, cfg, &local_dns);
 
     // 5.2. Canary Probe: селектор-группа '🛡️ Canary Probe' и локальный слушатель 127.0.0.1:7894.
     // Нужна и failover (Canary-тест), и изолированному speedtest (баг 84), поэтому есть всегда.
@@ -279,8 +290,6 @@ pub fn apply_routing_with_filters(
     }
 
     // 5.4. Интеграция AdGuard Home DNS под прокси (Mihomo nameserver -> 127.0.0.1:5353)
-    let agh_enabled = cfg.adguard.enabled || cfg.adblock_enabled;
-    let agh_port = if cfg.adguard.dns_port > 0 { cfg.adguard.dns_port } else { 5354 };
     if let Ok(with_agh_dns) = apply_adguard_dns_upstream(&current, agh_port, agh_enabled) {
         current = with_agh_dns;
     }

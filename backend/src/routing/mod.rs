@@ -1401,9 +1401,9 @@ rules:
         assert!(applied.contains(WHITELIST_GROUP_BEGIN));
         assert!(applied.contains(WHITELIST_GROUP_END));
         assert!(applied.contains(&format!("- name: '{WHITELIST_GROUP_NAME}'")));
-        assert!(!applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
-        assert!(!applied.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
-        assert!(!applied.contains("DOMAIN-SUFFIX,vk.com,DIRECT"));
+        assert!(applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
+        assert!(applied.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
+        assert!(applied.contains("DOMAIN-SUFFIX,vk.com,DIRECT"));
         assert!(applied.contains("DOMAIN-SUFFIX,user-added.example,DIRECT"));
         assert!(applied.contains(&format!("SRC-IP-CIDR,192.168.1.105/32,{WHITELIST_GROUP_NAME}")));
         assert!(validate_marker_pair(&applied, WHITELIST_BEGIN, WHITELIST_END).is_ok());
@@ -1451,8 +1451,8 @@ rules:
         let catchall = applied.find("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist").expect("IPv4 LAN catch-all must exist");
 
         assert!(
-            !block.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"),
-            "built-in Russian catalog must NOT be auto-injected into DIRECT (Kosyak 7)"
+            block.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"),
+            "built-in Russian catalog domain sberbank.ru must be routed DIRECT"
         );
         assert!(
             block.contains(&format!("DOMAIN-SUFFIX,hh.ru,{WHITELIST_GROUP_NAME}"))
@@ -1994,7 +1994,10 @@ rules:
             applied.contains("'+.my-bank.ru': '127.0.0.1:53'"),
             "DNS policy must point user custom domain to router DNS 127.0.0.1:53"
         );
-        assert!(!applied.contains("'+.gosuslugi.ru'"), "built-in catalog must not be auto-injected");
+        assert!(
+            applied.contains("'+.gosuslugi.ru': '127.0.0.1:53'"),
+            "built-in catalog domain must be in nameserver-policy"
+        );
     }
 
     #[test]
@@ -2017,7 +2020,7 @@ rules:
         assert!(applied.contains(WHITELIST_DNS_END));
         assert!(applied.contains("nameserver-policy:"));
         assert!(applied.contains("'+.my-portal.ru': '127.0.0.1:53'"));
-        assert!(!applied.contains("'+.gosuslugi.ru': '127.0.0.1:53'"));
+        assert!(applied.contains("'+.gosuslugi.ru': '127.0.0.1:53'"));
         assert!(applied.contains("- 77.88.8.8"), "Existing nameservers must be preserved");
 
         // Отключение очищает nameserver-policy
@@ -2072,9 +2075,9 @@ rules:
         assert!(applied.contains(WHITELIST_BEGIN));
         assert!(applied.contains(WHITELIST_END));
 
-        // 1. Встроенный каталог не инжектируется принудительно; в DIRECT идут только custom_domains.
-        assert!(!applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
-        assert!(!applied.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
+        // 1. Встроенный каталог и custom_domains идут в DIRECT.
+        assert!(applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
+        assert!(applied.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
         assert!(applied.contains("DOMAIN-SUFFIX,my-direct.ru,DIRECT"));
 
         // 2. Excluded device -> DIRECT
@@ -2100,7 +2103,7 @@ rules:
 
         let applied = apply_whitelist_rules(base_yaml, &cfg, None);
         assert!(applied.contains(WHITELIST_BEGIN));
-        assert!(!applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
+        assert!(applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
         assert!(applied.contains("DOMAIN-SUFFIX,my-direct.ru,DIRECT"));
         // В стандартном режиме blanket subnet перехват не должен добавляться
         assert!(!applied.contains("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist"));
@@ -2377,8 +2380,8 @@ rules:
 
         for &cd in &critical_domains {
             assert!(
-                !applied.contains(&format!("DOMAIN-SUFFIX,{cd},DIRECT")),
-                "Russian catalog domain {cd} must NOT be auto-injected into DIRECT (Kosyak 7)"
+                applied.contains(&format!("DOMAIN-SUFFIX,{cd},DIRECT")),
+                "Russian catalog domain {cd} must be routed DIRECT"
             );
             assert!(
                 DOMESTIC_WHITELIST_DOMAINS.contains(&cd),
@@ -2475,13 +2478,13 @@ rules:
         assert!(!with_rules.contains("DOMAIN-SUFFIX,ozon.ru,DIRECT"));
         assert!(with_rules.contains(&format!("DOMAIN-SUFFIX,sberbank.ru,{WHITELIST_GROUP_NAME}")));
         assert!(with_rules.contains(&format!("DOMAIN-SUFFIX,ozon.ru,{WHITELIST_GROUP_NAME}")));
-        assert!(!with_rules.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
+        assert!(with_rules.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
         assert!(with_rules.contains("DOMAIN-SUFFIX,my-direct.ru,DIRECT"));
 
         let with_dns = apply_whitelist_dns(&with_rules, &cfg, "127.0.0.1:53");
         assert!(!with_dns.contains("'+.sberbank.ru': '127.0.0.1:53'"));
         assert!(!with_dns.contains("'+.ozon.ru': '127.0.0.1:53'"));
-        assert!(!with_dns.contains("'+.gosuslugi.ru': '127.0.0.1:53'"));
+        assert!(with_dns.contains("'+.gosuslugi.ru': '127.0.0.1:53'"));
         assert!(with_dns.contains("'+.my-direct.ru': '127.0.0.1:53'"));
     }
 
@@ -3115,20 +3118,27 @@ rules:
         let rules_pos = applied.find("rules:").expect("rules section");
         let rules_sec = &applied[rules_pos..];
 
-        // 1. Ни одного из 249 вшитых доменов DOMESTIC_WHITELIST_DOMAINS нет ни в rules, ни в nameserver-policy
-        for forbidden in ["yandex.net", "gosuslugi.ru", "hh.ru", "sberdevices.ru"] {
+        // 1. Встроенные домены DOMESTIC_WHITELIST_DOMAINS присутствуют в DIRECT и nameserver-policy
+        for expected in ["ozon.ru", "ozone.ru", "yandex.net", "gosuslugi.ru", "hh.ru", "sberdevices.ru"] {
             assert!(
-                !rules_sec.contains(&format!("DOMAIN-SUFFIX,{forbidden},DIRECT")),
-                "built-in domain {forbidden} must NOT be injected into DIRECT:\n{rules_sec}"
+                rules_sec.contains(&format!("DOMAIN-SUFFIX,{expected},DIRECT")),
+                "built-in domain {expected} must be routed DIRECT in global БС:\n{rules_sec}"
             );
             assert!(
-                !applied.contains(&format!("'+.{forbidden}'")),
-                "built-in domain {forbidden} must NOT be injected into nameserver-policy:\n{applied}"
+                applied.contains(&format!("'+.{expected}': '127.0.0.1:53'")),
+                "built-in domain {expected} must be present in nameserver-policy:\n{applied}"
             );
         }
 
-        // 2. Нет общих правил (Google AI, Zapret, Gaming, direct_domains, force_domains, device_routing, category-ru, MATCH,PROXY)
-        assert!(!rules_sec.contains("some-direct.ru"), "direct_domains must be disabled in global БС");
+        // 2. Пользовательские direct_domains идут в DIRECT, а общие правила (Google AI, Zapret, Gaming, force_domains, device_routing, category-ru, MATCH,PROXY) изолированы
+        assert!(
+            rules_sec.contains("DOMAIN-SUFFIX,some-direct.ru,DIRECT"),
+            "user direct_domains must remain DIRECT in global БС:\n{rules_sec}"
+        );
+        assert!(
+            applied.contains("'+.some-direct.ru': '127.0.0.1:53'"),
+            "user direct_domains must be in nameserver-policy:\n{applied}"
+        );
         assert!(!rules_sec.contains("some-force.com"), "force_domains must be disabled in global БС");
         assert!(!rules_sec.contains("192.168.2.50"), "device_routing must be disabled in global БС");
         assert!(!rules_sec.contains("GOOGLE_AI_BEGIN"), "Google AI rules must be disabled in global БС");
@@ -3211,6 +3221,107 @@ rules:
         assert!(wl_dns.contains("  - IP-CIDR,104.18.124.108/32,DIRECT,no-resolve"), "whitelist must emit IP-CIDR for custom IP:\n{wl_dns}");
         assert!(!wl_dns.contains("'+.104.18.124.108'"), "nameserver-policy must not include IP:\n{wl_dns}");
         assert!(wl_dns.contains("'+.wb.ru': '127.0.0.1:53'"), "nameserver-policy must keep domain:\n{wl_dns}");
+    }
+
+    #[test]
+    fn regression_whitelist_routes_catalog_and_user_domains_direct_above_catchall() {
+        let base_yaml = concat!(
+            "port: 7890\n",
+            "dns:\n",
+            "  enable: true\n",
+            "  nameserver:\n",
+            "    - 77.88.8.8\n",
+            "proxy-groups:\n",
+            "  - name: PROXY\n",
+            "    type: select\n",
+            "    proxies:\n",
+            "      - DIRECT\n",
+            "rules:\n",
+            "  - MATCH,PROXY\n",
+        );
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
+        cfg.whitelist.custom_domains = vec![
+            "custom-direct.ru".into(),
+            "198.51.100.77".into(),
+        ];
+        cfg.whitelist.proxy_catalog_domains = vec!["sberbank.ru".into()];
+        cfg.direct_domains = vec![
+            "user-direct.ru".into(),
+            "203.0.113.0/24".into(),
+        ];
+        cfg.adguard.enabled = true;
+        cfg.adguard.dns_port = 5353;
+
+        let (applied, _) = apply_routing(base_yaml, &cfg).expect("apply_routing in global БС with AGH");
+        let rules_pos = applied.find("rules:").expect("rules section");
+        let rules_sec = &applied[rules_pos..];
+
+        // 1. Все 249 доменов DOMESTIC_WHITELIST_DOMAINS (кроме sberbank.ru из proxy_catalog_domains)
+        //    включая ozon.ru, ozone.ru, yandex.net, gosuslugi.ru идут в DIRECT и nameserver-policy (127.0.0.1:5353).
+        for required in ["ozon.ru", "ozone.ru", "yandex.net", "gosuslugi.ru"] {
+            assert!(
+                rules_sec.contains(&format!("  - DOMAIN-SUFFIX,{required},DIRECT")),
+                "catalog domain {required} must be routed DIRECT:\n{rules_sec}"
+            );
+            assert!(
+                applied.contains(&format!("'+.{required}': '127.0.0.1:5353'")),
+                "catalog domain {required} must use AGH endpoint in nameserver-policy:\n{applied}"
+            );
+        }
+        for &dom in DOMESTIC_WHITELIST_DOMAINS {
+            if dom == "sberbank.ru" {
+                continue;
+            }
+            assert!(
+                rules_sec.contains(&format!("  - DOMAIN-SUFFIX,{dom},DIRECT")),
+                "DOMESTIC_WHITELIST_DOMAINS entry {dom} must be routed DIRECT"
+            );
+            assert!(
+                applied.contains(&format!("'+.{dom}': '127.0.0.1:5353'")),
+                "DOMESTIC_WHITELIST_DOMAINS entry {dom} must be in nameserver-policy"
+            );
+        }
+
+        // 2. Пользовательские домены и IP/CIDR из custom_domains и direct_domains присутствуют как DIRECT
+        assert!(rules_sec.contains("  - DOMAIN-SUFFIX,custom-direct.ru,DIRECT"));
+        assert!(rules_sec.contains("  - DOMAIN-SUFFIX,user-direct.ru,DIRECT"));
+        assert!(applied.contains("'+.custom-direct.ru': '127.0.0.1:5353'"));
+        assert!(applied.contains("'+.user-direct.ru': '127.0.0.1:5353'"));
+        assert!(rules_sec.contains("  - IP-CIDR,198.51.100.77/32,DIRECT,no-resolve"));
+        assert!(rules_sec.contains("  - IP-CIDR,203.0.113.0/24,DIRECT,no-resolve"));
+
+        // 3. Домен из proxy_catalog_domains исключён из DIRECT и nameserver-policy и идёт в 🛡️ Whitelist
+        assert!(!rules_sec.contains("  - DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
+        assert!(!applied.contains("'+.sberbank.ru'"));
+        assert!(rules_sec.contains(&format!("  - DOMAIN-SUFFIX,sberbank.ru,{WHITELIST_GROUP_NAME}")));
+
+        // 4. Индекс любого DOMAIN-SUFFIX,<dom>,DIRECT меньше индекса SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist и MATCH,🛡️ Whitelist
+        let rule_lines: Vec<&str> = rules_sec.lines().collect();
+        let lan_catchall_idx = rule_lines
+            .iter()
+            .position(|l| l.trim() == format!("- SRC-IP-CIDR,192.168.0.0/16,{WHITELIST_GROUP_NAME}"))
+            .expect("LAN SRC-IP-CIDR catch-all must exist");
+        let match_catchall_idx = rule_lines
+            .iter()
+            .position(|l| l.trim() == format!("- MATCH,{WHITELIST_GROUP_NAME}"))
+            .expect("MATCH catch-all must exist");
+
+        for (idx, line) in rule_lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("- DOMAIN-SUFFIX,") && trimmed.ends_with(",DIRECT") {
+                assert!(
+                    idx < lan_catchall_idx,
+                    "DIRECT rule '{trimmed}' (idx {idx}) must be above LAN SRC-IP-CIDR (idx {lan_catchall_idx})"
+                );
+                assert!(
+                    idx < match_catchall_idx,
+                    "DIRECT rule '{trimmed}' (idx {idx}) must be above MATCH (idx {match_catchall_idx})"
+                );
+            }
+        }
     }
 }
 

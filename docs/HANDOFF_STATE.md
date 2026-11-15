@@ -22,3 +22,9 @@
 - [DONE] Косяк 7: Жёсткая изоляция маршрутизации в режиме БС (`backend/src/routing/ipset.rs`, `backend/src/routing/iptables.rs`, `backend/src/routing/mod.rs`, `routing::tests` 118/118 passed)
 - [DONE] Косяк 8: Отклонение IP/CIDR в `is_valid_rule_domain` и генерация `IP-CIDR,<cidr>,<target>,no-resolve` (`backend/src/routing/validator.rs`, `backend/src/routing/policy_routing.rs`, `backend/src/routing/ipset.rs`, `routing::tests` 119/119 passed)
 - [DONE] Косяк 9: Исправление слипания IP разных MAC в `whitelist.devices` и `gaming.devices` (`backend/src/watchdog.rs`, `watchdog::` 42/42 passed)
+
+## Исправление маршрутизации прямых доменов в режиме Белых списков (БС)
+- [DONE] Шаг 1: Восстановить объединение `DOMESTIC_WHITELIST_DOMAINS` (249 доменов) + `whitelist.custom_domains` + `cfg.direct_domains` (за вычетом `proxy_catalog_domains`) в `explicit_whitelist_direct_domains`, `apply_whitelist_rules` (включая `IP-CIDR` из обоих списков) и `apply_whitelist_dns` в `backend/src/routing/ipset.rs`.
+- [DONE] Шаг 2: Вычислять локальный DNS-эндпоинт с учётом AdGuard Home в `backend/src/routing/iptables.rs` (`apply_routing_with_filters`).
+- [DONE] Шаг 3: Обновить `regression_global_whitelist_isolates_rules_and_is_reversible` и добавить `regression_whitelist_routes_catalog_and_user_domains_direct_above_catchall` в `backend/src/routing/mod.rs`.
+- [DONE] Шаг 4: Запустить `cargo test` в `backend`, проверить 100% прохождение тестов и запросить разрешение на коммит и деплой (`748 passed, 0 failed`).
