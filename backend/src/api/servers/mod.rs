@@ -449,24 +449,62 @@ pub async fn switch_server(State(state): State<AppState>, Json(req): Json<Switch
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct PingReq {
     pub server_id: Option<String>,
+    #[serde(default)]
+    pub server_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub include_pools: Option<bool>,
     pub url: Option<String>,
+}
+
+pub(crate) async fn execute_ping_servers(
+    http: &reqwest::Client,
+    cfg: &config::AppConfig,
+    req: PingReq,
+) -> Result<std::collections::BTreeMap<String, i64>, String> {
+    let _manual_ping_guard = mihomo::begin_manual_ping();
+    let ids: Vec<String> = if let Some(id) = req.server_id {
+        if id.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![id]
+        }
+    } else if let Some(list) = req.server_ids {
+        list.into_iter()
+            .filter(|id| !id.trim().is_empty() && !mihomo::is_service_group_or_builtin(id))
+            .collect()
+    } else {
+        let include_pools = req.include_pools.unwrap_or(true);
+        mihomo::get_servers(http, cfg, &cfg.failover.priority_chain)
+            .await?
+            .into_iter()
+            .filter(|s| {
+                if mihomo::is_service_group_or_builtin(&s.id) {
+                    return false;
+                }
+                if cfg.ignore_servers.iter().any(|ig| ig.trim().eq_ignore_ascii_case(s.id.trim())) {
+                    return false;
+                }
+                if !include_pools && s.is_pool {
+                    return false;
+                }
+                true
+            })
+            .map(|s| s.id)
+            .collect()
+    };
+    Ok(mihomo::ping_all_url(http, cfg, &ids, 2500, req.url.as_deref()).await)
 }
 
 /// POST /api/servers/ping — один сервер или все (параллельно).
 pub async fn ping_servers(State(state): State<AppState>, Json(req): Json<PingReq>) -> Response {
     let cfg = state.config.read().await.clone();
-    let ids: Vec<String> = match req.server_id {
-        Some(id) => vec![id],
-        None => match mihomo::get_servers(&state.http, &cfg, &cfg.failover.priority_chain).await {
-            Ok(servers) => servers.into_iter().map(|s| s.id).collect(),
-            Err(e) => return api_err(e),
-        },
-    };
-    let pings = mihomo::ping_all_url(&state.http, &cfg, &ids, 2500, req.url.as_deref()).await;
-    api_ok(json!({ "pings": pings }))
+    match execute_ping_servers(&state.http, &cfg, req).await {
+        Ok(pings) => api_ok(json!({ "pings": pings })),
+        Err(e) => api_err(e),
+    }
 }
 
 /// Мгновенный фоновый замер пингов после изменения маршрутизации (fire-and-forget):
@@ -1393,5 +1431,114 @@ mod tests {
         assert_eq!(stabilize_post_switch_ping(Some(180), 0, Some(0)), Some(180));
         // Если прежнего пинга не было и оба таймаут -> None
         assert_eq!(stabilize_post_switch_ping(None, 0, Some(0)), None);
+    }
+
+    #[tokio::test]
+    async fn regression_ping_servers_skips_ignored_canary_and_pools_network() {
+        use std::collections::BTreeMap;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _guard = crate::mihomo::PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let ok_hits = Arc::new(AtomicUsize::new(0));
+        let ignored_hits = Arc::new(AtomicUsize::new(0));
+        let canary_hits = Arc::new(AtomicUsize::new(0));
+        let group_delay_hits = Arc::new(AtomicUsize::new(0));
+
+        let ok_h = ok_hits.clone();
+        let ig_h = ignored_hits.clone();
+        let ca_h = canary_hits.clone();
+        let gd_h = group_delay_hits.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { return };
+                let ok_h = ok_h.clone();
+                let ig_h = ig_h.clone();
+                let ca_h = ca_h.clone();
+                let gd_h = gd_h.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req.lines().next().unwrap_or("");
+                    let (status, body) = if first_line.contains("/proxies/node-ok/delay") {
+                        ok_h.fetch_add(1, Ordering::SeqCst);
+                        ("200 OK", r#"{"delay":85}"#.to_string())
+                    } else if first_line.contains("/proxies/node-ignored/delay") {
+                        ig_h.fetch_add(1, Ordering::SeqCst);
+                        ("504 Gateway Timeout", String::new())
+                    } else if first_line.contains("Canary") {
+                        ca_h.fetch_add(1, Ordering::SeqCst);
+                        ("504 Gateway Timeout", String::new())
+                    } else if first_line.contains("/group/") && first_line.contains("/delay") {
+                        gd_h.fetch_add(1, Ordering::SeqCst);
+                        ("200 OK", r#"{"node-ok":85}"#.to_string())
+                    } else {
+                        ("404 Not Found", String::new())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        crate::mihomo::set_proxies_cache_for_test(
+            BTreeMap::from([
+                (
+                    "PROXY".into(),
+                    serde_json::json!({ "type": "Selector", "now": "node-ok", "all": ["node-ok", "node-ignored"] }),
+                ),
+                (
+                    "Fastest".into(),
+                    serde_json::json!({ "type": "URLTest", "now": "node-ok", "all": ["node-ok"] }),
+                ),
+                (
+                    crate::mihomo::CANARY_PROBE_GROUP_NAME.into(),
+                    serde_json::json!({ "type": "Selector", "now": "DIRECT", "all": ["DIRECT", "node-ok"] }),
+                ),
+                (
+                    "node-ok".into(),
+                    serde_json::json!({ "type": "Vless", "server": "1.2.3.4", "port": 443 }),
+                ),
+                (
+                    "node-ignored".into(),
+                    serde_json::json!({ "type": "Vless", "server": "5.6.7.8", "port": 443 }),
+                ),
+            ]),
+            std::time::Instant::now(),
+        );
+        crate::mihomo::set_provider_proxies_cache_for_test(BTreeMap::new(), std::time::Instant::now());
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+        cfg.ignore_servers = vec!["node-ignored".into()];
+
+        let pings = execute_ping_servers(&reqwest::Client::new(), &cfg, PingReq::default())
+            .await
+            .expect("execute_ping_servers must succeed");
+        crate::mihomo::clear_proxies_cache_for_test();
+
+        assert_eq!(pings.get("node-ok").copied(), Some(85));
+        assert!(!pings.contains_key("node-ignored"), "ignored node must not be pinged: {pings:?}");
+        assert!(
+            !pings.contains_key(crate::mihomo::CANARY_PROBE_GROUP_NAME),
+            "Canary Probe must not be pinged: {pings:?}"
+        );
+        assert_eq!(pings.get("PROXY").copied(), Some(85), "pool PROXY must inherit active leaf delay without network storm");
+        assert_eq!(pings.get("Fastest").copied(), Some(85), "pool Fastest must inherit active leaf delay without network storm");
+        assert_eq!(ignored_hits.load(Ordering::SeqCst), 0, "must make 0 network requests for ignored node");
+        assert_eq!(canary_hits.load(Ordering::SeqCst), 0, "must make 0 network requests for Canary Probe");
+        assert_eq!(group_delay_hits.load(Ordering::SeqCst), 0, "must make 0 /group/.../delay requests for pools");
+        assert_eq!(ok_hits.load(Ordering::SeqCst), 1, "leaf node-ok must be pinged once");
     }
 }

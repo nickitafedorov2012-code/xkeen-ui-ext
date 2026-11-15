@@ -588,10 +588,7 @@ async fn main() {
                 crate::mihomo::last_selected_tunnel_server().as_deref(),
             )
             .await;
-            let ids = crate::mihomo::collect_auto_ping_ids(&cfg);
-            if !ids.is_empty() {
-                let _ = crate::mihomo::ping_all_url(&ping_auto_state.http, &cfg, &ids, 2500, None).await;
-            }
+            let _ = crate::mihomo::run_auto_ping_tick(&ping_auto_state.http, &cfg).await;
             tokio::select! {
                 _ = stop.cancelled() => break,
                 _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
@@ -1035,18 +1032,21 @@ mod tests {
         let mut cfg = config::AppConfig::default();
         cfg.whitelist.enabled = true;
         cfg.whitelist.strategy = config::WhitelistStrategy::StrictXKeen;
+        cfg.whitelist.custom_domains = vec!["hh.ru".to_string()];
 
         let updated = reconcile_startup_yaml(stale_yaml, &cfg)
             .expect("reconcile_startup_yaml should succeed")
-            .expect("stale YAML without catalog DIRECT rules must be updated on startup");
+            .expect("stale YAML must be updated on startup");
 
         let hh_pos = updated
             .find("- DOMAIN-SUFFIX,hh.ru,DIRECT")
-            .expect("updated YAML must include DIRECT rule for hh.ru");
+            .expect("updated YAML must include DIRECT rule for explicit custom_domains hh.ru");
         let src_pos = updated
             .find("- SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist")
             .expect("updated YAML must keep LAN SRC-IP-CIDR rule");
         assert!(hh_pos < src_pos, "hh.ru DIRECT rule must appear before SRC-IP-CIDR whitelist catch-all");
+        assert!(!updated.contains("yandex.net"), "unrequested catalog domain must not be injected");
+        assert!(updated.contains("- MATCH,🛡️ Whitelist"), "global БС must end with MATCH,🛡️ Whitelist");
 
         let second_pass = reconcile_startup_yaml(&updated, &cfg)
             .expect("second reconcile pass should succeed");

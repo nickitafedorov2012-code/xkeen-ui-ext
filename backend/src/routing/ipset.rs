@@ -20,15 +20,134 @@ fn proxy_catalog_domain_set(
         .collect()
 }
 
-/// Возвращает домены белого списка, направляемые в `DIRECT` и локальный DNS,
-/// исключая домены из `proxy_catalog`.
-fn direct_whitelist_domains_excluding(
+/// Возвращает ТОЛЬКО явно добавленные пользователем домены белого списка (custom_domains),
+/// направляемые в `DIRECT` и локальный DNS, исключая домены из `proxy_catalog`.
+/// Встроенные 249 доменов `DOMESTIC_WHITELIST_DOMAINS` больше НЕ инжектируются автоматически.
+fn explicit_whitelist_direct_domains(
     whitelist_cfg: &crate::config::WhitelistConfig,
     proxy_catalog: &std::collections::HashSet<String>,
 ) -> Vec<String> {
-    let mut domains = get_all_whitelist_domains(whitelist_cfg);
-    domains.retain(|d| !proxy_catalog.contains(d));
-    domains
+    let mut out = Vec::new();
+    for d in &whitelist_cfg.custom_domains {
+        let clean = crate::config::normalize_domain(d);
+        if !clean.is_empty()
+            && crate::config::is_valid_domain(&clean)
+            && !proxy_catalog.contains(&clean)
+            && !out.contains(&clean)
+        {
+            out.push(clean);
+        }
+    }
+    out
+}
+
+pub const WL_BASE_RULES_BEGIN: &str = "  # XKEEN_WL_BASE_RULES_BEGIN";
+pub const WL_BASE_RULES_END: &str = "  # XKEEN_WL_BASE_RULES_END";
+
+/// Изолирует секцию `rules:` при общем режиме БС:
+/// сохраняет исходные неуправляемые базовые правила в закомментированном бэкапе
+/// `# XKEEN_WL_BASE_RULES_BEGIN ... # XKEEN_WL_BASE_RULES_END`, удаляет все
+/// базовые правила (category-ru, Google AI, YouTube, MATCH,PROXY и т.д.) и ставит
+/// единственный catch-all `- MATCH,🛡️ Whitelist`.
+pub fn isolate_rules_for_global_whitelist(yaml: &str) -> String {
+    let lines: Vec<&str> = yaml.lines().collect();
+    let Some(rules_pos) = lines.iter().position(|l| l.trim_end() == "rules:") else {
+        return yaml.to_string();
+    };
+
+    let mut rules_end = lines.len();
+    for (idx, line) in lines.iter().enumerate().skip(rules_pos + 1) {
+        let t = line.trim();
+        if !line.starts_with(' ') && !t.is_empty() && !t.starts_with('#') {
+            rules_end = idx;
+            break;
+        }
+    }
+
+    let existing_slice = &lines[rules_pos + 1..rules_end];
+    let mut backup_lines: Vec<String> = Vec::new();
+    let has_backup = existing_slice.iter().any(|l| l.trim() == WL_BASE_RULES_BEGIN.trim());
+
+    if has_backup {
+        let mut in_backup = false;
+        for line in existing_slice {
+            let t = line.trim();
+            if t == WL_BASE_RULES_BEGIN.trim() {
+                in_backup = true;
+                continue;
+            }
+            if t == WL_BASE_RULES_END.trim() {
+                in_backup = false;
+                continue;
+            }
+            if in_backup {
+                backup_lines.push((*line).to_string());
+            }
+        }
+    } else {
+        for line in existing_slice {
+            let t = line.trim();
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            if t == format!("- MATCH,{WHITELIST_GROUP_NAME}") || t == format!("- MATCH,'{WHITELIST_GROUP_NAME}'") {
+                continue;
+            }
+            backup_lines.push(format!("  # {t}"));
+        }
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 4);
+    for line in &lines[..=rules_pos] {
+        out.push((*line).to_string());
+    }
+    if !backup_lines.is_empty() {
+        out.push(WL_BASE_RULES_BEGIN.to_string());
+        out.extend(backup_lines);
+        out.push(WL_BASE_RULES_END.to_string());
+    }
+    out.push(format!("  - MATCH,{WHITELIST_GROUP_NAME}"));
+    for line in &lines[rules_end..] {
+        out.push((*line).to_string());
+    }
+    out.join("\n")
+}
+
+/// Восстанавливает исходные базовые правила секции `rules:` из бэкапа `# XKEEN_WL_BASE_RULES_*`
+/// при выключении общего режима БС.
+pub fn restore_base_rules_from_whitelist_backup(yaml: &str) -> String {
+    if !yaml.contains(WL_BASE_RULES_BEGIN.trim()) {
+        return yaml.to_string();
+    }
+    let lines: Vec<&str> = yaml.lines().collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut in_backup = false;
+    let wl_match = format!("- MATCH,{WHITELIST_GROUP_NAME}");
+    let wl_match_q = format!("- MATCH,'{WHITELIST_GROUP_NAME}'");
+
+    for line in lines {
+        let t = line.trim();
+        if t == WL_BASE_RULES_BEGIN.trim() {
+            in_backup = true;
+            continue;
+        }
+        if t == WL_BASE_RULES_END.trim() {
+            in_backup = false;
+            continue;
+        }
+        if in_backup {
+            let restored = t.strip_prefix("# ").unwrap_or(t.strip_prefix('#').unwrap_or(t));
+            if !restored.is_empty() {
+                out.push(format!("  {restored}"));
+            }
+            continue;
+        }
+        if t == wl_match || t == wl_match_q {
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    out.join("\n")
 }
 
 /// Удаление блока управляемого отклонения QUIC (UDP/443).
@@ -497,11 +616,12 @@ pub fn apply_whitelist_rules(
     wl_rules.push(WHITELIST_BEGIN.to_string());
 
     let proxy_catalog = proxy_catalog_domain_set(&cfg.whitelist);
-    // Баг #14: по умолчанию все домены «Базового каталога РФ» (в т.ч. hh.ru) идут напрямую (DIRECT),
-    // кроме тех карточек, которые пользователь явно переключил в режим «через 🛡️ БС».
-    let domains_direct = direct_whitelist_domains_excluding(&cfg.whitelist, &proxy_catalog);
+    let domains_direct = explicit_whitelist_direct_domains(&cfg.whitelist, &proxy_catalog);
     for dom in &domains_direct {
         wl_rules.push(format!("  - DOMAIN-SUFFIX,{dom},DIRECT"));
+    }
+    for cidr in sanitize_ip_cidrs(&cfg.whitelist.custom_domains) {
+        wl_rules.push(format!("  - IP-CIDR,{cidr},DIRECT,no-resolve"));
     }
     for dom in &proxy_catalog {
         wl_rules.push(format!("  - DOMAIN-SUFFIX,{dom},{WHITELIST_GROUP_NAME}"));
@@ -642,7 +762,7 @@ pub fn apply_whitelist_dns(
     };
 
     let proxy_catalog = proxy_catalog_domain_set(&cfg.whitelist);
-    let all_domains = direct_whitelist_domains_excluding(&cfg.whitelist, &proxy_catalog);
+    let all_domains = explicit_whitelist_direct_domains(&cfg.whitelist, &proxy_catalog);
     let mut dns_block = Vec::with_capacity(all_domains.len() + 2);
     dns_block.push(format!("    {WHITELIST_DNS_BEGIN}"));
     for dom in &all_domains {

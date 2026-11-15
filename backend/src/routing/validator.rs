@@ -610,7 +610,7 @@ pub fn sync_disabled_providers_in_yaml(yaml: &str, disabled_providers: &[String]
         }
 
         // Пропускаем авто-добавленный fallback для пустого use (перегенерируется ниже при необходимости)
-        if trimmed.ends_with("# xk-empty-use-fallback") {
+        if trimmed.ends_with("# xk-empty-use-fallback") || trimmed.ends_with("# xk-auto-use") {
             continue;
         }
 
@@ -740,8 +740,21 @@ pub fn sync_disabled_providers_in_yaml(yaml: &str, disabled_providers: &[String]
         out.push(line.to_string());
     }
 
-    // Пост-проход по proxy-groups: если у группы блочный `use:` остался без активных элементов,
-    // комментируем его как `# use-disabled:` и при отсутствии `proxies:` добавляем `proxies:\n      - DIRECT # xk-empty-use-fallback`
+    // Пост-проход по proxy-groups:
+    // 1) При наличии отключённых подписок отключаем `include-all: true` / `include-all-providers: true`,
+    //    иначе Mihomo подтягивает все proxy-providers мимо закомментированного `use:`.
+    // 2) Если у группы блочный `use:` остался без активных элементов, комментируем его как `# use-disabled:`
+    //    и при отсутствии `proxies:` добавляем `proxies:\n      - DIRECT # xk-empty-use-fallback`.
+    let has_any_disabled = disabled_providers.iter().any(|d| !d.trim().is_empty());
+    let active_yaml_providers: Vec<String> = if has_any_disabled {
+        parse_provider_names(yaml)
+            .into_iter()
+            .filter(|p| !disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(p)))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let mut final_lines: Vec<String> = Vec::with_capacity(out.len());
     let mut in_proxy_groups = false;
     let mut i = 0;
@@ -774,8 +787,29 @@ pub fn sync_disabled_providers_in_yaml(yaml: &str, disabled_providers: &[String]
             let mut has_proxies_key = false;
             let mut has_active_use = false;
             let mut has_disabled_use = false;
+            let mut has_include_all = false;
             let mut use_idx: Option<usize> = None;
             let mut use_ind = 0usize;
+
+            for gl in group_slice.iter_mut() {
+                let gt = gl.trim().to_string();
+                let ind = gl.len() - gl.trim_start().len();
+                let spaces = " ".repeat(ind);
+                if has_any_disabled {
+                    if gt == "include-all: true" || gt == "include-all-providers: true" {
+                        *gl = format!("{spaces}# {gt} # xk-disabled-include-all");
+                        has_include_all = true;
+                    } else if gt == "# include-all: true # xk-disabled-include-all"
+                        || gt == "# include-all-providers: true # xk-disabled-include-all"
+                    {
+                        has_include_all = true;
+                    }
+                } else if gt == "# include-all: true # xk-disabled-include-all" {
+                    *gl = format!("{spaces}include-all: true");
+                } else if gt == "# include-all-providers: true # xk-disabled-include-all" {
+                    *gl = format!("{spaces}include-all-providers: true");
+                }
+            }
 
             for (idx, gl) in group_slice.iter().enumerate() {
                 let gt = gl.trim();
@@ -817,13 +851,28 @@ pub fn sync_disabled_providers_in_yaml(yaml: &str, disabled_providers: &[String]
                 }
             }
 
+            let prop_indent = group_slice
+                .get(1)
+                .map(|l| l.len() - l.trim_start().len())
+                .filter(|&n| n > 0)
+                .unwrap_or(4);
+            let sp = " ".repeat(prop_indent);
+
+            if has_any_disabled && has_include_all && use_idx.is_none() && !has_active_use && !has_disabled_use {
+                if !active_yaml_providers.is_empty() {
+                    group_slice.push(format!("{sp}use: # xk-auto-use"));
+                    for ap in &active_yaml_providers {
+                        group_slice.push(format!("{sp}  - {ap} # xk-auto-use"));
+                    }
+                    has_active_use = true;
+                } else if !has_proxies_key {
+                    group_slice.push(format!("{sp}proxies: # xk-empty-use-fallback"));
+                    group_slice.push(format!("{sp}  - DIRECT # xk-empty-use-fallback"));
+                    has_proxies_key = true;
+                }
+            }
+
             if !has_active_use && has_disabled_use && !has_proxies_key {
-                let prop_indent = group_slice
-                    .get(1)
-                    .map(|l| l.len() - l.trim_start().len())
-                    .filter(|&n| n > 0)
-                    .unwrap_or(4);
-                let sp = " ".repeat(prop_indent);
                 group_slice.push(format!("{sp}proxies: # xk-empty-use-fallback"));
                 group_slice.push(format!("{sp}  - DIRECT # xk-empty-use-fallback"));
             }
@@ -1018,8 +1067,23 @@ pub fn update_provider_hwid_in_yaml(yaml: &str, provider_id: &str, new_hwid: Opt
 pub fn is_valid_rule_domain(d: &str) -> bool {
     !d.is_empty()
         && d.len() <= 253
+        && !d.contains('/')
+        && d.parse::<std::net::IpAddr>().is_err()
         && d.contains('.')
         && d.split('.').all(|l| !l.is_empty() && l.len() <= 63 && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+}
+
+/// Извлекает и нормализует IP/CIDR (`IPv4 -> /32`, `IPv6 -> /128`) из списка доменных правил.
+pub fn sanitize_ip_cidrs(list: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = list
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| crate::config::is_valid_ip_or_cidr(s))
+        .map(super::policy_routing::format_src_ip_cidr)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Цель правила без символов, ломающих разбор правил Mihomo (баг 119).

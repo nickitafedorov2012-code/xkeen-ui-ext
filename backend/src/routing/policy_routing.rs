@@ -96,15 +96,26 @@ pub(crate) fn apply_domain_rules_with_priority_for_target(
     crate::routing::validate_marker_pair(yaml, FORCE_BEGIN, FORCE_END)?;
     crate::routing::validate_marker_pair(yaml, DEV_DOMAINS_BEGIN, DEV_DOMAINS_END)?;
     let content = remove_domain_blocks(yaml);
-    let direct = sanitize_domains(direct);
-    let direct_set: std::collections::HashSet<String> = direct.iter().cloned().collect();
-    let force: Vec<String> = sanitize_domains(force)
+    let direct_domains = sanitize_domains(direct);
+    let direct_cidrs = sanitize_ip_cidrs(direct);
+    let direct_set: std::collections::HashSet<String> = direct_domains.iter().cloned().collect();
+    let direct_cidr_set: std::collections::HashSet<String> = direct_cidrs.iter().cloned().collect();
+    let force_domains: Vec<String> = sanitize_domains(force)
         .into_iter()
         .filter(|d| !direct_set.contains(d))
         .collect();
+    let force_cidrs: Vec<String> = sanitize_ip_cidrs(force)
+        .into_iter()
+        .filter(|c| !direct_cidr_set.contains(c))
+        .collect();
     let has_dev_domains = !device_domains.is_empty() && device_domains.values().any(|v| !v.is_empty());
 
-    if direct.is_empty() && force.is_empty() && !has_dev_domains {
+    if direct_domains.is_empty()
+        && direct_cidrs.is_empty()
+        && force_domains.is_empty()
+        && force_cidrs.is_empty()
+        && !has_dev_domains
+    {
         return Ok(content);
     }
     let lines: Vec<&str> = content.lines().collect();
@@ -113,14 +124,17 @@ pub(crate) fn apply_domain_rules_with_priority_for_target(
         .position(|l| l.trim_end() == "rules:")
         .ok_or("В config.yaml нет секции rules:")?;
 
-    let mut out = Vec::with_capacity(lines.len() + direct.len() + force.len() + 12);
+    let mut out = Vec::with_capacity(
+        lines.len() + direct_domains.len() + direct_cidrs.len() + force_domains.len() + force_cidrs.len() + 12,
+    );
     let mut device_block = Vec::new();
     if has_dev_domains {
         device_block.push(DEV_DOMAINS_BEGIN.to_string());
         for (ip, rules) in device_domains {
             let cidr = format_src_ip_cidr(ip);
             for r in rules {
-                let dom = r.domain.trim().to_lowercase();
+                let raw_dom = r.domain.trim();
+                let dom = raw_dom.to_lowercase();
                 let raw_target = r.target.trim();
                 let target = match whitelist_override_target {
                     Some(wl_t)
@@ -134,10 +148,17 @@ pub(crate) fn apply_domain_rules_with_priority_for_target(
                 };
                 // Баг 119: домен и цель не должны ломать AND-правило; несуществующую цель
                 // заменяет sanitize_rule_targets в конце apply_routing (INV-4)
-                if is_valid_rule_domain(&dom) && is_safe_rule_target(target) {
-                    device_block.push(format!(
-                        "  - AND,((SRC-IP-CIDR,{cidr}),(DOMAIN-SUFFIX,{dom})),{target},no-resolve"
-                    ));
+                if is_safe_rule_target(target) {
+                    if is_valid_rule_domain(&dom) {
+                        device_block.push(format!(
+                            "  - AND,((SRC-IP-CIDR,{cidr}),(DOMAIN-SUFFIX,{dom})),{target},no-resolve"
+                        ));
+                    } else if crate::config::is_valid_ip_or_cidr(raw_dom) {
+                        let dst_cidr = format_src_ip_cidr(raw_dom);
+                        device_block.push(format!(
+                            "  - AND,((SRC-IP-CIDR,{cidr}),(IP-CIDR,{dst_cidr})),{target},no-resolve"
+                        ));
+                    }
                 }
             }
         }
@@ -145,24 +166,30 @@ pub(crate) fn apply_domain_rules_with_priority_for_target(
     }
 
     let mut direct_block = Vec::new();
-    if !direct.is_empty() {
+    if !direct_domains.is_empty() || !direct_cidrs.is_empty() {
         direct_block.push(DIRECT_BEGIN.to_string());
-        for d in &direct {
+        for d in &direct_domains {
             direct_block.push(format!("  - DOMAIN-SUFFIX,{d},DIRECT"));
+        }
+        for cidr in &direct_cidrs {
+            direct_block.push(format!("  - IP-CIDR,{cidr},DIRECT,no-resolve"));
         }
         direct_block.push(DIRECT_END.to_string());
     }
 
     let mut force_block = Vec::new();
-    if !force.is_empty() {
+    if !force_domains.is_empty() || !force_cidrs.is_empty() {
         let proxy_target = whitelist_override_target
             .map(str::to_string)
             .unwrap_or_else(|| find_proxy_target_group(&content));
         force_block.push(FORCE_BEGIN.to_string());
-        for d in &force {
+        for d in &force_domains {
             if !FLOW_DOMAINS.iter().any(|g| g.eq_ignore_ascii_case(d)) {
                 force_block.push(format!("  - DOMAIN-SUFFIX,{d},{proxy_target}"));
             }
+        }
+        for cidr in &force_cidrs {
+            force_block.push(format!("  - IP-CIDR,{cidr},{proxy_target},no-resolve"));
         }
         force_block.push(FORCE_END.to_string());
     }

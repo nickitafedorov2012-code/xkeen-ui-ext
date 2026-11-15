@@ -1401,9 +1401,9 @@ rules:
         assert!(applied.contains(WHITELIST_GROUP_BEGIN));
         assert!(applied.contains(WHITELIST_GROUP_END));
         assert!(applied.contains(&format!("- name: '{WHITELIST_GROUP_NAME}'")));
-        assert!(applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
-        assert!(applied.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
-        assert!(applied.contains("DOMAIN-SUFFIX,vk.com,DIRECT"));
+        assert!(!applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
+        assert!(!applied.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
+        assert!(!applied.contains("DOMAIN-SUFFIX,vk.com,DIRECT"));
         assert!(applied.contains("DOMAIN-SUFFIX,user-added.example,DIRECT"));
         assert!(applied.contains(&format!("SRC-IP-CIDR,192.168.1.105/32,{WHITELIST_GROUP_NAME}")));
         assert!(validate_marker_pair(&applied, WHITELIST_BEGIN, WHITELIST_END).is_ok());
@@ -1451,8 +1451,8 @@ rules:
         let catchall = applied.find("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist").expect("IPv4 LAN catch-all must exist");
 
         assert!(
-            block.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"),
-            "the built-in Russian catalog must route DIRECT by default (Bug #14)"
+            !block.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"),
+            "built-in Russian catalog must NOT be auto-injected into DIRECT (Kosyak 7)"
         );
         assert!(
             block.contains(&format!("DOMAIN-SUFFIX,hh.ru,{WHITELIST_GROUP_NAME}"))
@@ -1495,7 +1495,15 @@ rules:
 "#;
         let mut cfg = crate::config::AppConfig::default();
         cfg.whitelist.enabled = true;
+        cfg.whitelist.enabled_by = crate::config::WhitelistEnabledBy::Devices;
         cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
+        cfg.whitelist.devices.push(crate::config::WhitelistDevice {
+            mac: "AA:BB:CC:DD:EE:05".into(),
+            ip: "192.168.1.55".into(),
+            enabled: true,
+            name: Some("BS Device".into()),
+            server: None,
+        });
         cfg.whitelist.excluded_devices = vec!["192.168.1.99".into()];
         cfg.whitelist.custom_domains = vec!["custom-direct.example".into()];
         cfg.direct_domains = vec!["direct-list.example".into()];
@@ -1521,7 +1529,7 @@ rules:
         let force_pos = applied
             .find(&format!("DOMAIN-SUFFIX,proxy-list.example,{}", WHITELIST_GROUP_NAME))
             .expect("forced-proxy list entry in StrictXKeen must target Whitelist group (bug 3.1)");
-        let default_pos = applied.find("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist").expect("LAN default must target Whitelist");
+        let default_pos = applied.find("SRC-IP-CIDR,192.168.1.55/32,🛡️ Whitelist").expect("BS device must target Whitelist");
         let source_country_pos = applied.find("GEOIP,RU,DIRECT").expect("source country rule must be preserved");
         let adblock_pos = applied.find(ADBLOCK_BEGIN).expect("enabled AdBlock block must remain present");
         let device_rule = "SRC-IP-CIDR,192.168.1.23/32,";
@@ -1544,7 +1552,7 @@ rules:
         );
 
         let (reapplied, _) = apply_routing(&applied, &cfg).expect("rebuilding on panel/core restart must succeed");
-        let reapplied_default = reapplied.find("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist").expect("reapplied LAN default must target Whitelist");
+        let reapplied_default = reapplied.find("SRC-IP-CIDR,192.168.1.55/32,🛡️ Whitelist").expect("reapplied BS device must target Whitelist");
         assert!(reapplied.find("DOMAIN-SUFFIX,direct-list.example,DIRECT").unwrap() < reapplied_default);
         let force_rule_str = format!("DOMAIN-SUFFIX,proxy-list.example,{}", WHITELIST_GROUP_NAME);
         assert!(reapplied.find(&force_rule_str).unwrap() < reapplied_default);
@@ -1560,6 +1568,7 @@ rules:
         let yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - MATCH,PROXY\n";
         let mut cfg = crate::config::AppConfig::default();
         cfg.whitelist.enabled = true;
+        cfg.whitelist.enabled_by = crate::config::WhitelistEnabledBy::Devices;
         cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
         cfg.direct_domains = vec!["global-direct.example".into()];
         cfg.device_domain_rules.insert(
@@ -1879,6 +1888,7 @@ rules:
             ..Default::default()
         });
         cfg.whitelist.enabled = true;
+        cfg.whitelist.enabled_by = crate::config::WhitelistEnabledBy::Devices;
         cfg.whitelist.devices.push(crate::config::WhitelistDevice {
             mac: "AA:BB:CC:DD:EE:01".into(),
             ip: "192.168.1.105".into(),
@@ -1904,6 +1914,7 @@ rules:
         let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - GEOIP,RU,DIRECT\n  - MATCH,PROXY\n";
         let mut cfg = crate::config::AppConfig::default();
         cfg.whitelist.enabled = true;
+        cfg.whitelist.enabled_by = crate::config::WhitelistEnabledBy::Devices;
         cfg.direct_domains = vec!["fcm.googleapis.com".into()];
         cfg.whitelist.devices.push(crate::config::WhitelistDevice {
             mac: "AA:BB:CC:DD:EE:01".into(),
@@ -1967,6 +1978,7 @@ rules:
         let mut cfg = crate::config::AppConfig::default();
         cfg.whitelist.enabled = true;
         cfg.whitelist.devices.clear(); // Режим Zero-Touch без явных устройств!
+        cfg.whitelist.custom_domains = vec!["my-bank.ru".into()];
 
         let applied = apply_whitelist_dns(yaml, &cfg, "127.0.0.1:53");
 
@@ -1979,9 +1991,10 @@ rules:
             "WHITELIST_DNS_BEGIN must be present"
         );
         assert!(
-            applied.contains("127.0.0.1:53"),
-            "DNS policy must point to router DNS 127.0.0.1:53"
+            applied.contains("'+.my-bank.ru': '127.0.0.1:53'"),
+            "DNS policy must point user custom domain to router DNS 127.0.0.1:53"
         );
+        assert!(!applied.contains("'+.gosuslugi.ru'"), "built-in catalog must not be auto-injected");
     }
 
     #[test]
@@ -1997,12 +2010,14 @@ rules:
             server: None
         });
 
+        cfg.whitelist.custom_domains = vec!["my-portal.ru".into()];
+
         let applied = apply_whitelist_dns(base_yaml, &cfg, "127.0.0.1:53");
         assert!(applied.contains(WHITELIST_DNS_BEGIN));
         assert!(applied.contains(WHITELIST_DNS_END));
         assert!(applied.contains("nameserver-policy:"));
-        assert!(applied.contains("'+.gosuslugi.ru': '127.0.0.1:53'"));
-        assert!(applied.contains("'+.sberbank.ru': '127.0.0.1:53'"));
+        assert!(applied.contains("'+.my-portal.ru': '127.0.0.1:53'"));
+        assert!(!applied.contains("'+.gosuslugi.ru': '127.0.0.1:53'"));
         assert!(applied.contains("- 77.88.8.8"), "Existing nameservers must be preserved");
 
         // Отключение очищает nameserver-policy
@@ -2010,7 +2025,7 @@ rules:
         let disabled = apply_whitelist_dns(&applied, &cfg, "127.0.0.1:53");
         assert!(!disabled.contains(WHITELIST_DNS_BEGIN));
         assert!(!disabled.contains(WHITELIST_DNS_END));
-        assert!(!disabled.contains("'+.gosuslugi.ru'"));
+        assert!(!disabled.contains("'+.my-portal.ru'"));
         assert!(disabled.contains("- 77.88.8.8"));
     }
 
@@ -2051,14 +2066,16 @@ rules:
         cfg.whitelist.enabled = true;
         cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
         cfg.whitelist.excluded_devices = vec!["192.168.1.99".into()];
+        cfg.whitelist.custom_domains = vec!["my-direct.ru".into()];
 
         let applied = apply_whitelist_rules(base_yaml, &cfg, None);
         assert!(applied.contains(WHITELIST_BEGIN));
         assert!(applied.contains(WHITELIST_END));
 
-        // 1. Баг #14: базовый каталог РФ по умолчанию идёт DIRECT.
-        assert!(applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
-        assert!(applied.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
+        // 1. Встроенный каталог не инжектируется принудительно; в DIRECT идут только custom_domains.
+        assert!(!applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
+        assert!(!applied.contains("DOMAIN-SUFFIX,sberbank.ru,DIRECT"));
+        assert!(applied.contains("DOMAIN-SUFFIX,my-direct.ru,DIRECT"));
 
         // 2. Excluded device -> DIRECT
         assert!(applied.contains("SRC-IP-CIDR,192.168.1.99/32,DIRECT"));
@@ -2079,10 +2096,12 @@ rules:
         let mut cfg = crate::config::AppConfig::default();
         cfg.whitelist.enabled = true;
         cfg.whitelist.strategy = crate::config::WhitelistStrategy::Standard;
+        cfg.whitelist.custom_domains = vec!["my-direct.ru".into()];
 
         let applied = apply_whitelist_rules(base_yaml, &cfg, None);
         assert!(applied.contains(WHITELIST_BEGIN));
-        assert!(applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
+        assert!(!applied.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
+        assert!(applied.contains("DOMAIN-SUFFIX,my-direct.ru,DIRECT"));
         // В стандартном режиме blanket subnet перехват не должен добавляться
         assert!(!applied.contains("SRC-IP-CIDR,192.168.0.0/16,🛡️ Whitelist"));
     }
@@ -2190,6 +2209,7 @@ IP address       HW type     Flags       HW address            Mask     Device\n
         let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - GEOIP,RU,DIRECT\n  - MATCH,PROXY\n";
         let mut cfg = crate::config::AppConfig::default();
         cfg.whitelist.enabled = true;
+        cfg.whitelist.enabled_by = crate::config::WhitelistEnabledBy::Devices;
         cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
         cfg.force_domains = vec!["force-site.com".into()];
         cfg.direct_domains = vec!["direct-site.com".into()];
@@ -2357,8 +2377,8 @@ rules:
 
         for &cd in &critical_domains {
             assert!(
-                applied.contains(&format!("DOMAIN-SUFFIX,{cd},DIRECT")),
-                "Russian catalog domain {cd} must route DIRECT by default (Bug #14)"
+                !applied.contains(&format!("DOMAIN-SUFFIX,{cd},DIRECT")),
+                "Russian catalog domain {cd} must NOT be auto-injected into DIRECT (Kosyak 7)"
             );
             assert!(
                 DOMESTIC_WHITELIST_DOMAINS.contains(&cd),
@@ -2445,7 +2465,9 @@ rules:
         let base_yaml = "port: 7890\ndns:\n  enable: true\n  nameserver:\n    - 77.88.8.8\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - Fastest\nrules:\n  - MATCH,PROXY\n";
         let mut cfg = crate::config::AppConfig::default();
         cfg.whitelist.enabled = true;
+        cfg.whitelist.enabled_by = crate::config::WhitelistEnabledBy::Devices;
         cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
+        cfg.whitelist.custom_domains = vec!["my-direct.ru".into()];
         cfg.whitelist.proxy_catalog_domains = vec!["sberbank.ru".into(), "ozon.ru".into()];
 
         let with_rules = apply_whitelist_rules(base_yaml, &cfg, None);
@@ -2453,12 +2475,14 @@ rules:
         assert!(!with_rules.contains("DOMAIN-SUFFIX,ozon.ru,DIRECT"));
         assert!(with_rules.contains(&format!("DOMAIN-SUFFIX,sberbank.ru,{WHITELIST_GROUP_NAME}")));
         assert!(with_rules.contains(&format!("DOMAIN-SUFFIX,ozon.ru,{WHITELIST_GROUP_NAME}")));
-        assert!(with_rules.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
+        assert!(!with_rules.contains("DOMAIN-SUFFIX,gosuslugi.ru,DIRECT"));
+        assert!(with_rules.contains("DOMAIN-SUFFIX,my-direct.ru,DIRECT"));
 
         let with_dns = apply_whitelist_dns(&with_rules, &cfg, "127.0.0.1:53");
         assert!(!with_dns.contains("'+.sberbank.ru': '127.0.0.1:53'"));
         assert!(!with_dns.contains("'+.ozon.ru': '127.0.0.1:53'"));
-        assert!(with_dns.contains("'+.gosuslugi.ru': '127.0.0.1:53'"));
+        assert!(!with_dns.contains("'+.gosuslugi.ru': '127.0.0.1:53'"));
+        assert!(with_dns.contains("'+.my-direct.ru': '127.0.0.1:53'"));
     }
 
     #[test]
@@ -2502,6 +2526,62 @@ rules:
             "Inline use must be restored: {re_enabled}"
         );
         assert!(!re_enabled.contains("xk-empty-use-fallback"), "Fallback marker must be cleaned up: {re_enabled}");
+    }
+
+    #[test]
+    fn regression_disabled_provider_clears_include_all_and_restores_on_enable() {
+        let yaml = r#"proxy-providers:
+  geodema:
+    type: http
+    url: "https://example.com/geodema"
+  active_sub:
+    type: http
+    url: "https://example.com/active"
+proxy-groups:
+  - name: PROXY
+    type: select
+    include-all: true
+    use:
+      - geodema
+      - active_sub
+  - name: YouTube
+    type: select
+    include-all: true
+    use:
+      - geodema
+      - active_sub
+  - name: AutoOnlyIncludeAll
+    type: url-test
+    include-all: true
+"#;
+
+        let disabled = vec!["geodema".to_string()];
+        let synced = sync_disabled_providers_in_yaml(yaml, &disabled).expect("synced");
+
+        // Активный include-all: true не должен оставаться в конфиге, иначе Mihomo подтянет geodema мимо use:
+        let active_include_all_lines = synced
+            .lines()
+            .filter(|l| l.trim() == "include-all: true")
+            .count();
+        assert_eq!(
+            active_include_all_lines, 0,
+            "Active include-all: true must be disabled when a provider is disabled:\n{synced}"
+        );
+        assert!(synced.contains("# - geodema"), "geodema must be commented out:\n{synced}");
+        assert!(synced.contains("- active_sub"), "active_sub must remain active:\n{synced}");
+
+        // Повторное включение подписки должно полностью восстановить include-all: true и geodema
+        let restored = sync_disabled_providers_in_yaml(&synced, &[]).expect("restored");
+        let restored_include_all_lines = restored
+            .lines()
+            .filter(|l| l.trim() == "include-all: true")
+            .count();
+        assert_eq!(
+            restored_include_all_lines, 3,
+            "All 3 include-all: true lines must be restored when providers are re-enabled:\n{restored}"
+        );
+        assert!(restored.contains("- geodema"), "geodema must be restored:\n{restored}");
+        assert!(!restored.contains("xk-auto-use"), "Temporary auto-use markers must be cleaned up:\n{restored}");
     }
 
     #[test]
@@ -2767,6 +2847,7 @@ rules:
     fn test_quic_reject_rule_precedes_whitelist_catchall() {
         let mut cfg = crate::config::AppConfig::default();
         cfg.whitelist.enabled = true;
+        cfg.whitelist.enabled_by = crate::config::WhitelistEnabledBy::Devices;
         cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
 
         let base_yaml = "port: 7890\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - DIRECT\nrules:\n  - MATCH,PROXY\n";
@@ -2975,6 +3056,161 @@ rules:
             !wl_block.contains("- Platinum"),
             "disabled provider Platinum must be filtered out of whitelist use list:\n{wl_block}"
         );
+    }
+
+    #[test]
+    fn regression_global_whitelist_isolates_rules_and_is_reversible() {
+        let base_yaml = concat!(
+            "port: 7890\n",
+            "dns:\n",
+            "  enable: true\n",
+            "  nameserver:\n",
+            "    - 77.88.8.8\n",
+            "proxy-groups:\n",
+            "  - name: PROXY\n",
+            "    type: select\n",
+            "    proxies:\n",
+            "      - Fastest\n",
+            "  - name: YouTube\n",
+            "    type: select\n",
+            "    proxies:\n",
+            "      - PROXY\n",
+            "  - name: Discord\n",
+            "    type: select\n",
+            "    proxies:\n",
+            "      - PROXY\n",
+            "  - name: 🤖 Google AI\n",
+            "    type: select\n",
+            "    proxies:\n",
+            "      - PROXY\n",
+            "rules:\n",
+            "  - RULE-SET,youtube@domain,YouTube\n",
+            "  - RULE-SET,discord@classical,Discord\n",
+            "  - OR,((RULE-SET,category-ru@domain),(RULE-SET,category-ru@ipcidr)),DIRECT\n",
+            "  - GEOIP,RU,DIRECT\n",
+            "  - MATCH,PROXY\n",
+        );
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.strategy = crate::config::WhitelistStrategy::StrictXKeen;
+        cfg.whitelist.custom_domains = vec!["seller-auth.wildberries.ru".into()];
+        cfg.whitelist.excluded_devices = vec!["192.168.2.99".into()];
+        cfg.direct_domains = vec!["some-direct.ru".into()];
+        cfg.force_domains = vec!["some-force.com".into()];
+        cfg.zapret.enabled = true;
+        cfg.zapret.hybrid_youtube = true;
+        cfg.gaming.enabled = true;
+        cfg.device_routing.insert(
+            "192.168.2.50".into(),
+            crate::config::DeviceRouting {
+                servers: vec!["Fastest".into()],
+                ..Default::default()
+            },
+        );
+        cfg.vkturn.enabled = true;
+        cfg.vkturn.peer = "203.0.113.10:46000".into();
+
+        let (applied, _) = apply_routing(base_yaml, &cfg).expect("apply_routing in global БС");
+        let rules_pos = applied.find("rules:").expect("rules section");
+        let rules_sec = &applied[rules_pos..];
+
+        // 1. Ни одного из 249 вшитых доменов DOMESTIC_WHITELIST_DOMAINS нет ни в rules, ни в nameserver-policy
+        for forbidden in ["yandex.net", "gosuslugi.ru", "hh.ru", "sberdevices.ru"] {
+            assert!(
+                !rules_sec.contains(&format!("DOMAIN-SUFFIX,{forbidden},DIRECT")),
+                "built-in domain {forbidden} must NOT be injected into DIRECT:\n{rules_sec}"
+            );
+            assert!(
+                !applied.contains(&format!("'+.{forbidden}'")),
+                "built-in domain {forbidden} must NOT be injected into nameserver-policy:\n{applied}"
+            );
+        }
+
+        // 2. Нет общих правил (Google AI, Zapret, Gaming, direct_domains, force_domains, device_routing, category-ru, MATCH,PROXY)
+        assert!(!rules_sec.contains("some-direct.ru"), "direct_domains must be disabled in global БС");
+        assert!(!rules_sec.contains("some-force.com"), "force_domains must be disabled in global БС");
+        assert!(!rules_sec.contains("192.168.2.50"), "device_routing must be disabled in global БС");
+        assert!(!rules_sec.contains("GOOGLE_AI_BEGIN"), "Google AI rules must be disabled in global БС");
+        assert!(!rules_sec.contains("ZAPRET_HYBRID"), "Zapret rules must be disabled in global БС");
+        assert!(!rules_sec.contains("GAMING_BEGIN"), "Gaming rules must be disabled in global БС");
+        assert!(
+            !rules_sec.lines().any(|l| l.trim().starts_with("- OR,((RULE-SET,category-ru")),
+            "active category-ru rule must be removed:\n{rules_sec}"
+        );
+        assert!(
+            !rules_sec.lines().any(|l| l.trim().starts_with("- RULE-SET,youtube@domain")),
+            "active youtube rule must be removed:\n{rules_sec}"
+        );
+        assert!(
+            !rules_sec.lines().any(|l| l.trim() == "- MATCH,PROXY"),
+            "active MATCH,PROXY must be removed:\n{rules_sec}"
+        );
+
+        // 3. Присутствуют только vkturn, QUIC REJECT, пользовательский custom_domains, excluded_devices и MATCH,🛡️ Whitelist
+        assert!(rules_sec.contains("203.0.113.10/32,DIRECT"), "vkturn peer bypass must remain");
+        assert!(rules_sec.contains(QUIC_REJECT_RULE), "QUIC reject must remain");
+        assert!(rules_sec.contains("DOMAIN-SUFFIX,seller-auth.wildberries.ru,DIRECT"), "user custom_domains must remain");
+        assert!(rules_sec.contains("SRC-IP-CIDR,192.168.2.99/32,DIRECT"), "excluded_devices must remain");
+        assert!(rules_sec.contains(&format!("- MATCH,{WHITELIST_GROUP_NAME}")), "catch-all MATCH,🛡️ Whitelist must exist");
+
+        // 4. Обратимость: при выключении БС возвращаются исходные базовые правила и обычная маршрутизация
+        cfg.whitelist.enabled = false;
+        let (restored, _) = apply_routing(&applied, &cfg).expect("apply_routing after disabling БС");
+        let r_pos = restored.find("rules:").expect("rules section");
+        let r_sec = &restored[r_pos..];
+        assert!(r_sec.contains("- RULE-SET,youtube@domain,YouTube"), "base youtube rule must be restored:\n{r_sec}");
+        assert!(r_sec.contains("- MATCH,PROXY"), "base MATCH,PROXY must be restored:\n{r_sec}");
+        assert!(r_sec.contains("some-direct.ru"), "direct_domains must be restored");
+        assert!(r_sec.contains("192.168.2.50"), "device_routing must be restored");
+        assert!(!r_sec.contains(&format!("- MATCH,{WHITELIST_GROUP_NAME}")), "MATCH,🛡️ Whitelist must be removed");
+    }
+
+    #[test]
+    fn regression_ip_and_cidr_in_domain_lists_become_ip_cidr_not_domain_suffix() {
+        assert!(!is_valid_rule_domain("104.18.124.108"), "IPv4 must be rejected by is_valid_rule_domain");
+        assert!(!is_valid_rule_domain("104.18.124.0/24"), "CIDR must be rejected by is_valid_rule_domain");
+        assert!(is_valid_rule_domain("example.com"), "valid domain must be accepted");
+
+        let base_yaml = "port: 7890\ndns:\n  enable: true\n  nameserver-policy:\n    '+.lan': '127.0.0.1:53'\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - DIRECT\nrules:\n  - MATCH,PROXY\n";
+        let mut dev_rules = std::collections::BTreeMap::new();
+        dev_rules.insert(
+            "192.168.2.50".to_string(),
+            vec![crate::config::DeviceDomainRule {
+                domain: "79.253.72.27".to_string(),
+                target: "PROXY".to_string(),
+            }],
+        );
+        let out = apply_domain_rules_with_priority_for_target(
+            base_yaml,
+            &["10.20.30.40".to_string(), "direct.example.org".to_string()],
+            &["104.18.124.108".to_string(), "198.51.100.0/24".to_string(), "force.example.org".to_string()],
+            &dev_rules,
+            true,
+            None,
+        )
+        .expect("apply_domain_rules_with_priority_for_target");
+
+        assert!(!out.contains("DOMAIN-SUFFIX,104.18.124.108"), "IP must not produce DOMAIN-SUFFIX:\n{out}");
+        assert!(!out.contains("DOMAIN-SUFFIX,10.20.30.40"), "direct IP must not produce DOMAIN-SUFFIX:\n{out}");
+        assert!(!out.contains("DOMAIN-SUFFIX,79.253.72.27"), "device IP must not produce DOMAIN-SUFFIX:\n{out}");
+        assert!(out.contains("  - IP-CIDR,104.18.124.108/32,PROXY,no-resolve"), "force IPv4 must become IP-CIDR/32:\n{out}");
+        assert!(out.contains("  - IP-CIDR,198.51.100.0/24,PROXY,no-resolve"), "force CIDR must become IP-CIDR:\n{out}");
+        assert!(out.contains("  - IP-CIDR,10.20.30.40/32,DIRECT,no-resolve"), "direct IPv4 must become IP-CIDR/32:\n{out}");
+        assert!(out.contains("  - AND,((SRC-IP-CIDR,192.168.2.50/32),(IP-CIDR,79.253.72.27/32)),PROXY,no-resolve"), "device IPv4 must become AND with IP-CIDR:\n{out}");
+        assert!(out.contains("  - DOMAIN-SUFFIX,direct.example.org,DIRECT"), "domain must remain DOMAIN-SUFFIX");
+        assert!(out.contains("  - DOMAIN-SUFFIX,force.example.org,PROXY"), "domain must remain DOMAIN-SUFFIX");
+
+        // Whitelist custom_domains with IP must emit IP-CIDR in rules and never '+.<ip>' in nameserver-policy
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.custom_domains = vec!["104.18.124.108".to_string(), "wb.ru".to_string()];
+        let wl = apply_whitelist_rules(base_yaml, &cfg, None);
+        let wl_dns = apply_whitelist_dns(&wl, &cfg, "127.0.0.1:53");
+        assert!(!wl_dns.contains("DOMAIN-SUFFIX,104.18.124.108"), "whitelist must not emit DOMAIN-SUFFIX for IP:\n{wl_dns}");
+        assert!(wl_dns.contains("  - IP-CIDR,104.18.124.108/32,DIRECT,no-resolve"), "whitelist must emit IP-CIDR for custom IP:\n{wl_dns}");
+        assert!(!wl_dns.contains("'+.104.18.124.108'"), "nameserver-policy must not include IP:\n{wl_dns}");
+        assert!(wl_dns.contains("'+.wb.ru': '127.0.0.1:53'"), "nameserver-policy must keep domain:\n{wl_dns}");
     }
 }
 

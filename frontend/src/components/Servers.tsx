@@ -22,6 +22,18 @@ interface Props {
 
 const PAGE = 20
 
+export function mergePolledServerInfo(prev: ServerInfo, fresh: ServerInfo): ServerInfo {
+  return {
+    ...prev,
+    name: fresh.name,
+    host: fresh.host,
+    resolved_ip: fresh.resolved_ip,
+    is_active: fresh.is_active,
+    now_node: fresh.now_node,
+    ping_ms: fresh.ping_ms,
+  }
+}
+
 export default function Servers({ notify, status, refresh }: Props) {
   const [servers, setServers] = useState<ServerInfo[]>([])
   const [providers, setProviders] = useState<ProviderInfo[]>([])
@@ -180,7 +192,9 @@ export default function Servers({ notify, status, refresh }: Props) {
   const pingAll = useCallback(async () => {
     setPinging(true)
     try {
-      const data = await apiPost<{ pings?: Record<string, number> }>('servers/ping', {})
+      const data = await apiPost<{ pings?: Record<string, number> }>('servers/ping', {
+        include_pools: showPools,
+      })
       const pingsMap = data?.pings && typeof data.pings === 'object' ? data.pings : {}
       setServers((prev) => prev.map((s) => ({ ...s, ping_ms: pingsMap[s.id] ?? s.ping_ms })))
       const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -194,7 +208,7 @@ export default function Servers({ notify, status, refresh }: Props) {
     } finally {
       setPinging(false)
     }
-  }, [notify])
+  }, [notify, showPools])
 
   useEffect(() => {
     load()
@@ -213,15 +227,7 @@ export default function Servers({ notify, status, refresh }: Props) {
               return prev.map((s) => {
                 const fresh = data.servers.find((f) => f.id === s.id)
                 if (!fresh) return s
-                return {
-                  ...s,
-                  name: fresh.name,
-                  host: fresh.host,
-                  resolved_ip: fresh.resolved_ip,
-                  is_active: fresh.is_active,
-                  now_node: fresh.now_node,
-                  ping_ms: fresh.ping_ms > 0 ? fresh.ping_ms : s.ping_ms,
-                }
+                return mergePolledServerInfo(s, fresh)
               })
             })
           }

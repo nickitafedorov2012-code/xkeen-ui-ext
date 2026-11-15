@@ -564,26 +564,70 @@ pub fn migrate_ip_keyed_config(cfg: &mut config::AppConfig, changes: &[(String, 
         }
     }
 
-    // Шаг 5: whitelist.devices
+    // Шаг 5: whitelist.devices (только записи без MAC; при наличии MAC IP обновляется строго по MAC)
     for (old, new) in &valid_changes {
         for d in &mut cfg.whitelist.devices {
-            if d.ip.trim() == *old {
+            if d.mac.trim().is_empty() && d.ip.trim() == *old {
                 d.ip = (*new).to_string();
                 changed = true;
             }
         }
     }
 
-    // Шаг 6: gaming.devices
+    // Шаг 6: gaming.devices (только записи без MAC; при наличии MAC IP обновляется строго по MAC)
     for (old, new) in &valid_changes {
         for d in &mut cfg.gaming.devices {
-            if d.ip.trim() == *old {
+            if d.mac.trim().is_empty() && d.ip.trim() == *old {
                 d.ip = (*new).to_string();
                 changed = true;
             }
         }
     }
 
+    changed
+}
+
+/// Синхронизирует IP-адреса в `whitelist.devices` и `gaming.devices` строго по совпадению MAC
+/// из актуального списка устройств `current_devs` (исключает «слипание» IP между разными MAC).
+pub(crate) fn sync_mac_keyed_device_ips(
+    cfg: &mut config::AppConfig,
+    current_devs: &[rci::Device],
+) -> bool {
+    let mut changed = false;
+    for d in &mut cfg.whitelist.devices {
+        let mac = d.mac.trim();
+        if mac.is_empty() {
+            continue;
+        }
+        if let Some(rci_dev) = current_devs.iter().find(|r| r.mac.trim().eq_ignore_ascii_case(mac)) {
+            let new_ip = rci_dev.ip.trim();
+            if !new_ip.is_empty() && d.ip.trim() != new_ip {
+                log_i!(
+                    "[DHCP-WATCHDOG] 🔄 Whitelist: обновление IP для MAC {} ({} -> {})",
+                    mac, d.ip, new_ip
+                );
+                d.ip = new_ip.to_string();
+                changed = true;
+            }
+        }
+    }
+    for d in &mut cfg.gaming.devices {
+        let mac = d.mac.trim();
+        if mac.is_empty() {
+            continue;
+        }
+        if let Some(rci_dev) = current_devs.iter().find(|r| r.mac.trim().eq_ignore_ascii_case(mac)) {
+            let new_ip = rci_dev.ip.trim();
+            if !new_ip.is_empty() && d.ip.trim() != new_ip {
+                log_i!(
+                    "[DHCP-WATCHDOG] 🔄 Gaming: обновление IP для MAC {} ({} -> {})",
+                    mac, d.ip, new_ip
+                );
+                d.ip = new_ip.to_string();
+                changed = true;
+            }
+        }
+    }
     changed
 }
 
@@ -632,10 +676,11 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
                 }
             }
 
+            let has_mac_tracked = !cfg.whitelist.devices.is_empty() || !cfg.gaming.devices.is_empty();
             let gaming_tracked = cfg.gaming.enabled
                 && (cfg.gaming.mode == config::GamingMode::Compatibility || cfg.gaming.mode == config::GamingMode::BypassRu)
                 && !cfg.gaming.devices.is_empty();
-            if ip_changes.is_empty() && !gaming_tracked {
+            if ip_changes.is_empty() && !gaming_tracked && !has_mac_tracked {
                 continue;
             }
 
@@ -646,6 +691,9 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
             let mut changed = migrate_ip_keyed_config(tx.config_mut(), &ip_changes);
             for (old, new) in &ip_changes {
                 log_i!("[DHCP-WATCHDOG] 🔄 Устройство сменило IP {old} → {new}: настройки устройства перенесены");
+            }
+            if sync_mac_keyed_device_ips(tx.config_mut(), &current_devs) {
+                changed = true;
             }
 
             if gaming_tracked {
@@ -2256,7 +2304,7 @@ mod tests {
         cfg.whitelist.excluded_devices = vec!["192.168.1.10".to_string()];
         cfg.schedules.push(crate::config::DeviceSchedule { id: "s1".into(), ip: "192.168.1.10".into(), ..Default::default() });
         cfg.whitelist.devices.push(crate::config::WhitelistDevice {
-            mac: "aa:aa:aa:aa:aa:01".into(), ip: "192.168.1.10".into(), enabled: true, name: None, server: None,
+            mac: "".into(), ip: "192.168.1.10".into(), enabled: true, name: None, server: None,
         });
 
         assert!(migrate_ip_keyed_config(&mut cfg, &changes));
@@ -2708,5 +2756,88 @@ mod structural_regression_tests {
         assert!(!super::should_stop_idle_adguard(true, true, false));
         assert!(!super::should_stop_idle_adguard(false, false, false));
         assert!(!super::should_stop_idle_adguard(false, true, true));
+    }
+
+    #[test]
+    fn regression_dhcp_migration_does_not_glue_ips_across_different_macs() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.devices = vec![
+            crate::config::WhitelistDevice {
+                mac: "ea:0c:ab:1a:9f:06".into(),
+                ip: "192.168.2.50".into(),
+                enabled: true,
+                name: Some("Xiaomi 11T Pro".into()),
+                server: None,
+            },
+            crate::config::WhitelistDevice {
+                mac: "d4:3b:04:d5:73:a7".into(),
+                ip: "192.168.2.50".into(),
+                enabled: true,
+                name: Some("T480".into()),
+                server: None,
+            },
+        ];
+        cfg.gaming.devices = vec![
+            crate::config::GamingDevice {
+                mac: "ea:0c:ab:1a:9f:06".into(),
+                ip: "192.168.2.50".into(),
+                name: "Xiaomi 11T Pro".into(),
+                ..Default::default()
+            },
+            crate::config::GamingDevice {
+                mac: "d4:3b:04:d5:73:a7".into(),
+                ip: "192.168.2.50".into(),
+                name: "T480".into(),
+                ..Default::default()
+            },
+        ];
+
+        // DHCP-изменение 192.168.2.50 -> 192.168.2.118 НЕ должно слепо перезаписывать IP
+        // у записей с MAC-адресами в whitelist.devices и gaming.devices.
+        let changes = vec![("192.168.2.50".to_string(), "192.168.2.118".to_string())];
+        let migrated = super::migrate_ip_keyed_config(&mut cfg, &changes);
+        assert!(!migrated, "MAC-keyed whitelist/gaming devices must not be migrated blindly by old IP");
+        assert_eq!(cfg.whitelist.devices[0].ip, "192.168.2.50");
+        assert_eq!(cfg.whitelist.devices[1].ip, "192.168.2.50");
+        assert_eq!(cfg.gaming.devices[0].ip, "192.168.2.50");
+        assert_eq!(cfg.gaming.devices[1].ip, "192.168.2.50");
+
+        // Синхронизация по актуальному списку RCI-устройств обновляет каждый MAC строго своим IP.
+        let rci_devs = vec![
+            crate::rci::Device {
+                mac: "EA:0C:AB:1A:9F:06".into(),
+                name: "Xiaomi 11T Pro".into(),
+                ip: "192.168.2.118".into(),
+                policy: String::new(),
+                policy_name: String::new(),
+                online: true,
+                interface: String::new(),
+                is_current_device: false,
+                rxbytes: 0,
+                txbytes: 0,
+                speed_limit_kbps: 0,
+                ipv6: vec![],
+            },
+            crate::rci::Device {
+                mac: "d4:3b:04:d5:73:a7".into(),
+                name: "T480".into(),
+                ip: "192.168.2.63".into(),
+                policy: String::new(),
+                policy_name: String::new(),
+                online: true,
+                interface: String::new(),
+                is_current_device: false,
+                rxbytes: 0,
+                txbytes: 0,
+                speed_limit_kbps: 0,
+                ipv6: vec![],
+            },
+        ];
+        let synced = super::sync_mac_keyed_device_ips(&mut cfg, &rci_devs);
+        assert!(synced, "MAC-based sync must report changed=true");
+        assert_eq!(cfg.whitelist.devices[0].ip, "192.168.2.118");
+        assert_eq!(cfg.whitelist.devices[1].ip, "192.168.2.63");
+        assert_eq!(cfg.gaming.devices[0].ip, "192.168.2.118");
+        assert_eq!(cfg.gaming.devices[1].ip, "192.168.2.63");
     }
 }

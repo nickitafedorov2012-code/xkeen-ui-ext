@@ -35,6 +35,9 @@ pub fn store_ping_cache(pings: &BTreeMap<String, i64>) {
     for (id, delay) in pings {
         if *delay > 0 {
             cache.insert(id.clone(), (*delay, now));
+        } else if *delay < 0 {
+            // При подтверждённом -1 (недоступен/таймаут) удаляем устаревший положительный пинг из кэша.
+            cache.remove(id);
         }
     }
     // Не даём кэшу расти бесконечно: выкидываем протухшие записи
@@ -337,11 +340,13 @@ pub const PROXIES_CACHE_MAX_STALE_SECS: u64 = 30;
 #[derive(Clone, Debug)]
 pub struct ProxiesCacheEntry {
     pub cached_at: std::time::Instant,
+    pub endpoint: Option<(String, u16)>,
     pub data: BTreeMap<String, Value>,
 }
 
 static PROXIES_CACHE: std::sync::RwLock<Option<ProxiesCacheEntry>> = std::sync::RwLock::new(None);
 static PROVIDER_PROXIES_CACHE: std::sync::RwLock<Option<ProxiesCacheEntry>> = std::sync::RwLock::new(None);
+static PROVIDER_PROXIES_FETCH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static LAST_SELECTED_TUNNEL_SERVER: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
 /// Возвращает последний конкретный узел туннеля, выбранный в рантайме (вручную, failover или детектором БС).
@@ -384,13 +389,13 @@ pub fn clear_proxies_cache_for_test() {
 #[cfg(test)]
 pub fn set_proxies_cache_for_test(data: BTreeMap<String, Value>, cached_at: std::time::Instant) {
     let mut guard = PROXIES_CACHE.write().unwrap_or_else(|e| e.into_inner());
-    *guard = Some(ProxiesCacheEntry { cached_at, data });
+    *guard = Some(ProxiesCacheEntry { cached_at, endpoint: None, data });
 }
 
 #[cfg(test)]
 pub fn set_provider_proxies_cache_for_test(data: BTreeMap<String, Value>, cached_at: std::time::Instant) {
     let mut guard = PROVIDER_PROXIES_CACHE.write().unwrap_or_else(|e| e.into_inner());
-    *guard = Some(ProxiesCacheEntry { cached_at, data });
+    *guard = Some(ProxiesCacheEntry { cached_at, endpoint: None, data });
 }
 
 /// Проверка наличия свежего кэша в пределах TTL (3 секунды).
@@ -404,6 +409,21 @@ pub fn get_cached_proxies_if_fresh() -> Option<BTreeMap<String, Value>> {
     None
 }
 
+fn get_cached_provider_proxies_if_fresh_for(host: &str, port: u16) -> Option<BTreeMap<String, Value>> {
+    let guard = PROVIDER_PROXIES_CACHE.read().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref entry) = *guard {
+        let ep_ok = entry
+            .endpoint
+            .as_ref()
+            .map_or(true, |(h, p)| h == host && *p == port);
+        if ep_ok && entry.cached_at.elapsed() < std::time::Duration::from_secs(PROXIES_CACHE_TTL_SECS) {
+            return Some(entry.data.clone());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
 pub fn get_cached_provider_proxies_if_fresh() -> Option<BTreeMap<String, Value>> {
     let guard = PROVIDER_PROXIES_CACHE.read().unwrap_or_else(|e| e.into_inner());
     if let Some(ref entry) = *guard {
@@ -481,6 +501,7 @@ pub async fn get_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Result<BTre
         let mut guard = PROXIES_CACHE.write().unwrap_or_else(|e| e.into_inner());
         *guard = Some(ProxiesCacheEntry {
             cached_at: std::time::Instant::now(),
+            endpoint: None,
             data: out.clone(),
         });
     }
@@ -491,7 +512,12 @@ pub async fn get_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Result<BTre
 /// «имя прокси → данные». Провайдеры с vehicleType "Compatible" (служебные DIRECT/REJECT) пропускаем.
 /// Оптимизировано 3-секундным TTL-кэшем с fallback-защитой при сетевых сбоях ядра.
 pub async fn get_provider_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Result<BTreeMap<String, Value>, String> {
-    if let Some(cached) = get_cached_provider_proxies_if_fresh() {
+    if let Some(cached) = get_cached_provider_proxies_if_fresh_for(&cfg.mihomo.host, cfg.mihomo.port) {
+        return Ok(cached);
+    }
+
+    let _fetch_guard = PROVIDER_PROXIES_FETCH_LOCK.lock().await;
+    if let Some(cached) = get_cached_provider_proxies_if_fresh_for(&cfg.mihomo.host, cfg.mihomo.port) {
         return Ok(cached);
     }
 
@@ -544,6 +570,7 @@ pub async fn get_provider_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Re
         let mut guard = PROVIDER_PROXIES_CACHE.write().unwrap_or_else(|e| e.into_inner());
         *guard = Some(ProxiesCacheEntry {
             cached_at: std::time::Instant::now(),
+            endpoint: Some((cfg.mihomo.host.clone(), cfg.mihomo.port)),
             data: out.clone(),
         });
     }
@@ -1772,35 +1799,83 @@ pub async fn ping_server_url_expected_range(
         Some(code) => format!("&expected={}", urlencoding_lite(code)),
         None => String::new(),
     };
-    let url = format!(
-        "{}/proxies/{enc}/delay?timeout={timeout_ms}&url={check_url}{exp_param}",
-        cfg.mihomo_url()
-    );
-    let mut req = http.get(&url).timeout(std::time::Duration::from_millis(std::cmp::max(timeout_ms + 2000, 5000)));
-    if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
-        req = req.header(k, v);
-    }
-    if let Ok(resp) = req.send().await {
-        if resp.status().is_success() {
-            if let Ok(v) = resp.json::<Value>().await {
-                if let Some(d) = v.get("delay").and_then(|d| d.as_i64()) {
-                    if d > 0 {
-                        return d;
+    let req_timeout = std::time::Duration::from_millis(std::cmp::max(timeout_ms + 2000, 5000));
+
+    // 1. Если узел принадлежит proxy-провайдеру (подписке / file-провайдеру),
+    // сразу используем штатный точечный эндпоинт Mihomo:
+    // GET /providers/proxies/{provider}/{node}/healthcheck
+    // Это исключает лишний 404 на /proxies/{id}/delay и шторм /group/PROXY/delay.
+    let provider_name = get_provider_proxies(http, cfg)
+        .await
+        .ok()
+        .and_then(|providers| {
+            providers.get(server_id).and_then(|p| {
+                p.get("_provider")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        p.get("_providers")
+                            .and_then(|arr| arr.as_array())
+                            .and_then(|arr| arr.first())
+                            .and_then(|v| v.as_str())
+                    })
+                    .map(str::to_string)
+            })
+        });
+
+    if let Some(ref prov_name) = provider_name {
+        let prov_enc = urlencoding_lite(prov_name);
+        let node_hc_url = format!(
+            "{}/providers/proxies/{prov_enc}/{enc}/healthcheck?timeout={timeout_ms}&url={check_url}{exp_param}",
+            cfg.mihomo_url()
+        );
+        let mut hc_req = http.get(&node_hc_url).timeout(req_timeout);
+        if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
+            hc_req = hc_req.header(k, v);
+        }
+        if let Ok(resp) = hc_req.send().await {
+            if resp.status().is_success() {
+                if let Ok(v) = resp.json::<Value>().await {
+                    if let Some(d) = v.get("delay").and_then(|d| d.as_i64()) {
+                        if d > 0 {
+                            return d;
+                        }
+                    }
+                }
+            } else if resp.status() != reqwest::StatusCode::NOT_FOUND {
+                // Эндпоинт есть, но узел вернул 504/503/ошибку — считаем мёртвым без группового теста.
+                return -1;
+            }
+        }
+    } else {
+        let url = format!(
+            "{}/proxies/{enc}/delay?timeout={timeout_ms}&url={check_url}{exp_param}",
+            cfg.mihomo_url()
+        );
+        let mut req = http.get(&url).timeout(req_timeout);
+        if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
+            req = req.header(k, v);
+        }
+        if let Ok(resp) = req.send().await {
+            if resp.status().is_success() {
+                if let Ok(v) = resp.json::<Value>().await {
+                    if let Some(d) = v.get("delay").and_then(|d| d.as_i64()) {
+                        if d > 0 {
+                            return d;
+                        }
                     }
                 }
             }
         }
     }
 
-    // Для узла VK-туннеля (file-провайдер) сначала запускаем точечную проверку только провайдера vkturn,
-    // чтобы не запускать массовый задержковый тест всех серверов в группе PROXY.
+    // Для узла VK-туннеля (file-провайдер) fallback на точечный healthcheck провайдера vkturn,
+    // если поузловой эндпоинт недоступен (например, 404 или пустой кэш провайдеров).
     if server_id == crate::vkturn::PROXY_NAME {
         let prov_enc = urlencoding_lite(crate::vkturn::PROVIDER_ID);
         let hc_url = format!(
             "{}/providers/proxies/{prov_enc}/healthcheck?timeout={timeout_ms}&url={check_url}{exp_param}",
             cfg.mihomo_url()
         );
-        let req_timeout = std::time::Duration::from_millis(std::cmp::max(timeout_ms + 2000, 5000));
         let mut hc_req = http.get(&hc_url).timeout(req_timeout);
         if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
             hc_req = hc_req.header(k, v);
@@ -1831,21 +1906,20 @@ pub async fn ping_server_url_expected_range(
     }
 
     // Для групп/пулов (Fallback, Fastest, Selector) прямой /proxies/{id}/delay в ядре Mihomo отдаёт 404/ошибку.
-    // Разрешаем активный листовой сервер ("now") группы и проверяем его задержку, исключая ложный таймаут:
+    // Группу (включая PROXY) тестируем ТОЛЬКО если server_id в ней сейчас активен (group.now == server_id),
+    // чтобы не запускать массовый /group/PROXY/delay по всем узлам при проверке неактивного узла.
     if let Ok(proxies) = get_proxies(http, cfg).await {
-        // Узел из file-provider не является ресурсом /proxies/{node}, хотя он может быть
-        // активным в selector-группе. Mihomo измеряет такие узлы только через /group/{group}/delay.
-        let mut selector_groups = find_primary_group(&proxies).into_iter().collect::<Vec<_>>();
-        let known_groups = selector_groups.clone();
-        let extra_groups = proxies.iter().filter_map(|(name, group)| {
-            let typ = group.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
-            let active = group.get("now").and_then(|n| n.as_str()) == Some(server_id);
-            let contains = group.get("all").and_then(|all| all.as_array()).is_some_and(|all| {
-                all.iter().any(|node| node.as_str() == Some(server_id))
-            });
-            (typ == "selector" && active && contains && !known_groups.iter().any(|known| known == name)).then(|| name.clone())
-        }).collect::<Vec<_>>();
-        selector_groups.extend(extra_groups);
+        let selector_groups = proxies
+            .iter()
+            .filter_map(|(name, group)| {
+                let typ = group.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
+                let active = group.get("now").and_then(|n| n.as_str()) == Some(server_id);
+                let contains = group.get("all").and_then(|all| all.as_array()).is_some_and(|all| {
+                    all.iter().any(|node| node.as_str() == Some(server_id))
+                });
+                (typ == "selector" && active && contains).then(|| name.clone())
+            })
+            .collect::<Vec<_>>();
         for group_name in selector_groups {
             let group_enc = urlencoding_lite(&group_name);
             let group_url = format!(
@@ -1924,6 +1998,16 @@ pub async fn ping_server_url_expected_range(
 }
 
 pub const CANARY_PROBE_GROUP_NAME: &str = "🛡️ Canary Probe";
+
+/// Служебные/системные группы и встроенные политики, которые не должны участвовать в массовых и авто-пингах.
+pub fn is_service_group_or_builtin(id: &str) -> bool {
+    let t = id.trim();
+    t.eq_ignore_ascii_case("DIRECT")
+        || t.eq_ignore_ascii_case("REJECT")
+        || t.eq_ignore_ascii_case("GLOBAL")
+        || t == CANARY_PROBE_GROUP_NAME
+        || t.eq_ignore_ascii_case("Canary Probe")
+}
 
 /// Параллельная L7-проверка сервера реальным трафиком без переключения селектора клиентов (PROXY).
 /// 1. Если сервер активен в основной группе (PROXY) — проверяем через неё.
@@ -2090,7 +2174,33 @@ pub async fn ping_all(http: &reqwest::Client, cfg: &AppConfig, ids: &[String], t
     ping_all_url(http, cfg, ids, timeout_ms, None).await
 }
 
-/// Параллельный пинг списка серверов с произвольным тестовым URL
+fn resolve_group_active_leaf(proxies: &BTreeMap<String, Value>, start: &str) -> Option<String> {
+    let mut cur = start.to_string();
+    let mut visited = std::collections::HashSet::new();
+    for _ in 0..8 {
+        if !visited.insert(cur.clone()) {
+            return None;
+        }
+        let Some(val) = proxies.get(&cur) else {
+            return Some(cur);
+        };
+        let typ = val.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
+        if !matches!(typ.as_str(), "selector" | "select" | "urltest" | "fallback" | "load-balance" | "loadbalance") {
+            return Some(cur);
+        }
+        let next = val.get("now").and_then(|n| n.as_str()).unwrap_or("").trim();
+        if next.is_empty() {
+            return None;
+        }
+        cur = next.to_string();
+    }
+    None
+}
+
+/// Параллельный пинг списка серверов с произвольным тестовым URL.
+/// Служебные группы (DIRECT/REJECT/GLOBAL/Canary Probe) пропускаются;
+/// пулы/селекторные группы не запускают отдельный каскад сетевых запросов,
+/// а получают задержку своего активного листового узла.
 pub async fn ping_all_url(
     http: &reqwest::Client,
     cfg: &AppConfig,
@@ -2103,10 +2213,29 @@ pub async fn ping_all_url(
         return out;
     }
 
+    let proxies_map = get_proxies(http, cfg).await.ok();
+    let mut leaf_ids: Vec<String> = Vec::new();
+    let mut pool_ids: Vec<String> = Vec::new();
+
+    for id in ids {
+        if is_service_group_or_builtin(id) {
+            continue;
+        }
+        let is_group = proxies_map.as_ref().and_then(|m| m.get(id)).is_some_and(|val| {
+            let typ = val.get("type").and_then(|t| t.as_str()).unwrap_or("").to_lowercase();
+            matches!(typ.as_str(), "selector" | "select" | "urltest" | "fallback" | "load-balance" | "loadbalance")
+        });
+        if is_group {
+            pool_ids.push(id.clone());
+        } else {
+            leaf_ids.push(id.clone());
+        }
+    }
+
     // Не более 12 активных запросов. Остальные узлы остаются в исходном списке,
     // без выделения отдельной задачи и копии настроек на каждый узел подписки.
     let effective_timeout = std::cmp::min(timeout_ms, 2500);
-    let mut pings = stream::iter(ids.iter().cloned())
+    let mut pings = stream::iter(leaf_ids.iter().cloned())
         .map(|id| async move {
             let ms = ping_server_url(http, cfg, &id, effective_timeout, test_url).await;
             (id, ms)
@@ -2114,6 +2243,34 @@ pub async fn ping_all_url(
         .buffer_unordered(12);
     while let Some((id, ms)) = pings.next().await {
         out.insert(id, ms);
+    }
+
+    if let Some(ref proxies) = proxies_map {
+        for pool_id in pool_ids {
+            let mut resolved_delay = -1;
+            if let Some(leaf) = resolve_group_active_leaf(proxies, &pool_id) {
+                if !is_service_group_or_builtin(&leaf) {
+                    if let Some(&d) = out.get(&leaf) {
+                        resolved_delay = d;
+                    } else if let Some(leaf_val) = proxies.get(&leaf) {
+                        let ld = last_delay(leaf_val);
+                        if ld > 0 {
+                            resolved_delay = ld;
+                        } else if leaf_ids.is_empty() {
+                            // Если пинговали одиночный пул без листовых узлов — пингуем только его активный лист.
+                            resolved_delay = ping_server_url(http, cfg, &leaf, effective_timeout, test_url).await;
+                        }
+                    } else if leaf_ids.is_empty() {
+                        resolved_delay = ping_server_url(http, cfg, &leaf, effective_timeout, test_url).await;
+                    }
+                }
+            }
+            out.insert(pool_id, resolved_delay);
+        }
+    } else {
+        for pool_id in pool_ids {
+            out.insert(pool_id, -1);
+        }
     }
 
     // PING-AUTO: все замеры (фоновые, ручные, после переключения) попадают в кэш панели
@@ -2125,10 +2282,65 @@ pub async fn ping_all_url(
 /// Ограничение набора id для фонового автообновления пингов (анти-регрессия PING-AUTO):
 /// не даём фоновой задаче раздуться до всех нод провайдеров.
 pub const AUTO_PING_MAX_IDS: usize = 24;
+pub const AUTO_PING_COOLDOWN_SECS: u64 = 20;
+
+static MANUAL_PING_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static LAST_MANUAL_PING_AT: std::sync::RwLock<Option<std::time::Instant>> = std::sync::RwLock::new(None);
+
+pub struct ManualPingGuard;
+
+impl Drop for ManualPingGuard {
+    fn drop(&mut self) {
+        MANUAL_PING_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        let mut guard = LAST_MANUAL_PING_AT.write().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(std::time::Instant::now());
+    }
+}
+
+/// Отмечает начало ручного пинга из UI/API; при выходе из области видимости фиксирует время завершения.
+pub fn begin_manual_ping() -> ManualPingGuard {
+    MANUAL_PING_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut guard = LAST_MANUAL_PING_AT.write().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(std::time::Instant::now());
+    ManualPingGuard
+}
+
+/// Возвращает true, если фоновый тик PING-AUTO нужно пропустить (идёт ручной пинг или прошёл < 20 с).
+pub fn should_skip_auto_ping() -> bool {
+    if MANUAL_PING_IN_FLIGHT.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        return true;
+    }
+    let guard = LAST_MANUAL_PING_AT.read().unwrap_or_else(|e| e.into_inner());
+    if let Some(at) = *guard {
+        if at.elapsed() < std::time::Duration::from_secs(AUTO_PING_COOLDOWN_SECS) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Выполняет один тик фонового PING-AUTO, если не активен ручной пинг.
+/// Возвращает `true`, если тик был выполнен, и `false`, если пропущен.
+pub async fn run_auto_ping_tick(http: &reqwest::Client, cfg: &AppConfig) -> bool {
+    if should_skip_auto_ping() {
+        return false;
+    }
+    let ids = collect_auto_ping_ids(cfg);
+    if !ids.is_empty() {
+        let _ = ping_all_url(http, cfg, &ids, 2500, None).await;
+    }
+    true
+}
+
+#[cfg(test)]
+pub fn reset_manual_ping_state_for_test() {
+    MANUAL_PING_IN_FLIGHT.store(0, std::sync::atomic::Ordering::SeqCst);
+    *LAST_MANUAL_PING_AT.write().unwrap_or_else(|e| e.into_inner()) = None;
+}
 
 /// Набор id для фонового автообновления пингов (чистая функция, тестируемая):
 /// приоритетная цепочка failover + основной узел + авто-группы Fastest/Fallback/PROXY,
-/// дедупликация с сохранением порядка, ограничение AUTO_PING_MAX_IDS.
+/// дедупликация с сохранением порядка, исключение ignore_servers и служебных групп, ограничение AUTO_PING_MAX_IDS.
 /// Замер этих id держит историю mihomo свежей — GET /api/servers и опрос UI
 /// отдают живые пинги без каких-либо действий пользователя в панели.
 pub fn collect_auto_ping_ids(cfg: &AppConfig) -> Vec<String> {
@@ -2136,7 +2348,8 @@ pub fn collect_auto_ping_ids(cfg: &AppConfig) -> Vec<String> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let push = |ids: &mut Vec<String>, seen: &mut std::collections::HashSet<String>, v: &str| {
         let v = v.trim();
-        if !v.is_empty() && seen.insert(v.to_string()) {
+        let is_ignored = cfg.ignore_servers.iter().any(|ig| ig.trim().eq_ignore_ascii_case(v));
+        if !v.is_empty() && !is_service_group_or_builtin(v) && !is_ignored && seen.insert(v.to_string()) {
             ids.push(v.to_string());
         }
     };
@@ -3179,6 +3392,24 @@ mod tests {
     }
 
     #[test]
+    fn regression_ping_cache_evicts_stale_positive_on_dead_minus_one() {
+        let mut alive = BTreeMap::new();
+        alive.insert("node-die-test".to_string(), 120);
+        store_ping_cache(&alive);
+        assert_eq!(cached_ping("node-die-test"), Some(120));
+
+        // При подтверждённом -1 старый положительный пинг должен быть удалён из кэша
+        let mut dead = BTreeMap::new();
+        dead.insert("node-die-test".to_string(), -1);
+        store_ping_cache(&dead);
+        assert_eq!(
+            cached_ping("node-die-test"),
+            None,
+            "confirmed -1 must evict stale positive ping from PING_CACHE"
+        );
+    }
+
+    #[test]
     fn test_ip_groups_from_rules_rejects_dst_ip_cidr() {
         let rules_json = serde_json::json!({
             "rules": [
@@ -3294,6 +3525,8 @@ mod tests {
     #[tokio::test]
     async fn test_ping_server_l7_split_primary_timeout_secondary_fast() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_proxies_cache_for_test();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
@@ -3338,6 +3571,8 @@ mod tests {
     #[tokio::test]
     async fn test_ping_server_l7_split_secondary_fails_fast_primary_succeeds() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_proxies_cache_for_test();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
@@ -3836,7 +4071,7 @@ mod tests {
         use serde_json::json;
         use std::sync::{Arc, Mutex};
 
-        let _cache_guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap();
+        let _cache_guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_proxies_cache_for_test();
 
         let mut cfg = AppConfig::default();
@@ -3950,5 +4185,247 @@ mod tests {
             }),
             "🛡️ Whitelist selector must be restored to active tunnel server too: {recorded:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn regression_provider_node_ping_uses_provider_healthcheck_without_group_delay_storm() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let direct_proxy_delay_hits = Arc::new(AtomicUsize::new(0));
+        let group_delay_hits = Arc::new(AtomicUsize::new(0));
+        let provider_node_hc_hits = Arc::new(AtomicUsize::new(0));
+
+        let d_hits = direct_proxy_delay_hits.clone();
+        let g_hits = group_delay_hits.clone();
+        let p_hits = provider_node_hc_hits.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { return };
+                let d_hits = d_hits.clone();
+                let g_hits = g_hits.clone();
+                let p_hits = p_hits.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req.lines().next().unwrap_or("");
+                    let (status, body) = if first_line.contains("/providers/proxies/geodema2/geodema-de-1/healthcheck") {
+                        p_hits.fetch_add(1, Ordering::SeqCst);
+                        ("200 OK", r#"{"delay":142}"#.to_string())
+                    } else if first_line.contains("/providers/proxies/geodema2/geodema-dead-2/healthcheck") {
+                        p_hits.fetch_add(1, Ordering::SeqCst);
+                        ("504 Gateway Timeout", r#"{"message":"timeout"}"#.to_string())
+                    } else if first_line.contains("/group/PROXY/delay") {
+                        g_hits.fetch_add(1, Ordering::SeqCst);
+                        ("200 OK", r#"{"geodema-de-1":999}"#.to_string())
+                    } else if first_line.contains("/proxies/geodema-de-1/delay")
+                        || first_line.contains("/proxies/geodema-dead-2/delay")
+                    {
+                        d_hits.fetch_add(1, Ordering::SeqCst);
+                        ("404 Not Found", String::new())
+                    } else {
+                        ("404 Not Found", String::new())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        set_proxies_cache_for_test(
+            BTreeMap::from([(
+                "PROXY".into(),
+                json!({
+                    "type": "Selector",
+                    "now": "other-active-node",
+                    "all": ["other-active-node", "geodema-de-1", "geodema-dead-2"]
+                }),
+            )]),
+            std::time::Instant::now(),
+        );
+        set_provider_proxies_cache_for_test(
+            BTreeMap::from([
+                (
+                    "geodema-de-1".into(),
+                    json!({ "name": "geodema-de-1", "_provider": "geodema2", "_providers": ["geodema2"] }),
+                ),
+                (
+                    "geodema-dead-2".into(),
+                    json!({ "name": "geodema-dead-2", "_provider": "geodema2", "_providers": ["geodema2"] }),
+                ),
+            ]),
+            std::time::Instant::now(),
+        );
+
+        let mut cfg = AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+
+        let client = reqwest::Client::new();
+        let alive_delay = ping_server_url_expected_range(
+            &client,
+            &cfg,
+            "geodema-de-1",
+            3000,
+            Some("http://example.test/204"),
+            None,
+        )
+        .await;
+        let dead_delay = ping_server_url_expected_range(
+            &client,
+            &cfg,
+            "geodema-dead-2",
+            3000,
+            Some("http://example.test/204"),
+            None,
+        )
+        .await;
+        clear_proxies_cache_for_test();
+
+        assert_eq!(alive_delay, 142, "alive provider node must return delay from /providers/proxies/{{provider}}/{{node}}/healthcheck");
+        assert_eq!(dead_delay, -1, "dead provider node must return -1 without group delay storm");
+        assert_eq!(provider_node_hc_hits.load(Ordering::SeqCst), 2, "must call per-node provider healthcheck twice");
+        assert_eq!(group_delay_hits.load(Ordering::SeqCst), 0, "must NEVER trigger /group/PROXY/delay when PROXY.now != server_id");
+        assert_eq!(direct_proxy_delay_hits.load(Ordering::SeqCst), 0, "must not hit 404 /proxies/{{id}}/delay for known provider nodes");
+    }
+
+    #[tokio::test]
+    async fn regression_get_provider_proxies_singleflight_and_invalidation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_proxies_cache_for_test();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_srv = hits.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { return };
+                let hits_srv = hits_srv.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let _ = socket.read(&mut buf).await;
+                    hits_srv.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                    let body = r#"{"providers":{"sub1":{"vehicleType":"HTTP","proxies":[{"name":"DE-01"}]}}}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        let mut cfg = AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+        let client = reqwest::Client::new();
+
+        // Запускаем 12 параллельных запросов при холодном кэше — на сервер должен уйти только 1 запрос
+        let results: Vec<_> = stream::iter(0..12)
+            .map(|_| get_provider_proxies(&client, &cfg))
+            .buffer_unordered(12)
+            .collect()
+            .await;
+        for res in results {
+            let map = res.expect("get_provider_proxies must succeed");
+            assert!(map.contains_key("DE-01"));
+        }
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "12 concurrent cold-cache calls must coalesce into 1 HTTP request");
+
+        // После инвалидации кэша следующий вызов должен снова сходить на сервер
+        invalidate_proxies_cache();
+        let map2 = get_provider_proxies(&client, &cfg).await.expect("get_provider_proxies after invalidation");
+        assert!(map2.contains_key("DE-01"));
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "invalidated cache must trigger a fresh fetch");
+        clear_proxies_cache_for_test();
+    }
+
+    #[tokio::test]
+    async fn regression_auto_ping_skips_when_manual_ping_active_or_recent() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_proxies_cache_for_test();
+        reset_manual_ping_state_for_test();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let ping_hits = Arc::new(AtomicUsize::new(0));
+        let ping_hits_srv = ping_hits.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { return };
+                let ping_hits_srv = ping_hits_srv.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    if req.contains("/proxies/node-1/delay") {
+                        ping_hits_srv.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let body = r#"{"delay":55}"#;
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        set_proxies_cache_for_test(
+            BTreeMap::from([("node-1".into(), json!({ "type": "Vless", "server": "1.2.3.4" }))]),
+            std::time::Instant::now(),
+        );
+        let mut cfg = AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+        cfg.failover.priority_chain = vec!["node-1".into()];
+
+        let client = reqwest::Client::new();
+
+        // 1. Во время активного ручного пинга фоновый тик должен пропускаться
+        let manual_guard = begin_manual_ping();
+        assert!(should_skip_auto_ping(), "must skip auto-ping while manual ping is active");
+        assert!(!run_auto_ping_tick(&client, &cfg).await, "auto-ping tick must be skipped during manual ping");
+        assert_eq!(ping_hits.load(Ordering::SeqCst), 0);
+
+        // 2. Сразу после завершения ручного пинга (в окне cooldown) тоже пропускается
+        drop(manual_guard);
+        assert!(should_skip_auto_ping(), "must skip auto-ping during post-manual cooldown");
+        assert!(!run_auto_ping_tick(&client, &cfg).await, "auto-ping tick must be skipped during cooldown");
+        assert_eq!(ping_hits.load(Ordering::SeqCst), 0);
+
+        // 3. Когда ручного пинга давно не было — тик выполняется
+        reset_manual_ping_state_for_test();
+        assert!(!should_skip_auto_ping());
+        assert!(run_auto_ping_tick(&client, &cfg).await, "auto-ping tick must run when no manual ping is active/recent");
+        assert_eq!(ping_hits.load(Ordering::SeqCst), 1);
+
+        clear_proxies_cache_for_test();
+        reset_manual_ping_state_for_test();
     }
 }

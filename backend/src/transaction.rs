@@ -1310,7 +1310,7 @@ mod tests {
     async fn vkturn_manual_switch_keeps_existing_connections() {
         use axum::{extract::Request, http::StatusCode, response::IntoResponse, Json, Router};
         use serde_json::json;
-        let _cache_guard = mihomo::PROXIES_CACHE_TEST_LOCK.lock().unwrap();
+        let _cache_guard = mihomo::PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         mihomo::clear_proxies_cache_for_test();
 
         let root = std::env::temp_dir().join(format!("xkeen-vk-switch-{}", crate::auth::random_hex(8)));

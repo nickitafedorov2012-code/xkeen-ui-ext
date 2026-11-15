@@ -100,6 +100,66 @@ pub fn apply_routing_with_filters(
     filters: &mut std::collections::BTreeMap<String, String>,
 ) -> Result<(String, usize), String> {
     let mut current = sync_disabled_providers_in_yaml(yaml, &cfg.disabled_providers).unwrap_or_else(|_| yaml.to_string());
+    let global_whitelist_active = cfg.whitelist.enabled
+        && cfg.whitelist.enabled_by != crate::config::WhitelistEnabledBy::Devices;
+
+    if global_whitelist_active {
+        // Косяк 7: в общем режиме БС отключаем и очищаем все общие правила маршрутизации
+        // и встроенные категории, оставляя только БС, vkturn-исключения, QUIC REJECT и MATCH,🛡️ Whitelist.
+        current = remove_domain_blocks(&current);
+        current = remove_blocks(&current);
+        current = remove_gaming_rules(&current);
+        current = remove_gaming_fake_ip_filter(&current);
+        current = remove_zapret_hybrid_rules(&current);
+        current = remove_adblock_rules(&current);
+        current = remove_flow_rules(&current);
+        current = remove_whitelist_rules(&current);
+        current = remove_quic_reject_rules(&current);
+        current = crate::vkturn::remove_rules(&current);
+        current = isolate_rules_for_global_whitelist(&current);
+
+        let providers = if !cfg.mihomo.device_providers.is_empty() {
+            cfg.mihomo.device_providers.clone()
+        } else {
+            parse_provider_names(&current)
+        };
+        let providers: Vec<String> = providers
+            .into_iter()
+            .filter(|p| !cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(p)))
+            .collect();
+
+        if let Ok(with_ig) = apply_ignore_to_groups(&current, &cfg.ignore_servers) {
+            current = with_ig;
+        }
+        current = apply_ignore_to_providers(&current, &cfg.ignore_servers, filters);
+
+        let active_wl_tunnel = match cfg.whitelist.target_server.as_deref() {
+            Some(s) if !s.trim().is_empty() && s.trim() != "follow_failover" => Some(s.trim()),
+            _ => None,
+        };
+        current = apply_whitelist_rules(&current, cfg, active_wl_tunnel);
+        current = apply_whitelist_dns(&current, cfg, "127.0.0.1:53");
+        current = apply_canary_rules_with_providers(&current, &providers);
+
+        let agh_enabled = cfg.adguard.enabled || cfg.adblock_enabled;
+        let agh_port = if cfg.adguard.dns_port > 0 { cfg.adguard.dns_port } else { 5354 };
+        if let Ok(with_agh_dns) = apply_adguard_dns_upstream(&current, agh_port, agh_enabled) {
+            current = with_agh_dns;
+        }
+        if let Ok(with_vkturn) = crate::vkturn::apply_rules(&current, &cfg.vkturn) {
+            current = with_vkturn;
+        }
+        current = ensure_tcp_concurrent(&current);
+        current = apply_quic_reject_rules(&current);
+        let (sanitized, replaced) = sanitize_rule_targets(&current);
+        for r in &replaced {
+            crate::log_w!("[ROUTING] Цель правила '{r}' не является группой или прокси — заменена (INV-4)");
+        }
+        return Ok((sanitized, 0));
+    }
+
+    current = restore_base_rules_from_whitelist_backup(&current);
+
     let strict_whitelist_active = cfg.whitelist.enabled
         && cfg.whitelist.strategy == crate::config::WhitelistStrategy::StrictXKeen;
     if strict_whitelist_active {

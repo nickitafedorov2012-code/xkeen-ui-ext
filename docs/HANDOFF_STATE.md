@@ -9,5 +9,16 @@
 - [DONE] Шаг 3: Обновление тестов и добавление анти-регрессионного теста `regression_pruned_153_non_connecting_direct_domains_and_dns_policy` в `backend/src/routing/mod.rs` (`routing::tests`: 116 passed, 0 failed)
 - [DONE] Шаг 4: Бэкап на `192.168.2.1:1001` (`xr-20261114-234503-757`), применение `proxy_catalog_domains` (153 адреса переведены из `DIRECT` в `🛡️ Whitelist`, `PROXY` и `🛡️ Whitelist` сохранены на `📞 VK-туннель [БС]`), `cargo test` (738 passed, 0 failed) и `npm --prefix frontend run build` (`tsc && vite build`, built in 2.78s)
 - [DONE] Шаг 5.1: Bump версии до `1.16.16` / `v1.16.16.0` (`backend/Cargo.toml`, `backend/Cargo.lock`, `frontend/package.json`), ченжлог в `DEVELOPMENT.md`, `cargo check` и `npm --prefix frontend run build` (`built in 2.15s`)
-- [IN_PROGRESS] Шаг 5.2: Коммит `v1.16.16.0`, тег `v1.16.16.0`, push в `origin main`, ожидание GitHub Release CI
-- [PENDING] Шаг 5.3: Установка `v1.16.16.0` на `192.168.2.1:1001` (`POST /api/backups`, `POST /api/update/install`), очистка временного `proxy_catalog_domains`, проверка каталога (249) и активного туннеля (`📞 VK-туннель [БС]`)
+- [DONE] Шаг 5.2: Коммит `v1.16.16.0`, тег `v1.16.16.0`, push в `origin main`, ожидание GitHub Release CI
+- [DONE] Шаг 5.3: Установка `v1.16.16.0` на `192.168.2.1:1001` (`POST /api/backups` `xr-20261114-235851-090`, `POST /api/update/install`), очистка временного `proxy_catalog_domains` (`[]`), проверка каталога (249), Mihomo правил (0 из 153 в `DIRECT`) и активного туннеля (`📞 VK-туннель [БС]`)
+
+## Исправление косяков (`КОСЯКИ.md`)
+- [DONE] Косяк 1: Узлы подписок пингуются через `/providers/proxies/{provider}/{node}/healthcheck`, убран безусловный `/group/PROXY/delay` (`backend/src/mihomo.rs`, `mihomo::tests` 45/45 passed)
+- [DONE] Косяк 2: `sync_disabled_providers_in_yaml` отключает `include-all: true`/`include-all-providers: true` при наличии `disabled_providers` и восстанавливает при включении (`backend/src/routing/validator.rs`, `routing::tests` 117/117 passed)
+- [DONE] Косяк 3: `POST /api/servers/ping` и `ping_all_url` пропускают игнор-лист и служебные группы, пулы берут задержку от активного листа без сетевого шторма, UI передаёт `include_pools: showPools` (`backend/src/api/servers/mod.rs`, `backend/src/mihomo.rs`, `frontend/src/components/Servers.tsx`, `api::servers::tests` 6/6 passed)
+- [DONE] Косяк 4: Добавлена singleflight-блокировка `PROVIDER_PROXIES_FETCH_LOCK` для `get_provider_proxies`, 12 параллельных вызовов схлопываются в 1 запрос (`backend/src/mihomo.rs`, `mihomo::tests` 46/46 passed)
+- [DONE] Косяк 5: Добавлена координация `begin_manual_ping` / `run_auto_ping_tick` (20s cooldown) между ручным пингом и фоновым `PING-AUTO` (`backend/src/mihomo.rs`, `backend/src/api/servers/mod.rs`, `backend/src/main.rs`, `mihomo::tests` 47/47 passed)
+- [DONE] Косяк 6: `store_ping_cache` удаляет устаревший кэш при `-1`, `Servers.tsx` синхронизирует `fresh.ping_ms` без залипания (`backend/src/mihomo.rs`, `frontend/src/components/Servers.tsx`, `frontend/src/components/Servers.test.tsx`, `mihomo::tests` 48/48 + `Servers.test.tsx` 2/2 passed)
+- [DONE] Косяк 7: Жёсткая изоляция маршрутизации в режиме БС (`backend/src/routing/ipset.rs`, `backend/src/routing/iptables.rs`, `backend/src/routing/mod.rs`, `routing::tests` 118/118 passed)
+- [DONE] Косяк 8: Отклонение IP/CIDR в `is_valid_rule_domain` и генерация `IP-CIDR,<cidr>,<target>,no-resolve` (`backend/src/routing/validator.rs`, `backend/src/routing/policy_routing.rs`, `backend/src/routing/ipset.rs`, `routing::tests` 119/119 passed)
+- [DONE] Косяк 9: Исправление слипания IP разных MAC в `whitelist.devices` и `gaming.devices` (`backend/src/watchdog.rs`, `watchdog::` 42/42 passed)
