@@ -8,12 +8,14 @@ pub mod validator;
 pub mod dns_redirect;
 pub mod ipset;
 pub mod policy_routing;
+pub mod policy_isolation;
 pub mod iptables;
 
 pub use validator::*;
 pub use dns_redirect::*;
 pub use ipset::*;
 pub use policy_routing::*;
+pub use policy_isolation::*;
 pub use iptables::*;
 
 #[cfg(test)]

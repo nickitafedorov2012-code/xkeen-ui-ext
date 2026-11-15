@@ -525,6 +525,15 @@ pub fn apply_whitelist_rules(
     cfg: &crate::config::AppConfig,
     active_tunnel_node: Option<&str>,
 ) -> String {
+    apply_whitelist_rules_with_default_ips(content, cfg, active_tunnel_node, &[])
+}
+
+pub fn apply_whitelist_rules_with_default_ips(
+    content: &str,
+    cfg: &crate::config::AppConfig,
+    active_tunnel_node: Option<&str>,
+    default_policy_ips: &[String],
+) -> String {
     let clean = remove_whitelist_rules(content);
     if !cfg.whitelist.enabled {
         return clean;
@@ -643,8 +652,16 @@ pub fn apply_whitelist_rules(
         // в эту группу в рантайме (switch_group в sync_whitelist_mode_tunnel) — ноды подписок в rules недопустимы.
         let dev_target = WHITELIST_GROUP_NAME;
 
-        // 2.1. Исключенные устройства -> DIRECT
-        let excluded_ips = resolve_excluded_whitelist_ips(cfg);
+        // 2.1. Исключенные устройства и устройства в политике по умолчанию (`default`) -> DIRECT
+        let mut excluded_ips = resolve_excluded_whitelist_ips(cfg);
+        for ip in default_policy_ips {
+            let trimmed = ip.trim();
+            if !trimmed.is_empty() && crate::config::is_valid_ip_or_cidr(trimmed) {
+                excluded_ips.push(trimmed.to_string());
+            }
+        }
+        excluded_ips.sort();
+        excluded_ips.dedup();
         for ex_ip in &excluded_ips {
             let cidr = if ex_ip.contains('/') {
                 ex_ip.clone()

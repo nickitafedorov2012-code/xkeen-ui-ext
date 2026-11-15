@@ -110,6 +110,17 @@ pub fn apply_routing_with_filters(
     cfg: &crate::config::AppConfig,
     filters: &mut std::collections::BTreeMap<String, String>,
 ) -> Result<(String, usize), String> {
+    let default_ips = crate::routing::policy_isolation::get_cached_default_policy_ips();
+    apply_routing_with_filters_and_default_ips(yaml, cfg, filters, &default_ips)
+}
+
+/// Применение маршрутизации к YAML Mihomo с явным списком IP устройств политики по умолчанию (`default`).
+pub fn apply_routing_with_filters_and_default_ips(
+    yaml: &str,
+    cfg: &crate::config::AppConfig,
+    filters: &mut std::collections::BTreeMap<String, String>,
+    default_policy_ips: &[String],
+) -> Result<(String, usize), String> {
     let mut current = sync_disabled_providers_in_yaml(yaml, &cfg.disabled_providers).unwrap_or_else(|_| yaml.to_string());
     let global_whitelist_active = cfg.whitelist.enabled
         && cfg.whitelist.enabled_by != crate::config::WhitelistEnabledBy::Devices;
@@ -149,7 +160,7 @@ pub fn apply_routing_with_filters(
             _ => None,
         };
         let (agh_enabled, agh_port, local_dns) = whitelist_local_dns_endpoint(cfg);
-        current = apply_whitelist_rules(&current, cfg, active_wl_tunnel);
+        current = apply_whitelist_rules_with_default_ips(&current, cfg, active_wl_tunnel, default_policy_ips);
         current = apply_whitelist_dns(&current, cfg, &local_dns);
         current = apply_canary_rules_with_providers(&current, &providers);
 
@@ -277,7 +288,7 @@ pub fn apply_routing_with_filters(
         _ => None,
     };
     let (agh_enabled, agh_port, local_dns) = whitelist_local_dns_endpoint(cfg);
-    current = apply_whitelist_rules(&current, cfg, active_wl_tunnel);
+    current = apply_whitelist_rules_with_default_ips(&current, cfg, active_wl_tunnel, default_policy_ips);
     current = apply_whitelist_dns(&current, cfg, &local_dns);
 
     // 5.2. Canary Probe: селектор-группа '🛡️ Canary Probe' и локальный слушатель 127.0.0.1:7894.

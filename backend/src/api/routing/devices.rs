@@ -84,6 +84,9 @@ pub async fn set_device_policy(State(state): State<AppState>, Json(req): Json<Po
     } else {
         None
     };
+    if ok > 0 {
+        crate::routing::sync_default_policy_isolation(&state).await;
+    }
     match finish_rci_apply(ok, errors, save_res) {
         Ok(val) => api_ok(val),
         Err(e) => api_err(e),

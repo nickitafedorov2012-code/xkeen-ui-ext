@@ -655,6 +655,7 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
             let Ok(current_devs) = rci::get_devices(&state.http, &cfg, &policies, "").await else {
                 continue;
             };
+            crate::routing::sync_default_policy_isolation_with_data(&state, &cfg, &policies, &current_devs).await;
             let current_pairs: Vec<(String, String)> =
                 current_devs.iter().map(|d| (d.mac.clone(), d.ip.clone())).collect();
             // Баг 118: общий перенос IP-привязанных настроек для ВСЕХ устройств, а не только гейминга
