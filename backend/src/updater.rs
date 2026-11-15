@@ -15,9 +15,10 @@ const JSDELIVR_RESOLVED: &str =
     "https://data.jsdelivr.com/v1/packages/gh/nickitafedorov2012-code/xkeen-ui-ext/resolved";
 const JSDELIVR_CDN: &str = "https://cdn.jsdelivr.net/gh/nickitafedorov2012-code/xkeen-ui-ext";
 const GITHUB_RELEASES: &str =
-    "https://api.github.com/repos/nickitafedorov2012-code/xkeen-ui-ext/releases?per_page=1";
+    "https://api.github.com/repos/nickitafedorov2012-code/xkeen-ui-ext/releases?per_page=10";
 const GITHUB_RELEASE: &str = "https://github.com/nickitafedorov2012-code/xkeen-ui-ext/releases/download";
 const GITHUB_LATEST: &str = "https://github.com/nickitafedorov2012-code/xkeen-ui-ext/releases/latest";
+const GITHUB_RAW: &str = "https://raw.githubusercontent.com/nickitafedorov2012-code/xkeen-ui-ext";
 const BIN_PATH: &str = "/opt/sbin/xkeen-route";
 const INIT_SCRIPT: &str = "/opt/etc/init.d/S99xkeen-route";
 
@@ -165,14 +166,29 @@ pub fn handle_startup_update_guard(config_path: &Path) {
     }
 }
 
-#[derive(Deserialize, Clone)]
-struct GhRelease {
-    tag_name: String,
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct GhReleaseAsset {
+    pub name: String,
     #[serde(default)]
-    body: String,
+    pub size: u64,
 }
 
-static LAST_CHECK: tokio::sync::Mutex<Option<(std::time::Instant, GhRelease)>> =
+#[derive(Deserialize, Clone, Debug, Default)]
+pub struct GhRelease {
+    pub tag_name: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub prerelease: bool,
+    #[serde(default)]
+    pub assets: Vec<GhReleaseAsset>,
+}
+
+static LAST_CHECK_STABLE: tokio::sync::Mutex<Option<(std::time::Instant, GhRelease)>> =
+    tokio::sync::Mutex::const_new(None);
+static LAST_CHECK_BETA: tokio::sync::Mutex<Option<(std::time::Instant, GhRelease)>> =
     tokio::sync::Mutex::const_new(None);
 static UPDATE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -397,16 +413,26 @@ pub async fn download_file_verified_with_progress(
     Ok(bytes)
 }
 
-pub fn version_tuple(v: &str) -> (Vec<u64>, bool) {
+pub fn version_tuple(v: &str) -> (Vec<u64>, bool, Vec<u64>) {
     let clean = v.trim_start_matches('v');
-    let is_prerelease = clean.contains('-');
-    let main_part = clean.split('-').next().unwrap_or(clean);
-    let parts: Vec<u64> = main_part
+    let mut split = clean.splitn(2, '-');
+    let main_part = split.next().unwrap_or(clean);
+    let pre_part = split.next();
+    let mut parts: Vec<u64> = main_part
         .split('.')
         .filter(|s| !s.is_empty())
         .filter_map(|s| s.parse::<u64>().ok())
         .collect();
-    (parts, !is_prerelease)
+    while parts.len() > 1 && parts.last() == Some(&0) {
+        parts.pop();
+    }
+    let pre_nums: Vec<u64> = pre_part
+        .unwrap_or("")
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse::<u64>().ok())
+        .collect();
+    (parts, pre_part.is_none(), pre_nums)
 }
 
 pub fn is_newer(latest: &str, current: &str) -> bool {
@@ -472,7 +498,37 @@ pub fn extract_notes_from_markdown(text: &str, tag: &str) -> String {
     lines.join("\n")
 }
 
-async fn fetch_latest(direct: &reqwest::Client, proxy_url: &str) -> Result<GhRelease, String> {
+/// Выбирает лучший (максимальный по версии) релиз из списка GitHub Releases.
+/// Отсеивает draft, а для stable-канала — также prerelease.
+pub fn select_best_release(list: Vec<GhRelease>, include_beta: bool) -> Option<GhRelease> {
+    list.into_iter()
+        .filter(|r| !r.draft && (include_beta || !r.prerelease))
+        .max_by(|a, b| version_tuple(&a.tag_name).cmp(&version_tuple(&b.tag_name)))
+}
+
+/// Проверяет, загружены ли бинарник и .sha256 для целевой архитектуры в ассетах релиза.
+/// Если список ассетов пуст (например, получен через редирект latest/jsDelivr), возвращает true.
+pub fn is_release_asset_ready(rel: &GhRelease, arch: &str) -> bool {
+    if rel.assets.is_empty() {
+        return true;
+    }
+    let candidates = get_asset_candidates(arch);
+    if candidates.is_empty() {
+        return true;
+    }
+    candidates.iter().any(|cand| {
+        let sha_name = format!("{cand}.sha256");
+        let has_bin = rel.assets.iter().any(|a| a.name == *cand);
+        let has_sha = rel.assets.iter().any(|a| a.name == sha_name);
+        has_bin && has_sha
+    })
+}
+
+async fn fetch_latest(
+    direct: &reqwest::Client,
+    proxy_url: &str,
+    include_beta: bool,
+) -> Result<GhRelease, String> {
     let proxied = proxied_client(proxy_url);
     let mut clients = Vec::new();
     if let Some(ref p) = proxied {
@@ -480,7 +536,40 @@ async fn fetch_latest(direct: &reqwest::Client, proxy_url: &str) -> Result<GhRel
     }
     clients.push(direct);
 
+    let mut rate_limited = false;
+
     for http in clients {
+        if include_beta {
+            // Для beta-канала запрашиваем список релизов (включая pre-release) и выбираем макс. версию
+            if let Ok(res) = http
+                .get(GITHUB_RELEASES)
+                .header("Accept", "application/vnd.github+json")
+                .header("User-Agent", "xkeen-route")
+                .timeout(Duration::from_secs(8))
+                .send()
+                .await
+            {
+                if res.status() == reqwest::StatusCode::FORBIDDEN
+                    || res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                {
+                    rate_limited = true;
+                    continue;
+                }
+                if res.status().is_success() {
+                    if let Ok(list) = res.json::<Vec<GhRelease>>().await {
+                        if let Some(mut rel) = select_best_release(list, true) {
+                            if rel.body.trim().is_empty() {
+                                rel.body = fetch_notes(http, &rel.tag_name).await;
+                            }
+                            return Ok(rel);
+                        }
+                    }
+                }
+            }
+            // На beta-канале не падаем молча на stable-редирект/jsDelivr
+            continue;
+        }
+
         // 1. Быстрый редирект GitHub releases/latest (без лимитов API, мгновенно)
         if let Ok(res) = http
             .get(GITHUB_LATEST)
@@ -493,7 +582,11 @@ async fn fetch_latest(direct: &reqwest::Client, proxy_url: &str) -> Result<GhRel
                 let tag = tag.trim_matches('/').to_string();
                 if !tag.is_empty() {
                     let notes = fetch_notes(http, &tag).await;
-                    return Ok(GhRelease { tag_name: tag, body: notes });
+                    return Ok(GhRelease {
+                        tag_name: tag,
+                        body: notes,
+                        ..Default::default()
+                    });
                 }
             }
         }
@@ -509,12 +602,16 @@ async fn fetch_latest(direct: &reqwest::Client, proxy_url: &str) -> Result<GhRel
                 if let Ok(r) = res.json::<JsDelivrResolved>().await {
                     let tag = format!("v{}", r.version.trim_start_matches('v'));
                     let notes = fetch_notes(http, &tag).await;
-                    return Ok(GhRelease { tag_name: tag, body: notes });
+                    return Ok(GhRelease {
+                        tag_name: tag,
+                        body: notes,
+                        ..Default::default()
+                    });
                 }
             }
         }
 
-        // 3. GitHub REST API (список релизов)
+        // 3. GitHub REST API (список релизов — строго без draft и prerelease для stable)
         if let Ok(res) = http
             .get(GITHUB_RELEASES)
             .header("Accept", "application/vnd.github+json")
@@ -523,9 +620,15 @@ async fn fetch_latest(direct: &reqwest::Client, proxy_url: &str) -> Result<GhRel
             .send()
             .await
         {
+            if res.status() == reqwest::StatusCode::FORBIDDEN
+                || res.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+            {
+                rate_limited = true;
+                continue;
+            }
             if res.status().is_success() {
                 if let Ok(list) = res.json::<Vec<GhRelease>>().await {
-                    if let Some(mut rel) = list.into_iter().next() {
+                    if let Some(mut rel) = select_best_release(list, false) {
                         if rel.body.trim().is_empty() {
                             rel.body = fetch_notes(http, &rel.tag_name).await;
                         }
@@ -535,31 +638,75 @@ async fn fetch_latest(direct: &reqwest::Client, proxy_url: &str) -> Result<GhRel
             }
         }
     }
-    Err("GitHub и jsDelivr недоступны (напрямую и через прокси)".into())
+    if rate_limited {
+        Err("Превышен лимит запросов GitHub API (403 Rate Limit). Попробуйте позже.".into())
+    } else if include_beta {
+        Err("GitHub API недоступен для проверки beta-релизов".into())
+    } else {
+        Err("GitHub и jsDelivr недоступны (напрямую и через прокси)".into())
+    }
 }
 
-/// Кэшированное получение последнего релиза (кэш 30 секунд).
-async fn get_latest_cached(http: &reqwest::Client, proxy_url: &str) -> Result<GhRelease, String> {
-    let mut guard = LAST_CHECK.lock().await;
-    if let Some((time, ref rel)) = *guard {
-        if time.elapsed() < Duration::from_secs(30) {
-            return Ok(rel.clone());
+/// Кэшированное получение последнего релиза (раздельный кэш для stable и beta).
+async fn get_latest_cached(
+    http: &reqwest::Client,
+    proxy_url: &str,
+    include_beta: bool,
+    force: bool,
+) -> Result<GhRelease, String> {
+    let cache_mutex = if include_beta {
+        &LAST_CHECK_BETA
+    } else {
+        &LAST_CHECK_STABLE
+    };
+    let ttl = if include_beta {
+        Duration::from_secs(300)
+    } else {
+        Duration::from_secs(30)
+    };
+
+    if !force {
+        let guard = cache_mutex.lock().await;
+        if let Some((time, ref rel)) = *guard {
+            if time.elapsed() < ttl {
+                return Ok(rel.clone());
+            }
         }
     }
-    let fresh = fetch_latest(http, proxy_url).await?;
-    *guard = Some((std::time::Instant::now(), fresh.clone()));
-    Ok(fresh)
+
+    match fetch_latest(http, proxy_url, include_beta).await {
+        Ok(fresh) => {
+            let mut guard = cache_mutex.lock().await;
+            *guard = Some((std::time::Instant::now(), fresh.clone()));
+            Ok(fresh)
+        }
+        Err(e) => {
+            // При ошибке (например 403 Rate Limit) возвращаем последний закэшированный релиз, если он есть
+            let guard = cache_mutex.lock().await;
+            if let Some((_, ref rel)) = *guard {
+                Ok(rel.clone())
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
-/// Список изменений: секция `### {tag}` из DEVELOPMENT.md через jsDelivr CDN с фоллбэком на встроенный DEVELOPMENT.md.
+/// Список изменений: секция `### {tag}` из DEVELOPMENT.md через jsDelivr CDN,
+/// затем raw.githubusercontent.com, затем встроенный DEVELOPMENT.md.
 async fn fetch_notes(http: &reqwest::Client, tag: &str) -> String {
-    let url = format!("{JSDELIVR_CDN}@{tag}/DEVELOPMENT.md");
-    if let Ok(res) = http.get(&url).timeout(Duration::from_secs(8)).send().await {
-        if res.status().is_success() {
-            if let Ok(text) = res.text().await {
-                let extracted = extract_notes_from_markdown(&text, tag);
-                if !extracted.is_empty() {
-                    return extracted;
+    let urls = [
+        format!("{JSDELIVR_CDN}@{tag}/DEVELOPMENT.md"),
+        format!("{GITHUB_RAW}/{tag}/DEVELOPMENT.md"),
+    ];
+    for url in &urls {
+        if let Ok(res) = http.get(url).timeout(Duration::from_secs(8)).send().await {
+            if res.status().is_success() {
+                if let Ok(text) = res.text().await {
+                    let extracted = extract_notes_from_markdown(&text, tag);
+                    if !extracted.is_empty() {
+                        return extracted;
+                    }
                 }
             }
         }
@@ -568,25 +715,32 @@ async fn fetch_notes(http: &reqwest::Client, tag: &str) -> String {
 }
 
 /// Кэшированная проверка обновлений (текущая версия, последняя версия, доступность, список изменений).
-pub async fn check_update_info(state: &AppState) -> (String, String, bool, Vec<String>) {
+pub async fn check_update_info_with_channel_force(
+    state: &AppState,
+    include_beta: bool,
+    force: bool,
+) -> (String, String, bool, Vec<String>, bool, Option<String>) {
     let proxy_url = {
         let cfg = state.config.read().await;
         cfg.mihomo_proxy_url()
     };
     let current_tag = format!("v{}", VERSION.trim_start_matches('v'));
-    let rel = match get_latest_cached(&state.http, &proxy_url).await {
+    let rel = match get_latest_cached(&state.http, &proxy_url, include_beta, force).await {
         Ok(r) => r,
-        Err(_) => {
+        Err(err) => {
             let fallback_notes = extract_notes_from_markdown(EMBEDDED_DEV_MD, &current_tag);
             return (
                 VERSION.to_string(),
                 current_tag,
                 false,
                 notes_lines(&fallback_notes, 12),
+                true,
+                Some(err),
             );
         }
     };
     let latest = rel.tag_name.clone();
+    let asset_ready = is_release_asset_ready(&rel, current_arch());
     let update_available = is_newer(&latest, VERSION);
     let body_to_use = if !update_available {
         let local_notes = extract_notes_from_markdown(EMBEDDED_DEV_MD, &current_tag);
@@ -604,21 +758,110 @@ pub async fn check_update_info(state: &AppState) -> (String, String, bool, Vec<S
     };
     (
         VERSION.to_string(),
-        if update_available { latest } else { current_tag },
+        latest,
         update_available,
         notes_lines(&body_to_use, 12),
+        asset_ready,
+        None,
     )
 }
 
+pub async fn check_update_info_with_channel(
+    state: &AppState,
+    include_beta: bool,
+) -> (String, String, bool, Vec<String>) {
+    let (cur, lat, avail, notes, _, _) =
+        check_update_info_with_channel_force(state, include_beta, false).await;
+    (
+        cur,
+        if avail { lat } else { format!("v{}", VERSION.trim_start_matches('v')) },
+        avail,
+        notes,
+    )
+}
+
+pub async fn check_update_info(state: &AppState) -> (String, String, bool, Vec<String>) {
+    let cfg_channel = {
+        let cfg = state.config.read().await;
+        cfg.system.update_channel.clone()
+    };
+    let include_beta = if cfg_channel == "beta" {
+        true
+    } else if cfg_channel == "stable" {
+        false
+    } else {
+        VERSION.contains('-')
+    };
+    check_update_info_with_channel(state, include_beta).await
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct CheckQuery {
+    pub channel: Option<String>,
+    pub force: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetChannelReq {
+    pub channel: String,
+}
+
+/// POST /api/update/channel — сохранить выбранный канал обновлений ("stable" | "beta") в конфиге на роутере.
+pub async fn set_channel(
+    State(state): State<AppState>,
+    axum::Json(req): axum::Json<SetChannelReq>,
+) -> Response {
+    let ch = req.channel.trim().to_lowercase();
+    if ch != "stable" && ch != "beta" {
+        return api_err("Недопустимый канал обновлений (ожидается stable или beta)");
+    }
+    let cfg_snapshot = {
+        let mut cfg = state.config.write().await;
+        let mut new_cfg = (**cfg).clone();
+        new_cfg.system.update_channel = ch.clone();
+        let arc_cfg = std::sync::Arc::new(new_cfg);
+        *cfg = arc_cfg.clone();
+        arc_cfg
+    };
+    if let Err(e) = crate::config::save(&state.config_path, &cfg_snapshot).await {
+        return api_err(format!("Не удалось сохранить канал в конфиге: {e}"));
+    }
+    api_ok(json!({ "channel": ch }))
+}
+
 /// GET /api/update/check — текущая/последняя версия + список изменений (всегда включает changelog).
-pub async fn check(State(state): State<AppState>) -> Response {
-    let (current, latest, update_available, notes) = check_update_info(&state).await;
-    api_ok(json!({
+pub async fn check(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<CheckQuery>,
+) -> Response {
+    let cfg_channel = {
+        let cfg = state.config.read().await;
+        cfg.system.update_channel.clone()
+    };
+    let default_channel = if cfg_channel == "beta" || cfg_channel == "stable" {
+        cfg_channel.as_str()
+    } else if VERSION.contains('-') {
+        "beta"
+    } else {
+        "stable"
+    };
+    let channel = query.channel.as_deref().unwrap_or(default_channel);
+    let include_beta = channel == "beta";
+    let force = query.force.unwrap_or(false);
+    let (current, latest, update_available, notes, asset_ready, error) =
+        check_update_info_with_channel_force(&state, include_beta, force).await;
+    let mut resp = json!({
         "current": current,
         "latest": latest,
         "update_available": update_available,
         "notes": notes,
-    }))
+        "channel": if include_beta { "beta" } else { "stable" },
+        "asset_ready": asset_ready,
+    });
+    if let Some(err) = error {
+        resp["error"] = json!(err);
+    }
+    api_ok(resp)
 }
 
 /// Определяет целевую архитектуру для скачивания бинарников с точным учетом endianness для MIPS (mipsel vs mips).
@@ -688,14 +931,66 @@ pub fn get_asset_candidates(arch: &str) -> Vec<&'static str> {
     }
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct InstallReq {
+    pub channel: Option<String>,
+    pub target_version: Option<String>,
+    #[serde(default)]
+    pub allow_downgrade: bool,
+}
+
+/// Проверяет, что в указанном каталоге (или его родителе) свободно не менее `min_bytes` байт.
+async fn check_free_space_mb(path: &Path, min_bytes: u64) -> Result<(), String> {
+    let target = if path.exists() {
+        path.to_path_buf()
+    } else if let Some(p) = path.parent().filter(|p| p.exists()) {
+        p.to_path_buf()
+    } else {
+        return Ok(());
+    };
+    #[cfg(unix)]
+    {
+        if let Ok(out) = tokio::process::Command::new("df")
+            .arg("-k")
+            .arg(&target)
+            .output()
+            .await
+        {
+            if out.status.success() {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if let Some(line) = stdout.lines().nth(1) {
+                    let cols: Vec<&str> = line.split_whitespace().collect();
+                    if let Some(avail_kb) = cols.get(3).and_then(|s| s.parse::<u64>().ok()) {
+                        let avail_bytes = avail_kb.saturating_mul(1024);
+                        if avail_bytes < min_bytes {
+                            return Err(format!(
+                                "Недостаточно свободного места в {} (доступно {} МБ, требуется {} МБ)",
+                                target.display(),
+                                avail_bytes / (1024 * 1024),
+                                min_bytes / (1024 * 1024)
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let _ = (&target, min_bytes);
+    Ok(())
+}
+
 /// POST /api/update/install — скачать бинарь релиза, проверить, атомарно заменить с бэкапом и перезапустить сервис.
-pub async fn install(State(state): State<AppState>) -> Response {
+pub async fn install(
+    State(state): State<AppState>,
+    body: Option<axum::Json<InstallReq>>,
+) -> Response {
+    let req = body.map(|b| b.0).unwrap_or_default();
     let _update_guard = match UPDATE_LOCK.try_lock() {
         Ok(g) => g,
         Err(_) => return api_err("Операция обновления уже выполняется другим процессом"),
     };
 
-    let (bin_path_str, init_script_str) = {
+    let (bin_path_str, init_script_str, cfg_channel) = {
         let cfg = state.config.read().await;
         let b = if cfg.system.xkeen_route_bin.is_empty() {
             BIN_PATH.to_string()
@@ -707,7 +1002,7 @@ pub async fn install(State(state): State<AppState>) -> Response {
         } else {
             cfg.system.xkeen_route_init.clone()
         };
-        (b, i)
+        (b, i, cfg.system.update_channel.clone())
     };
 
     // Защита от инъекций и подмены путей (баг 125): проверяем ДО скачивания/записи
@@ -720,16 +1015,46 @@ pub async fn install(State(state): State<AppState>) -> Response {
         return api_err(format!("Недопустимый путь к init-скрипту '{init_script_str}'"));
     }
 
+    // Проверка свободного места (минимум 25 МБ) на /opt/tmp и в каталоге бинарника
+    const MIN_FREE_BYTES: u64 = 25 * 1024 * 1024;
+    if let Err(e) = check_free_space_mb(Path::new("/opt/tmp"), MIN_FREE_BYTES).await {
+        return api_err(e);
+    }
+    if let Some(bin_dir) = Path::new(&bin_path_str).parent() {
+        if let Err(e) = check_free_space_mb(bin_dir, MIN_FREE_BYTES).await {
+            return api_err(e);
+        }
+    }
+
+    let channel = req
+        .channel
+        .as_deref()
+        .unwrap_or(if cfg_channel == "beta" || cfg_channel == "stable" {
+            cfg_channel.as_str()
+        } else if VERSION.contains('-') {
+            "beta"
+        } else {
+            "stable"
+        });
+    let include_beta = channel == "beta";
+
     let proxy_url = {
         let cfg = state.config.read().await;
         cfg.mihomo_proxy_url()
     };
-    let rel = match fetch_latest(&state.http, &proxy_url).await {
+    let rel = match fetch_latest(&state.http, &proxy_url, include_beta).await {
         Ok(r) => r,
         Err(e) => return api_err(e),
     };
     let ver = rel.tag_name.clone();
-    if !is_newer(&ver, VERSION) {
+    if let Some(ref target) = req.target_version {
+        if ver.trim_start_matches('v') != target.trim_start_matches('v') {
+            return api_err(format!(
+                "Версия релиза изменилась ({ver} вместо {target}). Обновите страницу и повторите установку."
+            ));
+        }
+    }
+    if !req.allow_downgrade && !is_newer(&ver, VERSION) {
         return api_err(format!("Уже установлена актуальная версия {VERSION}"));
     }
 
@@ -1597,6 +1922,15 @@ pub async fn mihomo_install(
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_beta_version_comparison() {
+        assert!(is_newer("v1.3.0-beta.2", "1.3.0-beta.1"));
+        assert!(is_newer("v1.3.0-beta.10", "1.3.0-beta.2"));
+        assert!(is_newer("v1.3.0", "1.3.0-beta.2"));
+        assert!(!is_newer("v1.3.0-beta.2", "1.3.0"));
+        assert!(is_newer("v1.3.0-beta.1", "1.2.9"));
+    }
+
     /// HTTP-сервер, отдающий `chunks` порций по `chunk_len` байт с паузой `gap` между ними;
     /// после `stall_after` порций замолкает на `stall` (имитация оборвавшейся связи).
     async fn slow_server(
@@ -1950,5 +2284,61 @@ mod tests {
         clear_update_guard_marker(&marker);
         assert!(read_update_guard_marker(&marker).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_dual_channel_version_padding_and_prerelease() {
+        assert_eq!(version_tuple("1.16.18"), version_tuple("1.16.18.0"));
+        assert!(!is_newer("1.16.18.0", "1.16.18"));
+        assert!(!is_newer("1.16.18", "1.16.18.0"));
+        assert!(is_newer("1.17.0-beta.10", "1.17.0-beta.2"));
+        assert!(!is_newer("1.17.0-beta.2", "1.17.0-beta.10"));
+        assert!(is_newer("1.17.0", "1.17.0-beta.10"));
+        assert!(!is_newer("1.17.0-beta.10", "1.17.0"));
+    }
+
+    #[test]
+    fn test_select_best_release_filters_draft_and_prerelease() {
+        let releases = vec![
+            GhRelease { tag_name: "v1.18.0-beta.1".into(), draft: true, prerelease: true, ..Default::default() },
+            GhRelease { tag_name: "v1.17.0-beta.2".into(), draft: false, prerelease: true, ..Default::default() },
+            GhRelease { tag_name: "v1.16.18".into(), draft: false, prerelease: false, ..Default::default() },
+            GhRelease { tag_name: "v1.16.19".into(), draft: false, prerelease: false, ..Default::default() },
+            GhRelease { tag_name: "v1.15.9".into(), draft: false, prerelease: false, ..Default::default() },
+        ];
+        let best_stable = select_best_release(releases.clone(), false).unwrap();
+        assert_eq!(best_stable.tag_name, "v1.16.19");
+
+        let best_beta = select_best_release(releases, true).unwrap();
+        assert_eq!(best_beta.tag_name, "v1.17.0-beta.2");
+    }
+
+    #[test]
+    fn test_is_release_asset_ready() {
+        let incomplete = GhRelease {
+            tag_name: "v1.17.0-beta.1".into(),
+            assets: vec![GhReleaseAsset { name: "xkeen-route-arm64-v8a".into(), size: 1000 }],
+            ..Default::default()
+        };
+        assert!(!is_release_asset_ready(&incomplete, "aarch64"));
+
+        let complete = GhRelease {
+            tag_name: "v1.17.0-beta.1".into(),
+            assets: vec![
+                GhReleaseAsset { name: "xkeen-route-arm64-v8a".into(), size: 1000 },
+                GhReleaseAsset { name: "xkeen-route-arm64-v8a.sha256".into(), size: 64 },
+            ],
+            ..Default::default()
+        };
+        assert!(is_release_asset_ready(&complete, "aarch64"));
+    }
+
+    #[test]
+    fn test_system_config_update_channel_default_and_compat() {
+        let cfg: crate::config::SystemConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.update_channel, "stable");
+        let cfg_unknown: crate::config::SystemConfig =
+            serde_json::from_str(r#"{"update_channel":"beta","future_field":123}"#).unwrap();
+        assert_eq!(cfg_unknown.update_channel, "beta");
     }
 }

@@ -666,7 +666,7 @@ async fn handle_callback(
 
         let update_state = state.clone();
         tokio::spawn(async move {
-            let _ = crate::updater::install(axum::extract::State(update_state)).await;
+            let _ = crate::updater::install(axum::extract::State(update_state), None).await;
         });
         return;
     }

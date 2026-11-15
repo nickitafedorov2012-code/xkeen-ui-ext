@@ -146,6 +146,7 @@ fn logs_and_updates_routes() -> Router<AppState> {
         .route("/api/logs/clear", post(api::logs_clear))
         .route("/api/logs/ws", get(api::logs_ws))
         .route("/api/update/check", get(updater::check))
+        .route("/api/update/channel", post(updater::set_channel))
         .route("/api/update/install", post(updater::install))
         .route("/api/mihomo/releases", get(updater::mihomo_releases))
         .route("/api/mihomo/install", post(updater::mihomo_install))

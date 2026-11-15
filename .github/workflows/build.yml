@@ -131,11 +131,33 @@ jobs:
             xkeen-route-${{ matrix.name }}
             xkeen-route-${{ matrix.name }}.sha256
 
+      - name: Extract release notes from DEVELOPMENT.md
+        if: startsWith(github.ref, 'refs/tags/') || inputs.version != ''
+        run: |
+          TAG="${{ inputs.version || github.ref_name }}"
+          VER="${TAG#v}"
+          python3 -c "
+          import re, pathlib
+          text = pathlib.Path('DEVELOPMENT.md').read_text(encoding='utf-8')
+          pat = re.compile(r'^#{2,3}\s+v?' + re.escape('${VER}') + r'(?:\b|[^0-9A-Za-z.-]).*$', re.M)
+          m = pat.search(text)
+          if m:
+              rest = text[m.end():]
+              nxt = re.search(r'^#{2,3}\s+', rest, re.M)
+              body = rest[:nxt.start()].strip() if nxt else rest.strip()
+              pathlib.Path('release_notes.md').write_text(body + '\n', encoding='utf-8')
+          else:
+              pathlib.Path('release_notes.md').write_text('', encoding='utf-8')
+          "
+
       - name: Publish architecture asset to GitHub Release immediately
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/') || inputs.version != ''
         with:
           tag_name: ${{ inputs.version || github.ref_name }}
+          prerelease: ${{ contains(inputs.version || github.ref_name, '-') }}
+          make_latest: ${{ contains(inputs.version || github.ref_name, '-') && 'false' || 'true' }}
+          body_path: release_notes.md
           files: |
             xkeen-route-${{ matrix.name }}
             xkeen-route-${{ matrix.name }}.sha256
@@ -152,9 +174,27 @@ jobs:
           pattern: xkeen-route-*
           merge-multiple: true
           path: artifacts
+      - name: Extract release notes from DEVELOPMENT.md
+        run: |
+          TAG="${{ inputs.version || github.ref_name }}"
+          VER="${TAG#v}"
+          python3 -c "
+          import re, pathlib
+          text = pathlib.Path('DEVELOPMENT.md').read_text(encoding='utf-8')
+          pat = re.compile(r'^#{2,3}\s+v?' + re.escape('${VER}') + r'(?:\b|[^0-9A-Za-z.-]).*$', re.M)
+          m = pat.search(text)
+          if m:
+              rest = text[m.end():]
+              nxt = re.search(r'^#{2,3}\s+', rest, re.M)
+              body = rest[:nxt.start()].strip() if nxt else rest.strip()
+              pathlib.Path('release_notes.md').write_text(body + '\n', encoding='utf-8')
+          else:
+              pathlib.Path('release_notes.md').write_text('', encoding='utf-8')
+          "
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.version || github.ref_name }}
-          prerelease: false
-          make_latest: "true"
+          prerelease: ${{ contains(inputs.version || github.ref_name, '-') }}
+          make_latest: ${{ contains(inputs.version || github.ref_name, '-') && 'false' || 'true' }}
+          body_path: release_notes.md
           files: artifacts/*

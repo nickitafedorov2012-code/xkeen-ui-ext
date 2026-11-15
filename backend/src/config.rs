@@ -70,6 +70,10 @@ impl Default for MihomoConfig {
     }
 }
 
+fn default_update_channel() -> String {
+    "stable".into()
+}
+
 /// Сервис и бэкапы (универсальные пути; на Entware — стандартные).
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
@@ -86,6 +90,9 @@ pub struct SystemConfig {
     pub mihomo_bin: String,
     /// Init-скрипт службы zapret.
     pub zapret_init: String,
+    /// Канал обновлений ("stable" | "beta").
+    #[serde(default = "default_update_channel")]
+    pub update_channel: String,
 }
 
 impl Default for SystemConfig {
@@ -101,6 +108,7 @@ impl Default for SystemConfig {
             xkeen_route_init: "/opt/etc/init.d/S99xkeen-route".into(),
             mihomo_bin: "/opt/sbin/mihomo".into(),
             zapret_init: "/opt/etc/init.d/S51zapret".into(),
+            update_channel: default_update_channel(),
         }
     }
 }

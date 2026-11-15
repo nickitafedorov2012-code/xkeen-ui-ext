@@ -1,12 +1,17 @@
 import { useState, useEffect } from 'react'
-import { apiGet } from '../api'
+import { apiGet, apiPost } from '../api'
 import { isUpdateAvailable } from '../utils/version'
+
+export type UpdateChannel = 'stable' | 'beta'
 
 export interface UpdateCheckInfo {
   current: string
   latest: string
   notes: string[]
   update_available: boolean
+  channel: UpdateChannel
+  asset_ready: boolean
+  error?: string
 }
 
 interface UpdateCheckState {
@@ -29,37 +34,76 @@ function notifyListeners() {
   }
 }
 
-async function fetchUpdateCheck(): Promise<void> {
-  if (typeof document !== 'undefined' && document.hidden) return
-  if (inFlightPromise) return inFlightPromise
+export interface FetchUpdateOptions {
+  channel?: UpdateChannel
+  force?: boolean
+}
 
-  inFlightPromise = (async () => {
+async function fetchUpdateCheck(opts?: FetchUpdateOptions): Promise<void> {
+  if (!opts?.force && typeof document !== 'undefined' && document.hidden) return
+  if (inFlightPromise && !opts?.force && !opts?.channel) return inFlightPromise
+
+  const params = new URLSearchParams()
+  const targetChannel = opts?.channel ?? globalState.updateInfo?.channel
+  if (targetChannel) params.set('channel', targetChannel)
+  if (opts?.force) params.set('force', 'true')
+  const qs = params.toString()
+  const path = qs ? `update/check?${qs}` : 'update/check'
+
+  if (opts?.force || opts?.channel) {
+    globalState = { ...globalState, loading: true }
+    notifyListeners()
+  }
+
+  const run = (async () => {
     try {
-      const res = await apiGet<{ current: string; latest: string; notes?: string[]; update_available: boolean }>('update/check')
+      const res = await apiGet<{
+        current: string
+        latest: string
+        notes?: string[]
+        update_available: boolean
+        channel?: string
+        asset_ready?: boolean
+        error?: string
+      }>(path)
       if (res) {
         const cur = res.current || ''
         const lat = res.latest || ''
-        // Check update availability via numeric/semver comparison or backend flag validated by isUpdateAvailable
         const hasUpd = isUpdateAvailable(cur, lat) || Boolean(res.update_available && (cur === '' || isUpdateAvailable(cur, lat)))
+        const ch: UpdateChannel = res.channel === 'beta' ? 'beta' : 'stable'
         globalState = {
           updateInfo: {
             current: cur,
             latest: lat,
             notes: res.notes || [],
             update_available: hasUpd,
+            channel: ch,
+            asset_ready: res.asset_ready !== false,
+            error: res.error,
           },
           loading: false,
         }
         notifyListeners()
       }
     } catch {
-      /* ignore network errors */
+      globalState = { ...globalState, loading: false }
+      notifyListeners()
     } finally {
       inFlightPromise = null
     }
   })()
 
-  return inFlightPromise
+  inFlightPromise = run
+  return run
+}
+
+async function switchUpdateChannel(channel: UpdateChannel): Promise<void> {
+  try {
+    await apiPost('update/channel', { channel })
+  } catch {
+    /* ignore if backend unavailable */
+  }
+  await fetchUpdateCheck({ channel, force: true })
 }
 
 function startPollingIfNeeded() {
@@ -96,5 +140,6 @@ export function useUpdateCheck() {
     updateInfo: state.updateInfo,
     loading: state.loading,
     refresh: fetchUpdateCheck,
+    setChannel: switchUpdateChannel,
   }
 }

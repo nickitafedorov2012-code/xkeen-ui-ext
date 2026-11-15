@@ -57,8 +57,29 @@ export function compareVersions(a: string, b: string): number | null {
     return -1
   }
   if (pA.prerelease !== null && pB.prerelease !== null) {
-    if (pA.prerelease > pB.prerelease) return 1
-    if (pA.prerelease < pB.prerelease) return -1
+    const partsA = pA.prerelease.split('.')
+    const partsB = pB.prerelease.split('.')
+    const preLen = Math.max(partsA.length, partsB.length)
+    for (let i = 0; i < preLen; i++) {
+      const segA = partsA[i]
+      const segB = partsB[i]
+      if (segA === undefined) return -1
+      if (segB === undefined) return 1
+      const isNumA = /^\d+$/.test(segA)
+      const isNumB = /^\d+$/.test(segB)
+      if (isNumA && isNumB) {
+        const nA = parseInt(segA, 10)
+        const nB = parseInt(segB, 10)
+        if (nA > nB) return 1
+        if (nA < nB) return -1
+      } else if (isNumA !== isNumB) {
+        // SemVer: numeric identifiers always have lower precedence than non-numeric
+        return isNumA ? -1 : 1
+      } else {
+        if (segA > segB) return 1
+        if (segA < segB) return -1
+      }
+    }
   }
 
   return 0
@@ -76,26 +97,6 @@ export function compareVersions(a: string, b: string): number | null {
  * If either string is invalid/unparseable, returns false.
  */
 export function isUpdateAvailable(current: string, latest: string): boolean {
-  const pCurrent = parseVersion(current)
-  const pLatest = parseVersion(latest)
-  if (!pCurrent || !pLatest) return false
-
-  // First compare base numeric parts
-  const maxLen = Math.max(pCurrent.numbers.length, pLatest.numbers.length)
-  for (let i = 0; i < maxLen; i++) {
-    const numA = pCurrent.numbers[i] ?? 0
-    const numB = pLatest.numbers[i] ?? 0
-    if (numA > numB) return false // current numeric > latest numeric
-    if (numA < numB) return true  // current numeric < latest numeric
-  }
-
-  // Numeric parts are equal!
-  // E.g. current = 1.17.0-alpha, latest = 1.16.5 was already handled (1.17 > 1.16 => false).
-  // What if current = 1.19.0-rc1 and latest = 1.19.0?
-  // Or current = 1.16.5 and latest = 1.16.5?
-  // Per requirement: "если current >= latest (в т. ч. альфа/rc с большим номером) — обновления нет."
-  // When numeric base is identical (1.19.0 vs 1.19.0):
-  // If current already has the same base version as latest (even if current is rc/alpha of that version),
-  // or current is already equal to latest, there is NO new version release to upgrade to.
-  return false
+  const cmp = compareVersions(current, latest)
+  return cmp === -1
 }

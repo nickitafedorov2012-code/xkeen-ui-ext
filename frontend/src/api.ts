@@ -74,7 +74,7 @@ function getInflightPostKey(cleanPath: string, options: RequestInit): string | n
   return `${method}:${cleanPath}:${body}`
 }
 
-async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
+async function apiFetch<T>(path: string, options: RequestInit & { timeoutMs?: number } = {}): Promise<T> {
   const cleanPath = path.replace(/^\/+/, '')
   const inflightKey = getInflightPostKey(cleanPath, options)
   if (inflightKey) {
@@ -105,7 +105,7 @@ async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> 
     const abortTimer = setTimeout(() => {
       timedOut = true
       controller.abort()
-    }, 30000)
+    }, options.timeoutMs ?? 30000)
     try {
       const res = await fetch(`/api/${cleanPath}`, {
         ...options,
@@ -173,12 +173,18 @@ export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> 
   return apiFetch<T>(path, signal ? { signal } : undefined)
 }
 
-export async function apiPost<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+export async function apiPost<T>(
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+  timeoutMs?: number,
+): Promise<T> {
   return apiFetch<T>(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body ?? {}),
     signal,
+    timeoutMs,
   })
 }
 

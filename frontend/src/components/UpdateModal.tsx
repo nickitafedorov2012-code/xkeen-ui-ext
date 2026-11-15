@@ -1,12 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { apiGet, apiPost } from '../api'
-
-interface UpdateInfoResponse {
-  current: string
-  latest: string
-  update_available: boolean
-  notes?: string[]
-}
+import { useUpdateCheck, type UpdateChannel } from '../hooks/useUpdateCheck'
+import { compareVersions } from '../utils/version'
 
 interface UpdateModalProps {
   isOpen: boolean
@@ -26,64 +21,112 @@ export default function UpdateModal({
   notify,
 }: UpdateModalProps) {
 
-  const [updData, setUpdData] = useState<UpdateInfoResponse | null>(null)
+  const { updateInfo: sharedInfo, loading: hookLoading, refresh, setChannel } = useUpdateCheck()
   const [checking, setChecking] = useState(false)
   const [installing, setInstalling] = useState(false)
   const [stage, setStage] = useState('')
   const [countdown, setCountdown] = useState<number | null>(null)
   const [installError, setInstallError] = useState<string | null>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current)
+      if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current)
     }
   }, [])
 
-  const checkUpdates = useCallback(async () => {
+  const checkUpdates = useCallback(async (force = true) => {
     setChecking(true)
     setInstallError(null)
     try {
-      const res = await apiGet<UpdateInfoResponse>('update/check')
-      setUpdData(res)
+      await refresh({ channel: sharedInfo?.channel, force })
     } catch (e: any) {
       notify('Ошибка проверки обновлений: ' + (e?.message || e), true)
     } finally {
       setChecking(false)
     }
-  }, [notify])
+  }, [notify, refresh, sharedInfo?.channel])
 
   useEffect(() => {
     if (!isOpen) return
-    checkUpdates()
+    checkUpdates(false)
   }, [isOpen, checkUpdates])
 
-  const curVer = updData?.current || initialCurrent || '—'
-  const latVer = updData?.latest || initialLatest || '—'
-  const hasUpdate = updData !== null ? Boolean(updData.update_available) : Boolean(latVer && curVer && latVer !== curVer && !curVer.includes(latVer))
-  const notesList = updData?.notes || initialNotes || []
+  const channel: UpdateChannel = sharedInfo?.channel ?? (initialCurrent.includes('-') ? 'beta' : 'stable')
+  const curVer = sharedInfo?.current || initialCurrent || '—'
+  const latVer = sharedInfo?.latest || initialLatest || '—'
+  const hasUpdate = sharedInfo !== null ? Boolean(sharedInfo.update_available) : Boolean(latVer && curVer && latVer !== curVer && !curVer.includes(latVer))
+  const assetReady = sharedInfo?.asset_ready !== false
+  const apiError = sharedInfo?.error
+  const notesList = sharedInfo?.notes || initialNotes || []
+  const canDowngrade =
+    !hasUpdate &&
+    channel === 'stable' &&
+    curVer.includes('-') &&
+    latVer !== '—' &&
+    compareVersions(curVer, latVer) === 1
 
-  const handleInstall = async () => {
+  const handleChannelSwitch = async (next: UpdateChannel) => {
+    if (installing || next === channel) return
+    setChecking(true)
+    setInstallError(null)
+    try {
+      await setChannel(next)
+    } finally {
+      setChecking(false)
+    }
+  }
+
+  const startStatusPolling = () => {
+    if (timerRef.current) clearInterval(timerRef.current)
+    if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current)
+
+    let elapsed = 0
+    setCountdown(30)
+    timerRef.current = setInterval(() => {
+      elapsed += 1
+      setCountdown((prev) => (prev !== null && prev > 0 ? prev - 1 : 0))
+      if (elapsed >= 30) {
+        if (timerRef.current) clearInterval(timerRef.current)
+        window.location.reload()
+      }
+    }, 1000)
+
+    const poll = async () => {
+      try {
+        await apiGet('status')
+        if (timerRef.current) clearInterval(timerRef.current)
+        window.location.reload()
+      } catch {
+        if (elapsed < 30) {
+          pollTimeoutRef.current = setTimeout(poll, 1500)
+        }
+      }
+    }
+    pollTimeoutRef.current = setTimeout(poll, 3000)
+  }
+
+  const handleInstall = async (allowDowngrade = false) => {
     setInstalling(true)
     setInstallError(null)
     setStage('Загрузка артефакта, проверка ELF-заголовка и создание бэкапа…')
 
     try {
-      await apiPost<{ installed: string; restarting: boolean; success?: boolean }>('update/install')
-      setStage(`Версия ${latVer} успешно установлена! Перезапуск службы…`)
+      await apiPost<{ installed: string; restarting: boolean; success?: boolean }>(
+        'update/install',
+        {
+          channel,
+          target_version: latVer,
+          allow_downgrade: allowDowngrade,
+        },
+        undefined,
+        300_000,
+      )
+      setStage(`Версия ${latVer} успешно установлена! Ожидание запуска службы…`)
       notify(`Обновление ${latVer} установлено. Служба перезапускается.`)
-
-      let left = 6
-      setCountdown(left)
-      if (timerRef.current) clearInterval(timerRef.current)
-      timerRef.current = setInterval(() => {
-        left -= 1
-        setCountdown(left)
-        if (left <= 0) {
-          if (timerRef.current) clearInterval(timerRef.current)
-          window.location.reload()
-        }
-      }, 1000)
+      startStatusPolling()
     } catch (err: any) {
       setInstalling(false)
       setStage('')
@@ -167,7 +210,7 @@ export default function UpdateModal({
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <button
               className="btn sm"
-              onClick={checkUpdates}
+              onClick={() => checkUpdates(true)}
               disabled={checking || installing}
               title="Проверить наличие новой версии на GitHub"
             >
@@ -176,7 +219,8 @@ export default function UpdateModal({
             {hasUpdate && !installing && (
               <button
                 className="btn primary sm"
-                onClick={handleInstall}
+                disabled={!assetReady}
+                onClick={() => handleInstall(false)}
                 title={`Обновить панель до ${latVer}`}
                 style={{
                   background: 'linear-gradient(135deg, #0284c7, #2563eb)',
@@ -242,11 +286,99 @@ export default function UpdateModal({
             <button
               type="button"
               className="btn sm"
-              onClick={handleInstall}
+              onClick={() => handleInstall(false)}
               style={{ borderColor: '#f87171', color: '#f87171', flexShrink: 0 }}
             >
               🔄 Повторить
             </button>
+          </div>
+        )}
+
+        {/* Переключатель канала обновлений + кнопка проверки */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+          <div
+            role="group"
+            aria-label="Канал обновлений"
+            style={{
+              display: 'inline-flex',
+              background: 'rgba(15, 23, 42, 0.5)',
+              border: '1px solid var(--border-color)',
+              borderRadius: 8,
+              padding: 2,
+              gap: 2,
+            }}
+          >
+            {(['stable', 'beta'] as const).map((ch) => {
+              const active = channel === ch
+              return (
+                <button
+                  key={ch}
+                  type="button"
+                  disabled={installing || checking || hookLoading}
+                  onClick={() => handleChannelSwitch(ch)}
+                  style={{
+                    padding: '5px 12px',
+                    borderRadius: 6,
+                    border: 'none',
+                    fontSize: 12.5,
+                    fontWeight: active ? 600 : 400,
+                    cursor: installing ? 'not-allowed' : 'pointer',
+                    background: active
+                      ? ch === 'beta'
+                        ? 'rgba(245, 158, 11, 0.2)'
+                        : 'rgba(56, 189, 248, 0.2)'
+                      : 'transparent',
+                    color: active
+                      ? ch === 'beta'
+                        ? '#fbbf24'
+                        : '#38bdf8'
+                      : 'var(--text-muted)',
+                  }}
+                >
+                  {ch === 'stable' ? 'Стабильный' : 'Бета'}
+                </button>
+              )
+            })}
+          </div>
+          <button
+            type="button"
+            className="btn sm"
+            disabled={installing || checking || hookLoading}
+            onClick={() => checkUpdates(true)}
+          >
+            {checking || hookLoading ? '⏳ Проверка…' : '🔄 Проверить обновления'}
+          </button>
+        </div>
+
+        {channel === 'beta' && (
+          <div
+            style={{
+              background: 'rgba(245, 158, 11, 0.08)',
+              border: '1px solid rgba(245, 158, 11, 0.3)',
+              borderRadius: 8,
+              padding: '8px 12px',
+              marginBottom: 12,
+              fontSize: 12,
+              color: '#fbbf24',
+            }}
+          >
+            ⚠️ Тестовые бета-сборки могут содержать экспериментальные изменения и работать нестабильно.
+          </div>
+        )}
+
+        {apiError && (
+          <div
+            style={{
+              background: 'rgba(239, 68, 68, 0.08)',
+              border: '1px solid rgba(239, 68, 68, 0.3)',
+              borderRadius: 8,
+              padding: '8px 12px',
+              marginBottom: 12,
+              fontSize: 12,
+              color: '#f87171',
+            }}
+          >
+            {apiError}
           </div>
         )}
 
@@ -312,26 +444,49 @@ export default function UpdateModal({
         </div>
 
         {/* Кнопка закрытия / отмены в футере */}
-        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
           {!installing && (
             <button type="button" className="btn ghost" onClick={onClose}>
               Закрыть
             </button>
           )}
+          {hasUpdate && !assetReady && !installing && (
+            <span className="muted small" style={{ color: '#fbbf24' }}>
+              ⏳ Сборка для вашей архитектуры ещё готовится CI, попробуйте через пару минут
+            </span>
+          )}
           {hasUpdate && !installing && (
             <button
               type="button"
               className="btn btn-primary"
-              onClick={handleInstall}
+              disabled={!assetReady}
+              onClick={() => handleInstall(false)}
               style={{
                 padding: '8px 18px',
                 fontWeight: 600,
-                background: 'linear-gradient(135deg, #0284c7, #2563eb)',
-                boxShadow: '0 2px 10px rgba(37, 99, 235, 0.4)',
-                borderColor: '#38bdf8',
+                background: assetReady ? 'linear-gradient(135deg, #0284c7, #2563eb)' : 'rgba(100, 116, 139, 0.3)',
+                boxShadow: assetReady ? '0 2px 10px rgba(37, 99, 235, 0.4)' : 'none',
+                borderColor: assetReady ? '#38bdf8' : 'transparent',
+                cursor: assetReady ? 'pointer' : 'not-allowed',
               }}
             >
               🚀 Обновить до {latVer} в 1 клик
+            </button>
+          )}
+          {canDowngrade && !installing && (
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={!assetReady}
+              onClick={() => handleInstall(true)}
+              style={{
+                padding: '8px 18px',
+                fontWeight: 600,
+                background: 'linear-gradient(135deg, #0ea5e9, #0284c7)',
+                borderColor: '#38bdf8',
+              }}
+            >
+              ↩️ Вернуться на стабильную {latVer}
             </button>
           )}
         </div>

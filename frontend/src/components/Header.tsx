@@ -586,6 +586,23 @@ export default function Header({
         >
           <IconBox />
           <span className="header-pill-title">XRoute</span>
+          {(appVersion.includes('-') || appUpdateInfo?.channel === 'beta') && (
+            <span
+              style={{
+                fontSize: 9,
+                fontWeight: 700,
+                padding: '1px 4px',
+                borderRadius: 4,
+                background: 'rgba(245, 158, 11, 0.2)',
+                color: '#fbbf24',
+                border: '1px solid rgba(245, 158, 11, 0.35)',
+                whiteSpace: 'nowrap',
+                lineHeight: 1.2,
+              }}
+            >
+              BETA
+            </span>
+          )}
           <span className="header-pill-subtitle">{appVersion}</span>
           {updateAvailable && (
             <span
