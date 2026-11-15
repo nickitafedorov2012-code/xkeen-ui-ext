@@ -172,6 +172,7 @@ pub fn handle_startup_update_guard(config_path: &Path) {
 pub struct GhReleaseAsset {
     pub name: String,
     #[serde(default)]
+    #[allow(dead_code)]
     pub size: u64,
 }
 
@@ -415,7 +416,13 @@ pub async fn download_file_verified_with_progress(
     Ok(bytes)
 }
 
-pub fn version_tuple(v: &str) -> (Vec<u64>, bool, Vec<u64>) {
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PreSegment {
+    Num(u64),
+    Text(String),
+}
+
+pub fn version_tuple(v: &str) -> (Vec<u64>, bool, Vec<PreSegment>) {
     let clean = v.trim_start_matches('v');
     let mut split = clean.splitn(2, '-');
     let main_part = split.next().unwrap_or(clean);
@@ -428,13 +435,52 @@ pub fn version_tuple(v: &str) -> (Vec<u64>, bool, Vec<u64>) {
     while parts.len() > 1 && parts.last() == Some(&0) {
         parts.pop();
     }
-    let pre_nums: Vec<u64> = pre_part
-        .unwrap_or("")
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| s.parse::<u64>().ok())
-        .collect();
-    (parts, pre_part.is_none(), pre_nums)
+    let mut pre_segs = Vec::new();
+    if let Some(pre) = pre_part {
+        let mut buf = String::new();
+        let mut is_digits: Option<bool> = None;
+        for ch in pre.chars() {
+            if !ch.is_ascii_alphanumeric() {
+                if !buf.is_empty() {
+                    if is_digits == Some(true) {
+                        if let Ok(n) = buf.parse::<u64>() {
+                            pre_segs.push(PreSegment::Num(n));
+                        }
+                    } else {
+                        pre_segs.push(PreSegment::Text(buf.to_ascii_lowercase()));
+                    }
+                    buf.clear();
+                    is_digits = None;
+                }
+                continue;
+            }
+            let d = ch.is_ascii_digit();
+            if let Some(prev_d) = is_digits {
+                if prev_d != d && !buf.is_empty() {
+                    if prev_d {
+                        if let Ok(n) = buf.parse::<u64>() {
+                            pre_segs.push(PreSegment::Num(n));
+                        }
+                    } else {
+                        pre_segs.push(PreSegment::Text(buf.to_ascii_lowercase()));
+                    }
+                    buf.clear();
+                }
+            }
+            is_digits = Some(d);
+            buf.push(ch);
+        }
+        if !buf.is_empty() {
+            if is_digits == Some(true) {
+                if let Ok(n) = buf.parse::<u64>() {
+                    pre_segs.push(PreSegment::Num(n));
+                }
+            } else {
+                pre_segs.push(PreSegment::Text(buf.to_ascii_lowercase()));
+            }
+        }
+    }
+    (parts, pre_part.is_none(), pre_segs)
 }
 
 pub fn is_newer(latest: &str, current: &str) -> bool {
@@ -691,12 +737,13 @@ async fn fetch_latest(
 }
 
 /// Кэшированное получение последнего релиза (раздельный кэш для stable и beta).
+/// Возвращает `(release, stale_warning)`.
 async fn get_latest_cached(
     http: &reqwest::Client,
     proxy_url: &str,
     include_beta: bool,
     force: bool,
-) -> Result<GhRelease, String> {
+) -> Result<(GhRelease, Option<String>), String> {
     let cache_mutex = if include_beta {
         &LAST_CHECK_BETA
     } else {
@@ -712,7 +759,7 @@ async fn get_latest_cached(
         let guard = cache_mutex.lock().await;
         if let Some((time, ref rel)) = *guard {
             if time.elapsed() < ttl {
-                return Ok(rel.clone());
+                return Ok((rel.clone(), None));
             }
         }
     }
@@ -721,13 +768,13 @@ async fn get_latest_cached(
         Ok(fresh) => {
             let mut guard = cache_mutex.lock().await;
             *guard = Some((std::time::Instant::now(), fresh.clone()));
-            Ok(fresh)
+            Ok((fresh, None))
         }
         Err(e) => {
-            // При ошибке (например 403 Rate Limit) возвращаем последний закэшированный релиз, если он есть
+            // При ошибке (например 403 Rate Limit) возвращаем последний закэшированный релиз с пометкой
             let guard = cache_mutex.lock().await;
             if let Some((_, ref rel)) = *guard {
-                Ok(rel.clone())
+                Ok((rel.clone(), Some(format!("Показаны кэшированные данные: {e}"))))
             } else {
                 Err(e)
             }
@@ -768,7 +815,7 @@ pub async fn check_update_info_with_channel_force(
         cfg.mihomo_proxy_url()
     };
     let current_tag = format!("v{}", VERSION.trim_start_matches('v'));
-    let rel = match get_latest_cached(&state.http, &proxy_url, include_beta, force).await {
+    let (rel, cache_warning) = match get_latest_cached(&state.http, &proxy_url, include_beta, force).await {
         Ok(r) => r,
         Err(err) => {
             let fallback_notes = extract_notes_from_markdown(EMBEDDED_DEV_MD, &current_tag);
@@ -805,7 +852,7 @@ pub async fn check_update_info_with_channel_force(
         update_available,
         notes_lines(&body_to_use, 12),
         asset_ready,
-        None,
+        cache_warning,
     )
 }
 
@@ -1058,13 +1105,20 @@ pub async fn install(
         return api_err(format!("Недопустимый путь к init-скрипту '{init_script_str}'"));
     }
 
-    // Проверка свободного места (минимум 25 МБ) на /opt/tmp и в каталоге бинарника
-    const MIN_FREE_BYTES: u64 = 25 * 1024 * 1024;
-    if let Err(e) = check_free_space_mb(Path::new("/opt/tmp"), MIN_FREE_BYTES).await {
+    // Удаляем устаревший .bak до проверки места, чтобы он не занимал лишние ~11 МБ на флеше
+    let old_bak = Path::new(&bin_path_str).with_extension("bak");
+    if old_bak.exists() {
+        let _ = tokio::fs::remove_file(&old_bak).await;
+    }
+
+    // Проверка свободного места: 15 МБ на /opt/tmp (часто tmpfs в RAM) и 25 МБ в каталоге бинарника
+    const MIN_TMP_BYTES: u64 = 15 * 1024 * 1024;
+    const MIN_BIN_BYTES: u64 = 25 * 1024 * 1024;
+    if let Err(e) = check_free_space_mb(Path::new("/opt/tmp"), MIN_TMP_BYTES).await {
         return api_err(e);
     }
     if let Some(bin_dir) = Path::new(&bin_path_str).parent() {
-        if let Err(e) = check_free_space_mb(bin_dir, MIN_FREE_BYTES).await {
+        if let Err(e) = check_free_space_mb(bin_dir, MIN_BIN_BYTES).await {
             return api_err(e);
         }
     }
@@ -1078,8 +1132,23 @@ pub async fn install(
             "beta"
         } else {
             "stable"
-        });
+        })
+        .trim()
+        .to_lowercase();
     let include_beta = channel == "beta";
+
+    // Синхронизируем выбранный канал в конфиге роутера, если он передан явно
+    if req.channel.is_some() && (channel == "stable" || channel == "beta") && cfg_channel != channel {
+        let cfg_snapshot = {
+            let mut cfg = state.config.write().await;
+            let mut new_cfg = (**cfg).clone();
+            new_cfg.system.update_channel = channel.clone();
+            let arc_cfg = std::sync::Arc::new(new_cfg);
+            *cfg = arc_cfg.clone();
+            arc_cfg
+        };
+        let _ = crate::config::save(&state.config_path, &cfg_snapshot).await;
+    }
 
     let proxy_url = {
         let cfg = state.config.read().await;
@@ -1108,30 +1177,36 @@ pub async fn install(
     }
 
     let proxied = proxied_client(&proxy_url);
-    let http = proxied.as_ref().unwrap_or(&state.http);
+    let mut download_clients: Vec<&reqwest::Client> = Vec::new();
+    if let Some(ref p) = proxied {
+        download_clients.push(p);
+    }
+    download_clients.push(&state.http);
 
     let mut download_res = None;
     let mut chosen_asset = "";
-    for asset in asset_candidates {
-        let url = format!("{GITHUB_RELEASE}/{ver}/{asset}");
-        crate::log_i!("[UPDATE] Попытка загрузки {url}");
-        match http
-            .get(&url)
-            .header("User-Agent", "xkeen-route")
-            .timeout(Duration::from_secs(300))
-            .send()
-            .await
-        {
-            Ok(r) if r.status().is_success() => {
-                download_res = Some(r);
-                chosen_asset = asset;
-                break;
-            }
-            Ok(r) => {
-                crate::log_w!("[UPDATE] Ресурс {asset} вернул статус {}", r.status());
-            }
-            Err(e) => {
-                crate::log_w!("[UPDATE] Ошибка запроса {asset}: {e}");
+    'outer: for http in &download_clients {
+        for asset in &asset_candidates {
+            let url = format!("{GITHUB_RELEASE}/{ver}/{asset}");
+            crate::log_i!("[UPDATE] Попытка загрузки {url}");
+            match http
+                .get(&url)
+                .header("User-Agent", "xkeen-route")
+                .timeout(Duration::from_secs(300))
+                .send()
+                .await
+            {
+                Ok(r) if r.status().is_success() => {
+                    download_res = Some(r);
+                    chosen_asset = asset;
+                    break 'outer;
+                }
+                Ok(r) => {
+                    crate::log_w!("[UPDATE] Ресурс {asset} вернул статус {}", r.status());
+                }
+                Err(e) => {
+                    crate::log_w!("[UPDATE] Ошибка запроса {asset}: {e}");
+                }
             }
         }
     }
@@ -1194,19 +1269,24 @@ pub async fn install(
     let mut expected_sha = extract_hash_from_checksum_text(&rel.body, chosen_asset);
     if expected_sha.is_none() {
         let sums_url = format!("{GITHUB_RELEASE}/{ver}/{chosen_asset}.sha256");
-        match http
-            .get(&sums_url)
-            .header("User-Agent", "xkeen-route")
-            .timeout(Duration::from_secs(20))
-            .send()
-            .await
-        {
-            Ok(r) if r.status().is_success() => {
-                if let Ok(text) = r.text().await {
-                    expected_sha = extract_hash_from_checksum_text(&text, chosen_asset);
+        for http in &download_clients {
+            match http
+                .get(&sums_url)
+                .header("User-Agent", "xkeen-route")
+                .timeout(Duration::from_secs(20))
+                .send()
+                .await
+            {
+                Ok(r) if r.status().is_success() => {
+                    if let Ok(text) = r.text().await {
+                        expected_sha = extract_hash_from_checksum_text(&text, chosen_asset);
+                        if expected_sha.is_some() {
+                            break;
+                        }
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
     if let Err(e) = verify_release_checksum(&calculated_sha256, expected_sha.as_deref()) {
@@ -2334,8 +2414,11 @@ mod tests {
         assert_eq!(version_tuple("1.16.18"), version_tuple("1.16.18.0"));
         assert!(!is_newer("1.16.18.0", "1.16.18"));
         assert!(!is_newer("1.16.18", "1.16.18.0"));
+        assert!(is_newer("1.17.0-beta.1", "1.17.0-alpha.1"));
         assert!(is_newer("1.17.0-beta.10", "1.17.0-beta.2"));
         assert!(!is_newer("1.17.0-beta.2", "1.17.0-beta.10"));
+        assert!(is_newer("1.17.0-rc1", "1.17.0-beta.10"));
+        assert!(is_newer("1.17.0-rc10", "1.17.0-rc2"));
         assert!(is_newer("1.17.0", "1.17.0-beta.10"));
         assert!(!is_newer("1.17.0-beta.10", "1.17.0"));
     }

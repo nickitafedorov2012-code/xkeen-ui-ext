@@ -57,8 +57,8 @@ export function compareVersions(a: string, b: string): number | null {
     return -1
   }
   if (pA.prerelease !== null && pB.prerelease !== null) {
-    const partsA = pA.prerelease.split('.')
-    const partsB = pB.prerelease.split('.')
+    const partsA = pA.prerelease.match(/[a-z]+|\d+/gi) ?? []
+    const partsB = pB.prerelease.match(/[a-z]+|\d+/gi) ?? []
     const preLen = Math.max(partsA.length, partsB.length)
     for (let i = 0; i < preLen; i++) {
       const segA = partsA[i]

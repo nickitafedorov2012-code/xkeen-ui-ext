@@ -27,8 +27,11 @@ export default function UpdateModal({
   const [stage, setStage] = useState('')
   const [countdown, setCountdown] = useState<number | null>(null)
   const [installError, setInstallError] = useState<string | null>(null)
+  const [lastAllowDowngrade, setLastAllowDowngrade] = useState(false)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const channelRef = useRef<UpdateChannel | undefined>(sharedInfo?.channel)
+  channelRef.current = sharedInfo?.channel
 
   useEffect(() => {
     return () => {
@@ -41,13 +44,13 @@ export default function UpdateModal({
     setChecking(true)
     setInstallError(null)
     try {
-      await refresh({ channel: sharedInfo?.channel, force })
+      await refresh({ channel: channelRef.current, force })
     } catch (e: any) {
       notify('Ошибка проверки обновлений: ' + (e?.message || e), true)
     } finally {
       setChecking(false)
     }
-  }, [notify, refresh, sharedInfo?.channel])
+  }, [notify, refresh])
 
   useEffect(() => {
     if (!isOpen) return
@@ -74,6 +77,8 @@ export default function UpdateModal({
     setInstallError(null)
     try {
       await setChannel(next)
+    } catch (e: any) {
+      notify('Не удалось переключить канал обновлений: ' + (e?.message || e), true)
     } finally {
       setChecking(false)
     }
@@ -84,6 +89,7 @@ export default function UpdateModal({
     if (pollTimeoutRef.current) clearTimeout(pollTimeoutRef.current)
 
     let elapsed = 0
+    let sawRestart = false
     setCountdown(30)
     timerRef.current = setInterval(() => {
       elapsed += 1
@@ -96,19 +102,26 @@ export default function UpdateModal({
 
     const poll = async () => {
       try {
-        await apiGet('status')
-        if (timerRef.current) clearInterval(timerRef.current)
-        window.location.reload()
-      } catch {
-        if (elapsed < 30) {
-          pollTimeoutRef.current = setTimeout(poll, 1500)
+        const res = await apiGet<{ version?: string }>('status')
+        const newVer = (res?.version || '').replace(/^v/, '')
+        const oldVer = curVer.replace(/^v/, '')
+        if (sawRestart || elapsed >= 6 || (newVer && newVer !== oldVer)) {
+          if (timerRef.current) clearInterval(timerRef.current)
+          window.location.reload()
+          return
         }
+      } catch {
+        sawRestart = true
+      }
+      if (elapsed < 30) {
+        pollTimeoutRef.current = setTimeout(poll, 1500)
       }
     }
     pollTimeoutRef.current = setTimeout(poll, 3000)
   }
 
   const handleInstall = async (allowDowngrade = false) => {
+    setLastAllowDowngrade(allowDowngrade)
     setInstalling(true)
     setInstallError(null)
     setStage('Загрузка артефакта, проверка ELF-заголовка и создание бэкапа…')
@@ -286,7 +299,7 @@ export default function UpdateModal({
             <button
               type="button"
               className="btn sm"
-              onClick={() => handleInstall(false)}
+              onClick={() => handleInstall(lastAllowDowngrade)}
               style={{ borderColor: '#f87171', color: '#f87171', flexShrink: 0 }}
             >
               🔄 Повторить

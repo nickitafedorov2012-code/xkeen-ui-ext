@@ -27,6 +27,7 @@ let globalState: UpdateCheckState = {
 const listeners = new Set<(state: UpdateCheckState) => void>()
 let pollTimer: ReturnType<typeof setInterval> | null = null
 let inFlightPromise: Promise<void> | null = null
+let activeController: AbortController | null = null
 
 function notifyListeners() {
   for (const listener of listeners) {
@@ -42,6 +43,12 @@ export interface FetchUpdateOptions {
 async function fetchUpdateCheck(opts?: FetchUpdateOptions): Promise<void> {
   if (!opts?.force && typeof document !== 'undefined' && document.hidden) return
   if (inFlightPromise && !opts?.force && !opts?.channel) return inFlightPromise
+
+  if (activeController && (opts?.force || opts?.channel)) {
+    activeController.abort()
+  }
+  const controller = new AbortController()
+  activeController = controller
 
   const params = new URLSearchParams()
   const targetChannel = opts?.channel ?? globalState.updateInfo?.channel
@@ -65,7 +72,8 @@ async function fetchUpdateCheck(opts?: FetchUpdateOptions): Promise<void> {
         channel?: string
         asset_ready?: boolean
         error?: string
-      }>(path)
+      }>(path, controller.signal)
+      if (controller.signal.aborted) return
       if (res) {
         const cur = res.current || ''
         const lat = res.latest || ''
@@ -86,10 +94,14 @@ async function fetchUpdateCheck(opts?: FetchUpdateOptions): Promise<void> {
         notifyListeners()
       }
     } catch {
+      if (controller.signal.aborted) return
       globalState = { ...globalState, loading: false }
       notifyListeners()
     } finally {
-      inFlightPromise = null
+      if (activeController === controller) {
+        activeController = null
+        inFlightPromise = null
+      }
     }
   })()
 
@@ -98,11 +110,7 @@ async function fetchUpdateCheck(opts?: FetchUpdateOptions): Promise<void> {
 }
 
 async function switchUpdateChannel(channel: UpdateChannel): Promise<void> {
-  try {
-    await apiPost('update/channel', { channel })
-  } catch {
-    /* ignore if backend unavailable */
-  }
+  await apiPost('update/channel', { channel })
   await fetchUpdateCheck({ channel, force: true })
 }
 
