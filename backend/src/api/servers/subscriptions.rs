@@ -805,3 +805,39 @@ pub async fn update_provider_hwid(
 
     api_ok(json!({ "updated": true, "message": msg, "id": id, "hwid": req.hwid }))
 }
+
+#[derive(Deserialize)]
+pub struct FreeSubConnectReq {
+    #[serde(default)]
+    pub mode: crate::free_sub::FreeSubMode,
+}
+
+/// POST /api/providers/free-sub/connect — запуск подключения бесплатной мульти-подписки в 1 клик.
+pub async fn connect_free_sub(
+    State(state): State<AppState>,
+    Json(req): Json<FreeSubConnectReq>,
+) -> Response {
+    let cur = crate::free_sub::get_status().await;
+    if cur.running {
+        return api_ok(json!({
+            "started": false,
+            "already_running": true,
+            "status": cur,
+        }));
+    }
+    let st_clone = state.clone();
+    let mode = req.mode;
+    tokio::spawn(async move {
+        let _ = crate::free_sub::start_one_click_connect(st_clone, mode).await;
+    });
+    api_ok(json!({
+        "started": true,
+        "mode": mode,
+    }))
+}
+
+/// GET /api/providers/free-sub/status — текущий статус и диагностика конвейера бесплатной подписки.
+pub async fn get_free_sub_status() -> Response {
+    let st = crate::free_sub::get_status().await;
+    api_ok(json!({ "status": st }))
+}

@@ -134,6 +134,14 @@ pub fn group_yaml(group_name: &str, providers: &[String]) -> String {
     format!("{base}{use_block}")
 }
 
+pub const FREE_SUB_PROBE_PROVIDER_ID: &str = "__free_sub_probe";
+
+/// Служебные провайдеры (начинающиеся с `__`), которые не должны попадать в рабочие группы, UI и фоновые пинги.
+pub fn is_service_provider(name: &str) -> bool {
+    let t = name.trim();
+    t.eq_ignore_ascii_case(FREE_SUB_PROBE_PROVIDER_ID) || t.starts_with("__")
+}
+
 /// Имена proxy-providers верхнего уровня из config.yaml (для универсальности:
 /// на другом железе имена провайдеров свои).
 pub fn parse_provider_names(yaml: &str) -> Vec<String> {
@@ -157,6 +165,14 @@ pub fn parse_provider_names(yaml: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Пользовательские proxy-providers верхнего уровня (без служебных `__*` вроде `__free_sub_probe`).
+pub fn parse_user_provider_names(yaml: &str) -> Vec<String> {
+    parse_provider_names(yaml)
+        .into_iter()
+        .filter(|p| !is_service_provider(p))
+        .collect()
 }
 
 /// Карта id провайдера -> url из блока proxy-providers в YAML
@@ -412,6 +428,40 @@ pub fn add_file_provider_to_yaml(
         out.push(new_block_formatted);
     }
 
+    Ok(out.join(eol))
+}
+
+/// Добавить служебный file-провайдер (без фонового health-check) в блок proxy-providers в config.yaml.
+pub fn add_service_file_provider_to_yaml(yaml: &str, id: &str, file_path: &str) -> Result<String, String> {
+    let id = id.trim();
+    let file_path = file_path.trim();
+    if id.is_empty() || file_path.is_empty() {
+        return Err("ID провайдера и путь к файлу не могут быть пустыми".into());
+    }
+    if parse_provider_names(yaml).iter().any(|p| p.eq_ignore_ascii_case(id)) {
+        return Ok(yaml.to_string());
+    }
+    let is_crlf = yaml.contains("\r\n");
+    let eol = if is_crlf { "\r\n" } else { "\n" };
+    let new_block = format!(
+        "  {id}:\n    type: file\n    path: \"{file_path}\"\n    health-check:\n      enable: false\n    override:\n      udp: true\n      tfo: false"
+    );
+    let new_block_formatted = if is_crlf { new_block.replace('\n', "\r\n") } else { new_block };
+    let mut out = Vec::new();
+    let mut inserted = false;
+    for line in yaml.lines() {
+        if line.trim_end() == "proxy-providers:" {
+            out.push(line.to_string());
+            out.push(new_block_formatted.clone());
+            inserted = true;
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    if !inserted {
+        out.push(format!("{eol}proxy-providers:"));
+        out.push(new_block_formatted);
+    }
     Ok(out.join(eol))
 }
 
@@ -747,7 +797,7 @@ pub fn sync_disabled_providers_in_yaml(yaml: &str, disabled_providers: &[String]
     //    и при отсутствии `proxies:` добавляем `proxies:\n      - DIRECT # xk-empty-use-fallback`.
     let has_any_disabled = disabled_providers.iter().any(|d| !d.trim().is_empty());
     let active_yaml_providers: Vec<String> = if has_any_disabled {
-        parse_provider_names(yaml)
+        parse_user_provider_names(yaml)
             .into_iter()
             .filter(|p| !disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(p)))
             .collect()

@@ -11,6 +11,7 @@ import { PROVIDER_COLORS, isPoolServer } from './servers/serversHelpers'
 import { IgnoreListModal } from './servers/IgnoreListModal'
 import { SubscriptionsModal } from './servers/SubscriptionsModal'
 import { ActiveServerBanner } from './servers/ActiveServerBanner'
+import { FreeSubCard } from './servers/FreeSubCard'
 import { ServerList } from './servers/ServerList'
 
 export { formatQuotaBytes, isPoolServer } from './servers/serversHelpers'
@@ -1191,6 +1192,14 @@ export default function Servers({ notify, status, refresh }: Props) {
           </div>
         </div>
       </div>
+
+      <FreeSubCard
+        notify={notify}
+        onConnected={() => {
+          void load()
+          refresh?.()
+        }}
+      />
 
       {/* ОСНОВНОЙ СПИСОК СЕРВЕРОВ: на ВСЮ ширину страницы (полноценные 3-4 колонки) */}
       <ServerList

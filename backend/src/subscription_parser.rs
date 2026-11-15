@@ -853,6 +853,347 @@ fn emit_yaml_entry(out: &mut String, indent: usize, key: &str, v: &Value) {
     }
 }
 
+/// Проверка запрещённых IP-адресов (loopback, 0.0.0.0, private/LAN, link-local, CGNAT, multicast, ULA).
+pub fn is_forbidden_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            let is_cgnat = o[0] == 100 && (o[1] & 0xc0) == 64; // 100.64.0.0/10
+            let is_benchmark = o[0] == 198 && (o[1] == 18 || o[1] == 19); // 198.18.0.0/15
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_documentation()
+                || is_cgnat
+                || is_benchmark
+                || o[0] == 0
+        }
+        std::net::IpAddr::V6(v6) => {
+            let segs = v6.segments();
+            let is_ula = (segs[0] & 0xfe00) == 0xfc00; // fc00::/7
+            let is_link_local = (segs[0] & 0xffc0) == 0xfe80; // fe80::/10
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_forbidden_ip(std::net::IpAddr::V4(mapped));
+            }
+            v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() || is_ula || is_link_local
+        }
+    }
+}
+
+/// Проверка валидности хоста и порта прокси-узла.
+/// Отбрасывает пустые/локальные хосты, порт 0 и запрещённые IP, но РАЗРЕШАЕТ порты < 80 (например 22, 53).
+pub fn validate_proxy_host_port(server: &str, port: u16) -> Result<(), String> {
+    let host = server.trim();
+    if host.is_empty() || host.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err("пустой или некорректный адрес сервера".into());
+    }
+    if port == 0 {
+        return Err("нулевой порт (0) запрещён".into());
+    }
+    let lower = host.to_ascii_lowercase();
+    if lower == "localhost" || lower.ends_with(".localhost") || lower.ends_with(".local") || lower.ends_with(".internal") {
+        return Err(format!("локальный хост '{host}' запрещён"));
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if is_forbidden_ip(ip) {
+            return Err(format!("запрещённый IP-адрес '{ip}'"));
+        }
+    }
+    Ok(())
+}
+
+/// Оставляет только разрешённые поля прокси-узла Mihomo (исключает правила маршрутизации и настройки ядра).
+pub fn sanitize_proxy_value(val: &Value) -> Option<Value> {
+    const ALLOWED_TYPES: &[&str] = &["vless", "hysteria2", "trojan", "ss", "vmess", "tuic", "wireguard"];
+    const ALLOWED_FIELDS: &[&str] = &[
+        "name",
+        "type",
+        "server",
+        "port",
+        "uuid",
+        "password",
+        "cipher",
+        "alterId",
+        "udp",
+        "tls",
+        "sni",
+        "servername",
+        "client-fingerprint",
+        "alpn",
+        "skip-cert-verify",
+        "flow",
+        "network",
+        "reality-opts",
+        "ws-opts",
+        "grpc-opts",
+        "xhttp-opts",
+        "h2-opts",
+        "http-opts",
+        "obfs",
+        "obfs-password",
+        "ports",
+        "tfo",
+    ];
+
+    let obj = val.as_object()?;
+    let typ = obj.get("type")?.as_str()?.trim().to_ascii_lowercase();
+    if !ALLOWED_TYPES.contains(&typ.as_str()) {
+        return None;
+    }
+    let server = obj.get("server")?.as_str()?.trim().to_string();
+    let port_u64 = obj.get("port")?.as_u64()?;
+    let port = u16::try_from(port_u64).ok()?;
+    validate_proxy_host_port(&server, port).ok()?;
+
+    let mut clean = serde_json::Map::new();
+    for (k, v) in obj {
+        if ALLOWED_FIELDS.contains(&k.as_str()) {
+            if k == "type" {
+                clean.insert(k.clone(), Value::String(typ.clone()));
+            } else if k == "server" {
+                clean.insert(k.clone(), Value::String(server.clone()));
+            } else if k == "port" {
+                clean.insert(k.clone(), json!(port));
+            } else {
+                clean.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    if !clean.contains_key("name") {
+        clean.insert("name".into(), Value::String(format!("{typ} {server}:{port}")));
+    }
+    Some(Value::Object(clean))
+}
+
+/// Канонический ключ дедупликации по полному набору значимых параметров прокси-узла.
+pub fn node_dedup_key(v: &Value) -> String {
+    let get_str = |key: &str| -> String {
+        v.get(key)
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+    let get_nested = |outer: &str, inner: &str| -> String {
+        v.get(outer)
+            .and_then(|x| x.get(inner))
+            .and_then(|x| x.as_str())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+
+    let scheme = get_str("type").to_ascii_lowercase();
+    let host = get_str("server").to_ascii_lowercase();
+    let port = v.get("port").and_then(|p| p.as_u64()).unwrap_or(0);
+    let uuid = get_str("uuid");
+    let password = get_str("password");
+    let cipher = get_str("cipher").to_ascii_lowercase();
+    let alter_id = v.get("alterId").and_then(|a| a.as_u64()).unwrap_or(0);
+
+    let sni = {
+        let sn = get_str("servername");
+        if !sn.is_empty() { sn } else { get_str("sni") }
+    }
+    .to_ascii_lowercase();
+
+    let pbk = get_nested("reality-opts", "public-key");
+    let short_id = get_nested("reality-opts", "short-id");
+    let flow = get_str("flow").to_ascii_lowercase();
+    let fp = get_str("client-fingerprint").to_ascii_lowercase();
+
+    let raw_net = get_str("network").to_ascii_lowercase();
+    let transport = match raw_net.as_str() {
+        "" | "raw" | "tcp" => "tcp".to_string(),
+        other => other.to_string(),
+    };
+
+    let path = {
+        let ws = get_nested("ws-opts", "path");
+        let xh = get_nested("xhttp-opts", "path");
+        let h2 = get_nested("h2-opts", "path");
+        let http_p = v
+            .get("http-opts")
+            .and_then(|o| o.get("path"))
+            .and_then(|a| a.as_array())
+            .and_then(|a| a.first())
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if !ws.is_empty() { ws } else if !xh.is_empty() { xh } else if !h2.is_empty() { h2 } else { http_p }
+    };
+
+    let host_header = {
+        let ws_h = v
+            .get("ws-opts")
+            .and_then(|o| o.get("headers"))
+            .and_then(|h| h.get("Host"))
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let xh_h = get_nested("xhttp-opts", "host").to_ascii_lowercase();
+        let h2_h = v
+            .get("h2-opts")
+            .and_then(|o| o.get("host"))
+            .and_then(|a| a.as_array())
+            .and_then(|a| a.first())
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let http_h = v
+            .get("http-opts")
+            .and_then(|o| o.get("headers"))
+            .and_then(|h| h.get("Host"))
+            .and_then(|a| a.as_array())
+            .and_then(|a| a.first())
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        if !ws_h.is_empty() { ws_h } else if !xh_h.is_empty() { xh_h } else if !h2_h.is_empty() { h2_h } else { http_h }
+    };
+
+    let service_name = get_nested("grpc-opts", "grpc-service-name");
+    let xhttp_mode = get_nested("xhttp-opts", "mode").to_ascii_lowercase();
+    let http_upgrade = v
+        .get("ws-opts")
+        .and_then(|o| o.get("v2ray-http-upgrade"))
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
+    let obfs = get_str("obfs").to_ascii_lowercase();
+    let obfs_pw = get_str("obfs-password");
+    let skip_cert = v.get("skip-cert-verify").and_then(|b| b.as_bool()).unwrap_or(false);
+    let alpn = v
+        .get("alpn")
+        .and_then(|a| a.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str())
+                .map(|s| s.trim().to_ascii_lowercase())
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
+
+    format!(
+        "{scheme}|{host}:{port}|{uuid}|{password}|{cipher}|{alter_id}|{sni}|{pbk}|{short_id}|{flow}|{transport}|{path}|{host_header}|{service_name}|{fp}|{xhttp_mode}|{http_upgrade}|{obfs}|{obfs_pw}|{skip_cert}|{alpn}"
+    )
+}
+
+/// Разбор подписки (Base64 / URI / Xray JSON) с жёстким лимитом числа записей и санитайзингом полей/IP/портов.
+pub fn parse_subscription_nodes_bounded(
+    raw_content: &str,
+    max_nodes: usize,
+) -> (Vec<Value>, Vec<(String, String)>) {
+    let decoded_text = if let Ok(bytes) = base64_decode(raw_content.trim()) {
+        if let Ok(text) = String::from_utf8(bytes) {
+            let t = text.trim();
+            if t.contains("://") || (t.starts_with('[') && t.contains("\"remarks\"")) {
+                text
+            } else {
+                raw_content.to_string()
+            }
+        } else {
+            raw_content.to_string()
+        }
+    } else {
+        raw_content.to_string()
+    };
+
+    let mut proxies = Vec::new();
+    let mut rejected: Vec<(String, String)> = Vec::new();
+    let trimmed = decoded_text.trim();
+
+    if trimmed.starts_with('[') {
+        if let Ok(profiles) = serde_json::from_str::<Vec<Value>>(trimmed) {
+            for p in &profiles {
+                if proxies.len() >= max_nodes {
+                    break;
+                }
+                if let Some(proxy_val) = parse_xray_json_profile(p) {
+                    if let Some(clean) = sanitize_proxy_value(&proxy_val) {
+                        proxies.push(clean);
+                    } else {
+                        let hint = proxy_val.get("name").and_then(|n| n.as_str()).unwrap_or("xray-node").to_string();
+                        rejected.push((hint, "запрещённый адрес, порт или тип узла".to_string()));
+                    }
+                } else {
+                    let hint = p
+                        .get("remarks")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("xray-json-profile")
+                        .to_string();
+                    rejected.push((hint, "неподдерживаемый или неполный Xray JSON-профиль".to_string()));
+                }
+            }
+        }
+    }
+
+    if proxies.is_empty() {
+        for line in decoded_text.lines() {
+            if proxies.len() >= max_nodes {
+                break;
+            }
+            let trimmed_line = line.trim();
+            if trimmed_line.is_empty() || trimmed_line.starts_with('#') || trimmed_line.starts_with("//") {
+                continue;
+            }
+            match parse_v2ray_line_checked(trimmed_line) {
+                Ok(proxy_val) => {
+                    if let Some(clean) = sanitize_proxy_value(&proxy_val) {
+                        proxies.push(clean);
+                    } else {
+                        let label = proxy_val.get("name").and_then(|n| n.as_str()).unwrap_or("node").to_string();
+                        rejected.push((label, "запрещённый IP/хост, порт 0 или неподдерживаемый тип".to_string()));
+                    }
+                }
+                Err(reason) => {
+                    let label = trimmed_line
+                        .split_once('#')
+                        .map(|(_, f)| percent_decode(f))
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| trimmed_line.chars().take(48).collect());
+                    rejected.push((label, reason));
+                }
+            }
+        }
+    }
+
+    (proxies, rejected)
+}
+
+/// Сериализация списка нормализованных прокси-объектов в YAML провайдера Mihomo.
+pub fn proxies_to_mihomo_yaml(proxies: &[Value]) -> Result<String, String> {
+    if proxies.is_empty() {
+        return Err("Список прокси-узлов пуст".into());
+    }
+    let mut yaml = String::from("proxies:\n");
+    for p in proxies {
+        let obj = p.as_object().ok_or("Некорректный узел")?;
+        let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("Server");
+        yaml.push_str(&format!("  - name: {}\n", yaml_quote(name)));
+        let mut keys: Vec<&String> = obj.keys().filter(|k| k.as_str() != "name").collect();
+        let rank = |k: &str| match k {
+            "type" => 0,
+            "server" => 1,
+            "port" => 2,
+            _ => 3,
+        };
+        keys.sort_by(|x, y| rank(x).cmp(&rank(y)).then_with(|| x.cmp(y)));
+        for k in keys {
+            emit_yaml_entry(&mut yaml, 4, k, &obj[k.as_str()]);
+        }
+        if !obj.contains_key("udp") {
+            yaml.push_str("    udp: true\n");
+        }
+    }
+    Ok(yaml)
+}
+
 pub fn convert_subscription_to_mihomo_yaml(raw_content: &str) -> Result<(String, usize), String> {
     let (yaml, count, rejected) = convert_subscription_to_mihomo_yaml_with_report(raw_content)?;
     for (node_hint, reason) in &rejected {
@@ -928,28 +1269,7 @@ pub fn convert_subscription_to_mihomo_yaml_with_report(
     }
 
     let count = proxies.len();
-    // Баги 76, 77, 79: узел выводится целиком (cipher, alterId, транспорты и прочие поля парсера),
-    // а каждая строка — экранированным YAML-скаляром.
-    let mut yaml = String::from("proxies:\n");
-    for p in proxies {
-        let obj = p.as_object().ok_or("Некорректный узел")?;
-        let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("Server");
-        yaml.push_str(&format!("  - name: {}\n", yaml_quote(name)));
-        let mut keys: Vec<&String> = obj.keys().filter(|k| k.as_str() != "name").collect();
-        let rank = |k: &str| match k {
-            "type" => 0,
-            "server" => 1,
-            "port" => 2,
-            _ => 3,
-        };
-        keys.sort_by(|x, y| rank(x).cmp(&rank(y)).then_with(|| x.cmp(y)));
-        for k in keys {
-            emit_yaml_entry(&mut yaml, 4, k, &obj[k.as_str()]);
-        }
-        if !obj.contains_key("udp") {
-            yaml.push_str("    udp: true\n");
-        }
-    }
+    let yaml = proxies_to_mihomo_yaml(&proxies)?;
 
     Ok((yaml, count, rejected))
 }

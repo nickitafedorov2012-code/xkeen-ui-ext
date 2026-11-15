@@ -28,3 +28,12 @@
 - [DONE] Шаг 2: Вычислять локальный DNS-эндпоинт с учётом AdGuard Home в `backend/src/routing/iptables.rs` (`apply_routing_with_filters`).
 - [DONE] Шаг 3: Обновить `regression_global_whitelist_isolates_rules_and_is_reversible` и добавить `regression_whitelist_routes_catalog_and_user_domains_direct_above_catchall` в `backend/src/routing/mod.rs`.
 - [DONE] Шаг 4: Запустить `cargo test` в `backend`, проверить 100% прохождение тестов и запросить разрешение на коммит и деплой (`748 passed, 0 failed`).
+
+
+## Реализация «Подключить бесплатную мульти-подписку в 1 клик» (VPN / Белые списки)
+- [DONE] Шаг 1: Зафиксирован архитектурный план.
+- [DONE] Шаг 2: Расширение `backend/src/subscription_parser.rs` (`is_forbidden_ip`, `validate_proxy_host_port`, `sanitize_proxy_value`, `node_dedup_key`, `parse_subscription_nodes_bounded`, `proxies_to_mihomo_yaml`) и исключение служебного провайдера `__free_sub_probe` в `backend/src/routing/validator.rs`, `ipset.rs`, `iptables.rs`, `api/routing/devices.rs`, `backend/src/mihomo.rs` (+ `probe_service_provider_node_l7` и `parse_l7_healthcheck_response`).
+- [DONE] Шаг 3: Реализация `backend/src/free_sub/mod.rs` (компактные источники + RU-зеркала `gitverse.ru` + туннель + локальный seed-кэш на диске, жёсткие лимиты, DNS-резолв с отсевом запрещённых IP, мягкая квота `/24`, конвейер Fast-path -> TCP 16 сокетов/rate-limit/700ms+1800ms -> L7 через `__free_sub_probe`, атомарная публикация в `free_vpn.yaml`/`free_wl.yaml` с сохранением активной сессии) + эндпоинты `POST /api/providers/free-sub/connect` и `GET /api/providers/free-sub/status` в `backend/src/api/servers/subscriptions.rs` и `router.rs`.
+- [DONE] Шаг 4: Реализация UI-компонента `frontend/src/components/servers/FreeSubCard.tsx`, интеграция в `frontend/src/components/Servers.tsx`, типы в `frontend/src/types.ts`, тесты `FreeSubCard.test.tsx`.
+- [DONE] Шаг 5: Полный прогон тестов (`cargo test` — 759 passed, 0 failed; `FreeSubCard.test.tsx` + `Servers*.test.tsx` — 8 passed; `npm run build` — ок) и визуальная проверка скриншота `free_sub_servers.png` через `read_file`.
+

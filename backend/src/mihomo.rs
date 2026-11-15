@@ -541,6 +541,9 @@ pub async fn get_provider_proxies(http: &reqwest::Client, cfg: &AppConfig) -> Re
             if prov.get("vehicleType").and_then(|t| t.as_str()) == Some("Compatible") {
                 continue;
             }
+            if crate::routing::is_service_provider(pname) {
+                continue;
+            }
             if cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(pname)) {
                 continue;
             }
@@ -701,6 +704,7 @@ pub async fn get_providers_info(http: &reqwest::Client, cfg: &AppConfig) -> Resu
     if let Some(map) = v.get("providers").and_then(|p| p.as_object()) {
         for (pname, prov) in map {
             if pname == crate::vkturn::PROVIDER_ID
+                || crate::routing::is_service_provider(pname)
                 || prov.get("vehicleType").and_then(|t| t.as_str()) == Some("Compatible")
             {
                 continue;
@@ -772,7 +776,7 @@ pub async fn updatable_provider_names(http: &reqwest::Client, cfg: &AppConfig) -
     if let Ok(v) = m_get(http, cfg, "/providers/proxies").await {
         if let Some(map) = v.get("providers").and_then(|p| p.as_object()) {
             for (pname, prov) in map {
-                if pname == crate::vkturn::PROVIDER_ID {
+                if pname == crate::vkturn::PROVIDER_ID || crate::routing::is_service_provider(pname) {
                     continue;
                 }
                 if let Some(t) = prov.get("vehicleType").and_then(|t| t.as_str()) {
@@ -815,6 +819,86 @@ pub async fn force_update_all_providers(http: &reqwest::Client, cfg: &AppConfig)
         }
     }
     ok
+}
+
+pub const FREE_SUB_L7_PRIMARY_URL: &str = "https://www.gstatic.com/generate_204";
+pub const FREE_SUB_L7_FALLBACK_URL: &str = "https://cp.cloudflare.com/generate_204";
+
+/// Строгий разбор ответа точечного L7 healthcheck Mihomo (`/providers/proxies/{provider}/{node}/healthcheck`).
+/// Отклоняет любые HTTP-ошибки, JSON с `error`/`message` и `delay <= 0` без опоры на старую историю.
+pub fn parse_l7_healthcheck_response(status: reqwest::StatusCode, body: &str) -> Result<i64, String> {
+    if !status.is_success() {
+        return Err(format!("L7 healthcheck HTTP {status}"));
+    }
+    let val: Value = serde_json::from_str(body.trim())
+        .map_err(|e| format!("Некорректный JSON ответа healthcheck: {e}"))?;
+    if let Some(err_msg) = val
+        .get("error")
+        .or_else(|| val.get("message"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Err(format!("L7 healthcheck ошибка: {err_msg}"));
+    }
+    let delay = val.get("delay").and_then(|d| d.as_i64()).unwrap_or(0);
+    if delay <= 0 {
+        return Err("L7 healthcheck вернул delay <= 0".into());
+    }
+    Ok(delay)
+}
+
+async fn run_single_provider_node_healthcheck(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    provider_id: &str,
+    node_name: &str,
+    target_url: &str,
+    expected_status: u16,
+    timeout_ms: u64,
+) -> Result<i64, String> {
+    let prov_enc = urlencoding_lite(provider_id);
+    let node_enc = urlencoding_lite(node_name);
+    let check_url = urlencoding_lite(target_url);
+    let url = format!(
+        "{}/providers/proxies/{prov_enc}/{node_enc}/healthcheck?url={check_url}&timeout={timeout_ms}&expected={expected_status}",
+        cfg.mihomo_url()
+    );
+    let req_timeout = std::time::Duration::from_millis(std::cmp::max(timeout_ms + 2000, 5000));
+    let mut req = http.get(&url).timeout(req_timeout);
+    if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
+        req = req.header(k, v);
+    }
+    let resp = req.send().await.map_err(|e| format!("L7 healthcheck запрос: {e}"))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    parse_l7_healthcheck_response(status, &body)
+}
+
+/// Точечная L7-валидация узла через отдельный служебный провайдер Mihomo (без fallback на PROXY/историю).
+/// При сбое основной HTTPS-цели проверяет резервную независимую HTTPS-цель.
+pub async fn probe_service_provider_node_l7(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    provider_id: &str,
+    node_name: &str,
+    timeout_ms: u64,
+    primary_url: Option<&str>,
+    fallback_url: Option<&str>,
+) -> Result<i64, String> {
+    let primary = primary_url.unwrap_or(FREE_SUB_L7_PRIMARY_URL);
+    match run_single_provider_node_healthcheck(http, cfg, provider_id, node_name, primary, 204, timeout_ms).await {
+        Ok(delay) => Ok(delay),
+        Err(first_err) => {
+            let fallback = fallback_url.unwrap_or(FREE_SUB_L7_FALLBACK_URL);
+            if fallback == primary {
+                return Err(first_err);
+            }
+            run_single_provider_node_healthcheck(http, cfg, provider_id, node_name, fallback, 204, timeout_ms)
+                .await
+                .map_err(|second_err| format!("{first_err}; fallback: {second_err}"))
+        }
+    }
 }
 
 /// Рекурсивное разрешение активного «листа» из цепочек selector/fallback/urltest.

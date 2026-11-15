@@ -27,6 +27,7 @@ pub mod bot;
 pub mod whitelist_catalog;
 pub mod whitelist_tags;
 pub mod subscription_parser;
+pub mod free_sub;
 
 use axum::extract::Request;
 use axum::middleware::{self, Next};

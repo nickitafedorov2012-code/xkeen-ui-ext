@@ -184,6 +184,37 @@ export interface ProviderInfo {
   expire_timestamp?: number | null
 }
 
+export type FreeSubMode = 'vpn' | 'whitelist'
+
+export type FreeSubStage = 'idle' | 'sources' | 'prefilter' | 'l7' | 'publishing' | 'connected' | 'error'
+
+export interface FreeSubStats {
+  total_raw: number
+  rejected_invalid: number
+  rejected_dns: number
+  deduplicated: number
+  tcp_checked: number
+  tcp_passed: number
+  tcp_retried: number
+  l7_checked: number
+  l7_passed: number
+  working_count: number
+}
+
+export interface FreeSubStatus {
+  running: boolean
+  mode: FreeSubMode
+  stage: FreeSubStage
+  stage_label: string
+  ttff_ms: number | null
+  stats: FreeSubStats
+  active_node: string | null
+  preserved_active: boolean
+  source_used: string | null
+  error: string | null
+  updated_at: number | null
+}
+
 export interface ZapretCustomEntry {
   domain: string
   enabled: boolean

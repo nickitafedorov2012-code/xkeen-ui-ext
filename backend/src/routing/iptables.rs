@@ -132,7 +132,7 @@ pub fn apply_routing_with_filters(
         let providers = if !cfg.mihomo.device_providers.is_empty() {
             cfg.mihomo.device_providers.clone()
         } else {
-            parse_provider_names(&current)
+            parse_user_provider_names(&current)
         };
         let providers: Vec<String> = providers
             .into_iter()
@@ -181,7 +181,7 @@ pub fn apply_routing_with_filters(
     let providers = if !cfg.mihomo.device_providers.is_empty() {
         cfg.mihomo.device_providers.clone()
     } else {
-        parse_provider_names(&current)
+        parse_user_provider_names(&current)
     };
     let providers: Vec<String> = providers
         .into_iter()

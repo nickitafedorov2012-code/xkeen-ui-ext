@@ -534,7 +534,7 @@ pub fn apply_whitelist_rules(
     let existing_groups = parse_existing_group_names(&clean);
     let static_proxies = parse_static_proxy_names(&clean);
     let has_providers_section = clean.contains("proxy-providers:");
-    let providers: Vec<String> = parse_provider_names(&clean)
+    let providers: Vec<String> = parse_user_provider_names(&clean)
         .into_iter()
         .filter(|p| !cfg.disabled_providers.iter().any(|dp| dp.eq_ignore_ascii_case(p.trim())))
         .collect();
@@ -862,7 +862,7 @@ pub fn apply_canary_rules_with_providers(yaml: &str, providers: &[String]) -> St
 
     let static_proxies = parse_static_proxy_names(&clean);
     let parsed_providers = if providers.is_empty() {
-        parse_provider_names(&clean)
+        parse_user_provider_names(&clean)
     } else {
         providers.to_vec()
     };
@@ -970,6 +970,6 @@ pub fn resolve_excluded_zapret_ips(zapret_cfg: &crate::config::ZapretConfig) -> 
 /// Включает все статические прокси и подписки (use:), а также DIRECT и REJECT.
 #[cfg(test)]
 pub fn apply_canary_rules(yaml: &str) -> String {
-    let providers = parse_provider_names(yaml);
+    let providers = parse_user_provider_names(yaml);
     apply_canary_rules_with_providers(yaml, &providers)
 }

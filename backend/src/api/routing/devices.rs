@@ -373,7 +373,7 @@ pub async fn set_device_routing(State(state): State<AppState>, Json(req): Json<D
 /// из config.yaml (универсальность — на другом железе имена свои).
 pub(super) fn device_providers_for(cfg: &config::AppConfig, yaml: &str) -> Vec<String> {
     if cfg.mihomo.device_providers.is_empty() {
-        routing::parse_provider_names(yaml)
+        routing::parse_user_provider_names(yaml)
     } else {
         cfg.mihomo.device_providers.clone()
     }
