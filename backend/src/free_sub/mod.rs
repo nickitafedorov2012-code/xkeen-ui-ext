@@ -1789,4 +1789,18 @@ mod tests {
         assert_eq!(nodes[0]["server"], "1.2.3.4");
         assert_eq!(nodes[1]["server"], "5.6.7.8");
     }
+
+    #[test]
+    fn test_8_embedded_seeds_contain_valid_nodes() {
+        let (wl_nodes, _) = parse_subscription_nodes_bounded(EMBEDDED_WHITELIST_SEED, MAX_PARSED_NODES);
+        assert!(
+            !wl_nodes.is_empty(),
+            "embedded_whitelist_seed.txt must contain valid fallback nodes"
+        );
+        let (vpn_nodes, _) = parse_subscription_nodes_bounded(EMBEDDED_VPN_SEED, MAX_PARSED_NODES);
+        assert!(
+            !vpn_nodes.is_empty(),
+            "embedded_vpn_seed.txt must contain valid fallback nodes"
+        );
+    }
 }
