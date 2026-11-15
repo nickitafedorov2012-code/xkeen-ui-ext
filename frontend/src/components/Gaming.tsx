@@ -421,7 +421,7 @@ export default function Gaming({ notify }: GamingProps) {
         custom_domains: uniqueDomains,
       }
 
-      const { ignored_game_conns, ...patchFields } = newCfg
+      const { ignored_game_conns, enabled: _omitEnabled, ...patchFields } = newCfg
       await apiPost('gaming/save', { gaming: patchFields })
       setCfg(newCfg)
       notify('✓ Настройки игрового режима успешно сохранены и применены')

@@ -709,5 +709,6 @@ describe('Gaming Component', () => {
     expect(savePath).toBe('gaming/save')
     expect(saveBody).not.toHaveProperty('ignored_game_conns')
     expect(saveBody).not.toHaveProperty('gaming_suspended')
+    expect((saveBody as { gaming?: Record<string, unknown> })?.gaming).not.toHaveProperty('enabled')
   })
 })

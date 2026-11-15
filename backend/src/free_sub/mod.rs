@@ -855,6 +855,7 @@ async fn publish_and_connect(
 
     if !preserved_active && !target_name.is_empty() {
         let _ = mihomo::switch_server(&state.http, &updated_cfg, &target_name).await;
+        let _ = crate::api::sync_whitelist_mode_tunnel(state, &target_name).await;
     }
 
     Ok((target_name, preserved_active))
@@ -1441,5 +1442,15 @@ mod tests {
         let yaml = "proxy-providers:\n  __free_sub_probe:\n    type: file\n    path: ./providers/__free_sub_probe.yaml\n  free_wl:\n    type: file\n    path: ./providers/free_wl.yaml\n";
         let user_provs = crate::routing::parse_user_provider_names(yaml);
         assert_eq!(user_provs, vec!["free_wl".to_string()]);
+    }
+
+    #[test]
+    fn test_6_publish_and_connect_syncs_whitelist_mode_tunnel() {
+        let src = include_str!("mod.rs");
+        let prod = &src[..src.find("#[cfg(test)]").unwrap_or(src.len())];
+        assert!(
+            prod.contains("crate::api::sync_whitelist_mode_tunnel(state, &target_name)"),
+            "publish_and_connect must call sync_whitelist_mode_tunnel after switching server so whitelist/VPN mode and iptables stay in sync"
+        );
     }
 }

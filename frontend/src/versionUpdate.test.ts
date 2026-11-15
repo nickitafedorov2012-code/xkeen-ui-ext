@@ -17,7 +17,8 @@ describe('bug 140: update check & version comparison', () => {
     expect(isUpdateAvailable('1.16.5', 'invalid-ver')).toBe(false)
     expect(isUpdateAvailable('v1.19.0', 'v1.19.1')).toBe(true)
     expect(isUpdateAvailable('v1.19.1', 'v1.19.0')).toBe(false)
-    expect(isUpdateAvailable('v1.19.0-rc1', 'v1.19.0')).toBe(false)
+    expect(isUpdateAvailable('v1.19.0-rc1', 'v1.19.0')).toBe(true)
+    expect(isUpdateAvailable('v1.19.0', 'v1.19.0-rc1')).toBe(false)
     expect(isUpdateAvailable('1.19.0.1', '1.19.0.2')).toBe(true)
     expect(isUpdateAvailable('1.19.0.2', '1.19.0.1')).toBe(false)
 

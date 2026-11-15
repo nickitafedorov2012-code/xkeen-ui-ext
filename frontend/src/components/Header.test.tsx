@@ -206,7 +206,7 @@ describe('Header Component — Settings Navigation, Zapret 1/2 Pill & 5 AM Updat
 
   it('shows green update badge for Mihomo core and blue update badge for Panel', async () => {
     vi.spyOn(api, 'apiGet').mockImplementation((path: string) => {
-      if (path === 'update/check') {
+      if (path.startsWith('update/check')) {
         return Promise.resolve({
           current: 'v1.5.20',
           latest: 'v1.5.21',
