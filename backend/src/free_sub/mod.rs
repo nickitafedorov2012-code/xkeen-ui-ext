@@ -1544,6 +1544,7 @@ pub async fn close_active_free_session_on_external_switch(state: &AppState) {
 }
 
 /// Загрузка кандидатов из источников (RU-зеркала -> активный туннель -> резервный seed-кэш на диске).
+/// Опрашивает источники параллельно с жёстким таймаутом 6 с, чтобы недоступные зеркала не задерживали старт на 40+ с.
 async fn fetch_sources_or_cache(
     state: &AppState,
     cfg: &AppConfig,
@@ -1554,36 +1555,64 @@ async fn fetch_sources_or_cache(
         FreeSubMode::Vpn => VPN_SOURCES,
         FreeSubMode::Whitelist => WHITELIST_SOURCES,
     };
-    let proxied = crate::updater::proxied_client(&cfg.mihomo_proxy_url());
+    // Прокси-клиент используем только если реально поднят не-DIRECT прокси, иначе лишний таймаут на 127.0.0.1:7890
+    let active_leaf = mihomo::get_active_server(&state.http, cfg)
+        .await
+        .ok()
+        .flatten()
+        .map(|s| s.id)
+        .unwrap_or_default();
+    let has_live_tunnel = !active_leaf.is_empty()
+        && !active_leaf.eq_ignore_ascii_case("DIRECT")
+        && !active_leaf.eq_ignore_ascii_case("REJECT");
+    let proxied = if has_live_tunnel {
+        crate::updater::proxied_client(&cfg.mihomo_proxy_url())
+    } else {
+        None
+    };
+
+    const FAST_SOURCE_TIMEOUT_SECS: u64 = 6;
+
+    // Параллельно запрашиваем каждый источник (перебирая зеркала внутри источника)
+    let futs = sources.iter().map(|src| {
+        let http = state.http.clone();
+        let proxied_ref = proxied.clone();
+        async move {
+            for url in src.urls {
+                let mut body_res =
+                    fetch_bounded_text(&http, url, MAX_RESPONSE_BYTES, FAST_SOURCE_TIMEOUT_SECS).await;
+                if body_res.is_err() {
+                    if let Some(ref p_client) = proxied_ref {
+                        body_res =
+                            fetch_bounded_text(p_client, url, MAX_RESPONSE_BYTES, FAST_SOURCE_TIMEOUT_SECS).await;
+                    }
+                }
+                if let Ok(text) = body_res {
+                    let (nodes, rejected) = parse_subscription_nodes_bounded(&text, MAX_PARSED_NODES);
+                    if !nodes.is_empty() {
+                        return Some((src.label.to_string(), nodes, rejected.len()));
+                    }
+                }
+            }
+            None
+        }
+    });
+
+    let results = futures_util::future::join_all(futs).await;
     let mut collected = Vec::new();
     let mut rejected_invalid = 0usize;
     let mut used_source: Option<String> = None;
 
-    for src in sources {
-        if collected.len() >= MAX_PARSED_NODES {
+    for item in results.into_iter().flatten() {
+        let (label, nodes, rej_count) = item;
+        rejected_invalid += rej_count;
+        let remaining = MAX_PARSED_NODES.saturating_sub(collected.len());
+        if remaining == 0 {
             break;
         }
-        for url in src.urls {
-            // 1) Прямой запрос (в т.ч. к российскому зеркалу gitverse.ru)
-            let mut body_res = fetch_bounded_text(&state.http, url, MAX_RESPONSE_BYTES, HTTP_FETCH_TIMEOUT_SECS).await;
-            // 2) Если напрямую не вышло и поднят активный туннель — пробуем через него
-            if body_res.is_err() {
-                if let Some(ref p_client) = proxied {
-                    body_res = fetch_bounded_text(p_client, url, MAX_RESPONSE_BYTES, HTTP_FETCH_TIMEOUT_SECS).await;
-                }
-            }
-            if let Ok(text) = body_res {
-                let remaining = MAX_PARSED_NODES.saturating_sub(collected.len());
-                let (nodes, rejected) = parse_subscription_nodes_bounded(&text, remaining);
-                rejected_invalid += rejected.len();
-                if !nodes.is_empty() {
-                    collected.extend(nodes);
-                    if used_source.is_none() {
-                        used_source = Some(src.label.to_string());
-                    }
-                    break;
-                }
-            }
+        collected.extend(nodes.into_iter().take(remaining));
+        if used_source.is_none() {
+            used_source = Some(label);
         }
     }
 

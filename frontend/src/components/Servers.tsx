@@ -392,7 +392,8 @@ export default function Servers({ notify, status, refresh }: Props) {
       if (flowOnly && getFlowStatus(s) !== 'ok') {
         return false
       }
-      if (hideOffline && !s.is_active && (s.ping_ms <= 0 || s.ping_ms >= 9999)) {
+      const isFreeSubCard = s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL'
+      if (hideOffline && !isFreeSubCard && !s.is_active && (s.ping_ms <= 0 || s.ping_ms >= 9999)) {
         return false
       }
       if (selectedProviders.size > 0) {
