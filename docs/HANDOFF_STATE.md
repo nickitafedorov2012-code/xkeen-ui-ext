@@ -51,3 +51,9 @@
 - [DONE] Шаг 5: `frontend/src/` — кнопка `🆓 Добавить бесплатные подписки` в шапке `Servers.tsx`, единые карточки в `ServerList.tsx` с «Отключить» / «Удалить» / «Узлы и история ▾», компонент `FreeSubPoolSubmenu.tsx`, удаление верхнего `FreeSubCard`.
 - [DONE] Шаг 6: Автотесты бэкенда и фронтенда (`cargo test`, `npm test`, `npm run build`).
 
+## Исправление багов из ревью (`review-2026-11-16/REVIEW.md` + живая проверка `192.168.1.1`)
+- [DONE] Батч 1 (`free_sub` + `mihomo` + `ServerList` UI): R11–R21, R26–R33 + сброс `PROXIES_CACHE` в `publish_and_connect` + live-прогресс в UI. Файлы: `backend/src/free_sub/mod.rs`, `backend/src/api/servers/mod.rs`, `backend/src/api/servers/subscriptions.rs`, `backend/src/mihomo.rs`, `frontend/src/components/servers/FreeSubPoolSubmenu.tsx`, `frontend/src/components/servers/ServerList.tsx`.
+- [DONE] Батч 2 (`backups.rs` + `system_ssh.rs` + `gaming.rs` + `override_sync.rs`): R01–R10, R53, R54 + регрессионные тесты.
+- [DONE] Батч 3 (`subscription_parser.rs` + `transaction.rs`): R22–R25, R48 + регрессионные тесты.
+- [DONE] Батч 4 (`watchdog.rs` + `devices.rs` + `traffic.rs` + `auth.rs` + `antigravity.rs` + `updater.rs` + `MihomoCoreModal.tsx`): R34–R47, R49–R52 + регрессионные тесты.
+

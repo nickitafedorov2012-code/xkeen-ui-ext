@@ -828,7 +828,9 @@ pub async fn connect_free_sub(
     let st_clone = state.clone();
     let mode = req.mode;
     tokio::spawn(async move {
-        let _ = crate::free_sub::start_one_click_connect(st_clone, mode).await;
+        if let Err(e) = crate::free_sub::start_one_click_connect(st_clone, mode).await {
+            crate::log_e!("[FREE-SUB] Ошибка подключения ({mode:?}): {e}");
+        }
     });
     api_ok(json!({
         "started": true,

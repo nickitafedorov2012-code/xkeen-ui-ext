@@ -550,7 +550,9 @@ pub async fn apply_routing(State(state): State<AppState>, Json(req): Json<Routin
         let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
         let cfg_guard = state.config.read().await;
         let dns_port = resolve_active_dns_port(&cfg_guard);
-        let _ = sync_full_tunnel_modes(&cfg_guard, redir_port, tproxy_port, dns_port).await;
+        if let Err(e) = sync_full_tunnel_modes(&cfg_guard, redir_port, tproxy_port, dns_port).await {
+            return api_err(format!("Маршруты устройств сохранены, но не удалось применить iptables: {e}"));
+        }
     }
 
     tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -747,11 +749,66 @@ pub struct SaveSchedulesReq {
     pub expected_revision: Option<String>,
 }
 
+fn is_valid_hhmm(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() != 5 || bytes[2] != b':' {
+        return false;
+    }
+    let Ok(hh) = s[0..2].parse::<u8>() else {
+        return false;
+    };
+    let Ok(mm) = s[3..5].parse::<u8>() else {
+        return false;
+    };
+    hh <= 23 && mm <= 59
+}
+
+/// R38: Валидация доменной модели расписаний до транзакции.
+pub fn validate_schedules(schedules: &[config::DeviceSchedule]) -> Result<(), String> {
+    let mut seen_ids = std::collections::HashSet::new();
+    for (idx, s) in schedules.iter().enumerate() {
+        let id = s.id.trim();
+        if id.is_empty() {
+            return Err(format!("Расписание #{}: пустой id", idx + 1));
+        }
+        if !seen_ids.insert(id.to_string()) {
+            return Err(format!("Повторяющийся id расписания: '{id}'"));
+        }
+        if !is_valid_hhmm(s.time_start.trim()) || !is_valid_hhmm(s.time_end.trim()) {
+            return Err(format!(
+                "Расписание '{id}': некорректное время (ожидается HH:MM 00:00–23:59)"
+            ));
+        }
+        if s.days.is_empty() || s.days.iter().any(|&d| !(1..=7).contains(&d)) {
+            return Err(format!(
+                "Расписание '{id}': дни недели должны быть от 1 до 7 и список не должен быть пустым"
+            ));
+        }
+        match s.action.as_str() {
+            "block" | "direct" => {}
+            "proxy" => {
+                if s.target_server.as_deref().map(|v| v.trim().is_empty()).unwrap_or(true) {
+                    return Err(format!(
+                        "Расписание '{id}': для действия 'proxy' требуется target_server"
+                    ));
+                }
+            }
+            other => {
+                return Err(format!("Расписание '{id}': неизвестное действие '{other}'"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// POST /api/schedules — сохранение расписаний
 pub async fn save_schedules(
     State(state): State<AppState>,
     axum::extract::Json(body): axum::extract::Json<SaveSchedulesReq>,
 ) -> Response {
+    if let Err(e) = validate_schedules(&body.schedules) {
+        return api_err(e);
+    }
     let mut tx = match ConfigTx::begin(&state).await {
         Ok(tx) => tx,
         Err(e) => return api_err(e),
@@ -792,4 +849,42 @@ pub async fn save_schedules(
 }
 
 // ==================== ИГРОВОЙ РЕЖИМ (GAMING MODE) =============
+
+#[cfg(test)]
+mod schedule_validation_tests {
+    use super::validate_schedules;
+    use crate::config::DeviceSchedule;
+
+    fn sample_sched(id: &str) -> DeviceSchedule {
+        DeviceSchedule {
+            id: id.into(),
+            ip: "192.168.1.50".into(),
+            action: "block".into(),
+            target_server: None,
+            time_start: "23:00".into(),
+            time_end: "07:00".into(),
+            days: vec![1, 2, 3],
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn regression_r38_validate_schedules_rejects_invalid_times_days_actions_and_dup_ids() {
+        assert!(validate_schedules(&[sample_sched("ok1")]).is_ok());
+
+        let mut bad_time = sample_sched("t1");
+        bad_time.time_start = "25:90".into();
+        assert!(validate_schedules(&[bad_time]).is_err());
+
+        let mut bad_day = sample_sched("d1");
+        bad_day.days = vec![8];
+        assert!(validate_schedules(&[bad_day]).is_err());
+
+        let mut bad_action = sample_sched("a1");
+        bad_action.action = "unknown".into();
+        assert!(validate_schedules(&[bad_action]).is_err());
+
+        assert!(validate_schedules(&[sample_sched("dup"), sample_sched("dup")]).is_err());
+    }
+}
 

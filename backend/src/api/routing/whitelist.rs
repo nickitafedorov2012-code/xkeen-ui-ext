@@ -130,7 +130,9 @@ pub async fn set_whitelist_strategy(
         let ports = routing::redir_ports(&yaml);
         let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
         let dns_port = resolve_active_dns_port(tx.config());
-        let _ = sync_full_tunnel_modes(tx.config(), redir_port, tproxy_port, dns_port).await;
+        if let Err(e) = sync_full_tunnel_modes(tx.config(), redir_port, tproxy_port, dns_port).await {
+            return api_err(format!("Стратегия сохранена, но не удалось применить правила iptables: {e}"));
+        }
     }
 
     log_i!("Стратегия белых списков переключена на: {:?}", body.strategy);
@@ -217,7 +219,9 @@ pub async fn toggle_whitelist_exclude(
         let ports = routing::redir_ports(&yaml);
         let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
         let dns_port = resolve_active_dns_port(tx.config());
-        let _ = sync_full_tunnel_modes(tx.config(), redir_port, tproxy_port, dns_port).await;
+        if let Err(e) = sync_full_tunnel_modes(tx.config(), redir_port, tproxy_port, dns_port).await {
+            return api_err(format!("Стратегия сохранена, но не удалось применить правила iptables: {e}"));
+        }
     }
 
     log_i!("Статус исключения устройства {} из белых списков: {}", id_clean, body.excluded);
@@ -557,7 +561,9 @@ pub async fn sync_whitelist_runtime_after_commit(state: &AppState, cfg: &config:
     let ports = routing::redir_ports(&yaml);
     let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
     let dns_port = resolve_active_dns_port(cfg);
-    sync_full_tunnel_modes(cfg, redir_port, tproxy_port, dns_port).await;
+    if let Err(e) = sync_full_tunnel_modes(cfg, redir_port, tproxy_port, dns_port).await {
+        log_w!("[WHITELIST] Ошибка синхронизации полного перехвата: {}", e);
+    }
     let _ = mihomo::close_server_connections(&state.http, cfg, routing::WHITELIST_GROUP_NAME).await;
 }
 

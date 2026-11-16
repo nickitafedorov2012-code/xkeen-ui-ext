@@ -272,6 +272,10 @@ pub fn settings_change_effects(old: &config::AppConfig, new: &config::AppConfig)
         || old.device_routing != new.device_routing
         || old.device_domain_rules != new.device_domain_rules
         || old.schedules != new.schedules
+        || old.whitelist != new.whitelist
+        || old.gaming != new.gaming
+        || old.zapret != new.zapret
+        || old.flow_server != new.flow_server
     {
         effects.push(SettingsEffect::RoutingYaml);
     }
@@ -281,7 +285,7 @@ pub fn settings_change_effects(old: &config::AppConfig, new: &config::AppConfig)
     {
         effects.push(SettingsEffect::IptablesTunnelModes);
     }
-    if old.adguard != new.adguard {
+    if old.adguard != new.adguard || old.adblock_enabled != new.adblock_enabled {
         effects.push(SettingsEffect::AdGuardSync);
     }
     effects
@@ -291,34 +295,41 @@ pub async fn put_settings(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let cfg_guard = state.config_lock.lock().await;
-    let current = (**state.config.read().await).clone();
-    let new_cfg = match merge_settings_update(&current, &body) {
+    // R07: выполняем merge и commit внутри одной транзакции ConfigTx без сброса блокировки,
+    // чтобы параллельное изменение (например, change-password) не затиралось устаревшим снимком.
+    let mut tx = match crate::transaction::ConfigTx::begin(&state).await {
+        Ok(t) => t,
+        Err(e) => return api_err(e),
+    };
+    let old_cfg = tx.config().clone();
+    let new_cfg = match merge_settings_update(&old_cfg, &body) {
         Ok(c) => c,
         Err(e) => return api_err(e),
     };
-    let effects = settings_change_effects(&current, &new_cfg);
+    let effects = settings_change_effects(&old_cfg, &new_cfg);
     let needs_routing_yaml = effects.contains(&SettingsEffect::RoutingYaml);
+    *tx.config_mut() = new_cfg.clone();
 
     let mut errors: Vec<String> = Vec::new();
     let mut pending: Vec<String> = Vec::new();
 
     if needs_routing_yaml {
-        drop(cfg_guard);
-        let new_cfg_for_tx = new_cfg.clone();
-        if let Err(e) = crate::api::commit_config_with_routing(&state, move |cfg| {
-            *cfg = new_cfg_for_tx;
-        })
-        .await
-        {
+        let yaml = match tx.read_yaml().await {
+            Ok(y) => y,
+            Err(e) => return api_err(format!("Ошибка чтения YAML маршрутов: {e}")),
+        };
+        let (new_yaml, _) = match crate::routing::apply_routing(&yaml, &new_cfg) {
+            Ok(res) => res,
+            Err(e) => return api_err(format!("Ошибка применения маршрутов: {e}")),
+        };
+        if let Err(e) = tx.set_yaml(new_yaml) {
+            return api_err(format!("Ошибка подготовки YAML маршрутов: {e}"));
+        }
+        if let Err(e) = tx.commit_and_reload().await {
             return api_err(format!("Ошибка сохранения и применения маршрутов: {e}"));
         }
-    } else {
-        if let Err(e) = config::save(&state.config_path, &new_cfg).await {
-            return api_err(format!("Ошибка сохранения конфига: {}", e));
-        }
-        *state.config.write().await = std::sync::Arc::new(new_cfg.clone());
-        drop(cfg_guard);
+    } else if let Err(e) = tx.commit().await {
+        return api_err(format!("Ошибка сохранения конфига: {}", e));
     }
 
     for eff in &effects {
@@ -338,16 +349,25 @@ pub async fn put_settings(
                     .unwrap_or_default();
                 let ports = crate::routing::redir_ports(&yaml);
                 let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
-                let dns_port = crate::routing::mihomo_dns_port(&new_cfg);
-                crate::api::routing::sync_full_tunnel_modes(&new_cfg, redir_port, tproxy_port, dns_port).await;
+                // R09: используем единое определение активного DNS (с учётом AdGuard)
+                let dns_port = resolve_active_dns_port(&new_cfg);
+                if let Err(e) = crate::api::routing::sync_full_tunnel_modes(&new_cfg, redir_port, tproxy_port, dns_port).await {
+                    errors.push(format!("iptables (полный перехват): {e}"));
+                }
             }
             SettingsEffect::AdGuardSync => {
-                let res = if new_cfg.adguard.enabled {
+                // R10: при изменении adblock_enabled через /api/settings синхронизируем защиту AdGuard
+                if old_cfg.adblock_enabled != new_cfg.adblock_enabled {
+                    if let Err(e) = crate::adguard::set_protection(&state.http, &new_cfg.adguard, new_cfg.adblock_enabled).await {
+                        errors.push(format!("AdGuard защита: {e}"));
+                    }
+                }
+                let res = if new_cfg.adguard.enabled || new_cfg.adblock_enabled {
                     let active_port = crate::adguard::detect_adguard_dns_port()
                         .unwrap_or(new_cfg.adguard.dns_port);
                     crate::adguard::apply_adguard_iptables(active_port)
                 } else {
-                    crate::adguard::remove_adguard_iptables()
+                    crate::adguard::remove_adguard_iptables_for_mihomo_config(&new_cfg.mihomo.config_path)
                 };
                 if let Err(e) = res {
                     errors.push(format!("AdGuard DNS редирект: {e}"));
@@ -620,7 +640,7 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
                         let ports = crate::routing::redir_ports(&new_yaml);
                         let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
                         let dns_port = resolve_active_dns_port(&tx_cfg);
-                        sync_full_tunnel_modes(&tx_cfg, redir_port, tproxy_port, dns_port).await;
+                        sync_full_tunnel_modes(&tx_cfg, redir_port, tproxy_port, dns_port).await?;
                         Ok(())
                     }
                     .await;
@@ -1457,5 +1477,17 @@ mod tests {
         restart_changed.logs.remote_syslog = "192.168.1.50:514".to_string();
         let eff_restart = settings_change_effects(&base, &restart_changed);
         assert!(eff_restart.contains(&SettingsEffect::RestartRequired("logs.remote_syslog")));
+
+        // R08: whitelist/gaming/zapret/flow_server должны назначать RoutingYaml
+        let eff_wl = settings_change_effects(&base, &tunnel_changed);
+        assert!(eff_wl.contains(&SettingsEffect::RoutingYaml));
+        let mut flow_changed = base.clone();
+        flow_changed.flow_server = Some("VPS-1".to_string());
+        assert!(settings_change_effects(&base, &flow_changed).contains(&SettingsEffect::RoutingYaml));
+
+        // R10: adblock_enabled должен назначать AdGuardSync
+        let mut adblock_changed = base.clone();
+        adblock_changed.adblock_enabled = !base.adblock_enabled;
+        assert!(settings_change_effects(&base, &adblock_changed).contains(&SettingsEffect::AdGuardSync));
     }
 }

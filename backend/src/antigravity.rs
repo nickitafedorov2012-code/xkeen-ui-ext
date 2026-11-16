@@ -885,8 +885,22 @@ pub fn select_route(mode: &str, own_proxy: &str, _target: &str) -> Route {
     }
 }
 
-/// Разбор и валидация собственного прокси (`[http://|https://][user:pass@]host:port`)
-pub fn parse_proxy_host_port(raw: &str) -> Result<(String, Option<String>), String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyScheme {
+    Http,
+    Socks5,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxySpec {
+    pub scheme: ProxyScheme,
+    pub addr: String,
+    pub auth: Option<String>,
+}
+
+/// Разбор и валидация собственного прокси (`[http://|socks5://][user:pass@]host:port`).
+/// R45: сохраняет тип транспорта и отвергает `https://`, чтобы учётные данные не уходили открытым текстом.
+pub fn parse_proxy_spec(raw: &str) -> Result<ProxySpec, String> {
     let s = raw.trim();
     if s.is_empty() {
         return Err("Пустой адрес прокси".into());
@@ -894,11 +908,17 @@ pub fn parse_proxy_host_port(raw: &str) -> Result<(String, Option<String>), Stri
     if s.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err("Адрес прокси содержит недопустимые пробелы или управляющие символы".into());
     }
-    let without_scheme = s
-        .strip_prefix("http://")
-        .or_else(|| s.strip_prefix("https://"))
-        .or_else(|| s.strip_prefix("socks5://"))
-        .unwrap_or(s);
+    let (scheme, without_scheme) = if let Some(rest) = s.strip_prefix("http://") {
+        (ProxyScheme::Http, rest)
+    } else if let Some(rest) = s.strip_prefix("socks5://") {
+        (ProxyScheme::Socks5, rest)
+    } else if s.starts_with("https://") {
+        return Err("HTTPS-прокси (TLS до прокси) не поддерживается для CONNECT-туннеля; используйте http:// или socks5://".into());
+    } else if let Some((other_scheme, _)) = s.split_once("://") {
+        return Err(format!("Неподдерживаемая схема прокси: {other_scheme}://"));
+    } else {
+        (ProxyScheme::Http, s)
+    };
     if without_scheme.is_empty() {
         return Err("Отсутствует host:port прокси".into());
     }
@@ -924,31 +944,192 @@ pub fn parse_proxy_host_port(raw: &str) -> Result<(String, Option<String>), Stri
     if port == 0 {
         return Err("Порт прокси не может быть 0".into());
     }
-    Ok((format!("{host}:{port}"), auth))
+    Ok(ProxySpec {
+        scheme,
+        addr: format!("{host}:{port}"),
+        auth,
+    })
+}
+
+#[allow(dead_code)]
+pub fn parse_proxy_host_port(raw: &str) -> Result<(String, Option<String>), String> {
+    let spec = parse_proxy_spec(raw)?;
+    Ok((spec.addr, spec.auth))
 }
 
 pub fn validate_own_proxy(raw: &str) -> Result<(), String> {
     if raw.trim().is_empty() {
         return Ok(());
     }
-    parse_proxy_host_port(raw).map(|_| ())
+    parse_proxy_spec(raw).map(|_| ())
 }
 
-async fn connect_via_http_proxy(
-    proxy_raw: &str,
+/// Буферизованное чтение HTTP-заголовков до `\r\n\r\n` с дедлайном, лимитом и сохранением хвоста (R46, R47).
+async fn read_http_head(
+    stream: &mut TcpStream,
+    max_bytes: usize,
+    timeout: std::time::Duration,
+) -> Result<(String, Vec<u8>), String> {
+    let mut buf = Vec::with_capacity(1024);
+    let mut tmp = [0u8; 1024];
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head_end = pos + 4;
+            let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+            let trailing = buf[head_end..].to_vec();
+            return Ok((head, trailing));
+        }
+        if buf.len() >= max_bytes {
+            return Err("Превышен размер HTTP-заголовков".to_string());
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err("Таймаут чтения HTTP-заголовков".to_string());
+        }
+        let rem = deadline - now;
+        let n = tokio::time::timeout(rem, stream.read(&mut tmp))
+            .await
+            .map_err(|_| "Таймаут чтения HTTP-заголовков".to_string())?
+            .map_err(|e| format!("Ошибка чтения из сокета: {e}"))?;
+        if n == 0 {
+            return Err("Соединение закрыто до завершения HTTP-заголовков".to_string());
+        }
+        let to_take = n.min(max_bytes.saturating_sub(buf.len()) + 4);
+        buf.extend_from_slice(&tmp[..to_take]);
+    }
+}
+
+async fn connect_via_socks5_proxy(
+    spec: &ProxySpec,
     destination: &str,
-) -> Result<TcpStream, String> {
-    let (proxy_addr, auth) = parse_proxy_host_port(proxy_raw)?;
+) -> Result<(TcpStream, Vec<u8>), String> {
     let mut stream = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        TcpStream::connect(&proxy_addr),
+        TcpStream::connect(&spec.addr),
     )
     .await
-    .map_err(|_| format!("Таймаут подключения к прокси {proxy_addr}"))?
-    .map_err(|e| format!("Ошибка подключения к прокси {proxy_addr}: {e}"))?;
+    .map_err(|_| format!("Таймаут подключения к SOCKS5-прокси {}", spec.addr))?
+    .map_err(|e| format!("Ошибка подключения к SOCKS5-прокси {}: {e}", spec.addr))?;
+
+    let (user, pass) = match &spec.auth {
+        Some(a) => match a.split_once(':') {
+            Some((u, p)) => (Some(u), Some(p)),
+            None => (Some(a.as_str()), Some("")),
+        },
+        None => (None, None),
+    };
+    let greeting: Vec<u8> = if user.is_some() {
+        vec![0x05, 0x02, 0x00, 0x02]
+    } else {
+        vec![0x05, 0x01, 0x00]
+    };
+    stream.write_all(&greeting).await.map_err(|e| format!("SOCKS5 greeting error: {e}"))?;
+
+    let mut method_resp = [0u8; 2];
+    tokio::time::timeout(std::time::Duration::from_secs(10), stream.read_exact(&mut method_resp))
+        .await
+        .map_err(|_| "Таймаут ответа SOCKS5".to_string())?
+        .map_err(|e| format!("Ошибка чтения ответа SOCKS5: {e}"))?;
+    if method_resp[0] != 0x05 {
+        return Err("Некорректная версия ответа SOCKS5".to_string());
+    }
+    match method_resp[1] {
+        0x00 => {}
+        0x02 => {
+            let (u, p) = (user.unwrap_or(""), pass.unwrap_or(""));
+            if u.len() > 255 || p.len() > 255 {
+                return Err("Слишком длинные логин/пароль SOCKS5".to_string());
+            }
+            let mut auth_req = Vec::with_capacity(3 + u.len() + p.len());
+            auth_req.push(0x01);
+            auth_req.push(u.len() as u8);
+            auth_req.extend_from_slice(u.as_bytes());
+            auth_req.push(p.len() as u8);
+            auth_req.extend_from_slice(p.as_bytes());
+            stream.write_all(&auth_req).await.map_err(|e| format!("SOCKS5 auth write error: {e}"))?;
+            let mut auth_resp = [0u8; 2];
+            tokio::time::timeout(std::time::Duration::from_secs(10), stream.read_exact(&mut auth_resp))
+                .await
+                .map_err(|_| "Таймаут SOCKS5-аутентификации".to_string())?
+                .map_err(|e| format!("Ошибка чтения ответа SOCKS5-аутентификации: {e}"))?;
+            if auth_resp[1] != 0x00 {
+                return Err("SOCKS5-прокси отклонил логин/пароль".to_string());
+            }
+        }
+        _ => return Err("SOCKS5-прокси не принял ни один метод аутентификации".to_string()),
+    }
+
+    let (host, port_str) = destination
+        .rsplit_once(':')
+        .ok_or_else(|| format!("Некорректный destination для SOCKS5: {destination}"))?;
+    let port: u16 = port_str.parse().map_err(|_| format!("Некорректный порт {port_str}"))?;
+
+    let mut req = Vec::with_capacity(7 + host.len());
+    req.extend_from_slice(&[0x05, 0x01, 0x00]);
+    if let Ok(ip) = host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::IpAddr>() {
+        match ip {
+            std::net::IpAddr::V4(v4) => {
+                req.push(0x01);
+                req.extend_from_slice(&v4.octets());
+            }
+            std::net::IpAddr::V6(v6) => {
+                req.push(0x04);
+                req.extend_from_slice(&v6.octets());
+            }
+        }
+    } else {
+        if host.len() > 255 {
+            return Err("Слишком длинное имя хоста для SOCKS5".to_string());
+        }
+        req.push(0x03);
+        req.push(host.len() as u8);
+        req.extend_from_slice(host.as_bytes());
+    }
+    req.extend_from_slice(&port.to_be_bytes());
+    stream.write_all(&req).await.map_err(|e| format!("SOCKS5 CONNECT write error: {e}"))?;
+
+    let mut hdr = [0u8; 4];
+    tokio::time::timeout(std::time::Duration::from_secs(10), stream.read_exact(&mut hdr))
+        .await
+        .map_err(|_| "Таймаут SOCKS5 CONNECT".to_string())?
+        .map_err(|e| format!("Ошибка чтения ответа SOCKS5 CONNECT: {e}"))?;
+    if hdr[0] != 0x05 || hdr[1] != 0x00 {
+        return Err(format!("SOCKS5-прокси отклонил подключение (код {})", hdr[1]));
+    }
+    let addr_len = match hdr[3] {
+        0x01 => 4usize,
+        0x04 => 16usize,
+        0x03 => {
+            let mut len_b = [0u8; 1];
+            stream.read_exact(&mut len_b).await.map_err(|e| format!("SOCKS5 domain len error: {e}"))?;
+            len_b[0] as usize
+        }
+        other => return Err(format!("Неизвестный ATYP SOCKS5: {other}")),
+    };
+    let mut skip = vec![0u8; addr_len + 2];
+    stream.read_exact(&mut skip).await.map_err(|e| format!("SOCKS5 bind addr read error: {e}"))?;
+    Ok((stream, Vec::new()))
+}
+
+async fn connect_via_upstream_proxy(
+    proxy_raw: &str,
+    destination: &str,
+) -> Result<(TcpStream, Vec<u8>), String> {
+    let spec = parse_proxy_spec(proxy_raw)?;
+    if spec.scheme == ProxyScheme::Socks5 {
+        return connect_via_socks5_proxy(&spec, destination).await;
+    }
+    let mut stream = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        TcpStream::connect(&spec.addr),
+    )
+    .await
+    .map_err(|_| format!("Таймаут подключения к прокси {}", spec.addr))?
+    .map_err(|e| format!("Ошибка подключения к прокси {}: {e}", spec.addr))?;
 
     let mut req = format!("CONNECT {destination} HTTP/1.1\r\nHost: {destination}\r\n");
-    if let Some(creds) = auth {
+    if let Some(creds) = spec.auth {
         use base64::Engine as _;
         let encoded = base64::engine::general_purpose::STANDARD.encode(creds.as_bytes());
         req.push_str(&format!("Proxy-Authorization: Basic {encoded}\r\n"));
@@ -960,17 +1141,17 @@ async fn connect_via_http_proxy(
         .await
         .map_err(|e| format!("Ошибка записи CONNECT в прокси: {e}"))?;
 
-    let mut resp_buf = [0u8; 512];
-    let n = tokio::time::timeout(std::time::Duration::from_secs(10), stream.read(&mut resp_buf))
-        .await
-        .map_err(|_| "Таймаут ответа от прокси".to_string())?
-        .map_err(|e| format!("Ошибка чтения ответа прокси: {e}"))?;
-    let resp_line = String::from_utf8_lossy(&resp_buf[..n]);
-    let first = resp_line.lines().next().unwrap_or("");
-    if !first.contains(" 200") {
+    let (head, trailing) = read_http_head(&mut stream, 16 * 1024, std::time::Duration::from_secs(10)).await?;
+    let first = head.lines().next().unwrap_or("");
+    let status_ok = first
+        .split_whitespace()
+        .nth(1)
+        .map(|code| code == "200")
+        .unwrap_or(false);
+    if !status_ok {
         return Err(format!("Прокси отклонил CONNECT: {first}"));
     }
-    Ok(stream)
+    Ok((stream, trailing))
 }
 
 /// Обработка клиентского HTTP CONNECT запроса (TCP splice без MITM)
@@ -993,13 +1174,10 @@ async fn handle_proxy_conn(mut client: TcpStream, mgr: Arc<AntigravityManager>) 
         }
     }
 
-    let mut buf = [0u8; 1024];
-    let n = match tokio::time::timeout(std::time::Duration::from_secs(10), client.read(&mut buf)).await {
-        Ok(Ok(n)) if n > 0 => n,
-        _ => return Ok(()),
+    let (req_str, client_trailing) = match read_http_head(&mut client, 16 * 1024, std::time::Duration::from_secs(10)).await {
+        Ok(res) => res,
+        Err(_) => return Ok(()),
     };
-
-    let req_str = String::from_utf8_lossy(&buf[..n]);
     let first_line = req_str.lines().next().unwrap_or("");
     let parts: Vec<&str> = first_line.split_whitespace().collect();
 
@@ -1045,8 +1223,8 @@ async fn handle_proxy_conn(mut client: TcpStream, mgr: Arc<AntigravityManager>) 
         }
     };
 
-    let mut server = match select_route(&mode, &own_proxy, &destination) {
-        Route::ViaOwnProxy(proxy_addr) => match connect_via_http_proxy(&proxy_addr, &destination).await {
+    let (mut server, server_trailing) = match select_route(&mode, &own_proxy, &destination) {
+        Route::ViaOwnProxy(proxy_addr) => match connect_via_upstream_proxy(&proxy_addr, &destination).await {
             Ok(s) => s,
             Err(e) => {
                 let resp = format!("HTTP/1.1 502 Bad Gateway\r\nX-Error: {}\r\n\r\n", e);
@@ -1056,7 +1234,7 @@ async fn handle_proxy_conn(mut client: TcpStream, mgr: Arc<AntigravityManager>) 
         },
         Route::ViaMihomo => {
             let mihomo_proxy = format!("127.0.0.1:{mihomo_port}");
-            match connect_via_http_proxy(&mihomo_proxy, &destination).await {
+            match connect_via_upstream_proxy(&mihomo_proxy, &destination).await {
                 Ok(s) => s,
                 Err(e) => {
                     let resp = format!("HTTP/1.1 502 Bad Gateway\r\nX-Error: {}\r\n\r\n", e);
@@ -1083,7 +1261,7 @@ async fn handle_proxy_conn(mut client: TcpStream, mgr: Arc<AntigravityManager>) 
             }
 
             match tokio::time::timeout(std::time::Duration::from_secs(10), TcpStream::connect(&addrs[..])).await {
-                Ok(Ok(s)) => s,
+                Ok(Ok(s)) => (s, Vec::new()),
                 Ok(Err(e)) => {
                     let resp = format!("HTTP/1.1 502 Bad Gateway\r\nX-Error: {}\r\n\r\n", e);
                     client.write_all(resp.as_bytes()).await?;
@@ -1100,6 +1278,12 @@ async fn handle_proxy_conn(mut client: TcpStream, mgr: Arc<AntigravityManager>) 
 
     // Отвечаем клиенту: 200 Connection Established
     client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
+    if !client_trailing.is_empty() {
+        server.write_all(&client_trailing).await?;
+    }
+    if !server_trailing.is_empty() {
+        client.write_all(&server_trailing).await?;
+    }
 
     // Прозрачный бидирекционный байтовый обмен (TCP splice)
     let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
@@ -1387,5 +1571,54 @@ mod tests {
             cleanup_joined.contains("-D INPUT") && cleanup_joined.contains("--dport 53129"),
             "Antigravity INPUT cleanup must remove rules:\n{cleanup_joined}"
         );
+    }
+
+    #[tokio::test]
+    async fn regression_r45_r46_r47_proxy_schemes_and_fragmented_http_head() {
+        // R45: https:// отвергается, socks5:// и http:// сохраняют схему
+        assert!(validate_own_proxy("https://user:pass@10.0.0.5:443").is_err());
+        let socks_spec = parse_proxy_spec("socks5://u:p@10.0.0.5:1080").unwrap();
+        assert_eq!(socks_spec.scheme, ProxyScheme::Socks5);
+        assert_eq!(socks_spec.addr, "10.0.0.5:1080");
+
+        // R46: фрагментированный ответ upstream CONNECT > 512 байт с trailing-байтами
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let (_req, _) = read_http_head(&mut sock, 4096, std::time::Duration::from_secs(2))
+                .await
+                .unwrap();
+            let big_hdr = format!(
+                "HTTP/1.1 200 Connection Established\r\nX-Pad: {}\r\n\r\nHELLO",
+                "A".repeat(600)
+            );
+            for chunk in big_hdr.as_bytes().chunks(17) {
+                sock.write_all(chunk).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+        });
+        let (_up, trailing) = connect_via_upstream_proxy(&format!("http://{addr}"), "example.com:443")
+            .await
+            .unwrap();
+        assert_eq!(trailing, b"HELLO");
+        srv.await.unwrap();
+
+        // R47: побайтово фрагментированный входящий запрос read_http_head сохраняет trailing-байты
+        let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        let cli = tokio::spawn(async move {
+            let mut s = TcpStream::connect(addr2).await.unwrap();
+            for b in b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\nTAIL" {
+                s.write_all(&[*b]).await.unwrap();
+            }
+        });
+        let (mut srv_sock, _) = listener2.accept().await.unwrap();
+        let (head, tail) = read_http_head(&mut srv_sock, 4096, std::time::Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(head.starts_with("CONNECT example.com:443 HTTP/1.1"));
+        assert_eq!(tail, b"TAIL");
+        cli.await.unwrap();
     }
 }

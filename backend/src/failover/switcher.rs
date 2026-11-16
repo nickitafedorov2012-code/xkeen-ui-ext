@@ -251,7 +251,9 @@ pub async fn handle_whitelist_transition(
                     let ports = crate::routing::redir_ports(&applied_yaml);
                     let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
                     let dns_port = crate::api::resolve_active_dns_port(&cur);
-                    crate::api::sync_full_tunnel_modes(&cur, redir_port, tproxy_port, dns_port).await;
+                    if let Err(e) = crate::api::sync_full_tunnel_modes(&cur, redir_port, tproxy_port, dns_port).await {
+                        crate::log_w!("[FAILOVER] Ошибка синхронизации iptables: {}", e);
+                    }
                 }
                 Err(e) => {
                     crate::log_e!("[FAILOVER] Режим Белых списков не переключён — ядро не приняло конфигурацию: {e}");

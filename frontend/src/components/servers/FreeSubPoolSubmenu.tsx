@@ -69,7 +69,7 @@ export function FreeSubPoolSubmenu({ mode, notify, onUpdated, open }: Props) {
 
   const counterText =
     pool && pool.pool_total > 0
-      ? `${pool.pool_index != null ? pool.pool_index + 1 : '—'} / ${pool.pool_total}`
+      ? `${pool.pool_index != null && pool.pool_index > 0 ? pool.pool_index : '—'} / ${pool.pool_total}`
       : '0 / 0'
 
   return (

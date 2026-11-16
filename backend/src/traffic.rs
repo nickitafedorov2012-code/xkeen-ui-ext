@@ -16,6 +16,25 @@ pub static WHITELIST_UP: AtomicU64 = AtomicU64::new(0);
 pub static TOTAL_WHITELIST_BYTES: AtomicU64 = AtomicU64::new(0);
 pub static TOTAL_DIRECT_BYTES: AtomicU64 = AtomicU64::new(0);
 pub static TOTAL_PROXY_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static TOTAL_WHITELIST_DOWN_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static TOTAL_WHITELIST_UP_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static TOTAL_PROXY_DOWN_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static TOTAL_PROXY_UP_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Возвращает накопленные `(down_bytes, up_bytes)` для режима БС или обычного прокси.
+pub fn get_mode_up_down_bytes(is_whitelist: bool) -> (u64, u64) {
+    if is_whitelist {
+        (
+            TOTAL_WHITELIST_DOWN_BYTES.load(Ordering::Relaxed),
+            TOTAL_WHITELIST_UP_BYTES.load(Ordering::Relaxed),
+        )
+    } else {
+        (
+            TOTAL_PROXY_DOWN_BYTES.load(Ordering::Relaxed),
+            TOTAL_PROXY_UP_BYTES.load(Ordering::Relaxed),
+        )
+    }
+}
 pub static WHITELIST_ACTIVE: AtomicBool = AtomicBool::new(false);
 pub static DIRECT_IS_HARDWARE: AtomicBool = AtomicBool::new(false);
 
@@ -318,8 +337,14 @@ pub fn shutdown() {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ConnectionsTrafficDeltas {
     pub direct_bytes: u64,
+    pub direct_down_bytes: u64,
+    pub direct_up_bytes: u64,
     pub proxy_bytes: u64,
+    pub proxy_down_bytes: u64,
+    pub proxy_up_bytes: u64,
     pub whitelist_bytes: u64,
+    pub whitelist_down_bytes: u64,
+    pub whitelist_up_bytes: u64,
     pub provider_deltas: std::collections::HashMap<String, u64>,
 }
 
@@ -342,59 +367,86 @@ pub fn is_connection_direct(conn: &serde_json::Value) -> bool {
     false
 }
 
-/// Вычисление дельт трафика соединений Mihomo /connections (баги 72, 73).
-/// * DIRECT-соединения идут в `direct_bytes` и не попадают ни в VPS/БС, ни в квоту подписки (72).
-/// * Остальное — в `whitelist_bytes` (если активен БС или цепочка идёт через группу БС) либо в `proxy_bytes`.
-/// * Квота подписки (`provider_deltas`) списывается только с той подписки, через узел которой идёт цепочка (73).
-/// * Соединения, которых больше нет в ответе, удаляются из `prev_conns`, чтобы карта не росла бесконечно.
+/// Вычисление дельт трафика соединений Mihomo /connections (баги 72, 73, R39–R42).
+/// * `is_baseline_only = true` используется на первом снимке после старта панели,
+///   чтобы уже открытые соединения не давали повторного учёта старых байтов (R40).
+/// * Если в JSON нет массива `connections` (например, 401/500), `prev_conns` не очищается (R41).
+pub fn split_connections_delta_with_options(
+    connections_json: &serde_json::Value,
+    prev_conns: &mut std::collections::HashMap<String, (u64, u64)>,
+    server_to_provider: &std::collections::HashMap<String, String>,
+    whitelist_active: bool,
+    is_baseline_only: bool,
+) -> ConnectionsTrafficDeltas {
+    let mut deltas = ConnectionsTrafficDeltas::default();
+    let Some(arr) = connections_json.get("connections").and_then(|c| c.as_array()) else {
+        return deltas;
+    };
+    let mut seen = std::collections::HashSet::new();
+    for conn in arr {
+        let id = conn.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if id.is_empty() {
+            continue;
+        }
+        let upload = conn.get("upload").and_then(|v| v.as_u64()).unwrap_or(0);
+        let download = conn.get("download").and_then(|v| v.as_u64()).unwrap_or(0);
+        seen.insert(id.clone());
+        let prev = prev_conns.insert(id, (upload, download)).unwrap_or((0, 0));
+        if is_baseline_only {
+            continue;
+        }
+        let up_delta = upload.saturating_sub(prev.0);
+        let down_delta = download.saturating_sub(prev.1);
+        let delta = up_delta + down_delta;
+        if delta == 0 {
+            continue;
+        }
+
+        if is_connection_direct(conn) {
+            deltas.direct_bytes += delta;
+            deltas.direct_down_bytes += down_delta;
+            deltas.direct_up_bytes += up_delta;
+            continue;
+        }
+
+        let chains: Vec<&str> = conn
+            .get("chains")
+            .and_then(|c| c.as_array())
+            .map(|c| c.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        let via_wl_group = chains.iter().any(|s| s.contains("Whitelist") || s.contains("Белый"));
+        if whitelist_active || via_wl_group {
+            deltas.whitelist_bytes += delta;
+            deltas.whitelist_down_bytes += down_delta;
+            deltas.whitelist_up_bytes += up_delta;
+        } else {
+            deltas.proxy_bytes += delta;
+            deltas.proxy_down_bytes += down_delta;
+            deltas.proxy_up_bytes += up_delta;
+        }
+        if let Some(prov) = chains.iter().find_map(|name| server_to_provider.get(*name)) {
+            if prov != crate::vkturn::PROVIDER_ID {
+                *deltas.provider_deltas.entry(prov.clone()).or_insert(0) += delta;
+            }
+        }
+    }
+    prev_conns.retain(|id, _| seen.contains(id));
+    deltas
+}
+
 pub fn split_connections_delta_with_providers(
     connections_json: &serde_json::Value,
     prev_conns: &mut std::collections::HashMap<String, (u64, u64)>,
     server_to_provider: &std::collections::HashMap<String, String>,
     whitelist_active: bool,
 ) -> ConnectionsTrafficDeltas {
-    let mut deltas = ConnectionsTrafficDeltas::default();
-    let mut seen = std::collections::HashSet::new();
-    if let Some(arr) = connections_json.get("connections").and_then(|c| c.as_array()) {
-        for conn in arr {
-            let id = conn.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            if id.is_empty() {
-                continue;
-            }
-            let upload = conn.get("upload").and_then(|v| v.as_u64()).unwrap_or(0);
-            let download = conn.get("download").and_then(|v| v.as_u64()).unwrap_or(0);
-            seen.insert(id.clone());
-            let prev = prev_conns.insert(id, (upload, download)).unwrap_or((0, 0));
-            let delta = upload.saturating_sub(prev.0) + download.saturating_sub(prev.1);
-            if delta == 0 {
-                continue;
-            }
-
-            if is_connection_direct(conn) {
-                deltas.direct_bytes += delta;
-                continue;
-            }
-
-            let chains: Vec<&str> = conn
-                .get("chains")
-                .and_then(|c| c.as_array())
-                .map(|c| c.iter().filter_map(|v| v.as_str()).collect())
-                .unwrap_or_default();
-            let via_wl_group = chains.iter().any(|s| s.contains("Whitelist") || s.contains("Белый"));
-            if whitelist_active || via_wl_group {
-                deltas.whitelist_bytes += delta;
-            } else {
-                deltas.proxy_bytes += delta;
-            }
-            if let Some(prov) = chains.iter().find_map(|name| server_to_provider.get(*name)) {
-                if prov != crate::vkturn::PROVIDER_ID {
-                    *deltas.provider_deltas.entry(prov.clone()).or_insert(0) += delta;
-                }
-            }
-        }
-    }
-    prev_conns.retain(|id, _| seen.contains(id));
-    deltas
+    split_connections_delta_with_options(
+        connections_json,
+        prev_conns,
+        server_to_provider,
+        whitelist_active,
+        false,
+    )
 }
 
 /// Совместимость: разбиение без привязки к подпискам.
@@ -410,11 +462,29 @@ pub fn split_connections_delta(
     )
 }
 
-/// Доля не-DIRECT трафика Mihomo в промилле по последнему опросу /connections (для скоростей из /traffic).
-static NON_DIRECT_PERMILLE: AtomicU64 = AtomicU64::new(1000);
+/// Раздельные доли не-DIRECT трафика Mihomo в промилле по направлениям (R42).
+static NON_DIRECT_DOWN_PERMILLE: AtomicU64 = AtomicU64::new(1000);
+static NON_DIRECT_UP_PERMILLE: AtomicU64 = AtomicU64::new(1000);
 
-fn scale_by_non_direct(v: u64) -> u64 {
-    v.saturating_mul(NON_DIRECT_PERMILLE.load(Ordering::Relaxed)) / 1000
+fn scale_down_by_non_direct(v: u64) -> u64 {
+    v.saturating_mul(NON_DIRECT_DOWN_PERMILLE.load(Ordering::Relaxed)) / 1000
+}
+
+fn scale_up_by_non_direct(v: u64) -> u64 {
+    v.saturating_mul(NON_DIRECT_UP_PERMILLE.load(Ordering::Relaxed)) / 1000
+}
+
+pub fn update_non_direct_permille(d: &ConnectionsTrafficDeltas) {
+    let non_direct_down = d.proxy_down_bytes + d.whitelist_down_bytes;
+    let total_down = non_direct_down + d.direct_down_bytes;
+    if total_down > 0 {
+        NON_DIRECT_DOWN_PERMILLE.store(non_direct_down * 1000 / total_down, Ordering::Relaxed);
+    }
+    let non_direct_up = d.proxy_up_bytes + d.whitelist_up_bytes;
+    let total_up = non_direct_up + d.direct_up_bytes;
+    if total_up > 0 {
+        NON_DIRECT_UP_PERMILLE.store(non_direct_up * 1000 / total_up, Ordering::Relaxed);
+    }
 }
 
 /// Переключатель маппинга направлений `/traffic` Mihomo (`up -> down`, `down -> up`) (баг 74).
@@ -430,8 +500,8 @@ pub fn apply_traffic_frame(msg: &MihomoTrafficChunk) -> (u64, u64) {
     } else {
         (msg.down, msg.up)
     };
-    let down = scale_by_non_direct(raw_down);
-    let up = scale_by_non_direct(raw_up);
+    let down = scale_down_by_non_direct(raw_down);
+    let up = scale_up_by_non_direct(raw_up);
     let is_wl_now = WHITELIST_ACTIVE.load(Ordering::Relaxed);
     if is_wl_now {
         WHITELIST_DOWN.store(down, Ordering::Relaxed);
@@ -447,10 +517,75 @@ pub fn apply_traffic_frame(msg: &MihomoTrafficChunk) -> (u64, u64) {
     (down, up)
 }
 
-/// Учёт трафика по соединениям Mihomo (баги 72, 73): раз в 2 с GET /connections, раз в 30 с —
+/// R39: Учитывает трафик коротких/закрывшихся между опросами соединений из cumulative uploadTotal/downloadTotal.
+pub fn reconcile_closed_connections_delta(
+    connections_json: &serde_json::Value,
+    prev_totals: &mut Option<(u64, u64)>,
+    d: &mut ConnectionsTrafficDeltas,
+    whitelist_active: bool,
+    active_provider: Option<&str>,
+) {
+    let Some(cur_up) = connections_json.get("uploadTotal").and_then(|v| v.as_u64()) else {
+        return;
+    };
+    let Some(cur_down) = connections_json.get("downloadTotal").and_then(|v| v.as_u64()) else {
+        return;
+    };
+    let Some((prev_up, prev_down)) = *prev_totals else {
+        *prev_totals = Some((cur_up, cur_down));
+        return;
+    };
+    *prev_totals = Some((cur_up, cur_down));
+
+    // Если ядро Mihomo перезапустилось, cumulative счётчики обнуляются — не вычитаем
+    if cur_up < prev_up || cur_down < prev_down {
+        return;
+    }
+    let total_up_delta = cur_up - prev_up;
+    let total_down_delta = cur_down - prev_down;
+
+    let accounted_up = d.direct_up_bytes + d.proxy_up_bytes + d.whitelist_up_bytes;
+    let accounted_down = d.direct_down_bytes + d.proxy_down_bytes + d.whitelist_down_bytes;
+    let closed_up = total_up_delta.saturating_sub(accounted_up);
+    let closed_down = total_down_delta.saturating_sub(accounted_down);
+    if closed_up == 0 && closed_down == 0 {
+        return;
+    }
+
+    let non_direct_up = closed_up.saturating_mul(NON_DIRECT_UP_PERMILLE.load(Ordering::Relaxed)) / 1000;
+    let non_direct_down = closed_down.saturating_mul(NON_DIRECT_DOWN_PERMILLE.load(Ordering::Relaxed)) / 1000;
+    let direct_up = closed_up - non_direct_up;
+    let direct_down = closed_down - non_direct_down;
+
+    d.direct_up_bytes += direct_up;
+    d.direct_down_bytes += direct_down;
+    d.direct_bytes += direct_up + direct_down;
+
+    let non_direct_total = non_direct_up + non_direct_down;
+    if non_direct_total > 0 {
+        if whitelist_active {
+            d.whitelist_up_bytes += non_direct_up;
+            d.whitelist_down_bytes += non_direct_down;
+            d.whitelist_bytes += non_direct_total;
+        } else {
+            d.proxy_up_bytes += non_direct_up;
+            d.proxy_down_bytes += non_direct_down;
+            d.proxy_bytes += non_direct_total;
+        }
+        if let Some(prov) = active_provider {
+            if prov != crate::vkturn::PROVIDER_ID {
+                *d.provider_deltas.entry(prov.to_string()).or_insert(0) += non_direct_total;
+            }
+        }
+    }
+}
+
+/// Учёт трафика по соединениям Mihomo (баги 72, 73, R39–R42): раз в 2 с GET /connections, раз в 30 с —
 /// карта «узел → подписка» из /providers/proxies.
 async fn run_connections_accounting(state: AppState) {
     let mut prev: std::collections::HashMap<String, (u64, u64)> = std::collections::HashMap::new();
+    let mut prev_totals: Option<(u64, u64)> = None;
+    let mut baseline_initialized = false;
     let mut node_to_provider: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let mut last_map_refresh: Option<std::time::Instant> = None;
     loop {
@@ -477,26 +612,53 @@ async fn run_connections_accounting(state: AppState) {
             req = req.header("Authorization", format!("Bearer {}", cfg.mihomo.secret));
         }
         if let Ok(resp) = req.send().await {
-            if let Ok(json) = resp.json::<serde_json::Value>().await {
-                let d = split_connections_delta_with_providers(
-                    &json,
-                    &mut prev,
-                    &node_to_provider,
-                    WHITELIST_ACTIVE.load(Ordering::Relaxed),
-                );
-                TOTAL_PROXY_BYTES.fetch_add(d.proxy_bytes, Ordering::Relaxed);
-                TOTAL_WHITELIST_BYTES.fetch_add(d.whitelist_bytes, Ordering::Relaxed);
-                // Mihomo DIRECT выходит с роутера (OUTPUT) и не виден цепочке FORWARD XKEEN_DIRECT;
-                // без аппаратного учёта Direct считается как WAN − прокси и уже включает эти байты.
-                if DIRECT_IS_HARDWARE.load(Ordering::Relaxed) {
-                    TOTAL_DIRECT_BYTES.fetch_add(d.direct_bytes, Ordering::Relaxed);
-                }
-                for (prov, bytes) in &d.provider_deltas {
-                    add_provider_live_delta(prov, *bytes);
-                }
-                let total = d.direct_bytes + d.proxy_bytes + d.whitelist_bytes;
-                if total > 0 {
-                    NON_DIRECT_PERMILLE.store((d.proxy_bytes + d.whitelist_bytes) * 1000 / total, Ordering::Relaxed);
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if json.get("connections").and_then(|c| c.as_array()).is_some() {
+                        let wl_active = WHITELIST_ACTIVE.load(Ordering::Relaxed);
+                        let mut d = split_connections_delta_with_options(
+                            &json,
+                            &mut prev,
+                            &node_to_provider,
+                            wl_active,
+                            !baseline_initialized,
+                        );
+                        if !baseline_initialized {
+                            if let (Some(u), Some(dl)) = (
+                                json.get("uploadTotal").and_then(|v| v.as_u64()),
+                                json.get("downloadTotal").and_then(|v| v.as_u64()),
+                            ) {
+                                prev_totals = Some((u, dl));
+                            }
+                            baseline_initialized = true;
+                        } else {
+                            let active_prov = crate::mihomo::get_active_server(&state.http, &cfg)
+                                .await
+                                .ok()
+                                .flatten()
+                                .and_then(|s| node_to_provider.get(&s.id).cloned());
+                            reconcile_closed_connections_delta(
+                                &json,
+                                &mut prev_totals,
+                                &mut d,
+                                wl_active,
+                                active_prov.as_deref(),
+                            );
+                            TOTAL_PROXY_BYTES.fetch_add(d.proxy_bytes, Ordering::Relaxed);
+                            TOTAL_PROXY_DOWN_BYTES.fetch_add(d.proxy_down_bytes, Ordering::Relaxed);
+                            TOTAL_PROXY_UP_BYTES.fetch_add(d.proxy_up_bytes, Ordering::Relaxed);
+                            TOTAL_WHITELIST_BYTES.fetch_add(d.whitelist_bytes, Ordering::Relaxed);
+                            TOTAL_WHITELIST_DOWN_BYTES.fetch_add(d.whitelist_down_bytes, Ordering::Relaxed);
+                            TOTAL_WHITELIST_UP_BYTES.fetch_add(d.whitelist_up_bytes, Ordering::Relaxed);
+                            if DIRECT_IS_HARDWARE.load(Ordering::Relaxed) {
+                                TOTAL_DIRECT_BYTES.fetch_add(d.direct_bytes, Ordering::Relaxed);
+                            }
+                            for (prov, bytes) in &d.provider_deltas {
+                                add_provider_live_delta(prov, *bytes);
+                            }
+                            update_non_direct_permille(&d);
+                        }
+                    }
                 }
             }
         }
@@ -862,7 +1024,8 @@ mod tests {
     fn test_anti_regression_traffic_direction_mihomo_to_client_perspective() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_traffic("all");
-        NON_DIRECT_PERMILLE.store(1000, Ordering::Relaxed);
+        NON_DIRECT_DOWN_PERMILLE.store(1000, Ordering::Relaxed);
+        NON_DIRECT_UP_PERMILLE.store(1000, Ordering::Relaxed);
         set_whitelist_active(false);
         // Проверка: Mihomo chunk 'up' (данные, отдаваемые прокси клиенту) парсится
         // и направляется в Загрузку (DOWN), а chunk 'down' (от клиента к прокси) — в Отдачу (UP).
@@ -883,7 +1046,8 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Сбросим для чистоты теста
         reset_traffic("all");
-        NON_DIRECT_PERMILLE.store(1000, Ordering::Relaxed);
+        NON_DIRECT_DOWN_PERMILLE.store(1000, Ordering::Relaxed);
+        NON_DIRECT_UP_PERMILLE.store(1000, Ordering::Relaxed);
         set_whitelist_active(false);
 
         // 1. При неактивном Whitelist кадр /traffic идёт в PROXY (VPS Безлимит)
@@ -1200,7 +1364,8 @@ mod tests {
     #[test]
     fn regression_bug_75b_traffic_tests_call_production_code() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        NON_DIRECT_PERMILLE.store(1000, Ordering::Relaxed);
+        NON_DIRECT_DOWN_PERMILLE.store(1000, Ordering::Relaxed);
+        NON_DIRECT_UP_PERMILLE.store(1000, Ordering::Relaxed);
         set_whitelist_active(false);
         let msg = MihomoTrafficChunk { up: 1200, down: 300 };
         let (down, up) = apply_traffic_frame(&msg);
@@ -1225,7 +1390,8 @@ mod tests {
     fn regression_bug_74b_direction_mapping_is_single_switch() {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_traffic("all");
-        NON_DIRECT_PERMILLE.store(1000, Ordering::Relaxed);
+        NON_DIRECT_DOWN_PERMILLE.store(1000, Ordering::Relaxed);
+        NON_DIRECT_UP_PERMILLE.store(1000, Ordering::Relaxed);
         set_whitelist_active(false);
 
         let msg = MihomoTrafficChunk { up: 9000, down: 1500 };
@@ -1236,6 +1402,61 @@ mod tests {
             assert_eq!((down, up), (1500, 9000));
         }
         assert!(frame_direction_swapped(), "current router behavior expects swapped Mihomo up->down until verified on 192.168.1.1");
+        reset_traffic("all");
+    }
+
+    #[test]
+    fn regression_r39_r40_r41_r42_connections_accounting() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_traffic("all");
+        NON_DIRECT_DOWN_PERMILLE.store(1000, Ordering::Relaxed);
+        NON_DIRECT_UP_PERMILLE.store(1000, Ordering::Relaxed);
+
+        let mut prev = std::collections::HashMap::new();
+        let mut s2p = std::collections::HashMap::new();
+        s2p.insert("Node1".to_string(), "sub_a".to_string());
+
+        // R40: Первый снимок после рестарта только устанавливает baseline
+        let snap1 = serde_json::json!({
+            "uploadTotal": 1000,
+            "downloadTotal": 5000,
+            "connections": [
+                { "id": "c1", "upload": 1000, "download": 5000, "chains": ["Node1", "PROXY"] }
+            ]
+        });
+        let d1 = split_connections_delta_with_options(&snap1, &mut prev, &s2p, false, true);
+        assert_eq!(d1.proxy_bytes, 0);
+        assert_eq!(prev.get("c1"), Some(&(1000, 5000)));
+
+        // R41: Ошибочный JSON (без массива connections) не стирает baseline
+        let err_json = serde_json::json!({ "message": "Unauthorized" });
+        let _ = split_connections_delta_with_options(&err_json, &mut prev, &s2p, false, false);
+        assert_eq!(prev.get("c1"), Some(&(1000, 5000)));
+
+        // R42: Раздельные доли направлений при DIRECT download + VPN upload
+        let mut d_mix = ConnectionsTrafficDeltas {
+            direct_down_bytes: 1000,
+            direct_up_bytes: 0,
+            direct_bytes: 1000,
+            proxy_down_bytes: 0,
+            proxy_up_bytes: 500,
+            proxy_bytes: 500,
+            ..Default::default()
+        };
+        update_non_direct_permille(&d_mix);
+        let (down_spd, up_spd) = apply_traffic_frame(&MihomoTrafficChunk { up: 1000, down: 500 });
+        assert_eq!(down_spd, 0, "DIRECT download не должен рисовать VPN download");
+        assert_eq!(up_spd, 500, "VPN upload должен сохраняться полностью");
+
+        // R39: Короткое закрывшееся соединение между снимками учитывается через cumulative totals
+        NON_DIRECT_DOWN_PERMILLE.store(1000, Ordering::Relaxed);
+        NON_DIRECT_UP_PERMILLE.store(1000, Ordering::Relaxed);
+        let mut prev_totals = Some((1000, 5000));
+        let mut d_closed = ConnectionsTrafficDeltas::default();
+        let snap2 = serde_json::json!({ "uploadTotal": 1200, "downloadTotal": 5800 });
+        reconcile_closed_connections_delta(&snap2, &mut prev_totals, &mut d_closed, false, Some("sub_a"));
+        assert_eq!(d_closed.proxy_bytes, 1000);
+        assert_eq!(d_closed.provider_deltas.get("sub_a"), Some(&1000));
         reset_traffic("all");
     }
 }

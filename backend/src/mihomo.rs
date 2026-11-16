@@ -176,6 +176,7 @@ pub async fn close_all_connections(http: &reqwest::Client, cfg: &AppConfig) -> R
 }
 
 /// Возвращает количество активных соединений в ядре Mihomo.
+#[allow(dead_code)]
 pub async fn get_connections_count(http: &reqwest::Client, cfg: &AppConfig) -> Result<usize, String> {
     let val = m_get(http, cfg, "/connections").await?;
     Ok(val
@@ -183,6 +184,37 @@ pub async fn get_connections_count(http: &reqwest::Client, cfg: &AppConfig) -> R
         .and_then(|c| c.as_array())
         .map(|a| a.len())
         .unwrap_or(0))
+}
+
+/// Возвращает количество активных соединений Mihomo, проходящих через конкретный узел.
+pub async fn get_node_connections_count(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    node_id: &str,
+) -> Result<usize, String> {
+    let val = m_get(http, cfg, "/connections").await?;
+    let conns = val
+        .get("connections")
+        .and_then(|c| c.as_array())
+        .map(|a| a.as_slice())
+        .unwrap_or(&[]);
+    let target_lower = node_id.to_lowercase();
+    let count = conns
+        .iter()
+        .filter(|c| {
+            c.get("chains")
+                .and_then(|ch| ch.as_array())
+                .map(|arr| {
+                    arr.iter().any(|s| {
+                        s.as_str()
+                            .map(|st| st.to_lowercase() == target_lower)
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        })
+        .count();
+    Ok(count)
 }
 
 /// Селективный сброс сокетов: закрывает только соединения, проходящие через указанный сервер.

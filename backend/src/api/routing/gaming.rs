@@ -299,7 +299,7 @@ pub(super) async fn apply_and_verify_gaming(
     let ports = routing::redir_ports(&new_yaml);
     let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
     let dns_port = resolve_active_dns_port(tx.config());
-    let _ = sync_full_tunnel_modes(tx.config(), redir_port, tproxy_port, dns_port).await;
+    sync_full_tunnel_modes(tx.config(), redir_port, tproxy_port, dns_port).await?;
 
     Ok(())
 }
@@ -872,25 +872,37 @@ pub async fn resync_full_tunnel_from_disk(cfg: &config::AppConfig) {
     let ports = routing::redir_ports(&yaml);
     let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
     let dns_port = resolve_active_dns_port(cfg);
-    sync_full_tunnel_modes(cfg, redir_port, tproxy_port, dns_port).await;
+    if let Err(e) = sync_full_tunnel_modes(cfg, redir_port, tproxy_port, dns_port).await {
+        log_w!("[TUNNEL] Ошибка пересинхронизации полного перехвата: {}", e);
+    }
 }
 
-pub async fn sync_full_tunnel_modes(cfg: &config::AppConfig, redir_port: u16, tproxy_port: u16, dns_port: u16) {
+pub async fn sync_full_tunnel_modes(
+    cfg: &config::AppConfig,
+    redir_port: u16,
+    tproxy_port: u16,
+    dns_port: u16,
+) -> Result<(), String> {
     let want_bs = cfg.whitelist.enabled;
     let want_gaming = cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility;
     // Ядро недоступно и при аварии (сторож), и при штатной остановке служб пользователем:
     // DHCP-монитор и другие фоновые задачи не должны ставить перехват в остановленный Mihomo.
     let mihomo_down = crate::watchdog::is_mihomo_down() || crate::watchdog::is_service_stopped();
     let (bs_active, gaming_active) = effective_full_tunnel_flags(want_bs, want_gaming, mihomo_down);
+    let mut errs = Vec::new();
     if mihomo_down && (want_bs || want_gaming) {
         log_w!("[TUNNEL] Mihomo недоступен — полный перехват не устанавливается до восстановления ядра (защита от блэкаута)");
         let mut off = cfg.clone();
         off.whitelist.enabled = false;
         off.gaming.enabled = false;
-        let _ = sync_gaming_full_tunnel(&off.gaming, redir_port, tproxy_port, dns_port).await;
-        let _ = sync_whitelist_full_tunnel(&off, redir_port, tproxy_port, dns_port).await;
+        if let Err(e) = sync_gaming_full_tunnel(&off.gaming, redir_port, tproxy_port, dns_port).await {
+            errs.push(format!("gaming: {e}"));
+        }
+        if let Err(e) = sync_whitelist_full_tunnel(&off, redir_port, tproxy_port, dns_port).await {
+            errs.push(format!("whitelist: {e}"));
+        }
         let _ = tokio::process::Command::new("sh").arg("-c").arg(rp_filter_restore_script()).output().await;
-        return;
+        return if errs.is_empty() { Ok(()) } else { Err(errs.join("; ")) };
     }
 
     // Игровой синк: при активном БС принудительно в режим очистки (мьютекс правил)
@@ -901,7 +913,9 @@ pub async fn sync_full_tunnel_modes(cfg: &config::AppConfig, redir_port: u16, tp
     } else {
         cfg.gaming.clone()
     };
-    let _ = sync_gaming_full_tunnel(&gaming_cfg, redir_port, tproxy_port, dns_port).await;
+    if let Err(e) = sync_gaming_full_tunnel(&gaming_cfg, redir_port, tproxy_port, dns_port).await {
+        errs.push(format!("gaming: {e}"));
+    }
 
     // Синк БС: при активном игровом режиме принудительно в режим очистки
     let wl_cfg = if gaming_active && !bs_active {
@@ -911,9 +925,16 @@ pub async fn sync_full_tunnel_modes(cfg: &config::AppConfig, redir_port: u16, tp
     } else {
         cfg.clone()
     };
-    let _ = sync_whitelist_full_tunnel(&wl_cfg, redir_port, tproxy_port, dns_port).await;
+    if let Err(e) = sync_whitelist_full_tunnel(&wl_cfg, redir_port, tproxy_port, dns_port).await {
+        errs.push(format!("whitelist: {e}"));
+    }
     if rp_filter_restore_needed(gaming_active, bs_active) {
         let _ = tokio::process::Command::new("sh").arg("-c").arg(rp_filter_restore_script()).output().await;
+    }
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        Err(errs.join("; "))
     }
 }
 

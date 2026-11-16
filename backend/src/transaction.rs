@@ -76,51 +76,71 @@ pub fn sync_atomic_write_or_remove(path: &Path, content: Option<&str>) -> std::i
 }
 
 /// Легковесная валидация синтаксиса YAML (табуляции, кавычки, баланс скобок, UTF-8 safe).
+/// R48: поддерживает апострофы внутри plain scalars (Bob's server) и многострочные quoted scalars.
 pub fn validate_yaml_syntax(content: &str) -> Result<(), String> {
     let mut bracket_stack = Vec::new();
+    let mut in_single_quote: Option<usize> = None;
+    let mut in_double_quote: Option<usize> = None;
 
     for (line_num, line) in content.lines().enumerate() {
         let display_line = line_num + 1;
-        if line.contains('\t') {
+        if in_single_quote.is_none() && in_double_quote.is_none() && line.contains('\t') {
             return Err(format!(
                 "Строка {display_line}: обнаружен символ табуляции (\\t). В YAML допускаются только пробелы."
             ));
         }
 
         let trimmed = line.trim();
-        if trimmed.starts_with('#') || trimmed.is_empty() {
+        if in_single_quote.is_none() && in_double_quote.is_none() && (trimmed.starts_with('#') || trimmed.is_empty()) {
             continue;
         }
 
-        let mut in_single_quote = false;
-        let mut in_double_quote = false;
         let mut escaped = false;
-
         let mut chars = line.char_indices().peekable();
         while let Some((byte_offset, ch)) = chars.next() {
             if escaped {
                 escaped = false;
                 continue;
             }
-            if ch == '\\' && in_double_quote {
+            if ch == '\\' && in_double_quote.is_some() {
                 escaped = true;
                 continue;
             }
-            if ch == '\'' && !in_double_quote {
-                if in_single_quote {
+            if ch == '\'' && in_double_quote.is_none() {
+                if in_single_quote.is_some() {
                     if let Some(&(_, '\'')) = chars.peek() {
                         chars.next(); // поглощаем экранированную одинарную кавычку '' внутри строки
                         continue;
                     }
+                    in_single_quote = None;
+                    continue;
                 }
-                in_single_quote = !in_single_quote;
+                let prev_ch = line[..byte_offset].chars().next_back();
+                let starts_scalar = match prev_ch {
+                    None => true,
+                    Some(p) => p.is_whitespace() || matches!(p, ':' | '-' | '[' | '{' | ','),
+                };
+                if starts_scalar {
+                    in_single_quote = Some(display_line);
+                }
                 continue;
             }
-            if ch == '"' && !in_single_quote {
-                in_double_quote = !in_double_quote;
+            if ch == '"' && in_single_quote.is_none() {
+                if in_double_quote.is_some() {
+                    in_double_quote = None;
+                    continue;
+                }
+                let prev_ch = line[..byte_offset].chars().next_back();
+                let starts_scalar = match prev_ch {
+                    None => true,
+                    Some(p) => p.is_whitespace() || matches!(p, ':' | '-' | '[' | '{' | ','),
+                };
+                if starts_scalar {
+                    in_double_quote = Some(display_line);
+                }
                 continue;
             }
-            if in_single_quote || in_double_quote {
+            if in_single_quote.is_some() || in_double_quote.is_some() {
                 continue;
             }
             if ch == '#' && (byte_offset == 0 || line[..byte_offset].ends_with(' ')) {
@@ -153,15 +173,14 @@ pub fn validate_yaml_syntax(content: &str) -> Result<(), String> {
                 _ => {}
             }
         }
-
-        if in_single_quote {
-            return Err(format!("Строка {display_line}: незакрытая одинарная кавычка (') в YAML"));
-        }
-        if in_double_quote {
-            return Err(format!("Строка {display_line}: незакрытая двойная кавычка (\") в YAML"));
-        }
     }
 
+    if let Some(orig_line) = in_single_quote {
+        return Err(format!("Строка {orig_line}: незакрытая одинарная кавычка (') в YAML"));
+    }
+    if let Some(orig_line) = in_double_quote {
+        return Err(format!("Строка {orig_line}: незакрытая двойная кавычка (\") в YAML"));
+    }
     if let Some((ch, line)) = bracket_stack.pop() {
         return Err(format!("Строка {line}: незакрытая скобка '{ch}'"));
     }
@@ -944,7 +963,9 @@ pub async fn perform_commit_rollback(state: &AppState, p: &PersistedPendingCommi
     let ports = crate::routing::redir_ports(&yaml_now);
     let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
     let dns_port = crate::api::resolve_active_dns_port(&final_cfg);
-    crate::api::sync_full_tunnel_modes(&final_cfg, redir_port, tproxy_port, dns_port).await;
+    if let Err(e) = crate::api::sync_full_tunnel_modes(&final_cfg, redir_port, tproxy_port, dns_port).await {
+        log_w!("[TX] Предупреждение синхронизации iptables при откате/коммите: {}", e);
+    }
     let _ = tokio::fs::remove_file(pending_commit_file(&json_path)).await;
     Ok(())
 }
@@ -1848,5 +1869,29 @@ rules:
         let status = get_pending_commit_status();
         assert!(!status.pending);
         assert!(status.tx_id.is_none());
+    }
+
+    #[test]
+    fn regression_r48_yaml_validator_accepts_plain_apostrophe_and_multiline_quotes() {
+        let yaml_with_apostrophe = "proxies:\n  - name: Bob's server\n    type: vless\n";
+        assert!(
+            validate_yaml_syntax(yaml_with_apostrophe).is_ok(),
+            "апостроф внутри plain scalar должен приниматься"
+        );
+
+        let yaml_multiline_dq = "proxies:\n  - name: \"First line\n    second line\"\n    type: vless\n";
+        assert!(
+            validate_yaml_syntax(yaml_multiline_dq).is_ok(),
+            "многострочная двойная кавычка должна приниматься"
+        );
+
+        let yaml_multiline_sq = "proxies:\n  - name: 'First line\n    second line'\n    type: vless\n";
+        assert!(
+            validate_yaml_syntax(yaml_multiline_sq).is_ok(),
+            "многострочная одинарная кавычка должна приниматься"
+        );
+
+        let unclosed_dq = "proxies:\n  - name: \"unclosed\n";
+        assert!(validate_yaml_syntax(unclosed_dq).is_err());
     }
 }

@@ -1711,17 +1711,25 @@ pub async fn mihomo_install(
     // Определяем URL для загрузки и ожидаемый SHA-256 (если доступен)
     let mut expected_sha256 = req.sha256.clone().filter(|s| !s.trim().is_empty());
 
+    let rels = fetch_mihomo_releases_cached(&state.http, &proxy_url).await.unwrap_or_default();
+    let matched_rel = rels.iter()
+        .find(|r| r.tag_name.eq_ignore_ascii_case(tag) || r.tag_name.trim_start_matches('v') == tag.trim_start_matches('v'));
+
     let download_url = if let Some(ref cu) = req.custom_url {
         let cu_trim = cu.trim();
         if !cu_trim.starts_with("https://github.com/MetaCubeX/mihomo/releases/download/") {
             return api_err("Недопустимый URL загрузки ядра: разрешены только официальные релизы https://github.com/MetaCubeX/mihomo/releases/download/");
         }
+        // R49: при передаче официального custom_url всё равно подтягиваем SHA-256 из релиза
+        if expected_sha256.is_none() {
+            if let Some(asset_name) = cu_trim.rsplit('/').next() {
+                if let Some(rel) = matched_rel {
+                    expected_sha256 = extract_hash_from_checksum_text(&rel.body, asset_name);
+                }
+            }
+        }
         cu_trim.to_string()
     } else {
-        let rels = fetch_mihomo_releases_cached(&state.http, &proxy_url).await.unwrap_or_default();
-        let matched_rel = rels.iter()
-            .find(|r| r.tag_name.eq_ignore_ascii_case(tag) || r.tag_name.trim_start_matches('v') == tag.trim_start_matches('v'));
-
         let matched = matched_rel.and_then(|r| find_mihomo_asset(&r.assets, arch));
 
         if let (Some(rel), Some(asset)) = (matched_rel, matched) {
@@ -1860,7 +1868,8 @@ pub async fn mihomo_install(
 
     let _ = tokio::fs::remove_file(&gz_path).await;
 
-    if decompress_status.is_err() || !bin_path.exists() {
+    let decompress_ok = matches!(decompress_status, Ok(ref s) if s.success());
+    if !decompress_ok || !bin_path.exists() {
         let _ = tokio::fs::remove_file(&bin_path).await;
         return api_err("Ошибка распаковки архива ядра Mihomo (gunzip)");
     }
@@ -1987,7 +1996,7 @@ pub async fn mihomo_install(
     }
 
     // Перезапуск службы XKeen / Mihomo
-    let _ = tokio::process::Command::new("sh")
+    let restart_status = tokio::process::Command::new("sh")
         .arg(&cfg.system.xkeen_init)
         .arg("restart")
         .stdin(std::process::Stdio::null())
@@ -1996,20 +2005,33 @@ pub async fn mihomo_install(
         .status()
         .await;
 
-    crate::log_i!("[Mihomo Update] Служба XKeen перезапущена с новым ядром");
+    let restart_ok = matches!(restart_status, Ok(ref s) if s.success());
+    if restart_ok {
+        crate::log_i!("[Mihomo Update] Служба XKeen перезапущена с новым ядром");
+    } else {
+        crate::log_w!("[Mihomo Update] Команда перезапуска XKeen завершилась с ошибкой: {:?}", restart_status);
+    }
 
     tokio::time::sleep(Duration::from_millis(2500)).await;
 
-    let check_ok = match crate::mihomo::get_version(&state.http, &cfg).await {
-        Some(_) => true,
-        None => {
-            tokio::time::sleep(Duration::from_millis(2000)).await;
-            crate::mihomo::get_version(&state.http, &cfg).await.is_some()
-        }
-    };
+    let mut live_ver = crate::mihomo::get_version(&state.http, &cfg).await;
+    if live_ver.is_none() {
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+        live_ver = crate::mihomo::get_version(&state.http, &cfg).await;
+    }
+    let check_ok = restart_ok
+        && live_ver
+            .as_deref()
+            .map(|v| mihomo_version_matches_target(v, tag))
+            .unwrap_or(false);
 
     if !check_ok {
-        crate::log_w!("[Mihomo Update] Ядро не ответило после обновления. Выполняется автоматический откат...");
+        crate::log_w!(
+            "[Mihomo Update] Ядро не обновилось до '{}' (live={:?}, restart_ok={}). Выполняется автоматический откат...",
+            tag,
+            live_ver,
+            restart_ok
+        );
         let mut rollback_ok = false;
         if bak_bin.exists()
             && tokio::fs::copy(bak_bin, target_bin).await.is_ok() {
@@ -2039,6 +2061,21 @@ pub async fn mihomo_install(
         "full_version": new_ver_str,
         "message": format!("Ядро Mihomo успешно обновлено до {tag}")
     }))
+}
+
+/// R51: Проверка соответствия версии запущенного ядра целевому тегу.
+pub fn mihomo_version_matches_target(live_version: &str, requested_tag: &str) -> bool {
+    let live_clean = live_version.trim().to_ascii_lowercase();
+    let tag_clean = requested_tag.trim().to_ascii_lowercase();
+    if live_clean.is_empty() || tag_clean.is_empty() {
+        return false;
+    }
+    if tag_clean == "prerelease-alpha" || tag_clean == "alpha" {
+        return live_clean.contains("alpha");
+    }
+    let norm_tag = tag_clean.trim_start_matches('v');
+    let norm_live = live_clean.trim_start_matches('v');
+    norm_live == norm_tag || live_clean.contains(norm_tag)
 }
 
 #[cfg(test)]
@@ -2476,5 +2513,32 @@ mod tests {
         "#;
         let tags = parse_releases_atom_tags(xml);
         assert_eq!(tags, vec!["v1.17.0-beta.2", "v1.16.19"]);
+    }
+
+    #[test]
+    fn regression_r49_r50_r51_mihomo_core_update_safety() {
+        // R49: extract_hash_from_checksum_text находит sha256 по имени ассета из custom_url
+        let body = "SHA256:\n0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  mihomo-linux-arm64-v1.19.2.gz";
+        let asset_name = "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.2/mihomo-linux-arm64-v1.19.2.gz"
+            .rsplit('/')
+            .next()
+            .unwrap();
+        assert_eq!(
+            extract_hash_from_checksum_text(body, asset_name).as_deref(),
+            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        );
+
+        // R50: ненулевой exit code команды должен считаться ошибкой
+        #[cfg(windows)]
+        let status = std::process::Command::new("cmd").args(["/C", "exit 1"]).status();
+        #[cfg(not(windows))]
+        let status = std::process::Command::new("sh").args(["-c", "exit 1"]).status();
+        assert!(!matches!(status, Ok(ref s) if s.success()));
+
+        // R51: старая версия процесса не должна засчитываться как успешное обновление
+        assert!(!mihomo_version_matches_target("v1.18.0", "v1.19.2"));
+        assert!(mihomo_version_matches_target("v1.19.2", "v1.19.2"));
+        assert!(mihomo_version_matches_target("Mihomo Meta v1.19.2", "1.19.2"));
+        assert!(mihomo_version_matches_target("alpha-12345", "Prerelease-Alpha"));
     }
 }

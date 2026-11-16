@@ -117,24 +117,46 @@ fn parse_query_params(query: &str) -> BTreeMap<String, String> {
     map
 }
 
-/// Парсинг хоста и порта из строки вида `host:port` или `[ipv6]:port`
-fn parse_host_port(host_port: &str) -> (String, u16) {
+/// Парсинг хоста и порта из строки вида `host:port` или `[ipv6]:port`.
+/// R25: явно указанный некорректный или внедиапазонный порт отвергается вместо подмены на 443.
+fn parse_host_port_checked(host_port: &str) -> Result<(String, u16), String> {
     let hp = host_port.trim();
     if hp.starts_with('[') {
         if let Some(end_bracket) = hp.find(']') {
             let host = hp[1..end_bracket].to_string();
-            let port = hp[end_bracket + 1..]
-                .trim_start_matches(':')
+            let rest = hp[end_bracket + 1..].trim();
+            if rest.is_empty() {
+                return Ok((host, 443));
+            }
+            let port_str = rest
+                .strip_prefix(':')
+                .ok_or_else(|| format!("некорректный суффикс после IPv6-адреса: '{rest}'"))?
+                .trim();
+            let port = port_str
                 .parse::<u16>()
-                .unwrap_or(443);
-            return (host, port);
+                .map_err(|_| format!("некорректный порт '{port_str}'"))?;
+            if port == 0 {
+                return Err("порт не может быть равен 0".to_string());
+            }
+            return Ok((host, port));
         }
+        return Err("незакрытая '[' в IPv6-адресе".to_string());
     }
     if let Some((h, p)) = hp.rsplit_once(':') {
-        let port = p.parse::<u16>().unwrap_or(443);
-        (h.to_string(), port)
+        // Не считаем двоеточия в неэкранированном IPv6 портом, если их больше одного
+        if h.contains(':') {
+            return Ok((hp.to_string(), 443));
+        }
+        let port = p
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| format!("некорректный порт '{p}'"))?;
+        if port == 0 {
+            return Err("порт не может быть равен 0".to_string());
+        }
+        Ok((h.to_string(), port))
     } else {
-        (hp.to_string(), 443)
+        Ok((hp.to_string(), 443))
     }
 }
 
@@ -156,7 +178,7 @@ pub fn parse_vless_uri_checked(uri: &str) -> Result<Value, String> {
     let (uuid, host_port) = auth_host
         .split_once('@')
         .ok_or_else(|| "отсутствует uuid@host в vless://".to_string())?;
-    let (server, port) = parse_host_port(host_port);
+    let (server, port) = parse_host_port_checked(host_port)?;
     let params = parse_query_params(query_str);
 
     let server_name = if !fragment.is_empty() {
@@ -202,6 +224,25 @@ pub fn parse_vless_uri_checked(uri: &str) -> Result<Value, String> {
         if let Some(fp) = params.get("fp") {
             map.insert("client-fingerprint".into(), Value::String(fp.clone()));
         }
+    }
+    // R24: сохраняем alpn и allowInsecure -> skip-cert-verify в VLESS
+    if let Some(alpn_raw) = params.get("alpn").filter(|s| !s.trim().is_empty()) {
+        let alpn_list: Vec<Value> = alpn_raw
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| Value::String(s.to_string()))
+            .collect();
+        if !alpn_list.is_empty() {
+            map.insert("alpn".into(), Value::Array(alpn_list));
+        }
+    }
+    if params
+        .get("allowinsecure")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+    {
+        map.insert("skip-cert-verify".into(), Value::Bool(true));
     }
 
     let network = params
@@ -305,7 +346,7 @@ pub fn parse_hysteria2_uri(uri: &str) -> Option<Value> {
     };
 
     let (password, host_port) = auth_host.split_once('@')?;
-    let (server, port) = parse_host_port(host_port);
+    let (server, port) = parse_host_port_checked(host_port).ok()?;
     let params = parse_query_params(query_str);
 
     let server_name = if !fragment.is_empty() {
@@ -359,7 +400,7 @@ pub fn parse_trojan_uri_checked(uri: &str) -> Result<Value, String> {
     let (password, host_port) = auth_host
         .split_once('@')
         .ok_or_else(|| "отсутствует password@host в trojan://".to_string())?;
-    let (server, port) = parse_host_port(host_port);
+    let (server, port) = parse_host_port_checked(host_port)?;
     let params = parse_query_params(query_str);
 
     let server_name = if !fragment.is_empty() {
@@ -458,7 +499,7 @@ pub fn parse_ss_uri_checked(uri: &str) -> Result<Value, String> {
                 .ok_or_else(|| "отсутствует cipher:password в ss://".to_string())?;
             (c.to_string(), p.to_string())
         };
-        let (s, p) = parse_host_port(host_port);
+        let (s, p) = parse_host_port_checked(host_port)?;
         (s, p, cipher, pass)
     } else {
         // 2) Legacy: ss://BASE64(method:password@host:port)
@@ -472,7 +513,7 @@ pub fn parse_ss_uri_checked(uri: &str) -> Result<Value, String> {
         let (cipher, pass) = cipher_pass
             .split_once(':')
             .ok_or_else(|| "отсутствует cipher:password в legacy ss://".to_string())?;
-        let (s, p) = parse_host_port(host_port);
+        let (s, p) = parse_host_port_checked(host_port)?;
         (s, p, cipher.to_string(), pass.to_string())
     };
 
@@ -536,13 +577,17 @@ pub fn parse_vmess_uri(uri: &str) -> Option<Value> {
     let name = json_val.get("ps").and_then(|v| v.as_str()).unwrap_or("VMess Server").trim().to_string();
     let server = json_val.get("add").and_then(|v| v.as_str())?.trim().to_string();
     let port_num = if let Some(p) = json_val.get("port") {
-        if let Some(n) = p.as_u64() {
-            n as u16
+        let parsed = if let Some(n) = p.as_u64() {
+            u16::try_from(n).ok()
         } else if let Some(s) = p.as_str() {
-            s.parse::<u16>().unwrap_or(443)
+            s.trim().parse::<u16>().ok()
         } else {
-            443
+            None
+        }?;
+        if parsed == 0 {
+            return None;
         }
+        parsed
     } else {
         443
     };
@@ -934,6 +979,8 @@ pub fn sanitize_proxy_value(val: &Value) -> Option<Value> {
         "http-opts",
         "obfs",
         "obfs-password",
+        "plugin",
+        "plugin-opts",
         "ports",
         "tfo",
     ];
@@ -1066,6 +1113,30 @@ pub fn node_dedup_key(v: &Value) -> String {
         .unwrap_or(false);
     let obfs = get_str("obfs").to_ascii_lowercase();
     let obfs_pw = get_str("obfs-password");
+    let tls = v.get("tls").and_then(|b| b.as_bool()).unwrap_or(false);
+    let plugin = get_str("plugin").to_ascii_lowercase();
+    let plugin_opts = v
+        .get("plugin-opts")
+        .and_then(|o| o.as_object())
+        .map(|obj| {
+            let mut pairs: Vec<(String, String)> = obj
+                .iter()
+                .map(|(k, val)| {
+                    let s = val
+                        .as_str()
+                        .map(|x| x.to_string())
+                        .unwrap_or_else(|| val.to_string());
+                    (k.to_ascii_lowercase(), s)
+                })
+                .collect();
+            pairs.sort();
+            pairs
+                .into_iter()
+                .map(|(k, val)| format!("{k}={val}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .unwrap_or_default();
     let skip_cert = v.get("skip-cert-verify").and_then(|b| b.as_bool()).unwrap_or(false);
     let alpn = v
         .get("alpn")
@@ -1080,7 +1151,7 @@ pub fn node_dedup_key(v: &Value) -> String {
         .unwrap_or_default();
 
     format!(
-        "{scheme}|{host}:{port}|{uuid}|{password}|{cipher}|{alter_id}|{sni}|{pbk}|{short_id}|{flow}|{transport}|{path}|{host_header}|{service_name}|{fp}|{xhttp_mode}|{http_upgrade}|{obfs}|{obfs_pw}|{skip_cert}|{alpn}"
+        "{scheme}|{host}:{port}|{uuid}|{password}|{cipher}|{alter_id}|{tls}|{sni}|{pbk}|{short_id}|{flow}|{transport}|{path}|{host_header}|{service_name}|{fp}|{xhttp_mode}|{http_upgrade}|{obfs}|{obfs_pw}|{plugin}|{plugin_opts}|{skip_cert}|{alpn}"
     )
 }
 
@@ -1596,5 +1667,44 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(rejected.len(), 1);
         assert!(!rejected[0].1.is_empty(), "rejected node must include reason");
+    }
+
+    #[test]
+    fn regression_r22_r23_r24_r25_parser_dedup_and_ports() {
+        // R22: tls и plugin/plugin-opts должны различаться в node_dedup_key
+        let vless_tls = serde_json::json!({
+            "type": "vless", "server": "1.2.3.4", "port": 443, "uuid": "u1", "tls": true
+        });
+        let vless_plain = serde_json::json!({
+            "type": "vless", "server": "1.2.3.4", "port": 443, "uuid": "u1", "tls": false
+        });
+        assert_ne!(node_dedup_key(&vless_tls), node_dedup_key(&vless_plain));
+
+        let ss_a = serde_json::json!({
+            "type": "ss", "server": "1.2.3.4", "port": 8388, "cipher": "aes-128-gcm", "password": "pw",
+            "plugin": "obfs", "plugin-opts": { "mode": "tls", "host": "a.com" }
+        });
+        let ss_b = serde_json::json!({
+            "type": "ss", "server": "1.2.3.4", "port": 8388, "cipher": "aes-128-gcm", "password": "pw",
+            "plugin": "obfs", "plugin-opts": { "mode": "http", "host": "b.com" }
+        });
+        assert_ne!(node_dedup_key(&ss_a), node_dedup_key(&ss_b));
+
+        // R23: sanitize_proxy_value сохраняет plugin и plugin-opts
+        let clean_ss = sanitize_proxy_value(&ss_a).expect("ss with plugin");
+        assert_eq!(clean_ss["plugin"], "obfs");
+        assert_eq!(clean_ss["plugin-opts"]["mode"], "tls");
+
+        // R24: parse_vless_uri сохраняет alpn и allowInsecure -> skip-cert-verify
+        let vless = parse_vless_uri(
+            "vless://11111111-1111-1111-1111-111111111111@1.2.3.4:443?security=tls&sni=ex.com&alpn=h2,http/1.1&allowInsecure=1#V"
+        ).expect("valid vless");
+        assert_eq!(vless["alpn"], serde_json::json!(["h2", "http/1.1"]));
+        assert_eq!(vless["skip-cert-verify"], true);
+
+        // R25: невалидные порты в URI отвергаются вместо подмены на 443
+        assert!(parse_vless_uri_checked("vless://11111111-1111-1111-1111-111111111111@1.2.3.4:99999#BadPort").is_err());
+        assert!(parse_vless_uri_checked("vless://11111111-1111-1111-1111-111111111111@1.2.3.4:abc#BadPort").is_err());
+        assert!(parse_vless_uri_checked("vless://11111111-1111-1111-1111-111111111111@1.2.3.4:0#ZeroPort").is_err());
     }
 }

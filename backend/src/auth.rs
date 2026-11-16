@@ -644,7 +644,12 @@ pub fn is_legitimate_host(host_only: &str) -> bool {
     if let Ok(ip) = unbracketed.parse::<std::net::IpAddr>() {
         match ip {
             std::net::IpAddr::V4(ipv4) => ipv4.is_loopback() || ipv4.is_private() || ipv4.is_link_local(),
-            std::net::IpAddr::V6(ipv6) => ipv6.is_loopback() || ipv6.is_unicast_link_local(),
+            // R43: разрешаем IPv6 ULA (fc00::/7) наряду с loopback и link-local
+            std::net::IpAddr::V6(ipv6) => {
+                ipv6.is_loopback()
+                    || ipv6.is_unicast_link_local()
+                    || (ipv6.segments()[0] & 0xfe00) == 0xfc00
+            }
         }
     } else {
         let lower = host_only.to_ascii_lowercase();
@@ -660,28 +665,80 @@ pub fn is_legitimate_host(host_only: &str) -> bool {
     }
 }
 
-/// Проверка безопасности Origin/Referer для защиты от межсайтовых атак (CSRF)
-pub fn is_trusted_origin(origin_or_referer: &str, host_header: Option<&str>) -> bool {
-    let stripped = origin_or_referer
-        .trim_start_matches("http://")
-        .trim_start_matches("https://");
+fn split_host_and_port(host_part: &str, default_port: u16) -> Option<(&str, u16)> {
+    let h = host_part.trim();
+    if h.is_empty() {
+        return None;
+    }
+    if h.starts_with('[') {
+        let end = h.find(']')?;
+        let host = &h[..=end];
+        let rest = h[end + 1..].trim();
+        if rest.is_empty() {
+            return Some((host, default_port));
+        }
+        let port = rest.strip_prefix(':')?.parse::<u16>().ok()?;
+        return Some((host, port));
+    }
+    if let Some((host, port_str)) = h.rsplit_once(':') {
+        if host.contains(':') {
+            // Неэкранированный IPv6 без скобок
+            return Some((h, default_port));
+        }
+        let port = port_str.parse::<u16>().ok()?;
+        Some((host, port))
+    } else {
+        Some((h, default_port))
+    }
+}
 
-    let origin_host_part = stripped.split('/').next().unwrap_or("").trim();
-    let origin_host_only = extract_host_only(origin_host_part);
+/// Проверка безопасности Origin/Referer для защиты от межсайтовых атак (CSRF, R44).
+pub fn is_trusted_origin_for_scheme(
+    origin_or_referer: &str,
+    host_header: Option<&str>,
+    expected_scheme: Option<&str>,
+) -> bool {
+    let trimmed = origin_or_referer.trim();
+    let (scheme, rest) = if let Some(r) = trimmed.strip_prefix("http://") {
+        ("http", r)
+    } else if let Some(r) = trimmed.strip_prefix("https://") {
+        ("https", r)
+    } else {
+        return false;
+    };
 
-    // 1. Совпадение с переданным Host header (только если сам Host является легитимным адресом роутера — защита от DNS-rebinding, баг 91)
+    if let Some(exp) = expected_scheme {
+        if !scheme.eq_ignore_ascii_case(exp) {
+            return false;
+        }
+    }
+
+    let default_port = if scheme == "https" { 443 } else { 80 };
+    let origin_host_part = rest.split('/').next().unwrap_or("").trim();
+    let Some((origin_host_only, origin_port)) = split_host_and_port(origin_host_part, default_port) else {
+        return false;
+    };
+
+    // 1. Точное совпадение (scheme + host + port) с переданным Host header
     if let Some(host) = host_header {
         let host_trimmed = host.trim();
-        let host_only = extract_host_only(host_trimmed);
-        if (origin_host_part.eq_ignore_ascii_case(host_trimmed) || origin_host_only.eq_ignore_ascii_case(host_only))
-            && is_legitimate_host(host_only)
-        {
-            return true;
+        if let Some((host_only, host_port)) = split_host_and_port(host_trimmed, default_port) {
+            if origin_host_only.eq_ignore_ascii_case(host_only)
+                && origin_port == host_port
+                && is_legitimate_host(host_only)
+            {
+                return true;
+            }
         }
     }
 
     // 2. Локальные адреса loopback и доверенные имена роутера
     is_valid_origin(origin_host_only)
+}
+
+/// Проверка безопасности Origin/Referer для защиты от межсайтовых атак (CSRF)
+pub fn is_trusted_origin(origin_or_referer: &str, host_header: Option<&str>) -> bool {
+    is_trusted_origin_for_scheme(origin_or_referer, host_header, None)
 }
 
 /// Middleware защиты API и reverse-proxy Clash
@@ -776,7 +833,14 @@ pub async fn auth_middleware(
             .and_then(|h| h.to_str().ok());
 
         if let Some(origin) = origin_header {
-            if !is_trusted_origin(origin, host_header) {
+            let expected_scheme = req
+                .headers()
+                .get("x-forwarded-proto")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.split(',').next().unwrap_or("").trim())
+                .filter(|s| *s == "http" || *s == "https")
+                .unwrap_or("http");
+            if !is_trusted_origin_for_scheme(origin, host_header, Some(expected_scheme)) {
                 log_w!("[AUTH] ⚠️ Отклонен запрос с недопустимым Origin: {} к {}", origin, path);
                 return (
                     StatusCode::FORBIDDEN,
@@ -1216,5 +1280,34 @@ mod tests {
         assert_eq!(loaded.get("tok-1").copied(), Some(9_999_999_999));
         assert!(!store.with_extension("tmp").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn regression_r43_r44_ipv6_ula_and_strict_origin_scheme_port() {
+        // R43: IPv6 ULA fc00::/7 разрешены, глобальные IPv6 отклоняются
+        assert!(is_legitimate_host("[fd00::1]"));
+        assert!(is_legitimate_host("[fc00::1]"));
+        assert!(is_legitimate_host("fd12:3456:789a::1"));
+        assert!(!is_legitimate_host("[2001:db8::1]"));
+        assert!(!is_legitimate_host("[fe00::1]"));
+
+        // R44: другой порт или несовпадающая схема должны отклоняться
+        assert!(!is_trusted_origin("http://192.168.1.1:9999", Some("192.168.1.1:1001")));
+        assert!(!is_trusted_origin("http://192.168.1.1", Some("192.168.1.1:1001")));
+        assert!(!is_trusted_origin_for_scheme(
+            "https://192.168.1.1:1001",
+            Some("192.168.1.1:1001"),
+            Some("http")
+        ));
+        assert!(is_trusted_origin_for_scheme(
+            "http://192.168.1.1:1001",
+            Some("192.168.1.1:1001"),
+            Some("http")
+        ));
+        assert!(is_trusted_origin_for_scheme(
+            "http://[fd00::1]:1001",
+            Some("[fd00::1]:1001"),
+            Some("http")
+        ));
     }
 }

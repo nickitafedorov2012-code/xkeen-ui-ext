@@ -347,8 +347,26 @@ pub fn update_override_file_content(
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct AutoCdnEntry {
+    cdn: String,
+    #[serde(default)]
+    source_domains: Vec<String>,
+    #[serde(default)]
+    updated_at: u64,
+}
+
+const AUTO_CDN_TTL_SECS: u64 = 7 * 86_400;
+
+fn auto_cdn_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 static IPSET_SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-static CACHED_AUTO_CDNS: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+static CACHED_AUTO_CDNS: std::sync::RwLock<Vec<AutoCdnEntry>> = std::sync::RwLock::new(Vec::new());
 const DEFAULT_AUTO_CDNS_CACHE_FILE: &str = "/opt/etc/xkeen-route.auto_cdns.json";
 static AUTO_CDNS_CACHE_PATH_OVERRIDE: std::sync::Mutex<Option<std::path::PathBuf>> =
     std::sync::Mutex::new(None);
@@ -378,7 +396,7 @@ pub fn clear_cached_auto_cdns_for_test() {
     }
 }
 
-fn save_auto_cdns_cache_to_path(path: &Path, cdns: &[String]) {
+fn save_auto_cdns_cache_to_path(path: &Path, entries: &[AutoCdnEntry]) {
     #[cfg(test)]
     if path == Path::new(DEFAULT_AUTO_CDNS_CACHE_FILE) {
         return;
@@ -386,7 +404,7 @@ fn save_auto_cdns_cache_to_path(path: &Path, cdns: &[String]) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let Ok(serialized) = serde_json::to_vec(cdns) else {
+    let Ok(serialized) = serde_json::to_vec(entries) else {
         return;
     };
     let nonce = std::time::SystemTime::now()
@@ -401,39 +419,115 @@ fn save_auto_cdns_cache_to_path(path: &Path, cdns: &[String]) {
     }
 }
 
-/// Загрузка кэша найденных CDN с диска в память (баг 13).
+fn parse_auto_cdn_entries(bytes: &[u8]) -> Vec<AutoCdnEntry> {
+    if let Ok(entries) = serde_json::from_slice::<Vec<AutoCdnEntry>>(bytes) {
+        return entries;
+    }
+    if let Ok(legacy) = serde_json::from_slice::<Vec<String>>(bytes) {
+        let now = auto_cdn_now_secs();
+        return legacy
+            .into_iter()
+            .filter_map(|c| {
+                let clean = c.trim().to_lowercase();
+                if clean.is_empty() {
+                    None
+                } else {
+                    Some(AutoCdnEntry {
+                        cdn: clean,
+                        source_domains: Vec::new(),
+                        updated_at: now,
+                    })
+                }
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
+/// Загрузка кэша найденных CDN с диска в память (баг 13 + R53).
 pub fn load_cached_auto_cdns() -> Vec<String> {
     let path = get_auto_cdns_cache_path();
-    let loaded: Vec<String> = if path.exists() {
+    let now = auto_cdn_now_secs();
+    let loaded = if path.exists() {
         std::fs::read(&path)
             .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
+            .map(|b| parse_auto_cdn_entries(&b))
             .unwrap_or_default()
     } else {
         Vec::new()
     };
     if !loaded.is_empty() {
         if let Ok(mut cache) = CACHED_AUTO_CDNS.write() {
-            for c in &loaded {
-                let clean = c.trim().to_lowercase();
-                if !clean.is_empty() && !cache.contains(&clean) {
-                    cache.push(clean);
+            cache.retain(|e| e.updated_at == 0 || now.saturating_sub(e.updated_at) <= AUTO_CDN_TTL_SECS);
+            for entry in loaded {
+                let clean = entry.cdn.trim().to_lowercase();
+                if clean.is_empty() {
+                    continue;
+                }
+                if entry.updated_at != 0 && now.saturating_sub(entry.updated_at) > AUTO_CDN_TTL_SECS {
+                    continue;
+                }
+                if let Some(existing) = cache.iter_mut().find(|e| e.cdn == clean) {
+                    for src in entry.source_domains {
+                        let s = src.trim().to_lowercase();
+                        if !s.is_empty() && !existing.source_domains.contains(&s) {
+                            existing.source_domains.push(s);
+                        }
+                    }
+                    existing.updated_at = existing.updated_at.max(entry.updated_at);
+                } else {
+                    cache.push(AutoCdnEntry {
+                        cdn: clean,
+                        source_domains: entry
+                            .source_domains
+                            .into_iter()
+                            .map(|s| s.trim().to_lowercase())
+                            .filter(|s| !s.is_empty())
+                            .collect(),
+                        updated_at: if entry.updated_at == 0 { now } else { entry.updated_at },
+                    });
                 }
             }
-            return cache.clone();
+            return cache.iter().map(|e| e.cdn.clone()).collect();
         }
     }
-    loaded
+    Vec::new()
 }
 
-/// Обновление глобального кэша найденных CDN доменов в памяти и на диске (баг 13)
-pub fn sync_cached_auto_cdns(cdns: &[String]) {
+/// Обновление глобального кэша найденных CDN доменов с привязкой к source_domains (R53).
+pub fn sync_cached_auto_cdns_for_sources(cdns: &[String], sources: &[String]) {
+    let now = auto_cdn_now_secs();
+    let clean_sources: Vec<String> = sources
+        .iter()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
     let snapshot = if let Ok(mut cache) = CACHED_AUTO_CDNS.write() {
-        let mut changed = false;
+        let prev_len = cache.len();
+        cache.retain(|e| e.updated_at == 0 || now.saturating_sub(e.updated_at) <= AUTO_CDN_TTL_SECS);
+        let mut changed = cache.len() != prev_len;
         for c in cdns {
             let clean = c.trim().to_lowercase();
-            if !clean.is_empty() && !cache.contains(&clean) {
-                cache.push(clean);
+            if clean.is_empty() {
+                continue;
+            }
+            if let Some(existing) = cache.iter_mut().find(|e| e.cdn == clean) {
+                for s in &clean_sources {
+                    if !existing.source_domains.contains(s) {
+                        existing.source_domains.push(s.clone());
+                        changed = true;
+                    }
+                }
+                if now > existing.updated_at {
+                    existing.updated_at = now;
+                    changed = true;
+                }
+            } else {
+                cache.push(AutoCdnEntry {
+                    cdn: clean,
+                    source_domains: clean_sources.clone(),
+                    updated_at: now,
+                });
                 changed = true;
             }
         }
@@ -450,8 +544,55 @@ pub fn sync_cached_auto_cdns(cdns: &[String]) {
     }
 }
 
+/// Обновление глобального кэша найденных CDN доменов в памяти и на диске (баг 13)
+pub fn sync_cached_auto_cdns(cdns: &[String]) {
+    sync_cached_auto_cdns_for_sources(cdns, &[]);
+}
+
 pub fn get_cached_auto_cdns() -> Vec<String> {
-    CACHED_AUTO_CDNS.read().map(|c| c.clone()).unwrap_or_default()
+    let now = auto_cdn_now_secs();
+    CACHED_AUTO_CDNS
+        .read()
+        .map(|c| {
+            c.iter()
+                .filter(|e| e.updated_at == 0 || now.saturating_sub(e.updated_at) <= AUTO_CDN_TTL_SECS)
+                .map(|e| e.cdn.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn domain_matches_any_force_domain(domain: &str, force_domains: &[String]) -> bool {
+    let d = domain.trim().to_lowercase();
+    force_domains.iter().any(|f| {
+        let fl = f.trim().to_lowercase();
+        !fl.is_empty() && (d == fl || d.ends_with(&format!(".{fl}")))
+    })
+}
+
+fn get_cached_auto_cdns_for_force_domains(force_domains: &[String]) -> Vec<String> {
+    if force_domains.is_empty() {
+        return Vec::new();
+    }
+    let now = auto_cdn_now_secs();
+    CACHED_AUTO_CDNS
+        .read()
+        .map(|c| {
+            c.iter()
+                .filter(|e| e.updated_at == 0 || now.saturating_sub(e.updated_at) <= AUTO_CDN_TTL_SECS)
+                .filter(|e| {
+                    if e.source_domains.is_empty() {
+                        domain_matches_any_force_domain(&e.cdn, force_domains)
+                    } else {
+                        e.source_domains
+                            .iter()
+                            .any(|src| domain_matches_any_force_domain(src, force_domains))
+                    }
+                })
+                .map(|e| e.cdn.clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Синхронизирует IP-адреса force_domains с ru_exclude_override.lst и живыми ipset ядра.
@@ -538,9 +679,9 @@ pub async fn sync_geo_override(domains: &[String]) -> Result<usize, String> {
 /// Объединяет force_domains, статические CDN-бандлы, обнаруженные auto_cdns и активные игровые домены.
 pub fn collect_override_domains(cfg: &crate::config::AppConfig, extra_cdns: &[String]) -> Vec<String> {
     if !extra_cdns.is_empty() {
-        sync_cached_auto_cdns(extra_cdns);
+        sync_cached_auto_cdns_for_sources(extra_cdns, &cfg.force_domains);
     }
-    let cached = get_cached_auto_cdns();
+    let cached = get_cached_auto_cdns_for_force_domains(&cfg.force_domains);
 
     let mut all = cfg.force_domains.clone();
     if !cfg.force_domains.is_empty() {
@@ -1059,5 +1200,28 @@ add geo_override6_tmp 2001:db8::1 -exist
         clear_cached_auto_cdns_for_test();
         set_auto_cdns_cache_path_override(None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn regression_r53_removing_force_domain_drops_its_auto_cdns() {
+        let _test_guard = AUTO_CDNS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_cached_auto_cdns_for_test();
+
+        let mut cfg_a = crate::config::AppConfig::default();
+        cfg_a.force_domains = vec!["alpha.example".to_string()];
+        let domains_a = collect_override_domains(&cfg_a, &["fastly-alpha-cdn.net".to_string()]);
+        assert!(domains_a.contains(&"fastly-alpha-cdn.net".to_string()));
+
+        // Пользователь удалил alpha.example и оставил только beta.example
+        let mut cfg_b = crate::config::AppConfig::default();
+        cfg_b.force_domains = vec!["beta.example".to_string()];
+        let domains_b = collect_override_domains(&cfg_b, &["edge-beta-cdn.net".to_string()]);
+        assert!(domains_b.contains(&"edge-beta-cdn.net".to_string()));
+        assert!(
+            !domains_b.contains(&"fastly-alpha-cdn.net".to_string()),
+            "сиротский CDN удалённого force_domain не должен оставаться в override"
+        );
+
+        clear_cached_auto_cdns_for_test();
     }
 }

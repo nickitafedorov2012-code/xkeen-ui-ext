@@ -27,6 +27,30 @@ interface Props {
   onUpdated?: () => void
 }
 
+function parseMihomoSemver(raw: string): { nums: [number, number, number]; isAlpha: boolean } | null {
+  const clean = raw.trim().toLowerCase()
+  if (!clean) return null
+  const isAlpha = clean.includes('alpha') || clean.includes('prerelease') || clean.includes('-beta') || clean.includes('-rc')
+  const match = clean.match(/(\d+)\.(\d+)\.(\d+)/)
+  if (!match) return null
+  return {
+    nums: [Number(match[1]), Number(match[2]), Number(match[3])],
+    isAlpha,
+  }
+}
+
+export function isNewerMihomoVersion(latest: string, current: string): boolean {
+  const l = parseMihomoSemver(latest)
+  const c = parseMihomoSemver(current)
+  if (!l || !c) return false
+  for (let i = 0; i < 3; i++) {
+    if (l.nums[i] > c.nums[i]) return true
+    if (l.nums[i] < c.nums[i]) return false
+  }
+  // Та же тройка версий: обновление только с alpha/prerelease на stable
+  return c.isAlpha && !l.isAlpha
+}
+
 export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: Props) {
 
   const [data, setData] = useState<MihomoReleasesResponse | null>(null)
@@ -63,7 +87,7 @@ export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: 
       setStage(`Распаковка, проверка бинарника и установка ${tag}…`)
       const res = await apiPost<{ success: boolean; version: string; full_version?: string; message: string }>('mihomo/install', {
         tag,
-        custom_url: customUrl || undefined,
+        custom_url: tag === 'Prerelease-Alpha' && customUrl ? customUrl : undefined,
       })
 
       setStage(`Ядро Mihomo ${res.version || tag} успешно установлено!`)
@@ -83,7 +107,7 @@ export default function MihomoCoreModal({ isOpen, onClose, notify, onUpdated }: 
 
   const currentVer = data?.current_version || ''
   const latestVer = data?.latest_version || ''
-  const hasUpdate = Boolean(latestVer && currentVer && latestVer !== currentVer && !currentVer.includes(latestVer))
+  const hasUpdate = isNewerMihomoVersion(latestVer, currentVer)
 
   const filteredReleases = (data?.releases || []).filter((r) => {
     if (showAlpha) return true

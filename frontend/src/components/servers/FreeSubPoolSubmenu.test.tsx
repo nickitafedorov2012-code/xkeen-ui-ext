@@ -94,7 +94,7 @@ describe('FreeSubPoolSubmenu & ServerList free-sub cards', () => {
       })
 
       expect(mockGet).toHaveBeenCalledWith('providers/free-sub/pool?mode=vpn')
-      expect(container.textContent).toContain('Пул узлов (2 / 5)')
+      expect(container.textContent).toContain('Пул узлов (1 / 5)')
       expect(container.textContent).toContain('🚫 ЧС: 1')
       expect(container.textContent).toContain('🇫🇷 France — #1')
       expect(container.textContent).toContain('Обрыв')

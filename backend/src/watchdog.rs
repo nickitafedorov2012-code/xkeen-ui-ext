@@ -279,12 +279,112 @@ pub fn spawn(state: AppState) {
 }
 
 /// Проверка, попадает ли текущее время now_hm ("HH:MM") в интервал start..end.
+#[allow(dead_code)]
 pub fn is_time_in_range(now_hm: &str, start_hm: &str, end_hm: &str) -> bool {
     if start_hm <= end_hm {
         now_hm >= start_hm && now_hm < end_hm
     } else {
         // Переход через полночь (например, с 23:00 до 07:00)
         now_hm >= start_hm || now_hm < end_hm
+    }
+}
+
+/// R34: Проверка активности расписания с учётом ночного хвоста на предыдущий день недели.
+pub fn is_schedule_active(s: &config::DeviceSchedule, now_hm: &str, weekday: u8) -> bool {
+    if !s.enabled {
+        return false;
+    }
+    let prev_weekday = if weekday == 1 { 7 } else { weekday - 1 };
+    if s.time_start <= s.time_end {
+        s.days.contains(&weekday) && now_hm >= s.time_start.as_str() && now_hm < s.time_end.as_str()
+    } else {
+        (s.days.contains(&weekday) && now_hm >= s.time_start.as_str())
+            || (s.days.contains(&prev_weekday) && now_hm < s.time_end.as_str())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ActiveGroupSchedule {
+    pub group_name: String,
+    pub device_ip: String,
+    pub original_node: String,
+    pub applied_target: String,
+}
+
+fn schedule_target_node(s: &config::DeviceSchedule) -> Option<String> {
+    match s.action.as_str() {
+        "block" => Some("REJECT".to_string()),
+        "direct" => Some("DIRECT".to_string()),
+        "proxy" => Some(s.target_server.as_deref().unwrap_or("PROXY").to_string()),
+        _ => None,
+    }
+}
+
+fn schedule_action_priority(action: &str) -> u8 {
+    match action {
+        "block" => 3,
+        "direct" => 2,
+        "proxy" => 1,
+        _ => 0,
+    }
+}
+
+/// R36: Вычисляет единственное эффективное действие расписания на группу устройства.
+pub fn compute_effective_group_targets(
+    schedules: &[config::DeviceSchedule],
+    groups_by_ip: &std::collections::BTreeMap<String, String>,
+    now_hm: &str,
+    weekday: u8,
+) -> std::collections::HashMap<String, (String, String)> {
+    let mut best: std::collections::HashMap<String, (u8, String, String)> = std::collections::HashMap::new();
+    for s in schedules {
+        if !is_schedule_active(s, now_hm, weekday) {
+            continue;
+        }
+        let Some(target) = schedule_target_node(s) else {
+            continue;
+        };
+        let group_name = groups_by_ip
+            .get(&s.ip)
+            .cloned()
+            .unwrap_or_else(|| routing::group_name_for(&s.ip, ""));
+        let prio = schedule_action_priority(&s.action);
+        match best.get(&group_name) {
+            Some((cur_prio, _, _)) if *cur_prio > prio => {}
+            _ => {
+                best.insert(group_name, (prio, s.ip.clone(), target));
+            }
+        }
+    }
+    best.into_iter()
+        .map(|(g, (_, ip, target))| (g, (ip, target)))
+        .collect()
+}
+
+fn active_schedules_state_path(config_path: &std::path::Path) -> std::path::PathBuf {
+    let parent = config_path.parent().unwrap_or_else(|| std::path::Path::new("/opt/etc"));
+    parent.join("xkeen-route.active_schedules.json")
+}
+
+fn load_active_schedules_state(path: &std::path::Path) -> std::collections::HashMap<String, ActiveGroupSchedule> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_active_schedules_state(
+    path: &std::path::Path,
+    map: &std::collections::HashMap<String, ActiveGroupSchedule>,
+) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(bytes) = serde_json::to_vec(map) {
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, &bytes).is_ok() {
+            let _ = std::fs::rename(&tmp, path);
+        }
     }
 }
 
@@ -297,14 +397,9 @@ pub fn spawn_schedules_monitor(state: AppState) {
             }
             sleep(Duration::from_secs(1)).await;
         }
-        #[derive(Clone)]
-        struct ActiveScheduleEntry {
-            schedule_id: String,
-            device_ip: String,
-            group_name: String,
-            original_node: String,
-        }
-        let mut active_schedules: std::collections::HashMap<String, ActiveScheduleEntry> = std::collections::HashMap::new();
+        let state_file = active_schedules_state_path(&state.config_path);
+        let mut active_by_group: std::collections::HashMap<String, ActiveGroupSchedule> =
+            load_active_schedules_state(&state_file);
 
         loop {
             for _ in 0..30 {
@@ -315,32 +410,6 @@ pub fn spawn_schedules_monitor(state: AppState) {
             }
             let cfg = state.config.read().await.clone();
 
-            // RT-06: Reconcile удалённых расписаний с корректным group_name по IP устройства
-            let current_ids: std::collections::HashSet<String> = cfg
-                .schedules
-                .iter()
-                .map(|s| if s.id.is_empty() { s.ip.clone() } else { s.id.clone() })
-                .collect();
-
-            let mut removed_keys = Vec::new();
-            for key in active_schedules.keys() {
-                if !current_ids.contains(key) {
-                    removed_keys.push(key.clone());
-                }
-            }
-            for key in removed_keys {
-                if let Some(entry) = active_schedules.get(&key) {
-                    log_i!("[SCHEDULE] ⏰ Расписание '{}' удалено/снято для {}: возврат к исходному узлу '{}'", entry.schedule_id, entry.device_ip, entry.original_node);
-                    if mihomo::switch_group_scoped(&state.http, &cfg, &entry.group_name, &entry.original_node).await.is_ok() {
-                        active_schedules.remove(&key);
-                    }
-                }
-            }
-
-            if cfg.schedules.is_empty() {
-                continue;
-            }
-
             use chrono::Datelike;
             let now = chrono::Local::now();
             let now_hm = now.format("%H:%M").to_string();
@@ -350,55 +419,106 @@ pub fn spawn_schedules_monitor(state: AppState) {
             let groups_by_ip = mihomo::ip_groups_from_rules(&rules);
             let proxies_opt = mihomo::get_proxies(&state.http, &cfg).await.ok();
 
-            for s in &cfg.schedules {
-                let key = if s.id.is_empty() { s.ip.clone() } else { s.id.clone() };
-                let matches_day = s.days.contains(&weekday);
-                let in_range = s.enabled && matches_day && is_time_in_range(&now_hm, &s.time_start, &s.time_end);
+            let desired = compute_effective_group_targets(&cfg.schedules, &groups_by_ip, &now_hm, weekday);
+            let mut state_dirty = false;
 
-                let group_name = match groups_by_ip.get(&s.ip) {
-                    Some(g) => g.clone(),
-                    None => routing::group_name_for(&s.ip, ""),
-                };
-
-                if in_range {
-                    if let std::collections::hash_map::Entry::Vacant(e) = active_schedules.entry(key) {
-                        let current_node = proxies_opt
-                            .as_ref()
-                            .and_then(|p| p.get(&group_name))
-                            .and_then(|v| v.get("now"))
-                            .and_then(|n| n.as_str())
-                            .unwrap_or("DIRECT")
-                            .to_string();
-
-                        let target_node = match s.action.as_str() {
-                            "block" => "REJECT",
-                            "direct" => "DIRECT",
-                            "proxy" => s.target_server.as_deref().unwrap_or("PROXY"),
-                            _ => continue,
-                        };
-
-                        let switch_ok = if current_node != target_node {
-                            log_i!("[SCHEDULE] ⏰ Активация расписания '{}' ({}) для {}: {} -> {}", s.id, s.action, s.ip, current_node, target_node);
-                            mihomo::switch_group_scoped(&state.http, &cfg, &group_name, target_node).await.is_ok()
-                        } else {
-                            true
-                        };
-
-                        if switch_ok {
-                            e.insert(ActiveScheduleEntry {
-                                schedule_id: s.id.clone(),
-                                device_ip: s.ip.clone(),
-                                group_name,
-                                original_node: current_node,
-                            });
+            // 1. Активация новых или обновление изменившихся эффективных целей на группу (R35, R36, R37)
+            for (group_name, (device_ip, target_node)) in &desired {
+                if let Some(existing) = active_by_group.get_mut(group_name) {
+                    if existing.applied_target != *target_node {
+                        log_i!(
+                            "[SCHEDULE] ⏰ Обновление активного расписания для {} ({}): {} -> {}",
+                            device_ip,
+                            group_name,
+                            existing.applied_target,
+                            target_node
+                        );
+                        if mihomo::switch_group_scoped(&state.http, &cfg, group_name, target_node)
+                            .await
+                            .is_ok()
+                        {
+                            existing.device_ip = device_ip.clone();
+                            existing.applied_target = target_node.clone();
+                            state_dirty = true;
                         }
                     }
-                } else if let Some(entry) = active_schedules.get(&key) {
-                    log_i!("[SCHEDULE] ⏰ Окончание действия расписания '{}' для {}: возврат к исходному узлу '{}'", entry.schedule_id, entry.device_ip, entry.original_node);
-                    if mihomo::switch_group_scoped(&state.http, &cfg, &entry.group_name, &entry.original_node).await.is_ok() {
-                        active_schedules.remove(&key);
+                    continue;
+                }
+
+                let live_node = proxies_opt
+                    .as_ref()
+                    .and_then(|p| p.get(group_name))
+                    .and_then(|v| v.get("now"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("DIRECT")
+                    .to_string();
+                // R37: если панель перезапустилась без файла состояния во время REJECT, берём базовый узел из device_routing
+                let original_node = if live_node == "REJECT" {
+                    cfg.device_routing
+                        .get(device_ip)
+                        .and_then(|d| d.servers.first().map(|s| s.as_str()))
+                        .filter(|s| !s.trim().is_empty() && *s != "default" && *s != "REJECT")
+                        .unwrap_or("DIRECT")
+                        .to_string()
+                } else {
+                    live_node.clone()
+                };
+
+                let switch_ok = if live_node != *target_node {
+                    log_i!(
+                        "[SCHEDULE] ⏰ Активация расписания для {} ({}): {} -> {}",
+                        device_ip,
+                        group_name,
+                        live_node,
+                        target_node
+                    );
+                    mihomo::switch_group_scoped(&state.http, &cfg, group_name, target_node)
+                        .await
+                        .is_ok()
+                } else {
+                    true
+                };
+
+                if switch_ok {
+                    active_by_group.insert(
+                        group_name.clone(),
+                        ActiveGroupSchedule {
+                            group_name: group_name.clone(),
+                            device_ip: device_ip.clone(),
+                            original_node,
+                            applied_target: target_node.clone(),
+                        },
+                    );
+                    state_dirty = true;
+                }
+            }
+
+            // 2. Возврат к исходному узлу для групп, у которых больше нет активного расписания
+            let ended_groups: Vec<String> = active_by_group
+                .keys()
+                .filter(|g| !desired.contains_key(*g))
+                .cloned()
+                .collect();
+            for group_name in ended_groups {
+                if let Some(entry) = active_by_group.get(&group_name) {
+                    log_i!(
+                        "[SCHEDULE] ⏰ Окончание действия расписания для {} ({}): возврат к исходному узлу '{}'",
+                        entry.device_ip,
+                        entry.group_name,
+                        entry.original_node
+                    );
+                    if mihomo::switch_group_scoped(&state.http, &cfg, &entry.group_name, &entry.original_node)
+                        .await
+                        .is_ok()
+                    {
+                        active_by_group.remove(&group_name);
+                        state_dirty = true;
                     }
                 }
+            }
+
+            if state_dirty {
+                save_active_schedules_state(&state_file, &active_by_group);
             }
         }
     });
@@ -748,7 +868,9 @@ pub fn spawn_dhcp_device_monitor(state: AppState) {
                     let ports = routing::redir_ports(&new_yaml);
                     let (redir_port, tproxy_port) = (ports.redir, ports.tproxy);
                     let dns_port = crate::api::resolve_active_dns_port(&cfg_now);
-                    crate::api::sync_full_tunnel_modes(&cfg_now, redir_port, tproxy_port, dns_port).await;
+                    if let Err(e) = crate::api::sync_full_tunnel_modes(&cfg_now, redir_port, tproxy_port, dns_port).await {
+                        log_w!("[DHCP-WATCHDOG] Ошибка синхронизации полного перехвата: {}", e);
+                    }
                     if !cfg_now.zapret.excluded_devices.is_empty() {
                         let _ = crate::api::sync_zapret_files(&cfg_now.zapret).await;
                     }
@@ -1301,7 +1423,9 @@ pub fn spawn_mihomo_health_monitor(state: AppState) {
                         (5000, 5001)
                     };
                     let dns_port = crate::api::resolve_active_dns_port(&cfg);
-                    crate::api::sync_full_tunnel_modes(&cfg, redir_port, tproxy_port, dns_port).await;
+                    if let Err(e) = crate::api::sync_full_tunnel_modes(&cfg, redir_port, tproxy_port, dns_port).await {
+                        log_w!("[WATCHDOG] Ошибка восстановления полного перехвата: {}", e);
+                    }
                 }
             }
         }
@@ -2840,5 +2964,43 @@ mod structural_regression_tests {
         assert_eq!(cfg.whitelist.devices[1].ip, "192.168.2.63");
         assert_eq!(cfg.gaming.devices[0].ip, "192.168.2.118");
         assert_eq!(cfg.gaming.devices[1].ip, "192.168.2.63");
+    }
+
+    #[test]
+    fn regression_r34_r36_overnight_schedules_and_overlap_priority() {
+        let mon_night = crate::config::DeviceSchedule {
+            id: "s1".into(),
+            ip: "192.168.1.50".into(),
+            action: "direct".into(),
+            target_server: None,
+            time_start: "23:00".into(),
+            time_end: "07:00".into(),
+            days: vec![1], // Понедельник
+            enabled: true,
+        };
+        // R34: Понедельник 01:00 НЕ должен активироваться (начнётся в 23:00 понедельника)
+        assert!(!super::is_schedule_active(&mon_night, "01:00", 1));
+        // Понедельник 23:30 и Вторник 01:00 ДОЛЖНЫ быть активны
+        assert!(super::is_schedule_active(&mon_night, "23:30", 1));
+        assert!(super::is_schedule_active(&mon_night, "01:00", 2));
+
+        // Воскресенье (7) 23:00-07:00 действует в Понедельник (1) 02:00
+        let mut sun_night = mon_night.clone();
+        sun_night.days = vec![7];
+        assert!(super::is_schedule_active(&sun_night, "02:00", 1));
+
+        // R36: Пересекающиеся расписания одного устройства: block (REJECT) имеет приоритет над direct
+        let block_sched = crate::config::DeviceSchedule {
+            id: "s2".into(),
+            action: "block".into(),
+            days: vec![2],
+            time_start: "00:00".into(),
+            time_end: "04:00".into(),
+            ..mon_night.clone()
+        };
+        let groups = std::collections::BTreeMap::new();
+        let eff = super::compute_effective_group_targets(&[mon_night, block_sched], &groups, "01:00", 2);
+        let gname = crate::routing::group_name_for("192.168.1.50", "");
+        assert_eq!(eff.get(&gname).map(|(_, t)| t.as_str()), Some("REJECT"));
     }
 }

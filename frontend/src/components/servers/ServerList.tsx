@@ -1,6 +1,6 @@
-import React, { useState } from 'react'
-import { apiPost } from '../../api'
-import { pingClass, getFlowStatus, type FreeSubMode, type ServerInfo, type SpeedtestResult, type StatusInfo } from '../../types'
+import React, { useEffect, useState } from 'react'
+import { apiGet, apiPost } from '../../api'
+import { pingClass, getFlowStatus, type FreeSubMode, type FreeSubStatus, type ServerInfo, type SpeedtestResult, type StatusInfo } from '../../types'
 import { Sparkline } from './serversHelpers'
 import { FreeSubPoolSubmenu } from './FreeSubPoolSubmenu'
 
@@ -70,6 +70,42 @@ export function ServerList({
   const PAGE = pageSize
   const [expandedFreeSubIds, setExpandedFreeSubIds] = useState<Record<string, boolean>>({})
   const [freeSubBusyId, setFreeSubBusyId] = useState<string | null>(null)
+  const [freeSubStatus, setFreeSubStatus] = useState<FreeSubStatus | null>(null)
+
+  useEffect(() => {
+    if (!freeSubStatus?.running) return
+    const timer = window.setInterval(async () => {
+      try {
+        const res = await apiGet<{ status: FreeSubStatus }>('providers/free-sub/status')
+        if (res?.status) {
+          setFreeSubStatus(res.status)
+          if (!res.status.running) {
+            if (res.status.stage === 'connected') {
+              notify?.(`Подключено: ${res.status.active_node ?? 'рабочий узел'}`)
+              onFreeSubChanged?.()
+            } else if (res.status.stage === 'error' && res.status.error) {
+              notify?.(res.status.error, true)
+            }
+          }
+        }
+      } catch {
+        // ignore transient poll errors
+      }
+    }, 600)
+    return () => window.clearInterval(timer)
+  }, [freeSubStatus?.running, notify, onFreeSubChanged])
+
+  const handleFreeSubConnect = async (s: ServerInfo) => {
+    activate(s)
+    try {
+      const res = await apiGet<{ status: FreeSubStatus }>('providers/free-sub/status')
+      if (res?.status) {
+        setFreeSubStatus(res.status)
+      }
+    } catch {
+      // ignore
+    }
+  }
 
   const handleFreeSubDisconnect = async (s: ServerInfo, mode: FreeSubMode) => {
     setFreeSubBusyId(s.id)
@@ -290,11 +326,29 @@ export function ServerList({
                     <button
                       type="button"
                       className="btn sm btn-connect"
-                      onClick={() => activate(s)}
+                      onClick={() =>
+                        s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL'
+                          ? void handleFreeSubConnect(s)
+                          : activate(s)
+                      }
+                      disabled={
+                        (s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') &&
+                        Boolean(freeSubStatus?.running)
+                      }
                       title="Сделать этот сервер активным"
                     >
-                      <span>🔌</span>
-                      <span className="btn-label-optional">Подключить</span>
+                      <span>
+                        {(s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') &&
+                        freeSubStatus?.running
+                          ? '⏳'
+                          : '🔌'}
+                      </span>
+                      <span className="btn-label-optional">
+                        {(s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') &&
+                        freeSubStatus?.running
+                          ? 'Поиск…'
+                          : 'Подключить'}
+                      </span>
                     </button>
                   )}
                 </div>

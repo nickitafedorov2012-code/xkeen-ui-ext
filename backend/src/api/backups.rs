@@ -76,7 +76,10 @@ pub async fn create_backup(State(state): State<AppState>) -> Response {
     for zp in zapret_candidates {
         let p = std::path::Path::new(zp);
         if p.is_file() {
-            let _ = tokio::fs::copy(p, tmp_dir.join("zapret.conf")).await;
+            if let Err(e) = tokio::fs::copy(p, tmp_dir.join("zapret.conf")).await {
+                let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+                return api_err(format!("Не удалось скопировать {zp}: {e}"));
+            }
             break;
         }
     }
@@ -88,14 +91,20 @@ pub async fn create_backup(State(state): State<AppState>) -> Response {
     for hp in hosts_candidates {
         let p = std::path::Path::new(hp);
         if p.is_file() {
-            let _ = tokio::fs::copy(p, tmp_dir.join("zapret-hosts.txt")).await;
+            if let Err(e) = tokio::fs::copy(p, tmp_dir.join("zapret-hosts.txt")).await {
+                let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+                return api_err(format!("Не удалось скопировать {hp}: {e}"));
+            }
             break;
         }
     }
     // 5. ru_exclude_override.lst (если существует)
     let override_path = std::path::Path::new(crate::override_sync::OVERRIDE_FILE);
     if override_path.is_file() {
-        let _ = tokio::fs::copy(override_path, tmp_dir.join("ru_exclude_override.lst")).await;
+        if let Err(e) = tokio::fs::copy(override_path, tmp_dir.join("ru_exclude_override.lst")).await {
+            let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+            return api_err(format!("Не удалось скопировать {}: {e}", override_path.display()));
+        }
     }
     // 6. AdGuardHome.yaml (если существует)
     let agh_candidates = [
@@ -106,8 +115,38 @@ pub async fn create_backup(State(state): State<AppState>) -> Response {
     for ap in agh_candidates {
         let p = std::path::Path::new(ap);
         if p.is_file() {
-            let _ = tokio::fs::copy(p, tmp_dir.join("AdGuardHome.yaml")).await;
+            if let Err(e) = tokio::fs::copy(p, tmp_dir.join("AdGuardHome.yaml")).await {
+                let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+                return api_err(format!("Не удалось скопировать {ap}: {e}"));
+            }
             break;
+        }
+    }
+    // 7. Локальные файлы провайдеров (providers/*.yaml, R03)
+    let prov_dir = std::path::Path::new(&cfg.mihomo.config_path)
+        .parent()
+        .map(|p| p.join("providers"))
+        .unwrap_or_else(|| std::path::PathBuf::from("providers"));
+    if prov_dir.is_dir() {
+        let dst_prov_dir = tmp_dir.join("providers");
+        if let Ok(mut rd) = tokio::fs::read_dir(&prov_dir).await {
+            while let Ok(Some(ent)) = rd.next_entry().await {
+                let p = ent.path();
+                let fname = ent.file_name().to_string_lossy().to_string();
+                if p.is_file()
+                    && fname.ends_with(".yaml")
+                    && !fname.starts_with("__free_sub_probe")
+                {
+                    if let Err(e) = tokio::fs::create_dir_all(&dst_prov_dir).await {
+                        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+                        return api_err(format!("Не удалось создать каталог providers бэкапа: {e}"));
+                    }
+                    if let Err(e) = tokio::fs::copy(&p, dst_prov_dir.join(&fname)).await {
+                        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+                        return api_err(format!("Не удалось скопировать провайдер {}: {e}", p.display()));
+                    }
+                }
+            }
         }
     }
 
@@ -161,9 +200,10 @@ pub async fn restore_backup(State(state): State<AppState>, Json(req): Json<Backu
         Err(e) => return api_err(format!("Файл config.json в бэкапе поврежден: {e}")),
     };
 
-    // BK-04: Сохранение локальных путей хоста при переносе бэкапа
+    // BK-04: Сохранение локальных путей хоста при переносе бэкапа (включая AdGuardHome — R06)
     new_cfg.system = cfg.system.clone();
     new_cfg.mihomo.config_path = cfg.mihomo.config_path.clone();
+    new_cfg.adguard.config_path = cfg.adguard.config_path.clone();
 
     // 2. Старт транзакции через ConfigTx с блокировками и снапшотами (BK-04, BK-05)
     let mut tx = match crate::transaction::ConfigTx::begin(&state).await {
@@ -176,75 +216,122 @@ pub async fn restore_backup(State(state): State<AppState>, Json(req): Json<Backu
     }
     tx.stage_json(new_cfg);
 
-    // Дополнительные файлы (zapret.conf, zapret-hosts.txt и override), если присутствуют в бэкапе
+    // Дополнительные файлы (R05: не скрываем ошибки чтения/подготовки)
     let src_zapret = dir.join("zapret.conf");
     if src_zapret.is_file() {
-        if let Ok(z_content) = tokio::fs::read_to_string(&src_zapret).await {
-            let z_candidates = [
-                std::path::PathBuf::from("/opt/zapret/config/zapret.conf"),
-                std::path::PathBuf::from("/opt/etc/zapret/zapret.conf"),
-            ];
-            for z_path in &z_candidates {
-                if z_path.parent().map(|p| p.exists()).unwrap_or(false) {
-                    let _ = tx.set_extra_file(z_path.as_path(), z_content.clone(), false).await;
-                    break;
+        let z_content = match tokio::fs::read_to_string(&src_zapret).await {
+            Ok(c) => c,
+            Err(e) => return api_err(format!("Ошибка чтения zapret.conf из бэкапа: {e}")),
+        };
+        let z_candidates = [
+            std::path::PathBuf::from("/opt/zapret/config/zapret.conf"),
+            std::path::PathBuf::from("/opt/etc/zapret/zapret.conf"),
+        ];
+        for z_path in &z_candidates {
+            if z_path.parent().map(|p| p.exists()).unwrap_or(false) {
+                if let Err(e) = tx.set_extra_file(z_path.as_path(), z_content.clone(), false).await {
+                    return api_err(format!("Ошибка подготовки zapret.conf: {e}"));
                 }
+                break;
             }
         }
     }
 
     let src_hosts = dir.join("zapret-hosts.txt");
     if src_hosts.is_file() {
-        if let Ok(h_content) = tokio::fs::read_to_string(&src_hosts).await {
-            let h_candidates = [
-                std::path::PathBuf::from("/opt/etc/zapret/zapret-hosts.txt"),
-                std::path::PathBuf::from("/opt/zapret/config/zapret-hosts.txt"),
-            ];
-            for h_path in &h_candidates {
-                if h_path.parent().map(|p| p.exists()).unwrap_or(false) {
-                    let _ = tx.set_extra_file(h_path.as_path(), h_content.clone(), false).await;
-                    break;
+        let h_content = match tokio::fs::read_to_string(&src_hosts).await {
+            Ok(c) => c,
+            Err(e) => return api_err(format!("Ошибка чтения zapret-hosts.txt из бэкапа: {e}")),
+        };
+        let h_candidates = [
+            std::path::PathBuf::from("/opt/etc/zapret/zapret-hosts.txt"),
+            std::path::PathBuf::from("/opt/zapret/config/zapret-hosts.txt"),
+        ];
+        for h_path in &h_candidates {
+            if h_path.parent().map(|p| p.exists()).unwrap_or(false) {
+                if let Err(e) = tx.set_extra_file(h_path.as_path(), h_content.clone(), false).await {
+                    return api_err(format!("Ошибка подготовки zapret-hosts.txt: {e}"));
                 }
+                break;
             }
         }
     }
 
     let src_override = dir.join("ru_exclude_override.lst");
     if src_override.is_file() {
-        if let Ok(ov_content) = tokio::fs::read_to_string(&src_override).await {
-            let ov_path = std::path::Path::new(crate::override_sync::OVERRIDE_FILE);
-            if ov_path.parent().map(|p| p.exists()).unwrap_or(false) {
-                let _ = tx.set_extra_file(ov_path, ov_content, false).await;
+        let ov_content = match tokio::fs::read_to_string(&src_override).await {
+            Ok(c) => c,
+            Err(e) => return api_err(format!("Ошибка чтения ru_exclude_override.lst из бэкапа: {e}")),
+        };
+        let ov_path = std::path::Path::new(crate::override_sync::OVERRIDE_FILE);
+        if ov_path.parent().map(|p| p.exists()).unwrap_or(false) {
+            if let Err(e) = tx.set_extra_file(ov_path, ov_content, false).await {
+                return api_err(format!("Ошибка подготовки ru_exclude_override.lst: {e}"));
             }
         }
     }
 
     let src_agh = dir.join("AdGuardHome.yaml");
     if src_agh.is_file() {
-        if let Ok(agh_content) = tokio::fs::read_to_string(&src_agh).await {
-            let agh_candidates = [
-                std::path::PathBuf::from(&cfg.adguard.config_path),
-                std::path::PathBuf::from("/opt/etc/AdGuardHome.yaml"),
-                std::path::PathBuf::from("/opt/etc/AdGuardHome/AdGuardHome.yaml"),
-            ];
-            for a_path in &agh_candidates {
-                if a_path.parent().map(|p| p.exists()).unwrap_or(false) {
-                    let _ = tx.set_extra_file(a_path.as_path(), agh_content.clone(), true).await;
-                    break;
+        let agh_content = match tokio::fs::read_to_string(&src_agh).await {
+            Ok(c) => c,
+            Err(e) => return api_err(format!("Ошибка чтения AdGuardHome.yaml из бэкапа: {e}")),
+        };
+        let agh_candidates = [
+            std::path::PathBuf::from(&cfg.adguard.config_path),
+            std::path::PathBuf::from("/opt/etc/AdGuardHome.yaml"),
+            std::path::PathBuf::from("/opt/etc/AdGuardHome/AdGuardHome.yaml"),
+        ];
+        for a_path in &agh_candidates {
+            if a_path.parent().map(|p| p.exists()).unwrap_or(false) {
+                if let Err(e) = tx.set_extra_file(a_path.as_path(), agh_content.clone(), true).await {
+                    return api_err(format!("Ошибка подготовки AdGuardHome.yaml: {e}"));
+                }
+                break;
+            }
+        }
+    }
+
+    // Локальные файлы провайдеров (providers/*.yaml, R03)
+    let src_prov_dir = dir.join("providers");
+    if src_prov_dir.is_dir() {
+        let dst_prov_dir = std::path::Path::new(&cfg.mihomo.config_path)
+            .parent()
+            .map(|p| p.join("providers"))
+            .unwrap_or_else(|| std::path::PathBuf::from("providers"));
+        if let Err(e) = tokio::fs::create_dir_all(&dst_prov_dir).await {
+            return api_err(format!("Ошибка создания каталога providers: {e}"));
+        }
+        if let Ok(mut rd) = tokio::fs::read_dir(&src_prov_dir).await {
+            while let Ok(Some(ent)) = rd.next_entry().await {
+                let p = ent.path();
+                let fname = ent.file_name().to_string_lossy().to_string();
+                if p.is_file() && fname.ends_with(".yaml") {
+                    let content = match tokio::fs::read_to_string(&p).await {
+                        Ok(c) => c,
+                        Err(e) => return api_err(format!("Ошибка чтения провайдера {fname}: {e}")),
+                    };
+                    if let Err(e) = tx.set_extra_file(&dst_prov_dir.join(&fname), content, true).await {
+                        return api_err(format!("Ошибка подготовки провайдера {fname}: {e}"));
+                    }
                 }
             }
         }
     }
 
     // 3. Атомарное применение и reload с автоматическим двухфазным откатом при сбое (BK-05)
-    match tx.commit_and_reload().await {
+    let commit_res = tx.commit_and_reload().await;
+    let recovery_required = tx.is_recovery_required();
+    // R01: Освобождаем config_lock и routing_lock ДО вызова sync_vkturn_after_restore!
+    drop(tx);
+    match commit_res {
         Ok(_) => {
             crate::vkturn::sync_vkturn_after_restore(&state).await;
             log_i!("Конфиги атомарно восстановлены из бэкапа {}", req.name);
             api_ok(json!({ "restored": req.name }))
         }
         Err(e) => {
-            let recovery_note = if tx.is_recovery_required() {
+            let recovery_note = if recovery_required {
                 " (ВНИМАНИЕ: требуется ручное восстановление файлов)"
             } else {
                 ""
@@ -307,6 +394,23 @@ pub async fn export_backup(
     if let Ok(ov) = tokio::fs::read_to_string(dir.join("ru_exclude_override.lst")).await {
         files_map.insert("ru_exclude_override.lst".to_string(), json!(ov));
     }
+    if let Ok(agh) = tokio::fs::read_to_string(dir.join("AdGuardHome.yaml")).await {
+        files_map.insert("AdGuardHome.yaml".to_string(), json!(agh));
+    }
+    let prov_dir = dir.join("providers");
+    if prov_dir.is_dir() {
+        if let Ok(mut rd) = tokio::fs::read_dir(&prov_dir).await {
+            while let Ok(Some(ent)) = rd.next_entry().await {
+                let p = ent.path();
+                let fname = ent.file_name().to_string_lossy().to_string();
+                if p.is_file() && fname.ends_with(".yaml") {
+                    if let Ok(content) = tokio::fs::read_to_string(&p).await {
+                        files_map.insert(format!("providers/{fname}"), json!(content));
+                    }
+                }
+            }
+        }
+    }
 
     let backup_bundle = json!({
         "version": "1.0",
@@ -342,11 +446,25 @@ pub async fn import_backup(
 
     // 0. Строгая проверка допустимости имен файлов и защита от path traversal (BK-02)
     for key in files.keys() {
-        if key.contains("..") || key.contains('/') || key.contains('\\') {
+        if key.contains("..") || key.contains('\\') {
+            return api_err(format!("Обнаружена попытка path traversal в имени файла бэкапа: '{key}'"));
+        }
+        if let Some(prov_file) = key.strip_prefix("providers/") {
+            if prov_file.is_empty() || prov_file.contains('/') || !prov_file.ends_with(".yaml") {
+                return api_err(format!("Недопустимое имя файла провайдера в бэкапе: '{key}'"));
+            }
+            continue;
+        }
+        if key.contains('/') {
             return api_err(format!("Обнаружена попытка path traversal в имени файла бэкапа: '{key}'"));
         }
         match key.as_str() {
-            "config.yaml" | "config.json" | "zapret.conf" | "zapret-hosts.txt" | "ru_exclude_override.lst" => {},
+            "config.yaml"
+            | "config.json"
+            | "zapret.conf"
+            | "zapret-hosts.txt"
+            | "ru_exclude_override.lst"
+            | "AdGuardHome.yaml" => {}
             _ => return api_err(format!("Недопустимый файл в архиве бэкапа: '{key}'")),
         }
     }
@@ -428,7 +546,31 @@ pub async fn import_backup(
         let _ = tokio::fs::write(tmp_dir.join("zapret-hosts.txt"), hosts_str).await;
     }
     if let Some(ov_str) = files.get("ru_exclude_override.lst").and_then(|o| o.as_str()) {
-        let _ = tokio::fs::write(tmp_dir.join("ru_exclude_override.lst"), ov_str).await;
+        if let Err(e) = tokio::fs::write(tmp_dir.join("ru_exclude_override.lst"), ov_str).await {
+            let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+            return api_err(format!("Ошибка записи ru_exclude_override.lst: {e}"));
+        }
+    }
+    if let Some(agh_str) = files.get("AdGuardHome.yaml").and_then(|a| a.as_str()) {
+        if let Err(e) = tokio::fs::write(tmp_dir.join("AdGuardHome.yaml"), agh_str).await {
+            let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+            return api_err(format!("Ошибка записи AdGuardHome.yaml: {e}"));
+        }
+    }
+    for (key, val) in files {
+        if let Some(prov_file) = key.strip_prefix("providers/") {
+            if let Some(content) = val.as_str() {
+                let dst_dir = tmp_dir.join("providers");
+                if let Err(e) = tokio::fs::create_dir_all(&dst_dir).await {
+                    let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+                    return api_err(format!("Ошибка создания каталога providers: {e}"));
+                }
+                if let Err(e) = tokio::fs::write(dst_dir.join(prov_file), content).await {
+                    let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+                    return api_err(format!("Ошибка записи {key}: {e}"));
+                }
+            }
+        }
     }
 
     // Атомарное переименование staging -> final
@@ -439,5 +581,25 @@ pub async fn import_backup(
 
     log_i!("Импортирован бэкап '{}' в {}", safe_name, dir.display());
     api_ok(json!({ "imported": safe_name }))
+}
+
+#[cfg(test)]
+mod backup_regression_tests {
+    #[test]
+    fn regression_r01_r02_r03_r06_backup_contracts() {
+        let src = include_str!("backups.rs");
+        // R01: tx освобождается до sync_vkturn_after_restore
+        let restore_start = src.find("pub async fn restore_backup(").unwrap();
+        let drop_pos = src[restore_start..].find("drop(tx);").unwrap();
+        let vkturn_pos = src[restore_start..].find("crate::vkturn::sync_vkturn_after_restore(").unwrap();
+        assert!(drop_pos < vkturn_pos, "R01: drop(tx) должен выполняться до sync_vkturn_after_restore");
+
+        // R02/R03: export_backup и import_backup поддерживают AdGuardHome.yaml и providers/
+        assert!(src.contains("\"AdGuardHome.yaml\""));
+        assert!(src.contains("providers/"));
+
+        // R06: restore_backup сохраняет локальный adguard.config_path
+        assert!(src[restore_start..].contains("adguard.config_path = current_adguard_config_path"));
+    }
 }
 

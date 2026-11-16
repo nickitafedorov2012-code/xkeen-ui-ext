@@ -352,6 +352,7 @@ pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -
     if server_id == crate::free_sub::FREE_VPN_PROVIDER_ID
         || server_id == crate::free_sub::FREE_WL_PROVIDER_ID
     {
+        crate::speedtest::cancel_active_speedtest();
         let mode = if server_id == crate::free_sub::FREE_WL_PROVIDER_ID {
             crate::free_sub::FreeSubMode::Whitelist
         } else {
@@ -362,7 +363,9 @@ pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -
         }
         let st_clone = state.clone();
         tokio::spawn(async move {
-            let _ = crate::free_sub::start_one_click_connect(st_clone, mode).await;
+            if let Err(e) = crate::free_sub::start_one_click_connect(st_clone, mode).await {
+                log_e!("[FREE-SUB] Фоновый запуск подключения ({mode:?}) завершился ошибкой: {e}");
+            }
         });
         return Ok("Запущен поиск и проверка рабочих узлов…".into());
     }
@@ -381,6 +384,7 @@ pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -
     match switched {
         Ok(msg) => {
             log_i!("Смена сервера: {} — {}", server_id, msg);
+            crate::free_sub::close_active_free_session_on_external_switch(state).await;
             failover::record_manual_switch(server_id).await;
             let (srv_name, srv_prov) = if to_vkturn {
                 (crate::vkturn::PROXY_NAME.to_string(), Some(crate::vkturn::PROVIDER_ID.to_string()))
