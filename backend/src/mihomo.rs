@@ -175,6 +175,16 @@ pub async fn close_all_connections(http: &reqwest::Client, cfg: &AppConfig) -> R
     })
 }
 
+/// Возвращает количество активных соединений в ядре Mihomo.
+pub async fn get_connections_count(http: &reqwest::Client, cfg: &AppConfig) -> Result<usize, String> {
+    let val = m_get(http, cfg, "/connections").await?;
+    Ok(val
+        .get("connections")
+        .and_then(|c| c.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0))
+}
+
 /// Селективный сброс сокетов: закрывает только соединения, проходящие через указанный сервер.
 /// Соединения DIRECT (банки, Госуслуги, ТВ, SIP) остаются абсолютно нетронутыми!
 pub async fn close_server_connections(
@@ -823,6 +833,7 @@ pub async fn force_update_all_providers(http: &reqwest::Client, cfg: &AppConfig)
 
 pub const FREE_SUB_L7_PRIMARY_URL: &str = "https://www.gstatic.com/generate_204";
 pub const FREE_SUB_L7_FALLBACK_URL: &str = "https://cp.cloudflare.com/generate_204";
+pub const FREE_SUB_L7_VERIFY_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
 
 /// Строгий разбор ответа точечного L7 healthcheck Mihomo (`/providers/proxies/{provider}/{node}/healthcheck`).
 /// Отклоняет любые HTTP-ошибки, JSON с `error`/`message` и `delay <= 0` без опоры на старую историю.
@@ -899,6 +910,40 @@ pub async fn probe_service_provider_node_l7(
                 .map_err(|second_err| format!("{first_err}; fallback: {second_err}"))
         }
     }
+}
+
+/// Stability Gate: двойная последовательная L7-проверка узла.
+/// 1) `generate_204` (status 204)
+/// 2) Лёгкий HTTPS GET с проверкой ответа (`cdn-cgi/trace`, status 200) — отсеивает узлы с ECONNRESET на передаче данных.
+pub async fn probe_service_provider_node_l7_stable(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    provider_id: &str,
+    node_name: &str,
+    timeout_ms: u64,
+) -> Result<i64, String> {
+    let first_delay = probe_service_provider_node_l7(
+        http,
+        cfg,
+        provider_id,
+        node_name,
+        timeout_ms,
+        None,
+        None,
+    )
+    .await?;
+    let second_delay = run_single_provider_node_healthcheck(
+        http,
+        cfg,
+        provider_id,
+        node_name,
+        FREE_SUB_L7_VERIFY_URL,
+        200,
+        timeout_ms,
+    )
+    .await
+    .map_err(|e| format!("Stability gate (cdn-cgi/trace) провален: {e}"))?;
+    Ok((first_delay + second_delay) / 2)
 }
 
 /// Рекурсивное разрешение активного «листа» из цепочек selector/fallback/urltest.
@@ -1422,6 +1467,51 @@ pub async fn get_servers(
         }
     } else {
         servers.retain(|server| server.id != crate::vkturn::PROXY_NAME);
+    }
+
+    // Виртуальные карточки бесплатных мульти-подписок (`free_vpn` и `free_wl`):
+    // скрываем сырые узлы пула из общего списка и показываем единые карточки с реальными метриками активного узла.
+    let registered_yaml = tokio::fs::read_to_string(&cfg.mihomo.config_path).await.unwrap_or_default();
+    let registered_providers = crate::routing::parse_provider_names(&registered_yaml);
+    for (pid, default_title, proto, default_host) in [
+        (crate::free_sub::FREE_VPN_PROVIDER_ID, "🆓 Бесплатный VPN (Авто)", "FREE-VPN", "Пул бесплатного VPN"),
+        (crate::free_sub::FREE_WL_PROVIDER_ID, "🛡️ Бесплатный обход БС (Авто)", "FREE-WL", "Пул обхода БС"),
+    ] {
+        let pool_nodes: Vec<Server> = servers
+            .iter()
+            .filter(|s| s.provider.as_deref() == Some(pid))
+            .cloned()
+            .collect();
+        let is_registered = registered_providers.iter().any(|p| p.eq_ignore_ascii_case(pid));
+        servers.retain(|s| s.provider.as_deref() != Some(pid));
+
+        if is_registered || !pool_nodes.is_empty() {
+            let active_leaf = pool_nodes.iter().find(|s| s.is_active);
+            let best_leaf = active_leaf.or_else(|| pool_nodes.first());
+            let card_host = best_leaf
+                .map(|s| s.host.clone())
+                .filter(|h| !h.is_empty())
+                .unwrap_or_else(|| default_host.to_string());
+            let card_port = best_leaf.map(|s| s.port).unwrap_or(0);
+            let card_ping = best_leaf.map(|s| s.ping_ms).unwrap_or(-1);
+            let card_ip = best_leaf.and_then(|s| s.resolved_ip.clone());
+            let is_active = active_leaf.is_some();
+
+            servers.push(Server {
+                id: pid.to_string(),
+                name: default_title.to_string(),
+                protocol: proto.to_string(),
+                host: card_host,
+                port: card_port,
+                is_active,
+                is_priority: priority_chain.iter().any(|id| id == pid),
+                ping_ms: card_ping,
+                provider: Some(pid.to_string()),
+                provider_name: Some(default_title.to_string()),
+                is_pool: false,
+                resolved_ip: card_ip,
+            });
+        }
     }
 
     // Разрешаем DNS для активного узла, если он задан доменным именем

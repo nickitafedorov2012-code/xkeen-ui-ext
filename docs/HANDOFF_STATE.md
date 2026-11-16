@@ -43,3 +43,11 @@
 - [DONE] Шаг 2: Перепроверены пункты `4–10, 12, 14, 17, 24–30, 32, 33, 39, 41, 51, 56–59, 62, 64, 67, 76, 77, 80–86, 94–96, 98, 108–111, 116, 118–120, 122, 130, 131, 133–136`. Дозакрыт остаток по Багу 6 в `frontend/src/components/Gaming.tsx` (`handleSave` больше не шлёт устаревший `enabled` при сохранении доменов/платформ, тест в `Gaming.test.tsx` усилен, `Gaming.test.tsx` + `ConflictPairs.test.tsx` 16/16 passed).
 - [DONE] Шаг 3: Неначатые пункты и остатки проверены; исправлены [free_sub/mod.rs](backend/src/free_sub/mod.rs) (`sync_whitelist_mode_tunnel` + `test_6`) и 2 предсуществующих падения фронтенд-тестов (`versionUpdate.test.ts:20`, `Header.test.tsx:209`). Итоговый прогон: `cargo test` 760/760 passed, `vitest run` 44/44 файлов (381/381 тестов) passed, `vite build` ok. Выпуск `v1.17.0-beta.2`.
 
+## Переработка механики и UI «Бесплатных мульти-подписок» (v1.17.0-beta.6)
+- [DONE] Шаг 1: `backend/src/routing/validator.rs` — добавлена `add_provider_to_proxy_groups` (гарантированное добавление `free_vpn`/`free_wl` в `use:` группы `PROXY`) + тест `regression_add_provider_to_proxy_groups_adds_to_proxy`.
+- [DONE] Шаг 2: `backend/src/mihomo.rs` — Stability Gate (`probe_service_provider_node_l7_stable`: `generate_204` + `cdn-cgi/trace`), `get_connections_count` и виртуальные карточки `free_vpn` / `free_wl` в `get_servers`.
+- [DONE] Шаг 3: `backend/src/free_sub/mod.rs` — `BACKGROUND_BACKUP_TARGET = 20`, разнообразие по IP:port, `auto_connect: bool`, 24ч blacklist TTL, per-node история сессий и трафика, Real-Traffic Fast-Path, Smart Watchdog, `enable_both_free_subs`, `disconnect_free_sub`, `remove_free_sub`, `switch_pool_node`, `blacklist_and_next`, `start_background_refill`, `get_pool_and_history`.
+- [DONE] Шаг 4: `backend/src/api/servers/subscriptions.rs`, `backend/src/api/servers/mod.rs`, `backend/src/api/router.rs`, `backend/src/main.rs` — эндпоинты и 5-секундный цикл Smart Watchdog.
+- [DONE] Шаг 5: `frontend/src/` — кнопка `🆓 Добавить бесплатные подписки` в шапке `Servers.tsx`, единые карточки в `ServerList.tsx` с «Отключить» / «Удалить» / «Узлы и история ▾», компонент `FreeSubPoolSubmenu.tsx`, удаление верхнего `FreeSubCard`.
+- [DONE] Шаг 6: Автотесты бэкенда и фронтенда (`cargo test`, `npm test`, `npm run build`).
+

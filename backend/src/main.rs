@@ -600,6 +600,15 @@ async fn main() {
     // Фоновый автоподбор лучшего узла для Google AI / Flow (Баг 53)
     watchdog::spawn_flow_auto_select_loop(state.clone());
 
+    // Smart Watchdog для бесплатных мульти-подписок (авто-перелистывание при зависании 0 Б/с)
+    let free_sub_wd_state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            free_sub::check_free_sub_stall_watchdog(&free_sub_wd_state).await;
+        }
+    });
+
     // Синхронизация AdGuard Home DNS-редиректа при старте панели
     let adguard_sync_state = state.clone();
     tokio::spawn(async move {

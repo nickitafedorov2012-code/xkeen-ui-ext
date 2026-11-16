@@ -215,6 +215,37 @@ export interface FreeSubStatus {
   updated_at: number | null
 }
 
+export interface FreeSubPoolNode {
+  name: string
+  host: string
+  port: number
+  ping_ms: number | null
+  is_active: boolean
+}
+
+export interface FreeSubSessionRecord {
+  node_name: string
+  host: string
+  port: number
+  started_at: number
+  ended_at: number | null
+  duration_secs: number
+  down_bytes: number
+  up_bytes: number
+  end_reason: string
+}
+
+export interface FreeSubPoolInfo {
+  mode: FreeSubMode
+  provider_id: string
+  active_node: string | null
+  pool_index: number | null
+  pool_total: number
+  blacklist_count: number
+  nodes: FreeSubPoolNode[]
+  history: FreeSubSessionRecord[]
+}
+
 export interface ZapretCustomEntry {
   domain: string
   enabled: boolean

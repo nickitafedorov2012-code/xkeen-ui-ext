@@ -841,3 +841,117 @@ pub async fn get_free_sub_status() -> Response {
     let st = crate::free_sub::get_status().await;
     api_ok(json!({ "status": st }))
 }
+
+#[derive(Deserialize)]
+pub struct FreeSubModeReq {
+    #[serde(default)]
+    pub mode: crate::free_sub::FreeSubMode,
+}
+
+#[derive(Deserialize)]
+pub struct FreeSubSwitchNodeReq {
+    #[serde(default)]
+    pub mode: crate::free_sub::FreeSubMode,
+    #[serde(default)]
+    pub direction: Option<String>,
+    #[serde(default)]
+    pub node_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct FreeSubBlacklistReq {
+    #[serde(default)]
+    pub mode: crate::free_sub::FreeSubMode,
+    #[serde(default)]
+    pub node_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct FreeSubPoolQuery {
+    #[serde(default)]
+    pub mode: crate::free_sub::FreeSubMode,
+}
+
+/// POST /api/providers/free-sub/enable — добавить обе виртуальные карточки (`free_vpn` и `free_wl`) в 1 клик.
+pub async fn enable_free_sub(State(state): State<AppState>) -> Response {
+    match crate::free_sub::enable_both_free_subs(&state).await {
+        Ok(()) => api_ok(json!({ "enabled": true })),
+        Err(e) => api_err(e),
+    }
+}
+
+/// POST /api/providers/free-sub/disconnect — отключить активную бесплатную подписку с возвратом прежнего сервера.
+pub async fn disconnect_free_sub(
+    State(state): State<AppState>,
+    Json(req): Json<FreeSubModeReq>,
+) -> Response {
+    match crate::free_sub::disconnect_free_sub(&state, req.mode).await {
+        Ok(restored) => api_ok(json!({ "disconnected": true, "restored_server": restored })),
+        Err(e) => api_err(e),
+    }
+}
+
+/// POST /api/providers/free-sub/remove — удалить/выключить бесплатную подписку и её карточку.
+pub async fn remove_free_sub(
+    State(state): State<AppState>,
+    Json(req): Json<FreeSubModeReq>,
+) -> Response {
+    match crate::free_sub::remove_free_sub(&state, req.mode).await {
+        Ok(()) => api_ok(json!({ "removed": true, "mode": req.mode })),
+        Err(e) => api_err(e),
+    }
+}
+
+/// POST /api/providers/free-sub/switch-node — переключение узла в пуле (`next` / `prev` / `node_name`).
+pub async fn switch_free_sub_node(
+    State(state): State<AppState>,
+    Json(req): Json<FreeSubSwitchNodeReq>,
+) -> Response {
+    let target = req
+        .node_name
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or(req.direction.as_deref())
+        .unwrap_or("next");
+    match crate::free_sub::switch_pool_node(&state, req.mode, target).await {
+        Ok(node) => api_ok(json!({ "active_node": node, "mode": req.mode })),
+        Err(e) => api_err(e),
+    }
+}
+
+/// POST /api/providers/free-sub/blacklist-node — заблокировать плохой узел на 24ч и переключиться на следующий.
+pub async fn blacklist_free_sub_node(
+    State(state): State<AppState>,
+    Json(req): Json<FreeSubBlacklistReq>,
+) -> Response {
+    match crate::free_sub::blacklist_and_next(&state, req.mode, req.node_name.as_deref()).await {
+        Ok(node) => api_ok(json!({ "active_node": node, "mode": req.mode })),
+        Err(e) => api_err(e),
+    }
+}
+
+/// POST /api/providers/free-sub/refill — фоновый добор свежих узлов без обрыва текущей сессии.
+pub async fn refill_free_sub(
+    State(state): State<AppState>,
+    Json(req): Json<FreeSubModeReq>,
+) -> Response {
+    let cur = crate::free_sub::get_status().await;
+    if cur.running {
+        return api_ok(json!({ "started": false, "already_running": true, "status": cur }));
+    }
+    let st_clone = state.clone();
+    let mode = req.mode;
+    tokio::spawn(async move {
+        let _ = crate::free_sub::start_background_refill(st_clone, mode).await;
+    });
+    api_ok(json!({ "started": true, "mode": mode }))
+}
+
+/// GET /api/providers/free-sub/pool — список узлов пула, счётчик и история сессий.
+pub async fn get_free_sub_pool(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<FreeSubPoolQuery>,
+) -> Response {
+    let data = crate::free_sub::get_pool_and_history(&state, q.mode).await;
+    api_ok(data)
+}

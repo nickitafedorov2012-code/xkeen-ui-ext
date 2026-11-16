@@ -3325,6 +3325,17 @@ rules:
             }
         }
     }
+
+    #[test]
+    fn regression_add_provider_to_proxy_groups_adds_to_proxy() {
+        let base = "proxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - DIRECT\n  - name: Fastest\n    type: url-test\n    use:\n      - sub1\nrules:\n  - MATCH,DIRECT\n";
+        let out = add_provider_to_proxy_groups(base, "free_wl");
+        assert!(out.contains("  - name: PROXY\n    type: select\n    proxies:\n      - DIRECT\n    use:\n      - free_wl\n"), "PROXY must get use: free_wl: {out}");
+        assert!(out.contains("      - sub1\n      - free_wl\n"), "Fastest must also get free_wl: {out}");
+        // Idempotent
+        let out2 = add_provider_to_proxy_groups(&out, "free_wl");
+        assert_eq!(out, out2, "add_provider_to_proxy_groups must be idempotent");
+    }
 }
 
 

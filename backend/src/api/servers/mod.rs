@@ -349,6 +349,23 @@ pub fn stabilize_post_switch_ping(prev_ms: Option<i64>, attempt1_ms: i64, attemp
 /// 5. Обновление и сохранение приоритета в config.json (чтобы фоновый failover не откатывал узел)
 /// 6. Запуск быстрого фонового замера пингов нового сервера
 pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -> Result<String, String> {
+    if server_id == crate::free_sub::FREE_VPN_PROVIDER_ID
+        || server_id == crate::free_sub::FREE_WL_PROVIDER_ID
+    {
+        let mode = if server_id == crate::free_sub::FREE_WL_PROVIDER_ID {
+            crate::free_sub::FreeSubMode::Whitelist
+        } else {
+            crate::free_sub::FreeSubMode::Vpn
+        };
+        if let Ok(node) = crate::free_sub::switch_pool_node(state, mode, "next").await {
+            return Ok(format!("Подключён узел {node}"));
+        }
+        let st_clone = state.clone();
+        tokio::spawn(async move {
+            let _ = crate::free_sub::start_one_click_connect(st_clone, mode).await;
+        });
+        return Ok("Запущен поиск и проверка рабочих узлов…".into());
+    }
     let to_vkturn = server_id == crate::vkturn::PROXY_NAME;
     if to_vkturn {
         let rt = state.vkturn.rt.read().await;

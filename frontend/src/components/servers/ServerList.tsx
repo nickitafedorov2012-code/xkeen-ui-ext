@@ -1,6 +1,8 @@
-import React from 'react'
-import { pingClass, getFlowStatus, type ServerInfo, type SpeedtestResult, type StatusInfo } from '../../types'
+import React, { useState } from 'react'
+import { apiPost } from '../../api'
+import { pingClass, getFlowStatus, type FreeSubMode, type ServerInfo, type SpeedtestResult, type StatusInfo } from '../../types'
 import { Sparkline } from './serversHelpers'
+import { FreeSubPoolSubmenu } from './FreeSubPoolSubmenu'
 
 export interface ServerListProps {
   loading: boolean
@@ -30,6 +32,8 @@ export interface ServerListProps {
   toggleWhitelist: (id: string) => void
   makeServerNormal: (id: string) => void
   addToFailover: (serverId: string, position: 'start' | 'end') => void
+  notify?: (msg: string, isError?: boolean) => void
+  onFreeSubChanged?: () => void
 }
 
 export function ServerList({
@@ -60,8 +64,39 @@ export function ServerList({
   toggleWhitelist,
   makeServerNormal,
   addToFailover,
+  notify,
+  onFreeSubChanged,
 }: ServerListProps) {
   const PAGE = pageSize
+  const [expandedFreeSubIds, setExpandedFreeSubIds] = useState<Record<string, boolean>>({})
+  const [freeSubBusyId, setFreeSubBusyId] = useState<string | null>(null)
+
+  const handleFreeSubDisconnect = async (s: ServerInfo, mode: FreeSubMode) => {
+    setFreeSubBusyId(s.id)
+    try {
+      const res = await apiPost<{ restored_server?: string | null }>('providers/free-sub/disconnect', { mode })
+      notify?.(res.restored_server ? `Отключено. Возвращён сервер: ${res.restored_server}` : 'Бесплатная подписка отключена')
+      onFreeSubChanged?.()
+    } catch (e) {
+      notify?.(`Ошибка отключения: ${e instanceof Error ? e.message : String(e)}`, true)
+    } finally {
+      setFreeSubBusyId(null)
+    }
+  }
+
+  const handleFreeSubRemove = async (s: ServerInfo, mode: FreeSubMode) => {
+    setFreeSubBusyId(s.id)
+    try {
+      await apiPost('providers/free-sub/remove', { mode })
+      notify?.(`Подписка ${s.name} удалена`)
+      onFreeSubChanged?.()
+    } catch (e) {
+      notify?.(`Ошибка удаления: ${e instanceof Error ? e.message : String(e)}`, true)
+    } finally {
+      setFreeSubBusyId(null)
+    }
+  }
+
   return (
   <div className="servers-main-content">
     {loading ? (
@@ -233,10 +268,24 @@ export function ServerList({
               <div className="server-card-actions">
                 <div className="server-card-action-primary">
                   {s.is_active ? (
-                    <span className="tag current-active-badge">
-                      <span>✓</span>
-                      <span className="btn-label-optional">ПОДКЛЮЧЁН</span>
-                    </span>
+                    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                      <span className="tag current-active-badge">
+                        <span>✓</span>
+                        <span className="btn-label-optional">ПОДКЛЮЧЁН</span>
+                      </span>
+                      {(s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') && (
+                        <button
+                          type="button"
+                          className="btn sm ghost"
+                          data-testid={`free-sub-disconnect-${s.protocol === 'FREE-WL' ? 'whitelist' : 'vpn'}`}
+                          disabled={freeSubBusyId === s.id}
+                          onClick={() => void handleFreeSubDisconnect(s, s.protocol === 'FREE-WL' ? 'whitelist' : 'vpn')}
+                          title="Отключить бесплатную подписку и вернуть предыдущий сервер"
+                        >
+                          ⏹ Отключить
+                        </button>
+                      )}
+                    </div>
                   ) : (
                     <button
                       type="button"
@@ -250,7 +299,40 @@ export function ServerList({
                   )}
                 </div>
 
-                <div className="server-card-action-secondary">
+                {s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL' ? (
+                  <div className="server-card-action-secondary">
+                    {(() => {
+                      const mode: FreeSubMode = s.protocol === 'FREE-WL' ? 'whitelist' : 'vpn'
+                      const isOpen = !!expandedFreeSubIds[s.id]
+                      return (
+                        <>
+                          <button
+                            type="button"
+                            className={`btn sm ${isOpen ? 'primary' : 'ghost'}`}
+                            data-testid={`free-sub-toggle-${mode}`}
+                            onClick={() =>
+                              setExpandedFreeSubIds((prev) => ({ ...prev, [s.id]: !prev[s.id] }))
+                            }
+                            title="Управление пулом узлов и историей трафика"
+                          >
+                            Узлы и история {isOpen ? '▴' : '▾'}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn sm ghost"
+                            data-testid={`free-sub-remove-${mode}`}
+                            disabled={freeSubBusyId === s.id}
+                            onClick={() => void handleFreeSubRemove(s, mode)}
+                            title="Удалить бесплатную подписку и её карточку"
+                          >
+                            🗑 Удалить
+                          </button>
+                        </>
+                      )
+                    })()}
+                  </div>
+                ) : (
+                  <div className="server-card-action-secondary">
                   <button
                     type="button"
                     className={`btn sm ghost btn-speedtest ${speedtestingId === s.id ? 'loading' : ''}`}
@@ -336,7 +418,16 @@ export function ServerList({
                     </button>
                   )}
                 </div>
+                )}
               </div>
+              {(s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') && (
+                <FreeSubPoolSubmenu
+                  mode={s.protocol === 'FREE-WL' ? 'whitelist' : 'vpn'}
+                  notify={notify}
+                  onUpdated={() => onFreeSubChanged?.()}
+                  open={!!expandedFreeSubIds[s.id]}
+                />
+              )}
             </div>
           ))}
           {filtered.length > limit && (
@@ -474,7 +565,21 @@ export function ServerList({
                   {speedtestingId === s.id ? '⏳' : '🚀'}
                 </button>
                 {s.is_active ? (
-                  <span className="tag current" style={{ fontSize: 10, padding: '2px 6px' }}>✓</span>
+                  <>
+                    <span className="tag current" style={{ fontSize: 10, padding: '2px 6px' }}>✓</span>
+                    {(s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') && (
+                      <button
+                        type="button"
+                        className="btn sm ghost"
+                        disabled={freeSubBusyId === s.id}
+                        onClick={() => void handleFreeSubDisconnect(s, s.protocol === 'FREE-WL' ? 'whitelist' : 'vpn')}
+                        style={{ padding: '3px 6px' }}
+                        title="Отключить"
+                      >
+                        ⏹
+                      </button>
+                    )}
+                  </>
                 ) : (
                   <button className="btn sm btn-connect" onClick={() => activate(s)} style={{ padding: '3px 8px' }}>
                     🔌

@@ -431,6 +431,163 @@ pub fn add_file_provider_to_yaml(
     Ok(out.join(eol))
 }
 
+/// Гарантирует присутствие провайдера `id` в секции `use:` основных прокси-групп (`PROXY`, `Proxy`, `Fastest`, `Fallback`).
+pub fn add_provider_to_proxy_groups(yaml: &str, id: &str) -> String {
+    let id = id.trim();
+    if id.is_empty() {
+        return yaml.to_string();
+    }
+    let is_crlf = yaml.contains("\r\n");
+    let eol = if is_crlf { "\r\n" } else { "\n" };
+    let target_groups = ["PROXY", "Proxy", "Fastest", "Fallback"];
+
+    let lines: Vec<&str> = yaml.lines().collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len() + 8);
+    let mut in_proxy_groups = false;
+    let mut cur_group_is_target = false;
+    let mut cur_group_has_use = false;
+    let mut cur_group_has_id = false;
+    let mut in_use_block = false;
+    let mut use_block_insert_idx: Option<usize> = None;
+
+    let flush_missing_use = |out: &mut Vec<String>,
+                             is_target: bool,
+                             has_use: bool,
+                             has_id: bool,
+                             use_insert_idx: Option<usize>| {
+        if !is_target || has_id {
+            return;
+        }
+        if has_use {
+            if let Some(idx) = use_insert_idx {
+                out.insert(idx, format!("      - {id}"));
+            }
+        } else {
+            out.push("    use:".to_string());
+            out.push(format!("      - {id}"));
+        }
+    };
+
+    for line in &lines {
+        let trimmed = line.trim();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+
+        if line.trim_end() == "proxy-groups:" {
+            in_proxy_groups = true;
+            cur_group_is_target = false;
+            cur_group_has_use = false;
+            cur_group_has_id = false;
+            in_use_block = false;
+            use_block_insert_idx = None;
+            out.push((*line).to_string());
+            continue;
+        }
+
+        if in_proxy_groups && is_top {
+            flush_missing_use(
+                &mut out,
+                cur_group_is_target,
+                cur_group_has_use,
+                cur_group_has_id,
+                use_block_insert_idx,
+            );
+            in_proxy_groups = false;
+            cur_group_is_target = false;
+            in_use_block = false;
+        }
+
+        if in_proxy_groups {
+            if line.starts_with("  - name:") {
+                flush_missing_use(
+                    &mut out,
+                    cur_group_is_target,
+                    cur_group_has_use,
+                    cur_group_has_id,
+                    use_block_insert_idx,
+                );
+                let gname = trimmed
+                    .trim_start_matches("- name:")
+                    .trim()
+                    .trim_matches('\'')
+                    .trim_matches('"');
+                cur_group_is_target = target_groups.iter().any(|g| *g == gname);
+                cur_group_has_use = false;
+                cur_group_has_id = false;
+                in_use_block = false;
+                use_block_insert_idx = None;
+                out.push((*line).to_string());
+                continue;
+            }
+
+            if cur_group_is_target {
+                if trimmed == "use:" {
+                    cur_group_has_use = true;
+                    in_use_block = true;
+                    out.push((*line).to_string());
+                    use_block_insert_idx = Some(out.len());
+                    continue;
+                }
+                if (trimmed.starts_with("use: [") || trimmed.starts_with("use:["))
+                    && trimmed.contains(']')
+                {
+                    cur_group_has_use = true;
+                    in_use_block = false;
+                    let indent = &line[..line.len() - line.trim_start().len()];
+                    if let Some(close_idx) = line.find(']') {
+                        if let Some(open_idx) = line.find('[') {
+                            let inner = &line[open_idx + 1..close_idx];
+                            let items: Vec<&str> = inner
+                                .split(',')
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            if items.iter().any(|it| it.eq_ignore_ascii_case(id)) {
+                                cur_group_has_id = true;
+                                out.push((*line).to_string());
+                            } else {
+                                cur_group_has_id = true;
+                                let mut next_items: Vec<String> =
+                                    items.iter().map(|s| (*s).to_string()).collect();
+                                next_items.push(id.to_string());
+                                let tail = &line[close_idx + 1..];
+                                out.push(format!("{indent}use: [{}]{tail}", next_items.join(", ")));
+                            }
+                            continue;
+                        }
+                    }
+                }
+                if in_use_block {
+                    if trimmed.starts_with("- ") {
+                        let item = trimmed.trim_start_matches("- ").trim();
+                        if item.eq_ignore_ascii_case(id) {
+                            cur_group_has_id = true;
+                        }
+                        out.push((*line).to_string());
+                        use_block_insert_idx = Some(out.len());
+                        continue;
+                    } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                        in_use_block = false;
+                    }
+                }
+            }
+        }
+
+        out.push((*line).to_string());
+    }
+
+    if in_proxy_groups {
+        flush_missing_use(
+            &mut out,
+            cur_group_is_target,
+            cur_group_has_use,
+            cur_group_has_id,
+            use_block_insert_idx,
+        );
+    }
+
+    out.join(eol)
+}
+
 /// Добавить служебный file-провайдер (без фонового health-check) в блок proxy-providers в config.yaml.
 pub fn add_service_file_provider_to_yaml(yaml: &str, id: &str, file_path: &str) -> Result<String, String> {
     let id = id.trim();

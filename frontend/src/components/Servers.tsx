@@ -11,7 +11,6 @@ import { PROVIDER_COLORS, isPoolServer } from './servers/serversHelpers'
 import { IgnoreListModal } from './servers/IgnoreListModal'
 import { SubscriptionsModal } from './servers/SubscriptionsModal'
 import { ActiveServerBanner } from './servers/ActiveServerBanner'
-import { FreeSubCard } from './servers/FreeSubCard'
 import { ServerList } from './servers/ServerList'
 
 export { formatQuotaBytes, isPoolServer } from './servers/serversHelpers'
@@ -1108,6 +1107,26 @@ export default function Servers({ notify, status, refresh }: Props) {
             <button className="btn sm" onClick={openProvidersModal} title="Управление подписками">
               📦 Подписки{providersLoaded ? ` (${providers.length})` : ''}{providersError ? ' ⚠' : ''}
             </button>
+            {(!servers.some((srv) => srv.id === 'free_vpn') || !servers.some((srv) => srv.id === 'free_wl')) && (
+              <button
+                type="button"
+                className="btn sm primary"
+                data-testid="add-free-subs-btn"
+                onClick={async () => {
+                  try {
+                    await apiPost('providers/free-sub/enable', {})
+                    notify('Бесплатные подписки (VPN и Обход БС) добавлены в список серверов')
+                    await load()
+                    refresh?.()
+                  } catch (e) {
+                    notify(`Ошибка добавления бесплатных подписок: ${e instanceof Error ? e.message : String(e)}`, true)
+                  }
+                }}
+                title="В 1 клик добавить карточки Бесплатный VPN (Авто) и Бесплатный обход БС (Авто)"
+              >
+                🆓 Добавить бесплатные подписки
+              </button>
+            )}
             <button className="btn sm" onClick={openIgnore} title="Игнор-лист">
               🚫 Игнор{ignored.size > 0 ? ` (${ignored.size})` : ''}
             </button>
@@ -1193,14 +1212,6 @@ export default function Servers({ notify, status, refresh }: Props) {
         </div>
       </div>
 
-      <FreeSubCard
-        notify={notify}
-        onConnected={() => {
-          void load()
-          refresh?.()
-        }}
-      />
-
       {/* ОСНОВНОЙ СПИСОК СЕРВЕРОВ: на ВСЮ ширину страницы (полноценные 3-4 колонки) */}
       <ServerList
         loading={loading}
@@ -1230,6 +1241,11 @@ export default function Servers({ notify, status, refresh }: Props) {
         toggleWhitelist={toggleWhitelist}
         makeServerNormal={makeServerNormal}
         addToFailover={addToFailover}
+        notify={notify}
+        onFreeSubChanged={() => {
+          void load()
+          refresh?.()
+        }}
       />
 
       {/* МОДАЛЬНОЕ ОКНО ИГНОР-ЛИСТА */}

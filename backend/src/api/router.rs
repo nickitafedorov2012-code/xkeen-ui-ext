@@ -137,6 +137,13 @@ fn failover_and_providers_routes() -> Router<AppState> {
         .route("/api/providers/delete", post(api::delete_provider))
         .route("/api/providers/free-sub/connect", post(api::connect_free_sub))
         .route("/api/providers/free-sub/status", get(api::get_free_sub_status))
+        .route("/api/providers/free-sub/enable", post(api::enable_free_sub))
+        .route("/api/providers/free-sub/disconnect", post(api::disconnect_free_sub))
+        .route("/api/providers/free-sub/remove", post(api::remove_free_sub))
+        .route("/api/providers/free-sub/switch-node", post(api::switch_free_sub_node))
+        .route("/api/providers/free-sub/blacklist-node", post(api::blacklist_free_sub_node))
+        .route("/api/providers/free-sub/refill", post(api::refill_free_sub))
+        .route("/api/providers/free-sub/pool", get(api::get_free_sub_pool))
 }
 
 fn logs_and_updates_routes() -> Router<AppState> {
