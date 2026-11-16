@@ -230,8 +230,7 @@ const VPN_SOURCES: &[CuratedSource] = &[
     CuratedSource {
         label: "RU Curated Fallback Mirror",
         urls: &[
-            "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/Splitted-By-Protocol/vless.txt",
-            "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/splitted/vless.txt",
+            "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list_raw.txt",
         ],
     },
 ];
@@ -250,13 +249,14 @@ const WHITELIST_SOURCES: &[CuratedSource] = &[
         label: "GitVerse RU Mirror (Whitelist/SNI)",
         urls: &[
             "https://gitverse.ru/api/repos/strider/xkeen-free-subs/raw/branch/main/whitelist.txt",
+            "https://raw.githubusercontent.com/zieng2/wl/main/vless_universal.txt",
             "https://raw.githubusercontent.com/zieng2/wl/main/vless_lite.txt",
         ],
     },
     CuratedSource {
         label: "Whitelist Fallback Mirror",
         urls: &[
-            "https://raw.githubusercontent.com/zieng2/wl/main/vless.txt",
+            "https://raw.githubusercontent.com/igareck/vpn-configs-for-russia/main/Vless-Reality-White-Lists-Rus-Mobile.txt",
         ],
     },
 ];
