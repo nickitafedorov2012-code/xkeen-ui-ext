@@ -278,7 +278,9 @@ export function FailoverSection({
           >
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6, minWidth: 0 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0, overflow: 'hidden' }}>
-                <span className="pulse-live-dot" style={{ flexShrink: 0 }} title="Мониторинг Failover активен" />
+                {settings.failover.enabled && (
+                  <span className="pulse-live-dot" style={{ flexShrink: 0 }} title="Мониторинг Failover активен" />
+                )}
                 <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-bright)', whiteSpace: 'nowrap' }}>
                   Активный сервер
                 </span>

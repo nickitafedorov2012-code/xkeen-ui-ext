@@ -1674,4 +1674,23 @@ mod tests {
             "stalled notification task must time out instead of hanging"
         );
     }
+
+    #[tokio::test]
+    async fn regression_vkturn_commit_adds_provider_to_proxy_group_use() {
+        let (root, state) = setup_saved_state("proxy-group-use").await;
+        let resp = tokio::time::timeout(
+            Duration::from_secs(15),
+            crate::api::save_vkturn_config(axum::extract::State(state.clone()), axum::Json(enable_req())),
+        )
+        .await
+        .expect("save_vkturn_config timed out");
+        let v = response_json(resp).await;
+        assert_eq!(v["success"], true, "unexpected response: {v}");
+        let yaml = std::fs::read_to_string(root.join("config.yaml")).unwrap();
+        assert!(
+            yaml.contains("use:\n      - vkturn") || yaml.contains("- vkturn"),
+            "PROXY group must include vkturn in use: {yaml}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

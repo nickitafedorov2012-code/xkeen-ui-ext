@@ -145,26 +145,88 @@ impl Drop for NodeGroupGuard {
     }
 }
 
+/// Разрешение виртуальной карточки бесплатной подписки (`free_wl` / `free_vpn`) в имя активного (или первого) листа провайдера.
+fn pick_virtual_provider_leaf(
+    provider_id: &str,
+    proxies: &std::collections::BTreeMap<String, serde_json::Value>,
+    providers_resp: &serde_json::Value,
+) -> Result<String, String> {
+    let nodes: Vec<String> = providers_resp
+        .get("providers")
+        .and_then(|p| p.get(provider_id))
+        .and_then(|p| p.get("proxies"))
+        .and_then(|arr| arr.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.get("name").and_then(|v| v.as_str()).map(str::trim))
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if nodes.is_empty() {
+        return Err(format!(
+            "Бесплатная подписка '{provider_id}' ещё не подключена (нет активного узла в пуле). Сначала нажмите «Подключить»."
+        ));
+    }
+
+    if provider_id == crate::free_sub::FREE_WL_PROVIDER_ID {
+        if let Some(wl_now) = proxies
+            .get(crate::routing::WHITELIST_GROUP_NAME)
+            .and_then(|g| g.get("now"))
+            .and_then(|v| v.as_str())
+        {
+            if nodes.iter().any(|n| n == wl_now) {
+                return Ok(wl_now.to_string());
+            }
+        }
+    }
+
+    let active_leaf = crate::mihomo::resolve_active_leaf(proxies);
+    if !active_leaf.is_empty() && nodes.iter().any(|n| n == &active_leaf) {
+        return Ok(active_leaf);
+    }
+
+    Ok(nodes[0].clone())
+}
+
 /// Выполнение замера скорости загрузки через выбранный прокси-сервер.
 pub async fn run_speedtest(
     _http: &reqwest::Client,
     _cfg: &AppConfig,
     server_id: &str,
 ) -> Result<SpeedtestResponse, String> {
-    let target_server = server_id.trim();
-    if target_server.is_empty() {
+    let raw_server = server_id.trim();
+    if raw_server.is_empty() {
         return Err("Идентификатор сервера для Speedtest не может быть пустым".to_string());
     }
-
-    log_i!("Запуск теста скорости для сервера '{}'", target_server);
-    // SPD-01: фиксируем поколение замера — отмена определяется изменением поколения
-    let my_gen = speedtest_generation();
 
     // 1. Баг 84: замер изолирован — переключается только группа Canary Probe (слушатель 127.0.0.1:7894),
     // трафик LAN, группа БС и остальные selector-группы не трогаются.
     let proxies_now = crate::mihomo::get_proxies(_http, _cfg)
         .await
         .map_err(|e| format!("Ошибка получения списка прокси ядра Mihomo: {}", e))?;
+
+    let resolved_target = if (raw_server == crate::free_sub::FREE_WL_PROVIDER_ID
+        || raw_server == crate::free_sub::FREE_VPN_PROVIDER_ID)
+        && !proxies_now.contains_key(raw_server)
+    {
+        let providers_resp = crate::mihomo::m_get(_http, _cfg, "/providers/proxies")
+            .await
+            .map_err(|e| format!("Ошибка получения провайдеров ядра Mihomo: {}", e))?;
+        let leaf = pick_virtual_provider_leaf(raw_server, &proxies_now, &providers_resp)?;
+        log_i!("Speedtest: виртуальная карточка '{}' разрешена в узел '{}'", raw_server, leaf);
+        leaf
+    } else {
+        raw_server.to_string()
+    };
+    let target_server = resolved_target.as_str();
+
+    log_i!("Запуск теста скорости для сервера '{}'", target_server);
+    // SPD-01: фиксируем поколение замера — отмена определяется изменением поколения
+    let my_gen = speedtest_generation();
+
     let group_snapshot = isolated_speedtest_snapshot(&proxies_now)?;
     let original_server = group_snapshot
         .get(crate::mihomo::CANARY_PROBE_GROUP_NAME)
@@ -428,5 +490,38 @@ mod tests {
         proxies.remove(crate::mihomo::CANARY_PROBE_GROUP_NAME);
         let err = isolated_speedtest_snapshot(&proxies).unwrap_err();
         assert!(err.contains("Canary"), "без изолированной группы — отказ, а не переключение всей LAN: {err}");
+    }
+
+    #[test]
+    fn regression_speedtest_resolves_virtual_free_sub_cards() {
+        let mut proxies = std::collections::BTreeMap::new();
+        proxies.insert(
+            "PROXY".to_string(),
+            serde_json::json!({"type": "Selector", "now": "DIRECT"}),
+        );
+        proxies.insert(
+            crate::routing::WHITELIST_GROUP_NAME.to_string(),
+            serde_json::json!({"type": "Selector", "now": "wl-node-2"}),
+        );
+
+        let providers = serde_json::json!({
+            "providers": {
+                "free_wl": {
+                    "proxies": [
+                        {"name": "wl-node-1"},
+                        {"name": "wl-node-2"}
+                    ]
+                },
+                "free_vpn": {
+                    "proxies": []
+                }
+            }
+        });
+
+        let resolved_wl = pick_virtual_provider_leaf(crate::free_sub::FREE_WL_PROVIDER_ID, &proxies, &providers).unwrap();
+        assert_eq!(resolved_wl, "wl-node-2", "должен выбираться активный узел из группы Whitelist");
+
+        let err_vpn = pick_virtual_provider_leaf(crate::free_sub::FREE_VPN_PROVIDER_ID, &proxies, &providers).unwrap_err();
+        assert!(err_vpn.contains("не подключена"), "пустой пул должен давать понятную ошибку: {err_vpn}");
     }
 }

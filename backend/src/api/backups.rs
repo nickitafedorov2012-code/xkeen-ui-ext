@@ -523,7 +523,13 @@ pub async fn import_backup(
         return api_err(format!("Бэкап с именем '{}' уже существует", safe_name));
     }
 
-    let tmp_dir = backup_root(&cfg).join(format!("{safe_name}.tmp"));
+    static IMPORT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = IMPORT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp_dir = backup_root(&cfg).join(format!("{safe_name}.tmp.{nanos}.{seq}"));
     if let Err(e) = tokio::fs::create_dir_all(&tmp_dir).await {
         return api_err(format!("Ошибка создания временного каталога бэкапа: {e}"));
     }

@@ -1434,7 +1434,7 @@ mod tests {
         assert_eq!(prev.get("c1"), Some(&(1000, 5000)));
 
         // R42: Раздельные доли направлений при DIRECT download + VPN upload
-        let mut d_mix = ConnectionsTrafficDeltas {
+        let d_mix = ConnectionsTrafficDeltas {
             direct_down_bytes: 1000,
             direct_up_bytes: 0,
             direct_bytes: 1000,

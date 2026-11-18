@@ -154,7 +154,7 @@ pub fn parse_provider_names(yaml: &str) -> Vec<String> {
             continue;
         }
         if in_providers {
-            let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+            let is_top = !line.starts_with(' ') && !trimmed.is_empty() && !trimmed.starts_with('#');
             if is_top {
                 break;
             }
@@ -497,6 +497,10 @@ pub fn add_provider_to_proxy_groups(yaml: &str, id: &str) -> String {
         }
 
         if in_proxy_groups {
+            if trimmed.starts_with('#') {
+                out.push((*line).to_string());
+                continue;
+            }
             if line.starts_with("  - name:") {
                 flush_missing_use(
                     &mut out,
@@ -541,7 +545,7 @@ pub fn add_provider_to_proxy_groups(yaml: &str, id: &str) -> String {
                                 .map(str::trim)
                                 .filter(|s| !s.is_empty())
                                 .collect();
-                            if items.iter().any(|it| it.eq_ignore_ascii_case(id)) {
+                            if items.iter().any(|it| it.trim_matches(|c| c == '"' || c == '\'').eq_ignore_ascii_case(id)) {
                                 cur_group_has_id = true;
                                 out.push((*line).to_string());
                             } else {
@@ -558,7 +562,7 @@ pub fn add_provider_to_proxy_groups(yaml: &str, id: &str) -> String {
                 }
                 if in_use_block {
                     if trimmed.starts_with("- ") {
-                        let item = trimmed.trim_start_matches("- ").trim();
+                        let item = trimmed.trim_start_matches("- ").trim().trim_matches(|c| c == '"' || c == '\'');
                         if item.eq_ignore_ascii_case(id) {
                             cur_group_has_id = true;
                         }
@@ -1322,4 +1326,22 @@ pub fn section_end_offset(yaml: &str, section: &str) -> Result<usize, String> {
         offset += line.len();
     }
     found.ok_or_else(|| format!("В конфиге нет секции {}", section))
+}
+
+#[cfg(test)]
+mod n13_n14_tests {
+    use super::*;
+
+    #[test]
+    fn regression_n13_parse_provider_names_skips_comments() {
+        let yaml = "proxy-providers:\n# comment\n  geodema:\n    type: http\n";
+        assert_eq!(parse_provider_names(yaml), vec!["geodema".to_string()]);
+    }
+
+    #[test]
+    fn regression_n14_add_provider_to_proxy_groups_dedups_quoted_id() {
+        let yaml = "proxy-groups:\n  - name: PROXY\n    type: select\n    use: [\"geodema\"]\n";
+        let out = add_provider_to_proxy_groups(yaml, "geodema");
+        assert_eq!(out.trim_end(), yaml.trim_end(), "N14: провайдер в кавычках не должен дублироваться");
+    }
 }

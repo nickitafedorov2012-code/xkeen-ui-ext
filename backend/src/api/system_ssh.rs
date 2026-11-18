@@ -328,9 +328,10 @@ pub async fn put_settings(
         if let Err(e) = tx.commit_and_reload().await {
             return api_err(format!("Ошибка сохранения и применения маршрутов: {e}"));
         }
-    } else if let Err(e) = tx.commit().await {
+    } else if let Err(e) = tx.commit_without_reload().await {
         return api_err(format!("Ошибка сохранения конфига: {}", e));
     }
+    drop(tx);
 
     for eff in &effects {
         match eff {
@@ -467,6 +468,8 @@ pub fn merge_settings_update(current: &config::AppConfig, body: &serde_json::Val
     if !s.mihomo_bin.is_empty() && !crate::config::is_valid_init_script_path(&s.mihomo_bin) {
         return Err(format!("Недопустимый путь к исполняемому файлу mihomo_bin: '{}'", s.mihomo_bin));
     }
+
+    crate::api::routing::devices::validate_schedules(&new_cfg.schedules)?;
 
     Ok(new_cfg)
 }
@@ -1322,6 +1325,9 @@ pub async fn save_config_file(
         if let Err(e) = serde_json::from_str::<serde_json::Value>(&body.content) {
             return api_err(format!("Ошибка синтаксиса JSON в файле config.json: {e}"));
         }
+        if let Err(e) = serde_json::from_str::<config::AppConfig>(&body.content) {
+            return api_err(format!("Некорректная структура конфигурации в файле config.json: {e}"));
+        }
         let parsed_cfg = config::parse_config_content(&body.content, &path.display().to_string());
         tx.stage_raw_json(&body.content, parsed_cfg);
     } else if body.file == "mihomo" {
@@ -1489,5 +1495,144 @@ mod tests {
         let mut adblock_changed = base.clone();
         adblock_changed.adblock_enabled = !base.adblock_enabled;
         assert!(settings_change_effects(&base, &adblock_changed).contains(&SettingsEffect::AdGuardSync));
+    }
+
+    fn make_n_test_state(cfg: config::AppConfig, cfg_path: std::path::PathBuf) -> AppState {
+        let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(cfg)));
+        let ag = std::sync::Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        AppState {
+            config: config_arc,
+            config_path: std::sync::Arc::new(cfg_path),
+            http: reqwest::Client::new(),
+            failover_log: std::sync::Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn regression_n01_put_settings_persists_non_routing_changes_to_disk() {
+        let dir = std::env::temp_dir().join(format!("xkeen_n01_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.json");
+        let yaml_path = dir.join("config.yaml");
+        tokio::fs::write(&yaml_path, "proxies: []\nproxy-groups: []\nrules: []\n").await.unwrap();
+
+        let mut cfg = config::AppConfig::default();
+        cfg.mihomo.config_path = yaml_path.to_string_lossy().to_string();
+        cfg.logs.level = "info".to_string();
+        tokio::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).await.unwrap();
+
+        let state = make_n_test_state(cfg.clone(), cfg_path.clone());
+        let mut updated = cfg.clone();
+        updated.logs.level = "debug".to_string();
+
+        let resp = put_settings(State(state), Json(serde_json::to_value(&updated).unwrap())).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let on_disk: config::AppConfig = serde_json::from_str(
+            &tokio::fs::read_to_string(&cfg_path).await.unwrap(),
+        )
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(on_disk.logs.level, "debug", "N01: изменение без RoutingYaml должно сохраняться в config.json");
+    }
+
+    #[tokio::test]
+    async fn regression_n02_put_settings_failover_toggle_does_not_deadlock() {
+        let dir = std::env::temp_dir().join(format!("xkeen_n02_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.json");
+        let yaml_path = dir.join("config.yaml");
+        tokio::fs::write(&yaml_path, "proxies: []\nproxy-groups: []\nrules: []\n").await.unwrap();
+
+        let mut cfg = config::AppConfig::default();
+        cfg.mihomo.config_path = yaml_path.to_string_lossy().to_string();
+        cfg.failover.enabled = false;
+        tokio::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).await.unwrap();
+
+        let state = make_n_test_state(cfg.clone(), cfg_path.clone());
+        let mut updated = cfg.clone();
+        updated.failover.enabled = true;
+
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            put_settings(State(state), Json(serde_json::to_value(&updated).unwrap())),
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(res.is_ok(), "N02: переключение failover.enabled не должно вызывать deadlock ConfigTx");
+        assert_eq!(res.unwrap().status(), axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn regression_n07_save_config_file_rejects_invalid_schema() {
+        let dir = std::env::temp_dir().join(format!("xkeen_n07_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.json");
+
+        let mut cfg = config::AppConfig::default();
+        cfg.logs.level = "warn".to_string();
+        let orig_json = serde_json::to_string_pretty(&cfg).unwrap();
+        tokio::fs::write(&cfg_path, &orig_json).await.unwrap();
+
+        let state = make_n_test_state(cfg.clone(), cfg_path.clone());
+        let req = SaveConfigFileRequest {
+            file: "route".to_string(),
+            content: r#"{"mihomo": "broken_schema"}"#.to_string(),
+            reload_mihomo: false,
+        };
+
+        let resp = save_config_file(State(state.clone()), Json(req)).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            body.get("success").and_then(|v| v.as_bool()),
+            Some(false),
+            "N07: синтаксически корректный JSON с неверной схемой должен отклоняться: {body}"
+        );
+        let on_disk = tokio::fs::read_to_string(&cfg_path).await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(on_disk, orig_json, "N07: config.json не должен перезаписываться при ошибке схемы");
+    }
+
+    #[tokio::test]
+    async fn regression_r38_put_settings_rejects_invalid_schedules() {
+        let dir = std::env::temp_dir().join(format!("xkeen_r38_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.json");
+        let cfg = config::AppConfig::default();
+        tokio::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).await.unwrap();
+
+        let state = make_n_test_state(cfg.clone(), cfg_path.clone());
+        let mut updated = cfg.clone();
+        updated.schedules.push(config::DeviceSchedule {
+            id: "bad1".to_string(),
+            ip: "192.168.1.50".to_string(),
+            days: vec![1],
+            time_start: "99:99".to_string(),
+            time_end: "23:00".to_string(),
+            action: "block".to_string(),
+            target_server: None,
+            enabled: true,
+        });
+
+        let resp = put_settings(State(state), Json(serde_json::to_value(&updated).unwrap())).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            body.get("success").and_then(|v| v.as_bool()),
+            Some(false),
+            "R38: PUT /api/settings должен отклонять невалидные schedules: {body}"
+        );
     }
 }

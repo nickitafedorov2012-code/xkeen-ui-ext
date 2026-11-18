@@ -549,6 +549,16 @@ pub fn sync_cached_auto_cdns(cdns: &[String]) {
     sync_cached_auto_cdns_for_sources(cdns, &[]);
 }
 
+/// R53: сохраняет найденные CDN с привязкой к конкретному исходному домену.
+pub fn sync_cached_auto_cdns_by_source(
+    by_source: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+) {
+    for (source, cdns) in by_source {
+        let cdns_vec: Vec<String> = cdns.iter().cloned().collect();
+        sync_cached_auto_cdns_for_sources(&cdns_vec, std::slice::from_ref(source));
+    }
+}
+
 pub fn get_cached_auto_cdns() -> Vec<String> {
     let now = auto_cdn_now_secs();
     CACHED_AUTO_CDNS
@@ -1220,6 +1230,41 @@ add geo_override6_tmp 2001:db8::1 -exist
         assert!(
             !domains_b.contains(&"fastly-alpha-cdn.net".to_string()),
             "сиротский CDN удалённого force_domain не должен оставаться в override"
+        );
+
+        clear_cached_auto_cdns_for_test();
+    }
+
+    #[test]
+    fn regression_r53_ab_to_b_drops_alpha_only_cdns() {
+        let _test_guard = AUTO_CDNS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_cached_auto_cdns_for_test();
+
+        let mut by_source = std::collections::BTreeMap::new();
+        by_source.insert(
+            "alpha.example".to_string(),
+            ["cdn-alpha-only.net".to_string()].into_iter().collect(),
+        );
+        by_source.insert(
+            "beta.example".to_string(),
+            ["cdn-beta-only.net".to_string()].into_iter().collect(),
+        );
+        sync_cached_auto_cdns_by_source(&by_source);
+
+        let mut cfg_ab = crate::config::AppConfig::default();
+        cfg_ab.force_domains = vec!["alpha.example".to_string(), "beta.example".to_string()];
+        let domains_ab = collect_override_domains(&cfg_ab, &[]);
+        assert!(domains_ab.contains(&"cdn-alpha-only.net".to_string()));
+        assert!(domains_ab.contains(&"cdn-beta-only.net".to_string()));
+
+        // Пользователь удалил alpha.example, остался только beta.example
+        let mut cfg_b = crate::config::AppConfig::default();
+        cfg_b.force_domains = vec!["beta.example".to_string()];
+        let domains_b = collect_override_domains(&cfg_b, &[]);
+        assert!(domains_b.contains(&"cdn-beta-only.net".to_string()));
+        assert!(
+            !domains_b.contains(&"cdn-alpha-only.net".to_string()),
+            "R53: CDN, найденный только для alpha.example, не должен оставаться при наличии beta.example"
         );
 
         clear_cached_auto_cdns_for_test();

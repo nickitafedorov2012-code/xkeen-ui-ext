@@ -164,7 +164,7 @@ export default function Diagnostics({ notify }: DiagnosticsProps) {
               onChange={(e) => setDomain(e.target.value)}
               required
             />
-            <button type="submit" className="btn btn-primary" disabled={testingDns}>
+            <button type="submit" className="btn btn-primary" disabled={testingDns || !domain.trim()}>
               {testingDns ? '⏳ Тестирование…' : '🔍 Проверить домен'}
             </button>
           </div>
@@ -193,7 +193,7 @@ export default function Diagnostics({ notify }: DiagnosticsProps) {
                     </span>
                   )}
                   <span className={`status-pill ${dnsResult.http_direct_ok ? 'pill-ok' : 'pill-warn'}`}>
-                    {dnsResult.http_direct_ok ? 'Прямой доступ OK' : 'Прямой доступ заблокирован'}
+                    {dnsResult.http_direct_ok ? 'Прямой доступ OK' : 'Прямой HTTPS не ответил'}
                   </span>
                 </div>
               </div>

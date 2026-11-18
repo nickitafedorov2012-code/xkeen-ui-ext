@@ -111,7 +111,10 @@ fn config_and_backups_routes() -> Router<AppState> {
         .route("/api/backups/restore", post(api::restore_backup))
         .route("/api/backups/delete", post(api::delete_backup))
         .route("/api/backups/export/{name}", get(api::export_backup))
-        .route("/api/backups/import", post(api::import_backup))
+        .route(
+            "/api/backups/import",
+            post(api::import_backup).layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
         .route("/api/ignore", get(api::get_ignore).post(api::set_ignore))
         .route("/api/settings", get(api::get_settings).put(api::put_settings))
         .route("/api/settings/priority", post(api::set_priority))

@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { parseMultipleLinks, type ParsedNode } from '../utils/nodeParser'
 import { apiPost, decryptCsqttProfile, saveVkTurnConfig } from '../api'
 import { copyToClipboard } from '../utils/clipboard'
@@ -21,6 +21,14 @@ export default function OutboundGeneratorModal({
   const [target, setTarget] = useState<'config' | 'provider'>('config')
   const [providerName, setProviderName] = useState('custom')
   const [importing, setImporting] = useState(false)
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [onClose])
 
   // Парсинг нод и профилей csqtt:// в реальном времени при вводе текста
   const csqttLines = useMemo(() => {
@@ -236,6 +244,11 @@ export default function OutboundGeneratorModal({
                   </div>
                 )}
               </div>
+            </div>
+          )}
+          {inputText.trim().length > 0 && totalFound === 0 && (
+            <div style={{ marginTop: 8, fontSize: 12, color: '#f59e0b' }}>
+              ⚠️ Не распознано ни одной ссылки. Поддерживаются форматы <code>vless://</code>, <code>vmess://</code>, <code>trojan://</code>, <code>ss://</code>, <code>hysteria2://</code>, <code>tuic://</code> или <code>csqtt://</code>.
             </div>
           )}
         </div>

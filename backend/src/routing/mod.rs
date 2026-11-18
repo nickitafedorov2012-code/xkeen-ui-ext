@@ -3336,6 +3336,39 @@ rules:
         let out2 = add_provider_to_proxy_groups(&out, "free_wl");
         assert_eq!(out, out2, "add_provider_to_proxy_groups must be idempotent");
     }
+
+    #[test]
+    fn regression_add_provider_to_proxy_groups_handles_canary_comments() {
+        let base = "\
+proxy-groups:
+# --- AUTO-CANARY-GROUP-BEGIN ---
+  - name: '🛡️ Canary Probe'
+    type: select
+    proxies:
+      - DIRECT
+      - REJECT
+    use:
+      - free_vpn
+      - free_wl
+# --- AUTO-CANARY-GROUP-END ---
+  - name: PROXY
+    type: select
+    proxies:
+      - DIRECT
+rules:
+  - MATCH,DIRECT
+";
+        let out = add_provider_to_proxy_groups(base, "free_wl");
+        assert!(
+            out.contains("  - name: PROXY\n    type: select\n    proxies:\n      - DIRECT\n    use:\n      - free_wl\n"),
+            "PROXY must get use: free_wl even when Canary Probe comment block precedes it:\n{out}"
+        );
+        let out2 = add_provider_to_proxy_groups(&out, "free_vpn");
+        assert!(
+            out2.contains("  - name: PROXY\n    type: select\n    proxies:\n      - DIRECT\n    use:\n      - free_wl\n      - free_vpn\n"),
+            "PROXY must also get free_vpn:\n{out2}"
+        );
+    }
 }
 
 

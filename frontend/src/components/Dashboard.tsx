@@ -467,9 +467,19 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
         <section className="card active-server-card" style={{ height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
             <h2 style={{ margin: 0 }}>🛰 Активный сервер</h2>
-            <span className="badge" style={{ color: '#38bdf8', borderColor: 'rgba(56, 189, 248, 0.3)', background: 'rgba(56, 189, 248, 0.1)' }}>
-              🔵 В сети
-            </span>
+            {status?.service_running && status?.active_server ? (
+              <span className="badge" style={{ color: '#38bdf8', borderColor: 'rgba(56, 189, 248, 0.3)', background: 'rgba(56, 189, 248, 0.1)' }}>
+                🔵 В сети
+              </span>
+            ) : status?.service_running ? (
+              <span className="badge" style={{ color: 'var(--muted)', borderColor: 'var(--border)', background: 'transparent' }}>
+                ⚪ Не выбран
+              </span>
+            ) : (
+              <span className="badge" style={{ color: '#f87171', borderColor: 'rgba(248, 113, 113, 0.3)', background: 'rgba(248, 113, 113, 0.1)' }}>
+                🔴 Остановлен
+              </span>
+            )}
           </div>
 
           {status?.active_server ? (

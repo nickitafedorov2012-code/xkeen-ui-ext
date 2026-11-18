@@ -1151,7 +1151,8 @@ where
         yaml.clone()
     };
     let yaml_with_prov = if new_cfg.enabled {
-        normalize_vkturn_provider_in_yaml(&yaml_with_prov)
+        let with_groups = crate::routing::add_provider_to_proxy_groups(&yaml_with_prov, PROVIDER_ID);
+        normalize_vkturn_provider_in_yaml(&with_groups)
     } else {
         yaml_with_prov
     };

@@ -329,6 +329,26 @@ pub async fn scan_html_cdns(domain: &str, proxy_url: &str) -> Vec<String> {
     found.into_iter().collect()
 }
 
+/// Обнаружение CDN с сохранением привязки к каждому исходному домену.
+pub async fn discover_cdns_by_source(
+    domains: &[String],
+    proxy_url: &str,
+) -> std::collections::BTreeMap<String, BTreeSet<String>> {
+    let mut by_source = std::collections::BTreeMap::new();
+    for d in domains {
+        let mut cdns = expand_bundles(std::slice::from_ref(d));
+        cdns.extend(probe_subdomains(d).await);
+        cdns.extend(scan_html_cdns(d, proxy_url).await);
+        let clean = d.trim().to_lowercase();
+        cdns.remove(&clean);
+        cdns.remove(&clean.trim_start_matches("www.").to_string());
+        if !cdns.is_empty() {
+            by_source.insert(d.clone(), cdns);
+        }
+    }
+    by_source
+}
+
 /// Полный цикл обнаружения CDN: бандлы + опрос поддоменов + фоновый HTML-сканер.
 pub async fn discover_all_cdns(domains: &[String], proxy_url: &str) -> BTreeSet<String> {
     let mut discovered = BTreeSet::new();

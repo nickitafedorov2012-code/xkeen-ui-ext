@@ -425,7 +425,14 @@ pub fn spawn_schedules_monitor(state: AppState) {
             // 1. Активация новых или обновление изменившихся эффективных целей на группу (R35, R36, R37)
             for (group_name, (device_ip, target_node)) in &desired {
                 if let Some(existing) = active_by_group.get_mut(group_name) {
-                    if existing.applied_target != *target_node {
+                    let live_now = proxies_opt
+                        .as_ref()
+                        .and_then(|p| p.get(group_name))
+                        .and_then(|v| v.get("now"))
+                        .and_then(|n| n.as_str());
+                    if existing.applied_target != *target_node
+                        || live_now.is_some_and(|n| n != target_node.as_str())
+                    {
                         log_i!(
                             "[SCHEDULE] ⏰ Обновление активного расписания для {} ({}): {} -> {}",
                             device_ip,

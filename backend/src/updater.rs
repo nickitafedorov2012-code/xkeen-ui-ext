@@ -516,7 +516,13 @@ pub fn extract_notes_from_markdown(text: &str, tag: &str) -> String {
             if in_section {
                 break;
             }
-            if t.contains(&v_tag) || t.contains(tag) {
+            let heading_ver = t
+                .trim_start_matches('#')
+                .trim()
+                .split_whitespace()
+                .next()
+                .unwrap_or("");
+            if heading_ver == v_tag || heading_ver == tag {
                 in_section = true;
             }
             continue;

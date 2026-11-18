@@ -522,16 +522,6 @@ async fn main() {
     // В постоянном каталоге рядом с config.json (A-12): переживает и рестарт панели, и перезагрузку роутера.
     watchdog::init_service_stopped_flag(watchdog::service_stopped_flag_path(&state.config_path));
     watchdog::spawn(state.clone());
-
-    let guard_cfg_path = state.config_path.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(updater::UPDATE_GUARD_HEALTHY_SECS)).await;
-        let marker = updater::update_guard_marker_path(&guard_cfg_path);
-        if marker.exists() {
-            updater::clear_update_guard_marker(&marker);
-            log_i!("[UPDATE] Новая версия стабильна {}s — маркер отката удалён", updater::UPDATE_GUARD_HEALTHY_SECS);
-        }
-    });
     traffic::spawn(state.clone());
     bot::spawn(state.clone());
 
@@ -870,9 +860,9 @@ async fn main() {
             };
             if !domains.is_empty() {
                 log_i!("[CDN-SCHEDULE] ⏰ Запуск планового еженедельного сканирования CDN (понедельник 05:00)...");
-                let auto_cdns = cdn_discovery::discover_all_cdns(&domains, &proxy_url).await;
-                let auto_cdns_vec: Vec<String> = auto_cdns.into_iter().collect();
-                if let Err(e) = override_sync::sync_from_config(&cfg_snapshot, &auto_cdns_vec).await {
+                let by_source = cdn_discovery::discover_cdns_by_source(&domains, &proxy_url).await;
+                override_sync::sync_cached_auto_cdns_by_source(&by_source);
+                if let Err(e) = override_sync::sync_from_config(&cfg_snapshot, &[]).await {
                     log_w!("[CDN-SCHEDULE] Ошибка плановой синхронизации geo_override: {}", e);
                 } else {
                     log_i!("[CDN-SCHEDULE] ✓ Плановое еженедельное сканирование CDN успешно завершено");
@@ -907,6 +897,17 @@ async fn main() {
             }
         }
     };
+
+    // Баг 127: запускаем таймер очистки маркера отката только после успешного открытия HTTP-порта
+    let guard_cfg_path = state.config_path.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(updater::UPDATE_GUARD_HEALTHY_SECS)).await;
+        let marker = updater::update_guard_marker_path(&guard_cfg_path);
+        if marker.exists() {
+            updater::clear_update_guard_marker(&marker);
+            log_i!("[UPDATE] Новая версия стабильна {}s после открытия HTTP-порта — маркер отката удалён", updater::UPDATE_GUARD_HEALTHY_SECS);
+        }
+    });
     log_i!("Панель доступна на http://{}:{}", host_ip, port);
     {
         let cfg = state.config.read().await;

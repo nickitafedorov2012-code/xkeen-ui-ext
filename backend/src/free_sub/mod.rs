@@ -1269,39 +1269,39 @@ pub fn close_active_session_in_cache(
     }
 }
 
-async fn sync_mode_whitelist_state(state: &AppState, mode: FreeSubMode, target_node: Option<&str>) {
+async fn sync_mode_whitelist_state(state: &AppState, mode: FreeSubMode, target_node: Option<&str>) -> Result<(), String> {
     let enable_wl = mode == FreeSubMode::Whitelist;
-    let mut need_reapply = false;
-    {
-        let _cfg_guard = state.config_lock.lock().await;
-        let mut mut_cfg = (**state.config.read().await).clone();
-        if mut_cfg.whitelist.enabled != enable_wl {
-            mut_cfg.whitelist.enabled = enable_wl;
-            need_reapply = true;
-        }
-        mut_cfg.whitelist.target_server = if enable_wl {
-            target_node.map(str::to_string)
-        } else {
-            None
-        };
-        if let Err(e) = crate::config::save(&state.config_path, &mut_cfg).await {
-            log_w!("[FREE-SUB] Ошибка сохранения whitelist в config.json: {e}");
-        } else {
-            *state.config.write().await = std::sync::Arc::new(mut_cfg);
-        }
+    let mut tx = ConfigTx::begin(state).await?;
+    let need_reapply = tx.config().whitelist.enabled != enable_wl || !enable_wl;
+    tx.config_mut().whitelist.enabled = enable_wl;
+    tx.config_mut().whitelist.target_server = if enable_wl {
+        target_node.map(str::to_string)
+    } else {
+        None
+    };
+
+    if need_reapply {
+        let yaml = tx.read_yaml().await?;
+        let (routed, _) = crate::routing::apply_routing(&yaml, tx.config())?;
+        tx.set_yaml(routed)?;
+        tx.commit_and_reload().await?;
+    } else {
+        tx.commit_without_reload().await?;
     }
+    drop(tx);
+
     crate::traffic::set_whitelist_active(enable_wl);
-    if need_reapply || !enable_wl {
-        if let Ok(mut tx) = ConfigTx::begin(state).await {
-            if let Ok(y) = tx.read_yaml().await {
-                if let Ok((routed, _)) = crate::routing::apply_routing(&y, tx.config()) {
-                    let _ = tx.set_yaml(routed);
-                    let _ = tx.commit_and_reload().await;
-                }
-            }
-        }
-    }
     let _ = crate::api::sync_whitelist_mode_tunnel(state, target_node.unwrap_or("")).await;
+    if !enable_wl {
+        let cfg = state.config.read().await.clone();
+        let yaml = tokio::fs::read_to_string(&cfg.mihomo.config_path)
+            .await
+            .unwrap_or_default();
+        let ports = crate::routing::redir_ports(&yaml);
+        let dns_port = crate::api::resolve_active_dns_port(&cfg);
+        let _ = crate::api::routing::sync_full_tunnel_modes(&cfg, ports.redir, ports.tproxy, dns_port).await;
+    }
+    Ok(())
 }
 
 /// Атомарная публикация проверенного набора в рабочий провайдер (`free_vpn` / `free_wl`).
@@ -1472,7 +1472,7 @@ async fn publish_and_connect(
             return Err(e);
         }
         crate::failover::record_manual_switch(&target_name).await;
-        sync_mode_whitelist_state(state, mode, Some(&target_name)).await;
+        sync_mode_whitelist_state(state, mode, Some(&target_name)).await?;
         record_session_start(state, mode, &final_nodes, &target_name).await;
     }
 
@@ -2144,7 +2144,11 @@ async fn run_free_sub_job_inner(
                                 mc.working_nodes.push(CachedWorkingNode {
                                     proxy: n.clone(),
                                     last_ok_ts: ts,
-                                    last_delay_ms: 100,
+                                    last_delay_ms: n
+                                        .get("delay")
+                                        .and_then(|v| v.as_i64())
+                                        .filter(|&d| d > 0)
+                                        .unwrap_or(999),
                                     mode,
                                     high_priority: false,
                                     total_bytes: 0,
@@ -2154,7 +2158,12 @@ async fn run_free_sub_job_inner(
                         mc.working_nodes.truncate(BACKGROUND_BACKUP_TARGET);
                     })
                     .await;
-                    update_status(|st| st.stats.working_count = count).await;
+                    update_status(|st| {
+                        if !st.running || st.mode == mode {
+                            st.stats.working_count = count;
+                        }
+                    })
+                    .await;
                     log_i!("[FREE-SUB] Фоновый добор завершён: {count} рабочих узлов");
                 }
             }
@@ -2270,7 +2279,7 @@ pub async fn disconnect_free_sub(state: &AppState, mode: FreeSubMode) -> Result<
     .await;
 
     if mode == FreeSubMode::Whitelist {
-        sync_mode_whitelist_state(state, FreeSubMode::Vpn, None).await;
+        let _ = sync_mode_whitelist_state(state, FreeSubMode::Vpn, None).await;
     }
 
     update_status(|st| {
@@ -2416,7 +2425,7 @@ pub async fn switch_pool_node(
     mihomo::invalidate_proxies_cache();
     mihomo::switch_server(&state.http, &cfg, &chosen).await?;
     crate::failover::record_manual_switch(&chosen).await;
-    sync_mode_whitelist_state(state, mode, Some(&chosen)).await;
+    let _ = sync_mode_whitelist_state(state, mode, Some(&chosen)).await;
     record_session_start(state, mode, &nodes, &chosen).await;
     update_status(|st| {
         st.mode = mode;
@@ -2546,7 +2555,14 @@ pub async fn check_free_sub_stall_watchdog(state: &AppState) {
         Some(FREE_VPN_PROVIDER_ID) => FreeSubMode::Vpn,
         Some(FREE_WL_PROVIDER_ID) => FreeSubMode::Whitelist,
         _ => {
+            // N16: перечитываем активный сервер после L7-проверки, чтобы не перехватить ручной выбор пользователя
+        let current_active = mihomo::get_active_server(&state.http, &cfg).await.ok().flatten();
+        if current_active.as_ref().map(|s| s.name.as_str()) != Some(active.name.as_str()) {
             *STALL_WATCHDOG_STREAK.lock().await = (None, 0);
+            return;
+        }
+
+        *STALL_WATCHDOG_STREAK.lock().await = (None, 0);
             return;
         }
     };
@@ -2587,6 +2603,13 @@ pub async fn check_free_sub_stall_watchdog(state: &AppState) {
         .is_ok()
         {
             *STALL_WATCHDOG_STREAK.lock().await = (Some(active.id.clone()), 0);
+            return;
+        }
+
+        // N16: перечитываем активный сервер после L7-проверки, чтобы не перехватить ручной выбор пользователя
+        let current_active = mihomo::get_active_server(&state.http, &cfg).await.ok().flatten();
+        if current_active.as_ref().map(|s| s.name.as_str()) != Some(active.name.as_str()) {
+            *STALL_WATCHDOG_STREAK.lock().await = (None, 0);
             return;
         }
 
@@ -2988,5 +3011,50 @@ mod tests {
         .await;
         let _ = accept_task.await;
         assert_eq!(outcomes.get(&ok_addr), Some(&TcpOutcome::Ok));
+    }
+
+    #[tokio::test]
+    async fn regression_n03_r18_sync_mode_whitelist_state_atomic_and_full_tunnel_sync() {
+        let dir = std::env::temp_dir().join(format!("xkeen_n03_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.json");
+        let yaml_path = dir.join("missing_config.yaml");
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.config_path = yaml_path.to_string_lossy().to_string();
+        cfg.whitelist.enabled = false;
+        tokio::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).await.unwrap();
+
+        let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(std::sync::Arc::new(cfg)));
+        let ag = std::sync::Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = AppState {
+            config: config_arc,
+            config_path: std::sync::Arc::new(cfg_path.clone()),
+            http: reqwest::Client::new(),
+            failover_log: std::sync::Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        let res = sync_mode_whitelist_state(&state, FreeSubMode::Whitelist, Some("Node-1")).await;
+        assert!(res.is_err(), "N03: при ошибке чтения/применения YAML должен возвращаться Err");
+        assert!(
+            !state.config.read().await.whitelist.enabled,
+            "N03: при ошибке YAML флаг whitelist.enabled в AppState не должен меняться"
+        );
+        let on_disk: crate::config::AppConfig = serde_json::from_str(
+            &tokio::fs::read_to_string(&cfg_path).await.unwrap(),
+        )
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            !on_disk.whitelist.enabled,
+            "N03: при ошибке YAML флаг whitelist.enabled в config.json не должен меняться"
+        );
     }
 }

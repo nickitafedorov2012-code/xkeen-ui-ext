@@ -308,6 +308,23 @@ table.devices-table th:nth-child(11) { width: 72px; min-width: 50px; text-align:
     padding: 8px 12px;
     font-size: 12px;
   }
+  /* UI01-UI03: защита от горизонтального переполнения на 320px */
+  .modal,
+  .modal-content,
+  .card,
+  .server-card,
+  .free-sub-card {
+    max-width: 100%;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+  .modal-footer,
+  .modal-actions,
+  .sub-card-actions,
+  .server-card-actions {
+    flex-wrap: wrap;
+    max-width: 100%;
+  }
 }
 
 /* FE-MOBILE: персональный узел игрового устройства — на мобильном отдельной строкой */

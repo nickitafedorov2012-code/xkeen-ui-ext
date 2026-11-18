@@ -565,7 +565,9 @@ pub fn has_lan_bridge_interface(net_dev_content: &str) -> bool {
     for line in net_dev_content.lines() {
         if let Some((iface, _)) = line.split_once(':') {
             let name = iface.trim();
-            if name.starts_with("br") || name.starts_with("Bridge") {
+            if (name.starts_with("br") || name.starts_with("Bridge"))
+                && !name.to_ascii_lowercase().contains("guest")
+            {
                 return true;
             }
         }

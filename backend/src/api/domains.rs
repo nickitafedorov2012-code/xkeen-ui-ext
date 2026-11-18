@@ -138,11 +138,14 @@ pub async fn scan_cdn_manual(State(state): State<AppState>) -> Response {
 
     crate::log_i!("[MANUAL] Ручной запуск глубокого сканирования CDN...");
     // Сетевой скан CDN выполняется без удержания config_lock/routing_lock
-    let auto_cdns = crate::cdn_discovery::discover_all_cdns(&force_domains, &proxy_url).await;
+    let by_source = crate::cdn_discovery::discover_cdns_by_source(&force_domains, &proxy_url).await;
+    crate::override_sync::sync_cached_auto_cdns_by_source(&by_source);
+    let auto_cdns: std::collections::BTreeSet<String> =
+        by_source.into_values().flatten().collect();
     let auto_cdns_list: Vec<String> = auto_cdns.into_iter().collect();
 
     let cfg = state.config.read().await.clone();
-    let overridden = match crate::override_sync::sync_from_config(&cfg, &auto_cdns_list).await {
+    let overridden = match crate::override_sync::sync_from_config(&cfg, &[]).await {
         Ok(count) => count,
         Err(e) => {
             crate::log_w!("[MANUAL] Ошибка синхронизации geo_override: {e}");

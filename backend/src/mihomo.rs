@@ -1736,7 +1736,7 @@ async fn switch_server_inner(http: &reqwest::Client, cfg: &AppConfig, server_id:
             .map(|arr| arr.iter().any(|x| x.as_str() == Some(&target)))
             .unwrap_or(false);
     let groups = select_groups_to_switch(&proxies, &prev_active);
-    if groups.is_empty() {
+    if groups.is_empty() && !wl_has_target {
         return Err("Не найдено ни одной select-группы для переключения".into());
     }
     let mut switched = 0usize;
@@ -1760,10 +1760,23 @@ async fn switch_server_inner(http: &reqwest::Client, cfg: &AppConfig, server_id:
         }
     }
     let mut wl_switched = false;
+    if switched == 0 && wl_has_target {
+        if prev_wl_now == target {
+            switched = 1;
+        } else {
+            match switch_selector(http, cfg, crate::routing::WHITELIST_GROUP_NAME, &target).await {
+                Ok(_) => {
+                    wl_switched = true;
+                    switched = 1;
+                }
+                Err(e) => last_err = e,
+            }
+        }
+    }
     if switched > 0 {
         invalidate_proxies_cache();
         record_selected_tunnel_server(&target);
-        if wl_has_target && prev_wl_now != target {
+        if wl_has_target && !wl_switched && prev_wl_now != target {
             match switch_selector(http, cfg, crate::routing::WHITELIST_GROUP_NAME, &target).await {
                 Ok(_) => wl_switched = true,
                 Err(e) => crate::log_w!(
