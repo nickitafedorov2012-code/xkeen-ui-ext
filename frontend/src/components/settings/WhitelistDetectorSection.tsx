@@ -1,6 +1,6 @@
-import { useState } from 'react'
-import { detectWhitelistServers, applyDetectedWhitelistServers } from '../../api'
-import type { AppSettings, ServerInfo, ProviderInfo } from '../../types'
+import { useEffect, useState } from 'react'
+import { apiGet, detectWhitelistServers, applyDetectedWhitelistServers, runWhitelistDetectorCheck } from '../../api'
+import type { AppSettings, ServerInfo, ProviderInfo, WhitelistDetectorStatus } from '../../types'
 import NumberInput from '../NumberInput'
 
 interface WhitelistDetectorSectionProps {
@@ -27,6 +27,38 @@ export function WhitelistDetectorSection({
     details: Array<{ id: string; name: string; reason: string; type: 'server' | 'provider' }>
   } | null>(null)
   const [settingsClassifierApplying, setSettingsClassifierApplying] = useState(false)
+  const [liveStatus, setLiveStatus] = useState<WhitelistDetectorStatus | null>(null)
+  const [checkingNow, setCheckingNow] = useState(false)
+
+  const loadLiveStatus = async () => {
+    try {
+      const st = await apiGet<WhitelistDetectorStatus>('failover/whitelist-detector/status')
+      if (st && typeof st.state === 'string') {
+        setLiveStatus(st)
+      }
+    } catch {
+      // ignore in offline/mocked renders
+    }
+  }
+
+  useEffect(() => {
+    void loadLiveStatus()
+  }, [])
+
+  const handleCheckNow = async () => {
+    if (checkingNow) return
+    setCheckingNow(true)
+    try {
+      const res = await runWhitelistDetectorCheck()
+      notify(res.message || 'Проверка детектора БС выполнена')
+      await loadLiveStatus()
+      refresh?.()
+    } catch (e: any) {
+      notify(e?.message || 'Ошибка проверки детектора БС', true)
+    } finally {
+      setCheckingNow(false)
+    }
+  }
 
               const det = settings.failover.whitelist_detector || {
                 enabled: false,
@@ -139,6 +171,16 @@ export function WhitelistDetectorSection({
                       </span>
                     </div>
                     <div style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
+                      <button
+                        type="button"
+                        className="btn ghost sm"
+                        onClick={handleCheckNow}
+                        disabled={checkingNow}
+                        data-testid="settings-detector-check-now-btn"
+                        title="Проверить РФ-маяки (DIRECT) и зарубежные узлы прямо сейчас"
+                      >
+                        {checkingNow ? '⏳ Проверка...' : '🔍 Проверить сейчас'}
+                      </button>
                       <label className="switch" title="Включить детектор белых списков">
                         <input
                           type="checkbox"
@@ -158,6 +200,77 @@ export function WhitelistDetectorSection({
                       </span>
                     </div>
                   </div>
+
+                  {/* Живая панель статуса детектора */}
+                  {liveStatus && (
+                    <div
+                      data-testid="settings-detector-live-status"
+                      style={{
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 8,
+                        padding: '8px 12px',
+                        borderRadius: 8,
+                        background: liveStatus.wan_offline
+                          ? 'rgba(239, 68, 68, 0.10)'
+                          : liveStatus.state === 'WhitelistDetected'
+                          ? 'rgba(168, 85, 247, 0.14)'
+                          : 'rgba(34, 197, 94, 0.08)',
+                        border: liveStatus.wan_offline
+                          ? '1px solid rgba(239, 68, 68, 0.35)'
+                          : liveStatus.state === 'WhitelistDetected'
+                          ? '1px solid rgba(168, 85, 247, 0.35)'
+                          : '1px solid rgba(34, 197, 94, 0.25)',
+                        fontSize: 12,
+                      }}
+                    >
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                        <strong style={{
+                          color: liveStatus.wan_offline
+                            ? '#f87171'
+                            : liveStatus.state === 'WhitelistDetected'
+                            ? '#c084fc'
+                            : '#4ade80',
+                        }}>
+                          {liveStatus.wan_offline
+                            ? '🔴 Нет интернета (WAN)'
+                            : liveStatus.state === 'WhitelistDetected'
+                            ? '🟣 Обнаружены белые списки ТСПУ'
+                            : '🟢 Сеть в норме'}
+                        </strong>
+                        {liveStatus.domestic_ok !== undefined && liveStatus.domestic_ok !== null && (
+                          <span className="muted">
+                            РФ-маяки DIRECT: {liveStatus.domestic_ok ? '✅ доступны' : '❌ нет ответа'}
+                          </span>
+                        )}
+                        {liveStatus.total_nodes > 0 && (
+                          <span className="muted">
+                            Зарубежные VPS: {liveStatus.online_nodes}/{liveStatus.total_nodes} онлайн ({liveStatus.offline_percent}% оффлайн)
+                          </span>
+                        )}
+                        {(liveStatus.pending_confirmations ?? 0) > 0 && (
+                          <span style={{ color: '#fbbf24' }}>
+                            ⏳ Подтверждение {liveStatus.pending_confirmations}/{liveStatus.confirm_required ?? 2}
+                          </span>
+                        )}
+                        {(liveStatus.cooldown_remaining_secs ?? 0) > 0 && (
+                          <span style={{ color: '#38bdf8' }}>
+                            ⏸️ Пауза после ручного выбора ({Math.ceil((liveStatus.cooldown_remaining_secs ?? 0) / 60)} мин)
+                          </span>
+                        )}
+                      </div>
+                      {liveStatus.last_checked && (
+                        <span className="muted small">Проверено: {liveStatus.last_checked}</span>
+                      )}
+                      {liveStatus.warning && (
+                        <div style={{ width: '100%', fontSize: 11.5, color: '#fbbf24' }}>
+                          ⚠️ {liveStatus.warning}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10 }}>
                     {/* Контролируемый провайдер */}
@@ -374,8 +487,75 @@ export function WhitelistDetectorSection({
                     </span>
                   </div>
 
-                  {/* Чекбоксы: Отсев RU нод и Автовозврат на VPS */}
+                  {/* Чекбоксы: Мобильная сеть, РФ-маяки, Отсев RU нод и Автовозврат на VPS */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
+                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                      <span style={{ fontSize: 12 }}>Подтверждений подряд (Anti-Flap)</span>
+                      <NumberInput
+                        min={1}
+                        max={5}
+                        step={1}
+                        fallback={2}
+                        value={det.confirm_checks ?? 2}
+                        onChange={(val) =>
+                          patch((s) => {
+                            const d = ensureDetector(s)
+                            d.confirm_checks = val
+                          })
+                        }
+                        data-testid="settings-detector-confirm-checks"
+                      />
+                    </label>
+                    <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+                      <span style={{ fontSize: 12 }}>Пауза после ручного выбора (мин)</span>
+                      <NumberInput
+                        min={0}
+                        max={120}
+                        step={5}
+                        fallback={15}
+                        value={det.manual_cooldown_mins ?? 15}
+                        onChange={(val) =>
+                          patch((s) => {
+                            const d = ensureDetector(s)
+                            d.manual_cooldown_mins = val
+                          })
+                        }
+                        data-testid="settings-detector-manual-cooldown"
+                      />
+                    </label>
+                  </div>
+
                   <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5 }}>
+                      <input
+                        type="checkbox"
+                        checked={det.check_domestic_beacons ?? true}
+                        onChange={(e) =>
+                          patch((s) => {
+                            const d = ensureDetector(s)
+                            d.check_domestic_beacons = e.target.checked
+                          })
+                        }
+                        data-testid="settings-detector-domestic-beacons"
+                      />
+                      <span>Проверять РФ-маяки (DIRECT), чтобы отличать БС от падения интернета</span>
+                    </label>
+
+                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5 }}>
+                      <input
+                        type="checkbox"
+                        checked={det.mobile_mode ?? true}
+                        onChange={(e) =>
+                          patch((s) => {
+                            const d = ensureDetector(s)
+                            d.mobile_mode = e.target.checked
+                          })
+                        }
+                        data-testid="settings-detector-mobile-mode"
+                      />
+                      <span>Профиль мобильной сети (LTE-таймаут до 3000 мс)</span>
+                    </label>
+
                     <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12.5 }}>
                       <input
                         type="checkbox"

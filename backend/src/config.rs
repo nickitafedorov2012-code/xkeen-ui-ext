@@ -174,6 +174,14 @@ fn default_detector_sample_size() -> usize {
     0
 }
 
+fn default_detector_confirm_checks() -> u32 {
+    2
+}
+
+fn default_detector_manual_cooldown_mins() -> u64 {
+    15
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(default)]
 pub struct WhitelistDetectorConfig {
@@ -200,6 +208,18 @@ pub struct WhitelistDetectorConfig {
     pub auto_restore_vps: bool,
     #[serde(default = "default_detector_sample_size")]
     pub sample_size: usize,
+    /// Проверять ли прямую доступность РФ-маяков (DIRECT), чтобы отличать БС от потери WAN
+    #[serde(default = "default_true")]
+    pub check_domestic_beacons: bool,
+    /// Сколько подряд подтверждений нужно для переключения (защита от качелей в LTE)
+    #[serde(default = "default_detector_confirm_checks")]
+    pub confirm_checks: u32,
+    /// Пауза детектора (мин) после ручного переключения сервера пользователем
+    #[serde(default = "default_detector_manual_cooldown_mins")]
+    pub manual_cooldown_mins: u64,
+    /// Профиль мобильной сети (увеличенный таймаут L7 до 3000 мс и быстрый дожим)
+    #[serde(default = "default_true")]
+    pub mobile_mode: bool,
 }
 
 impl Default for WhitelistDetectorConfig {
@@ -218,6 +238,10 @@ impl Default for WhitelistDetectorConfig {
             check_interval_mins: default_detector_check_interval_mins(),
             auto_restore_vps: true,
             sample_size: default_detector_sample_size(),
+            check_domestic_beacons: true,
+            confirm_checks: default_detector_confirm_checks(),
+            manual_cooldown_mins: default_detector_manual_cooldown_mins(),
+            mobile_mode: true,
         }
     }
 }

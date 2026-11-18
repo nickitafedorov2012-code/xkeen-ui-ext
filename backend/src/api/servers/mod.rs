@@ -465,7 +465,11 @@ pub async fn execute_server_switch_workflow(state: &AppState, server_id: &str) -
 /// POST /api/servers/switch
 pub async fn switch_server(State(state): State<AppState>, Json(req): Json<SwitchReq>) -> Response {
     match execute_server_switch_workflow(&state, &req.server_id).await {
-        Ok(msg) => api_ok(json!({ "message": msg })),
+        Ok(msg) => {
+            let cooldown_mins = state.config.read().await.failover.whitelist_detector.manual_cooldown_mins;
+            failover::record_manual_server_switch(cooldown_mins).await;
+            api_ok(json!({ "message": msg }))
+        }
         Err(e) => api_err(e),
     }
 }

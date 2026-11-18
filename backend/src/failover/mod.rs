@@ -1331,8 +1331,13 @@ pub fn spawn(state: AppState) {
                 last_device_check = Instant::now();
                 let _ = run_device_check(&state).await;
             }
-            // 10-минутный скан детектора белых списков
-            if detector_enabled && last_detector_scan.elapsed() >= Duration::from_secs(detector_interval_secs) {
+            // Скан детектора белых списков (при незавершённом подтверждении ускоряется до 15 сек)
+            let effective_detector_interval = if has_pending_detector_confirmation() {
+                15
+            } else {
+                detector_interval_secs
+            };
+            if detector_enabled && last_detector_scan.elapsed() >= Duration::from_secs(effective_detector_interval) {
                 last_detector_scan = Instant::now();
                 let _ = run_whitelist_detector_check(&state, "Периодический скан детектора БС").await;
             }
@@ -5639,6 +5644,64 @@ proxies:
             default_qp.starts_with(std::env::temp_dir()),
             "default test quarantine path must live in temp_dir, got: {}",
             default_qp.display()
+        );
+    }
+
+    #[test]
+    fn regression_mobile_detector_distinguishes_wan_offline_from_tspu_isolation() {
+        // Когда РФ-маяки DIRECT недоступны (domestic_ok = Some(false)) — это падение WAN/LTE, а не ТСПУ БС
+        assert_eq!(
+            classify_network_isolation(WhitelistDetectorState::Normal, Some(false), true, false),
+            NetworkIsolationVerdict::WanOffline
+        );
+        assert_eq!(
+            classify_network_isolation(WhitelistDetectorState::WhitelistDetected, Some(false), false, true),
+            NetworkIsolationVerdict::WanOffline
+        );
+
+        // Когда РФ-маяки DIRECT доступны (domestic_ok = Some(true)) и зарубежные VPS лежат — это изоляция ТСПУ
+        assert_eq!(
+            classify_network_isolation(WhitelistDetectorState::Normal, Some(true), true, false),
+            NetworkIsolationVerdict::IsolationHit
+        );
+        // Когда РФ-маяки доступны и зарубежные VPS ожили — восстановление
+        assert_eq!(
+            classify_network_isolation(WhitelistDetectorState::WhitelistDetected, Some(true), false, true),
+            NetworkIsolationVerdict::RecoveryHit
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_mobile_detector_manual_cooldown_and_independent_scan() {
+        // 1. Пауза после ручного переключения сервера
+        record_manual_server_switch(15).await;
+        let rem = manual_cooldown_remaining_secs().await;
+        assert!(rem > 800 && rem <= 900, "cooldown should be ~15 mins, got {rem}s");
+        record_manual_server_switch(0).await;
+        assert_eq!(manual_cooldown_remaining_secs().await, 0);
+
+        // 2. run_whitelist_detector_check обязан разрешать периодический скан при whitelist_detector.enabled=true,
+        // даже если общий failover.enabled=false
+        let src = production_source();
+        let fn_body = src
+            .split("pub async fn run_whitelist_detector_check(")
+            .nth(1)
+            .and_then(|s| s.split("pub async fn current_live_status(").next())
+            .expect("run_whitelist_detector_check must exist");
+        assert!(
+            fn_body.contains("cfg.failover.whitelist_detector.enabled"),
+            "run_whitelist_detector_check must allow scan when whitelist_detector.enabled is true regardless of failover.enabled"
+        );
+
+        // 3. Fallback выбора БС должен проверять и bs_candidate_ids, даже если bs_priority_chain пуст
+        let eval_body = src
+            .split("pub async fn evaluate_and_apply_whitelist_detector(")
+            .nth(1)
+            .and_then(|s| s.split("pub async fn run_whitelist_detector_check(").next())
+            .expect("evaluate_and_apply_whitelist_detector must exist");
+        assert!(
+            eval_body.contains(".chain(bs_candidate_ids.iter())"),
+            "BS fallback must include bs_candidate_ids when bs_priority_chain is empty"
         );
     }
 }

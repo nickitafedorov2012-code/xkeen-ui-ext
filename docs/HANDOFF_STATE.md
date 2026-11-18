@@ -57,3 +57,9 @@
 - [DONE] Батч 3 (`subscription_parser.rs` + `transaction.rs`): R22–R25, R48 + регрессионные тесты.
 - [DONE] Батч 4 (`watchdog.rs` + `devices.rs` + `traffic.rs` + `auth.rs` + `antigravity.rs` + `updater.rs` + `MihomoCoreModal.tsx`): R34–R47, R49–R52 + регрессионные тесты.
 
+
+
+## Улучшение детектора белых списков для мобильной сети (Mobile Whitelist Detector v2)
+- [DONE] Шаг 1: Реализованы улучшения в `backend/src/config.rs`, `backend/src/failover/probe.rs`, `backend/src/failover/mod.rs`, `backend/src/api/servers/mod.rs` (двухконтурный маяк DIRECT РФ vs зарубеж, независимый от `failover.enabled` запуск, гистерезис 2+ подтверждений + 15-сек ускорение дожима, LTE-таймаут до 3000–3500 мс, `manual_cooldown_mins`, fallback на `bs_candidate_ids`, анти-регрессионные тесты: `failover` 131/131 passed).
+- [DONE] Шаг 2: Обновлён UI в `frontend/src/types.ts` и `frontend/src/components/settings/WhitelistDetectorSection.tsx` (`Settings.test.tsx` 16/16 passed, `vite build` ok).
+- [DONE] Шаг 3: Бэкап на `192.168.1.1:1001` (`xr-20261118-163330-221`), сборка `aarch64-unknown-linux-musl` и проверка на тестовом роутере `192.168.1.1` (двухконтурный маяк `domestic_ok=true`, гистерезис `1/2 -> 2/2`, выбор `free_wl`). Настройки и `detector_state.json` откачены в исходное состояние.

@@ -283,10 +283,130 @@ pub struct WhitelistDetectorStatus {
     pub last_event: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    #[serde(default)]
+    pub domestic_ok: Option<bool>,
+    #[serde(default)]
+    pub wan_offline: bool,
+    #[serde(default)]
+    pub pending_confirmations: u32,
+    #[serde(default)]
+    pub confirm_required: u32,
+    #[serde(default)]
+    pub cooldown_remaining_secs: u64,
 }
 
 static DETECTOR_STATE: tokio::sync::Mutex<WhitelistDetectorState> = tokio::sync::Mutex::const_new(WhitelistDetectorState::Normal);
 static DETECTOR_LAST_STATUS: tokio::sync::Mutex<Option<WhitelistDetectorStatus>> = tokio::sync::Mutex::const_new(None);
+static DETECTOR_CONSECUTIVE_ISOLATION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static DETECTOR_CONSECUTIVE_RECOVERY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static DETECTOR_MANUAL_COOLDOWN_UNTIL: tokio::sync::Mutex<Option<std::time::Instant>> = tokio::sync::Mutex::const_new(None);
+
+/// Зафиксировать ручное переключение сервера пользователем (включает паузу детектора, чтобы не воевать с пользователем)
+pub async fn record_manual_server_switch(cooldown_mins: u64) {
+    if cooldown_mins == 0 {
+        *DETECTOR_MANUAL_COOLDOWN_UNTIL.lock().await = None;
+        return;
+    }
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(cooldown_mins * 60);
+    *DETECTOR_MANUAL_COOLDOWN_UNTIL.lock().await = Some(until);
+    DETECTOR_CONSECUTIVE_ISOLATION.store(0, std::sync::atomic::Ordering::Relaxed);
+    DETECTOR_CONSECUTIVE_RECOVERY.store(0, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub async fn manual_cooldown_remaining_secs() -> u64 {
+    let guard = DETECTOR_MANUAL_COOLDOWN_UNTIL.lock().await;
+    match *guard {
+        Some(until) => {
+            let now = std::time::Instant::now();
+            if until > now {
+                (until - now).as_secs()
+            } else {
+                0
+            }
+        }
+        None => 0,
+    }
+}
+
+/// Есть ли незавершённая серия подтверждений (чтобы фоновый цикл ускорился до 15 сек вместо 10 мин)
+pub fn has_pending_detector_confirmation() -> bool {
+    DETECTOR_CONSECUTIVE_ISOLATION.load(std::sync::atomic::Ordering::Relaxed) > 0
+        || DETECTOR_CONSECUTIVE_RECOVERY.load(std::sync::atomic::Ordering::Relaxed) > 0
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetworkIsolationVerdict {
+    WanOffline,
+    IsolationHit,
+    RecoveryHit,
+    StableNormal,
+    StableIsolated,
+}
+
+/// Чистая классификация сетевого состояния с учётом прямых РФ-маяков (DIRECT)
+pub fn classify_network_isolation(
+    current_state: WhitelistDetectorState,
+    domestic_ok: Option<bool>,
+    is_trigger_hit: bool,
+    is_exit_hit: bool,
+) -> NetworkIsolationVerdict {
+    if domestic_ok == Some(false) {
+        return NetworkIsolationVerdict::WanOffline;
+    }
+    match current_state {
+        WhitelistDetectorState::Normal => {
+            if is_trigger_hit {
+                NetworkIsolationVerdict::IsolationHit
+            } else {
+                NetworkIsolationVerdict::StableNormal
+            }
+        }
+        WhitelistDetectorState::WhitelistDetected => {
+            if is_exit_hit {
+                NetworkIsolationVerdict::RecoveryHit
+            } else {
+                NetworkIsolationVerdict::StableIsolated
+            }
+        }
+    }
+}
+
+/// Проверка прямой доступности российских маяков (DIRECT, мимо прокси),
+/// чтобы отличать режим белых списков ТСПУ от полного падения мобильного интернета (WAN offline).
+pub async fn check_domestic_direct_beacons() -> bool {
+    let client = match reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_millis(2500))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return true, // При невозможности собрать клиент не блокируем детектор
+    };
+
+    let beacons = [
+        "https://ya.ru/generate_204",
+        "https://vk.com/robots.txt",
+        "https://www.gosuslugi.ru/",
+    ];
+
+    let mut handles = Vec::with_capacity(beacons.len());
+    for url in beacons {
+        let c = client.clone();
+        handles.push(tokio::spawn(async move {
+            match c.head(url).send().await {
+                Ok(resp) => resp.status().as_u16() < 500,
+                Err(_) => false,
+            }
+        }));
+    }
+
+    for h in handles {
+        if let Ok(true) = h.await {
+            return true;
+        }
+    }
+    false
+}
 
 /// Путь к файлу состояния детектора БС (рядом с quarantine.json, Баг 105)
 pub fn detector_state_path() -> std::path::PathBuf {
@@ -350,7 +470,9 @@ pub async fn set_detector_state(state: WhitelistDetectorState) {
 }
 
 pub async fn get_whitelist_detector_status() -> WhitelistDetectorStatus {
-    if let Some(status) = DETECTOR_LAST_STATUS.lock().await.clone() {
+    let cooldown = manual_cooldown_remaining_secs().await;
+    if let Some(mut status) = DETECTOR_LAST_STATUS.lock().await.clone() {
+        status.cooldown_remaining_secs = cooldown;
         status
     } else {
         WhitelistDetectorStatus {
@@ -364,6 +486,11 @@ pub async fn get_whitelist_detector_status() -> WhitelistDetectorStatus {
             last_checked: None,
             last_event: None,
             warning: None,
+            domestic_ok: None,
+            wan_offline: false,
+            pending_confirmations: 0,
+            confirm_required: 2,
+            cooldown_remaining_secs: cooldown,
         }
     }
 }
@@ -457,8 +584,12 @@ pub async fn check_whitelist_detector_nodes(
     let sample_total = sampled_candidates.len();
     let ids: Vec<String> = sampled_candidates.iter().map(|s| s.id.clone()).collect();
     let max_ping = det_cfg.max_acceptable_ping_ms as i64;
-    // Таймаут 1500мс для быстрого сканирования за 2-3 секунды
-    let ping_timeout = max_ping.clamp(1000, 1500) as u64;
+    // В мобильной сети (LTE) даём запас таймаута до 3000 мс, в обычном режиме 1000-1500 мс
+    let ping_timeout = if det_cfg.mobile_mode {
+        max_ping.clamp(2000, 3000) as u64
+    } else {
+        max_ping.clamp(1000, 1500) as u64
+    };
 
     let pings = mihomo::ping_all(http, cfg, &ids, ping_timeout).await;
 
@@ -519,9 +650,16 @@ pub async fn evaluate_and_apply_whitelist_detector(
     state: &AppState,
     cfg: &crate::config::AppConfig,
     servers: &[Server],
-    _trigger_reason: &str,
+    trigger_reason: &str,
 ) -> Result<Option<String>, String> {
     let det_cfg = &cfg.failover.whitelist_detector;
+    let confirm_required = det_cfg.confirm_checks.clamp(1, 5);
+    let is_manual = trigger_reason == "manual" || trigger_reason == "Ручной запуск из API";
+    if is_manual {
+        // При ручном запуске сбрасываем паузу ручного переключения
+        *DETECTOR_MANUAL_COOLDOWN_UNTIL.lock().await = None;
+    }
+    let cooldown_remaining = manual_cooldown_remaining_secs().await;
 
     // Проверяем наличие предупреждений о провайдере
     let mut detector_warning = None;
@@ -531,8 +669,18 @@ pub async fn evaluate_and_apply_whitelist_detector(
         }
     }
 
-    // Всегда опрашиваем узлы для актуализации метрик DETECTOR_LAST_STATUS
-    let check_res = check_whitelist_detector_nodes(&state.http, cfg, servers).await;
+    // Двухконтурный маяк: параллельно с опросом узлов (или перед переключением) проверяем РФ-маяки через DIRECT
+    let domestic_future = async {
+        if det_cfg.check_domestic_beacons {
+            Some(check_domestic_direct_beacons().await)
+        } else {
+            None
+        }
+    };
+    let nodes_future = check_whitelist_detector_nodes(&state.http, cfg, servers);
+    let (domestic_ok, check_res) = tokio::join!(domestic_future, nodes_future);
+    let wan_offline = domestic_ok == Some(false);
+
     let (sample_total, offline, online, offline_pct, pings, total_candidates) = match check_res {
         Ok(res) => res,
         Err(e) => {
@@ -550,6 +698,11 @@ pub async fn evaluate_and_apply_whitelist_detector(
                 last_checked: Some(now_str),
                 last_event: None,
                 warning: Some(warn),
+                domestic_ok,
+                wan_offline,
+                pending_confirmations: 0,
+                confirm_required,
+                cooldown_remaining_secs: cooldown_remaining,
             });
             return Ok(None);
         }
@@ -575,6 +728,37 @@ pub async fn evaluate_and_apply_whitelist_detector(
             last_checked: Some(now_str),
             last_event: None,
             warning: detector_warning,
+            domestic_ok,
+            wan_offline,
+            pending_confirmations: 0,
+            confirm_required,
+            cooldown_remaining_secs: cooldown_remaining,
+        });
+        return Ok(None);
+    }
+
+    // Если действует пауза после ручного переключения сервера — обновляем метрики, но не переключаем
+    if cooldown_remaining > 0 {
+        let mins = (cooldown_remaining + 59) / 60;
+        let cd_warn = detector_warning.or_else(|| {
+            Some(format!("Пауза после ручного переключения (осталось ~{} мин)", mins))
+        });
+        *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
+            state: current_state,
+            monitored_provider: det_cfg.monitored_provider.clone(),
+            total_nodes: sample_total,
+            monitored_total_nodes: total_candidates,
+            offline_nodes: offline,
+            online_nodes: online,
+            offline_percent: offline_pct,
+            last_checked: Some(now_str),
+            last_event: None,
+            warning: cd_warn,
+            domestic_ok,
+            wan_offline,
+            pending_confirmations: 0,
+            confirm_required,
+            cooldown_remaining_secs: cooldown_remaining,
         });
         return Ok(None);
     }
@@ -589,13 +773,69 @@ pub async fn evaluate_and_apply_whitelist_detector(
         _ => offline_pct <= det_cfg.exit_offline_percent,
     };
 
-    let current_state = match get_detector_state().await { s => s };
+    let verdict = classify_network_isolation(current_state, domestic_ok, is_trigger_hit, is_exit_hit);
+
+    // Если пропал весь мобильный интернет (WAN offline: даже РФ-маяки не отвечают), не дёргаем [БС]
+    if verdict == NetworkIsolationVerdict::WanOffline {
+        DETECTOR_CONSECUTIVE_ISOLATION.store(0, std::sync::atomic::Ordering::Relaxed);
+        DETECTOR_CONSECUTIVE_RECOVERY.store(0, std::sync::atomic::Ordering::Relaxed);
+        let wan_warn = Some("Нет связи с интернетом (РФ-маяки DIRECT тоже недоступны) — переключение на [БС] отменено".to_string());
+        *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
+            state: current_state,
+            monitored_provider: det_cfg.monitored_provider.clone(),
+            total_nodes: sample_total,
+            monitored_total_nodes: total_candidates,
+            offline_nodes: offline,
+            online_nodes: online,
+            offline_percent: offline_pct,
+            last_checked: Some(now_str),
+            last_event: None,
+            warning: wan_warn,
+            domestic_ok,
+            wan_offline: true,
+            pending_confirmations: 0,
+            confirm_required,
+            cooldown_remaining_secs: 0,
+        });
+        return Ok(None);
+    }
+
     let vkturn_ready = state.vkturn.rt.read().await.tunnel_ready();
 
     match current_state {
         WhitelistDetectorState::Normal => {
-            if is_trigger_hit {
-                // Порог пробит! Переключаем в режим WHITELIST_DETECTED
+            DETECTOR_CONSECUTIVE_RECOVERY.store(0, std::sync::atomic::Ordering::Relaxed);
+            if verdict == NetworkIsolationVerdict::IsolationHit {
+                let count = DETECTOR_CONSECUTIVE_ISOLATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if count < confirm_required {
+                    let pending_warn = detector_warning.or_else(|| {
+                        Some(format!(
+                            "Подозрение на белые списки ТСПУ (подтверждение {}/{}). Повторная проверка через 15 сек...",
+                            count, confirm_required
+                        ))
+                    });
+                    *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
+                        state: WhitelistDetectorState::Normal,
+                        monitored_provider: det_cfg.monitored_provider.clone(),
+                        total_nodes: sample_total,
+                        monitored_total_nodes: total_candidates,
+                        offline_nodes: offline,
+                        online_nodes: online,
+                        offline_percent: offline_pct,
+                        last_checked: Some(now_str),
+                        last_event: None,
+                        warning: pending_warn,
+                        domestic_ok,
+                        wan_offline: false,
+                        pending_confirmations: count,
+                        confirm_required,
+                        cooldown_remaining_secs: 0,
+                    });
+                    return Ok(None);
+                }
+
+                // Порог подтверждён! Сбрасываем счётчик и переключаем в режим WHITELIST_DETECTED
+                DETECTOR_CONSECUTIVE_ISOLATION.store(0, std::sync::atomic::Ordering::Relaxed);
                 set_detector_state(WhitelistDetectorState::WhitelistDetected).await;
 
                 // Сохраняем активный сервер как last_good_regular_vps, если он обычный VPS
@@ -657,7 +897,12 @@ pub async fn evaluate_and_apply_whitelist_detector(
                     }
                 }
 
-                // Параллельный L7-пинг до 12 кандидатов БС с семафором 12 и таймаутом 1500мс
+                // Параллельный L7-пинг до 12 кандидатов БС с семафором 12 (в мобильной сети таймаут 2500-3500мс)
+                let bs_ping_timeout = if det_cfg.mobile_mode {
+                    (det_cfg.max_acceptable_ping_ms as u64).clamp(2500, 3500)
+                } else {
+                    1500
+                };
                 let mut bs_target_id: Option<String> = None;
                 let mut bs_target_name: Option<String> = None;
 
@@ -666,14 +911,15 @@ pub async fn evaluate_and_apply_whitelist_detector(
                     let mut handles = Vec::new();
                     let shared_cfg = std::sync::Arc::new(cfg.clone());
 
-                    for cand_id in bs_candidate_ids {
+                    for cand_id in &bs_candidate_ids {
                         let http = state.http.clone();
                         let cand_cfg = shared_cfg.clone();
                         let sem_clone = sem.clone();
+                        let cand_id_owned = cand_id.clone();
                         handles.push(tokio::spawn(async move {
                             let _permit = sem_clone.acquire().await.ok();
-                            let ping = mihomo::ping_server_url(&http, &cand_cfg, &cand_id, 1500, None).await;
-                            (cand_id, ping)
+                            let ping = mihomo::ping_server_url(&http, &cand_cfg, &cand_id_owned, bs_ping_timeout, None).await;
+                            (cand_id_owned, ping)
                         }));
                     }
 
@@ -696,9 +942,9 @@ pub async fn evaluate_and_apply_whitelist_detector(
                     }
                 }
 
-                // Fallback: если все кандидаты не ответили по пингу, берем первого не находящегося в карантине из цепочки
+                // Fallback: если все кандидаты не ответили по пингу, берем первого не находящегося в карантине из цепочки БС или пула кандидатов БС
                 if bs_target_id.is_none() {
-                    for bs_id in &cfg.failover.bs_priority_chain {
+                    for bs_id in cfg.failover.bs_priority_chain.iter().chain(bs_candidate_ids.iter()) {
                         if !vkturn_ready && bs_id == crate::vkturn::PROXY_NAME {
                             continue;
                         }
@@ -779,10 +1025,16 @@ pub async fn evaluate_and_apply_whitelist_detector(
                     last_checked: Some(now_str),
                     last_event: Some(event_msg.clone()),
                     warning: detector_warning.clone(),
+                    domestic_ok,
+                    wan_offline: false,
+                    pending_confirmations: 0,
+                    confirm_required,
+                    cooldown_remaining_secs: 0,
                 });
 
                 return Ok(Some(event_msg));
             } else {
+                DETECTOR_CONSECUTIVE_ISOLATION.store(0, std::sync::atomic::Ordering::Relaxed);
                 *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
                     state: WhitelistDetectorState::Normal,
                     monitored_provider: det_cfg.monitored_provider.clone(),
@@ -794,12 +1046,47 @@ pub async fn evaluate_and_apply_whitelist_detector(
                     last_checked: Some(now_str),
                     last_event: None,
                     warning: detector_warning.clone(),
+                    domestic_ok,
+                    wan_offline: false,
+                    pending_confirmations: 0,
+                    confirm_required,
+                    cooldown_remaining_secs: 0,
                 });
             }
         }
         WhitelistDetectorState::WhitelistDetected => {
-            if is_exit_hit {
-                // Блокировка снята! Порог выхода достигнут
+            DETECTOR_CONSECUTIVE_ISOLATION.store(0, std::sync::atomic::Ordering::Relaxed);
+            if verdict == NetworkIsolationVerdict::RecoveryHit {
+                let rec_count = DETECTOR_CONSECUTIVE_RECOVERY.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if rec_count < confirm_required {
+                    let pending_warn = detector_warning.or_else(|| {
+                        Some(format!(
+                            "Зарубежные узлы ожили (подтверждение {}/{}). Повторная проверка через 15 сек...",
+                            rec_count, confirm_required
+                        ))
+                    });
+                    *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
+                        state: WhitelistDetectorState::WhitelistDetected,
+                        monitored_provider: det_cfg.monitored_provider.clone(),
+                        total_nodes: sample_total,
+                        monitored_total_nodes: total_candidates,
+                        offline_nodes: offline,
+                        online_nodes: online,
+                        offline_percent: offline_pct,
+                        last_checked: Some(now_str),
+                        last_event: None,
+                        warning: pending_warn,
+                        domestic_ok,
+                        wan_offline: false,
+                        pending_confirmations: rec_count,
+                        confirm_required,
+                        cooldown_remaining_secs: 0,
+                    });
+                    return Ok(None);
+                }
+
+                // Блокировка снята и подтверждена! Сбрасываем счётчик и возвращаем Normal
+                DETECTOR_CONSECUTIVE_RECOVERY.store(0, std::sync::atomic::Ordering::Relaxed);
                 set_detector_state(WhitelistDetectorState::Normal).await;
 
                 let mut restored_msg: Option<String> = None;
@@ -859,10 +1146,15 @@ pub async fn evaluate_and_apply_whitelist_detector(
                         }
 
                         // Проверяем доступность: либо подтверждён в pings, либо подтверждаем канареечным L7-тестом
+                        let fallback_ping_timeout = if det_cfg.mobile_mode {
+                            (det_cfg.max_acceptable_ping_ms as u64).clamp(2000, 3000)
+                        } else {
+                            1500
+                        };
                         let is_alive = if let Some(&p) = pings.get(&cand_server.id) {
                             p > 0 && p <= (det_cfg.max_acceptable_ping_ms as i64)
                         } else {
-                            let ms = mihomo::ping_server_url(&state.http, cfg, &cand_server.id, 1500, None).await;
+                            let ms = mihomo::ping_server_url(&state.http, cfg, &cand_server.id, fallback_ping_timeout, None).await;
                             ms > 0 && ms <= (det_cfg.max_acceptable_ping_ms as i64)
                         };
 
@@ -929,10 +1221,16 @@ pub async fn evaluate_and_apply_whitelist_detector(
                     last_checked: Some(now_str),
                     last_event: Some(final_msg.clone()),
                     warning: detector_warning.clone(),
+                    domestic_ok,
+                    wan_offline: false,
+                    pending_confirmations: 0,
+                    confirm_required,
+                    cooldown_remaining_secs: 0,
                 });
 
                 return Ok(Some(final_msg));
             } else {
+                DETECTOR_CONSECUTIVE_RECOVERY.store(0, std::sync::atomic::Ordering::Relaxed);
                 *DETECTOR_LAST_STATUS.lock().await = Some(WhitelistDetectorStatus {
                     state: WhitelistDetectorState::WhitelistDetected,
                     monitored_provider: det_cfg.monitored_provider.clone(),
@@ -944,6 +1242,11 @@ pub async fn evaluate_and_apply_whitelist_detector(
                     last_checked: Some(now_str),
                     last_event: None,
                     warning: detector_warning,
+                    domestic_ok,
+                    wan_offline: false,
+                    pending_confirmations: 0,
+                    confirm_required,
+                    cooldown_remaining_secs: 0,
                 });
             }
         }
@@ -958,7 +1261,10 @@ pub async fn run_whitelist_detector_check(state: &AppState, reason: &str) -> Res
     let speedtest_res = state.speedtest_lock.try_lock();
     let check_res = crate::failover::CHECK_IN_PROGRESS.try_lock();
     let flags = crate::failover::ScanGuardFlags {
-        failover_enabled: cfg.failover.enabled || reason == "manual",
+        failover_enabled: cfg.failover.enabled
+            || cfg.failover.whitelist_detector.enabled
+            || reason == "manual"
+            || reason == "Ручной запуск из API",
         service_stopped: crate::watchdog::is_service_stopped(),
         speedtest_running: speedtest_res.is_err(),
         check_in_progress: check_res.is_err(),

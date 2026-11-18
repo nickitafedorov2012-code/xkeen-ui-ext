@@ -415,6 +415,10 @@ export interface WhitelistDetectorConfig {
   check_interval_mins: number
   auto_restore_vps: boolean
   sample_size?: number
+  check_domestic_beacons?: boolean
+  confirm_checks?: number
+  manual_cooldown_mins?: number
+  mobile_mode?: boolean
 }
 
 export interface WhitelistDetectorStatus {
@@ -432,6 +436,11 @@ export interface WhitelistDetectorStatus {
   warning?: string | null
   check_interval_mins?: number
   auto_restore_vps?: boolean
+  domestic_ok?: boolean | null
+  wan_offline?: boolean
+  pending_confirmations?: number
+  confirm_required?: number
+  cooldown_remaining_secs?: number
 }
 
 export interface AppSettings {
