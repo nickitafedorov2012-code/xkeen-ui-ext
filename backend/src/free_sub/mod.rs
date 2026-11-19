@@ -310,18 +310,8 @@ pub async fn load_disk_cache(path: &Path) -> FreeSubCache {
 }
 
 pub async fn save_disk_cache(path: &Path, cache: &FreeSubCache) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    let tmp = path.with_extension("json.tmp");
     let json_str = serde_json::to_string_pretty(cache).map_err(|e| format!("Serialize cache: {e}"))?;
-    tokio::fs::write(&tmp, json_str)
-        .await
-        .map_err(|e| format!("Write cache tmp: {e}"))?;
-    tokio::fs::rename(&tmp, path)
-        .await
-        .map_err(|e| format!("Rename cache: {e}"))?;
-    Ok(())
+    crate::api::atomic_write_file(path, &json_str).await
 }
 
 pub fn is_yandex_disk_public_url(url: &str) -> bool {

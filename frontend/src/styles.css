@@ -289,20 +289,6 @@ table.devices-table th:nth-child(11) { width: 72px; min-width: 50px; text-align:
 }
 
 @media (max-width: 480px) {
-  .header-status-group {
-    width: auto;
-    max-width: 100%;
-    min-width: 0;
-  }
-  .header-utility-actions {
-    width: auto;
-  }
-  .header-versions-group {
-    gap: 6px;
-  }
-  .header-service-actions {
-    width: auto;
-  }
   /* Крупнее зоны касания для вкладок */
   .tab {
     padding: 8px 12px;

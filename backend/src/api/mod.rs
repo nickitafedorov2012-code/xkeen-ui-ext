@@ -2680,6 +2680,25 @@ mod tests {
 
     }
 
+    #[test]
+    fn regression_xkeen_service_fallback_starts_mihomo_and_verifies_process() {
+        let body = fn_body(production_source(), "pub async fn xkeen_service");
+        assert!(
+            !body.contains("/opt/sbin/xkeen -start"),
+            "xkeen_service fallback must not rely on `/opt/sbin/xkeen -start` which silently exits 0 when S05xkeen is absent"
+        );
+        assert!(
+            body.contains("nohup /opt/sbin/mihomo -d /opt/etc/mihomo")
+                && body.contains("nohup /opt/bin/mihomo -d /opt/etc/mihomo"),
+            "xkeen_service fallback must launch mihomo directly from /opt/sbin/mihomo or /opt/bin/mihomo"
+        );
+        assert!(
+            body.contains("is_process_running(\"mihomo\")")
+                && body.contains("Не удалось запустить процесс mihomo"),
+            "xkeen_service must verify mihomo process started and return api_err if not running"
+        );
+    }
+
     #[tokio::test]
     async fn regression_marking_active_subscription_enables_whitelist_mode() {
         use axum::{routing::{get, put}, Json, Router, http::StatusCode};

@@ -890,12 +890,12 @@ html, body {
 @media (max-width: 819.98px) {
   .header-bar,
   .toolbar.header-bar {
-    grid-template-columns: 1fr auto;
+    grid-template-columns: auto 1fr auto;
     grid-template-rows: auto auto auto;
     grid-template-areas:
-      "logo utility"
-      "status service"
-      "versions versions";
+      "logo utility utility"
+      "status status service"
+      "versions versions versions";
     gap: 10px 8px;
     padding: 10px 12px;
   }
@@ -914,11 +914,23 @@ html, body {
     padding: 8px 10px;
   }
   .header-status-group {
-    width: auto;
+    justify-self: stretch;
+    width: 100%;
     min-width: 0;
+  }
+  .status-badge-custom {
+    min-width: 0;
+    width: 100%;
+    max-width: 100%;
+    padding: 3px 8px;
   }
   .header-utility-actions {
     width: auto;
+    gap: 4px;
+  }
+  .header-service-actions {
+    width: auto;
+    gap: 4px;
   }
   .header-versions-group {
     flex-wrap: nowrap;
@@ -930,6 +942,15 @@ html, body {
   }
   .header-versions-group::-webkit-scrollbar {
     display: none;
+  }
+  .header-pill-btn {
+    height: 32px;
+    padding: 0 6px;
+    font-size: 11.5px;
+    flex-shrink: 0;
+  }
+  .header-pill-subtitle {
+    font-size: 10.5px;
   }
 }
 

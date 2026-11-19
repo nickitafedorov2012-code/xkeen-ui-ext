@@ -605,7 +605,27 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
     }
 
     let script_arg = if action == "restart_all" { "restart" } else { action.as_str() };
+    let is_start_action = matches!(action.as_str(), "start" | "restart" | "restart_all");
     let mihomo_was_running = crate::system::is_process_running("mihomo");
+
+    // Скрипт xkeen при запуске вызывает /opt/etc/init.d/S05xkeen и при его отсутствии
+    // молча выходит с кодом 0, не запуская ядро. Поэтому при отсутствии init-скрипта
+    // (или если он не поднял процесс) запускаем mihomo напрямую.
+    let fallback_mihomo_cmd = r#"
+killall -15 mihomo 2>/dev/null || true
+sleep 1
+if command -v mihomo >/dev/null 2>&1; then
+  nohup mihomo -d /opt/etc/mihomo </dev/null >/opt/var/log/mihomo.log 2>&1 &
+elif [ -x /opt/sbin/mihomo ]; then
+  nohup /opt/sbin/mihomo -d /opt/etc/mihomo </dev/null >/opt/var/log/mihomo.log 2>&1 &
+elif [ -x /opt/bin/mihomo ]; then
+  nohup /opt/bin/mihomo -d /opt/etc/mihomo </dev/null >/opt/var/log/mihomo.log 2>&1 &
+else
+  echo "Ни S05xkeen, ни бинарник mihomo не найдены" >&2
+  exit 1
+fi
+"#;
+
     let out = if std::path::Path::new(init_script).exists() {
         tokio::time::timeout(
             std::time::Duration::from_secs(15),
@@ -616,29 +636,11 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
                 .output(),
         )
         .await
-    } else if action == "start" || action == "restart" || action == "restart_all" {
+    } else if is_start_action {
         // AUDIT-080 / AUDIT-122: fallback если S05xkeen отсутствует (как на стенде WBR3000UAX)
-        let fallback_cmd = r#"
-if [ -x /opt/sbin/xkeen ]; then
-  /opt/sbin/xkeen -start </dev/null >/opt/var/log/xkeen-start.log 2>&1
-elif command -v mihomo >/dev/null 2>&1; then
-  killall -15 mihomo 2>/dev/null || true
-  sleep 1
-  nohup mihomo -d /opt/etc/mihomo </dev/null >/opt/var/log/mihomo.log 2>&1 &
-  sleep 1
-elif [ -x /opt/sbin/mihomo ]; then
-  killall -15 mihomo 2>/dev/null || true
-  sleep 1
-  nohup /opt/sbin/mihomo -d /opt/etc/mihomo </dev/null >/opt/var/log/mihomo.log 2>&1 &
-  sleep 1
-else
-  echo "Ни S05xkeen, ни /opt/sbin/xkeen, ни mihomo не найдены" >&2
-  exit 1
-fi
-"#;
         tokio::time::timeout(
             std::time::Duration::from_secs(15),
-            tokio::process::Command::new("sh").arg("-c").arg(fallback_cmd).output(),
+            tokio::process::Command::new("sh").arg("-c").arg(fallback_mihomo_cmd).output(),
         )
         .await
     } else {
@@ -726,6 +728,60 @@ fi
                 };
                 return api_err(format!("Команда '{}' завершилась с ошибкой: {}", action, err_msg));
             }
+            if is_start_action {
+                let mut started = false;
+                for _ in 0..10 {
+                    if crate::system::is_process_running("mihomo") {
+                        started = true;
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+                if !started {
+                    log_w!("После '{}' процесс mihomo не обнаружен — пробуем прямой fallback-запуск", action);
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        tokio::process::Command::new("sh").arg("-c").arg(fallback_mihomo_cmd).output(),
+                    )
+                    .await;
+                    for _ in 0..10 {
+                        if crate::system::is_process_running("mihomo") {
+                            started = true;
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    }
+                }
+                if !started {
+                    let log_tail = tokio::fs::read_to_string("/opt/var/log/mihomo.log")
+                        .await
+                        .ok()
+                        .map(|s| {
+                            s.lines()
+                                .rev()
+                                .take(5)
+                                .collect::<Vec<_>>()
+                                .into_iter()
+                                .rev()
+                                .collect::<Vec<_>>()
+                                .join(" | ")
+                        })
+                        .unwrap_or_default();
+                    let detail = if log_tail.is_empty() {
+                        "Проверьте наличие бинарника mihomo и конфигурацию /opt/etc/mihomo/config.yaml".to_string()
+                    } else {
+                        format!("Лог: {}", log_tail)
+                    };
+                    return api_err(format!("Не удалось запустить процесс mihomo ({}). {}", action, detail));
+                }
+            }
+            let running_now = if is_start_action {
+                true
+            } else if action == "stop" {
+                false
+            } else {
+                crate::system::is_process_running("mihomo")
+            };
             let msg = match action.as_str() {
                 "restart_all" => "Все компоненты (XKeen, Mihomo, Zapret, Панель) успешно перезапущены!",
                 "restart" => "Службы XKeen и Mihomo успешно перезапущены!",
@@ -737,7 +793,7 @@ fi
                 "code": o.status.code(),
                 "stdout": String::from_utf8_lossy(&o.stdout),
                 "stderr": String::from_utf8_lossy(&o.stderr),
-                "service_running": action != "stop",
+                "service_running": running_now,
                 "service_stopped": action == "stop",
                 "message": msg,
             }))

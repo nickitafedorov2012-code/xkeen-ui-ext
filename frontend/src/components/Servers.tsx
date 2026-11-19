@@ -383,16 +383,16 @@ export default function Servers({ notify, status, refresh }: Props) {
         return false
       }
       const isPool = isPoolServer(s)
+      const isFreeSubCard = s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL'
       if (poolOnly && !isPool) {
         return false
       }
-      if (!poolOnly && !showPools && isPool && !selectedProviders.has('__pool__')) {
+      if (!poolOnly && !showPools && isPool && !isFreeSubCard && !selectedProviders.has('__pool__')) {
         return false
       }
       if (flowOnly && getFlowStatus(s) !== 'ok') {
         return false
       }
-      const isFreeSubCard = s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL'
       if (hideOffline && !isFreeSubCard && !s.is_active && (s.ping_ms <= 0 || s.ping_ms >= 9999)) {
         return false
       }

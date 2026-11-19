@@ -93,4 +93,40 @@ describe('subscription controls', () => {
     }
   })
 
+  it('renders FREE-VPN and FREE-WL pool cards even when showPools is false', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input) === '/api/providers') {
+        return response({ providers: [
+          { id: 'free_vpn', name: 'Бесплатный VPN', count: 20, enabled: true },
+          { id: 'free_wl', name: 'Бесплатный обход БС', count: 15, enabled: true },
+        ] })
+      }
+      if (String(input) === '/api/servers') {
+        return response({ servers: [
+          {
+            id: 'free_vpn', name: '🆓 Бесплатный VPN (Авто)', protocol: 'FREE-VPN', host: 'pool', port: 0,
+            ping_ms: 85, is_active: false, is_priority: false, is_pool: true, is_whitelist: false, provider: 'free_vpn',
+          },
+          {
+            id: 'free_wl', name: '🛡️ Бесплатный обход БС (Авто)', protocol: 'FREE-WL', host: 'pool', port: 0,
+            ping_ms: 95, is_active: false, is_priority: false, is_pool: true, is_whitelist: true, provider: 'free_wl',
+          },
+          {
+            id: 'Fastest', name: 'Fastest Pool', protocol: 'URL-TEST', host: 'pool', port: 0,
+            ping_ms: 50, is_active: false, is_priority: false, is_pool: true, is_whitelist: false,
+          },
+        ] })
+      }
+      return response({})
+    }))
+    const container = document.createElement('div'); document.body.appendChild(container)
+    const root = createRoot(container)
+    try {
+      await act(async () => { root.render(<Servers notify={vi.fn()} />) })
+      expect(container.textContent).toContain('Бесплатный VPN (Авто)')
+      expect(container.textContent).toContain('Бесплатный обход БС (Авто)')
+      expect(container.textContent).not.toContain('Fastest Pool')
+    } finally { await act(async () => { root.unmount() }); container.remove() }
+  })
+
 })
