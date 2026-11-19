@@ -3399,7 +3399,7 @@ mod tests {
             "Gaming setup must ensure user_exclude ipset exists:\n{g_all}"
         );
         assert!(
-            g_all.contains("-A XKEEN_GAMING -m set --match-set user_exclude dst -j RETURN -w 2"),
+            g_all.contains("-A XKEEN_GAMING -m set --match-set user_exclude dst -j RETURN -w"),
             "Gaming nat/mangle must bypass user_exclude ipset:\n{g_all}"
         );
 

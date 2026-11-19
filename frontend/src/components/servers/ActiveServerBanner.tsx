@@ -228,13 +228,9 @@ export function ActiveServerBanner({
           >
             {(() => {
               const isWl = Boolean(status?.whitelist_mode_active || activeServer.is_whitelist)
-              const downSpeed = isWl
-                ? (liveTraffic?.whitelist?.down ?? liveTraffic?.down ?? 0)
-                : (liveTraffic?.proxy?.down ?? liveTraffic?.down ?? 0)
-              const upSpeed = isWl
-                ? (liveTraffic?.whitelist?.up ?? liveTraffic?.up ?? 0)
-                : (liveTraffic?.proxy?.up ?? liveTraffic?.up ?? 0)
-              const totalBytes = (liveTraffic?.proxy_bytes ?? 0) + (liveTraffic?.whitelist_bytes ?? 0)
+              const downSpeed = isWl ? (liveTraffic?.whitelist?.down ?? 0) : (liveTraffic?.proxy?.down ?? 0)
+              const upSpeed = isWl ? (liveTraffic?.whitelist?.up ?? 0) : (liveTraffic?.proxy?.up ?? 0)
+              const totalBytes = isWl ? (liveTraffic?.whitelist_bytes ?? 0) : (liveTraffic?.proxy_bytes ?? 0)
 
               return (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>

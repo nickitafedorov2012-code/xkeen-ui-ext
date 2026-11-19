@@ -814,14 +814,22 @@ pub fn is_allowed_connect_target(host: &str, port: u16, targets: &[String]) -> b
     targets.iter().any(|t| t.eq_ignore_ascii_case(clean_host))
 }
 
-/// Правила iptables INPUT для прокси Antigravity: разрешаем только LAN (`br+`) и `lo`, остальное DROP (Баг A-05)
+/// Правила iptables INPUT для прокси Antigravity: разрешаем только LAN (`br+`, `Bridge+`, `ra+`) и `lo`, остальное DROP (AUDIT-011)
 pub fn build_antigravity_input_rules(port: u16) -> (Vec<String>, Vec<String>) {
     let cleanup = vec![
         format!("iptables -w -D INPUT -i lo -p tcp --dport {port} -j ACCEPT 2>/dev/null || true"),
+        format!("iptables -w -D INPUT -i br+ -p tcp --dport {port} -j ACCEPT 2>/dev/null || true"),
+        format!("iptables -w -D INPUT -i Bridge+ -p tcp --dport {port} -j ACCEPT 2>/dev/null || true"),
+        format!("iptables -w -D INPUT -i ra+ -p tcp --dport {port} -j ACCEPT 2>/dev/null || true"),
+        format!("iptables -w -D INPUT -p tcp --dport {port} -j DROP 2>/dev/null || true"),
         format!("iptables -w -D INPUT ! -i br+ -p tcp --dport {port} -j DROP 2>/dev/null || true"),
     ];
     let mut setup = cleanup.clone();
-    setup.push(format!("iptables -w -I INPUT 1 ! -i br+ -p tcp --dport {port} -j DROP"));
+    // Вставляем в обратном порядке на позицию 1: ACCEPT (lo, br+, Bridge+, ra+) окажутся ВЫШЕ DROP
+    setup.push(format!("iptables -w -I INPUT 1 -p tcp --dport {port} -j DROP"));
+    setup.push(format!("iptables -w -I INPUT 1 -i ra+ -p tcp --dport {port} -j ACCEPT"));
+    setup.push(format!("iptables -w -I INPUT 1 -i Bridge+ -p tcp --dport {port} -j ACCEPT"));
+    setup.push(format!("iptables -w -I INPUT 1 -i br+ -p tcp --dport {port} -j ACCEPT"));
     setup.push(format!("iptables -w -I INPUT 1 -i lo -p tcp --dport {port} -j ACCEPT"));
     (setup, cleanup)
 }

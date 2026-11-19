@@ -243,7 +243,13 @@ pub fn build_zapret_pid_check_fn_with_qnum(qnum: u16) -> String {
     }
     let patterns = markers
         .iter()
-        .map(|m| format!("*{m}*"))
+        .map(|m| {
+            if m.contains(' ') {
+                format!("*\"{m}\"*")
+            } else {
+                format!("*{m}*")
+            }
+        })
         .collect::<Vec<_>>()
         .join("|");
     format!(
@@ -340,7 +346,9 @@ pub async fn find_our_zapret_pid() -> Option<u32> {
 // Подпункт 31.1 & 31.3: сборка безопасной команды снятия DNS-редиректов Zapret
 pub fn build_dns_redirect_remove_cmd(port: u16) -> String {
     format!(
-        r#"for ipt in "iptables -w 2" "ip6tables -w 2"; do
+        r#"IPT_W=""; command iptables -w -L -n >/dev/null 2>&1 && IPT_W="-w"
+IP6T_W=""; command ip6tables -w -L -n >/dev/null 2>&1 && IP6T_W="-w"
+for ipt in "iptables $IPT_W" "ip6tables $IP6T_W"; do
   $ipt -t nat -S PREROUTING 2>/dev/null | grep 'xkeen-route-zapret' | grep -- "--to-ports {port}" | while read -r rule; do
     del_cmd=$(echo "$rule" | sed 's/^-A/-D/')
     $ipt -t nat $del_cmd 2>/dev/null || true
@@ -367,18 +375,20 @@ pub fn zapret_dns_rules_missing(iptables_s_output: &str, port: u16) -> bool {
 
 // Подпункт 31.2 & 31.3: проверка остаточных правил Zapret в iptables при выключенном Zapret
 pub fn build_zapret_iptables_left_check_cmd(port: u16) -> String {
+    let ipt = crate::system::iptables_cmd_str();
     format!(
-        "iptables -w 2 -t mangle -S 2>/dev/null | grep -q zapret || iptables -w 2 -t nat -S PREROUTING 2>/dev/null | grep 'xkeen-route-zapret' | grep 'to-ports {port}' | grep -q ."
+        "{ipt} -t mangle -S 2>/dev/null | grep -q zapret || {ipt} -t nat -S PREROUTING 2>/dev/null | grep 'xkeen-route-zapret' | grep 'to-ports {port}' | grep -q ."
     )
 }
 
 // Подпункт 31.2 & 31.3: команда восстановления правил DNS-редиректа Zapret
 pub fn build_zapret_dns_restore_cmd(port: u16) -> String {
+    let ipt = crate::system::iptables_cmd_str();
     format!(
-        r#"iptables -w 2 -t nat -A PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports {port} 2>/dev/null || true
-iptables -w 2 -t nat -A PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports {port} 2>/dev/null || true
-iptables -w 2 -t nat -A PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports {port} 2>/dev/null || true
-iptables -w 2 -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports {port} 2>/dev/null || true"#
+        r#"{ipt} -t nat -A PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports {port}
+{ipt} -t nat -A PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports {port}
+{ipt} -t nat -A PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports {port}
+{ipt} -t nat -A PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports {port}"#
     )
 }
 

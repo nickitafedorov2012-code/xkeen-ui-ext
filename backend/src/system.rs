@@ -1,8 +1,67 @@
 use std::collections::HashMap;
 #[cfg(target_os = "linux")]
 use std::sync::Mutex;
+use std::sync::OnceLock;
 #[cfg(target_os = "linux")]
 use std::time::Instant;
+
+/// Единый детект поддержки `-w` (без числового аргумента!) для `iptables v1.4.21` на KeeneticOS (AUDIT-013).
+pub fn iptables_wait_arg() -> Option<&'static str> {
+    static WAIT_ARG: OnceLock<Option<&'static str>> = OnceLock::new();
+    *WAIT_ARG.get_or_init(|| {
+        #[cfg(target_os = "linux")]
+        {
+            let ok = std::process::Command::new("iptables")
+                .args(["-w", "-L", "-n"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok { Some("-w") } else { None }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Some("-w")
+        }
+    })
+}
+
+/// Возвращает префикс команды `iptables -w` или `iptables` в зависимости от поддержки ядром.
+pub fn iptables_cmd_str() -> &'static str {
+    if iptables_wait_arg().is_some() {
+        "iptables -w"
+    } else {
+        "iptables"
+    }
+}
+
+/// Выполняет `iptables` с единым `-w` (без числового аргумента) и возвращает ошибку при ненулевом коде возврата.
+#[cfg(target_os = "linux")]
+pub fn run_iptables(args: &[&str]) -> Result<std::process::Output, String> {
+    let mut cmd = std::process::Command::new("iptables");
+    if iptables_wait_arg().is_some() {
+        cmd.arg("-w");
+    }
+    cmd.args(args);
+    let out = cmd.output().map_err(|e| format!("Ошибка запуска iptables {}: {e}", args.join(" ")))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(format!(
+            "iptables {} завершился с кодом {}: {}",
+            args.join(" "),
+            out.status.code().unwrap_or(-1),
+            stderr
+        ));
+    }
+    Ok(out)
+}
+
+/// Выполняет `iptables` с единым `-w` и возвращает `true` при коде 0 (для `-C` проверок и очистки).
+#[cfg(target_os = "linux")]
+pub fn run_iptables_ok(args: &[&str]) -> bool {
+    run_iptables(args).is_ok()
+}
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProcessInfo {
@@ -834,8 +893,9 @@ pub fn matches_target_needle(comm_trim: &str, pid: u32, needle: &str, cmdline: O
         return true;
     }
     if let Some(cmd) = cmdline {
-        let cmd_lower = cmd.to_lowercase();
-        if cmd_lower.contains(&needle_lower) {
+        let argv0 = cmd.split_whitespace().next().unwrap_or("");
+        let argv0_base = argv0.rsplit('/').next().unwrap_or(argv0).to_ascii_lowercase();
+        if argv0_base == needle_lower {
             return true;
         }
     }

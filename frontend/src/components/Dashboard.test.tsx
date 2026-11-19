@@ -285,7 +285,7 @@ describe('Dashboard Component — Failover Card 10-Point Audit & Tier Modernizat
       aghBtn.click()
     })
 
-    expect(postSpy).toHaveBeenCalledWith('/adguard/protection', { enabled: true })
+    expect(postSpy).toHaveBeenCalledWith('adblock/toggle', { enabled: true })
     expect(notifyMock).toHaveBeenCalledWith('Ошибка переключения AdGuard: iptables failed', true)
     expect(aghBtn.textContent).toContain('ВЫКЛ')
     expect(aghBtn.textContent).not.toContain('ВКЛ 🟢')

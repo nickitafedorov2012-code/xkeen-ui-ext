@@ -60,7 +60,12 @@ pub fn sync_atomic_write_or_remove(path: &Path, content: Option<&str>) -> std::i
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
             let tmp_path = PathBuf::from(format!("{}.{}.{}.tmp", path.display(), std::process::id(), nonce));
-            std::fs::write(&tmp_path, data.as_bytes())?;
+            {
+                use std::io::Write;
+                let mut f = std::fs::File::create(&tmp_path)?;
+                f.write_all(data.as_bytes())?;
+                f.sync_all()?;
+            }
             if let Err(e) = std::fs::rename(&tmp_path, path) {
                 let _ = std::fs::remove_file(&tmp_path);
                 return Err(e);
@@ -1056,7 +1061,16 @@ pub async fn apply_with_confirmation(
     drop(tx);
 
     if rollback_seconds == 0 {
-        // Немедленная постоянная фиксация без отката
+        // AUDIT-027: при немедленной фиксации отменяем предыдущий PendingCommit и удаляем его маркер
+        if let Ok(mut g) = pending_commit_store().lock() {
+            if let Some(mut prev) = g.take() {
+                if let Some(tx) = prev.cancel_tx.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+        let persist_path = pending_commit_file(&json_path);
+        let _ = tokio::task::spawn_blocking(move || sync_atomic_write_or_remove(&persist_path, None)).await;
         return Ok(tx_id);
     }
 
@@ -1211,26 +1225,22 @@ pub fn validate_config_dry_run(
             warnings.push(format!("Предупреждение структуры Mihomo: {e}"));
         }
 
-        // Проверка конфликтов системных портов
+        // Проверка конфликтов системных портов (AUDIT-027: точное сравнение порта, не starts_with)
         for line in yaml.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with('#') {
                 continue;
             }
-            if trimmed.starts_with("port: 1001")
-                || trimmed.starts_with("mixed-port: 1001")
-                || trimmed.starts_with("socks-port: 1001")
-                || trimmed.starts_with("redir-port: 1001")
-                || trimmed.starts_with("tproxy-port: 1001")
-            {
-                errors.push("Конфликт порта 1001: данный порт зарезервирован веб-панелью XKeen Route".to_string());
-            }
-            if trimmed.starts_with("port: 80")
-                || trimmed.starts_with("mixed-port: 80")
-                || trimmed.starts_with("port: 22")
-                || trimmed.starts_with("mixed-port: 22")
-            {
-                errors.push("Конфликт системных портов KeeneticOS (80/22)".to_string());
+            if let Some((key, val)) = trimmed.split_once(':') {
+                let k = key.trim();
+                let v = val.split('#').next().unwrap_or(val).trim().trim_matches('"').trim_matches('\'');
+                if matches!(k, "port" | "mixed-port" | "socks-port" | "redir-port" | "tproxy-port") {
+                    if v == "1001" {
+                        errors.push("Конфликт порта 1001: данный порт зарезервирован веб-панелью XKeen Route".to_string());
+                    } else if v == "80" || v == "22" {
+                        errors.push("Конфликт системных портов KeeneticOS (80/22)".to_string());
+                    }
+                }
             }
         }
     }

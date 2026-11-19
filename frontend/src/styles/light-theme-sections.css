@@ -85,15 +85,31 @@
 }
 
 [data-theme="light"] .traffic-badge.direct {
+  background: #ecfdf5;
+  color: #047857;
+  border-color: #a7f3d0;
+}
+
+[data-theme="light"] .traffic-badge.proxy {
   background: #eff6ff;
   color: #1d4ed8;
   border-color: #93c5fd;
 }
 
-[data-theme="light"] .traffic-badge.proxy {
-  background: #ecfdf5;
-  color: #047857;
-  border-color: #a7f3d0;
+[data-theme="light"] .btn-whitelist,
+[data-theme="light"] .tag-whitelist,
+[data-theme="light"] .badge-whitelist {
+  background: #f5f3ff;
+  color: #6d28d9;
+  border-color: #c4b5fd;
+}
+
+[data-theme="light"] .modal-card.zapret-modal-card,
+[data-theme="light"] .modal-card.zapret-modal-card .card,
+[data-theme="light"] .modal-card.zapret-modal-card .zapret-strategy-card {
+  background: #ffffff;
+  color: #0f172a;
+  border-color: #cbd5e1;
 }
 
 [data-theme="light"] .traffic-badge.total {

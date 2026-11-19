@@ -1023,7 +1023,7 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
 
     let mut iptables_active = tokio::process::Command::new("sh")
         .arg("-c")
-        .arg("(iptables -w 2 -t mangle -S POSTROUTING 2>/dev/null | grep -q zapret || iptables -w 2 -t mangle -S PREROUTING 2>/dev/null | grep -q zapret) && iptables -w 2 -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE")
+        .arg(format!("({ipt} -t mangle -S POSTROUTING 2>/dev/null | grep -q zapret || {ipt} -t mangle -S PREROUTING 2>/dev/null | grep -q zapret) && {ipt} -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE", ipt = crate::system::iptables_cmd_str()))
         .output()
         .await
         .map(|o| o.status.success())
@@ -1121,7 +1121,7 @@ pub async fn get_zapret_status(State(state): State<AppState>) -> Response {
     let dns_resolver_ready = crate::zapret::check_dns_resolver_ready(mihomo_dns).await;
     let dns_redirect_active = tokio::process::Command::new("sh")
         .arg("-c")
-        .arg(format!("iptables -w 2 -t nat -S PREROUTING 2>/dev/null | grep -q '{mihomo_dns}'"))
+        .arg(format!("{} -t nat -S PREROUTING 2>/dev/null | grep -q '{mihomo_dns}'", crate::system::iptables_cmd_str()))
         .output()
         .await
         .map(|o| o.status.success())

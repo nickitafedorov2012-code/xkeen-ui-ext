@@ -148,13 +148,11 @@ pub fn log(level: &str, msg: &str) {
         let _ = tx.send(line.clone());
     }
 
-    if level == "ERROR" || level == "WARN" {
-        eprintln!("{line}");
-    }
-
-    // Асинхронная запись в файл без блокировки Tokio рантайма
+    // Асинхронная запись в файл без блокировки Tokio рантайма (AUDIT-085: без дубля в stderr при активном FILE_TX)
     if let Some(tx) = FILE_TX.get() {
-        let _ = tx.try_send(line);
+        let _ = tx.try_send(line.clone());
+    } else if level == "ERROR" || level == "WARN" {
+        eprintln!("{line}");
     }
 
     if let Ok(guard) = syslog_store().read() {

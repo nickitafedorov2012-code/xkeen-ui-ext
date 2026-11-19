@@ -164,6 +164,32 @@ pub fn apply_routing_with_filters_and_default_ips(
         current = apply_whitelist_dns(&current, cfg, &local_dns);
         current = apply_canary_rules_with_providers(&current, &providers);
 
+        if cfg.adblock_enabled {
+            current = apply_adblock_rules(&current, true)?;
+        }
+        // AUDIT-009: в global БС не восстанавливаем обычные device_routing,
+        // но сохраняем per-device группы для закреплённых БС-устройств (whitelist.devices с server)
+        let mut wl_pinned_assignments = Vec::new();
+        for d in &cfg.whitelist.devices {
+            if d.enabled {
+                if let Some(ref srv) = d.server {
+                    if !srv.trim().is_empty() && !d.ip.trim().is_empty() {
+                        wl_pinned_assignments.push(Assignment {
+                            ip: d.ip.clone(),
+                            name: d.name.clone().unwrap_or_default(),
+                            server: Some(srv.clone()),
+                        });
+                    }
+                }
+            }
+        }
+        if !wl_pinned_assignments.is_empty() {
+            let pinned = pinned_whitelist_ips(cfg);
+            if let Ok(with_devices) = apply_assignments(&current, &wl_pinned_assignments, &providers, &pinned) {
+                current = with_devices;
+            }
+        }
+
         if let Ok(with_agh_dns) = apply_adguard_dns_upstream(&current, agh_port, agh_enabled) {
             current = with_agh_dns;
         }

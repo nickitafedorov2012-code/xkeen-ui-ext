@@ -450,7 +450,7 @@ pub async fn zapret_action(
 
     // 0.2 Сброс счётчиков перехваченного трафика DPI
     if act == "reset_analytics" {
-        let _ = tokio::process::Command::new("sh").arg("-c").arg("iptables -w 2 -t mangle -Z zapret 2>/dev/null || true").output().await;
+        let _ = tokio::process::Command::new("sh").arg("-c").arg(format!("{} -t mangle -Z zapret 2>/dev/null || true", crate::system::iptables_cmd_str())).output().await;
         ZAPRET_LAST_IPT_BYTES.store(0, std::sync::atomic::Ordering::Relaxed);
         let _cfg_guard = state.config_lock.lock().await;
         let mut cfg = (**state.config.read().await).clone();
@@ -471,7 +471,7 @@ pub async fn zapret_action(
 
         let ipt_ok = tokio::process::Command::new("sh")
             .arg("-c")
-            .arg("(iptables -w 2 -t mangle -S PREROUTING 2>/dev/null | grep -q zapret || iptables -w 2 -t mangle -S POSTROUTING 2>/dev/null | grep -q zapret) && iptables -w 2 -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE")
+            .arg(format!("({ipt} -t mangle -S PREROUTING 2>/dev/null | grep -q zapret || {ipt} -t mangle -S POSTROUTING 2>/dev/null | grep -q zapret) && {ipt} -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE", ipt = crate::system::iptables_cmd_str()))
             .status()
             .await
             .map(|s| s.success())
@@ -758,15 +758,28 @@ pub async fn zapret_action(
         {
             Ok(out) => {
                 let output_str = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+                // AUDIT-064: проверяем реальное наличие ELF-бинарника nfqws2 перед фиксацией установки
+                let has_valid_elf = ["/opt/zapret2/nfqws2", "/opt/sbin/nfqws2"].iter().any(|p| {
+                    std::fs::read(p)
+                        .map(|b| b.len() >= 4 && &b[..4] == b"\x7fELF")
+                        .unwrap_or(false)
+                });
+                if !has_valid_elf {
+                    return api_err(format!(
+                        "Установка Zapret 2.0 прервана: бинарник nfqws2 не загружен или не является ELF.\n{}",
+                        output_str.trim()
+                    ));
+                }
                 let _ = tokio::fs::create_dir_all("/opt/zapret2").await;
                 let _ = tokio::fs::write("/opt/zapret2/version.txt", format!("{target_ver}\n")).await;
                 {
-                    let _cfg_guard = state.config_lock.lock().await;
-                    let mut cfg = (**state.config.read().await).clone();
-                    cfg.zapret.latest_version = Some(target_ver.clone());
-                    cfg.zapret.update_available = false;
-                    let _ = config::save(&state.config_path, &cfg).await;
-                    *state.config.write().await = std::sync::Arc::new(cfg);
+                    let mut tx = match crate::transaction::ConfigTx::begin(&state).await {
+                        Ok(tx) => tx,
+                        Err(e) => return api_err(e),
+                    };
+                    tx.config_mut().zapret.latest_version = Some(target_ver.clone());
+                    tx.config_mut().zapret.update_available = false;
+                    let _ = tx.commit_without_reload().await;
                 }
                 let _cfg = state.config.read().await;
                 let _ = sync_zapret_files(&_cfg.zapret).await;
@@ -1151,7 +1164,7 @@ static ZAPRET_LAST_IPT_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::
 
 /// GET /api/zapret/analytics — Live-монитор и счётчик спасённого трафика (DPI Analytics)
 pub async fn get_zapret_analytics(State(state): State<AppState>) -> Response {
-    let ipt_cmd = "iptables -w 2 -t mangle -L zapret -v -n -x 2>/dev/null";
+    let ipt_cmd = format!("{} -t mangle -L zapret -v -n -x 2>/dev/null", crate::system::iptables_cmd_str());
     let out = tokio::process::Command::new("sh").arg("-c").arg(ipt_cmd).output().await;
 
     let mut total_bytes: u64 = 0;
@@ -1371,28 +1384,35 @@ pub async fn run_mini_blockcheck(State(state): State<AppState>) -> Response {
         };
 
         // Многофакторная оценка стратегии (0..100 баллов):
-        // 1. Доступность YouTube Web + googlevideo CDN (до 30 баллов)
-        // 2. Доступность Discord Web + Media CDN (до 25 баллов)
-        // 3. Стойкость к ТСПУ (rnd/dupsid, midsld, tcp_ts_up, seqovl) (до 25 баллов)
-        // 4. Задержка TLS 1.3 рукопожатия и экономия ресурсов CPU роутера (до 20 баллов)
-        let mut score: i32 = 15;
-        if yt_ok { score += 22; }
-        if yt_cdn_ok && yt_ok { score += 8; }
-        if dc_ok { score += 18; }
-        if dc_cdn_ok && dc_ok { score += 7; }
-        if has_ts { score += 6; }
-        if has_midsld { score += 6; }
-        if has_rnd_sid { score += 8; }
-        if has_seqovl { score += 4; }
+        // AUDIT-014: при 0/4 доступных сайтов (yt_ok == false && dc_ok == false) НЕ начисляем фейковые 23..37 баллов!
+        let score: i32 = if !yt_ok && !dc_ok {
+            0
+        } else {
+            let mut s: i32 = 15;
+            if yt_ok { s += 22; }
+            if yt_cdn_ok && yt_ok { s += 8; }
+            if dc_ok { s += 18; }
+            if dc_cdn_ok && dc_ok { s += 7; }
+            if has_ts { s += 6; }
+            if has_midsld { s += 6; }
+            if has_rnd_sid { s += 8; }
+            if has_seqovl { s += 4; }
+            if *id == "split2_pos1" || *id == "disorder2_midsld" {
+                s += 4;
+            } else if has_seqovl || args.contains("repeats=8") {
+                s -= 2;
+            } else {
+                s += 2;
+            }
+            let latency_penalty = ((yt_ms + dc_ms) / 14).min(22) as i32;
+            (s - latency_penalty).clamp(15, 99)
+        };
 
         let cpu_impact = if *id == "split2_pos1" || *id == "disorder2_midsld" {
-            score += 4;
             "Низкая"
         } else if has_seqovl || args.contains("repeats=8") {
-            score -= 2;
             "Высокая"
         } else {
-            score += 2;
             "Оптимальная"
         };
 
@@ -1406,11 +1426,8 @@ pub async fn run_mini_blockcheck(State(state): State<AppState>) -> Response {
             "Базовая"
         };
 
-        let latency_penalty = ((yt_ms + dc_ms) / 14).min(22) as i32;
-        let score = (score - latency_penalty).clamp(15, 99);
-
         let total_ms = yt_ms + dc_ms;
-        if score > max_score || (score == max_score && total_ms < min_latency) {
+        if score > 0 && (score > max_score || (score == max_score && total_ms < min_latency)) {
             max_score = score;
             min_latency = total_ms;
             best_id = id;
@@ -1442,16 +1459,22 @@ pub async fn run_mini_blockcheck(State(state): State<AppState>) -> Response {
         }));
     }
 
-    for item in results.iter_mut() {
-        if item.get("id").and_then(|v| v.as_str()) == Some(best_id) {
-            item["is_best"] = serde_json::Value::Bool(true);
+    let best_out: Option<&str> = if max_score > 0 {
+        for item in results.iter_mut() {
+            if item.get("id").and_then(|v| v.as_str()) == Some(best_id) {
+                item["is_best"] = serde_json::Value::Bool(true);
+            }
         }
-    }
+        Some(best_id)
+    } else {
+        None
+    };
 
     api_ok(json!({
         "strategies": results,
-        "best_strategy_id": best_id,
+        "best_strategy_id": best_out,
         "active_strategy_id": active_strategy_id,
+        "unavailable": max_score <= 0,
     }))
 }
 

@@ -553,9 +553,10 @@ echo "AdGuard Home успешно установлен."
             format!("Установка завершена, но бинарный файл не обнаружен в /opt/AdGuardHome/AdGuardHome. Лог: {log}")
         })?;
 
-        // Создаем готовый конфиг AdGuardHome.yaml (если его еще нет), чтобы не требовалось проходить визард
+        // Создаем готовый конфиг AdGuardHome.yaml (если его еще нет), с проверкой занятости 53 и 5353 (avahi-daemon)
         let is_53_free = std::net::UdpSocket::bind("0.0.0.0:53").is_ok();
-        let dns_port = if is_53_free { 53 } else { 5353 };
+        let is_5353_free = std::net::UdpSocket::bind("0.0.0.0:5353").is_ok();
+        let dns_port = if is_53_free { 53 } else if is_5353_free { 5353 } else { DEFAULT_ADGUARD_DNS_FALLBACK_PORT };
         let conf_path = ensure_default_adguard_config(dns_port, 3000);
 
         // Создаем init-скрипт службы

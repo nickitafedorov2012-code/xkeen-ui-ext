@@ -609,15 +609,17 @@ export function ServerList({
                     🔗
                   </button>
                 )}
-                <button
-                  className={`btn sm ghost btn-speedtest ${speedtestingId === s.id ? 'loading' : ''}`}
-                  onClick={() => runSpeedtest(s)}
-                  disabled={speedtestingId !== null}
-                  style={{ padding: '3px 6px' }}
-                  title="Замерить скорость"
-                >
-                  {speedtestingId === s.id ? '⏳' : '🚀'}
-                </button>
+                {s.protocol !== 'FREE-VPN' && s.protocol !== 'FREE-WL' && (
+                  <button
+                    className={`btn sm ghost btn-speedtest ${speedtestingId === s.id ? 'loading' : ''}`}
+                    onClick={() => runSpeedtest(s)}
+                    disabled={speedtestingId !== null}
+                    style={{ padding: '3px 6px' }}
+                    title="Замерить скорость"
+                  >
+                    {speedtestingId === s.id ? '⏳' : '🚀'}
+                  </button>
+                )}
                 {s.is_active ? (
                   <>
                     <span className="tag current" style={{ fontSize: 10, padding: '2px 6px' }}>✓</span>
@@ -635,7 +637,18 @@ export function ServerList({
                     )}
                   </>
                 ) : (
-                  <button className="btn sm btn-connect" onClick={() => activate(s)} style={{ padding: '3px 8px' }}>
+                  <button
+                    className="btn sm btn-connect"
+                    disabled={(s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') && freeSubBusyId === s.id}
+                    onClick={() => {
+                      if (s.protocol === 'FREE-VPN' || s.protocol === 'FREE-WL') {
+                        void handleFreeSubConnect(s)
+                      } else {
+                        activate(s)
+                      }
+                    }}
+                    style={{ padding: '3px 8px' }}
+                  >
                     🔌
                   </button>
                 )}

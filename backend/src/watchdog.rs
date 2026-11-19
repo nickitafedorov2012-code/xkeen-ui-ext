@@ -987,9 +987,10 @@ pub fn spawn_zapret_monitor(state: AppState) {
                 // (Использование '||' было фатальной ошибкой: если Keenetic ndm сбрасывал POSTROUTING,
                 // цепочка zapret с NFQUEUE оставалась в памяти, из-за чего watchdog ошибочно считал
                 // перехват активным и никогда не восстанавливал вызов zapret из POSTROUTING).
+                let ipt = crate::system::iptables_cmd_str();
                 let iptables_active = tokio::process::Command::new("sh")
                     .arg("-c")
-                    .arg("(iptables -w 2 -t mangle -S POSTROUTING 2>/dev/null | grep -q zapret || iptables -w 2 -t mangle -S PREROUTING 2>/dev/null | grep -q zapret) && iptables -w 2 -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE")
+                    .arg(format!("({ipt} -t mangle -S POSTROUTING 2>/dev/null | grep -q zapret || {ipt} -t mangle -S PREROUTING 2>/dev/null | grep -q zapret) && {ipt} -t mangle -nL zapret 2>/dev/null | grep -q NFQUEUE"))
                     .output()
                     .await
                     .map(|o| o.status.success())
@@ -1029,7 +1030,7 @@ pub fn spawn_zapret_monitor(state: AppState) {
 
                 let iptables_nat_rules = tokio::process::Command::new("sh")
                     .arg("-c")
-                    .arg("iptables -w 2 -t nat -S PREROUTING 2>/dev/null")
+                    .arg(format!("{} -t nat -S PREROUTING 2>/dev/null", crate::system::iptables_cmd_str()))
                     .output()
                     .await
                     .map(|o| String::from_utf8_lossy(&o.stdout).to_string())

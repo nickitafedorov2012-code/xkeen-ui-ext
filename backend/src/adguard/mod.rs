@@ -12,29 +12,10 @@ use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use crate::config::AdGuardConfig;
 
-/// Быстрое и безопасное кодирование в Base64 без внешних зависимостей
+/// Кодирование в Base64 через стандартный крейт `base64` (D8).
 pub fn base64_encode(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let b0 = chunk[0] as usize;
-        let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as usize } else { 0 };
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(TABLE[(n >> 18) & 63] as char);
-        out.push(TABLE[(n >> 12) & 63] as char);
-        if chunk.len() > 1 {
-            out.push(TABLE[(n >> 6) & 63] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(TABLE[n & 63] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(input)
 }
 
 /// Форматирование заголовка HTTP Basic Auth для API AdGuard Home

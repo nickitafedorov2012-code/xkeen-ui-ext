@@ -52,12 +52,12 @@ jobs:
 
       - name: Rustfmt Check
         working-directory: backend
-        run: cargo fmt --check || true
+        run: cargo fmt --check
 
       - name: Clippy Linter
         working-directory: backend
-        run: cargo clippy || true
+        run: cargo clippy
 
       - name: Cargo Unit & Doc Tests
         working-directory: backend
-        run: cargo test --bin xkeen-route || true
+        run: cargo test --bin xkeen-route

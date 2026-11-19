@@ -254,11 +254,29 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
   const linesCount = content ? content.split('\n').length : 1
   const lineNumbers = Array.from({ length: linesCount }, (_, i) => i + 1)
 
+  useEffect(() => {
+    if (!isOpen) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [isOpen, onClose])
+
   if (!isOpen) return null
 
   return (
-    <div className="modal-backdrop editor-backdrop">
-      <div className="modal-card editor-card">
+    <div
+      className="modal-backdrop editor-backdrop"
+      style={{ zIndex: 1200 }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose()
+      }}
+    >
+      <div className="modal-card editor-card" onClick={(e) => e.stopPropagation()}>
         <div className="editor-header">
           <div className="editor-title-group">
             <div
@@ -342,6 +360,7 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
             </button>
 
             <button
+              type="button"
               className="btn btn-sm ghost"
               title="Закрыть"
               onClick={onClose}
@@ -415,10 +434,11 @@ export default function ConfigEditor({ isOpen = true, onClose, notify }: ConfigE
           </label>
 
           <div className="editor-footer-buttons">
-            <button className="btn btn-secondary" onClick={onClose}>
+            <button type="button" className="btn btn-secondary" onClick={onClose}>
               Отмена
             </button>
             <button
+              type="button"
               className="btn btn-primary"
               disabled={saving || !isDirty || loading || !!loadError || loadedFileIdRef.current !== selectedFile}
               onClick={handleSave}

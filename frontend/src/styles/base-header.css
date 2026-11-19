@@ -906,6 +906,33 @@ html, body {
   }
 }
 
+/* Компактный мобильный заголовок для узких экранов 390x844 (AUDIT-123) */
+@media (max-width: 560px) {
+  .header-bar,
+  .toolbar.header-bar {
+    gap: 6px;
+    padding: 8px 10px;
+  }
+  .header-status-group {
+    width: auto;
+    min-width: 0;
+  }
+  .header-utility-actions {
+    width: auto;
+  }
+  .header-versions-group {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    justify-content: flex-start;
+    gap: 4px;
+    font-size: 11px;
+    scrollbar-width: none;
+  }
+  .header-versions-group::-webkit-scrollbar {
+    display: none;
+  }
+}
+
 .tabs {
   display: flex;
   gap: 4px;

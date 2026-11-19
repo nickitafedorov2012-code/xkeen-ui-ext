@@ -146,41 +146,36 @@ pub async fn adblock_toggle_core(state: &AppState, target: Option<bool>) -> Resu
     tx.set_yaml(new_yaml)?;
     let agh_cfg = tx.config().adguard.clone();
 
-    for step in steps {
-        match step {
-            crate::adguard::AdblockStep::CommitConfig => {
-                tx.commit_and_reload().await?;
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    for step in crate::adguard::plan_adblock_toggle(&state.config.read().await.clone(), target_enabled) {
+    // AUDIT-012: сначала применяем защиту AdGuard и iptables, и только потом коммитим ConfigTx (или откатываем при сбое)
+    for step in &steps {
         match step {
             crate::adguard::AdblockStep::CommitConfig => {}
             crate::adguard::AdblockStep::SetProtection(en) => {
-                crate::adguard::set_protection(&state.http, &agh_cfg, en)
-                    .await
-                    .map_err(|e| format!("Ошибка переключения защиты AdGuard: {e}"))?;
-            }
-            crate::adguard::AdblockStep::SyncIptables { enable, port } => {
-                if enable {
-                    let active_port = crate::adguard::detect_adguard_dns_port().unwrap_or(port);
-                    crate::adguard::apply_adguard_iptables(active_port)
-                        .map_err(|e| format!("Ошибка настройки DNS-редиректа iptables: {e}"))?;
-                } else {
-                    let latest_cfg = state.config.read().await;
-                    crate::adguard::remove_adguard_iptables_for_mihomo_config(&latest_cfg.mihomo.config_path)
-                        .map_err(|e| format!("Ошибка снятия DNS-редиректа iptables: {e}"))?;
+                if let Err(e) = crate::adguard::set_protection(&state.http, &agh_cfg, *en).await {
+                    let _ = tx.rollback().await;
+                    return Err(format!("Ошибка переключения защиты AdGuard: {e}"));
                 }
             }
-            crate::adguard::AdblockStep::ResyncTunnels => {
-                let latest_cfg = state.config.read().await.clone();
-                resync_full_tunnel_from_disk(&latest_cfg).await;
+            crate::adguard::AdblockStep::SyncIptables { enable, port } => {
+                if *enable {
+                    let active_port = crate::adguard::detect_adguard_dns_port().unwrap_or(*port);
+                    if let Err(e) = crate::adguard::apply_adguard_iptables(active_port) {
+                        let _ = crate::adguard::set_protection(&state.http, &agh_cfg, !target_enabled).await;
+                        let _ = tx.rollback().await;
+                        return Err(format!("Ошибка настройки DNS-редиректа iptables: {e}"));
+                    }
+                } else if let Err(e) = crate::adguard::remove_adguard_iptables_for_mihomo_config(&tx.config().mihomo.config_path) {
+                    let _ = tx.rollback().await;
+                    return Err(format!("Ошибка снятия DNS-редиректа iptables: {e}"));
+                }
             }
+            crate::adguard::AdblockStep::ResyncTunnels => {}
         }
     }
+
+    tx.commit_and_reload().await?;
+    let latest_cfg = state.config.read().await.clone();
+    resync_full_tunnel_from_disk(&latest_cfg).await;
 
     Ok(target_enabled)
 }

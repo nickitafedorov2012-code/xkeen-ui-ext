@@ -93,7 +93,7 @@ async fn check_gaming_interception(cfg: &config::AppConfig) -> (bool, bool, bool
         // 1. Проверка перехвата TCP (PREROUTING nat -> xkeen или REDIRECT / TPROXY)
         let tcp_check = tokio::process::Command::new("sh")
             .arg("-c")
-            .arg("iptables -w 2 -t nat -C PREROUTING -j xkeen 2>/dev/null || iptables -w 2 -t nat -L xkeen -n 2>/dev/null || iptables -w 2 -t nat -L PREROUTING -n 2>/dev/null | grep -qE 'REDIRECT|TPROXY'")
+            .arg("iptables -w -t nat -C PREROUTING -j xkeen 2>/dev/null || iptables -w -t nat -L xkeen -n 2>/dev/null || iptables -w -t nat -L PREROUTING -n 2>/dev/null | grep -qE 'REDIRECT|TPROXY'")
             .status()
             .await
             .map(|s| s.success())
@@ -102,7 +102,7 @@ async fn check_gaming_interception(cfg: &config::AppConfig) -> (bool, bool, bool
         // 2. Проверка перехвата UDP (PREROUTING mangle -> xkeen или TPROXY / NFQUEUE)
         let udp_check = tokio::process::Command::new("sh")
             .arg("-c")
-            .arg("iptables -w 2 -t mangle -C PREROUTING -j xkeen 2>/dev/null || iptables -w 2 -t mangle -L xkeen -n 2>/dev/null || iptables -w 2 -t mangle -L PREROUTING -n 2>/dev/null | grep -qE 'TPROXY|NFQUEUE'")
+            .arg("iptables -w -t mangle -C PREROUTING -j xkeen 2>/dev/null || iptables -w -t mangle -L xkeen -n 2>/dev/null || iptables -w -t mangle -L PREROUTING -n 2>/dev/null | grep -qE 'TPROXY|NFQUEUE'")
             .status()
             .await
             .map(|s| s.success())
@@ -111,7 +111,7 @@ async fn check_gaming_interception(cfg: &config::AppConfig) -> (bool, bool, bool
         // 3. Честная проверка перехвата IPv6 (TPROXY/REDIRECT/xkeen в ip6tables mangle/nat)
         let ip6_iptables_check = tokio::process::Command::new("sh")
             .arg("-c")
-            .arg("ip6tables -w 2 -t mangle -C PREROUTING -j xkeen 2>/dev/null || ip6tables -w 2 -t mangle -L xkeen -n 2>/dev/null || ip6tables -w 2 -t nat -L xkeen -n 2>/dev/null || ip6tables -w 2 -t mangle -L PREROUTING -n 2>/dev/null | grep -qE 'TPROXY|REDIRECT|xkeen'")
+            .arg("ip6tables -w -t mangle -C PREROUTING -j xkeen 2>/dev/null || ip6tables -w -t mangle -L xkeen -n 2>/dev/null || ip6tables -w -t nat -L xkeen -n 2>/dev/null || ip6tables -w -t mangle -L PREROUTING -n 2>/dev/null | grep -qE 'TPROXY|REDIRECT|xkeen'")
             .status()
             .await
             .map(|s| s.success())
@@ -344,15 +344,15 @@ pub fn build_gaming_full_tunnel_commands(
     let d_port = if dns_port > 0 { dns_port } else { crate::routing::DEFAULT_MIHOMO_DNS_PORT };
 
     let cleanup_cmd = "\
-while iptables -t nat -D PREROUTING -j XKEEN_GAMING -w 2 2>/dev/null; do :; done; \
-iptables -t nat -F XKEEN_GAMING -w 2 2>/dev/null || true; \
-iptables -t nat -X XKEEN_GAMING -w 2 2>/dev/null || true; \
-while iptables -t mangle -D PREROUTING -j XKEEN_GAMING -w 2 2>/dev/null; do :; done; \
-iptables -t mangle -F XKEEN_GAMING -w 2 2>/dev/null || true; \
-iptables -t mangle -X XKEEN_GAMING -w 2 2>/dev/null || true; \
-while ip6tables -D FORWARD -j XKEEN_GAMING -w 2 2>/dev/null; do :; done; \
-ip6tables -F XKEEN_GAMING -w 2 2>/dev/null || true; \
-ip6tables -X XKEEN_GAMING -w 2 2>/dev/null || true; \
+while iptables -t nat -D PREROUTING -j XKEEN_GAMING -w 2>/dev/null; do :; done; \
+iptables -t nat -F XKEEN_GAMING -w 2>/dev/null || true; \
+iptables -t nat -X XKEEN_GAMING -w 2>/dev/null || true; \
+while iptables -t mangle -D PREROUTING -j XKEEN_GAMING -w 2>/dev/null; do :; done; \
+iptables -t mangle -F XKEEN_GAMING -w 2>/dev/null || true; \
+iptables -t mangle -X XKEEN_GAMING -w 2>/dev/null || true; \
+while ip6tables -D FORWARD -j XKEEN_GAMING -w 2>/dev/null; do :; done; \
+ip6tables -F XKEEN_GAMING -w 2>/dev/null || true; \
+ip6tables -X XKEEN_GAMING -w 2>/dev/null || true; \
 while ip rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; \
 while ip rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; \
 while ip -6 rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; \
@@ -381,16 +381,16 @@ ip -6 route flush table 115 2>/dev/null || true".to_string();
             setup_cmds.push("while ip -6 rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; while ip -6 rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; ip -6 rule add fwmark 0x115 lookup 115 priority 100 2>/dev/null || ip -6 rule add fwmark 0x115/0x115 lookup 115 priority 100 2>/dev/null || ip -6 rule add fwmark 0x115 lookup 115 2>/dev/null || true".to_string());
 
             // Изолированные цепочки XKEEN_GAMING
-            setup_cmds.push("iptables -t nat -N XKEEN_GAMING -w 2 2>/dev/null || true".to_string());
-            setup_cmds.push("iptables -t nat -I PREROUTING 1 -j XKEEN_GAMING -w 2".to_string());
-            setup_cmds.push("iptables -t mangle -N XKEEN_GAMING -w 2 2>/dev/null || true".to_string());
-            setup_cmds.push("iptables -t mangle -I PREROUTING 1 -j XKEEN_GAMING -w 2".to_string());
-            setup_cmds.push("ip6tables -N XKEEN_GAMING -w 2 2>/dev/null || true".to_string());
-            setup_cmds.push("ip6tables -I FORWARD 1 -j XKEEN_GAMING -w 2 2>/dev/null || true".to_string());
+            setup_cmds.push("iptables -t nat -N XKEEN_GAMING -w 2>/dev/null || true".to_string());
+            setup_cmds.push("iptables -t nat -I PREROUTING 1 -j XKEEN_GAMING -w".to_string());
+            setup_cmds.push("iptables -t mangle -N XKEEN_GAMING -w 2>/dev/null || true".to_string());
+            setup_cmds.push("iptables -t mangle -I PREROUTING 1 -j XKEEN_GAMING -w".to_string());
+            setup_cmds.push("ip6tables -N XKEEN_GAMING -w 2>/dev/null || true".to_string());
+            setup_cmds.push("ip6tables -I FORWARD 1 -j XKEEN_GAMING -w 2>/dev/null || true".to_string());
             // Баг 20: подменные IP Antigravity в user_exclude не должны перехватываться XKEEN_GAMING
             setup_cmds.push("ipset create user_exclude hash:ip -exist 2>/dev/null || true".to_string());
-            setup_cmds.push("iptables -t nat -A XKEEN_GAMING -m set --match-set user_exclude dst -j RETURN -w 2".to_string());
-            setup_cmds.push("iptables -t mangle -A XKEEN_GAMING -m set --match-set user_exclude dst -j RETURN -w 2".to_string());
+            setup_cmds.push("iptables -t nat -A XKEEN_GAMING -m set --match-set user_exclude dst -j RETURN -w".to_string());
+            setup_cmds.push("iptables -t mangle -A XKEEN_GAMING -m set --match-set user_exclude dst -j RETURN -w".to_string());
 
             let mut seen_ips = std::collections::HashSet::new();
 
@@ -421,7 +421,7 @@ ip -6 route flush table 115 2>/dev/null || true".to_string();
                     && mac.split(':').all(|p| p.len() == 2 && u8::from_str_radix(p, 16).is_ok());
                 if is_valid_mac {
                     setup_cmds.push(format!(
-                        "ip6tables -A XKEEN_GAMING -m mac --mac-source {mac} -j REJECT -w 2 2>/dev/null || true"
+                        "ip6tables -A XKEEN_GAMING -m mac --mac-source {mac} -j REJECT -w 2>/dev/null || true"
                     ));
                 }
                 for v6_raw in &dev.ipv6 {
@@ -429,7 +429,7 @@ ip -6 route flush table 115 2>/dev/null || true".to_string();
                     if let Ok(v6) = v6_clean.parse::<std::net::Ipv6Addr>() {
                         if !v6.is_unspecified() && !v6.is_loopback() && !v6.is_multicast() && (v6.segments()[0] & 0xffc0 != 0xfe80) {
                             setup_cmds.push(format!(
-                                "ip6tables -A XKEEN_GAMING -s {v6} -j REJECT -w 2 2>/dev/null || true"
+                                "ip6tables -A XKEEN_GAMING -s {v6} -j REJECT -w 2>/dev/null || true"
                             ));
                         }
                     }
@@ -438,62 +438,62 @@ ip -6 route flush table 115 2>/dev/null || true".to_string();
                 // NAT: прямой порядок правил (-A) в цепочке XKEEN_GAMING
                 // 1. Перехват DNS (UDP/TCP 53) -> REDIRECT --to-ports {d_port} (до локальных подсетей)
                 setup_cmds.push(format!(
-                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p udp --dport 53 -j REDIRECT --to-ports {d_port} -w 2"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p udp --dport 53 -j REDIRECT --to-ports {d_port} -w"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p tcp --dport 53 -j REDIRECT --to-ports {d_port} -w 2"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p tcp --dport 53 -j REDIRECT --to-ports {d_port} -w"
                 ));
                 // 2. Байпас локальных сетей через -j RETURN: 127.0.0.0/8, 169.254.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
                 setup_cmds.push(format!(
-                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 127.0.0.0/8 -j RETURN -w 2"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 127.0.0.0/8 -j RETURN -w"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 169.254.0.0/16 -j RETURN -w 2"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 169.254.0.0/16 -j RETURN -w"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 10.0.0.0/8 -j RETURN -w 2"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 10.0.0.0/8 -j RETURN -w"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 172.16.0.0/12 -j RETURN -w 2"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 172.16.0.0/12 -j RETURN -w"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 192.168.0.0/16 -j RETURN -w 2"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -d 192.168.0.0/16 -j RETURN -w"
                 ));
                 // 3. Весь остальной TCP -> REDIRECT --to-ports {r_port}
                 setup_cmds.push(format!(
-                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p tcp -j REDIRECT --to-ports {r_port} -w 2"
+                    "iptables -t nat -A XKEEN_GAMING -s {ip} -p tcp -j REDIRECT --to-ports {r_port} -w"
                 ));
 
                 // MANGLE: прямой порядок правил (-A) в цепочке XKEEN_GAMING
                 // 1. Пропуск DNS: -p udp --dport 53 -j RETURN (чтобы уходил в NAT REDIRECT)
                 setup_cmds.push(format!(
-                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -p udp --dport 53 -j RETURN -w 2"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -p udp --dport 53 -j RETURN -w"
                 ));
                 // 2. Байпас локальных сетей через -j RETURN: 127.0.0.0/8, 169.254.0.0/16, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 255.255.255.255/32
                 setup_cmds.push(format!(
-                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 127.0.0.0/8 -j RETURN -w 2"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 127.0.0.0/8 -j RETURN -w"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 169.254.0.0/16 -j RETURN -w 2"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 169.254.0.0/16 -j RETURN -w"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 10.0.0.0/8 -j RETURN -w 2"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 10.0.0.0/8 -j RETURN -w"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 172.16.0.0/12 -j RETURN -w 2"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 172.16.0.0/12 -j RETURN -w"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 192.168.0.0/16 -j RETURN -w 2"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 192.168.0.0/16 -j RETURN -w"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 224.0.0.0/4 -j RETURN -w 2"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 224.0.0.0/4 -j RETURN -w"
                 ));
                 setup_cmds.push(format!(
-                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 255.255.255.255/32 -j RETURN -w 2"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -d 255.255.255.255/32 -j RETURN -w"
                 ));
                 // 3. Весь остальной UDP -> TPROXY --tproxy-mark 0x115/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1
                 setup_cmds.push(format!(
-                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -p udp -j TPROXY --tproxy-mark 0x115/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1 -w 2"
+                    "iptables -t mangle -A XKEEN_GAMING -s {ip} -p udp -j TPROXY --tproxy-mark 0x115/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1 -w"
                 ));
             }
         }
@@ -576,7 +576,7 @@ pub async fn sync_gaming_full_tunnel(cfg: &config::GamingConfig, redir_port: u16
         if cfg.enabled && cfg.mode == config::GamingMode::Compatibility {
             let diag = tokio::process::Command::new("sh")
                 .arg("-c")
-                .arg("ip rule show; echo '--- table 115:'; ip route show table 115; echo '--- PREROUTING mangle:'; iptables -w 2 -t mangle -S PREROUTING | grep -E 'compat|XKEEN_GAMING' || true; echo '--- PREROUTING nat:'; iptables -w 2 -t nat -S PREROUTING | grep -E 'compat|XKEEN_GAMING' || true; echo '--- XKEEN_GAMING mangle:'; iptables -w 2 -t mangle -S XKEEN_GAMING 2>/dev/null || true; echo '--- XKEEN_GAMING nat:'; iptables -w 2 -t nat -S XKEEN_GAMING 2>/dev/null || true")
+                .arg("ip rule show; echo '--- table 115:'; ip route show table 115; echo '--- PREROUTING mangle:'; iptables -w -t mangle -S PREROUTING | grep -E 'compat|XKEEN_GAMING' || true; echo '--- PREROUTING nat:'; iptables -w -t nat -S PREROUTING | grep -E 'compat|XKEEN_GAMING' || true; echo '--- XKEEN_GAMING mangle:'; iptables -w -t mangle -S XKEEN_GAMING 2>/dev/null || true; echo '--- XKEEN_GAMING nat:'; iptables -w -t nat -S XKEEN_GAMING 2>/dev/null || true")
                 .output()
                 .await;
             if let Ok(d) = diag {

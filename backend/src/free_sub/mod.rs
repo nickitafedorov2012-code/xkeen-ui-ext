@@ -1450,6 +1450,14 @@ async fn publish_and_connect(
                 .await;
             }
         }
+        let (prev_wl_enabled, prev_wl_target) = {
+            let cur = state.config.read().await;
+            (cur.whitelist.enabled, cur.whitelist.target_server.clone())
+        };
+        if mode == FreeSubMode::Whitelist {
+            sync_mode_whitelist_state(state, mode, Some(&target_name)).await?;
+        }
+        let updated_cfg = state.config.read().await.clone();
         let mut switch_err: Option<String> = None;
         for attempt in 0..3 {
             mihomo::invalidate_proxies_cache();
@@ -1468,6 +1476,13 @@ async fn publish_and_connect(
             }
         }
         if let Some(e) = switch_err {
+            if mode == FreeSubMode::Whitelist {
+                if let Ok(mut tx) = crate::transaction::ConfigTx::begin(state).await {
+                    tx.config_mut().whitelist.enabled = prev_wl_enabled;
+                    tx.config_mut().whitelist.target_server = prev_wl_target;
+                    let _ = tx.commit_without_reload().await;
+                }
+            }
             rollback_provider_file().await;
             return Err(e);
         }

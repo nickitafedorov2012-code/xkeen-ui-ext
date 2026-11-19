@@ -41,7 +41,6 @@ pub struct UpdateGuardState {
 pub enum UpdateGuardAction {
     Nothing,
     Wait,
-    ClearMarker,
     Rollback,
 }
 
@@ -78,8 +77,8 @@ pub fn clear_update_guard_marker(marker: &Path) {
 
 pub fn update_guard_decision(
     state: Option<&UpdateGuardState>,
-    now: u64,
-    healthy_for: u64,
+    _now: u64,
+    _healthy_for: u64,
 ) -> UpdateGuardAction {
     let Some(st) = state else {
         return UpdateGuardAction::Nothing;
@@ -87,10 +86,46 @@ pub fn update_guard_decision(
     if st.attempts >= UPDATE_GUARD_MAX_ATTEMPTS {
         return UpdateGuardAction::Rollback;
     }
-    if now.saturating_sub(st.started_at) >= healthy_for {
-        return UpdateGuardAction::ClearMarker;
-    }
+    // Маркер сбрасывается ТОЛЬКО таймером текущего процесса после TcpListener::bind (main.rs),
+    // чтобы 5-минутный cron не удалил защиту отката до 3-й попытки.
     UpdateGuardAction::Wait
+}
+
+/// Атомарный откат бинарника через staging-файл в той же директории + sync_all + rename
+/// (предотвращает ETXTBSY при перезаписи запущенного исполняемого файла на Linux).
+pub fn rollback_binary_atomic(bak: &Path, bin: &Path) -> Result<(), String> {
+    use std::io::Write;
+    let parent = bin.parent().unwrap_or_else(|| Path::new("/tmp"));
+    let file_name = bin.file_name().and_then(|n| n.to_str()).unwrap_or("xkeen-route");
+    let staging = parent.join(format!(".{file_name}.rollback.{}", std::process::id()));
+
+    let bytes = std::fs::read(bak).map_err(|e| format!("чтение бэкапа {}: {e}", bak.display()))?;
+    let mut f = std::fs::File::create(&staging)
+        .map_err(|e| format!("создание staging {}: {e}", staging.display()))?;
+    if let Err(e) = f.write_all(&bytes) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(format!("запись staging {}: {e}", staging.display()));
+    }
+    if let Err(e) = f.sync_all() {
+        let _ = std::fs::remove_file(&staging);
+        return Err(format!("sync_all staging {}: {e}", staging.display()));
+    }
+    drop(f);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755)) {
+            let _ = std::fs::remove_file(&staging);
+            return Err(format!("chmod staging {}: {e}", staging.display()));
+        }
+    }
+
+    if let Err(e) = std::fs::rename(&staging, bin) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(format!("rename {} -> {}: {e}", staging.display(), bin.display()));
+    }
+    Ok(())
 }
 
 fn current_unix_secs() -> u64 {
@@ -120,15 +155,10 @@ pub fn handle_startup_update_guard(config_path: &Path) {
             let bak = Path::new(&guard.bak_path);
             let bin = Path::new(&guard.bin_path);
             if bak.exists() {
-                if let Err(e) = std::fs::copy(bak, bin) {
-                    crate::log_e!("[UPDATE] Ошибка отката бинарника из {}: {e}", guard.bak_path);
+                if let Err(e) = rollback_binary_atomic(bak, bin) {
+                    crate::log_e!("[UPDATE] Ошибка атомарного отката бинарника из {}: {e}", guard.bak_path);
                     let _ = write_update_guard_marker(&marker, &guard);
                     return;
-                }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(bin, std::fs::Permissions::from_mode(0o755));
                 }
             } else {
                 crate::log_e!("[UPDATE] Файл бэкапа {} не найден, откат невозможен", guard.bak_path);
@@ -157,9 +187,6 @@ pub fn handle_startup_update_guard(config_path: &Path) {
                 }
                 std::process::exit(1);
             }
-        }
-        UpdateGuardAction::ClearMarker => {
-            clear_update_guard_marker(&marker);
         }
         UpdateGuardAction::Wait => {
             let _ = write_update_guard_marker(&marker, &guard);
@@ -399,19 +426,19 @@ pub async fn download_file_verified_with_progress(
 
     let bytes = downloaded_bytes.ok_or(last_err)?;
 
-    // Верификация SHA-256
+    // Верификация SHA-256 (обязательная, без молчаливого пропуска)
+    let exp_clean = expected_sha256
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "Отсутствует обязательный SHA-256 для проверки целостности".to_string())?
+        .to_ascii_lowercase();
     let calculated_hash = compute_sha256(&bytes);
-    if let Some(expected) = expected_sha256 {
-        let exp_clean = expected.trim().to_ascii_lowercase();
-        if !exp_clean.is_empty() && calculated_hash != exp_clean {
-            return Err(format!(
-                "Ошибка верификации SHA-256: ожидалось {exp_clean}, получено {calculated_hash}"
-            ));
-        }
-        crate::log_i!("[download_file_verified] Хеш SHA-256 успешно верифицирован: {calculated_hash}");
-    } else {
-        crate::log_i!("[download_file_verified] Загружено {} байт, SHA-256: {calculated_hash}", bytes.len());
+    if calculated_hash != exp_clean {
+        return Err(format!(
+            "Ошибка верификации SHA-256: ожидалось {exp_clean}, получено {calculated_hash}"
+        ));
     }
+    crate::log_i!("[download_file_verified] Хеш SHA-256 успешно верифицирован: {calculated_hash}");
 
     Ok(bytes)
 }
@@ -1454,7 +1481,9 @@ pub async fn install(
                 // Если не удалось даже запустить команду перезапуска, пробуем восстановить из .bak
                 clear_update_guard_marker(&guard_marker);
                 if bak_bin.exists() {
-                    let _ = tokio::fs::copy(bak_bin, target_bin).await;
+                    let bak_c = bak_bin.to_path_buf();
+                    let bin_c = target_bin.to_path_buf();
+                    let _ = tokio::task::spawn_blocking(move || rollback_binary_atomic(&bak_c, &bin_c)).await;
                 }
                 return api_err(format!("Не удалось запустить перезапуск службы: {e}"));
             }
@@ -1695,6 +1724,40 @@ pub struct MihomoInstallReq {
     pub sha256: Option<String>,
 }
 
+/// Строгая валидация URL загрузки ядра Mihomo (запрещает path traversal, query, fragment, userinfo и сторонние хосты).
+pub fn validate_mihomo_download_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    let parsed = reqwest::Url::parse(trimmed)
+        .map_err(|_| "Некорректный URL загрузки ядра".to_string())?;
+    if parsed.scheme() != "https" {
+        return Err("URL загрузки ядра должен использовать HTTPS".into());
+    }
+    if parsed.host_str() != Some("github.com") || parsed.port().is_some() {
+        return Err("Разрешены только официальные релизы github.com".into());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("URL загрузки ядра не должен содержать учётные данные".into());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("URL загрузки ядра не должен содержать query-параметры или фрагменты".into());
+    }
+    let path = parsed.path();
+    let rest = path
+        .strip_prefix("/MetaCubeX/mihomo/releases/download/")
+        .ok_or_else(|| "Разрешены только релизы MetaCubeX/mihomo".to_string())?;
+    let segments: Vec<&str> = rest.split('/').collect();
+    if segments.len() < 2 || segments.iter().any(|s| s.is_empty()) {
+        return Err("Некорректный путь релиза Mihomo".into());
+    }
+    for seg in &segments {
+        let lower = seg.to_ascii_lowercase();
+        if *seg == "." || *seg == ".." || seg.contains("..") || seg.contains('\\') || lower.contains("%2e") || lower.contains("%2f") || lower.contains("%5c") {
+            return Err("Недопустимый сегмент пути в URL загрузки ядра".into());
+        }
+    }
+    Ok(parsed.to_string())
+}
+
 /// POST /api/mihomo/install — загрузка и установка выбранной версии ядра Mihomo
 pub async fn mihomo_install(
     State(state): State<AppState>,
@@ -1710,38 +1773,41 @@ pub async fn mihomo_install(
         return api_err("Не указана версия ядра Mihomo для установки");
     }
 
+    let validated_custom_url = if let Some(ref cu) = req.custom_url {
+        match validate_mihomo_download_url(cu) {
+            Ok(u) => Some(u),
+            Err(e) => return api_err(format!("Недопустимый URL загрузки ядра: {e}")),
+        }
+    } else {
+        None
+    };
+
     let cfg = state.config.read().await.clone();
     let proxy_url = cfg.mihomo_proxy_url();
     let arch = detect_mihomo_arch().await;
 
-    // Определяем URL для загрузки и ожидаемый SHA-256 (если доступен)
-    let mut expected_sha256 = req.sha256.clone().filter(|s| !s.trim().is_empty());
+    // Безопасность (AUDIT-001): не принимаем клиентский req.sha256 — берём хэш только из официального релиза
+    if req.sha256.as_deref().is_some_and(|s| !s.trim().is_empty()) {
+        crate::log_w!("[Mihomo Update] Клиентский req.sha256 проигнорирован политикой безопасности (AUDIT-001)");
+    }
+    let mut expected_sha256: Option<String> = None;
 
     let rels = fetch_mihomo_releases_cached(&state.http, &proxy_url).await.unwrap_or_default();
     let matched_rel = rels.iter()
         .find(|r| r.tag_name.eq_ignore_ascii_case(tag) || r.tag_name.trim_start_matches('v') == tag.trim_start_matches('v'));
 
-    let download_url = if let Some(ref cu) = req.custom_url {
-        let cu_trim = cu.trim();
-        if !cu_trim.starts_with("https://github.com/MetaCubeX/mihomo/releases/download/") {
-            return api_err("Недопустимый URL загрузки ядра: разрешены только официальные релизы https://github.com/MetaCubeX/mihomo/releases/download/");
-        }
-        // R49: при передаче официального custom_url всё равно подтягиваем SHA-256 из релиза
-        if expected_sha256.is_none() {
-            if let Some(asset_name) = cu_trim.rsplit('/').next() {
-                if let Some(rel) = matched_rel {
-                    expected_sha256 = extract_hash_from_checksum_text(&rel.body, asset_name);
-                }
+    let download_url = if let Some(validated) = validated_custom_url {
+        if let Some(asset_name) = validated.rsplit('/').next() {
+            if let Some(rel) = matched_rel {
+                expected_sha256 = extract_hash_from_checksum_text(&rel.body, asset_name);
             }
         }
-        cu_trim.to_string()
+        validated
     } else {
         let matched = matched_rel.and_then(|r| find_mihomo_asset(&r.assets, arch));
 
         if let (Some(rel), Some(asset)) = (matched_rel, matched) {
-            if expected_sha256.is_none() {
-                expected_sha256 = extract_hash_from_checksum_text(&rel.body, &asset.name);
-            }
+            expected_sha256 = extract_hash_from_checksum_text(&rel.body, &asset.name);
             asset.browser_download_url.clone()
         } else if let Some(asset) = matched {
             asset.browser_download_url.clone()
@@ -2345,12 +2411,17 @@ mod tests {
 
     #[test]
     fn test_mihomo_custom_url_whitelist() {
-        // SEC-13: Validate custom_url whitelist in mihomo_install
-        let is_valid_url = |url: &str| url.starts_with("https://github.com/MetaCubeX/mihomo/releases/download/");
-        assert!(is_valid_url("https://github.com/MetaCubeX/mihomo/releases/download/v1.19.31/mihomo-linux-amd64-v1.19.31.gz"));
-        assert!(!is_valid_url("https://evil-mirror.com/mihomo.gz"));
-        assert!(!is_valid_url("http://github.com/MetaCubeX/mihomo/releases/download/v1.19.31/mihomo-linux-amd64.gz"));
-        assert!(!is_valid_url("https://github.com/attacker/mihomo/releases/download/v1.0/mihomo.gz"));
+        // AUDIT-001: реальный валидатор URL вместо локальной лямбды
+        assert!(validate_mihomo_download_url(
+            "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.31/mihomo-linux-amd64-v1.19.31.gz"
+        ).is_ok());
+        assert!(validate_mihomo_download_url("https://evil-mirror.com/mihomo.gz").is_err());
+        assert!(validate_mihomo_download_url("http://github.com/MetaCubeX/mihomo/releases/download/v1.19.31/mihomo-linux-amd64.gz").is_err());
+        assert!(validate_mihomo_download_url("https://github.com/attacker/mihomo/releases/download/v1.0/mihomo.gz").is_err());
+        assert!(validate_mihomo_download_url("https://github.com/MetaCubeX/mihomo/releases/download/../../../../attacker/evil/mihomo.gz").is_err());
+        assert!(validate_mihomo_download_url("https://github.com/MetaCubeX/mihomo/releases/download/v1.19.31/mihomo.gz?token=evil").is_err());
+        assert!(validate_mihomo_download_url("https://github.com/MetaCubeX/mihomo/releases/download/v1.19.31/mihomo.gz#frag").is_err());
+        assert!(validate_mihomo_download_url("https://user@github.com/MetaCubeX/mihomo/releases/download/v1.19.31/mihomo.gz").is_err());
     }
 
     #[test]
@@ -2434,12 +2505,14 @@ mod tests {
             attempts: 1,
         };
         assert_eq!(update_guard_decision(Some(&guard), 1010, 30), UpdateGuardAction::Wait);
-        assert_eq!(update_guard_decision(Some(&guard), 1030, 30), UpdateGuardAction::ClearMarker);
+        // AUDIT-002: даже если с момента started_at прошло >= 30с (например, перезапуск через 5-мин cron),
+        // на старте маркер не должен очищаться — иначе откат не сработает на 3-й попытке.
+        assert_eq!(update_guard_decision(Some(&guard), 1300, 30), UpdateGuardAction::Wait);
 
         let crashed = UpdateGuardState { attempts: 3, ..guard.clone() };
         assert_eq!(update_guard_decision(Some(&crashed), 1005, 30), UpdateGuardAction::Rollback);
 
-        // Запись, чтение и удаление маркера во временной папке
+        // Запись, чтение и удаление маркера + атомарный откат во временной папке
         let dir = std::env::temp_dir().join(format!("xkeen-bug127-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let cfg_path = dir.join("config.json");
@@ -2449,6 +2522,13 @@ mod tests {
         assert_eq!(read_back, guard);
         clear_update_guard_marker(&marker);
         assert!(read_update_guard_marker(&marker).is_none());
+
+        let bak_file = dir.join("xkeen-route.bak");
+        let bin_file = dir.join("xkeen-route");
+        std::fs::write(&bak_file, b"old-working-binary").unwrap();
+        std::fs::write(&bin_file, b"broken-new-binary").unwrap();
+        rollback_binary_atomic(&bak_file, &bin_file).expect("atomic rollback must succeed");
+        assert_eq!(std::fs::read(&bin_file).unwrap(), b"old-working-binary");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

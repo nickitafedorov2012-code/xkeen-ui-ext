@@ -89,6 +89,7 @@ export interface StatusInfo {
   whitelist_providers?: string[]
   server_aliases?: Record<string, string>
   mihomo_version?: string | null
+  mixed_port?: number
   zapret?: {
     engine: 'v1' | 'v2'
     version: string

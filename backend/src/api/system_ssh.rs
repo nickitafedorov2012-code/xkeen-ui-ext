@@ -535,7 +535,9 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
             killall -15 mihomo xray nfqws nfqws2 2>/dev/null || true
             sleep 1
             killall -9 mihomo xray nfqws nfqws2 2>/dev/null || true
-            for ipt in "iptables -w 2" "ip6tables -w 2"; do
+            IPT_W=""; command iptables -w -L -n >/dev/null 2>&1 && IPT_W="-w"
+            IP6T_W=""; command ip6tables -w -L -n >/dev/null 2>&1 && IP6T_W="-w"
+            for ipt in "iptables $IPT_W" "ip6tables $IP6T_W"; do
               for tbl in nat mangle; do
                 while $ipt -t $tbl -D PREROUTING -j xkeen 2>/dev/null; do :; done
                 while $ipt -t $tbl -D OUTPUT -j xkeen_mask 2>/dev/null; do :; done
@@ -549,11 +551,11 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
                 $ipt -t $tbl -F XKEEN_GAMING 2>/dev/null || true
                 $ipt -t $tbl -X XKEEN_GAMING 2>/dev/null || true
               done
-              while ip6tables -w 2 -D FORWARD -j XKEEN_GAMING 2>/dev/null; do :; done
-              ip6tables -w 2 -F XKEEN_GAMING 2>/dev/null || true
-              ip6tables -w 2 -X XKEEN_GAMING 2>/dev/null || true
-              $ipt -w 2 -t nat -S PREROUTING 2>/dev/null | grep 'xkeen-route-zapret' | grep 'REDIRECT' | sed 's/^-A /-D /' | while read -r rule; do
-                $ipt -w 2 -t nat $rule 2>/dev/null || true
+              while ip6tables $IP6T_W -D FORWARD -j XKEEN_GAMING 2>/dev/null; do :; done
+              ip6tables $IP6T_W -F XKEEN_GAMING 2>/dev/null || true
+              ip6tables $IP6T_W -X XKEEN_GAMING 2>/dev/null || true
+              $ipt -t nat -S PREROUTING 2>/dev/null | grep 'xkeen-route-zapret' | grep 'REDIRECT' | sed 's/^-A /-D /' | while read -r rule; do
+                $ipt -t nat $rule 2>/dev/null || true
               done
             done
             while ip rule del fwmark 0x111/0xff lookup 111 2>/dev/null; do :; done
@@ -603,15 +605,45 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
     }
 
     let script_arg = if action == "restart_all" { "restart" } else { action.as_str() };
-    let out = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        tokio::process::Command::new("sh")
-            .env("fd_out", "true")
-            .arg(init_script)
-            .arg(script_arg)
-            .output(),
-    )
-    .await;
+    let mihomo_was_running = crate::system::is_process_running("mihomo");
+    let out = if std::path::Path::new(init_script).exists() {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio::process::Command::new("sh")
+                .env("fd_out", "true")
+                .arg(init_script)
+                .arg(script_arg)
+                .output(),
+        )
+        .await
+    } else if action == "start" || action == "restart" || action == "restart_all" {
+        // AUDIT-080 / AUDIT-122: fallback если S05xkeen отсутствует (как на стенде WBR3000UAX)
+        let fallback_cmd = r#"
+if [ -x /opt/sbin/xkeen ]; then
+  /opt/sbin/xkeen -start </dev/null >/opt/var/log/xkeen-start.log 2>&1
+elif command -v mihomo >/dev/null 2>&1; then
+  killall -15 mihomo 2>/dev/null || true
+  sleep 1
+  nohup mihomo -d /opt/etc/mihomo </dev/null >/opt/var/log/mihomo.log 2>&1 &
+  sleep 1
+elif [ -x /opt/sbin/mihomo ]; then
+  killall -15 mihomo 2>/dev/null || true
+  sleep 1
+  nohup /opt/sbin/mihomo -d /opt/etc/mihomo </dev/null >/opt/var/log/mihomo.log 2>&1 &
+  sleep 1
+else
+  echo "Ни S05xkeen, ни /opt/sbin/xkeen, ни mihomo не найдены" >&2
+  exit 1
+fi
+"#;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio::process::Command::new("sh").arg("-c").arg(fallback_cmd).output(),
+        )
+        .await
+    } else {
+        return api_err(format!("Init-скрипт '{}' не найден", init_script));
+    };
 
     match out {
         Err(_) => {
@@ -637,7 +669,11 @@ pub async fn xkeen_service(State(state): State<AppState>, Json(req): Json<Servic
                         let new_yaml = plan_xkeen_start_yaml(tx.config(), &raw_yaml)?;
                         let tx_cfg = tx.config().clone();
                         tx.set_yaml(new_yaml.clone())?;
-                        tx.commit_and_reload().await?;
+                        if action == "start" || !mihomo_was_running {
+                            tx.commit_without_reload().await?;
+                        } else {
+                            tx.commit_and_reload().await?;
+                        }
                         // stop снял цепочки XKEEN_GAMING/XKEEN_BS и NDM-хуки — без повторного
                         // синка UI показывал «игровой режим/БС включён», а трафик не перехватывался
                         let ports = crate::routing::redir_ports(&new_yaml);
@@ -859,27 +895,8 @@ Write-Host ""
 "#;
 
 fn base64_encode(input: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let b0 = chunk[0] as usize;
-        let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as usize } else { 0 };
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(TABLE[(n >> 18) & 63] as char);
-        out.push(TABLE[(n >> 12) & 63] as char);
-        if chunk.len() > 1 {
-            out.push(TABLE[(n >> 6) & 63] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(TABLE[n & 63] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(input)
 }
 
 /// GET /patch — отдавать сырой PowerShell-скрипт (text/plain; charset=utf-8)
@@ -1296,11 +1313,18 @@ pub async fn read_config_file(
     };
 
     match tokio::fs::read_to_string(&path).await {
-        Ok(content) => api_ok(json!({
-            "file": q.file,
-            "path": path.display().to_string(),
-            "content": content
-        })),
+        Ok(content) => {
+            let safe_content = if q.file == "route" {
+                crate::api::backups::redact_route_config_json(&content)
+            } else {
+                content
+            };
+            api_ok(json!({
+                "file": q.file,
+                "path": path.display().to_string(),
+                "content": safe_content
+            }))
+        }
         Err(e) => api_err(format!("Ошибка чтения файла {}: {}", path.display(), e)),
     }
 }
@@ -1387,7 +1411,7 @@ pub async fn get_diagnostics_health(State(state): State<AppState>) -> Response {
     let (gw_status, gw_msg) = match gateway_res {
         Ok(v) => {
             let ver = v.get("version").cloned().unwrap_or_else(|| "доступна".into());
-            ("ok", format!("KeeneticOS {}", ver))
+            ("ok", if ver.starts_with("KeeneticOS") { ver } else { format!("KeeneticOS {}", ver) })
         }
         Err(e) => ("fail", format!("Keenetic RCI недоступен: {}", e)),
     };
@@ -1459,6 +1483,53 @@ pub async fn get_diagnostics_health(State(state): State<AppState>) -> Response {
     }))
 }
 
+
+/// POST /api/settings/reset — полный сброс настроек панели к значениям по умолчанию (с сохранением auth).
+pub async fn reset_settings(State(state): State<AppState>) -> Response {
+    let mut tx = match ConfigTx::begin(&state).await {
+        Ok(tx) => tx,
+        Err(e) => return api_err(e),
+    };
+    let old_mihomo_path = tx.config().mihomo.config_path.clone();
+    let old_adguard_path = tx.config().adguard.config_path.clone();
+    let old_xkeen_init = tx.config().system.xkeen_init.clone();
+    let old_auth = tx.config().auth.clone();
+
+    let mut defaults = config::AppConfig::default();
+    if !old_mihomo_path.is_empty() {
+        defaults.mihomo.config_path = old_mihomo_path;
+    }
+    if !old_adguard_path.is_empty() {
+        defaults.adguard.config_path = old_adguard_path;
+    }
+    if !old_xkeen_init.is_empty() {
+        defaults.system.xkeen_init = old_xkeen_init;
+    }
+    defaults.auth = old_auth;
+    *tx.config_mut() = defaults;
+
+    let mut ports = crate::routing::redir_ports("");
+    if let Ok(yaml) = tx.read_yaml().await {
+        ports = crate::routing::redir_ports(&yaml);
+        if let Ok((new_yaml, _)) = crate::routing::apply_routing(&yaml, tx.config()) {
+            ports = crate::routing::redir_ports(&new_yaml);
+            let _ = tx.set_yaml(new_yaml);
+        }
+    }
+    let reset_cfg = tx.config().clone();
+    if let Err(e) = tx.commit_without_reload().await {
+        return api_err(format!("Ошибка сброса настроек: {e}"));
+    }
+    drop(tx);
+
+    let dns_port = resolve_active_dns_port(&reset_cfg);
+    if let Err(e) = sync_full_tunnel_modes(&reset_cfg, ports.redir, ports.tproxy, dns_port).await {
+        log_w!("[RESET] Предупреждение синхронизации режимов при сбросе: {e}");
+    }
+    crate::traffic::set_whitelist_active(false);
+    log_i!("Настройки панели полностью сброшены к значениям по умолчанию (auth сохранён)");
+    api_ok(json!({ "reset": true }))
+}
 
 #[cfg(test)]
 mod tests {
@@ -1634,5 +1705,39 @@ mod tests {
             Some(false),
             "R38: PUT /api/settings должен отклонять невалидные schedules: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn regression_reset_settings_restores_defaults() {
+        let dir = std::env::temp_dir().join(format!("xkeen_reset_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.json");
+        let yaml_path = dir.join("config.yaml");
+        tokio::fs::write(&yaml_path, "proxies: []\nproxy-groups: []\nrules: []\n").await.unwrap();
+
+        let mut cfg = config::AppConfig::default();
+        cfg.mihomo.config_path = yaml_path.to_string_lossy().to_string();
+        cfg.logs.level = "debug".to_string();
+        cfg.failover.enabled = true;
+        cfg.auth.enabled = true;
+        cfg.auth.password_hash = "pbkdf2$test_hash".to_string();
+        cfg.auth.session_secret = "test_secret_keep".to_string();
+        tokio::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).await.unwrap();
+
+        let state = make_n_test_state(cfg, cfg_path.clone());
+        let resp = reset_settings(State(state.clone())).await;
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let on_disk: config::AppConfig = serde_json::from_str(
+            &tokio::fs::read_to_string(&cfg_path).await.unwrap(),
+        )
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(on_disk.logs.level, "info");
+        assert!(!on_disk.failover.enabled);
+        assert!(on_disk.auth.enabled, "AUDIT-024: auth.enabled должен сохраняться при сбросе");
+        assert_eq!(on_disk.auth.password_hash, "pbkdf2$test_hash", "AUDIT-024: password_hash должен сохраняться");
+        assert_eq!(on_disk.auth.session_secret, "test_secret_keep", "AUDIT-024: auth.session_secret должен сохраняться");
     }
 }

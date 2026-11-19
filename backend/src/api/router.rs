@@ -117,6 +117,7 @@ fn config_and_backups_routes() -> Router<AppState> {
         )
         .route("/api/ignore", get(api::get_ignore).post(api::set_ignore))
         .route("/api/settings", get(api::get_settings).put(api::put_settings))
+        .route("/api/settings/reset", post(api::reset_settings))
         .route("/api/settings/priority", post(api::set_priority))
 }
 

@@ -215,32 +215,34 @@ export function FailoverSection({
         </div>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 10 }}>
-        <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 10 }}>
+        <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'stretch', gap: 4 }}>
           <span style={{ fontSize: 12 }}>Порог пинга для смены узла, мс</span>
           <NumberInput
             min={50}
             max={5000}
             step={50}
             fallback={300}
+            style={{ width: '100%', minWidth: 90, boxSizing: 'border-box' }}
             value={settings.failover.ping_threshold_ms}
             onChange={(val) => patch((s) => (s.failover.ping_threshold_ms = val))}
           />
         </label>
 
-        <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+        <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'stretch', gap: 4 }}>
           <span style={{ fontSize: 12 }}>Интервал проверки пинга, сек</span>
           <NumberInput
             min={15}
             max={3600}
             step={5}
             fallback={60}
+            style={{ width: '100%', minWidth: 90, boxSizing: 'border-box' }}
             value={settings.failover.interval_secs}
             onChange={(val) => patch((s) => (s.failover.interval_secs = val))}
           />
         </label>
 
-        <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'flex-start', gap: 4 }}>
+        <label className="row" style={{ margin: 0, flexDirection: 'column', alignItems: 'stretch', gap: 4 }}>
           <span style={{ fontSize: 12 }} title="Длительность проверочного теста стабильности перед возвратом трафика на основной узел">
             Тест возврата, сек
           </span>
@@ -249,6 +251,7 @@ export function FailoverSection({
             max={600}
             step={15}
             fallback={180}
+            style={{ width: '100%', minWidth: 90, boxSizing: 'border-box' }}
             value={settings.failover.canary_duration_secs || 180}
             onChange={(val) => patch((s) => (s.failover.canary_duration_secs = val))}
           />

@@ -394,7 +394,7 @@ export default function Devices({ notify }: Props) {
         auto_restore: drModal.autoRestore,
         follow_whitelist: drModal.followWhitelist ?? true,
       })
-      notify(drModal.servers.length ? `Failover chain saved: ${drModal.servers.length} server(s)` : 'Routing cleared')
+      notify(drModal.servers.length ? `Цепочка Failover сохранена: ${drModal.servers.length} серв.` : 'Маршрутизация очищена')
       setDrModal(null)
       load()
     } catch (e) {

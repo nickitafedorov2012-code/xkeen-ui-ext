@@ -472,15 +472,29 @@ pub fn sanitize_and_heal_adguard_yaml_with_proxy_port(
     }
 
     if has_zero_bind && has_loopback_bind {
-        lines.retain(|l| {
+        let mut in_dns_sec = false;
+        let mut in_bind_hosts_sec = false;
+        let mut filtered = Vec::with_capacity(lines.len());
+        for l in lines {
             let t = l.trim();
-            if t == "- 127.0.0.1" {
-                changed = true;
-                false
-            } else {
-                true
+            if t == "dns:" {
+                in_dns_sec = true;
+                in_bind_hosts_sec = false;
+            } else if in_dns_sec && !l.starts_with(' ') && !t.is_empty() && !t.starts_with('#') {
+                in_dns_sec = false;
+                in_bind_hosts_sec = false;
+            } else if in_dns_sec && t == "bind_hosts:" {
+                in_bind_hosts_sec = true;
+            } else if in_bind_hosts_sec && !t.is_empty() && !t.starts_with('-') && !t.starts_with('#') {
+                in_bind_hosts_sec = false;
             }
-        });
+            if in_bind_hosts_sec && t == "- 127.0.0.1" {
+                changed = true;
+                continue;
+            }
+            filtered.push(l);
+        }
+        lines = filtered;
     }
 
     // 3. Настройка http_proxy для скачивания фильтров через Mihomo (обход блокировок GitHub/CDN)
@@ -642,7 +656,7 @@ pub fn ensure_default_adguard_config(dns_port: u16, http_port: u16) -> PathBuf {
     }
     if !conf_path.is_file() {
         let content = generate_default_adguard_yaml(dns_port, http_port);
-        let _ = std::fs::write(&conf_path, content);
+        let _ = crate::transaction::sync_atomic_write_or_remove(&conf_path, Some(&content));
         crate::log_i!("Создана стандартная конфигурация AdGuard Home: {:?}", conf_path);
     } else if let Ok(existing) = std::fs::read_to_string(&conf_path) {
         let (healed, changed) = sanitize_and_heal_adguard_yaml(&existing, dns_port);

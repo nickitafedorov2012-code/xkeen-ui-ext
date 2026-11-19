@@ -176,7 +176,7 @@ export default function TrafficGraph({ notify }: TrafficGraphProps = {}) {
         if (!initialHistoryLoaded.current && Array.isArray(data.history) && data.history.length > 0) {
           const histLen = data.history.length
           const mapped: TrafficHistoryItem[] = data.history.map((h, idx) => {
-            const hWl = Boolean(data.whitelist_active ?? h.whitelist?.active)
+            const hWl = Boolean(h.whitelist?.active ?? data.whitelist_active)
             const tDown = hWl ? (h.whitelist?.down ?? h.down ?? 0) : (h.proxy?.down ?? h.down ?? 0)
             const tUp = hWl ? (h.whitelist?.up ?? h.up ?? 0) : (h.proxy?.up ?? h.up ?? 0)
             return {

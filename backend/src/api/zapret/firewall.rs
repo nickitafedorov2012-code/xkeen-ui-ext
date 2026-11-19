@@ -359,8 +359,8 @@ PATH=/opt/sbin:/opt/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:
 export PATH
 
 IPTABLES_CMD="iptables"
-if command iptables -w 1 -L -n >/dev/null 2>&1; then
-  IPTABLES_CMD="iptables -w 2"
+if command iptables -w -L -n >/dev/null 2>&1; then
+  IPTABLES_CMD="iptables -w"
 fi
 
 iptables() {
@@ -804,10 +804,10 @@ remove_fw_rules() {
   done
 
   # Remove DNS redirects with our comment (Bug 31: only own rules)
-  while iptables -w 2 -t nat -D PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports __ZAPRET_DNS_PORT__ 2>/dev/null; do :; done
-  while iptables -w 2 -t nat -D PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports __ZAPRET_DNS_PORT__ 2>/dev/null; do :; done
-  while iptables -w 2 -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports __ZAPRET_DNS_PORT__ 2>/dev/null; do :; done
-  while iptables -w 2 -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports __ZAPRET_DNS_PORT__ 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i br+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports __ZAPRET_DNS_PORT__ 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i br+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports __ZAPRET_DNS_PORT__ 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i Bridge+ -p udp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports __ZAPRET_DNS_PORT__ 2>/dev/null; do :; done
+  while iptables -t nat -D PREROUTING -i Bridge+ -p tcp --dport 53 -m comment --comment "xkeen-route-zapret" -j REDIRECT --to-ports __ZAPRET_DNS_PORT__ 2>/dev/null; do :; done
 
 
   # Remove TCPMSS clamping rule (NET-02 / NET-04)

@@ -189,6 +189,7 @@ pub async fn status(State(state): State<AppState>) -> Response {
         "whitelist_providers": cfg.whitelist_providers,
         "server_aliases": cfg.server_aliases,
         "mihomo": { "host": cfg.mihomo.host, "port": cfg.mihomo.port, "available": mihomo_available },
+        "mixed_port": crate::routing::mihomo_mixed_port_from_path(&cfg.mihomo.config_path),
         "rci": { "host": cfg.rci.host, "port": cfg.rci.port, "available": rci_available },
         "failover": failover_json,
         "refresh_interval_sec": cfg.refresh_interval_sec,

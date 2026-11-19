@@ -474,7 +474,8 @@ async fn main() {
         config,
         config_path: Arc::new(config_path),
         http: match reqwest::Client::builder()
-            .cookie_store(true)
+            .connect_timeout(std::time::Duration::from_secs(8))
+            .timeout(std::time::Duration::from_secs(20))
             .http1_only()
             .build()
         {
@@ -525,11 +526,30 @@ async fn main() {
     traffic::spawn(state.clone());
     bot::spawn(state.clone());
 
+    // AUDIT-122: автостарт mihomo после перезагрузки роутера, если S05xkeen отсутствует или не поднял ядро
+    let mihomo_autostart_state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        if crate::watchdog::is_service_stopped() || crate::system::is_process_running("mihomo") {
+            return;
+        }
+        let cfg = mihomo_autostart_state.config.read().await.clone();
+        let init_script = cfg.system.xkeen_init.trim();
+        let has_init = !init_script.is_empty() && std::path::Path::new(init_script).exists();
+        let start_cmd = if has_init {
+            format!("sh \"{init_script}\" start </dev/null >/dev/null 2>&1")
+        } else {
+            "if [ -x /opt/sbin/xkeen ]; then /opt/sbin/xkeen -start </dev/null >/dev/null 2>&1; elif [ -x /opt/sbin/mihomo ]; then nohup /opt/sbin/mihomo -d /opt/etc/mihomo </dev/null >/opt/var/log/mihomo.log 2>&1 & elif command -v mihomo >/dev/null 2>&1; then nohup mihomo -d /opt/etc/mihomo </dev/null >/opt/var/log/mihomo.log 2>&1 & fi".to_string()
+        };
+        log_i!("[STARTUP] Mihomo не запущен и service_stopped=false — выполняем автозапуск ядра...");
+        let _ = tokio::process::Command::new("sh").arg("-c").arg(&start_cmd).output().await;
+    });
+
     // Синхронизация файлов и Keenetic ndm хуков Zapret при старте панели
     let zapret_sync_state = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(6)).await;
-        let cfg = zapret_sync_state.config.read().await;
+        let cfg = zapret_sync_state.config.read().await.clone();
         if cfg.zapret.enabled {
             // Z-03: служба включена в конфигурации — маркер автозапуска должен отсутствовать
             zapret::clear_zapret_disabled_marker();
@@ -544,7 +564,7 @@ async fn main() {
     let gaming_sync_state = state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(7)).await;
-        let cfg = gaming_sync_state.config.read().await;
+        let cfg = gaming_sync_state.config.read().await.clone();
         let gaming_active = cfg.gaming.enabled && cfg.gaming.mode == config::GamingMode::Compatibility;
         let bs_active = cfg.whitelist.enabled;
         if gaming_active || bs_active {
@@ -606,7 +626,9 @@ async fn main() {
         let cfg = adguard_sync_state.config.read().await.clone();
         let agh_status = adguard::get_status(&adguard_sync_state.http, &cfg.adguard).await;
         let is_running_protected = agh_status.running && agh_status.protection_enabled;
-        let is_enabled = cfg.adguard.enabled || cfg.adblock_enabled || is_running_protected;
+        let is_enabled = cfg.adguard.enabled
+            || cfg.adblock_enabled
+            || (!cfg.adguard.integration_choice_locked && is_running_protected);
         if agh_status.running {
             let _ = adguard::heal_adguard_live_config(&adguard_sync_state.http, &cfg.adguard, Some(&cfg.rci.host)).await;
         }
@@ -632,7 +654,10 @@ async fn main() {
             // Автоматическая синхронизация AdGuard DNS upstream в config.yaml и config.json
             if let Ok(mut tx) = crate::transaction::ConfigTx::begin(&adguard_sync_state).await {
                 let mut needs_save = false;
-                if is_running_protected && (!tx.config().adguard.enabled || tx.config().adguard.dns_port != active_port) {
+                if is_running_protected
+                    && !tx.config().adguard.integration_choice_locked
+                    && (!tx.config().adguard.enabled || tx.config().adguard.dns_port != active_port)
+                {
                     tx.config_mut().adguard.enabled = true;
                     tx.config_mut().adguard.dns_port = active_port;
                     needs_save = true;

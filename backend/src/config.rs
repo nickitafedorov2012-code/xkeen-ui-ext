@@ -670,7 +670,7 @@ impl Default for GamingZapretPolicy {
     fn default() -> Self {
         Self {
             managed: true,
-            enabled: true,
+            enabled: false,
             preset: "gaming_compat".into(),
             restore_previous_state: true,
             previous_config: None,
@@ -1644,12 +1644,12 @@ pub fn load(path: &Path) -> AppConfig {
                     let corr_path = corrupted_backup_path(path, ts);
                     let _ = std::fs::copy(path, &corr_path);
                     eprintln!("[INFO] Создан бэкап поврежденного конфига: {}", corr_path.display());
-                    // Баг 130: сначала последняя рабочая копия; при отсутствии .bak — защитный режим с auth.enabled=true
+                    // AUDIT-023: сначала пробуем .bak; без .bak и при пустом password_hash не включаем auth.enabled=true (иначе вечный lockout)
                     load_backup(path).unwrap_or_else(|| {
                         let mut fallback = parse_config_content(&content, &path.display().to_string());
-                        if !fallback.auth.enabled {
-                            eprintln!("[SECURITY] Повреждённый/пустой конфиг без .bak: принудительно включаем auth.enabled=true.");
-                            fallback.auth.enabled = true;
+                        if fallback.auth.enabled && fallback.auth.password_hash.trim().is_empty() {
+                            eprintln!("[SECURITY] Повреждённый конфиг без password_hash: отключаем auth.enabled во избежание lockout.");
+                            fallback.auth.enabled = false;
                         }
                         fallback
                     })
@@ -1658,11 +1658,7 @@ pub fn load(path: &Path) -> AppConfig {
         }
         Err(e) => {
             eprintln!("[ERROR] Не удалось прочитать существующий конфиг {}: {e}", path.display());
-            load_backup(path).unwrap_or_else(|| {
-                let mut cfg = AppConfig::default();
-                cfg.auth.enabled = true;
-                cfg
-            })
+            load_backup(path).unwrap_or_else(AppConfig::default)
         }
     }
 }
@@ -1691,9 +1687,7 @@ pub async fn load_async(path: &Path) -> AppConfig {
         }
         Err(e) => {
             eprintln!("[ERROR] Не удалось прочитать существующий конфиг {}: {e}", path.display());
-            let mut cfg = AppConfig::default();
-            cfg.auth.enabled = true;
-            cfg
+            AppConfig::default()
         }
     }
 }
@@ -1916,6 +1910,22 @@ mod tests {
         assert!(!is_valid_mac("00:11:22:33:44:ZZ"));
         assert!(!is_valid_mac("00:11:22:33:44:55; rm -rf /"));
         assert!(!is_valid_mac("192.168.1.1"));
+    }
+
+    #[test]
+    fn regression_audit_023_corrupted_config_does_not_lockout() {
+        let dir = std::env::temp_dir().join(format!("xkeen_audit023_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.json");
+        std::fs::write(&cfg_path, "{broken json").unwrap();
+
+        let loaded = load(&cfg_path);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            !loaded.auth.enabled || !loaded.auth.password_hash.is_empty(),
+            "AUDIT-023: битый конфиг без password_hash не должен включать auth.enabled=true (вечный lockout)"
+        );
     }
 
     #[test]
@@ -2241,13 +2251,13 @@ mod tests {
         let bak_cfg = parse_config_strict(&bak_content).unwrap();
         assert_eq!(bak_cfg.refresh_interval_sec, 11, ".bak must contain version A");
 
-        // 130.2 & 130.3: пустой/битый config.json БЕЗ .bak -> auth.enabled == true и создаётся config.json.corrupted.<ts>.bak
+        // AUDIT-023: пустой/битый config.json БЕЗ .bak -> auth.enabled == false (без вечного lockout) и создаётся config.json.corrupted.<ts>.bak
         let dir2 = std::env::temp_dir().join(format!("xkeen-bug130-no-bak-{}", crate::auth::random_hex(8)));
         std::fs::create_dir_all(&dir2).unwrap();
         let empty_path = dir2.join("config.json");
         std::fs::write(&empty_path, "").unwrap();
         let loaded_empty = load(&empty_path);
-        assert!(loaded_empty.auth.enabled, "corrupted/empty config without .bak must keep auth.enabled=true");
+        assert!(!loaded_empty.auth.enabled, "AUDIT-023: corrupted/empty config without .bak/hash must NOT enable auth.enabled (lockout)");
         let has_corrupted = std::fs::read_dir(&dir2)
             .unwrap()
             .filter_map(|e| e.ok())

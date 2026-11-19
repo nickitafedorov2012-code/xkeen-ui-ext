@@ -183,7 +183,7 @@ pub fn parse_provider_urls(yaml: &str) -> std::collections::BTreeMap<String, Str
 
     for line in yaml.lines() {
         let trimmed = line.trim();
-        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty() && !trimmed.starts_with('#');
 
         if line.trim_end() == "proxy-providers:" {
             in_providers = true;
@@ -221,7 +221,7 @@ pub fn parse_provider_hwids(yaml: &str) -> std::collections::BTreeMap<String, St
 
     for line in yaml.lines() {
         let trimmed = line.trim();
-        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty() && !trimmed.starts_with('#');
 
         if line.trim_end() == "proxy-providers:" {
             in_providers = true;
@@ -333,7 +333,7 @@ pub fn add_provider_to_yaml_full(
 
     for line in yaml.lines() {
         let trimmed = line.trim();
-        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty() && !trimmed.starts_with('#');
 
         if line.trim_end() == "proxy-providers:" {
             in_providers = true;
@@ -408,7 +408,7 @@ pub fn add_file_provider_to_yaml(
 
     for line in yaml.lines() {
         let trimmed = line.trim();
-        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty() && !trimmed.starts_with('#');
 
         if line.trim_end() == "proxy-providers:" {
             in_providers = true;
@@ -439,7 +439,15 @@ pub fn add_provider_to_proxy_groups(yaml: &str, id: &str) -> String {
     }
     let is_crlf = yaml.contains("\r\n");
     let eol = if is_crlf { "\r\n" } else { "\n" };
-    let target_groups = ["PROXY", "Proxy", "Fastest", "Fallback"];
+    let target_groups = [
+        "PROXY",
+        "Proxy",
+        "Fastest",
+        "Fallback",
+        crate::routing::WHITELIST_GROUP_NAME,
+        "🛡️ Canary Probe",
+        "🎮 Gaming",
+    ];
 
     let lines: Vec<&str> = yaml.lines().collect();
     let mut out: Vec<String> = Vec::with_capacity(lines.len() + 8);
@@ -470,7 +478,7 @@ pub fn add_provider_to_proxy_groups(yaml: &str, id: &str) -> String {
 
     for line in &lines {
         let trimmed = line.trim();
-        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty() && !trimmed.starts_with('#');
 
         if line.trim_end() == "proxy-groups:" {
             in_proxy_groups = true;
@@ -643,7 +651,7 @@ pub fn convert_http_provider_to_file_in_yaml(yaml: &str, id: &str, file_path: &s
 
     for line in yaml.lines() {
         let trimmed = line.trim();
-        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty() && !trimmed.starts_with('#');
 
         if line.trim_end() == "proxy-providers:" {
             in_providers = true;
@@ -722,7 +730,7 @@ pub fn delete_provider_from_yaml(yaml: &str, id: &str) -> Result<String, String>
 
     for line in yaml.lines() {
         let trimmed = line.trim();
-        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty() && !trimmed.starts_with('#');
 
         // Отслеживаем вход в proxy-providers
         if line.trim_end() == "proxy-providers:" {
@@ -814,7 +822,7 @@ pub fn sync_disabled_providers_in_yaml(yaml: &str, disabled_providers: &[String]
 
     for line in yaml.lines() {
         let trimmed = line.trim();
-        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty() && !trimmed.starts_with('#');
 
         if is_top {
             in_use_block = false;
@@ -972,7 +980,7 @@ pub fn sync_disabled_providers_in_yaml(yaml: &str, disabled_providers: &[String]
     while i < out.len() {
         let line = &out[i];
         let trimmed = line.trim();
-        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty() && !trimmed.starts_with('#');
         if is_top {
             in_proxy_groups = trimmed == "proxy-groups:";
             final_lines.push(line.clone());
@@ -1136,8 +1144,13 @@ fn remove_hwid_from_url_line(line: &str) -> String {
 /// Обновить или удалить HWID подписки в config.yaml (в блоке header и query string URL)
 pub fn update_provider_hwid_in_yaml(yaml: &str, provider_id: &str, new_hwid: Option<&str>) -> Result<String, String> {
     let id = provider_id.trim();
-    if id.is_empty() {
-        return Err("ID подписки не может быть пустым".into());
+    if !crate::config::is_valid_provider_id(id) {
+        return Err(format!("Некорректный ID подписки '{id}'"));
+    }
+    if let Some(h) = new_hwid.map(str::trim).filter(|s| !s.is_empty()) {
+        if h.contains('\n') || h.contains('\r') || h.chars().any(|c| c.is_control()) {
+            return Err("Недопустимые управляющие символы в HWID".into());
+        }
     }
 
     let is_crlf = yaml.contains("\r\n");
@@ -1151,11 +1164,15 @@ pub fn update_provider_hwid_in_yaml(yaml: &str, provider_id: &str, new_hwid: Opt
     let mut header_indent = 4;
     let mut handled_hwid = false;
 
-    let clean_hwid = new_hwid.map(str::trim).filter(|h| !h.is_empty());
+    let escaped_hwid_owned = new_hwid
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .map(|h| h.replace('\\', "\\\\").replace('"', "\\\""));
+    let clean_hwid = escaped_hwid_owned.as_deref();
 
     for line in yaml.lines() {
         let trimmed = line.trim();
-        let is_top = !line.starts_with(' ') && !trimmed.is_empty();
+        let is_top = !line.starts_with(' ') && !trimmed.is_empty() && !trimmed.starts_with('#');
 
         if line.trim_end() == "proxy-providers:" {
             in_providers = true;
@@ -1343,5 +1360,14 @@ mod n13_n14_tests {
         let yaml = "proxy-groups:\n  - name: PROXY\n    type: select\n    use: [\"geodema\"]\n";
         let out = add_provider_to_proxy_groups(yaml, "geodema");
         assert_eq!(out.trim_end(), yaml.trim_end(), "N14: провайдер в кавычках не должен дублироваться");
+    }
+
+    #[test]
+    fn regression_audit_031_update_provider_hwid_rejects_yaml_injection() {
+        let yaml = "proxy-providers:\n  geodema:\n    type: http\n    url: https://example.com\n";
+        assert!(update_provider_hwid_in_yaml(yaml, "../evil", Some("abc")).is_err());
+        assert!(update_provider_hwid_in_yaml(yaml, "geodema", Some("abc\n    evil: true")).is_err());
+        let ok = update_provider_hwid_in_yaml(yaml, "geodema", Some("hw\"123")).unwrap();
+        assert!(ok.contains("x-hwid: [\"hw\\\"123\"]"), "HWID quotes must be escaped: {ok}");
     }
 }

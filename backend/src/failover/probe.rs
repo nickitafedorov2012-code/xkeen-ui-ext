@@ -949,7 +949,9 @@ pub async fn evaluate_and_apply_whitelist_detector(
                             continue;
                         }
                         if !is_quarantined(bs_id).await {
-                            if let Some(s) = servers.iter().find(|srv| &srv.id == bs_id) {
+                            if let Some(s) = servers.iter().find(|srv| {
+                                &srv.id == bs_id && !srv.is_pool && srv.id != "free_wl" && srv.id != "free_vpn"
+                            }) {
                                 bs_target_id = Some(s.id.clone());
                                 bs_target_name = Some(s.name.clone());
                                 break;

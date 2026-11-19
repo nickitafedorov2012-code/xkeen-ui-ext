@@ -270,17 +270,9 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
     const nextState = !isAghActive
     setAdguardToggling(true)
     try {
-      // 1. Переключаем защиту в AdGuard Home через REST API (синхронизирует iptables 53->5353 и config)
-      const aghRes = await apiPost<{ enabled: boolean }>('/adguard/protection', { enabled: nextState })
-      // 2. Синхронизируем флаг adblock в Mihomo
+      // AUDIT-069: единый вызов adblock/toggle (синхронизирует AdGuard protection, iptables 53->5353/5354 и Mihomo)
       const adblockRes = await apiPost<{ enabled: boolean }>('adblock/toggle', { enabled: nextState })
-
-      const effectiveState =
-        aghRes?.enabled !== undefined
-          ? aghRes.enabled
-          : adblockRes?.enabled !== undefined
-            ? adblockRes.enabled
-            : nextState
+      const effectiveState = adblockRes?.enabled !== undefined ? adblockRes.enabled : nextState
       setAdblockEnabled(effectiveState)
       setAdguardStatus((prev) => (prev ? { ...prev, protection_enabled: effectiveState } : null))
 
@@ -556,7 +548,7 @@ export default function Dashboard({ status, notify, refresh, onSwitchTab }: Prop
                   </li>
                   <li>
                     <span>Mixed Port</span>
-                    <b className="mono" style={{ fontSize: 12 }}>7890 (HTTP/SOCKS5)</b>
+                    <b className="mono" style={{ fontSize: 12 }}>{status?.mixed_port ?? 7890} (HTTP/SOCKS5)</b>
                   </li>
                   <li>
                     <span>Перехват / NAT</span>

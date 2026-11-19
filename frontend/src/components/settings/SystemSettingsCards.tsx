@@ -1,4 +1,5 @@
-import type { ChangeEvent, RefObject } from 'react'
+import { useState, type ChangeEvent, type RefObject } from 'react'
+import { apiPost } from '../../api'
 import type { AppSettings, DnsEnhancedMode, StatusInfo } from '../../types'
 import NumberInput from '../NumberInput'
 
@@ -32,6 +33,7 @@ interface SystemSettingsCardsProps {
   handleImportBackup: (e: ChangeEvent<HTMLInputElement>) => void
   restoreBackup: (name: string) => void
   deleteBackup: (name: string) => void
+  notify?: (msg: string, isError?: boolean) => void
 }
 
 export function SystemSettingsCards({
@@ -59,7 +61,25 @@ export function SystemSettingsCards({
   handleImportBackup,
   restoreBackup,
   deleteBackup,
+  notify,
 }: SystemSettingsCardsProps) {
+  const [confirmReset, setConfirmReset] = useState(false)
+  const [resetBusy, setResetBusy] = useState(false)
+
+  const handleResetSettings = async () => {
+    setResetBusy(true)
+    try {
+      await apiPost<{ reset?: boolean }>('settings/reset', {})
+      notify?.('Настройки сброшены к значениям по умолчанию')
+      window.location.reload()
+    } catch (e) {
+      notify?.(`Ошибка сброса настроек: ${e instanceof Error ? e.message : String(e)}`, true)
+      setConfirmReset(false)
+    } finally {
+      setResetBusy(false)
+    }
+  }
+
   return (
     <>
           {/* ADBLOCK */}
@@ -284,6 +304,36 @@ export function SystemSettingsCards({
                 <button className="btn sm" onClick={() => backupFileRef.current?.click()} disabled={backupBusy} title="Загрузить архив бэкапа с компьютера">
                   📤 Загрузить архив
                 </button>
+                {!confirmReset ? (
+                  <button
+                    type="button"
+                    className="btn sm danger"
+                    disabled={backupBusy || resetBusy}
+                    title="Сбросить все настройки панели к значениям по умолчанию"
+                    onClick={() => setConfirmReset(true)}
+                  >
+                    🗑️ Сбросить настройки
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className="btn sm danger"
+                      disabled={backupBusy || resetBusy}
+                      onClick={handleResetSettings}
+                    >
+                      {resetBusy ? 'Сброс…' : 'Подтвердить сброс'}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn sm ghost"
+                      disabled={resetBusy}
+                      onClick={() => setConfirmReset(false)}
+                    >
+                      Отмена
+                    </button>
+                  </>
+                )}
                 <input
                   ref={backupFileRef}
                   type="file"

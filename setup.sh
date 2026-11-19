@@ -103,25 +103,30 @@ do_install() {
   done
 
   if [ "$OK" = 1 ]; then
-    # Проверка SHA-256 контрольной суммы если доступен файл .sha256 в релизе
+    # Обязательная проверка SHA-256 контрольной суммы (AUDIT-084)
     SHA_URL="${DOWNLOAD_URL}.sha256"
     curl -fsSL --max-time 15 "${SHA_URL}" -o "$BIN.tmp.sha256" 2>/dev/null
-    if [ -s "$BIN.tmp.sha256" ] && which sha256sum >/dev/null 2>&1; then
-      EXPECTED_SHA=$(awk '{print $1}' "$BIN.tmp.sha256")
-      # Проверяем, что полученная строка является валидным 64-символьным hex-хешем (а не 404 "Not Found" / HTML)
-      if [ ${#EXPECTED_SHA} -eq 64 ] && [ -z "$(echo "$EXPECTED_SHA" | tr -d '0-9a-fA-F')" ]; then
-        ACTUAL_SHA=$(sha256sum "$BIN.tmp" | awk '{print $1}')
-        if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
-          msg "${RED} ❌ Ошибка проверки целостности SHA-256:${NC}"
-          msg "${RED}    Ожидалось: $EXPECTED_SHA${NC}"
-          msg "${RED}    Получено:  $ACTUAL_SHA${NC}"
-          rm -f "$BIN.tmp" "$BIN.tmp.sha256"
-          return 1
-        fi
-        msg "${GREEN}✅ Контрольная сумма SHA-256 проверена успешно${NC}"
-      fi
-      rm -f "$BIN.tmp.sha256"
+    if [ ! -s "$BIN.tmp.sha256" ] || ! which sha256sum >/dev/null 2>&1; then
+      msg "${RED} ❌ Не удалось получить контрольную сумму SHA-256 или отсутствует sha256sum${NC}"
+      rm -f "$BIN.tmp" "$BIN.tmp.sha256"
+      return 1
     fi
+    EXPECTED_SHA=$(awk '{print $1}' "$BIN.tmp.sha256")
+    rm -f "$BIN.tmp.sha256"
+    if [ ${#EXPECTED_SHA} -ne 64 ] || [ -n "$(echo "$EXPECTED_SHA" | tr -d '0-9a-fA-F')" ]; then
+      msg "${RED} ❌ Некорректный формат SHA-256 контрольной суммы${NC}"
+      rm -f "$BIN.tmp"
+      return 1
+    fi
+    ACTUAL_SHA=$(sha256sum "$BIN.tmp" | awk '{print $1}')
+    if [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
+      msg "${RED} ❌ Ошибка проверки целостности SHA-256:${NC}"
+      msg "${RED}    Ожидалось: $EXPECTED_SHA${NC}"
+      msg "${RED}    Получено:  $ACTUAL_SHA${NC}"
+      rm -f "$BIN.tmp"
+      return 1
+    fi
+    msg "${GREEN}✅ Контрольная сумма SHA-256 проверена успешно${NC}"
 
     # Проверка ELF-заголовка (\x7fELF)
     ELF_MAGIC=$(head -c 4 "$BIN.tmp" 2>/dev/null)

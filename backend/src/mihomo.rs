@@ -986,6 +986,17 @@ pub fn resolve_active_leaf(proxies: &BTreeMap<String, Value>) -> String {
             proxies.get(*g).and_then(|p| p.get("now")).and_then(|n| n.as_str()).map(|s| s.to_string()).filter(|s| !s.is_empty())
         })
         .unwrap_or_default();
+    // AUDIT-003: если PROXY в DIRECT или пуст, а 🛡️ Whitelist активен — резолвим лист из 🛡️ Whitelist
+    if initial.is_empty() || initial.eq_ignore_ascii_case("DIRECT") {
+        if let Some(wl_now) = proxies
+            .get(crate::routing::WHITELIST_GROUP_NAME)
+            .and_then(|p| p.get("now"))
+            .and_then(|n| n.as_str())
+            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("DIRECT"))
+        {
+            initial = wl_now.to_string();
+        }
+    }
     // Универсальный fallback: нет привычных имён — берём первый selector.
     if initial.is_empty() {
         for p in proxies.values() {
@@ -1540,7 +1551,7 @@ pub async fn get_servers(
                 ping_ms: card_ping,
                 provider: Some(pid.to_string()),
                 provider_name: Some(default_title.to_string()),
-                is_pool: false,
+                is_pool: true,
                 resolved_ip: card_ip,
             });
         }
@@ -1728,16 +1739,26 @@ async fn switch_server_inner(http: &reqwest::Client, cfg: &AppConfig, server_id:
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    let wl_has_target = cfg.whitelist.enabled
-        && proxies
-            .get(crate::routing::WHITELIST_GROUP_NAME)
-            .and_then(|v| v.get("all"))
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().any(|x| x.as_str() == Some(&target)))
-            .unwrap_or(false);
+    let wl_group_has_target = proxies
+        .get(crate::routing::WHITELIST_GROUP_NAME)
+        .and_then(|v| v.get("all"))
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().any(|x| x.as_str() == Some(&target)))
+        .unwrap_or(false);
+    let wl_has_target = cfg.whitelist.enabled && wl_group_has_target;
     let groups = select_groups_to_switch(&proxies, &prev_active);
-    if groups.is_empty() && !wl_has_target {
-        return Err("Не найдено ни одной select-группы для переключения".into());
+    let target_in_any_group = groups.iter().any(|g| {
+        proxies
+            .get(g)
+            .and_then(|p| p.get("all"))
+            .and_then(|a| a.as_array())
+            .map(|members| members.iter().any(|m| m.as_str() == Some(target.as_str())))
+            .unwrap_or(false)
+    });
+    if !target_in_any_group && !wl_group_has_target {
+        if groups.is_empty() {
+            return Err("Не найдено ни одной select-группы для переключения".into());
+        }
     }
     let mut switched = 0usize;
     let mut skipped = 0usize;
@@ -1760,7 +1781,9 @@ async fn switch_server_inner(http: &reqwest::Client, cfg: &AppConfig, server_id:
         }
     }
     let mut wl_switched = false;
-    if switched == 0 && wl_has_target {
+    // Если ни одна общая группа (PROXY и т.п.) не содержит целевой узел, но он есть в 🛡️ Whitelist,
+    // разрешаем прямое переключение 🛡️ Whitelist (явный выбор БС-узла), не затрагивая обычные VPS-свитчи.
+    if switched == 0 && wl_group_has_target {
         if prev_wl_now == target {
             switched = 1;
         } else {
@@ -4646,5 +4669,140 @@ mod tests {
 
         clear_proxies_cache_for_test();
         reset_manual_ping_state_for_test();
+    }
+
+    #[tokio::test]
+    async fn regression_switch_server_uses_whitelist_group_even_when_cfg_whitelist_disabled() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_proxies_cache_for_test();
+
+        let wl_put_hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let wl_hits_srv = wl_put_hits.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                let wl_hits = wl_hits_srv.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req.lines().next().unwrap_or("");
+                    let (status, body) = if first_line.starts_with("GET /proxies") {
+                        let json_body = serde_json::json!({
+                            "proxies": {
+                                "PROXY": { "type": "Selector", "now": "DIRECT", "all": ["DIRECT"] },
+                                crate::routing::WHITELIST_GROUP_NAME: {
+                                    "type": "Selector",
+                                    "now": "DIRECT",
+                                    "all": ["DIRECT", "wl-node-1"]
+                                },
+                                "wl-node-1": { "type": "Vless", "server": "1.2.3.4" }
+                            }
+                        }).to_string();
+                        ("200 OK", json_body)
+                    } else if first_line.starts_with("PUT /proxies/") && first_line.contains("Whitelist") {
+                        wl_hits.fetch_add(1, Ordering::SeqCst);
+                        ("204 No Content", String::new())
+                    } else if first_line.starts_with("DELETE /connections") {
+                        ("204 No Content", String::new())
+                    } else {
+                        ("400 Bad Request", "{\"message\":\"not found\"}".to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        let mut cfg = AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+        cfg.whitelist.enabled = false;
+
+        let client = reqwest::Client::new();
+        let res = switch_server(&client, &cfg, "wl-node-1").await;
+        assert!(res.is_ok(), "switch_server must succeed via Whitelist group even if cfg.whitelist.enabled=false: {res:?}");
+        assert_eq!(wl_put_hits.load(Ordering::SeqCst), 1, "must switch 🛡️ Whitelist group");
+        clear_proxies_cache_for_test();
+    }
+
+    #[tokio::test]
+    async fn regression_switch_server_preserves_whitelist_isolation_for_vps() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_proxies_cache_for_test();
+
+        let wl_put_hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let proxy_put_hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let wl_srv = wl_put_hits.clone();
+        let proxy_srv = proxy_put_hits.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                let wl_hits = wl_srv.clone();
+                let p_hits = proxy_srv.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req.lines().next().unwrap_or("");
+                    let (status, body) = if first_line.starts_with("GET /proxies") {
+                        let json_body = serde_json::json!({
+                            "proxies": {
+                                "PROXY": { "type": "Selector", "now": "DIRECT", "all": ["DIRECT", "vps-node-1"] },
+                                crate::routing::WHITELIST_GROUP_NAME: {
+                                    "type": "Selector",
+                                    "now": "DIRECT",
+                                    "all": ["DIRECT", "vps-node-1"]
+                                },
+                                "vps-node-1": { "type": "Vless", "server": "5.6.7.8" }
+                            }
+                        }).to_string();
+                        ("200 OK", json_body)
+                    } else if first_line.starts_with("PUT /proxies/") && first_line.contains("Whitelist") {
+                        wl_hits.fetch_add(1, Ordering::SeqCst);
+                        ("204 No Content", String::new())
+                    } else if first_line.starts_with("PUT /proxies/PROXY") {
+                        p_hits.fetch_add(1, Ordering::SeqCst);
+                        ("204 No Content", String::new())
+                    } else if first_line.starts_with("DELETE /connections") {
+                        ("204 No Content", String::new())
+                    } else {
+                        ("400 Bad Request", "{\"message\":\"not found\"}".to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        let mut cfg = AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+        cfg.whitelist.enabled = false;
+
+        let client = reqwest::Client::new();
+        let res = switch_server(&client, &cfg, "vps-node-1").await;
+        assert!(res.is_ok(), "switch_server must succeed via PROXY: {res:?}");
+        assert_eq!(proxy_put_hits.load(Ordering::SeqCst), 1, "must switch PROXY group");
+        assert_eq!(wl_put_hits.load(Ordering::SeqCst), 0, "AUDIT-004: must NOT touch 🛡️ Whitelist when cfg.whitelist.enabled=false for VPS");
+        clear_proxies_cache_for_test();
     }
 }

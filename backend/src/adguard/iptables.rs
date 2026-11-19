@@ -23,17 +23,19 @@ pub fn reinsert_rules_commands(rules: &[&str], to_port: u16) -> Vec<String> {
         } else {
             rest.to_string()
         };
-        cmds.push(format!("iptables -w 2 -t nat {del_cmd}"));
-        cmds.push(format!("iptables -w 2 -t nat -I {chain} {pos} {updated_rest}"));
+        let ipt = crate::system::iptables_cmd_str();
+        cmds.push(format!("{ipt} -t nat {del_cmd}"));
+        cmds.push(format!("{ipt} -t nat -I {chain} {pos} {updated_rest}"));
     }
     cmds
 }
 
 pub fn build_sync_tunnel_dns_ports_script(from_ports: &str, to_port: u16) -> String {
+    let ipt = crate::system::iptables_cmd_str();
     format!(
         "for chain in XKEEN_GAMING XKEEN_BS; do \\\n\
             pos=1; \\\n\
-            iptables -w 2 -t nat -S $chain 2>/dev/null | grep -E 'to-ports ({from_ports})' | while read -r line; do \\\n\
+            {ipt} -t nat -S $chain 2>/dev/null | grep -E 'to-ports ({from_ports})' | while read -r line; do \\\n\
                 del_cmd=$(echo \"$line\" | sed 's/^-A/-D/'); \\\n\
                 if [ \"$pos\" -eq 1 ]; then \\\n\
                     add_cmd=$(echo \"$line\" | sed -E 's/--to-ports [0-9]+/--to-ports {to_port}/' | sed \"s/^-A $chain/-I $chain 1/\"); \\\n\
@@ -41,8 +43,8 @@ pub fn build_sync_tunnel_dns_ports_script(from_ports: &str, to_port: u16) -> Str
                     add_cmd=$(echo \"$line\" | sed -E 's/--to-ports [0-9]+/--to-ports {to_port}/' | sed \"s/^-A $chain/-I $chain $pos/\"); \\\n\
                 fi; \\\n\
                 pos=$((pos + 1)); \\\n\
-                iptables -w 2 -t nat $del_cmd 2>/dev/null || true; \\\n\
-                iptables -w 2 -t nat $add_cmd 2>/dev/null || true; \\\n\
+                {ipt} -t nat $del_cmd 2>/dev/null || true; \\\n\
+                {ipt} -t nat $add_cmd 2>/dev/null || true; \\\n\
             done; \\\n\
         done; \\\n\
         for hook in /opt/etc/ndm/netfilter.d/060-xkeen-gaming.sh /opt/etc/ndm/netfilter.d/061-xkeen-bs.sh; do \\\n\
@@ -50,6 +52,7 @@ pub fn build_sync_tunnel_dns_ports_script(from_ports: &str, to_port: u16) -> Str
                 sed -i -E 's/--to-ports ({from_ports})/--to-ports {to_port}/g' \"$hook\" 2>/dev/null || true; \\\n\
             fi; \\\n\
         done",
+        ipt = ipt,
         from_ports = from_ports,
         to_port = to_port
     )
@@ -59,22 +62,24 @@ pub fn build_adguard_ndm_hook_content(dns_port: u16) -> String {
     let port_str = dns_port.to_string();
     let mihomo_port = crate::routing::mihomo_dns_port_from_path(&crate::config::MihomoConfig::default().config_path);
     let sync_script = build_sync_tunnel_dns_ports_script(&format!("{mihomo_port}|5353|5354"), dns_port);
+    let ipt = crate::system::iptables_cmd_str();
     format!(
         "#!/bin/sh\n[ \"$table\" != \"nat\" ] && [ \"$table\" != \"filter\" ] && [ -n \"$table\" ] && exit 0\n\
-        iptables -w 2 -t nat -N {chain} 2>/dev/null || true\n\
-        iptables -w 2 -t nat -F {chain} 2>/dev/null || true\n\
-        iptables -w 2 -t nat -A {chain} -d 127.0.0.1 -j RETURN 2>/dev/null || true\n\
-        iptables -w 2 -t nat -A {chain} -p udp --dport 53 -j REDIRECT --to-ports {port} 2>/dev/null || true\n\
-        iptables -w 2 -t nat -A {chain} -p tcp --dport 53 -j REDIRECT --to-ports {port} 2>/dev/null || true\n\
+        {ipt} -t nat -N {chain} 2>/dev/null || true\n\
+        {ipt} -t nat -F {chain}\n\
+        {ipt} -t nat -A {chain} -d 127.0.0.1 -j RETURN\n\
+        {ipt} -t nat -A {chain} -p udp --dport 53 -j REDIRECT --to-ports {port}\n\
+        {ipt} -t nat -A {chain} -p tcp --dport 53 -j REDIRECT --to-ports {port}\n\
         for iface in br+ Bridge+ ra+; do\n\
-            iptables -w 2 -t nat -C PREROUTING -i \"$iface\" -p udp --dport 53 -j {chain} 2>/dev/null || iptables -w 2 -t nat -I PREROUTING 1 -i \"$iface\" -p udp --dport 53 -j {chain} 2>/dev/null || true\n\
-            iptables -w 2 -t nat -C PREROUTING -i \"$iface\" -p tcp --dport 53 -j {chain} 2>/dev/null || iptables -w 2 -t nat -I PREROUTING 1 -i \"$iface\" -p tcp --dport 53 -j {chain} 2>/dev/null || true\n\
-            iptables -w 2 -t filter -C INPUT -i \"$iface\" -p udp --dport {port} -j ACCEPT 2>/dev/null || iptables -w 2 -t filter -I INPUT 1 -i \"$iface\" -p udp --dport {port} -j ACCEPT 2>/dev/null || true\n\
-            iptables -w 2 -t filter -C INPUT -i \"$iface\" -p tcp --dport {port} -j ACCEPT 2>/dev/null || iptables -w 2 -t filter -I INPUT 1 -i \"$iface\" -p tcp --dport {port} -j ACCEPT 2>/dev/null || true\n\
+            {ipt} -t nat -C PREROUTING -i \"$iface\" -p udp --dport 53 -j {chain} 2>/dev/null || {ipt} -t nat -I PREROUTING 1 -i \"$iface\" -p udp --dport 53 -j {chain}\n\
+            {ipt} -t nat -C PREROUTING -i \"$iface\" -p tcp --dport 53 -j {chain} 2>/dev/null || {ipt} -t nat -I PREROUTING 1 -i \"$iface\" -p tcp --dport 53 -j {chain}\n\
+            {ipt} -t filter -C INPUT -i \"$iface\" -p udp --dport {port} -j ACCEPT 2>/dev/null || {ipt} -t filter -I INPUT 1 -i \"$iface\" -p udp --dport {port} -j ACCEPT\n\
+            {ipt} -t filter -C INPUT -i \"$iface\" -p tcp --dport {port} -j ACCEPT 2>/dev/null || {ipt} -t filter -I INPUT 1 -i \"$iface\" -p tcp --dport {port} -j ACCEPT\n\
         done\n\
-        iptables -w 2 -t filter -C INPUT -i lo -p udp --dport {port} -j ACCEPT 2>/dev/null || iptables -w 2 -t filter -I INPUT 1 -i lo -p udp --dport {port} -j ACCEPT 2>/dev/null || true\n\
-        iptables -w 2 -t filter -C INPUT -i lo -p tcp --dport {port} -j ACCEPT 2>/dev/null || iptables -w 2 -t filter -I INPUT 1 -i lo -p tcp --dport {port} -j ACCEPT 2>/dev/null || true\n\
+        {ipt} -t filter -C INPUT -i lo -p udp --dport {port} -j ACCEPT 2>/dev/null || {ipt} -t filter -I INPUT 1 -i lo -p udp --dport {port} -j ACCEPT\n\
+        {ipt} -t filter -C INPUT -i lo -p tcp --dport {port} -j ACCEPT 2>/dev/null || {ipt} -t filter -I INPUT 1 -i lo -p tcp --dport {port} -j ACCEPT\n\
         {sync_script}\n",
+        ipt = ipt,
         chain = AGH_IPTABLES_CHAIN,
         port = port_str,
         sync_script = sync_script
@@ -86,45 +91,26 @@ pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         // 1. Создаем цепочку XKEEN_ADGUARD, если она не создана, и очищаем ее
-        let _ = std::process::Command::new("iptables")
-            .args(["-w", "2", "-t", "nat", "-N", AGH_IPTABLES_CHAIN])
-            .output();
-        let _ = std::process::Command::new("iptables")
-            .args(["-w", "2", "-t", "nat", "-F", AGH_IPTABLES_CHAIN])
-            .output();
+        if !crate::system::run_iptables_ok(&["-t", "nat", "-N", AGH_IPTABLES_CHAIN]) {
+            // Цепочка могла уже существовать — проверяем через -F ниже
+        }
+        crate::system::run_iptables(&["-t", "nat", "-F", AGH_IPTABLES_CHAIN])?;
 
         // 2. Исключаем трафик loopback
-        let _ = std::process::Command::new("iptables")
-            .args(["-w", "2", "-t", "nat", "-A", AGH_IPTABLES_CHAIN, "-d", "127.0.0.1", "-j", "RETURN"])
-            .output();
+        crate::system::run_iptables(&["-t", "nat", "-A", AGH_IPTABLES_CHAIN, "-d", "127.0.0.1", "-j", "RETURN"])?;
 
         // 3. Редирект входящих DNS-запросов (порт 53) на порт AdGuard Home
         let port_str = dns_port.to_string();
-        let _ = std::process::Command::new("iptables")
-            .args(["-w", "2", "-t", "nat", "-A", AGH_IPTABLES_CHAIN, "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", &port_str])
-            .output();
-        let _ = std::process::Command::new("iptables")
-            .args(["-w", "2", "-t", "nat", "-A", AGH_IPTABLES_CHAIN, "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", &port_str])
-            .output();
+        crate::system::run_iptables(&["-t", "nat", "-A", AGH_IPTABLES_CHAIN, "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-ports", &port_str])?;
+        crate::system::run_iptables(&["-t", "nat", "-A", AGH_IPTABLES_CHAIN, "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-ports", &port_str])?;
 
         // 4. Встраиваем переход в XKEEN_ADGUARD в PREROUTING для LAN мостов и Wi-Fi интерфейсов (br+, Bridge+, ra+)
         for iface in AGH_LAN_INTERFACES {
-            let check_udp = std::process::Command::new("iptables")
-                .args(["-w", "2", "-t", "nat", "-C", "PREROUTING", "-i", iface, "-p", "udp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
-                .output();
-            if !check_udp.map(|o| o.status.success()).unwrap_or(false) {
-                let _ = std::process::Command::new("iptables")
-                    .args(["-w", "2", "-t", "nat", "-I", "PREROUTING", "1", "-i", iface, "-p", "udp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
-                    .output();
+            if !crate::system::run_iptables_ok(&["-t", "nat", "-C", "PREROUTING", "-i", iface, "-p", "udp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN]) {
+                crate::system::run_iptables(&["-t", "nat", "-I", "PREROUTING", "1", "-i", iface, "-p", "udp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])?;
             }
-
-            let check_tcp = std::process::Command::new("iptables")
-                .args(["-w", "2", "-t", "nat", "-C", "PREROUTING", "-i", iface, "-p", "tcp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
-                .output();
-            if !check_tcp.map(|o| o.status.success()).unwrap_or(false) {
-                let _ = std::process::Command::new("iptables")
-                    .args(["-w", "2", "-t", "nat", "-I", "PREROUTING", "1", "-i", iface, "-p", "tcp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
-                    .output();
+            if !crate::system::run_iptables_ok(&["-t", "nat", "-C", "PREROUTING", "-i", iface, "-p", "tcp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN]) {
+                crate::system::run_iptables(&["-t", "nat", "-I", "PREROUTING", "1", "-i", iface, "-p", "tcp", "--dport", "53", "-j", AGH_IPTABLES_CHAIN])?;
             }
         }
 
@@ -133,13 +119,8 @@ pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
         allowed_input_ifaces.push("lo");
         for iface in allowed_input_ifaces {
             for proto in &["udp", "tcp"] {
-                let check_input = std::process::Command::new("iptables")
-                    .args(["-w", "2", "-t", "filter", "-C", "INPUT", "-i", iface, "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
-                    .output();
-                if !check_input.map(|o| o.status.success()).unwrap_or(false) {
-                    let _ = std::process::Command::new("iptables")
-                        .args(["-w", "2", "-t", "filter", "-I", "INPUT", "1", "-i", iface, "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
-                        .output();
+                if !crate::system::run_iptables_ok(&["-t", "filter", "-C", "INPUT", "-i", iface, "-p", proto, "--dport", &port_str, "-j", "ACCEPT"]) {
+                    crate::system::run_iptables(&["-t", "filter", "-I", "INPUT", "1", "-i", iface, "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])?;
                 }
             }
         }
@@ -147,10 +128,11 @@ pub fn apply_adguard_iptables(dns_port: u16) -> Result<(), String> {
         // 6. Синхронизируем XKEEN_GAMING и XKEEN_BS, если цепочки активны (перехват DNS туннелями на порт AdGuard, баг 1)
         let mihomo_port = crate::routing::mihomo_dns_port_from_path(&crate::config::MihomoConfig::default().config_path);
         let sync_cmd = build_sync_tunnel_dns_ports_script(&format!("{mihomo_port}|5353|5354"), dns_port);
-        let _ = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&sync_cmd)
-            .output();
+        if let Ok(out) = std::process::Command::new("sh").arg("-c").arg(&sync_cmd).output() {
+            if !out.status.success() {
+                crate::log_w!("[ADGUARD] Предупреждение синхронизации туннельных DNS-правил: {}", String::from_utf8_lossy(&out.stderr).trim());
+            }
+        }
 
         // 7. Устанавливаем NDM hook для защиты от сброса правил фаервола системой KeeneticOS
         let hook_path = std::path::Path::new("/opt/etc/ndm/netfilter.d/040-adguard.sh");
@@ -202,10 +184,7 @@ pub fn remove_adguard_iptables_with_restore_port(restore_port: Option<u16>) -> R
         for iface in AGH_LAN_INTERFACES {
             for proto in &["udp", "tcp"] {
                 for _ in 0..20 {
-                    let out = std::process::Command::new("iptables")
-                        .args(["-w", "2", "-t", "nat", "-D", "PREROUTING", "-i", iface, "-p", proto, "--dport", "53", "-j", AGH_IPTABLES_CHAIN])
-                        .output();
-                    if !out.map(|o| o.status.success()).unwrap_or(false) {
+                    if !crate::system::run_iptables_ok(&["-t", "nat", "-D", "PREROUTING", "-i", iface, "-p", proto, "--dport", "53", "-j", AGH_IPTABLES_CHAIN]) {
                         break;
                     }
                 }
@@ -216,18 +195,12 @@ pub fn remove_adguard_iptables_with_restore_port(restore_port: Option<u16>) -> R
         for iface in allowed_input_ifaces {
             for proto in &["udp", "tcp"] {
                 for _ in 0..20 {
-                    let out = std::process::Command::new("iptables")
-                        .args(["-w", "2", "-t", "filter", "-D", "INPUT", "-i", iface, "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
-                        .output();
-                    if !out.map(|o| o.status.success()).unwrap_or(false) {
+                    if !crate::system::run_iptables_ok(&["-t", "filter", "-D", "INPUT", "-i", iface, "-p", proto, "--dport", &port_str, "-j", "ACCEPT"]) {
                         break;
                     }
                 }
                 for _ in 0..20 {
-                    let out = std::process::Command::new("iptables")
-                        .args(["-w", "2", "-t", "filter", "-D", "INPUT", "-i", iface, "-p", proto, "--dport", "5353", "-j", "ACCEPT"])
-                        .output();
-                    if !out.map(|o| o.status.success()).unwrap_or(false) {
+                    if !crate::system::run_iptables_ok(&["-t", "filter", "-D", "INPUT", "-i", iface, "-p", proto, "--dport", "5353", "-j", "ACCEPT"]) {
                         break;
                     }
                 }
@@ -235,19 +208,13 @@ pub fn remove_adguard_iptables_with_restore_port(restore_port: Option<u16>) -> R
         }
         for proto in &["udp", "tcp"] {
             for _ in 0..20 {
-                let out = std::process::Command::new("iptables")
-                    .args(["-w", "2", "-t", "filter", "-D", "INPUT", "-p", proto, "--dport", &port_str, "-j", "ACCEPT"])
-                    .output();
-                if !out.map(|o| o.status.success()).unwrap_or(false) {
+                if !crate::system::run_iptables_ok(&["-t", "filter", "-D", "INPUT", "-p", proto, "--dport", &port_str, "-j", "ACCEPT"]) {
                     break;
                 }
             }
             // Также подчищаем старый порт 5353, если он был прописан в filter INPUT
             for _ in 0..20 {
-                let out = std::process::Command::new("iptables")
-                    .args(["-w", "2", "-t", "filter", "-D", "INPUT", "-p", proto, "--dport", "5353", "-j", "ACCEPT"])
-                    .output();
-                if !out.map(|o| o.status.success()).unwrap_or(false) {
+                if !crate::system::run_iptables_ok(&["-t", "filter", "-D", "INPUT", "-p", proto, "--dport", "5353", "-j", "ACCEPT"]) {
                     break;
                 }
             }

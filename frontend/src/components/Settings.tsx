@@ -144,15 +144,13 @@ export default function Settings({ notify, status, refresh }: Props) {
   const cleanNotifToken = telegramBotToken.trim().replace(/^['"]|['"]$/g, '')
   const cleanNotifChatId = telegramChatId.trim().replace(/^['"]|['"]$/g, '')
 
-  // Сохраняем введённые данные в localStorage, чтобы они не терялись при обновлении страницы или панели
+  // AUDIT-016: не храним токен Telegram-бота в открытом localStorage (очищаем устаревший ключ)
   useEffect(() => {
-    if (cleanNotifToken && cleanNotifToken !== '******') {
-      try { localStorage.setItem('xkeen_tg_bot_token', cleanNotifToken); } catch {}
-    }
+    try { localStorage.removeItem('xkeen_tg_bot_token'); } catch {}
     if (cleanNotifChatId) {
       try { localStorage.setItem('xkeen_tg_chat_id', cleanNotifChatId); } catch {}
     }
-  }, [cleanNotifToken, cleanNotifChatId]);
+  }, [cleanNotifChatId]);
 
   let notifTokenWarning: string | null = null
   if (cleanNotifToken && cleanNotifToken !== '******') {
@@ -275,13 +273,12 @@ export default function Settings({ notify, status, refresh }: Props) {
       setTelegramEnabled(s.notifications?.telegram_enabled ?? false)
       const token = s.notifications?.telegram_bot_token ?? ''
       const chatId = s.notifications?.telegram_chat_id ?? ''
-      let cachedToken = ''
       let cachedChatId = ''
       try {
-        cachedToken = localStorage.getItem('xkeen_tg_bot_token') ?? ''
+        localStorage.removeItem('xkeen_tg_bot_token')
         cachedChatId = localStorage.getItem('xkeen_tg_chat_id') ?? ''
       } catch {}
-      setTelegramBotToken(token && token !== '******' ? token : (cachedToken || token))
+      setTelegramBotToken(token)
       setTelegramChatId(chatId || cachedChatId)
       setWebhookUrl(s.notifications?.webhook_url ?? '')
     }).catch((e) => notify(e instanceof Error ? e.message : 'Ошибка', true))
@@ -938,6 +935,7 @@ export default function Settings({ notify, status, refresh }: Props) {
             handleImportBackup={handleImportBackup}
             restoreBackup={restoreBackup}
             deleteBackup={deleteBackup}
+            notify={notify}
           />
       </div>
 

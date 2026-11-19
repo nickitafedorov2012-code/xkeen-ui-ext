@@ -102,22 +102,24 @@ pub async fn set_domains(State(state): State<AppState>, Json(req): Json<DomainsR
 
     let (n_direct, n_force) = (tx.config().direct_domains.len(), tx.config().force_domains.len());
     let auto_cdns_list: Vec<String> = auto_cdns.into_iter().collect();
-
-    // Автоматическая синхронизация IP-адресов принудительно проксируемых доменов и их CDN с geo_override
-    let overridden = match crate::override_sync::sync_from_config(tx.config(), &auto_cdns_list).await {
-        Ok(count) => count,
-        Err(e) => {
-            crate::log_w!("[OVERRIDE] Ошибка синхронизации geo_override: {e}");
-            0
-        }
-    };
+    let cfg_for_override = tx.config().clone();
     let new_rev = calc_domains_revision(&tx.config().direct_domains, &tx.config().force_domains);
+    drop(tx);
+
+    // AUDIT-083 (Instant Domain Save < 1s): синхронизацию geo_override выносим в фон,
+    // чтобы не блокировать HTTP-ответ сохранения доменов.
+    let cdns_bg = auto_cdns_list.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::override_sync::sync_from_config(&cfg_for_override, &cdns_bg).await {
+            crate::log_w!("[OVERRIDE] Ошибка фоновой синхронизации geo_override: {e}");
+        }
+    });
 
     api_ok(json!({
         "direct": n_direct,
         "force": n_force,
         "auto_cdns": auto_cdns_list,
-        "overridden_ips": overridden,
+        "overridden_ips": 0,
         "revision": new_rev
     }))
 }

@@ -653,15 +653,12 @@ pub fn is_legitimate_host(host_only: &str) -> bool {
         }
     } else {
         let lower = host_only.to_ascii_lowercase();
-        // Локальные однословные хосты без точек (mycustombox, keenetic, router) или .lan/.local
-        !lower.contains('.')
+        // AUDIT-022: не доверяем произвольным однословным хостам и чужим *.keenetic.pro/.link/.name
+        lower == "localhost"
+            || lower == "router"
+            || lower == "my.keenetic.net"
             || lower.ends_with(".lan")
             || lower.ends_with(".local")
-            || lower == "localhost"
-            || lower == "my.keenetic.net"
-            || lower.ends_with(".keenetic.pro")
-            || lower.ends_with(".keenetic.link")
-            || lower.ends_with(".keenetic.name")
     }
 }
 
@@ -732,7 +729,15 @@ pub fn is_trusted_origin_for_scheme(
         }
     }
 
-    // 2. Локальные адреса loopback и доверенные имена роутера
+    // 2. Локальные адреса loopback и доверенные имена роутера:
+    // при наличии Host проверяем совпадение порта, чтобы origin_port не игнорировался (AUDIT-022)
+    if let Some(host) = host_header {
+        if let Some((_, host_port)) = split_host_and_port(host.trim(), default_port) {
+            if origin_port != host_port {
+                return false;
+            }
+        }
+    }
     is_valid_origin(origin_host_only)
 }
 
@@ -800,17 +805,17 @@ pub async fn auth_middleware(
     let path = req.uri().path().to_string();
 
     let is_protected = path.starts_with("/api/") || path.starts_with("/clash/");
-    let is_exempt = path == "/api/auth/login"
+    let is_token_exempt = path == "/api/auth/login"
         || path == "/api/auth/status"
         || path == "/patch"
         || path == "/api/antigravity/fix.cmd"
         || path == "/api/flow/extension.zip";
 
-    if !is_protected || is_exempt {
+    if !is_protected || (path == "/patch" || path == "/api/antigravity/fix.cmd" || path == "/api/flow/extension.zip") {
         return next.run(req).await;
     }
 
-    // Защита от DNS-rebinding (is_legitimate_host, баг 91, A-06)
+    // Защита от DNS-rebinding (is_legitimate_host, баг 91, A-06, AUDIT-022 — до token-exempt маршрутов)
     let peer_is_loopback = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -821,7 +826,7 @@ pub async fn auth_middleware(
         return reject_host_header_response(host_header, &path);
     }
 
-    // CSRF Guard для всех мутирующих запросов (POST, PUT, DELETE, PATCH)
+    // CSRF Guard для всех мутирующих запросов (POST, PUT, DELETE, PATCH), включая /api/auth/login (Login-CSRF)
     let method = req.method();
     if method == axum::http::Method::POST
         || method == axum::http::Method::PUT
@@ -833,13 +838,17 @@ pub async fn auth_middleware(
             .and_then(|h| h.to_str().ok());
 
         if let Some(origin) = origin_header {
-            let expected_scheme = req
-                .headers()
-                .get("x-forwarded-proto")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.split(',').next().unwrap_or("").trim())
-                .filter(|s| *s == "http" || *s == "https")
-                .unwrap_or("http");
+            // Доверяем x-forwarded-proto только от локального reverse-proxy (loopback)
+            let expected_scheme = if peer_is_loopback {
+                req.headers()
+                    .get("x-forwarded-proto")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.split(',').next().unwrap_or("").trim())
+                    .filter(|s| *s == "http" || *s == "https")
+                    .unwrap_or("http")
+            } else {
+                "http"
+            };
             if !is_trusted_origin_for_scheme(origin, host_header, Some(expected_scheme)) {
                 log_w!("[AUTH] ⚠️ Отклонен запрос с недопустимым Origin: {} к {}", origin, path);
                 return (
@@ -852,24 +861,33 @@ pub async fn auth_middleware(
                 ).into_response();
             }
         } else {
-            // SEC-08: Требуем X-Requested-With или X-CSRF-Token для мутирующих запросов без Origin/Referer
+            // SEC-08 / AUDIT-022: Требуем X-Requested-With: XMLHttpRequest или валидный подписанный токен в X-CSRF-Token
             let x_requested_with = req.headers().get("x-requested-with").and_then(|h| h.to_str().ok());
             let x_csrf_token = req.headers().get("x-csrf-token").and_then(|h| h.to_str().ok());
             let is_xhr = x_requested_with.map(|v| v.eq_ignore_ascii_case("xmlhttprequest")).unwrap_or(false);
-            let has_csrf = x_csrf_token.map(|v| !v.trim().is_empty()).unwrap_or(false);
+            let has_valid_csrf = if let Some(tok) = x_csrf_token.map(str::trim).filter(|s| !s.is_empty()) {
+                let cfg_snap = state.config.read().await;
+                !cfg_snap.auth.session_secret.is_empty() && verify_session_token(tok, &cfg_snap.auth.session_secret)
+            } else {
+                false
+            };
 
-            if !is_xhr && !has_csrf {
+            if !is_xhr && !has_valid_csrf {
                 log_w!("[AUTH] ⚠️ Отклонен мутирующий запрос без Origin/Referer и без CSRF-заголовков к {}", path);
                 return (
                     StatusCode::FORBIDDEN,
                     Json(json!({
                         "success": false,
                         "error": "forbidden",
-                        "message": "Отклонено политикой CSRF: отсутствует заголовок X-Requested-With или X-CSRF-Token"
+                        "message": "Отклонено политикой CSRF: отсутствует заголовок X-Requested-With или валидный X-CSRF-Token"
                     })),
                 ).into_response();
             }
         }
+    }
+
+    if is_token_exempt {
+        return next.run(req).await;
     }
 
     let cfg = state.config.read().await.clone();
@@ -1045,11 +1063,14 @@ mod tests {
         assert!(!is_trusted_origin("http://172.16.0.1", None));
         assert!(is_trusted_origin("http://172.31.255.254", Some("172.31.255.254")));
         assert!(!is_trusted_origin("http://172.31.255.254", None));
-        // 2. Источник совпадает с заголовком Host (включая KeenDNS)
-        assert!(is_trusted_origin("https://myrouter.keenetic.pro:1001", Some("myrouter.keenetic.pro:1001")));
+        // 2. Локальные адреса (my.keenetic.net, .lan, .local)
         assert!(is_trusted_origin("https://my.keenetic.net", Some("my.keenetic.net")));
-        assert!(is_trusted_origin("http://mycustombox:1001/dashboard", Some("mycustombox:1001")));
         assert!(is_trusted_origin("https://router.lan", Some("router.lan")));
+        // AUDIT-022: произвольные single-label и *.keenetic.pro не доверяются без явной настройки
+        assert!(!is_trusted_origin("https://myrouter.keenetic.pro:1001", Some("myrouter.keenetic.pro:1001")));
+        assert!(!is_trusted_origin("http://mycustombox:1001/dashboard", Some("mycustombox:1001")));
+        // AUDIT-022: несовпадение порта в Origin и Host должно отклоняться
+        assert!(!is_trusted_origin("http://localhost:9999", Some("192.168.1.1:1001")));
 
         // 3. Злонамеренные внешние источники (CSRF-атаки) ОБЯЗАНЫ блокироваться!
         // Включая чужие домены keenetic.pro без совпадения с Host (SEC-08)

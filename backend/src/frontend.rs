@@ -33,7 +33,20 @@ pub async fn serve(uri: Uri) -> Response {
             .into_response();
     }
 
-    // 1. Приоритет прямого поиска на диске (чтобы можно было обновлять UI без пересборки бинарника)
+    // 1. AUDIT-021: приоритет встроенных Assets бинарника над /opt/share/xkeen-route/dist
+    if let Some(content) = Assets::get(path) {
+        let mime = mime_guess::from_path(path).first_or_octet_stream();
+        return (
+            [
+                (header::CONTENT_TYPE, mime.as_ref()),
+                (header::CACHE_CONTROL, cache_control_for(path)),
+            ],
+            content.data,
+        )
+            .into_response();
+    }
+
+    // 2. Fallback на /opt/share/xkeen-route/dist (только если файла нет в бинарнике)
     let disk_dist = Path::new("/opt/share/xkeen-route/dist");
     if disk_dist.is_dir() {
         let candidate = disk_dist.join(path);
@@ -52,19 +65,6 @@ pub async fn serve(uri: Uri) -> Response {
                 }
             }
         }
-    }
-
-    // 2. Поиск в Assets бинарника (fallback)
-    if let Some(content) = Assets::get(path) {
-        let mime = mime_guess::from_path(path).first_or_octet_stream();
-        return (
-            [
-                (header::CONTENT_TYPE, mime.as_ref()),
-                (header::CACHE_CONTROL, cache_control_for(path)),
-            ],
-            content.data,
-        )
-            .into_response();
     }
 
     // 2. Если запрос был к /assets/..., но файл лежит в корне dist (или наоборот)
@@ -128,20 +128,7 @@ pub async fn serve(uri: Uri) -> Response {
             .into_response();
     }
 
-    // 5. Fallback на index.html для SPA клиентского роутинга
-    let idx = disk_dist.join("index.html");
-    if idx.is_file() {
-        if let Ok(data) = tokio::fs::read(&idx).await {
-            return (
-                [
-                    (header::CONTENT_TYPE, "text/html"),
-                    (header::CACHE_CONTROL, CACHE_NO_CACHE),
-                ],
-                data,
-            )
-                .into_response();
-        }
-    }
+    // 5. Fallback на index.html для SPA клиентского роутинга (приоритет Assets::get)
     match Assets::get("index.html") {
         Some(content) => (
             [

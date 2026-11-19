@@ -200,10 +200,11 @@ pub async fn restore_backup(State(state): State<AppState>, Json(req): Json<Backu
         Err(e) => return api_err(format!("Файл config.json в бэкапе поврежден: {e}")),
     };
 
-    // BK-04: Сохранение локальных путей хоста при переносе бэкапа (включая AdGuardHome — R06)
+    // BK-04: Сохранение локальных путей хоста и auth панели при переносе бэкапа (AUDIT-015)
     new_cfg.system = cfg.system.clone();
     new_cfg.mihomo.config_path = cfg.mihomo.config_path.clone();
     new_cfg.adguard.config_path = cfg.adguard.config_path.clone();
+    new_cfg.auth = cfg.auth.clone();
 
     // 2. Старт транзакции через ConfigTx с блокировками и снапшотами (BK-04, BK-05)
     let mut tx = match crate::transaction::ConfigTx::begin(&state).await {
@@ -360,6 +361,56 @@ pub async fn delete_backup(State(state): State<AppState>, Json(req): Json<Backup
 
 // ==================== ЭКСПОРТ И ИМПОРТ БЭКАПОВ В БРАУЗЕРЕ =============
 
+/// Маскирует секретные поля config.json перед экспортом/чтением (AUDIT-015).
+pub fn redact_route_config_json(raw: &str) -> String {
+    let Ok(mut val) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return raw.to_string();
+    };
+    if let Some(auth) = val.get_mut("auth").and_then(|v| v.as_object_mut()) {
+        auth.insert("password_hash".to_string(), json!(""));
+        auth.insert("salt".to_string(), json!(""));
+        auth.insert("session_secret".to_string(), json!(""));
+    }
+    if let Some(rci) = val.get_mut("rci").and_then(|v| v.as_object_mut()) {
+        if rci.get("password").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false) {
+            rci.insert("password".to_string(), json!("******"));
+        }
+    }
+    if let Some(notif) = val.get_mut("notifications").and_then(|v| v.as_object_mut()) {
+        if notif.get("telegram_bot_token").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false) {
+            notif.insert("telegram_bot_token".to_string(), json!("******"));
+        }
+    }
+    if let Some(vk) = val.get_mut("vkturn").and_then(|v| v.as_object_mut()) {
+        for k in ["vk_token", "profile_token", "password"] {
+            if vk.get(k).and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false) {
+                vk.insert(k.to_string(), json!("******"));
+            }
+        }
+    }
+    if let Some(mh) = val.get_mut("mihomo").and_then(|v| v.as_object_mut()) {
+        if mh.get("secret").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false) {
+            mh.insert("secret".to_string(), json!("******"));
+        }
+    }
+    serde_json::to_string_pretty(&val).unwrap_or_else(|_| raw.to_string())
+}
+
+fn redact_adguard_yaml(raw: &str) -> String {
+    raw.lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("password:") {
+                let indent = &line[..line.len() - trimmed.len()];
+                format!("{indent}password: \"******\"")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// GET /api/backups/export/:name — экспорт снимка конфигурации в формате JSON
 pub async fn export_backup(
     State(state): State<AppState>,
@@ -377,9 +428,10 @@ pub async fn export_backup(
     let mihomo_yaml = tokio::fs::read_to_string(dir.join("config.yaml"))
         .await
         .map_err(|e| AppError::internal(format!("Ошибка чтения config.yaml из бэкапа: {e}")))?;
-    let route_json = tokio::fs::read_to_string(dir.join("config.json"))
+    let route_json_raw = tokio::fs::read_to_string(dir.join("config.json"))
         .await
         .map_err(|e| AppError::internal(format!("Ошибка чтения config.json из бэкапа: {e}")))?;
+    let route_json = redact_route_config_json(&route_json_raw);
 
     let mut files_map = serde_json::Map::new();
     files_map.insert("config.yaml".to_string(), json!(mihomo_yaml));
@@ -395,7 +447,7 @@ pub async fn export_backup(
         files_map.insert("ru_exclude_override.lst".to_string(), json!(ov));
     }
     if let Ok(agh) = tokio::fs::read_to_string(dir.join("AdGuardHome.yaml")).await {
-        files_map.insert("AdGuardHome.yaml".to_string(), json!(agh));
+        files_map.insert("AdGuardHome.yaml".to_string(), json!(redact_adguard_yaml(&agh)));
     }
     let prov_dir = dir.join("providers");
     if prov_dir.is_dir() {
@@ -591,6 +643,31 @@ pub async fn import_backup(
 
 #[cfg(test)]
 mod backup_regression_tests {
+    #[test]
+    fn regression_audit_015_redact_route_config_json_masks_secrets() {
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.auth.enabled = true;
+        cfg.auth.password_hash = "hash123".to_string();
+        cfg.auth.salt = "salt123".to_string();
+        cfg.auth.session_secret = "sec123".to_string();
+        cfg.rci.password = "rci_pass".to_string();
+        cfg.notifications.telegram_bot_token = "12345:AAABBB".to_string();
+        cfg.vkturn.vk_token = Some("secret_vk_token_xyz".to_string());
+        cfg.vkturn.password = "secret_vk_pass_xyz".to_string();
+        cfg.mihomo.secret = "mh_sec".to_string();
+
+        let raw = serde_json::to_string_pretty(&cfg).unwrap();
+        let redacted = super::redact_route_config_json(&raw);
+        assert!(!redacted.contains("hash123"));
+        assert!(!redacted.contains("salt123"));
+        assert!(!redacted.contains("sec123"));
+        assert!(!redacted.contains("rci_pass"));
+        assert!(!redacted.contains("12345:AAABBB"));
+        assert!(!redacted.contains("secret_vk_token_xyz"));
+        assert!(!redacted.contains("secret_vk_pass_xyz"));
+        assert!(!redacted.contains("mh_sec"));
+    }
+
     #[test]
     fn regression_r01_r02_r03_r06_backup_contracts() {
         let src = include_str!("backups.rs");
