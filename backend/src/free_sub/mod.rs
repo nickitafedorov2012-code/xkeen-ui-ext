@@ -897,11 +897,49 @@ where
     Ok((d1 + d2) / 2)
 }
 
+/// Сортирует результаты L7-проверки партии по возрастанию задержки.
+pub fn sort_l7_verified_by_delay(verified: &mut [(Value, i64)]) {
+    verified.sort_by_key(|(_, d)| *d);
+}
+
+/// Приоритет L7-очереди: сначала TCP-кандидаты (с `ru_sni_score == 1` на самом верху),
+/// и только после них `is_quic_udp` (`hysteria2`/`tuic`) с сохранением приоритета RU-SNI.
+pub fn prioritize_l7_ready_proxies(
+    mut tcp_passed: Vec<CandidateNode>,
+    mut quic_udp: Vec<CandidateNode>,
+) -> Vec<Value> {
+    tcp_passed.sort_by_key(|c| std::cmp::Reverse(c.ru_sni_score));
+    quic_udp.sort_by_key(|c| std::cmp::Reverse(c.ru_sni_score));
+    tcp_passed
+        .into_iter()
+        .chain(quic_udp)
+        .map(|c| c.proxy)
+        .collect()
+}
+
+/// Решение об авто-переключении активного узла в фоновом доборе на более быстрый узел.
+pub fn should_upgrade_active_node(
+    current_delay_ms: i64,
+    current_is_quic_udp: bool,
+    candidate_delay_ms: i64,
+    candidate_is_quic_udp: bool,
+) -> bool {
+    if candidate_delay_ms <= 0 {
+        return false;
+    }
+    let much_faster = current_delay_ms > 0
+        && candidate_delay_ms * 2 <= current_delay_ms
+        && (current_delay_ms - candidate_delay_ms) >= 300;
+    let tcp_over_quic = current_is_quic_udp && !candidate_is_quic_udp && candidate_delay_ms < 600;
+    much_faster || tcp_over_quic
+}
+
 /// Фаза 2: точечная L7-валидация партии кандидатов через отдельный служебный провайдер `__free_sub_probe`.
+/// Проверяет всю мини-партию целиком и сортирует успешные узлы по возрастанию задержки.
 async fn run_l7_batch_probe(
     state: &AppState,
     batch: &[Value],
-    stop_after_first: bool,
+    _stop_after_first: bool,
 ) -> Vec<(Value, i64)> {
     if batch.is_empty() {
         return Vec::new();
@@ -957,15 +995,14 @@ async fn run_l7_batch_probe(
         if let Ok(delay) = res {
             update_status(|st| st.stats.l7_passed += 1).await;
             verified.push((node, delay));
-            if stop_after_first {
-                break;
-            }
         }
     }
+    sort_l7_verified_by_delay(&mut verified);
     verified
 }
 
 /// Сохраняет активный узел пользователя с прежним именем и параметрами, если он принадлежит целевой подписке.
+/// Не допускает более одного узла с одинаковым `(server, port)` в основном пуле.
 pub fn merge_verified_with_active_session(
     verified: Vec<Value>,
     existing_nodes: &[Value],
@@ -973,6 +1010,7 @@ pub fn merge_verified_with_active_session(
 ) -> (Vec<Value>, bool) {
     let mut out = Vec::new();
     let mut seen_keys = HashSet::new();
+    let mut seen_endpoints = HashSet::new();
     let mut preserved = false;
 
     if let Some(active_name) = active_leaf.map(str::trim).filter(|s| !s.is_empty()) {
@@ -981,6 +1019,9 @@ pub fn merge_verified_with_active_session(
             .find(|n| n.get("name").and_then(|v| v.as_str()) == Some(active_name))
         {
             seen_keys.insert(node_dedup_key(active_node));
+            if let Some(ep) = endpoint_blacklist_key(active_node) {
+                seen_endpoints.insert(ep);
+            }
             out.push(active_node.clone());
             preserved = true;
         }
@@ -988,7 +1029,10 @@ pub fn merge_verified_with_active_session(
 
     for node in verified {
         let key = node_dedup_key(&node);
-        if seen_keys.insert(key) {
+        let ep_ok = endpoint_blacklist_key(&node)
+            .map(|ep| seen_endpoints.insert(ep))
+            .unwrap_or(true);
+        if ep_ok && seen_keys.insert(key) {
             out.push(node);
         }
     }
@@ -1141,10 +1185,34 @@ pub fn prune_expired_blacklist(mc: &mut ModeCache, now_ts: i64) {
     mc.blacklist.retain(|_, exp| *exp > now_ts);
 }
 
+pub fn endpoint_blacklist_key(proxy: &Value) -> Option<String> {
+    let server = proxy
+        .get("server")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    let port = proxy
+        .get("port")
+        .and_then(|v| {
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+        })
+        .unwrap_or(0);
+    if server.is_empty() || port == 0 {
+        return None;
+    }
+    Some(format!("ep:{}:{port}", server.to_ascii_lowercase()))
+}
+
 pub fn is_node_blacklisted(mc: &ModeCache, proxy: &Value, node_name: &str, now_ts: i64) -> bool {
     let key = node_dedup_key(proxy);
     if mc.blacklist.get(&key).is_some_and(|exp| *exp > now_ts) {
         return true;
+    }
+    if let Some(ep_key) = endpoint_blacklist_key(proxy) {
+        if mc.blacklist.get(&ep_key).is_some_and(|exp| *exp > now_ts) {
+            return true;
+        }
     }
     mc.blacklist.get(node_name).is_some_and(|exp| *exp > now_ts)
 }
@@ -1161,6 +1229,9 @@ pub fn blacklist_node_in_cache(
     }
     if let Some(p) = proxy_opt {
         mc.blacklist.insert(node_dedup_key(p), expires);
+        if let Some(ep_key) = endpoint_blacklist_key(p) {
+            mc.blacklist.insert(ep_key, expires);
+        }
     }
 }
 
@@ -1894,12 +1965,13 @@ async fn run_free_sub_job_inner(
     );
     let ordered_candidates: Vec<CandidateNode> = primary_q.into_iter().chain(deferred_q).collect();
 
-    // Разделение: QUIC/UDP минуют TCP-предфильтр, TCP проходят через TCP-предфильтр
-    let mut l7_ready_proxies: Vec<Value> = Vec::new();
+    // Разделение: TCP/VLESS проходят через TCP-предфильтр и ставятся в начало очереди (с приоритетом RU-SNI),
+    // а QUIC/UDP (`hysteria2`/`tuic`) идут только после прошедших TCP-предфильтр узлов.
+    let mut quic_udp_candidates: Vec<CandidateNode> = Vec::new();
     let mut tcp_candidates: Vec<CandidateNode> = Vec::new();
     for c in ordered_candidates {
         if c.is_quic_udp {
-            l7_ready_proxies.push(c.proxy);
+            quic_udp_candidates.push(c);
         } else {
             tcp_candidates.push(c);
         }
@@ -1919,26 +1991,27 @@ async fn run_free_sub_job_inner(
     )
     .await;
 
-    let mut tcp_passed_count = 0usize;
+    let mut tcp_passed_candidates = Vec::new();
     let mut timed_out_candidates = Vec::new();
-    for c in &tcp_candidates {
+    for c in tcp_candidates {
         let any_ok = c
             .resolved_addrs
             .iter()
             .take(2)
             .any(|ep| wave1_outcomes.get(ep) == Some(&TcpOutcome::Ok));
         if any_ok {
-            tcp_passed_count += 1;
-            l7_ready_proxies.push(c.proxy.clone());
+            tcp_passed_candidates.push(c);
         } else if c
             .resolved_addrs
             .iter()
             .take(2)
             .any(|ep| wave1_outcomes.get(ep) == Some(&TcpOutcome::TimedOutFast))
         {
-            timed_out_candidates.push(c.clone());
+            timed_out_candidates.push(c);
         }
     }
+    let tcp_passed_count = tcp_passed_candidates.len();
+    let l7_ready_proxies = prioritize_l7_ready_proxies(tcp_passed_candidates, quic_udp_candidates);
     update_status(|st| {
         st.stats.tcp_checked = wave1_outcomes.len();
         st.stats.tcp_passed = tcp_passed_count;
@@ -2075,6 +2148,11 @@ async fn run_free_sub_job_inner(
     })
     .await;
 
+    let initial_active_delay = verified_nodes.first().map(|(_, d)| *d).unwrap_or(999);
+    let initial_active_is_quic = verified_nodes
+        .first()
+        .is_some_and(|(n, _)| is_quic_udp_node(n));
+
     let first_proxies: Vec<Value> = verified_nodes.iter().map(|(n, _)| n.clone()).collect();
     let connect_name = if auto_connect {
         first_proxies
@@ -2112,47 +2190,95 @@ async fn run_free_sub_job_inner(
     })
     .await;
 
-    // Фоновый добор до BACKGROUND_BACKUP_TARGET (20) резервных узлов без перехвата активного сервера
+    // Фоновый добор до BACKGROUND_BACKUP_TARGET (20) резервных узлов;
+    // если найден существенно более быстрый узел (или TCP вместо QUIC/UDP), автоматически переключаемся на него.
     if !remaining_for_bg.is_empty() {
         let bg_state = state.clone();
         let bg_cache_path = cache_path.clone();
         tokio::spawn(async move {
             let mut extra = first_proxies;
+            let mut seen_eps: HashSet<String> = extra
+                .iter()
+                .filter_map(endpoint_blacklist_key)
+                .collect();
+            let mut delay_by_key: HashMap<String, i64> = verified_nodes
+                .iter()
+                .map(|(n, d)| (node_dedup_key(n), *d))
+                .collect();
+            let mut cur_active_delay = initial_active_delay;
+            let mut cur_active_is_quic = initial_active_is_quic;
             let mut last_published_len = extra.len();
             for chunk in remaining_for_bg.chunks(L7_BATCH_SIZE).take(10) {
                 if current_mode_generation(mode) != my_gen || extra.len() >= BACKGROUND_BACKUP_TARGET {
                     break;
                 }
                 let res = run_l7_batch_probe(&bg_state, chunk, false).await;
-                for (n, _) in res {
+                let mut upgrade_target: Option<(String, i64, bool)> = None;
+                for (n, delay) in res {
                     if extra.len() >= BACKGROUND_BACKUP_TARGET {
                         break;
+                    }
+                    let ep_ok = endpoint_blacklist_key(&n)
+                        .map(|ep| seen_eps.insert(ep))
+                        .unwrap_or(true);
+                    if !ep_ok {
+                        continue;
+                    }
+                    let n_is_quic = is_quic_udp_node(&n);
+                    let n_name = n
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    delay_by_key.insert(node_dedup_key(&n), delay);
+                    if auto_connect
+                        && upgrade_target.is_none()
+                        && !n_name.is_empty()
+                        && should_upgrade_active_node(cur_active_delay, cur_active_is_quic, delay, n_is_quic)
+                    {
+                        upgrade_target = Some((n_name, delay, n_is_quic));
                     }
                     extra.push(n);
                 }
                 if current_mode_generation(mode) != my_gen {
                     return;
                 }
-                if extra.len() > last_published_len {
+                if extra.len() > last_published_len || upgrade_target.is_some() {
                     let count = extra.len();
-                    if publish_and_connect(&bg_state, mode, extra.clone(), None, false, Some(my_gen))
+                    let switch_name = upgrade_target.as_ref().map(|(nm, _, _)| nm.clone());
+                    let do_connect = switch_name.is_some();
+                    if publish_and_connect(&bg_state, mode, extra.clone(), switch_name.clone(), do_connect, Some(my_gen))
                         .await
                         .is_ok()
                     {
                         last_published_len = count;
+                        if let Some((ref new_name, new_delay, new_quic)) = upgrade_target {
+                            log_i!(
+                                "[FREE-SUB] Фоновый добор: авто-переключение на более быстрый узел '{}' ({} мс вместо {} мс)",
+                                new_name,
+                                new_delay,
+                                cur_active_delay
+                            );
+                            cur_active_delay = new_delay;
+                            cur_active_is_quic = new_quic;
+                            update_status(|st| {
+                                if !st.running || st.mode == mode {
+                                    st.active_node = Some(new_name.clone());
+                                }
+                            })
+                            .await;
+                        }
                         let ts = chrono::Utc::now().timestamp();
                         let _ = update_disk_cache(&bg_cache_path, |c| {
                             let mc = c.mode_mut(mode);
                             for n in &extra {
-                                if !mc.working_nodes.iter().any(|w| node_dedup_key(&w.proxy) == node_dedup_key(n)) {
+                                let dk = node_dedup_key(n);
+                                if !mc.working_nodes.iter().any(|w| node_dedup_key(&w.proxy) == dk) {
+                                    let node_delay = delay_by_key.get(&dk).copied().unwrap_or(999);
                                     mc.working_nodes.push(CachedWorkingNode {
                                         proxy: n.clone(),
                                         last_ok_ts: ts,
-                                        last_delay_ms: n
-                                            .get("delay")
-                                            .and_then(|v| v.as_i64())
-                                            .filter(|&d| d > 0)
-                                            .unwrap_or(999),
+                                        last_delay_ms: node_delay,
                                         mode,
                                         high_priority: false,
                                         total_bytes: 0,
@@ -2381,11 +2507,16 @@ pub async fn switch_pool_node(
     }
 
     let active_srv = mihomo::get_active_server(&state.http, &cfg).await.ok().flatten();
-    let cur_name = active_srv
-        .as_ref()
-        .filter(|s| names.iter().any(|n| n == &s.id))
-        .map(|s| s.id.clone())
-        .or_else(|| cache.mode_ref(mode).last_selected_node.clone());
+    let cur_name = resolve_pool_leaf_name(state, &cfg, mode, active_srv.as_ref(), &nodes)
+        .await
+        .filter(|leaf| names.iter().any(|n| n == leaf))
+        .or_else(|| {
+            cache
+                .mode_ref(mode)
+                .last_selected_node
+                .clone()
+                .filter(|leaf| names.iter().any(|n| n == leaf))
+        });
 
     let chosen = match target.trim() {
         "next" => {
@@ -2596,6 +2727,17 @@ pub async fn get_pool_and_history(state: &AppState, mode: FreeSubMode) -> Value 
 static IDLE_PROBE_TICKS: std::sync::LazyLock<Mutex<(Option<String>, u8)>> =
     std::sync::LazyLock::new(|| Mutex::new((None, 0)));
 
+/// Определяет, является ли текущий тик Smart Watchdog подозрительным на зависание:
+/// узел пропал из живых в провайдере ИЛИ при активных соединениях скорость в обе стороны ниже 1 КБ/с (капельный трафик).
+pub fn is_stall_watchdog_tick(
+    alive_in_provider: bool,
+    node_conns: usize,
+    down_speed: u64,
+    up_speed: u64,
+) -> bool {
+    !alive_in_provider || (node_conns > 0 && down_speed < 1024 && up_speed < 1024)
+}
+
 /// Smart Watchdog: при зависании активного бесплатного узла (есть соединения через ЭТОТ узел,
 /// 0 Б/с входящего и исходящего трафика >= 3 тика ~15-20с, либо Mihomo пометил узел `alive: false`,
 /// либо периодическая L7-проба при нулевом трафике упала)
@@ -2657,7 +2799,7 @@ pub async fn check_free_sub_stall_watchdog(state: &AppState) {
     if streak.0.as_deref() != Some(leaf_name.as_str()) {
         *streak = (Some(leaf_name.clone()), 0);
     }
-    if (node_conns > 0 && down_speed == 0 && up_speed == 0) || !alive_in_provider {
+    if is_stall_watchdog_tick(alive_in_provider, node_conns, down_speed, up_speed) {
         streak.1 = streak.1.saturating_add(1);
     } else {
         streak.1 = 0;
@@ -2666,7 +2808,7 @@ pub async fn check_free_sub_stall_watchdog(state: &AppState) {
     drop(streak);
 
     let mut periodic_probe_due = false;
-    if count < 3 && down_speed == 0 && up_speed == 0 {
+    {
         let mut idle = IDLE_PROBE_TICKS.lock().await;
         if idle.0.as_deref() != Some(leaf_name.as_str()) {
             *idle = (Some(leaf_name.clone()), 0);
@@ -2676,8 +2818,6 @@ pub async fn check_free_sub_stall_watchdog(state: &AppState) {
             idle.1 = 0;
             periodic_probe_due = true;
         }
-    } else if down_speed > 0 || up_speed > 0 {
-        *IDLE_PROBE_TICKS.lock().await = (Some(leaf_name.clone()), 0);
     }
 
     if count >= 3 || periodic_probe_due {
@@ -3472,6 +3612,212 @@ proxies:
         let nodes = res.get("nodes").and_then(|v| v.as_array()).unwrap();
         assert_eq!(nodes[0].get("is_active").and_then(|v| v.as_bool()), Some(false));
         assert_eq!(nodes[1].get("is_active").and_then(|v| v.as_bool()), Some(true));
+
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::mihomo::invalidate_proxies_cache();
+    }
+
+    #[test]
+    fn regression_tcp_ru_sni_prioritized_ahead_of_quic_udp_and_sorted_by_delay() {
+        let make_cand = |name: &str, is_quic_udp: bool, ru_sni_score: u8| CandidateNode {
+            proxy: json!({ "name": name, "type": if is_quic_udp { "hysteria2" } else { "vless" }, "server": "1.2.3.4", "port": 443 }),
+            name: name.to_string(),
+            server: "1.2.3.4".to_string(),
+            port: 443,
+            is_quic_udp,
+            resolved_addrs: Vec::new(),
+            subnet_key: "1.2.3.0/24".to_string(),
+            ru_sni_score,
+        };
+        let tcp_passed = vec![
+            make_cand("tcp-foreign", false, 0),
+            make_cand("tcp-ru-vk", false, 1),
+        ];
+        let quic_udp = vec![
+            make_cand("hy2-foreign", true, 0),
+            make_cand("hy2-ru", true, 1),
+        ];
+        let ordered = prioritize_l7_ready_proxies(tcp_passed, quic_udp);
+        let names: Vec<&str> = ordered
+            .iter()
+            .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert_eq!(names, vec!["tcp-ru-vk", "tcp-foreign", "hy2-ru", "hy2-foreign"]);
+
+        let mut verified = vec![
+            (json!({"name": "slow"}), 1200),
+            (json!({"name": "fast"}), 210),
+            (json!({"name": "mid"}), 480),
+        ];
+        sort_l7_verified_by_delay(&mut verified);
+        let sorted_names: Vec<&str> = verified
+            .iter()
+            .filter_map(|(v, _)| v.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert_eq!(sorted_names, vec!["fast", "mid", "slow"]);
+
+        assert!(should_upgrade_active_node(1200, false, 350, false));
+        assert!(should_upgrade_active_node(800, true, 450, false));
+        assert!(!should_upgrade_active_node(1200, false, 1000, false));
+    }
+
+    #[test]
+    fn regression_blacklist_blocks_all_clones_sharing_same_server_port() {
+        let clone1 = json!({
+            "name": "Clone-A",
+            "type": "vless",
+            "server": "185.151.243.186",
+            "port": 443,
+            "uuid": "11111111-1111-1111-1111-111111111111"
+        });
+        let clone2 = json!({
+            "name": "Clone-B",
+            "type": "vless",
+            "server": "185.151.243.186",
+            "port": 443,
+            "uuid": "22222222-2222-2222-2222-222222222222"
+        });
+        let other = json!({
+            "name": "Other-Node",
+            "type": "vless",
+            "server": "91.108.4.1",
+            "port": 443,
+            "uuid": "33333333-3333-3333-3333-333333333333"
+        });
+
+        let mut mc = ModeCache::default();
+        let now_ts = 1_700_000_000;
+        blacklist_node_in_cache(&mut mc, Some(&clone1), "Clone-A", now_ts);
+
+        assert!(is_node_blacklisted(&mc, &clone1, "Clone-A", now_ts + 10));
+        assert!(
+            is_node_blacklisted(&mc, &clone2, "Clone-B", now_ts + 10),
+            "Клон с тем же server:port должен быть заблокирован в blacklist"
+        );
+        assert!(!is_node_blacklisted(&mc, &other, "Other-Node", now_ts + 10));
+
+        let (merged, _) = merge_verified_with_active_session(
+            vec![clone1, clone2, other],
+            &[],
+            None,
+        );
+        let merged_names: Vec<&str> = merged
+            .iter()
+            .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert_eq!(merged_names, vec!["Clone-A", "Other-Node"]);
+    }
+
+    #[tokio::test]
+    async fn regression_stall_watchdog_triggers_on_trickle_traffic_and_switch_pool_resolves_leaf() {
+        assert!(is_stall_watchdog_tick(true, 4, 350, 180));
+        assert!(is_stall_watchdog_tick(false, 0, 5000, 5000));
+        assert!(!is_stall_watchdog_tick(true, 4, 2048, 128));
+        assert!(!is_stall_watchdog_tick(true, 0, 0, 0));
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _cache_guard = crate::mihomo::PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        crate::mihomo::invalidate_proxies_cache();
+        let dir = std::env::temp_dir().join(format!("xkeen_free_sub_switch_leaf_{}", std::process::id()));
+        let prov_dir = dir.join("providers");
+        let _ = std::fs::create_dir_all(&prov_dir);
+        let yaml_path = dir.join("config.yaml");
+        let cfg_path = dir.join("config.json");
+        std::fs::write(&yaml_path, "proxies: []\n").unwrap();
+        let pool_yaml = proxies_to_mihomo_yaml(&[
+            json!({"name": "node-a", "type": "vless", "server": "1.1.1.1", "port": 443, "uuid": "u1"}),
+            json!({"name": "node-b", "type": "vless", "server": "2.2.2.2", "port": 443, "uuid": "u2"}),
+        ])
+        .unwrap();
+        std::fs::write(prov_dir.join("free_wl.yaml"), pool_yaml).unwrap();
+
+        let switched_to = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let switched_clone = switched_to.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv_handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                let sw = switched_clone.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let first_line = req.lines().next().unwrap_or("");
+                    let (status, body) = if first_line.starts_with("PUT /proxies/") {
+                        if let Some(body_part) = req.split("\r\n\r\n").nth(1) {
+                            if let Ok(v) = serde_json::from_str::<Value>(body_part) {
+                                if let Some(name) = v.get("name").and_then(|x| x.as_str()) {
+                                    sw.lock().await.push(name.to_string());
+                                }
+                            }
+                        }
+                        ("204 No Content", String::new())
+                    } else if first_line.contains("GET /providers/proxies") {
+                        let json_body = serde_json::json!({
+                            "providers": {
+                                "free_wl": {
+                                    "name": "free_wl",
+                                    "vehicleType": "File",
+                                    "proxies": [
+                                        { "name": "node-a", "type": "VLESS", "alive": true },
+                                        { "name": "node-b", "type": "VLESS", "alive": true }
+                                    ]
+                                }
+                            }
+                        }).to_string();
+                        ("200 OK", json_body)
+                    } else if first_line.contains("GET /proxies") {
+                        let json_body = serde_json::json!({
+                            "proxies": {
+                                "PROXY": { "name": "PROXY", "type": "Selector", "now": "DIRECT", "all": ["DIRECT", "node-a", "node-b"] },
+                                "🛡️ Whitelist": { "name": "🛡️ Whitelist", "type": "Selector", "now": "node-a", "all": ["node-a", "node-b"] },
+                                "node-a": { "name": "node-a", "type": "VLESS", "alive": true },
+                                "node-b": { "name": "node-b", "type": "VLESS", "alive": true }
+                            }
+                        }).to_string();
+                        ("200 OK", json_body)
+                    } else {
+                        ("404 Not Found", "{}".to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+        cfg.mihomo.config_path = yaml_path.to_string_lossy().to_string();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist_providers = vec!["free_wl".into()];
+        tokio::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).await.unwrap();
+
+        let config_arc = Arc::new(tokio::sync::RwLock::new(Arc::new(cfg)));
+        let ag = Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = AppState {
+            config: config_arc,
+            config_path: Arc::new(cfg_path),
+            http: reqwest::Client::new(),
+            failover_log: Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        let chosen = switch_pool_node(&state, FreeSubMode::Whitelist, "next").await.unwrap();
+        srv_handle.abort();
+        assert_eq!(chosen, "node-b", "switch_pool_node('next') должен переключить с node-a на node-b");
+        let calls = switched_to.lock().await;
+        assert!(calls.iter().any(|c| c == "node-b"), "calls={calls:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
         crate::mihomo::invalidate_proxies_cache();

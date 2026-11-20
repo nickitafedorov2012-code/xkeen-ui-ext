@@ -70,6 +70,14 @@ pub async fn sync_whitelist_on_switch(
         || target_trimmed.is_empty();
     let matches_target = !node_id.is_empty() && target_trimmed == node_id;
 
+    let resolved_id = if crate::mihomo::is_virtual_free_sub_pool(node_id) {
+        crate::mihomo::resolve_virtual_pool_target(http, cfg, node_id)
+            .await
+            .unwrap_or_else(|_| node_id.to_string())
+    } else {
+        node_id.to_string()
+    };
+
     let prev_wl_now = match crate::mihomo::get_proxies(http, cfg).await {
         Ok(proxies) => proxies
             .get(crate::routing::WHITELIST_GROUP_NAME)
@@ -84,45 +92,45 @@ pub async fn sync_whitelist_on_switch(
     {
         let mut last_sync = LAST_WHITELIST_SYNC.lock().await;
         if let Some((ref last_id, ref last_time)) = *last_sync {
-            if last_id == node_id
+            if last_id == &resolved_id
                 && last_time.elapsed() < Duration::from_secs(2)
-                && !node_id.is_empty()
-                && prev_wl_now == node_id
+                && !resolved_id.is_empty()
+                && prev_wl_now == resolved_id
             {
                 return;
             }
         }
-        *last_sync = Some((node_id.to_string(), Instant::now()));
+        *last_sync = Some((resolved_id.clone(), Instant::now()));
     }
 
-    if !node_id.is_empty() && (should_follow || matches_target) {
+    if !resolved_id.is_empty() && (should_follow || matches_target) {
         // Только селектор: никогда не вызываем здесь полный switch_group, чтобы не рвать LAN-сессии,
         // а после переключения точечно закрываем только прокси-сокеты прежней цели группы 🛡️ Whitelist.
         let mut switched_ok = false;
-        match crate::mihomo::switch_selector(http, cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await {
+        match crate::mihomo::switch_selector(http, cfg, crate::routing::WHITELIST_GROUP_NAME, &resolved_id).await {
             Ok(_) => switched_ok = true,
             Err(e) => {
                 crate::log_w!(
                     "[FAILOVER] Первая попытка синхронизации '{}' -> '{}' не удалась: {} — повторяем...",
                     crate::routing::WHITELIST_GROUP_NAME,
-                    node_id,
+                    resolved_id,
                     e
                 );
                 tokio::time::sleep(Duration::from_millis(150)).await;
-                match crate::mihomo::switch_selector(http, cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await {
+                match crate::mihomo::switch_selector(http, cfg, crate::routing::WHITELIST_GROUP_NAME, &resolved_id).await {
                     Ok(_) => switched_ok = true,
                     Err(e2) => {
                         crate::log_e!(
                             "[FAILOVER] Не удалось переключить '{}' на '{}': {}",
                             crate::routing::WHITELIST_GROUP_NAME,
-                            node_id,
+                            resolved_id,
                             e2
                         );
                     }
                 }
             }
         }
-        if switched_ok && !prev_wl_now.is_empty() && prev_wl_now != node_id {
+        if switched_ok && !prev_wl_now.is_empty() && prev_wl_now != resolved_id {
             crate::mihomo::close_server_connections(http, cfg, crate::routing::WHITELIST_GROUP_NAME).await;
             if !prev_wl_now.eq_ignore_ascii_case("direct") {
                 crate::mihomo::close_server_connections(http, cfg, &prev_wl_now).await;
@@ -262,11 +270,25 @@ pub async fn handle_whitelist_transition(
         }
 
         if is_bs {
-            let _ = crate::mihomo::switch_selector(&state.http, &cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await;
+            let resolved_id = if crate::mihomo::is_virtual_free_sub_pool(node_id) {
+                crate::mihomo::resolve_virtual_pool_target(&state.http, &cfg, node_id)
+                    .await
+                    .unwrap_or_else(|_| node_id.to_string())
+            } else {
+                node_id.to_string()
+            };
+            let _ = crate::mihomo::switch_selector(&state.http, &cfg, crate::routing::WHITELIST_GROUP_NAME, &resolved_id).await;
         }
     } else if cfg.whitelist.enabled {
         // Селектор без сброса сокетов: решение о сбросе принимает вызывающий switch_server(_graceful)
-        let _ = crate::mihomo::switch_selector(&state.http, &cfg, crate::routing::WHITELIST_GROUP_NAME, node_id).await;
+        let resolved_id = if crate::mihomo::is_virtual_free_sub_pool(node_id) {
+            crate::mihomo::resolve_virtual_pool_target(&state.http, &cfg, node_id)
+                .await
+                .unwrap_or_else(|_| node_id.to_string())
+        } else {
+            node_id.to_string()
+        };
+        let _ = crate::mihomo::switch_selector(&state.http, &cfg, crate::routing::WHITELIST_GROUP_NAME, &resolved_id).await;
     }
 
     // FO-WL-03: Instant telemetry channel sync: актуализируем статус телеметрии сразу,

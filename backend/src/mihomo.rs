@@ -866,6 +866,7 @@ pub async fn force_update_all_providers(http: &reqwest::Client, cfg: &AppConfig)
 pub const FREE_SUB_L7_PRIMARY_URL: &str = "https://www.gstatic.com/generate_204";
 pub const FREE_SUB_L7_FALLBACK_URL: &str = "https://cp.cloudflare.com/generate_204";
 pub const FREE_SUB_L7_VERIFY_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
+pub const FREE_SUB_L7_THROUGHPUT_URL: &str = "https://speed.cloudflare.com/__down?bytes=50000";
 pub const FREE_SUB_L7_BLOCKED_SITE_URL: &str = "https://www.youtube.com/generate_204";
 
 /// Строгий разбор ответа точечного L7 healthcheck Mihomo (`/providers/proxies/{provider}/{node}/healthcheck`).
@@ -945,9 +946,20 @@ pub async fn probe_service_provider_node_l7(
     }
 }
 
+fn is_throughput_endpoint_http_rejection(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    if lower.contains("timeout") || lower.contains("timed out") || lower.contains("deadline") {
+        return false;
+    }
+    ["403", "500", "502", "503", "504"]
+        .iter()
+        .any(|code| lower.contains(code))
+}
+
 /// Stability Gate: тройная последовательная L7-проверка узла.
 /// 1) `generate_204` (status 204)
-/// 2) Лёгкий HTTPS GET с проверкой ответа (`cdn-cgi/trace`, status 200) — отсеивает узлы с ECONNRESET на передаче данных.
+/// 2) Throughput Gate: загрузка 50 КБ (`speed.cloudflare.com/__down?bytes=50000`, status 200, таймаут `min(timeout_ms, 3000)`) —
+///    отсеивает зашейпленные ТСПУ узлы (2–10 КБ/с), с fallback на `cdn-cgi/trace` только при HTTP 403/5xx самого эндпоинта.
 /// 3) Проверка доступа к заблокированному в РФ ресурсу (`youtube.com/generate_204`, status 204) — отсеивает российские реле под ТСПУ.
 pub async fn probe_service_provider_node_l7_stable(
     http: &reqwest::Client,
@@ -966,17 +978,36 @@ pub async fn probe_service_provider_node_l7_stable(
         None,
     )
     .await?;
-    let second_delay = run_single_provider_node_healthcheck(
+    let tp_timeout_ms = timeout_ms.min(3000);
+    let second_delay = match run_single_provider_node_healthcheck(
         http,
         cfg,
         provider_id,
         node_name,
-        FREE_SUB_L7_VERIFY_URL,
+        FREE_SUB_L7_THROUGHPUT_URL,
         200,
-        timeout_ms,
+        tp_timeout_ms,
     )
     .await
-    .map_err(|e| format!("Stability gate (cdn-cgi/trace) провален: {e}"))?;
+    {
+        Ok(d) => d,
+        Err(tp_err) if is_throughput_endpoint_http_rejection(&tp_err) => {
+            run_single_provider_node_healthcheck(
+                http,
+                cfg,
+                provider_id,
+                node_name,
+                FREE_SUB_L7_VERIFY_URL,
+                200,
+                timeout_ms,
+            )
+            .await
+            .map_err(|e| format!("Stability gate (throughput fallback cdn-cgi/trace) провален: {e}"))?
+        }
+        Err(tp_err) => {
+            return Err(format!("Stability gate (speed.cloudflare.com 50KB) провален: {tp_err}"));
+        }
+    };
     let blocked_delay = run_single_provider_node_healthcheck(
         http,
         cfg,
@@ -1724,11 +1755,12 @@ pub fn select_groups_to_switch(proxies: &BTreeMap<String, Value>, prev_active: &
 }
 
 async fn switch_server_inner(http: &reqwest::Client, cfg: &AppConfig, server_id: &str, graceful: bool) -> Result<String, String> {
-    let target = match server_id.to_lowercase().as_str() {
+    let raw_target = match server_id.to_lowercase().as_str() {
         "fastest" => "Fastest".to_string(),
         "fallback" => "Fallback".to_string(),
         _ => server_id.to_string(),
     };
+    let target = resolve_virtual_pool_target(http, cfg, &raw_target).await?;
     if !cfg.disabled_providers.is_empty() {
         if let Ok(v) = m_get(http, cfg, "/providers/proxies").await {
             if let Some(map) = v.get("providers").and_then(|p| p.as_object()) {
@@ -2525,6 +2557,23 @@ pub async fn resolve_virtual_pool_active_leaf(
 ) -> Option<(String, bool)> {
     let (proxies_res, provs_res) = tokio::join!(get_proxies(http, cfg), get_provider_proxies(http, cfg));
     resolve_virtual_pool_leaf_from_maps(provider_id, proxies_res.ok().as_ref(), provs_res.ok().as_ref())
+}
+
+/// Если `id` — виртуальный идентификатор пула бесплатной подписки (`free_wl` / `free_vpn`),
+/// разрешает его в имя реального рабочего листового узла этого провайдера.
+pub async fn resolve_virtual_pool_target(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    id: &str,
+) -> Result<String, String> {
+    if !is_virtual_free_sub_pool(id) {
+        return Ok(id.to_string());
+    }
+    resolve_virtual_pool_active_leaf(http, cfg, id)
+        .await
+        .map(|(leaf, _)| leaf)
+        .filter(|leaf| !leaf.is_empty() && !is_virtual_free_sub_pool(leaf))
+        .ok_or_else(|| format!("В пуле '{id}' нет доступных листовых узлов для переключения"))
 }
 
 fn resolve_group_active_leaf(proxies: &BTreeMap<String, Value>, start: &str) -> Option<String> {
@@ -5084,5 +5133,146 @@ mod tests {
         let eu_res = probe_service_provider_node_l7_stable(&client, &cfg, "__free_sub_probe", "eu-node", 2000).await;
         assert_eq!(eu_res, Ok(90));
         srv.abort();
+    }
+
+    #[tokio::test]
+    async fn regression_l7_stable_verifies_payload_throughput_and_rejects_throttled_node() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req.lines().next().unwrap_or("");
+                    let (status, body) = if first_line.contains("/throttled-node/healthcheck") {
+                        if first_line.contains("speed.cloudflare.com") {
+                            ("504 Gateway Timeout", r#"{"message":"context deadline exceeded"}"#.to_string())
+                        } else {
+                            ("200 OK", r#"{"delay":150}"#.to_string())
+                        }
+                    } else if first_line.contains("/cf-403-node/healthcheck") {
+                        if first_line.contains("speed.cloudflare.com") {
+                            ("503 Service Unavailable", r#"{"message":"status code 403"}"#.to_string())
+                        } else {
+                            ("200 OK", r#"{"delay":110}"#.to_string())
+                        }
+                    } else if first_line.contains("/fast-node/healthcheck") {
+                        if first_line.contains("speed.cloudflare.com") {
+                            assert!(first_line.contains("expected=200"), "line={first_line}");
+                            assert!(first_line.contains("timeout=3000"), "line={first_line}");
+                        }
+                        ("200 OK", r#"{"delay":120}"#.to_string())
+                    } else {
+                        ("404 Not Found", r#"{"message":"not found"}"#.to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        let mut cfg = AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+        let client = reqwest::Client::new();
+
+        let throttled = probe_service_provider_node_l7_stable(&client, &cfg, "__free_sub_probe", "throttled-node", 5000).await;
+        assert!(throttled.is_err(), "Зашейпленный узел с таймаутом на 50 КБ должен быть отклонён");
+        assert!(throttled.unwrap_err().contains("speed.cloudflare.com"));
+
+        let cf_403 = probe_service_provider_node_l7_stable(&client, &cfg, "__free_sub_probe", "cf-403-node", 5000).await;
+        assert_eq!(cf_403, Ok(110), "При HTTP 403 от speed.cloudflare.com должен сработать fallback на cdn-cgi/trace");
+
+        let fast = probe_service_provider_node_l7_stable(&client, &cfg, "__free_sub_probe", "fast-node", 5000).await;
+        assert_eq!(fast, Ok(120));
+        srv.abort();
+    }
+
+    #[tokio::test]
+    async fn regression_switch_server_resolves_virtual_free_sub_pool_id_to_leaf_node() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_proxies_cache_for_test();
+        let put_targets = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let put_clone = put_targets.clone();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                let pt = put_clone.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let first_line = req.lines().next().unwrap_or("");
+                    let (status, body) = if first_line.starts_with("PUT /proxies/") {
+                        let body_part = req.split("\r\n\r\n").nth(1).unwrap_or("");
+                        if let Ok(v) = serde_json::from_str::<Value>(body_part) {
+                            if let Some(name) = v.get("name").and_then(|x| x.as_str()) {
+                                pt.lock().await.push(name.to_string());
+                                if name == "free_wl" {
+                                    return;
+                                }
+                            }
+                        }
+                        ("204 No Content", String::new())
+                    } else if first_line.contains("GET /providers/proxies") {
+                        let json_body = serde_json::json!({
+                            "providers": {
+                                "free_wl": {
+                                    "name": "free_wl",
+                                    "vehicleType": "File",
+                                    "proxies": [
+                                        { "name": "🇷🇺 VK — #4", "type": "VLESS", "alive": true }
+                                    ]
+                                }
+                            }
+                        }).to_string();
+                        ("200 OK", json_body)
+                    } else if first_line.contains("GET /proxies") {
+                        let json_body = serde_json::json!({
+                            "proxies": {
+                                "PROXY": { "name": "PROXY", "type": "Selector", "now": "DIRECT", "all": ["DIRECT", "🇷🇺 VK — #4"] },
+                                "🛡️ Whitelist": { "name": "🛡️ Whitelist", "type": "Selector", "now": "DIRECT", "all": ["DIRECT", "🇷🇺 VK — #4"] },
+                                "🇷🇺 VK — #4": { "name": "🇷🇺 VK — #4", "type": "VLESS", "alive": true }
+                            }
+                        }).to_string();
+                        ("200 OK", json_body)
+                    } else {
+                        ("404 Not Found", "{}".to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        let mut cfg = AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+        cfg.whitelist.enabled = true;
+        let client = reqwest::Client::new();
+
+        let res = switch_server(&client, &cfg, "free_wl").await;
+        srv.abort();
+        assert!(res.is_ok(), "switch_server('free_wl') должен разрешиться в листовой узел: {res:?}");
+        let targets = put_targets.lock().await;
+        assert!(!targets.is_empty());
+        assert!(targets.iter().all(|t| t == "🇷🇺 VK — #4"), "targets={targets:?}");
+        clear_proxies_cache_for_test();
     }
 }
