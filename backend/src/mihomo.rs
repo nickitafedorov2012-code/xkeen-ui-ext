@@ -2043,6 +2043,35 @@ pub async fn ping_server_url_expected_range(
     };
     let req_timeout = std::time::Duration::from_millis(std::cmp::max(timeout_ms + 2000, 5000));
 
+    // 0. Виртуальные карточки бесплатных мульти-подписок (free_vpn / free_wl):
+    // резолвим текущий активный листовой узел и пингуем его через /providers/proxies/{provider}/{leaf}/healthcheck.
+    if is_virtual_free_sub_pool(server_id) {
+        if let Some((leaf, _)) = resolve_virtual_pool_active_leaf(http, cfg, server_id).await {
+            let prov_enc = urlencoding_lite(server_id);
+            let leaf_enc = urlencoding_lite(&leaf);
+            let node_hc_url = format!(
+                "{}/providers/proxies/{prov_enc}/{leaf_enc}/healthcheck?timeout={timeout_ms}&url={check_url}{exp_param}",
+                cfg.mihomo_url()
+            );
+            let mut hc_req = http.get(&node_hc_url).timeout(req_timeout);
+            if let Some((k, v)) = auth_header(&cfg.mihomo.secret) {
+                hc_req = hc_req.header(k, v);
+            }
+            if let Ok(resp) = hc_req.send().await {
+                if resp.status().is_success() {
+                    if let Ok(v) = resp.json::<Value>().await {
+                        if let Some(d) = v.get("delay").and_then(|d| d.as_i64()) {
+                            if d > 0 {
+                                return d;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return -1;
+    }
+
     // 1. Если узел принадлежит proxy-провайдеру (подписке / file-провайдеру),
     // сразу используем штатный точечный эндпоинт Mihomo:
     // GET /providers/proxies/{provider}/{node}/healthcheck
@@ -2416,6 +2445,75 @@ pub async fn ping_all(http: &reqwest::Client, cfg: &AppConfig, ids: &[String], t
     ping_all_url(http, cfg, ids, timeout_ms, None).await
 }
 
+pub fn is_virtual_free_sub_pool(id: &str) -> bool {
+    id == crate::free_sub::FREE_VPN_PROVIDER_ID || id == crate::free_sub::FREE_WL_PROVIDER_ID
+}
+
+fn provider_node_belongs_to(val: &Value, provider_id: &str) -> bool {
+    if val.get("_provider").and_then(|v| v.as_str()) == Some(provider_id) {
+        return true;
+    }
+    val.get("_providers")
+        .and_then(|arr| arr.as_array())
+        .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some(provider_id)))
+}
+
+/// Резолвит текущий активный листовой узел для виртуальной карточки пула (`free_vpn` / `free_wl`)
+/// и возвращает `(имя_листа, alive_в_провайдере)`.
+pub fn resolve_virtual_pool_leaf_from_maps(
+    provider_id: &str,
+    proxies: Option<&BTreeMap<String, Value>>,
+    provider_proxies: Option<&BTreeMap<String, Value>>,
+) -> Option<(String, bool)> {
+    let provs = provider_proxies?;
+    if let Some(pmap) = proxies {
+        let mut candidate_groups: Vec<String> = Vec::new();
+        if provider_id == crate::free_sub::FREE_WL_PROVIDER_ID
+            && pmap.contains_key(crate::routing::WHITELIST_GROUP_NAME)
+        {
+            candidate_groups.push(crate::routing::WHITELIST_GROUP_NAME.to_string());
+        }
+        if let Some(primary) = find_primary_group(pmap) {
+            if !candidate_groups.iter().any(|g| g == &primary) {
+                candidate_groups.push(primary);
+            }
+        }
+        for grp in candidate_groups {
+            if let Some(leaf) = resolve_group_active_leaf(pmap, &grp) {
+                if let Some(pval) = provs.get(&leaf) {
+                    if provider_node_belongs_to(pval, provider_id) {
+                        let alive = pval.get("alive").and_then(|a| a.as_bool()).unwrap_or(true);
+                        return Some((leaf, alive));
+                    }
+                }
+            }
+        }
+    }
+    let mut first_any: Option<(String, bool)> = None;
+    for (name, pval) in provs {
+        if !provider_node_belongs_to(pval, provider_id) {
+            continue;
+        }
+        let alive = pval.get("alive").and_then(|a| a.as_bool()).unwrap_or(true);
+        if alive {
+            return Some((name.clone(), true));
+        }
+        if first_any.is_none() {
+            first_any = Some((name.clone(), false));
+        }
+    }
+    first_any
+}
+
+pub async fn resolve_virtual_pool_active_leaf(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    provider_id: &str,
+) -> Option<(String, bool)> {
+    let (proxies_res, provs_res) = tokio::join!(get_proxies(http, cfg), get_provider_proxies(http, cfg));
+    resolve_virtual_pool_leaf_from_maps(provider_id, proxies_res.ok().as_ref(), provs_res.ok().as_ref())
+}
+
 fn resolve_group_active_leaf(proxies: &BTreeMap<String, Value>, start: &str) -> Option<String> {
     let mut cur = start.to_string();
     let mut visited = std::collections::HashSet::new();
@@ -2455,12 +2553,19 @@ pub async fn ping_all_url(
         return out;
     }
 
-    let proxies_map = get_proxies(http, cfg).await.ok();
+    let (proxies_res, provs_res) = tokio::join!(get_proxies(http, cfg), get_provider_proxies(http, cfg));
+    let proxies_map = proxies_res.ok();
+    let provider_proxies = provs_res.ok();
     let mut leaf_ids: Vec<String> = Vec::new();
     let mut pool_ids: Vec<String> = Vec::new();
+    let mut virtual_pool_ids: Vec<String> = Vec::new();
 
     for id in ids {
         if is_service_group_or_builtin(id) {
+            continue;
+        }
+        if is_virtual_free_sub_pool(id) {
+            virtual_pool_ids.push(id.clone());
             continue;
         }
         let is_group = proxies_map.as_ref().and_then(|m| m.get(id)).is_some_and(|val| {
@@ -2487,12 +2592,30 @@ pub async fn ping_all_url(
         out.insert(id, ms);
     }
 
+    // Виртуальные карточки пулов free_vpn / free_wl: пингуем их активный листовой узел
+    // и сохраняем задержку и для самой карточки, и для селекторов (PROXY / 🛡️ Whitelist).
+    let mut resolved_leaf_delays: BTreeMap<String, i64> = BTreeMap::new();
+    for vpid in virtual_pool_ids {
+        let mut delay = -1;
+        if let Some((leaf, _)) =
+            resolve_virtual_pool_leaf_from_maps(&vpid, proxies_map.as_ref(), provider_proxies.as_ref())
+        {
+            if let Some(&d) = out.get(&leaf).or_else(|| resolved_leaf_delays.get(&leaf)) {
+                delay = d;
+            } else {
+                delay = ping_server_url_expected_range(http, cfg, &vpid, effective_timeout, test_url, None).await;
+                resolved_leaf_delays.insert(leaf, delay);
+            }
+        }
+        out.insert(vpid, delay);
+    }
+
     if let Some(ref proxies) = proxies_map {
         for pool_id in pool_ids {
             let mut resolved_delay = -1;
             if let Some(leaf) = resolve_group_active_leaf(proxies, &pool_id) {
                 if !is_service_group_or_builtin(&leaf) {
-                    if let Some(&d) = out.get(&leaf) {
+                    if let Some(&d) = out.get(&leaf).or_else(|| resolved_leaf_delays.get(&leaf)) {
                         resolved_delay = d;
                     } else if let Some(leaf_val) = proxies.get(&leaf) {
                         let ld = last_delay(leaf_val);
@@ -2517,6 +2640,9 @@ pub async fn ping_all_url(
 
     // PING-AUTO: все замеры (фоновые, ручные, после переключения) попадают в кэш панели
     store_ping_cache(&out);
+    if !resolved_leaf_delays.is_empty() {
+        store_ping_cache(&resolved_leaf_delays);
+    }
 
     out
 }
@@ -4803,6 +4929,98 @@ mod tests {
         assert!(res.is_ok(), "switch_server must succeed via PROXY: {res:?}");
         assert_eq!(proxy_put_hits.load(Ordering::SeqCst), 1, "must switch PROXY group");
         assert_eq!(wl_put_hits.load(Ordering::SeqCst), 0, "AUDIT-004: must NOT touch 🛡️ Whitelist when cfg.whitelist.enabled=false for VPS");
+        clear_proxies_cache_for_test();
+    }
+
+    #[tokio::test]
+    async fn regression_ping_all_url_resolves_virtual_free_sub_pools_and_selectors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _guard = PROXIES_CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_proxies_cache_for_test();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let bad_virtual_hits = Arc::new(AtomicUsize::new(0));
+        let bad_hits_srv = bad_virtual_hits.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { return };
+                let bad_hits_srv = bad_hits_srv.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req_str = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req_str.lines().next().unwrap_or("");
+                    let (status, body) = if first_line.starts_with("GET /proxies/free_wl/delay")
+                        || first_line.starts_with("GET /proxies/free_vpn/delay")
+                    {
+                        bad_hits_srv.fetch_add(1, Ordering::SeqCst);
+                        ("404 Not Found", "{\"message\":\"not found\"}".to_string())
+                    } else if first_line.starts_with("GET /proxies ") {
+                        let json_body = serde_json::json!({
+                            "proxies": {
+                                "PROXY": { "type": "Selector", "now": "wl-leaf-1", "all": ["wl-leaf-1"] },
+                                crate::routing::WHITELIST_GROUP_NAME: {
+                                    "type": "Selector",
+                                    "now": "wl-leaf-1",
+                                    "all": ["wl-leaf-1"]
+                                },
+                                "wl-leaf-1": { "type": "Vless", "server": "1.1.1.1", "history": [] }
+                            }
+                        }).to_string();
+                        ("200 OK", json_body)
+                    } else if first_line.starts_with("GET /providers/proxies/free_wl/wl-leaf-1/healthcheck") {
+                        ("200 OK", "{\"delay\":145}".to_string())
+                    } else if first_line.starts_with("GET /providers/proxies/free_vpn/vpn-leaf-1/healthcheck") {
+                        ("200 OK", "{\"delay\":210}".to_string())
+                    } else if first_line.starts_with("GET /providers/proxies ") {
+                        let json_body = serde_json::json!({
+                            "providers": {
+                                "free_wl": {
+                                    "vehicleType": "HTTP",
+                                    "proxies": [{ "name": "wl-leaf-1", "alive": true, "history": [] }]
+                                },
+                                "free_vpn": {
+                                    "vehicleType": "HTTP",
+                                    "proxies": [{ "name": "vpn-leaf-1", "alive": true, "history": [] }]
+                                }
+                            }
+                        }).to_string();
+                        ("200 OK", json_body)
+                    } else {
+                        ("404 Not Found", "{\"message\":\"not found\"}".to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        let mut cfg = AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+        let client = reqwest::Client::new();
+
+        let ids = vec![
+            "free_wl".to_string(),
+            "free_vpn".to_string(),
+            "PROXY".to_string(),
+            crate::routing::WHITELIST_GROUP_NAME.to_string(),
+        ];
+        let res = ping_all_url(&client, &cfg, &ids, 2500, None).await;
+        assert_eq!(bad_virtual_hits.load(Ordering::SeqCst), 0, "virtual pool ids must not be pinged via /proxies/{{id}}/delay");
+        assert_eq!(res.get("free_wl"), Some(&145));
+        assert_eq!(res.get("free_vpn"), Some(&210));
+        assert_eq!(res.get("PROXY"), Some(&145));
+        assert_eq!(res.get(crate::routing::WHITELIST_GROUP_NAME), Some(&145));
         clear_proxies_cache_for_test();
     }
 }
