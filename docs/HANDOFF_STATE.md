@@ -102,3 +102,11 @@
   - `POST /api/servers/ping` с `{"include_pools": true}` вернул `free_wl: 1033`, `PROXY: 1033`, `🛡️ Whitelist: 1033`.
   - `iptables -t nat -S` / `iptables -t mangle -S` содержат цепочку `XKEEN_BS`, а `curl -x http://127.0.0.1:7892 http://cp.cloudflare.com/generate_204` вернул `204`.
 - [DONE] Релиз `v1.17.0-beta.14`: обновлены версии (`1.17.0-beta.14`), добавлен ченжлог в `DEVELOPMENT.md`, выполнена верификация на `192.168.1.1`.
+
+## Медленный интернет у клиентов за `192.168.1.1` в режиме БС (после `v1.17.0-beta.14`, `3c5c3a4`, ветка `dev`)
+- [DONE] Задача 1: `backend/src/api/routing/gaming.rs` — автоподгрузка `nf_tproxy_core`/`xt_socket`/`xt_TPROXY` до правил `mangle`/`TPROXY` + fallback `XKEEN_BS_FWD` (`filter FORWARD` REJECT UDP 443) при недоступности `TPROXY` + тест `regression_tproxy_kernel_modules_autoload_and_quic_forward_fallback`.
+- [DONE] Задача 2: `backend/src/routing/ipset.rs` + `iptables.rs` (`ensure_sniffer_enabled`) — автоматический `sniffer:` (`enable: true`, `force-dns-mapping: true`, `parse-pure-ip: true`, `override-destination: true`, HTTP/TLS/QUIC, `skip-domain`) + тест `regression_ensure_sniffer_enabled_adds_and_repairs_sniffer`.
+- [DONE] Задача 3: `backend/src/routing/ipset.rs` (`apply_whitelist_dns` / `remove_whitelist_dns`) — DoH через `🛡️ Whitelist`, `default-nameserver`/`proxy-server-nameserver` = `127.0.0.1:53`, бэкап и чистое восстановление исходного `dns:` при выключении БС + тест `regression_whitelist_dns_proxies_foreign_dns_and_restores_original_on_disable`.
+- [DONE] Задача 4: `backend/src/mihomo.rs` (`probe_service_provider_node_l7_stable`) + `backend/src/free_sub/mod.rs` (`check_free_sub_stall_watchdog`) — проверка `https://www.youtube.com/generate_204` для отсева российских релеев под ТСПУ + тест `regression_l7_stable_rejects_ru_relay_blocking_youtube`.
+- [DONE] Задача 5: `backend/src/free_sub/mod.rs` (`get_pool_and_history`, `resolve_pool_leaf_name`) — точный резолв `active_node`, `pool_index` и `is_active` через `resolve_virtual_pool_active_leaf` + тест `regression_get_pool_and_history_resolves_virtual_pool_active_leaf`.
+- [DONE] Релиз `v1.17.0-beta.15`: обновлены версии (`1.17.0-beta.15`), добавлен ченжлог в `DEVELOPMENT.md`, выполнена живая верификация на `192.168.1.1`.

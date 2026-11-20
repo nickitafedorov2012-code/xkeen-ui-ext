@@ -3347,3 +3347,91 @@ rules:
             "PROXY must also get free_vpn:\n{out2}"
         );
     }
+
+    #[test]
+    fn regression_ensure_sniffer_enabled_adds_and_repairs_sniffer() {
+        let base_no_sniffer = "mixed-port: 7892\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies:\n      - DIRECT\nrules:\n  - MATCH,DIRECT\n";
+        let added = ensure_sniffer_enabled(base_no_sniffer);
+        assert!(added.contains("sniffer:\n  enable: true\n"), "must add sniffer block:\n{added}");
+        assert!(added.contains("  override-destination: true\n"), "must enable override-destination:\n{added}");
+        assert!(added.contains("  parse-pure-ip: true\n"), "must enable parse-pure-ip:\n{added}");
+        assert!(added.contains("  force-dns-mapping: true\n"), "must enable force-dns-mapping:\n{added}");
+        assert!(added.contains("    TLS:\n      ports: [443, 8443]\n"), "must sniff TLS 443/8443:\n{added}");
+        assert_eq!(added, ensure_sniffer_enabled(&added), "ensure_sniffer_enabled must be idempotent");
+
+        let broken_sniffer = "sniffer:\n  enable: false\n  override-destination: false\nrules:\n  - MATCH,DIRECT\n";
+        let repaired = ensure_sniffer_enabled(broken_sniffer);
+        assert!(repaired.contains("  enable: true\n"), "must flip enable to true:\n{repaired}");
+        assert!(repaired.contains("  override-destination: true\n"), "must flip override-destination to true:\n{repaired}");
+        assert!(!repaired.contains("enable: false"), "enable: false must be gone:\n{repaired}");
+        assert!(repaired.contains("  sniff:\n"), "must add sniff protocols when missing:\n{repaired}");
+
+        // Проверяем также через apply_routing_with_filters в режиме БС
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        let mut filters = std::collections::BTreeMap::new();
+        let (applied, _) = apply_routing_with_filters(base_no_sniffer, &cfg, &mut filters)
+            .expect("apply_routing_with_filters must succeed");
+        assert!(applied.contains("sniffer:\n  enable: true\n"), "apply_routing must include sniffer:\n{applied}");
+    }
+
+    #[test]
+    fn regression_whitelist_dns_proxies_foreign_dns_and_restores_original_on_disable() {
+        let base_yaml = "\
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  nameserver:
+    - 1.1.1.1
+    - 8.8.8.8
+  fallback:
+    - 9.9.9.9
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - DIRECT
+rules:
+  - MATCH,DIRECT
+";
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+
+        let applied = apply_whitelist_dns(base_yaml, &cfg, "127.0.0.1:53");
+        assert!(
+            applied.contains("- 'https://1.1.1.1/dns-query#🛡️ Whitelist'"),
+            "BS DNS must route foreign DoH via 🛡️ Whitelist:\n{applied}"
+        );
+        assert!(
+            applied.contains("- 'https://8.8.8.8/dns-query#🛡️ Whitelist'"),
+            "BS DNS must route secondary DoH via 🛡️ Whitelist:\n{applied}"
+        );
+        assert!(
+            applied.contains("default-nameserver:\n    - 127.0.0.1:53"),
+            "BS DNS must set default-nameserver to 127.0.0.1:53:\n{applied}"
+        );
+        assert!(
+            applied.contains("proxy-server-nameserver:\n    - 127.0.0.1:53"),
+            "BS DNS must set proxy-server-nameserver to 127.0.0.1:53:\n{applied}"
+        );
+        // Убеждаемся, что голый 1.1.1.1 / 9.9.9.9 не остался активным upstream-сервером
+        assert!(
+            !applied.lines().any(|l| {
+                let t = l.trim();
+                t == "- 1.1.1.1" || t == "- 8.8.8.8" || t == "- 9.9.9.9"
+            }),
+            "raw WAN nameservers/fallback must be backed up (commented) while BS is active:\n{applied}"
+        );
+
+        // Идемпотентность
+        let reapplied = apply_whitelist_dns(&applied, &cfg, "127.0.0.1:53");
+        assert_eq!(applied, reapplied, "apply_whitelist_dns must be idempotent");
+
+        // Выключение БС: чистое восстановление исходного dns:
+        cfg.whitelist.enabled = false;
+        let restored = apply_whitelist_dns(&reapplied, &cfg, "127.0.0.1:53");
+        assert!(!restored.contains("https://1.1.1.1/dns-query#🛡️ Whitelist"), "BS DoH must be removed:\n{restored}");
+        assert!(!restored.contains("AUTO-WHITELIST-DNS"), "BS DNS markers must be removed:\n{restored}");
+        assert!(restored.contains("  nameserver:\n    - 1.1.1.1\n    - 8.8.8.8\n"), "original nameserver must be restored:\n{restored}");
+        assert!(restored.contains("  fallback:\n    - 9.9.9.9\n"), "original fallback must be restored:\n{restored}");
+    }

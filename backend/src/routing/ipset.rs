@@ -295,6 +295,163 @@ pub fn ensure_tcp_concurrent(yaml: &str) -> String {
     joined
 }
 
+/// SNIFF-01: Гарантирует наличие включённой секции `sniffer:` с `override-destination: true`
+/// в config.yaml для извлечения реального домена из TLS SNI / HTTP Host при прозрачном
+/// перехвате REDIRECT/TPROXY и корректной работы с Fake-IP / доменами РФ-каталога.
+pub fn ensure_sniffer_enabled(yaml: &str) -> String {
+    let eol = if yaml.contains("\r\n") { "\r\n" } else { "\n" };
+    let had_trailing_eol = yaml.ends_with('\n');
+    let mut lines: Vec<String> = yaml.lines().map(String::from).collect();
+
+    let sniffer_pos = lines.iter().position(|l| {
+        !l.starts_with(' ') && !l.starts_with('\t') && l.trim() == "sniffer:"
+    });
+
+    if let Some(start) = sniffer_pos {
+        let mut end = start + 1;
+        while end < lines.len() {
+            let l = &lines[end];
+            let trimmed = l.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') || l.starts_with(' ') || l.starts_with('\t') {
+                end += 1;
+            } else {
+                break;
+            }
+        }
+
+        // Определяем базовый отступ дочерних ключей (по умолчанию 2 пробела)
+        let child_indent = lines[start + 1..end]
+            .iter()
+            .find_map(|l| {
+                let t = l.trim();
+                if t.is_empty() || t.starts_with('#') {
+                    None
+                } else {
+                    let ind = l.len() - l.trim_start().len();
+                    if ind > 0 { Some(ind) } else { None }
+                }
+            })
+            .unwrap_or(2);
+        let pad = " ".repeat(child_indent);
+
+        let mut has_enable = false;
+        let mut has_force_dns = false;
+        let mut has_parse_pure_ip = false;
+        let mut has_override_dest = false;
+        let mut has_sniff = false;
+        let mut has_skip_domain = false;
+
+        for line in &mut lines[start + 1..end] {
+            let indent = line.len() - line.trim_start().len();
+            if indent != child_indent {
+                continue;
+            }
+            let trimmed = line.trim();
+            if trimmed.starts_with("enable:") {
+                has_enable = true;
+                *line = format!("{pad}enable: true");
+            } else if trimmed.starts_with("force-dns-mapping:") {
+                has_force_dns = true;
+                *line = format!("{pad}force-dns-mapping: true");
+            } else if trimmed.starts_with("parse-pure-ip:") {
+                has_parse_pure_ip = true;
+                *line = format!("{pad}parse-pure-ip: true");
+            } else if trimmed.starts_with("override-destination:") {
+                has_override_dest = true;
+                *line = format!("{pad}override-destination: true");
+            } else if trimmed == "sniff:" || trimmed.starts_with("sniff:") {
+                has_sniff = true;
+            } else if trimmed == "skip-domain:" || trimmed.starts_with("skip-domain:") {
+                has_skip_domain = true;
+            }
+        }
+
+        let mut to_prepend = Vec::new();
+        if !has_enable {
+            to_prepend.push(format!("{pad}enable: true"));
+        }
+        if !has_force_dns {
+            to_prepend.push(format!("{pad}force-dns-mapping: true"));
+        }
+        if !has_parse_pure_ip {
+            to_prepend.push(format!("{pad}parse-pure-ip: true"));
+        }
+        if !has_override_dest {
+            to_prepend.push(format!("{pad}override-destination: true"));
+        }
+
+        let mut to_append = Vec::new();
+        if !has_sniff {
+            to_append.extend([
+                format!("{pad}sniff:"),
+                format!("{pad}  HTTP:"),
+                format!("{pad}    ports: [80, 8080-8880]"),
+                format!("{pad}    override-destination: true"),
+                format!("{pad}  TLS:"),
+                format!("{pad}    ports: [443, 8443]"),
+                format!("{pad}  QUIC:"),
+                format!("{pad}    ports: [443, 8443]"),
+            ]);
+        }
+        if !has_skip_domain {
+            to_append.extend([
+                format!("{pad}skip-domain:"),
+                format!("{pad}  - 'Mijia Cloud'"),
+                format!("{pad}  - '+.push.apple.com'"),
+            ]);
+        }
+
+        if !to_append.is_empty() {
+            for (offset, item) in to_append.into_iter().enumerate() {
+                lines.insert(end + offset, item);
+            }
+        }
+        if !to_prepend.is_empty() {
+            for (offset, item) in to_prepend.into_iter().enumerate() {
+                lines.insert(start + 1 + offset, item);
+            }
+        }
+    } else {
+        let insert_idx = lines
+            .iter()
+            .position(|l| {
+                !l.starts_with(' ') && !l.starts_with('\t') && matches!(
+                    l.trim(),
+                    "proxies:" | "proxy-groups:" | "proxy-providers:" | "rules:"
+                )
+            })
+            .unwrap_or(lines.len());
+
+        let block = [
+            "sniffer:",
+            "  enable: true",
+            "  force-dns-mapping: true",
+            "  parse-pure-ip: true",
+            "  override-destination: true",
+            "  sniff:",
+            "    HTTP:",
+            "      ports: [80, 8080-8880]",
+            "      override-destination: true",
+            "    TLS:",
+            "      ports: [443, 8443]",
+            "    QUIC:",
+            "      ports: [443, 8443]",
+            "  skip-domain:",
+            "    - 'Mijia Cloud'",
+            "    - '+.push.apple.com'",
+        ];
+        for (offset, item) in block.into_iter().enumerate() {
+            lines.insert(insert_idx + offset, item.to_string());
+        }
+    }
+
+    let mut joined = lines.join(eol);
+    if had_trailing_eol && !joined.ends_with(eol) {
+        joined.push_str(eol);
+    }
+    joined
+}
+
 /// Удаление блока правил и селектор-группы режима белых списков из YAML.
 pub fn remove_whitelist_rules(yaml: &str) -> String {
     let mut out = Vec::new();
@@ -325,26 +482,46 @@ pub fn remove_whitelist_rules(yaml: &str) -> String {
     out.join("\n")
 }
 
-/// Удаление DNS-правил nameserver-policy режима белых списков из YAML.
+const WHITELIST_DNS_UPSTREAM_BEGIN: &str = "# --- AUTO-WHITELIST-DNS-UPSTREAM-BEGIN ---";
+const WHITELIST_DNS_UPSTREAM_END: &str = "# --- AUTO-WHITELIST-DNS-UPSTREAM-END ---";
+const WHITELIST_DNS_BAK_PREFIX: &str = "# [WL-DNS-BAK] ";
+
+/// Удаление DNS-правил nameserver-policy и восстановление исходных upstream-серверов dns: режима белых списков из YAML.
 pub fn remove_whitelist_dns(yaml: &str) -> String {
-    if !yaml.contains(WHITELIST_DNS_BEGIN) {
+    if !yaml.contains(WHITELIST_DNS_BEGIN) && !yaml.contains(WHITELIST_DNS_UPSTREAM_BEGIN) {
         return yaml.to_string();
     }
     let mut out = Vec::new();
-    let mut skipping = false;
+    let mut skipping_policy = false;
+    let mut in_upstream = false;
     for line in yaml.lines() {
         let t = line.trim();
         if t == WHITELIST_DNS_BEGIN {
-            skipping = true;
+            skipping_policy = true;
             continue;
         }
         if t == WHITELIST_DNS_END {
-            skipping = false;
+            skipping_policy = false;
             continue;
         }
-        if !skipping {
-            out.push(line);
+        if t == WHITELIST_DNS_UPSTREAM_BEGIN {
+            in_upstream = true;
+            continue;
         }
+        if t == WHITELIST_DNS_UPSTREAM_END {
+            in_upstream = false;
+            continue;
+        }
+        if skipping_policy {
+            continue;
+        }
+        if in_upstream {
+            if let Some(rest) = t.strip_prefix(WHITELIST_DNS_BAK_PREFIX) {
+                out.push(rest);
+            }
+            continue;
+        }
+        out.push(line);
     }
     out.join("\n")
 }
@@ -761,8 +938,109 @@ pub fn apply_whitelist_rules_with_default_ips(
     out.join("\n")
 }
 
+/// Внутренний хелпер: в режиме БС переключает upstream-серверы внутри `dns:` на DoH через
+/// `🛡️ Whitelist`, а `default-nameserver`/`proxy-server-nameserver` на локальный `127.0.0.1:53`,
+/// сохраняя исходные значения в `# [WL-DNS-BAK]` для чистого восстановления при выключении БС.
+fn inject_whitelist_dns_upstream(yaml: &str) -> String {
+    let lines: Vec<String> = yaml.lines().map(String::from).collect();
+    let Some(dns_pos) = lines.iter().position(|l| {
+        !l.starts_with(' ') && !l.starts_with('\t') && (l.trim() == "dns:" || l.trim_end() == "dns:")
+    }) else {
+        return yaml.to_string();
+    };
+
+    let mut dns_end = dns_pos + 1;
+    while dns_end < lines.len() {
+        let l = &lines[dns_end];
+        let t = l.trim();
+        if t.is_empty() || t.starts_with('#') || l.starts_with(' ') || l.starts_with('\t') {
+            dns_end += 1;
+        } else {
+            break;
+        }
+    }
+
+    let child_indent = lines[dns_pos + 1..dns_end]
+        .iter()
+        .find_map(|l| {
+            let t = l.trim();
+            if t.is_empty() || t.starts_with('#') {
+                None
+            } else {
+                let ind = l.len() - l.trim_start().len();
+                if ind > 0 { Some(ind) } else { None }
+            }
+        })
+        .unwrap_or(2);
+    let pad = " ".repeat(child_indent);
+
+    let managed_prefixes = [
+        "default-nameserver:",
+        "proxy-server-nameserver:",
+        "nameserver:",
+        "fallback:",
+    ];
+
+    let mut kept_dns_lines = Vec::new();
+    let mut backup_lines = Vec::new();
+    let mut in_managed_key = false;
+
+    for line in &lines[dns_pos + 1..dns_end] {
+        let trimmed = line.trim();
+        let indent = line.len() - line.trim_start().len();
+
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            if in_managed_key {
+                backup_lines.push(format!("{pad}{WHITELIST_DNS_BAK_PREFIX}{line}"));
+            } else {
+                kept_dns_lines.push(line.clone());
+            }
+            continue;
+        }
+
+        if indent == child_indent && !trimmed.starts_with("- ") && trimmed != "-" {
+            in_managed_key = managed_prefixes.iter().any(|p| trimmed.starts_with(p));
+            if in_managed_key {
+                backup_lines.push(format!("{pad}{WHITELIST_DNS_BAK_PREFIX}{line}"));
+            } else {
+                kept_dns_lines.push(line.clone());
+            }
+            continue;
+        }
+
+        if in_managed_key && (indent > child_indent || trimmed.starts_with("- ") || trimmed == "-") {
+            backup_lines.push(format!("{pad}{WHITELIST_DNS_BAK_PREFIX}{line}"));
+            continue;
+        }
+
+        in_managed_key = false;
+        kept_dns_lines.push(line.clone());
+    }
+
+    let wl_group = crate::routing::WHITELIST_GROUP_NAME;
+    let mut upstream_block = Vec::with_capacity(backup_lines.len() + 10);
+    upstream_block.push(format!("{pad}{WHITELIST_DNS_UPSTREAM_BEGIN}"));
+    upstream_block.extend(backup_lines);
+    upstream_block.push(format!("{pad}default-nameserver:"));
+    upstream_block.push(format!("{pad}  - 127.0.0.1:53"));
+    upstream_block.push(format!("{pad}proxy-server-nameserver:"));
+    upstream_block.push(format!("{pad}  - 127.0.0.1:53"));
+    upstream_block.push(format!("{pad}nameserver:"));
+    upstream_block.push(format!("{pad}  - 'https://1.1.1.1/dns-query#{wl_group}'"));
+    upstream_block.push(format!("{pad}  - 'https://8.8.8.8/dns-query#{wl_group}'"));
+    upstream_block.push(format!("{pad}{WHITELIST_DNS_UPSTREAM_END}"));
+
+    let mut out = Vec::with_capacity(lines.len() + upstream_block.len());
+    out.extend_from_slice(&lines[..=dns_pos]);
+    out.extend(kept_dns_lines);
+    out.extend(upstream_block);
+    out.extend_from_slice(&lines[dns_end..]);
+    out.join("\n")
+}
+
 /// Применение DNS nameserver-policy для доменов режима белых списков.
-/// Направляет резолвинг отечественных доменов в локальный DNS роутера (127.0.0.1:53).
+/// Направляет резолвинг отечественных доменов в локальный DNS роутера (127.0.0.1:53),
+/// а зарубежных доменов — через активный туннель 🛡️ Whitelist (DoH).
 pub fn apply_whitelist_dns(
     content: &str,
     cfg: &crate::config::AppConfig,
@@ -798,7 +1076,7 @@ pub fn apply_whitelist_dns(
     dns_block.push(format!("    {WHITELIST_DNS_END}"));
 
     let lines: Vec<&str> = clean.lines().collect();
-    if let Some(pos) = lines.iter().position(|l| l.trim() == "nameserver-policy:") {
+    let with_policy = if let Some(pos) = lines.iter().position(|l| l.trim() == "nameserver-policy:") {
         let mut out = Vec::with_capacity(lines.len() + dns_block.len());
         for (i, line) in lines.iter().enumerate() {
             out.push(line.to_string());
@@ -808,10 +1086,8 @@ pub fn apply_whitelist_dns(
                 }
             }
         }
-        return out.join("\n");
-    }
-
-    if let Some(dns_pos) = lines.iter().position(|l| l.trim() == "dns:" || l.trim_end() == "dns:") {
+        out.join("\n")
+    } else if let Some(dns_pos) = lines.iter().position(|l| l.trim() == "dns:" || l.trim_end() == "dns:") {
         let mut out = Vec::with_capacity(lines.len() + dns_block.len() + 2);
         for (i, line) in lines.iter().enumerate() {
             out.push(line.to_string());
@@ -822,20 +1098,22 @@ pub fn apply_whitelist_dns(
                 }
             }
         }
-        return out.join("\n");
-    }
+        out.join("\n")
+    } else {
+        let mut out = Vec::with_capacity(lines.len() + dns_block.len() + 3);
+        for line in lines {
+            out.push(line.to_string());
+        }
+        out.push("dns:".to_string());
+        out.push("  enable: true".to_string());
+        out.push("  nameserver-policy:".to_string());
+        for entry in &dns_block {
+            out.push(entry.clone());
+        }
+        out.join("\n")
+    };
 
-    let mut out = Vec::with_capacity(lines.len() + dns_block.len() + 3);
-    for line in lines {
-        out.push(line.to_string());
-    }
-    out.push("dns:".to_string());
-    out.push("  enable: true".to_string());
-    out.push("  nameserver-policy:".to_string());
-    for entry in &dns_block {
-        out.push(entry.clone());
-    }
-    out.join("\n")
+    inject_whitelist_dns_upstream(&with_policy)
 }
 
 /// Удаление блоков Canary Probe (селектор-группы и слушателя listeners) из YAML.

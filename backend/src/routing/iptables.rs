@@ -197,6 +197,7 @@ pub fn apply_routing_with_filters_and_default_ips(
             current = with_vkturn;
         }
         current = ensure_tcp_concurrent(&current);
+        current = ensure_sniffer_enabled(&current);
         current = apply_quic_reject_rules(&current);
         let (sanitized, replaced) = sanitize_rule_targets(&current);
         for r in &replaced {
@@ -359,6 +360,8 @@ pub fn apply_routing_with_filters_and_default_ips(
 
     // DNS-HE-01: параллельный TCP-дозвон Happy Eyeballs (RFC 8305) для исключения задержек YouTube
     current = ensure_tcp_concurrent(&current);
+    // SNIFF-01: автоматический TLS/HTTP sniffer с override-destination: true
+    current = ensure_sniffer_enabled(&current);
 
     // QUIC-ORD-01: управляемое отклонение QUIC строго ДО белых списков и ДО всех SRC-IP-CIDR
     current = apply_quic_reject_rules(&current);

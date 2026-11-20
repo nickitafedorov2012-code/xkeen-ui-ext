@@ -2474,6 +2474,57 @@ pub async fn blacklist_and_next(
     switch_pool_node(state, mode, "next").await
 }
 
+/// Разрешает имя реального листового узла для виртуального пула бесплатной подписки (`free_wl`/`free_vpn`).
+async fn resolve_pool_leaf_name(
+    state: &AppState,
+    cfg: &AppConfig,
+    mode: FreeSubMode,
+    active_srv: Option<&mihomo::Server>,
+    nodes: &[Value],
+) -> Option<String> {
+    let pid = mode.provider_id();
+    let is_mode_active = active_srv.is_some_and(|s| {
+        s.provider.as_deref() == Some(pid)
+            || nodes
+                .iter()
+                .any(|n| n.get("name").and_then(|v| v.as_str()) == Some(s.id.as_str()))
+    });
+    if !is_mode_active {
+        return None;
+    }
+
+    if let Some(s) = active_srv {
+        if !s.is_pool && !s.id.is_empty() && !mihomo::is_virtual_free_sub_pool(&s.id) {
+            return Some(s.id.clone());
+        }
+    }
+
+    if let Some((leaf, _)) = mihomo::resolve_virtual_pool_active_leaf(&state.http, cfg, pid).await {
+        if !leaf.is_empty() && !mihomo::is_virtual_free_sub_pool(&leaf) {
+            return Some(leaf);
+        }
+    }
+
+    if let Some(s) = active_srv {
+        let host = s.host.trim();
+        if !host.is_empty()
+            && host != "Пул бесплатного VPN"
+            && host != "Пул обхода БС"
+            && !mihomo::is_virtual_free_sub_pool(host)
+        {
+            return Some(host.to_string());
+        }
+    }
+
+    let cp = cache_file_path(&state.config_path);
+    load_disk_cache(&cp)
+        .await
+        .mode_ref(mode)
+        .last_selected_node
+        .clone()
+        .filter(|n| !n.is_empty() && !mihomo::is_virtual_free_sub_pool(n))
+}
+
 /// Получить пул узлов, индекс активного узла и историю сессий для карточки бесплатной подписки.
 pub async fn get_pool_and_history(state: &AppState, mode: FreeSubMode) -> Value {
     let pid = mode.provider_id();
@@ -2488,13 +2539,7 @@ pub async fn get_pool_and_history(state: &AppState, mode: FreeSubMode) -> Value 
     prune_expired_blacklist(cache.mode_mut(mode), now_ts);
 
     let active_srv = mihomo::get_active_server(&state.http, &cfg).await.ok().flatten();
-    let active_leaf = active_srv
-        .as_ref()
-        .filter(|s| {
-            s.provider.as_deref() == Some(pid)
-                || nodes.iter().any(|n| n.get("name").and_then(|v| v.as_str()) == Some(s.id.as_str()))
-        })
-        .map(|s| s.id.clone());
+    let active_leaf = resolve_pool_leaf_name(state, &cfg, mode, active_srv.as_ref(), &nodes).await;
 
     let available: Vec<Value> = nodes
         .iter()
@@ -2636,15 +2681,13 @@ pub async fn check_free_sub_stall_watchdog(state: &AppState) {
     }
 
     if count >= 3 || periodic_probe_due {
-        // Активная L7-проверка реального листового узла перед признанием обрыва
-        if mihomo::probe_service_provider_node_l7(
+        // Активная L7-проверка реального листового узла (включая доступ к youtube.com) перед признанием обрыва
+        if mihomo::probe_service_provider_node_l7_stable(
             &state.http,
             &cfg,
             mode.provider_id(),
             &leaf_name,
             L7_TIMEOUT_MS,
-            None,
-            None,
         )
         .await
         .is_ok()
@@ -3317,6 +3360,119 @@ mod tests {
             ),
             "мёртвый узел dead-leaf должен попасть в 24ч blacklist"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::mihomo::invalidate_proxies_cache();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn regression_get_pool_and_history_resolves_virtual_pool_active_leaf() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _cache_guard = crate::mihomo::PROXIES_CACHE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        crate::mihomo::invalidate_proxies_cache();
+
+        let dir = std::env::temp_dir().join(format!("xkeen_free_sub_pool_leaf_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let prov_dir = dir.join("providers");
+        std::fs::create_dir_all(&prov_dir).unwrap();
+        let yaml_path = dir.join("config.yaml");
+        std::fs::write(&yaml_path, "mixed-port: 7892\n").unwrap();
+        let wl_prov_yaml = "\
+proxies:
+  - name: \"node-a\"
+    type: vless
+    server: 93.184.216.34
+    port: 443
+    uuid: 11111111-1111-1111-1111-111111111111
+  - name: \"node-b\"
+    type: vless
+    server: 93.184.216.35
+    port: 443
+    uuid: 11111111-1111-1111-1111-111111111112
+";
+        std::fs::write(prov_dir.join("free_wl.yaml"), wl_prov_yaml).unwrap();
+        let cfg_path = dir.join("config.json");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv_handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req.lines().next().unwrap_or("");
+                    let (status, body) = if first_line.starts_with("GET /proxies ") {
+                        let json_body = json!({
+                            "proxies": {
+                                "PROXY": { "type": "Selector", "now": "DIRECT", "all": ["DIRECT"] },
+                                crate::routing::WHITELIST_GROUP_NAME: { "type": "Selector", "now": "node-b", "all": ["node-a", "node-b"] },
+                                "node-a": { "type": "Vless", "alive": true, "history": [] },
+                                "node-b": { "type": "Vless", "alive": true, "history": [] }
+                            }
+                        }).to_string();
+                        ("200 OK", json_body)
+                    } else if first_line.starts_with("GET /providers/proxies ") {
+                        let json_body = json!({
+                            "providers": {
+                                "free_wl": {
+                                    "vehicleType": "HTTP",
+                                    "proxies": [
+                                        { "name": "node-a", "alive": true, "history": [] },
+                                        { "name": "node-b", "alive": true, "history": [] }
+                                    ]
+                                }
+                            }
+                        }).to_string();
+                        ("200 OK", json_body)
+                    } else {
+                        ("404 Not Found", "{}".to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+        cfg.mihomo.config_path = yaml_path.to_string_lossy().to_string();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist_providers = vec!["free_wl".into()];
+        tokio::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg).unwrap()).await.unwrap();
+
+        let config_arc = Arc::new(tokio::sync::RwLock::new(Arc::new(cfg)));
+        let ag = Arc::new(crate::antigravity::AntigravityManager::new(config_arc.clone()));
+        let state = AppState {
+            config: config_arc,
+            config_path: Arc::new(cfg_path.clone()),
+            http: reqwest::Client::new(),
+            failover_log: Arc::new(crate::failover::FailoverLog::default()),
+            routing_lock: Arc::new(tokio::sync::Mutex::new(())),
+            config_lock: Arc::new(tokio::sync::Mutex::new(())),
+            speedtest_lock: Arc::new(tokio::sync::Mutex::new(())),
+            zapret_lock: Arc::new(tokio::sync::Mutex::new(())),
+            antigravity: ag,
+            vkturn: crate::vkturn::VkTurnManager::new(),
+        };
+
+        let res = get_pool_and_history(&state, FreeSubMode::Whitelist).await;
+        srv_handle.abort();
+
+        assert_eq!(res.get("active_node").and_then(|v| v.as_str()), Some("node-b"));
+        assert_eq!(res.get("pool_index").and_then(|v| v.as_u64()), Some(2), "res={res}");
+        let nodes = res.get("nodes").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(nodes[0].get("is_active").and_then(|v| v.as_bool()), Some(false));
+        assert_eq!(nodes[1].get("is_active").and_then(|v| v.as_bool()), Some(true));
+
         let _ = std::fs::remove_dir_all(&dir);
         crate::mihomo::invalidate_proxies_cache();
     }

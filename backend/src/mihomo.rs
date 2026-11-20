@@ -866,6 +866,7 @@ pub async fn force_update_all_providers(http: &reqwest::Client, cfg: &AppConfig)
 pub const FREE_SUB_L7_PRIMARY_URL: &str = "https://www.gstatic.com/generate_204";
 pub const FREE_SUB_L7_FALLBACK_URL: &str = "https://cp.cloudflare.com/generate_204";
 pub const FREE_SUB_L7_VERIFY_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
+pub const FREE_SUB_L7_BLOCKED_SITE_URL: &str = "https://www.youtube.com/generate_204";
 
 /// Строгий разбор ответа точечного L7 healthcheck Mihomo (`/providers/proxies/{provider}/{node}/healthcheck`).
 /// Отклоняет любые HTTP-ошибки, JSON с `error`/`message` и `delay <= 0` без опоры на старую историю.
@@ -944,9 +945,10 @@ pub async fn probe_service_provider_node_l7(
     }
 }
 
-/// Stability Gate: двойная последовательная L7-проверка узла.
+/// Stability Gate: тройная последовательная L7-проверка узла.
 /// 1) `generate_204` (status 204)
 /// 2) Лёгкий HTTPS GET с проверкой ответа (`cdn-cgi/trace`, status 200) — отсеивает узлы с ECONNRESET на передаче данных.
+/// 3) Проверка доступа к заблокированному в РФ ресурсу (`youtube.com/generate_204`, status 204) — отсеивает российские реле под ТСПУ.
 pub async fn probe_service_provider_node_l7_stable(
     http: &reqwest::Client,
     cfg: &AppConfig,
@@ -975,7 +977,18 @@ pub async fn probe_service_provider_node_l7_stable(
     )
     .await
     .map_err(|e| format!("Stability gate (cdn-cgi/trace) провален: {e}"))?;
-    Ok((first_delay + second_delay) / 2)
+    let blocked_delay = run_single_provider_node_healthcheck(
+        http,
+        cfg,
+        provider_id,
+        node_name,
+        FREE_SUB_L7_BLOCKED_SITE_URL,
+        204,
+        timeout_ms,
+    )
+    .await
+    .map_err(|e| format!("Stability gate (youtube.com/generate_204) провален: {e}"))?;
+    Ok((first_delay + second_delay + blocked_delay) / 3)
 }
 
 /// Рекурсивное разрешение активного «листа» из цепочек selector/fallback/urltest.
@@ -5022,5 +5035,54 @@ mod tests {
         assert_eq!(res.get("PROXY"), Some(&145));
         assert_eq!(res.get(crate::routing::WHITELIST_GROUP_NAME), Some(&145));
         clear_proxies_cache_for_test();
+    }
+
+    #[tokio::test]
+    async fn regression_l7_stable_rejects_ru_relay_blocking_youtube() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req.lines().next().unwrap_or("");
+                    let (status, body) = if first_line.contains("/ru-relay/healthcheck") {
+                        if first_line.contains("youtube.com") {
+                            ("504 Gateway Timeout", r#"{"message":"context deadline exceeded"}"#.to_string())
+                        } else {
+                            ("200 OK", r#"{"delay":120}"#.to_string())
+                        }
+                    } else if first_line.contains("/eu-node/healthcheck") {
+                        ("200 OK", r#"{"delay":90}"#.to_string())
+                    } else {
+                        ("404 Not Found", r#"{"message":"not found"}"#.to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        let mut cfg = AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+        let client = reqwest::Client::new();
+
+        let ru_res = probe_service_provider_node_l7_stable(&client, &cfg, "__free_sub_probe", "ru-relay", 2000).await;
+        assert!(ru_res.is_err(), "RU relay blocking youtube.com must be rejected by Stability Gate");
+        let err_msg = ru_res.unwrap_err();
+        assert!(err_msg.contains("youtube.com/generate_204"), "unexpected error: {err_msg}");
+
+        let eu_res = probe_service_provider_node_l7_stable(&client, &cfg, "__free_sub_probe", "eu-node", 2000).await;
+        assert_eq!(eu_res, Ok(90));
+        srv.abort();
     }
 }

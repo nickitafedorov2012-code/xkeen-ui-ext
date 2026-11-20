@@ -333,6 +333,14 @@ sysctl -w net.ipv4.conf.default.rp_filter=1 2>/dev/null || true; \
 fi".to_string()
 }
 
+/// Автоподгрузка модулей ядра для TPROXY (nf_tproxy_core, xt_socket, xt_TPROXY) перед созданием правил mangle.
+fn tproxy_kernel_modules_load_script() -> String {
+    "KVER=$(uname -r 2>/dev/null); \
+for mod in nf_tproxy_core xt_socket xt_TPROXY; do \
+  modprobe \"$mod\" 2>/dev/null || { [ -n \"$KVER\" ] && [ -f \"/lib/modules/$KVER/$mod.ko\" ] && insmod \"/lib/modules/$KVER/$mod.ko\" 2>/dev/null; } || true; \
+done".to_string()
+}
+
 pub fn build_gaming_full_tunnel_commands(
     cfg: &config::GamingConfig,
     redir_port: u16,
@@ -381,6 +389,7 @@ ip -6 route flush table 115 2>/dev/null || true".to_string();
             setup_cmds.push("while ip -6 rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; while ip -6 rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; ip -6 rule add fwmark 0x115 lookup 115 priority 100 2>/dev/null || ip -6 rule add fwmark 0x115/0x115 lookup 115 priority 100 2>/dev/null || ip -6 rule add fwmark 0x115 lookup 115 2>/dev/null || true".to_string());
 
             // Изолированные цепочки XKEEN_GAMING
+            setup_cmds.push(tproxy_kernel_modules_load_script());
             setup_cmds.push("iptables -t nat -N XKEEN_GAMING -w 2>/dev/null || true".to_string());
             setup_cmds.push("iptables -t nat -I PREROUTING 1 -j XKEEN_GAMING -w".to_string());
             setup_cmds.push("iptables -t mangle -N XKEEN_GAMING -w 2>/dev/null || true".to_string());
@@ -613,6 +622,9 @@ pub fn build_whitelist_full_tunnel_commands(
     // (при взаимно исключающихся режимах порядок синков гарантирует согласованность).
     let cleanup_cmd = "\
 while iptables -w -t filter -D INPUT -m mark --mark 0x115/0x115 -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable 2>/dev/null; do :; done; \
+while iptables -w -t filter -D FORWARD -j XKEEN_BS_FWD 2>/dev/null; do :; done; \
+iptables -w -t filter -F XKEEN_BS_FWD 2>/dev/null || true; \
+iptables -w -t filter -X XKEEN_BS_FWD 2>/dev/null || true; \
 while iptables -t nat -D PREROUTING -j XKEEN_BS -w 2>/dev/null; do :; done; \
 iptables -t nat -F XKEEN_BS -w 2>/dev/null || true; \
 iptables -t nat -X XKEEN_BS -w 2>/dev/null || true; \
@@ -640,6 +652,7 @@ ip6tables -w -X XKEEN_BS6 2>/dev/null || true".to_string();
     setup_cmds.push("while ip rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; while ip rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; ip rule add fwmark 0x115 lookup 115 priority 100 2>/dev/null || ip rule add fwmark 0x115/0x115 lookup 115 priority 100 2>/dev/null || ip rule add fwmark 0x115 lookup 115 2>/dev/null || true".to_string());
 
     // Изолированные цепочки XKEEN_BS
+    setup_cmds.push(tproxy_kernel_modules_load_script());
     setup_cmds.push("iptables -t nat -N XKEEN_BS -w 2>/dev/null || true".to_string());
     setup_cmds.push("iptables -t nat -I PREROUTING 1 -j XKEEN_BS -w".to_string());
     setup_cmds.push("iptables -t mangle -N XKEEN_BS -w 2>/dev/null || true".to_string());
@@ -720,6 +733,35 @@ ip6tables -w -X XKEEN_BS6 2>/dev/null || true".to_string();
         // MANGLE: весь остальной UDP (ЛЮБЫЕ порты) -> TPROXY в Mihomo
         setup_cmds.push(format!(
             "iptables -t mangle -A XKEEN_BS -s {target} -p udp -j TPROXY --tproxy-mark 0x115/0xffffffff --on-port {tp_port} --on-ip 127.0.0.1 -w"
+        ));
+    }
+
+    // Если TPROXY недоступен в ядре и правило -j TPROXY не создалось, гарантируем отклонение
+    // транзитного QUIC (UDP 443) в filter FORWARD, чтобы браузеры мгновенно переходили на TCP.
+    if !target_subnets_or_ips.is_empty() {
+        let mut quic_fwd_cmds = vec![
+            "iptables -w -t filter -N XKEEN_BS_FWD 2>/dev/null || true".to_string(),
+            "iptables -w -t filter -F XKEEN_BS_FWD 2>/dev/null || true".to_string(),
+            "iptables -w -t filter -A XKEEN_BS_FWD -m set --match-set user_exclude dst -j RETURN".to_string(),
+        ];
+        for ex_ip in resolve_excluded_whitelist_ips_pub(cfg) {
+            let ip_clean = ex_ip.split('/').next().unwrap_or(&ex_ip).trim();
+            if let Ok(v4) = ip_clean.parse::<std::net::Ipv4Addr>() {
+                quic_fwd_cmds.push(format!("iptables -w -t filter -A XKEEN_BS_FWD -s {v4} -j RETURN"));
+            }
+        }
+        for local_dst in ["127.0.0.0/8", "169.254.0.0/16", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] {
+            quic_fwd_cmds.push(format!("iptables -w -t filter -A XKEEN_BS_FWD -d {local_dst} -j RETURN"));
+        }
+        for target in &target_subnets_or_ips {
+            quic_fwd_cmds.push(format!(
+                "iptables -w -t filter -A XKEEN_BS_FWD -s {target} -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable"
+            ));
+        }
+        quic_fwd_cmds.push("iptables -w -t filter -I FORWARD 1 -j XKEEN_BS_FWD".to_string());
+        setup_cmds.push(format!(
+            "if ! iptables -w -t mangle -S XKEEN_BS 2>/dev/null | grep -q -- \"-j TPROXY\"; then {}; fi",
+            quic_fwd_cmds.join("; ")
         ));
     }
 
@@ -1473,3 +1515,56 @@ pub async fn ping_gaming_targets(State(_state): State<AppState>) -> Response {
 // =====================================================================
 // Whitelist Mode (Белые списки) API
 // =====================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn regression_tproxy_kernel_modules_autoload_and_quic_forward_fallback() {
+        let mut g_cfg = config::GamingConfig::default();
+        g_cfg.enabled = true;
+        g_cfg.mode = config::GamingMode::Compatibility;
+        g_cfg.devices.push(config::GamingDevice {
+            mac: "aa:bb:cc:dd:ee:01".to_string(),
+            name: "PS5".to_string(),
+            ip: "192.168.1.50".to_string(),
+            ipv6: Vec::new(),
+            enabled: true,
+            server: None,
+        });
+        let (_g_clean, g_setup, _) = build_gaming_full_tunnel_commands(&g_cfg, 10809, 10808, 1053);
+        let mod_idx = g_setup
+            .iter()
+            .position(|c| c.contains("xt_TPROXY") && c.contains("xt_socket") && c.contains("insmod"))
+            .expect("gaming setup must autoload TPROXY kernel modules");
+        let tp_idx = g_setup
+            .iter()
+            .position(|c| c.contains("-j TPROXY"))
+            .expect("gaming setup must add TPROXY rule");
+        assert!(mod_idx < tp_idx, "kernel modules must be loaded before TPROXY rules");
+
+        let mut cfg = config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.enabled_by = config::WhitelistEnabledBy::Manual;
+        let (wl_clean, wl_setup) = build_whitelist_full_tunnel_commands(&cfg, 10809, 10808, 1053);
+        let wl_mod_idx = wl_setup
+            .iter()
+            .position(|c| c.contains("xt_TPROXY") && c.contains("xt_socket") && c.contains("insmod"))
+            .expect("whitelist setup must autoload TPROXY kernel modules");
+        let wl_tp_idx = wl_setup
+            .iter()
+            .position(|c| c.contains("-j TPROXY"))
+            .expect("whitelist setup must add TPROXY rule");
+        assert!(wl_mod_idx < wl_tp_idx, "kernel modules must be loaded before BS TPROXY rules");
+
+        assert!(
+            wl_setup.iter().any(|c| c.contains("XKEEN_BS_FWD") && c.contains("--dport 443 -j REJECT")),
+            "whitelist setup must include FORWARD QUIC REJECT fallback when TPROXY is unavailable"
+        );
+        assert!(
+            wl_clean.contains("XKEEN_BS_FWD"),
+            "whitelist cleanup must remove XKEEN_BS_FWD"
+        );
+    }
+}
