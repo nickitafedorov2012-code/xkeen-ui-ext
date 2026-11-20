@@ -1789,11 +1789,11 @@ mod tests {
         let setup_all = setup_cmds.join("\n");
         assert!(setup_all.contains("sysctl -w net.ipv4.conf.all.rp_filter=2"), "Setup must relax rp_filter for TPROXY");
         assert!(setup_all.contains("ip route replace local default dev lo table 115"), "Setup must bind table 115 to local lo interface");
-        assert!(setup_all.contains("ip rule add fwmark 0x115 lookup 115 priority 100"), "Setup must add fwmark 0x115 rule pointing to table 115");
+        assert!(setup_all.contains("ip rule add fwmark 0x115 lookup 115 priority 5"), "Setup must add fwmark 0x115 rule pointing to table 115");
         assert!(!setup_all.contains("0x111"), "Setup MUST NOT contain old mark 0x111");
         assert!(!setup_all.contains("table 111"), "Setup MUST NOT contain old table 111");
         assert!(setup_all.contains("ip -6 route replace local default dev lo table 115"), "Setup must bind IPv6 table 115 to lo interface");
-        assert!(setup_all.contains("ip -6 rule add fwmark 0x115 lookup 115 priority 100"), "Setup must add IPv6 fwmark 0x115 rule pointing to table 115");
+        assert!(setup_all.contains("ip -6 rule add fwmark 0x115 lookup 115 priority 5"), "Setup must add IPv6 fwmark 0x115 rule pointing to table 115");
 
         // Chain creation & jumps
         assert!(setup_all.contains("iptables -t nat -N XKEEN_GAMING"), "Setup must create NAT XKEEN_GAMING chain");

@@ -352,6 +352,7 @@ pub fn build_gaming_full_tunnel_commands(
     let d_port = if dns_port > 0 { dns_port } else { crate::routing::DEFAULT_MIHOMO_DNS_PORT };
 
     let cleanup_cmd = "\
+while iptables -w -t filter -D INPUT -m mark --mark 0x115/0x115 -p udp -j ACCEPT 2>/dev/null; do :; done; \
 while iptables -t nat -D PREROUTING -j XKEEN_GAMING -w 2>/dev/null; do :; done; \
 iptables -t nat -F XKEEN_GAMING -w 2>/dev/null || true; \
 iptables -t nat -X XKEEN_GAMING -w 2>/dev/null || true; \
@@ -382,11 +383,14 @@ ip -6 route flush table 115 2>/dev/null || true".to_string();
             // Ослабление rp_filter для корректного прохождения TPROXY-пакетов через сетевой мост LAN (баг 112: с сохранением исходного)
             setup_cmds.push(rp_filter_set_script());
 
-            // TPROXY policy routing: связывание fwmark 0x115 с локальной таблицей сокетов dev lo table 115
+            // TPROXY policy routing: связывание fwmark 0x115 с локальной таблицей сокетов dev lo table 115.
+            // Приоритет 5 обязателен: выше KeeneticOS `10: from all fwmark 0xffffa00 lookup main`.
             setup_cmds.push("ip route replace local default dev lo table 115 2>/dev/null || ip route add local 0.0.0.0/0 dev lo table 115 2>/dev/null || true".to_string());
-            setup_cmds.push("while ip rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; while ip rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; ip rule add fwmark 0x115 lookup 115 priority 100 2>/dev/null || ip rule add fwmark 0x115/0x115 lookup 115 priority 100 2>/dev/null || ip rule add fwmark 0x115 lookup 115 2>/dev/null || true".to_string());
+            setup_cmds.push("while ip rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; while ip rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; ip rule add fwmark 0x115 lookup 115 priority 5 2>/dev/null || ip rule add fwmark 0x115/0x115 lookup 115 priority 5 2>/dev/null || ip rule add fwmark 0x115 lookup 115 2>/dev/null || true".to_string());
             setup_cmds.push("ip -6 route replace local default dev lo table 115 2>/dev/null || ip -6 route add local default dev lo table 115 2>/dev/null || true".to_string());
-            setup_cmds.push("while ip -6 rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; while ip -6 rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; ip -6 rule add fwmark 0x115 lookup 115 priority 100 2>/dev/null || ip -6 rule add fwmark 0x115/0x115 lookup 115 priority 100 2>/dev/null || ip -6 rule add fwmark 0x115 lookup 115 2>/dev/null || true".to_string());
+            setup_cmds.push("while ip -6 rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; while ip -6 rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; ip -6 rule add fwmark 0x115 lookup 115 priority 5 2>/dev/null || ip -6 rule add fwmark 0x115/0x115 lookup 115 priority 5 2>/dev/null || ip -6 rule add fwmark 0x115 lookup 115 2>/dev/null || true".to_string());
+            // Разрешаем доставку TPROXY-пакетов (0x115) в локальный сокет Mihomo до policy DROP в KeeneticOS INPUT.
+            setup_cmds.push("iptables -w -t filter -I INPUT 1 -m mark --mark 0x115/0x115 -p udp -j ACCEPT".to_string());
 
             // Изолированные цепочки XKEEN_GAMING
             setup_cmds.push(tproxy_kernel_modules_load_script());
@@ -622,6 +626,7 @@ pub fn build_whitelist_full_tunnel_commands(
     // (при взаимно исключающихся режимах порядок синков гарантирует согласованность).
     let cleanup_cmd = "\
 while iptables -w -t filter -D INPUT -m mark --mark 0x115/0x115 -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable 2>/dev/null; do :; done; \
+while iptables -w -t filter -D INPUT -m mark --mark 0x115/0x115 -p udp -j ACCEPT 2>/dev/null; do :; done; \
 while iptables -w -t filter -D FORWARD -j XKEEN_BS_FWD 2>/dev/null; do :; done; \
 iptables -w -t filter -F XKEEN_BS_FWD 2>/dev/null || true; \
 iptables -w -t filter -X XKEEN_BS_FWD 2>/dev/null || true; \
@@ -644,12 +649,14 @@ ip6tables -w -X XKEEN_BS6 2>/dev/null || true".to_string();
     // QUIC-INGR-01: Мгновенное отклонение QUIC (UDP/443) на уровне ядра Linux (ICMP Port Unreachable)
     // предотвращает многосекундные зависания Chromium/Firefox/YouTube при попытке соединиться по HTTP/3.
     setup_cmds.push("iptables -w -t filter -I INPUT 1 -m mark --mark 0x115/0x115 -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable".to_string());
+    // Остальные TPROXY UDP-пакеты (0x115) пропускаются в локальный сокет Mihomo до policy DROP в KeeneticOS INPUT.
+    setup_cmds.push("iptables -w -t filter -I INPUT 2 -m mark --mark 0x115/0x115 -p udp -j ACCEPT".to_string());
 
     // Ослабление rp_filter и policy routing для TPROXY (общие с игровым режимом,
     // режимы взаимно исключаются в sync_full_tunnel_modes; баг 112: с сохранением исходного)
     setup_cmds.push(rp_filter_set_script());
     setup_cmds.push("ip route replace local default dev lo table 115 2>/dev/null || ip route add local 0.0.0.0/0 dev lo table 115 2>/dev/null || true".to_string());
-    setup_cmds.push("while ip rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; while ip rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; ip rule add fwmark 0x115 lookup 115 priority 100 2>/dev/null || ip rule add fwmark 0x115/0x115 lookup 115 priority 100 2>/dev/null || ip rule add fwmark 0x115 lookup 115 2>/dev/null || true".to_string());
+    setup_cmds.push("while ip rule del fwmark 0x115 lookup 115 2>/dev/null; do :; done; while ip rule del fwmark 0x115/0x115 lookup 115 2>/dev/null; do :; done; ip rule add fwmark 0x115 lookup 115 priority 5 2>/dev/null || ip rule add fwmark 0x115/0x115 lookup 115 priority 5 2>/dev/null || ip rule add fwmark 0x115 lookup 115 2>/dev/null || true".to_string());
 
     // Изолированные цепочки XKEEN_BS
     setup_cmds.push(tproxy_kernel_modules_load_script());
@@ -1565,6 +1572,32 @@ mod tests {
         assert!(
             wl_clean.contains("XKEEN_BS_FWD"),
             "whitelist cleanup must remove XKEEN_BS_FWD"
+        );
+    }
+
+    #[test]
+    fn regression_tproxy_ip_rule_priority_and_input_accept_above_ndm_drop() {
+        let mut cfg = config::AppConfig::default();
+        cfg.whitelist.enabled = true;
+        cfg.whitelist.enabled_by = config::WhitelistEnabledBy::Manual;
+        let (wl_clean, wl_setup) = build_whitelist_full_tunnel_commands(&cfg, 10809, 10808, 1053);
+
+        assert!(
+            wl_setup.iter().any(|c| c.contains("fwmark 0x115 lookup 115 priority 5")),
+            "ip rule для TPROXY должен иметь priority 5 (выше KeeneticOS priority 10)"
+        );
+        let reject_idx = wl_setup
+            .iter()
+            .position(|c| c.contains("INPUT 1") && c.contains("--dport 443 -j REJECT"))
+            .expect("INPUT 1 REJECT UDP 443 must exist");
+        let accept_idx = wl_setup
+            .iter()
+            .position(|c| c.contains("INPUT 2") && c.contains("0x115/0x115") && c.contains("-j ACCEPT"))
+            .expect("INPUT 2 ACCEPT для fwmark 0x115 обязателен, иначе KeeneticOS INPUT policy DROP отбрасывает UDP");
+        assert!(reject_idx < accept_idx, "REJECT UDP 443 должен стоять перед общим ACCEPT 0x115");
+        assert!(
+            wl_clean.contains("-D INPUT -m mark --mark 0x115/0x115 -p udp -j ACCEPT"),
+            "cleanup должен удалять INPUT ACCEPT 0x115"
         );
     }
 }

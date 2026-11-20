@@ -868,6 +868,7 @@ pub const FREE_SUB_L7_FALLBACK_URL: &str = "https://cp.cloudflare.com/generate_2
 pub const FREE_SUB_L7_VERIFY_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
 pub const FREE_SUB_L7_THROUGHPUT_URL: &str = "https://speed.cloudflare.com/__down?bytes=50000";
 pub const FREE_SUB_L7_BLOCKED_SITE_URL: &str = "https://www.youtube.com/generate_204";
+pub const FREE_SUB_L7_TELEGRAM_URL: &str = "https://telegram.org/dl";
 
 /// Строгий разбор ответа точечного L7 healthcheck Mihomo (`/providers/proxies/{provider}/{node}/healthcheck`).
 /// Отклоняет любые HTTP-ошибки, JSON с `error`/`message` и `delay <= 0` без опоры на старую историю.
@@ -956,6 +957,23 @@ fn is_throughput_endpoint_http_rejection(err: &str) -> bool {
         .any(|code| lower.contains(code))
 }
 
+/// Расчёт итогового скора L7-пробы с учётом реальной пропускной способности под нагрузкой (50 КБ).
+/// Медленные перегруженные узлы с большим временем скачивания payload получают штраф `2x` за время передачи,
+/// чтобы `should_upgrade_active_node` автоматически переключал туннель на более быстрый сервер.
+pub fn compute_l7_stable_score(
+    first_delay: i64,
+    throughput_delay: i64,
+    blocked_delay: i64,
+    used_throughput_probe: bool,
+) -> i64 {
+    if !used_throughput_probe {
+        return (first_delay + throughput_delay + blocked_delay) / 3;
+    }
+    let base_rtt = (first_delay + blocked_delay) / 2;
+    let payload_transfer_ms = (throughput_delay - first_delay).max(0);
+    base_rtt + payload_transfer_ms * 2
+}
+
 /// Stability Gate: тройная последовательная L7-проверка узла.
 /// 1) `generate_204` (status 204)
 /// 2) Throughput Gate: загрузка 50 КБ (`speed.cloudflare.com/__down?bytes=50000`, status 200, таймаут `min(timeout_ms, 3000)`) —
@@ -979,6 +997,7 @@ pub async fn probe_service_provider_node_l7_stable(
     )
     .await?;
     let tp_timeout_ms = timeout_ms.min(3000);
+    let mut used_throughput_probe = true;
     let second_delay = match run_single_provider_node_healthcheck(
         http,
         cfg,
@@ -992,6 +1011,7 @@ pub async fn probe_service_provider_node_l7_stable(
     {
         Ok(d) => d,
         Err(tp_err) if is_throughput_endpoint_http_rejection(&tp_err) => {
+            used_throughput_probe = false;
             run_single_provider_node_healthcheck(
                 http,
                 cfg,
@@ -1019,7 +1039,117 @@ pub async fn probe_service_provider_node_l7_stable(
     )
     .await
     .map_err(|e| format!("Stability gate (youtube.com/generate_204) провален: {e}"))?;
-    Ok((first_delay + second_delay + blocked_delay) / 3)
+    Ok(compute_l7_stable_score(
+        first_delay,
+        second_delay,
+        blocked_delay,
+        used_throughput_probe,
+    ))
+}
+
+/// Добавляет оценку доступности Telegram к базовому L7-скору.
+/// Если Telegram отвечает — добавляет 1/3 задержки для приоритета быстрых узлов;
+/// если Telegram не отвечает/таймаутит — добавляет жёсткий штраф +4000 мс,
+/// чтобы узлы с отрезанным Telegram никогда не побеждали узлы с живым Telegram.
+pub fn compute_l7_scored_with_telegram(base_score: i64, telegram_delay: Option<i64>) -> i64 {
+    match telegram_delay {
+        Some(tg) if tg > 0 => base_score + tg / 3,
+        _ => base_score + 4000,
+    }
+}
+
+/// Устойчивый L7-скоринг для автоподбора бесплатных узлов:
+/// 1) Обязательный базовый `generate_204` (`gstatic` / `cp.cloudflare`).
+/// 2) Обязательная проверка доступа к заблокированному ресурсу (`youtube.com/generate_204`) — отсеивает RU-релеи под ТСПУ.
+/// 3) Параллельно: замер 50 КБ с `speed.cloudflare.com` и проверка `telegram.org/dl` (status 302).
+///    Если Telegram не отвечает — узел штрафуется на +4000 мс; если `speed.cloudflare.com` таймаутит — штраф +2500 мс.
+pub async fn probe_service_provider_node_l7_scored(
+    http: &reqwest::Client,
+    cfg: &AppConfig,
+    provider_id: &str,
+    node_name: &str,
+    timeout_ms: u64,
+) -> Result<i64, String> {
+    let first_delay = probe_service_provider_node_l7(
+        http,
+        cfg,
+        provider_id,
+        node_name,
+        timeout_ms,
+        None,
+        None,
+    )
+    .await?;
+    let blocked_delay = run_single_provider_node_healthcheck(
+        http,
+        cfg,
+        provider_id,
+        node_name,
+        FREE_SUB_L7_BLOCKED_SITE_URL,
+        204,
+        timeout_ms,
+    )
+    .await
+    .map_err(|e| format!("Stability gate (youtube.com/generate_204) провален: {e}"))?;
+
+    let tp_timeout_ms = timeout_ms.min(3000);
+    let tg_timeout_ms = timeout_ms.min(3500);
+
+    let tp_fut = async {
+        match run_single_provider_node_healthcheck(
+            http,
+            cfg,
+            provider_id,
+            node_name,
+            FREE_SUB_L7_THROUGHPUT_URL,
+            200,
+            tp_timeout_ms,
+        )
+        .await
+        {
+            Ok(d) => compute_l7_stable_score(first_delay, d, blocked_delay, true),
+            Err(tp_err) if is_throughput_endpoint_http_rejection(&tp_err) => {
+                match run_single_provider_node_healthcheck(
+                    http,
+                    cfg,
+                    provider_id,
+                    node_name,
+                    FREE_SUB_L7_VERIFY_URL,
+                    200,
+                    timeout_ms,
+                )
+                .await
+                {
+                    Ok(d) => compute_l7_stable_score(first_delay, d, blocked_delay, false),
+                    Err(_) => compute_l7_stable_score(
+                        first_delay,
+                        first_delay + 1250,
+                        blocked_delay,
+                        true,
+                    ),
+                }
+            }
+            Err(_) => compute_l7_stable_score(
+                first_delay,
+                first_delay + 1250,
+                blocked_delay,
+                true,
+            ),
+        }
+    };
+
+    let tg_fut = run_single_provider_node_healthcheck(
+        http,
+        cfg,
+        provider_id,
+        node_name,
+        FREE_SUB_L7_TELEGRAM_URL,
+        302,
+        tg_timeout_ms,
+    );
+
+    let (base_score, tg_res) = tokio::join!(tp_fut, tg_fut);
+    Ok(compute_l7_scored_with_telegram(base_score, tg_res.ok()))
 }
 
 /// Рекурсивное разрешение активного «листа» из цепочек selector/fallback/urltest.
@@ -5193,6 +5323,98 @@ mod tests {
 
         let fast = probe_service_provider_node_l7_stable(&client, &cfg, "__free_sub_probe", "fast-node", 5000).await;
         assert_eq!(fast, Ok(120));
+        srv.abort();
+    }
+
+    #[test]
+    fn regression_l7_stable_penalizes_slow_throughput_node_for_auto_upgrade() {
+        // Перегруженный узел: низкий базовый пинг 100 мс, но 50 КБ скачиваются за 500 мс (~125 КБ/с)
+        let slow_score = compute_l7_stable_score(100, 500, 120, true);
+        // Быстрый узел: базовый пинг 120 мс, но 50 КБ скачиваются за 160 мс (~1.25 МБ/с)
+        let fast_score = compute_l7_stable_score(120, 160, 140, true);
+        assert!(
+            slow_score >= 800 && fast_score <= 250,
+            "Медленный узел должен получать ощутимый штраф за payload: slow={slow_score}, fast={fast_score}"
+        );
+        assert!(
+            crate::free_sub::should_upgrade_active_node(slow_score, false, fast_score, false),
+            "Фоновый добор должен автоматически переключить активный узел с медленного ({slow_score}) на быстрый ({fast_score})"
+        );
+    }
+
+    #[tokio::test]
+    async fn regression_l7_scored_keeps_working_nodes_when_cloudflare_speed_times_out() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let srv = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else { break };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let first_line = req.lines().next().unwrap_or("");
+                    let (status, body) = if first_line.contains("/cf-timeout-node/healthcheck") {
+                        if first_line.contains("speed.cloudflare.com") {
+                            ("504 Gateway Timeout", r#"{"message":"context deadline exceeded"}"#.to_string())
+                        } else {
+                            ("200 OK", r#"{"delay":150}"#.to_string())
+                        }
+                    } else if first_line.contains("/dead-tg-node/healthcheck") {
+                        if first_line.contains("telegram.org") {
+                            ("504 Gateway Timeout", r#"{"message":"context deadline exceeded"}"#.to_string())
+                        } else {
+                            ("200 OK", r#"{"delay":100}"#.to_string())
+                        }
+                    } else if first_line.contains("/ru-relay/healthcheck") {
+                        if first_line.contains("youtube.com") {
+                            ("504 Gateway Timeout", r#"{"message":"context deadline exceeded"}"#.to_string())
+                        } else {
+                            ("200 OK", r#"{"delay":90}"#.to_string())
+                        }
+                    } else if first_line.contains("/fast-node/healthcheck") {
+                        ("200 OK", r#"{"delay":120}"#.to_string())
+                    } else {
+                        ("404 Not Found", r#"{"message":"not found"}"#.to_string())
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(resp.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+
+        let mut cfg = AppConfig::default();
+        cfg.mihomo.host = "127.0.0.1".into();
+        cfg.mihomo.port = port;
+        let client = reqwest::Client::new();
+
+        let ru = probe_service_provider_node_l7_scored(&client, &cfg, "__free_sub_probe", "ru-relay", 3000).await;
+        assert!(ru.is_err(), "RU-релей без доступа к youtube.com должен отклоняться");
+
+        let cf_timeout = probe_service_provider_node_l7_scored(&client, &cfg, "__free_sub_probe", "cf-timeout-node", 3000)
+            .await
+            .expect("Рабочий узел при таймауте speed.cloudflare.com не должен выбивать пул в 0");
+        let fast = probe_service_provider_node_l7_scored(&client, &cfg, "__free_sub_probe", "fast-node", 3000)
+            .await
+            .expect("Быстрый узел должен проходить");
+
+        assert!(
+            cf_timeout > fast + 1000,
+            "Узел без speed.cloudflare.com ({cf_timeout}) должен получать штраф и проигрывать быстрому ({fast})"
+        );
+
+        let dead_tg = probe_service_provider_node_l7_scored(&client, &cfg, "__free_sub_probe", "dead-tg-node", 3000)
+            .await
+            .expect("Узел с мёртвым Telegram должен оцениваться со штрафом");
+        assert!(
+            dead_tg > fast + 3000 && dead_tg > cf_timeout,
+            "Узел с мёртвым Telegram ({dead_tg}) должен проигрывать узлам с живым Telegram (fast={fast}, cf_timeout={cf_timeout})"
+        );
         srv.abort();
     }
 
