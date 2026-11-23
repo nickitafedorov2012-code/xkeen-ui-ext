@@ -66,9 +66,15 @@ pub const TUN_UDS_NAME: &str = "xkeen_route_csqtt_tun";
 pub const TUN_MTU: u16 = 900;
 /// Максимальный TCP MSS для соединений через csq0 (900 - 60 байт запаса на IP/TCP заголовки и опции).
 pub const TUN_TCP_MSS: u16 = 840;
-/// MTU и TCP MSS для режима `-turn-transport tcp` (нет UDP-фрагментации и DTLS-лимита датаграммы).
-pub const TUN_MTU_TCP: u16 = 1360;
-pub const TUN_TCP_MSS_TCP: u16 = 1300;
+/// MTU и TCP MSS для режима `-turn-transport tcp`.
+/// Инвариант ядра csqttr (`if packet.len() <= 1280`, коммит 0e90df23758):
+/// `MSS + 52 (IPv4 + TCP с timestamps) <= 1280` (1220 + 52 = 1272 <= 1280) и `MSS + 60 <= MTU`,
+/// чтобы пакеты не резались фрагментатором `wire_protocol::fragment_packet` 1 -> 2.
+pub const TUN_MTU_TCP: u16 = 1280;
+pub const TUN_TCP_MSS_TCP: u16 = 1220;
+/// Устаревшее значение TCP MSS (1300) из прежних сборок: подчищаем в iptables mangle,
+/// чтобы после обновления панели без перезагрузки роутера не оставалось висячих правил.
+pub(super) const LEGACY_TUN_TCP_MSS_TCP: u16 = 1300;
 /// Верхний предел потоков при авто-переключении на TCP (снижает нагрузку на CPU роутера).
 pub const TCP_AUTO_WORKERS_CAP: u32 = 10;
 /// Отдельная таблица маршрутизации для сокетов, привязанных к csq0 (в пределах 1..252 для Busybox).
@@ -482,12 +488,42 @@ mod tests {
         cfg.streams = 16;
         assert_eq!(effective_workers_for_transport(&cfg, "tcp"), 16, "ручной выбор потоков сохраняется");
 
+        assert_eq!(TUN_MTU, 900);
+        assert_eq!(TUN_TCP_MSS, 840);
+        assert_eq!(TUN_MTU_TCP, 1280);
+        assert_eq!(TUN_TCP_MSS_TCP, 1220);
+        assert!(TUN_MTU_TCP <= 1280, "MTU для TCP не должен превышать порог фрагментации csqttr (1280)");
+        assert!(TUN_TCP_MSS_TCP + 52 <= 1280, "MSS + 52 (IPv4 + TCP с timestamps) должен укладываться в 1280");
+        assert!(TUN_TCP_MSS_TCP + 60 <= TUN_MTU_TCP, "MSS + 60 должен укладываться в MTU TUN");
+        assert!(tcp_args.windows(2).any(|w| w == ["-obfs", "audio"]));
+
         let ip: std::net::Ipv4Addr = "10.66.67.2".parse().unwrap();
         let tcp_script = tun_configure_script_for_transport(ip, "tcp");
-        assert!(tcp_script.contains("mtu 1360 up"));
-        assert!(tcp_script.contains("--set-mss 1300"));
+        assert!(tcp_script.contains("mtu 1280 up"));
+        assert!(!tcp_script.contains("mtu 1360 up"));
+        assert!(tcp_script.contains("-I \"$ch\" 1 -o csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 1220"));
+        assert!(tcp_script.contains("-I \"$ch\" 1 -i csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 1220"));
+        assert!(!tcp_script.contains("-I \"$ch\" 1 -o csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 1300"));
+        assert!(!tcp_script.contains("-I \"$ch\" 1 -i csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 1300"));
+        assert!(tcp_script.contains("-D \"$ch\" -o csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 840"));
+        assert!(tcp_script.contains("-D \"$ch\" -i csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 840"));
+        assert!(tcp_script.contains("-D \"$ch\" -o csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 1300"));
+        assert!(tcp_script.contains("-D \"$ch\" -i csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 1300"));
+
+        let udp_script = tun_configure_script_for_transport(ip, "udp");
+        assert!(udp_script.contains("mtu 900 up"));
+        assert!(udp_script.contains("-I \"$ch\" 1 -o csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 840"));
+        assert!(udp_script.contains("-I \"$ch\" 1 -i csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 840"));
+        assert!(udp_script.contains("-D \"$ch\" -o csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 1220"));
+        assert!(udp_script.contains("-D \"$ch\" -i csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 1220"));
+        assert!(udp_script.contains("-D \"$ch\" -o csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 1300"));
+        assert!(udp_script.contains("-D \"$ch\" -i csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss 1300"));
+
         let teardown = tun_teardown_script();
-        assert!(teardown.contains("840") && teardown.contains("1300"));
+        for mss in [840, 1220, 1300] {
+            assert!(teardown.contains(&format!("-D \"$ch\" -o csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss {mss}")));
+            assert!(teardown.contains(&format!("-D \"$ch\" -i csq0 -p tcp --tcp-flags SYN,RST SYN -m comment --comment xkeen-route-vkturn -j TCPMSS --set-mss {mss}")));
+        }
 
         let mut rt = VkTurnRuntime::default();
         let now = Instant::now();

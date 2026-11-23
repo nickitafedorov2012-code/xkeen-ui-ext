@@ -2697,6 +2697,10 @@ mod tests {
                 && body.contains("Не удалось запустить процесс mihomo"),
             "xkeen_service must verify mihomo process started and return api_err if not running"
         );
+        assert!(
+            body.contains("cmd.env(\"fd_out\", \"true\")") && body.contains("cmd.arg(\"on\")"),
+            "xkeen_service must pass fd_out=true and 'on' to S05xkeen for synchronous SIGHUP-safe start/restart"
+        );
     }
 
     #[tokio::test]

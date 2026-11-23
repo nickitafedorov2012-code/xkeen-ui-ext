@@ -627,13 +627,14 @@ fi
 "#;
 
     let out = if std::path::Path::new(init_script).exists() {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.env("fd_out", "true").arg(init_script).arg(script_arg);
+        if is_start_action {
+            cmd.arg("on");
+        }
         tokio::time::timeout(
             std::time::Duration::from_secs(15),
-            tokio::process::Command::new("sh")
-                .env("fd_out", "true")
-                .arg(init_script)
-                .arg(script_arg)
-                .output(),
+            cmd.output(),
         )
         .await
     } else if is_start_action {

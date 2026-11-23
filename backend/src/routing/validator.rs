@@ -431,6 +431,10 @@ pub fn add_file_provider_to_yaml(
     Ok(out.join(eol))
 }
 
+fn is_block_use_key(trimmed: &str) -> bool {
+    trimmed == "use:" || trimmed.starts_with("use: #") || trimmed.starts_with("use:#")
+}
+
 /// Гарантирует присутствие провайдера `id` в секции `use:` основных прокси-групп (`PROXY`, `Proxy`, `Fastest`, `Fallback`).
 pub fn add_provider_to_proxy_groups(yaml: &str, id: &str) -> String {
     let id = id.trim();
@@ -457,12 +461,14 @@ pub fn add_provider_to_proxy_groups(yaml: &str, id: &str) -> String {
     let mut cur_group_has_id = false;
     let mut in_use_block = false;
     let mut use_block_insert_idx: Option<usize> = None;
+    let mut cur_group_last_content_idx: Option<usize> = None;
 
     let flush_missing_use = |out: &mut Vec<String>,
                              is_target: bool,
                              has_use: bool,
                              has_id: bool,
-                             use_insert_idx: Option<usize>| {
+                             use_insert_idx: Option<usize>,
+                             last_content_idx: Option<usize>| {
         if !is_target || has_id {
             return;
         }
@@ -470,6 +476,9 @@ pub fn add_provider_to_proxy_groups(yaml: &str, id: &str) -> String {
             if let Some(idx) = use_insert_idx {
                 out.insert(idx, format!("      - {id}"));
             }
+        } else if let Some(idx) = last_content_idx {
+            out.insert(idx, "    use:".to_string());
+            out.insert(idx + 1, format!("      - {id}"));
         } else {
             out.push("    use:".to_string());
             out.push(format!("      - {id}"));
@@ -487,6 +496,7 @@ pub fn add_provider_to_proxy_groups(yaml: &str, id: &str) -> String {
             cur_group_has_id = false;
             in_use_block = false;
             use_block_insert_idx = None;
+            cur_group_last_content_idx = None;
             out.push((*line).to_string());
             continue;
         }
@@ -498,14 +508,16 @@ pub fn add_provider_to_proxy_groups(yaml: &str, id: &str) -> String {
                 cur_group_has_use,
                 cur_group_has_id,
                 use_block_insert_idx,
+                cur_group_last_content_idx,
             );
             in_proxy_groups = false;
             cur_group_is_target = false;
             in_use_block = false;
+            cur_group_last_content_idx = None;
         }
 
         if in_proxy_groups {
-            if trimmed.starts_with('#') {
+            if trimmed.starts_with('#') || trimmed.is_empty() {
                 out.push((*line).to_string());
                 continue;
             }
@@ -516,6 +528,7 @@ pub fn add_provider_to_proxy_groups(yaml: &str, id: &str) -> String {
                     cur_group_has_use,
                     cur_group_has_id,
                     use_block_insert_idx,
+                    cur_group_last_content_idx,
                 );
                 let gname = trimmed
                     .trim_start_matches("- name:")
@@ -528,15 +541,17 @@ pub fn add_provider_to_proxy_groups(yaml: &str, id: &str) -> String {
                 in_use_block = false;
                 use_block_insert_idx = None;
                 out.push((*line).to_string());
+                cur_group_last_content_idx = Some(out.len());
                 continue;
             }
 
             if cur_group_is_target {
-                if trimmed == "use:" {
+                if is_block_use_key(trimmed) {
                     cur_group_has_use = true;
                     in_use_block = true;
                     out.push((*line).to_string());
                     use_block_insert_idx = Some(out.len());
+                    cur_group_last_content_idx = Some(out.len());
                     continue;
                 }
                 if (trimmed.starts_with("use: [") || trimmed.starts_with("use:["))
@@ -564,18 +579,26 @@ pub fn add_provider_to_proxy_groups(yaml: &str, id: &str) -> String {
                                 let tail = &line[close_idx + 1..];
                                 out.push(format!("{indent}use: [{}]{tail}", next_items.join(", ")));
                             }
+                            cur_group_last_content_idx = Some(out.len());
                             continue;
                         }
                     }
                 }
                 if in_use_block {
                     if trimmed.starts_with("- ") {
-                        let item = trimmed.trim_start_matches("- ").trim().trim_matches(|c| c == '"' || c == '\'');
+                        let item = trimmed
+                            .trim_start_matches("- ")
+                            .split('#')
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .trim_matches(|c| c == '"' || c == '\'');
                         if item.eq_ignore_ascii_case(id) {
                             cur_group_has_id = true;
                         }
                         out.push((*line).to_string());
                         use_block_insert_idx = Some(out.len());
+                        cur_group_last_content_idx = Some(out.len());
                         continue;
                     } else if !trimmed.is_empty() && !trimmed.starts_with('#') {
                         in_use_block = false;
@@ -585,6 +608,9 @@ pub fn add_provider_to_proxy_groups(yaml: &str, id: &str) -> String {
         }
 
         out.push((*line).to_string());
+        if in_proxy_groups && cur_group_is_target && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            cur_group_last_content_idx = Some(out.len());
+        }
     }
 
     if in_proxy_groups {
@@ -594,6 +620,7 @@ pub fn add_provider_to_proxy_groups(yaml: &str, id: &str) -> String {
             cur_group_has_use,
             cur_group_has_id,
             use_block_insert_idx,
+            cur_group_last_content_idx,
         );
     }
 
@@ -920,7 +947,7 @@ pub fn sync_disabled_providers_in_yaml(yaml: &str, disabled_providers: &[String]
             continue;
         }
 
-        if trimmed == "use:" || trimmed == "# use-disabled:" {
+        if is_block_use_key(trimmed) || trimmed == "# use-disabled:" {
             in_use_block = true;
             use_indent = line.len() - line.trim_start().len();
             let indent_spaces = &line[..use_indent];
@@ -1038,7 +1065,7 @@ pub fn sync_disabled_providers_in_yaml(yaml: &str, disabled_providers: &[String]
                     if !gt.ends_with("[]") {
                         has_active_use = true;
                     }
-                } else if gt == "use:" {
+                } else if is_block_use_key(gt) {
                     use_idx = Some(idx);
                     use_ind = gl.len() - gl.trim_start().len();
                 } else if gt.starts_with("# use-disabled:") {

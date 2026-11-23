@@ -189,7 +189,7 @@ ensure_xkeen() {{
     while [ "$attempt" -lt 12 ]; do
         mihomo_running && return 0
         if [ -x "$XKEEN_INIT" ]; then
-            sh "$XKEEN_INIT" start >/dev/null 2>&1 || true
+            fd_out=true sh "$XKEEN_INIT" start on >/dev/null 2>&1 || true
         fi
         attempt=$((attempt + 1))
         sleep 5
@@ -308,7 +308,7 @@ mod init_script_tests {
         assert!(script.contains("while [ \"$attempt\" -lt 120 ]; do"));
         assert!(script.contains("sleep 0.5"));
         assert!(script.contains("ensure_xkeen()"));
-        assert!(script.contains("sh \"$XKEEN_INIT\" start"));
+        assert!(script.contains("fd_out=true sh \"$XKEEN_INIT\" start on"));
         assert!(script.contains("Mihomo did not start in 60 seconds"));
     }
 
@@ -537,7 +537,7 @@ async fn main() {
         let init_script = cfg.system.xkeen_init.trim();
         let has_init = !init_script.is_empty() && std::path::Path::new(init_script).exists();
         let start_cmd = if has_init {
-            format!("sh \"{init_script}\" start </dev/null >/dev/null 2>&1")
+            format!("fd_out=true sh \"{init_script}\" start on </dev/null >/dev/null 2>&1")
         } else {
             "if [ -x /opt/sbin/xkeen ]; then /opt/sbin/xkeen -start </dev/null >/dev/null 2>&1; elif [ -x /opt/sbin/mihomo ]; then nohup /opt/sbin/mihomo -d /opt/etc/mihomo </dev/null >/opt/var/log/mihomo.log 2>&1 & elif command -v mihomo >/dev/null 2>&1; then nohup mihomo -d /opt/etc/mihomo </dev/null >/opt/var/log/mihomo.log 2>&1 & fi".to_string()
         };

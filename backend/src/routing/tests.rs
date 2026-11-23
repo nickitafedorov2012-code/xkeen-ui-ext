@@ -3435,3 +3435,115 @@ rules:
         assert!(restored.contains("  nameserver:\n    - 1.1.1.1\n    - 8.8.8.8\n"), "original nameserver must be restored:\n{restored}");
         assert!(restored.contains("  fallback:\n    - 9.9.9.9\n"), "original fallback must be restored:\n{restored}");
     }
+
+    #[test]
+    fn regression_free_sub_enable_on_fresh_config_with_canary_no_duplicate_use() {
+        let base_yaml = "\
+mixed-port: 7892
+proxy-groups:
+# --- AUTO-CANARY-GROUP-BEGIN ---
+  - name: '🛡️ Canary Probe'
+    type: select
+    proxies:
+      - DIRECT
+      - REJECT
+# --- AUTO-CANARY-GROUP-END ---
+  - name: PROXY
+    type: select
+    proxies:
+      - DIRECT
+rules:
+  - MATCH,PROXY
+";
+        let mut y = add_file_provider_to_yaml(base_yaml, "free_vpn", "./providers/free_vpn.yaml", None, None)
+            .expect("add free_vpn provider");
+        y = add_provider_to_proxy_groups(&y, "free_vpn");
+        y = add_file_provider_to_yaml(&y, "free_wl", "./providers/free_wl.yaml", None, None)
+            .expect("add free_wl provider");
+        y = add_provider_to_proxy_groups(&y, "free_wl");
+
+        let mut cfg = crate::config::AppConfig::default();
+        cfg.whitelist_providers.push("free_wl".to_string());
+        let (routed, _) = apply_routing(&y, &cfg).expect("apply_routing after enable_both_free_subs");
+
+        // Verify no `use:` appears immediately after AUTO-CANARY-GROUP-END or outside a group,
+        // and each proxy-group has at most one `use:` key.
+        let mut in_pg = false;
+        let mut cur_group = String::new();
+        let mut use_count_in_group = 0usize;
+        let mut canary_uses = Vec::new();
+        let mut proxy_uses = Vec::new();
+        let mut in_use_for: Option<String> = None;
+
+        for line in routed.lines() {
+            let t = line.trim();
+            if !line.starts_with(' ') && !t.is_empty() && !t.starts_with('#') {
+                in_pg = t == "proxy-groups:";
+                in_use_for = None;
+                continue;
+            }
+            if !in_pg {
+                continue;
+            }
+            if line.starts_with("  - name:") {
+                if !cur_group.is_empty() {
+                    assert!(
+                        use_count_in_group <= 1,
+                        "Group '{cur_group}' has duplicate use: keys ({use_count_in_group}):\n{routed}"
+                    );
+                }
+                cur_group = t.trim_start_matches("- name:").trim().trim_matches('\'').to_string();
+                use_count_in_group = 0;
+                in_use_for = None;
+                continue;
+            }
+            if t == "use:" || t.starts_with("use: #") || t.starts_with("use:#") {
+                assert!(
+                    !cur_group.is_empty(),
+                    "Orphaned use: outside any proxy-group:\n{routed}"
+                );
+                use_count_in_group += 1;
+                in_use_for = Some(cur_group.clone());
+                continue;
+            }
+            if let Some(ref g) = in_use_for {
+                if t.starts_with("- ") {
+                    let val = t.trim_start_matches("- ").trim().to_string();
+                    if g == "🛡️ Canary Probe" {
+                        canary_uses.push(val);
+                    } else if g == "PROXY" {
+                        proxy_uses.push(val);
+                    }
+                } else if !t.is_empty() && !t.starts_with('#') {
+                    in_use_for = None;
+                }
+            }
+        }
+        assert!(
+            use_count_in_group <= 1,
+            "Last group '{cur_group}' has duplicate use: keys ({use_count_in_group}):\n{routed}"
+        );
+        assert!(!routed.contains("# --- AUTO-CANARY-GROUP-END ---\n    use:"), "use: must never be placed after AUTO-CANARY-GROUP-END:\n{routed}");
+        assert!(canary_uses.iter().any(|x| x == "free_vpn") && canary_uses.iter().any(|x| x == "free_wl"), "Canary Probe must have both free_vpn and free_wl: {canary_uses:?}");
+        assert!(proxy_uses.iter().any(|x| x == "free_vpn") && proxy_uses.iter().any(|x| x == "free_wl"), "PROXY must have both free_vpn and free_wl: {proxy_uses:?}");
+    }
+
+    #[test]
+    fn regression_add_provider_to_proxy_groups_recognizes_commented_use_key() {
+        let base = "\
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - DIRECT
+    use: # xk-auto-use
+      - sub1 # xk-auto-use
+rules:
+  - MATCH,DIRECT
+";
+        let out = add_provider_to_proxy_groups(base, "free_vpn");
+        assert_eq!(out.matches("use:").count(), 1, "Must not duplicate commented use: key:\n{out}");
+        assert!(out.contains("      - free_vpn\n"), "Must append free_vpn to existing use: block:\n{out}");
+        let out2 = add_provider_to_proxy_groups(&out, "sub1");
+        assert_eq!(out, out2, "Must recognize sub1 despite inline comment:\n{out2}");
+    }

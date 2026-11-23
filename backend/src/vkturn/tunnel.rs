@@ -820,10 +820,10 @@ pub fn tun_configure_script(ip: Ipv4Addr) -> String {
 }
 
 pub fn tun_configure_script_for_transport(ip: Ipv4Addr, transport: &str) -> String {
-    let (mtu, mss) = if transport.eq_ignore_ascii_case("tcp") {
-        (TUN_MTU_TCP, TUN_TCP_MSS_TCP)
+    let (mtu, mss, other_mss) = if transport.eq_ignore_ascii_case("tcp") {
+        (TUN_MTU_TCP, TUN_TCP_MSS_TCP, TUN_TCP_MSS)
     } else {
-        (TUN_MTU, TUN_TCP_MSS)
+        (TUN_MTU, TUN_TCP_MSS, TUN_TCP_MSS_TCP)
     };
     format!(
         r#"set -e
@@ -854,10 +854,14 @@ ip rule add fwmark {ROUTE_TABLE} table {ROUTE_TABLE} pref 45; rule_mark=1
 echo 2 > /proc/sys/net/ipv4/conf/{TUN_IFACE}/rp_filter 2>/dev/null || true
 echo 1 > /proc/sys/net/ipv4/tcp_mtu_probing 2>/dev/null || true
 for ch in POSTROUTING OUTPUT; do
+  while iptables -w -t mangle -D "$ch" -o {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {other_mss} 2>/dev/null; do :; done
+  while iptables -w -t mangle -D "$ch" -o {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {LEGACY_TUN_TCP_MSS_TCP} 2>/dev/null; do :; done
   iptables -w -t mangle -C "$ch" -o {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {mss} 2>/dev/null \
     || iptables -w -t mangle -I "$ch" 1 -o {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {mss} 2>/dev/null || true
 done
 for ch in PREROUTING INPUT FORWARD; do
+  while iptables -w -t mangle -D "$ch" -i {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {other_mss} 2>/dev/null; do :; done
+  while iptables -w -t mangle -D "$ch" -i {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {LEGACY_TUN_TCP_MSS_TCP} 2>/dev/null; do :; done
   iptables -w -t mangle -C "$ch" -i {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {mss} 2>/dev/null \
     || iptables -w -t mangle -I "$ch" 1 -i {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {mss} 2>/dev/null || true
 done
@@ -881,10 +885,12 @@ pub(super) fn tun_teardown_script_for_ip(ip: Option<Ipv4Addr>) -> String {
         "for ch in POSTROUTING OUTPUT; do
   while iptables -w -t mangle -D \"$ch\" -o {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS} 2>/dev/null; do :; done
   while iptables -w -t mangle -D \"$ch\" -o {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS_TCP} 2>/dev/null; do :; done
+  while iptables -w -t mangle -D \"$ch\" -o {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {LEGACY_TUN_TCP_MSS_TCP} 2>/dev/null; do :; done
 done
 for ch in PREROUTING INPUT FORWARD; do
   while iptables -w -t mangle -D \"$ch\" -i {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS} 2>/dev/null; do :; done
   while iptables -w -t mangle -D \"$ch\" -i {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {TUN_TCP_MSS_TCP} 2>/dev/null; do :; done
+  while iptables -w -t mangle -D \"$ch\" -i {TUN_IFACE} -p tcp --tcp-flags SYN,RST SYN -m comment --comment {IPT_COMMENT} -j TCPMSS --set-mss {LEGACY_TUN_TCP_MSS_TCP} 2>/dev/null; do :; done
 done
 for ch in OUTPUT FORWARD; do
   while iptables -w -t filter -D \"$ch\" -o {TUN_IFACE} -p udp --dport 443 -m comment --comment {IPT_COMMENT} -j REJECT --reject-with icmp-port-unreachable 2>/dev/null; do :; done
